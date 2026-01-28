@@ -1,4 +1,4 @@
-# Ultimate Workflow Plugin
+# Claude Workflow Plugin
 
 <div align="center">
 
@@ -6,7 +6,6 @@
 
 [![Beads Required](https://img.shields.io/badge/Beads-Required-blue)](https://github.com/steveyegge/beads)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-Compatible-green)](https://claude.ai)
-[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 [Quick Start](#-quick-start) •
 [Features](#-features) •
