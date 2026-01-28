@@ -790,7 +790,8 @@ fi
 if create_file_safe "$TARGET/.claude/scripts/intent-router.sh"; then
 cat > "$TARGET/.claude/scripts/intent-router.sh" << 'SCRIPT_EOF'
 #!/bin/bash
-# UserPromptSubmit Hook: Detects intent and domains, injects Beads-aware workflow context
+# UserPromptSubmit Hook: Provides current Beads context for LLM-driven analysis
+# NOTE: Work type and domain detection is done by the Orchestrator agent, NOT keyword matching
 
 set -e
 
@@ -798,190 +799,78 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null || echo "$INPUT")
-PROMPT_LOWER=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]')
 
-# Skip for simple conversational messages
-if echo "$PROMPT_LOWER" | grep -qE '^(hi|hello|hey|ok|sure|thanks|yes|no|y|n)(\s|!|\.)?$'; then
-    echo "{}"; exit 0
-fi
-
-# Detect work type
-WORK_TYPE="general"
-if echo "$PROMPT_LOWER" | grep -qE '(bug|error|fail|broke|crash|wrong|issue|problem|not working|fix|debug)'; then
-    WORK_TYPE="bug"
-elif echo "$PROMPT_LOWER" | grep -qE '(add|create|build|make|implement|new|feature|develop)'; then
-    WORK_TYPE="feature"
-elif echo "$PROMPT_LOWER" | grep -qE '(improve|optimize|refactor|clean|simplify|enhance|update)'; then
-    WORK_TYPE="improvement"
-elif echo "$PROMPT_LOWER" | grep -qE '(test|verify|check|validate|coverage|spec|qa)'; then
-    WORK_TYPE="testing"
-elif echo "$PROMPT_LOWER" | grep -qE '(plan|design|architect|spec|requirements|think|strategy)'; then
-    WORK_TYPE="planning"
-fi
-
-# Detect domains (can be multiple)
-DOMAINS=""
-if echo "$PROMPT_LOWER" | grep -qE '(api|database|db|backend|server|endpoint|query|schema|migration|auth)'; then
-    DOMAINS="$DOMAINS backend"
-fi
-if echo "$PROMPT_LOWER" | grep -qE '(ui|frontend|component|page|style|css|react|vue|button|form|modal)'; then
-    DOMAINS="$DOMAINS frontend"
-fi
-if echo "$PROMPT_LOWER" | grep -qE '(deploy|ci|cd|docker|kubernetes|pipeline|infrastructure|devops|aws|gcp)'; then
-    DOMAINS="$DOMAINS devops"
-fi
-if [ -z "$DOMAINS" ]; then
-    DOMAINS="backend frontend"  # Default to both if unclear
-fi
-DOMAINS=$(echo "$DOMAINS" | xargs)  # Trim whitespace
-
-# Get current in-progress task if any
+# Get current Beads state for context
 CURRENT_TASK=""
+CURRENT_TASK_INFO=""
 if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
     CURRENT_TASK=$(bd list --status in_progress --json 2>/dev/null | jq -r '.[0].id // empty' 2>/dev/null || echo "")
+    if [ -n "$CURRENT_TASK" ]; then
+        CURRENT_TASK_INFO=$(bd show "$CURRENT_TASK" 2>/dev/null | head -30 || echo "")
+    fi
 fi
 
-# Build workflow context based on work type
-WORKFLOW_CONTEXT=""
+# Provide context for LLM-driven analysis (no keyword detection)
+WORKFLOW_CONTEXT="
+<orchestrator_instructions>
+## ANALYZE THIS REQUEST
 
-case "$WORK_TYPE" in
-    "bug")
-        WORKFLOW_CONTEXT="
-<auto_workflow type=\"bug\" domains=\"$DOMAINS\">
-## 🐛 BUG FIX DETECTED
+You are the Orchestrator. Analyze the user's request and determine:
 
-**Domains involved:** $DOMAINS
+### 1. WORK TYPE (choose one)
+- **bug**: Fixing something broken, errors, crashes, incorrect behavior
+- **feature**: Adding new functionality, capabilities, or components  
+- **improvement**: Enhancing existing functionality, refactoring, optimization
+- **testing**: Writing tests, verification, QA tasks
+- **planning**: Architecture, design, requirements gathering
 
-### Beads Workflow:
+### 2. DOMAINS INVOLVED (choose all that apply)
+- **backend**: APIs, database, server logic, authentication, business rules
+- **frontend**: UI components, styling, user interactions, accessibility
+- **devops**: CI/CD, deployment, infrastructure, containers, monitoring
+
+### 3. COMPLEXITY
+- **simple**: Single domain, straightforward change
+- **moderate**: Multiple files, one domain
+- **complex**: Multiple domains, needs epic with subtasks
+
+### 4. YOUR ACTIONS
+
+**For Simple Tasks:**
 \`\`\`bash
-# Create bug task (or use existing)
-bd create \"Bug: [description]\" -t bug -p 1 \\
-    --description \"[Detailed description]\" \\
-    -l bug,$( echo $DOMAINS | tr ' ' ',' ),qa-pending
-
-# If found during other work:
-bd create \"Bug: [description]\" -t bug -p 1 \\
-    --deps discovered-from:\$PARENT_TASK \\
-    -l bug,qa-pending
+bd create \"[Type]: [Description]\" -t [bug|task] -p 1 \\
+    -l [domain],qa-pending \\
+    --description \"[What and why]\"
+bd update \$ID --status in_progress
 \`\`\`
 
-### Required Steps:
-1. Reproduce the issue
-2. Write failing test that captures the bug
-3. Fix with minimal change
-4. Verify no regressions
-5. **🔐 MANDATORY: @qa review and approval**
-
-Cannot close without QA approval.
-</auto_workflow>"
-        ;;
-    "feature")
-        WORKFLOW_CONTEXT="
-<auto_workflow type=\"feature\" domains=\"$DOMAINS\">
-## ✨ FEATURE DETECTED
-
-**Domains involved:** $DOMAINS
-
-### Beads Workflow (Hierarchical):
+**For Complex Tasks (create epic):**
 \`\`\`bash
-# Create epic for the feature
-EPIC=\$(bd create \"Epic: [Feature Name]\" -t epic -p 1 \\
-    --description \"[What this feature does]\" --json | jq -r '.id')
-
-# Create subtasks for each domain
-bd create \"Backend: [specific work]\" -p 1 --parent \$EPIC -l backend,qa-pending
-bd create \"Frontend: [specific work]\" -p 1 --parent \$EPIC -l frontend,qa-pending
-bd create \"QA: Test user journeys\" -p 1 --parent \$EPIC -l qa
-
-# Dependencies: QA depends on implementation
-bd dep add \$QA_TASK \$BACKEND_TASK
-bd dep add \$QA_TASK \$FRONTEND_TASK
+EPIC=\$(bd create \"Epic: [Feature]\" -t epic -p 1 --description \"...\" --json | jq -r '.id')
+bd create \"Backend: [work]\" -p 1 --parent \$EPIC -l backend,qa-pending
+bd create \"Frontend: [work]\" -p 1 --parent \$EPIC -l frontend,qa-pending
+bd create \"QA: [tests]\" -p 1 --parent \$EPIC -l qa
 \`\`\`
 
-### Required Steps:
-1. Create epic with subtasks
-2. Delegate to domain specialists
-3. Track progress with structured notes
-4. **🔐 MANDATORY: @qa review and approval**
+**Then delegate to specialists:**
+- Backend work → Task(\"@backend\", \"...\")
+- Frontend work → Task(\"@frontend\", \"...\")
+- DevOps work → Task(\"@devops\", \"...\")
+- ALL code changes → Task(\"@qa\", \"...\") before completion
 
-Cannot close without QA approval.
-</auto_workflow>"
-        ;;
-    "improvement")
-        WORKFLOW_CONTEXT="
-<auto_workflow type=\"improvement\" domains=\"$DOMAINS\">
-## 🔧 IMPROVEMENT DETECTED
+### 🚫 MANDATORY QA GATE
+Every code change requires @qa approval. System will block completion without it.
+</orchestrator_instructions>"
 
-**Domains involved:** $DOMAINS
+# Add current task context if exists
+if [ -n "$CURRENT_TASK" ]; then
+    WORKFLOW_CONTEXT+="
+<current_task id=\"$CURRENT_TASK\">
+$CURRENT_TASK_INFO
+</current_task>"
+fi
 
-### Beads Workflow:
-\`\`\`bash
-bd create \"Improve: [description]\" -t task -p 2 \\
-    --description \"[What to improve and why]\" \\
-    -l improvement,$( echo $DOMAINS | tr ' ' ',' ),qa-pending
-\`\`\`
-
-### Required Steps:
-1. Document current state
-2. Implement improvement
-3. Verify no regressions
-4. **🔐 MANDATORY: @qa review and approval**
-</auto_workflow>"
-        ;;
-    "testing")
-        WORKFLOW_CONTEXT="
-<auto_workflow type=\"testing\" domains=\"$DOMAINS\">
-## 🧪 TESTING TASK DETECTED
-
-### Beads Workflow:
-\`\`\`bash
-bd create \"Test: [what to test]\" -t task -p 1 \\
-    --description \"[Testing scope]\" -l qa,testing
-\`\`\`
-
-### Testing Principles:
-- Test USER BEHAVIOR, not implementation
-- Cover critical user journeys
-- Test failure modes (network, timeout, invalid input)
-- Tests must be deterministic
-</auto_workflow>"
-        ;;
-    "planning")
-        WORKFLOW_CONTEXT="
-<auto_workflow type=\"planning\" domains=\"$DOMAINS\">
-## 📋 PLANNING MODE
-
-### Before implementing, consider:
-1. **Pre-Mortem**: What could go wrong? (3-5 failure modes)
-2. **Clarifying Questions**: Ask BEFORE assuming
-3. **Task Breakdown**: Atomic, testable units
-4. **Architecture Decision**: Document choices
-
-### Use Beads to track the plan:
-\`\`\`bash
-bd create \"Plan: [project name]\" -t epic -p 1 \\
-    --description \"[Planning details]\"
-\`\`\`
-</auto_workflow>"
-        ;;
-    *)
-        # General - still include current task context
-        if [ -n "$CURRENT_TASK" ]; then
-            TASK_INFO=$(bd show "$CURRENT_TASK" 2>/dev/null | head -20 || echo "")
-            WORKFLOW_CONTEXT="
-<current_context>
-## Current Task: $CURRENT_TASK
-
-$TASK_INFO
-
-Remember: All code changes require @qa approval before delivery.
-</current_context>"
-        fi
-        ;;
-esac
-
-if [ -n "$WORKFLOW_CONTEXT" ]; then
-    cat << EOF
+cat << EOF
 {
   "hookSpecificOutput": {
     "hookEventName": "UserPromptSubmit",
@@ -989,9 +878,6 @@ if [ -n "$WORKFLOW_CONTEXT" ]; then
   }
 }
 EOF
-else
-    echo "{}"
-fi
 SCRIPT_EOF
 echo -e "${GREEN}✓${NC} Created intent-router.sh"
 fi
