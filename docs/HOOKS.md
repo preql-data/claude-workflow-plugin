@@ -162,7 +162,19 @@ EOF
 
 **File**: `.claude/scripts/intent-router.sh`
 
-**Purpose**: Detect work type and domains, inject appropriate workflow context.
+**Purpose**: Provide context for LLM-driven work analysis (NOT keyword matching).
+
+### Design Philosophy
+
+**Old approach (removed)**: Keyword matching like `grep -qE '(bug|error|fix)'`
+- Brittle - misses nuanced requests
+- Limited - can't understand context
+- Inflexible - hardcoded patterns
+
+**Current approach**: LLM-driven analysis
+- The **Orchestrator agent** analyzes requests intelligently
+- Hook provides framework and current task context
+- Claude determines work type, domains, and complexity
 
 ### What It Does
 
@@ -170,95 +182,41 @@ EOF
 # 1. Parse user prompt
 INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
-PROMPT_LOWER=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]')
 
-# 2. Skip simple greetings
-if echo "$PROMPT_LOWER" | grep -qE '^(hi|hello|hey|ok)'; then
-    echo "{}"; exit 0
-fi
-
-# 3. Detect work type
-if echo "$PROMPT_LOWER" | grep -qE '(bug|error|fix|broken)'; then
-    WORK_TYPE="bug"
-elif echo "$PROMPT_LOWER" | grep -qE '(add|create|build|feature)'; then
-    WORK_TYPE="feature"
-elif echo "$PROMPT_LOWER" | grep -qE '(improve|optimize|refactor)'; then
-    WORK_TYPE="improvement"
-elif echo "$PROMPT_LOWER" | grep -qE '(test|verify|check)'; then
-    WORK_TYPE="testing"
-elif echo "$PROMPT_LOWER" | grep -qE '(plan|design|architect)'; then
-    WORK_TYPE="planning"
+# 2. Get current Beads state (for context, not detection)
+CURRENT_TASK=$(bd list --status in_progress --json | jq -r '.[0].id // empty')
+if [ -n "$CURRENT_TASK" ]; then
+    CURRENT_TASK_INFO=$(bd show "$CURRENT_TASK" | head -30)
 fi
 
-# 4. Detect domains
-if echo "$PROMPT_LOWER" | grep -qE '(api|database|auth)'; then
-    DOMAINS+=" backend"
-fi
-if echo "$PROMPT_LOWER" | grep -qE '(ui|component|css)'; then
-    DOMAINS+=" frontend"
-fi
-if echo "$PROMPT_LOWER" | grep -qE '(deploy|docker|ci)'; then
-    DOMAINS+=" devops"
-fi
-
-# 5. Inject workflow context based on type
+# 3. Inject orchestrator instructions (LLM does the analysis)
+# 4. Add current task context if exists
+# 5. Output JSON for additionalContext
 ```
 
-### Work Type Detection
+### Why LLM-Driven?
 
-| Keywords | Work Type |
-|----------|-----------|
-| bug, error, fix, broken, crash | `bug` |
-| add, create, build, make, feature | `feature` |
-| improve, optimize, refactor, enhance | `improvement` |
-| test, verify, check, validate | `testing` |
-| plan, design, architect, strategy | `planning` |
+| Scenario | Keyword Matching | LLM Analysis |
+|----------|------------------|--------------|
+| "The login isn't working right" | ❌ Might miss | ✅ Understands it's a bug |
+| "Can we make this faster?" | ❌ "improve" not present | ✅ Recognizes improvement |
+| "Users are complaining about X" | ❌ No keywords | ✅ Understands context |
+| "Continue what we were doing" | ❌ No keywords | ✅ Checks current task |
 
-### Domain Detection
+### Context Injected
 
-| Keywords | Domain |
-|----------|--------|
-| api, database, db, backend, server, auth | `backend` |
-| ui, frontend, component, page, css, react | `frontend` |
-| deploy, ci, cd, docker, kubernetes, pipeline | `devops` |
+The hook injects `<orchestrator_instructions>` that guide Claude to:
 
-### Context Injected by Work Type
+1. **Analyze work type**: bug, feature, improvement, testing, planning
+2. **Identify domains**: backend, frontend, devops
+3. **Assess complexity**: simple → single task, complex → epic with subtasks
+4. **Take action**: Create appropriate Beads tasks, delegate to specialists
 
-**Bug**:
-```xml
-<auto_workflow type="bug" domains="backend frontend">
-## 🐛 BUG FIX DETECTED
-
-### Beads Workflow:
-bd create "Bug: [description]" -t bug -p 1 -l bug,qa-pending
-
-### Required Steps:
-1. Reproduce the issue
-2. Write failing test
-3. Fix with minimal change
-4. Verify no regressions
-5. **🔐 MANDATORY: @qa review**
-</auto_workflow>
-```
-
-**Feature**:
-```xml
-<auto_workflow type="feature" domains="backend frontend">
-## ✨ FEATURE DETECTED
-
-### Beads Workflow (Hierarchical):
-EPIC=$(bd create "Epic: [Name]" -t epic -p 1 --json | jq -r '.id')
-bd create "Backend: [work]" -p 1 --parent $EPIC -l backend,qa-pending
-bd create "Frontend: [work]" -p 1 --parent $EPIC -l frontend,qa-pending
-bd create "QA: Tests" -p 1 --parent $EPIC -l qa
-
-### Required Steps:
-1. Create epic with subtasks
-2. Delegate to specialists
-3. Track progress
-4. **🔐 MANDATORY: @qa review**
-</auto_workflow>
-```
+The Orchestrator uses its intelligence to understand:
+- Nuanced language ("it's broken" → bug)
+- Context from current task
+- User intent beyond keywords
+- When to ask clarifying questions
 
 ---
 
