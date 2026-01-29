@@ -434,66 +434,47 @@ Write-Color "✓ Created session-start.sh" Green
 
 $IntentRouterContent = @'
 #!/bin/bash
-# UserPromptSubmit Hook: Provides current Beads context for LLM-driven analysis
-# NOTE: Work type and domain detection is done by the Orchestrator agent, NOT keyword matching
+# UserPromptSubmit Hook: Enforces mandatory agent delegation
 
 set -e
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-
 INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null || echo "$INPUT")
 
-# Get current Beads state for context
+# Skip very short messages
+[ ${#PROMPT} -lt 10 ] && echo "{}" && exit 0
+
+# Get current task context
 CURRENT_TASK=""
-CURRENT_TASK_INFO=""
 if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
     CURRENT_TASK=$(bd list --status in_progress --json 2>/dev/null | jq -r '.[0].id // empty' 2>/dev/null || echo "")
-    if [ -n "$CURRENT_TASK" ]; then
-        CURRENT_TASK_INFO=$(bd show "$CURRENT_TASK" 2>/dev/null | head -30 || echo "")
-    fi
 fi
 
-# Provide context for LLM-driven analysis (no keyword detection)
 WORKFLOW_CONTEXT="
-<orchestrator_instructions>
-## ANALYZE THIS REQUEST
+<mandatory_delegation>
+## MANDATORY AGENT DELEGATION
 
-You are the Orchestrator. Analyze the user's request and determine:
+You are the **Orchestrator**. You MUST delegate using Task().
+**DO NOT write implementation code yourself.**
 
-### 1. WORK TYPE (choose one)
-- **bug**: Fixing something broken, errors, crashes
-- **feature**: Adding new functionality
-- **improvement**: Enhancing existing functionality
-- **testing**: Writing tests, verification
-- **planning**: Architecture, design, requirements
+### Workflow:
+1. Analyze request (type: bug/feature/improvement, domains: backend/frontend/devops)
+2. Create Beads task: bd create \"...\" -t task -p 1 -l domain,qa-pending
+3. DELEGATE:
+   - Backend → Task(\"@backend\", \"...\")
+   - Frontend → Task(\"@frontend\", \"...\")
+   - DevOps → Task(\"@devops\", \"...\")
+4. After implementation → Task(\"@qa\", \"Review...\")
 
-### 2. DOMAINS INVOLVED (choose all that apply)
-- **backend**: APIs, database, server logic, auth
-- **frontend**: UI components, styling, interactions
-- **devops**: CI/CD, deployment, infrastructure
+### You are VIOLATING the workflow if you:
+- Write code yourself (delegate to specialists!)
+- Skip QA review (system will block you!)
 
-### 3. YOUR ACTIONS
+</mandatory_delegation>"
 
-**For Simple Tasks:**
-bd create \"[Type]: [Description]\" -t [type] -p 1 -l [domain],qa-pending
-
-**For Complex Tasks (create epic):**
-EPIC=\$(bd create \"Epic: [Feature]\" -t epic -p 1 --json | jq -r '.id')
-bd create \"Backend: [work]\" -p 1 --parent \$EPIC -l backend,qa-pending
-bd create \"Frontend: [work]\" -p 1 --parent \$EPIC -l frontend,qa-pending
-
-**Then delegate:** @backend, @frontend, @devops as needed
-**MANDATORY:** @qa must approve all code changes
-</orchestrator_instructions>"
-
-# Add current task context if exists
-if [ -n "$CURRENT_TASK" ]; then
-    WORKFLOW_CONTEXT+="
-<current_task id=\"$CURRENT_TASK\">
-$CURRENT_TASK_INFO
-</current_task>"
-fi
+[ -n "$CURRENT_TASK" ] && WORKFLOW_CONTEXT+="
+<current_task>Working on: $CURRENT_TASK</current_task>"
 
 cat << EOF
 {"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$(echo "$WORKFLOW_CONTEXT" | jq -Rs .)}}
