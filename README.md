@@ -55,7 +55,7 @@ bd --version
 **Linux / macOS:**
 ```bash
 cd /path/to/your/project
-curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/refs/heads/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
