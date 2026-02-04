@@ -55,13 +55,13 @@ bd --version
 **Linux / macOS:**
 ```bash
 cd /path/to/your/project
-curl -fsSL https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
 cd C:\Projects\myproject
-irm https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.ps1 | iex
 ```
 
 ### First Run
