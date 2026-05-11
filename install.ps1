@@ -135,6 +135,9 @@ try {
     }
 
     # Sanity-check
+    # Critical-path scripts are explicitly required; the rest of
+    # .claude/scripts/*.sh rides the glob copy below so the installer stays in
+    # sync as helpers are added.
     $Required = @(
         ".claude/agents/orchestrator.md",
         ".claude/agents/qa.md",
@@ -146,6 +149,9 @@ try {
         ".claude/scripts/post-edit.sh",
         ".claude/scripts/verify-before-stop.sh",
         ".claude/scripts/session-end.sh",
+        ".claude/scripts/qa-gate.sh",
+        ".claude/scripts/current-task.sh",
+        ".claude/scripts/prevent-orchestrator-edits.sh",
         ".claude/hooks/hooks.json",
         ".claude/skills/workflow-engine/SKILL.md",
         ".claude/settings.json",
@@ -338,10 +344,42 @@ build/
             -Dst "$ClaudeDir\agents\$agent.md"
     }
 
-    foreach ($s in @("session-start.sh","intent-router.sh","post-edit.sh","verify-before-stop.sh","session-end.sh")) {
-        Copy-WorkflowFile `
-            -Src (Join-Path $SourceDir ".claude/scripts/$s") `
-            -Dst "$ClaudeDir\scripts\$s"
+    # Copy every hook + helper script. The set has grown across plugin
+    # versions (v2 was 5 scripts; v3 is 14). Using a glob keeps the installer
+    # in sync automatically as scripts are added/removed in the plugin source.
+    Get-ChildItem (Join-Path $SourceDir ".claude/scripts/*.sh") -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-WorkflowFile -Src $_.FullName -Dst "$ClaudeDir\scripts\$($_.Name)"
+    }
+
+    # MCP servers -----------------------------------------------------------
+    # Copy each MCP server directory wholesale, excluding node_modules / .tmp
+    # / *.log. node_modules will be installed by the operator if they want to
+    # run the servers locally.
+    $SourceMcpDir = Join-Path $SourceDir ".claude/mcp"
+    if (Test-Path $SourceMcpDir) {
+        $TargetMcpDir = Join-Path $ClaudeDir "mcp"
+        New-Item -ItemType Directory -Force -Path $TargetMcpDir | Out-Null
+        Get-ChildItem -Path $SourceMcpDir -Directory | ForEach-Object {
+            $serverName = $_.Name
+            $dstServer = Join-Path $TargetMcpDir $serverName
+            New-Item -ItemType Directory -Force -Path $dstServer | Out-Null
+            # robocopy: /E = include subdirs (empty too), /XD = exclude dirs,
+            # /XF = exclude files, /NFL/NDL/NJH/NJS/NP = quiet output.
+            # Exit codes 0-7 are success in robocopy world.
+            $rc = & robocopy $_.FullName $dstServer /E /XD node_modules .tmp /XF *.log /NFL /NDL /NJH /NJS /NP
+            if ($LASTEXITCODE -gt 7) {
+                # Fall back to Copy-Item if robocopy isn't behaving.
+                Copy-Item -Path (Join-Path $_.FullName '*') -Destination $dstServer -Recurse -Force -Exclude @('node_modules','.tmp','*.log') -ErrorAction SilentlyContinue
+            }
+            $global:LASTEXITCODE = 0
+            Write-Color ("OK   mcp/{0}" -f $serverName) Green
+        }
+    }
+
+    # Root MCP config -------------------------------------------------------
+    $SourceMcpJson = Join-Path $SourceDir ".mcp.json"
+    if (Test-Path $SourceMcpJson) {
+        Copy-WorkflowFile -Src $SourceMcpJson -Dst (Join-Path $Target ".mcp.json")
     }
 
     Copy-WorkflowFile `

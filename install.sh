@@ -193,6 +193,8 @@ else
 fi
 
 # Sanity-check the source layout
+# Critical-path scripts are explicitly required; the rest of .claude/scripts/*.sh
+# rides the glob copy below so the installer stays in sync as helpers are added.
 for required in \
     ".claude/agents/orchestrator.md" \
     ".claude/agents/qa.md" \
@@ -204,6 +206,9 @@ for required in \
     ".claude/scripts/post-edit.sh" \
     ".claude/scripts/verify-before-stop.sh" \
     ".claude/scripts/session-end.sh" \
+    ".claude/scripts/qa-gate.sh" \
+    ".claude/scripts/current-task.sh" \
+    ".claude/scripts/prevent-orchestrator-edits.sh" \
     ".claude/hooks/hooks.json" \
     ".claude/skills/workflow-engine/SKILL.md" \
     ".claude/settings.json" \
@@ -432,10 +437,44 @@ for agent in orchestrator qa backend frontend devops; do
 done
 
 # Scripts ----------------------------------------------------------------------
-for script in session-start.sh intent-router.sh post-edit.sh verify-before-stop.sh session-end.sh; do
-    copy_file "$SOURCE_DIR/.claude/scripts/${script}" "$TARGET/.claude/scripts/${script}"
+# Copy every hook + helper script. The set has grown across plugin versions
+# (v2 was 5 scripts; v3 is 14). Using a glob keeps the installer in sync
+# automatically as scripts are added/removed in the plugin source.
+shopt -s nullglob
+for src in "$SOURCE_DIR/.claude/scripts/"*.sh; do
+    copy_file "$src" "$TARGET/.claude/scripts/$(basename "$src")"
 done
+shopt -u nullglob
 chmod +x "$TARGET/.claude/scripts/"*.sh 2>/dev/null || true
+
+# MCP servers -----------------------------------------------------------------
+# Copy each MCP server directory wholesale (source files + package.json +
+# package-lock.json + tests/). node_modules will be installed by the operator
+# if they want to run the servers locally; ship-time we just copy the source.
+if [ -d "$SOURCE_DIR/.claude/mcp" ]; then
+    mkdir -p "$TARGET/.claude/mcp"
+    for mcp_dir in "$SOURCE_DIR/.claude/mcp"/*/; do
+        [ -d "$mcp_dir" ] || continue
+        mcp_name=$(basename "$mcp_dir")
+        if command -v rsync >/dev/null 2>&1; then
+            rsync -a --exclude=node_modules --exclude=.tmp --exclude='*.log' \
+                "$mcp_dir" "$TARGET/.claude/mcp/$mcp_name/"
+        else
+            # Fallback: cp -R then prune dev artifacts.
+            mkdir -p "$TARGET/.claude/mcp/$mcp_name"
+            cp -R "$mcp_dir." "$TARGET/.claude/mcp/$mcp_name/"
+            rm -rf "$TARGET/.claude/mcp/$mcp_name/node_modules" 2>/dev/null || true
+            rm -rf "$TARGET/.claude/mcp/$mcp_name/.tmp" 2>/dev/null || true
+            find "$TARGET/.claude/mcp/$mcp_name" -maxdepth 2 -name '*.log' -type f -delete 2>/dev/null || true
+        fi
+        echo -e "${GREEN}OK${NC}   mcp/$mcp_name"
+    done
+fi
+
+# Root MCP config ------------------------------------------------------------
+if [ -f "$SOURCE_DIR/.mcp.json" ]; then
+    copy_file "$SOURCE_DIR/.mcp.json" "$TARGET/.mcp.json"
+fi
 
 # Hooks ------------------------------------------------------------------------
 copy_file "$SOURCE_DIR/.claude/hooks/hooks.json" "$TARGET/.claude/hooks/hooks.json"
