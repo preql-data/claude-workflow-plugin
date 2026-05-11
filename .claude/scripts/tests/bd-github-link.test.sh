@@ -29,6 +29,16 @@
 #   bash .claude/scripts/tests/bd-github-link.test.sh
 #   bash .claude/scripts/tests/bd-github-link.test.sh --keep   # leave fixture
 
+# shellcheck disable=SC2317
+# Helper functions in this file (assert_eq, assert_match, cleanup, and the
+# inline test scenarios further down) are invoked via name indirection — by
+# the trap (cleanup) and by direct in-script calls whose reachability the
+# static analyzer can't follow once `set -u` + early-exit + subshells are
+# in play. Older shellchecks (0.9.x, what CI runs) emit SC2317 on every
+# line inside those functions; the local 0.11.x is quieter but still flags
+# some. Disabled file-wide because the fix-by-fix approach would mean
+# annotating ~25 individual lines.
+
 set -u
 
 PASS=0
@@ -91,6 +101,13 @@ chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
 # Hard preconditions.
 if ! command -v bd >/dev/null 2>&1; then
+    # Match the L2 spec convention: in BD_SHIM_ONLY=1 mode (CI runner,
+    # no public bd installer), skip-with-log instead of hard-fail. The
+    # whole fixture is bd-driven — there's no useful partial coverage.
+    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
+        echo "SKIPPED: bd-github-link.test.sh (bd not available; CI env BD_SHIM_ONLY=1)"
+        exit 0
+    fi
     echo "bd CLI not on PATH -- this fixture requires Beads."
     exit 1
 fi

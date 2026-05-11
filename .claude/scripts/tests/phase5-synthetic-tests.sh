@@ -19,6 +19,15 @@
 #   bash .claude/scripts/tests/phase5-synthetic-tests.sh
 # Pass --keep to leave the temp fixture on disk.
 
+# shellcheck disable=SC2317
+# Helper functions in this file (assert_eq, assert_match, cleanup) are
+# invoked via name indirection — the trap calls cleanup, and the inline
+# scenarios call the asserts directly through a control flow the static
+# analyzer can't follow once `set -u` + early-exit branches are in play.
+# Older shellcheck (0.9.x, what CI runs) emits SC2317 on every line inside
+# those functions. Disabled file-wide because the fix-by-fix approach
+# would mean annotating ~15 individual lines.
+
 set -u
 
 PASS=0
@@ -80,6 +89,15 @@ cp "$PLUGIN_DIR/.claude/skills/workflow-engine/SKILL.md" \
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
 if ! command -v bd >/dev/null 2>&1; then
+    # Match the L2 spec convention: in BD_SHIM_ONLY=1 mode (CI runner,
+    # no public bd installer), skip-with-log instead of hard-fail. The
+    # statusline + qa-gate + memory-bridge sections all require real bd
+    # state — no useful partial coverage is possible. Dev-machine path
+    # stays loud so misconfigurations are caught.
+    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
+        echo "SKIPPED: phase5-synthetic-tests.sh (bd not available; CI env BD_SHIM_ONLY=1)"
+        exit 0
+    fi
     echo "bd CLI not on PATH — these synthetic tests require Beads."
     exit 1
 fi

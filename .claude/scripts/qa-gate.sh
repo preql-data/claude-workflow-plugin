@@ -337,7 +337,14 @@ cmd_approve() {
             removed_pending=1
         else
             # Roll back: re-add qa-gate-entered if we removed it, drop qa-approved.
-            [ "$removed_entered" = "1" ] && add_label "$tid" "qa-gate-entered" || true
+            # NB: the older `[ X ] && Y || true` shorthand here trips shellcheck
+            # SC2015 because `Y` is allowed to exit non-zero (add_label returns
+            # the bd exit code), in which case the `|| true` would mask it AND
+            # the meaning isn't quite if/then/else. The explicit `if` is what
+            # the SC2015 advice recommends.
+            if [ "$removed_entered" = "1" ]; then
+                add_label "$tid" "qa-gate-entered" || true
+            fi
             remove_label "$tid" "qa-approved" || true
             emit_json 0 "approve" "$tid" "error" "failed to remove qa-pending; rolled back"
             exit 3

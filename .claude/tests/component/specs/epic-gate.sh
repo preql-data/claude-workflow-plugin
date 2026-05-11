@@ -9,6 +9,12 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# This spec drives `bd create` / `bd label add` from start to finish — no
+# subset of it is meaningful without bd.
+bd_required_or_skip
+
 EG="$FIXTURE/.claude/scripts/epic-gate.sh"
 
 # Helper: extract a Beads task id from `bd create --json` output, normalised.

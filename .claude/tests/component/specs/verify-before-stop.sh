@@ -10,6 +10,13 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# The "QA-approved -> allow" and cross-repo guard scenarios both require
+# seeding bd state (qa-approved label, current-task repo fingerprint); we
+# skip the whole spec rather than expose partial coverage in CI.
+bd_required_or_skip
+
 VBS="$FIXTURE/.claude/scripts/verify-before-stop.sh"
 QG="$FIXTURE/.claude/scripts/qa-gate.sh"
 CT="$FIXTURE/.claude/scripts/current-task.sh"

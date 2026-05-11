@@ -9,6 +9,14 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# Later scenarios exercise the `--bd-task` flag, which opens a tracking
+# Beads task and writes its id back into TECHNICAL_DEBT.md. The TECH_DEBT
+# scenarios without bd are not separable from the spec's overall pass/fail
+# verdict, so we skip the whole spec when bd is missing.
+bd_required_or_skip
+
 TD="$FIXTURE/.claude/scripts/tech-debt.sh"
 DEBT="$FIXTURE/TECHNICAL_DEBT.md"
 

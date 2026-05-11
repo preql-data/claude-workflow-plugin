@@ -9,6 +9,13 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# session-start.sh queries bd for ready/in-progress task lists; without
+# bd the rendered additionalContext is missing the bullets the assertions
+# look for.
+bd_required_or_skip
+
 SS="$FIXTURE/.claude/scripts/session-start.sh"
 SE="$FIXTURE/.claude/scripts/session-end.sh"
 TRACK="$FIXTURE/.claude/.qa-tracking"

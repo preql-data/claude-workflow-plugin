@@ -30,6 +30,12 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# The baseline scenarios all exercise qa-gate.sh approve/enter against real
+# Beads tasks; the script reads bd state to compute the gate decision.
+bd_required_or_skip
+
 QG="$FIXTURE/.claude/scripts/qa-gate.sh"
 VBS="$FIXTURE/.claude/scripts/verify-before-stop.sh"
 CT="$FIXTURE/.claude/scripts/current-task.sh"

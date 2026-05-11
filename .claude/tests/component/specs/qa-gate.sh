@@ -9,6 +9,12 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# Every step of this spec talks to bd — seed task, enter/approve/block,
+# status read — so there's no useful partial coverage without it.
+bd_required_or_skip
+
 QG="$FIXTURE/.claude/scripts/qa-gate.sh"
 CT="$FIXTURE/.claude/scripts/current-task.sh"
 TRACK="$FIXTURE/.claude/.qa-tracking"

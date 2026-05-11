@@ -9,6 +9,14 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# The current_work-block assertion (test §5) seeds a real Beads task to
+# verify the active-task augmentation; without bd that scenario can't run,
+# and the spec is short enough that we'd rather skip the whole thing than
+# carry a half-coverage variant.
+bd_required_or_skip
+
 IR="$FIXTURE/.claude/scripts/intent-router.sh"
 
 # 1. Real prompt -> UserPromptSubmit envelope with workflow_engine context.

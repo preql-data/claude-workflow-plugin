@@ -9,6 +9,12 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# Every assertion below depends on the seeded Beads task (the additionalContext
+# the hook injects must mention the task id) — no bd, no signal.
+bd_required_or_skip
+
 HOOK="$FIXTURE/.claude/scripts/subagent-start.sh"
 CT="$FIXTURE/.claude/scripts/current-task.sh"
 

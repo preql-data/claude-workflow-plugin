@@ -40,6 +40,12 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# The cross-repo guard scenarios seed real Beads tasks via `bd create` to
+# get the repo-fingerprint on disk — no bd, no spec.
+bd_required_or_skip
+
 VBS="$FIXTURE/.claude/scripts/verify-before-stop.sh"
 CT="$FIXTURE/.claude/scripts/current-task.sh"
 TRACK="$FIXTURE/.claude/.qa-tracking"

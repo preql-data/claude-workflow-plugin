@@ -47,6 +47,12 @@ set -u
 
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent (CI runner, BD_SHIM_ONLY=1).
+# Both failure scenarios in this spec seed a Beads task before testing the
+# crashing-hook fallback behaviour; without bd the seeding step fails first.
+bd_required_or_skip
+
 VBS="$FIXTURE/.claude/scripts/verify-before-stop.sh"
 SUBAGENT_HOOK="$FIXTURE/.claude/scripts/subagent-start.sh"
 LINK_HOOK="$FIXTURE/.claude/scripts/bd-github-link.sh"

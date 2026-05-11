@@ -27,6 +27,14 @@
 #     the local convention of skip-with-log rather than failing.
 #   - Node 20 (LTS) for the L3 jobs. The harness's package.json caps
 #     deps at versions that work on 18+, but 20 is the latest LTS.
+#
+# BD_SHIM_ONLY=1 — set on the l1-unit and l2-component jobs. Beads has
+# no easy public installer URL we can curl in CI; rather than vendoring a
+# binary or spinning up a separate setup action, we let bd-dependent
+# specs skip-with-log when the env var is set. Each spec calls
+# `bd_required_or_skip` (or the L1 equivalent) near the top, prints a
+# single "SKIPPED:" line, and exits 0. Dev machines (where bd IS
+# installed) take the normal path and run the full coverage.
 
 name: tests
 
@@ -82,6 +90,10 @@ jobs:
   l1-unit:
     name: L1 — bash unit tests
     runs-on: ubuntu-latest
+    env:
+      # See workflow header — bd has no public CI installer; specs
+      # self-skip when this is set.
+      BD_SHIM_ONLY: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Verify dependencies
@@ -99,6 +111,10 @@ jobs:
   l2-component:
     name: L2 — component (hook pipelines)
     runs-on: ubuntu-latest
+    env:
+      # See workflow header — bd has no public CI installer; bd-dependent
+      # specs self-skip when this is set.
+      BD_SHIM_ONLY: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Verify dependencies

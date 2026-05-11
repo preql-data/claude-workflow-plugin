@@ -76,7 +76,14 @@ mk_bd_shim() {
     local real_bd
     real_bd=$(command -v bd 2>/dev/null || true)
     if [ -z "$real_bd" ]; then
-        printf 'mk_bd_shim: real bd not on PATH\n' >&2
+        # In BD_SHIM_ONLY mode (CI runner without bd installed), stay
+        # silent here — the spec's own `bd_required_or_skip` call will
+        # emit a single SKIPPED line. Two warnings per spec is noise.
+        # Outside BD_SHIM_ONLY we keep the warning so dev-machine
+        # misconfiguration is loud.
+        if [ "${BD_SHIM_ONLY:-0}" != "1" ]; then
+            printf 'mk_bd_shim: real bd not on PATH\n' >&2
+        fi
         return 1
     fi
 

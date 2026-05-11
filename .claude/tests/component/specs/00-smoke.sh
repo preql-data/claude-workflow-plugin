@@ -18,6 +18,13 @@ set -u
 # so its exports (CLAUDE_PROJECT_DIR, PATH) reach the spec's shell.
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
+
+# Skip-with-log when the real `bd` CLI is absent in BD_SHIM_ONLY=1 mode
+# (CI runners). The smoke spec exercises `bd create` at the bottom; we
+# can't fake that without a more elaborate shim. Dev-machine path is
+# unchanged.
+bd_required_or_skip
+
 assert_eq "smoke: mk_fixture returns a non-empty path" "0" "$([ -n "$FIXTURE" ] && echo 0 || echo 1)"
 assert_eq "smoke: fixture exists as a directory" "0" "$([ -d "$FIXTURE" ] && echo 0 || echo 1)"
 assert_eq "smoke: .claude/.qa-tracking present" "0" "$([ -d "$FIXTURE/.claude/.qa-tracking" ] && echo 0 || echo 1)"
