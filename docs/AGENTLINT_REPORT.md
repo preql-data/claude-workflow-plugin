@@ -6,7 +6,7 @@
 
 **AgentLint version**: 1.1.13 (CLI: `agentlint check`).
 
-**Date**: 2026-05-10.
+**Date**: 2026-05-11 (post-G8 + closeout verified).
 
 **Command**: `agentlint check --format md --output-dir docs/` (also
 exposed as `make check`).

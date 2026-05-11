@@ -31,6 +31,19 @@ listing the directory.
   permissions, additionalDirectories).
 - `.mcp.json` — MCP server bindings copied to user repos.
 
+## Test harness (G8)
+
+- `.claude/tests/` — five-tier test pyramid root with `component/`, `e2e/`,
+  and per-tier README.
+- `.claude/tests/component/` — L2 component specs (15 specs, 243
+  assertions; includes `qa-gate-baseline` codifying the 0wk.2 fix).
+- `.claude/tests/e2e/` — L3 live e2e fixtures + golden cassettes
+  (`node-react-auth`, `python-django-bug`, `go-cli-refactor`,
+  `monorepo-frontend-only`, `multi-domain-signup`, `qa-block-recovery`).
+- `.claude/scripts/tests/` — L1 bash unit tests (49 assertions).
+- `.github/workflows/test.yml` — GitHub Actions CI: lint + 6 test jobs
+  + L4 daily drift cron.
+
 ## Install / uninstall
 
 - `install.sh`, `install.ps1` — copy plugin assets into a target repo.
@@ -49,7 +62,7 @@ See `docs/` (which has its own index in `docs/plans/README.md`):
 - `docs/QUICKSTART.md` — first-run guide.
 - `docs/TROUBLESHOOTING.md` — common failure modes.
 - `docs/WORKFLOW.md` — end-to-end orchestration story.
-- `docs/AGENTLINT_REPORT.md` — most recent harness audit (Phase 7).
+- `docs/AGENTLINT_REPORT.md` — most recent harness audit (post-G8 Phase F).
 - `docs/plans/` — execution plans (`v3-upgrade.md` and successors).
 
 ## Tests

@@ -53,7 +53,7 @@ make check
 
 ## Handoff and current focus
 
-When you finish a task, update Beads via `bd update <id>` rather than leaving notes in this file. The plan currently being executed is `/Users/edk0/.claude/plans/we-are-working-on-dynamic-marshmallow.md` (Phases 0-7 of the v3 upgrade). Phase 7 (AgentLint validation) is the active phase as of 2026-05-09.
+When you finish a task, update Beads via `bd update <id>` rather than leaving notes in this file. The v3 upgrade plan at `docs/plans/v3-upgrade.md` (mirrored from `/Users/edk0/.claude/plans/we-are-working-on-dynamic-marshmallow.md`) is complete: Phases 0-7, the G8 test-harness epic, and the post-G8 closeout all shipped on `main` by 2026-05-11. See `CHANGELOG.md` `[3.0.0] - 2026-05-11` for the full per-phase breakdown.
 
 For multi-session continuity, refer to:
 - `bd list --status in_progress --json` for the live work queue.
