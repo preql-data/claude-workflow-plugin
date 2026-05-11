@@ -196,8 +196,68 @@ build/
         }
     }
 
-    # Mode selection
+    # v2 detection (PowerShell installer is minimal: detect + redirect to install.sh) ---
+    # Signals match the bash detect_v2_install in install.sh:
+    #   1. Agent files lack a `model:` frontmatter field.
+    #   2. .claude/hooks/hooks.json present but .claude-plugin/plugin.json absent.
+    #   3. No .claude/mcp/ and no .claude/skills/workflow-engine/.
+    # We do NOT perform the migration in PowerShell -- it duplicates 100+ lines
+    # of logic that install.sh already has and that we maintain in one place.
+    # Instead we print a clear redirect and exit.
     $ClaudeDir = Join-Path $Target ".claude"
+    $V2Signals = @()
+    if (Test-Path $ClaudeDir) {
+        $Agents = Get-ChildItem "$ClaudeDir\agents\*.md" -ErrorAction SilentlyContinue
+        if ($Agents.Count -gt 0) {
+            $MissingModel = 0
+            foreach ($a in $Agents) {
+                $head = Get-Content $a.FullName -TotalCount 20 -ErrorAction SilentlyContinue
+                if (-not ($head -match '^model:')) { $MissingModel++ }
+            }
+            if ($MissingModel -eq $Agents.Count) {
+                $V2Signals += "agents lack 'model:' frontmatter"
+            }
+        }
+        if ((Test-Path "$ClaudeDir\hooks\hooks.json") -and
+            (-not (Test-Path (Join-Path $Target ".claude-plugin/plugin.json")))) {
+            $V2Signals += "hooks.json present, no .claude-plugin/plugin.json"
+        }
+        $HasContent = (Test-Path "$ClaudeDir\agents") -or `
+                      (Test-Path "$ClaudeDir\scripts") -or `
+                      (Test-Path "$ClaudeDir\settings.json")
+        if ($HasContent -and `
+            (-not (Test-Path "$ClaudeDir\mcp")) -and `
+            (-not (Test-Path "$ClaudeDir\skills\workflow-engine"))) {
+            $V2Signals += "no .claude/mcp/ and no .claude/skills/workflow-engine/"
+        }
+    }
+
+    if ($V2Signals.Count -gt 0) {
+        Write-Host ""
+        Write-Color "Detected v2 plugin installation at $Target" Cyan
+        Write-Host ("  Signals: " + ($V2Signals -join "; "))
+        Write-Host ""
+        Write-Color "The v2 -> v3 upgrade flow is implemented in install.sh, not in PowerShell." Yellow
+        Write-Host "Run the bash installer to migrate (it backs up to .claude-v2-backup-<timestamp>/ first):"
+        Write-Host ""
+        Write-Host "  # via Git Bash (ships with Git for Windows):"
+        Write-Host "  bash install.sh --upgrade"
+        Write-Host ""
+        Write-Host "  # via WSL:"
+        Write-Host "  wsl bash install.sh --upgrade"
+        Write-Host ""
+        Write-Host "  # via curl-pipe in Git Bash:"
+        Write-Host "  curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash -s -- --upgrade"
+        Write-Host ""
+        Write-Color "Fresh installs work natively in PowerShell; only the migration requires bash." Yellow
+        Write-Host "If you want to overwrite the v2 install with a fresh v3 (losing v2 customizations),"
+        Write-Host "remove the .claude/ directory first and re-run this script:"
+        Write-Host "  Remove-Item -Recurse $ClaudeDir"
+        Write-Host ""
+        exit 2
+    }
+
+    # Mode selection
     $MergeMode = $false
     $UpdateMode = $false
     $BackupDir = $null

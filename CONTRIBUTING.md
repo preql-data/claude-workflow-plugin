@@ -1,5 +1,13 @@
 # Contributing
 
+The fastest way to customize the plugin: clone this repo, open it in Claude
+Code, and describe your change in plain English. The plugin runs on this
+repo itself — the orchestrator will create a Beads epic, route the work to
+the right specialist, and gate it through QA before anything ships. See
+the **Customize / contribute** section of [`README.md`](README.md) for the
+3-step walkthrough. This file covers the deeper extension points (a new
+specialist agent, a new hook, the test pyramid, AgentLint reconciliation).
+
 Thanks for considering a contribution. This file is intentionally short --
 it covers the two extension points that come up most often (a new specialist
 agent, a new hook), and points at the deferred testing strategy for anything

@@ -10,9 +10,12 @@
 #   curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
 #
 # Usage:
-#   bash install.sh [project-path]            # from a local clone
-#   curl -fsSL <url>/install.sh | bash        # via curl (auto-clones)
-#   curl -fsSL <url>/install.sh | bash -s -- /path/to/project
+#   bash install.sh [project-path]                   # from a local clone
+#   bash install.sh --upgrade [project-path]         # force v2->v3 upgrade flow
+#   bash install.sh --help                           # print usage
+#   curl -fsSL <url>/install.sh | bash               # via curl (auto-clones)
+#   curl -fsSL <url>/install.sh | bash -s -- /path   # specify target path
+#   curl -fsSL <url>/install.sh | bash -s -- --upgrade
 
 set -e
 
@@ -29,8 +32,73 @@ MIN_BD_VERSION="0.47"
 REPO_URL="${CLAUDE_WORKFLOW_REPO:-https://github.com/preql-data/claude-workflow-plugin.git}"
 REPO_BRANCH="${CLAUDE_WORKFLOW_BRANCH:-main}"
 
+# Argument parsing ------------------------------------------------------------
+# Supports:
+#   --upgrade   force the v2->v3 upgrade flow even if auto-detection is fuzzy
+#   --help/-h   print usage and exit 0
+# Anything else is treated as the target project path (back-compat with v2
+# install.sh's positional [project-path] form).
+FORCE_UPGRADE=false
+TARGET=""
+
+print_usage() {
+    cat <<'USAGE'
+Claude Workflow Plugin v3 installer
+
+Usage:
+  bash install.sh [project-path]                Install (auto-detects v2)
+  bash install.sh --upgrade [project-path]      Force the v2->v3 upgrade flow
+  bash install.sh --help                        Print this message
+
+Flags:
+  --upgrade    Run the v2->v3 migration even if auto-detection is fuzzy.
+               Backs up .claude/ to .claude-v2-backup-<timestamp>/ before
+               writing v3 files.
+  -h, --help   Print this message and exit 0.
+
+Curl-pipe forms:
+  curl -fsSL <url>/install.sh | bash
+  curl -fsSL <url>/install.sh | bash -s -- /path/to/project
+  curl -fsSL <url>/install.sh | bash -s -- --upgrade
+
+The default (no flag) auto-detects v2 layouts (no model: frontmatter, no
+.claude-plugin/plugin.json, no .claude/mcp/) and migrates them.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --upgrade)
+            FORCE_UPGRADE=true
+            shift
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --)
+            shift
+            ;;
+        -*)
+            echo "Unknown flag: $1" >&2
+            print_usage >&2
+            exit 1
+            ;;
+        *)
+            if [ -z "$TARGET" ]; then
+                TARGET="$1"
+            else
+                echo "Unexpected extra argument: $1" >&2
+                print_usage >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
 # Resolve target ---------------------------------------------------------------
-TARGET="${1:-.}"
+TARGET="${TARGET:-.}"
 mkdir -p "$TARGET"
 TARGET=$(cd "$TARGET" && pwd)
 
@@ -201,12 +269,96 @@ GITIGNORE_EOF
     fi
 fi
 
+# v2 detection ----------------------------------------------------------------
+# Signals (any one is enough to declare a v2 layout; all three is high
+# confidence):
+#   1. .claude/agents/ exists with agent files that LACK a `model:` frontmatter
+#      field (v2 pre-dated model pinning).
+#   2. .claude/hooks/hooks.json exists but .claude-plugin/plugin.json does NOT
+#      (v2 had no plugin manifest).
+#   3. The .claude/ tree lacks .claude/mcp/ AND .claude/skills/workflow-engine/
+#      (both arrived in v3).
+#
+# `--upgrade` forces the upgrade flow regardless of signal count.
+detect_v2_install() {
+    local claude_dir="$TARGET/.claude"
+    [ -d "$claude_dir" ] || return 1
+
+    local signals=()
+
+    # Signal 1: agents without model: frontmatter
+    if [ -d "$claude_dir/agents" ]; then
+        local missing_model_count=0
+        local agent_count=0
+        for f in "$claude_dir/agents/"*.md; do
+            [ -f "$f" ] || continue
+            agent_count=$((agent_count + 1))
+            # Look for `model:` inside the first 20 lines (the frontmatter).
+            if ! head -20 "$f" 2>/dev/null | grep -qE '^model:'; then
+                missing_model_count=$((missing_model_count + 1))
+            fi
+        done
+        if [ "$agent_count" -gt 0 ] && [ "$missing_model_count" = "$agent_count" ]; then
+            signals+=("agents lack 'model:' frontmatter")
+        fi
+    fi
+
+    # Signal 2: hooks.json without plugin.json
+    if [ -f "$claude_dir/hooks/hooks.json" ] && [ ! -f "$TARGET/.claude-plugin/plugin.json" ]; then
+        signals+=("hooks.json present, no .claude-plugin/plugin.json")
+    fi
+
+    # Signal 3: missing v3-era directories
+    if [ ! -d "$claude_dir/mcp" ] && [ ! -d "$claude_dir/skills/workflow-engine" ]; then
+        # Only flag this signal if .claude/ has any v2-era content at all;
+        # an empty .claude/ is not a v2 install, it's just a stub.
+        if [ -d "$claude_dir/agents" ] || [ -d "$claude_dir/scripts" ] || [ -f "$claude_dir/settings.json" ]; then
+            signals+=("no .claude/mcp/ and no .claude/skills/workflow-engine/")
+        fi
+    fi
+
+    if [ "${#signals[@]}" -gt 0 ]; then
+        V2_SIGNALS="${signals[*]}"
+        return 0
+    fi
+    return 1
+}
+
+V2_UPGRADE=false
+V2_SIGNALS=""
+V2_BACKUP_DIR=""
+
+if [ "$FORCE_UPGRADE" = true ]; then
+    V2_UPGRADE=true
+    if detect_v2_install; then
+        echo -e "${YELLOW}Upgrade mode forced (--upgrade). Detected signals: $V2_SIGNALS${NC}"
+    else
+        echo -e "${YELLOW}Upgrade mode forced (--upgrade). No v2 signals detected; treating .claude/ as v2 anyway.${NC}"
+    fi
+elif detect_v2_install; then
+    V2_UPGRADE=true
+    echo -e "${CYAN}Detected v2 plugin installation. Upgrading to v3...${NC}"
+    echo -e "  Signals: $V2_SIGNALS"
+fi
+
 # Mode selection (interactive) -------------------------------------------------
 BACKUP_DIR="$TARGET/.claude-backup-$(date +%Y%m%d-%H%M%S)"
 MERGE_MODE=false
 UPDATE_MODE=false
 
-if [ -d "$TARGET/.claude" ]; then
+# v2 upgrade path: back up the v2 .claude/ to .claude-v2-backup-<ts>/ and
+# fall through to a fresh install. We do not invoke the interactive mode
+# prompt because the upgrade is unambiguous.
+if [ "$V2_UPGRADE" = true ] && [ -d "$TARGET/.claude" ]; then
+    V2_BACKUP_DIR="$TARGET/.claude-v2-backup-$(date +%Y%m%d-%H%M%S)"
+    echo -e "${YELLOW}Backing up v2 install to $V2_BACKUP_DIR${NC}"
+    mkdir -p "$V2_BACKUP_DIR"
+    cp -r "$TARGET/.claude/"* "$V2_BACKUP_DIR/" 2>/dev/null || true
+    [ -f "$TARGET/CLAUDE.md" ] && cp "$TARGET/CLAUDE.md" "$V2_BACKUP_DIR/"
+    echo -e "${GREEN}OK${NC} v2 backup created"
+    # UPDATE_MODE preserves CLAUDE.md and merges settings non-destructively.
+    UPDATE_MODE=true
+elif [ -d "$TARGET/.claude" ]; then
     echo -e "${YELLOW}Existing .claude/ directory found.${NC}"
 
     EXISTING_AGENTS=$(find "$TARGET/.claude/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ' || echo "0")
@@ -421,19 +573,39 @@ echo ""
 echo -e "Installed to: ${BLUE}$TARGET/.claude/${NC}"
 echo -e "Manifest:     ${BLUE}$TARGET/.claude-plugin/plugin.json${NC}"
 
+if [ -n "$V2_BACKUP_DIR" ] && [ -d "$V2_BACKUP_DIR" ]; then
+    echo -e "v2 backup:    ${BLUE}$V2_BACKUP_DIR${NC}"
+fi
 if [ -d "$BACKUP_DIR" ]; then
     echo -e "Backup at:    ${BLUE}$BACKUP_DIR${NC}"
 fi
 
 echo ""
-echo -e "${CYAN}What's new in v3:${NC}"
-echo "  - Plugin manifest (.claude-plugin/plugin.json) with v3.0.0"
-echo "  - Model pinning per agent + /workflow-model upgrade command"
-echo "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
-echo "  - Parent-folder access via additionalDirectories (../)"
-echo "  - SessionStart warns on stale model + old bd"
-echo "  - Single-source-of-truth installer (no heredoc duplication)"
-echo "  - uninstall.sh for clean removal"
+if [ "$V2_UPGRADE" = true ]; then
+    echo -e "${CYAN}What changed in the v2 -> v3 upgrade:${NC}"
+    echo "  - .claude-plugin/plugin.json: first-class Claude Code plugin manifest"
+    echo "  - Agent files now pin 'model:' (run /workflow-model to bump)"
+    echo "  - Two MCP servers: bd-mcp (21 typed Beads tools), code-context-mcp (3 search tools)"
+    echo "  - QA gate is now Beads-label-driven (qa-approved), no longer marker-file"
+    echo "  - Hook output uses hookSpecificOutput envelope; PreToolUse blocks orchestrator edits"
+    echo "  - SessionStart warns on stale model / old bd; SessionEnd writes a structured summary"
+    echo "  - 5-tier test pyramid under .claude/tests/ + GitHub Actions CI"
+    echo "  - Single-source-of-truth installer (no embedded heredoc agent prompts)"
+    echo ""
+    echo -e "Full release notes: ${BLUE}CHANGELOG.md${NC}"
+    if [ -n "$V2_BACKUP_DIR" ]; then
+        echo -e "Diff your customizations: ${BLUE}diff -r $V2_BACKUP_DIR $TARGET/.claude${NC}"
+    fi
+else
+    echo -e "${CYAN}What's new in v3:${NC}"
+    echo "  - Plugin manifest (.claude-plugin/plugin.json) with v3.0.0"
+    echo "  - Model pinning per agent + /workflow-model upgrade command"
+    echo "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
+    echo "  - Parent-folder access via additionalDirectories (../)"
+    echo "  - SessionStart warns on stale model + old bd"
+    echo "  - Single-source-of-truth installer (no heredoc duplication)"
+    echo "  - uninstall.sh for clean removal"
+fi
 echo ""
 echo -e "${YELLOW}Usage:${NC}"
 echo "  cd $TARGET"

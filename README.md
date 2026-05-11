@@ -1,325 +1,164 @@
 # Claude Workflow Plugin
 
-<div align="center">
-
-**Orchestrator-first development workflow for Claude Code with mandatory QA gates**
+A plugin for [Claude Code](https://claude.ai) that turns "build me a feature"
+into a tracked, reviewed, regression-tested change set — without you driving
+every step.
 
 [![Beads Required](https://img.shields.io/badge/Beads-Required-blue)](https://github.com/steveyegge/beads)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-Compatible-green)](https://claude.ai)
 
-[Quick Start](#-quick-start) •
-[Features](#-features) •
-[Architecture](#-architecture) •
-[Documentation](#-documentation) •
-[FAQ](#-faq)
+## 🎯 What you get
 
-</div>
+- **Plain-English in, structured work out.** Describe a feature. The
+  orchestrator breaks it into a Beads epic with subtasks, routes each
+  subtask to a domain specialist (backend / frontend / devops / qa) that
+  already knows OWASP, performance budgets, accessibility patterns, and
+  root-cause analysis, and ships nothing until QA approves.
+- **A QA gate that's a real Stop hook.** Claude literally cannot release
+  the conversation without `qa-approved` on the active task. The decision
+  is recorded in Beads as a label and a comment — full audit trail, no
+  honour system. Bypass attempts are visible in the hook log.
+- **Tasks survive sessions.** Specialists auto-claim work via
+  `bd update --status in_progress`. PRs and Beads tasks auto-link to
+  GitHub (issues, PRs, close-on-merge). Pick up tomorrow where you left
+  off tonight.
+- **Two MCP servers ship in the box.** `bd-mcp` exposes 21 typed Beads
+  tools (no shell quoting bugs). `code-context-mcp` exposes 3 search
+  tools (`code_search`, `code_context`, `symbol_callers`). Both load
+  automatically via `.mcp.json` and `${CLAUDE_PLUGIN_ROOT}`.
+- **Regression coverage by construction.** Every QA iteration runs the
+  full test suite. A module-A edit that breaks module-B's contract is
+  caught before approval, not after. The plugin's own test pyramid (L1
+  bash unit → L4 daily drift) demonstrates the pattern.
 
----
+## ⚡ Install
 
-## 🎯 What Is This?
+The plugin requires Beads (`bd`) ≥ 0.47 and `jq`. The installer fails
+fast if either is missing and prints the upgrade command.
 
-The Ultimate Workflow Plugin transforms Claude Code into an **orchestrator-first development system** where:
-
-- 🤖 **AI agents are automatically invoked** based on work type and domain
-- 🚫 **No code ships without QA approval** - enforced at the system level
-- 📊 **Tasks persist across sessions** via Beads integration
-- 🔄 **Quality gates cannot be bypassed** - the system blocks completion
-
-### The Problem It Solves
-
-| Without This Plugin | With This Plugin |
-|---------------------|------------------|
-| AI skips testing "to save time" | Tests are mandatory, enforced by QA gate |
-| Context lost between sessions | Beads persists tasks, notes, decisions |
-| No visibility into blocked work | `bd blocked` shows what's waiting |
-| Flat task lists | Hierarchical epics organize complex features |
-| QA is optional | QA approval required to complete ANY task |
-
----
-
-## ⚡ Quick Start
-
-### Prerequisites
+### Fresh install
 
 ```bash
-# 1. Install Beads (REQUIRED)
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+# curl-pipe (no clone needed)
+curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash
 
-# 2. Verify installation
-bd --version
+# or clone-and-run
+git clone https://github.com/preql-data/claude-workflow-plugin
+cd claude-workflow-plugin
+bash install.sh /path/to/your/project
 ```
 
-### Installation
+### Upgrade from v2
 
-**Linux / macOS:**
+The installer auto-detects v2 layouts (no `model:` frontmatter, no
+`.claude-plugin/plugin.json`, no MCP servers) and migrates them. You can
+also force upgrade mode explicitly:
+
 ```bash
-cd /path/to/your/project
-curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/refs/heads/main/install.sh | bash
+# auto-detects v2 and migrates
+curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash
+
+# explicit upgrade
+curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash -s -- --upgrade
 ```
 
-**Windows (PowerShell):**
+Migration copies the existing `.claude/` to `.claude-v2-backup-<timestamp>/`
+before writing v3 files, so user customizations are recoverable. Run the
+diff after install to see what changed:
+
+```bash
+diff -r .claude-v2-backup-*/ .claude/
+```
+
+### Windows
+
 ```powershell
-cd C:\Projects\myproject
 irm https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.ps1 | iex
 ```
 
-### First Run
+PowerShell detects v2 layouts but does **not** perform the migration —
+it prints a message asking you to run `install.sh` (via WSL or Git Bash)
+for the upgrade. Fresh installs work natively in PowerShell.
 
-```bash
-cd your-project
-claude
+## 📦 What you get on disk
 
-# Just describe what you want:
-> Add user authentication with JWT tokens
-```
+| Component | Count | Where |
+|-----------|-------|-------|
+| Specialist agents | 5 | `.claude/agents/{orchestrator,qa,backend,frontend,devops}.md` |
+| Hook scripts | 9 | `.claude/scripts/` (8 hook events + statusline) |
+| MCP servers | 2 | `.claude/mcp/{bd-mcp,code-context-mcp}/` |
+| Slash commands | 1 | `.claude/commands/workflow-model.md` |
+| Test tiers | 5 | L1 bash unit → L4 daily drift watch (`.claude/tests/`) |
+| CI | GitHub Actions | `.github/workflows/test.yml` (lint + 6 test jobs + drift cron) |
 
-The system automatically:
-1. Creates a hierarchical epic with subtasks
-2. Labels tasks with domains (`backend`, `frontend`) and `qa-pending`
-3. Delegates to specialist agents
-4. **Blocks completion until @qa approves**
+The plugin manifest is at `.claude-plugin/plugin.json`. The MCP wiring
+is at `.mcp.json`. Both use `${CLAUDE_PLUGIN_ROOT}` so the install works
+regardless of project layout.
 
----
+## 🛠 Customize / contribute
 
-## ✨ Features
+The plugin is designed to be modified by the people using it. The
+workflow that ships in this repo runs ON this repo too — you can use
+the plugin to upgrade itself.
 
-### 🤖 Automatic Agent Delegation
+To customize for your team:
 
-The orchestrator analyzes your request and delegates to specialists:
+1. Clone:
+   ```bash
+   git clone https://github.com/preql-data/claude-workflow-plugin
+   cd claude-workflow-plugin
+   ```
 
-| Domain Detected | Agent | Expertise |
-|-----------------|-------|-----------|
-| API, database, auth | `@backend` | REST/GraphQL, SQL, business logic |
-| UI, components, styling | `@frontend` | React, CSS, accessibility |
-| CI/CD, Docker, infra | `@devops` | Pipelines, containers, IaC |
-| Testing, verification | `@qa` | E2E tests, edge cases, approval |
+2. Open the cloned repo in Claude Code. The plugin loads automatically.
 
-### 🚫 Mandatory QA Gate
+3. Describe what you want to change in plain English:
+   - "Add a security specialist that reviews every backend change"
+   - "Change the QA gate to require 80% test coverage before approval"
+   - "Add a slash command that creates a fresh Beads epic from a spec doc"
 
-**Every code change requires QA approval.** The Stop hook blocks task completion until:
+   The orchestrator will create a Beads epic, route the work to the
+   right specialist, and run it through the QA gate.
 
-```bash
-# QA adds approval comment
-bd comments add $TASK "QA APPROVED: Verified login flow, added 8 E2E tests"
+4. Claude will create a feature branch for the change. When QA approves,
+   you commit and push. Open a PR upstream if it's a generally-useful
+   addition.
 
-# QA updates labels
-bd label remove $TASK qa-pending
-bd label add $TASK qa-approved
-```
+The full contributor guide is in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+The test pyramid documentation in
+[`.claude/tests/README.md`](.claude/tests/README.md) explains how to add
+tests for your changes.
 
-Without approval, the system shows:
+## 📐 Architecture
 
-```
-🚫 QA APPROVAL REQUIRED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-15 file(s) changed - ALL require QA review
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED: Delegate to @qa NOW
-```
+The orchestrator never edits code; specialists do, gated by QA. Hooks
+enforce that contract — `prevent-orchestrator-edits.sh` blocks Write/Edit
+from the orchestrator role, and `verify-before-stop.sh` refuses Stop
+without `qa-approved` on the active task. Cross-repo work and GitHub
+auto-linking land via I3/I8 hooks (`bd-github-link.sh`,
+`current-task.sh`).
 
-### 📊 Full Beads Integration
+For the deep dive, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+For the test pyramid that gates every change, read
+[`.claude/tests/README.md`](.claude/tests/README.md). For the v3 release
+notes (G8 harness, MCP servers, plugin manifest, etc.) read
+[`CHANGELOG.md`](CHANGELOG.md).
 
-| Feature | How We Use It |
-|---------|---------------|
-| `bd prime` | Context injection at session start |
-| `bd ready` | Find available work |
-| `bd blocked` | Surface blocked issues |
-| Hierarchical issues | Epics for complex features |
-| Labels | Domain tracking, QA status |
-| Structured notes | Survive compaction |
-| Git hooks | Auto-sync on commit/push |
+## ⚠ Caveats
 
-### 🔄 Persistent Memory
-
-Notes survive Beads compaction with structured format:
-
-```
-COMPLETED: JWT auth endpoints with refresh tokens
-IN PROGRESS: None - ready for QA
-BLOCKED: None
-KEY DECISIONS: Using RS256, 15min access / 7d refresh
-```
-
----
-
-## 🏗 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        USER REQUEST                              │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  SessionStart Hook                                               │
-│  ├─ Runs bd prime (Beads context)                               │
-│  ├─ Shows bd blocked (blocked issues)                           │
-│  └─ Injects workflow instructions                                │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  UserPromptSubmit Hook                                           │
-│  ├─ Detects work type (bug/feature/improvement)                 │
-│  └─ Detects domains (backend/frontend/devops)                   │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  ORCHESTRATOR → Creates epic → Delegates to specialists         │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-       [@backend]         [@frontend]        [@devops]
-              │                 │                 │
-              └─────────────────┼─────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  PostToolUse Hook → Tracks all changed files                    │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Stop Hook - QA GATE                                             │
-│  ├─ Checks for qa-approved label OR "QA APPROVED" comment       │
-│  ├─ If NO: BLOCKS completion                                     │
-│  └─ If YES: Allows completion                                    │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-            [Not Approved]            [Approved]
-                    │                       │
-                    ▼                       ▼
-              Must delegate           ✅ COMPLETE
-              to @qa first            Task closes
-```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete architecture diagram.
-
----
-
-## 📁 Project Structure
-
-```
-your-project/
-├── .beads/                      # Beads database
-├── .claude/
-│   ├── agents/                  # AI agent definitions
-│   │   ├── orchestrator.md      # Main coordinator
-│   │   ├── backend.md           # API/DB specialist
-│   │   ├── frontend.md          # UI/UX specialist
-│   │   ├── devops.md            # CI/CD specialist
-│   │   └── qa.md                # Quality gate
-│   ├── scripts/                 # Hook scripts
-│   ├── hooks/                   # Hook configuration
-│   ├── skills/                  # Workflow documentation
-│   └── settings.json            # Claude Code settings
-├── CLAUDE.md                    # Project memory
-└── .gitignore
-```
-
----
-
-## 📖 Documentation
-
-| Document | Description |
-|----------|-------------|
-| [Quick Start](docs/QUICKSTART.md) | Get running in 5 minutes |
-| [Architecture](docs/ARCHITECTURE.md) | Deep dive into system design |
-| [Agents Reference](docs/AGENTS.md) | All agent prompts documented |
-| [Hooks Reference](docs/HOOKS.md) | Hook scripts explained |
-| [MCP Servers](docs/MCP_SERVERS.md) | bd-mcp + code-context-mcp |
-| [Beads Integration](docs/BEADS.md) | How we use Beads |
-| [Workflow & Labels](docs/WORKFLOW.md) | Labels, statuses, lifecycle |
-| [Test Pyramid](.claude/tests/README.md) | Five-tier test harness (L1 → L4) |
-| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues & fixes |
-
-### Testing
-
-The plugin ships with its own five-tier test pyramid. See
-[`.claude/tests/README.md`](.claude/tests/README.md) for the full layout —
-L1 bash unit through L4 daily drift watch. The offline gate (`make test-all`)
-runs L1 + L2 in under a minute; the live tier (`make test-e2e`) exercises
-six fixtures end-to-end against real Claude Opus 4.7 with golden cassettes
-capturing the structural fingerprint of each run.
-
----
-
-## 🏷️ Labels Convention
-
-| Label | Meaning | Set By |
-|-------|---------|--------|
-| `backend` | Backend domain work | Orchestrator |
-| `frontend` | Frontend domain work | Orchestrator |
-| `devops` | DevOps domain work | Orchestrator |
-| `qa-pending` | Awaiting QA review | Domain agents |
-| `qa-approved` | QA has signed off | @qa agent |
-| `bug` | Bug fix | Auto-detected |
-| `feature` | New feature | Auto-detected |
-
----
-
-## 🔧 Beads Commands Cheat Sheet
-
-```bash
-# Finding Work
-bd ready                      # Tasks with no blockers
-bd blocked                    # Tasks waiting on dependencies
-bd list --label qa-pending    # Awaiting QA
-
-# Creating Tasks
-bd create "Title" -t task -p 1 -l backend,qa-pending
-bd create "Epic" -t epic -p 1 --description "..."
-
-# QA Approval
-bd comments add $ID "QA APPROVED: summary"
-bd label remove $ID qa-pending
-bd label add $ID qa-approved
-
-# Health
-bd doctor                     # Check Beads health
-```
-
----
-
-## ❓ FAQ
-
-<details>
-<summary><b>Why is Beads required?</b></summary>
-
-Beads provides persistent memory across sessions, dependency tracking, and labels for QA tracking. Without it, context is lost between sessions.
-
-</details>
-
-<details>
-<summary><b>Can I skip the QA gate?</b></summary>
-
-**No.** The QA gate is enforced at the system level. The only ways to complete are: QA approval, user interrupt (`Ctrl+C`), or no code changes.
-
-</details>
-
-<details>
-<summary><b>What if I'm working alone?</b></summary>
-
-You still delegate to `@qa`, which is an AI agent that reviews your changes and writes tests.
-
-</details>
-
-<details>
-<summary><b>Does this work with existing projects?</b></summary>
-
-Yes! Run the installer and choose option 2 (Update mode) to preserve existing configurations.
-
-</details>
+- Live e2e runs cost roughly **$5–10 per fixture** against Claude Opus 4.7
+  with `maxTurns=30`. The offline gate (`make test-all`) is free and
+  covers L1 + L2. CI runs L3-live only on a daily schedule, not per PR.
+- The upstream `bd` daemon has a stack-overflow on stale locks; the
+  plugin ships a `--no-daemon` shim under `.claude/bin/bd` (inlined onto
+  `PATH` in test fixtures). Production installs degrade gracefully.
+- AgentLint flags a few intentional design choices (Bash auto-approve,
+  tag-pinned actions); rationale is in [`CONTRIBUTING.md`](CONTRIBUTING.md)
+  under "Design overrides vs. AgentLint".
 
 ---
 
 <div align="center">
 
-[Report Bug](../../issues) • [Request Feature](../../issues) • [Documentation](docs/)
+[Report Bug](../../issues) • [Request Feature](../../issues) • [Docs](docs/) • [Changelog](CHANGELOG.md)
 
 </div>
