@@ -177,7 +177,14 @@ jobs:
           cache: "npm"
           cache-dependency-path: .claude/tests/e2e/package-lock.json
       - name: Install harness dependencies
-        run: npm ci
+        # --include=optional is defensive: `npm ci` already installs
+        # optionalDependencies by default, but on ubuntu-latest the
+        # @anthropic-ai/claude-agent-sdk's platform-specific glibc
+        # native binary (`@anthropic-ai/claude-agent-sdk-linux-x64`)
+        # was being skipped in favour of the musl variant. Forcing
+        # the flag pins the behaviour against future npm changes
+        # and any cache-state edge cases.
+        run: npm ci --include=optional
       - name: Run offline unit tier
         run: npm run test:unit
       - name: Sanity-check test count
@@ -274,7 +281,30 @@ jobs:
           cache-dependency-path: .claude/tests/e2e/package-lock.json
       - if: steps.gate.outputs.skip != 'true'
         name: Install harness dependencies
-        run: npm ci
+        # See L3-vitest-unit for the rationale on --include=optional —
+        # forces the SDK's linux-x64 (glibc) native binary to install
+        # on ubuntu-latest. The previous run (25673394715) hit
+        # "Claude Code native binary not found at .../claude-agent-sdk-
+        # linux-x64-musl/claude" because the musl variant was selected
+        # but its binary couldn't run on glibc.
+        run: npm ci --include=optional
+      - if: steps.gate.outputs.skip != 'true'
+        name: Verify SDK native binary present
+        # If the glibc binary isn't on disk after `npm ci`, the live
+        # suite will fail with the same ReferenceError as run 25673394715.
+        # Fail fast here so the cause is unambiguous in the workflow log
+        # (rather than mixed into 6 fixture-spec failures further down).
+        run: |
+          path="node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude"
+          if [ -f "$path" ]; then
+            echo "OK: $path exists"
+            ls -l "$path"
+          else
+            echo "ERROR: glibc native binary missing at $path"
+            echo "Installed @anthropic-ai/* packages:"
+            ls node_modules/@anthropic-ai/ 2>&1 || true
+            exit 1
+          fi
       - if: steps.gate.outputs.skip != 'true'
         name: Download L2 component log (for META-TEST scrape)
         uses: actions/download-artifact@v4
