@@ -134,21 +134,60 @@ OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
 assert_eq "statusline: qa-pending" "[$TASK] qa: pending • 2 files changed" "$OUT"
 
 # 1.5 Task with gate entered
+# Covers the gate-entered semantic state: a task has been handed to QA but
+# not yet approved/blocked. The changed-files tracker still reflects the
+# 2 unique files staged from 1.2 — gate-entered does NOT truncate.
 bash "$FIXTURE/.claude/scripts/qa-gate.sh" enter "$TASK" >/dev/null 2>&1
 bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
 assert_eq "statusline: gate-entered" "[$TASK] qa: gate-entered • 2 files changed" "$OUT"
 
-# 1.6 Task approved (qa-gate.sh approve clears current-task as a side effect,
-# so we re-set it before reading statusline)
+# 1.6 Task approved — verify the semantic transition across approve.
+#
+# Pre-approve: gate-entered with 2 files staged (carried from 1.5).
+# Post-approve: qa: approved with 0 files changed.
+#
+# Post-0wk.2: qa-gate.sh approve truncates changed-files.txt as part of its
+# atomic cleanup (alongside clearing current-task and iteration counters).
+# The truncation is correct behavior: "approved" means "this batch is done",
+# so the post-edit tracker is correctly empty in the approved state. The
+# test now asserts the transition rather than the (stale) pre-truncate count.
+
+# Pre-approve check: gate-entered, 2 files still in tracker.
+OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
+assert_eq "statusline: pre-approve (gate-entered, 2 files)" \
+    "[$TASK] qa: gate-entered • 2 files changed" "$OUT"
+
+# Approve clears current-task and truncates changed-files.txt as side effects,
+# so we re-set the task before reading statusline.
 bash "$FIXTURE/.claude/scripts/qa-gate.sh" approve "$TASK" "Test approval" >/dev/null 2>&1
 bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: approved" "[$TASK] qa: approved • 2 files changed" "$OUT"
+assert_eq "statusline: approved" "[$TASK] qa: approved • 0 files changed" "$OUT"
 
-# 1.7 bd unavailable
+# 1.7 bd unavailable — verify both pre-approve (files staged) and
+# post-approve (truncated) shapes when bd is off PATH.
+#
+# The statusline degrades gracefully to "(bd unavailable)" when bd is not
+# on PATH, regardless of QA state. The file-count side is independent of
+# bd, so this still exercises the post-edit tracker.
+#
+# Approve in 1.6 already truncated changed-files.txt (post-0wk.2 behavior).
+# We simulate the two states directly by writing/clearing the tracker —
+# we cannot call approve a second time on the same task (it would no-op:
+# "qa-approved already set").
+
+# Pre-approve shape: 2 files staged.
+printf '/path/c.ts\n/path/d.ts\n' > "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
 OUT=$(PATH=/usr/bin:/bin bash -c "echo '{}' | bash '$FIXTURE/.claude/scripts/statusline.sh'")
-assert_eq "statusline: bd unavailable" "(bd unavailable) — 2 files changed" "$OUT"
+assert_eq "statusline: bd unavailable (pre-approve, 2 files)" \
+    "(bd unavailable) — 2 files changed" "$OUT"
+
+# Post-approve shape: tracker truncated (post-0wk.2 qa-gate.sh approve
+# semantics — see 1.6 for the qa-gate-driven verification of this).
+: > "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
+OUT=$(PATH=/usr/bin:/bin bash -c "echo '{}' | bash '$FIXTURE/.claude/scripts/statusline.sh'")
+assert_eq "statusline: bd unavailable" "(bd unavailable) — 0 files changed" "$OUT"
 
 # ---------------------------------------------------------------------------
 echo ""
