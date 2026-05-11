@@ -49,11 +49,14 @@ get_current_task() {
 
 # Count unique tracked file changes (sort -u handles the no-flock B9 path).
 count_changed_files() {
-    if [ -f "$TRACKING_FILE" ]; then
-        sort -u "$TRACKING_FILE" 2>/dev/null | grep -c . || echo "0"
-    else
+    if [ ! -f "$TRACKING_FILE" ]; then
         echo "0"
+        return
     fi
+    local count
+    # `sort -u` + `wc -l` is portable and always exits 0; trim macOS BSD `wc -l` leading spaces.
+    count=$(sort -u "$TRACKING_FILE" 2>/dev/null | wc -l | tr -d '[:space:]')
+    echo "${count:-0}"
 }
 
 # Read a task's QA state from its labels. Returns one of:
