@@ -1,0 +1,15 @@
+#!/bin/bash
+# bd shim — workaround for bd 0.47.1 stack-overflow bug in acquireStartLock
+# (cmd/bd/daemon_autostart.go:228). The user's bd binary at
+# /Users/edk0/.local/bin/bd crashes on every invocation that goes through
+# the daemon-autostart code path, but `bd --no-daemon <subcommand>` works
+# correctly.
+#
+# This shim makes the workaround transparent: callers invoke `bd <args>`
+# normally and we prepend --no-daemon so the daemon-autostart path is
+# never taken.
+#
+# Tracked upstream as claude-workflow-plugin-0wk.5 / 0wk.6. Pre-installed
+# in the fixture so the E2E happy-path doesn't have to self-heal during
+# the live run.
+exec /Users/edk0/.local/bin/bd --no-daemon "$@"

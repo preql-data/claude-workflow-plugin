@@ -1,116 +1,176 @@
-# Ultimate Workflow Plugin v2 - Windows Installer (PowerShell)
-# 
-# This plugin REQUIRES Beads (bd) for task tracking.
-# Install Beads first: irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+# Claude Workflow Plugin v3 - Windows installer (PowerShell)
 #
-# Usage: 
-#   .\install-ultimate-workflow.ps1
-#   .\install-ultimate-workflow.ps1 -Path "C:\Projects\myproject"
+# Single-source-of-truth: this script copies the canonical agent/script/hook
+# definitions from the repo (alongside this file, or freshly cloned to a temp
+# dir if piped from `irm | iex`). It does NOT embed the agent prompts.
+#
+# This plugin REQUIRES Beads (bd) for task tracking.
+# Install Beads first:
+#   irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+#
+# Usage:
+#   .\install.ps1                                       # uses current dir
+#   .\install.ps1 -Path "C:\Projects\myproject"
+#   irm https://.../install.ps1 | iex                   # auto-clones repo
 
 param(
-    [string]$Path = "."
+    [string]$Path = ".",
+    [string]$RepoUrl = $env:CLAUDE_WORKFLOW_REPO,
+    [string]$RepoBranch = $env:CLAUDE_WORKFLOW_BRANCH
 )
 
 $ErrorActionPreference = "Stop"
 
-# Colors
+if (-not $RepoUrl)    { $RepoUrl = "https://github.com/preql-data/claude-workflow-plugin.git" }
+if (-not $RepoBranch) { $RepoBranch = "main" }
+
+$MinBdVersion = [Version]"0.47"
+
 function Write-Color {
     param([string]$Message, [string]$Color = "White")
     Write-Host $Message -ForegroundColor $Color
 }
 
-# Resolve target path
-$Target = Resolve-Path $Path -ErrorAction SilentlyContinue
-if (-not $Target) {
-    New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    $Target = Resolve-Path $Path
-}
-$Target = $Target.Path
+# Resolve target path ---------------------------------------------------------
+if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+$Target = (Resolve-Path $Path).Path
 
 Write-Host ""
-Write-Color "╔════════════════════════════════════════════════════════════╗" Cyan
-Write-Color "║     Ultimate Workflow Plugin v2 - Windows Installer        ║" Cyan
-Write-Color "║   Full Beads Integration with Mandatory QA Gate            ║" Cyan
-Write-Color "╚════════════════════════════════════════════════════════════╝" Cyan
+Write-Color "Claude Workflow Plugin v3" Cyan
+Write-Color "Orchestrator-first workflow with mandatory QA gate" Cyan
 Write-Host ""
 Write-Host "Installing to: " -NoNewline
 Write-Color $Target Green
 Write-Host ""
 
-# ============================================================================
-# PREREQUISITES - BEADS IS REQUIRED
-# ============================================================================
-
+# Prerequisites ---------------------------------------------------------------
 Write-Color "Checking prerequisites..." Yellow
 
-# Check for Git
 if (Get-Command git -ErrorAction SilentlyContinue) {
-    Write-Color "✓ git installed" Green
+    Write-Color "OK git installed" Green
 } else {
-    Write-Color "✗ git not found - REQUIRED" Red
+    Write-Color "git not found - REQUIRED" Red
     Write-Host "  Install from: https://git-scm.com/download/win"
     exit 1
 }
 
-# Check for jq (optional but recommended)
-$HasJq = $false
 if (Get-Command jq -ErrorAction SilentlyContinue) {
-    Write-Color "✓ jq installed" Green
-    $HasJq = $true
+    Write-Color "OK jq installed" Green
 } else {
-    Write-Color "⚠ jq not found - some features limited" Yellow
+    Write-Color "jq not found - REQUIRED" Red
     Write-Host "  Install: winget install jqlang.jq"
+    exit 1
 }
 
-# Check for Beads (REQUIRED)
 if (-not (Get-Command bd -ErrorAction SilentlyContinue)) {
     Write-Host ""
-    Write-Color "╔════════════════════════════════════════════════════════════╗" Red
-    Write-Color "║  ✗ BEADS (bd) NOT FOUND - REQUIRED FOR THIS PLUGIN         ║" Red
-    Write-Color "╚════════════════════════════════════════════════════════════╝" Red
-    Write-Host ""
-    Write-Host "This workflow plugin requires Beads for:"
-    Write-Host "  • Task tracking and dependency management"
-    Write-Host "  • Persistent memory across sessions"
-    Write-Host "  • QA approval tracking"
-    Write-Host "  • Hierarchical issue organization"
+    Write-Color "Beads (bd) not found - REQUIRED" Red
     Write-Host ""
     Write-Color "Install Beads:" Cyan
-    Write-Host ""
-    Write-Host "  # PowerShell (Windows)"
+    Write-Host "  # PowerShell"
     Write-Host "  irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
-    Write-Host ""
-    Write-Host "  # npm"
-    Write-Host "  npm install -g @beads/bd"
-    Write-Host ""
-    Write-Host "  # Go"
-    Write-Host "  go install github.com/steveyegge/beads/cmd/bd@latest"
     Write-Host ""
     Write-Host "After installing, run this installer again."
     exit 1
 }
 
-$BdVersion = (bd --version 2>$null | Select-Object -First 1) -replace '\s+', ' '
-Write-Color "✓ Beads installed ($BdVersion)" Green
+$BdVersionRaw = (bd --version 2>$null | Select-Object -First 1)
+$BdVersionMatch = [regex]::Match("$BdVersionRaw", '(\d+)\.(\d+)(?:\.(\d+))?')
+$BdVersionNum = $null
+if ($BdVersionMatch.Success) {
+    $major = $BdVersionMatch.Groups[1].Value
+    $minor = $BdVersionMatch.Groups[2].Value
+    $patch = if ($BdVersionMatch.Groups[3].Success) { $BdVersionMatch.Groups[3].Value } else { "0" }
+    $BdVersionNum = [Version]"$major.$minor.$patch"
+}
+Write-Color "OK Beads installed ($BdVersionRaw)" Green
+
+# D6: enforce minimum bd version at install time
+if ($BdVersionNum -and $BdVersionNum -lt $MinBdVersion) {
+    Write-Host ""
+    Write-Color "Beads version $BdVersionNum is older than the required minimum $MinBdVersion." Red
+    Write-Host "Upgrade Beads, then rerun this installer:"
+    Write-Host "  irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
+    exit 1
+}
 
 Write-Host ""
 
-# ============================================================================
-# GIT REPOSITORY CHECK
-# ============================================================================
+# Locate source-of-truth files ------------------------------------------------
+$ScriptDir = $null
+if ($PSCommandPath) {
+    $ScriptDir = Split-Path -Parent $PSCommandPath
+} elseif ($MyInvocation.MyCommand.Definition) {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+}
 
-$GitDir = Join-Path $Target ".git"
-if (-not (Test-Path $GitDir)) {
-    Write-Color "No git repository found." Yellow
-    $InitGit = Read-Host "Initialize git repository? (required for Beads) (y/n)"
-    if ($InitGit -eq "y") {
-        Push-Location $Target
-        git init
-        
-        # Create .gitignore
-        $GitignoreFile = Join-Path $Target ".gitignore"
-        if (-not (Test-Path $GitignoreFile)) {
-            @"
+$SourceDir = $null
+$TmpClone = $null
+
+function Cleanup-Clone {
+    if ($script:TmpClone -and (Test-Path $script:TmpClone)) {
+        Remove-Item -Recurse -Force $script:TmpClone -ErrorAction SilentlyContinue
+    }
+}
+
+try {
+    if ($ScriptDir -and `
+        (Test-Path (Join-Path $ScriptDir ".claude/agents")) -and `
+        (Test-Path (Join-Path $ScriptDir ".claude-plugin/plugin.json"))) {
+        $SourceDir = $ScriptDir
+        Write-Color "OK Using local plugin source: $SourceDir" Green
+    } else {
+        Write-Color "Fetching plugin source from $RepoUrl ($RepoBranch)..." Yellow
+        $TmpClone = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "claude-workflow-$(Get-Random)")
+        New-Item -ItemType Directory -Path $TmpClone -Force | Out-Null
+        try {
+            git clone --depth 1 --branch $RepoBranch $RepoUrl $TmpClone 2>$null
+        } catch {
+            Remove-Item -Recurse -Force $TmpClone -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Path $TmpClone -Force | Out-Null
+            git clone --depth 1 $RepoUrl $TmpClone
+        }
+        $SourceDir = $TmpClone
+        Write-Color "OK Plugin source ready" Green
+    }
+
+    # Sanity-check
+    $Required = @(
+        ".claude/agents/orchestrator.md",
+        ".claude/agents/qa.md",
+        ".claude/agents/backend.md",
+        ".claude/agents/frontend.md",
+        ".claude/agents/devops.md",
+        ".claude/scripts/session-start.sh",
+        ".claude/scripts/intent-router.sh",
+        ".claude/scripts/post-edit.sh",
+        ".claude/scripts/verify-before-stop.sh",
+        ".claude/scripts/session-end.sh",
+        ".claude/hooks/hooks.json",
+        ".claude/skills/workflow-engine/SKILL.md",
+        ".claude/settings.json",
+        ".claude-plugin/plugin.json",
+        ".claude/commands/workflow-model.md"
+    )
+    foreach ($r in $Required) {
+        if (-not (Test-Path (Join-Path $SourceDir $r))) {
+            Write-Color "Plugin source missing: $r" Red
+            Write-Host "(Looked in $SourceDir.) Aborting."
+            exit 1
+        }
+    }
+
+    # Git repo check
+    $GitDir = Join-Path $Target ".git"
+    if (-not (Test-Path $GitDir)) {
+        Write-Color "No git repository found." Yellow
+        $InitGit = Read-Host "Initialize git repository? (required for Beads) (y/n)"
+        if ($InitGit -eq "y") {
+            Push-Location $Target
+            git init
+            $GitignoreFile = Join-Path $Target ".gitignore"
+            if (-not (Test-Path $GitignoreFile)) {
+                @"
 node_modules/
 .venv/
 __pycache__/
@@ -125,513 +185,160 @@ build/
 .claude/.session-start
 .claude/.qa-tracking/
 "@ | Out-File -FilePath $GitignoreFile -Encoding UTF8
+                git add .gitignore 2>$null
+            }
+            git commit -m "Initial commit" --allow-empty 2>$null
+            Pop-Location
+            Write-Color "OK Initialized git repository" Green
+        } else {
+            Write-Color "Cannot proceed without git repository." Red
+            exit 1
         }
-        
-        git add .gitignore 2>$null
-        git commit -m "Initial commit" --allow-empty 2>$null
-        Pop-Location
-        Write-Color "✓ Initialized git repository" Green
+    }
+
+    # Mode selection
+    $ClaudeDir = Join-Path $Target ".claude"
+    $MergeMode = $false
+    $UpdateMode = $false
+    $BackupDir = $null
+
+    if (Test-Path $ClaudeDir) {
+        Write-Color "Existing .claude/ directory found." Yellow
+
+        $ExistingAgents = (Get-ChildItem "$ClaudeDir\agents\*.md" -ErrorAction SilentlyContinue | Measure-Object).Count
+        $ExistingScripts = (Get-ChildItem "$ClaudeDir\scripts\*.sh" -ErrorAction SilentlyContinue | Measure-Object).Count
+
+        if ($ExistingAgents -gt 0 -or $ExistingScripts -gt 0) {
+            Write-Host "  Found: $ExistingAgents agents, $ExistingScripts scripts"
+            Write-Host ""
+            Write-Color "Options:" Yellow
+            Write-Host "  1) Backup and install fresh"
+            Write-Host "  2) Update workflow (keeps CLAUDE.md, merges settings)"
+            Write-Host "  3) Merge only (skip existing files)"
+            Write-Host "  4) Cancel"
+            Write-Host ""
+
+            $Choice = Read-Host "Choose [1-4]"
+            $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $BackupDir = Join-Path $Target ".claude-backup-$Stamp"
+
+            switch ($Choice) {
+                "1" {
+                    Write-Color "Creating backup at $BackupDir" Yellow
+                    Copy-Item -Path $ClaudeDir -Destination $BackupDir -Recurse
+                    if (Test-Path (Join-Path $Target "CLAUDE.md")) {
+                        Copy-Item -Path (Join-Path $Target "CLAUDE.md") -Destination $BackupDir
+                    }
+                    Write-Color "OK Backup created" Green
+                }
+                "2" {
+                    Copy-Item -Path $ClaudeDir -Destination $BackupDir -Recurse
+                    Write-Color "OK Backup created" Green
+                    $UpdateMode = $true
+                }
+                "3" {
+                    $MergeMode = $true
+                    Write-Color "Merge mode: will skip existing files" Yellow
+                }
+                default {
+                    Write-Host "Cancelled."
+                    exit 0
+                }
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Color "Creating plugin structure..." Yellow
+
+    foreach ($d in @(
+        "$ClaudeDir\agents",
+        "$ClaudeDir\skills\workflow-engine",
+        "$ClaudeDir\hooks",
+        "$ClaudeDir\scripts",
+        "$ClaudeDir\commands",
+        (Join-Path $Target ".claude-plugin")
+    )) {
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+    }
+
+    function Copy-WorkflowFile {
+        param([string]$Src, [string]$Dst)
+        if ($script:MergeMode -and (Test-Path $Dst)) {
+            Write-Color ("skip {0} (exists)" -f (Split-Path $Dst -Leaf)) Yellow
+            return
+        }
+        Copy-Item -Path $Src -Destination $Dst -Force
+        Write-Color ("OK   {0}" -f (Split-Path $Dst -Leaf)) Green
+    }
+
+    foreach ($agent in @("orchestrator","qa","backend","frontend","devops")) {
+        Copy-WorkflowFile `
+            -Src (Join-Path $SourceDir ".claude/agents/$agent.md") `
+            -Dst "$ClaudeDir\agents\$agent.md"
+    }
+
+    foreach ($s in @("session-start.sh","intent-router.sh","post-edit.sh","verify-before-stop.sh","session-end.sh")) {
+        Copy-WorkflowFile `
+            -Src (Join-Path $SourceDir ".claude/scripts/$s") `
+            -Dst "$ClaudeDir\scripts\$s"
+    }
+
+    Copy-WorkflowFile `
+        -Src (Join-Path $SourceDir ".claude/hooks/hooks.json") `
+        -Dst "$ClaudeDir\hooks\hooks.json"
+
+    Copy-WorkflowFile `
+        -Src (Join-Path $SourceDir ".claude/skills/workflow-engine/SKILL.md") `
+        -Dst "$ClaudeDir\skills\workflow-engine\SKILL.md"
+
+    Get-ChildItem (Join-Path $SourceDir ".claude/commands/*.md") -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-WorkflowFile -Src $_.FullName -Dst "$ClaudeDir\commands\$($_.Name)"
+    }
+
+    Copy-WorkflowFile `
+        -Src (Join-Path $SourceDir ".claude-plugin/plugin.json") `
+        -Dst (Join-Path $Target ".claude-plugin/plugin.json")
+
+    # Settings.json: merge if Update, copy fresh otherwise -----------------
+    $SettingsFile = "$ClaudeDir\settings.json"
+    $SourceSettings = Join-Path $SourceDir ".claude/settings.json"
+
+    if (Test-Path $SettingsFile) {
+        if ($UpdateMode) {
+            Write-Color "Merging settings.json (preserving non-workflow keys)..." Yellow
+            Copy-Item -Path $SettingsFile -Destination "$SettingsFile.bak" -Force
+            $jqExpr = '
+                .[0] as $existing |
+                .[1] as $new |
+                $existing
+                | .hooks = $new.hooks
+                | .env = (($existing.env // {}) + ($new.env // {}))
+                | .additionalDirectories = ($new.additionalDirectories // $existing.additionalDirectories)
+                | (if $existing.permissions then . else .permissions = $new.permissions end)
+            '
+            $merged = & jq -s $jqExpr $SettingsFile $SourceSettings
+            if ($LASTEXITCODE -eq 0 -and $merged) {
+                $merged | Out-File -FilePath $SettingsFile -Encoding UTF8 -NoNewline
+                Write-Color "OK   settings.json merged" Green
+            } else {
+                Write-Color "Could not merge settings.json - manual review needed" Red
+            }
+        } elseif ($MergeMode) {
+            Write-Color "skip settings.json (exists, merge mode)" Yellow
+        } else {
+            Copy-Item -Path $SourceSettings -Destination $SettingsFile -Force
+            Write-Color "OK   settings.json" Green
+        }
     } else {
-        Write-Color "Cannot proceed without git repository." Red
-        exit 1
+        Copy-Item -Path $SourceSettings -Destination $SettingsFile -Force
+        Write-Color "OK   settings.json" Green
     }
-}
 
-# ============================================================================
-# BACKUP EXISTING FILES
-# ============================================================================
-
-$ClaudeDir = Join-Path $Target ".claude"
-$MergeMode = $false
-$UpdateMode = $false
-
-if (Test-Path $ClaudeDir) {
-    Write-Color "Existing .claude/ directory found!" Yellow
-    
-    $ExistingAgents = (Get-ChildItem "$ClaudeDir\agents\*.md" -ErrorAction SilentlyContinue | Measure-Object).Count
-    $ExistingScripts = (Get-ChildItem "$ClaudeDir\scripts\*.sh" -ErrorAction SilentlyContinue | Measure-Object).Count
-    
-    if ($ExistingAgents -gt 0 -or $ExistingScripts -gt 0) {
-        Write-Host "  Found: $ExistingAgents agents, $ExistingScripts scripts"
-        Write-Host ""
-        Write-Color "Options:" Yellow
-        Write-Host "  1) Backup and install fresh"
-        Write-Host "  2) Update workflow (keeps CLAUDE.md)"
-        Write-Host "  3) Merge only (skip existing files)"
-        Write-Host "  4) Cancel"
-        Write-Host ""
-        
-        $Choice = Read-Host "Choose [1-4]"
-        
-        $BackupDir = "$ClaudeDir-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        
-        switch ($Choice) {
-            "1" {
-                Write-Color "Creating backup..." Yellow
-                Copy-Item -Path $ClaudeDir -Destination $BackupDir -Recurse
-                Write-Color "✓ Backup created at $BackupDir" Green
-            }
-            "2" {
-                Copy-Item -Path $ClaudeDir -Destination $BackupDir -Recurse
-                Write-Color "✓ Backup created" Green
-                $UpdateMode = $true
-            }
-            "3" {
-                $MergeMode = $true
-                Write-Color "Merge mode: will skip existing files" Yellow
-            }
-            default {
-                Write-Host "Cancelled."
-                exit 0
-            }
-        }
-    }
-}
-
-Write-Host ""
-Write-Color "Creating plugin structure..." Yellow
-
-# Create directories
-$Dirs = @(
-    "$ClaudeDir\agents",
-    "$ClaudeDir\skills\workflow-engine",
-    "$ClaudeDir\hooks",
-    "$ClaudeDir\scripts"
-)
-foreach ($Dir in $Dirs) {
-    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-}
-
-# Helper function
-function Create-FileIfNotMerge {
-    param([string]$FilePath, [string]$Content)
-    
-    if ($MergeMode -and (Test-Path $FilePath)) {
-        Write-Color "⊘ Skipped $(Split-Path $FilePath -Leaf) (exists)" Yellow
-        return $false
-    }
-    
-    $Content | Out-File -FilePath $FilePath -Encoding UTF8 -NoNewline
-    Write-Color "✓ Created $(Split-Path $FilePath -Leaf)" Green
-    return $true
-}
-
-# ============================================================================
-# AGENTS
-# ============================================================================
-
-$OrchestratorContent = @'
----
-name: orchestrator
-description: Primary workflow orchestrator using Beads task tracking with mandatory QA gate.
-tools: Read, Glob, Grep, LS, Task, Bash, Write, Edit
----
-
-You are the **Workflow Orchestrator** using Beads (bd) for persistent task tracking.
-
-## Beads Commands
-
-```bash
-bd ready                    # Tasks with no blockers
-bd blocked                  # Tasks waiting on dependencies
-bd create "Title" -t epic -p 1 --description "..."
-bd update $ID --status in_progress
-bd update $ID --notes "COMPLETED: X | IN PROGRESS: Y"
-bd label add $ID backend,qa-pending
-bd comments add $ID "QA APPROVED: summary"
-```
-
-## 🚫 MANDATORY QA GATE
-
-Every code change MUST be reviewed by @qa before delivery.
-System BLOCKS completion until QA approves.
-
-## Structured Notes Format
-
-```
-COMPLETED: [Deliverables]
-IN PROGRESS: [Current work]
-BLOCKED: [What's preventing progress]
-KEY DECISIONS: [Important choices]
-```
-'@
-
-Create-FileIfNotMerge -FilePath "$ClaudeDir\agents\orchestrator.md" -Content $OrchestratorContent
-
-$BackendContent = @'
----
-name: backend
-description: Backend specialist using Beads for tracking.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are a **Backend Engineering Specialist** using Beads.
-
-## When Starting: `bd update $ID --status in_progress`
-## When Done: `bd update $ID --notes "COMPLETED: X" && bd label add $ID qa-pending`
-
-## Self-Check Questions
-1. Bottlenecks?
-2. Scale limits?
-3. Failure points?
-4. Mitigations?
-'@
-
-Create-FileIfNotMerge -FilePath "$ClaudeDir\agents\backend.md" -Content $BackendContent
-
-$FrontendContent = @'
----
-name: frontend
-description: Frontend specialist using Beads for tracking.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are a **Frontend Engineering Specialist** using Beads.
-
-## When Starting: `bd update $ID --status in_progress`
-## When Done: `bd update $ID --notes "COMPLETED: X" && bd label add $ID qa-pending`
-
-## Self-Check Questions
-1. Using all backend features?
-2. UI/UX clear?
-3. Can be more convenient?
-4. Beautiful?
-'@
-
-Create-FileIfNotMerge -FilePath "$ClaudeDir\agents\frontend.md" -Content $FrontendContent
-
-$DevopsContent = @'
----
-name: devops
-description: DevOps specialist using Beads for tracking.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are a **DevOps Engineering Specialist** using Beads.
-
-## When Starting: `bd update $ID --status in_progress`
-## When Done: `bd update $ID --notes "COMPLETED: X" && bd label add $ID qa-pending`
-'@
-
-Create-FileIfNotMerge -FilePath "$ClaudeDir\agents\devops.md" -Content $DevopsContent
-
-$QaContent = @'
----
-name: qa
-description: QA specialist and mandatory quality gate.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are the **Quality Assurance Specialist** - the mandatory gate.
-
-## 🚨 No code ships without your approval
-
-## Test USER BEHAVIOR, Not Code
-
-WRONG: test("formatDate returns ISO string")
-RIGHT: test("user sees appointment in their timezone")
-
-## Approval Process
-
-```bash
-# When approved:
-bd comments add $ID "QA APPROVED: [summary]"
-bd label remove $ID qa-pending
-bd label add $ID qa-approved
-
-# When blocked:
-bd comments add $ID "QA BLOCKED: [issues]"
-```
-'@
-
-Create-FileIfNotMerge -FilePath "$ClaudeDir\agents\qa.md" -Content $QaContent
-
-# ============================================================================
-# HOOKS
-# ============================================================================
-
-$HooksContent = @'
-{
-  "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-start.sh\"", "timeout": 30000}]}],
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/intent-router.sh\""}]}],
-    "PostToolUse": [{"matcher": "Write|Edit|MultiEdit", "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/post-edit.sh\""}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/verify-before-stop.sh\""}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-end.sh\""}]}]
-  }
-}
-'@
-
-Create-FileIfNotMerge -FilePath "$ClaudeDir\hooks\hooks.json" -Content $HooksContent
-
-# ============================================================================
-# SCRIPTS (require Git Bash)
-# ============================================================================
-
-Write-Host ""
-Write-Color "Note: Scripts require Git Bash to run." Yellow
-
-$SessionStartContent = @'
-#!/bin/bash
-set -e
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-
-if ! command -v bd &> /dev/null; then
-    echo '{"error": "Beads (bd) not found"}'
-    exit 1
-fi
-
-if [ ! -d "$PROJECT_DIR/.beads" ]; then
-    echo '{"error": "Beads not initialized. Run: bd init"}'
-    exit 1
-fi
-
-mkdir -p "$PROJECT_DIR/.claude/.qa-tracking"
-touch "$PROJECT_DIR/.claude/.session-start"
-rm -f "$PROJECT_DIR/.claude/.qa-tracking/approved" 2>/dev/null || true
-rm -f "$PROJECT_DIR/.claude/.qa-tracking/changed-files.txt" 2>/dev/null || true
-
-CONTEXT=""
-
-BD_PRIME=$(bd prime 2>/dev/null || echo "")
-[ -n "$BD_PRIME" ] && CONTEXT+="<beads_context>
-$BD_PRIME
-</beads_context>
-"
-
-[ -f "$PROJECT_DIR/CLAUDE.md" ] && CONTEXT+="<project_memory>
-$(cat "$PROJECT_DIR/CLAUDE.md")
-</project_memory>
-"
-
-BLOCKED=$(bd blocked 2>/dev/null | head -10)
-[ -n "$BLOCKED" ] && CONTEXT+="<blocked_issues>
-$BLOCKED
-</blocked_issues>
-"
-
-CONTEXT+="<workflow_mode>
-## ULTIMATE WORKFLOW v2
-
-Orchestrator using Beads. MANDATORY QA GATE enforced.
-
-### Commands
-bd ready / bd blocked / bd list
-bd create \"Title\" -t epic -p 1 --parent \$EPIC -l backend,qa-pending
-bd update \$ID --notes \"COMPLETED: X | IN PROGRESS: Y\"
-bd comments add \$ID \"QA APPROVED: summary\"
-
-### Flow: Create → Delegate → @qa reviews → QA approves → Done
-</workflow_mode>"
-
-cat << EOF
-{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":$(echo "$CONTEXT" | jq -Rs .)}}
-EOF
-'@
-
-$SessionStartContent | Out-File -FilePath "$ClaudeDir\scripts\session-start.sh" -Encoding UTF8 -NoNewline
-Write-Color "✓ Created session-start.sh" Green
-
-$IntentRouterContent = @'
-#!/bin/bash
-# UserPromptSubmit Hook: Enforces mandatory agent delegation
-
-set -e
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-INPUT=$(cat)
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null || echo "$INPUT")
-
-# Skip very short messages
-[ ${#PROMPT} -lt 10 ] && echo "{}" && exit 0
-
-# Get current task context
-CURRENT_TASK=""
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    CURRENT_TASK=$(bd list --status in_progress --json 2>/dev/null | jq -r '.[0].id // empty' 2>/dev/null || echo "")
-fi
-
-WORKFLOW_CONTEXT="
-<mandatory_delegation>
-## MANDATORY AGENT DELEGATION
-
-You are the **Orchestrator**. You MUST delegate using Task().
-**DO NOT write implementation code yourself.**
-
-### Workflow:
-1. Analyze request (type: bug/feature/improvement, domains: backend/frontend/devops)
-2. Create Beads task: bd create \"...\" -t task -p 1 -l domain,qa-pending
-3. DELEGATE:
-   - Backend → Task(\"@backend\", \"...\")
-   - Frontend → Task(\"@frontend\", \"...\")
-   - DevOps → Task(\"@devops\", \"...\")
-4. After implementation → Task(\"@qa\", \"Review...\")
-
-### You are VIOLATING the workflow if you:
-- Write code yourself (delegate to specialists!)
-- Skip QA review (system will block you!)
-
-</mandatory_delegation>"
-
-[ -n "$CURRENT_TASK" ] && WORKFLOW_CONTEXT+="
-<current_task>Working on: $CURRENT_TASK</current_task>"
-
-cat << EOF
-{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$(echo "$WORKFLOW_CONTEXT" | jq -Rs .)}}
-EOF
-'@
-
-$IntentRouterContent | Out-File -FilePath "$ClaudeDir\scripts\intent-router.sh" -Encoding UTF8 -NoNewline
-Write-Color "✓ Created intent-router.sh" Green
-
-$PostEditContent = @'
-#!/bin/bash
-set -e
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-QA_DIR="$PROJECT_DIR/.claude/.qa-tracking"
-INPUT=$(cat)
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null)
-
-[[ ! "$FILE_PATH" =~ \.(ts|tsx|js|jsx|py|go|rs|java|vue|svelte|css)$ ]] && { echo "{}"; exit 0; }
-
-mkdir -p "$QA_DIR"
-TRACKING="$QA_DIR/changed-files.txt"
-grep -qxF "$FILE_PATH" "$TRACKING" 2>/dev/null || echo "$FILE_PATH" >> "$TRACKING"
-
-COUNT=$(sort -u "$TRACKING" 2>/dev/null | wc -l | tr -d ' ')
-echo "📝 $COUNT files changed. All require @qa approval."
-'@
-
-$PostEditContent | Out-File -FilePath "$ClaudeDir\scripts\post-edit.sh" -Encoding UTF8 -NoNewline
-Write-Color "✓ Created post-edit.sh" Green
-
-$VerifyContent = @'
-#!/bin/bash
-set -e
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-QA_DIR="$PROJECT_DIR/.claude/.qa-tracking"
-TRACKING="$QA_DIR/changed-files.txt"
-
-INPUT=$(cat)
-STOP_REASON=$(echo "$INPUT" | jq -r '.stop_reason // empty' 2>/dev/null)
-
-[[ "$STOP_REASON" == "user_interrupt" ]] && { echo "{}"; exit 0; }
-[[ ! -f "$TRACKING" ]] || [[ ! -s "$TRACKING" ]] && { echo "{}"; exit 0; }
-
-QA_APPROVED=false
-[ -f "$QA_DIR/approved" ] && QA_APPROVED=true
-
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    TASK=$(bd list --status in_progress --json 2>/dev/null | jq -r '.[0].id // empty')
-    if [ -n "$TASK" ]; then
-        LABELS=$(bd show "$TASK" --json 2>/dev/null | jq -r '.labels // [] | join(",")' 2>/dev/null)
-        echo "$LABELS" | grep -qi "qa-approved" && QA_APPROVED=true
-        
-        if [ "$QA_APPROVED" = false ]; then
-            COMMENT=$(bd show "$TASK" --json 2>/dev/null | jq -r '.comments[]? | select(test("QA APPROVED";"i"))' 2>/dev/null | head -1)
-            [ -n "$COMMENT" ] && QA_APPROVED=true
-        fi
-    fi
-fi
-
-if [ "$QA_APPROVED" = false ]; then
-    FILES=$(sort -u "$TRACKING" 2>/dev/null | head -10)
-    COUNT=$(sort -u "$TRACKING" 2>/dev/null | wc -l | tr -d ' ')
-    cat << EOF
-{"decision":"block","reason":"🚫 QA APPROVAL REQUIRED
-
-$COUNT files changed - require @qa review.
-
-Files: $FILES
-
-Delegate to @qa, then:
-  bd comments add \$ID 'QA APPROVED: summary'
-  bd label add \$ID qa-approved"}
-EOF
-    exit 0
-fi
-
-rm -f "$QA_DIR/approved" "$TRACKING" 2>/dev/null
-echo "{}"
-'@
-
-$VerifyContent | Out-File -FilePath "$ClaudeDir\scripts\verify-before-stop.sh" -Encoding UTF8 -NoNewline
-Write-Color "✓ Created verify-before-stop.sh" Green
-
-$SessionEndContent = @'
-#!/bin/bash
-set -e
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ] && bd sync 2>/dev/null || true
-echo "{}"
-'@
-
-$SessionEndContent | Out-File -FilePath "$ClaudeDir\scripts\session-end.sh" -Encoding UTF8 -NoNewline
-Write-Color "✓ Created session-end.sh" Green
-
-# ============================================================================
-# SKILL
-# ============================================================================
-
-$SkillContent = @'
-# Ultimate Workflow Engine v2
-
-> Full Beads integration with mandatory QA gate.
-
-## Requirements
-- Beads (bd) - REQUIRED
-- Git repository
-- Git Bash (for scripts on Windows)
-
-## Labels
-- `qa-pending` - Awaiting QA review
-- `qa-approved` - QA signed off
-- `backend`, `frontend`, `devops` - Domain tracking
-
-## Workflow
-1. Create task with `qa-pending` label
-2. Delegate to domain specialists
-3. @qa reviews and approves
-4. Task can close
-'@
-
-Create-FileIfNotMerge -FilePath "$ClaudeDir\skills\workflow-engine\SKILL.md" -Content $SkillContent
-
-# ============================================================================
-# SETTINGS
-# ============================================================================
-
-$SettingsFile = "$ClaudeDir\settings.json"
-
-$SettingsContent = @'
-{
-  "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-start.sh\"", "timeout": 30000}]}],
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/intent-router.sh\""}]}],
-    "PostToolUse": [{"matcher": "Write|Edit|MultiEdit", "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/post-edit.sh\""}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/verify-before-stop.sh\""}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-end.sh\""}]}]
-  },
-  "permissions": {"allow": ["Read", "Glob", "Grep", "LS"], "deny": ["Bash(rm -rf *)", "Bash(sudo *)"]}
-}
-'@
-
-if (Test-Path $SettingsFile) {
-    Write-Color "⚠ Existing settings.json - merge hooks manually" Yellow
-} else {
-    $SettingsContent | Out-File -FilePath $SettingsFile -Encoding UTF8 -NoNewline
-    Write-Color "✓ Created settings.json" Green
-}
-
-# ============================================================================
-# CLAUDE.md
-# ============================================================================
-
-$ClaudeMdFile = Join-Path $Target "CLAUDE.md"
-if (-not (Test-Path $ClaudeMdFile)) {
-    $ClaudeMdContent = @'
+    # CLAUDE.md (only if missing) -------------------------------------------
+    $ClaudeMdFile = Join-Path $Target "CLAUDE.md"
+    if (-not (Test-Path $ClaudeMdFile)) {
+        @'
 # Project Memory
 
 ## Overview
@@ -647,79 +354,78 @@ if (-not (Test-Path $ClaudeMdFile)) {
 **Steps**: 1. User... 2. User sees...
 **Failure modes**: Invalid input, network error
 
-## Labels Convention
+## Beads Labels Convention
 - `qa-pending` - Awaiting QA
 - `qa-approved` - QA signed off
 - `backend`, `frontend`, `devops` - Domain
-'@
+'@ | Out-File -FilePath $ClaudeMdFile -Encoding UTF8 -NoNewline
+        Write-Color "OK   CLAUDE.md template" Green
+    }
 
-    $ClaudeMdContent | Out-File -FilePath $ClaudeMdFile -Encoding UTF8 -NoNewline
-    Write-Color "✓ Created CLAUDE.md" Green
+    # Beads init / hooks / doctor -------------------------------------------
+    Write-Host ""
+    Write-Color "Setting up Beads..." Yellow
+
+    Push-Location $Target
+    try {
+        $BeadsDir = Join-Path $Target ".beads"
+        if (-not (Test-Path $BeadsDir)) {
+            Write-Host "Initializing Beads..."
+            bd init --quiet 2>$null
+            Write-Color "OK Beads initialized" Green
+        }
+
+        Write-Host "Installing Beads git hooks..."
+        bd hooks install 2>$null
+        Write-Color "OK Git hooks installed" Green
+
+        Write-Host "Running Beads health check..."
+        $DoctorOutput = bd doctor 2>&1
+        if ($DoctorOutput -match "error|Error") {
+            Write-Color "Some issues detected - run 'bd doctor' for details" Yellow
+        } else {
+            Write-Color "OK Beads health check passed" Green
+        }
+    } finally {
+        Pop-Location
+    }
+
+    # Done ------------------------------------------------------------------
+    Write-Host ""
+    Write-Color "Installation complete." Green
+    Write-Host ""
+    Write-Host "Installed to: " -NoNewline
+    Write-Color "$Target\.claude\" Cyan
+    Write-Host "Manifest:     " -NoNewline
+    Write-Color "$Target\.claude-plugin\plugin.json" Cyan
+    if ($BackupDir -and (Test-Path $BackupDir)) {
+        Write-Host "Backup at:    " -NoNewline
+        Write-Color $BackupDir Cyan
+    }
+    Write-Host ""
+    Write-Color "What's new in v3:" Cyan
+    Write-Host "  - Plugin manifest (.claude-plugin/plugin.json) with v3.0.0"
+    Write-Host "  - Model pinning per agent + /workflow-model upgrade command"
+    Write-Host "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
+    Write-Host "  - Parent-folder access via additionalDirectories ('../')"
+    Write-Host "  - SessionStart warns on stale model + old bd"
+    Write-Host "  - Single-source-of-truth installer (no embedded duplication)"
+    Write-Host "  - uninstall.ps1 for clean removal"
+    Write-Host ""
+    Write-Color "Requirements:" Yellow
+    Write-Host "  - Git Bash (comes with Git for Windows) - the workflow scripts run via bash"
+    Write-Host ""
+    Write-Color "Usage:" Yellow
+    Write-Host "  cd $Target"
+    Write-Host "  claude"
+    Write-Host ""
+    Write-Color "Beads commands:" Yellow
+    Write-Host "  bd ready    - Available work"
+    Write-Host "  bd blocked  - Blocked issues"
+    Write-Host "  bd doctor   - Health check"
+    Write-Host ""
+    Write-Color "Remember: all code changes require @qa approval." Red
+    Write-Host ""
+} finally {
+    Cleanup-Clone
 }
-
-# ============================================================================
-# INITIALIZE BEADS
-# ============================================================================
-
-Write-Host ""
-Write-Color "Setting up Beads..." Yellow
-
-Push-Location $Target
-
-# Initialize Beads
-$BeadsDir = Join-Path $Target ".beads"
-if (-not (Test-Path $BeadsDir)) {
-    Write-Host "Initializing Beads..."
-    bd init --quiet 2>$null
-    Write-Color "✓ Beads initialized" Green
-}
-
-# Install hooks
-Write-Host "Installing Beads git hooks..."
-bd hooks install 2>$null
-Write-Color "✓ Git hooks installed" Green
-
-# Health check
-Write-Host "Running Beads health check..."
-$DoctorOutput = bd doctor 2>&1
-if ($DoctorOutput -match "error|Error") {
-    Write-Color "⚠ Some issues detected - run 'bd doctor' for details" Yellow
-} else {
-    Write-Color "✓ Beads health check passed" Green
-}
-
-Pop-Location
-
-# ============================================================================
-# DONE
-# ============================================================================
-
-Write-Host ""
-Write-Color "╔════════════════════════════════════════════════════════════╗" Green
-Write-Color "║              ✅ Installation Complete!                      ║" Green
-Write-Color "╚════════════════════════════════════════════════════════════╝" Green
-Write-Host ""
-Write-Host "Installed to: " -NoNewline
-Write-Color $Target Cyan
-Write-Host ""
-Write-Color "What's New in v2:" Cyan
-Write-Host "  ✓ Beads is REQUIRED"
-Write-Host "  ✓ Uses bd prime for context"
-Write-Host "  ✓ Git hooks auto-sync"
-Write-Host "  ✓ Labels for QA tracking"
-Write-Host "  ✓ Hierarchical issues"
-Write-Host ""
-Write-Color "Requirements:" Yellow
-Write-Host "  - Git Bash (comes with Git for Windows)"
-Write-Host ""
-Write-Color "Usage:" Yellow
-Write-Host "  cd $Target"
-Write-Host "  claude"
-Write-Host ""
-Write-Color "Beads Commands:" Yellow
-Write-Host "  bd ready    - Available work"
-Write-Host "  bd blocked  - Blocked issues"
-Write-Host "  bd doctor   - Health check"
-Write-Host ""
-Write-Color "Remember: All code changes require @qa approval!" Red
-Write-Host ""

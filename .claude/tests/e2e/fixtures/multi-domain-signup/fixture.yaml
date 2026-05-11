@@ -1,0 +1,57 @@
+# multi-domain-signup — Phase C, fixture #5.
+#
+# Three-domain feature: API endpoint + React form + Postgres migration.
+# The fixture's directory layout (server/, client/, migrations/) is
+# explicit shape that drives the orchestrator to create an epic with
+# three children — one per domain.
+#
+# Spec asserts:
+#   - subagentInvocations contains backend, frontend, AND qa
+#   - beadsTasksCreated.length >= 3 (epic + 3 children, but accept any
+#     decomposition that produces at least 3 tasks)
+#   - F4 atomic QA approval: each child reaches qa-approved
+#   - B2 epic-level e2e gate: a final Stop:approve fires after all
+#     children close (the harness measures this as
+#     hookFired("Stop", { decision: "approve" }) — the gate's last
+#     event being approve)
+#
+# Per G8 plan, "Initial fixture set" — multi-domain-signup row.
+
+name: multi-domain-signup
+description: |
+  Three-domain signup fixture: server (Node/Express API), client (React
+  form), migrations (raw SQL). Prompt asks Claude to implement user
+  signup end-to-end across all three.
+
+prompt: |
+  Implement user signup end-to-end: API, UI, migration.
+
+expected_subagents:
+  - backend
+  - frontend
+  - qa
+
+expected_hooks:
+  - SessionStart
+  - UserPromptSubmit
+  - SubagentStart
+  - PreToolUse
+  - PostToolUse
+  - Stop
+  - SessionEnd
+
+expected_label_progression:
+  - qa-pending
+  - qa-approved
+
+notes: |
+  - server/, client/, migrations/ are top-level dirs visible to the
+    polyglot detector. Each domain's root has at least one source file
+    so the orchestrator's stack-detection picks "node + react + sql".
+  - Migrations directory starts empty (just a .gitkeep + README); the
+    @backend specialist (or a dedicated migrations role) creates
+    migrations/0001_users.sql or equivalent.
+  - .beads is initialized empty so task IDs in trace.beadsTasksCreated
+    came from the run itself.
+  - The spec uses maxTurns=60 because three-domain epics legitimately
+    take more turns than single-domain features.

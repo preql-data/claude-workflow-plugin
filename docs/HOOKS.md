@@ -198,10 +198,10 @@ fi
 
 | Scenario | Keyword Matching | LLM Analysis |
 |----------|------------------|--------------|
-| "The login isn't working right" | ❌ Might miss | ✅ Understands it's a bug |
-| "Can we make this faster?" | ❌ "improve" not present | ✅ Recognizes improvement |
-| "Users are complaining about X" | ❌ No keywords | ✅ Understands context |
-| "Continue what we were doing" | ❌ No keywords | ✅ Checks current task |
+| "The login isn't working right" | Might miss | Understands it's a bug |
+| "Can we make this faster?" | "improve" not present | Recognizes improvement |
+| "Users are complaining about X" | No keywords | Understands context |
+| "Continue what we were doing" | No keywords | Checks current task |
 
 ### Context Injected
 
@@ -226,59 +226,103 @@ The Orchestrator uses its intelligence to understand:
 
 **Purpose**: Track file changes for QA review.
 
+### Matcher
+
+Configured in `settings.json` with matcher `^(Write|Edit|MultiEdit)$`. Only
+these three tools trigger the hook — every other tool invocation is a
+no-op. Bash edits (e.g., `sed -i`) are intentionally untracked because
+specialists should be using the Write/Edit tools directly so the file
+appears in the QA review surface.
+
 ### What It Does
 
 ```bash
-# 1. Extract file path from tool input
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path')
+# 1. Extract file path from tool input. Both `.file_path` and `.path` are
+#    accepted because different tools expose the field differently.
+FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // empty')
 
-# 2. Filter for code files only
-if [[ ! "$FILE_PATH" =~ \.(ts|tsx|js|jsx|py|go|rs|java|vue|svelte|css)$ ]]; then
-    echo "{}"; exit 0
+# 2. Skip when the path is empty (defensive — Edit/MultiEdit always emit a
+#    file path, but the hook never errors on unexpected input).
+if [ -z "$FILE_PATH" ]; then
+    echo '{}'; exit 0
 fi
 
-# 3. Add to tracking file (deduplicated)
-if ! grep -qxF "$FILE_PATH" "$TRACKING_FILE"; then
-    echo "$FILE_PATH" >> "$TRACKING_FILE"
+# 3. Apply the build-artefact denylist. The pre-Phase-1 hook used an
+#    extension allowlist (B6) which silently dropped .md, .yaml, .toml,
+#    Dockerfile, .tf, .proto, etc. The current hook tracks EVERYTHING
+#    except known build/lock noise.
+DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next)/|\.(lock|pyc|map)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|Cargo\.lock|poetry\.lock|go\.sum)$'
+if [[ "$FILE_PATH" =~ $DENYLIST_REGEX ]]; then
+    echo '{}'; exit 0
 fi
 
-# 4. Cap at 500 files
-if [ "$LINE_COUNT" -gt 500 ]; then
-    tail -500 "$TRACKING_FILE" > "$TRACKING_FILE.tmp"
+# 4. Race-safe dedup append. With flock available we take an exclusive lock
+#    around grep+append. Without flock (macOS without coreutils), we append
+#    unconditionally and rely on `sort -u` at read time. Both strategies
+#    preserve correctness; the flock path saves disk on hot loops.
+if command -v flock >/dev/null 2>&1; then
+    (
+        flock -x 9
+        if [ ! -f "$TRACKING_FILE" ] || ! grep -qxF "$FILE_PATH" "$TRACKING_FILE"; then
+            printf '%s\n' "$FILE_PATH" >> "$TRACKING_FILE"
+        fi
+    ) 9>"$LOCK_FILE"
+else
+    printf '%s\n' "$FILE_PATH" >> "$TRACKING_FILE"
+fi
+
+# 5. Soft cap at ~500 unique entries; only trim when above 1000 so concurrent
+#    appenders don't lose data.
+if [ "$LINE_COUNT" -gt 1000 ]; then
+    sort -u "$TRACKING_FILE" | tail -500 > "$TRACKING_FILE.tmp"
     mv "$TRACKING_FILE.tmp" "$TRACKING_FILE"
 fi
 
-# 5. Update Beads progress (batched every 10 edits)
-if [ $((EDIT_COUNT % 10)) -eq 0 ]; then
-    bd comments add "$CURRENT_TASK" "Progress: $UNIQUE_COUNT files edited"
+# 6. Edit-count batching: emit a progress comment to Beads every 10 edits.
+#    EDIT_COUNT is reset to 0 by session-start.sh so the cadence resets per
+#    session. The active task id is sourced via current-task.sh (F3 single
+#    source of truth); when empty, we skip the comment rather than guess.
+if [ $((EDIT_COUNT % 10)) -eq 0 ] && [ -n "$CURRENT_TASK" ]; then
+    bd comments add "$CURRENT_TASK" "Progress: $UNIQUE_COUNT files edited" \
+        || log_sync_error "bd comments add failed for $CURRENT_TASK"
 fi
 
-# 6. Output reminder
-echo "📝 $COUNT files changed. All require @qa approval."
+# 7. Emit a valid JSON envelope. This hook only tracks state, so it emits
+#    `{}` rather than `additionalContext` — the Stop hook surfaces the
+#    review context to Claude.
+echo '{}'
 ```
+
+### Output Envelope
+
+Per the Claude Code hooks reference, PostToolUse must emit either `{}`
+(no-op) or `{"hookSpecificOutput":{"hookEventName":"PostToolUse",
+"additionalContext":"..."}}`. We standardise on `{}` because the gate
+surface lives in the Stop hook; emitting an inline reminder on every
+edit produces noise and confuses the model's context. (Pre-Phase-1 hooks
+emitted raw markdown text, which Claude silently dropped — B5.)
 
 ### Tracked File Types
 
-- TypeScript: `.ts`, `.tsx`
-- JavaScript: `.js`, `.jsx`
-- Python: `.py`
-- Go: `.go`
-- Rust: `.rs`
-- Java: `.java`
-- Ruby: `.rb`
-- PHP: `.php`
-- Vue: `.vue`
-- Svelte: `.svelte`
-- CSS: `.css`, `.scss`
-- HTML: `.html`
+The denylist approach means almost everything is tracked. Tracked files
+include source code (`.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.rs`,
+`.java`, `.rb`, `.php`, `.vue`, `.svelte`), stylesheets (`.css`, `.scss`),
+markup (`.html`, `.md`, `.yaml`, `.toml`), infra (`Dockerfile`, `.tf`,
+`.proto`), and config (`.json`, `.env.example`). What's denied: anything
+inside `node_modules/`, `dist/`, `build/`, `coverage/`, `.git/`, `.next/`,
+plus `*.lock`, `*.pyc`, `*.map`, `*.min.{js,css}`, and the major lockfiles.
 
 ### Tracking File Location
 
 ```
 .claude/.qa-tracking/
-├── changed-files.txt    # List of changed files
-├── edit-count           # Counter for batching
-└── approved             # Marker when QA approves
+├── changed-files.txt        # Deduplicated list of changed files (one per line)
+├── edit-count               # Counter for the every-10-edits batched bd comments
+├── current-task             # Single source of truth: active task id (F3)
+├── current-task.repo        # Repo fingerprint at set time (I8 cross-repo guard)
+├── approved-baseline        # git status --porcelain snapshot at approval time (0wk.2)
+├── sync-errors.log          # Best-effort bd-call failures surfaced by SessionStart
+└── .changed-files.lock      # flock target (only on systems with flock)
 ```
 
 ---
@@ -309,7 +353,7 @@ fi
 
 # 4. Run technical checks (tests, lint)
 if ! npm test; then
-    FAILED_CHECKS+="❌ Tests failing\n"
+    FAILED_CHECKS+="Tests failing\n"
 fi
 
 # 5. If checks fail, block
@@ -340,7 +384,7 @@ fi
 
 # 7. If not approved, BLOCK
 if [ "$QA_APPROVED" = false ]; then
-    echo '{"decision": "block", "reason": "🚫 QA APPROVAL REQUIRED..."}'
+    echo '{"decision": "block", "reason": "QA approval required..."}'
     exit 0
 fi
 
@@ -355,20 +399,16 @@ echo "{}"
 When QA hasn't approved, shows:
 
 ```
-🚫 QA APPROVAL REQUIRED
+QA approval required.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-15 file(s) changed - ALL require QA review
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 file(s) changed - all require QA review.
 
 Files changed:
 src/auth/login.ts
 src/components/LoginForm.tsx
 ... and 13 more files
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED: Delegate to @qa NOW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Required: delegate to @qa now.
 
 Cannot complete without QA approval.
 ```
@@ -392,15 +432,64 @@ Three methods (any one succeeds):
 ### What It Does
 
 ```bash
-# Sync Beads to ensure state is persisted
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    bd sync
+# Guard cwd: a missing PROJECT_DIR no longer corrupts state.
+cd "$PROJECT_DIR" || { echo '{}'; exit 0; }
+
+# Run bd sync and capture stderr for sync-errors.log so SessionStart can
+# surface a one-line warning next session.
+SYNC_ERR_FILE="$(mktemp -t bd-sync.XXXXXX)"
+if ! bd sync >/dev/null 2>"$SYNC_ERR_FILE"; then
+    TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ERR_LINE=$(head -1 "$SYNC_ERR_FILE" | tr -d '\n')
+    printf '%s\tbd sync failed: %s\n' "$TS" "${ERR_LINE:-unknown error}" \
+        >> "$SYNC_LOG"
 fi
+rm -f "$SYNC_ERR_FILE"
 
 echo "{}"
 ```
 
-This ensures any Beads changes are synced to the git-tracked JSONL file before the session closes.
+### No Decision Side Effects
+
+Per the Claude Code hooks reference, SessionEnd cannot block session
+termination — its output and exit code are ignored. We emit `{}` for
+clarity, even though stdout is not consumed. Any cleanup that needs to
+happen MUST happen before this hook runs (verify-before-stop is the
+canonical gate point); SessionEnd is best-effort persistence only.
+
+### sync-errors.log Surfacing
+
+When `bd sync` fails (typically because the bd daemon is unreachable —
+see bug 0wk.5), the failure is appended to
+`.claude/.qa-tracking/sync-errors.log` rather than swallowed silently.
+SessionStart reads recent entries from this file on the next session and
+surfaces a one-line `<sync_warnings>` block in `additionalContext` so
+Claude can mention the issue early in the next turn. The log is
+truncated to the last 100 entries to bound disk usage.
+
+---
+
+## Helper Scripts
+
+The hooks above orchestrate a set of helper scripts in `.claude/scripts/`
+that handle the structural state-keeping. None of them are wired as
+hooks; they are invoked by hooks, slash commands, and specialist agents.
+
+| Script | Purpose |
+|--------|---------|
+| `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`. Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`). On `approve` writes `approved-baseline` snapshot + truncates `changed-files.txt` (closes 0wk.2). |
+| `current-task.sh` | F3 single source of truth for the active Beads task id. Subcommands: `set`, `get`, `get-repo`. Persists task id at `.qa-tracking/current-task` plus repo fingerprint at `.qa-tracking/current-task.repo` (I8 cross-repo guard). |
+| `prevent-orchestrator-edits.sh` | PreToolUse hook blocking Write/Edit/MultiEdit when the active subagent is `orchestrator`. Emits `hookSpecificOutput.permissionDecision: deny` with a "delegate to specialist" reason. Defense in depth — the orchestrator's tool list already omits Write/Edit. |
+| `epic-gate.sh` | Epic-level QA gate (B2). Subcommands: `check`, `siblings`, `shared-files`. Returns `pass`/`defer`/`block` based on sibling status and file-intersection across in-progress tasks under the same epic. |
+| `subagent-start.sh` | J3 cross-session auto-assign. SubagentStart hook: when the spawned subagent is a specialist AND `current-task` is non-empty, injects `additionalContext` with the task id + brief summary so the orchestrator doesn't need to repeat the brief. |
+| `tech-debt.sh` | TECHNICAL_DEBT.md append (J22). Subcommands: `add <severity> <file:line> <effort> <description>`, `list`. Optional `--bd-task` creates a paired Beads task with `--deps blocks:<active-task>`. |
+| `bd-github-link.sh` | I3 Beads ↔ GitHub auto-link. PostToolUse hook on Bash invocations. When a Beads task closes, posts a `gh issue comment` linking back; when `gh pr create` runs, parses `Closes #N` and writes `gh-link:` into the task notes. |
+| `detect-stack.sh` | F8/J17 polyglot test runner detection. Emits JSON `{runner, test_cmd, lint_cmd, type_cmd, manifest, overrides}`. Supports npm, pytest, go, cargo, maven, gradle, phpunit, rake, swift, dotnet, make, plus `.claude/test-cmd` overrides. |
+| `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`. Drains stdin (Claude Code passes a session envelope it doesn't need). |
+
+Each helper is independently testable via the L1 bash unit tier
+(`.claude/scripts/tests/*.sh`) — see `.claude/tests/README.md` for the
+five-tier pyramid that exercises them.
 
 ---
 

@@ -29,8 +29,8 @@ bd --version
 
 | Tool | Required | Install |
 |------|----------|---------|
-| Git | ✅ Yes | [git-scm.com](https://git-scm.com/downloads) |
-| jq | ✅ Yes | `brew install jq` / `apt install jq` |
+| Git | Yes | [git-scm.com](https://git-scm.com/downloads) |
+| jq | Yes | `brew install jq` / `apt install jq` |
 
 ---
 
@@ -46,10 +46,10 @@ cd /path/to/your/project
 
 ```bash
 # Option A: Direct install
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/ultimate-workflow/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.sh | bash
 
 # Option B: Download first
-wget https://raw.githubusercontent.com/YOUR_ORG/ultimate-workflow/main/install.sh
+wget https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.sh
 bash install.sh
 ```
 
@@ -57,19 +57,19 @@ bash install.sh
 
 ```powershell
 # Option A: Direct install
-irm https://raw.githubusercontent.com/YOUR_ORG/ultimate-workflow/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.ps1 | iex
 
 # Option B: Download first
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/YOUR_ORG/ultimate-workflow/main/install.ps1" -OutFile "install.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.ps1" -OutFile "install.ps1"
 .\install.ps1
 ```
 
 The installer will:
-1. ✅ Check prerequisites (Git, jq, Beads)
-2. ✅ Initialize git repository (if needed)
-3. ✅ Create `.claude/` directory with agents and scripts
-4. ✅ Initialize Beads and install git hooks
-5. ✅ Run health check
+1. Check prerequisites (Git, jq, Beads)
+2. Initialize git repository (if needed)
+3. Create `.claude/` directory with agents and scripts
+4. Initialize Beads and install git hooks
+5. Run health check
 
 ---
 
@@ -140,8 +140,8 @@ Now just describe what you want to build:
 
 5. **QA Gate**: When trying to complete:
    ```
-   🚫 QA APPROVAL REQUIRED
-   15 file(s) changed - ALL require QA review
+   QA approval required.
+   15 file(s) changed - all require QA review.
    ```
 
 6. **QA Review**: You delegate to @qa, who reviews and approves
@@ -212,7 +212,7 @@ Should show SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd hooks.
 
 ## Next Steps
 
-- 📖 Read [Architecture](ARCHITECTURE.md) to understand how it works
-- 🤖 See [Agents Reference](AGENTS.md) for all agent prompts
-- 🔧 Check [Beads Integration](BEADS.md) for advanced usage
-- ❓ See [Troubleshooting](TROUBLESHOOTING.md) if you hit issues
+- Read [Architecture](ARCHITECTURE.md) to understand how it works
+- See [Agents Reference](AGENTS.md) for all agent prompts
+- Check [Beads Integration](BEADS.md) for advanced usage
+- See [Troubleshooting](TROUBLESHOOTING.md) if you hit issues

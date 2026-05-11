@@ -1,0 +1,50 @@
+# node-react-auth — Phase A, fixture #1.
+#
+# This fixture exercises the canonical happy-path: a feature spans both
+# backend (auth endpoint) and frontend (login form) so the orchestrator
+# must delegate to BOTH @backend and @frontend, then route to @qa for
+# approval before stopping. Per G8 plan, "Initial fixture set" table.
+#
+# The fixture is committed at HEAD with placeholder server/client code.
+# The runFixture harness git-stashes any per-run mutations and restores
+# the tree on completion, so this state is reusable across runs.
+
+name: node-react-auth
+description: |
+  Tiny Node/Express + React workspace. Bare bones today; the prompt asks
+  Claude to add a POST /auth/login endpoint with JWT plus a LoginForm
+  component, and the spec asserts the orchestrator -> backend + frontend
+  -> QA approval flow.
+
+prompt: |
+  Add a POST /auth/login endpoint with JWT tokens, plus a LoginForm component.
+
+expected_subagents:
+  - backend
+  - frontend
+  - qa
+
+expected_hooks:
+  - SessionStart
+  - UserPromptSubmit
+  - SubagentStart
+  - PreToolUse
+  - PostToolUse
+  - Stop
+  - SessionEnd
+
+expected_label_progression:
+  # Either the orchestrator opens an epic with two children, or a single
+  # task gets the qa-pending -> qa-approved transition. The spec asserts
+  # generic structure (qa-approved appears on at least one task) rather
+  # than a fixed task ID.
+  - qa-pending
+  - qa-approved
+
+notes: |
+  - The fixture is a workspace (root + client subpkg). `npm test` runs
+    vitest at the root; both server and client baselines are passing.
+  - .beads is initialized empty so any task IDs in trace.beadsTasksCreated
+    came from the run itself.
+  - .git is a real repo with a single initial commit; runFixture's
+    stash/restore depends on a clean git baseline.

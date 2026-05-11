@@ -518,3 +518,122 @@ bd label add $TASK_ID qa-pending
 ```
 
 Update the orchestrator to delegate to `@security` when security-related keywords are detected.
+
+---
+
+## QA Security Pass Checklist (J26)
+
+Every QA review runs through this 8-module security taxonomy before
+approving. The modules are run in dependency order — earlier modules
+gate later ones (e.g., a SECRETS leak fails the gate before INJECTION
+even runs). Each module is one-shot scannable, not exhaustive: the goal
+is to surface the recurring failure modes the team has hit before, not
+to substitute for a full security audit.
+
+| # | Module | What it scans for |
+|---|--------|-------------------|
+| 1 | **SECRETS** | Hard-coded API keys, tokens, passwords, private keys in source or git history. Cross-checked against `gitleaks` rules (when configured). Any committer-email in code paths. |
+| 2 | **INJECTION** | SQL injection (parameter interpolation), command injection (shell calls with user input), XSS in template renderers, prototype pollution in JS object merges. |
+| 3 | **AUTH** | Auth bypass (missing checks, wrong middleware), session-fixation (predictable IDs, no rotation on login), JWT verification (signature checked, expiry honoured, audience validated), authorization (each endpoint enforces ownership). |
+| 4 | **CONFIG** | Public defaults (debug mode on in prod, CORS `*`, permissive cookies), exposed admin endpoints, default credentials, missing security headers (`Content-Security-Policy`, `X-Frame-Options`, `Strict-Transport-Security`). |
+| 5 | **DEPS** | Known CVEs in dependencies via `npm audit` / `pip-audit` / equivalent, transitive vulnerability surface, abandoned packages (>2 years no commits), license drift. |
+| 6 | **AI** | Prompt injection in LLM call-sites, tool-call validation (the model can request tools, but those tools must validate their inputs), data exfiltration via tool output, autonomous-loop bounds (no infinite agent recursion). |
+| 7 | **MOBILE** | Insecure storage (plaintext credentials in `SharedPreferences` / `UserDefaults`), TLS pinning where required, deep-link validation, native-bridge surface area. Applies only when the project ships a mobile client. |
+| 8 | **DATA** | PII handling (logging redaction, retention policies, deletion requests), data classification (which fields are PII), encryption at rest where applicable, GDPR/CCPA hooks if user-facing. |
+
+A QA approval comment cites the modules touched; e.g., "SECRETS: clean.
+INJECTION: parameterised queries throughout. AUTH: JWT verified with
+audience and expiry. CONFIG: prod defaults reviewed."
+
+---
+
+## QA 5-Step Root-Cause Framework (J27)
+
+When QA finds a regression or the gate trips, the QA agent walks this
+five-step framework before proposing a fix. The framework is mandatory
+for every `qa-blocked` event — the block comment must cite the step it
+exited at, so the specialist receiving the bounce knows what evidence
+QA was working from.
+
+1. **Capture.** Record the failure: stack trace, reproducer command,
+   environment (OS, runtime version, branch SHA, last-passing commit if
+   known). Attach to the Beads task notes; don't paraphrase. Goal:
+   make the bug reproducible by anyone reading the task in three
+   months.
+
+2. **Reproduce.** Run the captured reproducer locally. Confirm it
+   fails. If it doesn't, the bug is intermittent — capture extra
+   environment context (network conditions, time of day, concurrent
+   load) until you find a deterministic trigger or escalate as flake.
+
+3. **Isolate.** Bisect to the smallest input / smallest commit /
+   smallest module that still reproduces. The output of this step is a
+   one-paragraph "X did Y and the system did Z because W" sentence.
+   No fix yet — only the root cause.
+
+4. **Minimal fix.** Write the smallest patch that resolves the root
+   cause from step 3. Resist the urge to refactor adjacent code; that
+   gets a separate Beads task. The minimal fix must include the test
+   that proves the bug is gone.
+
+5. **Verify and prevent.** Re-run the reproducer (now passes). Run the
+   full test suite (no regressions). Add a regression test if one
+   doesn't exist. File a paired follow-up Beads task for any adjacent
+   smell uncovered during isolation — never let a near-miss go
+   undocumented.
+
+---
+
+## Specialist Completion Contract (F7)
+
+Every specialist (`backend`, `frontend`, `devops`, `qa`) returns a
+structured completion payload when they finish a task. The contract is
+how the orchestrator chains delegations without re-deriving context.
+
+```json
+{
+  "task_id": "claude-workflow-plugin-<id>",
+  "files_changed": ["path/to/file.ts", "..."],
+  "tests_added": ["path/to/test.spec.ts", "..."],
+  "decisions": [
+    "Chose JWT RS256 with 15min access / 7d refresh; rotated kid quarterly.",
+    "..."
+  ],
+  "blockers": [],
+  "llm_observations": "<free-form medium-length text>"
+}
+```
+
+### Field semantics
+
+- **`task_id`** — required. Always the Beads task id the specialist
+  was working on.
+- **`files_changed`** — required, array. The full list of files the
+  specialist touched. Sourced from `.qa-tracking/changed-files.txt`
+  (the post-edit hook is the canonical writer). Empty array if no
+  files were changed.
+- **`tests_added`** — required, array. The tests the specialist
+  wrote. Empty array if no tests were added (rare — QA will flag this
+  in the security pass).
+- **`decisions`** — required, array. One sentence per architectural
+  choice the specialist made. The next reviewer should be able to
+  understand the system from this list alone. Empty array only for
+  trivial changes.
+- **`blockers`** — required, array. Free-form descriptions of anything
+  the specialist hit that prevented full completion. Empty array
+  means the specialist believes the work is done.
+- **`llm_observations`** — **required, mandatory**. Per principle #9
+  ("free-form `llm_observations` field on structured returns"), this
+  field is non-optional. It is the specialist's narrative — the kind
+  of thing a human engineer would say at a stand-up. What surprised
+  you? What was unclear in the brief? What did you notice that you
+  didn't act on? The orchestrator reads this when planning the next
+  step; QA reads it when assessing whether the specialist understood
+  the brief; future readers of the Beads task use it to reconstruct
+  the rationale. **A completion payload without `llm_observations`
+  is malformed.**
+
+The contract is enforced by convention, not schema validation —
+the QA gate doesn't reject missing fields, but the QA agent's review
+checklist asks "did the specialist return all six fields?" and that
+question being honest is part of QA approving.

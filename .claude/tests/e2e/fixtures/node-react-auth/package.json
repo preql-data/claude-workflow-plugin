@@ -1,0 +1,24 @@
+{
+  "name": "node-react-auth-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "G8 Phase A fixture: a tiny Node/Express + React skeleton used by the E2E harness to exercise orchestrator -> backend + frontend -> QA flow against real Claude. Has no real endpoints or components yet — the test prompt asks Claude to add them.",
+  "workspaces": [
+    "client"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:server": "vitest run server",
+    "test:client": "vitest run client",
+    "lint": "echo 'lint placeholder (fixture)' && exit 0",
+    "typecheck": "echo 'typecheck placeholder (fixture)' && exit 0"
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

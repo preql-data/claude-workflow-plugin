@@ -1,0 +1,17 @@
+{
+  "name": "node-react-auth-client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Client workspace for the node-react-auth fixture.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

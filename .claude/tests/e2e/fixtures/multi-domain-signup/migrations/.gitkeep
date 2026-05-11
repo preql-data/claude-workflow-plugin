@@ -1,0 +1,4 @@
+# Placeholder so the migrations/ directory is tracked even before any
+# SQL files land. Claude's @backend specialist (or a dedicated
+# migrations specialist) is expected to create migrations/0001_users.sql
+# during the signup epic.

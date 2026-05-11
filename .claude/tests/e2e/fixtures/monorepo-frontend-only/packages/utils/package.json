@@ -1,0 +1,14 @@
+{
+  "name": "@fixture/utils",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Pure-utility helper package. Not the target of the prompt.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,54 @@
+# python-django-bug — Phase C, fixture #2.
+#
+# Exercises the debugger 5-step framework (J27): Claude must investigate
+# the failing test_user_email_unique assertion, identify the root cause
+# (the email field on accounts/models.py:User has unique=False), and
+# either flip the constraint + amend the initial migration or add a new
+# migration. The fix routes through the @backend specialist (Django code
+# is backend domain) and lands in the QA gate.
+#
+# Polyglot test detection (F8/J17): pyproject.toml + pytest.ini config
+# tell intent-router/detect-stack the runner is pytest, not jest. Spec
+# asserts hookFired("UserPromptSubmit") with the expected routing.
+#
+# Per G8 plan, "Initial fixture set" — python-django-bug row.
+
+name: python-django-bug
+description: |
+  Tiny Django + pytest project with a deliberately failing
+  test_user_email_unique test. The accounts.User model has unique=False
+  on the email field so the test fails. The prompt asks Claude to
+  fix it; the spec asserts orchestrator -> backend -> QA flow plus
+  polyglot test detection routing to pytest.
+
+prompt: |
+  The `test_user_email_unique` test is failing — fix it.
+
+expected_subagents:
+  - backend
+  - qa
+
+expected_hooks:
+  - SessionStart
+  - UserPromptSubmit
+  - SubagentStart
+  - PreToolUse
+  - PostToolUse
+  - Stop
+  - SessionEnd
+
+expected_label_progression:
+  - qa-pending
+  - qa-approved
+
+notes: |
+  - Single Django app (accounts) with a User model and a 3-test test
+    file. The test_user_email_unique case expects an IntegrityError on
+    duplicate email; the seeded model has unique=False, so it fails.
+  - .beads is initialized empty so any task IDs in the trace came from
+    the run itself.
+  - The fix lands in accounts/models.py and likely
+    accounts/migrations/0001_initial.py (or a new migration). The QA
+    gate validates by re-reading the test expectations against the
+    code; pytest is not actually executed by the harness because
+    Python isn't installed in the SDK environment.

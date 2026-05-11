@@ -1,0 +1,8 @@
+# pnpm workspace declaration for the monorepo-frontend-only fixture.
+# Three top-level packages, each living under packages/<name>/ — a
+# canonical pnpm layout that makes the polyglot detector see this as
+# a JavaScript monorepo (intent-router routes to frontend by default
+# for component additions in packages/ui/).
+
+packages:
+  - "packages/*"

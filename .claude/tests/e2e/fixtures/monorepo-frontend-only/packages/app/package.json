@@ -1,0 +1,19 @@
+{
+  "name": "@fixture/app",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Consumer app package — depends on @fixture/ui and @fixture/utils. Not the target of the prompt; included so the workspace has multi-package shape.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fixture/ui": "workspace:*",
+    "@fixture/utils": "workspace:*",
+    "react": "^18.3.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

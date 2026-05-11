@@ -1,0 +1,13 @@
+# E2E harness — ignore generated artifacts. Golden cassettes ARE committed
+# (they are evidence; structural diffs against them are how we detect
+# regressions). Replays, run logs, and node_modules are not.
+
+node_modules/
+.tmp/
+.tsbuild/
+cassettes/replays/
+*.log
+
+# Allow committed golden cassettes.
+!cassettes/golden/
+!cassettes/golden/**

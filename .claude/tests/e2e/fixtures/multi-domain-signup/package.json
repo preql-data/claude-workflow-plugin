@@ -1,0 +1,24 @@
+{
+  "_comment": "G8 Phase C fixture #5: Node API + React + Postgres migration. Prompt asks Claude to implement user signup end-to-end. The fixture's structure (server/, client/, migrations/) naturally drives the orchestrator to create an epic with 3 children — one per domain. Tests F4 atomic QA approval (each child gets approved before epic closes) and B2 epic-level e2e gate (orchestrator runs sibling-cross-cutting tests after all 3 children close).",
+  "name": "multi-domain-signup-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "G8 Phase C: multi-domain signup fixture (server/api + client/ui + migrations/db) used to exercise epic creation with 3 children",
+  "workspaces": [
+    "client"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:server": "vitest run server",
+    "test:client": "vitest run client",
+    "lint": "echo 'lint placeholder (fixture)' && exit 0",
+    "typecheck": "echo 'typecheck placeholder (fixture)' && exit 0"
+  },
+  "dependencies": {
+    "express": "^4.19.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

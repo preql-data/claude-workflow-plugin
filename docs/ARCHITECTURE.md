@@ -400,3 +400,57 @@ This data is gitignored and not persisted.
 
 - `bd hooks install` adds auto-sync
 - Debounced sync (500ms) prevents spam
+
+---
+
+## Test Pyramid
+
+The plugin is gated by its own five-tier test pyramid. Each tier catches a
+different failure mode; together they form the gate that a change has to
+clear before it ships. The full reference is in
+[`.claude/tests/README.md`](../.claude/tests/README.md); the architectural
+shape is:
+
+| Tier | Lives at | Catches | Cost |
+|------|----------|---------|------|
+| **L1 — bash unit** | `.claude/scripts/tests/*.sh` | Hook script logic with crafted stdin payloads | Free, <1s |
+| **L2 — component** | `.claude/tests/component/specs/*.sh` | Hook pipelines end-to-end with tempdir fixtures | Free, <10s |
+| **L3 — vitest unit** | `.claude/tests/e2e/specs/*.unit.spec.ts` | Harness internals: trace schema, normalization, golden compare | Free, <30s |
+| **L3 — live e2e** | `.claude/tests/e2e/specs/<fixture>.spec.ts` | Plugin behaviour against real Claude Opus 4.7 | ~$5–10 per fixture |
+| **L4 — drift watch** | Same specs as L3-live | Model-output drift over time on `main` | Live, cron |
+
+### Six live fixtures
+
+L3-live runs against six representative fixtures:
+
+1. `node-react-auth` — end-to-end happy path (orchestrator → backend +
+   frontend → QA on a JWT-auth feature).
+2. `python-django-bug` — bug-fix path with regression test coverage.
+3. `go-cli-refactor` — single-specialist refactor with no domain split.
+4. `monorepo-frontend-only` — frontend-only delegation in a multi-package
+   workspace (proves the orchestrator doesn't fan out to backend
+   unnecessarily).
+5. `multi-domain-signup` — three-way delegation (backend + frontend +
+   devops) on a signup epic.
+6. `qa-block-recovery` — QA blocks, specialist iterates, QA re-approves
+   (proves the gate's `qa-blocked` → `qa-approved` round-trip).
+
+### Golden cassette workflow
+
+Each live fixture has a committed `cassettes/golden/<fixture>.jsonl` that
+captures the structural fingerprint of a known-good run (tool sequence,
+subagent tree shape, hook firing sequence, label transitions, Beads task
+IDs created, plugin loader status). Replays normalise away the noise (tool
+durations, costs, token counts, run IDs, raw file contents, free-form
+prose) so the diff is reliable. `cassette-diff` surfaces the structural
+delta; PR reviewers see this rather than 50 MB of raw cassette JSON.
+
+The CI workflow tallies META-TEST pass/fail counts as a distinct line in
+the L2 job summary. A META-TEST is a self-test that proves the assertion
+is sensitive to the failure it claims to catch — if it stops failing when
+the trace is mutated, the test has gone soft and the gate doesn't actually
+guard the thing it names.
+
+For the canonical reference (how to add a fixture, refresh a golden, read
+a structural diff, and the META-TEST convention), see
+[`.claude/tests/README.md`](../.claude/tests/README.md).

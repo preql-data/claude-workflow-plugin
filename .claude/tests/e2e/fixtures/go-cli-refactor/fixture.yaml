@@ -1,0 +1,52 @@
+# go-cli-refactor — Phase C, fixture #3.
+#
+# Exercises J19 regression-coverage: the prompt asks Claude to move the
+# parser/ directory into internal/parser/. main.go imports parser and
+# calls parser.Parse — moving the directory without updating the import
+# path breaks `go build`. main_test.go imports parser too, so its
+# import must update too.
+#
+# QA's regression-coverage check should catch any case where the
+# orchestrator moves files but leaves the unchanged caller stale. The
+# spec asserts that QA's gate either approves cleanly (refactor was
+# correct on first pass) OR blocks once and re-iterates (regression
+# caught) — both are acceptable shapes.
+
+name: go-cli-refactor
+description: |
+  Tiny Go CLI with a parser/ package called from main.go. The prompt
+  asks Claude to extract parser/ into internal/parser/. Tests J19
+  regression-coverage: the orchestrator must update the import path in
+  main.go (an unchanged caller) when the directory moves.
+
+prompt: |
+  Extract the `parser` directory into its own internal package.
+
+expected_subagents:
+  - backend
+  - qa
+
+expected_hooks:
+  - SessionStart
+  - UserPromptSubmit
+  - SubagentStart
+  - PreToolUse
+  - PostToolUse
+  - Stop
+  - SessionEnd
+
+expected_label_progression:
+  - qa-pending
+  - qa-approved
+
+notes: |
+  - Two Go packages: parser (root) and main (root). Tests live in
+    parser/parser_test.go (in-package) and main_test.go (cross-package
+    smoke). After the refactor, parser_test.go follows the package to
+    internal/parser/, while main_test.go's import path updates.
+  - The harness doesn't run `go test` itself; QA inspects file edits
+    and recognizes the orchestrator must update both main.go AND
+    main_test.go imports. Forgetting either is the regression QA
+    blocks on.
+  - .beads is initialized empty so task IDs in trace.beadsTasksCreated
+    came from the run itself.

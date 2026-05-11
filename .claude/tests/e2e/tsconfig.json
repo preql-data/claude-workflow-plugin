@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowSyntheticDefaultImports": true,
+    "verbatimModuleSyntax": false,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "~/lib/*": ["lib/*"]
+    },
+    "outDir": ".tsbuild",
+    "rootDir": "."
+  },
+  "include": ["lib/**/*.ts", "specs/**/*.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", ".tmp", ".tsbuild", "fixtures/**/node_modules", "cassettes"]
+}

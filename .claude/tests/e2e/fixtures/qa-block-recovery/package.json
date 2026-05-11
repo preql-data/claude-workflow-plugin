@@ -1,0 +1,19 @@
+{
+  "_comment": "G8 Phase C fixture #6. Node API with a deliberately broken seeded test in HEAD. The prompt asks for input validation on /users; the seeded test in the SAME file asserts validateEmail('foo@bar.com') === false (a clearly wrong assertion — that string IS a valid email by every reasonable definition). The QA gate's regression-coverage check should block, the orchestrator re-invokes @backend, and the recovery path lands a corrected test plus the validation logic. Memory bridge writes a feedback memory (E8) capturing the lesson learned.",
+  "name": "qa-block-recovery-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "G8 Phase C: QA-block-then-recover fixture. Seeded with a wrong test assertion that QA must catch.",
+  "scripts": {
+    "test": "vitest run",
+    "lint": "echo 'lint placeholder (fixture)' && exit 0",
+    "typecheck": "echo 'typecheck placeholder (fixture)' && exit 0"
+  },
+  "dependencies": {
+    "express": "^4.19.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

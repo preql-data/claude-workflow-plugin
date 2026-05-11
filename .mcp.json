@@ -1,0 +1,34 @@
+{
+  "_comment": "Phase 6 MCP server registry. Phase 6a wired bd-mcp (J29). Phase 6b activates code-context (J30, simpler search-based variant) and replaces the previous _phase6_codebase_graph_target placeholder. The placeholder block is preserved as _phase7_codebase_graph_target as a forward pointer to the optional tree-sitter upgrade described in the v3 plan; it is inert until Phase 7+.",
+  "mcpServers": {
+    "bd": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/bd-mcp/bin/bd-mcp.js"
+      ],
+      "env": {}
+    },
+    "code-context": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"
+      ],
+      "env": {}
+    }
+  },
+  "_phase7_codebase_graph_target": {
+    "_note": "Forward pointer to a tree-sitter-grade replacement for code-context. See .claude/mcp/code-context-mcp/README.md 'Limits / non-goals' for migration notes. Inert.",
+    "transport": "stdio",
+    "command": "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/codebase-graph/bin/server",
+    "args": [],
+    "env": {},
+    "tools_to_expose": [
+      "code_search",
+      "code_context",
+      "symbol_callers",
+      "symbol_callees"
+    ]
+  }
+}

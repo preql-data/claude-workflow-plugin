@@ -1,0 +1,13 @@
+{
+  "_comment": "G8 Phase C fixture #4. pnpm workspace with three packages: ui (component library), app (consumer), utils (helpers). Prompt asks Claude to add a <RetryButton> component to the ui package. Tests intent-router picks frontend ONLY (no backend, no QA polyglot detection drift) and that the doc-only fast path doesn't fire (the change is real component code).",
+  "name": "monorepo-frontend-only-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "description": "G8 Phase C: pnpm workspace fixture (ui + app + utils) — scoped frontend-only change",
+  "type": "module",
+  "scripts": {
+    "test": "pnpm -r test",
+    "lint": "echo 'lint placeholder (fixture)' && exit 0",
+    "typecheck": "echo 'typecheck placeholder (fixture)' && exit 0"
+  }
+}

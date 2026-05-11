@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentLint Report — 2026-05-10</title>
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--font:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;--mono:'SF Mono',Menlo,Consolas,monospace}
+body{background:#f9fafb;color:#374151;font-family:var(--font);line-height:1.5;max-width:720px;margin:0 auto;padding:8px 0}
+
+.hero{background:#f3f4f6;border-radius:16px;padding:28px 28px 26px;margin-bottom:14px}
+.hero-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.hero-brand{font-size:18px;font-weight:500;color:#111827}
+.hero-logo{width:28px;height:28px;margin-right:10px;flex-shrink:0;display:block}
+.hero-ver{font-size:11px;font-family:var(--mono);color:#9ca3af;background:#e5e7eb;padding:2px 8px;border-radius:8px;margin-left:10px}
+.hero-meta{font-size:12px;color:#9ca3af}
+.hero-gauge{position:relative;width:220px;height:148px;margin:0 auto}
+.hero-gauge-num{position:absolute;bottom:16px;left:0;right:0;text-align:center;font-size:60px;font-weight:500;color:#111827;line-height:1;letter-spacing:-3px}
+.hero-gauge-scope{position:absolute;bottom:-4px;left:0;right:0;text-align:center;font-size:11px;font-weight:500;color:#6b7280;letter-spacing:0.5px;text-transform:lowercase}
+.hero-stats{text-align:center;margin-top:2px;font-size:13px}
+.stats-sep{color:#9ca3af;margin:0 6px}
+.hero-pills{display:flex;justify-content:center;gap:10px;margin-top:20px}
+.pill{display:flex;align-items:center;gap:6px;padding:7px 16px;border-radius:10px;background:#fff;border:0.5px solid #e5e7eb}
+.pill-dot{width:8px;height:8px;border-radius:50%}
+.pill-num{font-size:14px;font-weight:500;color:#111827}
+.pill-label{font-size:13px;color:#4b5563}
+
+.card{border:0.5px solid #e5e7eb;border-radius:14px;overflow:hidden;background:#fff;margin-bottom:14px}
+.card-head{padding:16px 20px 4px;display:flex;align-items:baseline;gap:8px}
+.card-title{font-size:16px;font-weight:500;color:#111827}
+.card-count{font-size:12px;color:#9ca3af}
+
+.dim{border-top:0.5px solid #e5e7eb}
+.dim>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:12px;padding:13px 20px}
+.dim>summary::-webkit-details-marker{display:none}
+.dim-label{font-size:14px;font-weight:500;color:#111827;width:100px;flex-shrink:0}
+.dim-bar{flex:1;position:relative;height:6px;border-radius:3px;background:#e5e7eb;overflow:hidden}
+.dim-bar-ghost{position:absolute;height:100%;border-radius:3px;background:#d1d5db;opacity:.3}
+.dim-bar-fill{position:relative;height:100%;border-radius:3px}
+.dim-score{font-size:20px;font-weight:500;line-height:1;min-width:28px;text-align:right;flex-shrink:0}
+.dim-max{font-size:12px;color:#9ca3af;flex-shrink:0}
+.delta-pill{font-size:11px;font-weight:500;padding:2px 7px;border-radius:8px;min-width:28px;text-align:center;flex-shrink:0}
+.delta-up{background:rgba(29,158,117,.1);color:#0F6E56}
+.delta-down{background:rgba(226,75,74,.1);color:#991b1b}
+.delta-spacer{min-width:28px;flex-shrink:0}
+.dim-issues{width:44px;display:flex;gap:4px;flex-shrink:0;justify-content:flex-end;align-items:center}
+.issue-pill{font-size:11px;padding:2px 7px;border-radius:10px;font-weight:500}
+.issue-fail{background:rgba(226,75,74,.1);color:#A32D2D}
+.issue-warn{background:rgba(239,159,39,.1);color:#854F0B}
+
+.dim-checks{background:#f9fafb;border-top:0.5px solid #e5e7eb}
+.chk{border-bottom:0.5px solid #e5e7eb}
+.chk:last-child{border-bottom:none}
+.chk>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 20px;-webkit-user-select:none;user-select:none}
+.chk>summary::-webkit-details-marker{display:none}
+.chk>summary::after{content:'\203A';margin-left:auto;color:#9ca3af;font-size:14px;transition:transform .15s}
+.chk[open]>summary::after{transform:rotate(90deg)}
+.chk-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.chk-id{font-size:11px;font-family:var(--mono);color:#9ca3af;width:24px;flex-shrink:0}
+.chk-name{flex:1;font-size:13px;color:#111827}
+.chk-project{font-size:11px;color:#9ca3af;font-family:var(--mono)}
+.chk-badge{font-size:10px;font-weight:500;padding:2px 7px;border-radius:6px}
+.chk-fixed{background:rgba(29,158,117,.1);color:#0F6E56}
+.chk-improved{background:rgba(239,159,39,.1);color:#854F0B}
+.chk-detail{padding:0 20px 12px 51px;font-size:12.5px;color:#4b5563;line-height:1.7}
+
+.fix-item{display:flex;align-items:flex-start;gap:14px;padding:14px 20px;border-top:0.5px solid #e5e7eb}
+.fix-num{width:24px;height:24px;border-radius:50%;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500;color:#4b5563;flex-shrink:0}
+.fix-body{flex:1;min-width:0}
+.fix-desc{font-size:14px;font-weight:500;color:#111827;margin-bottom:3px}
+.fix-reason{font-size:12px;color:#4b5563;line-height:1.5}
+.fix-meta{display:flex;align-items:center;gap:8px;flex-shrink:0;margin-top:2px}
+.fix-type{font-size:10px;font-weight:500;padding:3px 9px;border-radius:8px;text-transform:uppercase;letter-spacing:.4px}
+.fix-guided{background:rgba(24,95,165,.08);color:#185FA5}
+.fix-assisted{background:rgba(186,117,23,.08);color:#854F0B}
+.fix-check{font-size:11px;font-family:var(--mono);color:#9ca3af}
+
+.evidence{background:#f3f4f6;border-radius:14px;padding:16px 20px;font-size:12px;color:#9ca3af;line-height:1.7}
+.evidence code{font-family:var(--mono);font-size:11px}
+.footer{padding:20px;color:#9ca3af;font-size:11px;text-align:center}
+.footer a{color:#00b48c;text-decoration:none;font-weight:500}
+</style>
+</head>
+<body>
+  <div class="hero">
+    <div class="hero-head">
+      <div style="display:flex;align-items:center">
+        <span class="hero-brand">AgentLint</span>
+        <span class="hero-ver">v1.1.13</span>
+      </div>
+      <span class="hero-meta">/Users/edk0/Desktop/projects/claude-workflow-plugin/ · 2026-05-10</span>
+    </div>
+    <div class="hero-gauge">
+      <svg width="220" height="148" viewBox="0 0 220 148"><line x1="46.0" y1="172.9" x2="38.3" y2="179.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="41.6" y1="167.0" x2="33.4" y2="172.7" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="37.7" y1="160.8" x2="29.0" y2="165.7" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="34.4" y1="154.2" x2="25.3" y2="158.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="31.7" y1="147.4" x2="22.2" y2="150.7" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="29.5" y1="140.3" x2="19.8" y2="142.8" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="28.0" y1="133.1" x2="18.2" y2="134.7" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="27.2" y1="125.8" x2="17.2" y2="126.5" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="27.0" y1="118.5" x2="17.0" y2="118.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="27.5" y1="111.1" x2="17.5" y2="110.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="28.6" y1="103.8" x2="18.8" y2="101.9" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="30.3" y1="96.7" x2="20.7" y2="93.9" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="32.7" y1="89.7" x2="23.4" y2="86.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="35.7" y1="83.0" x2="26.7" y2="78.5" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="39.3" y1="76.6" x2="30.7" y2="71.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="43.4" y1="70.5" x2="35.4" y2="64.5" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="48.0" y1="64.8" x2="40.6" y2="58.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="53.2" y1="59.5" x2="46.3" y2="52.2" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="58.8" y1="54.7" x2="52.6" y2="46.8" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="64.8" y1="50.4" x2="59.3" y2="42.0" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="71.1" y1="46.7" x2="66.4" y2="37.9" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="77.7" y1="43.5" x2="73.9" y2="34.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="84.6" y1="41.0" x2="81.6" y2="31.4" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="91.7" y1="39.0" x2="89.5" y2="29.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="99.0" y1="37.7" x2="97.7" y2="27.8" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="106.3" y1="37.1" x2="105.9" y2="27.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="113.7" y1="37.1" x2="114.1" y2="27.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="121.0" y1="37.7" x2="122.3" y2="27.8" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="128.3" y1="39.0" x2="130.5" y2="29.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="135.4" y1="41.0" x2="138.4" y2="31.4" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="142.3" y1="43.5" x2="146.1" y2="34.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="148.9" y1="46.7" x2="153.6" y2="37.9" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="155.2" y1="50.4" x2="160.7" y2="42.0" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="161.2" y1="54.7" x2="167.4" y2="46.8" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="166.8" y1="59.5" x2="173.7" y2="52.2" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="172.0" y1="64.8" x2="179.4" y2="58.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="176.6" y1="70.5" x2="184.6" y2="64.5" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="180.7" y1="76.6" x2="189.3" y2="71.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="184.3" y1="83.0" x2="193.3" y2="78.5" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="187.3" y1="89.7" x2="196.6" y2="86.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="189.7" y1="96.7" x2="199.3" y2="93.9" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="191.4" y1="103.8" x2="201.2" y2="101.9" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="192.5" y1="111.1" x2="202.5" y2="110.1" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="193.0" y1="118.5" x2="203.0" y2="118.3" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="192.8" y1="125.8" x2="202.8" y2="126.5" stroke="#1D9E75" stroke-width="4.5" stroke-linecap="round" opacity="1"/><line x1="192.0" y1="133.1" x2="201.8" y2="134.7" stroke="#e5e7eb" stroke-width="4.5" stroke-linecap="round" opacity="0.3"/><line x1="190.5" y1="140.3" x2="200.2" y2="142.8" stroke="#e5e7eb" stroke-width="4.5" stroke-linecap="round" opacity="0.3"/><line x1="188.3" y1="147.4" x2="197.8" y2="150.7" stroke="#e5e7eb" stroke-width="4.5" stroke-linecap="round" opacity="0.3"/><line x1="185.6" y1="154.2" x2="194.7" y2="158.3" stroke="#e5e7eb" stroke-width="4.5" stroke-linecap="round" opacity="0.3"/><line x1="182.3" y1="160.8" x2="191.0" y2="165.7" stroke="#e5e7eb" stroke-width="4.5" stroke-linecap="round" opacity="0.3"/><line x1="178.4" y1="167.0" x2="186.6" y2="172.7" stroke="#e5e7eb" stroke-width="4.5" stroke-linecap="round" opacity="0.3"/><line x1="174.0" y1="172.9" x2="181.7" y2="179.3" stroke="#e5e7eb" stroke-width="4.5" stroke-linecap="round" opacity="0.3"/></svg>
+      <div class="hero-gauge-num">87</div>
+      <div class="hero-gauge-scope" title="score_scope — which dimensions the total covers">(core)</div>
+    </div>
+    
+    <div class="hero-pills">
+      <div class="pill"><div class="pill-dot" style="background:#1D9E75"></div><span class="pill-num">44</span><span class="pill-label">pass</span></div>
+      <div class="pill"><div class="pill-dot" style="background:#EF9F27"></div><span class="pill-num">1</span><span class="pill-label">needs work</span></div>
+      <div class="pill"><div class="pill-dot" style="background:#E24B4A"></div><span class="pill-num">6</span><span class="pill-label">failing</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="card-title">Dimensions</span></div>
+    <details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Findability</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:100%;background:#1D9E75"></div></div>
+        <span class="dim-score" style="color:#1D9E75">10</span>
+        <span class="dim-max">/10</span>
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><svg width="14" height="14" viewBox="0 0 14 14"><path d="M3.5 7.5L5.5 9.5L10.5 4.5" fill="none" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      </summary>
+      <div class="dim-checks"><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F1</span>
+            <span class="chk-name">Entry file exists</span>
+            
+          </summary>
+          <div class="chk-detail">Entry file: CLAUDE.md (claude)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F2</span>
+            <span class="chk-name">Entry file describes the project</span>
+            
+          </summary>
+          <div class="chk-detail">Description found in first 10 lines of CLAUDE.md</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F3</span>
+            <span class="chk-name">Conditional loading guidance</span>
+            
+          </summary>
+          <div class="chk-detail">Conditional loading guidance found in CLAUDE.md</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F4</span>
+            <span class="chk-name">Large directories have index</span>
+            
+          </summary>
+          <div class="chk-detail">Root has 13 content files; index present: true</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F5</span>
+            <span class="chk-name">All references resolve</span>
+            
+          </summary>
+          <div class="chk-detail">All 0 extracted references resolve</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F6</span>
+            <span class="chk-name">Predictable file naming</span>
+            
+          </summary>
+          <div class="chk-detail">README.md, CLAUDE.md, and CHANGELOG.md are present</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F7</span>
+            <span class="chk-name">Include directives resolve</span>
+            
+          </summary>
+          <div class="chk-detail">No @include directives found</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F8</span>
+            <span class="chk-name">Rule file frontmatter uses globs</span>
+            
+          </summary>
+          <div class="chk-detail">No .claude/rules directory</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">F9</span>
+            <span class="chk-name">No unfilled template placeholders</span>
+            
+          </summary>
+          <div class="chk-detail">No template placeholders found</div>
+        </details></div>
+    </details><details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Deep</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:0%;background:#9AA0A6"></div></div>
+        <span class="dim-score" style="color:#9AA0A6">n/a</span>
+        
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><span class="issue-pill issue-warn" title="Optional analyzer — opt-in">opt-in</span></div>
+      </summary>
+      <div class="dim-checks"></div>
+    </details><details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Instructions</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:100%;background:#1D9E75"></div></div>
+        <span class="dim-score" style="color:#1D9E75">10</span>
+        <span class="dim-max">/10</span>
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><svg width="14" height="14" viewBox="0 0 14 14"><path d="M3.5 7.5L5.5 9.5L10.5 4.5" fill="none" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      </summary>
+      <div class="dim-checks"><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I1</span>
+            <span class="chk-name">Emphasis keyword usage</span>
+            
+          </summary>
+          <div class="chk-detail">Keyword counts in CLAUDE.md: IMPORTANT=0, NEVER=0, MUST=0, CRITICAL=0</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I2</span>
+            <span class="chk-name">Keyword density</span>
+            
+          </summary>
+          <div class="chk-detail">Emphasis density is 0 keywords per 1K words across 887 words</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I3</span>
+            <span class="chk-name">Rule specificity</span>
+            
+          </summary>
+          <div class="chk-detail">Found 7 Dont/Because rules out of 7 total</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I4</span>
+            <span class="chk-name">Action-oriented organization</span>
+            
+          </summary>
+          <div class="chk-detail">Action-oriented headings: 2; identity headings: 0</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I5</span>
+            <span class="chk-name">No identity language</span>
+            
+          </summary>
+          <div class="chk-detail">No identity language matches found</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I6</span>
+            <span class="chk-name">Entry file length</span>
+            
+          </summary>
+          <div class="chk-detail">CLAUDE.md has 114 lines</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I7</span>
+            <span class="chk-name">Entry file size within limit</span>
+            
+          </summary>
+          <div class="chk-detail">CLAUDE.md is 6244 characters (limit: 40,000)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">I8</span>
+            <span class="chk-name">Total injected content within budget</span>
+            
+          </summary>
+          <div class="chk-detail">Total injected content: 112 non-empty lines (reference: 60-200)</div>
+        </details></div>
+    </details><details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Workability</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:80%;background:#1D9E75"></div></div>
+        <span class="dim-score" style="color:#1D9E75">8</span>
+        <span class="dim-max">/10</span>
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><span class="issue-pill issue-fail">2</span></div>
+      </summary>
+      <div class="dim-checks"><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W1</span>
+            <span class="chk-name">Build/test commands documented</span>
+            
+          </summary>
+          <div class="chk-detail">Found build/test commands in CLAUDE.md</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W2</span>
+            <span class="chk-name">CI exists</span>
+            
+          </summary>
+          <div class="chk-detail">Found 1 workflow files</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W3</span>
+            <span class="chk-name">Tests exist and are non-empty</span>
+            
+          </summary>
+          <div class="chk-detail">Found 7728 test files</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#E24B4A"></div>
+            <span class="chk-id">W4</span>
+            <span class="chk-name">Linter configured</span>
+            
+          </summary>
+          <div class="chk-detail">No linter or formatter configuration found</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W5</span>
+            <span class="chk-name">No oversized source files</span>
+            
+          </summary>
+          <div class="chk-detail">No source files exceed 256 KB</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W6</span>
+            <span class="chk-name">Pre-commit hooks are fast</span>
+            
+          </summary>
+          <div class="chk-detail">Pre-commit hook looks fast (estimated 2s)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W7</span>
+            <span class="chk-name">Local fast test command documented</span>
+            
+          </summary>
+          <div class="chk-detail">Local fast test command documented in entry file</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W8</span>
+            <span class="chk-name">npm test script exists (JS/Node projects)</span>
+            
+          </summary>
+          <div class="chk-detail">No package.json (not a JS/Node project — skip)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W9</span>
+            <span class="chk-name">Release workflow validates version consistency</span>
+            
+          </summary>
+          <div class="chk-detail">No release workflow found (skip)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">W10</span>
+            <span class="chk-name">Test cost tiers defined (pytest markers)</span>
+            
+          </summary>
+          <div class="chk-detail">No Python project files found (skip — W10 is Python-only)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#E24B4A"></div>
+            <span class="chk-id">W11</span>
+            <span class="chk-name">feat/fix commits paired with test commits (test-required gate)</span>
+            
+          </summary>
+          <div class="chk-detail">No test-required.yml — feat/fix commits are not gated on paired test commits</div>
+        </details></div>
+    </details><details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Continuity</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:100%;background:#1D9E75"></div></div>
+        <span class="dim-score" style="color:#1D9E75">10</span>
+        <span class="dim-max">/10</span>
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><svg width="14" height="14" viewBox="0 0 14 14"><path d="M3.5 7.5L5.5 9.5L10.5 4.5" fill="none" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      </summary>
+      <div class="dim-checks"><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">C1</span>
+            <span class="chk-name">Document freshness</span>
+            
+          </summary>
+          <div class="chk-detail">Entry file trails latest code change by 0 days</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">C2</span>
+            <span class="chk-name">Handoff information exists</span>
+            
+          </summary>
+          <div class="chk-detail">Found handoff or progress information</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">C3</span>
+            <span class="chk-name">Changelog has why</span>
+            
+          </summary>
+          <div class="chk-detail">CHANGELOG.md has 184 lines</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">C4</span>
+            <span class="chk-name">Plans in repo</span>
+            
+          </summary>
+          <div class="chk-detail">Found plan directories: docs/plans</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">C5</span>
+            <span class="chk-name">CLAUDE.local.md not tracked</span>
+            
+          </summary>
+          <div class="chk-detail">No CLAUDE.local.md (OK)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">C6</span>
+            <span class="chk-name">HANDOFF.md contains verify conditions (not just status)</span>
+            
+          </summary>
+          <div class="chk-detail">8 verify condition(s) found in HANDOFF.md — next session can confirm readiness without re-running all checks</div>
+        </details></div>
+    </details><details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Session</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:0%;background:#9AA0A6"></div></div>
+        <span class="dim-score" style="color:#9AA0A6">n/a</span>
+        
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><span class="issue-pill issue-warn" title="Optional analyzer — opt-in">opt-in</span></div>
+      </summary>
+      <div class="dim-checks"></div>
+    </details><details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Safety</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:60%;background:#534AB7"></div></div>
+        <span class="dim-score" style="color:#534AB7">6</span>
+        <span class="dim-max">/10</span>
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><span class="issue-pill issue-fail">3</span></div>
+      </summary>
+      <div class="dim-checks"><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">S1</span>
+            <span class="chk-name">Env files gitignored</span>
+            
+          </summary>
+          <div class="chk-detail">.env is in .gitignore (good)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#E24B4A"></div>
+            <span class="chk-id">S2</span>
+            <span class="chk-name">Actions SHA pinned</span>
+            
+          </summary>
+          <div class="chk-detail">0/15 action references are SHA-pinned</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#E24B4A"></div>
+            <span class="chk-id">S3</span>
+            <span class="chk-name">Secret scanning configured</span>
+            
+          </summary>
+          <div class="chk-detail">No secret scanning (gitleaks or pre-commit) configured</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">S4</span>
+            <span class="chk-name">Security policy exists</span>
+            
+          </summary>
+          <div class="chk-detail">SECURITY.md exists</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">S5</span>
+            <span class="chk-name">Workflow permissions minimized</span>
+            
+          </summary>
+          <div class="chk-detail">No over-permissioned workflows</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">S6</span>
+            <span class="chk-name">No hardcoded secrets</span>
+            
+          </summary>
+          <div class="chk-detail">No hardcoded secret patterns found</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">S7</span>
+            <span class="chk-name">No personal paths in source</span>
+            
+          </summary>
+          <div class="chk-detail">No personal filesystem paths found in source</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">S8</span>
+            <span class="chk-name">No pull_request_target trigger</span>
+            
+          </summary>
+          <div class="chk-detail">No workflows use pull_request_target</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#E24B4A"></div>
+            <span class="chk-id">S9</span>
+            <span class="chk-name">No personal email in git history</span>
+            
+          </summary>
+          <div class="chk-detail">Personal email(s) in git history: atsamaz@preql.com — PII in public commit history</div>
+        </details></div>
+    </details><details class="dim">
+      <summary class="dim-row">
+        <span class="dim-label">Harness</span>
+        <div class="dim-bar"><div class="dim-bar-fill" style="width:70%;background:#534AB7"></div></div>
+        <span class="dim-score" style="color:#534AB7">7</span>
+        <span class="dim-max">/10</span>
+        <span class="delta-spacer"></span>
+        <div class="dim-issues"><span class="issue-pill issue-fail">1</span><span class="issue-pill issue-warn">1</span></div>
+      </summary>
+      <div class="dim-checks"><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">H1</span>
+            <span class="chk-name">Hook event names valid</span>
+            
+          </summary>
+          <div class="chk-detail">Valid hook events: 6/6</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">H2</span>
+            <span class="chk-name">PreToolUse hooks have matcher</span>
+            
+          </summary>
+          <div class="chk-detail">PreToolUse hooks with matcher: 1/1</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#E24B4A"></div>
+            <span class="chk-id">H4</span>
+            <span class="chk-name">No dangerous auto-approve</span>
+            
+          </summary>
+          <div class="chk-detail">Dangerous auto-approve rule(s) found: Bash</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#EF9F27"></div>
+            <span class="chk-id">H3</span>
+            <span class="chk-name">Stop hook has circuit breaker</span>
+            
+          </summary>
+          <div class="chk-detail">0/1 guarded, 1 unresolvable script path(s)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">H5</span>
+            <span class="chk-name">Env deny coverage complete</span>
+            
+          </summary>
+          <div class="chk-detail">No .env deny rules (N/A)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">H6</span>
+            <span class="chk-name">Hook scripts network access</span>
+            
+          </summary>
+          <div class="chk-detail">No hook scripts detected making network calls</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">H7</span>
+            <span class="chk-name">Gate workflows are blocking (not warn-only)</span>
+            
+          </summary>
+          <div class="chk-detail">No gate workflows found (OK)</div>
+        </details><details class="chk">
+          <summary class="chk-row">
+            <div class="chk-dot" style="background:#1D9E75"></div>
+            <span class="chk-id">H8</span>
+            <span class="chk-name">Hook errors use structured format (what/rule/fix)</span>
+            
+          </summary>
+          <div class="chk-detail">No tracked hook files found (skip)</div>
+        </details></div>
+    </details>
+  </div>
+
+  <div class="card">
+      <div class="card-head"><span class="card-title">Issues</span><span class="card-count">7 items</span></div>
+      <div class="fix-item">
+        <div class="fix-num">1</div>
+        <div class="fix-body">
+          <div class="fix-desc">Linter configured</div>
+          <div class="fix-reason">No linter or formatter configuration found</div>
+        </div>
+        <div class="fix-meta">
+          <span class="fix-check">W4</span>
+        </div>
+      </div><div class="fix-item">
+        <div class="fix-num">2</div>
+        <div class="fix-body">
+          <div class="fix-desc">feat/fix commits paired with test commits (test-required gate)</div>
+          <div class="fix-reason">No test-required.yml — feat/fix commits are not gated on paired test commits</div>
+        </div>
+        <div class="fix-meta">
+          <span class="fix-check">W11</span>
+        </div>
+      </div><div class="fix-item">
+        <div class="fix-num">3</div>
+        <div class="fix-body">
+          <div class="fix-desc">Actions SHA pinned</div>
+          <div class="fix-reason">0/15 action references are SHA-pinned</div>
+        </div>
+        <div class="fix-meta">
+          <span class="fix-check">S2</span>
+        </div>
+      </div><div class="fix-item">
+        <div class="fix-num">4</div>
+        <div class="fix-body">
+          <div class="fix-desc">Secret scanning configured</div>
+          <div class="fix-reason">No secret scanning (gitleaks or pre-commit) configured</div>
+        </div>
+        <div class="fix-meta">
+          <span class="fix-check">S3</span>
+        </div>
+      </div><div class="fix-item">
+        <div class="fix-num">5</div>
+        <div class="fix-body">
+          <div class="fix-desc">No personal email in git history</div>
+          <div class="fix-reason">Personal email(s) in git history: atsamaz@preql.com — PII in public commit history</div>
+        </div>
+        <div class="fix-meta">
+          <span class="fix-check">S9</span>
+        </div>
+      </div><div class="fix-item">
+        <div class="fix-num">6</div>
+        <div class="fix-body">
+          <div class="fix-desc">No dangerous auto-approve</div>
+          <div class="fix-reason">Dangerous auto-approve rule(s) found: Bash</div>
+        </div>
+        <div class="fix-meta">
+          <span class="fix-check">H4</span>
+        </div>
+      </div><div class="fix-item">
+        <div class="fix-num">7</div>
+        <div class="fix-body">
+          <div class="fix-desc">Stop hook has circuit breaker</div>
+          <div class="fix-reason">0/1 guarded, 1 unresolvable script path(s)</div>
+        </div>
+        <div class="fix-meta">
+          <span class="fix-check">H3</span>
+        </div>
+      </div>
+    </div>
+
+  <div class="evidence">
+    All checks backed by data, not opinions. Details in <code>standards/evidence.json</code>.
+  </div>
+
+  <div class="footer">
+    Generated by <a href="https://github.com/0xmariowu/AgentLint">AgentLint</a>
+  </div>
+</body>
+</html>

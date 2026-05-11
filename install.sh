@@ -1,99 +1,155 @@
 #!/bin/bash
-# Ultimate Workflow Plugin v2 - Full Beads Integration
-# 
+# Claude Workflow Plugin v3 - Linux/macOS installer
+#
+# Single-source-of-truth: this script copies the canonical agent/script/hook
+# definitions from the repo (alongside this file, or freshly cloned to a temp
+# dir if piped from curl). It does NOT embed the agent prompts as heredocs.
+#
 # This plugin REQUIRES Beads (bd) for task tracking.
-# Install Beads first: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+# Install Beads first:
+#   curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
 #
-# Usage: 
-#   bash install-ultimate-workflow.sh [project-path]
-#
-# If no project path given, installs to current directory
+# Usage:
+#   bash install.sh [project-path]            # from a local clone
+#   curl -fsSL <url>/install.sh | bash        # via curl (auto-clones)
+#   curl -fsSL <url>/install.sh | bash -s -- /path/to/project
 
 set -e
 
-# Colors
+# Colors -----------------------------------------------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Target directory
+# Tunables --------------------------------------------------------------------
+MIN_BD_VERSION="0.47"
+REPO_URL="${CLAUDE_WORKFLOW_REPO:-https://github.com/preql-data/claude-workflow-plugin.git}"
+REPO_BRANCH="${CLAUDE_WORKFLOW_BRANCH:-main}"
+
+# Resolve target ---------------------------------------------------------------
 TARGET="${1:-.}"
+mkdir -p "$TARGET"
 TARGET=$(cd "$TARGET" && pwd)
 
 echo ""
-echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║     Ultimate Workflow Plugin v2 - Full Beads Integration   ║${NC}"
-echo -e "${BLUE}║   Orchestrator-first workflow with mandatory QA gate       ║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+echo -e "${BLUE}Claude Workflow Plugin v3${NC}"
+echo -e "Orchestrator-first workflow with mandatory QA gate"
 echo ""
 echo -e "Installing to: ${GREEN}$TARGET${NC}"
 echo ""
 
-# ============================================================================
-# PREREQUISITES - BEADS IS REQUIRED
-# ============================================================================
-
+# Prerequisites ----------------------------------------------------------------
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 
-# Check for git (required)
 if ! command -v git &> /dev/null; then
-    echo -e "${RED}❌ git not found - REQUIRED${NC}"
-    echo "   Install from: https://git-scm.com/downloads"
+    echo -e "${RED}git not found - REQUIRED${NC}"
+    echo "  Install from: https://git-scm.com/downloads"
     exit 1
 fi
-echo -e "${GREEN}✓${NC} git installed"
+echo -e "${GREEN}OK${NC} git installed"
 
-# Check for jq (required)
 if ! command -v jq &> /dev/null; then
-    echo -e "${RED}❌ jq not found - REQUIRED${NC}"
-    echo "   Install with: brew install jq (macOS) or apt install jq (Linux)"
+    echo -e "${RED}jq not found - REQUIRED${NC}"
+    echo "  Install with: brew install jq (macOS) or apt install jq (Linux)"
     exit 1
 fi
-echo -e "${GREEN}✓${NC} jq installed"
+echo -e "${GREEN}OK${NC} jq installed"
 
-# Check for Beads (REQUIRED - not optional anymore)
 if ! command -v bd &> /dev/null; then
     echo ""
-    echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}║  ❌ BEADS (bd) NOT FOUND - REQUIRED FOR THIS PLUGIN        ║${NC}"
-    echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${RED}Beads (bd) not found - REQUIRED for this plugin${NC}"
     echo ""
-    echo -e "This workflow plugin requires Beads for:"
-    echo "  • Task tracking and dependency management"
-    echo "  • Persistent memory across sessions"
-    echo "  • QA approval tracking"
-    echo "  • Hierarchical issue organization"
-    echo ""
-    echo -e "${CYAN}Install Beads:${NC}"
-    echo ""
-    echo "  # Quick install (macOS/Linux)"
+    echo -e "Install Beads:"
+    echo "  # macOS / Linux"
     echo "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
     echo ""
-    echo "  # Homebrew (macOS/Linux)"
+    echo "  # Homebrew"
     echo "  brew tap steveyegge/beads && brew install beads"
     echo ""
-    echo "  # npm"
-    echo "  npm install -g @beads/bd"
-    echo ""
-    echo "  # Go"
-    echo "  go install github.com/steveyegge/beads/cmd/bd@latest"
-    echo ""
-    echo -e "After installing, run this installer again."
+    echo "After installing, run this installer again."
     exit 1
 fi
 
-BD_VERSION=$(bd --version 2>/dev/null | head -1 || echo "unknown")
-echo -e "${GREEN}✓${NC} Beads installed ($BD_VERSION)"
+BD_VERSION_RAW=$(bd --version 2>/dev/null | head -1 || echo "unknown")
+BD_VERSION_NUM=$(echo "$BD_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+echo -e "${GREEN}OK${NC} Beads installed ($BD_VERSION_RAW)"
+
+# D6: enforce minimum bd version at install time
+if [ -n "$BD_VERSION_NUM" ]; then
+    SORTED=$(printf '%s\n%s\n' "$BD_VERSION_NUM" "$MIN_BD_VERSION" | sort -V | head -1)
+    if [ "$SORTED" = "$BD_VERSION_NUM" ] && [ "$BD_VERSION_NUM" != "$MIN_BD_VERSION" ]; then
+        echo ""
+        echo -e "${RED}Beads version $BD_VERSION_NUM is older than the required minimum $MIN_BD_VERSION.${NC}"
+        echo "Upgrade Beads, then rerun this installer:"
+        echo "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
+        exit 1
+    fi
+fi
 
 echo ""
 
-# ============================================================================
-# GIT REPOSITORY CHECK
-# ============================================================================
+# Locate source-of-truth files -------------------------------------------------
+# If this script lives inside a clone of the plugin repo, use that. Otherwise
+# clone the repo into a temp directory.
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "")
+fi
 
+SOURCE_DIR=""
+TMP_CLONE=""
+cleanup_clone() {
+    if [ -n "$TMP_CLONE" ] && [ -d "$TMP_CLONE" ]; then
+        rm -rf "$TMP_CLONE"
+    fi
+}
+trap cleanup_clone EXIT
+
+if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/.claude/agents" ] && [ -f "$SCRIPT_DIR/.claude-plugin/plugin.json" ]; then
+    SOURCE_DIR="$SCRIPT_DIR"
+    echo -e "${GREEN}OK${NC} Using local plugin source: $SOURCE_DIR"
+else
+    echo -e "${YELLOW}Fetching plugin source from $REPO_URL ($REPO_BRANCH)...${NC}"
+    TMP_CLONE=$(mktemp -d)
+    if ! git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$TMP_CLONE" 2>/dev/null; then
+        # Some hosts default to a different branch name; retry without --branch
+        rm -rf "$TMP_CLONE"
+        TMP_CLONE=$(mktemp -d)
+        git clone --depth 1 "$REPO_URL" "$TMP_CLONE"
+    fi
+    SOURCE_DIR="$TMP_CLONE"
+    echo -e "${GREEN}OK${NC} Plugin source ready"
+fi
+
+# Sanity-check the source layout
+for required in \
+    ".claude/agents/orchestrator.md" \
+    ".claude/agents/qa.md" \
+    ".claude/agents/backend.md" \
+    ".claude/agents/frontend.md" \
+    ".claude/agents/devops.md" \
+    ".claude/scripts/session-start.sh" \
+    ".claude/scripts/intent-router.sh" \
+    ".claude/scripts/post-edit.sh" \
+    ".claude/scripts/verify-before-stop.sh" \
+    ".claude/scripts/session-end.sh" \
+    ".claude/hooks/hooks.json" \
+    ".claude/skills/workflow-engine/SKILL.md" \
+    ".claude/settings.json" \
+    ".claude-plugin/plugin.json" \
+    ".claude/commands/workflow-model.md" \
+    ; do
+    if [ ! -e "$SOURCE_DIR/$required" ]; then
+        echo -e "${RED}Plugin source missing: $required${NC}"
+        echo "(Looked in $SOURCE_DIR.) Aborting to avoid a partial install."
+        exit 1
+    fi
+done
+
+# Git repo init ----------------------------------------------------------------
 if [ ! -d "$TARGET/.git" ]; then
     echo -e "${YELLOW}No git repository found.${NC}"
     read -p "Initialize git repository? (required for Beads) (y/n) " -n 1 -r
@@ -101,8 +157,7 @@ if [ ! -d "$TARGET/.git" ]; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         cd "$TARGET"
         git init
-        
-        # Create .gitignore if it doesn't exist
+
         if [ ! -f ".gitignore" ]; then
             cat > ".gitignore" << 'GITIGNORE_EOF'
 # Dependencies
@@ -137,30 +192,27 @@ Thumbs.db
 GITIGNORE_EOF
             git add .gitignore
         fi
-        
+
         git commit -m "Initial commit" --allow-empty 2>/dev/null || true
-        echo -e "${GREEN}✓${NC} Initialized git repository"
+        echo -e "${GREEN}OK${NC} Initialized git repository"
     else
         echo -e "${RED}Cannot proceed without git repository.${NC}"
         exit 1
     fi
 fi
 
-# ============================================================================
-# BACKUP EXISTING FILES
-# ============================================================================
-
+# Mode selection (interactive) -------------------------------------------------
 BACKUP_DIR="$TARGET/.claude-backup-$(date +%Y%m%d-%H%M%S)"
 MERGE_MODE=false
 UPDATE_MODE=false
 
 if [ -d "$TARGET/.claude" ]; then
-    echo -e "${YELLOW}Existing .claude/ directory found!${NC}"
-    
-    EXISTING_AGENTS=$(ls "$TARGET/.claude/agents/"*.md 2>/dev/null | wc -l || echo "0")
-    EXISTING_SCRIPTS=$(ls "$TARGET/.claude/scripts/"*.sh 2>/dev/null | wc -l || echo "0")
+    echo -e "${YELLOW}Existing .claude/ directory found.${NC}"
+
+    EXISTING_AGENTS=$(find "$TARGET/.claude/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    EXISTING_SCRIPTS=$(find "$TARGET/.claude/scripts" -maxdepth 1 -name '*.sh' -type f 2>/dev/null | wc -l | tr -d ' ' || echo "0")
     EXISTING_SETTINGS=$([ -f "$TARGET/.claude/settings.json" ] && echo "1" || echo "0")
-    
+
     if [ "$EXISTING_AGENTS" -gt 0 ] || [ "$EXISTING_SCRIPTS" -gt 0 ] || [ "$EXISTING_SETTINGS" = "1" ]; then
         echo -e "  Found: ${EXISTING_AGENTS} agents, ${EXISTING_SCRIPTS} scripts"
         echo ""
@@ -172,20 +224,20 @@ if [ -d "$TARGET/.claude" ]; then
         echo ""
         read -p "Choose [1-4]: " -n 1 -r INSTALL_MODE
         echo ""
-        
+
         case $INSTALL_MODE in
             1)
                 echo -e "${YELLOW}Creating backup at $BACKUP_DIR${NC}"
                 mkdir -p "$BACKUP_DIR"
                 cp -r "$TARGET/.claude/"* "$BACKUP_DIR/" 2>/dev/null || true
                 [ -f "$TARGET/CLAUDE.md" ] && cp "$TARGET/CLAUDE.md" "$BACKUP_DIR/"
-                echo -e "${GREEN}✓${NC} Backup created"
+                echo -e "${GREEN}OK${NC} Backup created"
                 ;;
             2)
                 echo -e "${YELLOW}Update mode: updating workflow, preserving CLAUDE.md${NC}"
                 mkdir -p "$BACKUP_DIR"
                 cp -r "$TARGET/.claude/"* "$BACKUP_DIR/" 2>/dev/null || true
-                echo -e "${GREEN}✓${NC} Backup created"
+                echo -e "${GREEN}OK${NC} Backup created"
                 UPDATE_MODE=true
                 ;;
             3)
@@ -203,1170 +255,89 @@ fi
 echo ""
 echo -e "${YELLOW}Creating plugin structure...${NC}"
 
-# Create directories
 mkdir -p "$TARGET/.claude/agents"
 mkdir -p "$TARGET/.claude/skills/workflow-engine"
 mkdir -p "$TARGET/.claude/hooks"
 mkdir -p "$TARGET/.claude/scripts"
+mkdir -p "$TARGET/.claude/commands"
+mkdir -p "$TARGET/.claude-plugin"
 
-# Helper function to create file with merge mode support
-create_file_safe() {
-    local filepath="$1"
-    if [ "$MERGE_MODE" = true ] && [ -f "$filepath" ]; then
-        echo -e "${YELLOW}⊘${NC} Skipped $(basename "$filepath") (exists)"
-        return 1
+# Idempotent file copy with merge-mode awareness ------------------------------
+copy_file() {
+    local src="$1"
+    local dst="$2"
+    if [ "$MERGE_MODE" = true ] && [ -f "$dst" ]; then
+        echo -e "${YELLOW}skip${NC} $(basename "$dst") (exists)"
+        return 0
     fi
-    return 0
+    cp "$src" "$dst"
+    echo -e "${GREEN}OK${NC}   $(basename "$dst")"
 }
 
-# ============================================================================
-# AGENTS - Updated with full Beads integration
-# ============================================================================
-
-if create_file_safe "$TARGET/.claude/agents/orchestrator.md"; then
-cat > "$TARGET/.claude/agents/orchestrator.md" << 'AGENT_EOF'
----
-name: orchestrator
-description: Primary workflow orchestrator. Coordinates and DELEGATES - does NOT implement code directly.
-tools: Read, Glob, Grep, LS, Task, Bash, Write, Edit
----
-
-# Orchestrator Agent
-
-You are the **Workflow Orchestrator**. You **coordinate and delegate**, you do NOT implement.
-
-## 🚨 CRITICAL: YOU DO NOT WRITE IMPLEMENTATION CODE
-
-You are a coordinator. Your job is to:
-- ✅ Analyze requests (determine type, domains, complexity)
-- ✅ Create Beads tasks for tracking
-- ✅ **DELEGATE to @backend, @frontend, @devops using Task()**
-- ✅ Ensure @qa reviews all changes
-- ❌ **DO NOT write business logic, API code, UI components, etc.**
-
-If you find yourself writing code → STOP → Delegate instead.
-
-## Workflow
-
-### 1. Analyze the Request
-
-Determine:
-- **Type**: bug | feature | improvement | testing | planning
-- **Domains**: backend | frontend | devops (can be multiple)
-- **Complexity**: simple (1 domain) | complex (epic needed)
-
-### 2. Create Beads Task(s)
-
-```bash
-# Simple (one domain)
-bd create "Fix: Login timeout" -t bug -p 1 -l backend,qa-pending
-
-# Complex (multiple domains) - USE EPIC
-EPIC=$(bd create "Epic: User Auth" -t epic -p 1 --json | jq -r '.id')
-bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending
-```
-
-### 3. DELEGATE (MANDATORY)
-
-**Use Task() to delegate. This is NOT optional.**
-
-| Domain | Delegate To |
-|--------|-------------|
-| API, database, auth, server logic | `Task("@backend", "...")` |
-| UI, components, styling, UX | `Task("@frontend", "...")` |
-| CI/CD, Docker, infrastructure | `Task("@devops", "...")` |
-
-Example:
-```
-Task("@backend", "Implement POST /auth/login endpoint with JWT tokens. Handle invalid credentials with 401.")
-
-Task("@frontend", "Create LoginForm component with email/password inputs, validation, error display.")
-```
-
-### 4. QA Review (MANDATORY)
-
-After specialists complete work:
-```
-Task("@qa", "Review auth implementation. Test login/logout flows, invalid credentials, session handling.")
-```
-
-## Self-Check
-
-Before responding, verify:
-- [ ] Did I analyze the request?
-- [ ] Did I create Beads task(s)?
-- [ ] Did I delegate to specialists with Task()?
-- [ ] Am I writing code myself? (If yes → delegate instead!)
-
-## Beads Quick Reference
-
-```bash
-bd ready                 # Available work
-bd blocked               # What's stuck
-bd update $ID --status in_progress
-bd update $ID --notes "COMPLETED: X | IN PROGRESS: Y"
-```
-
-## 🆘 ESCAPE HATCH
-
-Stuck after 2-3 attempts? Use **AskUserQuestionTool**.
-AGENT_EOF
-echo -e "${GREEN}✓${NC} Created orchestrator.md"
-fi
-
-if create_file_safe "$TARGET/.claude/agents/backend.md"; then
-cat > "$TARGET/.claude/agents/backend.md" << 'AGENT_EOF'
----
-name: backend
-description: Backend specialist. Updates Beads with structured progress notes.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are a **Backend Engineering Specialist** using Beads for tracking.
-
-## When Starting Work
-
-```bash
-# Claim the task
-bd update $TASK_ID --status in_progress
-
-# Add initial progress note
-bd update $TASK_ID --notes "IN PROGRESS: Starting backend implementation"
-```
-
-## Self-Check Questions (ALWAYS ask)
-
-1. **Bottlenecks**: Any bottlenecks with current setup?
-2. **Scale**: Can we fail if we scale? At what point?
-3. **Failure Points**: Where are potential failure points?
-4. **Mitigations**: How to mitigate those failures?
-
-## When Completing Work
-
-```bash
-# Update with structured notes
-bd update $TASK_ID --notes "COMPLETED: API endpoints for /users, /auth
-IN PROGRESS: None - ready for QA
-KEY DECISIONS: Using JWT with RS256, 15min expiry"
-
-# Add qa-pending label if not already present
-bd label add $TASK_ID qa-pending
-```
-
-## TDD Workflow
-
-1. Write failing test first
-2. Implement minimal code to pass
-3. Refactor while keeping tests green
-4. Run: `npm test && npm run lint && npm run typecheck`
-
-**Don't mark complete until ALL checks pass.**
-AGENT_EOF
-echo -e "${GREEN}✓${NC} Created backend.md"
-fi
-
-if create_file_safe "$TARGET/.claude/agents/frontend.md"; then
-cat > "$TARGET/.claude/agents/frontend.md" << 'AGENT_EOF'
----
-name: frontend
-description: Frontend specialist. Updates Beads with structured progress notes.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are a **Frontend Engineering Specialist** using Beads for tracking.
-
-## When Starting Work
-
-```bash
-bd update $TASK_ID --status in_progress
-bd update $TASK_ID --notes "IN PROGRESS: Starting frontend implementation"
-```
-
-## Self-Check Questions (ALWAYS ask)
-
-1. **Backend Features**: Am I using ALL available backend features?
-2. **Clarity**: Is UI/UX completely clear and intuitive?
-3. **Convenience**: Can anything be made more convenient?
-4. **Beauty**: Does UI look beautiful? How can I improve it?
-
-## When Completing Work
-
-```bash
-bd update $TASK_ID --notes "COMPLETED: Login form with validation, error states
-IN PROGRESS: None - ready for QA
-KEY DECISIONS: Using react-hook-form for validation"
-
-bd label add $TASK_ID qa-pending
-```
-
-## Component Checklist
-
-- [ ] Props typed and documented
-- [ ] Loading, error, empty states handled
-- [ ] Responsive on all breakpoints
-- [ ] Accessible (keyboard, screen readers)
-- [ ] Tests for user interactions
-
-**Don't mark complete until ALL checks pass.**
-AGENT_EOF
-echo -e "${GREEN}✓${NC} Created frontend.md"
-fi
-
-if create_file_safe "$TARGET/.claude/agents/devops.md"; then
-cat > "$TARGET/.claude/agents/devops.md" << 'AGENT_EOF'
----
-name: devops
-description: DevOps specialist. Updates Beads with structured progress notes.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are a **DevOps Engineering Specialist** using Beads for tracking.
-
-## When Starting Work
-
-```bash
-bd update $TASK_ID --status in_progress
-bd update $TASK_ID --notes "IN PROGRESS: Starting infrastructure work"
-```
-
-## Self-Check Questions (ALWAYS ask)
-
-1. **Ease**: How to make deployment/setup easiest possible?
-2. **Portability**: Any limitations on different environments?
-3. **DX**: How to make installation seamless for other engineers?
-
-## When Completing Work
-
-```bash
-bd update $TASK_ID --notes "COMPLETED: CI/CD pipeline with GitHub Actions
-IN PROGRESS: None - ready for QA
-KEY DECISIONS: Using composite actions for reusability"
-
-bd label add $TASK_ID qa-pending
-```
-
-## Deployment Checklist
-
-- [ ] Environment variables documented
-- [ ] Secrets properly managed
-- [ ] Health checks configured
-- [ ] Rollback strategy defined
-AGENT_EOF
-echo -e "${GREEN}✓${NC} Created devops.md"
-fi
-
-if create_file_safe "$TARGET/.claude/agents/qa.md"; then
-cat > "$TARGET/.claude/agents/qa.md" << 'AGENT_EOF'
----
-name: qa
-description: QA specialist and quality gate. Must approve all code changes before delivery.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
----
-
-You are the **Quality Assurance Specialist** and the mandatory quality gate.
-
-## 🚨 CRITICAL: You Are The Gate
-
-**No code can be delivered to users without your approval.**
-
-The system will BLOCK task completion until you add "QA APPROVED" to the task.
-
-## When Reviewing Work
-
-```bash
-# Claim the QA task
-bd update $TASK_ID --status in_progress
-bd update $TASK_ID --notes "IN PROGRESS: QA review started"
-```
-
-## 🎯 Test USER BEHAVIOR, Not Code
-
-**WRONG:**
-```javascript
-test("formatDate returns ISO string", ...)
-```
-
-**RIGHT:**
-```javascript
-test("user sees appointment in their local timezone", ...)
-```
-
-## Before Writing ANY Test, Ask:
-
-1. **WHO** is the user? (new, returning, admin, mobile)
-2. **WHAT** are they trying to accomplish?
-3. **HOW** might they misuse this? (typos, double-click, back button)
-4. **WHAT** real-world conditions matter? (slow network, stale data)
-
-## Review Checklist
-
-- [ ] Tests cover USER BEHAVIOR (not implementation details)
-- [ ] Critical user journeys tested end-to-end
-- [ ] Failure modes handled (network, timeout, invalid input)
-- [ ] Edge cases covered (empty, boundary, concurrent)
-- [ ] Tests are deterministic (no flakiness)
-- [ ] All tests PASS
-
-## 🔐 MANDATORY: Approval Process
-
-When verified and approved:
-
-```bash
-# Add approval comment
-bd comments add $TASK_ID "QA APPROVED: [Summary of what was verified]
-
-Verified:
-- User login handles invalid email with clear error
-- Session timeout redirects to login
-- Password reset flow works end-to-end
-
-Tests added: 5 E2E tests, 12 unit tests
-All tests passing."
-
-# Update labels
-bd label remove $TASK_ID qa-pending
-bd label add $TASK_ID qa-approved
-
-# Update notes
-bd update $TASK_ID --notes "COMPLETED: QA review and approval
-Tests: 5 E2E, 12 unit - all passing
-KEY DECISIONS: Focused on user journey coverage"
-```
-
-## If NOT Approved
-
-```bash
-bd comments add $TASK_ID "QA BLOCKED: [What needs fixing]
-
-Issues found:
-- No error handling for network timeout
-- Missing test for empty cart checkout
-- Accessibility: no keyboard navigation for modal
-
-Must fix before approval."
-
-bd update $TASK_ID --notes "BLOCKED: QA review - issues found (see comments)"
-```
-
-## Discovered Bugs
-
-When you find bugs during review:
-
-```bash
-bd create "Bug: [description]" -t bug -p 1 \
-    --description "[detailed description]" \
-    --deps discovered-from:$PARENT_TASK \
-    -l bug,qa-pending
-```
-AGENT_EOF
-echo -e "${GREEN}✓${NC} Created qa.md"
-fi
-
-# ============================================================================
-# HOOKS
-# ============================================================================
-
-if create_file_safe "$TARGET/.claude/hooks/hooks.json"; then
-cat > "$TARGET/.claude/hooks/hooks.json" << 'HOOKS_EOF'
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-start.sh\"",
-            "timeout": 30000
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/intent-router.sh\""
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/post-edit.sh\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/verify-before-stop.sh\""
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-end.sh\""
-          }
-        ]
-      }
-    ]
-  }
-}
-HOOKS_EOF
-echo -e "${GREEN}✓${NC} Created hooks.json"
-fi
-
-# ============================================================================
-# SCRIPTS - Using bd prime and full Beads integration
-# ============================================================================
-
-if create_file_safe "$TARGET/.claude/scripts/session-start.sh"; then
-cat > "$TARGET/.claude/scripts/session-start.sh" << 'SCRIPT_EOF'
-#!/bin/bash
-# SessionStart Hook: Uses bd prime + adds workflow context and blocked issues
-
-set -e
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-
-# Verify Beads is available
-if ! command -v bd &> /dev/null; then
-    echo '{"error": "Beads (bd) not found. This workflow requires Beads."}'
-    exit 1
-fi
-
-# Verify Beads is initialized in this project
-if [ ! -d "$PROJECT_DIR/.beads" ]; then
-    echo '{"error": "Beads not initialized. Run: bd init"}'
-    exit 1
-fi
-
-# Run bd doctor to check health (silent, just for validation)
-bd doctor --quiet 2>/dev/null || true
-
-# Create session marker for change detection
-mkdir -p "$PROJECT_DIR/.claude"
-touch "$PROJECT_DIR/.claude/.session-start"
-
-# Reset QA tracking for new session
-QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
-mkdir -p "$QA_TRACKING_DIR"
-rm -f "$QA_TRACKING_DIR/approved" 2>/dev/null || true
-rm -f "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null || true
-rm -f "$QA_TRACKING_DIR/edit-count" 2>/dev/null || true
-
-# Build context using bd prime as base
-CONTEXT=""
-
-# 1. Get bd prime output (Beads' built-in agent context)
-BD_PRIME=$(bd prime 2>/dev/null || echo "")
-if [ -n "$BD_PRIME" ]; then
-    CONTEXT+="
-<beads_context>
-$BD_PRIME
-</beads_context>
-"
-fi
-
-# 2. Load CLAUDE.md if exists (project memory)
-if [ -f "$PROJECT_DIR/CLAUDE.md" ]; then
-    CONTEXT+="
-<project_memory>
-$(cat "$PROJECT_DIR/CLAUDE.md")
-</project_memory>
-"
-fi
-
-# 3. Show blocked issues (important visibility)
-BLOCKED_ISSUES=$(bd blocked --json 2>/dev/null || echo "[]")
-BLOCKED_COUNT=$(echo "$BLOCKED_ISSUES" | jq 'length' 2>/dev/null || echo "0")
-if [ "$BLOCKED_COUNT" -gt 0 ]; then
-    BLOCKED_SUMMARY=$(bd blocked 2>/dev/null | head -20)
-    CONTEXT+="
-<blocked_issues count=\"$BLOCKED_COUNT\">
-## ⚠️ BLOCKED ISSUES - Need attention
-
-$BLOCKED_SUMMARY
-
-Use \`bd show <id>\` to see what's blocking each issue.
-</blocked_issues>
-"
-fi
-
-# 4. Show issues pending QA (qa-pending label)
-QA_PENDING=$(bd list --label qa-pending --status open --json 2>/dev/null || echo "[]")
-QA_PENDING_COUNT=$(echo "$QA_PENDING" | jq 'length' 2>/dev/null || echo "0")
-if [ "$QA_PENDING_COUNT" -gt 0 ]; then
-    QA_PENDING_LIST=$(bd list --label qa-pending --status open 2>/dev/null | head -10)
-    CONTEXT+="
-<qa_pending count=\"$QA_PENDING_COUNT\">
-## 🔍 AWAITING QA REVIEW
-
-$QA_PENDING_LIST
-
-These need @qa review before they can be delivered.
-</qa_pending>
-"
-fi
-
-# 5. Inject workflow instructions with strong delegation emphasis
-CONTEXT+="
-<workflow_mode>
-## ULTIMATE WORKFLOW ACTIVE
-
-You are the **Orchestrator**. You coordinate work by DELEGATING to specialists.
-
-### 🚨 CRITICAL RULE
-**You do NOT write implementation code yourself.**
-**You MUST delegate using Task().**
-
-### When User Requests Something:
-
-1. **Analyze**: What type? (bug/feature/improvement) What domains? (backend/frontend/devops)
-
-2. **Create Beads Task**:
-   \`\`\`bash
-   bd create \"[Type]: [Description]\" -t task -p 1 -l [domain],qa-pending
-   \`\`\`
-
-3. **DELEGATE** (MANDATORY):
-   - Backend work → \`Task(\"@backend\", \"Implement: ...\")\`
-   - Frontend work → \`Task(\"@frontend\", \"Implement: ...\")\`
-   - DevOps work → \`Task(\"@devops\", \"Implement: ...\")\`
-
-4. **QA Review** (MANDATORY before completion):
-   \`Task(\"@qa\", \"Review all changes...\")\`
-
-### ⛔ You Are Doing It WRONG If:
-- You write API code (delegate to @backend!)
-- You write UI components (delegate to @frontend!)
-- You write Docker/CI config (delegate to @devops!)
-- You skip QA review (system will block you!)
-
-### ✅ You Are Doing It RIGHT If:
-- You analyze and plan
-- You create Beads tasks
-- You delegate with Task()
-- You ensure QA reviews
-
-### Beads Commands
-\`\`\`bash
-bd ready                    # Find available work
-bd blocked                  # See blocked issues
-bd create \"...\" -t task -p 1 -l domain,qa-pending
-bd update \$ID --notes \"COMPLETED: X | IN PROGRESS: Y\"
-\`\`\`
-
-**Start by analyzing what the user needs, then DELEGATE.**
-</workflow_mode>
-"
-
-# Output as JSON for additionalContext injection
-cat << EOF
-{
-  "hookSpecificOutput": {
-    "hookEventName": "SessionStart",
-    "additionalContext": $(echo "$CONTEXT" | jq -Rs .)
-  }
-}
-EOF
-SCRIPT_EOF
-echo -e "${GREEN}✓${NC} Created session-start.sh"
-fi
-
-if create_file_safe "$TARGET/.claude/scripts/intent-router.sh"; then
-cat > "$TARGET/.claude/scripts/intent-router.sh" << 'SCRIPT_EOF'
-#!/bin/bash
-# UserPromptSubmit Hook: Enforces mandatory agent delegation
-# Analysis is LLM-driven, but delegation is MANDATORY
-
-set -e
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-
-INPUT=$(cat)
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null || echo "$INPUT")
-
-# Skip for very short conversational responses
-PROMPT_LENGTH=${#PROMPT}
-if [ "$PROMPT_LENGTH" -lt 10 ]; then
-    echo "{}"; exit 0
-fi
-
-# Get current Beads state
-CURRENT_TASK=""
-CURRENT_TASK_INFO=""
-IN_PROGRESS_COUNT=0
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    IN_PROGRESS=$(bd list --status in_progress --json 2>/dev/null || echo "[]")
-    IN_PROGRESS_COUNT=$(echo "$IN_PROGRESS" | jq 'length' 2>/dev/null || echo "0")
-    CURRENT_TASK=$(echo "$IN_PROGRESS" | jq -r '.[0].id // empty' 2>/dev/null || echo "")
-    if [ -n "$CURRENT_TASK" ]; then
-        CURRENT_TASK_INFO=$(bd show "$CURRENT_TASK" 2>/dev/null | head -20 || echo "")
-    fi
-fi
-
-# Build mandatory delegation context
-WORKFLOW_CONTEXT="
-<mandatory_delegation>
-## 🚨 MANDATORY AGENT DELEGATION
-
-You are the **Orchestrator**. You MUST delegate work to specialist agents.
-**DO NOT implement code yourself.** Your job is to coordinate.
-
-### STEP 1: Analyze the Request
-
-Determine work type:
-- **bug**: Something broken, error, crash, incorrect behavior
-- **feature**: New functionality, new capability
-- **improvement**: Enhance existing, refactor, optimize
-- **testing**: Write tests, verify behavior
-- **planning**: Design, architecture, requirements
-
-Determine domains involved:
-- **backend**: API, database, auth, server logic, business rules
-- **frontend**: UI, components, styling, UX, accessibility
-- **devops**: CI/CD, deploy, Docker, infrastructure
-
-### STEP 2: Create Beads Task
-
-\`\`\`bash
-# Simple task
-bd create \"[Type]: [Description]\" -t task -p 1 -l [domains],qa-pending
-
-# Complex feature (use epic)
-EPIC=\$(bd create \"Epic: [Name]\" -t epic -p 1 --json | jq -r '.id')
-bd create \"Backend: [work]\" -p 1 --parent \$EPIC -l backend,qa-pending
-bd create \"Frontend: [work]\" -p 1 --parent \$EPIC -l frontend,qa-pending
-\`\`\`
-
-### STEP 3: DELEGATE (MANDATORY)
-
-**You MUST use Task() to delegate. DO NOT write code yourself.**
-
-| Domain Detected | Action Required |
-|-----------------|-----------------|
-| Backend work | \`Task(\"@backend\", \"Implement: [specific task]\")\` |
-| Frontend work | \`Task(\"@frontend\", \"Implement: [specific task]\")\` |
-| DevOps work | \`Task(\"@devops\", \"Implement: [specific task]\")\` |
-| ANY code changes | \`Task(\"@qa\", \"Review and approve\")\` **BEFORE completion** |
-
-### STEP 4: Verify Delegation
-
-After delegating, verify:
-- [ ] Backend work → delegated to @backend
-- [ ] Frontend work → delegated to @frontend  
-- [ ] DevOps work → delegated to @devops
-- [ ] ALL changes → delegated to @qa for approval
-
-### ⛔ VIOLATIONS
-
-You are VIOLATING the workflow if you:
-- Write implementation code yourself (delegate to specialists!)
-- Skip @qa review (QA gate will block you anyway)
-- Don't create Beads tasks (progress won't be tracked)
-
-### ✅ CORRECT BEHAVIOR
-
-1. Analyze request → determine type and domains
-2. Create Beads task(s) with appropriate labels
-3. **Delegate to @backend/@frontend/@devops** for implementation
-4. **Delegate to @qa** for review before completion
-5. Update Beads with progress
-
-</mandatory_delegation>"
-
-# Add current task context if work is in progress
-if [ "$IN_PROGRESS_COUNT" -gt 0 ] && [ -n "$CURRENT_TASK" ]; then
-    WORKFLOW_CONTEXT+="
-<current_work>
-## Currently In Progress: $CURRENT_TASK
-
-$CURRENT_TASK_INFO
-
-If continuing this task, delegate next steps to appropriate specialist.
-</current_work>"
-fi
-
-cat << EOF
-{
-  "hookSpecificOutput": {
-    "hookEventName": "UserPromptSubmit",
-    "additionalContext": $(echo "$WORKFLOW_CONTEXT" | jq -Rs .)
-  }
-}
-EOF
-SCRIPT_EOF
-echo -e "${GREEN}✓${NC} Created intent-router.sh"
-fi
-
-if create_file_safe "$TARGET/.claude/scripts/post-edit.sh"; then
-cat > "$TARGET/.claude/scripts/post-edit.sh" << 'SCRIPT_EOF'
-#!/bin/bash
-# PostToolUse Hook: Tracks file changes for QA review, updates Beads
-
-set -e
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
-INPUT=$(cat)
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || echo "")
-
-# Only track code files
-if [[ ! "$FILE_PATH" =~ \.(ts|tsx|js|jsx|py|go|rs|java|rb|php|vue|svelte|css|scss|html)$ ]]; then
-    echo "{}"; exit 0
-fi
-
-# Track this file (deduplicated)
-mkdir -p "$QA_TRACKING_DIR"
-TRACKING_FILE="$QA_TRACKING_DIR/changed-files.txt"
-if [ ! -f "$TRACKING_FILE" ] || ! grep -qxF "$FILE_PATH" "$TRACKING_FILE" 2>/dev/null; then
-    echo "$FILE_PATH" >> "$TRACKING_FILE"
-fi
-
-# Prevent tracking file from growing too large (cap at 500 files)
-if [ -f "$TRACKING_FILE" ]; then
-    LINE_COUNT=$(wc -l < "$TRACKING_FILE" 2>/dev/null || echo "0")
-    if [ "$LINE_COUNT" -gt 500 ]; then
-        tail -500 "$TRACKING_FILE" > "$TRACKING_FILE.tmp" && mv "$TRACKING_FILE.tmp" "$TRACKING_FILE"
-    fi
-fi
-
-# Update Beads task with progress (batched to avoid spam)
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    EDIT_COUNT_FILE="$QA_TRACKING_DIR/edit-count"
-    EDIT_COUNT=$(cat "$EDIT_COUNT_FILE" 2>/dev/null || echo "0")
-    EDIT_COUNT=$((EDIT_COUNT + 1))
-    echo "$EDIT_COUNT" > "$EDIT_COUNT_FILE"
-    
-    # Every 10 edits, update Beads with progress
-    if [ $((EDIT_COUNT % 10)) -eq 0 ]; then
-        CURRENT_TASK=$(bd list --status in_progress --json 2>/dev/null | jq -r '.[0].id // empty' 2>/dev/null || echo "")
-        if [ -n "$CURRENT_TASK" ]; then
-            UNIQUE_COUNT=$(sort -u "$TRACKING_FILE" 2>/dev/null | wc -l | tr -d ' ')
-            # Update notes with progress
-            CURRENT_NOTES=$(bd show "$CURRENT_TASK" --json 2>/dev/null | jq -r '.notes // ""' 2>/dev/null || echo "")
-            if [ -n "$CURRENT_NOTES" ]; then
-                bd comments add "$CURRENT_TASK" "Progress: $UNIQUE_COUNT files edited" 2>/dev/null || true
-            fi
-        fi
-    fi
-fi
-
-# Count unique changed files
-CHANGE_COUNT=$(sort -u "$TRACKING_FILE" 2>/dev/null | wc -l | tr -d ' ' || echo "1")
-
-echo "📝 File edited ($CHANGE_COUNT unique files this session). All require @qa approval."
-SCRIPT_EOF
-echo -e "${GREEN}✓${NC} Created post-edit.sh"
-fi
-
-if create_file_safe "$TARGET/.claude/scripts/verify-before-stop.sh"; then
-cat > "$TARGET/.claude/scripts/verify-before-stop.sh" << 'SCRIPT_EOF'
-#!/bin/bash
-# Stop Hook: MANDATORY QA GATE - Blocks until QA approval via Beads
-
-set -e
-
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
-TRACKING_FILE="$QA_TRACKING_DIR/changed-files.txt"
-
-INPUT=$(cat)
-STOP_REASON=$(echo "$INPUT" | jq -r '.stop_reason // empty' 2>/dev/null || echo "")
-
-# Skip for user interrupt
-if [[ "$STOP_REASON" == "user_interrupt" ]] || [[ "$STOP_REASON" == "max_turns" ]]; then
-    echo "{}"; exit 0
-fi
-
-# Check for tracked changes
-CODE_CHANGES_DETECTED=false
-if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
-    CODE_CHANGES_DETECTED=true
-fi
-
-# Fallback to git status
-if [ "$CODE_CHANGES_DETECTED" = false ] && [ -d "$PROJECT_DIR/.git" ]; then
-    GIT_CHANGES=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | grep -E '\.(ts|tsx|js|jsx|py|go|rs|java|vue|svelte)$' | head -1)
-    if [ -n "$GIT_CHANGES" ]; then
-        CODE_CHANGES_DETECTED=true
-    fi
-fi
-
-if [ "$CODE_CHANGES_DETECTED" = false ]; then
-    echo "{}"; exit 0
-fi
-
-# GATE 1: Run technical checks
-FAILED_CHECKS=""
-if [ -f "$PROJECT_DIR/package.json" ]; then
-    if jq -e '.scripts.test' "$PROJECT_DIR/package.json" > /dev/null 2>&1; then
-        if ! npm test --prefix "$PROJECT_DIR" > /dev/null 2>&1; then
-            FAILED_CHECKS+="❌ Tests failing - run \`npm test\`\n"
-        fi
-    fi
-    if jq -e '.scripts.lint' "$PROJECT_DIR/package.json" > /dev/null 2>&1; then
-        if ! npm run lint --prefix "$PROJECT_DIR" > /dev/null 2>&1; then
-            FAILED_CHECKS+="❌ Lint errors - run \`npm run lint\`\n"
-        fi
-    fi
-fi
-
-if [ -n "$FAILED_CHECKS" ]; then
-    cat << EOF
-{
-  "decision": "block",
-  "reason": "🚫 VERIFICATION FAILED
-
-$FAILED_CHECKS
-
-Fix these issues first, then QA will review."
-}
-EOF
-    exit 0
-fi
-
-# GATE 2: Check for QA approval via Beads
-QA_APPROVED=false
-
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    CURRENT_TASK=$(bd list --status in_progress --json 2>/dev/null | jq -r '.[0].id // empty' 2>/dev/null || echo "")
-    
-    if [ -n "$CURRENT_TASK" ]; then
-        # Check 1: Look for qa-approved label
-        LABELS=$(bd show "$CURRENT_TASK" --json 2>/dev/null | jq -r '.labels // [] | join(",")' 2>/dev/null || echo "")
-        if echo "$LABELS" | grep -qi "qa-approved"; then
-            QA_APPROVED=true
-        fi
-        
-        # Check 2: Look for "QA APPROVED" in comments
-        if [ "$QA_APPROVED" = false ]; then
-            QA_COMMENT=$(bd show "$CURRENT_TASK" --json 2>/dev/null | jq -r '.comments[]? | select(test("QA APPROVED|qa approved|✅ QA"; "i"))' 2>/dev/null | head -1 || echo "")
-            if [ -n "$QA_COMMENT" ]; then
-                QA_APPROVED=true
-            fi
-        fi
-    fi
-fi
-
-# Also check file marker (backup method)
-if [ -f "$QA_TRACKING_DIR/approved" ]; then
-    QA_APPROVED=true
-fi
-
-if [ "$QA_APPROVED" = false ]; then
-    # Get changed files for display
-    CHANGED_FILES=""
-    CHANGE_COUNT=0
-    if [ -f "$TRACKING_FILE" ]; then
-        CHANGE_COUNT=$(sort -u "$TRACKING_FILE" 2>/dev/null | wc -l | tr -d ' ')
-        if [ "$CHANGE_COUNT" -gt 15 ]; then
-            CHANGED_FILES=$(sort -u "$TRACKING_FILE" 2>/dev/null | head -15)
-            CHANGED_FILES="$CHANGED_FILES
-... and $((CHANGE_COUNT - 15)) more files"
-        else
-            CHANGED_FILES=$(sort -u "$TRACKING_FILE" 2>/dev/null)
-        fi
-    else
-        CHANGED_FILES="(check git status)"
-        CHANGE_COUNT="?"
-    fi
-
-    # Get task ID for the command
-    TASK_ID="${CURRENT_TASK:-\$TASK_ID}"
-
-    cat << EOF
-{
-  "decision": "block",
-  "reason": "🚫 QA APPROVAL REQUIRED
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-**$CHANGE_COUNT file(s) changed - ALL require QA review**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-**Files changed:**
-$CHANGED_FILES
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-**REQUIRED: Delegate to @qa NOW**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Task(\"@qa\", \"MANDATORY REVIEW before delivery:
-
-Files to review:
-$CHANGED_FILES
-
-Checklist:
-□ Tests cover USER BEHAVIOR (not implementation)
-□ Critical user journeys tested
-□ Failure modes handled
-□ All tests PASS
-
-If APPROVED:
-  bd comments add $TASK_ID 'QA APPROVED: <summary>'
-  bd label remove $TASK_ID qa-pending
-  bd label add $TASK_ID qa-approved
-
-If NOT approved:
-  bd comments add $TASK_ID 'QA BLOCKED: <issues>'\")
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-**Cannot complete without QA approval.**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-}
-EOF
-    exit 0
-fi
-
-# QA approved - can proceed
-# Update Beads task to completed
-if [ -n "$CURRENT_TASK" ] && command -v bd &> /dev/null; then
-    bd update "$CURRENT_TASK" --status completed 2>/dev/null || true
-fi
-
-# Clean up tracking
-rm -f "$QA_TRACKING_DIR/approved" 2>/dev/null || true
-rm -f "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null || true
-
-echo "{}"
-SCRIPT_EOF
-echo -e "${GREEN}✓${NC} Created verify-before-stop.sh"
-fi
-
-if create_file_safe "$TARGET/.claude/scripts/session-end.sh"; then
-cat > "$TARGET/.claude/scripts/session-end.sh" << 'SCRIPT_EOF'
-#!/bin/bash
-# SessionEnd Hook: Sync Beads state
-
-set -e
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    cd "$PROJECT_DIR"
-    
-    # Sync to ensure all changes are persisted
-    bd sync 2>/dev/null || true
-fi
-
-echo "{}"
-SCRIPT_EOF
-echo -e "${GREEN}✓${NC} Created session-end.sh"
-fi
-
-# Make scripts executable
+# Agents -----------------------------------------------------------------------
+for agent in orchestrator qa backend frontend devops; do
+    copy_file "$SOURCE_DIR/.claude/agents/${agent}.md" "$TARGET/.claude/agents/${agent}.md"
+done
+
+# Scripts ----------------------------------------------------------------------
+for script in session-start.sh intent-router.sh post-edit.sh verify-before-stop.sh session-end.sh; do
+    copy_file "$SOURCE_DIR/.claude/scripts/${script}" "$TARGET/.claude/scripts/${script}"
+done
 chmod +x "$TARGET/.claude/scripts/"*.sh 2>/dev/null || true
 
-# ============================================================================
-# SKILL
-# ============================================================================
+# Hooks ------------------------------------------------------------------------
+copy_file "$SOURCE_DIR/.claude/hooks/hooks.json" "$TARGET/.claude/hooks/hooks.json"
 
-if create_file_safe "$TARGET/.claude/skills/workflow-engine/SKILL.md"; then
-cat > "$TARGET/.claude/skills/workflow-engine/SKILL.md" << 'SKILL_EOF'
-# Ultimate Workflow Engine v2
+# Skill ------------------------------------------------------------------------
+copy_file "$SOURCE_DIR/.claude/skills/workflow-engine/SKILL.md" \
+    "$TARGET/.claude/skills/workflow-engine/SKILL.md"
 
-> **Full Beads integration** with mandatory QA approval gate.
+# Commands ---------------------------------------------------------------------
+for cmd in "$SOURCE_DIR/.claude/commands/"*.md; do
+    [ -f "$cmd" ] || continue
+    copy_file "$cmd" "$TARGET/.claude/commands/$(basename "$cmd")"
+done
 
-## Requirements
+# Plugin manifest --------------------------------------------------------------
+copy_file "$SOURCE_DIR/.claude-plugin/plugin.json" "$TARGET/.claude-plugin/plugin.json"
 
-- **Beads (bd)** - REQUIRED for this workflow
-- Git repository
-- jq
-
-## 🚫 MANDATORY QA GATE
-
-**Every code change MUST be reviewed and approved by @qa before delivery.**
-
-The Stop hook BLOCKS completion until:
-1. @qa adds "QA APPROVED" comment to the task
-2. OR task has `qa-approved` label
-
-## Beads Features Used
-
-| Feature | How We Use It |
-|---------|---------------|
-| `bd prime` | Context injection at session start |
-| `bd ready` | Find available work |
-| `bd blocked` | Show blocked issues |
-| Hierarchical issues | Epics for complex features |
-| Labels | `qa-pending`, `qa-approved`, domain tracking |
-| Structured notes | COMPLETED/IN PROGRESS/BLOCKED format |
-| Dependencies | QA depends on implementation |
-| `bd hooks install` | Auto-sync with git |
-| `bd doctor` | Health checks |
-
-## Hooks
-
-| Hook | What It Does |
-|------|--------------|
-| SessionStart | Runs `bd prime`, shows blocked issues, injects workflow |
-| UserPromptSubmit | Detects work type/domains, suggests Beads commands |
-| PostToolUse | Tracks changed files, updates Beads progress |
-| Stop | **BLOCKS** until QA approves (via label or comment) |
-| SessionEnd | Runs `bd sync` |
-
-## Labels Convention
-
-| Label | Meaning |
-|-------|---------|
-| `backend` | Backend domain work |
-| `frontend` | Frontend domain work |
-| `devops` | DevOps domain work |
-| `qa` | QA-owned task |
-| `qa-pending` | Awaiting QA review |
-| `qa-approved` | QA has signed off |
-| `bug` | Bug fix |
-| `improvement` | Enhancement |
-
-## Structured Notes Format
-
-```
-COMPLETED: [Specific deliverables]
-IN PROGRESS: [Current work + next step]
-BLOCKED: [What's preventing progress]
-KEY DECISIONS: [Important architectural choices]
-```
-
-This format survives Beads compaction and provides context for future sessions.
-
-## Workflow Example
-
-```bash
-# 1. Create epic for feature
-EPIC=$(bd create "Epic: User Auth" -t epic -p 1 \
-    --description "Add user authentication" --json | jq -r '.id')
-
-# 2. Create subtasks with labels
-bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending
-bd create "QA: Test auth flows" -p 1 --parent $EPIC -l qa
-
-# 3. Work on tasks
-bd update $TASK --status in_progress
-bd update $TASK --notes "IN PROGRESS: Implementing JWT endpoints"
-
-# 4. Complete implementation
-bd update $TASK --notes "COMPLETED: JWT auth endpoints"
-
-# 5. QA reviews and approves
-bd comments add $TASK "QA APPROVED: Verified login, logout, token refresh"
-bd label remove $TASK qa-pending
-bd label add $TASK qa-approved
-
-# 6. Close task
-bd close $TASK --reason "Auth implemented and verified"
-```
-SKILL_EOF
-echo -e "${GREEN}✓${NC} Created SKILL.md"
-fi
-
-# ============================================================================
-# SETTINGS
-# ============================================================================
-
+# Settings.json (with merge support) ------------------------------------------
 SETTINGS_FILE="$TARGET/.claude/settings.json"
-
-WORKFLOW_HOOKS='{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-start.sh\"",
-            "timeout": 30000
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/intent-router.sh\""
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/post-edit.sh\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/verify-before-stop.sh\""
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-end.sh\""
-          }
-        ]
-      }
-    ]
-  },
-  "permissions": {
-    "allow": ["Read", "Glob", "Grep", "LS"],
-    "deny": ["Bash(rm -rf *)", "Bash(sudo *)"]
-  }
-}'
+SOURCE_SETTINGS="$SOURCE_DIR/.claude/settings.json"
 
 if [ -f "$SETTINGS_FILE" ]; then
     if [ "$UPDATE_MODE" = true ]; then
-        echo -e "${YELLOW}Merging hooks into existing settings.json...${NC}"
+        echo -e "${YELLOW}Merging settings.json (preserving non-workflow keys)...${NC}"
         cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
-        
-        EXISTING=$(cat "$SETTINGS_FILE")
-        MERGED=$(echo "$EXISTING" | jq --argjson hooks "$(echo "$WORKFLOW_HOOKS" | jq '.hooks')" \
-            '.hooks = $hooks' 2>/dev/null) || MERGED=""
-        
+        # Replace workflow-owned keys (hooks, env, additionalDirectories) but keep others.
+        MERGED=$(jq -s '
+            .[0] as $existing |
+            .[1] as $new |
+            $existing
+            | .hooks = $new.hooks
+            | .env = (($existing.env // {}) + ($new.env // {}))
+            | .additionalDirectories = ($new.additionalDirectories // $existing.additionalDirectories)
+            | (if $existing.permissions then . else .permissions = $new.permissions end)
+        ' "$SETTINGS_FILE" "$SOURCE_SETTINGS" 2>/dev/null) || MERGED=""
         if [ -n "$MERGED" ]; then
             echo "$MERGED" > "$SETTINGS_FILE"
-            echo -e "${GREEN}✓${NC} Merged hooks into settings.json"
+            echo -e "${GREEN}OK${NC}   settings.json merged"
         else
-            echo -e "${RED}✗${NC} Could not merge - copying hooks.json for manual merge"
+            echo -e "${RED}Could not merge settings.json - manual review needed${NC}"
         fi
+    elif [ "$MERGE_MODE" = true ]; then
+        echo -e "${YELLOW}skip${NC} settings.json (exists, merge mode)"
     else
-        echo -e "${YELLOW}⚠${NC} Existing settings.json - merge hooks manually from .claude/hooks/hooks.json"
+        # Mode 1 (backup-and-install-fresh) overwrites
+        cp "$SOURCE_SETTINGS" "$SETTINGS_FILE"
+        echo -e "${GREEN}OK${NC}   settings.json"
     fi
 else
-    echo "$WORKFLOW_HOOKS" > "$SETTINGS_FILE"
-    echo -e "${GREEN}✓${NC} Created settings.json"
+    cp "$SOURCE_SETTINGS" "$SETTINGS_FILE"
+    echo -e "${GREEN}OK${NC}   settings.json"
 fi
 
-# ============================================================================
-# CLAUDE.md (Project Memory)
-# ============================================================================
-
+# CLAUDE.md template (only if missing) ----------------------------------------
 if [ ! -f "$TARGET/CLAUDE.md" ]; then
     cat > "$TARGET/CLAUDE.md" << 'CLAUDE_EOF'
 # Project Memory
@@ -1405,15 +376,6 @@ if [ ! -f "$TARGET/CLAUDE.md" ]; then
 ## Known Mistakes (Check Before Implementing)
 <!-- Learning loop: mistakes made before -->
 
-### Authentication
-- [ ] <!-- e.g., Always use httpOnly cookies -->
-
-### Database
-- [ ] <!-- e.g., Always use transactions -->
-
-### Frontend
-- [ ] <!-- e.g., Forms need loading AND error states -->
-
 ## Current Focus
 <!-- What are we working on? -->
 
@@ -1423,66 +385,55 @@ if [ ! -f "$TARGET/CLAUDE.md" ]; then
 - `qa-approved` - QA has signed off
 - `bug`, `improvement` - Work type
 CLAUDE_EOF
-    echo -e "${GREEN}✓${NC} Created CLAUDE.md template"
+    echo -e "${GREEN}OK${NC}   CLAUDE.md template"
 fi
 
-# ============================================================================
-# INITIALIZE BEADS
-# ============================================================================
-
+# Beads init / hooks / doctor --------------------------------------------------
 echo ""
 echo -e "${YELLOW}Setting up Beads...${NC}"
 
 cd "$TARGET"
 
-# Initialize Beads if not already
 if [ ! -d ".beads" ]; then
-    echo -e "Initializing Beads..."
+    echo "Initializing Beads..."
     bd init --quiet
-    echo -e "${GREEN}✓${NC} Beads initialized"
+    echo -e "${GREEN}OK${NC} Beads initialized"
 fi
 
-# Install git hooks for auto-sync
-echo -e "Installing Beads git hooks..."
+echo "Installing Beads git hooks..."
 bd hooks install 2>/dev/null || true
-echo -e "${GREEN}✓${NC} Git hooks installed"
+echo -e "${GREEN}OK${NC} Git hooks installed"
 
-# Run doctor to verify setup
-echo -e "Running Beads health check..."
+echo "Running Beads health check..."
 DOCTOR_OUTPUT=$(bd doctor 2>&1 || true)
-if echo "$DOCTOR_OUTPUT" | grep -q "error\|Error\|ERROR"; then
-    echo -e "${YELLOW}⚠${NC} Some issues detected:"
-    echo "$DOCTOR_OUTPUT" | grep -i "error" | head -5
-    echo "  Run 'bd doctor' for details"
+if echo "$DOCTOR_OUTPUT" | grep -qiE 'error'; then
+    echo -e "${YELLOW}Some issues detected:${NC}"
+    echo "$DOCTOR_OUTPUT" | grep -i error | head -5
+    echo "  Run 'bd doctor' for details."
 else
-    echo -e "${GREEN}✓${NC} Beads health check passed"
+    echo -e "${GREEN}OK${NC} Beads health check passed"
 fi
 
-# ============================================================================
-# DONE
-# ============================================================================
-
+# Done -------------------------------------------------------------------------
 echo ""
-echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║              ✅ Installation Complete!                      ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}Installation complete.${NC}"
 echo ""
 echo -e "Installed to: ${BLUE}$TARGET/.claude/${NC}"
+echo -e "Manifest:     ${BLUE}$TARGET/.claude-plugin/plugin.json${NC}"
 
 if [ -d "$BACKUP_DIR" ]; then
     echo -e "Backup at:    ${BLUE}$BACKUP_DIR${NC}"
 fi
 
 echo ""
-echo -e "${CYAN}What's New in v2:${NC}"
-echo "  ✓ Beads is now REQUIRED (not optional)"
-echo "  ✓ Uses bd prime for context injection"
-echo "  ✓ Git hooks auto-sync Beads state"
-echo "  ✓ Labels for domain/QA tracking"
-echo "  ✓ Hierarchical issues (epics) for features"
-echo "  ✓ Structured notes (survive compaction)"
-echo "  ✓ bd blocked visibility in context"
-echo "  ✓ bd doctor health checks"
+echo -e "${CYAN}What's new in v3:${NC}"
+echo "  - Plugin manifest (.claude-plugin/plugin.json) with v3.0.0"
+echo "  - Model pinning per agent + /workflow-model upgrade command"
+echo "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
+echo "  - Parent-folder access via additionalDirectories (../)"
+echo "  - SessionStart warns on stale model + old bd"
+echo "  - Single-source-of-truth installer (no heredoc duplication)"
+echo "  - uninstall.sh for clean removal"
 echo ""
 echo -e "${YELLOW}Usage:${NC}"
 echo "  cd $TARGET"
@@ -1492,11 +443,11 @@ echo "  Then describe what you want:"
 echo "  > Add user authentication"
 echo "  > Fix the login bug"
 echo ""
-echo -e "${YELLOW}Beads Commands:${NC}"
+echo -e "${YELLOW}Beads commands:${NC}"
 echo "  bd ready          # Tasks available to work on"
 echo "  bd blocked        # Tasks waiting on dependencies"
 echo "  bd list           # All tasks"
 echo "  bd doctor         # Health check"
 echo ""
-echo -e "${RED}Remember: All code changes require @qa approval!${NC}"
+echo "Remember: all code changes require @qa approval."
 echo ""

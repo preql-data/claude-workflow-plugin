@@ -1,0 +1,52 @@
+{
+  "name": "claude-workflow",
+  "version": "3.0.0",
+  "description": "Mandatory orchestrator -> specialists -> QA workflow with Beads task tracking",
+  "author": {
+    "name": "preql-data",
+    "url": "https://github.com/preql-data/claude-workflow-plugin"
+  },
+  "homepage": "https://github.com/preql-data/claude-workflow-plugin",
+  "repository": "https://github.com/preql-data/claude-workflow-plugin",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "orchestrator",
+    "qa-gate",
+    "beads",
+    "task-tracking",
+    "agents"
+  ],
+  "agents": [
+    "./.claude/agents/orchestrator.md",
+    "./.claude/agents/qa.md",
+    "./.claude/agents/backend.md",
+    "./.claude/agents/frontend.md",
+    "./.claude/agents/devops.md"
+  ],
+  "commands": [
+    "./.claude/commands/workflow-model.md"
+  ],
+  "skills": [
+    "./.claude/skills/workflow-engine"
+  ],
+  "hooks": "./.claude/hooks/hooks.json",
+  "mcpServers": {
+    "bd": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/bd-mcp/bin/bd-mcp.js"
+      ],
+      "env": {}
+    },
+    "code-context": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"
+      ],
+      "env": {}
+    }
+  }
+}

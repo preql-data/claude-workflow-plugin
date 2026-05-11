@@ -1,0 +1,50 @@
+# monorepo-frontend-only — Phase C, fixture #4.
+#
+# pnpm workspace with three packages (ui, app, utils). The prompt is a
+# scoped frontend change: add a <RetryButton> to the ui package. The
+# spec asserts:
+#   - intent-router picks frontend (no backend), so subagentInvocations
+#     contains @frontend but NOT @backend
+#   - QA still runs (mandatory orchestrator -> specialist -> QA flow)
+#   - doc-only fast path didn't fire (real component code)
+#   - the diff is scoped to packages/ui/ (no spurious edits to app or
+#     utils)
+#
+# Per G8 plan, "Initial fixture set" — monorepo-frontend-only row.
+
+name: monorepo-frontend-only
+description: |
+  pnpm workspace fixture. Three packages: @fixture/ui, @fixture/app
+  (consumer), @fixture/utils (pure helpers). Prompt asks Claude to add
+  a RetryButton component to the ui package only.
+
+prompt: |
+  Add a `<RetryButton>` component to the `ui` package.
+
+expected_subagents:
+  - frontend
+  - qa
+
+expected_hooks:
+  - SessionStart
+  - UserPromptSubmit
+  - SubagentStart
+  - PreToolUse
+  - PostToolUse
+  - Stop
+  - SessionEnd
+
+expected_label_progression:
+  - qa-pending
+  - qa-approved
+
+notes: |
+  - The fixture's pnpm-workspace.yaml + per-package package.json files
+    give the polyglot detector a clear "javascript-monorepo" signal.
+  - .beads is initialized empty.
+  - The diff should be scoped: packages/ui/src/RetryButton.jsx (new)
+    + packages/ui/src/RetryButton.test.jsx (new) + a barrel re-export
+    in packages/ui/src/index.js. No edits to app or utils packages.
+  - This fixture intentionally does NOT include backend code because
+    the spec's primary assertion is that intent-router does NOT route
+    to @backend.

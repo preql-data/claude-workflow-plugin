@@ -1,0 +1,22 @@
+[project]
+# G8 Phase C fixture #1: minimal Django + pytest skeleton.
+#
+# The fixture seeds a deliberately failing test_user_email_unique test in
+# accounts/tests/test_models.py. The prompt asks Claude to "fix it"; the
+# spec asserts the debugger 5-step framework (J27) runs, polyglot test
+# detection routes to pytest (F8/J17), and QA iteration loop closes
+# cleanly.
+#
+# Kept dep-light: no Django wheel actually installs in the harness because
+# the LLM doesn't run the test suite — it analyses the failure and edits
+# the code. The pyproject.toml's existence is the polyglot-detection
+# signal; pytest.ini gives the runner its config.
+name = "python-django-bug-fixture"
+version = "0.0.0"
+description = "G8 Phase C fixture: Django + pytest project with a deliberately failing test_user_email_unique test"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py", "tests.py"]
+testpaths = ["accounts"]

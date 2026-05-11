@@ -1,0 +1,56 @@
+# Secrets and environment files (AgentLint S1; Claude Code Glob defaults to
+# CLAUDE_CODE_GLOB_NO_IGNORE=true so .env files remain visible to AI tooling
+# even when gitignored — gitignore here is the second layer, not the only one).
+.env
+.env.*
+!.env.example
+*.env
+*.env.local
+
+# Local Claude state. The plugin's own .claude/ tree IS tracked (it ships with
+# the plugin); the .qa-tracking subdirectory is per-session ephemera.
+.claude/.qa-tracking/
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Node (in case downstream consumers run `npm install` for tooling)
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs
+*.log
+
+# E2E harness — generated artifacts. Golden cassettes ARE tracked
+# (see .claude/tests/e2e/.gitignore for the local override that allows them).
+.claude/tests/e2e/.tmp/
+.claude/tests/e2e/.tsbuild/
+.claude/tests/e2e/cassettes/replays/
+
+# Fixtures' nested .git/, beads SQLite shards, and per-run .qa-tracking
+# state. The fixtures' source files (server/, client/, .claude/scripts/,
+# .beads/{issues.jsonl,config.yaml,metadata.json,README.md,.gitignore})
+# remain tracked by the parent repo.
+.claude/tests/e2e/fixtures/*/.git/
+.claude/tests/e2e/fixtures/*/.beads/beads.db
+.claude/tests/e2e/fixtures/*/.beads/beads.db-wal
+.claude/tests/e2e/fixtures/*/.beads/beads.db-shm
+.claude/tests/e2e/fixtures/*/.beads/daemon.lock
+.claude/tests/e2e/fixtures/*/.beads/daemon.log
+.claude/tests/e2e/fixtures/*/.beads/daemon.pid
+.claude/tests/e2e/fixtures/*/.beads/bd.sock
+.claude/tests/e2e/fixtures/*/.beads/last-touched
+.claude/tests/e2e/fixtures/*/.beads/sync_base.jsonl
+.claude/tests/e2e/fixtures/*/.beads/sync-state.json
+.claude/tests/e2e/fixtures/*/.beads/.local_version
+.claude/tests/e2e/fixtures/*/.claude/.qa-tracking/

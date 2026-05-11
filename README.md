@@ -232,9 +232,20 @@ your-project/
 | [Architecture](docs/ARCHITECTURE.md) | Deep dive into system design |
 | [Agents Reference](docs/AGENTS.md) | All agent prompts documented |
 | [Hooks Reference](docs/HOOKS.md) | Hook scripts explained |
+| [MCP Servers](docs/MCP_SERVERS.md) | bd-mcp + code-context-mcp |
 | [Beads Integration](docs/BEADS.md) | How we use Beads |
 | [Workflow & Labels](docs/WORKFLOW.md) | Labels, statuses, lifecycle |
+| [Test Pyramid](.claude/tests/README.md) | Five-tier test harness (L1 → L4) |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues & fixes |
+
+### Testing
+
+The plugin ships with its own five-tier test pyramid. See
+[`.claude/tests/README.md`](.claude/tests/README.md) for the full layout —
+L1 bash unit through L4 daily drift watch. The offline gate (`make test-all`)
+runs L1 + L2 in under a minute; the live tier (`make test-e2e`) exercises
+six fixtures end-to-end against real Claude Opus 4.7 with golden cassettes
+capturing the structural fingerprint of each run.
 
 ---
 

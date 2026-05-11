@@ -1,0 +1,64 @@
+# qa-block-recovery — Phase C, fixture #6.
+#
+# Node API seeded with a deliberately wrong test assertion in HEAD
+# (validate.test.js asserts validateEmail("foo@bar.com") === false,
+# which is conceptually inverted — a valid email is being declared
+# invalid). The prompt asks Claude to add input validation to the
+# existing /users endpoint.
+#
+# Expected flow:
+#   1. Orchestrator creates a task and routes to @backend.
+#   2. @backend writes the validation logic in server/index.js.
+#   3. QA gate (Stop hook) reads the existing test, notices the
+#      assertion is inverted, and BLOCKS — the assertion is the
+#      regression the orchestrator must surface.
+#   4. Orchestrator re-invokes @backend (or a dedicated fix delegation)
+#      to either fix the test or document the inversion.
+#   5. Recovery loop lands a corrected test; QA approves.
+#   6. Memory bridge (E8) writes a feedback memory capturing the
+#      "broken test in HEAD must be fixed before adding production
+#      logic" lesson.
+#
+# Spec asserts:
+#   - At least one Stop:block fired (QA caught the wrong assertion).
+#   - The same trace also has a Stop:approve (recovery succeeded), OR
+#     the @backend specialist was invoked at least twice (recovery
+#     pattern even when the second Stop hits maxTurns).
+
+name: qa-block-recovery
+description: |
+  Node API with a seeded broken test assertion. Validates the QA
+  gate's block-then-recover flow: the gate catches the wrong assertion,
+  specialist re-invoked, recovery lands.
+
+prompt: |
+  Add input validation to the existing /users endpoint.
+
+expected_subagents:
+  - backend
+  - qa
+
+expected_hooks:
+  - SessionStart
+  - UserPromptSubmit
+  - SubagentStart
+  - PreToolUse
+  - PostToolUse
+  - Stop
+  - SessionEnd
+
+expected_label_progression:
+  - qa-pending
+  - qa-approved
+
+notes: |
+  - server/validate.test.js is INTENTIONALLY broken in HEAD. Don't
+    "fix" the assertion at fixture build time — the whole point of
+    the fixture is for the QA gate to exercise the recovery flow on
+    a real wrong assertion.
+  - The other test, server/index.test.js, is a clean baseline so QA
+    has at least one passing test to anchor against.
+  - The /users endpoint exists but has no validation — that's the
+    prompt's actual ask. The seeded broken test is a side trap that
+    the regression-coverage gate must surface.
+  - .beads is initialized empty.

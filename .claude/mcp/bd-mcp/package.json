@@ -1,0 +1,23 @@
+{
+  "name": "@claude-workflow-plugin/bd-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP server exposing the Beads (bd) CLI as typed tools for the claude-workflow-plugin specialists.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "bd-mcp": "bin/bd-mcp.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/integration.test.js tests/validation.test.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.8"
+  },
+  "license": "MIT"
+}
