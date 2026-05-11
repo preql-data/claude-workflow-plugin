@@ -37,6 +37,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inline). Specialists now register as `claude-workflow:<role>` instead
   of falling back to `general-purpose`.
 
+### Post-G8 closeout
+
+#### Added
+- **README rewrite**: 325 -> 164 lines, value-forward pitch with
+  install + upgrade + customize sections and copy-pasteable commands.
+- **`install.sh --upgrade`**: detects v2 installs via three signals
+  (agents lack `model:`, no `.claude-plugin/plugin.json`, no
+  `.claude/mcp/` or `.claude/skills/workflow-engine/`), backs up to
+  `.claude-v2-backup-<timestamp>/`, runs the v3 install, prints a
+  "what changed" summary. Curl-pipe friendly:
+  `... | bash -s -- --upgrade`.
+- **`install.ps1` v2 redirect**: detects v2 and redirects to
+  `install.sh` via Git Bash / WSL / curl instead of re-implementing
+  the migration in PowerShell.
+- **`CONTRIBUTING.md` quick-start**: mirror paragraph pointing at
+  README's Customize section.
+- **CI**: `npm ci --include=optional` plus glibc-binary verification
+  step in `l3-live` and `l3-vitest-unit` jobs (SDK was resolving the
+  `linux-x64-musl` variant on ubuntu-latest).
+
+#### Fixed
+- **`statusline.sh::count_changed_files`** "00" bug: `grep -c .`
+  exited non-zero on empty input and the `|| echo "0"` fallback ran
+  on top of grep's own "0" output. Switched to `sort -u | wc -l`.
+- **L1 `phase5-synthetic-tests.sh` statusline expectations**: updated
+  to cover the full 0wk.2 transition (`gate-entered - 2 files` ->
+  `approved - 0 files`) rather than the pre-0wk.2 state.
+- **CI portability** (`BD_SHIM_ONLY=1` env opt): L1+L2 bd-dependent
+  specs skip-with-log on the GitHub Actions runner (no `bd` CLI).
+  Dev-machine paths unchanged.
+- **L3 vitest unit specs**: replaced hardcoded `/Users/edk0/...`
+  paths in `_lib.unit.spec.ts` with `import.meta.url`-relative
+  resolution; replay-file reference replaced with the committed
+  golden cassette.
+- **shellcheck**: SC2015 refactor at `qa-gate.sh:340`
+  (A && B || C -> if/then/fi); file-wide `# shellcheck disable=SC2317`
+  in `bd-github-link.test.sh` and `phase5-synthetic-tests.sh` for
+  source-pattern false positives.
+
+#### Closed bugs
+- `0wk.7` -- zero subagent invocations (resolved by 0wk.9 plugin.json
+  fix).
+- `0wk.8` -- SDK doesn't register plugin agents (resolved by 0wk.9).
+- `0wk.2` -- `qa-gate.sh approve` didn't clear `changed-files.txt`
+  (resolved in the closeout pass).
+
+#### Known limitations (unchanged from G8)
+- L3 live runs cost ~$5-10/fixture; gated on `ANTHROPIC_API_KEY`
+  secret. Now actually fires on every PR since the secret is
+  configured.
+- L3-live golden cassettes drift periodically as the model evolves;
+  re-record via `RECORD_GOLDEN=1 npm run test:run` from the fixture
+  dir.
+
 ## [G8 - E2E Test Harness] - 2026-05-09 to 2026-05-11
 
 ### Added
