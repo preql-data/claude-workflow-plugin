@@ -185,6 +185,21 @@ jobs:
         # the flag pins the behaviour against future npm changes
         # and any cache-state edge cases.
         run: npm ci --include=optional
+      - name: Verify SDK glibc native binary present
+        # Defensive: this tier doesn't invoke the SDK binary (it's
+        # offline unit tests), but a missing glibc variant here is the
+        # same upstream symptom that breaks L3-live. Failing here
+        # gives an earlier, clearer signal than waiting 50min for the
+        # live tier to choke on a not-found native binary.
+        run: |
+          if [ -d node_modules/@anthropic-ai/claude-agent-sdk-linux-x64 ]; then
+            echo "OK: glibc native binary installed"
+            ls -la node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/ | head -5
+          else
+            echo "FAIL: expected glibc variant missing"
+            ls -la node_modules/@anthropic-ai/ 2>&1 | head -20
+            exit 1
+          fi
       - name: Run offline unit tier
         run: npm run test:unit
       - name: Sanity-check test count
