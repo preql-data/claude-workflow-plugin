@@ -289,18 +289,33 @@ jobs:
         # but its binary couldn't run on glibc.
         run: npm ci --include=optional
       - if: steps.gate.outputs.skip != 'true'
-        name: Verify SDK native binary present
-        # If the glibc binary isn't on disk after `npm ci`, the live
-        # suite will fail with the same ReferenceError as run 25673394715.
-        # Fail fast here so the cause is unambiguous in the workflow log
-        # (rather than mixed into 6 fixture-spec failures further down).
+        name: Remove musl SDK variant; verify glibc variant present
+        # Why: the SDK's native-binary lookup (see node_modules/@anthropic-ai/
+        # claude-agent-sdk/sdk.mjs, function F5) tries the musl variant
+        # FIRST on linux and short-circuits the moment require.resolve()
+        # succeeds — without checking the binary actually runs. On
+        # ubuntu-latest (glibc), the musl tarball's `claude` file is
+        # present but its dynamic linker (/lib/ld-musl-x86_64.so.1) is
+        # not, so spawn() fails with ENOENT and the SDK reports
+        # "native binary not found".
+        #
+        # The lockfile lacks a `libc` field on the optional deps
+        # (lockfileVersion 3 + npm 10 doesn't propagate it), so
+        # `npm ci --libc=glibc` doesn't filter either. Cleanest
+        # surgical fix: physically remove the musl variant so the
+        # SDK's lookup falls through to linux-x64 (glibc).
         run: |
-          path="node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude"
-          if [ -f "$path" ]; then
-            echo "OK: $path exists"
-            ls -l "$path"
+          musl="node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl"
+          gnu="node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude"
+          if [ -d "$musl" ]; then
+            echo "Removing musl variant: $musl"
+            rm -rf "$musl"
+          fi
+          if [ -f "$gnu" ]; then
+            echo "OK: glibc binary present"
+            ls -l "$gnu"
           else
-            echo "ERROR: glibc native binary missing at $path"
+            echo "ERROR: glibc native binary missing at $gnu"
             echo "Installed @anthropic-ai/* packages:"
             ls node_modules/@anthropic-ai/ 2>&1 || true
             exit 1
