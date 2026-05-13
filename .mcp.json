@@ -5,7 +5,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/bd-mcp/bin/bd-mcp.js"
+        "${CLAUDE_PROJECT_DIR}/.claude/mcp/bd-mcp/bin/bd-mcp.js"
       ],
       "env": {}
     },
@@ -13,7 +13,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"
+        "${CLAUDE_PROJECT_DIR}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"
       ],
       "env": {}
     }
@@ -21,7 +21,7 @@
   "_phase7_codebase_graph_target": {
     "_note": "Forward pointer to a tree-sitter-grade replacement for code-context. See .claude/mcp/code-context-mcp/README.md 'Limits / non-goals' for migration notes. Inert.",
     "transport": "stdio",
-    "command": "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/codebase-graph/bin/server",
+    "command": "${CLAUDE_PROJECT_DIR}/.claude/mcp/codebase-graph/bin/server",
     "args": [],
     "env": {},
     "tools_to_expose": [
