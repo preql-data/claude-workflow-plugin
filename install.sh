@@ -40,6 +40,7 @@ REPO_BRANCH="${CLAUDE_WORKFLOW_BRANCH:-main}"
 # install.sh's positional [project-path] form).
 FORCE_UPGRADE=false
 TARGET=""
+INSTALL_MODE_OVERRIDE=""
 
 print_usage() {
     cat <<'USAGE'
@@ -51,10 +52,16 @@ Usage:
   bash install.sh --help                        Print this message
 
 Flags:
-  --upgrade    Run the v2->v3 migration even if auto-detection is fuzzy.
-               Backs up .claude/ to .claude-v2-backup-<timestamp>/ before
-               writing v3 files.
-  -h, --help   Print this message and exit 0.
+  --upgrade        Run the v2->v3 migration even if auto-detection is fuzzy.
+                   Backs up .claude/ to .claude-v2-backup-<timestamp>/ before
+                   writing v3 files.
+  --mode=<1|2|3>   Explicitly choose the install mode for existing .claude/:
+                     1 = Backup and install fresh
+                     2 = Update workflow (keeps CLAUDE.md, merges settings)
+                     3 = Merge only (skip existing files)
+                   Useful when running under `curl ... | bash` where the
+                   interactive prompt has no usable stdin.
+  -h, --help       Print this message and exit 0.
 
 Curl-pipe forms:
   curl -fsSL <url>/install.sh | bash
@@ -71,6 +78,14 @@ while [ $# -gt 0 ]; do
         --upgrade)
             FORCE_UPGRADE=true
             shift
+            ;;
+        --mode=*)
+            INSTALL_MODE_OVERRIDE="${1#*=}"
+            shift
+            ;;
+        --mode)
+            INSTALL_MODE_OVERRIDE="${2:-}"
+            shift 2
             ;;
         -h|--help)
             print_usage
@@ -96,6 +111,17 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+# Validate --mode override (must be 1, 2, or 3 if set) ------------------------
+if [ -n "$INSTALL_MODE_OVERRIDE" ]; then
+    case "$INSTALL_MODE_OVERRIDE" in
+        1|2|3) ;;
+        *)
+            echo "Invalid --mode value: '$INSTALL_MODE_OVERRIDE' (expected 1, 2, or 3)" >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # Resolve target ---------------------------------------------------------------
 TARGET="${TARGET:-.}"
@@ -225,8 +251,23 @@ done
 # Git repo init ----------------------------------------------------------------
 if [ ! -d "$TARGET/.git" ]; then
     echo -e "${YELLOW}No git repository found.${NC}"
-    read -p "Initialize git repository? (required for Beads) (y/n) " -n 1 -r
-    echo
+    # Under `curl ... | bash`, stdin is the curl pipe so `read` gets EOF and
+    # we'd silently fall to the "Cannot proceed" branch. Prefer the
+    # controlling terminal when available; otherwise default to "y" since
+    # the script literally cannot continue without git anyway (Beads
+    # depends on it).
+    if [ -t 0 ]; then
+        read -p "Initialize git repository? (required for Beads) (y/n) " -n 1 -r
+        echo
+    elif (exec 3</dev/tty) 2>/dev/null; then
+        # See the mode-prompt block for why this probe is needed.
+        echo "(curl-piped; reading from /dev/tty)"
+        read -p "Initialize git repository? (required for Beads) (y/n) " -n 1 -r < /dev/tty
+        echo
+    else
+        REPLY="y"
+        echo -e "${YELLOW}Non-interactive mode detected. Auto-initializing git (required for Beads).${NC}"
+    fi
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         cd "$TARGET"
         git init
@@ -379,8 +420,33 @@ elif [ -d "$TARGET/.claude" ]; then
         echo "  3) Merge only (add new files, skip ALL existing)"
         echo "  4) Cancel"
         echo ""
-        read -p "Choose [1-4]: " -n 1 -r INSTALL_MODE
-        echo ""
+        # When piped from curl, stdin is the pipe — `read` from stdin gets
+        # empty input and we'd fall through to "Cancelled." Read from
+        # /dev/tty if it's available; otherwise default to Update (the
+        # safe non-destructive choice for re-running upgrades).
+        if [ -n "$INSTALL_MODE_OVERRIDE" ]; then
+            INSTALL_MODE="$INSTALL_MODE_OVERRIDE"
+            echo "Mode set via --mode=$INSTALL_MODE"
+        elif [ -t 0 ]; then
+            # Interactive (terminal stdin)
+            read -p "Choose [1-4]: " -n 1 -r INSTALL_MODE
+            echo ""
+        elif (exec 3</dev/tty) 2>/dev/null; then
+            # curl-piped but a controlling terminal is actually openable.
+            # The `[ -e /dev/tty ]` test alone is not enough on macOS —
+            # the device node always exists but `open()` fails with
+            # ENXIO when there's no controlling terminal. Probing with
+            # `exec 3</dev/tty` in a subshell tells us for real.
+            echo "(curl-piped; reading from /dev/tty)"
+            read -p "Choose [1-4]: " -n 1 -r INSTALL_MODE < /dev/tty
+            echo ""
+        else
+            # Fully non-interactive (CI, no controlling tty). Default to
+            # Update — the safe re-install path.
+            INSTALL_MODE=2
+            echo -e "${YELLOW}Non-interactive mode detected. Defaulting to Update (option 2).${NC}"
+            echo -e "${YELLOW}Pass --mode=<1|2|3> to override or --upgrade for the v2 migration flow.${NC}"
+        fi
 
         case $INSTALL_MODE in
             1)

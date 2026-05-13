@@ -16,7 +16,12 @@
 param(
     [string]$Path = ".",
     [string]$RepoUrl = $env:CLAUDE_WORKFLOW_REPO,
-    [string]$RepoBranch = $env:CLAUDE_WORKFLOW_BRANCH
+    [string]$RepoBranch = $env:CLAUDE_WORKFLOW_BRANCH,
+    # Explicit mode override for non-interactive runs (irm | iex). Valid
+    # values: "1" (backup+fresh), "2" (update), "3" (merge). Empty means
+    # prompt interactively or default to Update under irm-pipe.
+    [ValidateSet("", "1", "2", "3")]
+    [string]$Mode = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -166,11 +171,23 @@ try {
         }
     }
 
+    # Detect non-interactive mode (irm | iex pipes; CI runners). When the
+    # host UI isn't interactive, Read-Host can hang or throw; we default
+    # to the safe path instead. Mirrors install.sh's /dev/tty fallback.
+    $NonInteractive = (-not [Environment]::UserInteractive) -or `
+                      ($Host.Name -eq "ServerRemoteHost") -or `
+                      ($null -eq $Host.UI.RawUI)
+
     # Git repo check
     $GitDir = Join-Path $Target ".git"
     if (-not (Test-Path $GitDir)) {
         Write-Color "No git repository found." Yellow
-        $InitGit = Read-Host "Initialize git repository? (required for Beads) (y/n)"
+        if ($NonInteractive) {
+            Write-Color "Non-interactive mode detected. Auto-initializing git (required for Beads)." Yellow
+            $InitGit = "y"
+        } else {
+            $InitGit = Read-Host "Initialize git repository? (required for Beads) (y/n)"
+        }
         if ($InitGit -eq "y") {
             Push-Location $Target
             git init
@@ -284,7 +301,19 @@ build/
             Write-Host "  4) Cancel"
             Write-Host ""
 
-            $Choice = Read-Host "Choose [1-4]"
+            # Under `irm | iex`, Read-Host can hang or throw. Honour -Mode
+            # explicitly; otherwise default to Update (option 2) in
+            # non-interactive contexts. Matches install.sh's behaviour.
+            if ($Mode) {
+                $Choice = $Mode
+                Write-Host "Mode set via -Mode: $Choice"
+            } elseif ($NonInteractive) {
+                $Choice = "2"
+                Write-Color "Non-interactive mode detected. Defaulting to Update (option 2)." Yellow
+                Write-Color "Pass -Mode 1|2|3 to override." Yellow
+            } else {
+                $Choice = Read-Host "Choose [1-4]"
+            }
             $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
             $BackupDir = Join-Path $Target ".claude-backup-$Stamp"
 
