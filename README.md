@@ -145,9 +145,14 @@ notes (G8 harness, MCP servers, plugin manifest, etc.) read
 
 ## ⚠ Caveats
 
-- Live e2e runs cost roughly **$5–10 per fixture** against Claude Opus 4.7
-  with `maxTurns=30`. The offline gate (`make test-all`) is free and
-  covers L1 + L2. CI runs L3-live only on a daily schedule, not per PR.
+- Live e2e runs cost roughly $5–10 per fixture against Claude Opus 4.7.
+  The offline gate (`make test-all`) is free and covers L1 + L2. As of
+  v3.1.0, live runs are MANUAL ONLY: `make test-live FIXTURE=<name>`
+  prints the estimated cost and prompts for confirmation before
+  spending. There is no scheduled CI run that consumes API spend, and
+  no automatic per-PR live tier. Live assertions are model-agnostic
+  invariants declared in each fixture's `fixture.yaml` — goldens are
+  retained as debugging references only.
 - The upstream `bd` daemon has a stack-overflow on stale locks; the
   plugin ships a `--no-daemon` shim under `.claude/bin/bd` (inlined onto
   `PATH` in test fixtures). Production installs degrade gracefully.

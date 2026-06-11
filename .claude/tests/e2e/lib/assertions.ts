@@ -10,8 +10,15 @@
  * not prose. None of these matchers ever look at finalAssistantMessage.
  */
 import { expect } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+
 import type { Trace } from "./trace.js";
 import { compareToGolden } from "./goldenCompare.js";
+import {
+  evaluateAll,
+  parseInvariantsFromYaml,
+  type InvariantSpec,
+} from "./invariants.js";
 
 interface MatcherResult {
   pass: boolean;
@@ -405,9 +412,83 @@ export const matchers = {
   },
 
   /**
-   * Assert the trace structurally matches a committed golden cassette.
-   * Records a new cassette when RECORD_GOLDEN=1 is set and the file is
-   * absent.
+   * Assert the trace satisfies every invariant declared in a fixture's
+   * fixture.yaml `invariants:` block. This is the PRIMARY gate for live
+   * specs since v3.1.0 spec item 0.8 — model-agnostic, drift-free.
+   *
+   * The matcher reads fixture.yaml from disk, extracts the invariants
+   * block via `parseInvariantsFromYaml`, runs each through the engine in
+   * `invariants.ts`, and pass/fails on aggregate. Skipped invariants are
+   * surfaced in the message (we don't pretend a skip is a pass) but do
+   * not fail the assertion.
+   *
+   * Example:
+   *   await expect(trace).satisfiesInvariants(
+   *     path.join(FIXTURE_PATH, "fixture.yaml")
+   *   );
+   */
+  async satisfiesInvariants(
+    received: unknown,
+    fixtureYamlPath: string,
+  ): Promise<MatcherResult> {
+    assertTrace(received, "satisfiesInvariants");
+    if (!existsSync(fixtureYamlPath)) {
+      return {
+        pass: false,
+        message: () =>
+          `satisfiesInvariants: fixture.yaml not found at ${fixtureYamlPath}`,
+      };
+    }
+    let content: string;
+    try {
+      content = readFileSync(fixtureYamlPath, "utf8");
+    } catch (err) {
+      return {
+        pass: false,
+        message: () =>
+          `satisfiesInvariants: could not read ${fixtureYamlPath}: ${(err as Error).message}`,
+      };
+    }
+    const specs: InvariantSpec[] = parseInvariantsFromYaml(content);
+    if (specs.length === 0) {
+      return {
+        pass: false,
+        message: () =>
+          `satisfiesInvariants: no invariants declared in ${fixtureYamlPath}. Add an 'invariants:' block (see .claude/tests/README.md).`,
+      };
+    }
+    const agg = evaluateAll(received, specs);
+    if (agg.allPassed) {
+      const skipNote =
+        agg.skipped.length > 0
+          ? ` (skipped: ${agg.skipped.join(", ")})`
+          : "";
+      const lines = agg.results
+        .map((r) => `  - ${r.name}: ${r.result.skipped ? "skipped" : "pass"} — ${r.result.detail}`)
+        .join("\n");
+      return {
+        pass: true,
+        message: () =>
+          `expected trace NOT to satisfy ${specs.length} invariant(s)${skipNote}.\n${lines}`,
+      };
+    }
+    const failureLines = agg.results
+      .filter((r) => !r.result.pass && !r.result.skipped)
+      .map((r) => `  - ${r.name}: ${r.result.detail}`)
+      .join("\n");
+    return {
+      pass: false,
+      message: () =>
+        `${agg.failed.length} invariant(s) violated:\n${failureLines}\n\nFixture: ${fixtureYamlPath}`,
+    };
+  },
+
+  /**
+   * @deprecated Since v3.1.0 (spec item 0.8): golden cassette equality is
+   * no longer a gate. Goldens are kept as debugging references; live
+   * specs gate via `satisfiesInvariants(fixtureYamlPath)`. This matcher
+   * remains for ad-hoc inspection (e.g. inside cassette-diff workflows)
+   * but every live spec should use the invariant matcher instead.
    *
    * NOTE: This is async; Vitest's expect.extend supports async matchers
    * since v1.0+. Tests use `await expect(trace).matchesGolden(path)`.
@@ -460,6 +541,8 @@ declare module "vitest" {
     ): void;
     fileWritten(pathOrRegex: string | RegExp): void;
     noPermissionDenials(): void;
+    satisfiesInvariants(fixtureYamlPath: string): Promise<void>;
+    /** @deprecated Use satisfiesInvariants. Retained for debugging only. */
     matchesGolden(goldenPath: string): Promise<void>;
   }
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type
@@ -477,6 +560,8 @@ declare module "vitest" {
     ): unknown;
     fileWritten(pathOrRegex: string | RegExp): unknown;
     noPermissionDenials(): unknown;
+    satisfiesInvariants(fixtureYamlPath: string): Promise<unknown>;
+    /** @deprecated Use satisfiesInvariants. */
     matchesGolden(goldenPath: string): Promise<unknown>;
   }
 }

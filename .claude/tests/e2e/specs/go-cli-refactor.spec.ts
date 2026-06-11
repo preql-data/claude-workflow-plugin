@@ -29,13 +29,9 @@ import { runFixture } from "../lib/runFixture.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = path.resolve(__dirname, "..", "fixtures", "go-cli-refactor");
-const GOLDEN_PATH = path.resolve(
-  __dirname,
-  "..",
-  "cassettes",
-  "golden",
-  "go-cli-refactor.jsonl",
-);
+// v3.1.0 (spec item 0.8): invariants from fixture.yaml replace
+// golden-cassette equality.
+const FIXTURE_YAML = path.join(FIXTURE_PATH, "fixture.yaml");
 
 describe("go-cli-refactor: regression coverage on unchanged caller", () => {
   it(
@@ -120,8 +116,8 @@ describe("go-cli-refactor: regression coverage on unchanged caller", () => {
       //    matches against the path regardless of changeType.)
       expect(trace).fileWritten("main.go");
 
-      // 9) Match the committed golden cassette.
-      await expect(trace).matchesGolden(GOLDEN_PATH);
+      // 9) Workflow-contract invariants from fixture.yaml (v3.1.0).
+      await expect(trace).satisfiesInvariants(FIXTURE_YAML);
     },
     1_800_000,
   );

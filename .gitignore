@@ -10,6 +10,10 @@
 # Local Claude state. The plugin's own .claude/ tree IS tracked (it ships with
 # the plugin); the .qa-tracking subdirectory is per-session ephemera.
 .claude/.qa-tracking/
+# Spec 0.3: model-select.sh writes a memoised pointer to the standing
+# Beads "Model selection log" task here. It is per-project state, not
+# part of the shipped plugin source.
+.claude/.model-select-meta-task
 
 # OS / editor noise
 .DS_Store

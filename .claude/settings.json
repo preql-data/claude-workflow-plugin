@@ -1,7 +1,9 @@
 {
   "additionalDirectories": ["../"],
+  "effortLevel": "xhigh",
   "env": {
     "MAX_THINKING_TOKENS": "64000",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max",
     "CLAUDE_LATEST_OPUS": "claude-opus-4-7"
   },
   "statusLine": {

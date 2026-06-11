@@ -7,6 +7,13 @@ session that produced them ends.
 
 ## Index
 
+- `verification-suite.md` — Phases 0/A/B/C shipping v3.1.0 through v3.4.0:
+  MCP path hotfix, binding QA-gate escalation, best-model auto-selection,
+  evidence-before-fix protocol, lessons ledger, invariant-based live testing
+  (golden-cassette retirement), rubric-grader QA loop, code-graph MCP,
+  mutation testing with LLM-judge filter. One Beads epic per phase.
+  **Status**: Active (started 2026-06-11).
+
 - `v3-upgrade.md` — the consolidated v3 plan executed across Phases 0-7
   (claude-workflow-plugin-y4a). Originally drafted as `dynamic-marshmallow`
   in `~/.claude/plans/`; mirrored here for posterity.

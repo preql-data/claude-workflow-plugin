@@ -10,6 +10,9 @@
 #   status  <task-id>                       Print one of: not-entered, entered, approved, blocked.
 #   approve <task-id> <approval-summary>    Atomic: -qa-gate-entered, -qa-pending, +qa-approved, comment.
 #   block   <task-id> <reason>              Add qa-blocked label + comment. Keeps qa-gate-entered.
+#   choose  <approve|continue|tech-debt|defer> <task-id> <note> [extra args for tech-debt]
+#                                           Spec 0.2: record a J21 decision while qa-escalated.
+#                                           Each choice records a comment + acts on labels/state.
 #
 # Output: every subcommand prints structured JSON to stdout. Errors go to stderr.
 # JSON shape (per principle #9 - free-form `observations` for LLM-side context):
@@ -139,6 +142,9 @@ truncate_changed_files_tracker() {
 # task_id (e.g., iteration-count.<task-id>), so we wipe both the legacy
 # unscoped path AND the per-task path for the task being approved. The
 # task_id is passed as $1.
+#
+# Spec 0.2: also wipe escalation artifacts (cached test result, escalation
+# comment marker) so a future cycle starts clean.
 wipe_iteration_state() {
     local tid="$1"
     rm -f "$QA_TRACKING_DIR/iteration-count" 2>/dev/null || true
@@ -146,11 +152,26 @@ wipe_iteration_state() {
         local sanitized
         sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
         rm -f "$QA_TRACKING_DIR/iteration-count.$sanitized" 2>/dev/null || true
+        rm -f "$QA_TRACKING_DIR/last-test-rc.$sanitized" 2>/dev/null || true
+        rm -f "$QA_TRACKING_DIR/last-failed-checks.$sanitized" 2>/dev/null || true
+        rm -f "$QA_TRACKING_DIR/last-runner.$sanitized" 2>/dev/null || true
+        rm -f "$QA_TRACKING_DIR/escalation-posted.$sanitized" 2>/dev/null || true
     fi
     rm -f "$QA_TRACKING_DIR/last-test-output.log" 2>/dev/null || true
     rm -f "$QA_TRACKING_DIR/last-lint-output.log" 2>/dev/null || true
     rm -f "$QA_TRACKING_DIR/last-type-output.log" 2>/dev/null || true
     rm -f "$QA_TRACKING_DIR/tech-debt-draft.md" 2>/dev/null || true
+}
+
+# Spec 0.2: best-effort label clears for escalation labels. Used by approve,
+# enter, and the choose subcommand for the "continue"/"approve" paths.
+# We intentionally swallow errors — these labels may not be present and
+# bd's remove-when-absent path is a no-op.
+remove_escalation_labels() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    remove_label "$tid" "qa-escalated" 2>/dev/null || true
+    remove_label "$tid" "qa-deferred" 2>/dev/null || true
 }
 
 emit_json() {
@@ -174,6 +195,16 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
   status  <task-id>
   approve <task-id> <approval-summary>
   block   <task-id> <reason>
+  choose  <approve|continue|tech-debt|defer> <task-id> <note> [tech-debt: severity file:line effort]
+              Record a J21 decision while qa-escalated. The note is the
+              human-readable rationale; for `tech-debt` the note becomes
+              the description and the optional trailing args are passed
+              through to .claude/scripts/tech-debt.sh add.
+              Effects:
+                approve    -> delegates to `approve` (same atomic flow)
+                continue   -> clears qa-escalated + resets iteration counter
+                tech-debt  -> tech-debt.sh add --bd-task + clears escalation
+                defer      -> sets qa-deferred (allows Stop next time)
 USAGE
 }
 
@@ -231,6 +262,22 @@ cmd_enter() {
     [ -z "$tid" ] && { usage; exit 1; }
     require_bd "enter" "$tid"
 
+    # Spec 0.2: a fresh enter is the "resumes normal gating" signal for a
+    # deferred task. Clearing the escalation labels + cached state on every
+    # enter (idempotent path included) means a re-entered task starts a
+    # clean review cycle. Doing this before the idempotent short-circuit
+    # below also handles the case where the operator re-enters an
+    # already-entered task that happens to carry qa-escalated/qa-deferred.
+    local was_escalated=0 was_deferred=0
+    has_label "$tid" "qa-escalated" && was_escalated=1
+    has_label "$tid" "qa-deferred" && was_deferred=1
+    if [ "$was_escalated" = "1" ] || [ "$was_deferred" = "1" ]; then
+        remove_escalation_labels "$tid"
+    fi
+    # Spec 0.2: also wipe the per-iteration cache + counter so the next
+    # Stop runs the full suite from scratch (resumes normal gating).
+    wipe_iteration_state "$tid"
+
     if has_label "$tid" "qa-gate-entered"; then
         # Idempotent re-enter: the label is already there, but we still
         # refresh current-task in case it drifted (e.g., a different task
@@ -238,6 +285,9 @@ cmd_enter() {
         local refreshed_obs="qa-gate-entered already set; current-task refreshed"
         if ! write_current_task "$tid"; then
             refreshed_obs="qa-gate-entered already set; WARNING current-task write failed (see sync-errors.log)"
+        fi
+        if [ "$was_escalated" = "1" ] || [ "$was_deferred" = "1" ]; then
+            refreshed_obs="$refreshed_obs; cleared prior escalation labels (escalated=$was_escalated deferred=$was_deferred) and reset iteration state"
         fi
         emit_json 1 "enter" "$tid" "entered" "$refreshed_obs"
         return 0
@@ -266,7 +316,11 @@ cmd_enter() {
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     add_comment "$tid" "QA-GATE: entered at $ts"
 
-    emit_json 1 "enter" "$tid" "entered" "qa-gate-entered label set at $ts; current-task persisted.$persist_warn"
+    local extra_obs=""
+    if [ "$was_escalated" = "1" ] || [ "$was_deferred" = "1" ]; then
+        extra_obs=" cleared prior escalation labels (escalated=$was_escalated deferred=$was_deferred) and reset iteration state."
+    fi
+    emit_json 1 "enter" "$tid" "entered" "qa-gate-entered label set at $ts; current-task persisted.$persist_warn$extra_obs"
 }
 
 cmd_status() {
@@ -364,6 +418,11 @@ cmd_approve() {
     clear_current_task
     wipe_iteration_state "$tid"
 
+    # Spec 0.2: also clear any qa-escalated / qa-deferred labels so a
+    # subsequent re-enter on this task (or a future bug regression) starts
+    # from a clean lifecycle.
+    remove_escalation_labels "$tid"
+
     # 0wk.2 fix: snapshot current git status to approved-baseline. Subsequent
     # Stop hook fires compare git status against this baseline and only
     # block if NEW uncommitted entries appear. Closes 0wk.2.
@@ -373,7 +432,7 @@ cmd_approve() {
     # means a fresh approval starts a clean tracker. Closes 0wk.2.
     truncate_changed_files_tracker
 
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -533,6 +592,114 @@ cmd_block() {
     emit_json 1 "block" "$tid" "blocked" "qa-blocked label set at $ts (qa-gate-entered preserved if present); ${memory_obs}"
 }
 
+# Spec 0.2: record a J21 decision while qa-escalated. Signature is
+# intentionally uniform across the four choices so callers don't have to
+# branch on the choice in their shell:
+#
+#   choose approve   <task-id> <note>
+#   choose continue  <task-id> <note>
+#   choose tech-debt <task-id> <description> [severity] [file:line] [effort]
+#   choose defer     <task-id> <note>
+#
+# Every choice:
+#   - emits a comment "QA-GATE CHOICE <choice> at <ts>: <note>"
+#   - drives the side effects spec'd in 0.2 (label flips, counter resets,
+#     tech-debt entry, etc.)
+#   - prints a JSON envelope to stdout via emit_json
+#
+# Keep this thin (principle 7): comments + labels are the record. Per-choice
+# bookkeeping (counter wipe, escalation clear) reuses the existing helpers
+# so behaviour stays in lockstep with approve/enter.
+cmd_choose() {
+    local choice="${1:-}"
+    local tid="${2:-}"
+    if [ -z "$choice" ] || [ -z "$tid" ]; then
+        usage
+        exit 1
+    fi
+    # Validate choice up front so a typo like `chose` doesn't silently
+    # create a comment with garbage and no side effect.
+    case "$choice" in
+        approve|continue|tech-debt|defer) ;;
+        *)
+            printf 'qa-gate.sh: unknown choose value: %s (expected approve|continue|tech-debt|defer)\n' \
+                "$choice" >&2
+            usage
+            exit 1
+            ;;
+    esac
+    shift 2 || true
+
+    # Collect the trailing args. For most choices this is just a single
+    # note; for tech-debt we additionally accept severity, file:line, effort.
+    local note="${1:-}"
+    [ -z "$note" ] && { usage; exit 1; }
+    shift || true
+    local td_severity="${1:-medium}"
+    local td_fileline="${2:-<unknown>}"
+    local td_effort="${3:-unknown}"
+
+    require_bd "choose" "$tid"
+
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    add_comment "$tid" "QA-GATE CHOICE $choice at $ts: $note"
+
+    case "$choice" in
+        approve)
+            # Option 1: accept findings. Delegate to the existing atomic
+            # approve flow so the rollback contract stays intact. The
+            # approve flow itself clears escalation labels + iteration
+            # state (see remove_escalation_labels above).
+            cmd_approve "$tid" "$note"
+            return $?
+            ;;
+        continue)
+            # Option 2: re-enter the fix loop. Clear escalation, reset
+            # iteration counter so the next Stop runs the suite from
+            # scratch. We do NOT touch qa-pending here — the loop is
+            # alive again, the cycle just starts at iteration 0.
+            remove_escalation_labels "$tid"
+            wipe_iteration_state "$tid"
+            emit_json 1 "choose" "$tid" "continue" "choose continue at $ts: escalation labels cleared, iteration counter reset"
+            ;;
+        tech-debt)
+            # Option 3: convert findings to deferred debt. Calls
+            # tech-debt.sh add --bd-task; clears escalation; resets
+            # counter. Best-effort on the tech-debt write — failure is
+            # logged but does not prevent the label/counter side effects
+            # (a stuck escalation is worse than a missing row).
+            local td_script="$PROJECT_DIR/.claude/scripts/tech-debt.sh"
+            local td_obs=""
+            if [ -x "$td_script" ]; then
+                if ! "$td_script" add "$td_severity" "$td_fileline" "$td_effort" "$note" --bd-task >/dev/null 2>&1; then
+                    td_obs="tech-debt.sh add failed (see sync-errors.log); "
+                    log_sync_error "choose tech-debt: tech-debt.sh add failed for $tid (severity=$td_severity fileline=$td_fileline)"
+                fi
+            else
+                td_obs="tech-debt.sh missing or not executable; "
+                log_sync_error "choose tech-debt: $td_script missing or not executable"
+            fi
+            remove_escalation_labels "$tid"
+            wipe_iteration_state "$tid"
+            emit_json 1 "choose" "$tid" "tech-debt" "${td_obs}choose tech-debt at $ts: tech-debt row queued + escalation cleared"
+            ;;
+        defer)
+            # Option 4: stop iterating; surface to user. Set qa-deferred
+            # so verify-before-stop allows the next Stop. Leave
+            # qa-pending in place per spec — the task stays open, just
+            # quiet, until the user acts. Counter is NOT reset here:
+            # SessionStart can show "deferred at iteration N" usefully.
+            local def_warn=""
+            if ! add_label "$tid" "qa-deferred"; then
+                def_warn=" WARNING: failed to add qa-deferred label; verify-before-stop may still block."
+                log_sync_error "choose defer: failed to add qa-deferred label on $tid"
+            fi
+            emit_json 1 "choose" "$tid" "deferred" "choose defer at $ts: qa-deferred label set; qa-pending preserved; verify-before-stop will allow next Stop.$def_warn"
+            ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 
@@ -544,6 +711,7 @@ case "$SUB" in
     status)  cmd_status "$@" ;;
     approve) cmd_approve "$@" ;;
     block)   cmd_block "$@" ;;
+    choose)  cmd_choose "$@" ;;
     ""|-h|--help|help)
         usage
         exit 1

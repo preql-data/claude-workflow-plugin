@@ -27,13 +27,9 @@ import { runFixture } from "../lib/runFixture.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = path.resolve(__dirname, "..", "fixtures", "python-django-bug");
-const GOLDEN_PATH = path.resolve(
-  __dirname,
-  "..",
-  "cassettes",
-  "golden",
-  "python-django-bug.jsonl",
-);
+// v3.1.0 (spec item 0.8): invariants from fixture.yaml replace
+// golden-cassette equality.
+const FIXTURE_YAML = path.join(FIXTURE_PATH, "fixture.yaml");
 
 describe("python-django-bug: debugger 5-step + polyglot pytest routing", () => {
   it(
@@ -108,8 +104,8 @@ describe("python-django-bug: debugger 5-step + polyglot pytest routing", () => {
       //    fails.
       expect(trace).fileWritten(/^accounts\/models\.py$/);
 
-      // 8) Match the committed golden cassette.
-      await expect(trace).matchesGolden(GOLDEN_PATH);
+      // 8) Workflow-contract invariants from fixture.yaml (v3.1.0).
+      await expect(trace).satisfiesInvariants(FIXTURE_YAML);
     },
     1_800_000,
   );

@@ -44,6 +44,23 @@ expected_label_progression:
   - qa-pending
   - qa-approved
 
+# Model-agnostic invariants (v3.1.0, spec item 0.8).
+invariants:
+  - name: stop-requires-approval
+  - name: orchestrator-no-edits
+  - name: completion-contract
+  - name: label-milestones
+    params:
+      milestones:
+        - qa-pending
+        - qa-approved
+  - name: declared-subagents-only
+    params:
+      declared:
+        - backend
+        - frontend
+        - qa
+
 notes: |
   - server/, client/, migrations/ are top-level dirs visible to the
     polyglot detector. Each domain's root has at least one source file

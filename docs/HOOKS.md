@@ -421,6 +421,48 @@ Three methods (any one succeeds):
 2. **Comment**: Task has comment containing "QA APPROVED"
 3. **File marker**: `.claude/.qa-tracking/approved` exists
 
+### Escalation State Machine (spec 0.2)
+
+The Stop hook tracks a per-task iteration counter at
+`.qa-tracking/iteration-count.<task-id>`. The counter bumps on every Stop
+fire that detects tracked changes. When the counter reaches
+`MAX_ITERATIONS` (default 3) the gate transitions into an `escalated`
+state to prevent the runaway loop captured in the bug report (iteration
+7+ still re-running the suite with no behavioral consequence).
+
+States — each row lists the trigger, label set, and Stop-hook behaviour:
+
+| State | Trigger | Labels on task | Stop hook |
+| ----- | ------- | -------------- | --------- |
+| `pending` | normal review cycle | `qa-pending` (+ `qa-gate-entered`) | Run full suite each loop; block until approved |
+| `escalated` | iteration counter reaches `MAX_ITERATIONS` | `+qa-escalated` | Skip full suite; reuse cached failure; block with "record a J21 choice" wording; post J21 options comment exactly once |
+| `deferred` | `qa-gate.sh choose defer` OR one more Stop while escalated with no recorded choice (auto-defer) | `+qa-deferred` (qa-pending preserved) | Allow Stop immediately — the single audited escape valve permitted by principle 6 |
+
+Exit transitions:
+
+- `qa-gate.sh approve` (or `choose approve`) — drops escalation/deferred,
+  wipes counter, sets `qa-approved` per the existing atomic flow.
+- `qa-gate.sh choose continue '<note>'` — clears `qa-escalated`, resets
+  iteration counter to 0; the next Stop runs the suite fresh.
+- `qa-gate.sh choose tech-debt '<description>' [severity] [file:line] [effort]`
+  — calls `tech-debt.sh add --bd-task`, clears `qa-escalated`, resets counter.
+- `qa-gate.sh enter <task-id>` — a fresh enter on a `qa-deferred` or
+  `qa-escalated` task clears both labels and wipes per-iteration cache
+  files, resuming normal gating. This is the "I'm starting a new review
+  cycle after fixing things" signal.
+
+Failure classification (spec 0.2): when tests fail, the block message
+distinguishes "Test suite failed to run (environment/runner issue)" from
+"Tests failing" so the next iteration targets the right surface. The
+heuristic is conservative — exit codes 126/127 and unambiguous patterns
+(`command not found`, `Cannot find module`, missing npm script,
+testcontainers TypeError) classify as runner-failure; everything else is
+assertion-failure.
+
+Iteration counters are per-task keyed (`iteration-count.<task-id>`), so
+switching active tasks naturally reads a different counter file — a Stop
+on task B does NOT pick up where task A left off.
+
 ---
 
 ## SessionEnd Hook
@@ -477,7 +519,7 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 
 | Script | Purpose |
 |--------|---------|
-| `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`. Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`). On `approve` writes `approved-baseline` snapshot + truncates `changed-files.txt` (closes 0wk.2). |
+| `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`, `choose` (spec 0.2). Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`, plus `qa-escalated` and `qa-deferred` after spec 0.2). On `approve` writes `approved-baseline` snapshot + truncates `changed-files.txt` (closes 0wk.2). |
 | `current-task.sh` | F3 single source of truth for the active Beads task id. Subcommands: `set`, `get`, `get-repo`. Persists task id at `.qa-tracking/current-task` plus repo fingerprint at `.qa-tracking/current-task.repo` (I8 cross-repo guard). |
 | `prevent-orchestrator-edits.sh` | PreToolUse hook blocking Write/Edit/MultiEdit when the active subagent is `orchestrator`. Emits `hookSpecificOutput.permissionDecision: deny` with a "delegate to specialist" reason. Defense in depth — the orchestrator's tool list already omits Write/Edit. |
 | `epic-gate.sh` | Epic-level QA gate (B2). Subcommands: `check`, `siblings`, `shared-files`. Returns `pass`/`defer`/`block` based on sibling status and file-intersection across in-progress tasks under the same epic. |

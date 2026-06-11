@@ -20,13 +20,9 @@ import { runFixture } from "../lib/runFixture.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = path.resolve(__dirname, "..", "fixtures", "multi-domain-signup");
-const GOLDEN_PATH = path.resolve(
-  __dirname,
-  "..",
-  "cassettes",
-  "golden",
-  "multi-domain-signup.jsonl",
-);
+// v3.1.0 (spec item 0.8): invariants from fixture.yaml replace
+// golden-cassette equality.
+const FIXTURE_YAML = path.join(FIXTURE_PATH, "fixture.yaml");
 
 describe("multi-domain-signup: epic with 3 children, B2 epic gate", () => {
   it(
@@ -109,8 +105,8 @@ describe("multi-domain-signup: epic with 3 children, B2 epic gate", () => {
       expect(sawClientEdit).toBe(true);
       expect(sawMigrationEdit).toBe(true);
 
-      // 8) Match the committed golden cassette.
-      await expect(trace).matchesGolden(GOLDEN_PATH);
+      // 8) Workflow-contract invariants from fixture.yaml (v3.1.0).
+      await expect(trace).satisfiesInvariants(FIXTURE_YAML);
     },
     1_800_000,
   );

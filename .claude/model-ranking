@@ -1,0 +1,35 @@
+# Model family ranking — spec 0.3.
+#
+# One model-family id-prefix per line, in preference order (best first). The
+# model-select.sh helper enumerates /v1/models, groups results by these
+# prefixes, picks the highest version within the highest-ranked family the
+# account has access to, and prefers the largest-context variant when the
+# listing distinguishes by max_input_tokens.
+#
+# Add a brand-new family by inserting a line above its weaker peers. The
+# unknown-newer heuristic catches a higher version inside an already-listed
+# family even when this file hasn't been touched, so the only edits this
+# file requires are net-new families (e.g. when Anthropic ships a new tier
+# above Fable).
+#
+# Comments and blank lines are ignored. Whitespace is trimmed.
+
+# Tier 1: Fable family — Claude's most capable in-cycle model (per
+# /docs/en/model-config: "the most capable model in Claude Code"). Listed
+# first so an account with Fable access always selects Fable.
+claude-fable
+
+# Tier 2: Mythos family — Fable's stablemate per the Fable launch notes.
+claude-mythos
+
+# Tier 3: Opus family — current default for the Anthropic API on Max,
+# Team Premium, Enterprise pay-as-you-go.
+claude-opus
+
+# Tier 4: Sonnet family — daily-coding default on Pro / Team Standard /
+# Enterprise subscription seats.
+claude-sonnet
+
+# Tier 5: Haiku family — fast/cheap, used here only when nothing above
+# is available to the account.
+claude-haiku

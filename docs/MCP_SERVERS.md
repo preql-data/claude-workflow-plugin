@@ -47,7 +47,35 @@ multi-label flips.
 
 ## Wiring summary
 
-`.mcp.json` (project-scoped, applies to anyone who opens the plugin's repo in Claude Code):
+The plugin ships two parallel MCP manifests. Each scope uses a different
+variable form because Claude Code expands variables differently in each.
+
+`.mcp.json` (project-scoped, applies to anyone who opens the plugin's
+repo in Claude Code) uses `${CLAUDE_PROJECT_DIR:-.}`:
+
+```json
+{
+  "mcpServers": {
+    "bd":           { "type": "stdio", "command": "node",
+                      "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/bd-mcp/bin/bd-mcp.js"] },
+    "code-context": { "type": "stdio", "command": "node",
+                      "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"] }
+  }
+}
+```
+
+The `:-.` default is required. Per the Claude Code MCP docs
+([code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)),
+`CLAUDE_PROJECT_DIR` is set in the *spawned MCP server's* environment,
+not in Claude Code's own environment — so a bare `${CLAUDE_PROJECT_DIR}`
+in a project-scoped `.mcp.json` is unresolved at substitution time and
+produces an MCP-diagnostics warning ("Missing environment variables:
+CLAUDE_PROJECT_DIR"). The `:-.` default falls back to the current working
+directory (which is the project root when Claude Code starts), which
+resolves the warning without changing semantics.
+
+`.claude-plugin/plugin.json` (the plugin manifest, applies when the plugin
+is loaded as a plugin) uses bare `${CLAUDE_PLUGIN_ROOT}`:
 
 ```json
 {
@@ -60,7 +88,12 @@ multi-label flips.
 }
 ```
 
-The same block is mirrored in `.claude-plugin/plugin.json`. The two manifests should always agree; if you change one, change the other.
+Plugin-scope manifests substitute `${CLAUDE_PLUGIN_ROOT}` (and
+`${CLAUDE_PROJECT_DIR}`) directly per the docs, so the default form is
+not required here.
+
+The two manifests should always agree on server set and tool surface; if
+you change one, change the other in the same commit.
 
 ## Forward-looking
 

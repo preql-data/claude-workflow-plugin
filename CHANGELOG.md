@@ -20,6 +20,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes. The next release entry will go here.
 
+## [3.1.0] - 2026-06-11
+
+Phase 0 of the verification-suite plan (`docs/plans/verification-suite.md`).
+Two production hotfixes (MCP loader, QA-gate escalation cap), five agent
+policy upgrades (best-model auto-selection, max effort + time budget,
+evidence-before-fix protocol, parallel-specialist worktree isolation,
+lessons ledger), and a live-test economics rework (retire golden-cassette
+equality, manual invariant-based live testing only, zero-API CI). All
+eight child tasks (`claude-workflow-plugin-e0d.1` through `e0d.8`) were
+`qa-approved` on `main` by 2026-06-11. Phases A/B/C remain pending and
+will ship as v3.2.0 / v3.3.0 / v3.4.0.
+
+### Fixed
+
+- **MCP path resolution in installed projects (0.1).** `.mcp.json` server
+  entries now use `${CLAUDE_PROJECT_DIR:-.}` default form so both `bd` and
+  `code-context` servers load in installed targets, not just the plugin's
+  own repo. Verified against the Claude Code MCP configuration docs
+  (project-scoped variables) and covered by a new L2 installer spec that
+  asserts no unresolved `${...}` refs in a rendered fresh install.
+- **QA-gate escalation cap is now binding (0.2).** Adds `qa-escalated`
+  state (J21 comment + label at cap-hit, suite re-runs skipped while
+  escalated), `qa-deferred` auto-defer escape valve on the next choiceless
+  Stop (the single audited bypass under principle 6), and runner-vs-
+  assertion failure classification so environment errors route to
+  "fix the environment" instead of looping on code. Previously a live
+  transcript showed `ESCALATION: Iteration 7 (>= 3)` re-running the suite
+  on every loop with no behavioral consequence.
+
+### Added
+
+- **Automatic best-model selection on every SessionStart (0.3).** New
+  `.claude/scripts/model-select.sh` resolves available models via the
+  free `GET /v1/models` listing, ranks by `.claude/model-ranking`
+  (family preference + unknown-newer heuristic + largest-context
+  variant), and rewrites agent `model:` fields through the shared
+  `workflow-model-apply.sh` helper. 1-hour cache; fail-open on
+  missing key or network failure. Every switch records a Beads
+  comment on a standing meta-task with the `/workflow-model` rollback
+  command.
+- **Maximum effort and high time budget (0.4).** `effortLevel: xhigh`
+  (the highest persisted value) in `settings.json`,
+  `CLAUDE_CODE_EFFORT_LEVEL=max` in the `env` block (env wins per the
+  Claude Code env-vars docs), and `effort: max` in every agent's
+  frontmatter. Shared time-budget block added to all six agent prompts
+  with principle-3 language ("Depth beats speed in every trade"). L1
+  test discovers agents via glob so future additions get covered
+  automatically.
+- **Evidence-before-fix protocol (0.5).** Merged into qa.md's J27
+  framework as 6 numbered steps (deterministic repro, failing test
+  first, root-cause statement with cited evidence, declare confidence
+  or ask, fix flips the failing test, two-bounce mandatory return to
+  evidence mode). Mirrored in `backend.md`, `frontend.md`, `devops.md`
+  with voice-appropriate tooling references. The "symptom-patching
+  chains" anti-pattern is named explicitly in all four agent files
+  and in `docs/AGENTS.md`. Bug-typed tasks only.
+- **Worktree isolation for parallel specialists (0.6).** Orchestrator
+  delegation rule: 2+ concurrent specialists every get
+  `isolation: "worktree"` on the Task call. Serial single-specialist
+  delegation unchanged. New `.worktreeinclude` at repo root covers
+  env files so worktrees are runnable. Cited against the Claude Code
+  sub-agents and worktrees docs.
+- **Lessons ledger (0.7).** New `.claude/scripts/lessons.sh add
+  '<text>' --source <task-id>` helper with normalized-text dedup;
+  prints structured JSON output. `LESSONS.md` at repo root seeded
+  with the two production lessons (worktree contamination,
+  boundary-mock fidelity sourced from a real producer spec).
+  `CLAUDE.md` conditional-loading row points the orchestrator to
+  read it before non-trivial planning. `qa.md` epic-close step now
+  emits candidate-lesson `lessons.sh add` calls instead of chat
+  prose.
+- **Invariant engine for manual live testing (0.8).** New
+  `lib/invariants.ts` over normalized traces with 4 active
+  invariants (orchestrator-no-edits, qa-approved-required,
+  milestone-subsequence, declared-subagents-only) plus 1 honestly
+  skipped (F7 completion contract, surfaced as `skipped` in matcher
+  output rather than green-washed). Every fixture's `fixture.yaml`
+  declares an `invariants:` block; `satisfiesInvariants` matcher
+  replaces `matchesGolden` across all 6 live specs. New L2
+  installer-config spec asserts no unresolved variables in
+  rendered fresh installs.
+
+### Changed
+
+- **Manual-only live testing, zero-API CI (0.8).** L4 daily drift
+  cron and per-PR live CI removed from `.github/workflows/test.yml`.
+  `l3-live` is now `workflow_dispatch`-only. `make test-live` requires
+  an explicit `FIXTURE=<name>` (or `FIXTURES="a b c"`), validates
+  `ANTHROPIC_API_KEY`, prints a per-fixture cost estimate, and gates
+  on `CONFIRM=1` for the y/N prompt. CI now consumes zero API spend
+  on every PR.
+
+### Removed
+
+- **Golden-cassette equality as a gate (0.8).** `matchesGolden` is
+  deprecated to a manual debugging reference; gating is invariant-
+  based after this release. The retained recorded cassettes seed the
+  invariant-engine self-tests. `make test-e2e` and
+  `make test-e2e-record` are deprecated aliases that exit 2 with a
+  pointer to `make test-live`.
+
 ## [3.0.0] - 2026-05-11
 
 This release is the v2 -> v3 upgrade (Phases 0-7 of the consolidated v3 plan
@@ -299,7 +400,8 @@ Initial commit (`1909ebf initial commit`). Pre-Beads experimental layout;
 not separately documented because v2 superseded it before any external
 release.
 
-[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/preql-data/claude-workflow-plugin/releases/tag/v2.0.0
 [1.0.0]: https://github.com/preql-data/claude-workflow-plugin/releases/tag/v1.0.0

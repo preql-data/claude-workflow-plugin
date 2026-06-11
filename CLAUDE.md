@@ -17,6 +17,7 @@ Use this checklist instead of front-loading every doc. Pick the row matching the
 - if you are extending the workflow with a new specialist -> read `CONTRIBUTING.md`
 - if you are looking at past releases -> read `CHANGELOG.md`
 - if you need the broader plan -> read `docs/WORKFLOW.md` and `docs/ARCHITECTURE.md`
+- if you are starting non-trivial planning (epics, multi-domain work, anything an orchestrator decomposes) -> read `LESSONS.md`
 
 ## Local test
 
@@ -94,7 +95,7 @@ These rules guide every change. Ordered by how often they trip us up.
 
 ## Architecture (one-paragraph map)
 
-The plugin is five agent prompts (`orchestrator`, `qa`, `backend`, `frontend`, `devops`) plus seven hook scripts that gate Claude's behavior. The orchestrator delegates by intent; specialists implement; QA gates with a multi-stage check (test, lint, type, security pass) before allowing the Stop hook to release. Beads stores all task state; bd-mcp surfaces it; code-context-mcp pre-loads call sites for QA's regression assessment. Settings give every agent maximum thinking budget and full Bash access. See `docs/ARCHITECTURE.md` for the full diagram.
+The plugin is five agent prompts (`orchestrator`, `qa`, `backend`, `frontend`, `devops`) plus seven hook scripts that gate Claude's behavior. The orchestrator delegates by intent; specialists implement; QA gates with a multi-stage check (test, lint, type, security pass) before allowing the Stop hook to release. Beads stores all task state; bd-mcp surfaces it; code-context-mcp pre-loads call sites for QA's regression assessment. Settings give every agent maximum thinking budget and full Bash access. `LESSONS.md` at the repo root is the institutional-memory ledger — append-only via `.claude/scripts/lessons.sh add '<lesson>' --source <task-id>`, read by the orchestrator before decomposing non-trivial work, never hand-edited. See `docs/ARCHITECTURE.md` for the full diagram.
 
 ## Beads labels
 

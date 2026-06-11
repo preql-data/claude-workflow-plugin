@@ -547,40 +547,67 @@ audience and expiry. CONFIG: prod defaults reviewed."
 
 ---
 
-## QA 5-Step Root-Cause Framework (J27)
+## QA Root-Cause Framework (J27, extended by spec 0.5)
 
-When QA finds a regression or the gate trips, the QA agent walks this
-five-step framework before proposing a fix. The framework is mandatory
-for every `qa-blocked` event — the block comment must cite the step it
-exited at, so the specialist receiving the bounce knows what evidence
-QA was working from.
+When QA finds a regression or the gate trips, the QA agent walks the
+root-cause framework below before proposing a fix. The framework is
+mandatory for every `qa-blocked` event — the block comment must cite
+the step it exited at, so the specialist receiving the bounce knows
+what evidence QA was working from.
 
-1. **Capture.** Record the failure: stack trace, reproducer command,
-   environment (OS, runtime version, branch SHA, last-passing commit if
-   known). Attach to the Beads task notes; don't paraphrase. Goal:
-   make the bug reproducible by anyone reading the task in three
-   months.
+For bug-typed tasks (`-t bug` or `bug` label), this framework runs in
+**evidence mode**: steps 1-3 produce written evidence on the Beads task
+before any fix is contemplated. The same protocol is mirrored into
+`backend.md`, `frontend.md`, and `devops.md` under "Evidence-before-fix
+protocol (bug-typed tasks)" — every implementing specialist runs the
+same gate when the task type is `bug`. This is the canonical defence
+against **symptom-patching chains**: speculative fixes stacking into
+double-digit follow-up PRs for a single issue, none of which can be
+proved to be the one that worked.
 
-2. **Reproduce.** Run the captured reproducer locally. Confirm it
-   fails. If it doesn't, the bug is intermittent — capture extra
+1. **Capture and reproduce deterministically.** Record the failure:
+   full stack trace, reproducer command, environment (OS, runtime
+   version, branch SHA, last-passing commit if known). Reduce to a
+   minimal failing case and confirm it reproduces every run. If it
+   doesn't, the bug is not yet understood — keep capturing extra
    environment context (network conditions, time of day, concurrent
-   load) until you find a deterministic trigger or escalate as flake.
+   load) until you find a deterministic trigger.
 
-3. **Isolate.** Bisect to the smallest input / smallest commit /
-   smallest module that still reproduces. The output of this step is a
-   one-paragraph "X did Y and the system did Z because W" sentence.
-   No fix yet — only the root cause.
+2. **Write the failing test first.** Encode the reproduction as a test
+   that fails for the root cause, not the surface symptom. The test is
+   what makes the bug unambiguous in code; the fix in step 5 must flip
+   exactly this test from red to green.
 
-4. **Minimal fix.** Write the smallest patch that resolves the root
-   cause from step 3. Resist the urge to refactor adjacent code; that
-   gets a separate Beads task. The minimal fix must include the test
-   that proves the bug is gone.
+3. **Attach a root-cause statement.** Write a "X did Y because W;
+   evidence: Z" sentence to the Beads task notes, with the actual
+   evidence — trace excerpt, `git bisect` result, log lines, profiler
+   output. No prose hand-wave; the statement must cite the specific
+   input, code path, or contract that flips behaviour. This is the
+   output of isolation; no fix yet.
 
-5. **Verify and prevent.** Re-run the reproducer (now passes). Run the
-   full test suite (no regressions). Add a regression test if one
-   doesn't exist. File a paired follow-up Beads task for any adjacent
-   smell uncovered during isolation — never let a near-miss go
-   undocumented.
+4. **Declare confidence.** If confidence in the root-cause statement
+   is not total, do not patch. Instrument the code, collect more logs,
+   or use `AskUserQuestion` to request logs, reproduction details, or
+   access from the user. Asking is always cheaper than a wrong fix.
+
+5. **Minimal fix that flips the failing test.** Write the smallest
+   patch that resolves the root cause from step 3. The fix must flip
+   the test from step 2 from red to green; if it doesn't, the test or
+   the fix is wrong. Resist the urge to refactor adjacent code; that
+   gets a separate Beads task.
+
+6. **Verify and prevent.** Re-run the failing test (now passes) and
+   the full suite (no regressions). Add the regression test to the
+   permanent suite. File a paired follow-up Beads task for any
+   adjacent smell uncovered during isolation — never let a near-miss
+   go undocumented.
+
+**Bounce-twice rule.** If a shipped fix bounces — the issue persists
+after merge — twice, return to evidence mode is mandatory. The next
+attempt restarts from step 1 (do not iterate on the previous patch)
+and the block comment names the prior attempts so the next reviewer
+can see the chain. Two bounces is the signal that the root-cause
+statement is wrong, not that the fix needs more polish.
 
 ---
 
@@ -637,3 +664,33 @@ The contract is enforced by convention, not schema validation —
 the QA gate doesn't reject missing fields, but the QA agent's review
 checklist asks "did the specialist return all six fields?" and that
 question being honest is part of QA approving.
+
+---
+
+## Worktree isolation for parallel specialists (spec 0.6)
+
+When the orchestrator spawns two or more specialists CONCURRENTLY —
+same message, or with overlapping work windows — every concurrently
+spawned specialist runs in its own git worktree. The mechanism is the
+`isolation: "worktree"` parameter on the `Task` tool call (per
+`code.claude.com/docs/en/sub-agents`).
+
+Serial single-specialist delegation is unchanged. The parameter is
+omitted when only one specialist is writing at a time; the cost of
+creating and tearing down a worktree is not worth paying when nothing
+is racing on the tree.
+
+`.worktreeinclude` at the repo root tells the worktree-creation
+machinery which gitignored files to copy into each fresh worktree.
+Per `code.claude.com/docs/en/worktrees`, the file uses `.gitignore`
+syntax, only matching gitignored files are copied (tracked files are
+never duplicated), and the rule applies to subagent worktrees
+automatically. Worktrees with no changes are auto-removed when the
+subagent finishes.
+
+Why this matters: same-tree parallel agents contaminate each other's
+branches. It is the first entry in `LESSONS.md` because it is the
+most common multi-agent failure mode the plugin has seen. The
+orchestrator's `Task()` call site is the single point where the
+isolation parameter can be applied without rewriting any specialist
+prompt; the rule lives there.

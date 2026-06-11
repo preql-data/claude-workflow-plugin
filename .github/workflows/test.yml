@@ -1,32 +1,34 @@
-# G8 Phase E — Multi-tier CI for the claude-workflow-plugin.
+# Multi-tier CI for the claude-workflow-plugin.
 #
-# Tier matrix (cross-ref: G8 plan, "Phase E — CI wiring"):
+# Tier matrix:
 #   - lint           — shellcheck (advisory; never blocks).
 #   - l1-unit        — bash unit tests (.claude/scripts/tests/).
 #   - l2-component   — hook-pipeline component tests (.claude/tests/component/).
 #                      Surfaces META-TEST counts as a distinct summary line so
-#                      regression-injection sensitivity is visible at a glance
-#                      (per QA's Phase D recommendation).
-#   - l3-vitest-unit — offline self-tests of the E2E harness (~55 tests).
+#                      regression-injection sensitivity is visible at a glance.
+#   - l3-vitest-unit — offline self-tests of the E2E harness (~55+ tests
+#                      including the invariant engine specs from 0.8).
 #   - manifest-validate — Zod-replica check of .claude-plugin/plugin.json.
-#   - l3-live        — full E2E suite against real Claude. Conditional on
-#                      ANTHROPIC_API_KEY secret. Posts cassette-diff +
-#                      trace-summary to the PR.
-#   - l4-drift-watch — daily cron of l3-live on main, surfaces drift.
+#   - l3-live        — full live E2E suite. MANUAL ONLY (workflow_dispatch).
+#                      Per phase 0.8, no automatic paid runs: no cron,
+#                      no PR trigger, no push trigger. Live testing is a
+#                      development-cycle activity, gated behind explicit
+#                      operator invocation.
 #
-# Permissions: contents:read (default checkout) + pull-requests:write
-# (for posting cassette-diff and trace-summary comments). Nothing
-# destructive. The l3-live job needs id-token:none — it never assumes
-# an OIDC role.
+# Per 0.8, a normal PR or push run consumes ZERO API spend. The L4 daily
+# drift watch is retired; goldens are debugging-only references.
 #
-# Notes on portability:
+# Permissions: contents:read for checkout. The live tier does not post
+# PR comments (it only runs on workflow_dispatch, where there is no PR
+# context).
+#
+# Portability:
 #   - All jobs run on ubuntu-latest. shellcheck is pre-installed on the
 #     standard runner image so the lint job just calls `make lint`.
 #   - jq is also pre-installed; bd (Beads CLI) is not — L1/L2 invoke bd
 #     only inside specs that have a `bd` shim or self-skip. We mirror
 #     the local convention of skip-with-log rather than failing.
-#   - Node 20 (LTS) for the L3 jobs. The harness's package.json caps
-#     deps at versions that work on 18+, but 20 is the latest LTS.
+#   - Node 20 (LTS) for the L3 jobs.
 #
 # BD_SHIM_ONLY=1 — set on the l1-unit and l2-component jobs. Beads has
 # no easy public installer URL we can curl in CI; rather than vendoring a
@@ -43,25 +45,17 @@ on:
     branches: [main]
   push:
     branches: [main]
-  schedule:
-    # Daily drift watch at 06:00 UTC. Cron only triggers on the default
-    # branch (main). Matches the G8 plan's "L4 daily on main" cadence.
-    - cron: "0 6 * * *"
   workflow_dispatch:
-    # Manual trigger — useful for re-running the live tier after the
-    # ANTHROPIC_API_KEY secret is rotated.
+    # Manual trigger — runs the offline tiers AND the live tier
+    # (l3-live gates itself on github.event_name == 'workflow_dispatch').
 
-# Cancel stale runs on the same PR/branch when a new push arrives. The
-# live tier is expensive; we don't want two of them racing on the same
-# PR. Push-to-main and the scheduled drift watch always run to
-# completion (concurrency group includes ref).
+# Cancel stale runs on the same PR/branch when a new push arrives.
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
-  pull-requests: write
   checks: write
 
 jobs:
@@ -105,15 +99,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # L2 — component tier. Hook-pipeline tests with crafted stdin envelopes.
-  # Captures the runner's log so the META-TEST scrape stays auditable; the
-  # log is exposed as a job artifact for cross-job consumption by l3-live.
   # ---------------------------------------------------------------------------
   l2-component:
     name: L2 — component (hook pipelines)
     runs-on: ubuntu-latest
     env:
-      # See workflow header — bd has no public CI installer; bd-dependent
-      # specs self-skip when this is set.
       BD_SHIM_ONLY: "1"
     steps:
       - uses: actions/checkout@v4
@@ -131,9 +121,9 @@ jobs:
         run: |
           # META-TESTs prove the test's own sensitivity (vs regular
           # assertions, which prove SUT behaviour). We tally them
-          # separately per QA's Phase D recommendation. The pattern
-          # matches both helper-emitted lines (assert_eq with a
-          # META-TEST name) and ad-hoc inline PASS/FAIL prints.
+          # separately. The pattern matches both helper-emitted lines
+          # (assert_eq with a META-TEST name) and ad-hoc inline
+          # PASS/FAIL prints.
           total=$(grep -cE '^\s*(PASS|FAIL):\s+.*META-TEST' component-tier.log || true)
           pass=$(grep -cE '^\s*PASS:\s+.*META-TEST' component-tier.log || true)
           fail=$(grep -cE '^\s*FAIL:\s+.*META-TEST' component-tier.log || true)
@@ -160,7 +150,8 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # L3 unit tier — ~55 offline self-tests of the e2e harness. No API key.
+  # L3 unit tier — offline self-tests of the e2e harness, including the
+  # invariant engine specs introduced in 0.8. No API key.
   # ---------------------------------------------------------------------------
   l3-vitest-unit:
     name: L3 — vitest unit (offline harness self-tests)
@@ -188,9 +179,8 @@ jobs:
       - name: Verify SDK glibc native binary present
         # Defensive: this tier doesn't invoke the SDK binary (it's
         # offline unit tests), but a missing glibc variant here is the
-        # same upstream symptom that breaks L3-live. Failing here
-        # gives an earlier, clearer signal than waiting 50min for the
-        # live tier to choke on a not-found native binary.
+        # same upstream symptom that breaks the live tier. Failing here
+        # gives an earlier, clearer signal.
         run: |
           if [ -d node_modules/@anthropic-ai/claude-agent-sdk-linux-x64 ]; then
             echo "OK: glibc native binary installed"
@@ -203,13 +193,11 @@ jobs:
       - name: Run offline unit tier
         run: npm run test:unit
       - name: Sanity-check test count
-        # The spec calls for ~55 unit tests passing. A regression that
+        # The spec calls for a meaningful unit tier (~55+ tests including
+        # the new invariant engine specs from 0.8). A regression that
         # drops the count below 50 likely means the test:unit filter
         # missed files; we fail loudly so it's caught.
         run: |
-          # Vitest's JSON reporter would give a clean count; instead we
-          # re-derive it from a second run with --reporter=json (cheap;
-          # all 55 tests run in <300ms).
           mkdir -p .tmp
           npx vitest run unit.spec --reporter=json --outputFile=.tmp/unit-results.json
           count=$(jq '[.testResults[].assertionResults[]] | length' .tmp/unit-results.json)
@@ -244,34 +232,23 @@ jobs:
         run: npx tsx lib/validate-plugin-manifest.ts
 
   # ---------------------------------------------------------------------------
-  # L3 live tier — full e2e suite against real Claude. Conditional.
+  # L3 live tier — MANUAL ONLY.
   #
-  # Gating: only runs when ANTHROPIC_API_KEY is set (secrets aren't
-  # available on forked-PR runs, where the workflow runs in a
-  # restricted permission context anyway). The job is a no-op skip,
-  # NOT a failure, when the secret is missing — fork PRs shouldn't be
-  # blocked on a tier they can't run.
+  # Per 0.8 (cross-cutting principle #9): no automatic paid runs. This
+  # job runs only when an operator manually dispatches the workflow via
+  # the GitHub UI or `gh workflow run`. It does NOT run on pull_request
+  # or push. There is no PR context, so it does not post PR comments;
+  # results land in $GITHUB_STEP_SUMMARY and as workflow artifacts.
   #
-  # After a live run, two PR-comment posts:
-  #   1. Cassette diff vs each committed golden. If any drifts, the
-  #      diff is posted so reviewers can decide whether to refresh
-  #      the cassette (consent gate per the determinism strategy).
-  #   2. Trace summary — subagent tree + hook firing + Beads label
-  #      transitions + META-TEST tally + total cost.
+  # Live runs are also invariant-asserted now (0.8): the specs no
+  # longer gate on golden-trace equality. A successful run = invariants
+  # held. Cassette refresh, if anyone wants one, is a deliberate
+  # `make cassette-diff` step on a dev machine.
   # ---------------------------------------------------------------------------
   l3-live:
-    name: L3 — live (real Claude)
+    name: L3 — live (real Claude, manual only)
     runs-on: ubuntu-latest
-    # Disabled pending resolution of 0wk.27 (golden cassette drift across
-    # CI runs). The matchesGolden normalizer is too strict for current
-    # model variability — every run produces a non-trivial diff that
-    # neither indicates a real regression nor stabilises across re-records.
-    # See Beads task claude-workflow-plugin-0wk.27 for the four pickup
-    # paths (advisory mode, looser normalizer, semantic matching, or
-    # cassette re-record). Re-enable by removing `if: false` once one
-    # of those is shipped.
-    if: false
-    continue-on-error: true
+    if: github.event_name == 'workflow_dispatch'
     needs: [l3-vitest-unit, manifest-validate]
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -279,52 +256,29 @@ jobs:
       run:
         working-directory: .claude/tests/e2e
     steps:
-      - name: Skip if no API key (forks / unconfigured repos)
-        id: gate
-        # `secrets.X` evaluates to "" when missing; we propagate that
-        # through env and consult it here. The job continues past this
-        # step only if the secret is present.
+      - name: Require API key (manual dispatch implies live intent)
         working-directory: ${{ github.workspace }}
         run: |
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "ANTHROPIC_API_KEY is not set; skipping live tier."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "L3-live was dispatched without ANTHROPIC_API_KEY set."
+            echo "Set the secret on this repo and re-dispatch."
+            exit 1
           fi
-      - if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@v4
-      - if: steps.gate.outputs.skip != 'true'
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: .claude/tests/e2e/package-lock.json
-      - if: steps.gate.outputs.skip != 'true'
-        name: Install harness dependencies
-        # See L3-vitest-unit for the rationale on --include=optional —
-        # forces the SDK's linux-x64 (glibc) native binary to install
-        # on ubuntu-latest. The previous run (25673394715) hit
-        # "Claude Code native binary not found at .../claude-agent-sdk-
-        # linux-x64-musl/claude" because the musl variant was selected
-        # but its binary couldn't run on glibc.
+      - name: Install harness dependencies
         run: npm ci --include=optional
-      - if: steps.gate.outputs.skip != 'true'
-        name: Remove musl SDK variant; verify glibc variant present
-        # Why: the SDK's native-binary lookup (see node_modules/@anthropic-ai/
-        # claude-agent-sdk/sdk.mjs, function F5) tries the musl variant
-        # FIRST on linux and short-circuits the moment require.resolve()
+      - name: Remove musl SDK variant; verify glibc variant present
+        # The SDK's native-binary lookup tries the musl variant first
+        # on linux and short-circuits the moment require.resolve()
         # succeeds — without checking the binary actually runs. On
         # ubuntu-latest (glibc), the musl tarball's `claude` file is
-        # present but its dynamic linker (/lib/ld-musl-x86_64.so.1) is
-        # not, so spawn() fails with ENOENT and the SDK reports
-        # "native binary not found".
-        #
-        # The lockfile lacks a `libc` field on the optional deps
-        # (lockfileVersion 3 + npm 10 doesn't propagate it), so
-        # `npm ci --libc=glibc` doesn't filter either. Cleanest
-        # surgical fix: physically remove the musl variant so the
-        # SDK's lookup falls through to linux-x64 (glibc).
+        # present but its dynamic linker isn't. Surgical fix: remove
+        # the musl variant so the lookup falls through to glibc.
         run: |
           musl="node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl"
           gnu="node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude"
@@ -337,204 +291,35 @@ jobs:
             ls -l "$gnu"
           else
             echo "ERROR: glibc native binary missing at $gnu"
-            echo "Installed @anthropic-ai/* packages:"
             ls node_modules/@anthropic-ai/ 2>&1 || true
             exit 1
           fi
-      - if: steps.gate.outputs.skip != 'true'
-        name: Download L2 component log (for META-TEST scrape)
-        uses: actions/download-artifact@v4
-        with:
-          name: component-tier-log
-          path: .claude/tests/e2e
-        continue-on-error: true
-      - if: steps.gate.outputs.skip != 'true'
-        name: Run full E2E suite (live)
+      - name: Run full E2E suite (live)
         run: npm run test:run
-      - if: always() && steps.gate.outputs.skip != 'true'
-        name: Diff cassettes against goldens
-        id: diff
+      - name: Summarize live results
+        if: always()
         run: |
-          # For every replay produced this run, diff against the
-          # matching golden. We use the filename prefix (everything
-          # before the first ISO timestamp segment) as the fixture
-          # identifier, then look up cassettes/golden/<fixture>.jsonl.
           set -u
-          drift=0
-          mkdir -p .tmp
-          : > .tmp/cassette-diff-summary.md
-          for replay in cassettes/replays/*.jsonl; do
-            [ -e "$replay" ] || continue
-            base=$(basename "$replay" | sed -E 's/-[0-9]{4}-[0-9]{2}-[0-9]{2}T.+\.jsonl$//')
-            golden="cassettes/golden/$base.jsonl"
-            if [ ! -f "$golden" ]; then
-              echo "No golden for $replay — skipping diff."
-              continue
+          {
+            echo "## L3 live results"
+            echo ""
+            echo "Triggered manually via workflow_dispatch. Live e2e ran"
+            echo "against real Claude; invariants are the gate (per 0.8 —"
+            echo "no golden-trace equality)."
+            echo ""
+            if [ -d cassettes/replays ]; then
+              echo "Replays produced this run:"
+              for r in cassettes/replays/*.jsonl; do
+                [ -e "$r" ] || continue
+                echo "- $(basename "$r")"
+              done
             fi
-            echo "Diffing $replay vs $golden"
-            tmp=".tmp/diff-$base.md"
-            # The CLI distinguishes 0 (match) / 1 (drift) / 2 (error).
-            # We collect drifts; errors fail the step.
-            set +e
-            npm run --silent cassette-diff -- --replay "$replay" --golden "$golden" --out "$tmp"
-            rc=$?
-            set -e
-            case "$rc" in
-              0) echo "  match" ;;
-              1)
-                echo "  drift!"
-                drift=1
-                cat "$tmp" >> .tmp/cassette-diff-summary.md
-                echo "" >> .tmp/cassette-diff-summary.md
-                ;;
-              *)
-                echo "  cassette-diff exited $rc (invocation error)"
-                exit "$rc"
-                ;;
-            esac
-          done
-          echo "drift=$drift" >> "$GITHUB_OUTPUT"
-      - if: always() && steps.gate.outputs.skip != 'true' && steps.diff.outputs.drift == '1' && github.event_name == 'pull_request'
-        name: Post cassette-diff comment on PR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        working-directory: ${{ github.workspace }}
-        run: |
-          gh pr comment "$PR_NUMBER" --body-file .claude/tests/e2e/.tmp/cassette-diff-summary.md
-      - if: always() && steps.gate.outputs.skip != 'true'
-        name: Render PR trace summary
-        run: |
-          # Per-fixture summary. Each replay gets one PR comment so
-          # reviewers can scroll through what each fixture did. The
-          # component-tier log (if downloaded above) feeds META-TEST
-          # tallies into every summary — they share the same gate
-          # health, not per-fixture.
-          set -u
-          mkdir -p .tmp
-          for replay in cassettes/replays/*.jsonl; do
-            [ -e "$replay" ] || continue
-            base=$(basename "$replay" | sed -E 's/\.jsonl$//')
-            out=".tmp/pr-summary-$base.md"
-            args=( --replay "$replay" --out "$out" )
-            if [ -f component-tier.log ]; then
-              args+=( --component-log component-tier.log )
-            fi
-            npm run --silent pr-summary -- "${args[@]}"
-          done
-      - if: always() && steps.gate.outputs.skip != 'true' && github.event_name == 'pull_request'
-        name: Post trace-summary comment(s) on PR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        working-directory: ${{ github.workspace }}
-        run: |
-          for summary in .claude/tests/e2e/.tmp/pr-summary-*.md; do
-            [ -e "$summary" ] || continue
-            gh pr comment "$PR_NUMBER" --body-file "$summary"
-          done
-      - if: always() && steps.gate.outputs.skip != 'true'
-        name: Upload replays + reports
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload replays
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: l3-live-artifacts
-          path: |
-            .claude/tests/e2e/cassettes/replays/
-            .claude/tests/e2e/.tmp/
-          retention-days: 30
-
-  # ---------------------------------------------------------------------------
-  # L4 — daily drift watch on main. Identical to l3-live but no PR
-  # context (no PR comment posts; results go to the step summary +
-  # workflow artifacts). A drift in this job is the early-warning
-  # signal that the model or plugin surface shifted under us.
-  # ---------------------------------------------------------------------------
-  l4-drift-watch:
-    name: L4 — daily drift watch (main)
-    runs-on: ubuntu-latest
-    # Disabled pending resolution of 0wk.27 (golden cassette drift across
-    # CI runs). Same root cause as l3-live above — the daily watch runs
-    # the same suite and surfaces the same false drift signal every
-    # morning. The cron schedule still fires (so re-enabling is just
-    # removing `if: false`); the job short-circuits until 0wk.27 ships.
-    if: false
-    continue-on-error: true
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    defaults:
-      run:
-        working-directory: .claude/tests/e2e
-    steps:
-      - name: Skip if no API key
-        id: gate
-        working-directory: ${{ github.workspace }}
-        run: |
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "ANTHROPIC_API_KEY is not set; drift watch can't run."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-      - if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@v4
-        with:
-          ref: main
-      - if: steps.gate.outputs.skip != 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: .claude/tests/e2e/package-lock.json
-      - if: steps.gate.outputs.skip != 'true'
-        name: Install harness dependencies
-        run: npm ci
-      - if: steps.gate.outputs.skip != 'true'
-        name: Run full E2E suite (live, drift-watch)
-        run: npm run test:run
-      - if: always() && steps.gate.outputs.skip != 'true'
-        name: Diff cassettes; surface drift in step summary
-        run: |
-          set -u
-          drift=0
-          mkdir -p .tmp
-          : > .tmp/cassette-diff-summary.md
-          for replay in cassettes/replays/*.jsonl; do
-            [ -e "$replay" ] || continue
-            base=$(basename "$replay" | sed -E 's/-[0-9]{4}-[0-9]{2}-[0-9]{2}T.+\.jsonl$//')
-            golden="cassettes/golden/$base.jsonl"
-            [ -f "$golden" ] || continue
-            tmp=".tmp/diff-$base.md"
-            set +e
-            npm run --silent cassette-diff -- --replay "$replay" --golden "$golden" --out "$tmp"
-            rc=$?
-            set -e
-            case "$rc" in
-              0) ;;  # match
-              1)
-                drift=1
-                cat "$tmp" >> .tmp/cassette-diff-summary.md
-                echo "" >> .tmp/cassette-diff-summary.md
-                ;;
-              *)
-                echo "cassette-diff exited $rc (invocation error)"
-                exit "$rc"
-                ;;
-            esac
-          done
-          if [ "$drift" -eq 1 ]; then
-            echo "# Drift detected" >> "$GITHUB_STEP_SUMMARY"
-            cat .tmp/cassette-diff-summary.md >> "$GITHUB_STEP_SUMMARY"
-            # Drift in the daily watch is a signal, not necessarily a
-            # failure — model output naturally shifts. We exit 1 so
-            # the workflow shows red on the GitHub dashboard, making
-            # the signal visible. Maintainers triage in the morning.
-            exit 1
-          fi
-      - if: always() && steps.gate.outputs.skip != 'true'
-        name: Upload drift-watch artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: l4-drift-watch-artifacts
           path: |
             .claude/tests/e2e/cassettes/replays/
             .claude/tests/e2e/.tmp/

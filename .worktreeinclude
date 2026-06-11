@@ -1,0 +1,30 @@
+# .worktreeinclude — spec 0.6 (claude-workflow-plugin-e0d.6).
+#
+# When the worktree-creation machinery (the `--worktree` flag,
+# subagent worktrees spawned via `isolation: "worktree"`, and parallel
+# sessions in the desktop app) builds a fresh worktree, it copies
+# every file matching a pattern here that is ALSO gitignored — tracked
+# files are never duplicated. Reference:
+#   https://code.claude.com/docs/en/worktrees#copy-gitignored-files-into-worktrees
+#
+# This file uses `.gitignore` syntax. Comments start with `#`.
+#
+# Goal: every concurrently spawned specialist boots into a worktree
+# that has the same secrets, env, and per-machine settings as the
+# parent checkout, so their tests and tooling actually run.
+
+# Environment files (mirrors the .gitignore patterns under "Secrets
+# and environment files"). The .env.example IS tracked so it is not
+# eligible for copying here — that is correct; we want the developer's
+# real .env files copied, not the example.
+.env
+.env.*
+*.env
+*.env.local
+
+# Per-developer Claude Code settings. .claude/settings.json is tracked
+# (it ships with the plugin); .claude/settings.local.json is the
+# user-specific override that holds local-only tweaks. The local file
+# is gitignored on most installs (the user's project .gitignore or
+# global gitignore), so it needs the explicit copy rule.
+.claude/settings.local.json

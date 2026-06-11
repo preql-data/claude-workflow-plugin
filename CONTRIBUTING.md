@@ -284,6 +284,21 @@ lives here so future contributors don't try to "fix" them.
   break downstream forks; we don't perform it without an explicit user
   request. New commits should use a project-anonymous email when
   feasible (e.g., `noreply@github.com` or a role address).
+- **S7 (no personal paths in source).** AgentLint flags seven files
+  containing `/Users/` or `/home/` patterns; all are pre-existing and
+  intentional. (1) The `_legacy_project_slug` comment in
+  `.claude/scripts/qa-gate.sh:450` documents the slug transform via a
+  fictitious `/Users/foo/Desktop/projects/bar` example — it is
+  documentation, not a personal path, and the same comment is mirrored
+  into the six G8 fixture copies of qa-gate.sh. (2) The
+  `.claude/tests/e2e/fixtures/<name>/.claude/bin/bd` shim files
+  hardcode `/Users/edk0/.local/bin/bd` as part of the G8 e2e
+  infrastructure that records cassettes from this developer machine;
+  fixtures are test infrastructure, not shipped plugin code. Both are
+  contained inside `.claude/tests/` and never reach an installed
+  target. Rewriting them is out of scope for Phase 0 (verification-
+  suite spec 0.8 retires golden-equality entirely; the fixtures stay
+  as a seed corpus for the invariant engine self-tests).
 
 Re-run AgentLint after non-trivial changes:
 

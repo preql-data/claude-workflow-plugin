@@ -41,6 +41,22 @@ expected_label_progression:
   - qa-pending
   - qa-approved
 
+# Model-agnostic invariants (v3.1.0, spec item 0.8).
+invariants:
+  - name: stop-requires-approval
+  - name: orchestrator-no-edits
+  - name: completion-contract
+  - name: label-milestones
+    params:
+      milestones:
+        - qa-pending
+        - qa-approved
+  - name: declared-subagents-only
+    params:
+      declared:
+        - backend
+        - qa
+
 notes: |
   - Single Django app (accounts) with a User model and a 3-test test
     file. The test_user_email_unique case expects an IntegrityError on

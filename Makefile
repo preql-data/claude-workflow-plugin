@@ -2,16 +2,18 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help test test-component test-all test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff lint shellcheck check install-test clean
+.PHONY: help test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff lint shellcheck check install-test clean
 
 help:
 	@echo "Targets:"
 	@echo "  test              — run the plugin's bash test suite (L1 unit)"
 	@echo "  test-component    — run hook-pipeline component tests (L2; Phase B)"
 	@echo "  test-all          — run L1 unit + L2 component tiers (offline; CI-friendly)"
-	@echo "  test-e2e          — run live SDK-driven E2E tests (L3; needs ANTHROPIC_API_KEY)"
-	@echo "  test-e2e-unit     — run only the offline self-tests of the E2E harness (~55 tests)"
-	@echo "  test-e2e-record   — same as test-e2e, captures missing golden cassettes"
+	@echo "  test-live         — run live E2E for ONE OR MORE fixtures (requires FIXTURE=name OR FIXTURES=\"a b c\";"
+	@echo "                      paid; needs ANTHROPIC_API_KEY; pass CONFIRM=1 to skip the cost prompt; RECORD=1 to refresh cassettes)"
+	@echo "  test-e2e          — DEPRECATED alias (prints pointer to test-live and exits 2)"
+	@echo "  test-e2e-record   — DEPRECATED alias (use 'test-live RECORD=1')"
+	@echo "  test-e2e-unit     — run only the offline self-tests of the E2E harness"
 	@echo "  test-e2e-install  — install npm deps for the E2E harness"
 	@echo "  manifest-validate — validate .claude-plugin/plugin.json (offline)"
 	@echo "  test-ci           — run every offline tier (L1 + L2 + L3-unit + manifest); 'what CI runs without API key'"
@@ -37,23 +39,88 @@ test-component:
 # new wiring (CI, docs) should target `test-all` for the full offline gate.
 test-all: test test-component
 
-# L3 / L4 E2E tier. Hits real Claude. Requires ANTHROPIC_API_KEY in env.
-# We surface that requirement loudly rather than fail mid-run.
-test-e2e:
-	@if [ -z "$$ANTHROPIC_API_KEY" ]; then \
-		echo "test-e2e: ANTHROPIC_API_KEY is not set. The E2E harness drives real Claude — set the key and rerun." ; \
+# L3 live tier — MANUAL ONLY. Per v3.1.0 spec item 0.8, live testing is
+# a development-cycle activity, gated behind explicit operator invocation
+# with a confirmed cost preview. The old `test-e2e` ran every fixture
+# unconditionally on every invocation; `test-live` requires FIXTURE= and
+# prints the estimated spend before starting.
+#
+# Usage:
+#   make test-live FIXTURE=node-react-auth
+#   make test-live FIXTURES="node-react-auth go-cli-refactor"
+#   make test-live FIXTURE=node-react-auth CONFIRM=1        # skip the prompt
+#   make test-live FIXTURE=node-react-auth RECORD=1         # captures missing goldens (debugging only — goldens are not a gate after 0.8)
+#
+# Per-fixture cost estimates (from the 2026-05 G8 runs; estimates only,
+# the real cost depends on the model snapshot and any retries triggered
+# by QA block-then-recover):
+#   node-react-auth        ~ $5-10  / 13-17 min
+#   go-cli-refactor        ~ $5-10  / 13-17 min
+#   monorepo-frontend-only ~ $5-10  / 13-17 min
+#   multi-domain-signup    ~ $5-10  / 13-17 min
+#   python-django-bug      ~ $5-10  / 13-17 min
+#   qa-block-recovery      ~ $5-10  / 13-17 min (often higher; recovery
+#                                                loops add iterations)
+test-live:
+	@fixtures=""; \
+	if [ -n "$$FIXTURES" ]; then \
+		fixtures="$$FIXTURES"; \
+	elif [ -n "$$FIXTURE" ]; then \
+		fixtures="$$FIXTURE"; \
+	else \
+		echo "Usage: make test-live FIXTURE=<name>" ; \
+		echo "       make test-live FIXTURES=\"<a> <b> <c>\"" ; \
+		echo "       Optional: CONFIRM=1 (skip cost prompt), RECORD=1 (refresh cassettes)" ; \
+		echo "" ; \
+		echo "Available fixtures:" ; \
+		ls .claude/tests/e2e/fixtures/ 2>/dev/null | sed 's/^/  /' ; \
 		exit 2 ; \
+	fi ; \
+	if [ -z "$$ANTHROPIC_API_KEY" ]; then \
+		echo "test-live: ANTHROPIC_API_KEY is not set. Live testing drives real Claude — set the key and rerun." ; \
+		exit 2 ; \
+	fi ; \
+	count=0 ; total_lo=0 ; total_hi=0 ; \
+	for f in $$fixtures; do \
+		count=$$((count + 1)) ; \
+		total_lo=$$((total_lo + 5)) ; \
+		total_hi=$$((total_hi + 10)) ; \
+	done ; \
+	echo "test-live: about to run $$count live fixture(s): $$fixtures" ; \
+	echo "test-live: estimated cost ~ \$$$$total_lo-\$$$$total_hi USD (Claude Opus 4.7; 2026-05 baseline)" ; \
+	if [ "$$CONFIRM" != "1" ]; then \
+		printf 'test-live: proceed? (y/N) ' ; \
+		read reply ; \
+		case "$$reply" in y|Y|yes|YES) ;; *) echo "test-live: aborted." ; exit 0 ;; esac ; \
+	fi ; \
+	pattern="" ; \
+	for f in $$fixtures; do \
+		case "$$pattern" in "") pattern="$$f.spec.ts" ;; *) pattern="$$pattern|$$f.spec.ts" ;; esac ; \
+	done ; \
+	echo "test-live: running vitest with filter -> $$pattern" ; \
+	if [ "$$RECORD" = "1" ]; then \
+		echo "test-live: RECORD=1 — RECORD_GOLDEN will be set for the run (debugging only; goldens are not a gate after 0.8)" ; \
+		cd .claude/tests/e2e && RECORD_GOLDEN=1 npx vitest run --testNamePattern '.*' specs/ -t "" 2>&1 | tee ../../../.tmp/test-live.log ; \
+	else \
+		mkdir -p .tmp ; \
+		cd .claude/tests/e2e && npx vitest run $$(for f in $$fixtures; do echo "specs/$$f.spec.ts"; done) ; \
 	fi
-	cd .claude/tests/e2e && npm test
 
-# Record golden cassettes for any spec missing one. Existing cassettes are
-# never overwritten silently — to refresh, delete the cassette and rerun.
+# test-e2e / test-e2e-record — DEPRECATED. The historical behaviour was
+# "run every live fixture on every invocation"; per 0.8 that's the
+# wrong default (it burns API spend unintentionally and disagrees with
+# the manual-only live policy). Keeping the targets as thin aliases that
+# point at test-live and exit 2 so any CI / cron / muscle-memory caller
+# fails loudly. To run live: `make test-live FIXTURE=<name>`.
+test-e2e:
+	@echo "test-e2e is deprecated. Use 'make test-live FIXTURE=<name>' (v3.1.0 / spec 0.8)." ; \
+	echo "See: make help" ; \
+	exit 2
+
 test-e2e-record:
-	@if [ -z "$$ANTHROPIC_API_KEY" ]; then \
-		echo "test-e2e-record: ANTHROPIC_API_KEY is not set." ; \
-		exit 2 ; \
-	fi
-	cd .claude/tests/e2e && RECORD_GOLDEN=1 npm run test:run
+	@echo "test-e2e-record is deprecated. Use 'make test-live FIXTURE=<name> RECORD=1' (v3.1.0 / spec 0.8)." ; \
+	echo "Note: goldens are no longer a gate after 0.8; they are kept for debugging only." ; \
+	exit 2
 
 # Install the E2E harness's npm deps. Separate target so `make test-e2e`
 # stays cheap when the deps are already installed.

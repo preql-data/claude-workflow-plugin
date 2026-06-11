@@ -1,11 +1,11 @@
 {
-  "_comment": "Phase 6 MCP server registry. Phase 6a wired bd-mcp (J29). Phase 6b activates code-context (J30, simpler search-based variant) and replaces the previous _phase6_codebase_graph_target placeholder. The placeholder block is preserved as _phase7_codebase_graph_target as a forward pointer to the optional tree-sitter upgrade described in the v3 plan; it is inert until Phase 7+.",
+  "_comment": "Phase 6 MCP server registry. Phase 6a wired bd-mcp (J29). Phase 6b activates code-context (J30, simpler search-based variant) and replaces the previous _phase6_codebase_graph_target placeholder. The placeholder block is preserved as _phase7_codebase_graph_target as a forward pointer to the optional tree-sitter upgrade described in the v3 plan; it is inert until Phase 7+. Variable form is `${CLAUDE_PROJECT_DIR:-.}` because Claude Code sets CLAUDE_PROJECT_DIR in the spawned MCP server's environment, not in its own — so a bare `${CLAUDE_PROJECT_DIR}` in this project-scoped .mcp.json is unresolved at substitution time and produces an MCP-diagnostics warning. The `:-` default form is the documented fix (https://code.claude.com/docs/en/mcp); .claude-plugin/plugin.json keeps the bare `${CLAUDE_PLUGIN_ROOT}` form because the plugin scope substitutes those variables directly.",
   "mcpServers": {
     "bd": {
       "type": "stdio",
       "command": "node",
       "args": [
-        "${CLAUDE_PROJECT_DIR}/.claude/mcp/bd-mcp/bin/bd-mcp.js"
+        "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/bd-mcp/bin/bd-mcp.js"
       ],
       "env": {}
     },
@@ -13,7 +13,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "${CLAUDE_PROJECT_DIR}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"
+        "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"
       ],
       "env": {}
     }
@@ -21,7 +21,7 @@
   "_phase7_codebase_graph_target": {
     "_note": "Forward pointer to a tree-sitter-grade replacement for code-context. See .claude/mcp/code-context-mcp/README.md 'Limits / non-goals' for migration notes. Inert.",
     "transport": "stdio",
-    "command": "${CLAUDE_PROJECT_DIR}/.claude/mcp/codebase-graph/bin/server",
+    "command": "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/codebase-graph/bin/server",
     "args": [],
     "env": {},
     "tools_to_expose": [

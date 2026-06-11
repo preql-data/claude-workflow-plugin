@@ -34,17 +34,11 @@ import { runFixture } from "../lib/runFixture.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = path.resolve(__dirname, "..", "fixtures", "node-react-auth");
-// Golden cassettes are JSONL (metadata header + normalized trace body) —
-// see goldenCompare.ts / promoteReplay.ts. The filename extension matches
-// the gitignore allowlist (`cassettes/golden/**`) and the promoter's
-// default output path.
-const GOLDEN_PATH = path.resolve(
-  __dirname,
-  "..",
-  "cassettes",
-  "golden",
-  "node-react-auth.jsonl",
-);
+// v3.1.0 (spec item 0.8): live specs gate on invariants declared in the
+// fixture's fixture.yaml, not on golden-trace equality. The golden
+// cassette path below is retained for debugging only (`make
+// cassette-diff`); the assertion runs through `satisfiesInvariants`.
+const FIXTURE_YAML = path.join(FIXTURE_PATH, "fixture.yaml");
 
 describe("happy-path: node-react-auth", () => {
   it(
@@ -107,9 +101,13 @@ describe("happy-path: node-react-auth", () => {
         ),
       ).toBe(true);
 
-      // 7) Match the committed golden cassette. Drift = either real
-      //    regression or intentional change requiring cassette refresh.
-      await expect(trace).matchesGolden(GOLDEN_PATH);
+      // 7) Workflow-contract invariants from fixture.yaml. v3.1.0
+      //    (spec item 0.8) replaces golden-cassette equality with
+      //    model-agnostic invariants — every declared invariant must
+      //    pass. See .claude/tests/e2e/lib/invariants.ts for the
+      //    available checks and .claude/tests/README.md for the
+      //    fixture.yaml schema.
+      await expect(trace).satisfiesInvariants(FIXTURE_YAML);
     },
     1_800_000,
   );

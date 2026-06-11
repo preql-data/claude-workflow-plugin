@@ -41,6 +41,26 @@ expected_label_progression:
   - qa-pending
   - qa-approved
 
+# Model-agnostic invariants (v3.1.0, spec item 0.8). Live specs assert
+# these via `await expect(trace).satisfiesInvariants(<fixture.yaml>)`.
+# See .claude/tests/e2e/lib/invariants.ts for the implementations and
+# .claude/tests/README.md for the schema.
+invariants:
+  - name: stop-requires-approval
+  - name: orchestrator-no-edits
+  - name: completion-contract
+  - name: label-milestones
+    params:
+      milestones:
+        - qa-pending
+        - qa-approved
+  - name: declared-subagents-only
+    params:
+      declared:
+        - backend
+        - frontend
+        - qa
+
 notes: |
   - The fixture is a workspace (root + client subpkg). `npm test` runs
     vitest at the root; both server and client baselines are passing.
