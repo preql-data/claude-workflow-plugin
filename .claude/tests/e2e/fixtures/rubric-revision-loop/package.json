@@ -1,0 +1,16 @@
+{
+  "_comment": "Phase A live-validation fixture (spec v3.2.0). Seeds a deliberately under-tested change so the rubric grader returns needs_revision on iteration 1; the specialist iterates and the second grader pass returns satisfied. Built now, RUN later by the orchestrator at phase closeout via `make test-live FIXTURE=rubric-revision-loop`. This package.json mirrors node-react-auth's shape so the runFixture harness's existing infrastructure picks it up without special handling.",
+  "name": "rubric-revision-loop-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "G8 Phase A live-validation fixture: deliberately under-tested helper drives the rubric needs_revision → satisfied loop.",
+  "scripts": {
+    "test": "vitest run",
+    "lint": "echo 'lint placeholder (fixture)' && exit 0",
+    "typecheck": "echo 'typecheck placeholder (fixture)' && exit 0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

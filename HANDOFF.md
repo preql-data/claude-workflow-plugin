@@ -8,18 +8,65 @@ work on this repository.
 - Plan `docs/plans/v3-upgrade.md` (Phases 0-7) is **complete**. The G8
   end-to-end test-harness epic and the post-G8 closeout pass also
   shipped. Everything landed on `main` by 2026-05-11.
+- Plan `docs/plans/verification-suite.md` Phase A shipped 2026-06-11
+  as **v3.2.0** (pending the recorded live validation —
+  `make test-live FIXTURE=rubric-revision-loop` is the single
+  remaining manual step; result will be appended to the closeout
+  notes when run). Phases B/C remain pending. Parent epic for
+  Phase A: `claude-workflow-plugin-l1r` with two child tasks
+  `l1r.1` (rubric plumbing) and `l1r.2` (grader + wiring) both
+  `qa-approved`.
 - Plan `docs/plans/verification-suite.md` Phase 0 shipped 2026-06-11
-  as **v3.1.0**. Phases A/B/C remain pending (next: Phase A —
-  rubric-grader QA loop). Parent epic for Phase 0:
+  as **v3.1.0**. Parent epic for Phase 0:
   `claude-workflow-plugin-e0d` (all eight child tasks
   `e0d.1`–`e0d.8` `qa-approved`).
 - Parent epic: `claude-workflow-plugin-y4a` (v3.0.0 upgrade) — closed.
-- Per-phase release notes: `CHANGELOG.md` `[3.1.0] - 2026-06-11`
-  (Phase 0) and `[3.0.0] - 2026-05-11` (v3 + G8 + closeout).
+- Per-phase release notes: `CHANGELOG.md` `[3.2.0] - 2026-06-11`
+  (Phase A), `[3.1.0] - 2026-06-11` (Phase 0), and
+  `[3.0.0] - 2026-05-11` (v3 + G8 + closeout).
 - Open tickets: `bd ready` (ready to start), `bd blocked` (waiting on
   dependencies), `bd list --label qa-pending` (awaiting QA). The known
   deferrals are `claude-workflow-plugin-8oz` (SHA-pin GitHub Actions,
   P2) and `claude-workflow-plugin-a7y` (gitleaks CI job, P2).
+
+## Verify conditions for "v3.2.0 (Phase A) shipped"
+
+A new session can confirm readiness without re-running everything by
+checking these assertions:
+
+- assert: `.claude-plugin/plugin.json` `version` equals `3.2.0`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `3.2.0`.
+- assert: `make test-all` exits 0 (offline gate — L1 bash unit + L2
+  component). Post-Phase-A baseline is **19 specs / 359 assertions**.
+- assert: `qa-gate.sh grade-record` with no positional arguments
+  exits non-zero with a structured-error JSON envelope. Run
+  `bash .claude/scripts/qa-gate.sh grade-record </dev/null; echo $?`
+  and confirm the final line is `1` and the trailing JSON contains
+  `"error_key":"missing_task_id"`.
+- assert: `.claude/agents/grader.md` exists and declares the
+  read-only tool set on its frontmatter line. Run
+  `grep -E '^tools: Read, Grep, Glob, LS$' .claude/agents/grader.md`
+  and confirm a single hit (no `Bash`, no `Write`, no `Edit`, no
+  `Task`).
+- assert: `.claude/rubrics/default.md` carries `version: 1` in its
+  frontmatter. Run
+  `awk '/^---/{c++;next} c==1 && /^version: 1$/ {found=1} END{exit !found}' .claude/rubrics/default.md`
+  and confirm exit 0.
+- assert: `qa-gate.sh enter` on a fresh task arms `rubric-pending`
+  alongside `qa-gate-entered`. Proxy verification (no live sandbox
+  needed): the L1 spec
+  `.claude/scripts/tests/qa-gate-grade-record.test.sh` Section 1
+  exercises this end-to-end (87/87 assertions); rerun via
+  `bash .claude/scripts/tests/qa-gate-grade-record.test.sh` and
+  confirm `Failed: 0`.
+- assert: AgentLint score holds at **87/100**. Phase A's new files
+  (grader prompt, rubrics, L1 test, L2 spec, fixture) introduce no
+  new deterministic-detector findings. Re-run via `make check`.
+
+The single manual live validation —
+`make test-live FIXTURE=rubric-revision-loop` — is recorded in the
+closeout notes when run (`bd update claude-workflow-plugin-l1r.4`).
 
 ## Verify conditions for "v3.1.0 (Phase 0) shipped"
 
@@ -72,6 +119,28 @@ checking these assertions:
 
 ## Recent decisions
 
+- 2026-06-11 (Phase A / v3.2.0): Two child tasks shipped in the
+  `claude-workflow-plugin-l1r` epic. A.1 (`l1r.1`) added the
+  rubric plumbing — `qa-gate.sh grade-record` with structured-error
+  envelopes for nine malformed-input cases, `enter` arming
+  `rubric-pending` (clearing stale `rubric-satisfied` on re-entry),
+  `approve` warning loudly when `rubric-pending` is still set
+  (principle 6: no hard gate; the override-reason rule is the
+  prompt's concern), and a versioned rubric set
+  (`.claude/rubrics/{default,backend,frontend,devops}.md` + the
+  `bugfix.md` overlay) with `.claude/rubric-config` carrying
+  `iteration_cap=3`. A.2 (`l1r.2`) added the grader subagent
+  (separate context, read-only tools, strict-JSON verdict), the
+  QA grading loop (qa.md section 6 with subsections 6a–6f),
+  docs/AGENTS.md update (5 → 6 agents), the statusline rubric
+  segment on the existing `bd show` round-trip, and the
+  `rubric-revision-loop` e2e fixture (built; live validation
+  pending — recorded in closeout notes when run). The binding
+  cap from `.claude/rubric-config` engages the 0.2 escalation
+  path on cap-hit rather than looping further.
+  `verify-before-stop.sh` is **unmodified** — the rubric is a QA
+  input, not a parallel Stop gate (principle 6). AgentLint holds
+  at 87/100 with no composition change.
 - 2026-06-11 (Phase 0 / v3.1.0): Eight items shipped in one epic
   (`claude-workflow-plugin-e0d`). Two hotfixes — `${CLAUDE_PROJECT_DIR:-.}`
   default form in `.mcp.json` (0.1) and a binding QA-gate escalation cap

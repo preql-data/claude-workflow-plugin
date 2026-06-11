@@ -111,47 +111,35 @@ rubric_state_for_labels() {
 # named in arg 2 (caller passes the variable name). We split the work
 # this way to keep qa_state_for's existing signature stable for any
 # external consumer and avoid a second `bd show` call.
-# Variant of qa_state_for that prints BOTH the QA state AND the raw
-# labels string on stdout, separated by a single tab. The caller splits
-# the result with `cut -f1` / `cut -f2`. We use this shape instead of a
-# pass-by-name variable because `qa_state_for_with_labels` is invoked via
-# command substitution — the subshell would discard any eval-into-var
-# write. The single `bd show` call is shared between the QA state read
-# and the rubric state derivation, so this stays within the cheap-only
-# budget (no extra round-trip).
-#
-# Output shape:
-#   <qa-state>\t<labels-csv>
-# where <qa-state> is one of {approved, blocked, gate-entered, pending,
-# none, bd-unavailable, no-beads} and <labels-csv> is the comma-joined
-# label list (or empty when the read failed).
 qa_state_for_with_labels() {
     local tid="$1"
-    if [ -z "$tid" ]; then
-        printf 'none\t'
-        return
-    fi
+    local labels_var="$2"
+    [ -z "$tid" ] && { eval "$labels_var=''"; printf 'none'; return; }
     if ! command -v bd >/dev/null 2>&1; then
-        printf 'bd-unavailable\t'
+        eval "$labels_var=''"
+        printf 'bd-unavailable'
         return
     fi
     if [ ! -d "$PROJECT_DIR/.beads" ]; then
-        printf 'no-beads\t'
+        eval "$labels_var=''"
+        printf 'no-beads'
         return
     fi
     local labels
     labels=$(bd show "$tid" --json 2>/dev/null \
         | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null \
         || echo "")
-    local state
+    # Store labels for the caller. eval with single-quoted printf -v style
+    # via assignment; portable across bash 3.2 (no `declare -g`).
+    # shellcheck disable=SC2086
+    eval "$labels_var=\$labels"
     case ",$labels," in
-        *,qa-approved,*)      state="approved" ;;
-        *,qa-blocked,*)       state="blocked" ;;
-        *,qa-gate-entered,*)  state="gate-entered" ;;
-        *,qa-pending,*)       state="pending" ;;
-        *)                    state="none" ;;
+        *,qa-approved,*)      printf 'approved' ;;
+        *,qa-blocked,*)       printf 'blocked' ;;
+        *,qa-gate-entered,*)  printf 'gate-entered' ;;
+        *,qa-pending,*)       printf 'pending' ;;
+        *)                    printf 'none' ;;
     esac
-    printf '%s\t%s' "$state" "$labels"
 }
 
 # ---------------------------------------------------------------------------
@@ -172,10 +160,9 @@ fi
 
 # Spec Phase A: use the labels-surfacing helper so we can derive the
 # rubric state from the SAME `bd show` response — no extra round-trip.
-# qa_state_for_with_labels prints "state\tlabels"; split on the tab.
-QA_OUT=$(qa_state_for_with_labels "$CURRENT_TASK")
-QA_STATE=$(printf '%s' "$QA_OUT" | cut -f1)
-RUBRIC_STATE_LABELS=$(printf '%s' "$QA_OUT" | cut -f2-)
+# RUBRIC_STATE_LABELS is set inside qa_state_for_with_labels.
+RUBRIC_STATE_LABELS=""
+QA_STATE=$(qa_state_for_with_labels "$CURRENT_TASK" RUBRIC_STATE_LABELS)
 RUBRIC_STATE=$(rubric_state_for_labels "$RUBRIC_STATE_LABELS")
 
 case "$QA_STATE" in

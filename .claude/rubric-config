@@ -1,0 +1,15 @@
+# .claude/rubric-config — Phase A rubric loop configuration (spec v3.2.0).
+#
+# Consumed by the QA agent's grading loop. The cap engages spec 0.2's
+# escalation when hit (qa-escalated label + binding J21 decision required
+# before iterating further).
+#
+# Format: simple key=value lines. Comments (lines starting with #) and
+# blank lines are ignored. Whitespace around the = is tolerated.
+#
+# Recognised keys:
+#   iteration_cap   maximum grading iterations before escalation engages.
+#                   Default: 3. Set higher only for tasks with explicit
+#                   spec justification — the cap is binding.
+
+iteration_cap=3

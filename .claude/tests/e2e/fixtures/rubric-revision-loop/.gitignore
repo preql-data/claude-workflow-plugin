@@ -1,0 +1,5 @@
+node_modules/
+.qa-tracking/
+.claude/.qa-tracking/
+*.log
+.DS_Store

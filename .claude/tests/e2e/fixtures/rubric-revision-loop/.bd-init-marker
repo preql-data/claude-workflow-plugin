@@ -1,0 +1,1 @@
+rubric-revision-loop fixture marker — presence of this file signals the fixture has been beads-initialized at commit time. The harness's init step is a no-op when this is present.

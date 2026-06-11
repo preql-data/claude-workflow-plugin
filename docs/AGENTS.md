@@ -6,7 +6,7 @@ Complete documentation of all AI agent prompts in the Ultimate Workflow Plugin.
 
 ## Overview
 
-The plugin includes 5 agents:
+The plugin includes 6 agents:
 
 | Agent | Role | File |
 |-------|------|------|
@@ -15,6 +15,7 @@ The plugin includes 5 agents:
 | **Frontend** | UI/UX specialist | `agents/frontend.md` |
 | **DevOps** | CI/CD specialist | `agents/devops.md` |
 | **QA** | Quality gate | `agents/qa.md` |
+| **Grader** | Separate-context rubric scorer (spawned by QA only) | `agents/grader.md` |
 
 ---
 
@@ -422,6 +423,93 @@ bd create "Bug: [description]" -t bug -p 1 \
 3. **Writes deterministic tests** - no flakiness
 4. **Approves or blocks** with specific feedback
 5. **Creates discovered bugs** linked to parent task
+
+### QA rubric-grading step (Phase A, spec v3.2.0)
+
+Before approval, QA spawns the **grader** subagent in a separate context to score the work against the versioned rubric. The rubric is composed from `.claude/rubrics/default.md` plus a domain overlay (`backend.md`, `frontend.md`, or `devops.md`) plus the `bugfix.md` overlay when the task type is `bug`. Every grader verdict — `satisfied` or `needs_revision` — is recorded via `qa-gate.sh grade-record`, which appends a Beads comment of the shape `RUBRIC <version> iteration <n>: <verdict> — <summary>` and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`.
+
+The grading packet is six items: `bd show` output, the SPEC doc, the diff scoped to `.qa-tracking/changed-files.txt`, the specialist's F7 completion contract, `LESSONS.md`, and the rubric file(s) being applied. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify packet claims against the files the diff references — never to browse the repo or propose fixes beyond `required_fixes`.
+
+Loop wiring:
+
+1. After the review modules pass, QA assembles the packet and spawns the grader with `Task(subagent_type="grader", ...)`. Iteration counter starts at 1.
+2. The grader returns a STRICT JSON verdict: `{verdict, criterion_results, required_fixes, iteration, rubric_version}`. QA pipes the JSON to `qa-gate.sh grade-record $TASK_ID` verbatim.
+3. On `needs_revision`: QA calls `qa-gate.sh block $TASK_ID` with the grader's `required_fixes` pasted into the block comment. The specialist iterates; the gate re-enters; QA re-spawns the grader with iteration + 1.
+4. On the iteration cap (default 3 — `.claude/rubric-config`'s `iteration_cap` key), QA stops the rubric loop and records a J21 choice via `qa-gate.sh choose <approve|continue|tech-debt|defer>`. Spec 0.2's escalation contract handles iterations beyond the cap; running the rubric loop alongside it would duplicate the cycle.
+5. The approval comment cites the final rubric verdict (`Rubric v1 satisfied at iteration 2 ...`). Approving WITHOUT `rubric-satisfied` requires an explicit override reason inside the approval comment text — the script-side warning surfaces the missing label, the QA prompt makes the override deliberate and auditable.
+
+Principle 6 is preserved: `verify-before-stop.sh` is unchanged. The rubric is an INPUT QA consumes before approving, not a parallel gate wired into the Stop hook.
+
+---
+
+## Grader
+
+**File**: `.claude/agents/grader.md`
+
+**Role**: Separate-context rubric grader. Scores a grading packet against the versioned rubric and returns a strict JSON verdict. Spawned deliberately by the QA agent — never auto-routed.
+
+**Tools**: `Read`, `Grep`, `Glob`, `LS` (read-only — no Bash, no Write, no Edit, no Task).
+
+**Proactivity**: explicit non-proactive ("Spawned deliberately by the QA agent — never auto-routed." in the description). Backend/frontend/devops/qa signal proactivity by including "Use proactively whenever ..." in their description; the grader's description omits that phrasing and explicitly says the opposite.
+
+### Input contract — the grading packet
+
+The QA agent assembles the packet and pastes it into the grader's prompt. Six items, in order:
+
+1. `bd show <task-id>` output — task record, labels, comments.
+2. The SPEC doc — what the orchestrator wrote via `bd_doc_write(name="spec")`.
+3. The diff — `git diff` scoped to `.qa-tracking/changed-files.txt`.
+4. The F7 completion contract — the specialist's structured return payload.
+5. `LESSONS.md` contents — institutional memory, graded as criteria-by-reference.
+6. The rubric file(s) — default + the domain overlay matching the task label + the bugfix overlay if the task type is `bug`.
+
+The grader does NOT see the specialist's conversation, the orchestrator's plan, prior QA notes, or anything else outside the packet. The separation is the mechanism — it prevents the self-critique contamination where the reviewing agent's own framing colours the verdict.
+
+### Output contract — STRICT JSON only
+
+The grader's final message is a single JSON object, nothing else:
+
+```json
+{
+  "verdict": "satisfied | needs_revision",
+  "criterion_results": [
+    {
+      "criterion": "C1",
+      "pass": true,
+      "justification": "POST /auth/login returns 200 on valid creds, 401 on invalid; both are exercised by server/auth.test.ts."
+    }
+  ],
+  "required_fixes": [
+    "server/auth.ts:42 — add an explicit timeout to the upstream identity-provider call (B4)."
+  ],
+  "iteration": 1,
+  "rubric_version": "1"
+}
+```
+
+- `verdict` is `satisfied` iff every criterion passes; any failure flips to `needs_revision`.
+- `criterion_results` has one entry per criterion in every applicable rubric (default + domain + bugfix when relevant). Each entry is `{criterion, pass, justification}`.
+- `required_fixes` is concrete and actionable — file + what to change, one per failed criterion at minimum. Empty array on `satisfied`.
+- `iteration` echoes the iteration counter QA passed in.
+- `rubric_version` is the highest version among applied rubrics, copied from the rubric frontmatter.
+
+Malformed JSON, missing required keys, or invalid enum values trip `qa-gate.sh grade-record`'s structured error envelope (`{"ok": false, "error_key": "missing_key:verdict", ...}`), which the QA agent uses to re-prompt the grader with precision.
+
+### Evaluation rules
+
+- Pass/fail per criterion + one-line justification. No numeric scores.
+- Uncertainty is a fail — the affected criterion fails with the justification naming the missing evidence.
+- The boundary-mock criterion (default C7) is an automatic `needs_revision` trigger when the diff introduces invented or circular pass-through mocks. Cite `LESSONS.md` lesson 2 in the justification.
+- Bugfix overlay criteria (G1-G4) are automatic `needs_revision` triggers when the task type is `bug` and the protocol is not followed (no failing test first, no root-cause statement with evidence, speculative language, fix doesn't flip the test).
+- Lessons in `LESSONS.md` are criteria-by-reference: work re-introducing a recorded anti-pattern fails the relevant criterion with the lesson cited.
+
+### Key behaviors
+
+1. **Operates in a separate context** — never sees the specialist's or QA's conversation, only the packet.
+2. **Reads only to verify packet claims** — no general repo browsing, no scope creep.
+3. **Returns STRICT JSON** — `qa-gate.sh grade-record` rejects anything else with a structured error.
+4. **Pass/fail per criterion + one-line justification** — no partial credit, no numeric theatre.
+5. **Spawned by QA only** — non-proactive frontmatter; never auto-routed by the intent router.
 
 ---
 

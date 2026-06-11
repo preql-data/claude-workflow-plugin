@@ -1,4 +1,4 @@
-# AgentLint report — post Phase 0 (claude-workflow-plugin-e0d)
+# AgentLint report — post Phase A (claude-workflow-plugin-l1r)
 
 > For design rationale behind deferred AgentLint findings, see
 > `docs/plans/v3-upgrade.md`, `docs/plans/verification-suite.md`, and
@@ -6,27 +6,98 @@
 
 **AgentLint version**: 1.1.13 (CLI: `agentlint check`).
 
-**Date**: 2026-06-11 (post-Phase-0 verified; v3.1.0 release closeout).
+**Date**: 2026-06-11 (post-Phase-A verified; v3.2.0 release closeout).
 
 **Command**: `agentlint check --format md --output-dir docs/` (also
 exposed as `make check`).
 
 ## Summary
 
-| Metric | Phase 7 baseline | Post G8 Phase F | Post Phase 0 |
-| ------ | ---------------- | --------------- | ------------ |
-| Overall score | 90/100 | 87/100 | **87/100** (no change) |
-| Findability | 10/10 | 10/10 | 10/10 |
-| Instructions | 10/10 | 10/10 | 10/10 |
-| Workability | 8/10 | 8/10 | 8/10 |
-| Continuity | 10/10 | 10/10 | 10/10 |
-| Safety | 8/10 | 6/10 | 6/10 (composition shifted; see below) |
-| Harness | 7/10 | 7/10 | 7/10 |
+Current run (post Phase A): **87/100** — unchanged from the
+post-Phase-0 baseline, and Phase A introduces no new
+deterministic-detector findings.
 
-The "Phase 7 baseline" column is the score immediately after Phase 7
-closed (Beads `claude-workflow-plugin-y4a.14`). "Post G8 Phase F" is
-the post-G8 score. "Post Phase 0" is the current run, after the v3.1.0
-release closeout.
+### Score history
+
+The table has been retired in favour of a list — four columns of
+dimension scores were getting cramped. Each entry below is a single
+release closeout; "Δ" notes what moved versus the prior entry.
+
+- **Phase 7 baseline — 90/100.** Findability 10, Instructions 10,
+  Workability 8, Continuity 10, Safety 8, Harness 7. Recorded
+  immediately after Phase 7 closed (Beads
+  `claude-workflow-plugin-y4a.14`).
+- **Post G8 Phase F — 87/100.** Δ versus Phase 7: Workability gained
+  W2 (CI now exists, +2), Safety lost S2 (new actions tag-pinned
+  rather than SHA-pinned, -4). Net -3.
+- **Post Phase 0 (v3.1.0) — 87/100.** Δ versus Phase F: no overall
+  change. Composition shifted inside Safety — S7 (no personal paths
+  in source) flipped from 1 → 0 as a detector-visibility artifact
+  (the G8 fixture infrastructure expanded enough that the
+  project-wide sample now reaches the legacy comment in
+  `qa-gate.sh:450` and the fixture `bd` shims). Other dimensions
+  unchanged.
+- **Post Phase A (v3.2.0) — 87/100.** Δ versus Phase 0: none.
+  Phase A's new files (`grader.md`, the rubric set, the rubric
+  config, the `qa-gate-grade-record.test.sh` L1 spec, the
+  `rubric-loop.sh` L2 spec, and the `rubric-revision-loop` e2e
+  fixture) pass every deterministic detector in the same shape as
+  the rest of the repo: no personal paths in the prompts or
+  rubrics; no emphasis-keyword spam (I1/I2 pass); no new hook
+  scripts (H1–H8 unchanged); no new workflows (S2 unchanged); no
+  new permissions (H4 unchanged). The `rubric-revision-loop`
+  fixture follows the existing fixture convention (a `bd` shim
+  hardcoding `/Users/edk0/.local/bin/bd` and a fixture-local copy
+  of `qa-gate.sh` carrying the legacy `_legacy_project_slug`
+  example comment); both fall under the documented S7 override —
+  fixtures are test infrastructure under `.claude/tests/`, never
+  shipped to operators. AgentLint reports the same count of seven
+  S7-flagged files as Phase 0; the override rationale in
+  `CONTRIBUTING.md` is unchanged.
+
+## Phase A closeout — 2026-06-11
+
+The Phase A release (v3.2.0) added 1 new agent prompt
+(`.claude/agents/grader.md`), 5 new rubric files
+(`.claude/rubrics/{default,backend,frontend,devops}.md` plus the
+`bugfix.md` overlay), 1 new config file (`.claude/rubric-config`),
+1 new L1 test (`qa-gate-grade-record.test.sh`, 87 assertions),
+1 new L2 spec (`rubric-loop.sh`, 44 assertions), 1 new e2e fixture
+(`rubric-revision-loop/`), substantive edits to two scripts
+(`qa-gate.sh` for `grade-record` + the `rubric-pending` lifecycle;
+`statusline.sh` for the rubric segment), one agent prompt
+(`qa.md` section 6 — the grading loop), one doc (`docs/AGENTS.md`
+— 5 → 6 agents), and one label-table refresh (`docs/WORKFLOW.md`).
+The overall AgentLint score holds at **87/100** with no composition
+change. Every dimension scored identically to the Post-Phase-0
+column above.
+
+The new files are structurally invisible to the deterministic
+detector for the same reasons the Phase 0 additions were: the
+grader prompt and rubrics are agent-style markdown (passing I1/I2
+emphasis density and rule-specificity); the L1/L2 specs live under
+`.claude/scripts/tests/` and `.claude/tests/component/specs/`
+(W3 already counts the directory globally, not per-file); and the
+fixture follows the existing G8 convention (no new hook scripts,
+no new workflows, no new permissions). The `rubric-revision-loop`
+fixture copies the `bd` shim and `qa-gate.sh` from the existing
+fixture template — both already flagged under S7 and already
+documented as overrides; the count of S7-flagged files holds at
+seven because the detector's reporting groups by symbol pattern,
+not per-file.
+
+No new H-tier (hook harness) findings. No new W-tier (workability)
+findings. No new I-tier (instructions) findings. The Phase 0
+deductions (W4, W11, S2, S3, S7, S9, plus the H3 partial and the
+H4 design override) carry forward unchanged.
+
+The single manual live validation
+(`make test-live FIXTURE=rubric-revision-loop`) is pending; it
+exercises the grader subagent end-to-end against the fixture's
+deliberately-under-tested prompt, and its recorded result will be
+appended to the `claude-workflow-plugin-l1r.4` closeout notes when
+run. AgentLint does not evaluate live runs, so this report's score
+is final for the v3.2.0 release.
 
 ## Phase 0 closeout — 2026-06-11
 

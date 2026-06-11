@@ -192,7 +192,178 @@ Use this whenever `verify-before-stop.sh` or any QA pass surfaces a failure, bef
 
 Only after step 6 do you decide between `qa-gate.sh approve` and `qa-gate.sh block`.
 
-## 6. Approval and blocking via the gate helper
+## 6. Rubric grading via the grader subagent (Phase A)
+
+After the review modules (sections 3-4) and the root-cause framework (section 5) come back clean, but BEFORE approving, run the rubric grader. The grader scores the work against the versioned rubric in a separate context — the QA gate's structural protection against self-critique contamination, where the same agent that wrote the review also decides whether to approve it.
+
+`verify-before-stop.sh` is **not modified** by this section. Principle 6 of the v3.2 spec is "one approval source of truth — `qa-approved` is the only signal the Stop hook trusts". The rubric is a QA INPUT, not a parallel gate. Future editors: do not wire the rubric label into `verify-before-stop.sh`; the loop lives in this prompt, not in the Stop hook.
+
+### 6a. Assemble the grading packet
+
+The grader is spawned in a separate context with no access to your conversation. Its entire input is the packet you assemble below. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify claims against the packet — they do not let it browse the repo. Build the packet completely; an incomplete packet is itself a `needs_revision` finding the grader will surface.
+
+The packet is six items:
+
+1. **`bd show <task-id>` output** — the canonical task record:
+
+   ```bash
+   bd show $TASK_ID
+   ```
+
+2. **The SPEC doc** — via `bd_doc_read`:
+
+   ```
+   bd_doc_read(task_id="$TASK_ID", name="spec")
+   ```
+
+   If a `context` or `arch` doc is referenced from the spec, include those too.
+
+3. **The diff of files listed in `.qa-tracking/changed-files.txt`**:
+
+   ```bash
+   # Read the list of changed files
+   FILES=$(sort -u "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/changed-files.txt")
+   # Diff scoped to those files (avoid global diff so unrelated working-tree
+   # state doesn't leak into the packet)
+   git -C "$CLAUDE_PROJECT_DIR" diff -- $FILES
+   # If the diff is against a base branch rather than working tree, use
+   # the appropriate refspec (e.g. main...HEAD).
+   ```
+
+4. **The specialist's F7 completion contract** — the structured JSON return payload the specialist surfaced when handing the task to QA. Read it from the Beads task notes or from the orchestrator's hand-off. All six base fields (`task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`) must be present; missing fields are a finding the grader will record.
+
+5. **`LESSONS.md` contents**:
+
+   ```bash
+   cat "$CLAUDE_PROJECT_DIR/LESSONS.md"
+   ```
+
+6. **The rubric file(s) to apply** — default plus the domain overlay matching the task label, plus the bugfix overlay when the task type is `bug`:
+
+   ```bash
+   cat "$CLAUDE_PROJECT_DIR/.claude/rubrics/default.md"
+   # Domain overlay — read the task labels and pick the matching one(s).
+   # Tasks routinely carry exactly one domain label; multi-domain epics
+   # decompose into per-domain child tasks before this step.
+   case "$DOMAIN_LABEL" in
+       backend)  cat "$CLAUDE_PROJECT_DIR/.claude/rubrics/backend.md" ;;
+       frontend) cat "$CLAUDE_PROJECT_DIR/.claude/rubrics/frontend.md" ;;
+       devops)   cat "$CLAUDE_PROJECT_DIR/.claude/rubrics/devops.md" ;;
+   esac
+   # Bugfix overlay applies whenever the task type is bug or carries the
+   # bug label.
+   if [ "$TASK_TYPE" = "bug" ] || printf '%s' "$LABELS" | grep -q '\bbug\b'; then
+       cat "$CLAUDE_PROJECT_DIR/.claude/rubrics/bugfix.md"
+   fi
+   ```
+
+Iteration counter: this starts at 1 on the first grading pass. Increment it by 1 each time you re-spawn the grader after a `needs_revision` round-trip. The counter is grader-input only — `qa-gate.sh grade-record` records whatever value the grader echoes back in its verdict.
+
+### 6b. Spawn the grader
+
+Spawn the grader via `Task` with `subagent_type: grader`, pasting the assembled packet into the prompt. The grader is read-only by frontmatter; it has no Bash/Write/Edit/Task tools, so it cannot mutate state or recursively spawn anything.
+
+```
+Task(
+    description="Grade $TASK_ID against rubric (iteration $ITERATION)",
+    subagent_type="grader",
+    prompt="""
+        ## Grading packet — iteration $ITERATION
+
+        Task type: $TASK_TYPE
+        Task labels: $LABELS
+        Applicable rubrics: default, $DOMAIN_OVERLAY[, bugfix]
+
+        ### 1. bd show output
+        $BD_SHOW_OUTPUT
+
+        ### 2. SPEC doc
+        $SPEC_DOC
+
+        ### 3. Diff
+        $DIFF
+
+        ### 4. F7 completion contract
+        $F7_CONTRACT
+
+        ### 5. LESSONS.md
+        $LESSONS_MD
+
+        ### 6. Rubric(s)
+        $RUBRICS
+
+        Return the strict-JSON verdict per your output contract.
+    """,
+)
+```
+
+The grader returns a single JSON object as its final message. Capture it verbatim; do not re-narrate it.
+
+### 6c. Record every verdict via the gate helper
+
+Every grader output is recorded — `satisfied` AND `needs_revision`. The Beads comment is the durable audit trail:
+
+```bash
+# Capture grader output and pipe to grade-record. The helper validates the
+# shape and rejects malformed JSON with a structured error envelope naming
+# the offending key, so re-prompting the grader is precise.
+printf '%s' "$GRADER_JSON" | bash .claude/scripts/qa-gate.sh grade-record $TASK_ID
+```
+
+On `satisfied`, the helper removes `rubric-pending` and adds `rubric-satisfied`. On `needs_revision`, labels are unchanged — the qa-blocked round-trip is your move (next step). If `grade-record` returns a structured JSON error (`{"ok": false, "error_key": "..."}`), the grader output was malformed; re-prompt the grader with the missing piece (the error_key tells you what to fix) rather than papering over it.
+
+### 6d. needs_revision: block the specialist and iterate
+
+When the verdict is `needs_revision`, route through the existing `qa-gate.sh block` round-trip with the grader's `required_fixes` pasted into the block comment:
+
+```bash
+# Extract required_fixes from the grader's JSON and format them for the
+# block message. The grader's required_fixes are concrete and actionable
+# by contract (file + what to change); you do not re-author them.
+REQUIRED_FIXES=$(printf '%s' "$GRADER_JSON" | jq -r '.required_fixes | join("\n- ")')
+bash .claude/scripts/qa-gate.sh block $TASK_ID "Rubric needs_revision (iteration $ITERATION):
+- $REQUIRED_FIXES
+
+Re-grade after the specialist addresses these. See the RUBRIC comment for the full criterion-by-criterion verdict."
+```
+
+After the specialist round-trip lands and the gate re-enters, increment the iteration counter and re-grade with the new diff. The packet is reassembled fresh — the specialist's latest F7 contract, the latest diff, the latest task state — because every cycle's evidence is what the grader is asked to score.
+
+### 6e. The iteration cap is binding
+
+Read `.claude/rubric-config` for the cap (default 3 — `iteration_cap=3`):
+
+```bash
+ITERATION_CAP=$(grep -E '^iteration_cap=' "$CLAUDE_PROJECT_DIR/.claude/rubric-config" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '[:space:]')
+ITERATION_CAP="${ITERATION_CAP:-3}"
+```
+
+On hitting the cap (the grader returns `needs_revision` at iteration == `ITERATION_CAP`), STOP the rubric loop. Spec 0.2's escalation path takes over — once `verify-before-stop.sh` records `qa-escalated`, you do not keep looping; you record a J21 choice via `qa-gate.sh choose <approve|continue|tech-debt|defer>` and let the binding-escalation contract handle iterations beyond the cap. The cap is binding; iterating past it duplicates the rubric loop on top of the J21 loop and burns tokens for no audit value.
+
+Concretely: when iteration == cap and the verdict is `needs_revision`, your next action is the J21 decision (`qa-gate.sh choose <option>`), not another grader spawn.
+
+### 6f. Approval must cite the verdict — override requires a reason
+
+When the rubric verdict is `satisfied` (label `rubric-satisfied` set, RUBRIC comment recorded), the approval comment cites the final rubric verdict (version + iteration):
+
+```bash
+bash .claude/scripts/qa-gate.sh approve $TASK_ID \
+    'Rubric v1 satisfied at iteration 2 (all default + backend criteria pass).
+Verified: POST /auth/login handles invalid email with clear error; session timeout redirects to login; password reset flow works end-to-end. Tests added: 5 E2E + 12 unit, all passing.'
+```
+
+Approving WITHOUT `rubric-satisfied` (e.g. via the J21 escalation `approve` choice, or any exceptional override) is permitted but requires an explicit override reason inside the approval comment. The `qa-gate.sh approve` JSON envelope already surfaces a WARNING when `rubric-pending` is still set — your comment text makes that override deliberate and auditable:
+
+```bash
+# Example override: cap escalation chose option 1 (approve as known-non-blocking).
+bash .claude/scripts/qa-gate.sh approve $TASK_ID \
+    'OVERRIDE: approving without rubric-satisfied. Reason: iteration cap reached after 3 needs_revision rounds on criterion C7 (boundary-mock fidelity); the seeded upstream API has no public OpenAPI spec to derive a fixture from, and the team accepts the documented mock per the deferral in `decisions`. J21 choice: approve. Follow-up Beads task filed: claude-workflow-plugin-XYZ.'
+```
+
+The override-reason rule is enforced by THIS prompt, not by the script (the gate is a single source of truth — adding script-side denial of approve-without-satisfied would create a parallel gate and violate principle 6). A reviewer auditing the trail reads the rubric label state, the RUBRIC comments, and the approve comment; if the approve comment lacks an override reason and the label state is not satisfied, the QA-of-QA reviewer flags it.
+
+## 7. Approval and blocking via the gate helper
 
 Use the `qa-gate.sh` helper for all gate transitions. It performs the label changes, comment, and rollback atomically — replacing the older manual `bd label add/remove` ceremonies and the legacy `.qa-tracking/approved` marker file.
 
@@ -229,7 +400,7 @@ KEY DECISIONS: Focused on user-journey coverage"
 bd update $TASK_ID --notes "BLOCKED: QA review — issues found (see comments)"
 ```
 
-## 7. Discovered bugs
+## 8. Discovered bugs
 
 When you find bugs during review that are out of scope for the current task:
 
@@ -240,7 +411,7 @@ bd create "Bug: [description]" -t bug -p 1 \
     -l bug,qa-pending
 ```
 
-## 8. Lessons at epic close (spec 0.7)
+## 9. Lessons at epic close (spec 0.7)
 
 When the last child task of an epic clears the gate — or whenever a review surfaces a takeaway worth carrying across sessions — propose candidate lessons as concrete `lessons.sh add` calls in your completion report, not as chat-text prose. The ledger at `LESSONS.md` (helper at `.claude/scripts/lessons.sh`) is the durable channel; chat-text vanishes with the session. The orchestrator reads `LESSONS.md` before decomposing new work, and the grader (Phase A) receives it in the grading packet, so anything written there compounds.
 
@@ -256,7 +427,7 @@ bash .claude/scripts/lessons.sh add \
 
 The helper dedup-merges by normalized text, so re-proposing a lesson the ledger already has just appends the new source — safe to over-propose.
 
-## 9. Completion contract
+## 10. Completion contract
 
 When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical six base fields shared with `backend.md` and `frontend.md`, plus a documented QA-specific superset on top. The base six must keep their canonical names and ordering; QA-specific fields are additive, not replacements.
 

@@ -137,10 +137,16 @@ assert_eq "statusline: qa-pending" "[$TASK] qa: pending • 2 files changed" "$O
 # Covers the gate-entered semantic state: a task has been handed to QA but
 # not yet approved/blocked. The changed-files tracker still reflects the
 # 2 unique files staged from 1.2 — gate-entered does NOT truncate.
+#
+# Spec Phase A (rubric-grader): qa-gate.sh enter ALSO adds rubric-pending
+# alongside qa-gate-entered (spec v3.2.0). statusline.sh surfaces the
+# rubric state on the SAME `bd show` call (no extra round-trip), so the
+# expected output here includes the "rubric: pending" segment.
 bash "$FIXTURE/.claude/scripts/qa-gate.sh" enter "$TASK" >/dev/null 2>&1
 bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: gate-entered" "[$TASK] qa: gate-entered • 2 files changed" "$OUT"
+assert_eq "statusline: gate-entered (rubric-pending also set per Phase A)" \
+    "[$TASK] qa: gate-entered • rubric: pending • 2 files changed" "$OUT"
 
 # 1.6 Task approved — verify the semantic transition across approve.
 #
@@ -153,10 +159,13 @@ assert_eq "statusline: gate-entered" "[$TASK] qa: gate-entered • 2 files chang
 # so the post-edit tracker is correctly empty in the approved state. The
 # test now asserts the transition rather than the (stale) pre-truncate count.
 
-# Pre-approve check: gate-entered, 2 files still in tracker.
+# Pre-approve check: gate-entered, 2 files still in tracker. Spec Phase A
+# adds the rubric: pending segment to the statusline output once the
+# gate is entered (qa-gate.sh enter sets rubric-pending alongside
+# qa-gate-entered).
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: pre-approve (gate-entered, 2 files)" \
-    "[$TASK] qa: gate-entered • 2 files changed" "$OUT"
+assert_eq "statusline: pre-approve (gate-entered, rubric-pending, 2 files)" \
+    "[$TASK] qa: gate-entered • rubric: pending • 2 files changed" "$OUT"
 
 # Approve clears current-task and truncates changed-files.txt as side effects,
 # so we re-set the task before reading statusline.

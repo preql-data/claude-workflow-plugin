@@ -1,0 +1,130 @@
+# rubric-revision-loop — Phase A live-validation fixture (spec v3.2.0).
+#
+# Seeds a deliberately under-tested change so the rubric grader returns
+# `needs_revision` on iteration 1 (the default rubric's C2 — "tests added
+# exercise user behavior" — fails because the prompt explicitly omits
+# tests for the new helper). The specialist iterates, adds a test, and
+# the second grading pass returns `satisfied`. The rubric labels move
+# `rubric-pending` → `rubric-satisfied` and QA approves the work citing
+# the rubric verdict.
+#
+# This fixture is BUILT NOW but RUN LATER. The orchestrator triggers it
+# at phase closeout via `make test-live FIXTURE=rubric-revision-loop`
+# per spec Phase A's "dev-cycle live validation (manual, once, during
+# this phase)" rule. CI never invokes it; this fixture is not in any
+# scheduled job.
+#
+# Expected flow:
+#   1. Orchestrator analyses the prompt, opens a Beads task with the
+#      `backend` label (validate.js is JS module code), writes a SPEC
+#      doc, and delegates to @backend.
+#   2. @backend reads the SPEC, adds the email-validation helper to
+#      src/validate.js per the prompt — and, per the prompt's
+#      instruction, deliberately omits tests for the new helper.
+#   3. QA picks up the qa-pending task, runs the review modules + J27
+#      framework, then assembles the rubric grading packet and spawns
+#      the grader subagent.
+#   4. Grader returns iteration 1 = needs_revision (C2 fails: no tests
+#      added for the new validateEmail helper). `qa-gate.sh grade-record`
+#      records the comment; QA calls `qa-gate.sh block` with the
+#      grader's required_fixes pasted in.
+#   5. @backend round-trips, adds tests for validateEmail.
+#   6. QA re-enters the gate (rubric-pending refreshed), re-spawns the
+#      grader with iteration counter = 2 and the new diff in the packet.
+#   7. Grader returns iteration 2 = satisfied; `qa-gate.sh grade-record`
+#      flips rubric-pending → rubric-satisfied.
+#   8. QA approves the task with the verdict cited in the approval
+#      comment.
+#
+# Spec assertions: satisfiesInvariants from fixture.yaml + the standard
+# trace shape (subagent delegations, hooks firing, files written, Beads
+# task milestones). The label-milestones invariant carries the rubric
+# transition `rubric-pending` → `rubric-satisfied` plus the universal
+# `qa-pending` → `qa-approved`. declared-subagents-only declares
+# backend, qa, AND grader (the spec spawns the grader by design).
+
+name: rubric-revision-loop
+description: |
+  Tiny JS module workspace. The prompt asks Claude to add an
+  email-validation helper to src/validate.js, deliberately framed so
+  the specialist omits tests on the first pass. The default rubric's
+  C2 criterion fails on iteration 1, exercising the full
+  needs_revision → satisfied loop.
+
+prompt: |
+  Add an email-validation helper named validateEmail(email) to
+  src/validate.js. It should accept a string and return true if the
+  string is a syntactically valid email address (basic local@domain
+  with a TLD), false otherwise.
+
+  Note: do not add tests unless review demands them. The existing test
+  file is enough for now.
+
+expected_subagents:
+  - backend
+  - qa
+  - grader
+
+expected_hooks:
+  - SessionStart
+  - UserPromptSubmit
+  - SubagentStart
+  - PreToolUse
+  - PostToolUse
+  - Stop
+  - SessionEnd
+
+# Universal label sequence + Phase A rubric transitions. The
+# label-milestones invariant treats this as a subsequence (intermediate
+# steps allowed); both rubric-pending and rubric-satisfied appear in
+# this order before qa-approved.
+expected_label_progression:
+  - qa-pending
+  - rubric-pending
+  - rubric-satisfied
+  - qa-approved
+
+# Model-agnostic invariants (v3.1.0, spec item 0.8). Live specs assert
+# these via `await expect(trace).satisfiesInvariants(<fixture.yaml>)`.
+# See .claude/tests/e2e/lib/invariants.ts for implementations and
+# .claude/tests/README.md for the schema. The rubric-revision-loop
+# fixture is what exercises the rubric labels in a live invariant sweep.
+invariants:
+  - name: stop-requires-approval
+  - name: orchestrator-no-edits
+  - name: completion-contract
+  - name: label-milestones
+    params:
+      # Ordered milestones; subsequence semantics (extra intermediate
+      # labels allowed, per spec 0.8). rubric-pending appears once
+      # qa-gate.sh enter runs; rubric-satisfied appears after the
+      # second grading pass; qa-approved is the universal terminal.
+      milestones:
+        - qa-pending
+        - rubric-pending
+        - rubric-satisfied
+        - qa-approved
+  - name: declared-subagents-only
+    params:
+      # The grader IS a declared specialist here — the QA agent
+      # deliberately spawns it during its grading step. Any other
+      # subagent appearing in the trace would be a workflow violation.
+      declared:
+        - backend
+        - qa
+        - grader
+
+notes: |
+  - This fixture is BUILT NOW, RUN LATER. Spec Phase A calls for one
+    manual live run during the development cycle; CI must not invoke
+    it on its own. `make test-live FIXTURE=rubric-revision-loop`
+    prints the per-fixture cost estimate and requires CONFIRM=1 or an
+    interactive yes.
+  - src/validate.js + src/validate.test.js are seeded with a
+    deliberately small surface area (normalize + its tests). The
+    prompt's "do not add tests unless review demands them" is the
+    forcing function for the C2 failure.
+  - .beads is NOT pre-initialized — the harness's
+    ensureFixtureGitInit + the runFixture stash/restore pattern
+    handle the .git side, and `bd init` runs implicitly as part of
+    the agent's session-start.

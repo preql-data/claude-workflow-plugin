@@ -20,6 +20,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes. The next release entry will go here.
 
+## [3.2.0] - 2026-06-11
+
+Phase A of the verification-suite plan (`docs/plans/verification-suite.md`):
+the rubric-grader QA loop. Adds a separate-context `grader` subagent, a
+versioned rubric set (default + backend/frontend/devops domain overlays
++ bugfix overlay), `qa-gate.sh grade-record` lifecycle with
+`rubric-pending`/`rubric-satisfied` labels, the QA grading loop with a
+binding iteration cap that engages the 0.2 escalation path, and a
+statusline rubric segment. Both Phase A child tasks
+(`claude-workflow-plugin-l1r.1` plumbing, `l1r.2` grader + wiring) were
+`qa-approved` on `main` by 2026-06-11. The single live validation
+(`make test-live FIXTURE=rubric-revision-loop`) is pending; the
+recorded result will be appended to the closeout notes when run.
+Phases B/C remain pending and will ship as v3.3.0 / v3.4.0.
+
+### Added
+
+- **Grader subagent (A.2).** New `.claude/agents/grader.md` — read-only
+  tools (`Read, Grep, Glob, LS`), non-proactive (spawned deliberately by
+  the QA agent), carrying the shared `effort: max` + time-budget block.
+  Strict-JSON output contract (`verdict`, `criterion_results`,
+  `required_fixes`, `iteration`, `rubric_version`); separate context
+  prevents self-critique contamination.
+- **Versioned rubric set (A.1).** `.claude/rubrics/default.md` (v1,
+  C1–C7: SPEC fidelity, user-behavior tests, F7 with substantive
+  `llm_observations`, no unrelated scope, J26 modules addressed, docs
+  updated, boundary-mock fidelity citing `LESSONS.md` lesson 2);
+  `backend.md` / `frontend.md` / `devops.md` (each extends default
+  with four domain criteria); `bugfix.md` overlay (applies_to: bug,
+  G1–G4 enforcing spec 0.5 evidence-before-fix protocol).
+- **`qa-gate.sh grade-record` (A.1).** New subcommand that reads a
+  strict-JSON verdict from `--file <path>` or stdin, validates the
+  shape (rejecting malformed input with a structured `error_key`
+  envelope), appends a `RUBRIC <version> iteration <n>: <verdict>`
+  Beads comment, and on `satisfied` flips `rubric-pending` →
+  `rubric-satisfied`. On `needs_revision` labels are unchanged — the
+  `qa-blocked` round-trip is the QA agent's move per principle 7.
+- **QA grading loop with binding cap (A.2).** New section 6 in
+  `qa.md` (subsections 6a–6f: packet assembly → spawn grader →
+  record → needs_revision round-trip → cap → override-reason rule).
+  Cap reads from `.claude/rubric-config` (`iteration_cap=3` default);
+  hitting the cap engages the 0.2 escalation path
+  (`qa-escalated` + J21 decision) rather than looping further.
+  Mirrored into `docs/AGENTS.md` (5 → 6 agents).
+- **Statusline rubric segment (A.2).** `.claude/scripts/statusline.sh`
+  now emits `qa: <state> • rubric: <state> • N files changed` when a
+  rubric label is present, using the existing `bd show` round-trip
+  (no new fetch). Suppresses the rubric segment when no rubric label
+  is set, to keep the line short.
+- **`rubric-revision-loop` live fixture (A.2).** Full e2e fixture
+  under `.claude/tests/e2e/fixtures/rubric-revision-loop/` with a
+  prompt that deliberately under-tests its change, forcing C2 to
+  fail on iteration 1 so the loop exercises the needs_revision
+  → re-grade → satisfied path. Live validation pending; recorded in
+  closeout notes when run via `make test-live FIXTURE=rubric-revision-loop`.
+
+### Changed
+
+- **`qa-gate.sh enter` arms `rubric-pending` (A.1).** Fresh and
+  idempotent paths both set `rubric-pending` alongside
+  `qa-gate-entered`; re-entry clears any stale `rubric-satisfied`
+  from a prior cycle. `cmd_status` now reports
+  `rubric=<pending|satisfied|none>` in `observations`.
+- **`qa-gate.sh approve` warns on un-graded approvals (A.1).** Per
+  principle 6 the approve path does NOT hard-gate on
+  `rubric-satisfied`; it warns loudly in `observations` when
+  `rubric-pending` is still set, and the QA agent's prompt (6f)
+  enforces the explicit override-reason rule. Approve drops
+  `rubric-pending` (cycle ends) and preserves `rubric-satisfied`
+  as the audit trail.
+
 ## [3.1.0] - 2026-06-11
 
 Phase 0 of the verification-suite plan (`docs/plans/verification-suite.md`).
@@ -400,7 +471,8 @@ Initial commit (`1909ebf initial commit`). Pre-Beads experimental layout;
 not separately documented because v2 superseded it before any external
 release.
 
-[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/preql-data/claude-workflow-plugin/releases/tag/v2.0.0
