@@ -45,6 +45,7 @@ import path from "node:path";
 import {
   snapshotFixture,
   restoreFixture,
+  selfHealOnEntry,
 } from "../lib/runFixture.js";
 
 // Build a fresh git sandbox with a fixture.yaml + a tracked source file
@@ -178,6 +179,96 @@ describe("runFixture.restoreFixture: harness-metadata preservation", () => {
       // override has the right input.
       expect(snap.harnessMetadata).toBeDefined();
       expect(snap.harnessMetadata["fixture.yaml"]).toBe(operatorYaml);
+    } finally {
+      sandbox.cleanup();
+    }
+  });
+
+  it("Run-3 regression: uncommitted fixture.yaml SURVIVES the dirty-on-entry self-heal that precedes snapshotFixture (claude-workflow-plugin-366.8)", () => {
+    // Run 3 of Phase B (node-react-auth, 2026-06-12T00-50-56-312Z) ended
+    // with fixture.yaml -28 lines vs outer HEAD on disk, and the live
+    // spec failed with "no invariants declared in fixture.yaml". Forensic
+    // chain:
+    //
+    //   1. Outer repo committed an invariants block to fixture.yaml at
+    //      256e0c1 (v3.3.0). The FIXTURE's nested .git (a separate repo
+    //      created by fixtureInit.ensureFixtureGitInit) was last committed
+    //      before that, so the outer-committed bytes look UNCOMMITTED to
+    //      the inner git.
+    //   2. On every fresh runFixture invocation the inner repo therefore
+    //      shows `git status --porcelain` dirty (the operator-authored
+    //      invariants edit is uncommitted relative to nested HEAD).
+    //   3. The dirty-on-entry self-heal at runFixture.ts:811-818 runs
+    //      `git reset --hard HEAD && git clean -fd -e node_modules`
+    //      BEFORE snapshotFixture (line 838) calls snapshotHarnessMetadata.
+    //   4. Net: snapshotHarnessMetadata captures the post-reset (no-
+    //      invariants) bytes, and the end-of-run restoreHarnessMetadata
+    //      writes those wiped bytes back. The operator's edit is
+    //      structurally unrecoverable through this code path.
+    //
+    // This test pins the contract: a dirty-on-entry fixture must come
+    // out of the entry-self-heal with HARNESS_METADATA_FILES preserved,
+    // even though tracked-but-uncommitted source files (src.js below)
+    // get reverted to HEAD as designed.
+    const committedYaml = `name: regression-fixture\nprompt: test\n`;
+    // Operator's intended edit — committed at the OUTER plugin repo but
+    // not at the inner fixture repo (the run-3 production shape).
+    const operatorYaml = `name: regression-fixture\nprompt: test\ninvariants:\n  - name: stop-requires-approval\n  - name: orchestrator-no-edits\n`;
+
+    const sandbox = makeFixtureSandbox("run3-dirty-entry", committedYaml);
+    try {
+      // Simulate the prior crash leftover: an untracked artifact AND an
+      // uncommitted edit to fixture.yaml. This is the exact shape run 3
+      // had on entry.
+      writeFileSync(path.join(sandbox.dir, "fixture.yaml"), operatorYaml);
+      writeFileSync(
+        path.join(sandbox.dir, "crash-leftover.txt"),
+        "// stray artifact from a SIGKILL'd prior run",
+      );
+      // Also simulate an agent-style tracked-file mutation.
+      writeFileSync(
+        path.join(sandbox.dir, "src.js"),
+        "// agent-mutated content from prior crashed run\n",
+      );
+
+      // selfHealOnEntry is the structural extraction of the dirty-on-entry
+      // recovery from runFixture.ts. It MUST preserve harness-metadata
+      // files while still wiping crash leftovers + reverting tracked
+      // source files. This is the contract the run-3 regression broke.
+      selfHealOnEntry(sandbox.dir);
+
+      // fixture.yaml — operator's intent MUST survive the self-heal.
+      const yamlAfterHeal = readFileSync(
+        path.join(sandbox.dir, "fixture.yaml"),
+        "utf8",
+      );
+      expect(yamlAfterHeal).toBe(operatorYaml);
+
+      // Crash leftover MUST be cleaned.
+      expect(existsSync(path.join(sandbox.dir, "crash-leftover.txt"))).toBe(false);
+
+      // Tracked source file MUST be reverted to HEAD (existing self-heal
+      // contract, unchanged).
+      const srcAfterHeal = readFileSync(path.join(sandbox.dir, "src.js"), "utf8");
+      expect(srcAfterHeal).toBe("// canonical pre-run content\n");
+
+      // End-to-end follow-through: snapshotFixture then restoreFixture
+      // must round-trip the operator's bytes correctly. This is the
+      // user-visible contract — what the live spec's satisfiesInvariants
+      // sees at end-of-run.
+      const snap = snapshotFixture(sandbox.dir);
+      // The agent under test "writes" to the tracked file mid-run.
+      writeFileSync(
+        path.join(sandbox.dir, "src.js"),
+        "// in-run agent edit\n",
+      );
+      restoreFixture(sandbox.dir, snap);
+
+      const yamlAtEnd = readFileSync(
+        path.join(sandbox.dir, "fixture.yaml"),
+        "utf8",
+      );
+      expect(yamlAtEnd).toBe(operatorYaml);
     } finally {
       sandbox.cleanup();
     }

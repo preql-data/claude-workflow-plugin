@@ -59,6 +59,14 @@ remains pending and will ship as v3.4.0.
   changed symbol during a regression pass; declared on the
   `node-react-auth` fixture's `fixture.yaml`. Composes with the
   existing four active invariants.
+- **`agent-mcp-tools-parity.test.sh` L1 test (366.6).** New L1
+  parity test asserts every non-exempt agent file with a `tools:`
+  frontmatter line enumerates each `mcp__*` tool its prompt body
+  references. Carries four META-TESTs (gap trips checker;
+  server-grant passes; exempt short-circuit; no-tools-line
+  inherits). `grader.md` is exempt-by-design (read-only tools,
+  no MCP body references); the exemption is encoded in
+  `EXEMPT_AGENTS` with a justification.
 - **L2 installer assertions for the new server (B.2).** Five new
   assertions in `.claude/tests/component/specs/installer-mcp-config.sh`:
   `code-graph` args reference the launcher path and use the
@@ -128,14 +136,58 @@ detail is in `docs/MCP_SERVERS.md`.
 
 ### Fixed
 
-- **`docs/MCP_SERVERS.md` fabricated example removed (B.1 QA
-  follow-up).** The "byj" tool-output example that had no
-  corresponding tool was replaced with a real `code_search` output
-  shape during the doc rewrite.
+- **`docs/MCP_SERVERS.md` fabricated example corrected (B.1 QA
+  follow-up, `byj`).** The "Concrete example" paragraph cited a
+  non-existent fixture symbol (`auth-handler`) and a non-existent
+  invariant name. The fix implemented the real
+  `qa-queried-impact-of` invariant (declared on `node-react-auth`'s
+  `fixture.yaml`) and rewrote the example around the real
+  `createApp` symbol (the Express app factory in
+  `server/index.js`).
 - **Stale fixture `SKILL.md` references swept (B.2).** Every
   fixture under `.claude/skills/workflow-engine/SKILL.md` and the
   seven fixture variants were rewritten to reference `code-graph`
   in their MCP server table row.
+- **`make test-live FIXTURE=<fixture>` spec resolution (366.4).**
+  The recipe assumed 1:1 fixture-to-spec naming and failed with
+  "No test files found" for `FIXTURE=node-react-auth` (the lone
+  scenario-named spec, `happy-path.spec.ts`). New
+  `.claude/scripts/resolve-fixture-spec.sh` scans each spec's
+  `FIXTURE_PATH` constant for the requested fixture; the Makefile
+  resolves before the cost prompt, prints the resolved spec(s),
+  and unknown fixtures now fail fast with a listing of available
+  fixtures.
+- **Harness Beads capture #2 (366.5).** `bd 0.47.1`'s
+  `sync --flush-only` short-circuits with "auto-import skipped,
+  JSONL unchanged (hash match)" when `issues.jsonl` is absent and
+  `sync_base.jsonl`'s hash matches `metadata.jsonl_content_hash`
+  in `beads.db` — the live-fixture restore pattern hits this
+  every run, leaving `issues.jsonl` unmaterialized so the Phase B
+  live trace reported zero created tasks. `lib/beadsCapture.ts`
+  now falls back to `bd export --force -o .beads/issues.jsonl` to
+  force materialization; `happy-path.spec.ts:90` adopted the
+  multi-domain-signup OR-shape assertion (harness diff OR
+  `bd_create_(task|epic)` MCP OR Bash `bd create`); the Phase B
+  live trace was committed as the seed regression anchor with a
+  dedicated `_phase-b-trace.unit.spec.ts`.
+- **Subagent MCP tool allowlists (366.6).** Subagent `tools:`
+  frontmatter is an allowlist, and per
+  `code.claude.com/docs/en/sub-agents` it structurally strips MCP
+  tools when no `mcp__*` entry is enumerated — so QA and the
+  three specialists could not reach the `code-graph` / `bd` MCP
+  servers at all. Server-level grants
+  (`mcp__plugin_claude-workflow_code-graph`,
+  `mcp__plugin_claude-workflow_bd`, `mcp__code-graph`, `mcp__bd`)
+  were added under both the plugin and project prefixes for all
+  five non-grader agents. QA section 3a + orchestrator section 1a
+  wording was tightened so an empty/missing index is a lazy-build
+  signal (PROCEED) rather than a degradation reason — degrade
+  only when `code-graph` is structurally absent from the surface.
+  `lib/runFixture.ts` gained `HARNESS_METADATA_FILES` +
+  `snapshotHarnessMetadata` / `restoreHarnessMetadata` so
+  operator-authored `fixture.yaml` content survives the
+  reset/clean/pop restore cycle (new
+  `_fixture-restore.unit.spec.ts`, 4 specs).
 
 ## [3.2.0] - 2026-06-11
 

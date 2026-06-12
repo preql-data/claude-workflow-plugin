@@ -341,6 +341,47 @@ function restoreHarnessMetadata(
   }
 }
 
+/** Self-heal a fixture whose working tree is dirty on entry. This runs
+ *  at the TOP of `runFixture` before any snapshotting, so a previously
+ *  crashed run (e.g. vitest testTimeout SIGKILL) cannot leak its
+ *  intermediate state into the new run's baseline.
+ *
+ *  Contract (claude-workflow-plugin-366.8):
+ *    - Crash leftovers (untracked files) are removed.
+ *    - Tracked source files mutated mid-crash are reverted to HEAD.
+ *    - HARNESS_METADATA_FILES (currently fixture.yaml) are PRESERVED
+ *      across the reset+clean cycle, because they may carry operator-
+ *      authored edits that exist only as uncommitted bytes in the inner
+ *      fixture git (e.g. when the OUTER plugin repo has updated
+ *      fixture.yaml but the inner repo's HEAD predates that update —
+ *      the inner repo sees the outer commit as uncommitted).
+ *
+ *  No-ops on a clean working tree (no `git status` output → no reset
+ *  performed). Exported for direct unit testing in
+ *  `_fixture-restore.unit.spec.ts`; runFixture calls this inline.
+ */
+export function selfHealOnEntry(fixturePath: string): void {
+  const dirty = git(fixturePath, ["status", "--porcelain"]);
+  if (dirty.status !== 0 || !dirty.stdout.trim()) {
+    return;
+  }
+  // Capture harness-metadata files BEFORE the reset so we can write
+  // them back immediately afterward. This is the load-bearing change
+  // versus the pre-366.8 implementation, which let `git reset --hard`
+  // wipe operator-authored fixture.yaml edits before snapshotFixture
+  // could record them.
+  const preservedMetadata = snapshotHarnessMetadata(fixturePath);
+  process.stderr.write(
+    `[runFixture] WARNING: fixture ${fixturePath} was dirty on entry (probable prior crash — vitest SIGKILL bypasses try/finally cleanup); restoring before run\n`,
+  );
+  git(fixturePath, ["reset", "--hard", "HEAD"]);
+  git(fixturePath, ["clean", "-fd", "-e", "node_modules"]);
+  // Re-apply harness metadata. snapshotFixture will then re-read these
+  // bytes and the end-of-run restoreHarnessMetadata will write them
+  // back, completing the round-trip.
+  restoreHarnessMetadata(fixturePath, preservedMetadata);
+}
+
 /** Restore the fixture to its pre-run state. Best-effort: we always try
  *  `git reset --hard <pre-run-sha>` + `git clean -fd` even if stash pop
  *  fails, so the fixture is never left in a partially-mutated state.
@@ -808,14 +849,14 @@ export async function runFixture(opts: RunFixtureOptions): Promise<Trace> {
   // doing anything else — including BEFORE git stash, so we don't end
   // up stashing crash artifacts and creating a confusing dangling
   // stash entry. This makes the harness self-healing across crashes.
-  const dirtyOnEntry = git(opts.fixturePath, ["status", "--porcelain"]);
-  if (dirtyOnEntry.status === 0 && dirtyOnEntry.stdout.trim()) {
-    process.stderr.write(
-      `[runFixture] WARNING: fixture ${opts.fixturePath} was dirty on entry (probable prior crash — vitest SIGKILL bypasses try/finally cleanup); restoring before run\n`,
-    );
-    git(opts.fixturePath, ["reset", "--hard", "HEAD"]);
-    git(opts.fixturePath, ["clean", "-fd", "-e", "node_modules"]);
-  }
+  //
+  // claude-workflow-plugin-366.8: the recovery must preserve harness-
+  // metadata files (fixture.yaml) across the reset, because an inner-
+  // fixture-git that predates an outer-plugin-repo fixture.yaml update
+  // will see the operator's intent as uncommitted, and a naive
+  // `git reset --hard` would silently revert it. selfHealOnEntry
+  // captures the metadata BEFORE resetting and restores it after.
+  selfHealOnEntry(opts.fixturePath);
 
   // Snapshot fixture state before mutation. Flush bd's pending writes to
   // `.beads/issues.jsonl` before reading so the pre-run baseline reflects
