@@ -43,7 +43,43 @@ bash .claude/tests/mutation/mutation-sweep.sh --confirm-judge --judge-cmd "$JUDG
 
 # Override the run-wide cap:
 bash .claude/tests/mutation/mutation-sweep.sh --max-mutants 12 --no-judge
+
+# Per-target test-cmd override (recommended for hook scripts):
+bash .claude/tests/mutation/mutation-sweep.sh \
+    --targets .claude/scripts/verify-before-stop.sh \
+    --test-cmd 'bash .claude/scripts/tests/run-tests.sh && \
+                bash .claude/tests/component/run.sh' \
+    --no-judge
 ```
+
+### Per-target test-cmd overrides
+
+The default `--test-cmd` is the L1 unit subset
+(`bash .claude/scripts/tests/run-tests.sh`). That keeps the sweep fast,
+but it also means a mutant whose only kill-path lives in L2 component
+specs will SURVIVE the deterministic pass even though an L2 spec would
+have caught it. The C.3 acceptance sweep
+(`claude-workflow-plugin-n45.3`) hit exactly this on
+`verify-before-stop.sh` survivor id 12: the L1 default missed the
+cache-replay control-flow regression that the L2
+`verify-before-stop.sh` spec subsequently killed with eight new
+assertions.
+
+Two ways to handle this:
+
+1. **Per-target override (recommended).** When mutating a hook script
+   whose primary regression coverage lives in L2 specs, pass
+   `--test-cmd 'bash .claude/scripts/tests/run-tests.sh && bash
+   .claude/tests/component/run.sh'`. The override trades sweep wall
+   clock for tier-true survivor counts.
+2. **Whole-suite default.** Set `--test-cmd` for the whole sweep when
+   every target has L2 coverage; otherwise the L2 wall-clock cost is
+   wasted on targets whose contract lives in L1 (e.g. helper-only
+   scripts).
+
+The `mutation.conf` comment on `MUTANT_TEST_TIMEOUT_S` documents the
+same recommendation. Either path keeps every byte of the sweep on the
+free tiers — no API spend.
 
 Outputs land under `.claude/.mutation-runs/<timestamp>/`:
 

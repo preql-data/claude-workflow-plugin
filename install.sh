@@ -483,6 +483,8 @@ mkdir -p "$TARGET/.claude/skills/workflow-engine"
 mkdir -p "$TARGET/.claude/hooks"
 mkdir -p "$TARGET/.claude/scripts"
 mkdir -p "$TARGET/.claude/commands"
+mkdir -p "$TARGET/.claude/rubrics"
+mkdir -p "$TARGET/.claude/tests/mutation"
 mkdir -p "$TARGET/.claude-plugin"
 
 # Idempotent file copy with merge-mode awareness ------------------------------
@@ -498,9 +500,15 @@ copy_file() {
 }
 
 # Agents -----------------------------------------------------------------------
-for agent in orchestrator qa backend frontend devops; do
-    copy_file "$SOURCE_DIR/.claude/agents/${agent}.md" "$TARGET/.claude/agents/${agent}.md"
+# Glob copy so newly-shipped agents (grader.md @ v3.2.0, judge.md @ v3.4.0)
+# ride along without an installer edit per release. The required-source
+# check above pins the five v3.0 agents so a missing core role still fails
+# fast; the glob picks up everything else under .claude/agents/.
+shopt -s nullglob
+for src in "$SOURCE_DIR/.claude/agents/"*.md; do
+    copy_file "$src" "$TARGET/.claude/agents/$(basename "$src")"
 done
+shopt -u nullglob
 
 # Scripts ----------------------------------------------------------------------
 # Copy every hook + helper script. The set has grown across plugin versions
@@ -554,6 +562,66 @@ for cmd in "$SOURCE_DIR/.claude/commands/"*.md; do
     [ -f "$cmd" ] || continue
     copy_file "$cmd" "$TARGET/.claude/commands/$(basename "$cmd")"
 done
+
+# Rubrics (Phase A / v3.2.0) ---------------------------------------------------
+# The grader subagent reads these at grading time. Default + per-domain
+# overlays + bug-type overlay; shipped as plain markdown.
+if [ -d "$SOURCE_DIR/.claude/rubrics" ]; then
+    shopt -s nullglob
+    for src in "$SOURCE_DIR/.claude/rubrics/"*.md; do
+        copy_file "$src" "$TARGET/.claude/rubrics/$(basename "$src")"
+    done
+    shopt -u nullglob
+fi
+
+# Rubric config (Phase A / v3.2.0) ---------------------------------------------
+if [ -f "$SOURCE_DIR/.claude/rubric-config" ]; then
+    copy_file "$SOURCE_DIR/.claude/rubric-config" "$TARGET/.claude/rubric-config"
+fi
+
+# Model-ranking (Phase 0 / v3.1.0) ---------------------------------------------
+# Read by model-select.sh on SessionStart. Single file, plain text.
+if [ -f "$SOURCE_DIR/.claude/model-ranking" ]; then
+    copy_file "$SOURCE_DIR/.claude/model-ranking" "$TARGET/.claude/model-ranking"
+fi
+
+# Mutation tier (Phase C / v3.4.0) ---------------------------------------------
+# The /mutation-sweep command and the @judge subagent both expect this
+# tier on disk. We ship the catalog, config, harness, judge-gate, and the
+# hand-labeled calibration set. Per-run output dirs
+# (.claude/.mutation-runs/, .claude/.mutation-worktrees/) are gitignored
+# and created on first sweep.
+if [ -d "$SOURCE_DIR/.claude/tests/mutation" ]; then
+    mkdir -p "$TARGET/.claude/tests/mutation/calibration"
+    mkdir -p "$TARGET/.claude/tests/mutation/lib"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --exclude='runs' --exclude='*.log' \
+            "$SOURCE_DIR/.claude/tests/mutation/" \
+            "$TARGET/.claude/tests/mutation/"
+    else
+        cp -R "$SOURCE_DIR/.claude/tests/mutation/." \
+            "$TARGET/.claude/tests/mutation/"
+        rm -rf "$TARGET/.claude/tests/mutation/calibration/runs" 2>/dev/null || true
+    fi
+    chmod +x "$TARGET/.claude/tests/mutation/"*.sh 2>/dev/null || true
+    chmod +x "$TARGET/.claude/tests/mutation/lib/"*.sh 2>/dev/null || true
+    echo -e "${GREEN}OK${NC}   tests/mutation/"
+fi
+
+# Lessons ledger (Phase 0 / v3.1.0) --------------------------------------------
+# The orchestrator reads this during decomposition; seeded with the two
+# production lessons. Keep at the repo root so it's discoverable from a
+# fresh checkout.
+if [ -f "$SOURCE_DIR/LESSONS.md" ]; then
+    copy_file "$SOURCE_DIR/LESSONS.md" "$TARGET/LESSONS.md"
+fi
+
+# Worktree-include (Phase 0 / v3.1.0) ------------------------------------------
+# Patterns required for parallel-specialist isolated worktrees to be
+# runnable (env files, etc.).
+if [ -f "$SOURCE_DIR/.worktreeinclude" ]; then
+    copy_file "$SOURCE_DIR/.worktreeinclude" "$TARGET/.worktreeinclude"
+fi
 
 # Plugin manifest --------------------------------------------------------------
 copy_file "$SOURCE_DIR/.claude-plugin/plugin.json" "$TARGET/.claude-plugin/plugin.json"

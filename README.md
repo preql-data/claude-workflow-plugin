@@ -22,6 +22,13 @@ every step.
   `bd update --status in_progress`. PRs and Beads tasks auto-link to
   GitHub (issues, PRs, close-on-merge). Pick up tomorrow where you left
   off tonight.
+- **A separate-context rubric grader gates every QA approval.** Before
+  QA signs off, a read-only `grader` subagent scores the work against
+  a versioned rubric (default + per-domain overlays + a bugfix overlay
+  for evidence-before-fix). The grader sees only the diff, the SPEC,
+  and the lessons ledger — no specialist conversation context — so its
+  verdict is independent. Iteration cap is binding and engages the
+  escalation path on cap-hit.
 - **Two MCP servers ship in the box.** `bd-mcp` exposes 21 typed Beads
   tools (no shell quoting bugs). `code-graph-mcp` exposes 7 graph tools
   (`code_search`, `code_context`, `symbol_callers`, `impact_of`,
@@ -31,7 +38,21 @@ every step.
 - **Regression coverage by construction.** Every QA iteration runs the
   full test suite. A module-A edit that breaks module-B's contract is
   caught before approval, not after. The plugin's own test pyramid (L1
-  bash unit → L4 daily drift) demonstrates the pattern.
+  bash unit → L3 vitest unit → L3 live e2e → L3.5 mutation tier)
+  demonstrates the pattern. Live tests are invariant-based, manual
+  only, and the CI consumes zero API spend per PR.
+- **On-demand mutation sweep with a calibrated LLM judge filter.**
+  `/mutation-sweep` generates fault-class mutants for hook scripts,
+  runs them in throwaway git worktrees against the free L1/L2 tiers,
+  and routes survivors through a read-only `judge` subagent
+  calibrated against a hand-labeled set (precision ≥ 0.8). Every
+  step is dev-cycle-manual — no CI wiring, no scheduled job, no
+  automatic paid call.
+- **Lessons ledger as institutional memory.** `LESSONS.md` is
+  append-only via `lessons.sh add`; the orchestrator reads it before
+  decomposing non-trivial work; the grader reads it as part of every
+  grading packet. The two seed lessons (parallel-agent worktree
+  isolation; boundary-mock fidelity) shipped with v3.1.0.
 
 ## ⚡ Install
 
@@ -86,16 +107,21 @@ for the upgrade. Fresh installs work natively in PowerShell.
 
 | Component | Count | Where |
 |-----------|-------|-------|
-| Specialist agents | 5 | `.claude/agents/{orchestrator,qa,backend,frontend,devops}.md` |
-| Hook scripts | 9 | `.claude/scripts/` (8 hook events + statusline) |
+| Agents | 7 | `.claude/agents/{orchestrator,qa,backend,frontend,devops,grader,judge}.md` |
+| Hook scripts | 9+ | `.claude/scripts/` (hook events + statusline + lessons + model-select) |
 | MCP servers | 2 | `.claude/mcp/{bd-mcp,code-graph-mcp}/` |
-| Slash commands | 1 | `.claude/commands/workflow-model.md` |
-| Test tiers | 5 | L1 bash unit → L4 daily drift watch (`.claude/tests/`) |
-| CI | GitHub Actions | `.github/workflows/test.yml` (lint + 6 test jobs + drift cron) |
+| Rubrics | 5 | `.claude/rubrics/{default,backend,frontend,devops}.md` + `bugfix.md` overlay |
+| Slash commands | 2 | `.claude/commands/{workflow-model,mutation-sweep}.md` |
+| Test tiers | L1 + L2 + L3 unit + L3 live + L3.5 mutation | `.claude/scripts/tests/` + `.claude/tests/{component,e2e,mutation}/` |
+| Lessons ledger | 1 | `LESSONS.md` (append-only via `lessons.sh add`) |
+| CI | GitHub Actions | `.github/workflows/test.yml` (lint + offline tiers; live tier `workflow_dispatch`-only; zero API spend per PR) |
 
 The plugin manifest is at `.claude-plugin/plugin.json`. The MCP wiring
-is at `.mcp.json`. Both use `${CLAUDE_PLUGIN_ROOT}` so the install works
-regardless of project layout.
+is at `.mcp.json`. The plugin manifest uses `${CLAUDE_PLUGIN_ROOT}`
+(plugin scope substitutes this directly); the project-scoped `.mcp.json`
+uses `${CLAUDE_PROJECT_DIR:-.}` (the default form per the Claude Code
+MCP docs — bare `${CLAUDE_PROJECT_DIR}` produces a diagnostics warning
+in project scope).
 
 ## 🛠 Customize / contribute
 
@@ -137,13 +163,17 @@ enforce that contract — `prevent-orchestrator-edits.sh` blocks Write/Edit
 from the orchestrator role, and `verify-before-stop.sh` refuses Stop
 without `qa-approved` on the active task. Cross-repo work and GitHub
 auto-linking land via I3/I8 hooks (`bd-github-link.sh`,
-`current-task.sh`).
+`current-task.sh`). Two of the seven agents are spawned from the root
+conversation only (the `grader` for rubric verdicts and the `judge`
+for mutation classification) because Claude Code subagents cannot
+spawn other subagents — both arrive via root-orchestrated relays
+(`RUBRIC-RELAY` and `JUDGE-RELAY`).
 
 For the deep dive, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 For the test pyramid that gates every change, read
 [`.claude/tests/README.md`](.claude/tests/README.md). For the v3 release
-notes (G8 harness, MCP servers, plugin manifest, etc.) read
-[`CHANGELOG.md`](CHANGELOG.md).
+notes (G8 harness, MCP servers, rubric loop, code-graph MCP, mutation
+tier) read [`CHANGELOG.md`](CHANGELOG.md).
 
 ## ⚠ Caveats
 
@@ -155,6 +185,14 @@ notes (G8 harness, MCP servers, plugin manifest, etc.) read
   no automatic per-PR live tier. Live assertions are model-agnostic
   invariants declared in each fixture's `fixture.yaml` — goldens are
   retained as debugging references only.
+- The mutation tier (`/mutation-sweep`, v3.4.0) is also dev-cycle
+  manual. The deterministic pass — generate, apply in worktree, run
+  L1+L2 — is free; the judge step is gated behind `--confirm-judge`
+  or an interactive y/N prompt with a per-call cost estimate (default
+  `JUDGE_COST_PER_CALL_USD=0.03`). EOF stdin defaults to N so a
+  scripted invocation can never trip a paid call without an explicit
+  `--confirm-judge` flag. Judge precision is reported on every run
+  against the hand-labeled calibration set (default threshold 0.8).
 - The upstream `bd` daemon has a stack-overflow on stale locks; the
   plugin ships a `--no-daemon` shim under `.claude/bin/bd` (inlined onto
   `PATH` in test fixtures). Production installs degrade gracefully.

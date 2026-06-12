@@ -192,6 +192,40 @@ assert_eq "installer-mcp-config: rendered install does NOT have .claude/mcp/code
 assert_eq "installer-mcp-config: rendered install has at least one tree-sitter wasm grammar" "0" \
     "$([ -f "$INSTALL_TARGET/.claude/mcp/code-graph-mcp/grammars/tree-sitter-typescript.wasm" ] && echo 0 || echo 1)"
 
+# 3c. Phase A (v3.2.0) + Phase C (v3.4.0) surface presence.
+#     The plugin manifest's agents[] declares all seven agents; if a
+#     declared agent file is missing from the rendered install,
+#     Claude Code will warn at session-start and the workflow will
+#     degrade silently (a delegation Task call hits an unloaded
+#     agent type and falls through to general-purpose). The same
+#     applies to the @judge subagent path declared by /mutation-sweep
+#     and the rubric files the grader reads. These assertions guard
+#     install.sh against forgetting a newly-shipped agent / tier when
+#     subsequent versions land more.
+assert_eq "installer-mcp-config: rendered install has grader.md (Phase A)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/agents/grader.md" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has judge.md (Phase C)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/agents/judge.md" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has .claude/rubrics/default.md (Phase A)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/rubrics/default.md" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has .claude/rubric-config (Phase A)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/rubric-config" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has .claude/tests/mutation/mutation-sweep.sh (Phase C)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/tests/mutation/mutation-sweep.sh" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has .claude/tests/mutation/judge-gate.sh (Phase C)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/tests/mutation/judge-gate.sh" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has .claude/tests/mutation/calibration/calibration-set.json (Phase C)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/tests/mutation/calibration/calibration-set.json" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has .claude/commands/mutation-sweep.md (Phase C)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/commands/mutation-sweep.md" ] && echo 0 || echo 1)"
+# Phase 0 (v3.1.0) — lessons ledger + model-ranking + worktreeinclude
+# are user-discoverable assets the orchestrator + SessionStart hooks
+# expect at the repo root / .claude/ root respectively.
+assert_eq "installer-mcp-config: rendered install has LESSONS.md (Phase 0)" "0" \
+    "$([ -f "$INSTALL_TARGET/LESSONS.md" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install has .claude/model-ranking (Phase 0)" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/model-ranking" ] && echo 0 || echo 1)"
+
 # 4. META-TEST: feed the asserter a synthetic config with a bare
 #    ${CLAUDE_PROJECT_DIR} (the exact bug shape the asserter must catch).
 #    The asserter MUST return non-zero. If this passes through, the

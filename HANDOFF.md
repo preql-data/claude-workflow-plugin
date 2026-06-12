@@ -8,6 +8,34 @@ work on this repository.
 - Plan `docs/plans/v3-upgrade.md` (Phases 0-7) is **complete**. The G8
   end-to-end test-harness epic and the post-G8 closeout pass also
   shipped. Everything landed on `main` by 2026-05-11.
+- Plan `docs/plans/verification-suite.md` is **complete** across all
+  four phases (0 → A → B → C → v3.1.0 / v3.2.0 / v3.3.0 / v3.4.0).
+  Definition-of-done sweep (spec line 213) is green: every epic
+  closed with `qa-approved` on every child task; fresh install
+  renders zero MCP-diagnostics warnings AND ships the full
+  manifest-declared surface (7 agents + rubrics + mutation tier);
+  CI carries no scheduled paid job (zero API spend per PR); per-phase
+  manual live-validation cost was recorded inline in each `[3.x.0]`
+  CHANGELOG section; AgentLint holds at 87/100 with documented
+  Phase-A + Phase-C overrides; CHANGELOG reads as coherent release
+  notes 3.1.0 → 3.4.0; README "What you get" + Caveats updated to
+  reflect 7 agents, rubrics, 2 MCP servers, invariant-based manual
+  live testing, lessons ledger, and the mutation tier.
+- Plan `docs/plans/verification-suite.md` Phase C shipped 2026-06-12
+  as **v3.4.0**. Parent epic: `claude-workflow-plugin-n45` with five
+  child tasks `n45.1` (deterministic harness), `n45.2` (judge +
+  calibration), `n45.3` (acceptance sweep), `n45.5`
+  (exclusion-bypass fix + JUDGE-RELAY), and `n45.4` (this closeout) —
+  all `qa-approved`. First calibration round 2026-06-12 (in-session,
+  zero API spend): precision 0.9412 / recall 0.9412 — GATE PASSED
+  (0.8 threshold). Acceptance sweep over `verify-before-stop.sh` +
+  `post-edit.sh`: 32 mutants generated, 4 killed by existing suite,
+  28 survived; judge classified 27 genuine + 1 equivalent; one
+  genuine survivor (id 12, cache-replay control-flow regression)
+  was killed via 8 new L2 assertions on `verify-before-stop.sh`;
+  26 remaining genuine survivors tracked as
+  `claude-workflow-plugin-6ix` (P2 backlog) with 2 TECHNICAL_DEBT.md
+  rows.
 - Plan `docs/plans/verification-suite.md` Phase B shipped 2026-06-12
   as **v3.3.0**. Parent epic: `claude-workflow-plugin-366` with two
   child tasks `366.1` (code-graph-mcp server: scaffold, indexer, 7
@@ -15,7 +43,7 @@ work on this repository.
   wiring, migration) both `qa-approved`. Phase A's live validation
   also completed in this cycle (3 runs, defects fixed in-flight,
   trace anchored offline) — Phase A entry amended in the
-  `[3.2.0]` section. Phase C remains pending.
+  `[3.2.0]` section.
 - Plan `docs/plans/verification-suite.md` Phase A shipped 2026-06-11
   as **v3.2.0**. Parent epic for Phase A:
   `claude-workflow-plugin-l1r` with two child tasks `l1r.1` (rubric
@@ -27,19 +55,107 @@ work on this repository.
   `claude-workflow-plugin-e0d` (all eight child tasks
   `e0d.1`–`e0d.8` `qa-approved`).
 - Parent epic: `claude-workflow-plugin-y4a` (v3.0.0 upgrade) — closed.
-- Per-phase release notes: `CHANGELOG.md` `[3.3.0] - 2026-06-12`
-  (Phase B), `[3.2.0] - 2026-06-11` (Phase A), `[3.1.0] - 2026-06-11`
+- Per-phase release notes: `CHANGELOG.md` `[3.4.0] - 2026-06-12`
+  (Phase C), `[3.3.0] - 2026-06-12` (Phase B),
+  `[3.2.0] - 2026-06-11` (Phase A), `[3.1.0] - 2026-06-11`
   (Phase 0), and `[3.0.0] - 2026-05-11` (v3 + G8 + closeout).
+- Suite numbers (post-Phase-C): `make test` (L1) reports **14 specs**
+  passing; `make test-all` (L1 + L2 offline gate) reports **21 specs
+  / 429 assertions** passing (+10 over the 3.3.0 baseline of 419,
+  from the new Phase A + C presence assertions in
+  `installer-mcp-config.sh`); `cd .claude/tests/e2e && npm run
+  test:unit` reports **158 passed / 5 skipped** (the five skips are
+  honest invariant-engine + trace-anchor artifact-missing skips —
+  not green-washed); `make lint` clean; `make check` (AgentLint)
+  holds at **87/100**.
 - Open tickets: `bd ready` (ready to start), `bd blocked` (waiting on
   dependencies), `bd list --label qa-pending` (awaiting QA). The
   carried bugs across the v3.x line are
+  `claude-workflow-plugin-n6d` (Phase B carried bug: QA did not
+  query `impact_of` live across 4 paid runs even with explicit
+  prompt cues — mechanical pre-compute option C is the design
+  candidate; tracked P1),
+  `claude-workflow-plugin-9ke` (Phase B carried bug:
+  `beadsLabelTransitions` captures net diffs missing transient
+  `qa-pending` — engine repair tracked P2),
+  `claude-workflow-plugin-6ix` (Phase C 26-survivor mutation
+  backlog; P2 with seven theme groupings A–G),
   `claude-workflow-plugin-l1r.3` (Phase A follow-up),
+  `claude-workflow-plugin-n45.6` (Phase C.1 polish: SIGINT halt,
+  stale-worktree reclaim, MAX_MUTANTS_PER_FILE doc, judge-output
+  robustness — extract LAST well-formed JSON object; P3),
   `claude-workflow-plugin-0wk.4` (vitest SIGKILL bypasses
   try/finally cleanup; self-heal mitigation in `runFixture.ts`),
   `0wk.5` (upstream bd daemon stack-overflow on stale locks;
   `--allow-stale` workaround), `0wk.6` (carried Phase 0 follow-up),
   `claude-workflow-plugin-8oz` (SHA-pin GitHub Actions, P2), and
   `claude-workflow-plugin-a7y` (gitleaks CI job, P2).
+
+## Verify conditions for "v3.4.0 (Phase C) shipped"
+
+A new session can confirm readiness without re-running everything by
+checking these assertions:
+
+- assert: `.claude-plugin/plugin.json` `version` equals `3.4.0`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `3.4.0`.
+- assert: `.claude-plugin/plugin.json` agents[] declares all seven
+  agents (orchestrator, qa, backend, frontend, devops, grader,
+  judge). Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).agents.length)'`
+  and confirm `7`.
+- assert: `make test-all` exits 0 (offline gate — L1 bash unit + L2
+  component). Post-Phase-C baseline is **21 specs / 429 assertions**
+  (+10 over the 3.3.0 baseline of 419, from the new Phase A + C
+  presence assertions in `installer-mcp-config.sh`).
+- assert: `.claude/tests/component/specs/installer-mcp-config.sh`
+  reports **24/24** assertions passing (the two META-TESTs plus
+  twelve content assertions for code-graph + zero-bare-`${VAR}` +
+  the ten new presence assertions for grader.md, judge.md,
+  rubrics/default.md, rubric-config, mutation-sweep.sh,
+  judge-gate.sh, calibration-set.json, mutation-sweep.md,
+  LESSONS.md, model-ranking).
+- assert: `cd .claude/tests/e2e && npm run test:unit` reports
+  **158 passed / 5 skipped** (unchanged from 3.3.0; Phase C is a
+  manual-tier closeout, so the L3 vitest count holds).
+- assert: `.claude/agents/judge.md` exists and declares the
+  read-only tool set on its frontmatter line. Run
+  `grep -E '^tools: Read, Grep, Glob, LS$' .claude/agents/judge.md`
+  and confirm a single hit (no `Bash`, no `Write`, no `Edit`, no
+  `Task`).
+- assert: `.claude/tests/mutation/judge-gate.sh` exists and is
+  executable. Run `test -x .claude/tests/mutation/judge-gate.sh`.
+- assert: `.claude/tests/mutation/calibration/calibration-set.json`
+  exists and carries ≥20 entries with all 8 fault classes. Run
+  `node -e 'const j=JSON.parse(require("fs").readFileSync(".claude/tests/mutation/calibration/calibration-set.json","utf8")); console.log(j.length>=20, new Set(j.map(e=>e.fault)).size>=8)'`
+  and confirm `true true`.
+- assert: the orchestrator wires JUDGE-RELAY. Run
+  `grep -c 'JUDGE-RELAY: judging-relay' .claude/agents/orchestrator.md`
+  and confirm `>= 1`.
+- assert: AgentLint score holds at **87/100**. Phase C introduces
+  no new deterministic-detector findings beyond the documented S7
+  fixture overrides. Re-run via `make check`.
+- assert: a rendered fresh install has all of: `.claude/agents/{grader,judge}.md`,
+  `.claude/rubrics/default.md`, `.claude/rubric-config`,
+  `.claude/tests/mutation/{mutation-sweep.sh,judge-gate.sh}`,
+  `.claude/tests/mutation/calibration/calibration-set.json`,
+  `.claude/commands/mutation-sweep.md`, `LESSONS.md`,
+  `.claude/model-ranking`. The L2
+  `installer-mcp-config.sh` spec asserts each path; the spec runs
+  inside `make test-all`. The fresh-install rendering itself uses
+  `bash install.sh <tempdir>`; ten new assertions added in v3.4.0
+  cover the surface.
+
+The single manual calibration run —
+`/mutation-sweep` over `verify-before-stop.sh` + `post-edit.sh` with
+the JUDGE-RELAY — was run 2026-06-12 (in-session relay; zero API-key
+spend because the judge ran via the operator's existing Claude
+session). Precision 0.9412 / recall 0.9412 — GATE PASSED.
+Acceptance sweep numbers (32 mutants / 4 killed / 28 survived;
+27 genuine / 1 equivalent; survivor id 12 killed via 8 L2
+assertions; 26-survivor backlog tracked as
+`claude-workflow-plugin-6ix`) are recorded in the `[3.4.0]`
+CHANGELOG section.
 
 ## Verify conditions for "v3.3.0 (Phase B) shipped"
 
@@ -175,6 +291,43 @@ checking these assertions:
 
 ## Recent decisions
 
+- 2026-06-12 (Phase C / v3.4.0): Five child tasks shipped in the
+  `claude-workflow-plugin-n45` epic. C.1 (`n45.1`) shipped the
+  deterministic harness — `.claude/tests/mutation/mutation-sweep.sh`
+  + the 8-class catalog (F1–F8) + `mutation.conf` caps +
+  `lib/generate.sh` (deterministic awk/sed generators) +
+  `lib/rank-targets.sh` (`impact_of` when code-graph index present,
+  heuristic fallback when not), throwaway-worktree containment
+  with three-layer cleanup (per-mutant remove + EXIT/INT/TERM trap +
+  final prune), and the cost-confirmation gate (EOF defaults to N).
+  C.2 (`n45.2`) shipped `.claude/agents/judge.md` (read-only tools;
+  strict JSON output; 3 worked examples), the 24-mutant hand-labeled
+  calibration set (all 8 fault classes, 7 equivalents), the
+  precision/recall gate (`judge-gate.sh`; threshold 0.8 — recall
+  reported but not gating), and the L1 suite
+  (`judge-calibration.test.sh`, 65 assertions, 2 META-TESTs).
+  C.3 (`n45.3`) ran the acceptance sweep over
+  `verify-before-stop.sh` + `post-edit.sh` (32 mutants, 4 killed,
+  28 survived; judge 27 genuine / 1 equivalent) and shipped the
+  killing test for survivor id 12 (cache-replay control-flow
+  regression — 8 new L2 assertions). C.5 (`n45.5`) fixed the
+  COMMAND_EXCLUSIONS bypass in F2/F4/F5/F7/F8 generators and added
+  the JUDGE-RELAY anchor to `orchestrator.md` section 5b
+  (mirroring the 5a RUBRIC-RELAY shape). C.4 (`n45.4`, this
+  closeout) bumped `plugin.json` to 3.4.0, fixed the installer
+  surface gap (was hardcoded to 5 v3.0 agents — silently dropped
+  grader.md from v3.2.0 and judge.md from v3.4.0 in fresh
+  installs; now glob-copies all 7 + ships
+  `.claude/rubrics/*` + `.claude/tests/mutation/` + rubric-config +
+  model-ranking + LESSONS.md + `.worktreeinclude`), extended the
+  `installer-mcp-config.sh` L2 spec with 10 new presence
+  assertions (Phase A + C surface), and added a doc note +
+  `mutation.conf` comment + per-target `--test-cmd` override
+  recommendation so future sweeps over hook scripts pick the
+  L1+L2 combo by default. First calibration round 2026-06-12
+  (in-session, zero API spend): precision 0.9412 / recall 0.9412
+  — GATE PASSED. 26-survivor backlog tracked as
+  `claude-workflow-plugin-6ix` (P2). AgentLint holds at 87/100.
 - 2026-06-11 (Phase A / v3.2.0): Two child tasks shipped in the
   `claude-workflow-plugin-l1r` epic. A.1 (`l1r.1`) added the
   rubric plumbing — `qa-gate.sh grade-record` with structured-error

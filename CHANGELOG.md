@@ -20,6 +20,176 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes. The next release entry will go here.
 
+## [3.4.0] - 2026-06-12
+
+Phase C of the verification-suite plan (`docs/plans/verification-suite.md`):
+the mutation-testing tier (L3.5). Ships an on-demand sweep that generates
+fault-class mutants for hook scripts, contains them in throwaway git
+worktrees, runs the free L1/L2 tiers against each, and filters surviving
+mutants through a separate-context `@judge` subagent calibrated against a
+hand-labeled set (precision 0.9412 on the 24-mutant corpus, threshold
+0.8). Every step is dev-cycle-manual — `make mutate` or `/mutation-sweep`
+— with zero CI wiring, zero scheduled jobs, and zero automatic paid
+calls. The acceptance sweep over `verify-before-stop.sh` + `post-edit.sh`
+produced 32 mutants (4 killed by the existing suite, 28 survived); the
+judge classified 27 genuine + 1 equivalent; survivor 12 (a cache-replay
+control-flow regression that bypassed the test suite while still
+reporting "technical checks passed") was killed with 8 new L2
+assertions, and the 26-survivor backlog is tracked as
+`claude-workflow-plugin-6ix`. All five Phase C child tasks
+(`claude-workflow-plugin-n45.1` harness, `n45.2` judge + calibration,
+`n45.3` acceptance sweep, `n45.5` exclusion-bypass + JUDGE-RELAY fix,
+`n45.4` closeout) were `qa-approved` on `main` by 2026-06-12.
+
+### Added
+
+- **Mutation-testing harness (C.1).** New tier under
+  `.claude/tests/mutation/`: `mutation-sweep.sh` entry point,
+  `fault-classes.md` catalog (F1 doc-only / F2 inverted conditional /
+  F3 off-by-one / F4 swapped sentinel / F5 dropped jq fallback /
+  F6 wrong hook envelope key / F7 removed regex anchor / F8 removed
+  flock — destructive command classes excluded by design),
+  `mutation.conf` caps (`MAX_MUTANTS_PER_FILE=24`,
+  `MAX_MUTANTS_PER_RUN=60`, `MUTANT_TEST_TIMEOUT_S=60`,
+  `SWEEP_TIMEOUT_S=1800`, `COMMAND_EXCLUSIONS` covering `rm mv cp curl
+  wget gh push reset checkout`, `JUDGE_PRECISION_MIN=0.8`),
+  `lib/generate.sh` (deterministic awk/sed generators — all 8 generators
+  now uniformly call `should_skip` after n45.5; fault-class catalog
+  parity is enforced at L1), `lib/rank-targets.sh` (`impact_of` when
+  code-graph index present, lines × test-references fallback
+  otherwise — graceful-degradation proven by the L1 test fixture
+  running with no DB). 18-assertion L1 suite
+  (`mutation-harness.test.sh`) with two META-TESTs (inverted
+  kill-detection and trap-stripped containment leak).
+- **Worktree containment (C.1).** Every mutant applied inside a
+  fresh `git worktree --detach HEAD` under
+  `.claude/.mutation-worktrees/m-<run_ts>-<idx>/`; main checkout is
+  never touched. Three-layer cleanup: per-mutant
+  `git worktree remove --force`, EXIT/INT/TERM trap, and final
+  `git worktree prune`. Both `.claude/.mutation-runs/` and
+  `.claude/.mutation-worktrees/` are gitignored. Containment proof
+  is the L1 suite section 3 (HEAD + tracked-file hashes unchanged
+  after sweep) + section 4 (zero worktrees in directory and registry)
+  + section 9 META-TEST (trap-stripped harness leaks at least one
+  worktree).
+- **Cost-confirmation gate (C.1).** After the deterministic pass the
+  harness prints a survivor count + judge cost estimate (survivors
+  × `JUDGE_COST_PER_CALL_USD`); the judge step gates behind
+  `--confirm-judge` (CI / scripted) or an interactive y/N prompt.
+  EOF stdin defaults to N (no paid call without explicit
+  confirmation). `--no-judge` skips the gate entirely. Mirrors the
+  0.8 manual-only-live-testing convention.
+- **`/mutation-sweep` Claude-invokable command (C.1).** New
+  `.claude/commands/mutation-sweep.md` — thin wrapper that asks
+  Claude to pick targets and forward to `mutation-sweep.sh`.
+  Registered in `plugin.json` commands[] in the same commit per the
+  manifest-parity lesson.
+- **Judge subagent (C.2).** New `.claude/agents/judge.md` —
+  read-only tools (`Read, Grep, Glob, LS`), strict-JSON output
+  (`{verdict: equivalent|genuine, confidence, justification}`),
+  three worked examples (equivalent counter, genuine label-typo,
+  subtle defended-caller default removal), `proactive: false`
+  (spawned only from the root via JUDGE-RELAY). Carries the shared
+  `effort: max` + time-budget block. Calibration design bias is
+  precision over recall — better to miss an equivalent than to bury
+  a real regression. Registered in `plugin.json` agents[] in the
+  same commit (manifest-parity lesson; now 7 agents total).
+- **Calibration set + precision gate (C.2).** Hand-labeled corpus at
+  `.claude/tests/mutation/calibration/calibration-set.json`: 24
+  entries (≥20 per spec headroom), all 8 fault classes represented
+  (≥5 equivalents so precision has a real denominator),
+  per-entry `ground_truth` + `label_rationale`. The L1 suite
+  (`judge-calibration.test.sh`, 65 assertions, 2 META-TESTs)
+  validates the shape, the ≥20 / ≥5 contracts, and the precision/
+  recall math. `judge-gate.sh` runs precision/recall against the set:
+  exit 0 iff `precision >= JUDGE_PRECISION_MIN` (default 0.8). Recall
+  is reported alongside but is not a gating threshold. Exit codes
+  0 / 1 / 2 / 3 cover pass, below-threshold, malformed input, and
+  undefined precision respectively.
+- **Calibration round result (C.2).** First calibration sweep ran
+  2026-06-12 (root-orchestrated relay, in-session, zero API spend
+  via the operator's existing Claude session): TP 16, FP 1, FN 1,
+  TN 6, **precision 0.9412 / recall 0.9412 — GATE PASSED** (0.8
+  threshold). One FP (id 8 — ARG_MAX/PATH-stub jq failure surface
+  argued constructible; ground truth holds it unconstructible) and
+  one FN (id 12 per the confusion matrix). Run artefacts:
+  `calibration/runs/2026-06-12-{calibration-report,verdict}.json`
+  (tracked); raw run dir gitignored.
+- **JUDGE-RELAY procedure (C.2, n45.5).** Orchestrator section 5b
+  (`JUDGE-RELAY: judging-relay`) — judge is always spawned from the
+  root conversation, never by another subagent (`code.claude.com/docs/
+  en/sub-agents`: `Agent(agent_type)` has no effect in a subagent
+  definition). The harness writes `judge-packet.json` on disk; the
+  orchestrator reads it, spawns `@judge` once via `Task`, captures
+  stdout to `verdict.json`, then runs `judge-gate.sh`. Guarded at L1
+  by `no-nested-spawn-instructions.test.sh`. Mirrors the 5a
+  RUBRIC-RELAY shape introduced in v3.2.0.
+- **Acceptance sweep results (C.3).** First sweep over
+  `.claude/scripts/verify-before-stop.sh` + `.claude/scripts/post-edit.sh`
+  ran 2026-06-12 (`/mutation-sweep`, throwaway worktrees,
+  `--no-judge` deterministic pass + JUDGE-RELAY for survivors).
+  **32 mutants generated, 4 killed by the existing suite, 28
+  survived** (87.5 % survival rate before triage). The judge
+  classified **27 genuine / 1 equivalent** (id 27 — printf-rc
+  masking, unconstructible failure surface). Killing-test target:
+  id 12 (line 657 `=` → `!=`) — the failing test suite was replayed
+  from cache while the gate reported "technical checks passed", a
+  false-positive everything-is-fine verdict on a session that
+  actually had a failing suite. Survivor 12 was killed by 8 new L2
+  assertions on `.claude/tests/component/specs/verify-before-stop.sh`
+  testing the suite-actually-ran invariant via on-disk tracking
+  artefacts (`last-test-rc.<TID>`, `last-test-output.log`,
+  `last-runner.<TID>`) plus negative-wording assertions on the block
+  reason (no "QA approval required" / "technical checks passed" when
+  tests fail). The remaining 26 genuine survivors are tracked as
+  `claude-workflow-plugin-6ix` with seven theme groupings
+  (A: block-reason wording paths; B: F1 doc-only fast path;
+  C: cross-repo detection; D: git-status fallback; E: escalation
+  boundary; F: post-edit tracking/cadence; G: post-edit doc filter)
+  and two `TECHNICAL_DEBT.md` rows.
+- **Installer surface expanded for the v3.4.0 manifest (C.4).**
+  `install.sh` + `install.ps1` now ship every agent declared in
+  `plugin.json` agents[] (was hardcoded to the five v3.0 roles,
+  silently dropped `grader.md` from v3.2.0 and `judge.md` from
+  v3.4.0). Glob-copy under `.claude/agents/*.md` replaces the
+  fixed list. Additionally ships `.claude/rubrics/*.md` +
+  `.claude/rubric-config` (Phase A surface), `.claude/tests/mutation/`
+  excluding `runs/` + `*.log` (Phase C surface),
+  `.claude/model-ranking` + `LESSONS.md` + `.worktreeinclude` (Phase 0
+  surface). Ten new assertions in `installer-mcp-config.sh` cover the
+  full Phase A + Phase C presence (grader.md, judge.md,
+  rubrics/default.md, rubric-config, mutation-sweep.sh, judge-gate.sh,
+  calibration-set.json, mutation-sweep.md command, LESSONS.md,
+  model-ranking).
+
+### Changed
+
+- **`mutation.conf` documents the default test-cmd tier (C.4).** The
+  `MUTANT_TEST_TIMEOUT_S` block now documents that the harness
+  defaults to the L1 unit subset
+  (`bash .claude/scripts/tests/run-tests.sh`) and recommends a
+  per-target `--test-cmd 'L1 && L2'` override for hook-script targets
+  whose primary coverage lives in L2 component specs. Originates
+  from the C.3 acceptance sweep where survivor 12 needed L2
+  assertions to be killable — the L1 default would have left it
+  survived. The README "Per-target test-cmd overrides" section
+  carries the operator-facing variant.
+
+### Migration
+
+- **Existing v3.3.0 installs missing the v3.2.0 grader + v3.4.0
+  judge files: re-run the installer.** `bash install.sh` (or the
+  curl-pipe form) over the existing target copies the missing
+  agents, rubrics, mutation tier, and supporting config files. No
+  manual editing required; Beads data, settings, hooks, and MCP
+  config are preserved (merge-aware copy). The `update` mode is
+  conservative — workflow-owned keys are refreshed, non-workflow
+  keys (and any local customizations under `.claude/`) are kept.
+- **Mutation tier is gitignored at runtime.** `.claude/.mutation-runs/`
+  and `.claude/.mutation-worktrees/` are added to the install-time
+  `.gitignore`. Calibration `runs/` artefacts are tracked
+  per-checkpoint; only the live run dirs are excluded.
+
 ## [3.3.0] - 2026-06-12
 
 Phase B of the verification-suite plan (`docs/plans/verification-suite.md`):
@@ -30,7 +200,7 @@ and the QA regression scan, with measured ~67.5 % context efficiency
 on a representative QA workload. Both child tasks
 (`claude-workflow-plugin-366.1` server build, `366.2` integration +
 migration) were `qa-approved` on `main` by 2026-06-12. Phase C
-remains pending and will ship as v3.4.0.
+shipped immediately after, as v3.4.0 — see the entry above.
 
 ### Added
 
@@ -643,7 +813,8 @@ Initial commit (`1909ebf initial commit`). Pre-Beads experimental layout;
 not separately documented because v2 superseded it before any external
 release.
 
-[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.3.0...HEAD
+[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.4.0...HEAD
+[3.4.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.3.0...v3.4.0
 [3.3.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.0.0...v3.1.0

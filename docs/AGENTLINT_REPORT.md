@@ -1,4 +1,4 @@
-# AgentLint report — post Phase A (claude-workflow-plugin-l1r)
+# AgentLint report — post Phase C (claude-workflow-plugin-n45)
 
 > For design rationale behind deferred AgentLint findings, see
 > `docs/plans/v3-upgrade.md`, `docs/plans/verification-suite.md`, and
@@ -6,16 +6,16 @@
 
 **AgentLint version**: 1.1.13 (CLI: `agentlint check`).
 
-**Date**: 2026-06-11 (post-Phase-A verified; v3.2.0 release closeout).
+**Date**: 2026-06-12 (post-Phase-C verified; v3.4.0 release closeout).
 
 **Command**: `agentlint check --format md --output-dir docs/` (also
 exposed as `make check`).
 
 ## Summary
 
-Current run (post Phase A): **87/100** — unchanged from the
-post-Phase-0 baseline, and Phase A introduces no new
-deterministic-detector findings.
+Current run (post Phase C): **87/100** — unchanged from the
+post-Phase-0 / post-Phase-A / post-Phase-B baseline, and Phases
+B + C introduce no new deterministic-detector findings.
 
 ### Score history
 
@@ -54,6 +54,44 @@ release closeout; "Δ" notes what moved versus the prior entry.
   shipped to operators. AgentLint reports the same count of seven
   S7-flagged files as Phase 0; the override rationale in
   `CONTRIBUTING.md` is unchanged.
+- **Post Phase B (v3.3.0) — 87/100.** Δ versus Phase A: none.
+  Phase B replaced `code-context-mcp` with `code-graph-mcp` (the
+  retired server was removed, the new server's 31 tests shipped
+  under `.claude/mcp/code-graph-mcp/`) and added the
+  `agent-mcp-tools-parity.test.sh` L1 + extended the
+  `installer-mcp-config.sh` L2 with five Phase-B-specific
+  assertions. No new agent files; no new permissions; no new
+  workflows. The byte-compatible trio (`code_search`,
+  `code_context`, `symbol_callers`) preserved the surface the
+  rubric grader / orchestrator / QA prompts call by name, so the
+  prompt-side detectors saw zero diff. AgentLint's S7 count is
+  unchanged.
+- **Post Phase C (v3.4.0) — 87/100.** Δ versus Phase B: none.
+  Phase C's new files (`judge.md` agent prompt; the mutation
+  tier under `.claude/tests/mutation/` with `mutation-sweep.sh`,
+  `fault-classes.md`, `mutation.conf`, `judge-gate.sh`, the
+  hand-labeled calibration set, and the two new L1 specs
+  `mutation-harness.test.sh` + `judge-calibration.test.sh`;
+  the `/mutation-sweep` Claude-invokable command; the
+  `JUDGE-RELAY` block in `orchestrator.md` section 5b) all pass
+  every deterministic detector in the same shape as the
+  Phase A surface: no personal paths in the prompts or harness;
+  no emphasis-keyword spam (I1/I2 pass); no new hook scripts
+  (H1–H8 unchanged); no new workflows (S2 unchanged); no new
+  permissions (H4 unchanged); the `agents[]` manifest covers
+  `judge.md`. The `installer-mcp-config.sh` L2 spec was extended
+  with 10 Phase A + C presence assertions covering the
+  rendered-install surface (grader.md, judge.md, rubrics,
+  mutation tier, model-ranking, LESSONS.md). The C.4 installer
+  fix glob-copies all agents under `.claude/agents/*.md`
+  (was hardcoded to the 5 v3.0 roles, silently dropped grader.md
+  from v3.2.0 and judge.md from v3.4.0 in fresh installs). S7
+  count is unchanged from Phase 0 / A / B; calibration `runs/`
+  artefacts under `.claude/tests/mutation/calibration/runs/`
+  are gitignored at the live-run-dir level (tracked
+  per-checkpoint via the explicit `calibration-report.json` +
+  `verdict.json` filenames), so no new S7-flagged personal-path
+  surface is introduced.
 
 ## Phase A closeout — 2026-06-11
 
@@ -98,6 +136,101 @@ deliberately-under-tested prompt, and its recorded result will be
 appended to the `claude-workflow-plugin-l1r.4` closeout notes when
 run. AgentLint does not evaluate live runs, so this report's score
 is final for the v3.2.0 release.
+
+## Phase C closeout — 2026-06-12
+
+The Phase C release (v3.4.0) added 1 new agent prompt
+(`.claude/agents/judge.md`), a new tier under
+`.claude/tests/mutation/` (`mutation-sweep.sh`, `fault-classes.md`,
+`mutation.conf`, `judge-gate.sh`, `lib/generate.sh`,
+`lib/rank-targets.sh`, the `calibration/` directory with a
+24-mutant calibration-set, plus the README), 1 new Claude-invokable
+command (`.claude/commands/mutation-sweep.md`), 2 new L1 tests
+(`mutation-harness.test.sh` and `judge-calibration.test.sh`,
+together carrying 83 assertions and 4 META-TESTs), extensions to
+the `installer-mcp-config.sh` L2 spec (+10 presence assertions for
+the Phase A + C surface), and substantive edits to two scripts
+(`install.sh` glob-copies all 7 agents + ships rubrics + mutation
+tier + LESSONS.md + model-ranking + `.worktreeinclude`; same in
+`install.ps1`). One new agent file (`judge.md`) lands in
+`plugin.json` agents[] in the same commit per the manifest-parity
+lesson; agents[] now declares 7 entries. The overall AgentLint
+score holds at **87/100** with no composition change. Every
+dimension scored identically to the Post-Phase-B column above.
+
+The new files are structurally invisible to the deterministic
+detector for the same reasons the Phase 0 / A / B additions were:
+the judge prompt is agent-style markdown (passing I1/I2 emphasis
+density and rule-specificity); the harness + L1 specs live under
+`.claude/tests/mutation/` and `.claude/scripts/tests/` (W3 counts
+the directories globally); and the new command file follows the
+existing `/workflow-model` convention. The mutation tier introduces
+NO new permissions, NO new hook scripts (the harness is invoked
+manually via `make` / `/mutation-sweep`, never wired into a hook
+event), and NO new workflow files. The calibration-set's `runs/`
+artefacts are tracked per-checkpoint with explicit filenames
+(`2026-06-12-calibration-report.json` +
+`2026-06-12-verdict.json`); the live run directories are gitignored
+at the wildcard level so no per-session personal paths leak into
+the tracked tree.
+
+The S7 count holds at the same seven files as Phase 0 / A / B —
+the legacy `qa-gate.sh:450` comment and the six fixture `bd` /
+`qa-gate.sh` shims under `.claude/tests/e2e/fixtures/`. The
+override rationale in `CONTRIBUTING.md` remains valid for both
+classes; nothing in Phase C introduces a new fixture or new
+shim. No new H-tier, W-tier, or I-tier findings. The Phase 0
+deductions (W4, W11, S2, S3, S7, S9, H3 partial, H4 design
+override) carry forward unchanged.
+
+The single manual calibration round
+(`/mutation-sweep` → JUDGE-RELAY with the 24-mutant calibration
+set as packet) was run 2026-06-12 in-session (zero API spend via
+the operator's existing Claude session): precision 0.9412 /
+recall 0.9412 — GATE PASSED (0.8 threshold). The acceptance sweep
+over `verify-before-stop.sh` + `post-edit.sh` (32 mutants, 4
+killed, 28 survived; judge 27 genuine / 1 equivalent) generated
+the 26-survivor backlog tracked as `claude-workflow-plugin-6ix`
+and produced one killing test for survivor id 12 (8 new L2
+assertions on `verify-before-stop.sh`). AgentLint does not
+evaluate dev-cycle mutation runs, so this report's score is final
+for the v3.4.0 release.
+
+## Phase B closeout — 2026-06-12
+
+The Phase B release (v3.3.0) replaced the `code-context-mcp` server
+with `code-graph-mcp` (a tree-sitter + SQLite code graph; 7 tools;
+31 server tests under `.claude/mcp/code-graph-mcp/`), added one new
+L1 test (`agent-mcp-tools-parity.test.sh`, parity guard for
+`mcp__*` tool references), extended the `installer-mcp-config.sh`
+L2 spec with 5 Phase-B-specific assertions, and made substantive
+edits to `orchestrator.md` (section 1a impact_of pre-delegation
+step) + `qa.md` (section 3a impact_of regression scan) + both
+manifests (`.mcp.json` and `.claude-plugin/plugin.json`; same
+commit per the manifest-parity lesson). The byte-compatible trio
+(`code_search`, `code_context`, `symbol_callers`) preserved the
+input schemas and primary output keys; only the `tool` / `backend`
+value strings changed (`"git-grep"` → `"graph-index"`). The
+overall AgentLint score holds at **87/100** with no composition
+change.
+
+The new server lives under `.claude/mcp/code-graph-mcp/` with a
+node-driven indexer + tool surface; the harness ships 10 vendored
+wasm grammars (~9.6 MB) so first-tool-call builds the index lazily
+with no SessionStart parse cost. AgentLint's S7 count is unchanged
+— the new server brings no personal paths into the tracked tree.
+
+No new H-tier (hook harness) findings. No new W-tier findings. No
+new I-tier findings. The Phase 0 / A deductions carry forward
+unchanged.
+
+The Phase B live validation ran across 4 paid attempts
+(~$16-26 total, 3 paid + 1 free pre-fix attempt): run 3 verified
+beads capture, run 4 verified the `satisfiesInvariants` engine
+end-to-end (3 invariants PASS, 1 SKIP, 2 FAIL — both FAIL paths
+tracked as standalone carried bugs: `n6d` for the
+`qa-queried-impact-of` invariant, `9ke` for the
+`label-milestones` engine bug).
 
 ## Phase 0 closeout — 2026-06-11
 

@@ -352,6 +352,10 @@ build/
         "$ClaudeDir\hooks",
         "$ClaudeDir\scripts",
         "$ClaudeDir\commands",
+        "$ClaudeDir\rubrics",
+        "$ClaudeDir\tests\mutation",
+        "$ClaudeDir\tests\mutation\calibration",
+        "$ClaudeDir\tests\mutation\lib",
         (Join-Path $Target ".claude-plugin")
     )) {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
@@ -367,10 +371,10 @@ build/
         Write-Color ("OK   {0}" -f (Split-Path $Dst -Leaf)) Green
     }
 
-    foreach ($agent in @("orchestrator","qa","backend","frontend","devops")) {
-        Copy-WorkflowFile `
-            -Src (Join-Path $SourceDir ".claude/agents/$agent.md") `
-            -Dst "$ClaudeDir\agents\$agent.md"
+    # Agents glob copy so newly-shipped agents (grader.md @ v3.2.0,
+    # judge.md @ v3.4.0) ride along without an installer edit per release.
+    Get-ChildItem (Join-Path $SourceDir ".claude/agents/*.md") -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-WorkflowFile -Src $_.FullName -Dst "$ClaudeDir\agents\$($_.Name)"
     }
 
     # Copy every hook + helper script. The set has grown across plugin
@@ -421,6 +425,40 @@ build/
 
     Get-ChildItem (Join-Path $SourceDir ".claude/commands/*.md") -ErrorAction SilentlyContinue | ForEach-Object {
         Copy-WorkflowFile -Src $_.FullName -Dst "$ClaudeDir\commands\$($_.Name)"
+    }
+
+    # Rubrics (Phase A / v3.2.0) ------------------------------------------
+    $SourceRubrics = Join-Path $SourceDir ".claude/rubrics"
+    if (Test-Path $SourceRubrics) {
+        Get-ChildItem (Join-Path $SourceRubrics "*.md") -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-WorkflowFile -Src $_.FullName -Dst "$ClaudeDir\rubrics\$($_.Name)"
+        }
+    }
+
+    # Rubric config + model-ranking + LESSONS + .worktreeinclude ----------
+    foreach ($asset in @(
+        @{ Src = ".claude/rubric-config"; Dst = "$ClaudeDir\rubric-config" },
+        @{ Src = ".claude/model-ranking"; Dst = "$ClaudeDir\model-ranking" },
+        @{ Src = "LESSONS.md";            Dst = (Join-Path $Target "LESSONS.md") },
+        @{ Src = ".worktreeinclude";       Dst = (Join-Path $Target ".worktreeinclude") }
+    )) {
+        $SrcPath = Join-Path $SourceDir $asset.Src
+        if (Test-Path $SrcPath) {
+            Copy-WorkflowFile -Src $SrcPath -Dst $asset.Dst
+        }
+    }
+
+    # Mutation tier (Phase C / v3.4.0) ------------------------------------
+    $SourceMutation = Join-Path $SourceDir ".claude/tests/mutation"
+    if (Test-Path $SourceMutation) {
+        $TargetMutation = "$ClaudeDir\tests\mutation"
+        New-Item -ItemType Directory -Force -Path $TargetMutation | Out-Null
+        $rc = & robocopy $SourceMutation $TargetMutation /E /XD runs /XF *.log /NFL /NDL /NJH /NJS /NP
+        if ($LASTEXITCODE -gt 7) {
+            Copy-Item -Path (Join-Path $SourceMutation '*') -Destination $TargetMutation -Recurse -Force -Exclude @('runs','*.log') -ErrorAction SilentlyContinue
+        }
+        $global:LASTEXITCODE = 0
+        Write-Color "OK   tests/mutation/" Green
     }
 
     Copy-WorkflowFile `
