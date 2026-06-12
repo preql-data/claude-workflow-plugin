@@ -164,4 +164,68 @@ assert_contains "vbs: block reason mentions test output" \
     "Tests failing" "$REASON"
 assert_match "vbs: reason mentions runner=npm" "runner: npm" "$REASON"
 
+# 10. Mutation-test kill (C.3 survivor id 12, line 657): a non-escalated
+# Stop with a failing TEST_CMD MUST genuinely run the suite, NOT take the
+# cache-replay branch. The mutant `if [ "$QA_ESCALATED" != "true" ]; then`
+# inverted the escalated-state check so every non-escalated Stop replayed
+# the (empty) cache, leaving the runner at "none" and FAILED_CHECKS empty
+# — the gate then degraded to the "QA approval required ... technical
+# checks passed" path. Verdict: .claude/.mutation-runs/20260612T063107Z/verdict.json id=12.
+#
+# Evidence the suite GENUINELY ran (vs cache-replay):
+#   (a) last-test-rc.<TID> exists and is non-empty (suite ran -> rc persisted).
+#   (b) last-test-output.log exists and is non-empty (capture from runner).
+#   (c) last-runner.<TID> contains "npm" (not "none" from the replay default).
+#   (d) FAILED_CHECKS rendering carries "Tests failing" + "runner: npm".
+#   (e) Block reason MUST NOT carry "QA approval required" / "technical
+#       checks passed" — those are the symptoms of the cache-replay branch
+#       being taken on a non-escalated task.
+#
+# These assertions are redundant with #9's existing kill on the wording,
+# but they document the invariant ("suite genuinely runs when not
+# escalated") so future refactors that bypass detect-stack via a
+# different control-flow path are still caught.
+#
+# Reuse TID_FAIL state from #9 (npm shim still exits 1; tracking-files
+# from #9 already written by the original run). Re-derive expectations
+# from the on-disk tracking artifacts.
+SAN_FAIL=$(printf '%s' "$TID_FAIL" | tr -c 'A-Za-z0-9._-' '_')
+LAST_RC_FILE="$TRACK/last-test-rc.$SAN_FAIL"
+LAST_RUN_FILE="$TRACK/last-runner.$SAN_FAIL"
+LAST_LOG_FILE="$TRACK/last-test-output.log"
+
+assert_eq "vbs: suite ran -> last-test-rc.<TID> exists (mut 12 kill)" \
+    "yes" "$([ -s "$LAST_RC_FILE" ] && echo yes || echo no)"
+LAST_RC=$(cat "$LAST_RC_FILE" 2>/dev/null || echo "")
+# Sanity: shim exits 1, so rc must be non-zero and not empty.
+assert_eq "vbs: suite ran -> last-test-rc carries shim exit=1" \
+    "1" "$LAST_RC"
+assert_eq "vbs: suite ran -> last-test-output.log exists" \
+    "yes" "$([ -s "$LAST_LOG_FILE" ] && echo yes || echo no)"
+assert_eq "vbs: suite ran -> last-runner.<TID> exists" \
+    "yes" "$([ -s "$LAST_RUN_FILE" ] && echo yes || echo no)"
+LAST_RUN=$(cat "$LAST_RUN_FILE" 2>/dev/null || echo "")
+assert_eq "vbs: suite ran -> last-runner is 'npm' (NOT 'none' from replay)" \
+    "npm" "$LAST_RUN"
+
+# Negative-shape assertions on the block reason: under the mutant the
+# control-flow falls into the QA-required path. These two strings ONLY
+# appear there.
+NOT_QA_REQ=$(printf '%s' "$REASON" | grep -c 'QA approval required' || true)
+NOT_QA_REQ=$(printf '%s' "$NOT_QA_REQ" | tr -d '[:space:]')
+assert_eq "vbs: failing tests block reason MUST NOT say 'QA approval required'" \
+    "0" "$NOT_QA_REQ"
+NOT_TECH_OK=$(printf '%s' "$REASON" | grep -c 'technical checks passed' || true)
+NOT_TECH_OK=$(printf '%s' "$NOT_TECH_OK" | tr -d '[:space:]')
+assert_eq "vbs: failing tests block reason MUST NOT say 'technical checks passed'" \
+    "0" "$NOT_TECH_OK"
+
+# 10a. Direct proof: the npm shim was invoked at least once during this
+# Stop. The shim records each invocation to bin/npm.log; a present log
+# with at least one line means detect-stack -> run_with_timeout actually
+# fired the configured TEST_CMD. Cache-replay never reaches this code.
+NPM_LOG_F="$FIXTURE/bin/npm.log"
+assert_eq "vbs: npm shim invoked (suite ran, NOT replayed)" \
+    "yes" "$([ -s "$NPM_LOG_F" ] && echo yes || echo no)"
+
 [ "$FAIL" -eq 0 ]
