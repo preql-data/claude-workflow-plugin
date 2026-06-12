@@ -50,12 +50,18 @@ checking these assertions:
   `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
   and confirm `3.3.0`.
 - assert: `make test-all` exits 0 (offline gate — L1 bash unit + L2
-  component). Post-Phase-B baseline is **21 specs / 409 assertions**
+  component). Post-Phase-B baseline is **21 specs / 411 assertions**
   (the 21st spec is `resolve-fixture-spec.sh`, added by `366.4` —
-  the test-live fixture→spec resolver bug fix).
+  the test-live fixture→spec resolver bug fix; the 411 figure
+  includes the 2 new `vbs` assertions added by `366.9`'s impact_of
+  cue fix — QA-fix inline 2026-06-12 during the 366 epic-close
+  review; prior closeout amendment recorded 409).
 - assert: `cd .claude/tests/e2e && npm run test:unit` reports
-  `125/2 skip` for the vitest unit tier (the two skips are honest
-  invariant-engine skips; not green-washed).
+  `158/5 skip` for the vitest unit tier (the five skips are honest
+  invariant-engine skips and trace-anchor artifact-missing skips;
+  not green-washed; up from 125/2 with the addition of the run-3
+  + run-4 trace anchors filed under `366.8`/`366.10` — QA-fix
+  inline 2026-06-12 during the 366 epic-close review).
 - assert: `cd .claude/mcp/code-graph-mcp && npm test` reports
   **31 tests** passing (7 indexer + 15 tools + 9 server). The DB at
   `.claude/.code-graph/index.db` is gitignored and built lazily on
