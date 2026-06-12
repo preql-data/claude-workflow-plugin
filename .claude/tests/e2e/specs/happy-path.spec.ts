@@ -87,7 +87,36 @@ describe("happy-path: node-react-auth", () => {
       // 4) At least one Beads task was created (the orchestrator opens
       //    one per workflow rules). We don't pin task IDs because
       //    they're project-scoped and not deterministic.
-      expect(trace.beadsTasksCreated.length).toBeGreaterThan(0);
+      //
+      //    OR-shape on creation evidence (mirrors multi-domain-signup
+      //    pattern donor, see _phase-a-trace.unit.spec.ts:113-135 for
+      //    the original rationale): harness diff OR MCP bd_create_*
+      //    tool call OR Bash `bd create` invocation. The harness diff
+      //    alone is not load-bearing because bd 0.47.1 `--flush-only`
+      //    can silently no-op when sync_base.jsonl carries the export
+      //    baseline (Phase B forensic: claude-workflow-plugin-366.5).
+      //    Even after the beadsCapture.ts fallback fix, keeping the
+      //    OR-shape here gives belt-and-suspenders coverage if a
+      //    future bd version regresses the export contract again.
+      const sawBeadsTask =
+        trace.beadsTasksCreated.length > 0 ||
+        trace.toolCalls.some((c) => {
+          if (
+            c.name.includes("bd_create_task") ||
+            c.name.includes("bd__create_task") ||
+            c.name.includes("bd_create_epic") ||
+            c.name.includes("bd__create_epic")
+          ) {
+            return true;
+          }
+          if (c.name === "Bash") {
+            const cmd =
+              (c.input as { command?: string } | undefined)?.command ?? "";
+            return /\bbd\s+create\b/.test(cmd);
+          }
+          return false;
+        });
+      expect(sawBeadsTask).toBe(true);
 
       // 5) Autonomy principle — no permission prompts blocked the run.
       expect(trace).noPermissionDenials();

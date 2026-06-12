@@ -11,3 +11,12 @@ cassettes/replays/
 # Allow committed golden cassettes.
 !cassettes/golden/
 !cassettes/golden/**
+
+# Allow committed seed-corpus traces. These are recorded-trace
+# regression anchors (live captures pinned to the repo so offline tests
+# can re-validate the structural shape without re-spending the API
+# budget). See `_phase-a-trace.unit.spec.ts` and
+# claude-workflow-plugin-l1r.7. Add new traces deliberately; they
+# document a moment-in-time live evidence and must not churn.
+!cassettes/seed/
+!cassettes/seed/**

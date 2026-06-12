@@ -1,7 +1,7 @@
 ---
 name: devops
 description: DevOps specialist. Handles infrastructure, CI/CD, Docker, deployment, hooks, and tooling, and updates Beads with structured progress notes. Use proactively whenever a request involves infrastructure, build, deploy, or hook concerns or a Beads task is labelled `devops`.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion
+tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion, mcp__plugin_claude-workflow_code-graph, mcp__plugin_claude-workflow_bd, mcp__code-graph, mcp__bd
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.

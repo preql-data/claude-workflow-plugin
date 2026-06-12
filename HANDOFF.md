@@ -8,26 +8,73 @@ work on this repository.
 - Plan `docs/plans/v3-upgrade.md` (Phases 0-7) is **complete**. The G8
   end-to-end test-harness epic and the post-G8 closeout pass also
   shipped. Everything landed on `main` by 2026-05-11.
+- Plan `docs/plans/verification-suite.md` Phase B shipped 2026-06-12
+  as **v3.3.0**. Parent epic: `claude-workflow-plugin-366` with two
+  child tasks `366.1` (code-graph-mcp server: scaffold, indexer, 7
+  tools, 31 tests) and `366.2` (manifests, installer test, agent
+  wiring, migration) both `qa-approved`. Phase A's live validation
+  also completed in this cycle (3 runs, defects fixed in-flight,
+  trace anchored offline) — Phase A entry amended in the
+  `[3.2.0]` section. Phase C remains pending.
 - Plan `docs/plans/verification-suite.md` Phase A shipped 2026-06-11
-  as **v3.2.0** (pending the recorded live validation —
-  `make test-live FIXTURE=rubric-revision-loop` is the single
-  remaining manual step; result will be appended to the closeout
-  notes when run). Phases B/C remain pending. Parent epic for
-  Phase A: `claude-workflow-plugin-l1r` with two child tasks
-  `l1r.1` (rubric plumbing) and `l1r.2` (grader + wiring) both
-  `qa-approved`.
+  as **v3.2.0**. Parent epic for Phase A:
+  `claude-workflow-plugin-l1r` with two child tasks `l1r.1` (rubric
+  plumbing) and `l1r.2` (grader + wiring) both `qa-approved`. Live
+  validation completed 2026-06-12 (recorded in the `[3.2.0]`
+  CHANGELOG amendment alongside Phase B's closeout).
 - Plan `docs/plans/verification-suite.md` Phase 0 shipped 2026-06-11
   as **v3.1.0**. Parent epic for Phase 0:
   `claude-workflow-plugin-e0d` (all eight child tasks
   `e0d.1`–`e0d.8` `qa-approved`).
 - Parent epic: `claude-workflow-plugin-y4a` (v3.0.0 upgrade) — closed.
-- Per-phase release notes: `CHANGELOG.md` `[3.2.0] - 2026-06-11`
-  (Phase A), `[3.1.0] - 2026-06-11` (Phase 0), and
-  `[3.0.0] - 2026-05-11` (v3 + G8 + closeout).
+- Per-phase release notes: `CHANGELOG.md` `[3.3.0] - 2026-06-12`
+  (Phase B), `[3.2.0] - 2026-06-11` (Phase A), `[3.1.0] - 2026-06-11`
+  (Phase 0), and `[3.0.0] - 2026-05-11` (v3 + G8 + closeout).
 - Open tickets: `bd ready` (ready to start), `bd blocked` (waiting on
-  dependencies), `bd list --label qa-pending` (awaiting QA). The known
-  deferrals are `claude-workflow-plugin-8oz` (SHA-pin GitHub Actions,
-  P2) and `claude-workflow-plugin-a7y` (gitleaks CI job, P2).
+  dependencies), `bd list --label qa-pending` (awaiting QA). The
+  carried bugs across the v3.x line are
+  `claude-workflow-plugin-l1r.3` (Phase A follow-up),
+  `claude-workflow-plugin-0wk.4` (vitest SIGKILL bypasses
+  try/finally cleanup; self-heal mitigation in `runFixture.ts`),
+  `0wk.5` (upstream bd daemon stack-overflow on stale locks;
+  `--allow-stale` workaround), `0wk.6` (carried Phase 0 follow-up),
+  `claude-workflow-plugin-8oz` (SHA-pin GitHub Actions, P2), and
+  `claude-workflow-plugin-a7y` (gitleaks CI job, P2).
+
+## Verify conditions for "v3.3.0 (Phase B) shipped"
+
+A new session can confirm readiness without re-running everything by
+checking these assertions:
+
+- assert: `.claude-plugin/plugin.json` `version` equals `3.3.0`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `3.3.0`.
+- assert: `make test-all` exits 0 (offline gate — L1 bash unit + L2
+  component). Post-Phase-B baseline is **21 specs / 409 assertions**
+  (the 21st spec is `resolve-fixture-spec.sh`, added by `366.4` —
+  the test-live fixture→spec resolver bug fix).
+- assert: `cd .claude/tests/e2e && npm run test:unit` reports
+  `125/2 skip` for the vitest unit tier (the two skips are honest
+  invariant-engine skips; not green-washed).
+- assert: `cd .claude/mcp/code-graph-mcp && npm test` reports
+  **31 tests** passing (7 indexer + 15 tools + 9 server). The DB at
+  `.claude/.code-graph/index.db` is gitignored and built lazily on
+  first tool call.
+- assert: `.claude/tests/component/specs/installer-mcp-config.sh`
+  reports **14/14** assertions passing (the two META-TESTs plus the
+  twelve content assertions including the five new Phase B ones for
+  `code-graph` wiring and `code-context` retirement).
+- assert: the `code-context` server entry is absent from both
+  manifests. Run
+  `! grep -q '"code-context"' .mcp.json .claude-plugin/plugin.json`
+  and confirm exit 0.
+- assert: `.claude/mcp/code-graph-mcp/bin/code-graph-mcp.js` exists
+  and is referenced from both manifests in the `${VAR:-.}` default
+  form. Run
+  `test -x .claude/mcp/code-graph-mcp/bin/code-graph-mcp.js`.
+- assert: AgentLint score holds at **87/100** (or higher). Phase B
+  introduces no new deterministic-detector findings beyond the
+  documented S7 fixture overrides. Re-run via `make check`.
 
 ## Verify conditions for "v3.2.0 (Phase A) shipped"
 
@@ -65,8 +112,11 @@ checking these assertions:
   new deterministic-detector findings. Re-run via `make check`.
 
 The single manual live validation —
-`make test-live FIXTURE=rubric-revision-loop` — is recorded in the
-closeout notes when run (`bd update claude-workflow-plugin-l1r.4`).
+`make test-live FIXTURE=rubric-revision-loop` — was run 2026-06-12
+(3 runs, ~$15-30, defects fixed in-flight). Recorded in the
+`[3.2.0]` CHANGELOG amendment shipped alongside the Phase B
+(v3.3.0) closeout. The trace is anchored offline in
+`_phase-a-trace.unit.spec.ts` and the seed cassette.
 
 ## Verify conditions for "v3.1.0 (Phase 0) shipped"
 
@@ -173,7 +223,7 @@ checking these assertions:
   the AgentLint detector limitations documented in
   `docs/AGENTLINT_REPORT.md`. See `CONTRIBUTING.md` -> "Design overrides
   vs. AgentLint" for the full list.
-- 2026-05-08 (Phase 6): bd-mcp + code-context-mcp ship as in-tree node servers
+- 2026-05-08 (Phase 6): bd-mcp + code-context-mcp ship as in-tree node servers (code-context-mcp was retired in 3.3.0 in favor of code-graph-mcp; see verification-suite Phase B)
   under `.claude/mcp/`. The `.mcp.json` references them via
   `${CLAUDE_PLUGIN_ROOT}` so they relocate cleanly.
 - 2026-05-08 (Phase 4): QA gate is iterative with regression coverage; the

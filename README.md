@@ -23,9 +23,11 @@ every step.
   GitHub (issues, PRs, close-on-merge). Pick up tomorrow where you left
   off tonight.
 - **Two MCP servers ship in the box.** `bd-mcp` exposes 21 typed Beads
-  tools (no shell quoting bugs). `code-context-mcp` exposes 3 search
-  tools (`code_search`, `code_context`, `symbol_callers`). Both load
-  automatically via `.mcp.json` and `${CLAUDE_PLUGIN_ROOT}`.
+  tools (no shell quoting bugs). `code-graph-mcp` exposes 7 graph tools
+  (`code_search`, `code_context`, `symbol_callers`, `impact_of`,
+  `dead_code`, `dependency_path`, `code_index_health`) backed by a
+  tree-sitter + SQLite index. Both load automatically via `.mcp.json`
+  and `${CLAUDE_PLUGIN_ROOT}`.
 - **Regression coverage by construction.** Every QA iteration runs the
   full test suite. A module-A edit that breaks module-B's contract is
   caught before approval, not after. The plugin's own test pyramid (L1
@@ -86,7 +88,7 @@ for the upgrade. Fresh installs work natively in PowerShell.
 |-----------|-------|-------|
 | Specialist agents | 5 | `.claude/agents/{orchestrator,qa,backend,frontend,devops}.md` |
 | Hook scripts | 9 | `.claude/scripts/` (8 hook events + statusline) |
-| MCP servers | 2 | `.claude/mcp/{bd-mcp,code-context-mcp}/` |
+| MCP servers | 2 | `.claude/mcp/{bd-mcp,code-graph-mcp}/` |
 | Slash commands | 1 | `.claude/commands/workflow-model.md` |
 | Test tiers | 5 | L1 bash unit → L4 daily drift watch (`.claude/tests/`) |
 | CI | GitHub Actions | `.github/workflows/test.yml` (lint + 6 test jobs + drift cron) |

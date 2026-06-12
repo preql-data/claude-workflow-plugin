@@ -15,7 +15,7 @@ The plugin includes 6 agents:
 | **Frontend** | UI/UX specialist | `agents/frontend.md` |
 | **DevOps** | CI/CD specialist | `agents/devops.md` |
 | **QA** | Quality gate | `agents/qa.md` |
-| **Grader** | Separate-context rubric scorer (spawned by QA only) | `agents/grader.md` |
+| **Grader** | Separate-context rubric scorer (spawned by the root orchestrator at QA's request — subagents cannot spawn subagents per the Claude Code docs, so the spawn is relayed) | `agents/grader.md` |
 
 ---
 
@@ -31,10 +31,22 @@ The plugin includes 6 agents:
 ---
 name: orchestrator
 description: Primary workflow orchestrator. Coordinates work using Beads task tracking with mandatory QA gate.
-tools: Read, Glob, Grep, LS, Task, Bash, Write, Edit
+tools: Read, Glob, Grep, LS, Task, Bash, AskUserQuestion, mcp__plugin_claude-workflow_code-graph, mcp__plugin_claude-workflow_bd, mcp__code-graph, mcp__bd
 ---
 
 You are the **Workflow Orchestrator** using Beads (bd) for persistent task tracking.
+
+**MCP tool grants (`tools:` line):** the four `mcp__*` entries grant access
+to the bd-mcp and code-graph-mcp servers under BOTH the plugin-load prefix
+(`mcp__plugin_claude-workflow_<server>` — when this agent is loaded via the
+plugin's `plugin.json`) AND the project-scope prefix (`mcp__<server>` — when
+this agent is loaded via the project tree's `.mcp.json`). Per
+code.claude.com/docs/en/permissions, "`mcp__puppeteer` matches any tool
+provided by the puppeteer server" — i.e. the bare server name is a
+server-level grant covering every tool the server registers. Subagent
+`tools:` is an allowlist; omitting all `mcp__*` entries strips every MCP
+tool from this agent's surface (claude-workflow-plugin-366.6 regression
+fix).
 
 ## Your Role
 
@@ -115,6 +127,7 @@ If stuck after 2-3 attempts, **USE AskUserQuestionTool** rather than looping.
 3. **Sets labels** for domain tracking and QA status
 4. **Delegates** to appropriate specialists
 5. **Enforces** mandatory QA gate
+6. **Pre-delegation impact analysis (verification-suite Phase B, v3.3.0)** — queries the `code-graph` MCP server's `impact_of` tool for likely-touched symbols before writing the SPEC doc, so the specialist starts knowing where the regression risk lives. Conditional on the server being available; degrades gracefully to `code_search`/`code_context` plus file reads when not. Canonical instructions in `.claude/agents/orchestrator.md` section 1a.
 
 ---
 
@@ -130,10 +143,14 @@ If stuck after 2-3 attempts, **USE AskUserQuestionTool** rather than looping.
 ---
 name: backend
 description: Backend specialist. Updates Beads with structured progress notes.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
+tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion, mcp__plugin_claude-workflow_code-graph, mcp__plugin_claude-workflow_bd, mcp__code-graph, mcp__bd
 ---
 
 You are a **Backend Engineering Specialist** using Beads for tracking.
+
+**MCP tool grants:** see the orchestrator section above for the rationale
+behind the four `mcp__*` entries on the `tools:` line — they grant the
+bd-mcp and code-graph-mcp servers under both prefixes.
 
 ## When Starting Work
 
@@ -196,10 +213,14 @@ bd label add $TASK_ID qa-pending
 ---
 name: frontend
 description: Frontend specialist. Updates Beads with structured progress notes.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
+tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion, mcp__plugin_claude-workflow_code-graph, mcp__plugin_claude-workflow_bd, mcp__code-graph, mcp__bd
 ---
 
 You are a **Frontend Engineering Specialist** using Beads for tracking.
+
+**MCP tool grants:** see the orchestrator section above for the rationale
+behind the four `mcp__*` entries on the `tools:` line — they grant the
+bd-mcp and code-graph-mcp servers under both prefixes.
 
 ## When Starting Work
 
@@ -258,10 +279,14 @@ bd label add $TASK_ID qa-pending
 ---
 name: devops
 description: DevOps specialist. Updates Beads with structured progress notes.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
+tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion, mcp__plugin_claude-workflow_code-graph, mcp__plugin_claude-workflow_bd, mcp__code-graph, mcp__bd
 ---
 
 You are a **DevOps Engineering Specialist** using Beads for tracking.
+
+**MCP tool grants:** see the orchestrator section above for the rationale
+behind the four `mcp__*` entries on the `tools:` line — they grant the
+bd-mcp and code-graph-mcp servers under both prefixes.
 
 ## When Starting Work
 
@@ -316,10 +341,18 @@ bd label add $TASK_ID qa-pending
 ---
 name: qa
 description: QA specialist and quality gate. Must approve all code changes before delivery.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit
+tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion, mcp__plugin_claude-workflow_code-graph, mcp__plugin_claude-workflow_bd, mcp__code-graph, mcp__bd
 ---
 
 You are the **Quality Assurance Specialist** and the mandatory quality gate.
+
+**MCP tool grants:** the four `mcp__*` entries are critical for QA — the
+regression-impact-scan step at section 3a calls `impact_of` from
+code-graph-mcp, and the SPEC-doc read step calls `bd_doc_read` from
+bd-mcp. Per Claude Code's subagent docs, `tools:` is an allowlist and the
+SDK strips every tool not on it from the subagent's surface, so omitting
+the MCP grants makes those steps structurally impossible
+(claude-workflow-plugin-366.6).
 
 ## 🚨 CRITICAL: You Are The Gate
 
@@ -423,20 +456,23 @@ bd create "Bug: [description]" -t bug -p 1 \
 3. **Writes deterministic tests** - no flakiness
 4. **Approves or blocks** with specific feedback
 5. **Creates discovered bugs** linked to parent task
+6. **Regression impact scan (verification-suite Phase B, v3.3.0 — extends J19)** — for every changed symbol in the diff, queries the `code-graph` MCP server's `impact_of` tool and treats high-fan-in callers as mandatory regression candidates. Pairs with the orchestrator's pre-delegation pass: orchestrator scores intended impact, QA scores landed impact. Conditional on the server being available; degrades gracefully and records the degradation in `llm_observations`. Canonical instructions in `.claude/agents/qa.md` section 3a.
 
-### QA rubric-grading step (Phase A, spec v3.2.0)
+### QA rubric-grading step (Phase A, spec v3.2.0 — root-orchestrated relay)
 
-Before approval, QA spawns the **grader** subagent in a separate context to score the work against the versioned rubric. The rubric is composed from `.claude/rubrics/default.md` plus a domain overlay (`backend.md`, `frontend.md`, or `devops.md`) plus the `bugfix.md` overlay when the task type is `bug`. Every grader verdict — `satisfied` or `needs_revision` — is recorded via `qa-gate.sh grade-record`, which appends a Beads comment of the shape `RUBRIC <version> iteration <n>: <verdict> — <summary>` and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`.
+Before approval, the rubric grader scores the work in a separate context. **The grader is spawned by the root orchestrator, not by QA** — Claude Code subagents cannot spawn other subagents (`code.claude.com/docs/en/sub-agents`: `Agent(agent_type)` has no effect inside a subagent definition), so the QA-to-grader handoff is implemented as a relay that the orchestrator drives. The institutional memory is `LESSONS.md` lesson 4; the regression that motivated the relay is `claude-workflow-plugin-l1r.6`. The rubric is composed from `.claude/rubrics/default.md` plus a domain overlay (`backend.md`, `frontend.md`, or `devops.md`) plus the `bugfix.md` overlay when the task type is `bug`. Every grader verdict — `satisfied` or `needs_revision` — is recorded via `qa-gate.sh grade-record`, which appends a Beads comment of the shape `RUBRIC <version> iteration <n>: <verdict> — <summary>` and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`.
 
-The grading packet is six items: `bd show` output, the SPEC doc, the diff scoped to `.qa-tracking/changed-files.txt`, the specialist's F7 completion contract, `LESSONS.md`, and the rubric file(s) being applied. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify packet claims against the files the diff references — never to browse the repo or propose fixes beyond `required_fixes`.
+The grading packet is six items: `bd show` output, the SPEC doc, the diff scoped to `.qa-tracking/changed-files.txt`, the specialist's F7 completion contract, `LESSONS.md`, and the rubric file(s) being applied. QA assembles the packet and persists it as a `grading-packet` bd_doc on the task; the orchestrator reads that doc and pastes it into the grader's prompt. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify packet claims against the files the diff references — never to browse the repo or propose fixes beyond `required_fixes`.
 
-Loop wiring:
+Loop wiring (root-orchestrated relay):
 
-1. After the review modules pass, QA assembles the packet and spawns the grader with `Task(subagent_type="grader", ...)`. Iteration counter starts at 1.
-2. The grader returns a STRICT JSON verdict: `{verdict, criterion_results, required_fixes, iteration, rubric_version}`. QA pipes the JSON to `qa-gate.sh grade-record $TASK_ID` verbatim.
-3. On `needs_revision`: QA calls `qa-gate.sh block $TASK_ID` with the grader's `required_fixes` pasted into the block comment. The specialist iterates; the gate re-enters; QA re-spawns the grader with iteration + 1.
-4. On the iteration cap (default 3 — `.claude/rubric-config`'s `iteration_cap` key), QA stops the rubric loop and records a J21 choice via `qa-gate.sh choose <approve|continue|tech-debt|defer>`. Spec 0.2's escalation contract handles iterations beyond the cap; running the rubric loop alongside it would duplicate the cycle.
-5. The approval comment cites the final rubric verdict (`Rubric v1 satisfied at iteration 2 ...`). Approving WITHOUT `rubric-satisfied` requires an explicit override reason inside the approval comment text — the script-side warning surfaces the missing label, the QA prompt makes the override deliberate and auditable.
+1. **First QA spawn — assemble & hand off.** After the review modules pass, QA assembles the packet, writes it via `bd_doc_write(name="grading-packet", ...)`, and returns its completion contract with `qa_status: "needs-grading"` and the sentinel `RUBRIC-RELAY: status=needs-grading` in `llm_observations`. QA does NOT spawn the grader. Iteration counter starts at 1.
+2. **Orchestrator relay — root spawn + record.** The orchestrator reads the `grading-packet` doc, spawns the grader at root via `Task(subagent_type="grader", ...)`, pipes the grader's strict-JSON verdict (`{verdict, criterion_results, required_fixes, iteration, rubric_version}`) through `qa-gate.sh grade-record $TASK_ID`, then re-engages QA with `Task("@qa", ...)`. The orchestrator's `RUBRIC-RELAY: grading-relay` step is canonical in `orchestrator.md` section 5a.
+3. **Second QA spawn — act on the verdict.** QA reads the latest `RUBRIC` comment on the task. On `satisfied`: approve, citing the verdict. On `needs_revision`: call `qa-gate.sh block $TASK_ID` with the grader's `required_fixes` pasted into the block comment. The specialist iterates; the gate re-enters; QA returns `needs-grading` again with iteration + 1, and the orchestrator runs another relay.
+4. **Cap.** On the iteration cap (default 3 — `.claude/rubric-config`'s `iteration_cap` key), the orchestrator stops relaying and re-engages QA noting the cap state; QA records a J21 choice via `qa-gate.sh choose <approve|continue|tech-debt|defer>`. Spec 0.2's escalation contract handles iterations beyond the cap; running the rubric loop alongside it would duplicate the cycle.
+5. **Approval cites the verdict.** The approval comment cites the final rubric verdict (`Rubric v1 satisfied at iteration 2 ...`). Approving WITHOUT `rubric-satisfied` requires an explicit override reason inside the approval comment text — the script-side warning surfaces the missing label, the QA prompt makes the override deliberate and auditable.
+
+Why the relay shape: the original v3.2.0 design had QA spawning the grader directly. Two live traces (`2026-06-11T20-05`, `2026-06-11T21-01`) confirmed the spawn step never fired — `claude-workflow:grader` was in the QA subagent's availableSubagents manifest at init, yet QA made zero Task calls inside both spawns. Per `code.claude.com/docs/en/sub-agents`, subagents cannot spawn other subagents; the spawn-from-QA call site was structurally unreachable. The relay restores the design's separate-context property by moving the spawn to the only level where it actually fires (the root), while preserving every other invariant — packet contents unchanged, strict-JSON verdict unchanged, `grade-record` machinery unchanged, label/comment audit trail unchanged, binding iteration cap unchanged, approval-cites-verdict unchanged, `verify-before-stop.sh` untouched.
 
 Principle 6 is preserved: `verify-before-stop.sh` is unchanged. The rubric is an INPUT QA consumes before approving, not a parallel gate wired into the Stop hook.
 
@@ -446,15 +482,17 @@ Principle 6 is preserved: `verify-before-stop.sh` is unchanged. The rubric is an
 
 **File**: `.claude/agents/grader.md`
 
-**Role**: Separate-context rubric grader. Scores a grading packet against the versioned rubric and returns a strict JSON verdict. Spawned deliberately by the QA agent — never auto-routed.
+**Role**: Separate-context rubric grader. Scores a grading packet against the versioned rubric and returns a strict JSON verdict. Spawned by the root orchestrator at QA's request — never auto-routed.
 
 **Tools**: `Read`, `Grep`, `Glob`, `LS` (read-only — no Bash, no Write, no Edit, no Task).
 
-**Proactivity**: explicit non-proactive ("Spawned deliberately by the QA agent — never auto-routed." in the description). Backend/frontend/devops/qa signal proactivity by including "Use proactively whenever ..." in their description; the grader's description omits that phrasing and explicitly says the opposite.
+**Proactivity**: explicit non-proactive. Backend/frontend/devops/qa signal proactivity by including "Use proactively whenever ..." in their description; the grader's description omits that phrasing and explicitly names the deliberate-spawn relay.
+
+**Why the root relay** (not direct QA spawn): Claude Code subagents cannot spawn other subagents — per `code.claude.com/docs/en/sub-agents`, `Agent(agent_type)` has no effect inside a subagent definition. QA assembles the grading packet, writes it to the task as a `grading-packet` bd_doc, and returns a `needs-grading` status. The root orchestrator reads the doc, spawns the grader from the root level (the only level where the spawn actually fires), pipes the verdict through `qa-gate.sh grade-record`, and re-engages QA. This relay is the institutional response to `claude-workflow-plugin-l1r.6`.
 
 ### Input contract — the grading packet
 
-The QA agent assembles the packet and pastes it into the grader's prompt. Six items, in order:
+QA assembles the packet and persists it as a `grading-packet` doc on the Beads task (`bd_doc_write`). The root orchestrator reads that doc and pastes its contents verbatim into the grader's prompt. Six items, in order:
 
 1. `bd show <task-id>` output — task record, labels, comments.
 2. The SPEC doc — what the orchestrator wrote via `bd_doc_write(name="spec")`.
@@ -509,7 +547,7 @@ Malformed JSON, missing required keys, or invalid enum values trip `qa-gate.sh g
 2. **Reads only to verify packet claims** — no general repo browsing, no scope creep.
 3. **Returns STRICT JSON** — `qa-gate.sh grade-record` rejects anything else with a structured error.
 4. **Pass/fail per criterion + one-line justification** — no partial credit, no numeric theatre.
-5. **Spawned by QA only** — non-proactive frontmatter; never auto-routed by the intent router.
+5. **Spawned by the root orchestrator at QA's request** — non-proactive frontmatter; never auto-routed by the intent router; the spawn lives at the root level because subagents cannot spawn subagents.
 
 ---
 

@@ -80,6 +80,24 @@ test-live:
 		echo "test-live: ANTHROPIC_API_KEY is not set. Live testing drives real Claude — set the key and rerun." ; \
 		exit 2 ; \
 	fi ; \
+	resolver=".claude/scripts/resolve-fixture-spec.sh" ; \
+	resolved_specs="" ; \
+	for f in $$fixtures; do \
+		spec=$$("$$resolver" "$$f" 2>/tmp/test-live-resolve-err.$$$$) ; \
+		rc=$$? ; \
+		if [ "$$rc" -ne 0 ]; then \
+			echo "test-live: failed to resolve fixture '$$f' to a spec file (rc=$$rc)" ; \
+			cat /tmp/test-live-resolve-err.$$$$ >&2 ; \
+			rm -f /tmp/test-live-resolve-err.$$$$ ; \
+			exit $$rc ; \
+		fi ; \
+		rm -f /tmp/test-live-resolve-err.$$$$ ; \
+		resolved_specs="$$resolved_specs $$spec" ; \
+	done ; \
+	pattern="" ; \
+	for spec in $$resolved_specs; do \
+		case "$$pattern" in "") pattern="$$spec" ;; *) pattern="$$pattern|$$spec" ;; esac ; \
+	done ; \
 	count=0 ; total_lo=0 ; total_hi=0 ; \
 	for f in $$fixtures; do \
 		count=$$((count + 1)) ; \
@@ -87,23 +105,19 @@ test-live:
 		total_hi=$$((total_hi + 10)) ; \
 	done ; \
 	echo "test-live: about to run $$count live fixture(s): $$fixtures" ; \
+	echo "test-live: resolved spec(s) -> $$pattern" ; \
 	echo "test-live: estimated cost ~ \$$$$total_lo-\$$$$total_hi USD (Claude Opus 4.7; 2026-05 baseline)" ; \
 	if [ "$$CONFIRM" != "1" ]; then \
 		printf 'test-live: proceed? (y/N) ' ; \
 		read reply ; \
 		case "$$reply" in y|Y|yes|YES) ;; *) echo "test-live: aborted." ; exit 0 ;; esac ; \
 	fi ; \
-	pattern="" ; \
-	for f in $$fixtures; do \
-		case "$$pattern" in "") pattern="$$f.spec.ts" ;; *) pattern="$$pattern|$$f.spec.ts" ;; esac ; \
-	done ; \
-	echo "test-live: running vitest with filter -> $$pattern" ; \
 	if [ "$$RECORD" = "1" ]; then \
 		echo "test-live: RECORD=1 — RECORD_GOLDEN will be set for the run (debugging only; goldens are not a gate after 0.8)" ; \
 		cd .claude/tests/e2e && RECORD_GOLDEN=1 npx vitest run --testNamePattern '.*' specs/ -t "" 2>&1 | tee ../../../.tmp/test-live.log ; \
 	else \
 		mkdir -p .tmp ; \
-		cd .claude/tests/e2e && npx vitest run $$(for f in $$fixtures; do echo "specs/$$f.spec.ts"; done) ; \
+		cd .claude/tests/e2e && npx vitest run $$(for s in $$resolved_specs; do echo "specs/$$s"; done) ; \
 	fi
 
 # test-e2e / test-e2e-record — DEPRECATED. The historical behaviour was

@@ -95,7 +95,7 @@ These rules guide every change. Ordered by how often they trip us up.
 
 ## Architecture (one-paragraph map)
 
-The plugin is five agent prompts (`orchestrator`, `qa`, `backend`, `frontend`, `devops`) plus seven hook scripts that gate Claude's behavior. The orchestrator delegates by intent; specialists implement; QA gates with a multi-stage check (test, lint, type, security pass) before allowing the Stop hook to release. Beads stores all task state; bd-mcp surfaces it; code-context-mcp pre-loads call sites for QA's regression assessment. Settings give every agent maximum thinking budget and full Bash access. `LESSONS.md` at the repo root is the institutional-memory ledger — append-only via `.claude/scripts/lessons.sh add '<lesson>' --source <task-id>`, read by the orchestrator before decomposing non-trivial work, never hand-edited. See `docs/ARCHITECTURE.md` for the full diagram.
+The plugin is five agent prompts (`orchestrator`, `qa`, `backend`, `frontend`, `devops`) plus seven hook scripts that gate Claude's behavior. The orchestrator delegates by intent; specialists implement; QA gates with a multi-stage check (test, lint, type, security pass) before allowing the Stop hook to release. Beads stores all task state; bd-mcp surfaces it; code-graph-mcp pre-loads call sites and impact analysis (`impact_of` for orchestrator pre-delegation, `impact_of` per changed symbol for QA's regression assessment — code-context-mcp was retired in 3.3.0 in favor of this richer surface). Settings give every agent maximum thinking budget and full Bash access. `LESSONS.md` at the repo root is the institutional-memory ledger — append-only via `.claude/scripts/lessons.sh add '<lesson>' --source <task-id>`, read by the orchestrator before decomposing non-trivial work, never hand-edited. See `docs/ARCHITECTURE.md` for the full diagram.
 
 ## Beads labels
 
@@ -116,3 +116,4 @@ These were the recurring mistakes from prior phases. Verify your change does not
 - Comment-text fallback in `verify-before-stop.sh` for QA approval -> bypasses the label gate.
 - Specialist tool list narrowed below the broad set -> specialist hits an "unauthorized tool" wall mid-task.
 - `additionalDirectories` missing from settings -> plugin can't read the parent project tree.
+- Agent-spawning step inside a subagent prompt -> structurally unreachable; subagents cannot spawn subagents (`code.claude.com/docs/en/sub-agents`: `Agent(agent_type)` has no effect in subagent definitions). Spawn from root, or design as a root-orchestrated relay (see the QA -> grader handoff in `.claude/agents/qa.md` section 6 and `.claude/agents/orchestrator.md` section 5a; regression guarded by `no-nested-spawn-instructions.test.sh`).

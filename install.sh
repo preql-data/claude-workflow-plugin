@@ -690,7 +690,7 @@ if [ "$V2_UPGRADE" = true ]; then
     echo -e "${CYAN}What changed in the v2 -> v3 upgrade:${NC}"
     echo "  - .claude-plugin/plugin.json: first-class Claude Code plugin manifest"
     echo "  - Agent files now pin 'model:' (run /workflow-model to bump)"
-    echo "  - Two MCP servers: bd-mcp (21 typed Beads tools), code-context-mcp (3 search tools)"
+    echo "  - Two MCP servers: bd-mcp (21 typed Beads tools), code-graph-mcp (7 graph tools incl. impact_of / dead_code)"
     echo "  - QA gate is now Beads-label-driven (qa-approved), no longer marker-file"
     echo "  - Hook output uses hookSpecificOutput envelope; PreToolUse blocks orchestrator edits"
     echo "  - SessionStart warns on stale model / old bd; SessionEnd writes a structured summary"

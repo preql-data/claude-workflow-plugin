@@ -392,6 +392,164 @@ function invDeclaredSubagentsOnly(
 }
 
 // ============================================================================
+// Invariant 6: qa-queried-impact-of
+// ============================================================================
+/**
+ * The QA subagent called the code-graph `impact_of` MCP tool at least
+ * `min_calls` times during the run. Encodes the contract written into
+ * the QA agent prompt (extends J19): when a diff lands in front of QA,
+ * QA must query `impact_of` for the symbols touched so high-fan-in
+ * callers are surfaced as regression candidates, not just the tests
+ * shipped in the diff.
+ *
+ * The plan text for Phase B of the verification-suite explicitly says
+ * "add a fixture-declared invariant that the QA step queried `impact_of`
+ * for every changed symbol" — see `docs/plans/verification-suite.md`.
+ *
+ * APPROXIMATION ("every changed symbol" is NOT verifiable from the trace):
+ *   The trace records fileWrites (paths + change types) and toolCalls
+ *   (name + input shape), but it does NOT record the diff's symbol set —
+ *   we'd need to parse changed-file ASTs to know which symbols moved.
+ *   Doing that inside an invariant would re-implement the code-graph
+ *   indexer and burn the gate's deterministic story.
+ *
+ *   The strongest checkable form: when the run produced any file writes
+ *   (`fileWrites.length > 0` — there is a real diff to assess), at least
+ *   `min_calls` (default 1) `impact_of` calls must be attributable to a
+ *   QA subagent. This catches the headline failure mode the contract
+ *   guards against — QA approved a diff without consulting the impact
+ *   graph at all — while being honest about the symbol-set blind spot.
+ *
+ *   When the trace acquires structured changed-symbol fields (Phase A
+ *   follow-up that the completion-contract skip also waits on), this
+ *   invariant can tighten to "at least one impact_of call per changed
+ *   symbol identifier". Until then, presence-given-diff is the strongest
+ *   defensible assertion — same precedent as `label-milestones` set-
+ *   membership in lieu of in-run ordering.
+ *
+ * GRACEFUL SKIP:
+ *   The code-graph server wiring is conditional by design — agent
+ *   prompts degrade to search-only when the server is absent (see
+ *   `docs/MCP_SERVERS.md` migration section). If the trace's
+ *   `toolsAvailable` shows no `code-graph` tools at all, the run
+ *   could not have called `impact_of`; we return `skipped` rather than
+ *   fail. A target project that hasn't installed code-graph degrades to
+ *   the search-only flow by design.
+ *
+ *   The skip is also emitted when the trace records zero `fileWrites` —
+ *   there's nothing for QA to assess, so the regression-query contract
+ *   is vacuous. This matches the spirit of `stop-requires-approval`'s
+ *   "no Stop:allow -> vacuous pass" branch, but uses `skipped` to make
+ *   the gap visible to operators reviewing the result.
+ *
+ * TOOL-NAME MATCHING:
+ *   The SDK rewrites MCP tool names with a plugin-qualifier prefix,
+ *   observed in cassettes as `mcp__plugin_<plugin>_<server>__<tool>`
+ *   (e.g. `mcp__plugin_claude-workflow_code-graph__impact_of`). The
+ *   matcher tolerates any variant by checking the regex pattern
+ *   `code-graph.*impact_of` against the recorded tool name, with a
+ *   fallback to the bare `impact_of` form (which the in-process server
+ *   tests use). Likewise for `toolsAvailable` presence-of-code-graph
+ *   detection.
+ *
+ * Params:
+ *   `min_calls: number` — minimum impact_of calls from QA. Default 1.
+ */
+function invQaQueriedImpactOf(
+  trace: Trace,
+  params?: Record<string, unknown>,
+): InvariantResult {
+  const minCalls =
+    typeof params?.min_calls === "number" && Number.isFinite(params.min_calls)
+      ? Math.max(0, Math.floor(params.min_calls as number))
+      : 1;
+
+  // Code-graph server presence: any tool whose name pattern carries
+  // `code-graph` is enough evidence the server registered. The
+  // SDK-rewritten form `mcp__plugin_<plugin>_code-graph__<tool>` is the
+  // most common shape; the bare server-tool form `impact_of` (from
+  // direct in-process tests) is also tolerated downstream.
+  const codeGraphPattern = /code-graph/;
+  const hasCodeGraphServer = trace.toolsAvailable.some((t) =>
+    codeGraphPattern.test(t),
+  );
+  if (!hasCodeGraphServer) {
+    return {
+      pass: true,
+      skipped: true,
+      detail:
+        "skipped: trace.toolsAvailable shows no code-graph tools — code-graph server was not loaded (agents degrade to search-only flow per MCP_SERVERS.md migration).",
+    };
+  }
+
+  // Vacuous skip: no file writes -> no diff for QA to assess -> the
+  // regression-query contract is empty. Documented gap rather than a
+  // silent pass.
+  if (trace.fileWrites.length === 0) {
+    return {
+      pass: true,
+      skipped: true,
+      detail:
+        "skipped: trace.fileWrites is empty — no diff for QA to assess, regression-query contract is vacuous.",
+    };
+  }
+
+  // Identify the set of QA Task tool_use ids. Any tool call whose parent
+  // chain leads to one of these is "QA-attributable". Plugin-qualifier
+  // tolerant: both `qa` and `claude-workflow:qa` count.
+  const qaTaskIds = new Set<string>();
+  for (const inv of trace.subagentInvocations) {
+    if (stripQualifier(inv.type) === "qa") {
+      qaTaskIds.add(inv.toolUseId);
+    }
+  }
+  if (qaTaskIds.size === 0) {
+    return {
+      pass: false,
+      detail:
+        "no QA subagent invocation found in trace.subagentInvocations — cannot attribute any impact_of call to QA.",
+    };
+  }
+
+  // Walk parentToolUseId chains to find impact_of calls whose ancestor
+  // is a QA Task. We accept tool names that match the code-graph
+  // pattern with `impact_of`, the SDK-rewritten plugin-qualified form,
+  // and the bare `impact_of` form for in-process callers.
+  const impactPattern = /code-graph.*impact_of|^impact_of$/;
+  const index = buildToolCallIndex(trace);
+  const qaImpactCalls: ToolCall[] = [];
+  for (const call of trace.toolCalls) {
+    if (!impactPattern.test(call.name)) continue;
+    // Climb parent chain looking for a QA Task ancestor.
+    let parentId = call.parentToolUseId;
+    const seen = new Set<string>();
+    let qaAttributable = false;
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      if (qaTaskIds.has(parentId)) {
+        qaAttributable = true;
+        break;
+      }
+      const parent = index.get(parentId);
+      if (!parent) break;
+      parentId = parent.parentToolUseId;
+    }
+    if (qaAttributable) qaImpactCalls.push(call);
+  }
+
+  if (qaImpactCalls.length >= minCalls) {
+    return {
+      pass: true,
+      detail: `${qaImpactCalls.length} impact_of call(s) attributable to QA (min_calls=${minCalls}); approximation: presence-given-diff, not per-symbol coverage — see invariants.ts docstring.`,
+    };
+  }
+  return {
+    pass: false,
+    detail: `qa-queried-impact-of: ${qaImpactCalls.length} impact_of call(s) from QA, expected at least ${minCalls}. fileWrites=${trace.fileWrites.length} (non-empty -> diff exists); QA must call impact_of to surface high-fan-in regression candidates (extends J19).`,
+  };
+}
+
+// ============================================================================
 // Registry
 // ============================================================================
 /**
@@ -408,6 +566,7 @@ export const INVARIANTS: Record<string, InvariantImpl> = {
   "completion-contract": invCompletionContract,
   "label-milestones": invLabelMilestones,
   "declared-subagents-only": invDeclaredSubagentsOnly,
+  "qa-queried-impact-of": invQaQueriedImpactOf,
 };
 
 /** Returns the sorted list of registered invariant names. Useful for

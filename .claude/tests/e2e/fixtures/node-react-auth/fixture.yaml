@@ -45,6 +45,13 @@ expected_label_progression:
 # these via `await expect(trace).satisfiesInvariants(<fixture.yaml>)`.
 # See .claude/tests/e2e/lib/invariants.ts for the implementations and
 # .claude/tests/README.md for the schema.
+#
+# qa-queried-impact-of is added by claude-workflow-plugin-366.6 as the
+# Phase B regression anchor: QA's frontmatter now grants code-graph MCP
+# tools, so on a future live run QA can call impact_of and this
+# invariant flips green. Before the 366.6 fix QA's `tools:` allowlist
+# omitted all `mcp__*` entries and the SDK stripped MCP tools from QA's
+# surface entirely — 0 impact_of calls in the seed trace.
 invariants:
   - name: stop-requires-approval
   - name: orchestrator-no-edits
@@ -60,6 +67,7 @@ invariants:
         - backend
         - frontend
         - qa
+  - name: qa-queried-impact-of
 
 notes: |
   - The fixture is a workspace (root + client subpkg). `npm test` runs

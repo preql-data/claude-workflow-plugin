@@ -1,6 +1,6 @@
 {
   "name": "claude-workflow",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Mandatory orchestrator -> specialists -> QA workflow with Beads task tracking",
   "author": {
     "name": "preql-data",
@@ -22,7 +22,8 @@
     "./.claude/agents/qa.md",
     "./.claude/agents/backend.md",
     "./.claude/agents/frontend.md",
-    "./.claude/agents/devops.md"
+    "./.claude/agents/devops.md",
+    "./.claude/agents/grader.md"
   ],
   "commands": [
     "./.claude/commands/workflow-model.md"
@@ -40,11 +41,11 @@
       ],
       "env": {}
     },
-    "code-context": {
+    "code-graph": {
       "type": "stdio",
       "command": "node",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/code-context-mcp/bin/code-context-mcp.js"
+        "${CLAUDE_PLUGIN_ROOT}/.claude/mcp/code-graph-mcp/bin/code-graph-mcp.js"
       ],
       "env": {}
     }

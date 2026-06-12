@@ -2,11 +2,21 @@
  * rubric-revision-loop.spec.ts — Phase A live-validation fixture spec.
  *
  * Drives the rubric-revision-loop fixture against real Claude Opus 4.7
- * and asserts the canonical "QA spawns grader → needs_revision →
- * specialist iterates → grader satisfied → QA approves citing the
+ * and asserts the canonical "QA assembles grading packet → orchestrator
+ * spawns grader at root → needs_revision → specialist iterates →
+ * orchestrator re-spawns grader → satisfied → QA approves citing the
  * verdict" flow. The fixture seeds a deliberately under-tested change
  * (validateEmail helper without tests, per the prompt), exercising the
  * default rubric's C2 criterion failure on the first grading pass.
+ *
+ * Why the relay shape: Claude Code subagents cannot spawn other
+ * subagents (code.claude.com/docs/en/sub-agents — `Agent(agent_type)`
+ * has no effect inside a subagent definition). QA assembles and
+ * persists the grading packet as a `grading-packet` bd_doc and returns
+ * `needs-grading` to the orchestrator; the orchestrator spawns the
+ * grader at root, pipes the verdict through `qa-gate.sh grade-record`,
+ * and re-engages QA. See orchestrator.md section 5a (RUBRIC-RELAY:
+ * grading-relay) and qa.md section 6.
  *
  * Cross-references:
  *   - Spec Phase A, "Tests" → "Dev-cycle live validation (manual, once,
@@ -31,14 +41,16 @@
  *     contract was returned, etc.
  *
  * Failure modes the spec guards against:
- *   - QA approves on iteration 1 without ever spawning the grader →
+ *   - The relay fails to spawn the grader (QA returns needs-grading
+ *     but the orchestrator never runs the relay; or QA approves on
+ *     iteration 1 without ever assembling a packet) →
  *     declared-subagents-only carries `grader`; failure to invoke it
  *     when the rubric loop is the point of the fixture is a workflow
  *     violation. We also assert subagentInvoked("grader") directly.
- *   - QA spawns the grader but accepts a malformed verdict silently →
- *     fixture.yaml's label-milestones requires `rubric-satisfied`,
- *     which only appears via a valid satisfied verdict through
- *     `qa-gate.sh grade-record`.
+ *   - The grader runs but the orchestrator accepts a malformed verdict
+ *     silently → fixture.yaml's label-milestones requires
+ *     `rubric-satisfied`, which only appears via a valid satisfied
+ *     verdict through `qa-gate.sh grade-record`.
  *   - QA bypasses the rubric loop and approves without
  *     rubric-satisfied — the milestone sequence would not contain
  *     `rubric-satisfied`, and the label-milestones invariant fails.
@@ -59,7 +71,7 @@ const FIXTURE_YAML = path.join(FIXTURE_PATH, "fixture.yaml");
 
 describe("rubric-revision-loop: grader-driven revision loop", () => {
   it(
-    "QA spawns grader → needs_revision → specialist iterates → satisfied → approval",
+    "QA assembles packet → orchestrator spawns grader at root → needs_revision → specialist iterates → satisfied → approval",
     async () => {
       const trace = await runFixture({
         fixturePath: FIXTURE_PATH,
@@ -81,11 +93,18 @@ file is enough for now.`,
       // 1) Backend specialist ran (validate.js is JS module code).
       expect(trace).subagentInvoked("backend");
 
-      // 2) QA ran (must — without QA the grader doesn't get spawned).
+      // 2) QA ran (must — without QA the grading packet is never
+      //    assembled and the orchestrator has nothing to relay to the
+      //    grader).
       expect(trace).subagentInvoked("qa");
 
       // 3) The grader subagent fired. This is the fixture's whole point —
-      //    the rubric loop is what we're validating.
+      //    the rubric loop is what we're validating. The spawn lives at
+      //    root level (orchestrator.md section 5a's RUBRIC-RELAY:
+      //    grading-relay) because subagents cannot spawn subagents; the
+      //    trace records the invocation regardless of WHO spawned it,
+      //    so subagentInvoked("grader") remains the right assertion
+      //    under the relay design.
       expect(trace).subagentInvoked("grader");
 
       // 4) Stop ultimately approved. If the loop bounced past the cap,
@@ -94,8 +113,33 @@ file is enough for now.`,
       //    iteration 2, well under the cap.
       expect(trace).hookFired("Stop", { decision: "approve" });
 
-      // 5) Beads task was created.
-      expect(trace.beadsTasksCreated.length).toBeGreaterThan(0);
+      // 5) Beads task was created. Accept the harness diff OR an MCP
+      //    `bd_create_task` call in toolCalls OR a Bash `bd create` call
+      //    in toolCalls. The harness diff occasionally misses tasks
+      //    written via the bd daemon path (MCP route) when the daemon's
+      //    JSONL flush hasn't ticked before runFixture reads
+      //    `.beads/issues.jsonl`. runFixture now flushes via
+      //    `bd sync --flush-only` before the post-snapshot, but capture
+      //    stays best-effort; the structural evidence in toolCalls is the
+      //    authoritative fallback. See claude-workflow-plugin-l1r.7 and
+      //    go-cli-refactor.spec.ts for the established pattern.
+      const sawBeadsTask =
+        trace.beadsTasksCreated.length > 0 ||
+        trace.toolCalls.some((c) => {
+          if (
+            c.name.includes("bd_create_task") ||
+            c.name.includes("bd__create_task")
+          ) {
+            return true;
+          }
+          if (c.name === "Bash") {
+            const cmd =
+              (c.input as { command?: string } | undefined)?.command ?? "";
+            return /\bbd\s+create\b/.test(cmd);
+          }
+          return false;
+        });
+      expect(sawBeadsTask).toBe(true);
 
       // 6) Autonomy.
       expect(trace).noPermissionDenials();

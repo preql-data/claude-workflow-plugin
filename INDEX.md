@@ -26,7 +26,7 @@ listing the directory.
 - `.claude/hooks/hooks.json` — hook bindings.
 - `.claude/skills/workflow-engine/` — auto-loaded skill describing the
   always-on workflow.
-- `.claude/mcp/` — bundled MCP servers (`bd-mcp`, `code-context-mcp`).
+- `.claude/mcp/` — bundled MCP servers (`bd-mcp`, `code-graph-mcp`).
 - `.claude/settings.json` — runtime settings (model, thinking budget,
   permissions, additionalDirectories).
 - `.mcp.json` — MCP server bindings copied to user repos.
@@ -58,7 +58,7 @@ See `docs/` (which has its own index in `docs/plans/README.md`):
 - `docs/ARCHITECTURE.md` — full architecture write-up.
 - `docs/BEADS.md` — Beads conventions used by the plugin.
 - `docs/HOOKS.md` — every hook script's contract.
-- `docs/MCP_SERVERS.md` — bd-mcp and code-context-mcp interfaces.
+- `docs/MCP_SERVERS.md` — bd-mcp and code-graph-mcp interfaces.
 - `docs/QUICKSTART.md` — first-run guide.
 - `docs/TROUBLESHOOTING.md` — common failure modes.
 - `docs/WORKFLOW.md` — end-to-end orchestration story.

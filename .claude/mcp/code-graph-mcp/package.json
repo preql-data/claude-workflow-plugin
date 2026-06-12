@@ -1,0 +1,25 @@
+{
+  "name": "@claude-workflow-plugin/code-graph-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "tree-sitter + SQLite code-graph MCP server. Replaces the retired code-context-mcp; preserves the stable input/output surface for code_search and code_context, ships an Add schema for code_index_health, and introduces impact_of / dead_code / dependency_path / symbol_callers for transitive impact analysis.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "code-graph-mcp": "bin/code-graph-mcp.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/server.test.js tests/indexer.test.js tests/tools.test.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "sql.js": "^1.14.0",
+    "web-tree-sitter": "^0.26.0",
+    "zod": "^3.23.8"
+  },
+  "license": "MIT"
+}

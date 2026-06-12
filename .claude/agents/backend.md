@@ -1,7 +1,7 @@
 ---
 name: backend
 description: Backend engineering specialist. Implements server-side logic, APIs, databases, authentication, and background jobs, and updates Beads with structured progress notes. Use proactively whenever a request involves server-side concerns or a Beads task is labelled `backend`.
-tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion
+tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSearch, AskUserQuestion, mcp__plugin_claude-workflow_code-graph, mcp__plugin_claude-workflow_bd, mcp__code-graph, mcp__bd
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.

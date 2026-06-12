@@ -130,6 +130,10 @@ describe("invariant engine: registry", () => {
     expect(names).toContain("declared-subagents-only");
   });
 
+  it("registers the qa-queried-impact-of invariant from verification-suite Phase B", () => {
+    expect(listInvariants()).toContain("qa-queried-impact-of");
+  });
+
   it("evaluateAll fails-loudly on an unknown invariant name (catches fixture.yaml typos)", () => {
     const t = goodTrace();
     const agg = evaluateAll(t, [{ name: "does-not-exist" }]);
@@ -426,6 +430,235 @@ describe("invariant: declared-subagents-only", () => {
     expect(r.detail).toMatch(/missing `declared` parameter/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// qa-queried-impact-of (verification-suite Phase B). The trace must
+// show a code-graph `impact_of` call attributable to a QA subagent when
+// the run produced any file writes. Skip semantics: no code-graph in
+// toolsAvailable (server absent by design) OR no fileWrites (vacuous).
+// ---------------------------------------------------------------------------
+
+/** Build a synthetic trace where QA calls impact_of via the code-graph
+ *  MCP server after backend writes a file. Mirrors the SDK's rewritten
+ *  tool-name shape (`mcp__plugin_<plugin>_<server>__<tool>`) so the
+ *  pattern matcher in the invariant is exercised against the realistic
+ *  form, not just the bare `impact_of` shorthand. */
+function impactPositiveTrace(): Trace {
+  const t = createEmptyTrace(
+    "synthetic-impact-positive",
+    "prompt",
+    "claude-opus-4-7",
+  );
+  t.toolsAvailable = [
+    "mcp__plugin_claude-workflow_code-graph__code_search",
+    "mcp__plugin_claude-workflow_code-graph__code_context",
+    "mcp__plugin_claude-workflow_code-graph__impact_of",
+    "mcp__plugin_claude-workflow_code-graph__code_index_health",
+  ];
+  t.toolCalls = [
+    // Backend writes the auth endpoint into the fixture's server/index.js.
+    {
+      id: "task-backend",
+      name: "Task",
+      input: { subagent_type: "backend" },
+      parentToolUseId: null,
+      subagentType: "backend",
+      durationMs: 0,
+    },
+    {
+      id: "write-server",
+      name: "Write",
+      input: { file_path: "server/index.js", content: "..." },
+      parentToolUseId: "task-backend",
+      durationMs: 0,
+    },
+    // QA spawns and calls impact_of on a real symbol from the fixture
+    // (the createApp factory in server/index.js).
+    {
+      id: "task-qa",
+      name: "Task",
+      input: { subagent_type: "qa" },
+      parentToolUseId: null,
+      subagentType: "qa",
+      durationMs: 0,
+    },
+    {
+      id: "qa-impact-call",
+      name: "mcp__plugin_claude-workflow_code-graph__impact_of",
+      input: { symbol: "createApp" },
+      parentToolUseId: "task-qa",
+      durationMs: 0,
+    },
+  ];
+  t.subagentInvocations = [
+    { type: "backend", toolUseId: "task-backend", parentToolUseId: null },
+    { type: "qa", toolUseId: "task-qa", parentToolUseId: null },
+  ];
+  t.fileWrites = [
+    { path: "server/index.js", bytesWritten: 800, changeType: "modified" },
+  ];
+  t.hookOutputs = [
+    {
+      event: "Stop",
+      script: "verify-before-stop.sh",
+      durationMs: 1,
+    },
+  ];
+  t.beadsLabelTransitions = [
+    {
+      taskId: "impact-good-1",
+      added: ["qa-pending", "qa-approved"],
+      removed: [],
+    },
+  ];
+  return t;
+}
+
+describe("invariant: qa-queried-impact-of", () => {
+  it("passes when QA called impact_of and fileWrites is non-empty", () => {
+    const t = impactPositiveTrace();
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeUndefined();
+    expect(r.detail).toMatch(/impact_of call/);
+  });
+
+  it("matches the plugin-qualifier-tolerant subagent typing (claude-workflow:qa)", () => {
+    const t = impactPositiveTrace();
+    t.subagentInvocations = [
+      {
+        type: "claude-workflow:backend",
+        toolUseId: "task-backend",
+        parentToolUseId: null,
+      },
+      {
+        type: "claude-workflow:qa",
+        toolUseId: "task-qa",
+        parentToolUseId: null,
+      },
+    ];
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(true);
+  });
+
+  it("also matches the bare `impact_of` tool-name form (in-process direct callers)", () => {
+    const t = impactPositiveTrace();
+    // Swap the SDK-rewritten name for the bare server-side form. The
+    // pattern matcher accepts both.
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-impact-call" ? { ...c, name: "impact_of" } : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(true);
+  });
+
+  it("respects the min_calls param when set (e.g. require ≥2 impact_of calls from QA)", () => {
+    const t = impactPositiveTrace();
+    // Only one impact_of call attributable to QA — should fail with min_calls=2.
+    const r1 = INVARIANTS["qa-queried-impact-of"]!(t, { min_calls: 2 });
+    expect(r1.pass).toBe(false);
+    expect(r1.detail).toMatch(/expected at least 2/);
+    // Add a second call → passes.
+    t.toolCalls.push({
+      id: "qa-impact-call-2",
+      name: "mcp__plugin_claude-workflow_code-graph__impact_of",
+      input: { symbol: "express" },
+      parentToolUseId: "task-qa",
+      durationMs: 0,
+    });
+    const r2 = INVARIANTS["qa-queried-impact-of"]!(t, { min_calls: 2 });
+    expect(r2.pass).toBe(true);
+  });
+
+  it("skips with a documented reason when the code-graph server is absent", () => {
+    const t = impactPositiveTrace();
+    // Server not loaded — agents degrade to search-only flow.
+    t.toolsAvailable = ["Write", "Edit", "Bash", "Read"];
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/code-graph/);
+    expect(r.detail).toMatch(/search-only/);
+  });
+
+  it("skips vacuously when fileWrites is empty (no diff for QA to assess)", () => {
+    const t = impactPositiveTrace();
+    t.fileWrites = [];
+    // Also strip the impact_of call to prove the skip path doesn't
+    // depend on impact_of being present.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-impact-call");
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/vacuous/);
+  });
+
+  it("evaluateAll surfaces the skip in `skipped`, not `failed`", () => {
+    const t = impactPositiveTrace();
+    t.toolsAvailable = []; // code-graph absent
+    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
+    expect(agg.allPassed).toBe(true);
+    expect(agg.skipped).toContain("qa-queried-impact-of");
+    expect(agg.failed).toEqual([]);
+  });
+
+  it("META-TEST: fails when the QA-attributable impact_of call is stripped from a passing trace", () => {
+    const t = impactPositiveTrace();
+    // Remove only the impact_of call — keep code-graph in toolsAvailable
+    // and fileWrites populated so the invariant cannot fall back to
+    // either skip branch. This is the headline failure mode: QA
+    // approved a diff without consulting the impact graph.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-impact-call");
+    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
+    expect(agg.allPassed).toBe(false);
+    expect(agg.failed).toEqual(["qa-queried-impact-of"]);
+    expect(agg.results[0]?.result.detail).toMatch(/0 impact_of call/);
+    expect(agg.results[0]?.result.detail).toMatch(/expected at least 1/);
+  });
+
+  it("META-TEST: fails when impact_of is called by a non-QA subagent (e.g. orchestrator at root)", () => {
+    const t = impactPositiveTrace();
+    // Reattribute the impact_of call to the orchestrator (parent=null).
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-impact-call" ? { ...c, parentToolUseId: null } : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/0 impact_of call/);
+  });
+
+  it("META-TEST: fails when impact_of is called by a backend subagent rather than QA", () => {
+    const t = impactPositiveTrace();
+    // Move the impact_of call under the backend Task instead of QA.
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-impact-call"
+        ? { ...c, parentToolUseId: "task-backend" }
+        : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/0 impact_of call/);
+  });
+
+  it("fails loudly when no QA subagent appears in the trace at all (gate would have been bypassed)", () => {
+    const t = impactPositiveTrace();
+    t.subagentInvocations = t.subagentInvocations.filter(
+      (s) => stripQualifier(s.type) !== "qa",
+    );
+    // Also drop the QA Task call itself.
+    t.toolCalls = t.toolCalls.filter(
+      (c) => c.id !== "task-qa" && c.id !== "qa-impact-call",
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/no QA subagent/i);
+  });
+});
+
+// Local helper duplicate (the engine's `stripQualifier` is module-private).
+function stripQualifier(type: string): string {
+  return type.includes(":") ? type.slice(type.indexOf(":") + 1) : type;
+}
 
 // ---------------------------------------------------------------------------
 // Seed-corpus validation: retained replays should satisfy the universal

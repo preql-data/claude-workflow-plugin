@@ -144,18 +144,53 @@ assert_no_unresolved_vars "$RENDERED_MCP" || ASSERT_RC=$?
 assert_eq "installer-mcp-config: no bare \${VAR} in mcpServers fields" "0" "$ASSERT_RC"
 
 # 3. Spot-check: both expected servers are wired.
+#    Phase B (v3.3.0) replaces code-context with code-graph; the entry
+#    key is "code-graph" and the launcher path lives under
+#    .claude/mcp/code-graph-mcp/. The old code-context entry MUST be
+#    absent — leaving it would shadow the new server and produce a
+#    diagnostics warning for a launcher path that no longer exists.
 BD_ARGS=$(jq -r '.mcpServers.bd.args[0] // empty' "$RENDERED_MCP")
-CC_ARGS=$(jq -r '.mcpServers["code-context"].args[0] // empty' "$RENDERED_MCP")
+CG_ARGS=$(jq -r '.mcpServers["code-graph"].args[0] // empty' "$RENDERED_MCP")
+CC_PRESENT=$(jq -r '.mcpServers["code-context"] // empty | length' "$RENDERED_MCP")
 assert_contains "installer-mcp-config: bd server args reference bd-mcp" \
     "bd-mcp/bin/bd-mcp.js" "$BD_ARGS"
-assert_contains "installer-mcp-config: code-context server args reference code-context-mcp" \
-    "code-context-mcp/bin/code-context-mcp.js" "$CC_ARGS"
+assert_contains "installer-mcp-config: code-graph server args reference code-graph-mcp" \
+    "code-graph-mcp/bin/code-graph-mcp.js" "$CG_ARGS"
 # Confirm the default form is present (positive case complementing the
 # negative bare-form check above).
 assert_contains "installer-mcp-config: bd args use :- default form" \
     '${CLAUDE_PROJECT_DIR:-.}' "$BD_ARGS"
-assert_contains "installer-mcp-config: code-context args use :- default form" \
-    '${CLAUDE_PROJECT_DIR:-.}' "$CC_ARGS"
+assert_contains "installer-mcp-config: code-graph args use :- default form" \
+    '${CLAUDE_PROJECT_DIR:-.}' "$CG_ARGS"
+# Phase B migration: the retired code-context entry must be gone. A
+# silent leftover here would mean the installer (or this spec) was
+# updated only partially — the rendered .mcp.json would still try to
+# spawn a launcher under a directory that the installer no longer
+# copies.
+assert_eq "installer-mcp-config: retired code-context server is absent from rendered .mcp.json" \
+    "" "$CC_PRESENT"
+
+# 3a. The code-graph-mcp directory must be present in the rendered
+#     install (the generic MCP copy loop in install.sh globs
+#     .claude/mcp/*/ — this is the spot-check that the loop picked it
+#     up). The retired code-context-mcp directory must NOT have been
+#     copied; the source tree no longer contains it (B.2 deleted it
+#     in the same commit family as this assertion), so a copy here
+#     would indicate the source had been resurrected.
+assert_eq "installer-mcp-config: rendered install has .claude/mcp/code-graph-mcp/" "0" \
+    "$([ -d "$INSTALL_TARGET/.claude/mcp/code-graph-mcp" ] && echo 0 || echo 1)"
+assert_eq "installer-mcp-config: rendered install does NOT have .claude/mcp/code-context-mcp/" "0" \
+    "$([ ! -e "$INSTALL_TARGET/.claude/mcp/code-context-mcp" ] && echo 0 || echo 1)"
+
+# 3b. Spot-check that the vendored grammars rode along with the MCP
+#     copy. The grammars directory is ~9.6 MB and the install.sh copy
+#     uses rsync (or cp -R fallback) on the whole server dir, so any
+#     of the 10 .wasm grammars is a reasonable single spot-check. If
+#     this fails, the copy mechanism is skipping non-source files
+#     (the rsync exclude patterns ship node_modules and *.log only;
+#     anything else missing is a real regression).
+assert_eq "installer-mcp-config: rendered install has at least one tree-sitter wasm grammar" "0" \
+    "$([ -f "$INSTALL_TARGET/.claude/mcp/code-graph-mcp/grammars/tree-sitter-typescript.wasm" ] && echo 0 || echo 1)"
 
 # 4. META-TEST: feed the asserter a synthetic config with a bare
 #    ${CLAUDE_PROJECT_DIR} (the exact bug shape the asserter must catch).

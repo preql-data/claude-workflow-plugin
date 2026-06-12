@@ -12,7 +12,9 @@
 #   2. grade-record(needs_revision, iteration 1) — RUBRIC comment posted,
 #      labels unchanged.
 #   3. qa-gate.sh block — qa-blocked label added; comment recorded
-#      (carrying the required_fixes the QA agent would paste in).
+#      (carrying the required_fixes the QA agent would paste in on the
+#      spawn AFTER the orchestrator records the verdict — qa.md section
+#      6c routes the recorded RUBRIC comment into qa-gate.sh block).
 #   4. re-enter on the same task — rubric-satisfied cleared (none present
 #      to clear; rubric-pending refreshed), counters reset, escalation
 #      labels cleared. The full QA round-trip rejoins normal gating.
@@ -37,13 +39,23 @@
 #
 # What this spec does NOT cover (L2-untestable-by-design):
 #
-#   - The 3-iteration cap from .claude/rubric-config is read by the QA
-#     AGENT PROMPT, not by qa-gate.sh. The cap is a prompt-level
-#     contract (qa.md section 6e). At L2 we exercise the SCRIPT slice:
-#     grade-record + labels + the 0.2 escalation continuing to work
-#     with rubric labels present. The prompt-level cap is covered by
-#     the e2e rubric-revision-loop fixture (built but RUN manually
-#     at phase closeout).
+#   - The 3-iteration cap from .claude/rubric-config is read by the
+#     ROOT ORCHESTRATOR prompt (and surfaced to QA on cap-hit), not by
+#     qa-gate.sh. The cap is a prompt-level contract (orchestrator.md
+#     section 5a's Step E + qa.md section 6e). At L2 we exercise the
+#     SCRIPT slice: grade-record + labels + the 0.2 escalation
+#     continuing to work with rubric labels present. The prompt-level
+#     cap is covered by the e2e rubric-revision-loop fixture (built
+#     but RUN manually at phase closeout).
+#   - The RUBRIC-RELAY: grading-relay handoff itself — QA persisting
+#     a grading-packet bd_doc and returning needs-grading, the
+#     orchestrator reading the doc and spawning the grader at root —
+#     is a prompt-level contract enforced via the L1 sentinel test
+#     no-nested-spawn-instructions.test.sh. The script-level surface
+#     of grade-record + labels exercised below is invariant under
+#     where the grader spawn fires from (QA vs root); the relay shape
+#     is verified by the L1 test and observed end-to-end in the live
+#     rubric-revision-loop fixture.
 #
 # Run via the L2 component runner (.claude/tests/component/run.sh),
 # which pre-sources assert.sh / shim.sh / hook-envelope.sh / fixture.sh.
@@ -76,9 +88,11 @@ mk_shim "npm" "$FIXTURE" 1 "FAIL  src/handler.test.ts: AssertionError: 1 test fa
 NPM_LOG="$FIXTURE/bin/npm.log"
 
 # Canned-verdict directory. Each file is a strict-JSON grader output the
-# QA agent would pipe into `qa-gate.sh grade-record`. Building them as
-# files (rather than inline heredocs) lets us replay/mutate them across
-# the meta-tests.
+# root orchestrator would pipe into `qa-gate.sh grade-record` (per the
+# RUBRIC-RELAY: grading-relay step in orchestrator.md — subagents cannot
+# spawn subagents, so the grader spawn + verdict-recording live at the
+# root). Building them as files (rather than inline heredocs) lets us
+# replay/mutate them across the meta-tests.
 VERDICTS_DIR="$FIXTURE/.canned-verdicts"
 mkdir -p "$VERDICTS_DIR"
 
@@ -188,8 +202,8 @@ assert_json_field "rubric-loop-2: grade-record ok=true on needs_revision" \
 assert_json_field "rubric-loop-2: grade-record status=needs_revision" \
     "$GR_OUT_1" '.status' "needs_revision"
 
-# Labels stayed where they were — qa-blocked round-trip is the QA agent's
-# move, not grade-record's.
+# Labels stayed where they were — qa-blocked round-trip is QA's move on
+# the spawn AFTER the orchestrator records the verdict, not grade-record's.
 LABELS_2=$(labels_for "$TID")
 assert_contains "rubric-loop-2: rubric-pending preserved after needs_revision" \
     "rubric-pending" "$LABELS_2"
@@ -204,10 +218,12 @@ assert_eq "rubric-loop-2: RUBRIC iteration-1 comment posted" "1" \
     "$RUBRIC_COMMENT_COUNT"
 
 # ---------------------------------------------------------------------------
-# Section 3: qa-gate.sh block — the QA agent pastes required_fixes into
-# the block comment. We're not asserting on the comment text directly
-# beyond it being recorded; the contract is "block label added,
-# qa-gate-entered preserved" + the block comment exists.
+# Section 3: qa-gate.sh block — on the spawn after the orchestrator
+# records the needs_revision verdict, QA reads the RUBRIC comment, pastes
+# required_fixes into a block comment, and calls qa-gate.sh block. We're
+# not asserting on the comment text directly beyond it being recorded;
+# the contract is "block label added, qa-gate-entered preserved" + the
+# block comment exists.
 
 BLOCK_OUT=$(bash "$QG" block "$TID" "Rubric needs_revision (iteration 1): server/login.test.ts — add a test asserting 401 on invalid credentials. Re-grade after the specialist addresses these. See the RUBRIC comment for the full criterion-by-criterion verdict.")
 assert_json_field "rubric-loop-3: block ok=true" "$BLOCK_OUT" '.ok' "true"
@@ -227,11 +243,14 @@ assert_eq "rubric-loop-3: QA-GATE BLOCKED comment recorded" "1" \
     "$BLOCK_COMMENT_COUNT"
 
 # ---------------------------------------------------------------------------
-# Section 4: re-enter on the same task — fresh cycle.
+# Section 4: re-enter on the same task — fresh relay cycle.
 #
 # Simulate the specialist round-trip landing: the task is qa-blocked,
-# the specialist fixed the failing criterion, and now QA re-enters to
-# re-grade. enter() must (per qa-gate.sh enter logic):
+# the specialist fixed the failing criterion, and now the orchestrator
+# kicks off another rubric relay (per the RUBRIC-RELAY: grading-relay
+# step in orchestrator.md) — QA re-enters the gate, assembles a fresh
+# packet, and returns needs-grading; this section exercises the gate's
+# enter() invariants. enter() must (per qa-gate.sh enter logic):
 #   - keep rubric-pending set
 #   - clear stale rubric-satisfied (none here, but the path runs)
 #   - clear escalation labels (none here either)
@@ -347,14 +366,17 @@ assert_eq "rubric-loop-7: rubric-satisfied NOT inadvertently added by escalation
 # Section 8: META-TEST — corrupt scripted verdicts.
 # grade-record rejects malformed input with the structured error envelope
 # (`ok=false`, `error_key=...`, `usage=...`). This is the spec's
-# guard that the QA agent gets a precise re-prompt rather than a silent
-# accept of garbage.
+# guard that the root orchestrator (the relay step that pipes the
+# grader output into grade-record) gets a precise re-prompt rather than
+# a silent accept of garbage.
 
 TID_M=$(cd "$FIXTURE" && bd create "META: malformed verdict" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID_M" >/dev/null
 
 # 8a. Missing required key (rubric_version) — error_key carries the
-# missing-key signal so the QA agent can re-spawn precisely.
+# missing-key signal so the root orchestrator can re-spawn the grader
+# precisely (the spawn is at root level per the RUBRIC-RELAY: grading-
+# relay step in orchestrator.md).
 META_OUT_MISSING=$(bash "$QG" grade-record "$TID_M" --file "$VERDICTS_DIR/corrupt-missing-key.json" 2>&1 || true)
 META_OK_MISSING=$(printf '%s' "$META_OUT_MISSING" | tail -1 | jq -r 'if has("ok") then .ok else "?" end' 2>/dev/null || echo "?")
 META_EKEY_MISSING=$(printf '%s' "$META_OUT_MISSING" | tail -1 | jq -r '.error_key // ""' 2>/dev/null || echo "")

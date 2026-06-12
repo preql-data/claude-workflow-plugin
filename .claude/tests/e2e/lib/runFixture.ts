@@ -53,6 +53,11 @@ import {
   type ToolCall,
 } from "./trace.js";
 import { ensureFixtureGitInit } from "./fixtureInit.js";
+import {
+  readBeadsIssues,
+  diffBeadsIssues,
+  flushFixtureBeads,
+} from "./beadsCapture.js";
 
 // Lazy import — keeps `runFixture` compilable even if the SDK isn't
 // installed (so a developer can `npm install` to bring it in).
@@ -196,71 +201,11 @@ export function findPluginRoot(startDir: string): string {
   );
 }
 
-/** Read the fixture's .beads/issues.jsonl into a map keyed by id. Tolerant
- *  of a missing file (returns empty map). */
-function readBeadsIssues(fixturePath: string): Map<string, BeadsIssue> {
-  const issuesPath = path.join(fixturePath, ".beads", "issues.jsonl");
-  const result = new Map<string, BeadsIssue>();
-  if (!existsSync(issuesPath)) return result;
-  const raw = readFileSync(issuesPath, "utf8");
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed.id === "string") {
-        result.set(parsed.id, {
-          id: parsed.id,
-          labels: Array.isArray(parsed.labels) ? [...parsed.labels] : [],
-        });
-      }
-    } catch {
-      // Tolerate corrupt lines — beads occasionally produces them mid-write
-      // and the cleanup pass repairs them. Skipping is safe here.
-    }
-  }
-  return result;
-}
-
-interface BeadsIssue {
-  id: string;
-  labels: string[];
-}
-
-/** Compute the diff between pre- and post-run beads state. */
-function diffBeadsIssues(
-  before: Map<string, BeadsIssue>,
-  after: Map<string, BeadsIssue>,
-): {
-  created: string[];
-  transitions: Array<{ taskId: string; added: string[]; removed: string[] }>;
-} {
-  const created: string[] = [];
-  const transitions: Array<{
-    taskId: string;
-    added: string[];
-    removed: string[];
-  }> = [];
-
-  for (const [id, post] of after.entries()) {
-    const pre = before.get(id);
-    if (!pre) {
-      created.push(id);
-      if (post.labels.length > 0) {
-        transitions.push({ taskId: id, added: [...post.labels], removed: [] });
-      }
-      continue;
-    }
-    const preSet = new Set(pre.labels);
-    const postSet = new Set(post.labels);
-    const added = [...postSet].filter((l) => !preSet.has(l));
-    const removed = [...preSet].filter((l) => !postSet.has(l));
-    if (added.length > 0 || removed.length > 0) {
-      transitions.push({ taskId: id, added, removed });
-    }
-  }
-  return { created, transitions };
-}
+// Beads-capture helpers (readBeadsIssues, diffBeadsIssues, flushFixtureBeads)
+// live in beadsCapture.ts so they can be unit-tested in isolation; this
+// module imports them at the top. Keeping them out of runFixture.ts means
+// _beads-capture.unit.spec.ts doesn't need to spin up the SDK to exercise
+// the capture contract — see claude-workflow-plugin-l1r.7 for the rationale.
 
 /** Run a git command in the fixture and return stdout/stderr/exit. */
 function git(fixturePath: string, args: string[]): SpawnSyncReturns<string> {
@@ -279,9 +224,23 @@ function git(fixturePath: string, args: string[]): SpawnSyncReturns<string> {
  *  run-time `bd sync` (or any other process) that COMMITS to the
  *  fixture during the run and would otherwise leave HEAD advanced past
  *  the canonical fixture state. */
-function snapshotFixture(
+/** File names that are harness metadata (never written by the agent
+ *  under test) and must survive a restore cycle even if their working
+ *  copy contained uncommitted edits at snapshot time.
+ *
+ *  fixture.yaml is the canonical case: an operator editing invariants
+ *  or expected_subagents must not have those edits silently wiped by
+ *  the next live run's restoreFixture call (the Phase B trace fix at
+ *  claude-workflow-plugin-366.6 had its fixture.yaml restoration lost
+ *  exactly this way — uncommitted edit + git-based restore).
+ *
+ *  Keep this list small and conservative; anything an agent is allowed
+ *  to write must NOT be on it. */
+const HARNESS_METADATA_FILES = ["fixture.yaml"] as const;
+
+export function snapshotFixture(
   fixturePath: string,
-): { stashed: boolean; headSha: string } {
+): { stashed: boolean; headSha: string; harnessMetadata: Record<string, string> } {
   // Refuse to run if the fixture isn't a git repo — the restore step
   // depends on git working.
   const isRepo = git(fixturePath, ["rev-parse", "--is-inside-work-tree"]);
@@ -305,12 +264,21 @@ function snapshotFixture(
   }
   const sha = headSha.stdout.trim();
 
+  // Capture harness-metadata file contents BEFORE we stash — they
+  // represent the operator-authored state at the START of the run.
+  // restoreFixture will rewrite them at the END regardless of how the
+  // intermediate stash/reset/clean/pop sequence behaves, so any
+  // uncommitted edits the operator left in place survive the cycle.
+  // See claude-workflow-plugin-366.6 for the regression that produced
+  // this contract.
+  const harnessMetadata = snapshotHarnessMetadata(fixturePath);
+
   const status = git(fixturePath, ["status", "--porcelain"]);
   if (status.status !== 0) {
     throw new Error(`runFixture: git status failed: ${status.stderr}`);
   }
   if (!status.stdout.trim()) {
-    return { stashed: false, headSha: sha };
+    return { stashed: false, headSha: sha, harnessMetadata };
   }
   const stash = git(fixturePath, [
     "stash",
@@ -322,7 +290,55 @@ function snapshotFixture(
   if (stash.status !== 0) {
     throw new Error(`runFixture: git stash failed: ${stash.stderr}`);
   }
-  return { stashed: true, headSha: sha };
+  return { stashed: true, headSha: sha, harnessMetadata };
+}
+
+/** Read each harness-metadata file's current bytes from the fixture
+ *  working tree, returning a map of relative-path -> contents. Missing
+ *  files are silently omitted (a fixture without fixture.yaml is
+ *  legitimate — the resolver only enforces invariants where declared). */
+function snapshotHarnessMetadata(
+  fixturePath: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rel of HARNESS_METADATA_FILES) {
+    const full = path.join(fixturePath, rel);
+    if (!existsSync(full)) continue;
+    try {
+      out[rel] = readFileSync(full, "utf8");
+    } catch {
+      // Best-effort: a permission error or transient I/O error here
+      // means we'd rather take a degraded restore (no metadata
+      // protection) than abort the whole run.
+    }
+  }
+  return out;
+}
+
+/** Write each preserved file back to the fixture. Idempotent: writing
+ *  the same bytes is a no-op as far as git is concerned (the
+ *  working-tree file ends up identical to the version `git reset`
+ *  produced, in which case it does nothing visible; or it overrides
+ *  the reset-restored version with the operator's uncommitted edits,
+ *  which is the whole point). */
+function restoreHarnessMetadata(
+  fixturePath: string,
+  snapshot: Record<string, string>,
+): void {
+  for (const [rel, content] of Object.entries(snapshot)) {
+    const full = path.join(fixturePath, rel);
+    try {
+      // Ensure the parent dir exists — defensive, since fixture.yaml
+      // lives at the fixture root which we know exists by this point.
+      const parent = path.dirname(full);
+      if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
+      writeFileSync(full, content);
+    } catch {
+      // Same trade-off as snapshotHarnessMetadata: a failure here
+      // means an operator edit may be lost, but we won't abort the
+      // whole restore.
+    }
+  }
 }
 
 /** Restore the fixture to its pre-run state. Best-effort: we always try
@@ -333,10 +349,18 @@ function snapshotFixture(
  *  the run made — e.g. `bd sync` auto-committing beads/issues.jsonl
  *  via the post-edit hook — are rolled back. Without this, fixture
  *  HEAD would accumulate spurious commits across runs and the
- *  beadsTasksCreated diff would degrade to 0 after the first run. */
-function restoreFixture(
+ *  beadsTasksCreated diff would degrade to 0 after the first run.
+ *
+ *  Harness-metadata files (fixture.yaml — see HARNESS_METADATA_FILES)
+ *  are SNAPSHOTTED BEFORE the reset and RESTORED AFTER, so that
+ *  uncommitted operator edits to those files survive the cycle. The
+ *  agent under test never writes them; preserving them is safe. This
+ *  closes the Phase B regression at claude-workflow-plugin-366.6
+ *  where an uncommitted fixture.yaml invariants edit was wiped by a
+ *  live run's restoreFixture. */
+export function restoreFixture(
   fixturePath: string,
-  snapshot: { stashed: boolean; headSha: string },
+  snapshot: { stashed: boolean; headSha: string; harnessMetadata?: Record<string, string> },
 ): void {
   // Hard-reset to the captured pre-run SHA. This rolls back BOTH
   // tracked changes AND any commits the run made (e.g. bd sync).
@@ -352,6 +376,16 @@ function restoreFixture(
     if (pop.status !== 0) {
       git(fixturePath, ["stash", "drop"]);
     }
+  }
+  // Re-write harness-metadata files AFTER the reset/clean/pop using
+  // the snapshot captured at the TOP of the run (in snapshotFixture).
+  // This is intentionally the last step so any prior step that touched
+  // these files is overridden by the operator's pre-run version. The
+  // `harnessMetadata` field is optional in the type only for backward
+  // compatibility with callers built against the pre-366.6 signature;
+  // the snapshotFixture() helper in this file always populates it.
+  if (snapshot.harnessMetadata) {
+    restoreHarnessMetadata(fixturePath, snapshot.harnessMetadata);
   }
 }
 
@@ -783,7 +817,23 @@ export async function runFixture(opts: RunFixtureOptions): Promise<Trace> {
     git(opts.fixturePath, ["clean", "-fd", "-e", "node_modules"]);
   }
 
-  // Snapshot fixture state before mutation.
+  // Snapshot fixture state before mutation. Flush bd's pending writes to
+  // `.beads/issues.jsonl` before reading so the pre-run baseline reflects
+  // any prior tasks the fixture's DB carries (e.g. seeded by a fixture's
+  // build script). Without this the baseline could miss tasks the daemon
+  // had cached but not yet written, and a later identical read at end-of-run
+  // would spuriously report them as "created during this run". Tolerant of
+  // failure — see flushFixtureBeads docstring for the best-effort contract.
+  // Discovered: claude-workflow-plugin-l1r.7 — the live rubric-revision-loop
+  // trace showed an empty beads diff despite three bd-create operations on
+  // the wire. The daemon path doesn't flush JSONL synchronously, so without
+  // an explicit flush the post-snapshot can read stale state.
+  const preFlush = flushFixtureBeads(opts.fixturePath);
+  if (!preFlush.ok && !preFlush.noBeadsDir) {
+    process.stderr.write(
+      `[runFixture] WARNING: pre-run beads flush failed (continuing): bdMissing=${preFlush.bdMissing}, status=${preFlush.status}, stderrTail=${preFlush.stderrTail.replace(/\n/g, " | ").slice(0, 200)}\n`,
+    );
+  }
   const beadsBefore = readBeadsIssues(opts.fixturePath);
   const snapshot = snapshotFixture(opts.fixturePath);
 
@@ -937,6 +987,22 @@ export async function runFixture(opts: RunFixtureOptions): Promise<Trace> {
     // Capture fixture file diffs and Beads label transitions BEFORE we
     // restore — once we restore, the diffs vanish.
     trace.fileWrites = captureFileWrites(opts.fixturePath);
+    // Flush bd's pending JSONL exports before reading `beadsAfter`. The
+    // daemon path (MCP `bd_create_task` and similar) writes SQLite eagerly
+    // but flushes JSONL on a 5s poll interval, so a naive read here misses
+    // any task created within ~5s of end-of-run. The flush is run with
+    // BD_NO_DAEMON=1 and `--flush-only` (skips git ops), so it's fast and
+    // hermetic. Tolerant of failure — see flushFixtureBeads docstring.
+    // The matching spec assertion in fixtures uses the established OR-shape
+    // (harness diff OR MCP tool call OR Bash bd create) so a flush failure
+    // here doesn't break workflow assertions. Cross-ref:
+    // claude-workflow-plugin-l1r.7 (live rubric trace evidence).
+    const postFlush = flushFixtureBeads(opts.fixturePath);
+    if (!postFlush.ok && !postFlush.noBeadsDir) {
+      process.stderr.write(
+        `[runFixture] WARNING: post-run beads flush failed (capture will fall back to spec OR-shape): bdMissing=${postFlush.bdMissing}, status=${postFlush.status}, stderrTail=${postFlush.stderrTail.replace(/\n/g, " | ").slice(0, 200)}\n`,
+      );
+    }
     const beadsAfter = readBeadsIssues(opts.fixturePath);
     const { created, transitions } = diffBeadsIssues(beadsBefore, beadsAfter);
     trace.beadsTasksCreated = created;

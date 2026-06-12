@@ -14,6 +14,9 @@
 # Beads "Model selection log" task here. It is per-project state, not
 # part of the shipped plugin source.
 .claude/.model-select-meta-task
+# Phase B (claude-workflow-plugin-366.1): code-graph-mcp's lazy-built
+# index DB. Per-project runtime state, never checked in.
+.claude/.code-graph/
 
 # OS / editor noise
 .DS_Store

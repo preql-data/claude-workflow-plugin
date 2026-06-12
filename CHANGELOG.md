@@ -20,6 +20,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes. The next release entry will go here.
 
+## [3.3.0] - 2026-06-12
+
+Phase B of the verification-suite plan (`docs/plans/verification-suite.md`):
+the code-graph MCP server. Replaces `code-context-mcp` (3 git-grep tools)
+with `code-graph-mcp` (7 graph tools backed by tree-sitter + SQLite).
+Adds impact-analysis surfaces to the orchestrator pre-delegation step
+and the QA regression scan, with measured ~67.5 % context efficiency
+on a representative QA workload. Both child tasks
+(`claude-workflow-plugin-366.1` server build, `366.2` integration +
+migration) were `qa-approved` on `main` by 2026-06-12. Phase C
+remains pending and will ship as v3.4.0.
+
+### Added
+
+- **`code-graph-mcp` server (B.1).** New tree-sitter + SQLite code
+  graph server under `.claude/mcp/code-graph-mcp/`. Seven tools:
+  `code_search`, `code_context`, `symbol_callers` (byte-compatible
+  trio with the retired engine on inputs and primary output keys —
+  the `tool` / `backend` strings change to `"graph-index"`), plus
+  `impact_of`, `dead_code`, `dependency_path`, `code_index_health`
+  (the new analysis surface). Lazy index at
+  `.claude/.code-graph/index.db` (gitignored), incremental by content
+  hash, built on first tool call so SessionStart pays no parse cost.
+  Ships 10 vendored wasm grammars (JS/TS/TSX/Python/Go/Rust/Bash/
+  Ruby/Java/C). 31 server tests (7 indexer + 15 tools + 9 server).
+- **Agent wiring for impact analysis (B.2).** `orchestrator.md`
+  section 1a queries `impact_of` for likely-touched symbols/files
+  during pre-delegation and attaches the result to the SPEC doc;
+  `qa.md` section 3a queries `impact_of` for every changed symbol
+  in the diff and treats high-fan-in callers as mandatory regression
+  candidates (extends J19). Both calls degrade gracefully when the
+  server is unavailable (logged in `llm_observations`).
+  `docs/AGENTS.md` mirrors the new behaviors (orchestrator + QA
+  Key Behaviors each gain item 6).
+- **`qa-queried-impact-of` invariant + fixture declaration (B.2).**
+  New live-test invariant asserts QA queried `impact_of` for every
+  changed symbol during a regression pass; declared on the
+  `node-react-auth` fixture's `fixture.yaml`. Composes with the
+  existing four active invariants.
+- **L2 installer assertions for the new server (B.2).** Five new
+  assertions in `.claude/tests/component/specs/installer-mcp-config.sh`:
+  `code-graph` args reference the launcher path and use the
+  `${CLAUDE_PROJECT_DIR:-.}` default form; the retired `code-context`
+  entry is absent from the rendered `.mcp.json`; the rendered install
+  has `.claude/mcp/code-graph-mcp/` and a vendored wasm grammar
+  (typescript spot-check on the rsync exclude behavior); the
+  `.claude/mcp/code-context-mcp/` directory is gone. The two
+  META-TESTs (bare-form rejected, default-form accepted) are
+  unchanged.
+
+### Changed
+
+- **Measured context efficiency: 259,744 → 84,442 bytes
+  (~67.5 % reduction).** Offline output-size proxy on a
+  representative QA regression workload (decomposition target:
+  change `qa-gate.sh`'s grade-record action format; symbol seed
+  `cmd_grade_record`). BEFORE figure is the minimum file-read
+  cost an orchestrator would pay without `impact_of` (23 files at
+  ~256 KB); AFTER is `code_search` + `code_context` + `impact_of`
+  seed. Tokens are bytes/4, conservative for JSON. Method,
+  raw 23-file list, and caveats documented in
+  `.claude/mcp/code-graph-mcp/README.md` under "Before/after token
+  comparison".
+
+### Removed
+
+- **`code-context-mcp` retired (B.2).** `.claude/mcp/code-context-mcp/`
+  deleted; the `code-context` server entry removed from both
+  `.mcp.json` and `.claude-plugin/plugin.json` in the same commit
+  the new server was wired in. The `_phase7_codebase_graph_target`
+  forward-pointer block in `.mcp.json` is gone now that it is
+  filled. Beads data and the QA gate semantics are untouched.
+
+### Migration — code-context-mcp retired (3.3.0)
+
+Phase B of the verification-suite plan (v3.3.0) replaces
+`code-context-mcp` with `code-graph-mcp`, a tree-sitter + SQLite
+code-graph server. For existing installs:
+
+- **Easy path: re-run the installer.** `bash install.sh` (or the
+  curl-pipe form) over the existing target rewrites `.mcp.json` and
+  `.claude-plugin/plugin.json` to wire `code-graph` and drops the
+  retired `code-context` entry. The `${CLAUDE_PROJECT_DIR:-.}`
+  default form from 3.1.0 is preserved.
+- **Manual path: edit `.mcp.json` in place.** Swap the
+  `code-context` entry's `command` / `args` to point at
+  `${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/code-graph-mcp/bin/code-graph-mcp.js`
+  and rename the key from `code-context` to `code-graph`. Keep the
+  `${VAR:-.}` default form (the 3.1.0 hotfix).
+- **First tool call builds the index lazily.** No SessionStart
+  parse cost; the first `code_search` / `code_context` /
+  `impact_of` call pays the build (~tens of ms per kLOC for the
+  vendored grammars). Subsequent calls are incremental by content
+  hash.
+- **Beads data unaffected.** Task state, labels, comments, gate
+  semantics are all unchanged — the swap is MCP-layer only.
+
+`code_search` and `code_context` keep their input schemas and
+primary output keys; only the `tool` / `backend` value strings
+change (`"git-grep"` → `"graph-index"`). `code_index_health` is
+intentionally an **Add** rather than byte-compat — the old engine
+reported git-grep environment health, the new engine reports
+staleness, per-language coverage, last index time, and DB size.
+No live consumer reads the old health fields. The full migration
+detail is in `docs/MCP_SERVERS.md`.
+
+### Fixed
+
+- **`docs/MCP_SERVERS.md` fabricated example removed (B.1 QA
+  follow-up).** The "byj" tool-output example that had no
+  corresponding tool was replaced with a real `code_search` output
+  shape during the doc rewrite.
+- **Stale fixture `SKILL.md` references swept (B.2).** Every
+  fixture under `.claude/skills/workflow-engine/SKILL.md` and the
+  seven fixture variants were rewritten to reference `code-graph`
+  in their MCP server table row.
+
 ## [3.2.0] - 2026-06-11
 
 Phase A of the verification-suite plan (`docs/plans/verification-suite.md`):
@@ -30,10 +147,12 @@ versioned rubric set (default + backend/frontend/devops domain overlays
 binding iteration cap that engages the 0.2 escalation path, and a
 statusline rubric segment. Both Phase A child tasks
 (`claude-workflow-plugin-l1r.1` plumbing, `l1r.2` grader + wiring) were
-`qa-approved` on `main` by 2026-06-11. The single live validation
-(`make test-live FIXTURE=rubric-revision-loop`) is pending; the
-recorded result will be appended to the closeout notes when run.
-Phases B/C remain pending and will ship as v3.3.0 / v3.4.0.
+`qa-approved` on `main` by 2026-06-11. Validated 2026-06-11 — 3 runs
+(~$15-30), relay demonstrated end-to-end in run 3, trace anchored
+offline in `_phase-a-trace.unit.spec.ts` + seed cassette; two
+live-found defects fixed (grader manifest registration; nested-spawn
+relay redesign). Phases B/C remain pending and will ship as
+v3.3.0 / v3.4.0.
 
 ### Added
 
@@ -73,8 +192,9 @@ Phases B/C remain pending and will ship as v3.3.0 / v3.4.0.
   under `.claude/tests/e2e/fixtures/rubric-revision-loop/` with a
   prompt that deliberately under-tests its change, forcing C2 to
   fail on iteration 1 so the loop exercises the needs_revision
-  → re-grade → satisfied path. Live validation pending; recorded in
-  closeout notes when run via `make test-live FIXTURE=rubric-revision-loop`.
+  → re-grade → satisfied path. Validated live 2026-06-12 (3 runs,
+  ~$15-30; relay demonstrated in run 3; trace anchored offline in
+  `_phase-a-trace.unit.spec.ts` + seed cassette).
 
 ### Changed
 
@@ -471,7 +591,8 @@ Initial commit (`1909ebf initial commit`). Pre-Beads experimental layout;
 not separately documented because v2 superseded it before any external
 release.
 
-[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/preql-data/claude-workflow-plugin/compare/v2.0.0...v3.0.0
