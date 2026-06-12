@@ -350,6 +350,112 @@ Task("@qa", "Rubric cap reached at iteration $ITERATION_CAP. Do NOT request anot
 - Grader output reject loop (`grade-record` returns `ok:false` three times in a row) → grader prompt is broken or the rubric file is malformed; surface to user via `AskUserQuestion`, do not iterate blind.
 - Beads `RUBRIC` comment count does not increment after Step C → `grade-record` silently failed; check `bd` connectivity before retrying.
 
+#### 5b. Mutation-judge relay (JUDGE-RELAY: judging-relay)
+
+The mutation-testing tier (`.claude/tests/mutation/`) classifies surviving mutants via the `@judge` subagent before C.3 routes the genuine survivors into Beads / tech-debt. Like the rubric grader, the judge is **always** spawned from THIS conversation level (the root) — Claude Code subagents cannot spawn other subagents (`code.claude.com/docs/en/sub-agents`: `Agent(agent_type)` has no effect inside a subagent definition). The mutation harness writes a judge-packet to disk and the orchestrator relays it. This subsection is the canonical JUDGE-RELAY: judging-relay procedure; the full mutation tier overview lives at `.claude/tests/mutation/README.md`, particularly its "Calibration procedure — root-orchestrated relay" section.
+
+**Trigger.** Either of:
+
+- The operator runs `/mutation-sweep` (or `bash .claude/tests/mutation/mutation-sweep.sh`) and confirms the cost gate, leaving a packet on disk at `.claude/.mutation-runs/<ts>/judge-packet.json`.
+- The operator explicitly asks for a calibration round (the input packet is the `.claude/tests/mutation/calibration/calibration-set.json` corpus reformatted to the survivor shape — strip `ground_truth` and `label_rationale` before handing it to the judge so the labels do not contaminate the verdict).
+
+Two modes apply to the same relay shape; only the gate command in Step C differs (calibration runs `judge-gate.sh` for the precision check; sweep runs attach verdicts to the survivors report). Do NOT call the judge during a routine plan-and-delegate flow — the operator initiates the run and confirms the cost. Re-running the judge on the same packet without operator consent is a v3 principle 9 violation ("no automatic paid runs").
+
+**Step A — read the packet path and decide the mode.**
+
+```bash
+# Pick the freshest run directory under .claude/.mutation-runs/.
+RUN_DIR=$(find "$CLAUDE_PROJECT_DIR/.claude/.mutation-runs" -maxdepth 1 -type d -name '20*' \
+    2>/dev/null | sort | tail -1)
+PACKET="$RUN_DIR/judge-packet.json"
+VERDICT="$RUN_DIR/verdict.json"
+
+# Mode: sweep (default) vs calibration (caller declared it explicitly).
+# A calibration run uses the calibration-set as input AND expects
+# judge-gate.sh to score precision against the ground truth.
+MODE="${JUDGE_RELAY_MODE:-sweep}"
+
+[ -f "$PACKET" ] || { printf 'judge-relay: packet missing at %s\n' "$PACKET" >&2; exit 1; }
+```
+
+If the packet is missing or empty (`survivors: []`), do NOT spawn the judge — there is nothing to classify. Record the empty-survivors outcome on the Beads task and exit the relay; the deterministic pass already shipped a clean report and there is no work for the judge.
+
+**Step B — spawn the judge at root.**
+
+```
+Task(
+    description="Judge mutation survivors at $PACKET (mode=$MODE)",
+    subagent_type="judge",
+    prompt="""
+        ## Mutation judge packet ($MODE)
+        (Paste the contents of $PACKET verbatim here, OR cite the absolute path
+        so the judge `Read`s it. Either works — `judge.md` accepts both per
+        its Input contract section.)
+    """,
+)
+```
+
+The judge returns a single JSON object as its final message — capture it verbatim per `judge.md`'s output contract (`{contract_version, verdicts: [...], calibration: {precision, recall}}`). Do NOT re-narrate it; do NOT edit it. If the judge's response is not a single JSON object (prose preamble, markdown fence, malformed `verdicts[].classification` enum), re-spawn the judge with a corrective hint that names the offending field. The downstream gate / report is jq-based and refuses to parse prose.
+
+Write the captured JSON to `$VERDICT` verbatim:
+
+```bash
+printf '%s\n' "$JUDGE_JSON" > "$VERDICT"
+```
+
+This file is the durable artefact for the run — survives the relay, replayable, auditable in Beads.
+
+**Step C — gate (calibration) or attach (sweep).**
+
+For a **calibration** run, score the verdict against the calibration set:
+
+```bash
+bash "$CLAUDE_PROJECT_DIR/.claude/tests/mutation/judge-gate.sh" \
+    --verdict "$VERDICT" \
+    --calibration "$CLAUDE_PROJECT_DIR/.claude/tests/mutation/calibration/calibration-set.json"
+GATE_RC=$?
+```
+
+`judge-gate.sh` writes `calibration-report.json` alongside the verdict and exits:
+- `0` precision ≥ `JUDGE_PRECISION_MIN` (default 0.8) — calibration PASSED.
+- `1` precision <  threshold — calibration FAILED; the judge prompt or the rubric needs tuning.
+- `2` malformed inputs (verdict / calibration JSON shape, id-set mismatch).
+- `3` precision undefined (the judge predicted zero genuine).
+
+Post the precision number and the confusion matrix to the Beads task that owns the calibration round; on exit code 1, do NOT treat the run as a baseline — re-tune the judge prompt and re-run from Step B with the new prompt, or surface to operator via `AskUserQuestion` if the failure is unclear.
+
+For a **sweep** run, there is no calibration set — the verdict is just attached to the survivors report:
+
+```bash
+# Append the verdict path to the sweep's survivors report. C.3 (the
+# Beads / tech-debt routing seam) reads $VERDICT and routes each
+# survivor whose classification is "genuine" into a fresh tracked task.
+printf 'verdict: %s\n' "$VERDICT" >> "$RUN_DIR/summary.txt"
+```
+
+C.3 (`claude-workflow-plugin-n45.3`, when it lands) consumes `$VERDICT` directly; no further orchestrator action is required for a sweep.
+
+**Step D — record outcomes in Beads.**
+
+```bash
+bd update "$TASK_ID" --notes "JUDGE-RELAY ($MODE): verdict at $VERDICT
+contract_version: 1
+survivors: <count from packet>
+verdicts: <count from verdict>
+calibration: precision=$(jq -r '.precision // "n/a"' "$RUN_DIR/calibration-report.json" 2>/dev/null) recall=$(jq -r '.recall // "n/a"' "$RUN_DIR/calibration-report.json" 2>/dev/null) gate=<passed|failed|undefined|n/a>
+"
+```
+
+The audit trail must show: which mode the relay ran in, where the verdict landed on disk, and (for calibration) the precision/recall/gate outcome. Future reviewers of the Beads task reconstruct what happened from this comment.
+
+**Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
+
+- Packet `survivors: []` → the deterministic pass killed every mutant. No judge call; record the empty outcome.
+- Judge returned non-JSON or missing `verdicts[]` → re-spawn ONCE with a corrective hint. If the second attempt also fails, surface to operator via `AskUserQuestion`; the prompt or the model snapshot is broken.
+- `judge-gate.sh` exit code 2 (id-set mismatch) → packet/verdict join failed. The judge skipped or hallucinated a survivor id; do NOT iterate blind — re-spawn with the offending ids cited in the prompt.
+- `judge-gate.sh` exit code 3 (precision undefined; zero genuine predictions) → judge is too cautious or the calibration set is dominated by equivalents. Surface to operator; rebalancing the calibration set is a separate task.
+- Repeat invocation on the same packet without operator consent → v3 principle 9 violation. Do not retry the judge without explicit re-confirmation; the cost gate's `--confirm-judge` is the single source of operator intent.
+
 ## Self-check
 
 Before responding, verify:

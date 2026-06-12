@@ -17,6 +17,11 @@
 # Phase B (claude-workflow-plugin-366.1): code-graph-mcp's lazy-built
 # index DB. Per-project runtime state, never checked in.
 .claude/.code-graph/
+# Phase C (claude-workflow-plugin-n45.1): throwaway worktrees and per-run
+# reports from .claude/tests/mutation/mutation-sweep.sh. Per-run state,
+# never checked in. The harness's source files ARE tracked.
+.claude/.mutation-worktrees/
+.claude/.mutation-runs/
 
 # OS / editor noise
 .DS_Store

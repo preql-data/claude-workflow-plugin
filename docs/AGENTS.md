@@ -6,7 +6,7 @@ Complete documentation of all AI agent prompts in the Ultimate Workflow Plugin.
 
 ## Overview
 
-The plugin includes 6 agents:
+The plugin includes 7 agents:
 
 | Agent | Role | File |
 |-------|------|------|
@@ -16,6 +16,7 @@ The plugin includes 6 agents:
 | **DevOps** | CI/CD specialist | `agents/devops.md` |
 | **QA** | Quality gate | `agents/qa.md` |
 | **Grader** | Separate-context rubric scorer (spawned by the root orchestrator at QA's request — subagents cannot spawn subagents per the Claude Code docs, so the spawn is relayed) | `agents/grader.md` |
+| **Judge** | Separate-context mutation classifier (spawned by the root orchestrator from the C.1 mutation-sweep packet — subagents cannot spawn subagents, so the harness writes a judge-packet to disk and the orchestrator relays it; classifies surviving mutants as `equivalent` or `genuine`) | `agents/judge.md` |
 
 ---
 
@@ -548,6 +549,104 @@ Malformed JSON, missing required keys, or invalid enum values trip `qa-gate.sh g
 3. **Returns STRICT JSON** — `qa-gate.sh grade-record` rejects anything else with a structured error.
 4. **Pass/fail per criterion + one-line justification** — no partial credit, no numeric theatre.
 5. **Spawned by the root orchestrator at QA's request** — non-proactive frontmatter; never auto-routed by the intent router; the spawn lives at the root level because subagents cannot spawn subagents.
+
+---
+
+## Judge
+
+**File**: `.claude/agents/judge.md`
+
+**Role**: Separate-context mutation classifier. Classifies surviving mutants from the C.1 mutation harness as `equivalent` (no test could ever distinguish the mutant from the original) or `genuine` (a plausible future test could kill it). Spawned by the root orchestrator from the mutation-sweep packet — never auto-routed.
+
+**Tools**: `Read`, `Grep`, `Glob`, `LS` (read-only — no Bash, no Write, no Edit, no Task).
+
+**Proactivity**: explicit non-proactive. The judge runs only when the operator initiated a mutation sweep and confirmed the cost gate; running it automatically would violate v3 principle 9 ("no automatic paid runs").
+
+**Why the root relay** (not direct sweep-script spawn): Claude Code subagents cannot spawn other subagents — per `code.claude.com/docs/en/sub-agents`, `Agent(agent_type)` has no effect inside a subagent definition. The mutation harness writes a packet to `.claude/.mutation-runs/<ts>/judge-packet.json`, the root orchestrator reads that file, and the orchestrator spawns the judge from the root level. The relay anchor in `orchestrator.md` is `JUDGE-RELAY: judging-relay` (section 5b); the no-nested-spawn L1 test guards both the QA → grader (RUBRIC-RELAY) and the sweep → judge (JUDGE-RELAY) shapes.
+
+### Input contract — the judge-packet
+
+The mutation harness writes a packet file with this shape (Phase C.1 seam, `contract_version: "1"`):
+
+```jsonc
+{
+  "contract_version": "1",
+  "report": ".claude/.mutation-runs/<ts>/report.json",
+  "survivors": [
+    {
+      "id": 7,
+      "fault": "F6",
+      "target": ".claude/scripts/qa-gate.sh",
+      "line": 142,
+      "rationale": "off-by-one -gt -> -ge",
+      "orig": "if [ \"$iter\" -gt \"$MAX_ITERATIONS\" ]; then escalate; fi",
+      "mut":  "if [ \"$iter\" -ge \"$MAX_ITERATIONS\" ]; then escalate; fi",
+      "status": "SURVIVED"
+    }
+  ]
+}
+```
+
+For a calibration round the input packet is the `.claude/tests/mutation/calibration/calibration-set.json` corpus reformatted to the survivor shape — `ground_truth` and `label_rationale` are stripped before the judge sees the packet so the labels do not contaminate the verdict.
+
+### Output contract — STRICT JSON only
+
+The judge's final message is a single JSON object, nothing else:
+
+```jsonc
+{
+  "contract_version": "1",
+  "verdicts": [
+    {
+      "id": 7,
+      "classification": "genuine",
+      "confidence": 0.92,
+      "justification": "Flipping -gt to -ge shifts the escalation cap by one iteration; a sustained-load test asserting escalation fires at exactly iteration 4 would distinguish them."
+    },
+    {
+      "id": 8,
+      "classification": "equivalent",
+      "confidence": 0.85,
+      "justification": "The mutated line is inside an unreachable fallback branch (caller always provides a value); no test can drive execution past line 142."
+    }
+  ],
+  "calibration": { "precision": null, "recall": null }
+}
+```
+
+- `classification` is exactly `"equivalent"` or `"genuine"` — no other strings, no `"unsure"`.
+- `confidence` is a number in `[0.0, 1.0]`. Uncertainty bias: when in doubt, return `genuine` with low confidence (better to waste one C.3 follow-up than bury a real regression).
+- `justification` cites the script line and the observation surface — where downstream consumers would see the divergence.
+- `calibration.precision` / `recall` are always `null` — `judge-gate.sh` computes them; the judge does not estimate.
+
+Malformed JSON, missing required keys, or invalid enum values cause `judge-gate.sh` to refuse the verdict (exit code 2). The orchestrator re-spawns the judge with a corrective hint inlined.
+
+### Calibration gate
+
+After the judge returns, the orchestrator runs `.claude/tests/mutation/judge-gate.sh` for a calibration round:
+
+```bash
+bash .claude/tests/mutation/judge-gate.sh \
+    --verdict .claude/.mutation-runs/<ts>/verdict.json \
+    --calibration .claude/tests/mutation/calibration/calibration-set.json
+```
+
+Exit codes:
+
+- `0` — precision ≥ `JUDGE_PRECISION_MIN` (`mutation.conf`; default `0.8`). Calibration PASSED.
+- `1` — precision < threshold. Calibration FAILED; the judge prompt or rubric needs tuning before this round can be treated as a baseline.
+- `2` — malformed inputs (verdict / calibration JSON shape, id-set mismatch).
+- `3` — precision is undefined (zero `genuine` predictions).
+
+The gate is precision-only; recall is reported alongside but not gating. C.2's design bias is **precision over recall** — missing one equivalent (a false-genuine) wastes one C.3 follow-up, but missing one genuine (a false-equivalent) buries a real regression. See `.claude/tests/mutation/README.md` § "Calibration procedure — root-orchestrated relay" for the full flow.
+
+### Key behaviors
+
+1. **Operates in a separate context** — never sees the harness's stdout, the orchestrator's plan, or anything outside the packet.
+2. **Reads only to verify packet claims** — opens the target script and a 20-40 line window around the mutated line; never general repo browsing.
+3. **Returns STRICT JSON** — `judge-gate.sh` is jq-based and refuses to parse prose.
+4. **Reports confidence honestly** — low-confidence `genuine` is welcome; the calibration gate weights precision over recall and tolerates low-confidence positives.
+5. **Spawned by the root orchestrator from the mutation-sweep packet** — non-proactive; never auto-routed; the spawn lives at the root level because subagents cannot spawn subagents.
 
 ---
 

@@ -59,17 +59,30 @@ AGENTS_DIR="$PROJECT_DIR/.claude/agents"
 # orchestrator.md is excluded — it is the ONLY agent permitted to spawn
 # other subagents via Task() (its tool list includes Task; subagents'
 # Task tool, even when granted, has no effect per the docs cited above).
+#
+# judge.md (C.2) is included here for the same reason as grader.md: the
+# judge is spawned BY the orchestrator from the mutation-sweep packet,
+# never by another subagent. Re-nesting the judge spawn (e.g., having QA
+# spawn it) would be structurally unreachable per the docs.
 NON_ORCHESTRATOR_AGENTS=(
     "$AGENTS_DIR/qa.md"
     "$AGENTS_DIR/backend.md"
     "$AGENTS_DIR/frontend.md"
     "$AGENTS_DIR/devops.md"
     "$AGENTS_DIR/grader.md"
+    "$AGENTS_DIR/judge.md"
 )
 
 # Relay sentinels — fixed strings so whitespace/case don't drift.
 QA_RELAY_SENTINEL='RUBRIC-RELAY: status=needs-grading'
 ORCH_RELAY_SENTINEL='RUBRIC-RELAY: grading-relay'
+# JUDGE-RELAY (claude-workflow-plugin-n45.5): the mutation-judge relay
+# lives at the same root-orchestrated level as the rubric grader for
+# the same structural reason (subagents cannot spawn subagents). The
+# orchestrator must carry a JUDGE-RELAY: judging-relay anchor so a
+# future refactor that strips the section is caught at L1, parallel
+# to the rubric-grader guard above.
+ORCH_JUDGE_RELAY_SENTINEL='JUDGE-RELAY: judging-relay'
 
 # Spawn-directive patterns. Each is an extended regex; a match in a
 # non-orchestrator agent file means that file is instructing the agent
@@ -170,6 +183,17 @@ else
 fi
 assert_eq "no-nested-spawn: orchestrator.md contains relay-pickup sentinel" "0" "$orch_sentinel_rc"
 
+# orchestrator.md MUST also contain the JUDGE-RELAY anchor (claude-
+# workflow-plugin-n45.5). Same shape as the RUBRIC-RELAY guard above —
+# this catches a future refactor that drops or renames the mutation-
+# judge relay section.
+if [ -f "$ORCH_FILE" ] && grep -qF -- "$ORCH_JUDGE_RELAY_SENTINEL" "$ORCH_FILE"; then
+    orch_judge_sentinel_rc=0
+else
+    orch_judge_sentinel_rc=1
+fi
+assert_eq "no-nested-spawn: orchestrator.md contains JUDGE-RELAY anchor" "0" "$orch_judge_sentinel_rc"
+
 # --- META-TEST ------------------------------------------------------------
 #
 # Build a fixture agent file that DOES contain a nested-spawn directive
@@ -198,10 +222,12 @@ Task(
 ```
 MD
 
-# Soft check: the fixture must NOT inadvertently contain either relay
-# sentinel — otherwise the META-TEST would pass for the wrong reason.
+# Soft check: the fixture must NOT inadvertently contain any of the
+# relay sentinels — otherwise the META-TEST would pass for the wrong
+# reason (the assertion checks a different invariant than expected).
 if grep -qF -- "$QA_RELAY_SENTINEL" "$META_TMP" \
-    || grep -qF -- "$ORCH_RELAY_SENTINEL" "$META_TMP"; then
+    || grep -qF -- "$ORCH_RELAY_SENTINEL" "$META_TMP" \
+    || grep -qF -- "$ORCH_JUDGE_RELAY_SENTINEL" "$META_TMP"; then
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("META-TEST fixture inadvertently contains a relay sentinel")
     printf '  FAIL: META-TEST fixture inadvertently contains a relay sentinel\n'

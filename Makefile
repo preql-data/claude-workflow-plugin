@@ -202,7 +202,7 @@ shellcheck:
 		echo "shellcheck not on PATH (skipping); install via 'brew install shellcheck' or apt for stricter local lint"; \
 		exit 0; \
 	else \
-		shellcheck .claude/scripts/*.sh .claude/scripts/tests/*.sh install.sh uninstall.sh; \
+		shellcheck .claude/scripts/*.sh .claude/scripts/tests/*.sh .claude/tests/mutation/*.sh .claude/tests/mutation/lib/*.sh install.sh uninstall.sh; \
 	fi
 
 check:

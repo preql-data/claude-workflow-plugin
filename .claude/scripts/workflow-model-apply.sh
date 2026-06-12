@@ -45,16 +45,20 @@ AGENTS=(orchestrator qa backend frontend devops)
 # pre-emptively so the rewrite covers it the moment the file lands. The
 # loop already tolerates missing files.
 AGENTS+=(grader)
+# Phase C.2 (spec): judge.md is the mutation-judge subagent. Same shape
+# as grader — read-only, model-pinned, tracked by /workflow-model.
+AGENTS+=(judge)
 
 CHANGED=0
 
 for agent in "${AGENTS[@]}"; do
     f="$PROJECT_DIR/.claude/agents/${agent}.md"
     if [ ! -f "$f" ]; then
-        # grader.md not yet present is the expected Phase 0 state; stay
-        # silent rather than spamming the operator. Other missing agents
-        # are an installer bug and we surface them.
-        if [ "$agent" != "grader" ]; then
+        # grader.md / judge.md not yet present is the expected
+        # pre-phase state; stay silent rather than spamming the
+        # operator. Other missing agents are an installer bug and we
+        # surface them.
+        if [ "$agent" != "grader" ] && [ "$agent" != "judge" ]; then
             printf 'skip: %s (missing)\n' "$f"
         fi
         continue

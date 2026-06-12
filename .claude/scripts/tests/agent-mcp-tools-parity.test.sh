@@ -66,6 +66,11 @@ EXEMPT_AGENTS=(
     # references; it scores a pre-assembled packet. No MCP grants
     # needed.
     "grader"
+    # judge.md — separate-context mutation judge with the same
+    # read-only tool set (Read, Grep, Glob, LS). Its prompt body has
+    # no MCP tool references; it classifies survivors from a packet
+    # the orchestrator hands it. No MCP grants needed (Phase C.2).
+    "judge"
 )
 
 # Tool-to-server registry. Hard-coded so the checker stays offline (no

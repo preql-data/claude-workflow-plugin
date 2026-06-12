@@ -23,10 +23,12 @@
     "./.claude/agents/backend.md",
     "./.claude/agents/frontend.md",
     "./.claude/agents/devops.md",
-    "./.claude/agents/grader.md"
+    "./.claude/agents/grader.md",
+    "./.claude/agents/judge.md"
   ],
   "commands": [
-    "./.claude/commands/workflow-model.md"
+    "./.claude/commands/workflow-model.md",
+    "./.claude/commands/mutation-sweep.md"
   ],
   "skills": [
     "./.claude/skills/workflow-engine"
