@@ -61,3 +61,6 @@ venv/
 .claude/tests/e2e/fixtures/*/.beads/sync-state.json
 .claude/tests/e2e/fixtures/*/.beads/.local_version
 .claude/tests/e2e/fixtures/*/.claude/.qa-tracking/
+
+# live-run specialist worktrees inside fixtures (transient agent state)
+.claude/tests/e2e/fixtures/*/.claude/worktrees/
