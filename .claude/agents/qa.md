@@ -151,10 +151,18 @@ Before writing any test, ask:
 
 ### 3a. Regression impact scan (extends J19, code-graph)
 
-The Stop-hook gate already runs the FULL test suite each iteration — that is J19's regression coverage. The impact scan here is the second pass: for every symbol changed in the diff, query the code-graph server's `impact_of` tool and treat high-fan-in hits as **mandatory regression candidates** you read (and run, if not already exercised) before approving. The point is not to re-run tests the gate already ran; the point is to know which of the tests that ran were actually testing the things this change can break.
+**FIRST ACTION when any files have changed: Before reading the diff, before running review modules, before writing review notes — run `impact_of` (code-graph MCP) on each changed exported symbol AND on each whole changed file.** This is the unconditional opening step of the review procedure, not an embedded tip. The previous trace (claude-workflow-plugin-366.9 / Phase B run 3) approved a change with `impact_of` calls = 0 because the call was buried mid-paragraph and felt optional; do not repeat that mistake.
+
+```
+# Step 1 — the FIRST thing you do on every review with fileWrites > 0:
+impact_of({symbol: "<changed-symbol>", max_depth: 5})
+# When the whole file is the change unit (e.g. a hook script):
+impact_of({file: ".claude/scripts/qa-gate.sh", max_depth: 5})
+```
 
 ```bash
-# Pull the changed-files list the post-edit hook maintains.
+# Pull the changed-files list the post-edit hook maintains so you have
+# the symbol/file seed set in front of you for the FIRST ACTION above.
 FILES=$(sort -u "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/changed-files.txt")
 
 # For each changed symbol (extracted via `git diff` + tree-sitter or
@@ -166,15 +174,9 @@ FILES=$(sort -u "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/changed-files.txt")
 # fan-in; a five-hop chain ending in one test is not.
 ```
 
-In code:
+**Why this is the first action, not a later step.** The Stop-hook gate already runs the FULL test suite each iteration — that is J19's regression coverage. The impact scan here is the second pass: for every symbol changed in the diff, query the code-graph server's `impact_of` tool and treat high-fan-in hits as **mandatory regression candidates** you read (and run, if not already exercised) before approving. The point is not to re-run tests the gate already ran; the point is to know which of the tests that ran were actually testing the things this change can break. Running `impact_of` AFTER you have already formed an opinion from reading the diff means your opinion drives the regression set instead of the call graph driving it — that is the bias the FIRST ACTION wording exists to break.
 
-```
-impact_of({symbol: "<changed-symbol>", max_depth: 5})
-# When the whole file is the change unit (e.g. a hook script):
-impact_of({file: ".claude/scripts/qa-gate.sh", max_depth: 5})
-```
-
-Mandatory follow-up: for each high-fan-in caller surfaced, confirm there is at least one test exercising it. If the gate's suite already ran the test, read its output to verify it actually covered the new behaviour — a green test that doesn't touch the changed code path is not regression coverage. If no test covers a high-fan-in caller, either write one as part of the review (your `tests_added` field captures this) or surface it as `must_fix` so the specialist adds it before approval.
+Mandatory follow-up after the FIRST ACTION returns: for each high-fan-in caller surfaced, confirm there is at least one test exercising it. If the gate's suite already ran the test, read its output to verify it actually covered the new behaviour — a green test that doesn't touch the changed code path is not regression coverage. If no test covers a high-fan-in caller, either write one as part of the review (your `tests_added` field captures this) or surface it as `must_fix` so the specialist adds it before approval.
 
 **Graceful degradation.** Degrade ONLY when the code-graph tools are structurally absent from your tool surface (i.e. no `mcp__*code-graph*` entry in this session's tool list — the server is not registered or the transport is unhealthy). An EMPTY index is NOT a degradation reason: the first `impact_of` / `code_search` / `code_context` call builds the index lazily inside the server, and `code_index_health` reporting empty/missing is the expected pre-build state. PROCEED with `impact_of` in that case; the call triggers the build and returns the answer in a single round-trip. The mistake to avoid (Phase B trace forensic, claude-workflow-plugin-366.5): observing "0 entries" and degrading to grep, which then masks the real impact set. When the code-graph tools genuinely are not present in your surface, fall back to `code_search` / `code_context` plus file reads to find callers manually, and note the degradation in `llm_observations` ("code-graph unavailable; impact scan was best-effort, manual file walk used"). The review still ships; the audit trail records that the impact-analysis evidence is weaker than usual. Do not let server unavailability silently downgrade the gate — the note in the contract is what makes a future reviewer see what was actually checked.
 

@@ -974,6 +974,12 @@ Read the intent payload above and decide which review modules to run
 appear in filenames.
 
 Checklist:
+- FIRST: for every changed file or exported symbol in the diff, query
+  impact_of (code-graph MCP — mcp__plugin_claude-workflow_code-graph)
+  BEFORE writing the review notes, and fold the high-fan-in callers it
+  surfaces into the regression assessment. If the code-graph tools are
+  NOT in your tool list this spawn, say so explicitly in llm_observations
+  and fall back to grep/code_search; do not silently skip the impact pass.
 - Tests cover user behavior (not implementation)
 - Critical user journeys tested
 - Failure modes handled

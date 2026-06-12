@@ -48,6 +48,21 @@ REASON=$(printf '%s' "$OUT" | jq -r '.reason // empty')
 assert_match "vbs: reason mentions no active task" \
     "No active Beads task detected" "$REASON"
 
+# 5a. claude-workflow-plugin-366.9: the EMITTED Task("@qa", ...)
+# delegation block must carry the impact_of cue so QA's task prompt
+# surfaces it at the top of its working memory. Pre-366.9 (Phase B
+# run 3) the template enumerated tests/journeys/failure-modes only and
+# QA never reached for impact_of even though all 7 code-graph tools
+# were structurally available — fixed by inserting an unconditional
+# FIRST checklist item naming impact_of and code-graph. Assert against
+# the live emission, not against the source, so a future refactor that
+# accidentally bypasses the rendering path (e.g. by templating the
+# checklist elsewhere) is still caught.
+assert_contains "vbs: QA-required block emits impact_of cue (366.9)" \
+    "impact_of" "$REASON"
+assert_contains "vbs: QA-required block names code-graph MCP (366.9)" \
+    "code-graph" "$REASON"
+
 # 6. Changed files + task qa-approved -> {} (allow). Need bd-real task.
 TID=$(cd "$FIXTURE" && bd create "Approved-path task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID" >/dev/null
