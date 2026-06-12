@@ -5,11 +5,30 @@ work on this repository.
 
 ## Current state
 
+- Hotfix **v3.4.1** shipped 2026-06-13. Parent epic
+  `claude-workflow-plugin-vlp` with three child tasks all
+  `qa-approved` on `main`: `vlp.1` (model resolver — generation-aware
+  selection, `--refresh` flag, statusline pin, ranking
+  exclusion-semantics, 6 stale-doc refs), `vlp.2` (effort defaults —
+  `effortLevel: xhigh` + `env.CLAUDE_CODE_EFFORT_LEVEL: max` +
+  SessionStart one-liner + CONTRIBUTING.md `Why ultracode cannot be
+  the durable default`), and the discovered-from defect
+  `claude-workflow-plugin-3fn` (manual-adopt stdout-sentinel —
+  `MANUAL_ADOPT_REQUIRED` subshell-loss). Closeout
+  (`vlp.3` — CHANGELOG, HANDOFF, version bump, AgentLint rerun) is
+  this current task. First real-world adoption recorded
+  2026-06-13: all seven agent pins moved
+  `claude-opus-4-7 → claude-fable-5` (newest `created_at` in the
+  live `/v1/models` listing); audit comment on meta-task
+  `claude-workflow-plugin-4o2` (`Model selection log`, comment 278)
+  with rollback `/workflow-model claude-opus-4-7`. Statusline now
+  displays the active model id.
 - Plan `docs/plans/v3-upgrade.md` (Phases 0-7) is **complete**. The G8
   end-to-end test-harness epic and the post-G8 closeout pass also
   shipped. Everything landed on `main` by 2026-05-11.
 - Plan `docs/plans/verification-suite.md` is **complete** across all
-  four phases (0 → A → B → C → v3.1.0 / v3.2.0 / v3.3.0 / v3.4.0).
+  four phases (0 → A → B → C → v3.1.0 / v3.2.0 / v3.3.0 / v3.4.0
+  → hotfix v3.4.1).
   Definition-of-done sweep (spec line 213) is green: every epic
   closed with `qa-approved` on every child task; fresh install
   renders zero MCP-diagnostics warnings AND ships the full
@@ -18,9 +37,10 @@ work on this repository.
   manual live-validation cost was recorded inline in each `[3.x.0]`
   CHANGELOG section; AgentLint holds at 87/100 with documented
   Phase-A + Phase-C overrides; CHANGELOG reads as coherent release
-  notes 3.1.0 → 3.4.0; README "What you get" + Caveats updated to
-  reflect 7 agents, rubrics, 2 MCP servers, invariant-based manual
-  live testing, lessons ledger, and the mutation tier.
+  notes 3.1.0 → 3.4.0 → 3.4.1; README "What you get" + Caveats
+  updated to reflect 7 agents, rubrics, 2 MCP servers,
+  invariant-based manual live testing, lessons ledger, and the
+  mutation tier.
 - Plan `docs/plans/verification-suite.md` Phase C shipped 2026-06-12
   as **v3.4.0**. Parent epic: `claude-workflow-plugin-n45` with five
   child tasks `n45.1` (deterministic harness), `n45.2` (judge +
@@ -55,19 +75,21 @@ work on this repository.
   `claude-workflow-plugin-e0d` (all eight child tasks
   `e0d.1`–`e0d.8` `qa-approved`).
 - Parent epic: `claude-workflow-plugin-y4a` (v3.0.0 upgrade) — closed.
-- Per-phase release notes: `CHANGELOG.md` `[3.4.0] - 2026-06-12`
-  (Phase C), `[3.3.0] - 2026-06-12` (Phase B),
-  `[3.2.0] - 2026-06-11` (Phase A), `[3.1.0] - 2026-06-11`
-  (Phase 0), and `[3.0.0] - 2026-05-11` (v3 + G8 + closeout).
-- Suite numbers (post-Phase-C): `make test` (L1) reports **14 specs**
-  passing; `make test-all` (L1 + L2 offline gate) reports **21 specs
-  / 429 assertions** passing (+10 over the 3.3.0 baseline of 419,
-  from the new Phase A + C presence assertions in
-  `installer-mcp-config.sh`); `cd .claude/tests/e2e && npm run
-  test:unit` reports **158 passed / 5 skipped** (the five skips are
-  honest invariant-engine + trace-anchor artifact-missing skips —
-  not green-washed); `make lint` clean; `make check` (AgentLint)
-  holds at **87/100**.
+- Per-phase release notes: `CHANGELOG.md` `[3.4.1] - 2026-06-13`
+  (hotfix), `[3.4.0] - 2026-06-12` (Phase C), `[3.3.0] - 2026-06-12`
+  (Phase B), `[3.2.0] - 2026-06-11` (Phase A),
+  `[3.1.0] - 2026-06-11` (Phase 0), and `[3.0.0] - 2026-05-11`
+  (v3 + G8 + closeout).
+- Suite numbers (post-v3.4.1): `make test` (L1) reports **15 specs**
+  passing (+1 over Phase-C: `effort-fail-open.test.sh` from
+  `vlp.2`); `make test-all` (L1 + L2 offline gate) reports
+  **21 specs / 454 assertions** passing (+20 over the 3.4.0
+  baseline of 434, all from the M-block manual-adopt regression
+  coverage added by `3fn`); `cd .claude/tests/e2e && npm run
+  test:unit` reports **158 passed / 5 skipped** (unchanged from
+  v3.4.0 — the five skips are honest invariant-engine +
+  trace-anchor artifact-missing skips, not green-washed);
+  `make lint` clean; `make check` (AgentLint) holds at **87/100**.
 - Open tickets: `bd ready` (ready to start), `bd blocked` (waiting on
   dependencies), `bd list --label qa-pending` (awaiting QA). The
   carried bugs across the v3.x line are
@@ -91,10 +113,72 @@ work on this repository.
   `claude-workflow-plugin-8oz` (SHA-pin GitHub Actions, P2), and
   `claude-workflow-plugin-a7y` (gitleaks CI job, P2).
 
-## Verify conditions for "v3.4.0 (Phase C) shipped"
+## Verify conditions for "v3.4.1 (hotfix) shipped"
 
 A new session can confirm readiness without re-running everything by
 checking these assertions:
+
+- assert: `.claude-plugin/plugin.json` `version` equals `3.4.1`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `3.4.1`.
+- assert: all seven agent frontmatter `model:` lines equal
+  `claude-fable-5`. Run
+  `grep -hE '^model:' .claude/agents/*.md | sort -u`
+  and confirm the single line `model: claude-fable-5`.
+- assert: `.claude/settings.json` `env.CLAUDE_LATEST_OPUS` equals
+  `claude-fable-5`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude/settings.json","utf8")).env.CLAUDE_LATEST_OPUS)'`
+  and confirm `claude-fable-5`.
+- assert: `.claude/settings.json` `effortLevel` equals `"xhigh"` and
+  `env.CLAUDE_CODE_EFFORT_LEVEL` equals `"max"` (the persistable
+  pair per the cited docs).
+- assert: `model-select.sh apply` emits both the LOUD adopt notice
+  and a `manual adoption required for '...'` result line when the
+  winner's `created_at` is unparseable, AND leaves the seven agent
+  pins byte-unchanged. This is the contract enforced by Spec M
+  (`ms-M / ms-ME / ms-MT / ms-MC / ms-MX`) in
+  `.claude/tests/component/specs/model-select.sh`; rerun via
+  `bash .claude/tests/component/run.sh --filter model-select` and
+  confirm `45/45`.
+- assert: `make test-all` exits 0. Post-v3.4.1 baseline is
+  **21 specs / 454 assertions** (+20 over the v3.4.0 baseline of
+  434, all from the new M-block manual-adopt regression coverage).
+- assert: `make test` exits 0. Post-v3.4.1 baseline is **15 specs**
+  (+1 over Phase-C: `effort-fail-open.test.sh` from `vlp.2`).
+- assert: `cd .claude/tests/e2e && npm run test:unit` reports
+  **158 passed / 5 skipped** (unchanged — the v3.4.1 patch surface
+  does not touch the L3 vitest tier).
+- assert: meta-task `claude-workflow-plugin-4o2`
+  (`Model selection log`) carries at least one comment with the
+  `MODEL SWITCH` prefix recording the
+  `claude-opus-4-7 -> claude-fable-5` transition (comment id 278
+  in the 2026-06-13 snapshot).
+- assert: statusline emits `• model: <id>` for every output
+  branch. Proxy check:
+  `bash .claude/scripts/tests/phase5-synthetic-tests.sh` includes
+  two assertions covering the pin-present and pin-absent branches;
+  rerun via `make test` and confirm green.
+- assert: AgentLint score holds at **87/100**. The v3.4.1 patch
+  surface introduces one additional S7 fixture path
+  (`.claude/tests/component/specs/model-select.sh`) that matches
+  the documented S7 fixture override convention; the numeric score
+  is unchanged. Re-run via `make check`.
+
+The single manual live event — the first real-world model adoption —
+ran 2026-06-13. Decision path was offline + cached listing: the
+resolver picked `claude-fable-5` as the newest `created_at`, the
+seven agent pins flipped from `claude-opus-4-7`, and the audit
+comment landed on meta-task `4o2`. Zero API spend during the
+hotfix cycle.
+
+## Verify conditions for "v3.4.0 (Phase C) shipped"
+
+A new session can confirm readiness without re-running everything by
+checking these assertions. Counts and `version` lines below are
+**v3.4.0 release-time anchors** — the v3.4.1 hotfix bumped the
+version to `3.4.1`, `make test` to 15 specs, and `make test-all` to
+21 / 454; see the v3.4.1 verify block above for the post-hotfix
+numbers.
 
 - assert: `.claude-plugin/plugin.json` `version` equals `3.4.0`. Run
   `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`

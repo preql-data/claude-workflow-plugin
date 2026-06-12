@@ -111,27 +111,33 @@ export HOME="$TEST_HOME"
 echo ""
 echo "=== Section 1: Statusline (E4 / I2) ==="
 
+# Hotfix vlp.1: statusline now appends " • model: <id>" (read from
+# orchestrator.md frontmatter). The phase5 fixture does NOT seed an
+# orchestrator.md, so the suffix is the literal "• model: (no model pin)".
+# A separate per-section test below covers the "with pin" path.
+MODEL_SUFFIX_NONE=" • model: (no model pin)"
+
 # 1.1 No task, no files
 bash "$FIXTURE/.claude/scripts/current-task.sh" clear 2>/dev/null || true
 rm -f "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: no task, no files" "(no active task) — 0 files changed" "$OUT"
+assert_eq "statusline: no task, no files" "(no active task) — 0 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # 1.2 No task, with file changes
 printf '/path/a.ts\n/path/b.ts\n/path/a.ts\n' > "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: no task, 2 unique files" "(no active task) — 2 files changed" "$OUT"
+assert_eq "statusline: no task, 2 unique files" "(no active task) — 2 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # 1.3 Task set, no QA labels
 TASK=$(bd create "Statusline test" -t task -p 1 --json | jq -r '.id')
 bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: task set, qa: none" "[$TASK] qa: none • 2 files changed" "$OUT"
+assert_eq "statusline: task set, qa: none" "[$TASK] qa: none • 2 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # 1.4 Task with qa-pending
 bd label add "$TASK" qa-pending >/dev/null 2>&1
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: qa-pending" "[$TASK] qa: pending • 2 files changed" "$OUT"
+assert_eq "statusline: qa-pending" "[$TASK] qa: pending • 2 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # 1.5 Task with gate entered
 # Covers the gate-entered semantic state: a task has been handed to QA but
@@ -146,7 +152,7 @@ bash "$FIXTURE/.claude/scripts/qa-gate.sh" enter "$TASK" >/dev/null 2>&1
 bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
 assert_eq "statusline: gate-entered (rubric-pending also set per Phase A)" \
-    "[$TASK] qa: gate-entered • rubric: pending • 2 files changed" "$OUT"
+    "[$TASK] qa: gate-entered • rubric: pending • 2 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # 1.6 Task approved — verify the semantic transition across approve.
 #
@@ -165,14 +171,14 @@ assert_eq "statusline: gate-entered (rubric-pending also set per Phase A)" \
 # qa-gate-entered).
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
 assert_eq "statusline: pre-approve (gate-entered, rubric-pending, 2 files)" \
-    "[$TASK] qa: gate-entered • rubric: pending • 2 files changed" "$OUT"
+    "[$TASK] qa: gate-entered • rubric: pending • 2 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # Approve clears current-task and truncates changed-files.txt as side effects,
 # so we re-set the task before reading statusline.
 bash "$FIXTURE/.claude/scripts/qa-gate.sh" approve "$TASK" "Test approval" >/dev/null 2>&1
 bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
-assert_eq "statusline: approved" "[$TASK] qa: approved • 0 files changed" "$OUT"
+assert_eq "statusline: approved" "[$TASK] qa: approved • 0 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # 1.7 bd unavailable — verify both pre-approve (files staged) and
 # post-approve (truncated) shapes when bd is off PATH.
@@ -190,13 +196,47 @@ assert_eq "statusline: approved" "[$TASK] qa: approved • 0 files changed" "$OU
 printf '/path/c.ts\n/path/d.ts\n' > "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
 OUT=$(PATH=/usr/bin:/bin bash -c "echo '{}' | bash '$FIXTURE/.claude/scripts/statusline.sh'")
 assert_eq "statusline: bd unavailable (pre-approve, 2 files)" \
-    "(bd unavailable) — 2 files changed" "$OUT"
+    "(bd unavailable) — 2 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # Post-approve shape: tracker truncated (post-0wk.2 qa-gate.sh approve
 # semantics — see 1.6 for the qa-gate-driven verification of this).
 : > "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
 OUT=$(PATH=/usr/bin:/bin bash -c "echo '{}' | bash '$FIXTURE/.claude/scripts/statusline.sh'")
-assert_eq "statusline: bd unavailable" "(bd unavailable) — 0 files changed" "$OUT"
+assert_eq "statusline: bd unavailable" "(bd unavailable) — 0 files changed${MODEL_SUFFIX_NONE}" "$OUT"
+
+# 1.8 Hotfix vlp.1: seed an orchestrator.md with a model pin and verify
+# the statusline picks it up. This is the positive coverage for the
+# new "• model: <id>" segment — sections 1.1-1.7 covered the "no pin"
+# fallback; here we prove the read path works against real frontmatter.
+mkdir -p "$FIXTURE/.claude/agents"
+cat > "$FIXTURE/.claude/agents/orchestrator.md" <<'AGENT'
+---
+name: orchestrator
+description: stub
+model: claude-fable-5
+---
+stub body
+AGENT
+# Restore PATH (1.7 dropped bd from PATH); fresh tracker; task active.
+bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
+: > "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
+OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
+assert_eq "statusline: pin read from orchestrator.md" \
+    "[$TASK] qa: approved • 0 files changed • model: claude-fable-5" "$OUT"
+
+# META-TEST: remove the model: line entirely; the statusline must
+# degrade to "(no model pin)" without erroring. Sensitivity check on
+# the read_model_pin path.
+cat > "$FIXTURE/.claude/agents/orchestrator.md" <<'AGENT'
+---
+name: orchestrator
+description: stub without model pin
+---
+stub body
+AGENT
+OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")
+assert_eq "statusline META-TEST: missing model: line falls back to (no model pin)" \
+    "[$TASK] qa: approved • 0 files changed${MODEL_SUFFIX_NONE}" "$OUT"
 
 # ---------------------------------------------------------------------------
 echo ""

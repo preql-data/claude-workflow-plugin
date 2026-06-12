@@ -127,6 +127,34 @@ if [ -n "$SYNC_ERROR_LINE" ]; then
 - Last session's bd sync failed at ${SYNC_TS:-an unknown time}; see .claude/.qa-tracking/sync-errors.log"
 fi
 
+# Warning 4: hotfix vlp.2 — name the applied effort level and the
+# ultracode opt-in path. Reads the configured level from settings.json
+# (effortLevel) AND the env override (CLAUDE_CODE_EFFORT_LEVEL); the env
+# var takes precedence per docs. Best-effort: missing jq or unreadable
+# settings.json falls through silently rather than failing the session.
+SETTINGS_FILE="$PROJECT_DIR/.claude/settings.json"
+EFFORT_DECLARED=""
+EFFORT_ENV=""
+if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
+    EFFORT_DECLARED=$(jq -r '.effortLevel // ""' "$SETTINGS_FILE" 2>/dev/null || echo "")
+    EFFORT_ENV=$(jq -r '.env.CLAUDE_CODE_EFFORT_LEVEL // ""' "$SETTINGS_FILE" 2>/dev/null || echo "")
+fi
+# Precedence per docs/en/env-vars: CLAUDE_CODE_EFFORT_LEVEL > /effort > effortLevel.
+EFFORT_APPLIED="$EFFORT_ENV"
+[ -z "$EFFORT_APPLIED" ] && EFFORT_APPLIED="$EFFORT_DECLARED"
+if [ -n "$EFFORT_APPLIED" ]; then
+    # Mention BOTH the env var and effortLevel only when they differ;
+    # otherwise the message stays one line. The ultracode hint is always
+    # included so operators learn the runtime-only opt-in path.
+    if [ -n "$EFFORT_DECLARED" ] && [ -n "$EFFORT_ENV" ] && [ "$EFFORT_DECLARED" != "$EFFORT_ENV" ]; then
+        WARNINGS+="
+- effort: applied '$EFFORT_APPLIED' via CLAUDE_CODE_EFFORT_LEVEL (settings effortLevel='$EFFORT_DECLARED' overridden by env). For dynamic workflow orchestration, opt in this session with /effort ultracode (cannot be persisted)."
+    else
+        WARNINGS+="
+- effort: applied '$EFFORT_APPLIED' (persisted via settings + env). For dynamic workflow orchestration, opt in this session with /effort ultracode (cannot be persisted)."
+    fi
+fi
+
 # 1. Get bd prime output (Beads' built-in agent context)
 BD_PRIME=$(bd prime 2>/dev/null || echo "")
 if [ -n "$BD_PRIME" ]; then

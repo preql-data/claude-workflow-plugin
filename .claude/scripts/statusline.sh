@@ -28,6 +28,20 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 CURRENT_TASK_HELPER="$PROJECT_DIR/.claude/scripts/current-task.sh"
 TRACKING_FILE="$QA_TRACKING_DIR/changed-files.txt"
+ORCH_AGENT_FILE="$PROJECT_DIR/.claude/agents/orchestrator.md"
+
+# Hotfix vlp.1: read the active model pin from orchestrator.md frontmatter
+# (no network). All seven agent pins are kept in lockstep by
+# workflow-model-apply.sh, so reading one is sufficient. We surface this
+# in the statusline so the operator can see at-a-glance which model is
+# active for the current session — closes the principle-1 visibility gap
+# called out in the hotfix plan.
+read_model_pin() {
+    [ -f "$ORCH_AGENT_FILE" ] || { printf ''; return; }
+    local pin
+    pin=$(grep -E '^model:' "$ORCH_AGENT_FILE" 2>/dev/null | head -1 | awk '{print $2}')
+    printf '%s' "$pin"
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -163,10 +177,16 @@ FILE_COUNT=$(count_changed_files)
 FILE_COUNT=$(printf '%s' "$FILE_COUNT" | tr -d '[:space:]')
 [ -z "$FILE_COUNT" ] && FILE_COUNT=0
 
+# Hotfix vlp.1: read the model pin once; append " • model: <id>" to every
+# branch below so visibility is consistent across task-active /
+# no-active-task / bd-unavailable states. Empty pin -> "(no model pin)".
+MODEL_PIN=$(read_model_pin)
+MODEL_SUFFIX=" • model: ${MODEL_PIN:-(no model pin)}"
+
 if [ -z "$CURRENT_TASK" ]; then
     # No active task — still report file count (useful when changes are
     # accumulating but no task has been claimed yet).
-    printf '(no active task) — %s files changed\n' "$FILE_COUNT"
+    printf '(no active task) — %s files changed%s\n' "$FILE_COUNT" "$MODEL_SUFFIX"
     exit 0
 fi
 
@@ -180,10 +200,10 @@ RUBRIC_STATE=$(rubric_state_for_labels "$RUBRIC_STATE_LABELS")
 
 case "$QA_STATE" in
     bd-unavailable)
-        printf '(bd unavailable) — %s files changed\n' "$FILE_COUNT"
+        printf '(bd unavailable) — %s files changed%s\n' "$FILE_COUNT" "$MODEL_SUFFIX"
         ;;
     no-beads)
-        printf '[%s] (.beads missing) — %s files changed\n' "$CURRENT_TASK" "$FILE_COUNT"
+        printf '[%s] (.beads missing) — %s files changed%s\n' "$CURRENT_TASK" "$FILE_COUNT" "$MODEL_SUFFIX"
         ;;
     *)
         # Surface rubric state only when present (pending/satisfied). The
@@ -191,11 +211,11 @@ case "$QA_STATE" in
         # not yet entered — suppressing it keeps the line short for the
         # common case (intent-router fires before qa-gate enter).
         if [ "$RUBRIC_STATE" = "satisfied" ] || [ "$RUBRIC_STATE" = "pending" ]; then
-            printf '[%s] qa: %s • rubric: %s • %s files changed\n' \
-                "$CURRENT_TASK" "$QA_STATE" "$RUBRIC_STATE" "$FILE_COUNT"
+            printf '[%s] qa: %s • rubric: %s • %s files changed%s\n' \
+                "$CURRENT_TASK" "$QA_STATE" "$RUBRIC_STATE" "$FILE_COUNT" "$MODEL_SUFFIX"
         else
-            printf '[%s] qa: %s • %s files changed\n' \
-                "$CURRENT_TASK" "$QA_STATE" "$FILE_COUNT"
+            printf '[%s] qa: %s • %s files changed%s\n' \
+                "$CURRENT_TASK" "$QA_STATE" "$FILE_COUNT" "$MODEL_SUFFIX"
         fi
         ;;
 esac

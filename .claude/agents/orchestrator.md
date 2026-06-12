@@ -11,7 +11,7 @@ permissionMode: plan
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.
-model: claude-opus-4-7
+model: claude-fable-5
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. CLAUDE_CODE_EFFORT_LEVEL env var (in settings.json) takes
 # precedence on a per-session basis; this is the durable fallback.

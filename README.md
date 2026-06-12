@@ -177,8 +177,11 @@ tier) read [`CHANGELOG.md`](CHANGELOG.md).
 
 ## ⚠ Caveats
 
-- Live e2e runs cost roughly $5–10 per fixture against Claude Opus 4.7.
-  The offline gate (`make test-all`) is free and covers L1 + L2. As of
+- Live e2e runs cost roughly $5–10 per fixture against the
+  SessionStart-resolved model (whichever family/tier the resolver picks
+  per `.claude/model-ranking`; the active pin is shown in the statusline
+  and tracked on the "Model selection log" Beads meta-task). The
+  offline gate (`make test-all`) is free and covers L1 + L2. As of
   v3.1.0, live runs are MANUAL ONLY: `make test-live FIXTURE=<name>`
   prints the estimated cost and prompts for confirmation before
   spending. There is no scheduled CI run that consumes API spend, and

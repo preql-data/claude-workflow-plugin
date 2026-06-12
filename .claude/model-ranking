@@ -1,22 +1,50 @@
-# Model family ranking — spec 0.3.
+# Model ranking — spec 0.3 + hotfix vlp.1 (exclusion + tertiary tie-break).
 #
-# One model-family id-prefix per line, in preference order (best first). The
-# model-select.sh helper enumerates /v1/models, groups results by these
-# prefixes, picks the highest version within the highest-ranked family the
-# account has access to, and prefers the largest-context variant when the
-# listing distinguishes by max_input_tokens.
+# This file is an EXCLUSION list and a TERTIARY TIE-BREAK hint. It does
+# NOT restrict which models the resolver considers. Unknown families are
+# FIRST-CLASS candidates: a newly-launched tier above Fable wins
+# automatically by recency, without an edit to this file.
 #
-# Add a brand-new family by inserting a line above its weaker peers. The
-# unknown-newer heuristic catches a higher version inside an already-listed
-# family even when this file hasn't been touched, so the only edits this
-# file requires are net-new families (e.g. when Anthropic ships a new tier
-# above Fable).
+# Syntax
+# ------
+# Lines starting with `!` are exclusions:
 #
-# Comments and blank lines are ignored. Whitespace is trimmed.
+#     !claude-haiku       # drop every claude-haiku-* model
+#
+# Lines without `!` are family prefixes used to break ties when two
+# surviving candidates have identical created_at AND max_input_tokens.
+# Lines higher in the file get a lower (better) tie-break rank.
+#
+# Comments (`#`) and blank lines are ignored. Whitespace is trimmed.
+#
+# Resolver sort (primary -> tertiary)
+# -----------------------------------
+#   1. created_at DESC   — newest model wins (ISO 8601 from /v1/models).
+#   2. max_input_tokens DESC — larger context wins on date tie.
+#   3. ranking-file position ASC — families listed earlier preferred;
+#      unknown families slot after every listed family for the tie-break.
+#
+# When the resolver picks a winner whose created_at is missing or
+# unparseable, the SessionStart notice prints LOUDLY with the manual
+# `/workflow-model <id>` adopt command and refuses to auto-rewrite the
+# pins — so a malformed listing can never silently switch the workflow.
+#
+# Why this is set up as exclusion-only
+# ------------------------------------
+# Before hotfix vlp.1 this file was a strict allow-list: only families
+# whose prefix appeared here could be selected, with version-tuple
+# sorting inside each family. That meant a brand-new family tier shipped
+# upstream (e.g. above Fable) would be invisible to the resolver until
+# someone hand-edited this file. Reversing the polarity — exclusion +
+# tie-break, with created_at as the primary sort — fixes principle 1
+# ("auto-upgrade") without requiring this file to track upstream
+# releases.
+#
+# Tier list (tertiary tie-break order; from best to worst when dates
+# are identical):
 
 # Tier 1: Fable family — Claude's most capable in-cycle model (per
-# /docs/en/model-config: "the most capable model in Claude Code"). Listed
-# first so an account with Fable access always selects Fable.
+# /docs/en/model-config: "the most capable model in Claude Code").
 claude-fable
 
 # Tier 2: Mythos family — Fable's stablemate per the Fable launch notes.
@@ -30,6 +58,8 @@ claude-opus
 # Enterprise subscription seats.
 claude-sonnet
 
-# Tier 5: Haiku family — fast/cheap, used here only when nothing above
-# is available to the account.
+# Tier 5: Haiku family — fast/cheap. Listed last so it loses every
+# tie-break against the heavier tiers above. Add `!claude-haiku` (above
+# the tier list) to exclude haiku entirely if you never want it picked
+# even when it is the newest model in the listing.
 claude-haiku

@@ -1,24 +1,26 @@
 #!/bin/bash
-# model-select.sh — automatic best-model selection (spec 0.3).
+# model-select.sh — automatic best-model selection (spec 0.3 + hotfix vlp.1).
 #
 # Resolves the best model available to this account, ranks it against
 # .claude/model-ranking, and (in the `apply` path) rewrites every agent's
 # model: pin via the shared workflow-model-apply.sh helper.
 #
 # Subcommands:
-#   resolve [--quiet]
+#   resolve [--quiet] [--refresh]
 #       Print "<model-id>\t<source>" on stdout (source is one of
 #       "cache","api"). Returns 0 if a model was resolved or the operator
 #       wanted a fail-open warning; exits 0 either way so SessionStart
 #       never blocks on an enumeration failure (spec principle: "never
 #       block the session"). On fail-open, the message goes to stderr and
-#       stdout is empty.
+#       stdout is empty. --refresh bypasses the cache and forces an API
+#       round-trip (no-op without an API key).
 #
-#   apply [--quiet]
+#   apply [--quiet] [--refresh]
 #       Resolve as above; if the resolved id differs from the current
 #       pin, invoke workflow-model-apply.sh and record the switch on the
 #       standing "Model selection log" Beads meta-task. Quiet suppresses
 #       per-file rewrite chatter; the one-line summary still prints.
+#       --refresh bypasses the cache (same semantics as resolve).
 #
 #   status
 #       Print current pin (from orchestrator.md), cached best (if cache
@@ -28,12 +30,44 @@
 #   .claude/.qa-tracking/model-select-cache.json
 #     { "timestamp": <unix-ts>, "models": [ { "id":..., "max_input_tokens":..., "created_at":... }, ... ] }
 #   TTL is 3600s. A stale cache is ignored (we refresh); a missing cache
-#   triggers an API fetch.
+#   triggers an API fetch. --refresh ignores TTL outright.
+#
+# Ranking semantics (hotfix vlp.1):
+#   `.claude/model-ranking` is an EXCLUSION + TERTIARY-TIE-BREAK file.
+#   Lines starting with `!` are exclusion patterns ("!claude-haiku" drops
+#   every id whose family prefix is `claude-haiku-`). All other lines are
+#   family prefixes used only to break ties when two surviving entries
+#   have identical `created_at` AND `max_input_tokens`. The picker DOES
+#   NOT restrict candidates to ranked families; unknown families are
+#   first-class candidates so a newly-launched tier above Fable wins
+#   automatically without editing this file.
+#
+# Sort (primary -> tertiary):
+#   1. created_at DESC (newest first; parsed as ISO 8601).
+#   2. max_input_tokens DESC (larger context wins on tie).
+#   3. Ranking-file position ASC (families listed earlier preferred).
+#   When a winner's created_at is missing or unparseable, the helper
+#   emits a LOUD notice naming the id and the `/workflow-model <id>`
+#   adopt command — and refuses to auto-adopt. The session keeps the
+#   current pin until the operator runs the adopt command explicitly.
+#
+# pick_best stdout contract (defect 3fn fix — never silent stale pin):
+#   Happy path:        `<id>\n`
+#   Manual-adopt path: `MANUAL\t<id>\n`
+#   The MANUAL prefix is parsed by every caller — cmd_apply uses it to
+#   short-circuit BEFORE current-pin comparison or rewrite; cmd_resolve
+#   strips it and prints the id (so the operator sees "what *would*
+#   be picked"); cmd_status surfaces the qualifier on its cached-best
+#   line. We do NOT use a parent-shell global because pick_best is
+#   always invoked via `$(...)` command substitution and a subshell
+#   variable assignment is invisible to the parent — encoding the
+#   signal on stdout is the only channel that survives the subshell.
 #
 # Fail-open contract (spec 0.3 principle 1):
 #   - No ANTHROPIC_API_KEY and no fresh cache: emit warning, exit 0.
 #   - curl failure / timeout: emit warning, exit 0.
-#   - empty model list / ranking match miss: emit warning, exit 0.
+#   - empty model list / no candidates after exclusion: emit warning, exit 0.
+#   - unparseable created_at on winner: emit loud manual-adopt notice, exit 0.
 #   - Never trigger inference, drift, or any paid call on switch.
 
 set -u
@@ -47,16 +81,25 @@ APPLY_HELPER="$PROJECT_DIR/.claude/scripts/workflow-model-apply.sh"
 ORCH_AGENT="$PROJECT_DIR/.claude/agents/orchestrator.md"
 
 QUIET=0
+REFRESH=0
 SUBCMD="${1:-}"
 shift || true
 
 while [ "${1:-}" != "" ]; do
     case "$1" in
         --quiet|-q) QUIET=1 ;;
+        --refresh)  REFRESH=1 ;;
         *) ;;  # ignore unknown args; subcommand-specific positional args are absent today
     esac
     shift
 done
+
+# Manual-adopt signal traveling between pick_best and its callers.
+# History (defect 3fn): a parent-shell global was tried first and lost
+# every time because pick_best is always invoked via `$(...)` command
+# substitution — Bash subshell assignments don't propagate. We now
+# encode the signal as a `MANUAL\t<id>` stdout prefix from pick_best;
+# callers parse the prefix. See the file-header contract for details.
 
 # Logging helpers: stderr only (stdout is reserved for resolved values).
 #
@@ -97,7 +140,14 @@ cache_age_s() {
 }
 
 # cache_fresh — exit 0 if cache exists, parses, and is within TTL.
+# --refresh forces this to return non-zero so get_models falls through to
+# the API path. We deliberately treat --refresh as "ignore cache" rather
+# than "delete cache" so a fail-open after --refresh can still surface the
+# stale entries with the "using stale cache" warning if the API call
+# fails — the operator should never lose state because they asked for a
+# refresh that the network couldn't deliver.
 cache_fresh() {
+    [ "$REFRESH" = "1" ] && return 1
     local age
     age=$(cache_age_s)
     [ "$age" -ge 0 ] && [ "$age" -lt "$CACHE_TTL_SECONDS" ]
@@ -184,119 +234,153 @@ get_models() {
 }
 
 # ---------------------------------------------------------------------------
-# Ranking.
+# Ranking (hotfix vlp.1: exclusion + tertiary tie-break, no family-gating).
 # ---------------------------------------------------------------------------
 
-# load_ranking — print one family-prefix per line, in preference order;
-# strip comments and blank lines.
-load_ranking() {
+# load_ranking_raw — print every non-empty, non-comment line from the
+# ranking file in file order. Includes any leading `!` so callers can
+# split exclusions from tie-break entries.
+load_ranking_raw() {
     [ -f "$RANKING_FILE" ] || return 0
     sed -E -e 's/#.*$//' -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$//' \
         "$RANKING_FILE" | grep -v '^$'
 }
 
-# pick_best <models-json> — print the best id (with optional [1m] suffix)
-# on stdout, return 0 on success. Returns 1 when ranking yields no match.
+# load_exclusions — print one family prefix per line, in file order,
+# stripped of the leading `!`. Lines without `!` are skipped.
+load_exclusions() {
+    load_ranking_raw | awk '/^!/{sub(/^!/, ""); print}'
+}
+
+# load_tiers — print one family prefix per line, in file order, of the
+# non-exclusion entries. These are the tertiary tie-break preference;
+# they no longer restrict candidate selection.
+load_tiers() {
+    load_ranking_raw | grep -v '^!'
+}
+
+# pick_best <models-json> — print the best id on stdout, return 0 on
+# success. Returns 1 when no candidate survives the exclusion + sort.
 #
-# Algorithm:
-#   1. Read families in order (load_ranking).
-#   2. For each model, find the longest matching family prefix among
-#      configured families. Models in unknown families are skipped with
-#      a single warning naming them (spec: "unknown families ignored
-#      with a warning").
-#   3. Within the chosen-family pool: sort by version tuple DESC, then by
-#      max_input_tokens DESC; the head is the winner. Version tuple is
-#      extracted from the id with `claude-<family>-<v0>-<v1>[-<v2>]`
-#      style ids (e.g. claude-opus-4-7 -> [4,7]; claude-fable-5 -> [5,0]).
-#   4. If the winner's id has a sibling with the same version but a
-#      larger context window AND there's no separate entry (i.e. the
-#      shape Anthropic ships is one id with two context modes), keep the
-#      base id — Claude Code applies the [1m] suffix at the model: layer.
-#      In practice we just emit the bare id; the rewriter accepts the
-#      [1m] suffix when callers want to force it.
+# Stdout contract (defect 3fn fix):
+#   Happy path:        `<id>\n`
+#   Manual-adopt path: `MANUAL\t<id>\n`
+# Manual-adopt fires when the winner's created_at is missing or
+# unparseable. cmd_apply parses the `MANUAL\t` prefix to refuse the
+# auto-rewrite; cmd_resolve strips it and prints the id; cmd_status
+# surfaces a qualifier on the cached-best line. A parent-shell global
+# is NOT used because pick_best is always invoked via `$(...)` and
+# Bash subshell assignments do not propagate.
 #
-# Note: the "[1m] preferred variant" path triggers only when the API
-# listing distinguishes by id (we'd see a separate model entry). When it
-# doesn't, the shape is identical and the suffix is a settings-level
-# concern documented in /workflow-model. We don't auto-add the suffix
-# from this helper to avoid an opinion that hurts under model rotation.
+# Algorithm (hotfix vlp.1):
+#   1. Drop entries whose id starts with any "!<excl>-" prefix from the
+#      ranking file.
+#   2. Sort surviving entries by:
+#        primary:   created_at DESC (parsed as ISO 8601; unparseable
+#                   gets -1 so it sorts to the bottom — but if it ends
+#                   up the winner anyway, the MANUAL prefix is emitted
+#                   on stdout and the apply path refuses auto-rewrite).
+#        secondary: max_input_tokens DESC (larger context wins on tie).
+#        tertiary:  ranking-file position ASC (families listed earlier
+#                   preferred; unknown families slot after every listed
+#                   family for the tie-break).
+#   3. Emit the head's id (with the MANUAL prefix when appropriate).
+#
+# We deliberately DO NOT family-gate. Unknown families are first-class
+# candidates so a newly-launched tier above the listed families wins
+# without an edit to the ranking file. The header doc covers this.
 pick_best() {
     local models="$1"
-    local ranking
-    ranking=$(load_ranking)
-    if [ -z "$ranking" ]; then
-        _warn "ranking file empty or absent at $RANKING_FILE"
-        return 1
-    fi
 
-    # Build a jq filter that, for each ranked family in order, scans the
-    # models array for entries whose id starts with the family prefix
-    # (followed by `-` to avoid claude-opus matching claude-opusplan-like
-    # accidents). Returns the first non-empty family bucket as
-    # [{id, version, max_input_tokens}], sorted DESC by version then DESC
-    # by max_input_tokens. Empty buckets fall through.
-    local families_json
-    families_json=$(printf '%s\n' "$ranking" | jq -R -s -c 'split("\n") | map(select(length>0))')
+    local exclusions_json tiers_json
+    exclusions_json=$(load_exclusions | jq -R -s -c 'split("\n") | map(select(length>0))')
+    tiers_json=$(load_tiers | jq -R -s -c 'split("\n") | map(select(length>0))')
 
-    # The jq program:
-    #   - For each family (in order), filter the model list to entries
-    #     whose id matches "^<family>-".
-    #   - For each match, parse a version array from the part after the
-    #     family prefix: split on '-' (or '.') and keep numeric tokens.
-    #   - Sort DESC by version tuple, then DESC by max_input_tokens, and
-    #     emit the head as the winner of that family.
-    #   - The outer `first(...)` picks the first family that produced a
-    #     match.
+    # Single-pass jq:
+    #   - Filter out excluded ids (any id starting with "<excl>-").
+    #   - Annotate each with _ts (created_at parsed to epoch via fromdate?,
+    #     or -1 when missing/unparseable), _ctx (max_input_tokens), and
+    #     _rank (lowest index of a tier whose prefix matches, or
+    #     |tiers| for "unranked" — places unknown families at the back
+    #     of the tertiary tie-break).
+    #   - Sort by _ts DESC, _ctx DESC, _rank ASC.
+    #   - Emit the head (or null when no candidates).
     local pick
     pick=$(jq -n -c \
         --argjson models "$models" \
-        --argjson families "$families_json" '
-        def parse_version($id; $fam):
-            ($id | ltrimstr($fam + "-"))
-            | split("-")
-            | map(select(test("^[0-9]+(\\.[0-9]+)?$"))
-                  | tonumber);
+        --argjson excludes "$exclusions_json" \
+        --argjson tiers "$tiers_json" '
+        def rank_for($id; $tiers):
+            # Bind each tier entry as $e before the pipe — `.value` inside
+            # a `select($id | ...)` body would be evaluated against $id (a
+            # string), tripping "Cannot index string with string". The
+            # `as $e` binding scopes the lookup outside the pipe.
+            ($tiers | to_entries
+             | map(. as $e | select($id | startswith($e.value + "-")))
+             | (first | .key) // ($tiers | length));
 
-        def family_pick($fam):
-            ($models // [])
-            | map(select(.id | startswith($fam + "-")))
-            | map({id, version: parse_version(.id; $fam),
-                   max_input_tokens: (.max_input_tokens // 0)})
-            | sort_by(.version, .max_input_tokens)
-            | reverse
-            | (first // null);
+        def excluded($id; $excludes):
+            ($excludes | any(. as $e | $id | startswith($e + "-")));
 
-        ($families | map(family_pick(.)) | map(select(. != null)) | first)
-        // null
+        ($models // [])
+        | map(select(excluded(.id; $excludes) | not))
+        | map(. + {
+            _ts: ((.created_at // "")
+                  | if . == "" then -1
+                    else (fromdate? // -1)
+                    end),
+            _ctx: (.max_input_tokens // 0),
+            _rank: rank_for(.id; $tiers)
+          })
+        | sort_by([-(._ts), -(._ctx), ._rank])
+        | (first // null)
     ' 2>/dev/null)
 
     if [ -z "$pick" ] || [ "$pick" = "null" ]; then
-        # Surface which families WERE present in the listing so the
-        # operator knows whether the ranking file needs editing (spec:
-        # "unknown families ignored with a warning naming them").
         local seen
         seen=$(printf '%s' "$models" | jq -r '[.[].id | capture("^(?<fam>claude-[a-z]+)").fam] | unique | join(",")' 2>/dev/null)
         if [ -n "$seen" ]; then
-            _warn "no ranking match. Families seen in listing: $seen. Edit $RANKING_FILE to add."
+            _warn "no candidates after applying ranking exclusions. Families seen in listing: $seen. Review $RANKING_FILE."
         else
-            _warn "no ranking match and no recognisable model ids in listing."
+            _warn "no candidates after applying ranking exclusions and no recognisable model ids in listing."
         fi
         return 1
     fi
 
-    printf '%s\n' "$pick" | jq -r '.id'
+    local picked_id picked_ts
+    picked_id=$(printf '%s' "$pick" | jq -r '.id')
+    picked_ts=$(printf '%s' "$pick" | jq -r '._ts')
+
+    # Unparseable created_at on the winner -> loud notice + MANUAL stdout
+    # prefix. The apply path parses the prefix and refuses to rewrite;
+    # the resolve path strips the prefix and prints the id so the
+    # operator can see what would have been picked. We use a tab
+    # separator so the parse is unambiguous even if some future id ever
+    # contains the literal "MANUAL" substring; "MANUAL\t" can never
+    # collide with a model id, which is restricted to [a-z0-9-]+.
+    if [ -z "$picked_ts" ] || [ "$picked_ts" = "-1" ] || [ "$picked_ts" = "null" ]; then
+        _warn "winner '$picked_id' has missing/unparseable created_at; manual adoption required: /workflow-model $picked_id"
+        printf 'MANUAL\t%s\n' "$picked_id"
+        return 0
+    fi
+
+    printf '%s\n' "$picked_id"
 }
 
 # unknown_families_warning <models-json> — surface families seen in the
-# listing that are NOT in the ranking file. This is the "brand-new family
-# is a one-line edit away" affordance: when Anthropic ships a new tier,
-# this prints once per SessionStart so the operator sees the name they
-# need to add.
+# listing that are NOT in the ranking file's tier list (exclusions are
+# omitted from this check; an explicitly-excluded family is intentional).
+# This is the "brand-new family is here, you may want to bump its rank"
+# affordance — it never blocks selection. Under the new contract,
+# unknown families are SELECTED automatically; the warning is just a
+# heads-up so the operator can curate the tier list if they want a
+# different tie-break order in the future.
 unknown_families_warning() {
     local models="$1"
-    local ranking_families
-    ranking_families=$(load_ranking)
-    [ -n "$ranking_families" ] || return 0
+    local tiers excluded
+    tiers=$(load_tiers)
+    excluded=$(load_exclusions)
+    [ -n "$tiers$excluded" ] || return 0
     local listed
     listed=$(printf '%s' "$models" | jq -r '[.[].id | capture("^(?<fam>claude-[a-z]+)").fam] | unique | .[]' 2>/dev/null)
     [ -n "$listed" ] || return 0
@@ -304,14 +388,16 @@ unknown_families_warning() {
     local fam
     while IFS= read -r fam; do
         [ -z "$fam" ] && continue
-        if ! printf '%s\n' "$ranking_families" | grep -qx "$fam"; then
+        # Known if the family appears either as a tier or an exclusion.
+        if ! printf '%s\n' "$tiers" | grep -qx "$fam" \
+            && ! printf '%s\n' "$excluded" | grep -qx "$fam"; then
             unknown="${unknown:+$unknown,}$fam"
         fi
     done <<EOF
 $listed
 EOF
     if [ -n "$unknown" ]; then
-        _warn "unknown family/families in listing (add to $RANKING_FILE if newer): $unknown"
+        _warn "new family/families in listing (selected when newest, add to $RANKING_FILE to influence tie-break order or exclude with '!<family>'): $unknown"
     fi
 }
 
@@ -400,8 +486,17 @@ cmd_resolve() {
         return 0
     fi
     unknown_families_warning "$models"
-    local best
-    best=$(pick_best "$models") || { _result "ranking produced no candidate"; return 0; }
+    local raw_best best
+    raw_best=$(pick_best "$models") || { _result "ranking produced no candidate"; return 0; }
+    # pick_best may emit "MANUAL\t<id>" on the manual-adopt path. The
+    # resolve contract is "tell me what would have been picked" — we
+    # strip the prefix and print the id. The LOUD notice already fired
+    # via stderr inside pick_best, so the operator still sees the
+    # manual-adopt instruction. See file-header stdout contract.
+    case "$raw_best" in
+        MANUAL$'\t'*) best="${raw_best#MANUAL$'\t'}" ;;
+        *)            best="$raw_best" ;;
+    esac
     local source="api"
     cache_fresh && source="cache"
     printf '%s\t%s\n' "$best" "$source"
@@ -423,12 +518,30 @@ cmd_apply() {
         return 0
     fi
     unknown_families_warning "$models"
-    local best
-    best=$(pick_best "$models")
-    if [ -z "$best" ]; then
+    local raw_best best
+    raw_best=$(pick_best "$models")
+    if [ -z "$raw_best" ]; then
         _result "ranking produced no candidate; keeping current pin"
         return 0
     fi
+    # Manual-adopt gate (defect 3fn fix): pick_best emits "MANUAL\t<id>"
+    # when the winner's created_at is missing/unparseable. We parse the
+    # prefix here BEFORE current-pin comparison and BEFORE any rewrite.
+    # The session keeps the current pin and surfaces the LOUD adopt
+    # instruction so a malformed listing can never silently switch us.
+    # Previous implementation used a parent-shell global; that variable
+    # was set inside a $(...) subshell and was invisible here, leaving
+    # this gate unreachable and rewrites silent.
+    case "$raw_best" in
+        MANUAL$'\t'*)
+            local manual_id="${raw_best#MANUAL$'\t'}"
+            _result "manual adoption required for '$manual_id' (unparseable created_at) — run /workflow-model $manual_id"
+            return 0
+            ;;
+        *)
+            best="$raw_best"
+            ;;
+    esac
     local cur
     cur=$(current_pin)
     if [ "$cur" = "$best" ]; then
@@ -467,7 +580,7 @@ cmd_apply() {
 # ---------------------------------------------------------------------------
 
 cmd_status() {
-    local cur best age
+    local cur raw_best best age
     cur=$(current_pin)
     age=$(cache_age_s)
     printf 'current pin: %s\n' "${cur:-<unset>}"
@@ -476,7 +589,19 @@ cmd_status() {
     elif cache_fresh; then
         local models
         models=$(read_cache_models)
-        best=$(pick_best "$models" 2>/dev/null) || best=""
+        # Run pick_best with stderr preserved (defect 3fn fix): the LOUD
+        # manual-adopt notice surfaces here so the operator gets the
+        # adopt instruction from `model-select.sh status` as well. The
+        # previous `2>/dev/null` swallowed it.
+        raw_best=$(pick_best "$models") || raw_best=""
+        case "$raw_best" in
+            MANUAL$'\t'*)
+                best="${raw_best#MANUAL$'\t'} (manual adopt required)"
+                ;;
+            *)
+                best="$raw_best"
+                ;;
+        esac
         printf 'cache:       fresh (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
         printf 'cached best: %s\n' "${best:-<unranked>}"
     else

@@ -76,7 +76,9 @@ waits for a y/N confirmation.
 
 All estimates derive from the G8 runs in 2026-05. Real cost depends on
 the active model snapshot and whether QA's block-then-recover loop
-fires. Values are USD against Claude Opus 4.7.
+fires. Values are USD; the active model is whichever the SessionStart
+resolver pins (see `.claude/scripts/model-select.sh` and the statusline
+output).
 
 | Fixture | Estimated cost | Estimated time | Notes |
 | ------- | -------------- | -------------- | ----- |

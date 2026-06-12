@@ -20,6 +20,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes. The next release entry will go here.
 
+## [3.4.1] - 2026-06-13
+
+Hotfix release for the v3.4.0 line: model resolution was selecting the
+stale `claude-opus-4-7` pin instead of the newest catalogue entry, and
+the effort-default story was muddled by working-tree drift after the
+`/effort` exposure. Three child tasks under epic
+`claude-workflow-plugin-vlp` — `vlp.1` (resolver), `vlp.2` (effort
+defaults), and the discovered-from defect
+`claude-workflow-plugin-3fn` (manual-adopt subshell-loss) — all
+`qa-approved` on `main` by 2026-06-13. First real-world adoption
+recorded the same day: all seven agent pins moved
+`claude-opus-4-7 → claude-fable-5`; the switch is logged on
+meta-task `claude-workflow-plugin-4o2` (`Model selection log`,
+comment 278) with the rollback command `/workflow-model
+claude-opus-4-7`. Operator pain summary: zero — the switch was
+quiet, the statusline now displays the active pin, and
+SessionStart names the applied effort level.
+
+### Fixed
+
+- **Model resolver: generation-aware, never family-gated (vlp.1).**
+  `.claude/scripts/model-select.sh` `pick_best` rewritten. Sort is now
+  `created_at` DESC → `max_input_tokens` DESC → ranking-file position
+  ASC. The family-gated `startswith` jq filter that silently dropped
+  unknown families is removed; unknown families are first-class
+  candidates and trigger an advisory warning, not exclusion. The
+  `.claude/model-ranking` header rewritten end-to-end: `!prefix`
+  lines are exclusions, non-`!` lines are tertiary tie-breakers, and
+  the tier list itself is preserved. Regression test: spec X in
+  `.claude/tests/component/specs/model-select.sh` exercises a
+  faked listing with `claude-zenith-6` (unknown family, newest
+  `created_at`) and asserts the resolver picks it; the META-TEST
+  spec I proves a stub picker propagates to the agent pin (sensitivity).
+- **Manual-adopt gate stdout-sentinel fix (3fn).** Defect filed
+  during QA review of `vlp.1`: `MANUAL_ADOPT_REQUIRED=...` inside
+  `pick_best` was a subshell-local assignment lost by `$(...)`
+  command substitution, so the gate at `cmd_apply` was dead code
+  and the LOUD adopt notice fired _while_ the pin was rewritten
+  anyway — a 100 % silent-stale-pin contract violation on every
+  unparseable `created_at`. Fix changes `pick_best`'s stdout
+  contract to encode the signal: happy path emits `<id>\n`,
+  manual-adopt path emits `MANUAL\t<id>\n`. `cmd_apply`,
+  `cmd_resolve`, and `cmd_status` all parse the `MANUAL$'\t'*`
+  prefix; `cmd_apply` short-circuits BEFORE `current_pin`
+  comparison or rewrite. Tab byte is unambiguous — model ids are
+  restricted to `[a-z0-9-]+` so no collision. Dead parent-shell
+  global removed; file-header contract comment updated (lines 49–67).
+  Regression: Spec M block (`ms-M` / `ms-ME` / `ms-MT` / `ms-MC` /
+  `ms-MX`) adds 20 assertions including a META-TEST proving the new
+  gate is sensitive (stripped `cmd_apply` rewrites the pin; honest
+  `cmd_apply` does not).
+- **`--refresh` flag bypasses the 1-hour listing cache (vlp.1).**
+  `model-select.sh resolve --refresh` / `apply --refresh` forces a
+  live `/v1/models` GET; `cache_fresh` returns false when
+  `REFRESH=1`. Documented in the resolver header.
+- **Statusline shows the active model pin (vlp.1).**
+  `.claude/scripts/statusline.sh` appends `• model: <id>` to every
+  output branch; the id is read from `orchestrator.md` frontmatter
+  (no network). Fallback `(no model pin)` when the frontmatter line
+  is absent. Two new assertions in
+  `.claude/scripts/tests/phase5-synthetic-tests.sh` cover both the
+  pin-present and pin-absent branches.
+- **Six stale `Opus 4.7` doc references (vlp.1).** Model-agnostic
+  prose now lands in `README.md:180`, `docs/ARCHITECTURE.md:419`,
+  `CONTRIBUTING.md:34/61/208`, and `.claude/tests/README.md:79`.
+  Historical references inside dated CHANGELOG sections (e.g. the
+  `[3.0.0]` entry) are preserved as accurate snapshots of what
+  shipped at the time.
+
+### Changed
+
+- **Effort default landed at the maximum persistable level (vlp.2).**
+  `.claude/settings.json` carries `effortLevel: "xhigh"` (the cap
+  accepted by the `effortLevel` field per
+  `docs.claude.com/en/docs/claude-code/settings` — `"max"` is
+  invalid in this field and is rejected at load) plus
+  `env.CLAUDE_CODE_EFFORT_LEVEL: "max"` (the env var DOES accept
+  `max` and persists across sessions per
+  `docs.claude.com/en/docs/claude-code/env-vars`). Working-tree
+  drift (`effortLevel: "max"` + deleted env var) reverted via
+  deliberate Write. All seven agent frontmatter `effort: max` lines
+  unchanged — `max` is the highest subagent-frontmatter value per
+  `docs.claude.com/en/docs/claude-code/sub-agents`. SessionStart
+  now emits a one-line note naming the applied level + the
+  `/effort ultracode` opt-in path; the env value takes precedence
+  per the cited docs, and the message names both when they differ.
+  Ultracode itself is documented as a runtime opt-in (via `/effort
+  ultracode`, `--settings`, or the SDK control request), not a
+  durable default, because the docs explicitly state ultracode
+  cannot be persisted in settings. CONTRIBUTING.md carries the
+  verbatim docs quote and the three persistable knobs.
+- **First real-world model adoption recorded (vlp.1, vlp.2).**
+  2026-06-13: all seven agent pins moved from `claude-opus-4-7` to
+  `claude-fable-5` (newest `created_at` in the live `/v1/models`
+  listing). Settings `env.CLAUDE_LATEST_OPUS` updated. Audit comment
+  on `claude-workflow-plugin-4o2` (`Model selection log`) records
+  the transition plus the rollback `/workflow-model
+  claude-opus-4-7`. Statusline now displays `• model:
+  claude-fable-5`.
+
+### Verification
+
+- `make test` (L1 bash unit): **15 specs**, 0 fail.
+- `make test-all` (L1 + L2 component): **21 specs / 454 assertions**,
+  0 fail (+20 over the v3.4.0 baseline of 434; the M-block
+  manual-adopt regression coverage).
+- `cd .claude/tests/e2e && npm run test:unit`: **158 passed / 5
+  skipped** (unchanged from v3.4.0 — the five skips are honest
+  invariant-engine + trace-anchor artifact-missing skips, not
+  green-washed).
+- `make lint`: clean.
+- `make check` (AgentLint): **87/100** core (composition stable
+  post-pin change — the only S7 line that shifted is a new fixture
+  path in `.claude/tests/component/specs/model-select.sh`, which
+  matches the documented S7 fixture override convention; the
+  numeric score is unchanged).
+- Plugin manifest: `node -e JSON.parse(...)` confirms valid + version
+  `3.4.1`.
+- Guard suites green: `agents-manifest-parity`, `agent-time-budget`,
+  `agent-mcp-tools-parity`, `no-nested-spawn-instructions`.
+
 ## [3.4.0] - 2026-06-12
 
 Phase C of the verification-suite plan (`docs/plans/verification-suite.md`):
