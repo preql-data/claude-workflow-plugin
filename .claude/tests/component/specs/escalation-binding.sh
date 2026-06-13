@@ -361,4 +361,129 @@ META_ESC=$(printf '%s' "$META_ESC" | tr -d '[:space:]')
 assert_eq "META-TEST: qa-escalated NOT set under stubbed counter (proves the cap-assertion would fail)" \
     "0" "$META_ESC"
 
+# ===========================================================================
+# Escalation block-reason WORDING kills (G2.6ix / claude-workflow-plugin-llh.5).
+#
+# The re-sweep (per-file cap raised to 60) exposed F1 survivors in the
+# escalation block-reason composition that the early capped sweeps had
+# truncated past line 884. These are the wording branches an agent READS to
+# decide what to do at the cap; their contract matters. We drive the two
+# escalated cap-hit paths and assert the exact wording each mutant would
+# corrupt:
+#   - FAILED_CHECKS escalated path: 921 (SUITE_REUSED "Cached failure summary"
+#     banner vs "Last failure summary"), 974 (J21 options block at cap).
+#   - QA-required escalated path:   1048 ("QA approval required — gate
+#     ESCALATED" wording), 1114 (J21 options block at cap).
+#
+# Fresh fixture, same detect-stack/npm shim pattern as above.
+mk_fixture
+FIXTURE_W="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_W="$FIXTURE_W/.claude/scripts/verify-before-stop.sh"
+QG_W="$FIXTURE_W/.claude/scripts/qa-gate.sh"
+TRACK_W="$FIXTURE_W/.claude/.qa-tracking"
+rm -f "$FIXTURE_W/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE_W/.claude/scripts/detect-stack.sh" <<'STUB'
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"npm test","lint_cmd":"","type_cmd":""}\n'
+STUB
+chmod +x "$FIXTURE_W/.claude/scripts/detect-stack.sh"
+mk_shim "npm" "$FIXTURE_W" 1 "FAIL src/h.test.ts: AssertionError" >/dev/null
+ensure_w() { printf 'src/h.ts\n' > "$TRACK_W/changed-files.txt"; }
+
+# --- FAILED_CHECKS escalated path (921, 974): iters 1-3 fail+escalate, iter 4 replays ---
+TID_W=$(cd "$FIXTURE_W" && bd create "esc wording failed-path" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_W" enter "$TID_W" >/dev/null
+bd label add "$TID_W" qa-pending >/dev/null 2>&1
+for _ in 1 2 3; do ensure_w; printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_W" >/dev/null 2>&1; done
+ensure_w
+REASON_W4=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_W" 2>&1 | tail -1 | jq -r '.reason // empty')
+# id921: escalated replay (SUITE_REUSED=true) MUST use the "Cached failure
+# summary (test suite NOT re-run...)" banner, NOT "Last failure summary".
+assert_contains "vbs mut921: escalated replay shows 'Cached failure summary' banner (SUITE_REUSED)" \
+    "Cached failure summary" "$REASON_W4"
+W4_LASTFAIL=$(printf '%s' "$REASON_W4" | grep -c 'Last failure summary' || true)
+W4_LASTFAIL=$(printf '%s' "$W4_LASTFAIL" | tr -d '[:space:]')
+assert_eq "vbs mut921: escalated replay does NOT use 'Last failure summary'" "0" "$W4_LASTFAIL"
+# id974: at the cap the FAILED_CHECKS path appends the J21 options block,
+# identified by its 'ESCALATION: Iteration' header.
+assert_contains "vbs mut974: FAILED_CHECKS escalated reason includes the J21 options block (cap)" \
+    "ESCALATION: Iteration" "$REASON_W4"
+
+# --- QA-required escalated path (1048, 1114) -------------------------------
+# Reach the QA-required ESCALATED branch: escalate via failing tests (iters
+# 1-3), then clear the cached FAILED_CHECKS so the escalated replay yields an
+# EMPTY failure set and falls through to the QA-required block while still
+# carrying qa-escalated + ITER>cap.
+TID_WQ=$(cd "$FIXTURE_W" && bd create "esc wording qa-req path" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_W" enter "$TID_WQ" >/dev/null
+bd label add "$TID_WQ" qa-pending >/dev/null 2>&1
+for _ in 1 2 3; do ensure_w; printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_W" >/dev/null 2>&1; done
+SAN_WQ=$(printf '%s' "$TID_WQ" | tr -c 'A-Za-z0-9._-' '_')
+rm -f "$TRACK_W/last-failed-checks.$SAN_WQ"   # clear cache -> empty FAILED_CHECKS on replay
+ensure_w
+REASON_WQ=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_W" 2>&1 | tail -1 | jq -r '.reason // empty')
+# id1048: the QA-required escalated wording.
+assert_contains "vbs mut1048: QA-required escalated path uses 'QA approval required — gate ESCALATED'" \
+    "QA approval required — gate ESCALATED" "$REASON_WQ"
+# id1114: the QA-required path appends the J21 options block at the cap.
+assert_contains "vbs mut1114: QA-required escalated reason includes the J21 options block (cap)" \
+    "ESCALATION: Iteration" "$REASON_WQ"
+
+# --- META-TEST: prove the 921 banner assertion is load-bearing ------------
+# Mutate SUITE_REUSED guard (line 921) in a copy so the escalated replay uses
+# "Last failure summary"; the 921 assertion must then FAIL (banner absent).
+REAL_VBS_W=$(readlink "$VBS_W" || printf '%s' "$VBS_W")
+VBS_W_MUT="$FIXTURE_W/vbs-suitereuse-mut.sh"
+awk 'NR==921 && /SUITE_REUSED" = "true"/ {print "        if [ \"$SUITE_REUSED\" != \"true\" ]; then"; next} {print}' \
+    "$REAL_VBS_W" > "$VBS_W_MUT"
+chmod +x "$VBS_W_MUT"
+VBS_W_MUT_LANDED=$(sed -n '921p' "$VBS_W_MUT" | grep -c 'SUITE_REUSED" != "true"' || true)
+VBS_W_MUT_LANDED=$(printf '%s' "$VBS_W_MUT_LANDED" | tr -d '[:space:]')
+assert_eq "vbs META: SUITE_REUSED guard mutation applied to copy at line 921" "1" "$VBS_W_MUT_LANDED"
+TID_WM=$(cd "$FIXTURE_W" && bd create "esc wording meta" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_W" enter "$TID_WM" >/dev/null
+bd label add "$TID_WM" qa-pending >/dev/null 2>&1
+for _ in 1 2 3; do ensure_w; printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_W_MUT" >/dev/null 2>&1; done
+ensure_w
+REASON_WM=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_W_MUT" 2>&1 | tail -1 | jq -r '.reason // empty')
+WM_CACHED=$(printf '%s' "$REASON_WM" | grep -c 'Cached failure summary' || true)
+WM_CACHED=$(printf '%s' "$WM_CACHED" | tr -d '[:space:]')
+assert_eq "vbs META: under SUITE_REUSED mutant the 'Cached failure summary' banner VANISHES (mut921 assertion WOULD fail)" \
+    "0" "$WM_CACHED"
+
+# --- J21 placeholder when no active task (FAILED_CHECKS path, line ~976) ---
+# Re-sweep survivor: `j21_options_block "${CURRENT_TASK:-<TASK_ID_NEEDED>}"`.
+# The F4 mutant drops the default (`${CURRENT_TASK}`) so a cap-hit with NO
+# active task renders the J21 options with an EMPTY task id instead of the
+# `<TASK_ID_NEEDED>` placeholder — the agent then sees `qa-gate.sh choose
+# approve  '<summary>'` (blank id) and can't act. Drive a no-task failing-test
+# scenario to the cap and assert the placeholder is present.
+mk_fixture
+FIXTURE_NT="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_NT="$FIXTURE_NT/.claude/scripts/verify-before-stop.sh"
+CT_NT="$FIXTURE_NT/.claude/scripts/current-task.sh"
+TRACK_NT="$FIXTURE_NT/.claude/.qa-tracking"
+rm -f "$FIXTURE_NT/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE_NT/.claude/scripts/detect-stack.sh" <<'STUB'
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"npm test","lint_cmd":"","type_cmd":""}\n'
+STUB
+chmod +x "$FIXTURE_NT/.claude/scripts/detect-stack.sh"
+mk_shim "npm" "$FIXTURE_NT" 1 "FAIL src/h.test.ts: AssertionError" >/dev/null
+# No active task: clear before EVERY Stop (the gate's iteration counter falls
+# back to the legacy unscoped path, so the cap is still reached at ITER 3).
+NT_REASON=""
+for _ in 1 2 3 4; do
+    printf 'src/h.ts\n' > "$TRACK_NT/changed-files.txt"
+    bash "$CT_NT" clear >/dev/null 2>&1
+    NT_REASON=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_NT" 2>&1 | tail -1 | jq -r '.reason // empty')
+done
+assert_contains "vbs mut976: no-task cap-hit renders the J21 options block" \
+    "ESCALATION: Iteration" "$NT_REASON"
+# id976: the J21 block MUST carry the <TASK_ID_NEEDED> placeholder (not a blank id).
+assert_contains "vbs mut976: no-task J21 block uses the <TASK_ID_NEEDED> placeholder (default intact)" \
+    "TASK_ID_NEEDED" "$NT_REASON"
+
 [ "$FAIL" -eq 0 ]

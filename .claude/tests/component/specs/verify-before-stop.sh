@@ -402,4 +402,149 @@ OUT_MM2=$(run_vbs_mm)
 assert_decision "META vbs-llh3: mixed diff blocks regardless of fast path" \
     "$OUT_MM2" "block"
 
+# ===========================================================================
+# Mutation-survivor kills (G2.6ix / claude-workflow-plugin-llh.5).
+#
+# Two gaps the C.3 sweep (task claude-workflow-plugin-6ix) left, re-confirmed
+# surviving against the CURRENT code by the re-sweep
+# (.claude/.mutation-runs/20260613T102846Z):
+#
+#   A. Lint / type-check block-reason wording (original survivors id16-19):
+#      no spec ever configured a FAILING lint_cmd or type_cmd, so the mutants
+#      flipping `lint_rc -ne 0` / `type_rc -ne 0` (bullet vanishes) and
+#      `lint_rc = 124` / `type_rc = 124` (rc=1 mislabelled "timed out") all
+#      survived. The escalation-binding spec covers the TEST bullet wording;
+#      this covers lint + type.
+#
+#   B. No-active-task beads/empty fast-path (NEW survivor introduced by the
+#      llh.3 fast-path code at the `FASTPATH_CLASS = "beads-state"` elif): the
+#      existing llh.3 repros all enter a task first, so the "no task +
+#      beads-only change-set -> ALLOW" sub-branch was uncovered. Negating
+#      `[ "$FASTPATH_CLASS" = "beads-state" ]` made a no-task beads-only Stop
+#      fall through to a QA-required block instead of allowing.
+#
+# Fresh fixture: a detect-stack stub that reports a passing (empty) test_cmd
+# plus shimmable lint/type commands, and a git repo so the no-task fast-path
+# git fallback has something to read.
+mk_fixture
+FIXTURE3="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS3="$FIXTURE3/.claude/scripts/verify-before-stop.sh"
+QG3="$FIXTURE3/.claude/scripts/qa-gate.sh"
+CT3="$FIXTURE3/.claude/scripts/current-task.sh"
+TRACK3="$FIXTURE3/.claude/.qa-tracking"
+
+# detect-stack stub: empty test (skips the test pass -> stays fast and keeps
+# the test bullet out of the way), failing-capable lint + type via shims.
+rm -f "$FIXTURE3/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE3/.claude/scripts/detect-stack.sh" <<'STUB'
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"","lint_cmd":"mylint","type_cmd":"mytype"}\n'
+STUB
+chmod +x "$FIXTURE3/.claude/scripts/detect-stack.sh"
+
+# --- A. lint + type wording (ids 16-19) -----------------------------------
+# Shim mylint + mytype to exit 1 (a genuine assertion-class failure, NOT a
+# 124 timeout). The block reason must carry the exit-1 bullets and must NOT
+# carry the timeout wording.
+printf '#!/bin/bash\nexit 1\n' > "$FIXTURE3/bin/mylint"; chmod +x "$FIXTURE3/bin/mylint"
+printf '#!/bin/bash\nexit 1\n' > "$FIXTURE3/bin/mytype"; chmod +x "$FIXTURE3/bin/mytype"
+TID_LT=$(cd "$FIXTURE3" && bd create "lint/type wording" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG3" enter "$TID_LT" >/dev/null
+bd label add "$TID_LT" qa-pending >/dev/null 2>&1
+printf 'src/handler.ts\n' > "$TRACK3/changed-files.txt"
+OUT_LT=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS3" 2>&1 | tail -1)
+assert_decision "vbs mut16-19: failing lint+type blocks" "$OUT_LT" "block"
+REASON_LT=$(printf '%s' "$OUT_LT" | jq -r '.reason // empty')
+# id16: failing lint MUST produce the exit-1 bullet (mutant -eq drops it).
+assert_contains "vbs mut16: failing lint renders 'Lint errors (exit 1)'" \
+    "Lint errors (exit 1)" "$REASON_LT"
+# id17: rc=1 lint must NOT be mislabelled as a timeout (mutant != 124).
+LT_LINT_TIMEOUT=$(printf '%s' "$REASON_LT" | grep -c 'Lint timed out' || true)
+LT_LINT_TIMEOUT=$(printf '%s' "$LT_LINT_TIMEOUT" | tr -d '[:space:]')
+assert_eq "vbs mut17: rc=1 lint is NOT rendered as 'Lint timed out'" "0" "$LT_LINT_TIMEOUT"
+# id18: failing type MUST produce the exit-1 bullet (mutant -eq drops it).
+assert_contains "vbs mut18: failing type renders 'Type-check failing (exit 1)'" \
+    "Type-check failing (exit 1)" "$REASON_LT"
+# id19: rc=1 type must NOT be mislabelled as a timeout (mutant != 124).
+LT_TYPE_TIMEOUT=$(printf '%s' "$REASON_LT" | grep -c 'Type-check timed out' || true)
+LT_TYPE_TIMEOUT=$(printf '%s' "$LT_TYPE_TIMEOUT" | tr -d '[:space:]')
+assert_eq "vbs mut19: rc=1 type is NOT rendered as 'Type-check timed out'" "0" "$LT_TYPE_TIMEOUT"
+
+# --- B. no-active-task beads-state fast-path (NEW survivor, line ~677) -----
+# A beads-only change-set with NO active task must ALLOW ({}). The mutant
+# negating `[ "$FASTPATH_CLASS" = "beads-state" ]` would fall through to a
+# QA-required block. Drive a beads-only tracked change-set and clear the task.
+bash "$CT3" clear
+printf '%s\n' '.beads/issues.jsonl' > "$TRACK3/changed-files.txt"
+OUT_NTBS=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS3" 2>&1 | tail -1)
+assert_empty_envelope "vbs mut(line677): no-task beads-only change-set -> ALLOW" "$OUT_NTBS"
+
+# --- META-TEST: prove the lint-wording assertion is load-bearing ----------
+# Build a copy of verify-before-stop.sh with the lint_rc guard mutated
+# (-ne 0 -> -eq 0) so a failing lint produces NO bullet, and re-run the
+# lint scenario. The "Lint errors (exit 1)" assertion must then FAIL — i.e.
+# the bullet must be ABSENT — proving the assertion catches the regression.
+REAL_VBS3=$(readlink "$VBS3" || printf '%s' "$VBS3")
+VBS3_MUT="$FIXTURE3/vbs-lintmut.sh"
+awk 'NR==829 && /lint_rc" -ne 0/ {print "        if [ \"$lint_rc\" -eq 0 ]; then"; next} {print}' \
+    "$REAL_VBS3" > "$VBS3_MUT"
+chmod +x "$VBS3_MUT"
+VBS3_MUT_LANDED=$(sed -n '829p' "$VBS3_MUT" | grep -c 'lint_rc" -eq 0' || true)
+VBS3_MUT_LANDED=$(printf '%s' "$VBS3_MUT_LANDED" | tr -d '[:space:]')
+assert_eq "vbs META: lint-guard mutation applied to copy at line 829" "1" "$VBS3_MUT_LANDED"
+TID_LTM=$(cd "$FIXTURE3" && bd create "lint wording meta" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG3" enter "$TID_LTM" >/dev/null
+bd label add "$TID_LTM" qa-pending >/dev/null 2>&1
+printf 'src/handler.ts\n' > "$TRACK3/changed-files.txt"
+OUT_LTM=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS3_MUT" 2>&1 | tail -1)
+REASON_LTM=$(printf '%s' "$OUT_LTM" | jq -r '.reason // empty')
+LTM_HAS_LINT=$(printf '%s' "$REASON_LTM" | grep -c 'Lint errors (exit 1)' || true)
+LTM_HAS_LINT=$(printf '%s' "$LTM_HAS_LINT" | tr -d '[:space:]')
+assert_eq "vbs META: under lint-guard mutant the 'Lint errors (exit 1)' bullet VANISHES (mut16 assertion WOULD fail)" \
+    "0" "$LTM_HAS_LINT"
+
+# --- changed-files truncation at >15 (QA-required path, line ~1016) -------
+# Re-sweep survivor (exposed once the per-file cap was raised past line 884):
+# the F1 mutant `CHANGE_COUNT -gt 15 -> -le 15` inverts the file-list
+# truncation. With >15 tracked files the original shows the first 15 plus an
+# "...and N more files" line; the mutant takes the else branch and dumps the
+# FULL list (no truncation marker). Drive 20 tracked files with NO active task
+# (clean QA-required block) and assert the truncation marker is present.
+mk_fixture
+FIXTURE4="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS4="$FIXTURE4/.claude/scripts/verify-before-stop.sh"
+CT4="$FIXTURE4/.claude/scripts/current-task.sh"
+TRACK4="$FIXTURE4/.claude/.qa-tracking"
+# 20 unique tracked source files -> CHANGE_COUNT=20 (>15).
+awk 'BEGIN{for(i=1;i<=20;i++)print "src/mod"i".ts"}' > "$TRACK4/changed-files.txt"
+bash "$CT4" clear
+OUT_TRUNC=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS4" 2>&1 | tail -1)
+assert_decision "vbs mut1016: 20 changed files + no task -> block" "$OUT_TRUNC" "block"
+REASON_TRUNC=$(printf '%s' "$OUT_TRUNC" | jq -r '.reason // empty')
+# id1016: the truncation marker MUST appear (>15 triggers head -15 + "more files").
+assert_contains "vbs mut1016: >15 changed files truncates with '...and N more files'" \
+    "more files" "$REASON_TRUNC"
+# Specifically "...and 5 more files" (20 - 15).
+assert_contains "vbs mut1016: truncation reports the correct overflow count (20-15=5)" \
+    "and 5 more files" "$REASON_TRUNC"
+
+# --- META-TEST: prove the truncation assertion is load-bearing ------------
+REAL_VBS4=$(readlink "$VBS4" || printf '%s' "$VBS4")
+VBS4_MUT="$FIXTURE4/vbs-truncmut.sh"
+awk 'NR==1016 && /CHANGE_COUNT" -gt 15/ {print "        if [ \"$CHANGE_COUNT\" -le 15 ]; then"; next} {print}' \
+    "$REAL_VBS4" > "$VBS4_MUT"
+chmod +x "$VBS4_MUT"
+VBS4_MUT_LANDED=$(sed -n '1016p' "$VBS4_MUT" | grep -c 'CHANGE_COUNT" -le 15' || true)
+VBS4_MUT_LANDED=$(printf '%s' "$VBS4_MUT_LANDED" | tr -d '[:space:]')
+assert_eq "vbs META: truncation guard mutation applied to copy at line 1016" "1" "$VBS4_MUT_LANDED"
+bash "$CT4" clear
+awk 'BEGIN{for(i=1;i<=20;i++)print "src/mod"i".ts"}' > "$TRACK4/changed-files.txt"
+REASON_TRUNCM=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS4_MUT" 2>&1 | tail -1 | jq -r '.reason // empty')
+TRUNCM_MORE=$(printf '%s' "$REASON_TRUNCM" | grep -c 'more files' || true)
+TRUNCM_MORE=$(printf '%s' "$TRUNCM_MORE" | tr -d '[:space:]')
+assert_eq "vbs META: under -le 15 mutant the truncation marker VANISHES (mut1016 assertion WOULD fail)" \
+    "0" "$TRUNCM_MORE"
+
 [ "$FAIL" -eq 0 ]
