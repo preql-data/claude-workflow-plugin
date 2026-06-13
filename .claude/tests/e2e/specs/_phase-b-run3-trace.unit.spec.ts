@@ -39,13 +39,17 @@
  *        - stop-requires-approval: PASS
  *        - orchestrator-no-edits:  PASS
  *        - completion-contract:    SKIPPED (documented trace gap)
- *        - label-milestones:       FAIL — qa-pending missing from
- *          observed adds. The post-run beads diff is set-membership
- *          (added-minus-removed), and qa-pending was added then
- *          removed by qa-approved within the same run, so it never
- *          surfaces in the diff. Documented approximation in
- *          invariants.ts; pinning the failure here makes the gap
- *          visible without weakening the invariant.
+ *        - label-milestones:       SKIP (post-G2.9ke; was FAIL) —
+ *          "trace lacks beadsLabelEvents (pre-3.5 recording)". The
+ *          original FAIL came from qa-pending being missing from the
+ *          post-run net diff (added then removed by qa-approved in the
+ *          same run). That was a recording-layer artifact, not a
+ *          workflow defect: the fix (claude-workflow-plugin-llh.4)
+ *          added trace.beadsLabelEvents and rewrote the invariant to
+ *          read the event stream. This trace predates the field, so the
+ *          invariant SKIPS honestly instead of re-failing. The
+ *          event-stream PASS is proven against this trace in
+ *          `_label-events.unit.spec.ts`.
  *        - declared-subagents-only: PASS
  *        - qa-queried-impact-of:   FAIL — code-graph tools present,
  *          fileWrites > 0, zero QA-attributable impact_of calls. The
@@ -251,7 +255,7 @@ describe.skipIf(!HAVE_TRACE)(
       expect(qaImpactCalls.length).toBe(0);
     });
 
-    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 1 skip + 2 fail (verbatim from the evaluator)", () => {
+    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 2 skip + 1 fail (label-milestones now SKIPS on this pre-3.5 trace — G2.9ke)", () => {
       const trace = loadTrace();
       const yamlContent = readFileSync(FIXTURE_YAML_PATH, "utf8");
       const specs = parseInvariantsFromYaml(yamlContent);
@@ -260,17 +264,27 @@ describe.skipIf(!HAVE_TRACE)(
 
       const agg = evaluateAll(trace, specs);
 
-      // Aggregate shape: 2 failed, 1 skipped, allPassed=false.
+      // G2.9ke (claude-workflow-plugin-llh.4) UPDATED THE STATE THIS
+      // ANCHOR PINS. Run 3 was recorded before the beadsLabelEvents
+      // field existed, so the rewritten label-milestones invariant SKIPS
+      // it ("trace lacks beadsLabelEvents (pre-3.5 recording)") rather
+      // than emitting the old structural FAIL. The original FAIL was a
+      // recording-layer artifact — the net diff cannot see qa-pending
+      // added then removed in-run — NOT a workflow defect, so
+      // retro-failing this old trace would re-assert the very bug 9ke
+      // removed. The event-stream PASS is proven against this same trace
+      // in `_label-events.unit.spec.ts` ("the previously-impossible
+      // invariant PASSES on run 3 once events are derived").
+      //
+      // Aggregate now: 1 failed (qa-queried-impact-of), 2 skipped
+      // (completion-contract + label-milestones), allPassed=false.
       expect(agg.allPassed).toBe(false);
-      expect(agg.skipped).toEqual(["completion-contract"]);
-      expect(agg.failed.sort()).toEqual(
-        ["label-milestones", "qa-queried-impact-of"].sort(),
-      );
+      expect(agg.skipped).toEqual(["completion-contract", "label-milestones"]);
+      expect(agg.failed).toEqual(["qa-queried-impact-of"]);
 
       // Per-invariant verdicts — pin each one so a future engine change
       // that flips any of them (e.g. tightening the skip branch on
-      // qa-queried-impact-of, or extending label-milestones to inspect
-      // tool_use sequencing instead of beadsLabelTransitions) is loud.
+      // qa-queried-impact-of) is loud.
       const resultsByName = Object.fromEntries(
         agg.results.map((r) => [r.name, r.result]),
       );
@@ -278,9 +292,14 @@ describe.skipIf(!HAVE_TRACE)(
       expect(resultsByName["orchestrator-no-edits"]?.pass).toBe(true);
       expect(resultsByName["completion-contract"]?.skipped).toBe(true);
       expect(resultsByName["completion-contract"]?.pass).toBe(true);
-      expect(resultsByName["label-milestones"]?.pass).toBe(false);
+      // UPDATED PIN (was: pass=false + "missing milestone label add(s):
+      // [qa-pending]"). The new state is an honest SKIP on a pre-3.5
+      // trace — pin the exact skip reason so a future re-record (which
+      // WOULD carry the events field and must then PASS) flips this loud.
+      expect(resultsByName["label-milestones"]?.skipped).toBe(true);
+      expect(resultsByName["label-milestones"]?.pass).toBe(true);
       expect(resultsByName["label-milestones"]?.detail ?? "").toContain(
-        "missing milestone label add(s): [qa-pending]",
+        "trace lacks beadsLabelEvents (pre-3.5 recording)",
       );
       expect(resultsByName["declared-subagents-only"]?.pass).toBe(true);
       expect(resultsByName["qa-queried-impact-of"]?.pass).toBe(false);

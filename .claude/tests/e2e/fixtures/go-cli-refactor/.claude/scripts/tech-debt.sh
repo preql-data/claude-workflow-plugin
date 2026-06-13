@@ -24,7 +24,6 @@ set -e
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 DEBT_FILE="$PROJECT_DIR/TECHNICAL_DEBT.md"
-QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 CURRENT_TASK_HELPER="$PROJECT_DIR/.claude/scripts/current-task.sh"
 
 usage() {
@@ -100,12 +99,12 @@ cmd_add() {
         if [ -x "$CURRENT_TASK_HELPER" ]; then
             active=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null || echo "")
         fi
-        local deps_arg=""
-        [ -n "$active" ] && deps_arg="--deps blocks:$active"
+        local -a deps_args=()
+        [ -n "$active" ] && deps_args=(--deps "blocks:$active")
         # bd create returns json with --json. Title is the description.
         local title="Tech-debt ($severity): $description"
         # Best-effort: capture id, fall back silently on parse failure.
-        bd_task_id=$(bd create "$title" -t task -p 2 $deps_arg --json 2>/dev/null \
+        bd_task_id=$(bd create "$title" -t task -p 2 "${deps_args[@]}" --json 2>/dev/null \
             | jq -r '.id // empty' 2>/dev/null || echo "")
     fi
 
@@ -126,6 +125,7 @@ cmd_add() {
 
 cmd_list() {
     if [ ! -f "$DEBT_FILE" ]; then
+        # shellcheck disable=SC2016  # literal backticks are intentional in user-facing hint.
         printf 'No TECHNICAL_DEBT.md yet. Use `tech-debt.sh add` to create one.\n'
         return 0
     fi

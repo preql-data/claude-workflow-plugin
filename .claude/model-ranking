@@ -43,6 +43,17 @@
 # Tier list (tertiary tie-break order; from best to worst when dates
 # are identical):
 
+# --- Regional exclusions (added 2026-06-13) ---
+# Fable and Mythos are unreachable in this account's region — subagent
+# spawns against claude-fable-5 fail ("may not exist or you may not have
+# access to it"). Excluded so the resolver auto-selects the best
+# REACHABLE model (Opus) instead of re-adopting an unspawnable pin and
+# bricking the workflow. This is a SOFT pin: the resolver still
+# auto-upgrades among reachable families and to any future Opus by
+# recency. Delete a line if/when that family becomes reachable for you.
+!claude-fable
+!claude-mythos
+
 # Tier 1: Fable family — Claude's most capable in-cycle model (per
 # /docs/en/model-config: "the most capable model in Claude Code").
 claude-fable

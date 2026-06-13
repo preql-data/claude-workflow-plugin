@@ -270,32 +270,59 @@ function invCompletionContract(_trace: Trace): InvariantResult {
 // Invariant 4: label-milestones
 // ============================================================================
 /**
- * Fixture-declared milestones appear as a subsequence of label-add
- * events in the trace. This REPLACES `expected_label_progression`
- * equality (which forced exact matching against per-run noise).
+ * Fixture-declared milestones appear as an ordered subsequence of
+ * label-ADD events in the trace's event stream. This REPLACES the
+ * pre-3.5 net-diff set-membership check, which was STRUCTURALLY unable
+ * to pass on correct approve-flow runs (claude-workflow-plugin-9ke):
+ * `beadsLabelTransitions` is a post-run net diff, so a label added then
+ * removed in-run — `qa-pending` in every correct gate cycle — was
+ * invisible, and the invariant failed identically on Phase B runs 3
+ * and 4 despite both runs cycling the gate correctly.
  *
- * APPROXIMATION ON ORDERING:
- *   `beadsLabelTransitions` is computed as a single post-run before/after
- *   diff per task (see runFixture.diffBeadsIssues). Within one
- *   transition's `added[]`, the labels are unordered (set diff). Across
- *   transitions, the array order reflects the order tasks appear in
- *   `.beads/issues.jsonl`, not the temporal order labels were added.
+ * EVIDENCE MODEL (strongest honestly-checkable form):
  *
- *   Given the lack of in-run temporal ordering, the strongest assertion
- *   the trace supports is SET MEMBERSHIP: every declared milestone must
- *   appear as an `added` label on SOME task. Order is enforced only via
- *   the absence of in-trace evidence, so "subsequence" here is "every
- *   required milestone present, extras allowed". This matches the
- *   spec's "extra intermediate steps allowed" relaxation versus the old
- *   exact-equality contract.
+ *   1. PRIMARY — `trace.beadsLabelEvents`, the ordered event stream the
+ *      recorder derives from the tool-call sequence (qa-gate.sh
+ *      subcommands imply events per the gate contract; raw
+ *      `bd label add/remove`, `bd create -l`, `bd update
+ *      --add/remove-label`, and the MCP bd surface yield direct
+ *      events — see lib/labelEvents.ts). Milestones must match as a
+ *      subsequence of ADD events: each declared milestone's add must
+ *      appear at or after the previous milestone's match position.
+ *      A transient label (added then removed) is therefore full
+ *      evidence — the remove no longer hides the add.
  *
- *   When the trace acquires in-run label sequencing (Phase A follow-up:
- *   capture `bd label add` / `bd qa_*` calls as structured events
- *   with timestamps), this invariant becomes a real-subsequence check
- *   over the temporal stream.
+ *   2. NET-DIFF COMPLEMENT — a milestone with ZERO add events anywhere
+ *      in the stream may still be proven by membership in the net-diff
+ *      adds. This exists for STREAM-INVISIBLE adds: `rubric-satisfied`
+ *      is set INSIDE `qa-gate.sh grade-record` (no tool call ever
+ *      shows the label; the verdict lives in piped JSON), and approve
+ *      preserves it, so it survives to the post-run diff. Without this
+ *      complement the rubric-revision-loop fixture would recreate the
+ *      exact impossible-invariant bug this rewrite fixes. Ordering is
+ *      not verifiable for net-diff matches (the cursor does not
+ *      advance); the provenance string says so.
+ *
+ *   3. ORDER IS ENFORCED WHERE THE STREAM CAN SEE IT — if a milestone
+ *      HAS add events in the stream but only BEFORE the preceding
+ *      milestone's match (affirmative misorder), that is a FAILURE;
+ *      the net-diff complement must not rescue it.
+ *
+ * HONESTY CAVEATS:
+ *   - Events are derived from tool-call INPUTS (intent), not observed
+ *     Beads state — a command that failed at runtime still yields its
+ *     events (the trace does not capture per-call results). The
+ *     net-diff remains the end-state ground truth alongside.
+ *   - Traces recorded before the events field existed (all pre-3.5
+ *     cassettes/seeds) are SKIPPED, not retro-failed: absence of
+ *     `beadsLabelEvents` means the recorder never derived events, and
+ *     pretending the net diff could answer the milestone question is
+ *     the exact bug this invariant had. An EMPTY events array is NOT
+ *     absence — it means the recorder ran and saw no label activity,
+ *     and the check proceeds (typically failing, loudly and correctly).
  *
  * Params:
- *   `milestones: string[]` — required label adds. Defaults to
+ *   `milestones: string[]` — required label adds, in order. Defaults to
  *     `['qa-pending', 'qa-approved']` so a fixture that declares the
  *     invariant by name without params still gets the canonical
  *     coverage.
@@ -310,22 +337,75 @@ function invLabelMilestones(
       )
     : ["qa-pending", "qa-approved"];
 
-  // Flatten every added-label observation across all transitions.
-  const addedAcrossTrace = new Set<string>();
-  for (const t of trace.beadsLabelTransitions) {
-    for (const l of t.added) addedAcrossTrace.add(l);
-  }
-
-  const missing = milestones.filter((m) => !addedAcrossTrace.has(m));
-  if (missing.length === 0) {
+  const events = Array.isArray(trace.beadsLabelEvents)
+    ? trace.beadsLabelEvents
+    : undefined;
+  if (events === undefined) {
     return {
       pass: true,
-      detail: `all ${milestones.length} milestone label(s) observed as added: [${milestones.join(", ")}]`,
+      skipped: true,
+      detail:
+        "skipped: trace lacks beadsLabelEvents (pre-3.5 recording) — the net-diff beadsLabelTransitions cannot observe transient labels (added then removed in-run), so milestone adds are unevaluable on this trace; re-record with the current recorder to evaluate (claude-workflow-plugin-9ke).",
     };
+  }
+
+  // Net-diff adds: the complement channel for stream-invisible adds.
+  const netAdds = new Set<string>();
+  for (const t of trace.beadsLabelTransitions) {
+    for (const l of t.added) netAdds.add(l);
+  }
+
+  // Indexed add events, preserving stream order.
+  const addEvents: Array<{ label: string; i: number }> = [];
+  events.forEach((e, i) => {
+    if (e.action === "add") addEvents.push({ label: e.label, i });
+  });
+
+  let cursor = 0; // next stream match must sit at index >= cursor
+  const provenance: string[] = [];
+  const missing: string[] = [];
+  const misordered: string[] = [];
+  for (const m of milestones) {
+    const hit = addEvents.find((a) => a.i >= cursor && a.label === m);
+    if (hit) {
+      cursor = hit.i + 1;
+      provenance.push(`${m}@event[${hit.i}]`);
+      continue;
+    }
+    if (addEvents.some((a) => a.label === m)) {
+      // The stream affirmatively shows this add only BEFORE the
+      // preceding milestone's match — a real ordering violation that
+      // the net-diff complement must not paper over.
+      misordered.push(m);
+      continue;
+    }
+    if (netAdds.has(m)) {
+      provenance.push(`${m}@net-diff`);
+      continue;
+    }
+    missing.push(m);
+  }
+
+  if (missing.length === 0 && misordered.length === 0) {
+    return {
+      pass: true,
+      detail: `all ${milestones.length} milestone label add(s) proven: [${provenance.join(", ")}] (@event[i] = ordered event-stream match; @net-diff = stream-invisible add that survived to the post-run diff — see invariants.ts).`,
+    };
+  }
+  const observedAdds = addEvents.map((a) => a.label).join(", ") || "<none>";
+  const netAddsStr = [...netAdds].sort().join(", ") || "<none>";
+  const parts: string[] = [];
+  if (missing.length > 0) {
+    parts.push(`missing milestone label add(s): [${missing.join(", ")}]`);
+  }
+  if (misordered.length > 0) {
+    parts.push(
+      `milestone label add(s) out of declared order: [${misordered.join(", ")}] (each has add event(s) in the stream only before the preceding milestone's match)`,
+    );
   }
   return {
     pass: false,
-    detail: `missing milestone label add(s): [${missing.join(", ")}] — observed adds across run: [${[...addedAcrossTrace].sort().join(", ") || "<none>"}]`,
+    detail: `${parts.join("; ")} — declared order: [${milestones.join(", ")}]; observed add events (in order): [${observedAdds}]; net-diff adds: [${netAddsStr}]`,
   };
 }
 
@@ -424,8 +504,8 @@ function invDeclaredSubagentsOnly(
  *   follow-up that the completion-contract skip also waits on), this
  *   invariant can tighten to "at least one impact_of call per changed
  *   symbol identifier". Until then, presence-given-diff is the strongest
- *   defensible assertion — same precedent as `label-milestones` set-
- *   membership in lieu of in-run ordering.
+ *   defensible assertion — same precedent as `label-milestones`' net-diff
+ *   complement for stream-invisible adds.
  *
  * GRACEFUL SKIP:
  *   The code-graph server wiring is conditional by design — agent

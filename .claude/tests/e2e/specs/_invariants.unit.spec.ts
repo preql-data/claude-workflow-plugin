@@ -95,8 +95,57 @@ function goodTrace(): Trace {
     },
   ];
   t.beadsTasksCreated = ["good-1"];
+  // Net diff models REALITY on a correct approve flow: qa-pending is
+  // added then removed in-run, so only surviving labels appear here.
+  // The transient cycle lives in beadsLabelEvents below (G2.9ke) —
+  // which is what the label-milestones invariant reads since the
+  // event-stream rewrite.
   t.beadsLabelTransitions = [
-    { taskId: "good-1", added: ["qa-pending", "qa-approved"], removed: [] },
+    { taskId: "good-1", added: ["qa-approved"], removed: [] },
+  ];
+  t.beadsLabelEvents = [
+    {
+      action: "add",
+      label: "qa-pending",
+      taskId: "good-1",
+      source: "bash-label-add",
+    },
+    {
+      action: "add",
+      label: "qa-gate-entered",
+      taskId: "good-1",
+      source: "bash-gate-enter",
+    },
+    {
+      action: "add",
+      label: "rubric-pending",
+      taskId: "good-1",
+      source: "bash-gate-enter",
+    },
+    {
+      action: "add",
+      label: "qa-approved",
+      taskId: "good-1",
+      source: "bash-gate-approve",
+    },
+    {
+      action: "remove",
+      label: "qa-gate-entered",
+      taskId: "good-1",
+      source: "bash-gate-approve",
+    },
+    {
+      action: "remove",
+      label: "qa-pending",
+      taskId: "good-1",
+      source: "bash-gate-approve",
+    },
+    {
+      action: "remove",
+      label: "rubric-pending",
+      taskId: "good-1",
+      source: "bash-gate-approve",
+    },
   ];
   return t;
 }
@@ -278,8 +327,8 @@ describe("invariant: completion-contract", () => {
   });
 });
 
-describe("invariant: label-milestones", () => {
-  it("passes when every declared milestone appears as an added label", () => {
+describe("invariant: label-milestones (event-stream semantics, G2.9ke)", () => {
+  it("passes when every declared milestone appears as an ordered add in the event stream", () => {
     const t = goodTrace();
     const r = INVARIANTS["label-milestones"]!(t, {
       milestones: ["qa-pending", "qa-approved"],
@@ -287,11 +336,25 @@ describe("invariant: label-milestones", () => {
     expect(r.pass).toBe(true);
   });
 
-  it("passes when milestones span multiple transitions on different tasks", () => {
+  it("THE 9ke FIX: passes even though qa-pending was removed in-run (net diff lacks it; event stream proves the add)", () => {
     const t = goodTrace();
-    t.beadsLabelTransitions = [
-      { taskId: "a", added: ["qa-pending"], removed: [] },
-      { taskId: "b", added: ["qa-approved"], removed: [] },
+    // goodTrace's net diff intentionally has ONLY qa-approved — the
+    // qa-pending add+remove cycle lives in beadsLabelEvents. Before the
+    // event-stream rewrite this trace failed (the pre-3.5 net-diff bug).
+    const netAdds = t.beadsLabelTransitions.flatMap((x) => x.added);
+    expect(netAdds).not.toContain("qa-pending");
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/qa-pending@event/);
+  });
+
+  it("passes when milestones span add events on different tasks (set-membership across the stream)", () => {
+    const t = goodTrace();
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-pending", taskId: "a", source: "s1" },
+      { action: "add", label: "qa-approved", taskId: "b", source: "s2" },
     ];
     const r = INVARIANTS["label-milestones"]!(t, {
       milestones: ["qa-pending", "qa-approved"],
@@ -299,14 +362,14 @@ describe("invariant: label-milestones", () => {
     expect(r.pass).toBe(true);
   });
 
-  it("tolerates extra intermediate adds (e.g. qa-blocked) — spec 0.8 'extras allowed'", () => {
+  it("tolerates extra intermediate add events (e.g. qa-blocked) — subsequence, extras allowed", () => {
     const t = goodTrace();
-    t.beadsLabelTransitions = [
-      {
-        taskId: "x",
-        added: ["qa-pending", "qa-blocked", "qa-pending", "qa-approved"],
-        removed: [],
-      },
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-pending", taskId: "x", source: "s1" },
+      { action: "add", label: "qa-blocked", taskId: "x", source: "s2" },
+      { action: "remove", label: "qa-blocked", taskId: "x", source: "s3" },
+      { action: "add", label: "qa-pending", taskId: "x", source: "s4" },
+      { action: "add", label: "qa-approved", taskId: "x", source: "s5" },
     ];
     const r = INVARIANTS["label-milestones"]!(t, {
       milestones: ["qa-pending", "qa-approved"],
@@ -314,10 +377,14 @@ describe("invariant: label-milestones", () => {
     expect(r.pass).toBe(true);
   });
 
-  it("META-TEST: fails when a required milestone is missing from every transition", () => {
+  it("META-TEST: fails when a required milestone has no add event and is not in the net diff", () => {
     const t = goodTrace();
+    // qa-approved is gone from BOTH the event stream and the net diff;
+    // only qa-pending shows up.
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-pending", taskId: "good-1", source: "s1" },
+    ];
     t.beadsLabelTransitions = [
-      // qa-approved is gone; only qa-pending shows up.
       { taskId: "good-1", added: ["qa-pending"], removed: [] },
     ];
     const agg = evaluateAll(t, [
@@ -331,14 +398,28 @@ describe("invariant: label-milestones", () => {
     expect(agg.results[0]?.result.detail).toMatch(/qa-approved/);
   });
 
-  it("META-TEST: fails when no label transitions occur at all", () => {
+  it("META-TEST: fails when the event stream is EMPTY and the net diff is empty (empty != absent)", () => {
     const t = goodTrace();
+    t.beadsLabelEvents = [];
     t.beadsLabelTransitions = [];
     const r = INVARIANTS["label-milestones"]!(t, {
       milestones: ["qa-pending", "qa-approved"],
     });
     expect(r.pass).toBe(false);
     expect(r.detail).toMatch(/missing milestone/);
+  });
+
+  it("SKIPS (does not fail) when the trace predates the events field — pre-3.5 recording", () => {
+    const t = goodTrace();
+    delete (t as { beadsLabelEvents?: unknown }).beadsLabelEvents;
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toContain(
+      "trace lacks beadsLabelEvents (pre-3.5 recording)",
+    );
   });
 });
 

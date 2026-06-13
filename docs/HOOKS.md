@@ -362,25 +362,16 @@ if [ -n "$FAILED_CHECKS" ]; then
     exit 0
 fi
 
-# 6. Check for QA approval
+# 6. Check for QA approval — SINGLE source of truth: the qa-approved label,
+#    read through qa-gate.sh status (verify-before-stop.sh:982-992).
 QA_APPROVED=false
-
-# Method 1: Check qa-approved label
-LABELS=$(bd show "$TASK" --json | jq -r '.labels | join(",")')
-if echo "$LABELS" | grep -qi "qa-approved"; then
+GATE_STATUS=$("$QA_GATE" status "$TASK" | jq -r '.status')
+if [ "$GATE_STATUS" = "approved" ]; then
     QA_APPROVED=true
 fi
-
-# Method 2: Check for "QA APPROVED" comment
-COMMENT=$(bd show "$TASK" --json | jq -r '.comments[] | select(test("QA APPROVED"))')
-if [ -n "$COMMENT" ]; then
-    QA_APPROVED=true
-fi
-
-# Method 3: Check file marker
-if [ -f "$QA_TRACKING_DIR/approved" ]; then
-    QA_APPROVED=true
-fi
+# There is NO comment-text fallback and NO marker file. Both were deleted
+# (verify-before-stop.sh:20-22); a comment that merely says "QA APPROVED"
+# does NOT release the gate, and `.qa-tracking/approved` is never read.
 
 # 7. If not approved, BLOCK
 if [ "$QA_APPROVED" = false ]; then
@@ -388,11 +379,19 @@ if [ "$QA_APPROVED" = false ]; then
     exit 0
 fi
 
-# 8. If approved, allow and clean up
+# 8. If approved, allow and clean up. The legacy `approved` marker is rm'd
+#    defensively (to clean stale files from old installs) but is never an
+#    approval source (verify-before-stop.sh:1177-1181).
 rm -f "$QA_TRACKING_DIR/approved"
 rm -f "$QA_TRACKING_DIR/changed-files.txt"
 echo "{}"
 ```
+
+Note that `qa-gate.sh approve` itself refuses (exit 2) unless a
+hash-current per-file impact report exists at
+`.qa-tracking/impact-report-<task>.json`, so setting the label is gated on
+the regression-impact artifact as well (see the QA agent's 3a step and
+`docs/MCP_SERVERS.md`).
 
 ### Block Message
 
@@ -415,11 +414,32 @@ Cannot complete without QA approval.
 
 ### Approval Detection
 
-Three methods (any one succeeds):
+**One source of truth: the `qa-approved` Beads label**, read via
+`qa-gate.sh status` (`verify-before-stop.sh:982-992`). The label is set
+atomically by `qa-gate.sh approve` (which also drops `qa-pending` /
+`qa-gate-entered` and writes an audit comment). There is no comment-text
+fallback and no marker-file fallback — both were deleted
+(`verify-before-stop.sh:20-22`):
 
-1. **Label**: Task has `qa-approved` label
-2. **Comment**: Task has comment containing "QA APPROVED"
-3. **File marker**: `.claude/.qa-tracking/approved` exists
+- A comment whose body contains the literal text "QA APPROVED" does **not**
+  release the gate. The earlier comment-text method (B13) was removed so the
+  gate has a single deterministic signal.
+- The legacy `.claude/.qa-tracking/approved` marker is **never read**. The
+  Stop hook `rm`s it defensively (`verify-before-stop.sh:1177-1181`) only to
+  clear stale files left by pre-v3 installs.
+
+The gate also auto-approves without QA when there is nothing reviewable to
+review — the **F1 fast path** (`verify-before-stop.sh:616-691`), which fires
+when every changed path is doc-only, is Beads/gate bookkeeping
+(`.beads/*.jsonl`, `beads.db`, `.qa-tracking/*`), or the change-set is empty
+after the build-artifact denylist. A mixed diff (bookkeeping **plus** one
+real source file) is not fast-path eligible and still requires the label.
+
+One more precondition on the label itself: `qa-gate.sh approve` refuses
+(exit 2) unless a hash-current per-file impact report exists at
+`.claude/.qa-tracking/impact-report-<task>.json`. So the only way to set
+`qa-approved` (short of the audited `approve --no-impact-report '<reason>'`
+override) is with the regression-impact artifact present and current.
 
 ### Escalation State Machine (spec 0.2)
 

@@ -7,8 +7,20 @@
 #
 # Subcommands:
 #   enter   <task-id>                       Mark gate as entered (label + comment).
+#                                           Also generates the mechanical impact
+#                                           report via impact-report.sh (G2.n6d;
+#                                           tolerant — enter never fails on it).
 #   status  <task-id>                       Print one of: not-entered, entered, approved, blocked.
-#   approve <task-id> <approval-summary>    Atomic: -qa-gate-entered, -qa-pending, +qa-approved, comment.
+#   approve <task-id> [--no-impact-report '<reason>'] <approval-summary>
+#                                           Atomic: -qa-gate-entered, -qa-pending, +qa-approved, comment.
+#                                           REFUSES (exit 2) when the impact report
+#                                           (.qa-tracking/impact-report-<task-id>.json)
+#                                           is missing or its change_set_hash no longer
+#                                           matches the current changed-files list.
+#                                           server:"absent" reports are accepted (the
+#                                           documented degradation). The bypass flag
+#                                           approves anyway and records the reason in
+#                                           the approval comment + gate JSON.
 #   block   <task-id> <reason>              Add qa-blocked label + comment. Keeps qa-gate-entered.
 #   choose  <approve|continue|tech-debt|defer> <task-id> <note> [extra args for tech-debt]
 #                                           Spec 0.2: record a J21 decision while qa-escalated.
@@ -25,7 +37,8 @@
 # Exit codes:
 #   0   success
 #   1   missing args / usage error
-#   2   bd unavailable or task lookup failed
+#   2   bd unavailable, task lookup failed, or approve REFUSED for a
+#       missing/invalid/stale impact report (error_key names which)
 #   3   atomic operation rolled back
 
 set -e
@@ -194,6 +207,53 @@ remove_rubric_satisfied() {
     remove_label "$tid" "rubric-satisfied" 2>/dev/null || true
 }
 
+# G2.n6d (claude-workflow-plugin-llh.2): mechanical impact-report helpers.
+#
+# The report file is the deterministic impact_of artifact that the QA
+# agent cannot skip: enter generates it, approve refuses without a fresh
+# one. Path uses the same task-id sanitisation as the iteration counter.
+IMPACT_REPORT_SCRIPT="$PROJECT_DIR/.claude/scripts/impact-report.sh"
+
+impact_report_path_for() {
+    local sanitized
+    sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    printf '%s/impact-report-%s.json' "$QA_TRACKING_DIR" "$sanitized"
+}
+
+# generate_impact_report <task-id> — best-effort invocation for enter.
+# Sets IMPACT_REPORT_OBS (appended to enter's JSON observations) and
+# returns 0/1. NEVER allowed to fail the enter flow: failures are logged
+# loudly to sync-errors.log + a per-task stderr log, and the observation
+# tells the operator approve will refuse until the artifact exists.
+IMPACT_REPORT_OBS=""
+generate_impact_report() {
+    local tid="$1"
+    IMPACT_REPORT_OBS=""
+    local report stderr_log rc=0
+    report=$(impact_report_path_for "$tid")
+    stderr_log="${report%.json}.log"
+
+    if [ ! -f "$IMPACT_REPORT_SCRIPT" ]; then
+        log_sync_error "enter: impact-report.sh missing at $IMPACT_REPORT_SCRIPT for $tid; approve will refuse without the artifact"
+        IMPACT_REPORT_OBS=" WARNING: impact-report.sh missing — approve will refuse until the artifact exists (regenerate manually or use approve --no-impact-report '<reason>')."
+        return 1
+    fi
+
+    # Thread CLAUDE_PROJECT_DIR explicitly (same cwd-drift guard as
+    # write_current_task). Progress/diagnostics land in the per-task log.
+    CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" "$tid" >/dev/null 2>"$stderr_log" || rc=$?
+    if [ "$rc" -eq 0 ] && [ -s "$report" ]; then
+        local server_mode
+        server_mode=$(jq -r '.server // "?"' "$report" 2>/dev/null || echo "?")
+        IMPACT_REPORT_OBS=" Impact report generated (server=$server_mode): $report"
+        return 0
+    fi
+
+    log_sync_error "enter: impact-report.sh failed for $tid (rc=$rc); tail: $(tail -2 "$stderr_log" 2>/dev/null | tr '\n' ' ' | head -c 200)"
+    IMPACT_REPORT_OBS=" WARNING: impact-report.sh failed (rc=$rc, see $stderr_log and sync-errors.log) — approve will refuse until the artifact is regenerated (bash .claude/scripts/impact-report.sh $tid) or bypassed."
+    return 1
+}
+
 emit_json() {
     # emit_json <ok 0|1> <subcommand> <task_id> <status> <observations>
     local ok="$1" sub="$2" tid="$3" st="$4" obs="$5"
@@ -212,8 +272,18 @@ usage() {
     cat >&2 <<'USAGE'
 Usage: qa-gate.sh <subcommand> <task-id> [args]
   enter   <task-id>
+              Also generates the mechanical impact report
+              (.claude/.qa-tracking/impact-report-<task-id>.json) via
+              impact-report.sh — tolerant, enter never fails because of it.
   status  <task-id>
-  approve <task-id> <approval-summary>
+  approve <task-id> [--no-impact-report '<reason>'] <approval-summary>
+              REFUSES (exit 2, structured error) when the impact report is
+              missing or stale (change_set_hash != current changed-files
+              list). Regenerate with:
+                bash .claude/scripts/impact-report.sh <task-id>
+              server:"absent" reports are accepted (documented degradation).
+              --no-impact-report '<reason>' bypasses the refusal; the reason
+              is recorded in the approval comment and the gate JSON.
   block   <task-id> <reason>
   choose  <approve|continue|tech-debt|defer> <task-id> <note> [tech-debt: severity file:line effort]
               Record a J21 decision while qa-escalated. The note is the
@@ -359,6 +429,11 @@ cmd_enter() {
         if [ "$was_rubric_satisfied" = "1" ]; then
             refreshed_obs="$refreshed_obs; cleared stale rubric-satisfied"
         fi
+        # G2.n6d: refresh the mechanical impact report on re-enter too —
+        # a resumed cycle reviews the CURRENT change set, so the artifact
+        # must reflect it. Tolerant: enter never fails because of this.
+        generate_impact_report "$tid" || true
+        refreshed_obs="$refreshed_obs;$IMPACT_REPORT_OBS"
         emit_json 1 "enter" "$tid" "entered" "$refreshed_obs"
         return 0
     fi
@@ -393,6 +468,12 @@ cmd_enter() {
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     add_comment "$tid" "QA-GATE: entered at $ts"
 
+    # G2.n6d: generate the mechanical impact report as part of packet
+    # assembly. Tolerant by contract — a failed generation degrades to a
+    # WARNING in the observations + sync-errors.log; enter still succeeds.
+    # (approve is where the artifact is ENFORCED.)
+    generate_impact_report "$tid" || true
+
     local extra_obs=""
     if [ "$was_escalated" = "1" ] || [ "$was_deferred" = "1" ]; then
         extra_obs=" cleared prior escalation labels (escalated=$was_escalated deferred=$was_deferred) and reset iteration state."
@@ -400,7 +481,7 @@ cmd_enter() {
     if [ "$was_rubric_satisfied" = "1" ]; then
         extra_obs="$extra_obs cleared stale rubric-satisfied."
     fi
-    emit_json 1 "enter" "$tid" "entered" "qa-gate-entered + rubric-pending labels set at $ts; current-task persisted.$persist_warn$extra_obs"
+    emit_json 1 "enter" "$tid" "entered" "qa-gate-entered + rubric-pending labels set at $ts; current-task persisted.$persist_warn$extra_obs$IMPACT_REPORT_OBS"
 }
 
 cmd_status() {
@@ -439,9 +520,40 @@ cmd_status() {
 }
 
 cmd_approve() {
-    local tid="$1"
+    local tid="${1:-}"
     shift || true
-    local summary="$*"
+
+    # G2.n6d: parse the documented impact-report bypass. The flag may
+    # appear anywhere after the task id; every other argument joins the
+    # approval summary (preserving the historical `summary="$*"` shape
+    # for multi-word callers).
+    local bypass_impact=0
+    local bypass_reason=""
+    local summary=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-impact-report)
+                bypass_impact=1
+                bypass_reason="${2:-}"
+                if [ -z "$bypass_reason" ]; then
+                    emit_error_json "approve" "$tid" "bypass_reason_required" \
+                        "--no-impact-report requires a non-empty reason; the bypass is recorded in the audit trail and an unexplained bypass is indistinguishable from gate evasion" \
+                        "qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            *)
+                if [ -z "$summary" ]; then
+                    summary="$1"
+                else
+                    summary="$summary $1"
+                fi
+                shift || true
+                ;;
+        esac
+    done
+
     if [ -z "$tid" ] || [ -z "$summary" ]; then
         usage
         exit 1
@@ -469,6 +581,70 @@ cmd_approve() {
         emit_json 1 "approve" "$tid" "approved" "qa-approved already set; idempotent no-op"
         return 0
     fi
+
+    # G2.n6d: impact-report audit note. Declared OUTSIDE the sentinel
+    # block below so (a) the bypass audit trail survives even if the
+    # refusal block is stripped, and (b) the stripped copy stays
+    # syntactically coherent for the META-TEST.
+    local impact_obs=""
+    if [ "$bypass_impact" = "1" ]; then
+        impact_obs="; impact-bypass: $bypass_reason (impact-report refusal bypassed via --no-impact-report; reason recorded per G2.n6d)"
+    fi
+
+    # IMPACT-REPORT-REFUSAL BEGIN (G2.n6d / claude-workflow-plugin-llh.2)
+    #
+    # Mechanical gate: approve refuses unless a FRESH impact report
+    # exists for this task. "Fresh" = the report's change_set_hash equals
+    # the sha256 of the CURRENT canonical changed-files list (computed by
+    # the same script that generated the report, so the canonicalisation
+    # cannot drift). A stale report is no report: it analysed a change
+    # set that no longer matches what would ship.
+    #
+    # Deliberately NOT checked: the report's `server` field. A
+    # server:"absent" report is the documented degradation (code-graph
+    # not installed/bootable) and is a valid artifact — the refusal
+    # exists to stop SKIPPED analysis, not degraded environments.
+    #
+    # The sentinel comments wrapping this block are load-bearing: the L2
+    # META-TEST strips everything between them and asserts approve then
+    # succeeds without the artifact (proving the refusal is what enforces
+    # the contract). Do not rename them.
+    if [ "$bypass_impact" != "1" ]; then
+        local impact_report current_hash recorded_hash
+        impact_obs=""
+        impact_report=$(impact_report_path_for "$tid")
+        if [ ! -f "$impact_report" ]; then
+            emit_error_json "approve" "$tid" "impact_report_missing" \
+                "approve refused: mechanical impact report missing at $impact_report. The QA workflow requires the impact_of analysis artifact (G2.n6d). Regenerate: bash .claude/scripts/impact-report.sh $tid — or bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--no-impact-report '<reason>'] <summary>"
+            exit 2
+        fi
+        recorded_hash=$(jq -r '.change_set_hash // empty' "$impact_report" 2>/dev/null || echo "")
+        if [ -z "$recorded_hash" ]; then
+            emit_error_json "approve" "$tid" "impact_report_invalid" \
+                "approve refused: impact report at $impact_report is unparseable or missing change_set_hash. Regenerate: bash .claude/scripts/impact-report.sh $tid — or bypass: bash .claude/scripts/qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--no-impact-report '<reason>'] <summary>"
+            exit 2
+        fi
+        current_hash=""
+        if [ -f "$IMPACT_REPORT_SCRIPT" ]; then
+            current_hash=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || echo "")
+        fi
+        if [ -z "$current_hash" ]; then
+            emit_error_json "approve" "$tid" "impact_report_unverifiable" \
+                "approve refused: cannot recompute the current change-set hash ($IMPACT_REPORT_SCRIPT missing or failing), so the report's freshness is unverifiable. Restore the script, or bypass: bash .claude/scripts/qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--no-impact-report '<reason>'] <summary>"
+            exit 2
+        fi
+        if [ "$recorded_hash" != "$current_hash" ]; then
+            emit_error_json "approve" "$tid" "impact_report_stale" \
+                "approve refused: impact report is STALE — its change_set_hash ($recorded_hash) no longer matches the current changed-files list ($current_hash); files changed after the report was generated, so the impact analysis does not cover what would ship. Regenerate: bash .claude/scripts/impact-report.sh $tid — or bypass: bash .claude/scripts/qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--no-impact-report '<reason>'] <summary>"
+            exit 2
+        fi
+        impact_obs="; impact-report verified (change_set_hash match: $current_hash)"
+    fi
+    # IMPACT-REPORT-REFUSAL END (G2.n6d / claude-workflow-plugin-llh.2)
 
     # Step 1: add qa-approved (the source of truth).
     if ! add_label "$tid" "qa-approved"; then
@@ -511,9 +687,14 @@ cmd_approve() {
     fi
 
     # Step 4: comment with summary (non-fatal — labels are the source of truth).
-    local ts
+    # G2.n6d: a bypass reason is appended so the audit trail names WHY the
+    # mechanical impact gate was waived for this approval.
+    local ts comment_suffix=""
+    if [ "$bypass_impact" = "1" ]; then
+        comment_suffix=" [impact-report bypass: $bypass_reason]"
+    fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    add_comment "$tid" "QA-GATE APPROVED at $ts: $summary"
+    add_comment "$tid" "QA-GATE APPROVED at $ts: $summary$comment_suffix"
 
     # F3 + F4: clear active task and wipe per-iteration state. These are
     # the last-step side effects: if a previous step failed and rolled back,
@@ -557,7 +738,7 @@ cmd_approve() {
         rubric_obs="; no rubric labels present at approve (likely pre-Phase-A task)"
     fi
 
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The

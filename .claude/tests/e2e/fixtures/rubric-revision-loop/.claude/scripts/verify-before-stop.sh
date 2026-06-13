@@ -83,7 +83,19 @@ log_sync_error() {
 }
 
 # Denylist (B6).
-DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
+#
+# G2.gate-friction (claude-workflow-plugin-llh.3): added `.claude/worktrees/`.
+# Worktree scratch dirs are harness-internal transient state created by
+# isolation:"worktree" agents and the e2e fixture runner — never code under
+# review. A Stop firing while such a path is dirty (the run's own teardown
+# reverts it minutes later) used to trip CODE_CHANGES_DETECTED and produce a
+# false QA-required block. Classifying it here keeps it out of the change-set
+# entirely (same treatment as node_modules / build artifacts). NOTE: we do
+# NOT denylist `.beads/` or `.qa-tracking/` here — those are handled by the
+# fast-path classifier below (is_fastpath_only_change), which auto-approves
+# with an audited comment rather than silently dropping the paths, so the
+# beads-state churn still appears in the audit trail.
+DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
 
 is_tracked_change() {
     local p="$1"
@@ -112,6 +124,58 @@ is_doc_only_path() {
         */docs/*|docs/*) return 0 ;;
     esac
     return 1
+}
+
+# G2.gate-friction (claude-workflow-plugin-llh.3): beads-state / gate-
+# bookkeeping classifier. A path is "beads-or-gate state" — i.e., workflow
+# machinery, never reviewable source — if it is:
+#   - a Beads JSONL ledger:   .beads/*.jsonl (at any depth, incl. e2e fixtures)
+#   - the Beads sqlite db:     beads.db (or .beads/*.db)
+#   - gate bookkeeping:        anything under .claude/.qa-tracking/
+# These are the files a `qa-gate.sh enter` label-write and the gate's own
+# cache churn dirty. They are NOT denylisted (so they still show up in the
+# change-set / audit trail), but a change-set consisting SOLELY of them is
+# fast-path eligible (see is_fastpath_only_change + the F1 block below).
+is_beads_or_gate_path() {
+    local p="$1"
+    [ -z "$p" ] && return 1
+    case "$p" in
+        */.beads/*.jsonl|.beads/*.jsonl) return 0 ;;
+        */.beads/*.db|.beads/*.db) return 0 ;;
+        */beads.db|beads.db) return 0 ;;
+        # `*/.qa-tracking/*` already covers the canonical
+        # `.claude/.qa-tracking/...` location at any depth (the `.claude/`
+        # segment is absorbed by the leading `*/`).
+        */.qa-tracking/*|.qa-tracking/*) return 0 ;;
+    esac
+    return 1
+}
+
+# G2.gate-friction (claude-workflow-plugin-llh.3): is the post-denylist
+# change-set fast-path eligible on the beads/empty axis? Returns 0 (eligible)
+# when EITHER:
+#   (a) the change-set is empty after the denylist, OR
+#   (b) every member is beads-state / gate-bookkeeping (is_beads_or_gate_path).
+# Returns 1 (not eligible) the moment any real source path is present — that
+# is the anti-overreach guard: a mixed diff (beads + one .ts file) is a real
+# code change and MUST still go through the qa-approved-only release rule.
+#
+# Operates on the caller's ALL_CHANGED_FILES array (the same post-denylist set
+# CODE_CHANGES_DETECTED is derived from), passed by name-expansion so this
+# stays a pure function under `set -e`.
+is_fastpath_only_change() {
+    # "$@" is the already-filtered (post-denylist) change-set.
+    if [ "$#" -eq 0 ]; then
+        return 0   # (a) empty after denylist — nothing to review.
+    fi
+    local f
+    for f in "$@"; do
+        [ -z "$f" ] && continue
+        if ! is_beads_or_gate_path "$f"; then
+            return 1   # a real source path is present -> NOT fast-path.
+        fi
+    done
+    return 0   # (b) every member is beads-state / gate-bookkeeping.
 }
 
 # F3 (Phase 4 fix pass): the persisted helper file is the single source of
@@ -549,9 +613,40 @@ cross-repo case, never the gate."
     emit_block "$REASON"
 fi
 
-# F1: Doc-only fast path. Auto-approve via qa-gate.sh and short-circuit.
-# This MUST run before test/lint to avoid spending 1200s on README updates.
+# F1: fast path. Auto-approve via qa-gate.sh and short-circuit. MUST run
+# before test/lint to avoid spending 1200s on changes that need no review.
+#
+# Three eligible classes (FASTPATH_CLASS names which one fired, and lands in
+# the audit comment):
+#   doc-only     — every changed file is documentation (original F1).
+#   beads-state  — every changed file is beads ledger / gate bookkeeping
+#                  (.beads/*.jsonl, beads.db, .qa-tracking/*).
+#                  G2.gate-friction (claude-workflow-plugin-llh.3).
+#   empty        — nothing left after the denylist (belt-and-braces; the
+#                  "no changes" check above usually catches this first).
+#
+# ANTI-OVERREACH: a mixed change-set (beads + one real source file) is NOT
+# eligible — is_fastpath_only_change returns 1 the moment a non-beads source
+# path appears, so the qa-approved-only release rule stays intact for every
+# real code path. Doc-only precedence is preserved (it was here first).
+FASTPATH_CLASS=""
 if [ "$DOC_ONLY" = true ] && [ ${#ALL_CHANGED_FILES[@]} -gt 0 ]; then
+    FASTPATH_CLASS="doc-only"
+elif [ ${#ALL_CHANGED_FILES[@]} -eq 0 ]; then
+    # Empty post-denylist set. (The earlier "no changes -> allow" check only
+    # fires when CODE_CHANGES_DETECTED is false; this guards the rare path
+    # where detection set the flag but every member was denylist-filtered.)
+    if is_fastpath_only_change; then
+        FASTPATH_CLASS="empty"
+    fi
+elif is_fastpath_only_change "${ALL_CHANGED_FILES[@]}"; then
+    FASTPATH_CLASS="beads-state"
+fi
+
+if [ -n "$FASTPATH_CLASS" ]; then
+    # Audit text naming the class that fired (mirrors the original F1
+    # wording so existing log/observability greps still match on "F1").
+    FASTPATH_REASON="Auto-approved: $FASTPATH_CLASS change-set detected (F1 fast path) — no reviewable source changed."
     if [ -n "$CURRENT_TASK" ] && [ -x "$QA_GATE" ]; then
         # Auto-approve only if the task is currently pending (not already
         # approved/blocked). This idempotency is enforced inside qa-gate.sh
@@ -560,14 +655,14 @@ if [ "$DOC_ONLY" = true ] && [ ${#ALL_CHANGED_FILES[@]} -gt 0 ]; then
         case "$GATE_STATUS" in
             not-entered|entered|pending)
                 # Ensure the gate is entered first (so approve is well-formed).
-                "$QA_GATE" enter "$CURRENT_TASK" >/dev/null 2>&1 || log_sync_error "qa-gate enter failed during F1 doc-only fast path for $CURRENT_TASK"
-                "$QA_GATE" approve "$CURRENT_TASK" "Auto-approved: doc-only changes detected (F1 fast path)" >/dev/null 2>&1 || log_sync_error "qa-gate approve failed during F1 doc-only fast path for $CURRENT_TASK"
+                "$QA_GATE" enter "$CURRENT_TASK" >/dev/null 2>&1 || log_sync_error "qa-gate enter failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
+                "$QA_GATE" approve "$CURRENT_TASK" "$FASTPATH_REASON" >/dev/null 2>&1 || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
                 # Mark task as closed if bd is available. Beads 0.47.x uses
                 # status=closed (not "completed"); using the wrong value used
                 # to silently fail under `|| true`, so we log to sync-errors.log.
                 if command -v bd >/dev/null 2>&1; then
                     bd update "$CURRENT_TASK" --status closed 2>/dev/null \
-                        || log_sync_error "bd update --status closed failed for $CURRENT_TASK during F1 doc-only fast path"
+                        || log_sync_error "bd update --status closed failed for $CURRENT_TASK during F1 $FASTPATH_CLASS fast path"
                 fi
                 # Clean up tracking artifacts. Includes per-task iteration
                 # counter (legacy unscoped path is also cleared so users
@@ -579,9 +674,19 @@ if [ "$DOC_ONLY" = true ] && [ ${#ALL_CHANGED_FILES[@]} -gt 0 ]; then
                 echo "{}"; exit 0
                 ;;
         esac
+    elif [ "$FASTPATH_CLASS" = "beads-state" ] || [ "$FASTPATH_CLASS" = "empty" ]; then
+        # No active task AND nothing reviewable changed (beads/gate state or
+        # an empty post-denylist set). There is no code to gate, so allow
+        # immediately — blocking here is the exact false-block the bug report
+        # captured (a Stop fired right after a gate label-write, no task set,
+        # demanding QA on a `.beads/issues.jsonl | 2 +-` diff). doc-only with
+        # no task still falls through (it MAY carry reviewable intent a human
+        # wants to see; beads/empty never does).
+        log_sync_error "Stop allowed: $FASTPATH_CLASS change-set with no active task (nothing reviewable; F1 fast path)"
+        echo "{}"; exit 0
     fi
-    # No active task - we can't auto-approve, but we can still skip
-    # the test/lint pass since the changes are doc-only. Fall through to
+    # doc-only with no active task - we can't auto-approve, but we can still
+    # skip the test/lint pass since the changes are doc-only. Fall through to
     # the QA-required messaging with a hint.
 fi
 
@@ -974,6 +1079,18 @@ Read the intent payload above and decide which review modules to run
 appear in filenames.
 
 Checklist:
+- FIRST: read the mechanical impact report at
+  .claude/.qa-tracking/impact-report-$TASK_ID.json — qa-gate.sh enter
+  already ran impact_of (code-graph MCP) over every changed file and
+  persisted the results there, and qa-gate.sh approve REFUSES when that
+  artifact is missing or stale (regenerate:
+  bash .claude/scripts/impact-report.sh $TASK_ID). Fold the high-fan-in
+  callers it surfaces into the regression assessment; make follow-up
+  impact_of calls (mcp__plugin_claude-workflow_code-graph) only for
+  symbol-level questions the per-file report leaves open. A report with
+  server: absent means the code-graph server was unavailable — note that
+  degradation in llm_observations and fall back to grep/code_search for
+  the impact pass.
 - Tests cover user behavior (not implementation)
 - Critical user journeys tested
 - Failure modes handled

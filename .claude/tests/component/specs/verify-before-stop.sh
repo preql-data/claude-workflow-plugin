@@ -228,4 +228,178 @@ NPM_LOG_F="$FIXTURE/bin/npm.log"
 assert_eq "vbs: npm shim invoked (suite ran, NOT replayed)" \
     "yes" "$([ -s "$NPM_LOG_F" ] && echo yes || echo no)"
 
+# ===========================================================================
+# claude-workflow-plugin-llh.3 (G2.gate-friction) — false-block repros.
+#
+# Production evidence (build sessions 2026-06-12): the Stop hook blocked
+# with "0 file(s) changed - all require QA review" + empty Files list while
+# the J18 diff_summary showed ONLY beads-state or transient-fixture paths:
+#   case 1: `.beads/issues.jsonl | 2 +-`   (a qa-gate-enter LABEL write —
+#           beads state, not code)
+#   case 2: `fixtures/node-react-auth/fixture.yaml | 28 ----` (transient
+#           mid-live-run state the run's own restore reverted minutes later)
+#   case 3: `fixtures/node-react-auth/.beads/issues.jsonl | 13 ----`
+#
+# Root cause (changed_files-vs-diff_summary divergence): the gate-fires flag
+# CODE_CHANGES_DETECTED is set by the git-status fallback, which keeps any
+# path passing is_tracked_change — and the denylist does NOT exclude
+# beads-state files (.beads/*.jsonl, beads.db) or gate-bookkeeping
+# (.qa-tracking/*). Meanwhile CHANGE_COUNT / Files-changed read from the
+# (empty) changed-files.txt and diff_summary reads RAW git diff. Three
+# disagreeing sources => the self-contradictory "0 files but still blocks"
+# payload.
+#
+# These are written FAILING-FIRST (red before the fast-path extension): the
+# pre-fix script BLOCKS on all three; the fix makes the hook ALLOW. A fresh
+# task is entered for each so the auto-approve path (the F1-style branch) is
+# exercised the way production case 1 hit it (gate-entered task).
+#
+# A fresh fixture isolates git state from the detect-stack/npm shimming the
+# earlier cases left behind.
+mk_fixture
+FIXTURE2="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS2="$FIXTURE2/.claude/scripts/verify-before-stop.sh"
+QG2="$FIXTURE2/.claude/scripts/qa-gate.sh"
+CT2="$FIXTURE2/.claude/scripts/current-task.sh"
+TRACK2="$FIXTURE2/.claude/.qa-tracking"
+
+# Init the fixture as a git repo so the git-status fallback + diff_summary
+# (raw git diff) both have something to read — this is the surface the bug
+# lives on. Commit a baseline so subsequent edits show as modifications.
+(cd "$FIXTURE2" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+
+# Helper: run the gate once and return the FINAL JSON envelope line. The
+# post-approval `bd update --status closed` prints to stdout/stderr; the
+# envelope is the last JSON-shaped line.
+run_vbs2() {
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS2" 2>&1 | tail -1
+}
+
+# --- Repro 1: beads-only diff -------------------------------------------
+# git diff shows ONLY .beads/issues.jsonl changed; changed-files.txt is
+# empty (post-edit never tracks beads writes). A gate-entered task exists
+# (mirrors production case 1: the dirty beads file IS the enter label-write).
+# Assert: ALLOW. Pre-fix this BLOCKS (red).
+TID_BEADS=$(cd "$FIXTURE2" && bd create "beads-only diff task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG2" enter "$TID_BEADS" >/dev/null
+: > "$TRACK2/changed-files.txt"   # empty tracking — beads write was untracked
+# Dirty ONLY the beads-state file relative to HEAD.
+printf '{"id":"%s","label":"qa-gate-entered"}\n' "$TID_BEADS" > "$FIXTURE2/.beads/issues.jsonl"
+OUT_BEADS=$(run_vbs2)
+assert_empty_envelope "vbs-llh3: beads-only diff -> ALLOW (case 1)" "$OUT_BEADS"
+
+# --- Repro 2: empty change-set after denylist ----------------------------
+# changed-files.txt lists ONLY a denylisted path (pnpm-lock.yaml); git diff
+# is otherwise clean for tracked code. Assert: ALLOW. Pre-fix this is the
+# exact "0 file(s) changed - all require QA review" production payload (the
+# fallback trips on the lockfile/beads churn while CHANGE_COUNT reads 0).
+TID_EMPTY=$(cd "$FIXTURE2" && bd create "empty-post-denylist task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG2" enter "$TID_EMPTY" >/dev/null
+printf 'pnpm-lock.yaml\n' > "$TRACK2/changed-files.txt"
+# Make the lockfile actually dirty so the change-set is non-empty PRE-denylist
+# but empty POST-denylist; leave no real source dirty.
+printf 'lockfile-churn\n' > "$FIXTURE2/pnpm-lock.yaml"
+OUT_EMPTY=$(run_vbs2)
+assert_empty_envelope "vbs-llh3: empty-after-denylist change-set -> ALLOW (case 2-shape)" "$OUT_EMPTY"
+
+# --- Repro 3: transient fixture-internal paths ---------------------------
+# Paths that are dirty during a live e2e run but are harness-internal
+# transient state, never code under review: an e2e fixture's nested
+# .beads/issues.jsonl (case 3) and a .claude/worktrees/ path. Assert: ALLOW.
+# Pre-fix this BLOCKS because neither is denylisted.
+TID_TRANSIENT=$(cd "$FIXTURE2" && bd create "transient fixture paths task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG2" enter "$TID_TRANSIENT" >/dev/null
+# Drive these through the TRACKING_FILE path (post-edit recorded them) so the
+# repro doesn't depend on actually scaffolding a nested fixture git tree.
+{
+    printf '%s\n' '.claude/tests/e2e/fixtures/node-react-auth/.beads/issues.jsonl'
+    printf '%s\n' '.claude/worktrees/wt-1/src/handler.ts'
+} > "$TRACK2/changed-files.txt"
+OUT_TRANSIENT=$(run_vbs2)
+assert_empty_envelope "vbs-llh3: transient fixture-internal paths -> ALLOW (case 3)" "$OUT_TRANSIENT"
+
+# --- Anti-overreach guard: mixed diff MUST still block -------------------
+# A change-set with beads state AND one real source file is a REAL code
+# change. The fast-path extension must NOT swallow it — the qa-approved-only
+# release rule is untouched for any real code path. Assert: BLOCK.
+TID_MIXED=$(cd "$FIXTURE2" && bd create "mixed diff task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG2" enter "$TID_MIXED" >/dev/null
+bd label add "$TID_MIXED" qa-pending >/dev/null 2>&1
+{
+    printf '%s\n' '.beads/issues.jsonl'
+    printf '%s\n' 'src/handler.ts'
+} > "$TRACK2/changed-files.txt"
+OUT_MIXED=$(run_vbs2)
+assert_decision "vbs-llh3: mixed (beads + source) diff STILL blocks (anti-overreach)" \
+    "$OUT_MIXED" "block"
+
+# ===========================================================================
+# META-TEST (anti-overreach): revert the fast-path extension in a COPY of
+# verify-before-stop.sh and prove repros 1-2 go RED again, while the
+# mixed-diff case keeps blocking. This proves the new ALLOW assertions are
+# load-bearing on the fast-path code (not passing for some incidental
+# reason) AND that the guard against over-approving a mixed diff is real.
+#
+# We neutralize the fast-path extension by deleting the function that
+# classifies a change-set as fast-path-eligible (is_fastpath_only_change),
+# forcing it to always report "not eligible" — i.e., the pre-fix behaviour.
+mk_fixture
+FIXTURE_MM="$COMPONENT_FIXTURE_PATH"
+VBS_MM="$FIXTURE_MM/.claude/scripts/verify-before-stop.sh"
+QG_MM="$FIXTURE_MM/.claude/scripts/qa-gate.sh"
+TRACK_MM="$FIXTURE_MM/.claude/.qa-tracking"
+(cd "$FIXTURE_MM" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+
+# Build the mutated copy: override is_fastpath_only_change to ALWAYS return
+# 1 (never eligible) — the pre-fix world. We append the override AFTER the
+# real definition so it wins (later definition shadows earlier in bash).
+PLUGIN_VBS_MM=$(readlink "$VBS_MM")
+rm "$VBS_MM"
+# Copy the real script, then append a shadowing override of the classifier
+# right before the main-flow `INPUT=$(cat)` line would have consumed stdin.
+# Appending at end-of-file is too late (the function is called mid-script),
+# so we insert the override immediately after the function's closing brace.
+awk '
+    { print }
+    /^is_fastpath_only_change\(\) \{$/ { seen=1 }
+    seen && /^\}$/ && !done {
+        print ""
+        print "# META-TEST override: neutralize the fast-path extension."
+        print "is_fastpath_only_change() { return 1; }"
+        done=1
+    }
+' "$PLUGIN_VBS_MM" > "$VBS_MM"
+chmod +x "$VBS_MM"
+
+run_vbs_mm() {
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_MM" 2>&1 | tail -1
+}
+
+# META repro 1: beads-only -> now BLOCKS under the neutralized fast path.
+TID_MM1=$(cd "$FIXTURE_MM" && bd create "meta beads-only" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_MM" enter "$TID_MM1" >/dev/null
+bd label add "$TID_MM1" qa-pending >/dev/null 2>&1
+: > "$TRACK_MM/changed-files.txt"
+printf '{"id":"%s"}\n' "$TID_MM1" > "$FIXTURE_MM/.beads/issues.jsonl"
+OUT_MM1=$(run_vbs_mm)
+assert_decision "META vbs-llh3: beads-only goes RED (blocks) when fast path neutralized" \
+    "$OUT_MM1" "block"
+
+# META mixed-diff: still blocks (anti-overreach guard holds regardless).
+TID_MM2=$(cd "$FIXTURE_MM" && bd create "meta mixed" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_MM" enter "$TID_MM2" >/dev/null
+bd label add "$TID_MM2" qa-pending >/dev/null 2>&1
+{
+    printf '%s\n' '.beads/issues.jsonl'
+    printf '%s\n' 'src/handler.ts'
+} > "$TRACK_MM/changed-files.txt"
+OUT_MM2=$(run_vbs_mm)
+assert_decision "META vbs-llh3: mixed diff blocks regardless of fast path" \
+    "$OUT_MM2" "block"
+
 [ "$FAIL" -eq 0 ]

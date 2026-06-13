@@ -156,7 +156,7 @@ elif [ -f "$PROJECT_DIR/Package.swift" ]; then
     TYPE_CMD="cd \"$PROJECT_DIR\" && swift build"
 elif ls "$PROJECT_DIR"/*.csproj >/dev/null 2>&1 || ls "$PROJECT_DIR"/*.sln >/dev/null 2>&1; then
     RUNNER="dotnet"
-    MANIFEST=$(ls "$PROJECT_DIR"/*.csproj "$PROJECT_DIR"/*.sln 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "dotnet")
+    MANIFEST=$(find "$PROJECT_DIR" -maxdepth 1 \( -name '*.csproj' -o -name '*.sln' \) -type f 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "dotnet")
     TEST_CMD="cd \"$PROJECT_DIR\" && dotnet test"
     TYPE_CMD="cd \"$PROJECT_DIR\" && dotnet build"
 elif [ -f "$PROJECT_DIR/Makefile" ]; then

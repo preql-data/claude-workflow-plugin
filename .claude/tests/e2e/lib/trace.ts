@@ -107,6 +107,42 @@ export const BeadsLabelTransitionSchema = z.object({
 export type BeadsLabelTransition = z.infer<typeof BeadsLabelTransitionSchema>;
 
 /**
+ * One Beads label transition EVENT, derived from the run's tool-call
+ * stream (G2.9ke / claude-workflow-plugin-9ke).
+ *
+ * WHY THIS EXISTS: `beadsLabelTransitions` is a NET pre/post diff per
+ * task, so a label added and then removed within the same run (the
+ * canonical case: `qa-pending` during a successful gate cycle) is
+ * invisible to it — which made the `label-milestones` invariant
+ * structurally unable to pass on correct approve-flow runs (failed
+ * identically on Phase B runs 3 and 4; pinned in
+ * `_phase-b-run3-trace.unit.spec.ts` / `_phase-b-run4-trace.unit.spec.ts`).
+ * Events fix that: every label add/remove the tool-call stream evidences
+ * is recorded in chronological order, so transient labels stay visible.
+ *
+ * DERIVATION, NOT OBSERVATION: events are derived from tool-call INPUTS
+ * (command/param shapes), not from observed Beads state. A command that
+ * failed at runtime still yields its intended events (the trace does not
+ * capture per-call results). The net-diff field above remains the
+ * end-state ground truth; the pair is the strongest honestly-checkable
+ * form. See `lib/labelEvents.ts` for the derivation contract and its
+ * documented gaps.
+ */
+export const BeadsLabelEventSchema = z.object({
+  /** Whether the label was added or removed. */
+  action: z.enum(["add", "remove"]),
+  /** The label the event applies to (e.g. "qa-pending"). */
+  label: z.string(),
+  /** Task id the event targets. Empty string when the originating call
+   *  does not carry one (labels applied at `bd create` time — the new
+   *  task's id is assigned server-side and never appears in the call). */
+  taskId: z.string().default(""),
+  /** tool_use id of the originating tool call, for audit back-refs. */
+  source: z.string(),
+});
+export type BeadsLabelEvent = z.infer<typeof BeadsLabelEventSchema>;
+
+/**
  * Plugin-load error as surfaced by the SDK at `system/init`.
  *
  * Two shapes occur in the wild:
@@ -205,6 +241,14 @@ export const TraceSchema = z.object({
   hookOutputs: z.array(HookOutputSchema).default([]),
   beadsTasksCreated: z.array(z.string()).default([]),
   beadsLabelTransitions: z.array(BeadsLabelTransitionSchema).default([]),
+  /** Ordered label transition EVENTS derived from the tool-call stream
+   *  (see BeadsLabelEventSchema). OPTIONAL ON PURPOSE — not defaulted:
+   *  ABSENCE means the trace predates the 3.5 recorder (pre-3.5
+   *  recording) and consumers (the `label-milestones` invariant) SKIP
+   *  rather than retro-fail it; an EMPTY ARRAY means the recorder ran
+   *  and derived no label activity. Changing this to `.default([])`
+   *  would erase that distinction at parse time — don't. */
+  beadsLabelEvents: z.array(BeadsLabelEventSchema).optional(),
   /** Plugin loader status from the SDK init event. Cassette-stable; if
    *  this drifts, the harness is loading the plugin wrong. */
   pluginsLoaded: z

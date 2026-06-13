@@ -290,26 +290,21 @@ bd update $QA --status in_progress
 
 # ... review and test ...
 
-# APPROVE
-bd comments add $BACKEND "QA APPROVED: Auth API verified.
+# APPROVE — qa-gate.sh approve is atomic: it sets the qa-approved label
+# (the sole gate signal), drops qa-pending/qa-gate-entered, and records the
+# summary as an audit comment in one step. The summary text is free-form.
+bash .claude/scripts/qa-gate.sh approve $BACKEND "Auth API verified.
 - Login with valid/invalid credentials
 - Token refresh flow
 - Rate limiting works
 Tests: 8 E2E tests added"
 
-bd comments add $FRONTEND "QA APPROVED: Login UI verified.
+bash .claude/scripts/qa-gate.sh approve $FRONTEND "Login UI verified.
 - Form validation
 - Error messages
 - Password visibility
 - Accessibility (keyboard, screen reader)
 Tests: 12 component tests added"
-
-# Update labels
-bd label remove $BACKEND qa-pending
-bd label add $BACKEND qa-approved
-
-bd label remove $FRONTEND qa-pending
-bd label add $FRONTEND qa-approved
 
 # Close QA task
 bd update $QA --notes "COMPLETED: Full auth flow verified"
@@ -407,15 +402,25 @@ The Stop hook enforces QA approval:
 
 ### What Gets Blocked
 
-- Any task with code file changes
-- If task has `qa-pending` but not `qa-approved`
-- If no "QA APPROVED" comment exists
+- Any task with reviewable code-file changes that does **not** carry the
+  `qa-approved` label.
 
 ### What Allows Completion
 
-- Task has `qa-approved` label, OR
-- Task has comment containing "QA APPROVED", OR
-- No code files were changed
+Exactly two paths (`verify-before-stop.sh:982-992` and the F1 fast path at
+`:616-691`):
+
+- The task has the **`qa-approved` label** (the single source of truth, set
+  by `qa-gate.sh approve`), OR
+- **Nothing reviewable changed** — every changed path is doc-only, Beads /
+  gate bookkeeping (`.beads/*.jsonl`, `beads.db`, `.qa-tracking/*`), or the
+  change-set is empty after the build-artifact denylist (the F1 fast path,
+  which auto-approves with an audited comment).
+
+There is **no** "comment containing QA APPROVED" path. The comment-text
+fallback was deleted (`verify-before-stop.sh:20-22`); a comment whose body
+says "QA APPROVED" does not release the gate. Likewise there is no marker
+file: `.qa-tracking/approved` is never read.
 
 ### Bypass (Emergency Only)
 

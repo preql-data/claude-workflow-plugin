@@ -34,14 +34,17 @@ import {
   type SpawnSyncReturns,
 } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,6 +61,7 @@ import {
   diffBeadsIssues,
   flushFixtureBeads,
 } from "./beadsCapture.js";
+import { deriveBeadsLabelEvents } from "./labelEvents.js";
 
 // Lazy import — keeps `runFixture` compilable even if the SDK isn't
 // installed (so a developer can `npm install` to bring it in).
@@ -237,6 +241,147 @@ function git(fixturePath: string, args: string[]): SpawnSyncReturns<string> {
  *  Keep this list small and conservative; anything an agent is allowed
  *  to write must NOT be on it. */
 const HARNESS_METADATA_FILES = ["fixture.yaml"] as const;
+
+/** Canonical plugin scripts that are HARNESS-ONLY and must NOT be synced
+ *  into fixtures. `resolve-fixture-spec.sh` is the Makefile's
+ *  fixture->spec resolver (claude-workflow-plugin-366.4); it is never
+ *  referenced by any fixture's settings.json hooks and no fixture ships
+ *  it. Everything else under `.claude/scripts/*.sh` is a plugin hook
+ *  script (or a transitive dependency of one — e.g. verify-before-stop.sh
+ *  shells out to qa-gate.sh / impact-report.sh / current-task.sh /
+ *  epic-gate.sh / detect-stack.sh, and session-start.sh shells out to
+ *  model-select.sh), so the safe, class-killing rule is: a fixture's
+ *  `.claude/scripts/` is a byte-for-byte mirror of the canonical set
+ *  minus this exclude list. That mirrors exactly what install.sh lands
+ *  in a consumer project (install.sh copies the whole glob).
+ *
+ *  Keep this list TIGHT: only add a name here if it is provably never
+ *  invoked through a fixture hook (directly or transitively). Over-
+ *  excluding reintroduces the run-4 staleness class for the excluded
+ *  script. */
+const FIXTURE_SYNC_EXCLUDES = new Set<string>(["resolve-fixture-spec.sh"]);
+
+/** Relative path (from a fixture root) to the synced scripts dir. */
+const FIXTURE_SCRIPTS_RELDIR = path.join(".claude", "scripts");
+
+/** A single synced-script record: which script, the canonical content
+ *  SHA we wrote, and whether the fixture's prior copy differed (i.e.
+ *  this sync actually changed bytes on disk). */
+export interface SyncedScript {
+  name: string;
+  sha256: string;
+  changed: boolean;
+}
+
+/** Short hex SHA-256 of a buffer/string — used to record the exact
+ *  canonical bytes synced into each fixture (bd-notes audit trail) and
+ *  to drive the drift guard's identical/stale verdict. */
+export function sha256Hex(content: Buffer | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/** Enumerate the canonical plugin hook scripts that fixtures must mirror:
+ *  every `*.sh` under `<pluginRoot>/.claude/scripts/` EXCEPT the
+ *  harness-only excludes (FIXTURE_SYNC_EXCLUDES). Sorted for stable
+ *  iteration / deterministic bd-notes output. Exported for the drift
+ *  guard + meta-test so the guard and the live sync share ONE source of
+ *  truth for "what counts as a fixture hook script". */
+export function listCanonicalHookScripts(pluginRoot: string): string[] {
+  const dir = path.join(pluginRoot, ".claude", "scripts");
+  if (!existsSync(dir)) {
+    throw new Error(
+      `listCanonicalHookScripts: canonical scripts dir not found: ${dir}`,
+    );
+  }
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".sh") && !FIXTURE_SYNC_EXCLUDES.has(f))
+    .sort();
+}
+
+/** Sync the canonical plugin hook scripts into ONE fixture's
+ *  `.claude/scripts/`. Overwrites each fixture copy with the canonical
+ *  bytes (mode 0o755 so the shell hook is executable) and returns a
+ *  record per script noting whether bytes changed.
+ *
+ *  ORDERING CONTRACT (why this runs where it does in runFixture):
+ *    selfHealOnEntry  ->  syncFixtureScripts  ->  snapshotFixture  ->  run  ->  restoreFixture
+ *
+ *  - AFTER selfHealOnEntry: self-heal reverts inner-dirty tracked files
+ *    to the inner-fixture HEAD and cleans crash leftovers. If we synced
+ *    BEFORE it, self-heal would immediately revert our freshly-written
+ *    canonical scripts back to the (possibly stale) committed copies —
+ *    defeating the sync. Running after means the canonical bytes are the
+ *    last writer before the snapshot.
+ *  - BEFORE snapshotFixture: snapshotFixture stashes the (now-dirty,
+ *    because freshly-synced) working tree and records the pre-run HEAD
+ *    SHA. The stash PRESERVES the synced scripts so they are present on
+ *    disk for the duration of the live run — `$CLAUDE_PROJECT_DIR/.claude/
+ *    scripts/verify-before-stop.sh` resolves to the CURRENT canonical
+ *    script, not the committed-at-fixture-creation one. This is the exact
+ *    fix for the run-4 staleness class (bd claude-workflow-plugin-366.10 /
+ *    n6d): the fixture's verify-before-stop.sh predated a shipped fix, so
+ *    the fix never reached the live run.
+ *  - restoreFixture (end of run) resets to the pre-run HEAD SHA and
+ *    `git clean`s, so the synced scripts are rolled OUT of the working
+ *    tree afterward; the fixture returns to its committed state. The
+ *    committed copies are kept current by the offline drift guard + the
+ *    one-time bulk sync (sync step 4), so a fresh clone's inner-git HEAD
+ *    is already canonical and the run-start sync is a no-op there.
+ *
+ *  INNER-DIRTY note (deliberate, documented): on a dev machine whose
+ *  fixture inner-git HEAD predates a canonical script change, the synced
+ *  files show up in `git status --porcelain` as modified. That is
+ *  intended — snapshotFixture's stash handles it and restoreFixture
+ *  rolls it back. The harness-metadata protection (fixture.yaml) is
+ *  unaffected: scripts are NOT harness metadata and are SUPPOSED to be
+ *  reset to HEAD at end-of-run.
+ *
+ *  Returns the per-script sync records (sorted by name). */
+export function syncFixtureScripts(
+  fixturePath: string,
+  pluginRoot: string,
+): SyncedScript[] {
+  const canonicalDir = path.join(pluginRoot, ".claude", "scripts");
+  const fixtureScriptsDir = path.join(fixturePath, FIXTURE_SCRIPTS_RELDIR);
+  // A fixture without a .claude/scripts/ dir is not a plugin-install
+  // shape (e.g. a minimal fixture that doesn't exercise hooks). Create
+  // the dir so the canonical set lands — the fixture's settings.json
+  // hooks reference $CLAUDE_PROJECT_DIR/.claude/scripts/... so the dir
+  // must exist for any fixture that has hooks; creating it is harmless
+  // for those that don't.
+  if (!existsSync(fixtureScriptsDir)) {
+    mkdirSync(fixtureScriptsDir, { recursive: true });
+  }
+  const out: SyncedScript[] = [];
+  for (const name of listCanonicalHookScripts(pluginRoot)) {
+    const canonical = readFileSync(path.join(canonicalDir, name));
+    const sha = sha256Hex(canonical);
+    const dest = path.join(fixtureScriptsDir, name);
+    let changed = true;
+    if (existsSync(dest)) {
+      try {
+        changed = sha256Hex(readFileSync(dest)) !== sha;
+      } catch {
+        changed = true;
+      }
+    }
+    if (changed) {
+      writeFileSync(dest, canonical);
+    }
+    // Always normalize the mode to executable — a freshly-created dest
+    // or a previously non-executable copy would otherwise fail the
+    // `bash "$CLAUDE_PROJECT_DIR/.claude/scripts/..."` invocation. (bash
+    // <file> doesn't strictly need +x, but install.sh chmods them and we
+    // mirror the installed surface exactly.)
+    try {
+      chmodSync(dest, 0o755);
+    } catch {
+      /* best-effort: a read-only FS shouldn't abort the run */
+    }
+    out.push({ name, sha256: sha, changed });
+  }
+  return out;
+}
 
 export function snapshotFixture(
   fixturePath: string,
@@ -858,6 +1003,31 @@ export async function runFixture(opts: RunFixtureOptions): Promise<Trace> {
   // captures the metadata BEFORE resetting and restores it after.
   selfHealOnEntry(opts.fixturePath);
 
+  // Sync canonical plugin hook scripts into the fixture BEFORE snapshot.
+  // This is the run-4 staleness fix (claude-workflow-plugin-llh.8): the
+  // fixture carries COMMITTED copies of plugin hook scripts invoked via
+  // `$CLAUDE_PROJECT_DIR/.claude/scripts/...` from its settings.json
+  // hooks, and those copies pin whatever was rendered at fixture-creation.
+  // In run 4 a fixture's verify-before-stop.sh predated a shipped fix, so
+  // the fix never reached the live run. Overwriting them with the current
+  // canonical bytes here — AFTER selfHealOnEntry (so the heal doesn't
+  // revert our writes) and BEFORE snapshotFixture (so the stash preserves
+  // them for the run and restoreFixture rolls them back after) — means
+  // every live run exercises the CURRENT hook scripts, not a snapshot. The
+  // plugin AGENT surface already loads dynamically via plugins:[{local}];
+  // only these project-scoped script copies could drift. See
+  // syncFixtureScripts for the full ordering contract + inner-dirty note.
+  const syncedScripts = syncFixtureScripts(opts.fixturePath, pluginRoot);
+  if (opts.verbose) {
+    const changed = syncedScripts.filter((s) => s.changed).map((s) => s.name);
+    process.stderr.write(
+      `[runFixture] synced ${syncedScripts.length} canonical hook scripts into fixture` +
+        (changed.length
+          ? ` (${changed.length} changed: ${changed.join(", ")})\n`
+          : ` (all already current)\n`),
+    );
+  }
+
   // Snapshot fixture state before mutation. Flush bd's pending writes to
   // `.beads/issues.jsonl` before reading so the pre-run baseline reflects
   // any prior tasks the fixture's DB carries (e.g. seeded by a fixture's
@@ -1048,6 +1218,16 @@ export async function runFixture(opts: RunFixtureOptions): Promise<Trace> {
     const { created, transitions } = diffBeadsIssues(beadsBefore, beadsAfter);
     trace.beadsTasksCreated = created;
     trace.beadsLabelTransitions = transitions;
+    // G2.9ke (claude-workflow-plugin-9ke): derive the ordered label
+    // transition EVENT stream from the tool-call sequence. The net diff
+    // above cannot see labels added then removed within the run
+    // (qa-pending in every correct approve flow), which made the
+    // label-milestones invariant structurally unable to pass; the event
+    // stream is what makes it evaluable. Pure function over toolCalls —
+    // derived after the loop so the stream is complete. Traces recorded
+    // before this field existed simply lack it, and consumers treat
+    // absence as "pre-3.5 recording" (skip), NOT as "no label activity".
+    trace.beadsLabelEvents = deriveBeadsLabelEvents(trace.toolCalls);
   } finally {
     // ALWAYS restore — even on throw — so the fixture is reusable.
     try {

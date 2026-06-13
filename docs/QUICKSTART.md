@@ -46,10 +46,10 @@ cd /path/to/your/project
 
 ```bash
 # Option A: Direct install
-curl -fsSL https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash
 
 # Option B: Download first
-wget https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.sh
+wget https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh
 bash install.sh
 ```
 
@@ -57,10 +57,10 @@ bash install.sh
 
 ```powershell
 # Option A: Direct install
-irm https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.ps1 | iex
 
 # Option B: Download first
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/preql-data/ultimate-workflow/main/install.ps1" -OutFile "install.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.ps1" -OutFile "install.ps1"
 .\install.ps1
 ```
 

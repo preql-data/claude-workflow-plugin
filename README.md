@@ -101,7 +101,27 @@ irm https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/ins
 
 PowerShell detects v2 layouts but does **not** perform the migration —
 it prints a message asking you to run `install.sh` (via WSL or Git Bash)
-for the upgrade. Fresh installs work natively in PowerShell.
+for the upgrade. Fresh installs: PowerShell installer provided; verified
+by parity inspection, not execution. (An executable check —
+`.github/workflows/windows-install.yml`, a `workflow_dispatch` job that
+runs `install.ps1` on `windows-latest` and asserts the rendered install
+plus an MCP stdio boot-check — is committed but has not been dispatched:
+publishing it requires a token with the GitHub `workflow` scope.)
+
+### Supported bd range
+
+The hooks and MCP servers are verified against `bd $(bd --version)` by
+`.claude/tests/component/specs/bd-compat.sh`, which pins all 32 bd
+invocations the production scripts depend on — exit codes, JSON shapes,
+id formats, and the `BD_NO_DAEMON` flush/export path. Supported range:
+**>= 0.47.x** with no known upper break. That spec is the compatibility
+oracle: after upgrading bd, run it to certify the new version (it prints
+the detected `bd --version` in its header and fails loudly, naming the
+exact command, on any output-shape mismatch):
+
+```bash
+bash .claude/tests/component/run.sh --filter bd-compat
+```
 
 ## 📦 What you get on disk
 
@@ -196,9 +216,13 @@ tier) read [`CHANGELOG.md`](CHANGELOG.md).
   scripted invocation can never trip a paid call without an explicit
   `--confirm-judge` flag. Judge precision is reported on every run
   against the hand-labeled calibration set (default threshold 0.8).
-- The upstream `bd` daemon has a stack-overflow on stale locks; the
-  plugin ships a `--no-daemon` shim under `.claude/bin/bd` (inlined onto
-  `PATH` in test fixtures). Production installs degrade gracefully.
+- The upstream `bd` daemon has a stack-overflow on stale locks. A
+  `--no-daemon` shim that sidesteps it ships **only inside the e2e test
+  fixtures** (`.claude/tests/e2e/fixtures/<name>/.claude/bin/bd`, resolved
+  onto `PATH` per-fixture by the harness — `beadsCapture.ts:169`); the
+  installer does **not** place a shim on a production install (no
+  `.claude/bin/` is rendered). If you hit the daemon bug on a real
+  install, invoke `bd --no-daemon <subcommand>` yourself.
 - AgentLint flags a few intentional design choices (Bash auto-approve,
   tag-pinned actions); rationale is in [`CONTRIBUTING.md`](CONTRIBUTING.md)
   under "Design overrides vs. AgentLint".

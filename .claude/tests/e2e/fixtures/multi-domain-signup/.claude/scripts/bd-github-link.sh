@@ -224,6 +224,8 @@ resolve_ref_kind() {
 # on every re-fire (QA defect, claude-workflow-plugin-vhm).
 gh_link_comment_body() {
     local tid="$1"
+    # shellcheck disable=SC2016  # literal backticks: this is the canonical
+    # comment shape that post_link_comment() greps for verbatim.
     printf 'bd-link: tracked as `%s` (claude-workflow-plugin Beads task)\n' "$tid"
 }
 
@@ -310,7 +312,7 @@ extract_tid_from_tail() {
     # shellcheck disable=SC2206
     local words=($tail)
     local i=0 n=${#words[@]} skip_next=0
-    while [ $i -lt $n ]; do
+    while [ "$i" -lt "$n" ]; do
         local tok="${words[$i]}"
         # Strip one layer of surrounding double or single quote.
         tok="${tok%\"}"; tok="${tok#\"}"
@@ -323,7 +325,7 @@ extract_tid_from_tail() {
             --*)
                 # Lookahead: if next token is non-flag, treat as this flag's value.
                 local nxt=""
-                if [ $((i+1)) -lt $n ]; then nxt="${words[$((i+1))]}"; fi
+                if [ $((i+1)) -lt "$n" ]; then nxt="${words[$((i+1))]}"; fi
                 nxt="${nxt%\"}"; nxt="${nxt#\"}"
                 nxt="${nxt%\'}"; nxt="${nxt#\'}"
                 if [ -n "$nxt" ] && [[ "$nxt" != -* ]]; then

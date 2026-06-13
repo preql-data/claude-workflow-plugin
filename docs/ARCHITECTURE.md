@@ -41,8 +41,7 @@ The plugin implements an **orchestrator-first architecture** where:
 │                                                      │              │
 │  ┌──────────────────────────────────────────────────────────┐      │
 │  │                      STOP HOOK                            │      │
-│  │  • Checks for qa-approved label                          │      │
-│  │  • Checks for "QA APPROVED" comment                      │      │
+│  │  • Checks for qa-approved label (sole source of truth)   │      │
 │  │  • BLOCKS if not approved                                │      │
 │  └──────────────────────────────────────────────────────────┘      │
 │                              │                                       │
@@ -147,8 +146,9 @@ BD_PRIME=$(bd prime)
 # 2. Check if code files were changed
 # 3. Run technical checks (tests, lint)
 # 4. Check for QA approval:
-#    - Look for qa-approved label on task
-#    - Look for "QA APPROVED" in comments
+#    - Look for qa-approved label on task (sole source of truth;
+#      no comment-text or marker-file fallback — both deleted,
+#      verify-before-stop.sh:20-22)
 # 5. If not approved: BLOCK with instructions
 # 6. If approved: Allow completion
 ```
@@ -200,12 +200,16 @@ The mandatory quality gate that:
 - Writes E2E tests for critical journeys
 - Approves or blocks with specific feedback
 
-Approval process:
+Approval process — use the atomic helper, which sets the `qa-approved`
+label (the sole gate signal), drops `qa-pending`/`qa-gate-entered`, and
+writes the audit comment in one operation (and refuses unless a current
+impact report exists):
 ```bash
-bd comments add $ID "QA APPROVED: <summary>"
-bd label remove $ID qa-pending
-bd label add $ID qa-approved
+bash .claude/scripts/qa-gate.sh approve $ID '<summary>'
 ```
+The summary lands as an audit comment; the **label** is what releases the
+Stop hook. Setting the label by hand without going through `qa-gate.sh`
+skips the impact-report check, so it is not the supported path.
 
 ---
 
@@ -253,7 +257,8 @@ Implementation Complete
 ┌─────────────────────────────────────┐
 │ Stop Hook Triggered                 │
 │ Checks: qa-approved label?          │
-│ Checks: "QA APPROVED" comment?      │
+│ (sole source of truth — no comment- │
+│  text or marker-file fallback)      │
 └─────────────────────────────────────┘
     │
     ├─── NO ───┐
@@ -274,8 +279,9 @@ Implementation Complete
     │          ▼
     │   ┌─────────────────────────────┐
     │   │ @qa Approves                │
-    │   │ bd comments add "QA APPROVED│
-    │   │ bd label add qa-approved    │
+    │   │ qa-gate.sh approve <id> '..'│
+    │   │  → sets qa-approved label   │
+    │   │    (+ audit comment, atomic)│
     │   └─────────────────────────────┘
     │          │
     └──────────┘
@@ -354,19 +360,29 @@ This ensures future sessions have context even after compaction.
 
 ## Security Considerations
 
-### Denied Operations
+### Permissions model
 
-The `settings.json` denies dangerous operations:
+The shipped `settings.json` carries an **allow-list only** — there is no
+`permissions.deny` block (`.claude/settings.json:85-99`):
 ```json
 {
   "permissions": {
-    "deny": [
-      "Bash(rm -rf *)",
-      "Bash(sudo *)"
+    "allow": [
+      "Read", "Write", "Edit", "MultiEdit", "Glob",
+      "Grep", "LS", "Bash", "Task", "WebFetch", "WebSearch"
     ]
   }
 }
 ```
+
+This is deliberate. Principle 3 of the workflow is **full autonomy, no
+permission prompts**: specialists must run unattended, so every `deny` rule
+would become a future user-facing approval prompt. `CLAUDE.md` explicitly
+forbids adding a `deny` block. Dangerous-operation containment is therefore
+**not** a settings-level denylist — it comes from the structural guards
+(the orchestrator's tool list omits Write/Edit; `prevent-orchestrator-edits.sh`
+blocks edits from the orchestrator role; the QA gate blocks completion) plus
+the operator's own environment, not from `permissions.deny`.
 
 ### Tracking Data
 
@@ -386,7 +402,11 @@ This data is gitignored and not persisted.
 
 ### Context Efficiency
 
-- `bd prime` provides ~1-2k tokens (vs 10-50k for MCP)
+- `bd prime` produces a compact context block — measured at ~740 tokens on
+  this repo (2961 bytes ÷ 4-bytes-per-token heuristic; `bd prime | wc -c`,
+  bd 0.47.1, 2026-06-13). The output scales with the number of ready/blocked
+  tasks, so a busy repo lands in the low thousands; the point is it is an
+  order of magnitude smaller than loading equivalent state through MCP.
 - Blocked issues capped at 20 entries
 - QA pending issues capped at 10 entries
 
@@ -398,8 +418,7 @@ This data is gitignored and not persisted.
 
 ### Git Hooks
 
-- `bd hooks install` adds auto-sync
-- Debounced sync (500ms) prevents spam
+- `bd hooks install` adds auto-sync on commit/push
 
 ---
 
@@ -417,7 +436,14 @@ shape is:
 | **L2 — component** | `.claude/tests/component/specs/*.sh` | Hook pipelines end-to-end with tempdir fixtures | Free, <10s |
 | **L3 — vitest unit** | `.claude/tests/e2e/specs/*.unit.spec.ts` | Harness internals: trace schema, normalization, golden compare | Free, <30s |
 | **L3 — live e2e** | `.claude/tests/e2e/specs/<fixture>.spec.ts` | Plugin behaviour against the auto-selected model (see `model-select.sh`; whichever model the resolver picks at SessionStart) | ~$5–10 per fixture |
-| **L4 — drift watch** | Same specs as L3-live | Model-output drift over time on `main` | Live, cron |
+
+There is no L4 tier. An earlier design had an **L4 daily drift watch** (the
+L3-live specs on a `cron` schedule, catching model-output drift on `main`),
+but it was **retired**: per phase 0.8 there are no automatic paid runs —
+`test.yml` has no `schedule:` trigger, the live tier is `workflow_dispatch`
+only, and the goldens are kept as debugging-only references
+(`.github/workflows/test.yml:13,19`). A normal PR or push consumes zero API
+spend.
 
 ### Six live fixtures
 

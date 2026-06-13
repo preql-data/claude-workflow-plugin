@@ -1,0 +1,394 @@
+# Windows installer verification — executes install.ps1 for real on
+# windows-latest and asserts the rendered install matches the parity spec.
+#
+# WHY THIS EXISTS
+#   The README claims "Fresh installs work natively in PowerShell." Per the
+#   release-acceptance rule "no adjective without artifact / prove-or-remove",
+#   that claim needs EXECUTED evidence on a real Windows runner, not just
+#   parity-by-inspection. This job is that evidence: a green run is the
+#   artifact the README points at.
+#
+# TRIGGER POLICY (principle #9 — no automatic paid runs)
+#   workflow_dispatch ONLY. Zero scheduled runs, no push trigger, no
+#   pull_request trigger. windows-latest minutes bill at 2x on GitHub's
+#   hosted runners; this job runs only when an operator explicitly
+#   dispatches it (GitHub UI or `gh workflow run windows-install.yml`).
+#   It makes no Anthropic API calls — pure install + filesystem assertions
+#   + a local stdio MCP boot-check — so it never touches the paid cap.
+#
+# WHAT IT ASSERTS
+#   The PowerShell assertions below are a port of the INTENT of
+#   .claude/tests/component/specs/installer-mcp-config.sh (the bash L2
+#   spec that runs install.sh on ubuntu). Each bash assert_eq /
+#   assert_contains becomes a PowerShell Test-Path / content check, with a
+#   per-assertion PASS/FAIL line and a non-zero exit if ANY assertion
+#   fails. A final boot-check confirms the code-graph-mcp server answers a
+#   JSON-RPC `initialize` over stdio on Windows (the same handshake
+#   Claude Code performs when it spawns the server).
+#
+# NODE VERSION
+#   Pinned to 20 — matches the repo's other CI jobs (test.yml) and clears
+#   the MCP servers' `engines.node` floor of >=18.17
+#   (.claude/mcp/{bd,code-graph}-mcp/package.json). There is no root
+#   package.json engines field; the MCP package engines are the binding
+#   constraint and Node 20 LTS satisfies them.
+
+name: windows-install
+
+on:
+  workflow_dispatch:
+    # Manual only. No schedule / push / pull_request — see header.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-install:
+    name: install.ps1 on windows-latest (parity assertions + MCP boot)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (pin matches MCP engines floor >=18.17)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # install.ps1 prerequisites: git, jq, bd. git ships on the runner.
+      # jq ships on windows-latest as well, but we assert it explicitly so
+      # a missing tool fails with a clear message rather than deep inside
+      # the installer. bd has no public CI installer (same constraint the
+      # bash CI documents in test.yml) — install.ps1 hard-requires it, so
+      # we drop a minimal `bd` shim on PATH that satisfies the version
+      # gate and the `bd init/hooks/doctor` calls without needing the real
+      # binary. The shim mirrors the bash spec's mk_fixture bd wrapper:
+      # the file-copy step is what we're exercising, not Beads itself.
+      - name: Verify git + jq; stage a bd shim
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git --version
+          jq --version
+          # Minimal bd shim: prints a version >= the installer's MinBdVersion
+          # (0.47) and no-ops the init/hooks/doctor subcommands.
+          $shimDir = Join-Path $env:RUNNER_TEMP "bd-shim"
+          New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+          $bdCmd = Join-Path $shimDir "bd.cmd"
+          # Build the batch shim line-by-line (no here-string — a here-string's
+          # content/terminator would have to sit at column 0, which collides
+          # with YAML block-scalar indentation rules).
+          $bdLines = @(
+            '@echo off',
+            'if "%1"=="--version" (',
+            '  echo bd version 0.47.0',
+            '  exit /b 0',
+            ')',
+            'rem init / hooks / doctor and anything else: succeed quietly.',
+            'exit /b 0'
+          )
+          Set-Content -LiteralPath $bdCmd -Value $bdLines -Encoding ascii
+          # Prepend the shim dir to PATH for subsequent steps.
+          "$shimDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding ascii -Append
+          Write-Host "bd shim staged at $bdCmd"
+
+      - name: Confirm bd shim resolves
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $v = (bd --version)
+          Write-Host "bd --version -> $v"
+          if ($v -notmatch '0\.47') { Write-Error "bd shim did not report expected version"; exit 1 }
+
+      # Run the REAL installer into a fresh temp dir. We git-init the
+      # target first (mirrors installer-mcp-config.sh lines 105-112) so the
+      # installer's "Initialize git repository?" branch is bypassed
+      # deterministically regardless of how the runner reports
+      # UserInteractive. -Mode 1 = "Backup and install fresh" (the bash
+      # spec's --mode=1); on a pristine temp dir there's no existing
+      # .claude/ so the mode is effectively a no-op, but we pass it to
+      # match the spec's intent and guard against a stray pre-existing dir.
+      - name: Execute install.ps1 into a fresh temp dir
+        id: install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = Join-Path $env:RUNNER_TEMP ("cwp-install-" + [Guid]::NewGuid().ToString("N").Substring(0,8))
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          Push-Location $target
+          try {
+            git init -q
+            git -c user.email=ci@example.com -c user.name=ci commit --allow-empty -m "ci baseline" -q
+          } finally {
+            Pop-Location
+          }
+          Write-Host "Install target: $target"
+          # Persist the target for the assertion + boot-check steps.
+          "INSTALL_TARGET=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding ascii -Append
+          # Run the installer. $LASTEXITCODE is the installer's exit code.
+          & "$env:GITHUB_WORKSPACE/install.ps1" -Path $target -Mode 1
+          $rc = $LASTEXITCODE
+          Write-Host "install.ps1 exit code: $rc"
+          "INSTALL_RC=$rc" | Out-File -FilePath $env:GITHUB_ENV -Encoding ascii -Append
+
+      # The parity assertion harness. Ports the INTENT of every
+      # assert_eq / assert_contains in installer-mcp-config.sh, plus the
+      # task's explicit surface list (7 agent files, both MCP server dirs,
+      # hooks.json, settings merge). Each check appends a [PASS]/[FAIL]
+      # row; the step exits non-zero if any row failed. The two bash
+      # META-TESTs (which test the asserter's own sensitivity, not the
+      # install) are ported as a self-sensitivity check of the
+      # bare-${VAR} walker so the parity check isn't theatre.
+      - name: Assert rendered install matches parity spec
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = $env:INSTALL_TARGET
+          $installRc = [int]$env:INSTALL_RC
+          $results = New-Object System.Collections.Generic.List[object]
+
+          function Add-Result {
+            param([string]$Name, [bool]$Pass, [string]$Detail = "")
+            $script:results.Add([pscustomobject]@{ Name = $Name; Pass = $Pass; Detail = $Detail })
+          }
+          function Assert-PathExists {
+            param([string]$Name, [string]$RelPath)
+            $full = Join-Path $script:target $RelPath
+            $ok = Test-Path -LiteralPath $full
+            Add-Result -Name $Name -Pass $ok -Detail $full
+          }
+          function Assert-PathAbsent {
+            param([string]$Name, [string]$RelPath)
+            $full = Join-Path $script:target $RelPath
+            $ok = -not (Test-Path -LiteralPath $full)
+            Add-Result -Name $Name -Pass $ok -Detail $full
+          }
+
+          $mcp = Join-Path $target ".mcp.json"
+
+          # --- 1. installer exit 0 -----------------------------------------
+          Add-Result "install.ps1 exit 0" ($installRc -eq 0) "rc=$installRc"
+
+          # --- 2. rendered .mcp.json present -------------------------------
+          $mcpPresent = Test-Path -LiteralPath $mcp
+          Add-Result ".mcp.json present" $mcpPresent $mcp
+
+          # --- 3. .mcp.json parses as JSON ---------------------------------
+          $mcpObj = $null
+          $parseOk = $false
+          if ($mcpPresent) {
+            try { $mcpObj = Get-Content -LiteralPath $mcp -Raw | ConvertFrom-Json; $parseOk = $true }
+            catch { $parseOk = $false }
+          }
+          Add-Result ".mcp.json parses as JSON" $parseOk ""
+
+          # Helper: collect every string under mcpServers.*.{command,args,env,url,headers}.
+          # Uses a single script-scoped accumulator ($script:__mcpAcc) so the
+          # recursive Walk and the outer collector share state unambiguously —
+          # a nested function does NOT see the parent's *local* variables in
+          # PowerShell, only script/global scope, so we are explicit about it.
+          function Walk-McpValue { param($v)
+            if ($null -eq $v) { return }
+            if ($v -is [string]) { $script:__mcpAcc.Add($v); return }
+            if ($v -is [System.Collections.IEnumerable] -and -not ($v -is [string])) {
+              foreach ($i in $v) { Walk-McpValue $i }; return
+            }
+            if ($v -is [psobject]) { foreach ($p in $v.PSObject.Properties) { Walk-McpValue $p.Value }; return }
+          }
+          function Get-McpServerStrings {
+            param($Servers)
+            $script:__mcpAcc = New-Object System.Collections.Generic.List[string]
+            if ($Servers) {
+              foreach ($svc in $Servers.PSObject.Properties) {
+                foreach ($field in 'command','args','env','url','headers') {
+                  $val = $svc.Value.PSObject.Properties[$field]
+                  if ($val) { Walk-McpValue $val.Value }
+                }
+              }
+            }
+            return ,$script:__mcpAcc
+          }
+          # Bare ${VAR} (no ":-" default) detector — the exact bug shape the
+          # bash asserter catches.
+          function Test-HasBareVar { param([string[]]$Strings)
+            foreach ($s in $Strings) {
+              if ($s -match '\$\{[A-Z_][A-Z0-9_]*\}') { return $true }
+            }
+            return $false
+          }
+
+          $serverStrings = @()
+          if ($parseOk -and $mcpObj.mcpServers) { $serverStrings = Get-McpServerStrings $mcpObj.mcpServers }
+
+          # --- 4. no bare ${VAR} in mcpServers fields ----------------------
+          $noBare = -not (Test-HasBareVar $serverStrings)
+          Add-Result "no bare `${VAR} in mcpServers fields" $noBare ""
+
+          # --- 5-8. server args reference launchers + use :- default form --
+          $bdArgs = ""
+          $cgArgs = ""
+          if ($parseOk -and $mcpObj.mcpServers) {
+            if ($mcpObj.mcpServers.bd)            { $bdArgs = ($mcpObj.mcpServers.bd.args            -join ' ') }
+            if ($mcpObj.mcpServers.'code-graph')  { $cgArgs = ($mcpObj.mcpServers.'code-graph'.args  -join ' ') }
+          }
+          Add-Result "bd args reference bd-mcp launcher"            ($bdArgs -like '*bd-mcp/bin/bd-mcp.js*') $bdArgs
+          Add-Result "code-graph args reference code-graph-mcp"     ($cgArgs -like '*code-graph-mcp/bin/code-graph-mcp.js*') $cgArgs
+          Add-Result "bd args use `${CLAUDE_PROJECT_DIR:-.} form"        ($bdArgs -like '*${CLAUDE_PROJECT_DIR:-.}*') $bdArgs
+          Add-Result "code-graph args use `${CLAUDE_PROJECT_DIR:-.} form" ($cgArgs -like '*${CLAUDE_PROJECT_DIR:-.}*') $cgArgs
+
+          # --- 9. retired code-context server absent from .mcp.json --------
+          $ccAbsent = $true
+          if ($parseOk -and $mcpObj.mcpServers -and $mcpObj.mcpServers.'code-context') { $ccAbsent = $false }
+          Add-Result "retired code-context server absent from .mcp.json" $ccAbsent ""
+
+          # --- 10-11. MCP server dirs: code-graph present, code-context gone
+          Assert-PathExists "rendered install has .claude/mcp/code-graph-mcp/" ".claude/mcp/code-graph-mcp"
+          Assert-PathAbsent "rendered install does NOT have .claude/mcp/code-context-mcp/" ".claude/mcp/code-context-mcp"
+          # Task intent: BOTH MCP server dirs present (bash spec spot-checks
+          # only code-graph; the bd server dir is the other half).
+          Assert-PathExists "rendered install has .claude/mcp/bd-mcp/" ".claude/mcp/bd-mcp"
+
+          # --- 12. at least one tree-sitter wasm grammar -------------------
+          Assert-PathExists "rendered install has tree-sitter-typescript.wasm grammar" `
+            ".claude/mcp/code-graph-mcp/grammars/tree-sitter-typescript.wasm"
+
+          # --- 13-14. Phase A/C agents (grader, judge) ---------------------
+          Assert-PathExists "rendered install has grader.md (Phase A)" ".claude/agents/grader.md"
+          Assert-PathExists "rendered install has judge.md (Phase C)"  ".claude/agents/judge.md"
+
+          # --- Task intent: ALL 7 agent files present ----------------------
+          # (bash spec spot-checks only grader+judge; the manifest declares
+          # all seven, so a missing one degrades delegation silently.)
+          $agents = 'orchestrator','qa','backend','frontend','devops','grader','judge'
+          $agentDir = Join-Path $target ".claude/agents"
+          $present = @(Get-ChildItem -LiteralPath $agentDir -Filter *.md -ErrorAction SilentlyContinue | ForEach-Object { $_.BaseName })
+          $missing = @($agents | Where-Object { $present -notcontains $_ })
+          Add-Result "rendered install has all 7 agent files" ($missing.Count -eq 0) ("present=" + ($present -join ',') + " missing=" + ($missing -join ','))
+
+          # --- 15-16. rubrics + rubric-config (Phase A) --------------------
+          Assert-PathExists "rendered install has .claude/rubrics/default.md (Phase A)" ".claude/rubrics/default.md"
+          Assert-PathExists "rendered install has .claude/rubric-config (Phase A)" ".claude/rubric-config"
+
+          # --- 17-20. mutation tier (Phase C) ------------------------------
+          Assert-PathExists "rendered install has .claude/tests/mutation/mutation-sweep.sh (Phase C)" ".claude/tests/mutation/mutation-sweep.sh"
+          Assert-PathExists "rendered install has .claude/tests/mutation/judge-gate.sh (Phase C)" ".claude/tests/mutation/judge-gate.sh"
+          Assert-PathExists "rendered install has .claude/tests/mutation/calibration/calibration-set.json (Phase C)" ".claude/tests/mutation/calibration/calibration-set.json"
+          Assert-PathExists "rendered install has .claude/commands/mutation-sweep.md (Phase C)" ".claude/commands/mutation-sweep.md"
+
+          # --- 21-22. Phase 0 assets ---------------------------------------
+          Assert-PathExists "rendered install has LESSONS.md (Phase 0)" "LESSONS.md"
+          Assert-PathExists "rendered install has .claude/model-ranking (Phase 0)" ".claude/model-ranking"
+
+          # --- Task intent: hooks.json + settings.json (merge target) ------
+          Assert-PathExists "rendered install has .claude/hooks/hooks.json" ".claude/hooks/hooks.json"
+          # settings merge: a fresh install copies settings.json wholesale;
+          # presence + valid JSON is the parity check for the merge path's
+          # output. (The Update/merge branch is exercised by re-runs; a
+          # fresh temp dir takes the copy-fresh branch.)
+          $settingsPath = Join-Path $target ".claude/settings.json"
+          $settingsOk = $false
+          if (Test-Path -LiteralPath $settingsPath) {
+            try { Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json | Out-Null; $settingsOk = $true } catch { $settingsOk = $false }
+          }
+          Add-Result "rendered install has valid .claude/settings.json (merge output)" $settingsOk $settingsPath
+
+          # --- META: asserter self-sensitivity (ports the bash META-TESTs) -
+          # Prove the bare-${VAR} walker is sensitive to the exact bug it
+          # claims to catch, and that the :- default form passes through.
+          # If these don't behave, the "no bare ${VAR}" assertion above is
+          # meaningless.
+          $metaBadHit  = Test-HasBareVar @('${CLAUDE_PROJECT_DIR}/.claude/mcp/x/bin/x.js')
+          $metaGoodHit = Test-HasBareVar @('${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/x/bin/x.js')
+          Add-Result "META: walker flags bare `${CLAUDE_PROJECT_DIR}" ($metaBadHit -eq $true) ""
+          Add-Result "META: walker passes `${CLAUDE_PROJECT_DIR:-.}" ($metaGoodHit -eq $false) ""
+
+          # --- Summary -----------------------------------------------------
+          $passCount = (@($results | Where-Object { $_.Pass }).Count)
+          $failCount = (@($results | Where-Object { -not $_.Pass }).Count)
+          Write-Host ""
+          Write-Host "=== Parity assertion results ($passCount/$($results.Count) passed) ==="
+          foreach ($r in $results) {
+            $tag = if ($r.Pass) { "[PASS]" } else { "[FAIL]" }
+            $line = "{0} {1}" -f $tag, $r.Name
+            if ($r.Detail) { $line += "  ($($r.Detail))" }
+            Write-Host $line
+          }
+
+          # GitHub step summary (Markdown table).
+          $sb = New-Object System.Text.StringBuilder
+          [void]$sb.AppendLine("## Windows install parity assertions")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("install.ps1 executed on ``windows-latest``; rendered install asserted against the intent of ``.claude/tests/component/specs/installer-mcp-config.sh``.")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("**$passCount / $($results.Count) assertions passed.**")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("| Result | Assertion |")
+          [void]$sb.AppendLine("| --- | --- |")
+          foreach ($r in $results) {
+            $tag = if ($r.Pass) { "PASS" } else { "**FAIL**" }
+            $name = $r.Name -replace '\|','\|'
+            [void]$sb.AppendLine("| $tag | $name |")
+          }
+          $sb.ToString() | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          if ($failCount -gt 0) {
+            Write-Error "$failCount parity assertion(s) failed."
+            exit 1
+          }
+          Write-Host "All parity assertions passed."
+
+      # Boot-check: the rendered code-graph-mcp server must answer a
+      # JSON-RPC `initialize` over stdio on Windows — the same handshake
+      # Claude Code performs when it spawns the server. We install the
+      # server's npm deps first (the installer intentionally does NOT vendor
+      # node_modules), then pipe a single NDJSON initialize request to the
+      # launcher and assert the response carries result.serverInfo.
+      - name: Boot-check — code-graph-mcp answers JSON-RPC initialize over stdio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = $env:INSTALL_TARGET
+          $serverDir = Join-Path $target ".claude/mcp/code-graph-mcp"
+          $launcher = Join-Path $serverDir "bin/code-graph-mcp.js"
+          if (-not (Test-Path -LiteralPath $launcher)) {
+            Write-Error "launcher missing at $launcher"; exit 1
+          }
+          Write-Host "Installing code-graph-mcp deps for the boot-check..."
+          Push-Location $serverDir
+          try {
+            # No package-lock is vendored; npm install resolves from the
+            # declared deps. --no-audit/--no-fund keep it quiet+fast.
+            npm install --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { Write-Error "npm install failed (rc=$LASTEXITCODE)"; exit 1 }
+          } finally {
+            Pop-Location
+          }
+
+          # Drive the handshake from a small Node harness: spawn the
+          # launcher, write one NDJSON initialize line to its stdin, read
+          # the first stdout line, assert result.serverInfo is present.
+          # This is the same envelope validated locally against src/server.js
+          # (StdioServerTransport). Done in Node (not raw pwsh pipes) so the
+          # NDJSON framing + timeout are robust on Windows.
+          #
+          # The harness source is embedded base64-encoded and decoded to a
+          # .mjs at runtime. Rationale: a here-string would need its content
+          # and closing terminator at column 0, which collides with YAML
+          # block-scalar indentation; base64 is a single indented token with
+          # nothing for YAML or PowerShell to misparse. Decoded source:
+          #   import { spawn } from "node:child_process";
+          #   ... spawn(launcher) -> write initialize NDJSON to stdin ->
+          #       read first stdout line -> require result.serverInfo ...
+          # Round-trip verified byte-identical against the committed source
+          # and run green locally before encoding.
+          $harness = Join-Path $env:RUNNER_TEMP "mcp-bootcheck.mjs"
+          $harnessB64 = 'aW1wb3J0IHsgc3Bhd24gfSBmcm9tICJub2RlOmNoaWxkX3Byb2Nlc3MiOwoKY29uc3QgbGF1bmNoZXIgPSBwcm9jZXNzLmFyZ3ZbMl07CmNvbnN0IGluaXQgPSBKU09OLnN0cmluZ2lmeSh7CiAganNvbnJwYzogIjIuMCIsIGlkOiAxLCBtZXRob2Q6ICJpbml0aWFsaXplIiwKICBwYXJhbXM6IHsgcHJvdG9jb2xWZXJzaW9uOiAiMjAyNC0xMS0wNSIsIGNhcGFiaWxpdGllczoge30sIGNsaWVudEluZm86IHsgbmFtZTogImJvb3QtY2hlY2siLCB2ZXJzaW9uOiAiMS4wLjAiIH0gfQp9KTsKCmNvbnN0IGNoaWxkID0gc3Bhd24ocHJvY2Vzcy5leGVjUGF0aCwgW2xhdW5jaGVyXSwgeyBzdGRpbzogWyJwaXBlIiwgInBpcGUiLCAicGlwZSJdIH0pOwpsZXQgb3V0ID0gIiIsIGVyciA9ICIiLCBkb25lID0gZmFsc2U7Cgpjb25zdCB0aW1lciA9IHNldFRpbWVvdXQoKCkgPT4gewogIGlmIChkb25lKSByZXR1cm47CiAgZG9uZSA9IHRydWU7CiAgY29uc29sZS5lcnJvcigiQk9PVC1DSEVDSyBGQUlMOiB0aW1lZCBvdXQgd2FpdGluZyBmb3IgaW5pdGlhbGl6ZSByZXNwb25zZSIpOwogIGlmIChlcnIpIGNvbnNvbGUuZXJyb3IoInN0ZGVycjpcbiIgKyBlcnIpOwogIHRyeSB7IGNoaWxkLmtpbGwoKTsgfSBjYXRjaCB7fQogIHByb2Nlc3MuZXhpdCgxKTsKfSwgMzAwMDApOwoKY2hpbGQuc3RkZXJyLm9uKCJkYXRhIiwgZCA9PiB7IGVyciArPSBkLnRvU3RyaW5nKCk7IH0pOwpjaGlsZC5zdGRvdXQub24oImRhdGEiLCBkID0+IHsKICBvdXQgKz0gZC50b1N0cmluZygpOwogIGNvbnN0IG5sID0gb3V0LmluZGV4T2YoIlxuIik7CiAgaWYgKG5sID09PSAtMSB8fCBkb25lKSByZXR1cm47CiAgZG9uZSA9IHRydWU7CiAgY2xlYXJUaW1lb3V0KHRpbWVyKTsKICBjb25zdCBsaW5lID0gb3V0LnNsaWNlKDAsIG5sKS50cmltKCk7CiAgdHJ5IHsgY2hpbGQua2lsbCgpOyB9IGNhdGNoIHt9CiAgdHJ5IHsKICAgIGNvbnN0IG8gPSBKU09OLnBhcnNlKGxpbmUpOwogICAgY29uc3Qgb2sgPSBvLmpzb25ycGMgPT09ICIyLjAiICYmIG8ucmVzdWx0ICYmIChvLnJlc3VsdC5zZXJ2ZXJJbmZvIHx8IG8ucmVzdWx0LnByb3RvY29sVmVyc2lvbik7CiAgICBpZiAob2spIHsKICAgICAgY29uc3QgaW5mbyA9IG8ucmVzdWx0LnNlcnZlckluZm8gPyBKU09OLnN0cmluZ2lmeShvLnJlc3VsdC5zZXJ2ZXJJbmZvKSA6IG8ucmVzdWx0LnByb3RvY29sVmVyc2lvbjsKICAgICAgY29uc29sZS5sb2coIkJPT1QtQ0hFQ0sgUEFTUzogaW5pdGlhbGl6ZSBhbnN3ZXJlZCAtPiAiICsgaW5mbyk7CiAgICAgIHByb2Nlc3MuZXhpdCgwKTsKICAgIH0KICAgIGNvbnNvbGUuZXJyb3IoIkJPT1QtQ0hFQ0sgRkFJTDogcmVzcG9uc2UgaGFkIG5vIHJlc3VsdC5zZXJ2ZXJJbmZvOiAiICsgbGluZSk7CiAgICBwcm9jZXNzLmV4aXQoMSk7CiAgfSBjYXRjaCAoZSkgewogICAgY29uc29sZS5lcnJvcigiQk9PVC1DSEVDSyBGQUlMOiBmaXJzdCBzdGRvdXQgbGluZSB3YXMgbm90IEpTT046ICIgKyBsaW5lKTsKICAgIGNvbnNvbGUuZXJyb3IoInBhcnNlIGVycm9yOiAiICsgZS5tZXNzYWdlKTsKICAgIHByb2Nlc3MuZXhpdCgxKTsKICB9Cn0pOwpjaGlsZC5vbigiZXJyb3IiLCBlID0+IHsKICBpZiAoZG9uZSkgcmV0dXJuOyBkb25lID0gdHJ1ZTsgY2xlYXJUaW1lb3V0KHRpbWVyKTsKICBjb25zb2xlLmVycm9yKCJCT09ULUNIRUNLIEZBSUw6IGZhaWxlZCB0byBzcGF3biBsYXVuY2hlcjogIiArIGUubWVzc2FnZSk7CiAgcHJvY2Vzcy5leGl0KDEpOwp9KTsKY2hpbGQuc3RkaW4ud3JpdGUoaW5pdCArICJcbiIpOwo='
+          [System.IO.File]::WriteAllText($harness, [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($harnessB64)))
+
+          node $harness $launcher
+          if ($LASTEXITCODE -ne 0) { Write-Error "MCP boot-check failed (rc=$LASTEXITCODE)"; exit 1 }
+          "## MCP boot-check`n`ncode-graph-mcp answered a JSON-RPC ``initialize`` over stdio on windows-latest." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

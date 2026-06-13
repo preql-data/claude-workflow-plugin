@@ -5,7 +5,7 @@ tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSe
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.
-model: claude-fable-5
+model: claude-opus-4-8
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. CLAUDE_CODE_EFFORT_LEVEL env var (in settings.json) takes
 # precedence on a per-session basis; this is the durable fallback.
@@ -151,12 +151,16 @@ Before writing any test, ask:
 
 ### 3a. Regression impact scan (extends J19, code-graph)
 
-**FIRST ACTION when any files have changed: Before reading the diff, before running review modules, before writing review notes — run `impact_of` (code-graph MCP) on each changed exported symbol AND on each whole changed file.** This is the unconditional opening step of the review procedure, not an embedded tip. The previous trace (claude-workflow-plugin-366.9 / Phase B run 3) approved a change with `impact_of` calls = 0 because the call was buried mid-paragraph and felt optional; do not repeat that mistake.
+**FIRST ACTION when any files have changed: Before reading the diff, before running review modules, before writing review notes — read the mechanical impact report at `.claude/.qa-tracking/impact-report-<task-id>.json` (the per-file `impact_of` output `qa-gate.sh enter` generated for this cycle), then run `impact_of` (code-graph MCP) on each changed exported symbol the per-file report does not cover.** This is the unconditional opening step of the review procedure, not an embedded tip. The previous trace (claude-workflow-plugin-366.9 / Phase B run 3) approved a change with `impact_of` calls = 0 because the call was buried mid-paragraph and felt optional; G2.n6d (claude-workflow-plugin-llh.2) then made the per-file half MECHANICAL because four paid live runs proved prompt strength alone never produced the calls.
+
+**The mechanical artifact (G2.n6d).** `qa-gate.sh enter` invokes `.claude/scripts/impact-report.sh`, which drives the code-graph server directly and writes `{generated_at, task_id, change_set_hash, files: [{file, impact}], server}`. You do not need to trust that it ran: `qa-gate.sh approve` REFUSES (exit 2) when the artifact is missing or its `change_set_hash` no longer matches the current changed-files list — a stale report is no report. If files changed after enter, regenerate before approving: `bash .claude/scripts/impact-report.sh <task-id>`. A report with `server: "absent"` is the documented degradation (code-graph not installed/bootable): approve accepts it, but YOU must then do the impact pass manually (grep/code_search) and record the degradation in `llm_observations`. The bypass (`approve --no-impact-report '<reason>'`) exists for genuine emergencies only; the reason lands in the audit trail.
 
 ```
 # Step 1 — the FIRST thing you do on every review with fileWrites > 0:
+cat .claude/.qa-tracking/impact-report-<task-id>.json   # per-file impact, pre-computed
+# Step 2 — symbol-level follow-ups the per-file report can't answer:
 impact_of({symbol: "<changed-symbol>", max_depth: 5})
-# When the whole file is the change unit (e.g. a hook script):
+# (The file-seed form is what the report already ran for every changed file:)
 impact_of({file: ".claude/scripts/qa-gate.sh", max_depth: 5})
 ```
 
@@ -241,7 +245,7 @@ After the review modules (sections 3-4) and the root-cause framework (section 5)
 
 The grader is spawned by the root orchestrator in a separate context with no access to your conversation. Its entire input is the packet you assemble below; the orchestrator pastes the doc contents directly into the grader's prompt per `grader.md`'s input contract. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify claims against the packet — they do not let it browse the repo. Build the packet completely; an incomplete packet is itself a `needs_revision` finding the grader will surface.
 
-The packet is six items:
+The packet is seven items:
 
 1. **`bd show <task-id>` output** — the canonical task record:
 
@@ -295,6 +299,14 @@ The packet is six items:
        cat "$CLAUDE_PROJECT_DIR/.claude/rubrics/bugfix.md"
    fi
    ```
+
+7. **The mechanical impact report** (G2.n6d) — the per-file `impact_of` artifact `qa-gate.sh enter` generated for this cycle. Guaranteed present for any task that entered the gate (the approve refusal enforces it), so the grader can score regression-coverage claims against actual caller data instead of prose:
+
+   ```bash
+   cat "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/impact-report-$TASK_ID.json"
+   ```
+
+   Fold its high-fan-in hits into the regression claims the packet makes. If files changed since enter (stale hash), regenerate first — `bash .claude/scripts/impact-report.sh $TASK_ID` — because approve will refuse a stale artifact anyway. A `server: "absent"` report is included as-is with a note that the impact pass was manual (3a's degradation contract).
 
 Iteration counter: this starts at 1 on the first grading pass. The orchestrator increments it by 1 each relay round-trip and includes the current value in the packet header it pastes to the grader. The counter is grader-input only — `qa-gate.sh grade-record` records whatever value the grader echoes back in its verdict.
 

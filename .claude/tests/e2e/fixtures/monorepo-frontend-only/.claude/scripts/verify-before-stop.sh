@@ -83,7 +83,19 @@ log_sync_error() {
 }
 
 # Denylist (B6).
-DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
+#
+# G2.gate-friction (claude-workflow-plugin-llh.3): added `.claude/worktrees/`.
+# Worktree scratch dirs are harness-internal transient state created by
+# isolation:"worktree" agents and the e2e fixture runner — never code under
+# review. A Stop firing while such a path is dirty (the run's own teardown
+# reverts it minutes later) used to trip CODE_CHANGES_DETECTED and produce a
+# false QA-required block. Classifying it here keeps it out of the change-set
+# entirely (same treatment as node_modules / build artifacts). NOTE: we do
+# NOT denylist `.beads/` or `.qa-tracking/` here — those are handled by the
+# fast-path classifier below (is_fastpath_only_change), which auto-approves
+# with an audited comment rather than silently dropping the paths, so the
+# beads-state churn still appears in the audit trail.
+DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
 
 is_tracked_change() {
     local p="$1"
@@ -105,11 +117,65 @@ is_doc_only_path() {
     case "$p" in
         *.md|*.markdown|*.mdx|*.rst|*.txt) return 0 ;;
         */LICENSE|LICENSE|LICENSE.*) return 0 ;;
-        */CHANGELOG.md|CHANGELOG.md|*/CHANGELOG|CHANGELOG) return 0 ;;
+        # .md variants of CHANGELOG are already covered by *.md above; keep
+        # the extension-less forms here so e.g. plain `CHANGELOG` still wins.
+        */CHANGELOG|CHANGELOG) return 0 ;;
         */NOTICE|NOTICE|*/AUTHORS|AUTHORS) return 0 ;;
         */docs/*|docs/*) return 0 ;;
     esac
     return 1
+}
+
+# G2.gate-friction (claude-workflow-plugin-llh.3): beads-state / gate-
+# bookkeeping classifier. A path is "beads-or-gate state" — i.e., workflow
+# machinery, never reviewable source — if it is:
+#   - a Beads JSONL ledger:   .beads/*.jsonl (at any depth, incl. e2e fixtures)
+#   - the Beads sqlite db:     beads.db (or .beads/*.db)
+#   - gate bookkeeping:        anything under .claude/.qa-tracking/
+# These are the files a `qa-gate.sh enter` label-write and the gate's own
+# cache churn dirty. They are NOT denylisted (so they still show up in the
+# change-set / audit trail), but a change-set consisting SOLELY of them is
+# fast-path eligible (see is_fastpath_only_change + the F1 block below).
+is_beads_or_gate_path() {
+    local p="$1"
+    [ -z "$p" ] && return 1
+    case "$p" in
+        */.beads/*.jsonl|.beads/*.jsonl) return 0 ;;
+        */.beads/*.db|.beads/*.db) return 0 ;;
+        */beads.db|beads.db) return 0 ;;
+        # `*/.qa-tracking/*` already covers the canonical
+        # `.claude/.qa-tracking/...` location at any depth (the `.claude/`
+        # segment is absorbed by the leading `*/`).
+        */.qa-tracking/*|.qa-tracking/*) return 0 ;;
+    esac
+    return 1
+}
+
+# G2.gate-friction (claude-workflow-plugin-llh.3): is the post-denylist
+# change-set fast-path eligible on the beads/empty axis? Returns 0 (eligible)
+# when EITHER:
+#   (a) the change-set is empty after the denylist, OR
+#   (b) every member is beads-state / gate-bookkeeping (is_beads_or_gate_path).
+# Returns 1 (not eligible) the moment any real source path is present — that
+# is the anti-overreach guard: a mixed diff (beads + one .ts file) is a real
+# code change and MUST still go through the qa-approved-only release rule.
+#
+# Operates on the caller's ALL_CHANGED_FILES array (the same post-denylist set
+# CODE_CHANGES_DETECTED is derived from), passed by name-expansion so this
+# stays a pure function under `set -e`.
+is_fastpath_only_change() {
+    # "$@" is the already-filtered (post-denylist) change-set.
+    if [ "$#" -eq 0 ]; then
+        return 0   # (a) empty after denylist — nothing to review.
+    fi
+    local f
+    for f in "$@"; do
+        [ -z "$f" ] && continue
+        if ! is_beads_or_gate_path "$f"; then
+            return 1   # a real source path is present -> NOT fast-path.
+        fi
+    done
+    return 0   # (b) every member is beads-state / gate-bookkeeping.
 }
 
 # F3 (Phase 4 fix pass): the persisted helper file is the single source of
@@ -242,21 +308,113 @@ read_iteration() {
 # common case — technical checks pass but no QA approval at iter>=3 —
 # never saw the options. Factored into a helper so we can append it to
 # either reason string. $1 = task id (may be "<TASK_ID_NEEDED>").
+#
+# Spec 0.2: this block is now driven by qa-gate.sh choose <choice>; the
+# direct `qa-gate.sh approve` form still works (`choose approve` is a
+# thin wrapper around it). Wording mirrors the spec.
 j21_options_block() {
     local tid="$1"
     cat <<EOF
 
 ESCALATION: Iteration $ITER (>= $MAX_ITERATIONS). Use the J21 decision gate
-options to choose a path forward:
+options to choose a path forward (record via \`qa-gate.sh choose ...\` so
+the gate exits escalation):
 
 Options:
-  1. approve  — \`bash .claude/scripts/qa-gate.sh approve $tid '<summary>'\`
+  1. approve  — \`bash .claude/scripts/qa-gate.sh choose approve $tid '<summary>'\`
                 (only if you genuinely accept the findings as known/non-blocking)
-  2. continue — fix the underlying issue and re-run; gate re-evaluates from scratch.
-  3. tech-debt — \`bash .claude/scripts/tech-debt.sh add <severity> <file:line> <effort> '<description>' --bd-task\`
-                 to defer specific findings.
-  4. defer — leave gate qa-pending; surface to the user and stop iterating.
+  2. continue — \`bash .claude/scripts/qa-gate.sh choose continue $tid '<note>'\`
+                fix the underlying issue and re-run; clears qa-escalated and resets the iteration counter.
+  3. tech-debt — \`bash .claude/scripts/qa-gate.sh choose tech-debt $tid '<description>' [severity] [file:line] [effort]\`
+                 records a TECHNICAL_DEBT.md row + bd task, clears qa-escalated.
+  4. defer — \`bash .claude/scripts/qa-gate.sh choose defer $tid '<note>'\`
+             stops iteration; sets qa-deferred so the next Stop is allowed.
+
+If no choice is recorded by the NEXT Stop, the gate auto-selects option 4
+(defer) and surfaces the task on the next SessionStart.
 EOF
+}
+
+# Spec 0.2 helpers ------------------------------------------------------------
+#
+# Cache + label inspection for the escalation state machine. The verify
+# script uses these to:
+#   - read qa-escalated / qa-deferred labels on the active task
+#   - cache the most-recent test run so escalated Stops don't re-run the
+#     full suite each loop (the production bug we're fixing)
+#   - distinguish runner-failure ("environment broke") from
+#     assertion-failure ("the code is wrong") in the block reason
+#
+# State files live alongside the iteration counter (per-task keyed). They
+# survive across Stop fires until qa-gate.sh wipes them on
+# approve / re-enter / choose continue / choose tech-debt.
+
+# Path helpers ---------------------------------------------------------------
+last_test_rc_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-test-rc"; return; }
+    printf '%s/last-test-rc.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+last_failed_checks_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-failed-checks"; return; }
+    printf '%s/last-failed-checks.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+last_runner_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-runner"; return; }
+    printf '%s/last-runner.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+escalation_posted_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/escalation-posted"; return; }
+    printf '%s/escalation-posted.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+
+# task_has_label <task-id> <label> - 0 if present, 1 if absent or bd unavailable.
+# Mirrors qa-gate.sh's has_label but lives here so verify-before-stop can
+# read labels without sourcing qa-gate.sh.
+task_has_label() {
+    local tid="$1" label="$2"
+    [ -z "$tid" ] && return 1
+    command -v bd >/dev/null 2>&1 || return 1
+    [ -d "$PROJECT_DIR/.beads" ] || return 1
+    local labels
+    labels=$(bd show "$tid" --json 2>/dev/null \
+        | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null \
+        || echo "")
+    echo ",$labels," | grep -q ",$label,"
+}
+
+# Spec 0.2: classify a test failure as a runner/infrastructure issue vs.
+# assertion failure. Conservative heuristic — when in doubt we say
+# "assertion" (the existing wording) so we never mis-direct an
+# assertion failure to "fix the environment".
+#
+# Inputs:
+#   $1 - test exit code (numeric)
+#   $2 - tail of the test log
+#
+# Returns:
+#   prints "runner" or "assertion" on stdout.
+classify_test_failure() {
+    local rc="$1" tail_log="$2"
+    # Timeout has its own wording upstream; classify as assertion so the
+    # callsite keeps the dedicated "Tests timed out" message.
+    [ "$rc" = "124" ] && { printf 'assertion'; return; }
+    # Exit 127 = command not found; 126 = found but not executable.
+    # These are unambiguously environment problems — the runner itself
+    # did not start.
+    if [ "$rc" = "127" ] || [ "$rc" = "126" ]; then
+        printf 'runner'; return
+    fi
+    # Pattern probe over the log tail. Conservative — only patterns that
+    # are unambiguous runner-infra signals.
+    if [ -n "$tail_log" ] && printf '%s' "$tail_log" \
+            | grep -qE 'command not found|Cannot find module|No such file or directory|npm ERR! Missing script|No rule to make target|TS5057: Cannot find a tsconfig\.json|Error: Cannot find package|ENOENT.*node_modules|testcontainers.*TypeError'; then
+        printf 'runner'; return
+    fi
+    printf 'assertion'
 }
 
 # Compute a JSON-encoded summary of changes for J18 intent-routing context.
@@ -351,17 +509,49 @@ if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
     done < <(sort -u "$TRACKING_FILE" 2>/dev/null)
 fi
 
+# 0wk.2 fix: git-status fallback - but ONLY surface entries NEW since the
+# last qa-gate approval. The approved-baseline (written by qa-gate approve)
+# captures the git state that was approved. Subsequent stops are allowed
+# to slip through if the working tree matches the baseline (i.e., the
+# user opened the session, the gate fires, but nothing has been edited
+# since the last approval). Without this, every Stop hook fired
+# "0 file(s) changed - all require QA review" against the same
+# pre-existing uncommitted state -- the bug 0wk.2 closed.
+#
+# Strategy: diff CURRENT git status against BASELINE. If a line is in
+# current but not in baseline, it's a NEW change requiring review.
+# `comm -23 <a> <b>` prints lines in a but not in b; we sort both inputs.
+# Bash 3.2 supports process substitution (verified on macOS bash 3.2.57).
 if [ "$CODE_CHANGES_DETECTED" = false ] && [ -d "$PROJECT_DIR/.git" ]; then
-    while IFS= read -r line; do
-        path="${line#???}"
-        if is_tracked_change "$path"; then
-            CODE_CHANGES_DETECTED=true
-            ALL_CHANGED_FILES+=("$path")
-            if ! is_doc_only_path "$path"; then
-                DOC_ONLY=false
+    baseline_file="$QA_TRACKING_DIR/approved-baseline"
+    baseline=""
+    [ -f "$baseline_file" ] && baseline=$(cat "$baseline_file" 2>/dev/null || echo "")
+
+    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | sort)
+
+    # Diff: only entries in current that aren't in baseline.
+    if [ -z "$baseline" ]; then
+        # No baseline - any git-detected change is "new". This preserves
+        # the pre-0wk.2 behaviour for users who haven't yet approved
+        # anything (the gate fires on first edit, as expected).
+        new_entries=$(printf '%s\n' "$current" | grep -v '^$' || true)
+    else
+        new_entries=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
+    fi
+
+    if [ -n "$new_entries" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            path="${line#???}"
+            if is_tracked_change "$path"; then
+                CODE_CHANGES_DETECTED=true
+                ALL_CHANGED_FILES+=("$path")
+                if ! is_doc_only_path "$path"; then
+                    DOC_ONLY=false
+                fi
             fi
-        fi
-    done < <(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)
+        done <<< "$new_entries"
+    fi
 fi
 
 # If no changes at all, allow.
@@ -423,9 +613,40 @@ cross-repo case, never the gate."
     emit_block "$REASON"
 fi
 
-# F1: Doc-only fast path. Auto-approve via qa-gate.sh and short-circuit.
-# This MUST run before test/lint to avoid spending 1200s on README updates.
+# F1: fast path. Auto-approve via qa-gate.sh and short-circuit. MUST run
+# before test/lint to avoid spending 1200s on changes that need no review.
+#
+# Three eligible classes (FASTPATH_CLASS names which one fired, and lands in
+# the audit comment):
+#   doc-only     — every changed file is documentation (original F1).
+#   beads-state  — every changed file is beads ledger / gate bookkeeping
+#                  (.beads/*.jsonl, beads.db, .qa-tracking/*).
+#                  G2.gate-friction (claude-workflow-plugin-llh.3).
+#   empty        — nothing left after the denylist (belt-and-braces; the
+#                  "no changes" check above usually catches this first).
+#
+# ANTI-OVERREACH: a mixed change-set (beads + one real source file) is NOT
+# eligible — is_fastpath_only_change returns 1 the moment a non-beads source
+# path appears, so the qa-approved-only release rule stays intact for every
+# real code path. Doc-only precedence is preserved (it was here first).
+FASTPATH_CLASS=""
 if [ "$DOC_ONLY" = true ] && [ ${#ALL_CHANGED_FILES[@]} -gt 0 ]; then
+    FASTPATH_CLASS="doc-only"
+elif [ ${#ALL_CHANGED_FILES[@]} -eq 0 ]; then
+    # Empty post-denylist set. (The earlier "no changes -> allow" check only
+    # fires when CODE_CHANGES_DETECTED is false; this guards the rare path
+    # where detection set the flag but every member was denylist-filtered.)
+    if is_fastpath_only_change; then
+        FASTPATH_CLASS="empty"
+    fi
+elif is_fastpath_only_change "${ALL_CHANGED_FILES[@]}"; then
+    FASTPATH_CLASS="beads-state"
+fi
+
+if [ -n "$FASTPATH_CLASS" ]; then
+    # Audit text naming the class that fired (mirrors the original F1
+    # wording so existing log/observability greps still match on "F1").
+    FASTPATH_REASON="Auto-approved: $FASTPATH_CLASS change-set detected (F1 fast path) — no reviewable source changed."
     if [ -n "$CURRENT_TASK" ] && [ -x "$QA_GATE" ]; then
         # Auto-approve only if the task is currently pending (not already
         # approved/blocked). This idempotency is enforced inside qa-gate.sh
@@ -434,14 +655,14 @@ if [ "$DOC_ONLY" = true ] && [ ${#ALL_CHANGED_FILES[@]} -gt 0 ]; then
         case "$GATE_STATUS" in
             not-entered|entered|pending)
                 # Ensure the gate is entered first (so approve is well-formed).
-                "$QA_GATE" enter "$CURRENT_TASK" >/dev/null 2>&1 || log_sync_error "qa-gate enter failed during F1 doc-only fast path for $CURRENT_TASK"
-                "$QA_GATE" approve "$CURRENT_TASK" "Auto-approved: doc-only changes detected (F1 fast path)" >/dev/null 2>&1 || log_sync_error "qa-gate approve failed during F1 doc-only fast path for $CURRENT_TASK"
+                "$QA_GATE" enter "$CURRENT_TASK" >/dev/null 2>&1 || log_sync_error "qa-gate enter failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
+                "$QA_GATE" approve "$CURRENT_TASK" "$FASTPATH_REASON" >/dev/null 2>&1 || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
                 # Mark task as closed if bd is available. Beads 0.47.x uses
                 # status=closed (not "completed"); using the wrong value used
                 # to silently fail under `|| true`, so we log to sync-errors.log.
                 if command -v bd >/dev/null 2>&1; then
                     bd update "$CURRENT_TASK" --status closed 2>/dev/null \
-                        || log_sync_error "bd update --status closed failed for $CURRENT_TASK during F1 doc-only fast path"
+                        || log_sync_error "bd update --status closed failed for $CURRENT_TASK during F1 $FASTPATH_CLASS fast path"
                 fi
                 # Clean up tracking artifacts. Includes per-task iteration
                 # counter (legacy unscoped path is also cleared so users
@@ -453,9 +674,19 @@ if [ "$DOC_ONLY" = true ] && [ ${#ALL_CHANGED_FILES[@]} -gt 0 ]; then
                 echo "{}"; exit 0
                 ;;
         esac
+    elif [ "$FASTPATH_CLASS" = "beads-state" ] || [ "$FASTPATH_CLASS" = "empty" ]; then
+        # No active task AND nothing reviewable changed (beads/gate state or
+        # an empty post-denylist set). There is no code to gate, so allow
+        # immediately — blocking here is the exact false-block the bug report
+        # captured (a Stop fired right after a gate label-write, no task set,
+        # demanding QA on a `.beads/issues.jsonl | 2 +-` diff). doc-only with
+        # no task still falls through (it MAY carry reviewable intent a human
+        # wants to see; beads/empty never does).
+        log_sync_error "Stop allowed: $FASTPATH_CLASS change-set with no active task (nothing reviewable; F1 fast path)"
+        echo "{}"; exit 0
     fi
-    # No active task - we can't auto-approve, but we can still skip
-    # the test/lint pass since the changes are doc-only. Fall through to
+    # doc-only with no active task - we can't auto-approve, but we can still
+    # skip the test/lint pass since the changes are doc-only. Fall through to
     # the QA-required messaging with a hint.
 fi
 
@@ -466,90 +697,253 @@ fi
 ITERATION_FILE=$(iteration_file_for "$CURRENT_TASK")
 ITER=$(bump_iteration "$ITERATION_FILE")
 
+# Spec 0.2: escalation state machine. Read once and act before the suite
+# runs so we never repeat the four-loops-past-the-cap behaviour the bug
+# report captured. The label reads are best-effort — if bd is missing or
+# the task id is empty we fall through to the legacy "always run tests"
+# path so single-repo / no-Beads users see no regression.
+QA_DEFERRED=false
+QA_ESCALATED=false
+if [ -n "$CURRENT_TASK" ]; then
+    if task_has_label "$CURRENT_TASK" "qa-deferred"; then QA_DEFERRED=true; fi
+    if task_has_label "$CURRENT_TASK" "qa-escalated"; then QA_ESCALATED=true; fi
+fi
+
+# Spec 0.2 escape valve: if qa-deferred is set on the active task, allow
+# this Stop immediately. The user explicitly recorded "defer" (or the
+# gate auto-deferred after escalation went unanswered) — re-running the
+# block here would defeat the choice. Principle 6 says this is the
+# single audited Stop-hook escape; we don't touch labels or counters,
+# so a future re-enter on this task naturally resumes normal gating.
+if [ "$QA_DEFERRED" = "true" ]; then
+    log_sync_error "Stop allowed under qa-deferred label for $CURRENT_TASK (iteration $ITER)"
+    echo "{}"; exit 0
+fi
+
+# Spec 0.2 auto-defer: if qa-escalated has been set for at least one
+# prior Stop AND no recorded J21 choice has arrived in time, auto-pick
+# option 4 (defer). The threshold is one buffer iteration past the cap
+# — cap-hit (ITER=MAX) shows the J21 options, ITER=MAX+1 still blocks
+# under the escalation wording (giving the agent one more chance to
+# record a choice), and ITER>=MAX+2 auto-defers. This matches the L2
+# acceptance ("lands on a recorded J21 decision by iteration 5 at the
+# latest" with MAX=3 and a one-iteration warning buffer).
+if [ "$QA_ESCALATED" = "true" ] && [ -n "$CURRENT_TASK" ] && [ "$ITER" -gt $((MAX_ITERATIONS + 1)) ]; then
+    if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
+        bd label add "$CURRENT_TASK" qa-deferred >/dev/null 2>&1 \
+            || log_sync_error "auto-defer: bd label add qa-deferred failed for $CURRENT_TASK"
+        # Use bd comments (qa-gate.sh's add_comment wraps this pair) so
+        # the audit trail mirrors a manual `qa-gate.sh choose defer`.
+        AUTO_DEFER_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
+        AUTO_DEFER_NOTE="QA-GATE AUTO-DEFER at $AUTO_DEFER_TS: auto-deferred at iteration $ITER after escalation went unanswered; task remains qa-pending"
+        bd comments add "$CURRENT_TASK" "$AUTO_DEFER_NOTE" >/dev/null 2>&1 \
+            || bd comment add "$CURRENT_TASK" "$AUTO_DEFER_NOTE" >/dev/null 2>&1 \
+            || log_sync_error "auto-defer: comment add failed for $CURRENT_TASK"
+    fi
+    log_sync_error "Stop auto-deferred for $CURRENT_TASK at iteration $ITER (qa-escalated unanswered)"
+    echo "{}"; exit 0
+fi
+
 # F8/J17 + B3: detect runner and run test/lint/type-check with timeouts.
+# Spec 0.2: while qa-escalated is set we MUST NOT re-run the full suite;
+# we reuse whatever the cap-hit Stop cached. This was the production bug.
 RUNNER="none"
 TEST_CMD=""
 LINT_CMD=""
 TYPE_CMD=""
-if [ -x "$DETECT_STACK" ]; then
-    DETECT_JSON=$("$DETECT_STACK" 2>/dev/null || echo "{}")
-    RUNNER=$(echo "$DETECT_JSON" | jq -r '.runner // "none"' 2>/dev/null || echo "none")
-    TEST_CMD=$(echo "$DETECT_JSON" | jq -r '.test_cmd // ""' 2>/dev/null || echo "")
-    LINT_CMD=$(echo "$DETECT_JSON" | jq -r '.lint_cmd // ""' 2>/dev/null || echo "")
-    TYPE_CMD=$(echo "$DETECT_JSON" | jq -r '.type_cmd // ""' 2>/dev/null || echo "")
-fi
-
-# J19: regression-coverage framing. We always run the FULL test suite +
-# FULL type-check (when configured), not just for changed files. This is
-# essential because changes in module A might break module B's contract;
-# only running A's tests would miss B's failure. Document this in the
-# block reason when checks fail so the operator (or Claude) understands
-# why the suite is wider than the diff.
 
 FAILED_CHECKS=""
 TEST_FAIL_TAIL=""
 LINT_FAIL_TAIL=""
 TYPE_FAIL_TAIL=""
+TEST_FAIL_CLASS=""        # "runner" | "assertion" | "" (set when we re-run or replay)
+SUITE_REUSED=false        # true when this Stop reused cached results
 
-# NOTE on capturing exit codes under `set -e`:
-#   The pattern `if ! cmd; then rc=$?; fi` is BROKEN under `set -e` because
-#   the `if !` branch resets `$?` to 0 before the inner block runs. We must
-#   capture rc in the same statement as the call itself, e.g.:
-#       rc=0; cmd || rc=$?
-#   This preserves the real exit code (124 for GNU `timeout`, anything else
-#   for genuine failures) so downstream branches can distinguish timeout
-#   from failure.
+if [ "$QA_ESCALATED" = "true" ]; then
+    # Replay the cached state. If anything is missing we fall back to
+    # treating this as a generic block — better than running the suite
+    # under escalation, which would reintroduce the bug. We do not
+    # currently consume last-test-rc on the replay path (the cached
+    # FAILED_CHECKS already carries the rendered wording), but the file
+    # exists for diagnostics / future use.
+    LFC_FILE=$(last_failed_checks_file_for "$CURRENT_TASK")
+    LRN_FILE=$(last_runner_file_for "$CURRENT_TASK")
+    if [ -s "$LFC_FILE" ]; then
+        # Prefer the literal-newline form of the previously rendered
+        # FAILED_CHECKS so we don't need to re-derive the tail. The
+        # file may contain plain text including the rendered tails;
+        # we just slurp it.
+        FAILED_CHECKS=$(cat "$LFC_FILE" 2>/dev/null || echo "")
+    fi
+    [ -s "$LRN_FILE" ] && RUNNER=$(head -1 "$LRN_FILE" | tr -d '\r\n')
+    SUITE_REUSED=true
+else
+    if [ -x "$DETECT_STACK" ]; then
+        DETECT_JSON=$("$DETECT_STACK" 2>/dev/null || echo "{}")
+        RUNNER=$(echo "$DETECT_JSON" | jq -r '.runner // "none"' 2>/dev/null || echo "none")
+        TEST_CMD=$(echo "$DETECT_JSON" | jq -r '.test_cmd // ""' 2>/dev/null || echo "")
+        LINT_CMD=$(echo "$DETECT_JSON" | jq -r '.lint_cmd // ""' 2>/dev/null || echo "")
+        TYPE_CMD=$(echo "$DETECT_JSON" | jq -r '.type_cmd // ""' 2>/dev/null || echo "")
+    fi
 
-if [ -n "$TEST_CMD" ]; then
+    # J19: regression-coverage framing. We always run the FULL test suite
+    # + FULL type-check (when configured), not just for changed files.
+    # This is essential because changes in module A might break module B's
+    # contract; only running A's tests would miss B's failure. Document
+    # this in the block reason when checks fail so the operator (or
+    # Claude) understands why the suite is wider than the diff.
+    #
+    # NOTE on capturing exit codes under `set -e`:
+    #   The pattern `if ! cmd; then rc=$?; fi` is BROKEN under `set -e`
+    #   because the `if !` branch resets `$?` to 0 before the inner block
+    #   runs. We must capture rc in the same statement as the call
+    #   itself, e.g.:
+    #       rc=0; cmd || rc=$?
+    #   This preserves the real exit code (124 for GNU `timeout`, anything
+    #   else for genuine failures) so downstream branches can distinguish
+    #   timeout from failure.
+
     test_rc=0
-    run_with_timeout "$TEST_TIMEOUT_S" "$TEST_LOG" "$TEST_CMD" || test_rc=$?
-    if [ "$test_rc" -ne 0 ]; then
-        if [ "$test_rc" = "124" ]; then
-            FAILED_CHECKS+="- Tests timed out after ${TEST_TIMEOUT_S}s — see $TEST_LOG\n"
-        else
-            FAILED_CHECKS+="- Tests failing (exit $test_rc) — see $TEST_LOG\n"
+    if [ -n "$TEST_CMD" ]; then
+        run_with_timeout "$TEST_TIMEOUT_S" "$TEST_LOG" "$TEST_CMD" || test_rc=$?
+        if [ "$test_rc" -ne 0 ]; then
+            TEST_FAIL_TAIL=$(log_tail "$TEST_LOG" 50)
+            # Spec 0.2: classify runner-vs-assertion BEFORE composing
+            # the failure header so we lead with the right wording.
+            TEST_FAIL_CLASS=$(classify_test_failure "$test_rc" "$TEST_FAIL_TAIL")
+            if [ "$test_rc" = "124" ]; then
+                FAILED_CHECKS+="- Tests timed out after ${TEST_TIMEOUT_S}s — see $TEST_LOG\n"
+            elif [ "$TEST_FAIL_CLASS" = "runner" ]; then
+                # Lead with the environment/runner hint per spec 0.2 so
+                # the next iteration targets the environment first.
+                FAILED_CHECKS+="- Test suite failed to run (environment/runner issue — fix the environment before changing code): exit $test_rc — see $TEST_LOG\n"
+            else
+                FAILED_CHECKS+="- Tests failing (exit $test_rc) — see $TEST_LOG\n"
+            fi
         fi
-        TEST_FAIL_TAIL=$(log_tail "$TEST_LOG" 50)
+    fi
+
+    if [ -n "$LINT_CMD" ]; then
+        lint_rc=0
+        run_with_timeout "$LINT_TIMEOUT_S" "$LINT_LOG" "$LINT_CMD" || lint_rc=$?
+        if [ "$lint_rc" -ne 0 ]; then
+            if [ "$lint_rc" = "124" ]; then
+                FAILED_CHECKS+="- Lint timed out after ${LINT_TIMEOUT_S}s — see $LINT_LOG\n"
+            else
+                FAILED_CHECKS+="- Lint errors (exit $lint_rc) — see $LINT_LOG\n"
+            fi
+            LINT_FAIL_TAIL=$(log_tail "$LINT_LOG" 50)
+        fi
+    fi
+
+    if [ -n "$TYPE_CMD" ]; then
+        type_rc=0
+        run_with_timeout "$TYPE_TIMEOUT_S" "$TYPE_LOG" "$TYPE_CMD" || type_rc=$?
+        if [ "$type_rc" -ne 0 ]; then
+            if [ "$type_rc" = "124" ]; then
+                FAILED_CHECKS+="- Type-check timed out after ${TYPE_TIMEOUT_S}s — see $TYPE_LOG\n"
+            else
+                FAILED_CHECKS+="- Type-check failing (exit $type_rc) — see $TYPE_LOG\n"
+            fi
+            TYPE_FAIL_TAIL=$(log_tail "$TYPE_LOG" 50)
+        fi
+    fi
+
+    # Spec 0.2: persist what we just observed so the next Stop, if it
+    # arrives while qa-escalated, can replay without re-running the
+    # suite. We persist regardless of pass/fail — qa-gate.sh wipes the
+    # files on approve/enter/choose so a stale cache can't follow a
+    # task across cycles.
+    if [ -n "$CURRENT_TASK" ]; then
+        printf '%s' "$test_rc" > "$(last_test_rc_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        printf '%s' "$RUNNER" > "$(last_runner_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        # We persist the rendered failure body (already includes the
+        # leading "- " bullets and the trailing newline). Including the
+        # tails would bloat the cache — they get re-derived from the
+        # log files which we leave on disk in the same dir.
+        if [ -n "$FAILED_CHECKS" ]; then
+            printf '%s' "$FAILED_CHECKS" > "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        else
+            # Tech-checks passed; clear any stale cache so a future
+            # cap-hit while passing tech checks doesn't replay an old
+            # failure summary.
+            rm -f "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        fi
     fi
 fi
 
-if [ -n "$LINT_CMD" ]; then
-    lint_rc=0
-    run_with_timeout "$LINT_TIMEOUT_S" "$LINT_LOG" "$LINT_CMD" || lint_rc=$?
-    if [ "$lint_rc" -ne 0 ]; then
-        if [ "$lint_rc" = "124" ]; then
-            FAILED_CHECKS+="- Lint timed out after ${LINT_TIMEOUT_S}s — see $LINT_LOG\n"
-        else
-            FAILED_CHECKS+="- Lint errors (exit $lint_rc) — see $LINT_LOG\n"
-        fi
-        LINT_FAIL_TAIL=$(log_tail "$LINT_LOG" 50)
+# Spec 0.2: at the moment we first reach the cap, record qa-escalated +
+# post the J21 options comment exactly once. The comment marker file
+# prevents re-posting on subsequent escalated loops (idempotent).
+mark_escalation_if_capped() {
+    local tid="$1"
+    [ -z "$tid" ] && return 0
+    if [ "$ITER" -lt "$MAX_ITERATIONS" ]; then
+        return 0
     fi
-fi
-
-if [ -n "$TYPE_CMD" ]; then
-    type_rc=0
-    run_with_timeout "$TYPE_TIMEOUT_S" "$TYPE_LOG" "$TYPE_CMD" || type_rc=$?
-    if [ "$type_rc" -ne 0 ]; then
-        if [ "$type_rc" = "124" ]; then
-            FAILED_CHECKS+="- Type-check timed out after ${TYPE_TIMEOUT_S}s — see $TYPE_LOG\n"
-        else
-            FAILED_CHECKS+="- Type-check failing (exit $type_rc) — see $TYPE_LOG\n"
-        fi
-        TYPE_FAIL_TAIL=$(log_tail "$TYPE_LOG" 50)
+    if [ "$QA_ESCALATED" = "true" ]; then
+        return 0  # already escalated; no relabel, no relog
     fi
-fi
+    if ! command -v bd >/dev/null 2>&1 || [ ! -d "$PROJECT_DIR/.beads" ]; then
+        return 0
+    fi
+    # Label.
+    bd label add "$tid" qa-escalated >/dev/null 2>&1 \
+        || log_sync_error "mark_escalation: bd label add qa-escalated failed for $tid"
+    # One comment, idempotent via marker file.
+    local marker
+    marker=$(escalation_posted_file_for "$tid")
+    if [ ! -f "$marker" ]; then
+        local ts options_text
+        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
+        options_text=$(j21_options_block "$tid")
+        bd comments add "$tid" "QA-GATE ESCALATED at $ts (iteration $ITER >= $MAX_ITERATIONS).$options_text" >/dev/null 2>&1 \
+            || bd comment add "$tid" "QA-GATE ESCALATED at $ts (iteration $ITER >= $MAX_ITERATIONS).$options_text" >/dev/null 2>&1 \
+            || log_sync_error "mark_escalation: comment add failed for $tid"
+        : > "$marker" 2>/dev/null || true
+    fi
+    QA_ESCALATED=true
+}
 
 # J19: iterative loop. If checks fail, surface tail + iteration count +
 # escalation hint when MAX_ITERATIONS is reached.
 if [ -n "$FAILED_CHECKS" ]; then
-    REASON="Verification failed (iteration $ITER of $MAX_ITERATIONS).
+    # Spec 0.2: at cap-hit, transition to escalated state (idempotent).
+    # We do this BEFORE composing REASON so the wording can branch on
+    # the post-transition QA_ESCALATED.
+    mark_escalation_if_capped "${CURRENT_TASK:-}"
+
+    if [ "$QA_ESCALATED" = "true" ]; then
+        # Spec 0.2 wording: "escalated — record a J21 choice before
+        # iterating further." Lead with the escalation banner; include
+        # the cached failure summary so the agent still sees why.
+        REASON="Verification gate ESCALATED (iteration $ITER of $MAX_ITERATIONS; cap reached) — record a J21 choice before iterating further."
+        if [ "$SUITE_REUSED" = "true" ]; then
+            REASON="$REASON
+
+Cached failure summary (test suite NOT re-run this loop per the
+escalation contract — see qa-gate.sh choose ...):
+
+$FAILED_CHECKS"
+        else
+            REASON="$REASON
+
+Last failure summary:
+
+$FAILED_CHECKS"
+        fi
+    else
+        REASON="Verification failed (iteration $ITER of $MAX_ITERATIONS).
 
 $FAILED_CHECKS
 
 Regression coverage note: this gate runs the FULL test suite + FULL
 type-check on every iteration, not just tests for changed files. Changes
 to module A might break module B's contract; only running A's tests
-would miss B's failure.
+would miss B's failure."
+    fi
+
+    REASON="$REASON
 
 Detected runner: $RUNNER"
 
@@ -598,6 +992,13 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
 fi
 
 if [ "$QA_APPROVED" = false ]; then
+    # Spec 0.2: at cap-hit, transition to escalated state (idempotent).
+    # The QA-required path is the more common cap-hit case (clean tech
+    # checks waiting on QA), so escalation must fire here too — without
+    # this, an iteration-7 transcript like the bug report shows the
+    # J21 options block but no qa-escalated label.
+    mark_escalation_if_capped "${CURRENT_TASK:-}"
+
     # J18: surface intent-routing payload (LLM, not regex, decides scope).
     INTENT_JSON=$(compute_intent_payload)
 
@@ -641,9 +1042,19 @@ No active Beads task detected. Create one (and write its id via
     # J18: include the intent payload as a JSON block. The orchestrator/QA
     # agent reads this to decide which review pass to invoke (security,
     # perf, a11y, etc.) — driven by reading the diff, NOT regex.
-    REASON="QA approval required (iteration $ITER, runner=$RUNNER, technical checks passed).
+    # Spec 0.2: when escalated, lead with the escalation wording (the cap
+    # is what we're enforcing; the suite-reuse note disambiguates from
+    # the FAILED_CHECKS path which DOES surface a failure summary).
+    if [ "$QA_ESCALATED" = "true" ]; then
+        REASON="QA approval required — gate ESCALATED (iteration $ITER of $MAX_ITERATIONS; cap reached) — record a J21 choice before iterating further. Test suite NOT re-run this loop per the escalation contract (runner=$RUNNER, technical checks previously passed).
 
-$CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE
+$CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
+    else
+        REASON="QA approval required (iteration $ITER, runner=$RUNNER, technical checks passed).
+
+$CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
+    fi
+    REASON="$REASON
 
 Files changed:
 $CHANGED_FILES
@@ -668,6 +1079,18 @@ Read the intent payload above and decide which review modules to run
 appear in filenames.
 
 Checklist:
+- FIRST: read the mechanical impact report at
+  .claude/.qa-tracking/impact-report-$TASK_ID.json — qa-gate.sh enter
+  already ran impact_of (code-graph MCP) over every changed file and
+  persisted the results there, and qa-gate.sh approve REFUSES when that
+  artifact is missing or stale (regenerate:
+  bash .claude/scripts/impact-report.sh $TASK_ID). Fold the high-fan-in
+  callers it surfaces into the regression assessment; make follow-up
+  impact_of calls (mcp__plugin_claude-workflow_code-graph) only for
+  symbol-level questions the per-file report leaves open. A report with
+  server: absent means the code-graph server was unavailable — note that
+  degradation in llm_observations and fall back to grep/code_search for
+  the impact pass.
 - Tests cover user behavior (not implementation)
 - Critical user journeys tested
 - Failure modes handled
@@ -760,6 +1183,13 @@ rm -f "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null || true
 rm -f "$QA_TRACKING_DIR/edit-count" 2>/dev/null || true
 rm -f "$ITERATION_FILE" 2>/dev/null || true
 rm -f "$ITERATION_FILE_LEGACY" 2>/dev/null || true
+# Spec 0.2: clear per-task escalation cache so a future cycle starts fresh.
+if [ -n "$CURRENT_TASK" ]; then
+    rm -f "$(last_test_rc_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    rm -f "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    rm -f "$(last_runner_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    rm -f "$(escalation_posted_file_for "$CURRENT_TASK")" 2>/dev/null || true
+fi
 
 # B2: if the epic gate had something to surface, emit it as a non-blocking
 # note via additionalContext. Otherwise emit a clean {}.
