@@ -424,7 +424,15 @@ file: `.qa-tracking/approved` is never read.
 
 ### Bypass (Emergency Only)
 
-User can `Ctrl+C` to interrupt, but this is tracked and visible.
+A `Ctrl+C` interrupt does end the turn: when the Stop hook fires with
+`stop_reason=user_interrupt` it emits `{}` and exits 0 immediately, before
+running any check or writing any artifact (`verify-before-stop.sh:543-545`).
+This pass-through is deliberate — it is the same anti-loop guard that lets
+the hook bail out on `stop_hook_active` (`:538-540`, AgentLint H3) so the
+gate can never trap the user in a forced continuation. It is **not** tracked
+or recorded anywhere: the interrupt leaves no Beads label, no comment, and
+no `sync-errors.log` entry. The task simply stays at whatever gate state it
+held, so the next non-interrupted Stop re-evaluates it normally.
 
 ---
 

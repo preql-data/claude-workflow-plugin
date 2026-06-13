@@ -426,10 +426,10 @@ assert_contains "qa-gate mut(enter L481): new-enter obs reports 'cleared stale r
 # assertion would FAIL), confirming sensitivity.
 REAL_QG_CL=$(readlink "$QG_CL" || printf '%s' "$QG_CL")
 QG_CL_MUT="$FIXTURE_CL/qa-gate-enter396mut.sh"
-awk 'NR==396 && /was_escalated" = "1"/ {print "    if [ \"$was_escalated\" != \"1\" ] || [ \"$was_deferred\" = \"1\" ]; then"; next} {print}' \
+awk 'NR==408 && /was_escalated" = "1"/ {print "    if [ \"$was_escalated\" != \"1\" ] || [ \"$was_deferred\" = \"1\" ]; then"; next} {print}' \
     "$REAL_QG_CL" > "$QG_CL_MUT"
 chmod +x "$QG_CL_MUT"
-QG_CL_MUT_LANDED=$(sed -n '396p' "$QG_CL_MUT" | grep -c 'was_escalated" != "1"' || true)
+QG_CL_MUT_LANDED=$(sed -n '408p' "$QG_CL_MUT" | grep -c 'was_escalated" != "1"' || true)
 QG_CL_MUT_LANDED=$(printf '%s' "$QG_CL_MUT_LANDED" | tr -d '[:space:]')
 assert_eq "qa-gate META: L396 guard mutation applied to copy" "1" "$QG_CL_MUT_LANDED"
 TID_META396=$(cd "$FIXTURE_CL" && bd create "meta L396" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
@@ -482,5 +482,60 @@ assert_eq "qa-gate mut(approve-rollback L680): rollback re-adds qa-gate-entered 
 # And qa-approved must NOT remain (it was rolled back).
 RB_APPROVED=$(has_lbl "$TID_RB" "qa-approved" && echo present || echo absent)
 assert_eq "qa-gate mut(approve-rollback L680): qa-approved rolled back" "absent" "$RB_APPROVED"
+
+# ===========================================================================
+# Change-set-bound approval record (G2 red-team / claude-workflow-plugin-llh.18).
+#
+# approve must write a TAMPER-EVIDENT record carrying the change_set_hash of
+# the approved change-set — the binding that lets verify-before-stop.sh
+# distinguish a real qa-gate.sh approve from a forged bare `bd label add
+# qa-approved`. The hash MUST equal impact-report.sh --hash-only of the
+# change-set that was current at approve time.
+mk_fixture
+FIXTURE_BIND="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+QG_BIND="$FIXTURE_BIND/.claude/scripts/qa-gate.sh"
+IR_BIND="$FIXTURE_BIND/.claude/scripts/impact-report.sh"
+TRACK_BIND="$FIXTURE_BIND/.claude/.qa-tracking"
+bind_hash_of_record() {
+    bd show "$1" --json 2>/dev/null \
+        | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
+                 | select(test("QA-GATE APPROVED .*change_set_hash="))
+                 | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | head -1
+}
+TID_BIND=$(cd "$FIXTURE_BIND" && bd create "approve writes bound record" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/bound-change.ts\n' > "$TRACK_BIND/changed-files.txt"
+bash "$QG_BIND" enter "$TID_BIND" >/dev/null 2>&1   # generates a fresh impact report
+# Capture the EXPECTED hash BEFORE approve runs — approve truncates
+# changed-files.txt as a last step (0wk.2), so a post-approve --hash-only
+# would return the empty-set hash, not the approved change-set's.
+BIND_EXP_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_BIND" bash "$IR_BIND" --hash-only 2>/dev/null || echo "")
+BIND_OUT=$(bash "$QG_BIND" approve "$TID_BIND" "reviewed; binding test" 2>/dev/null)
+assert_json_field "qa-gate llh18: approve succeeds (fresh report)" "$BIND_OUT" '.status' "approved"
+# The approval comment carries a change_set_hash token.
+BIND_REC_HASH=$(bind_hash_of_record "$TID_BIND")
+assert_eq "qa-gate llh18: approve wrote a change_set_hash record" "0" \
+    "$([ -n "$BIND_REC_HASH" ] && echo 0 || echo 1)"
+# And that recorded hash equals the canonical --hash-only of the change-set
+# that was current at approve time.
+assert_eq "qa-gate llh18: recorded change_set_hash == impact-report.sh --hash-only (at approve time)" \
+    "$BIND_EXP_HASH" "$BIND_REC_HASH"
+# approve's observations surface the binding.
+assert_contains "qa-gate llh18: approve obs reports the change-set binding" \
+    "change-set-bound approval record written" "$BIND_OUT"
+
+# Bypass path (--no-impact-report) still binds: the hash is the current
+# change-set's, recorded even though the impact-report refusal was waived.
+TID_BIND_BP=$(cd "$FIXTURE_BIND" && bd create "bypass still binds" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/bypass-bound.ts\n' > "$TRACK_BIND/changed-files.txt"
+bash "$QG_BIND" enter "$TID_BIND_BP" >/dev/null 2>&1
+rm -f "$TRACK_BIND/impact-report-$(printf '%s' "$TID_BIND_BP" | tr -c 'A-Za-z0-9._-' '_').json"
+# Capture the expected hash before approve truncates the tracker.
+BP_EXP_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_BIND" bash "$IR_BIND" --hash-only 2>/dev/null || echo "")
+BP_OUT=$(bash "$QG_BIND" approve "$TID_BIND_BP" --no-impact-report "ops emergency" "bypass approval" 2>/dev/null)
+assert_json_field "qa-gate llh18: bypass approve succeeds" "$BP_OUT" '.status' "approved"
+BP_REC_HASH=$(bind_hash_of_record "$TID_BIND_BP")
+assert_eq "qa-gate llh18: bypass path still writes a matching change_set_hash record" \
+    "$BP_EXP_HASH" "$BP_REC_HASH"
 
 [ "$FAIL" -eq 0 ]

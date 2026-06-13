@@ -220,6 +220,18 @@ impact_report_path_for() {
     printf '%s/impact-report-%s.json' "$QA_TRACKING_DIR" "$sanitized"
 }
 
+# llh.18 (red-team P0/P1): the CANONICAL change-set hash, sourced from the
+# ONE place that defines the canonicalisation — impact-report.sh --hash-only.
+# We deliberately do NOT re-implement the sort/denylist/sha here (the
+# denylist regex already lives in 3 copies; a 4th would be a fresh drift
+# surface). Printing empty on any failure is intentional: the caller decides
+# whether an unverifiable hash is fatal (approve's refusal block) or merely
+# omits the change-set binding (best-effort comment write).
+compute_change_set_hash() {
+    [ -f "$IMPACT_REPORT_SCRIPT" ] || { printf ''; return 1; }
+    CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || printf ''
+}
+
 # generate_impact_report <task-id> — best-effort invocation for enter.
 # Sets IMPACT_REPORT_OBS (appended to enter's JSON observations) and
 # returns 0/1. NEVER allowed to fail the enter flow: failures are logged
@@ -626,10 +638,7 @@ cmd_approve() {
                 "qa-gate.sh approve <task-id> [--no-impact-report '<reason>'] <summary>"
             exit 2
         fi
-        current_hash=""
-        if [ -f "$IMPACT_REPORT_SCRIPT" ]; then
-            current_hash=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || echo "")
-        fi
+        current_hash=$(compute_change_set_hash)
         if [ -z "$current_hash" ]; then
             emit_error_json "approve" "$tid" "impact_report_unverifiable" \
                 "approve refused: cannot recompute the current change-set hash ($IMPACT_REPORT_SCRIPT missing or failing), so the report's freshness is unverifiable. Restore the script, or bypass: bash .claude/scripts/qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'" \
@@ -645,6 +654,23 @@ cmd_approve() {
         impact_obs="; impact-report verified (change_set_hash match: $current_hash)"
     fi
     # IMPACT-REPORT-REFUSAL END (G2.n6d / claude-workflow-plugin-llh.2)
+
+    # llh.18 (red-team P0/P1): capture the canonical change-set hash that
+    # this approval covers. Declared OUTSIDE the sentinel block above so:
+    #   (a) the bypass path (which skips the refusal) still binds the
+    #       approval to a change-set, and
+    #   (b) the META-TEST's stripped copy (sentinels removed) still writes a
+    #       change-set-bound record — keeping the stripped copy coherent.
+    # The non-bypass path already computed current_hash inside the refusal
+    # block; we recompute here unconditionally so the value exists on every
+    # path. compute_change_set_hash prints empty on failure; an empty hash
+    # degrades to the legacy unbound comment (logged) rather than aborting
+    # the approval (labels remain the lifecycle source of truth).
+    local approved_hash
+    approved_hash=$(compute_change_set_hash)
+    if [ -z "$approved_hash" ]; then
+        log_sync_error "approve: could not compute change_set_hash for $tid (impact-report.sh missing/failing); writing approval comment WITHOUT a change-set binding — verify-before-stop will not be able to match it (re-run approve once impact-report.sh is restored)"
+    fi
 
     # Step 1: add qa-approved (the source of truth).
     if ! add_label "$tid" "qa-approved"; then
@@ -689,12 +715,38 @@ cmd_approve() {
     # Step 4: comment with summary (non-fatal — labels are the source of truth).
     # G2.n6d: a bypass reason is appended so the audit trail names WHY the
     # mechanical impact gate was waived for this approval.
+    #
+    # llh.18 (red-team P0/P1): the comment is now the TAMPER-EVIDENT APPROVAL
+    # RECORD that binds this approval to the reviewed change-set. The
+    # `change_set_hash=<h>` token is what verify-before-stop.sh reads back and
+    # matches against the CURRENT change-set hash before releasing. The label
+    # `qa-approved` remains necessary (status precedence, idempotency); the
+    # change-set-bound record is now ADDITIONALLY required at Stop time. A bare
+    # `bd label add <task> qa-approved` writes no such record → Stop blocks
+    # (P0); a decoy-task approval records the decoy's hash, not the shipping
+    # change-set's → Stop blocks (P1); a post-approval edit shifts the current
+    # hash away from the recorded one → Stop blocks (re-review).
+    #
+    # THREAT-MODEL BOUNDARY (documented, NOT overclaimed): an agent with
+    # arbitrary shell + the hash tool could still forge this very comment
+    # (`bd comment add "QA-GATE APPROVED change_set_hash=$(impact-report.sh
+    # --hash-only)"`). This fix raises the bar from "trivially-forgeable
+    # label" to "must reproduce a change-set-bound record", defeats
+    # accidental / lazy / bare-`bd label add` drift, and binds approval to the
+    # reviewed files (P1) — it is NOT a cryptographic sandbox against a
+    # determined adversary. A signed/HMAC'd record keyed on a secret the
+    # gated process cannot read would be required for that, which the
+    # full-shell autonomy model (no secrets withheld from agents) precludes.
     local ts comment_suffix=""
     if [ "$bypass_impact" = "1" ]; then
         comment_suffix=" [impact-report bypass: $bypass_reason]"
     fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    add_comment "$tid" "QA-GATE APPROVED at $ts: $summary$comment_suffix"
+    local hash_field=""
+    if [ -n "$approved_hash" ]; then
+        hash_field="change_set_hash=$approved_hash "
+    fi
+    add_comment "$tid" "QA-GATE APPROVED ${hash_field}at $ts: $summary$comment_suffix"
 
     # F3 + F4: clear active task and wipe per-iteration state. These are
     # the last-step side effects: if a previous step failed and rolled back,
@@ -738,7 +790,15 @@ cmd_approve() {
         rubric_obs="; no rubric labels present at approve (likely pre-Phase-A task)"
     fi
 
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs"
+    # llh.18: surface whether the approval was bound to a change-set hash.
+    local binding_obs
+    if [ -n "$approved_hash" ]; then
+        binding_obs="; change-set-bound approval record written (change_set_hash=$approved_hash) — verify-before-stop will release only while the current change-set matches this hash"
+    else
+        binding_obs="; WARNING approval comment written WITHOUT a change-set binding (hash unavailable) — verify-before-stop cannot match it; re-run approve once impact-report.sh is restored"
+    fi
+
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs$binding_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The

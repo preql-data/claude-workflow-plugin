@@ -838,6 +838,69 @@ describe("invariant: qa-queried-impact-of (n6d mechanical signature)", () => {
     expect(r.detail).toMatch(/--no-impact-report|bypass/i);
   });
 
+  // -- llh.16: Branch B tightening (footprint-alone is no longer a PASS) ------
+  // A hand-built trace that merely MENTIONS the artifact path (echo/grep) with
+  // NO unbypassed approve used to trip the loose artifactPattern and green the
+  // invariant via the footprint-alone branch. It now SKIPs ("consultation
+  // footprint present but no in-scope approve to confirm"): the only defensible
+  // PASS is footprint + an unbypassed approve (Branch A), because approve
+  // refuses without a fresh artifact.
+  it("OVER-MATCH (llh.16): a bare echo/grep mention of impact-report-*.json with NO approve -> SKIP, not PASS", () => {
+    const t = impactN6dPositiveTrace();
+    // Drop the real unbypassed approve so only a footprint-shaped MENTION
+    // remains — the over-match the loose artifactPattern is vulnerable to.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-gate-approve");
+    // Swap the genuine `cat` for a no-op `echo`/`grep` that merely NAMES the
+    // artifact path: a hand-built mention, not a real consultation.
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-cat-report"
+        ? {
+            ...c,
+            input: {
+              command: `echo "see .claude/.qa-tracking/impact-report-${N6D_TASK_ID}.json" && grep -l impact-report.sh /dev/null || true`,
+            },
+          }
+        : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    // The headline assertion: a mention alone must NOT green the invariant.
+    expect(r.pass && !r.skipped).toBe(false);
+    expect(r.skipped).toBe(true);
+    expect(r.detail).toMatch(/footprint present.*no in-scope|consultation footprint/i);
+    // And it must NOT be reported as a failure (the approve may simply be out
+    // of the captured QA scope — under-claim to SKIP, do not retro-FAIL).
+    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
+    expect(agg.failed).toEqual([]);
+    expect(agg.skipped).toContain("qa-queried-impact-of");
+  });
+
+  it("POSITIVE stays PASS (llh.16): footprint + unbypassed approve still greens via Branch A (legit live signature unaffected)", () => {
+    // The exact live signature: artifact footprint AND an unbypassed approve.
+    // The Branch B tightening must NOT touch this — it PASSes via Branch A
+    // before footprint-alone is ever consulted.
+    const t = impactN6dPositiveTrace();
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/unbypassed|without the --no-impact-report|impact report/i);
+  });
+
+  it("META-TEST (llh.16): the unbypassed-approve co-signal is load-bearing on the footprint PASS — removing it drops PASS to SKIP", () => {
+    // Start from the live PASS signature (footprint + unbypassed approve).
+    const t = impactN6dPositiveTrace();
+    const pass = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(pass.pass).toBe(true);
+    expect(pass.skipped).toBeFalsy();
+    // Remove ONLY the unbypassed approve, leaving the genuine artifact
+    // footprint intact. Pre-llh.16 the footprint-alone branch still returned a
+    // clean PASS here; post-llh.16 it must degrade to a SKIP, never a green.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-gate-approve");
+    const mutated = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(mutated.pass && !mutated.skipped).toBe(false);
+    expect(mutated.skipped).toBe(true);
+    expect(mutated.detail).toMatch(/consultation footprint|no in-scope/i);
+  });
+
   it("fails loudly when no QA subagent appears in the trace at all (gate would have been bypassed)", () => {
     const t = impactN6dPositiveTrace();
     t.subagentInvocations = t.subagentInvocations.filter(

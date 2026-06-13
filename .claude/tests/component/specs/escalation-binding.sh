@@ -431,16 +431,23 @@ assert_contains "vbs mut1114: QA-required escalated reason includes the J21 opti
     "ESCALATION: Iteration" "$REASON_WQ"
 
 # --- META-TEST: prove the 921 banner assertion is load-bearing ------------
-# Mutate SUITE_REUSED guard (line 921) in a copy so the escalated replay uses
-# "Last failure summary"; the 921 assertion must then FAIL (banner absent).
+# Mutate the SUITE_REUSED guard in a copy so the escalated replay uses
+# "Last failure summary"; the banner assertion must then FAIL (banner absent).
+# Anchor the mutation by the guard's UNIQUE text (`SUITE_REUSED" = "true"`,
+# which occurs exactly once — the assignment `SUITE_REUSED=true` has no
+# spaces/quotes), NOT an absolute line number. This guard has already drifted
+# twice (921 -> 974 with the llh.18 change-set-bound helpers, 974 -> 1000 with
+# the llh.20/llh.17 comment additions); pattern-anchoring ends the churn while
+# mutating the SAME guard with identical force. The assertion NAME keeps the
+# historical mut921 tag.
 REAL_VBS_W=$(readlink "$VBS_W" || printf '%s' "$VBS_W")
 VBS_W_MUT="$FIXTURE_W/vbs-suitereuse-mut.sh"
-awk 'NR==921 && /SUITE_REUSED" = "true"/ {print "        if [ \"$SUITE_REUSED\" != \"true\" ]; then"; next} {print}' \
+awk '/SUITE_REUSED" = "true"/ {print "        if [ \"$SUITE_REUSED\" != \"true\" ]; then"; next} {print}' \
     "$REAL_VBS_W" > "$VBS_W_MUT"
 chmod +x "$VBS_W_MUT"
-VBS_W_MUT_LANDED=$(sed -n '921p' "$VBS_W_MUT" | grep -c 'SUITE_REUSED" != "true"' || true)
+VBS_W_MUT_LANDED=$(grep -c 'SUITE_REUSED" != "true"' "$VBS_W_MUT" || true)
 VBS_W_MUT_LANDED=$(printf '%s' "$VBS_W_MUT_LANDED" | tr -d '[:space:]')
-assert_eq "vbs META: SUITE_REUSED guard mutation applied to copy at line 921" "1" "$VBS_W_MUT_LANDED"
+assert_eq "vbs META: SUITE_REUSED guard mutation applied to copy (pattern-anchored)" "1" "$VBS_W_MUT_LANDED"
 TID_WM=$(cd "$FIXTURE_W" && bd create "esc wording meta" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG_W" enter "$TID_WM" >/dev/null
 bd label add "$TID_WM" qa-pending >/dev/null 2>&1

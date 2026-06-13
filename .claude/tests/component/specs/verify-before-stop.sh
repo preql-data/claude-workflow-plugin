@@ -96,6 +96,69 @@ else
     fi
 fi
 
+# 6a. claude-workflow-plugin-llh.20: the approved-path Stop hook STDOUT must
+# be a single valid-JSON envelope — NOT `✓ Updated issue: <id>\n{}`.
+#
+# The post-approval `bd update --status closed` prints a `✓ Updated issue: <id>`
+# banner to STDOUT on success. Pre-llh.20 the call silenced only stderr
+# (`2>/dev/null`), so that banner leaked onto the hook's stdout and prefixed
+# the `{}` verdict. Per the Claude Code hooks contract the hook's stdout must
+# be a JSON object; raw text before it means `jq` over the WHOLE stdout fails
+# and Claude silently ignores the verdict (the documented "raw text -> Claude
+# ignores output" antipattern). The fix routes the bd close's STDOUT to
+# /dev/null too (`>/dev/null 2>&1`).
+#
+# This assertion captures STDOUT ONLY (2>/dev/null, NO `tail -1` salvage) and
+# requires the whole thing to parse as JSON with no `✓` / "Updated issue"
+# prefix. Written failing-first: pre-fix the raw stdout is
+# `✓ Updated issue: <id>\n{}`, which fails `jq -e .`.
+#
+# Fresh task + empty-test detect-stack stub so the approved short-circuit is
+# reached fast and in isolation from case 6's post-close state.
+TID_STDOUT=$(cd "$FIXTURE" && bd create "Approved-path stdout (llh.20)" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+# Stub detect-stack to report an empty test_cmd (skip the test pass; stays fast
+# and keeps the change-set non-doc so the approved path — not the F1 doc fast
+# path — closes the task). Saved/restored around this case so later cases
+# (which install their own detect-stack stub) are unaffected.
+DS_REAL=$(readlink "$FIXTURE/.claude/scripts/detect-stack.sh" 2>/dev/null || printf '%s' "$FIXTURE/.claude/scripts/detect-stack.sh")
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint_cmd\":\"\",\"type_cmd\":\"\"}'" \
+    > "$FIXTURE/.claude/scripts/detect-stack.sh"
+chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
+bash "$QG" enter "$TID_STDOUT" >/dev/null 2>&1
+bash "$CT" set "$TID_STDOUT"
+bash "$QG" approve "$TID_STDOUT" "reviewed; ships safely" >/dev/null 2>&1
+# approve clears current-task + truncates changed-files; restore both to the
+# approved change-set so the legit Stop fires against the same reviewed files.
+bash "$CT" set "$TID_STDOUT"
+printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
+# Capture STDOUT ONLY — discard stderr, take the WHOLE thing (no tail).
+STDOUT_ONLY=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' | bash "$VBS" 2>/dev/null)
+# (1) The whole stdout must be valid JSON. This is the load-bearing llh.20
+#     assertion: pre-fix the banner makes `jq -e .` over the whole stdout fail.
+if printf '%s' "$STDOUT_ONLY" | jq -e . >/dev/null 2>&1; then
+    PASS=$((PASS + 1))
+    printf '  PASS: %s\n' "vbs-llh20: approved-path stdout is valid JSON (whole stdout, no tail salvage)"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("vbs-llh20: approved-path stdout NOT valid JSON")
+    printf '  FAIL: vbs-llh20: approved-path stdout NOT valid JSON: [%s]\n' "$STDOUT_ONLY"
+fi
+# (2) The stdout must not carry the `✓` banner prefix nor the "Updated issue"
+#     text — a belt-and-braces guard that names the exact pollution source.
+STDOUT_HAS_CHECK=$(printf '%s' "$STDOUT_ONLY" | grep -c 'Updated issue' || true)
+STDOUT_HAS_CHECK=$(printf '%s' "$STDOUT_HAS_CHECK" | tr -d '[:space:]')
+assert_eq "vbs-llh20: approved-path stdout carries no 'Updated issue' bd banner" \
+    "0" "$STDOUT_HAS_CHECK"
+# (3) And it parses to exactly {} (the clean approved verdict in this fixture).
+STDOUT_COMPACT=$(printf '%s' "$STDOUT_ONLY" | jq -c '.' 2>/dev/null || echo "NOT_JSON")
+assert_eq "vbs-llh20: approved-path stdout is exactly the {} verdict" \
+    "{}" "$STDOUT_COMPACT"
+# Restore the original detect-stack symlink for the cases that follow.
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+ln -sf "$DS_REAL" "$FIXTURE/.claude/scripts/detect-stack.sh" 2>/dev/null || true
+
 # 7. Cross-repo (I8): different recorded repo than cwd -> block with the
 # 3-option recovery prose. Spoof by writing a fake current-task.repo file
 # pointing somewhere clearly different from $FIXTURE.
@@ -337,6 +400,145 @@ assert_decision "vbs-llh3: mixed (beads + source) diff STILL blocks (anti-overre
     "$OUT_MIXED" "block"
 
 # ===========================================================================
+# claude-workflow-plugin-llh.17 (G2.gate-friction residual) — e2e fixture
+# script/beads churn must NOT false-block the ORCHESTRATOR's Stop gate.
+#
+# Production evidence (observed 5x): during `make test-live`, runFixture syncs
+# the canonical hook scripts into fixtures/<f>/.claude/scripts/ (llh.8
+# run-start sync) and the live run mutates the fixture's own .beads/ ledger.
+# The orchestrator session driving the run then fires its Stop hook while those
+# fixture paths are dirty. changed-files.txt is EMPTY (post-edit never tracked
+# the sync), so the gate falls through to the git-status fallback, which keeps
+# any path passing is_tracked_change — and the denylist did NOT exclude
+# fixture-internal .claude/scripts/ or .beads/. Result: a self-contradictory
+# "QA approval required" block whose diff is purely harness-internal transient
+# state the run's own teardown reverts minutes later.
+#
+# These repros drive the GIT-STATUS FALLBACK path specifically (empty
+# changed-files.txt + a dirty fixture-internal path in git), which is the
+# surface the orchestrator-session false-block lives on — distinct from the
+# llh.3 repro-3 above, which drove transient paths through the TRACKING_FILE.
+# Written FAILING-FIRST: pre-fix (no fixtures alternative in DENYLIST_REGEX)
+# these BLOCK; the fix makes the hook ALLOW.
+#
+# A fresh git fixture with a NESTED e2e-fixture scripts tree so git-status has
+# a real fixture-internal path to report.
+mk_fixture
+FIXTURE_FX="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_FX="$FIXTURE_FX/.claude/scripts/verify-before-stop.sh"
+CT_FX="$FIXTURE_FX/.claude/scripts/current-task.sh"
+TRACK_FX="$FIXTURE_FX/.claude/.qa-tracking"
+# Build a nested e2e-fixture tree inside the component fixture and commit a
+# baseline so subsequent edits show as modifications in git-status.
+NESTED_SCRIPTS="$FIXTURE_FX/.claude/tests/e2e/fixtures/node-react-auth/.claude/scripts"
+NESTED_BEADS="$FIXTURE_FX/.claude/tests/e2e/fixtures/node-react-auth/.beads"
+NESTED_YAML="$FIXTURE_FX/.claude/tests/e2e/fixtures/node-react-auth/fixture.yaml"
+mkdir -p "$NESTED_SCRIPTS" "$NESTED_BEADS"
+printf '#!/bin/bash\n# canonical-synced qa-gate (baseline)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
+printf '{"id":"fixture-task","status":"open"}\n' > "$NESTED_BEADS/issues.jsonl"
+printf 'name: node-react-auth\ninvariants: []\n' > "$NESTED_YAML"
+(cd "$FIXTURE_FX" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+
+run_vbs_fx() {
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_FX" 2>&1 | tail -1
+}
+
+# --- Repro 1: dirty fixture-internal SCRIPT churn (the llh.8 run-start sync) ---
+# changed-files.txt empty; git-status shows ONLY the synced fixture script
+# dirtied. Assert: ALLOW. Pre-fix this is the exact orchestrator-session
+# false-block.
+bash "$CT_FX" clear
+: > "$TRACK_FX/changed-files.txt"
+printf '#!/bin/bash\n# canonical-synced qa-gate (MUTATED by live run sync)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
+OUT_FX_SCRIPT=$(run_vbs_fx)
+assert_empty_envelope "vbs-llh17: fixture-internal script churn (git fallback) -> ALLOW" \
+    "$OUT_FX_SCRIPT"
+
+# --- Repro 2: dirty fixture-internal .beads churn -------------------------
+# Restore the script, dirty the fixture's own beads ledger instead. Assert:
+# ALLOW (fixture-internal beads is transient test state, not the project's
+# audit-trail beads).
+printf '#!/bin/bash\n# canonical-synced qa-gate (baseline)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
+printf '{"id":"fixture-task","status":"closed"}\n' > "$NESTED_BEADS/issues.jsonl"
+: > "$TRACK_FX/changed-files.txt"
+OUT_FX_BEADS=$(run_vbs_fx)
+assert_empty_envelope "vbs-llh17: fixture-internal .beads churn (git fallback) -> ALLOW" \
+    "$OUT_FX_BEADS"
+
+# --- ANTI-OVERREACH 1: a REAL plugin-source change still BLOCKS -----------
+# Restore the fixture paths; dirty a REAL plugin-source file at the project
+# root instead. The fixtures denylist alternative must NOT swallow this — it
+# is a genuine orchestrator-visible change with no active task, so the
+# QA-required block must still fire. Assert: BLOCK.
+printf '{"id":"fixture-task","status":"open"}\n' > "$NESTED_BEADS/issues.jsonl"
+mkdir -p "$FIXTURE_FX/src"
+printf 'export const x = 1;\n' > "$FIXTURE_FX/src/real-source.ts"
+bash "$CT_FX" clear
+: > "$TRACK_FX/changed-files.txt"
+OUT_FX_REAL=$(run_vbs_fx)
+assert_decision "vbs-llh17 anti-overreach: REAL plugin-source change STILL blocks (git fallback)" \
+    "$OUT_FX_REAL" "block"
+rm -f "$FIXTURE_FX/src/real-source.ts"
+
+# --- ANTI-OVERREACH 2: a fixture DELIVERABLE (fixture.yaml) still BLOCKS ---
+# The denylist is scoped to the fixtures' .claude/scripts + .beads subtrees.
+# A change to the fixture's OWN deliverable (fixture.yaml, src/, the scenario
+# prompt) is reviewable intent and must NOT be denylisted. Assert: BLOCK.
+printf 'name: node-react-auth\ninvariants: [stop-requires-approval]\n' > "$NESTED_YAML"
+bash "$CT_FX" clear
+: > "$TRACK_FX/changed-files.txt"
+OUT_FX_YAML=$(run_vbs_fx)
+assert_decision "vbs-llh17 anti-overreach: fixture DELIVERABLE (fixture.yaml) STILL blocks" \
+    "$OUT_FX_YAML" "block"
+# Restore the deliverable so the tree is clean for any later reuse.
+printf 'name: node-react-auth\ninvariants: []\n' > "$NESTED_YAML"
+
+# --- META-TEST: prove the fixtures-denylist ALLOW assertions are load-bearing.
+# Build a COPY of verify-before-stop.sh with the fixtures alternative stripped
+# from DENYLIST_REGEX (the pre-llh.17 world) and re-run repro 1. The
+# fixture-script-churn case must then BLOCK — proving the ALLOW assertion above
+# is sensitive to the denylist extension, not passing for some incidental
+# reason. Pattern-anchored python strip over the unique fixtures sub-pattern.
+REAL_VBS_FX=$(readlink "$VBS_FX" || printf '%s' "$VBS_FX")
+VBS_FX_MUT="$FIXTURE_FX/vbs-fxmut.sh"
+FIXTURES_ALT='|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/' \
+    REAL_VBS_FX="$REAL_VBS_FX" VBS_FX_MUT="$VBS_FX_MUT" python3 - <<'PYEOF'
+import io, os
+real = os.environ["REAL_VBS_FX"]; out = os.environ["VBS_FX_MUT"]; alt = os.environ["FIXTURES_ALT"]
+with io.open(real, "r", encoding="utf-8") as f:
+    s = f.read()
+if alt not in s:
+    raise SystemExit("META precondition failed: fixtures alternative not found in script under test")
+s = s.replace(alt, "", 1)
+with io.open(out, "w", encoding="utf-8") as f:
+    f.write(s)
+PYEOF
+chmod +x "$VBS_FX_MUT"
+# Confirm the alternative was actually removed from the copy. Anchor on the
+# regex-only token `fixtures/[^/]+/` (the `[^/]+` bracket-class appears ONLY
+# in the DENYLIST_REGEX line, never in the prose comment that also mentions
+# "tests/e2e/fixtures") so the precondition checks the LOAD-BEARING regex,
+# not the doc comment.
+FX_MUT_STRIPPED=$(grep -cF 'fixtures/[^/]+/' "$VBS_FX_MUT" || true)
+FX_MUT_STRIPPED=$(printf '%s' "$FX_MUT_STRIPPED" | tr -d '[:space:]')
+assert_eq "vbs-llh17 META: fixtures denylist alternative stripped from copy (regex token gone)" \
+    "0" "$FX_MUT_STRIPPED"
+run_vbs_fx_mut() {
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_FX_MUT" 2>&1 | tail -1
+}
+bash "$CT_FX" clear
+: > "$TRACK_FX/changed-files.txt"
+printf '#!/bin/bash\n# synced qa-gate (mutated again)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
+OUT_FX_MUT=$(run_vbs_fx_mut)
+assert_decision "vbs-llh17 META: with fixtures denylist stripped, fixture-script churn BLOCKS (ALLOW assertion WOULD fail)" \
+    "$OUT_FX_MUT" "block"
+# Restore baseline script.
+printf '#!/bin/bash\n# canonical-synced qa-gate (baseline)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
+
+# ===========================================================================
 # META-TEST (anti-overreach): revert the fast-path extension in a COPY of
 # verify-before-stop.sh and prove repros 1-2 go RED again, while the
 # mixed-diff case keeps blocking. This proves the new ALLOW assertions are
@@ -485,14 +687,22 @@ assert_empty_envelope "vbs mut(line677): no-task beads-only change-set -> ALLOW"
 # (-ne 0 -> -eq 0) so a failing lint produces NO bullet, and re-run the
 # lint scenario. The "Lint errors (exit 1)" assertion must then FAIL — i.e.
 # the bullet must be ABSENT — proving the assertion catches the regression.
+#
+# Anchor the mutation by the guard's UNIQUE text (`lint_rc" -ne 0`, which
+# occurs exactly once), NOT an absolute line number. Pattern-anchoring keeps
+# this META-TEST stable when unrelated edits shift line numbers — the llh.20
+# fix added comment lines to the two `bd update --status closed` close paths,
+# moving this guard 882->890, the kind of drift that used to silently un-land
+# a fixed-line mutation (same lesson the truncation META-TEST below records).
+# It still mutates the SAME guard, so the assertion is identical in force.
 REAL_VBS3=$(readlink "$VBS3" || printf '%s' "$VBS3")
 VBS3_MUT="$FIXTURE3/vbs-lintmut.sh"
-awk 'NR==829 && /lint_rc" -ne 0/ {print "        if [ \"$lint_rc\" -eq 0 ]; then"; next} {print}' \
+awk '/lint_rc" -ne 0/ {print "        if [ \"$lint_rc\" -eq 0 ]; then"; next} {print}' \
     "$REAL_VBS3" > "$VBS3_MUT"
 chmod +x "$VBS3_MUT"
-VBS3_MUT_LANDED=$(sed -n '829p' "$VBS3_MUT" | grep -c 'lint_rc" -eq 0' || true)
+VBS3_MUT_LANDED=$(grep -c 'lint_rc" -eq 0' "$VBS3_MUT" || true)
 VBS3_MUT_LANDED=$(printf '%s' "$VBS3_MUT_LANDED" | tr -d '[:space:]')
-assert_eq "vbs META: lint-guard mutation applied to copy at line 829" "1" "$VBS3_MUT_LANDED"
+assert_eq "vbs META: lint-guard mutation applied to copy (pattern-anchored)" "1" "$VBS3_MUT_LANDED"
 TID_LTM=$(cd "$FIXTURE3" && bd create "lint wording meta" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG3" enter "$TID_LTM" >/dev/null
 bd label add "$TID_LTM" qa-pending >/dev/null 2>&1
@@ -531,14 +741,21 @@ assert_contains "vbs mut1016: truncation reports the correct overflow count (20-
     "and 5 more files" "$REASON_TRUNC"
 
 # --- META-TEST: prove the truncation assertion is load-bearing ------------
+# Anchor the mutation by the guard's UNIQUE text, not an absolute line number:
+# the `CHANGE_COUNT" -gt 15` guard appears exactly once, and pattern-anchoring
+# keeps this META-TEST stable when unrelated edits shift line numbers (the
+# llh.18 re-work added comment lines above this guard, moving it 1131->1153 —
+# the kind of drift that used to silently un-land the mutation). It still
+# mutates the SAME guard (`-gt 15` -> `-le 15`), so the assertion is identical
+# in force.
 REAL_VBS4=$(readlink "$VBS4" || printf '%s' "$VBS4")
 VBS4_MUT="$FIXTURE4/vbs-truncmut.sh"
-awk 'NR==1016 && /CHANGE_COUNT" -gt 15/ {print "        if [ \"$CHANGE_COUNT\" -le 15 ]; then"; next} {print}' \
+awk '/CHANGE_COUNT" -gt 15/ {print "        if [ \"$CHANGE_COUNT\" -le 15 ]; then"; next} {print}' \
     "$REAL_VBS4" > "$VBS4_MUT"
 chmod +x "$VBS4_MUT"
-VBS4_MUT_LANDED=$(sed -n '1016p' "$VBS4_MUT" | grep -c 'CHANGE_COUNT" -le 15' || true)
+VBS4_MUT_LANDED=$(grep -c 'CHANGE_COUNT" -le 15' "$VBS4_MUT" || true)
 VBS4_MUT_LANDED=$(printf '%s' "$VBS4_MUT_LANDED" | tr -d '[:space:]')
-assert_eq "vbs META: truncation guard mutation applied to copy at line 1016" "1" "$VBS4_MUT_LANDED"
+assert_eq "vbs META: truncation guard mutation applied to copy (pattern-anchored)" "1" "$VBS4_MUT_LANDED"
 bash "$CT4" clear
 awk 'BEGIN{for(i=1;i<=20;i++)print "src/mod"i".ts"}' > "$TRACK4/changed-files.txt"
 REASON_TRUNCM=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS4_MUT" 2>&1 | tail -1 | jq -r '.reason // empty')
@@ -546,5 +763,313 @@ TRUNCM_MORE=$(printf '%s' "$REASON_TRUNCM" | grep -c 'more files' || true)
 TRUNCM_MORE=$(printf '%s' "$TRUNCM_MORE" | tr -d '[:space:]')
 assert_eq "vbs META: under -le 15 mutant the truncation marker VANISHES (mut1016 assertion WOULD fail)" \
     "0" "$TRUNCM_MORE"
+
+# ===========================================================================
+# claude-workflow-plugin-llh.18 (red-team P0/P1) — change-set-bound approval.
+#
+# The headline falsification: verify-before-stop.sh used to RELEASE on the
+# qa-approved LABEL alone (GATE_STATUS == approved == has_label qa-approved).
+# That label is forgeable by any agent (`bd label add <task> qa-approved`,
+# bypassing qa-gate.sh approve's impact-report refusal / audit comment /
+# rubric — P0) and is never bound to the tracked changed files (approve a
+# trivial decoy, redirect current-task, ship unrelated code — P1).
+#
+# The fix: release now requires BOTH the qa-approved label AND a
+# tamper-evident `QA-GATE APPROVED change_set_hash=<h>` record (written only
+# by qa-gate.sh approve) whose <h> matches the CURRENT change-set hash. This
+# blocks the forged bare label (no record), the decoy redirect (record's hash
+# != current change-set), and post-approval edits (current hash drifted).
+#
+# Written FAILING-FIRST: against the pre-fix script the forged-label and
+# decoy-redirect cases ALLOW (red); the captured repro is on the Beads task.
+#
+# Fresh fixture: a real git repo + a passing (empty) test command so the
+# QA-approval path is reached without the test/lint pass interfering.
+mk_fixture
+FIXTURE_CSB="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_CSB="$FIXTURE_CSB/.claude/scripts/verify-before-stop.sh"
+QG_CSB="$FIXTURE_CSB/.claude/scripts/qa-gate.sh"
+CT_CSB="$FIXTURE_CSB/.claude/scripts/current-task.sh"
+IR_CSB="$FIXTURE_CSB/.claude/scripts/impact-report.sh"
+TRACK_CSB="$FIXTURE_CSB/.claude/.qa-tracking"
+(cd "$FIXTURE_CSB" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+# detect-stack stub: empty test_cmd so the test pass is skipped (stays fast,
+# keeps the change-set non-doc so the F1 fast path does NOT swallow it).
+rm -f "$FIXTURE_CSB/.claude/scripts/detect-stack.sh"
+printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint_cmd\":\"\",\"type_cmd\":\"\"}'" \
+    > "$FIXTURE_CSB/.claude/scripts/detect-stack.sh"
+chmod +x "$FIXTURE_CSB/.claude/scripts/detect-stack.sh"
+
+csb_decision() {
+    printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
+        | bash "$VBS_CSB" 2>/dev/null | tail -1 | jq -r '.decision // "ALLOW"' 2>/dev/null
+}
+
+# --- Repro P0: forged bare label -> BLOCK (currently red pre-fix) ----------
+TID_P0=$(cd "$FIXTURE_CSB" && bd create "forged-label P0" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/handler.ts\n' > "$TRACK_CSB/changed-files.txt"
+bash "$QG_CSB" enter "$TID_P0" >/dev/null 2>&1
+bash "$CT_CSB" set "$TID_P0"
+# Control: entered, no approval -> block.
+assert_eq "vbs-llh18: P0 control (entered, no approval) blocks" "block" "$(csb_decision)"
+# Forge the label WITHOUT going through qa-gate.sh approve.
+bd label add "$TID_P0" qa-approved >/dev/null 2>&1
+# Sanity: the gate's status now reports approved (the forgeable signal).
+P0_STATUS=$(bash "$QG_CSB" status "$TID_P0" | jq -r '.status' 2>/dev/null)
+assert_eq "vbs-llh18: P0 bare label flips qa-gate status to approved (the forgeable signal)" \
+    "approved" "$P0_STATUS"
+# THE failing-first assertion: a forged bare label must NOT release.
+assert_eq "vbs-llh18: P0 forged bare label -> BLOCK (no change-set-bound record)" \
+    "block" "$(csb_decision)"
+# The block reason must name the exact failure mode + correct remediation.
+P0_REASON=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
+    | bash "$VBS_CSB" 2>/dev/null | tail -1 | jq -r '.reason // empty')
+assert_contains "vbs-llh18: P0 reason explains no change-set-bound record matches" \
+    "no change-set-bound approval record matches" "$P0_REASON"
+assert_contains "vbs-llh18: P0 reason steers to qa-gate.sh approve, not a bare label add" \
+    "not a bare label add" "$P0_REASON"
+
+# --- Positive: legit qa-gate.sh approve -> RELEASE -------------------------
+TID_POS=$(cd "$FIXTURE_CSB" && bd create "legit approve release" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/handler.ts\n' > "$TRACK_CSB/changed-files.txt"
+bash "$QG_CSB" enter "$TID_POS" >/dev/null 2>&1   # generates a fresh impact report for this change-set
+bash "$CT_CSB" set "$TID_POS"
+assert_eq "vbs-llh18: positive control (entered, not approved) blocks" "block" "$(csb_decision)"
+# Legit approve writes the change-set-bound record.
+POS_APPROVE=$(bash "$QG_CSB" approve "$TID_POS" "reviewed; ships safely" 2>&1)
+assert_json_field "vbs-llh18: legit approve succeeds" "$POS_APPROVE" '.status' "approved"
+assert_contains "vbs-llh18: approve obs reports the change-set-bound record" \
+    "change-set-bound approval record written" "$POS_APPROVE"
+# approve clears current-task + truncates changed-files; restore both to the
+# approved change-set (the legit Stop fires against the same reviewed files).
+bash "$CT_CSB" set "$TID_POS"
+printf 'src/handler.ts\n' > "$TRACK_CSB/changed-files.txt"
+# Direct proof the record carries the hash --hash-only computes for the
+# RESTORED change-set. Captured BEFORE the release assertion below, because
+# the RELEASE path runs vbs's QA-approved cleanup (it rm's changed-files.txt),
+# after which --hash-only would return the empty-set hash.
+POS_CUR_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_CSB" bash "$IR_CSB" --hash-only 2>/dev/null || echo "")
+POS_REC_HASH=$(cd "$FIXTURE_CSB" && bd show "$TID_POS" --json 2>/dev/null \
+    | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
+             | select(test("QA-GATE APPROVED .*change_set_hash="))
+             | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | head -1)
+assert_eq "vbs-llh18: recorded change_set_hash == --hash-only of the approved change-set" \
+    "$POS_CUR_HASH" "$POS_REC_HASH"
+assert_eq "vbs-llh18: positive legit approve -> RELEASE (matching record)" \
+    "ALLOW" "$(csb_decision)"
+
+# --- Hash-mismatch: edit a tracked file after approval -> re-BLOCK ----------
+# Reuse the approved TID_POS; introduce a NEW tracked file so the current
+# change-set hash drifts away from the recorded one.
+printf 'src/handler.ts\nsrc/added-after-approval.ts\n' > "$TRACK_CSB/changed-files.txt"
+bash "$CT_CSB" set "$TID_POS"
+assert_eq "vbs-llh18: post-approval edit (hash drift) -> BLOCK (re-review)" \
+    "block" "$(csb_decision)"
+
+# --- Repro P1: decoy-task redirect -> BLOCK (currently red pre-fix) ---------
+# Approve a trivial DECOY (its own change-set), redirect current-task to it,
+# then ship a DIFFERENT, unreviewed change-set. The decoy's record carries the
+# decoy's hash, which will not match the shipping change-set.
+TID_REAL=$(cd "$FIXTURE_CSB" && bd create "P1 real unreviewed" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/secret-feature.ts\n' > "$TRACK_CSB/changed-files.txt"
+bash "$QG_CSB" enter "$TID_REAL" >/dev/null 2>&1
+bash "$CT_CSB" set "$TID_REAL"
+assert_eq "vbs-llh18: P1 real unreviewed change blocks first" "block" "$(csb_decision)"
+# Legitimately approve a decoy with a DIFFERENT change-set.
+TID_DECOY=$(cd "$FIXTURE_CSB" && bd create "P1 trivial decoy" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/trivial-decoy.ts\n' > "$TRACK_CSB/changed-files.txt"
+bash "$QG_CSB" enter "$TID_DECOY" >/dev/null 2>&1
+bash "$QG_CSB" approve "$TID_DECOY" "decoy reviewed (trivial)" >/dev/null 2>&1
+assert_eq "vbs-llh18: P1 decoy genuinely approved" "approved" \
+    "$(bash "$QG_CSB" status "$TID_DECOY" | jq -r '.status' 2>/dev/null)"
+# Redirect current-task to the decoy, restore the REAL unreviewed change-set.
+bash "$CT_CSB" set "$TID_DECOY"
+printf 'src/secret-feature.ts\n' > "$TRACK_CSB/changed-files.txt"
+# THE failing-first assertion: the decoy's approval must not release the
+# unrelated, unreviewed change-set.
+assert_eq "vbs-llh18: P1 decoy redirect -> BLOCK (record hash != shipping change-set)" \
+    "block" "$(csb_decision)"
+
+# ===========================================================================
+# llh.18 re-work — fail-OPEN regression on MISSING impact-report.sh.
+#
+# QA BLOCK (bd note 355): verify-before-stop.sh:~1060
+#   CURRENT_CS_HASH=$(current_change_set_hash)
+# runs under `set -e` (line 25). current_change_set_hash() returns 1 when
+# impact-report.sh is MISSING (`[ -f "$IMPACT_REPORT_SCRIPT" ] || { printf '';
+# return 1; }`). A bare command-substitution ASSIGNMENT whose RHS exits
+# non-zero trips `set -e` -> the whole script ABORTS with empty stdout +
+# exit 1. Per the hooks contract only exit 2 / a JSON `decision:block`
+# blocks a Stop; exit 1 with no envelope is a NON-blocking error -> Claude
+# ALLOWS the Stop (FAIL-OPEN). The intended fail-closed branch the implementer
+# wrote (the `if [ -z "$CURRENT_CS_HASH" ]` arm of LABEL_WITHOUT_RECORD) is
+# UNREACHABLE in this sub-case because the abort happens at the assignment.
+#
+# ASYMMETRY that proves it's this exact mechanism (not a different missing-dep
+# failure): the PRESENT-BUT-FAILING case fails CLOSED correctly — the existing
+# P0/decoy/hash-drift cases above all exercise a present impact-report.sh whose
+# helper bodies end in `|| printf ''` (rc 0) so the empty hash reaches the
+# LABEL_WITHOUT_RECORD block. Only the MISSING-script case (no `|| ...` guard
+# at the call site) aborts. The producer (qa-gate.sh approve) REFUSES (exit 2)
+# when impact-report.sh is missing, so the consumer's fail-open is a
+# producer/consumer inconsistency too.
+#
+# Exploit (re-opens the very P0 this task fixes, one line): an agent with
+# shell runs `rm .claude/scripts/impact-report.sh` then a bare
+# `bd label add <task> qa-approved` -> the Stop fails open -> unreviewed code
+# ships. It also silently disables gating in any partial-install /
+# code-graph-absent environment that lacks impact-report.sh: a genuine
+# post-approval edit there fails to re-block.
+#
+# Written FAILING-FIRST: against the pre-fix script this assertion is RED
+# (the gate aborts -> ALLOW, not block). The fix
+# (`CURRENT_CS_HASH=$(current_change_set_hash) || true`) lets the missing-script
+# case fall into the existing fail-closed LABEL_WITHOUT_RECORD branch -> block.
+#
+# Fresh fixture so the deletion of impact-report.sh can't disturb the other
+# llh.18 cases above (they share FIXTURE_CSB, whose impact-report.sh must stay
+# intact for the positive-release / hash-drift / decoy assertions).
+mk_fixture
+FIXTURE_MISS="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_MISS="$FIXTURE_MISS/.claude/scripts/verify-before-stop.sh"
+QG_MISS="$FIXTURE_MISS/.claude/scripts/qa-gate.sh"
+CT_MISS="$FIXTURE_MISS/.claude/scripts/current-task.sh"
+IR_MISS="$FIXTURE_MISS/.claude/scripts/impact-report.sh"
+TRACK_MISS="$FIXTURE_MISS/.claude/.qa-tracking"
+(cd "$FIXTURE_MISS" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+# detect-stack stub: empty test_cmd (skip the test pass; keep the change-set
+# non-doc so the F1 fast path does NOT swallow it before the approved-path).
+rm -f "$FIXTURE_MISS/.claude/scripts/detect-stack.sh"
+printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint_cmd\":\"\",\"type_cmd\":\"\"}'" \
+    > "$FIXTURE_MISS/.claude/scripts/detect-stack.sh"
+chmod +x "$FIXTURE_MISS/.claude/scripts/detect-stack.sh"
+
+# decision-or-abort helper: capture the FINAL JSON line AND distinguish the
+# three outcomes precisely so the evidence is unambiguous:
+#   "block"   -> emitted {"decision":"block",...}     (FAIL-CLOSED, correct)
+#   "ALLOW"   -> emitted {} / a note envelope          (allowed the Stop)
+#   "ABORT"   -> empty stdout + non-zero exit (set -e abort = the bug symptom)
+# Both ALLOW and ABORT are fail-open; only "block" is correct here.
+miss_decision() {
+    local raw rc dec
+    raw=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
+        | bash "$VBS_MISS" 2>/dev/null)
+    rc=$?
+    local last
+    last=$(printf '%s' "$raw" | tail -1)
+    if [ -z "$last" ]; then
+        # Empty stdout. If the process also exited non-zero, that is the
+        # set -e abort (fail-open). Name it distinctly.
+        if [ "$rc" -ne 0 ]; then printf 'ABORT'; else printf 'ALLOW'; fi
+        return
+    fi
+    dec=$(printf '%s' "$last" | jq -r '.decision // "ALLOW"' 2>/dev/null || printf 'ALLOW')
+    printf '%s' "$dec"
+}
+
+# Build a legit, change-set-bound approval (record present, hash matches), so
+# we isolate the variable under test to "impact-report.sh present vs missing"
+# and nothing else. With the script PRESENT this releases (sanity check).
+TID_MISS=$(cd "$FIXTURE_MISS" && bd create "missing impact-report fail-closed" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
+bash "$QG_MISS" enter "$TID_MISS" >/dev/null 2>&1     # generates the impact report
+bash "$QG_MISS" approve "$TID_MISS" "reviewed; ships safely" >/dev/null 2>&1
+# approve clears current-task + truncates changed-files; restore both to the
+# approved change-set so the legit Stop fires against the same reviewed files.
+bash "$CT_MISS" set "$TID_MISS"
+printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
+# Sanity: with impact-report.sh PRESENT, the matching record releases.
+assert_eq "vbs-llh18-miss: sanity — legit approve releases while impact-report.sh present" \
+    "ALLOW" "$(miss_decision)"
+
+# Now HIDE impact-report.sh. The label + matching record are untouched; the
+# ONLY change is the script the gate needs to recompute the current hash.
+# Re-seed the change-set (the sanity release above ran vbs's QA-approved
+# cleanup, which rm's changed-files.txt).
+bash "$CT_MISS" set "$TID_MISS"
+printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
+MISS_REAL_IR=$(readlink "$IR_MISS" 2>/dev/null || printf '%s' "$IR_MISS")
+rm -f "$IR_MISS"
+# Prove the precondition: the script the gate calls is genuinely gone.
+assert_eq "vbs-llh18-miss: precondition — impact-report.sh is absent" \
+    "absent" "$([ -e "$IR_MISS" ] && echo present || echo absent)"
+
+# THE failing-first assertion: a MISSING impact-report.sh must FAIL CLOSED
+# (decision:block), NOT fail open. Pre-fix this is RED — the gate aborts under
+# set -e (miss_decision returns ABORT) instead of emitting a block envelope.
+assert_eq "vbs-llh18-miss: MISSING impact-report.sh -> FAIL-CLOSED (decision:block, not abort/allow)" \
+    "block" "$(miss_decision)"
+# The block reason must name the exact failure mode (the dead-code branch the
+# fix makes reachable): hash could not be recomputed because the script is gone.
+MISS_REASON=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
+    | bash "$VBS_MISS" 2>/dev/null | tail -1 | jq -r '.reason // empty' 2>/dev/null || printf '')
+assert_contains "vbs-llh18-miss: block reason explains the hash could not be recomputed" \
+    "could not be recomputed" "$MISS_REASON"
+
+# Restore impact-report.sh for any later cases that reuse the symlink target
+# (defensive; this fixture isn't reused below, but keep the tree consistent).
+ln -sf "$MISS_REAL_IR" "$IR_MISS" 2>/dev/null || true
+
+# ===========================================================================
+# META-TEST (llh.18): prove the hash-match check is LOAD-BEARING.
+#
+# Neutralize ONLY the new check by shadowing task_has_matching_approval_record
+# so it always reports a match (return 0) — i.e., the pre-fix world where
+# label-presence alone releases. Under that shadow the forged-bare-label case
+# must RELEASE again, so the "P0 forged label -> BLOCK" assertion above WOULD
+# fail. That demonstrates the assertion is sensitive to the new check, not
+# passing for some incidental reason.
+mk_fixture
+FIXTURE_MM18="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_MM18="$FIXTURE_MM18/.claude/scripts/verify-before-stop.sh"
+QG_MM18="$FIXTURE_MM18/.claude/scripts/qa-gate.sh"
+CT_MM18="$FIXTURE_MM18/.claude/scripts/current-task.sh"
+TRACK_MM18="$FIXTURE_MM18/.claude/.qa-tracking"
+(cd "$FIXTURE_MM18" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+rm -f "$FIXTURE_MM18/.claude/scripts/detect-stack.sh"
+printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint_cmd\":\"\",\"type_cmd\":\"\"}'" \
+    > "$FIXTURE_MM18/.claude/scripts/detect-stack.sh"
+chmod +x "$FIXTURE_MM18/.claude/scripts/detect-stack.sh"
+# Build the shadowed copy: append an override of the matcher AFTER its real
+# definition (later definition wins in bash) but BEFORE the main flow consumes
+# stdin. Insert immediately after the function's closing brace.
+PLUGIN_VBS_MM18=$(readlink "$VBS_MM18" || printf '%s' "$VBS_MM18")
+rm -f "$VBS_MM18"
+awk '
+    { print }
+    /^task_has_matching_approval_record\(\) \{$/ { seen=1 }
+    seen && /^\}$/ && !done {
+        print ""
+        print "# META-TEST override (llh.18): neutralize the change-set-bound check."
+        print "task_has_matching_approval_record() { return 0; }"
+        done=1
+    }
+' "$PLUGIN_VBS_MM18" > "$VBS_MM18"
+chmod +x "$VBS_MM18"
+# Sanity: the override landed.
+MM18_LANDED=$(grep -c 'META-TEST override (llh.18)' "$VBS_MM18" || true)
+MM18_LANDED=$(printf '%s' "$MM18_LANDED" | tr -d '[:space:]')
+assert_eq "vbs META-llh18: matcher override applied to copy" "1" "$MM18_LANDED"
+# Forge a bare label under the neutralized check.
+TID_MM18=$(cd "$FIXTURE_MM18" && bd create "meta forged label" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/handler.ts\n' > "$TRACK_MM18/changed-files.txt"
+bash "$QG_MM18" enter "$TID_MM18" >/dev/null 2>&1
+bash "$CT_MM18" set "$TID_MM18"
+bd label add "$TID_MM18" qa-approved >/dev/null 2>&1   # forged bare label
+MM18_DEC=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
+    | bash "$VBS_MM18" 2>/dev/null | tail -1 | jq -r '.decision // "ALLOW"' 2>/dev/null)
+# Under the neutralized check the forged label RELEASES (the P0 assertion
+# above would FAIL against this copy) — proving the check is load-bearing.
+assert_eq "vbs META-llh18: with hash-match check neutralized, forged label RELEASES (P0 assertion WOULD fail)" \
+    "ALLOW" "$MM18_DEC"
 
 [ "$FAIL" -eq 0 ]

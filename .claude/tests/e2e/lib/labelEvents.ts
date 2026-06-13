@@ -37,6 +37,16 @@
  *   4. `bd [global-flags] update <task-id> --add-label X --remove-label Y`
  *      Bash commands.
  *
+ *   BD-BOUND VARIABLE INDIRECTION (sources 2-4 + the label-remove path):
+ *      the `bd` head also matches `$VAR` / `${VAR}` / `"$VAR"` when the
+ *      SAME command assigned that var a bd path (`BD=./.claude/bin/bd;
+ *      "$BD" create … -l backend,qa-pending`). This is the orchestrator's
+ *      own observed flow — a paid live run's qa-pending arrived exclusively
+ *      via `"$BD" create -l …,qa-pending`, invisible to the old literal-`bd`
+ *      anchor (claude-workflow-plugin-llh.23). The indirection is scoped to
+ *      in-command bd assignments so an arbitrary `"$FOO" create` is not
+ *      mistaken for a bd call.
+ *
  *   5. The MCP bd surface (tool names matched by suffix so both the
  *      plugin-qualified `mcp__plugin_<plugin>_bd__<tool>` and bare
  *      `mcp__bd__<tool>` / `<tool>` forms work):
@@ -153,23 +163,109 @@ const QA_GATE_SUB_RE =
 const QA_GATE_CHOOSE_APPROVE_RE =
   /qa-gate\.sh\s+choose\s+approve\s+["']?([A-Za-z0-9._-]+)/g;
 
-/** `bd [global-flags] label add|remove <rest...>`. The `rest` capture
- *  stops at the first shell separator character (`&`, `|`, `;`,
- *  newline) so `&&`-chains, pipes, and `2>&1` redirects bound the
- *  token list; tokenization below does the fine-grained filtering. */
-const BD_LABEL_RE =
-  /\bbd(?:\s+-{1,2}\w[\w-]*(?:=\S+)?)*\s+label\s+(add|remove)\s+([^&|;\n]*)/g;
+// THE BD COMMAND HEAD — literal `bd` OR a bd-bound shell variable.
+//
+// claude-workflow-plugin-llh.23 (3rd live run): the orchestrator's own
+// flow aliases the bd binary and invokes through the variable:
+//   BD=./.claude/bin/bd
+//   "$BD" create "…" -t feature -l backend,feature,qa-pending …
+// The original `\bbd…\s+create` anchor requires a LITERAL `bd` token, so
+// `"$BD" create …` matched NOTHING and the qa-pending creation-label add
+// was never derived — label-milestones failed on the real trace even
+// though the workflow genuinely set qa-pending (evidence in the task's
+// bd notes). The same blind spot affected the label/update anchors.
+//
+// We therefore build the four bd-anchored scanners PER COMMAND from a
+// head fragment that matches the literal `bd` OR `$VAR`/`${VAR}`/`"$VAR"`
+// — but ONLY for variable names that were assigned a bd-ish value earlier
+// in the SAME command string (`VAR=…bd`). Scoping the indirection to
+// in-command bd assignments keeps an arbitrary `"$FOO" create` from being
+// mistaken for a bd call (additive-noise guard, mirroring the module
+// header's regex-not-a-shell-parser stance).
 
-/** `bd [global-flags] update <task-id>` anchor; label flags are scanned
- *  in the slice between this anchor and the next one (or end). */
-const BD_UPDATE_RE =
-  /\bbd(?:\s+-{1,2}\w[\w-]*(?:=\S+)?)*\s+update\s+["']?([A-Za-z0-9._-]+)["']?/g;
+/** Assignments binding a shell var to the bd binary: `BD=bd`,
+ *  `BD=./.claude/bin/bd`, `BD="$(command -v bd)"`, `BD=$(which bd)`,
+ *  `bd_bin=/usr/bin/bd`. The value's last bd-token must be a `bd` binary
+ *  reference — a `/bd` path suffix or a bare `bd` word at a value
+ *  boundary — so `BDX=foo` or `B=binary` do NOT qualify (the `bd` in
+ *  `binary` is not a word: `\bbd` requires a word boundary before it and
+ *  the next char to be a non-word char or value end).
+ *
+ *  Two value shapes are accepted:
+ *    - a `$(...)` / backtick command substitution (possibly quote-wrapped)
+ *      whose body contains a `bd` binary token — spaces allowed inside,
+ *      e.g. `"$(command -v bd)"`, `$(which bd)`;
+ *    - otherwise a separator-free token ending in a `bd` binary token
+ *      (`/bd` path suffix or bare `\bbd`), e.g. `bd`, `./.claude/bin/bd`.
+ *  Both require the `bd` to be a binary reference, so `BDX=foo`,
+ *  `B=binary`, `X=/usr/bin/abd` do NOT qualify. */
+const BD_VAR_ASSIGN_RE = new RegExp(
+  "(?:^|[\\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=" +
+    "(?:" +
+    // command substitution (optionally quote-wrapped) containing a bd token
+    "[\"']?(?:\\$\\([^)]*(?:/bd|\\bbd)[^)]*\\)|`[^`]*(?:/bd|\\bbd)[^`]*`)[\"']?" +
+    "|" +
+    // plain separator-free value whose last bd-token is a binary ref
+    "[^\\s;&|]*(?:/bd|\\bbd)[\"')]*" +
+    ")" +
+    "(?=$|[\\s;&|])",
+  "g",
+);
+
+/** Escape a string for safe interpolation into a RegExp body. */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Build the regex SOURCE for "a bd invocation head" in this command:
+ *  literal `bd`, or `$VAR` / `${VAR}` / `"$VAR"` / `"${VAR}"` for any var
+ *  the command assigned a bd-ish value to. Returns a NON-capturing group
+ *  source string (no leading/trailing anchors) for composition. */
+function bdHeadSource(command: string): string {
+  const names = new Set<string>();
+  for (const m of command.matchAll(BD_VAR_ASSIGN_RE)) {
+    if (m[1]) names.add(m[1]);
+  }
+  // Literal `bd` is always an alternative (word-boundary anchored).
+  const alts = ["\\bbd"];
+  if (names.size > 0) {
+    const nameAlt = [...names].map(escapeRe).join("|");
+    // "?\$\{?(NAME)\}?"?  — optional surrounding double-quote, optional
+    // braces. Single-quoted `'$BD'` is NOT a var expansion in shell, so
+    // we deliberately do not match a single-quote wrapper here.
+    alts.push(`"?\\$\\{?(?:${nameAlt})\\}?"?`);
+  }
+  return `(?:${alts.join("|")})`;
+}
+
+/** Per-command scanner builders. Each mirrors the original literal-`bd`
+ *  regex with the head swapped for `bdHeadSource(command)`. The global
+ *  flag is set so `matchAll` enumerates every hit; a fresh RegExp per
+ *  command means no shared lastIndex state (same guarantee the original
+ *  module-level constants had via matchAll's per-call clone). */
+const GLOBAL_FLAGS_TAIL = "(?:\\s+-{1,2}\\w[\\w-]*(?:=\\S+)?)*";
+
+function bdLabelRe(command: string): RegExp {
+  return new RegExp(
+    `${bdHeadSource(command)}${GLOBAL_FLAGS_TAIL}\\s+label\\s+(add|remove)\\s+([^&|;\\n]*)`,
+    "g",
+  );
+}
+function bdUpdateRe(command: string): RegExp {
+  return new RegExp(
+    `${bdHeadSource(command)}${GLOBAL_FLAGS_TAIL}\\s+update\\s+["']?([A-Za-z0-9._-]+)["']?`,
+    "g",
+  );
+}
+function bdCreateRe(command: string): RegExp {
+  return new RegExp(
+    `${bdHeadSource(command)}${GLOBAL_FLAGS_TAIL}\\s+create\\b`,
+    "g",
+  );
+}
+
 const UPDATE_LABEL_FLAG_RE =
   /--(add|remove)-label[=\s]+["']?([A-Za-z0-9._,-]+)/g;
-
-/** `bd [global-flags] create …` anchor; `-l|--label|--labels` values are
- *  scanned in the slice between this anchor and the next one (or end). */
-const BD_CREATE_RE = /\bbd(?:\s+-{1,2}\w[\w-]*(?:=\S+)?)*\s+create\b/g;
 const CREATE_LABEL_FLAG_RE =
   /(?:^|\s)(?:-l|--labels?)[=\s]+(?:"([^"]+)"|'([^']+)'|([^\s"']+))/g;
 
@@ -219,7 +315,7 @@ function deriveFromBashCommand(
   }
 
   // --- raw `bd label add|remove <tid> <label...>` -> direct events.
-  for (const m of command.matchAll(BD_LABEL_RE)) {
+  for (const m of command.matchAll(bdLabelRe(command))) {
     const action = (m[1] ?? "") as Action;
     const tokens = (m[2] ?? "").trim().split(/\s+/).filter(Boolean);
     if (tokens.length < 2) continue;
@@ -244,7 +340,7 @@ function deriveFromBashCommand(
   }
 
   // --- `bd update <tid> --add-label X --remove-label Y` -> direct events.
-  const updateMatches = [...command.matchAll(BD_UPDATE_RE)];
+  const updateMatches = [...command.matchAll(bdUpdateRe(command))];
   updateMatches.forEach((m, i) => {
     const tid = m[1] ?? "";
     if (!ID_TOKEN_RE.test(tid)) return;
@@ -269,7 +365,7 @@ function deriveFromBashCommand(
 
   // --- `bd create … -l a,b` -> creation-label adds (taskId "" — the
   // new id is assigned server-side and never appears in the command).
-  const createMatches = [...command.matchAll(BD_CREATE_RE)];
+  const createMatches = [...command.matchAll(bdCreateRe(command))];
   createMatches.forEach((m, i) => {
     const sliceStart = (m.index ?? 0) + m[0].length;
     const sliceEnd =

@@ -228,11 +228,16 @@ The Orchestrator uses its intelligence to understand:
 
 ### Matcher
 
-Configured in `settings.json` with matcher `^(Write|Edit|MultiEdit)$`. Only
-these three tools trigger the hook — every other tool invocation is a
-no-op. Bash edits (e.g., `sed -i`) are intentionally untracked because
-specialists should be using the Write/Edit tools directly so the file
-appears in the QA review surface.
+Configured in `settings.json` with matcher `^(Write|Edit|MultiEdit|Bash)$`.
+The Write/Edit/MultiEdit tools trigger tracking of `tool_input.file_path`.
+Bash invocations are inspected too (llh.19): a *write-shaped* Bash command
+(heredoc-to-file, `>`/`>>` into a path, `tee`, `sed -i`, `dd of=`, or
+`cp`/`mv` into the tree) has its target source path(s) recovered and tracked
+so a Bash-laundered edit is still visible to the QA change-set. Transient
+sinks (`/tmp`, `/dev/null`, …) and read-only Bash (git, reads, test runs)
+produce no tracked entry. This recovery is a best-effort heuristic — see the
+threat-model boundary note in `prevent-orchestrator-edits.sh`; specialists
+should still prefer the Write/Edit tools so the edit surfaces cleanly.
 
 ### What It Does
 
@@ -541,7 +546,7 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 |--------|---------|
 | `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`, `choose` (spec 0.2). Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`, plus `qa-escalated` and `qa-deferred` after spec 0.2). On `approve` writes `approved-baseline` snapshot + truncates `changed-files.txt` (closes 0wk.2). |
 | `current-task.sh` | F3 single source of truth for the active Beads task id. Subcommands: `set`, `get`, `get-repo`. Persists task id at `.qa-tracking/current-task` plus repo fingerprint at `.qa-tracking/current-task.repo` (I8 cross-repo guard). |
-| `prevent-orchestrator-edits.sh` | PreToolUse hook blocking Write/Edit/MultiEdit when the active subagent is `orchestrator`. Emits `hookSpecificOutput.permissionDecision: deny` with a "delegate to specialist" reason. Defense in depth — the orchestrator's tool list already omits Write/Edit. |
+| `prevent-orchestrator-edits.sh` | PreToolUse hook (matcher `^(Write\|Edit\|MultiEdit\|Bash)$`) blocking code edits by the `orchestrator`. Denies the Write/Edit/MultiEdit tools AND *write-shaped* Bash (redirection into source, `tee`, `sed -i`, `dd of=`, `cp`/`mv` into the tree) so the orchestrator cannot launder a write through Bash (llh.19). Legitimate orchestrator Bash (git/bd/reads/test-runs, redirects into `/tmp`/`/dev/null`) is allowed (anti-overreach). For a WRITE with no probeable agent identity it fails CLOSED (deny) — an unattributed write is treated as a possible mis-attributed orchestrator edit. Emits `hookSpecificOutput.permissionDecision: deny`. Defense in depth (the Bash detector is a raise-the-bar heuristic, not airtight); the primary guard is the orchestrator's omitted Write/Edit tools. |
 | `epic-gate.sh` | Epic-level QA gate (B2). Subcommands: `check`, `siblings`, `shared-files`. Returns `pass`/`defer`/`block` based on sibling status and file-intersection across in-progress tasks under the same epic. |
 | `subagent-start.sh` | J3 cross-session auto-assign. SubagentStart hook: when the spawned subagent is a specialist AND `current-task` is non-empty, injects `additionalContext` with the task id + brief summary so the orchestrator doesn't need to repeat the brief. |
 | `tech-debt.sh` | TECHNICAL_DEBT.md append (J22). Subcommands: `add <severity> <file:line> <effort> <description>`, `list`. Optional `--bd-task` creates a paired Beads task with `--deps blocks:<active-task>`. |

@@ -547,6 +547,19 @@ function invDeclaredSubagentsOnly(
  *     "pre-3.5 recording" skip avoids for `label-milestones`. Re-record
  *     under the current (n6d) plugin to evaluate.
  *
+ *   SKIP "footprint without approve" (llh.16) — code-graph present +
+ *     fileWrites>0 + an artifact footprint BUT no QA-attributable
+ *     unbypassed approve. The footprint match is a loose string test (it
+ *     fires on any command text mentioning impact-report-*.json or
+ *     impact-report.sh), so a hand-built mention — an `echo`/`grep` of the
+ *     path — trips it without any real consultation. Footprint-ALONE is
+ *     therefore NOT a trustworthy PASS: the only defensible green is
+ *     footprint + an unbypassed approve (the PASS branch), because
+ *     approve REFUSES without a fresh artifact and that refusal is the
+ *     co-signal a bare mention lacks. We SKIP rather than PASS so a mere
+ *     mention cannot green the invariant, and rather than FAIL because the
+ *     approve may simply have happened outside the captured QA scope.
+ *
  * NOTE the `min_calls` param (legacy: minimum QA `impact_of` calls) is now
  * vestigial — the disproven signal it tuned is gone. It is still accepted
  * and ignored so existing fixture.yaml `params: {min_calls: N}` entries do
@@ -696,17 +709,29 @@ function invQaQueriedImpactOf(
     };
   }
 
-  // Footprint present but no QA-attributable approve observable in the
-  // trace (e.g. the approve happened outside the captured QA scope). The
-  // artifact reference is itself a post-n6d-only construct, so this is a
-  // post-n6d run and must NOT fall through to the pre-n6d skip. With the
-  // artifact consulted and no disqualifying bypass seen, footprint-alone is
-  // the strongest defensible PASS.
+  // Footprint present but NO QA-attributable unbypassed approve observable
+  // (the approve happened outside the captured QA scope, OR the "footprint"
+  // is a hand-built mention — an `echo`/`grep` of impact-report-*.json or
+  // impact-report.sh — with no approve to confirm a real consultation).
+  //
+  // llh.16: this is now a SKIP, not a PASS. The artifactPattern is a loose
+  // string match (it fires on any command text mentioning the artifact
+  // path), so footprint-ALONE is forgeable and cannot be trusted to green
+  // the invariant. The ONLY defensible PASS is Branch A above
+  // (footprint + unbypassed approve): an unbypassed successful approve
+  // mechanically proves a FRESH artifact existed, because qa-gate.sh approve
+  // REFUSES without one — that refusal is the load-bearing co-signal a bare
+  // mention lacks. Without it we cannot confirm the mechanic actually ran,
+  // so we SKIP ("consultation footprint present but no in-scope approve to
+  // confirm") rather than assert a green we cannot defend. The legit live
+  // signature (footprint + unbypassed approve) is unaffected — it already
+  // PASSed via Branch A and never reaches here.
   if (qaArtifactFootprint) {
     return {
       pass: true,
+      skipped: true,
       detail:
-        "QA consulted the mechanical impact report (n6d artifact footprint) and no --no-impact-report bypass was recorded; impact analysis ran via impact-report.sh (impact_of tool_uses are absent from the trace by design post-n6d).",
+        "skipped: consultation footprint present (an impact-report-<taskid>.json / impact-report.sh reference) but no in-scope unbypassed qa-gate.sh approve to confirm it. The artifact reference alone is a loose string match (a hand-built echo/grep mention trips it), so it is not a trustworthy PASS signal on its own — only footprint + an unbypassed approve (Branch A) is, because approve REFUSES without a fresh artifact. Re-evaluate with the approve in QA scope.",
     };
   }
 
