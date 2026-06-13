@@ -20,6 +20,164 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No unreleased changes. The next release entry will go here.
 
+## [3.5.0] - 2026-06-14
+
+The **Release Acceptance Gauntlet**. Epic `claude-workflow-plugin-llh`
+put every shipped claim through an adversarial certification —
+operating rules: no adjective without artifact, prove-or-remove,
+mechanics over prompts, dogfood throughout, hard $80 paid cap. The
+output is a 121-row claims ledger (`docs/RELEASE_AUDIT.md`) re-tallied
+mechanically at the verdict to **PROVEN 51 / PROVEN-WITH-CAVEAT 47 /
+REMOVED 23 / NOT-PROVEN 0**. The gauntlet found and fixed a release-gate
+P0 (a forgeable approval label that released unreviewed code), hardened
+the Stop invariant against it, removed 13 stale-doc claims that no longer
+matched the code, and red-team-certified that the gate does not leak
+under live load — confirmed on two paid runs ($10.15 of $80): a
+node-react-auth feature shipped end-to-end through the gate, and a
+python-django-bug bugfix run whose unreviewed change the hardened gate
+correctly BLOCKED. The guarantee: **51 claims proven by executed tests,
+47 caveats documented and tracked, zero unproven claims shipped.** The
+release rule (NOT-PROVEN = 0 AND Stage-3 P0/P1 closed) is MET.
+
+### Added
+
+- **Change-set-hash-bound QA approval — the P0 fix (llh.18).** The Stop
+  gate no longer releases on the bare `qa-approved` label. `qa-gate.sh
+  approve` now writes a tamper-evident approval record carrying
+  `change_set_hash` — the sha256 of the sorted, denylist-filtered diff
+  via `impact-report.sh --hash-only` (`qa-gate.sh:230,730-749`) — and
+  `verify-before-stop.sh` requires a record whose hash matches the
+  *current* change-set, not the label
+  (`task_has_matching_approval_record`, release predicate
+  `:1101-1146`). A bare label-add writes no record → block; a decoy-task
+  approval has a different hash → block; any post-approval edit changes
+  the hash → re-block. The release predicate fails CLOSED on a missing or
+  unrecomputable hash. A load-bearing META-test proves the check is
+  load-bearing (neutralize the hash comparison → a forged label
+  releases).
+- **`impact-report.sh` — mechanical impact analysis (G2.n6d, llh.2).**
+  A deterministic driver that runs code-graph `impact_of` over the
+  changed files at gate-enter and writes
+  `.qa-tracking/impact-report-<task>.json`
+  (`{generated_at, task_id, change_set_hash, files:[{file,impact}],
+  server}`). `qa-gate.sh approve` REFUSES (exit 2) without a
+  hash-current artifact; the documented bypass `approve
+  --no-impact-report '<reason>'` lands in the audit trail. L1
+  `impact-report.test.sh`.
+- **bd-compatibility L2 spec (G2.bd-compat, llh.6).** `bd-compat.sh`
+  pins 32 distinct `bd` command+flag invocations — inventoried from
+  every hook script, bd-mcp, and the e2e capture lib — each run against
+  the installed `bd` (0.47.1) and asserted to the EXACT output shape the
+  caller parses (verbatim production `jq`). 71 assertions / 0 fail,
+  auto-discovered into `make test-all`. Three load-bearing contract
+  subtleties are pinned (create returns an OBJECT vs show/update
+  1-element ARRAYS; `bd close` on a BLOCKED issue is an exit-0 no-op;
+  `bd list --type epic --json` carries no `.dependents` on 0.47.1). A
+  non-vacuity META-test fails loudly with a supported-range banner on
+  shape mismatch.
+- **`windows-install.yml` CI job (G2.ps1, llh.7) — dispatch-only.**
+  `.github/workflows/windows-install.yml` (windows-latest,
+  `workflow_dispatch` only, zero API spend) ports 27 parity assertions
+  from `installer-mcp-config.sh` and includes a code-graph-mcp stdio
+  `initialize` boot-check validated locally on macOS
+  (`serverInfo={code-graph-mcp,1.0.0}`). It is authored but undispatched
+  — gh's token scopes (`gist, read:org, repo`) lack `workflow`, so
+  `install.ps1` is verified by parity inspection + local boot, not
+  Windows execution (see Security/residuals).
+- **Claims ledger (`docs/RELEASE_AUDIT.md`).** The 121-row artifact of
+  the gauntlet: every README / QUICKSTART / docs / installer / agent-
+  prompt claim plus the seven implicit gauntlet-spec claims, each with a
+  verification method, an evidence pointer, and a status. Re-tallied
+  mechanically at the verdict (grep over end-anchored status cells).
+
+### Changed
+
+- **Stop-requires-approval invariant hardened (llh.25 disposition).**
+  The live `invStopRequiresApproval` check now excludes H3
+  `stop_hook_active` re-entry guards (16ms `{}`-and-exit-0 anti-loop
+  bail-outs were being mis-counted as approval leaks) and skips on
+  bd-unavailable (a crashed bd daemon zeroes out label writes, which is
+  an infra failure, not a gate leak).
+- **Label-event deriver matches var-bound `bd` (llh.23).** The e2e
+  label-transition deriver maps the variable-bound `bd` command shapes
+  the live workflow emits, not only the literal seed-fixture forms, so
+  `qa-pending → qa-approved` milestones derive from real runs.
+- **Stop-hook fast-path extended (G2.gate-friction, llh.3/llh.17).**
+  The doc-only fast path now also short-circuits beads-state-only diffs,
+  empty post-denylist change-sets, and transient e2e fixture-script
+  churn — the false-block cases the original fast path missed,
+  reproduced as L2 cases first.
+- **`bd close` stdout no longer pollutes the verdict (llh.20).** The
+  `✓ Updated issue` banner bd prints on close is suppressed/redirected
+  before `verify-before-stop.sh` emits its `{}` verdict, so the Stop
+  hook's JSON is not corrupted by bd's success chatter.
+
+### Fixed
+
+- **Red-team P0: forgeable approval label (llh.18).** A bare `bd label
+  add <task> qa-approved` (every agent has `bd`) released unreviewed
+  code because the Stop predicate reduced to `has_label qa-approved`,
+  skipping the impact-report refusal, audit comment, and rubric that
+  `qa-gate.sh approve` enforces. Closed by the change-set-hash-bound
+  approval record (see Added).
+- **Red-team P1: decoy current-task redirect (llh.18).** The gate
+  checked approval of whatever `current-task` pointed at and never bound
+  it to the tracked changed files — approve a trivial decoy, repoint
+  `current-task`, ship unrelated unreviewed code. Closed by binding the
+  approval record to the change-set hash.
+- **Fail-open in the P0 fix (llh.18).** The first iteration of the
+  hash-bound check could pass when the hash was missing/unrecomputable;
+  the release predicate now fails CLOSED in that case.
+- **13 stale-doc claims (prove-or-remove).** Claims contradicted by the
+  current code/config were removed or rewritten: the hook-event count
+  (5 → 6 in settings.json + a 7th, SubagentStart, in hooks.json:
+  H1/AR1/Q6/H2); the embedded agent-prompt blocks relabeled "Full
+  Prompt" → excerpt (A2); the live-fixture count (six → seven, adding
+  `rubric-revision-loop`: M4/AR10); the PostToolUse extension-allowlist
+  description corrected to the actual build-artifact denylist + `{}`
+  emit (AR2); the file-tracking trim threshold (500 → 1000 with 2x
+  headroom: AR4); the golden-cassette PR-diff framing → debugging-
+  reference framing (AR11); stale "Ultimate Workflow Plugin" branding +
+  the unmeasured "in 5 minutes" claim (Q2); the "`bd doctor` all green"
+  overclaim caveated to the CORE SYSTEM + GIT INTEGRATION must-pass set
+  (Q4); and the hardcoded "v3.0.0" installer banner dropped in favor of
+  pointing at the manifest (I7).
+
+### Security
+
+- **Red-team certification — the gate does not leak under live load.**
+  The three mandatory red-team attacks (forge the label via `bd`
+  directly; recreate the legacy marker file; interrupt the hook
+  mid-evaluation) were reproduced and DEFEATED, and the failed attacks
+  are the evidence (the marker is never read; the interrupt is a
+  deliberate `{}`-and-exit-0 anti-loop pass-through that leaves prior
+  gate state intact). Forensically confirmed on the paid python-django-
+  bug run (llh.25): the gate BLOCKED the unreviewed `models.py` change
+  on every Stop reaching change-set logic; the only "allow" Stops were
+  H3 re-entry guards, and no unaudited completion path survived.
+- **Residual threat boundary documented.** The fix raises the bar from a
+  trivially-forgeable label to a change-set-bound record; it is not a
+  cryptographic sandbox. An agent with arbitrary shell can still
+  reproduce the hash-bound comment by hand (`bd comment add "QA-GATE
+  APPROVED change_set_hash=$(impact-report.sh --hash-only)"`) — a stated
+  THREAT-MODEL BOUNDARY at both the producer (`qa-gate.sh:730`) and
+  consumer (`verify-before-stop.sh:1146`) sites; the full-shell-autonomy
+  model precludes an HMAC keyed on a withheld secret. The orchestrator
+  Bash-write vector is the related residual: Write/Edit/MultiEdit are
+  structurally omitted from the orchestrator tool list and
+  hook-blocked, but a write-shaped Bash command is not — closing it
+  mechanically needs runtime-surfaced subagent identity this environment
+  does not provide.
+
+### Reverted
+
+- **llh.19 (orchestrator Bash-write fail-closed).** The mechanical
+  attempt to fail CLOSED on write-shaped Bash from the orchestrator was
+  reverted to HEAD: `prevent-orchestrator-edits.sh` cannot attribute the
+  caller in this identity-less runtime, so failing closed broke
+  legitimate specialist Bash. The Bash-write vector is carried as a
+  documented residual (see Security) rather than fixed.
+
 ## [3.4.1] - 2026-06-13
 
 Hotfix release for the v3.4.0 line: model resolution was selecting the

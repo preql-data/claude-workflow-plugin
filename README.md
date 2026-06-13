@@ -22,9 +22,11 @@ every step.
   current diff, so a forged `qa-approved` label (added without
   `qa-gate.sh approve`) does not pass the gate.
 - **Tasks survive sessions.** Specialists auto-claim work via
-  `bd update --status in_progress`. PRs and Beads tasks auto-link to
-  GitHub (issues, PRs, close-on-merge). Pick up tomorrow where you left
-  off tonight.
+  `bd update --status in_progress`. GitHub issue auto-linking is provided
+  (`bd-github-link.sh`: posts a back-link comment on task close and parses
+  `Closes #N`); its call shapes are verified by the `bd-github-link` L1
+  test against a stubbed `gh`, not a live round-trip. Pick up tomorrow
+  where you left off tonight.
 - **A separate-context rubric grader gates every QA approval.** Before
   QA signs off, a read-only `grader` subagent scores the work against
   a versioned rubric (default + per-domain overlays + a bugfix overlay

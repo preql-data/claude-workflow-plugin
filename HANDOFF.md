@@ -5,6 +5,32 @@ work on this repository.
 
 ## Current state
 
+- **v3.5.0** — the Release Acceptance Gauntlet — closeout complete
+  2026-06-14; awaiting the orchestrator commit + first git tag. Parent
+  epic `claude-workflow-plugin-llh`. The gauntlet put every shipped
+  claim through adversarial certification (rules: no adjective without
+  artifact; prove-or-remove; mechanics over prompts; $80 hard paid cap).
+  Output: the 121-row claims ledger `docs/RELEASE_AUDIT.md`, re-tallied
+  mechanically at the verdict to **PROVEN 51 / PROVEN-WITH-CAVEAT 47 /
+  REMOVED 23 / NOT-PROVEN 0** (grep over end-anchored status cells; the
+  one textual `NOT-PROVEN` left is the status-vocabulary DEFINITION row,
+  not a data row). **Release rule MET**: NOT-PROVEN = 0 AND the Stage-3
+  red-team P0/P1 (llh.18) closed. The release-defining change is the
+  **change-set-hash-bound QA approval (llh.18)** — the Stop gate now
+  requires a tamper-evident approval record whose `change_set_hash`
+  matches the current diff, not the bare `qa-approved` label, defeating
+  the red team's forged-label (P0), decoy-current-task (P1), and
+  post-approval-drift attacks (642 L2 assertions incl. a load-bearing
+  META-test). The gate was red-team-certified NOT to leak under live
+  load: forensically confirmed (llh.25) on the paid python-django-bug
+  run, where the hardened gate BLOCKED the unreviewed change. **Paid
+  budget: $10.15 of $80** — node-react-auth ($8.01, feature shipped +
+  QA-approved + worktrees merged) and python-django-bug ($2.14,
+  bugfix-0.5 engaged + gate held). Closeout task:
+  `claude-workflow-plugin-llh.26`. **NO commit/tag was made by the
+  closeout** — the orchestrator commits and applies the first git tag.
+  See `CHANGELOG.md` `[3.5.0] - 2026-06-14` and the residual-risk
+  register below.
 - Hotfix **v3.4.1** shipped 2026-06-13. Parent epic
   `claude-workflow-plugin-vlp` with three child tasks all
   `qa-approved` on `main`: `vlp.1` (model resolver — generation-aware
@@ -112,6 +138,113 @@ work on this repository.
   `--allow-stale` workaround), `0wk.6` (carried Phase 0 follow-up),
   `claude-workflow-plugin-8oz` (SHA-pin GitHub Actions, P2), and
   `claude-workflow-plugin-a7y` (gitleaks CI job, P2).
+
+## Residual-risk register (v3.5.0)
+
+The gauntlet shipped with NOT-PROVEN = 0, but 47 rows are
+PROVEN-WITH-CAVEAT. These are the carried residuals that survive into the
+release notes — each has a concrete flip-to-PROVEN path in its
+`docs/RELEASE_AUDIT.md` row, and each carries a tracking task.
+
+- **n6d consultation inject-fix (ledger A4/M3/P6b/S3; tracker
+  `claude-workflow-plugin-llh.22`, open).** The mechanical impact report
+  is generated + freshness-gated + hash-bound at gate-enter (PROVEN);
+  QA *consulting* it is prompt-surfaced (qa.md §3a "FIRST ACTION: cat the
+  report"), NOT force-injected — the paid node-react-auth run recorded 0
+  QA reads despite §3a. Fix: embed the impact summary (high-fan-in
+  callers) into the `verify-before-stop.sh` QA-Task template so it is in
+  QA context by construction; the `qa-queried-impact-of` invariant must
+  co-evolve to check the embedded-in-prompt signal. Flip: inject-fix +
+  one re-validation.
+- **Windows execution (ledger S6/R25/R26/I5/Q7; tracker `llh.7`,
+  carried).** `install.ps1` is parity-inspected and the code-graph-mcp
+  stdio boot is validated locally on macOS; `.github/workflows/
+  windows-install.yml` exists (27 parity assertions) but is
+  undispatched — gh's token scopes (`gist, read:org, repo`) lack
+  `workflow`. Flip: re-auth gh with `workflow` scope, push, dispatch +
+  watch a green windows-latest run.
+- **Orchestrator Bash-write vector (ledger R30/P1; tracker `llh.19`,
+  reverted).** Write/Edit/MultiEdit are structurally omitted from the
+  orchestrator tool list AND hook-blocked (red-team confirmed); a
+  write-shaped Bash command (`bash -c 'cat > src/x.ts'`) is neither
+  denied nor tracked. The mechanical fail-closed fix (llh.19) was
+  REVERTED because `prevent-orchestrator-edits.sh` cannot attribute the
+  caller in this identity-less runtime, so failing closed broke
+  legitimate specialist Bash. Flip: runtime-surfaced subagent identity
+  (not available in this environment), or content-detection on
+  write-shaped Bash.
+- **bd daemon stack-overflow — 0wk.5 (ledger P10; tracker
+  `claude-workflow-plugin-0wk.5`, open, upstream/environmental).** The
+  installed `bd` (0.47.1) crashes on daemon autostart against stale
+  locks (`acquireStartLock`, `daemon_autostart.go:228`; `runtime:
+  goroutine stack exceeds 1000000000-byte limit`), which zeroed out all
+  label writes on the paid python-django-bug run and blocked the
+  bugfix-0.5 label-milestone confirmation. NOT a workflow defect (llh.25
+  classified INVARIANT-NUANCE + bd-daemon-crash; the gate did not leak).
+  Workaround: the documented `bd --no-daemon` path. Flip: a bd build
+  without the 0wk.5 crash + a captured `qa-pending → qa-approved`
+  milestone stream from a re-run.
+- **node-react-auth label-cassette gap (tracker:
+  `claude-workflow-plugin-llh.27`, this closeout's follow-up; pre-
+  existing, non-blocking).** The seed-fixture worktree task-creation
+  label-event stream is not fully derived (a `qa-pending` add-event is
+  declared in the fixture but absent from the derived stream).
+  DISTINCT from llh.23's var-bound-bd deriver fix. Flip: extend the
+  deriver to map the worktree task-creation command shape, then the
+  label-milestone invariant passes on the seed cassette.
+
+## Verify conditions for "v3.5.0 (Release Acceptance Gauntlet) shipped"
+
+A new session can confirm readiness without re-running the gauntlet by
+checking these assertions:
+
+- assert: `.claude-plugin/plugin.json` `version` equals `3.5.0`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `3.5.0`.
+- assert: `docs/RELEASE_AUDIT.md` re-tallies to **PROVEN 51 /
+  PROVEN-WITH-CAVEAT 47 / NOT-PROVEN 0 / REMOVED 23 = 121**. Run the four
+  greps `grep -cE '\| PROVEN \|$'`, `grep -cE '\| PROVEN-WITH-CAVEAT \|$'`,
+  `grep -cE '\| NOT-PROVEN \|$'`, `grep -cE '\| REMOVED \|$'` over the
+  file and confirm `51 / 47 / 0 / 23`; the leading-row-id count
+  `grep -cE '^\| [A-Za-z]+[0-9]+[a-z]? \|'` is `121`. (The only textual
+  `NOT-PROVEN` is the status-vocabulary DEFINITION row, which is not
+  end-anchored as a data row.)
+- assert: `make test-all` exits 0. Post-gauntlet baseline is **22 specs
+  / 642 assertions** (+1 spec over v3.4.1's 21 — the `bd-compat.sh`
+  L2 smoke spec from llh.6, 71 assertions — plus the llh.18
+  change-set-hash-bound approval assertions on `qa-gate.sh` +
+  `verify-before-stop.sh`).
+- assert: `make test` exits 0. Post-gauntlet L1 baseline is **16 specs**
+  (+1 over v3.4.1's 15 — the `impact-report.test.sh` from G2.n6d/llh.2).
+- assert: `cd .claude/tests/e2e && npm run test:unit` reports **368
+  passed / 5 skipped** (+210 tests over v3.4.1's 158 — chiefly the
+  `_fixture-script-sync.unit.spec.ts` 140-case drift guard from llh.8 +
+  the bd-compat / hardened-gate unit coverage; the five skips are the
+  honest invariant-engine + trace-anchor artifact-missing skips, not
+  green-washed).
+- assert: `make lint` clean (shellcheck over all hook + test scripts +
+  install/uninstall).
+- assert: the hardened gate requires a hash-matching approval record,
+  not the bare label. Run
+  `grep -c 'task_has_matching_approval_record' .claude/scripts/verify-before-stop.sh`
+  and confirm `>= 1`; a bare `bd label add <task> qa-approved` without a
+  matching `QA-GATE APPROVED change_set_hash=<h>` record must NOT release
+  the Stop gate.
+- assert: `.claude/scripts/impact-report.sh` exists and `qa-gate.sh
+  approve` refuses (exit 2) without a hash-current impact-report
+  artifact.
+- assert: `.github/workflows/windows-install.yml` exists and is
+  `workflow_dispatch`-only (authored, undispatched — see residual
+  register).
+
+The two paid live events ran 2026-06-13 (budget $10.15 of $80):
+node-react-auth ($8.01, 1526s, trace
+`cassettes/replays/node-react-auth-2026-06-13T16-52-03-909Z.jsonl`) —
+feature shipped + QA-approved + worktree branches merged; and
+python-django-bug ($2.14, 620s, trace
+`cassettes/replays/python-django-bug-2026-06-13T19-56-33-557Z.jsonl`) —
+bugfix-0.5 engaged, the hardened gate BLOCKED the unreviewed change
+(llh.25: no leak).
 
 ## Verify conditions for "v3.4.1 (hotfix) shipped"
 

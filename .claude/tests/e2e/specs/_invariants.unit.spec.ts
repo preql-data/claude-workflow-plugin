@@ -233,16 +233,257 @@ describe("invariant: stop-requires-approval", () => {
     expect(r.pass).toBe(true);
   });
 
-  it("META-TEST: fails when Stop:allow fires without any qa-approved/qa-deferred", () => {
+  it("META-TEST: fails when a RELEASE allow fires without any qa-approved/qa-deferred (genuine leak)", () => {
+    // llh.25: the leak signature is now precise — a NON-H3 release allow (an
+    // allow NOT preceded by a Stop:block) WITH unreviewed changes present AND
+    // bd observably healthy AND no approval. goodTrace's lone Stop:allow has
+    // no preceding block (so it is a release allow, not an H3 re-entry guard);
+    // we strip the approval, ensure a file was changed, and keep bd healthy
+    // (events present + a persisted non-approval transition). That is the real
+    // gate leak the invariant must still catch.
     const t = goodTrace();
-    // Strip the approval transition; Stop:allow remains.
+    t.fileWrites = [
+      { path: "server/index.js", bytesWritten: 100, changeType: "modified" },
+    ];
+    // Strip the approval transition but keep a persisted label (bd healthy —
+    // SOMETHING landed in the net diff, so this is NOT the bd-unavailable skip).
     t.beadsLabelTransitions = [
       { taskId: "good-1", added: ["qa-pending"], removed: [] },
     ];
     const agg = evaluateAll(t, [{ name: "stop-requires-approval" }]);
     expect(agg.allPassed).toBe(false);
     expect(agg.failed).toEqual(["stop-requires-approval"]);
-    expect(agg.results[0]?.result.detail).toMatch(/gate may have leaked/);
+    expect(agg.results[0]?.result.detail).toMatch(/gate leaked/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stop-requires-approval — llh.25 invariant-hardening (H3 re-entry guards +
+// bd-unavailable honest-skip).
+//
+// FORENSIC CONTEXT (claude-workflow-plugin-llh.25): the python-django-bug
+// live run FAILED stop-requires-approval + label-milestones, but the gate did
+// NOT leak. It BLOCKED the unreviewed accounts/models.py change twice; the 2
+// "allow" decisions the invariant counted were 16-17ms H3 stop_hook_active
+// re-entry guards (verify-before-stop.sh 553-558) firing on teardown after
+// those blocks, and a bd daemon stack-overflow crashed ALL label persistence
+// (beadsLabelTransitions=[]) so no qa-* label could be recorded regardless of
+// correct gate behavior. The pre-llh.25 invariant over-counted the H3 {}
+// re-entries as leak-allows and did not account for bd-unavailable runs.
+//
+// `stop_hook_active` is NOT captured per-event (the recorder sees only the
+// hook's STDOUT `{}`, never its STDIN — trace.ts HookOutputSchema), so the H3
+// signal is the cleanest available proxy: a bare {} allow preceded by a
+// Stop:block (the block is what set stop_hook_active and forced the re-entry).
+// ---------------------------------------------------------------------------
+
+/** Build a trace that BLOCKED an unreviewed change, then emitted two terminal
+ *  bare {} allows — the H3 re-entry guards firing on teardown. No approval
+ *  ever persisted (bd had no label activity, NOT a crash). This is the shape
+ *  of the python-django-bug live run (minus the bd-crash signature). */
+function h3TeardownAfterBlockTrace(): Trace {
+  const t = createEmptyTrace("synthetic-h3-teardown", "prompt", "claude-opus-4-7");
+  t.fileWrites = [
+    { path: "accounts/models.py", bytesWritten: 897, changeType: "modified" },
+  ];
+  t.hookOutputs = [
+    {
+      event: "Stop",
+      script: "verify-before-stop.sh",
+      decision: "block",
+      reason: "QA approval required (iteration 3). 1 file changed.",
+      durationMs: 1471,
+      response: { decision: "block", reason: "QA approval required" },
+    },
+    {
+      event: "Stop",
+      script: "verify-before-stop.sh",
+      decision: "block",
+      reason: "QA approval required (iteration 3). 1 file changed.",
+      durationMs: 45823,
+      response: { decision: "block", reason: "QA approval required" },
+    },
+    // The two terminal H3 re-entry guards: bare {} after the blocks.
+    { event: "Stop", script: "verify-before-stop.sh", durationMs: 16, response: {} },
+    { event: "Stop", script: "verify-before-stop.sh", durationMs: 17, response: {} },
+  ];
+  t.beadsLabelTransitions = [];
+  t.beadsLabelEvents = []; // recorder ran, saw no label activity (not a crash)
+  return t;
+}
+
+describe("invariant: stop-requires-approval (llh.25: H3 re-entry + bd-unavailable)", () => {
+  it("H3 re-entry guard allows are NOT counted as releases — block-then-teardown PASSES with no approval", () => {
+    // Both terminal {} allows fire after a Stop:block, so they are H3
+    // re-entry guards (anti-infinite-loop), not release decisions. The gate
+    // blocked the unreviewed change and never released it -> no leak.
+    const t = h3TeardownAfterBlockTrace();
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/H3 re-entry guard/i);
+  });
+
+  it("META-TEST: the H3-exclusion is load-bearing — a bare {} allow with NO preceding block is treated as a release (not excluded)", () => {
+    // Remove the blocks so the bare {} allows are no longer preceded by a
+    // block. They can no longer be H3 re-entry guards; with changes present,
+    // bd healthy (events present + a persisted non-approval transition) and no
+    // approval, the engine must NOT silently pass — it must FAIL as a leak.
+    const t = h3TeardownAfterBlockTrace();
+    t.hookOutputs = t.hookOutputs.filter((h) => h.decision !== "block");
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-pending", taskId: "x", source: "create" },
+    ];
+    t.beadsLabelTransitions = [
+      { taskId: "x", added: ["qa-pending"], removed: [] },
+    ];
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/gate leaked/);
+  });
+
+  it("bd-UNAVAILABLE run SKIPS (not fails): attempted qa-gate-entered add but empty net diff, even with a non-H3 allow", () => {
+    // The gate attempted its writes (qa-gate-entered add event) but bd crashed
+    // so nothing persisted (empty transitions). Even a non-H3 release allow
+    // does not flip this to FAIL — label state cannot answer the question, so
+    // the honest verdict is SKIP, not a false leak.
+    const t = createEmptyTrace("synthetic-bdcrash", "prompt", "claude-opus-4-7");
+    t.fileWrites = [{ path: "x.py", bytesWritten: 100, changeType: "modified" }];
+    t.hookOutputs = [
+      { event: "Stop", script: "verify-before-stop.sh", durationMs: 16, response: {} },
+    ];
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "c1", source: "enter" },
+      { action: "add", label: "rubric-pending", taskId: "c1", source: "enter" },
+    ];
+    t.beadsLabelTransitions = []; // crashed — nothing persisted
+    const agg = evaluateAll(t, [{ name: "stop-requires-approval" }]);
+    expect(agg.allPassed).toBe(true);
+    expect(agg.skipped).toContain("stop-requires-approval");
+    expect(agg.failed).toEqual([]);
+    expect(agg.results[0]?.result.detail).toMatch(/bd unavailable/i);
+  });
+
+  it("GENUINE LEAK still FAILS: non-H3 release allow + unreviewed changes + bd healthy + no approval (proves the invariant wasn't neutered)", () => {
+    // The load-bearing negative: an allow with NO preceding block (so it is a
+    // release, not an H3 guard), unreviewed source changed, bd observably
+    // healthy (events present AND a persisted non-approval transition — so NOT
+    // the bd-unavailable skip and NOT a pre-3.5 trace), and no qa-approved.
+    const t = createEmptyTrace("synthetic-real-leak", "prompt", "claude-opus-4-7");
+    t.fileWrites = [
+      { path: "server/index.js", bytesWritten: 100, changeType: "modified" },
+    ];
+    t.hookOutputs = [
+      { event: "Stop", script: "verify-before-stop.sh", durationMs: 1, response: {} },
+    ];
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-pending", taskId: "leak-1", source: "create" },
+    ];
+    t.beadsLabelTransitions = [
+      { taskId: "leak-1", added: ["qa-pending", "backend"], removed: [] },
+    ];
+    const agg = evaluateAll(t, [{ name: "stop-requires-approval" }]);
+    expect(agg.allPassed).toBe(false);
+    expect(agg.failed).toEqual(["stop-requires-approval"]);
+    expect(agg.results[0]?.result.detail).toMatch(/gate leaked/);
+  });
+
+  it("pre-3.5 recording with a non-H3 bare {} allow and no approval SKIPS (approval unobservable; mirrors label-milestones)", () => {
+    // A release-shaped bare {} allow with no preceding block, no approval, and
+    // NO beadsLabelEvents field at all (pre-3.5). A release allow is a bare {}
+    // indistinguishable from a benign QA-approved release, and the recorder of
+    // the day captured no labels — so approval is unobservable. SKIP, not FAIL.
+    const t = createEmptyTrace("synthetic-pre35", "prompt", "claude-opus-4-7");
+    t.fileWrites = [{ path: "x.js", bytesWritten: 100, changeType: "modified" }];
+    t.hookOutputs = [
+      { event: "Stop", script: "verify-before-stop.sh", durationMs: 59, response: {} },
+    ];
+    t.beadsLabelTransitions = [];
+    // No beadsLabelEvents field at all (pre-3.5).
+    delete (t as { beadsLabelEvents?: unknown }).beadsLabelEvents;
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/pre-3\.5 recording/);
+  });
+
+  // -- THE KEY EVIDENCE: the actual python-django-bug live trace ------------
+  // Re-evaluate the real failing cassette. Before llh.25 this trace FAILED
+  // stop-requires-approval ("gate may have leaked") and label-milestones.
+  // After the fix both must PASS-or-SKIP, because the gate did NOT leak (it
+  // blocked the unreviewed change; the {} allows were H3 re-entry guards and
+  // bd crashed). This anchors the fix against the ground-truth trace, not just
+  // synthetics.
+  const DJANGO_TRACE = path.resolve(
+    __dirname,
+    "..",
+    "cassettes",
+    "replays",
+    "python-django-bug-2026-06-13T19-56-33-557Z.jsonl",
+  );
+
+  it("THE llh.25 EVIDENCE: the python-django-bug live trace no longer FAILS stop-requires-approval (PASS — all allows are H3 re-entry guards)", () => {
+    expect(existsSync(DJANGO_TRACE)).toBe(true);
+    const parsed = TraceSchema.safeParse(
+      JSON.parse(readFileSync(DJANGO_TRACE, "utf8").trim()),
+    );
+    expect(parsed.success).toBe(true);
+    const t = parsed.data!;
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    // Gate did NOT leak: the 2 terminal {} allows are H3 re-entry guards after
+    // the iteration-3 BLOCK on accounts/models.py.
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/H3 re-entry guard/i);
+  });
+
+  it("THE llh.25 EVIDENCE: the python-django-bug live trace no longer FAILS label-milestones (SKIP — bd unavailable)", () => {
+    const parsed = TraceSchema.safeParse(
+      JSON.parse(readFileSync(DJANGO_TRACE, "utf8").trim()),
+    );
+    expect(parsed.success).toBe(true);
+    const t = parsed.data!;
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    // bd crashed: the gate attempted qa-gate-entered adds but nothing
+    // persisted, so the milestones are unverifiable from labels -> SKIP.
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/bd unavailable/i);
+  });
+
+  it("THE llh.25 EVIDENCE: both django invariants FAILED before the fix (regression-anchor the before/after)", () => {
+    // Reproduce the pre-llh.25 verdict logic inline so the before-state is
+    // pinned in-repo: the OLD stop-requires-approval counted EVERY bare {}
+    // Stop as an allow and required a qa-approved/qa-deferred net-diff add.
+    const parsed = TraceSchema.safeParse(
+      JSON.parse(readFileSync(DJANGO_TRACE, "utf8").trim()),
+    );
+    const t = parsed.data!;
+    const oldStopAllows = t.hookOutputs.filter(
+      (h) =>
+        h.event === "Stop" &&
+        (h.decision === "approve" ||
+          h.decision === undefined ||
+          h.decision === null),
+    );
+    const oldSawApproval = t.beadsLabelTransitions.some(
+      (x) => x.added.includes("qa-approved") || x.added.includes("qa-deferred"),
+    );
+    // OLD verdict: allows present (2) AND no approval -> FAIL.
+    expect(oldStopAllows.length).toBeGreaterThan(0);
+    expect(oldSawApproval).toBe(false);
+    const oldVerdict = oldStopAllows.length > 0 && !oldSawApproval ? "FAIL" : "PASS";
+    expect(oldVerdict).toBe("FAIL");
+    // And the bd-crash signature that explains the empty net diff is present:
+    expect(
+      (t.beadsLabelEvents ?? []).some(
+        (e) => e.action === "add" && e.label === "qa-gate-entered",
+      ),
+    ).toBe(true);
+    expect(t.beadsLabelTransitions.length).toBe(0);
   });
 });
 
@@ -420,6 +661,68 @@ describe("invariant: label-milestones (event-stream semantics, G2.9ke)", () => {
     expect(r.detail).toContain(
       "trace lacks beadsLabelEvents (pre-3.5 recording)",
     );
+  });
+
+  // -- llh.25: bd-unavailable honest-skip (the python-django-bug case) -------
+  it("llh.25: SKIPS (not fails) when bd crashed — gate-enter attempted but empty net diff means milestones could not persist", () => {
+    // The gate ran `qa-gate.sh enter` (qa-gate-entered/rubric-pending add
+    // events present in the stream) but the bd daemon crashed, so NOTHING
+    // persisted to the net diff. qa-pending/qa-approved never landed — an
+    // infra fault, not a workflow defect — so the milestone question is
+    // unverifiable from labels and the honest verdict is SKIP.
+    const t = goodTrace();
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "good-1", source: "enter" },
+      { action: "add", label: "rubric-pending", taskId: "good-1", source: "enter" },
+    ];
+    t.beadsLabelTransitions = []; // bd crashed — nothing persisted
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/bd unavailable/i);
+  });
+
+  it("llh.25: the bd-unavailable skip is NARROW — bd healthy (a persisted transition) with a missing milestone still FAILS", () => {
+    // Same attempted gate-enter events, but a transition DID persist (bd
+    // healthy). qa-approved is still missing -> this is a real milestone gap,
+    // not an infra fault, so it must FAIL (the skip must not mask it).
+    const t = goodTrace();
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "good-1", source: "enter" },
+      { action: "add", label: "qa-pending", taskId: "good-1", source: "create" },
+    ];
+    t.beadsLabelTransitions = [
+      { taskId: "good-1", added: ["qa-pending"], removed: [] },
+    ]; // persisted -> bd healthy
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.pass).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/missing milestone/);
+  });
+
+  it("llh.25: the bd-unavailable skip does NOT mask an affirmative MISORDER (visible in the stream = real defect)", () => {
+    // qa-approved is added BEFORE qa-pending in the stream (a real ordering
+    // violation the stream can see), and transitions are empty. Even though
+    // the bd-unavailable structural signature is present, an affirmative
+    // misorder is a workflow defect the net-diff outage cannot explain, so it
+    // must still FAIL — the skip only covers purely-MISSING milestones.
+    const t = goodTrace();
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "good-1", source: "enter" },
+      { action: "add", label: "qa-approved", taskId: "good-1", source: "x" },
+      { action: "add", label: "qa-pending", taskId: "good-1", source: "y" },
+    ];
+    t.beadsLabelTransitions = [];
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.pass).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/out of declared order/);
   });
 });
 

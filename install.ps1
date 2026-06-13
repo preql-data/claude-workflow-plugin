@@ -569,7 +569,7 @@ build/
     }
     Write-Host ""
     Write-Color "What's new in v3:" Cyan
-    Write-Host "  - Plugin manifest (.claude-plugin/plugin.json) with v3.0.0"
+    Write-Host "  - Plugin manifest (.claude-plugin/plugin.json) — see it for the version"
     Write-Host "  - Model pinning per agent + /workflow-model upgrade command"
     Write-Host "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
     Write-Host "  - Parent-folder access via additionalDirectories ('../')"

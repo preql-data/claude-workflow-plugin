@@ -1,6 +1,6 @@
 # Agents Reference
 
-Complete documentation of all AI agent prompts in the Ultimate Workflow Plugin.
+Complete documentation of all AI agent prompts in the claude-workflow plugin.
 
 ---
 
@@ -26,7 +26,14 @@ The plugin includes 7 agents:
 
 **Role**: Primary workflow orchestrator that coordinates all development work using Beads.
 
-### Full Prompt
+> The blocks below are **abridged excerpts** of the agent prompts, kept
+> for orientation. They omit the `model:`/`effort:` frontmatter, the
+> plan-mode and root-relay sections, and the impact-analysis steps the
+> shipped prompts carry. The canonical, complete prompt for each agent is
+> its file under [`.claude/agents/`](../.claude/agents/) — read that, not
+> this excerpt, when the exact wording matters.
+
+### Prompt (excerpt)
 
 ```markdown
 ---
@@ -138,7 +145,7 @@ If stuck after 2-3 attempts, **USE AskUserQuestionTool** rather than looping.
 
 **Role**: Backend engineering specialist for APIs, databases, and business logic.
 
-### Full Prompt
+### Prompt (excerpt)
 
 ```markdown
 ---
@@ -208,7 +215,7 @@ bd label add $TASK_ID qa-pending
 
 **Role**: Frontend engineering specialist for UI, UX, and components.
 
-### Full Prompt
+### Prompt (excerpt)
 
 ```markdown
 ---
@@ -274,7 +281,7 @@ bd label add $TASK_ID qa-pending
 
 **Role**: DevOps specialist for CI/CD, infrastructure, and deployment.
 
-### Full Prompt
+### Prompt (excerpt)
 
 ```markdown
 ---
@@ -336,7 +343,7 @@ bd label add $TASK_ID qa-pending
 
 **Role**: Quality gate that must approve all code changes before delivery.
 
-### Full Prompt
+### Prompt (excerpt)
 
 ```markdown
 ---

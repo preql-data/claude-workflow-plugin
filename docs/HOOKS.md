@@ -1,26 +1,34 @@
 # Hooks Reference
 
-Complete documentation of all hook scripts in the Ultimate Workflow Plugin.
+Complete documentation of all hook scripts in the claude-workflow plugin.
 
 ---
 
 ## Overview
 
-The plugin uses 5 Claude Code hooks:
+The plugin wires 6 Claude Code hook events in `.claude/settings.json`
+(the plugin-manifest `.claude/hooks/hooks.json` adds a 7th, SubagentStart,
+for plugin-scoped installs):
 
 | Hook | File | Trigger |
 |------|------|---------|
 | SessionStart | `session-start.sh` | Session begins |
 | UserPromptSubmit | `intent-router.sh` | User submits prompt |
-| PostToolUse | `post-edit.sh` | After Write/Edit tools |
+| PreToolUse | `prevent-orchestrator-edits.sh` | Before Write/Edit/MultiEdit (blocks orchestrator edits) |
+| PostToolUse | `post-edit.sh` | After Write/Edit/MultiEdit tools |
 | Stop | `verify-before-stop.sh` | Claude attempts to stop |
 | SessionEnd | `session-end.sh` | Session ends |
+| SubagentStart (`hooks.json` only) | `subagent-start.sh` | A subagent starts (auto-assign injection) |
 
 ---
 
 ## Hook Configuration
 
 **File**: `.claude/settings.json`
+
+The shipped `hooks` block wires all six event types (the file also carries
+`statusLine`, an `env` block, and a `permissions.allow` list alongside
+`hooks` — omitted here for focus):
 
 ```json
 {
@@ -41,18 +49,32 @@ The plugin uses 5 Claude Code hooks:
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/intent-router.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/intent-router.sh\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Write|Edit|MultiEdit)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/prevent-orchestrator-edits.sh\"",
+            "timeout": 5000
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "^(Write|Edit|MultiEdit)$",
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/post-edit.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/post-edit.sh\"",
+            "timeout": 10000
           }
         ]
       }
@@ -62,7 +84,8 @@ The plugin uses 5 Claude Code hooks:
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/verify-before-stop.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/verify-before-stop.sh\"",
+            "timeout": 1320000
           }
         ]
       }
@@ -72,7 +95,8 @@ The plugin uses 5 Claude Code hooks:
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-end.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/session-end.sh\"",
+            "timeout": 15000
           }
         ]
       }
@@ -80,6 +104,11 @@ The plugin uses 5 Claude Code hooks:
   }
 }
 ```
+
+> The plugin-manifest `.claude/hooks/hooks.json` mirrors this block and
+> additionally wires `SubagentStart` (`subagent-start.sh`) and a second
+> `PostToolUse` matcher (`^Bash$` → `bd-github-link.sh`) for
+> plugin-scoped installs.
 
 ---
 

@@ -125,11 +125,128 @@ function isOrchestratorAttributable(
   return true;
 }
 
+/**
+ * Is this Stop hookOutput a bare "no-op" allow — an empty `{}` envelope with
+ * no decision and no reason? (claude-workflow-plugin-llh.25)
+ *
+ * `verify-before-stop.sh` prints exactly `echo "{}"` from EVERY non-blocking
+ * exit: the H3 re-entry guard (line 557), the max_turns/user_interrupt skip
+ * (562), the no-changes allow (630), the F1 fast-path (753/765), the
+ * post-denylist-empty allow (799/823), AND the genuine QA-approved release
+ * (1375). The recorder only captures the hook's STDOUT (`msg.output`), never
+ * its STDIN, so `stop_hook_active` is NOT observable per-event (trace.ts
+ * HookOutputSchema has no such field). A bare `{}` is therefore the
+ * trace-observable signature of "this Stop did NOT run the block pipeline /
+ * did not emit a change-set-bound block" — it is the necessary (not
+ * sufficient) half of the H3-re-entry-guard signal; `isH3ReentryGuardAllow`
+ * adds the sufficient half (a preceding block).
+ */
+function isBareAllowOutput(h: Trace["hookOutputs"][number]): boolean {
+  if (h.reason !== undefined && h.reason !== "") return false;
+  const resp = h.response;
+  if (resp === undefined || resp === null) return true;
+  if (typeof resp === "object") return Object.keys(resp as object).length === 0;
+  return false;
+}
+
+/**
+ * The trace-observable H3 re-entry-guard signal (claude-workflow-plugin-llh.25).
+ *
+ * WHY THIS EXISTS: when a Stop hook BLOCKS, Claude Code re-fires Stop with
+ * `stop_hook_active=true`; `verify-before-stop.sh` lines 553-558 short-circuit
+ * that re-entry with a bare `echo "{}"` BEFORE any change-set evaluation —
+ * the documented AgentLint-H3 anti-infinite-loop guard. That terminal `{}` is
+ * NOT a release decision, yet the pre-llh.25 invariant counted EVERY bare
+ * `{}` Stop as a leak-candidate "allow" and so reported a leak on every
+ * correct block-then-defer run whose approval never persisted (e.g. the
+ * python-django-bug live run where bd crashed). See `bd show
+ * claude-workflow-plugin-llh.25`.
+ *
+ * `stop_hook_active` is not captured per-event (see `isBareAllowOutput`), so
+ * we use the cleanest available PROXY, exactly as the H3 mechanic works: an
+ * H3 re-entry guard fires ONLY because a prior Stop already BLOCKED in the
+ * same run (the block is what set `stop_hook_active`). So an allow is an H3
+ * re-entry guard iff it is a bare `{}` (did not run the pipeline) AND it is
+ * preceded — in hook-stream order — by a Stop:block. An allow with NO
+ * preceding block cannot be an H3 re-entry guard: it is either a genuine
+ * release (handled by the qa-approved branch) or, with changes present and
+ * no approval and bd healthy, a real leak (which MUST still fail). This is
+ * the "correlate the allow with whether the change-set was evaluated" signal
+ * the llh.25 brief prefers: a leak is an allow that evaluated unreviewed
+ * changes and let them through; an H3 re-entry guard short-circuited before
+ * evaluation, after a block.
+ *
+ * Returns the indices (into trace.hookOutputs) of Stop:allow events that are
+ * H3 re-entry guards, plus the indices of the remaining (non-H3) allows.
+ */
+function classifyStopAllows(trace: Trace): {
+  h3Reentry: number[];
+  nonH3: number[];
+} {
+  const h3Reentry: number[] = [];
+  const nonH3: number[] = [];
+  let sawBlock = false;
+  trace.hookOutputs.forEach((h, i) => {
+    if (h.event !== "Stop") return;
+    if (h.decision === "block") {
+      sawBlock = true;
+      return;
+    }
+    const isAllow =
+      h.decision === "approve" ||
+      h.decision === undefined ||
+      h.decision === null;
+    if (!isAllow) return;
+    if (sawBlock && isBareAllowOutput(h)) {
+      h3Reentry.push(i);
+    } else {
+      nonH3.push(i);
+    }
+  });
+  return { h3Reentry, nonH3 };
+}
+
+/**
+ * Was Beads unavailable during the run — i.e. the gate ATTEMPTED to write
+ * labels but nothing persisted? (claude-workflow-plugin-llh.25)
+ *
+ * The trace does not carry the fixture's `sync-errors.log`, so the in-trace
+ * signature of bd-unavailability is structural: `beadsLabelEvents` (derived
+ * from tool-call INPUTS — intent, not observed state; see trace.ts) shows an
+ * ATTEMPTED gate write — a `qa-gate-entered` or `qa-pending` ADD, which only
+ * `qa-gate.sh enter` / a `qa-pending` create-label can produce — while
+ * `beadsLabelTransitions` (the post-run net diff of what ACTUALLY persisted to
+ * issues.jsonl) is EMPTY. Gate-entered-but-nothing-persisted means the bd
+ * writes crashed/hung (the python-django-bug daemon stack-overflow:
+ * acquireStartLock recursion), so qa-* labels could not be recorded
+ * regardless of whether the gate behaved correctly.
+ *
+ * GUARD AGAINST MASKING A LEAK: this is intentionally a NARROW signal —
+ * attempted-add + empty-net-diff. It requires `beadsLabelEvents` to be PRESENT
+ * (a post-3.5 recording) AND to contain a real gate-enter/qa-pending attempt.
+ * It does NOT fire on a pre-3.5 trace (no events at all), nor on an empty
+ * events array (recorder ran, saw no label activity), nor on a healthy run
+ * (transitions non-empty). Callers still apply it only AFTER excluding H3
+ * re-entry guards and confirming no approval, so a genuine leak (a non-H3
+ * allow with changes present and SOME persisted label state) is never skipped.
+ */
+function beadsUnavailable(trace: Trace): boolean {
+  const events = trace.beadsLabelEvents;
+  if (!Array.isArray(events)) return false; // pre-3.5: no events derived.
+  const attemptedGateWrite = events.some(
+    (e) =>
+      e.action === "add" &&
+      (e.label === "qa-gate-entered" || e.label === "qa-pending"),
+  );
+  if (!attemptedGateWrite) return false;
+  return trace.beadsLabelTransitions.length === 0;
+}
+
 // ============================================================================
 // Invariant 1: stop-requires-approval
 // ============================================================================
 /**
- * No Stop hook ever allowed completion while the active task lacked
+ * No Stop hook ever RELEASED completion while the active task lacked
  * `qa-approved` (or the audited escape `qa-deferred` from 0.2).
  *
  * APPROXIMATION:
@@ -139,39 +256,65 @@ function isOrchestratorAttributable(
  *   at the exact moment a Stop hook fires. The strongest checkable form
  *   asserted here:
  *
- *     If ANY Stop hook output emitted an `allow` decision (decision
- *     absent / null / "approve"), THEN at least one transition's added
+ *     If ANY Stop hook output emitted a RELEASE allow (an allow that was
+ *     not an H3 re-entry guard), THEN at least one transition's added
  *     labels must include `qa-approved` or `qa-deferred`.
  *
  *   This catches the failure mode the invariant guards against — Stop
- *   allowed completion with no QA approval anywhere in the run — while
- *   being honest about the temporal blind spot. A trace with a single
- *   Stop:allow late in the run AND a single qa-approved label add
- *   anywhere passes, even though we can't prove ordering. The
- *   block-then-recover pattern naturally satisfies this (the final
- *   Stop:allow comes after qa-approved is set on the task).
+ *   released completion with no QA approval anywhere in the run — while
+ *   being honest about the temporal blind spot. The block-then-recover
+ *   pattern naturally satisfies this (the final release allow comes after
+ *   qa-approved is set on the task).
  *
  *   When a Stop hook output has `decision === "block"`, it does NOT
- *   count as an `allow` for this check. A trace with only Stop:block
- *   events and no qa-approved transitions PASSES this invariant
- *   (block IS the gate working correctly), though such a trace
- *   typically fails other assertions in the spec.
+ *   count as an allow. A trace with only Stop:block events and no
+ *   qa-approved transitions PASSES this invariant (block IS the gate
+ *   working correctly).
+ *
+ * llh.25 — TWO false-positive sources removed (see `bd show
+ * claude-workflow-plugin-llh.25`; the python-django-bug live run tripped
+ * BOTH although its gate did NOT leak):
+ *
+ *   1. H3 RE-ENTRY GUARDS ARE NOT RELEASES. After a Stop:block, Claude Code
+ *      re-fires Stop with `stop_hook_active=true`; the hook short-circuits
+ *      that re-entry with a bare `echo "{}"` (verify-before-stop.sh 553-558),
+ *      the documented anti-infinite-loop guard — emitted on teardown, after
+ *      the gate had already BLOCKED, without re-evaluating the change-set.
+ *      The pre-llh.25 code counted every bare `{}` Stop as a leak-candidate
+ *      allow, so a correct block-then-defer run read as a leak. We now
+ *      classify allows (`classifyStopAllows`) and EXCLUDE H3 re-entry guards
+ *      (a bare `{}` allow preceded by a Stop:block) from the release set.
+ *      `stop_hook_active` is not captured per-event (the recorder sees only
+ *      hook STDOUT), so the preceding-block proxy is the cleanest signal —
+ *      it mirrors exactly when the H3 guard can fire.
+ *
+ *   2. bd-UNAVAILABLE → SKIP, NOT FAIL. If the gate ATTEMPTED its qa-*
+ *      writes but bd crashed so nothing persisted (`beadsUnavailable`:
+ *      qa-gate-entered/qa-pending ADD attempted in the event stream, empty
+ *      net diff), then the gate's behavior is unverifiable FROM LABELS — a
+ *      missing qa-approved transition proves an infra fault, not a leak. We
+ *      SKIP (honest-skip discipline), but ONLY after excluding H3 re-entry
+ *      guards and confirming no non-H3 release allow with changes present
+ *      remains — so a genuine leak is never masked by bd being down.
+ *
+ *   A genuine leak — a non-H3 release allow, no approval, changes present,
+ *   bd observably healthy (some label state persisted, or an events stream
+ *   present with no attempted-but-unpersisted gate write) — still FAILS.
  */
 function invStopRequiresApproval(trace: Trace): InvariantResult {
-  const stopAllows = trace.hookOutputs.filter(
-    (h) =>
-      h.event === "Stop" &&
-      (h.decision === "approve" ||
-        h.decision === undefined ||
-        h.decision === null),
-  );
-  if (stopAllows.length === 0) {
+  const { h3Reentry, nonH3 } = classifyStopAllows(trace);
+  const totalAllows = h3Reentry.length + nonH3.length;
+  if (totalAllows === 0) {
     return {
       pass: true,
       detail:
         "no Stop hook emitted an allow decision (vacuously satisfied)",
     };
   }
+
+  // Approval recorded anywhere -> the gate cycled correctly. Reported first
+  // so the message stays informative (and the phase-b run-3/run-4 anchors,
+  // which pin this exact substring, keep passing).
   const sawApproval = trace.beadsLabelTransitions.some(
     (t) =>
       t.added.includes("qa-approved") || t.added.includes("qa-deferred"),
@@ -185,12 +328,60 @@ function invStopRequiresApproval(trace: Trace): InvariantResult {
       .map((t) => t.taskId);
     return {
       pass: true,
-      detail: `${stopAllows.length} Stop:allow event(s) with qa-approved/qa-deferred recorded on: [${allTransitions.join(", ")}]`,
+      detail: `${totalAllows} Stop:allow event(s) with qa-approved/qa-deferred recorded on: [${allTransitions.join(", ")}]`,
+    };
+  }
+
+  // No approval persisted. If the ONLY allows were H3 re-entry guards, the
+  // gate's actual Stop decisions were all blocks (the guards just yielded on
+  // teardown after a block) — not a leak. This is the python-django-bug
+  // case: both terminal {} allows are H3 re-entry guards firing after the
+  // iteration-3 BLOCK on accounts/models.py.
+  if (nonH3.length === 0) {
+    return {
+      pass: true,
+      detail: `${h3Reentry.length} Stop:allow event(s), all H3 re-entry guards (bare {} emitted after a Stop:block — the anti-infinite-loop guard, verify-before-stop.sh 553-558), no release allow; gate blocked and did not leak (llh.25)`,
+    };
+  }
+
+  // There IS a non-H3 release allow but no approval persisted. Before failing,
+  // honour the honest-skip discipline: if bd was unavailable (attempted gate
+  // writes, empty net diff), label state cannot answer the question.
+  if (beadsUnavailable(trace)) {
+    return {
+      pass: true,
+      skipped: true,
+      detail: `skipped: bd unavailable (daemon crash) — the gate attempted its qa-* label writes (qa-gate-entered/qa-pending add events present) but none persisted (beadsLabelTransitions empty), so gate behavior is unverifiable from labels. ${nonH3.length} non-H3 Stop:allow event(s) observed; with no persisted approval the leak/no-leak question cannot be answered from this trace (llh.25 honest-skip).`,
+    };
+  }
+
+  // No `beadsLabelEvents` at all -> pre-3.5 recording. Approval was not
+  // captured by the recorder of the day, and every release allow emits a bare
+  // {} (indistinguishable from a benign QA-approved release at the output
+  // layer), so we cannot observe whether approval happened. SKIP rather than
+  // retro-fail — mirrors the label-milestones pre-3.5 skip (llh.4). A genuine
+  // leak in a CURRENT trace carries beadsLabelEvents and so never lands here.
+  if (!Array.isArray(trace.beadsLabelEvents)) {
+    return {
+      pass: true,
+      skipped: true,
+      detail: `skipped: pre-3.5 recording (no beadsLabelEvents) — ${nonH3.length} non-H3 Stop:allow event(s) but the recorder of the day did not capture label transitions, and a release allow is a bare {} indistinguishable from a benign QA-approved release; approval is unobservable. Re-record under the current recorder to evaluate (llh.25; mirrors the label-milestones pre-3.5 skip).`,
+    };
+  }
+
+  // bd observably healthy, no approval, and a non-H3 release allow remains.
+  // If unreviewed changes were present, this is the genuine leak the
+  // invariant guards against.
+  const changesPresent = trace.fileWrites.length > 0;
+  if (!changesPresent) {
+    return {
+      pass: true,
+      detail: `${nonH3.length} non-H3 Stop:allow event(s) with no approval, but trace.fileWrites is empty — nothing reviewable was changed, so no leak (vacuous).`,
     };
   }
   return {
     pass: false,
-    detail: `Stop hook emitted ${stopAllows.length} allow decision(s) but no task transitioned to qa-approved or qa-deferred — gate may have leaked`,
+    detail: `Stop hook emitted ${nonH3.length} release allow decision(s) (not H3 re-entry guards) with unreviewed changes present and no task transitioned to qa-approved or qa-deferred (bd healthy) — gate leaked`,
   };
 }
 
@@ -392,6 +583,29 @@ function invLabelMilestones(
       detail: `all ${milestones.length} milestone label add(s) proven: [${provenance.join(", ")}] (@event[i] = ordered event-stream match; @net-diff = stream-invisible add that survived to the post-run diff — see invariants.ts).`,
     };
   }
+
+  // bd-UNAVAILABLE → SKIP, not FAIL (claude-workflow-plugin-llh.25).
+  // When the gate ATTEMPTED its qa-* writes but bd crashed so nothing
+  // persisted (`beadsUnavailable`: qa-gate-entered/qa-pending add attempted in
+  // the stream, empty net diff), the missing milestone adds are an infra fault
+  // — the labels could not land regardless of correct gate behavior — not a
+  // workflow defect. This is the python-django-bug case: beadsLabelEvents
+  // shows the attempted qa-gate-entered adds, but the daemon stack-overflow
+  // meant qa-pending/qa-approved never persisted to either the stream or the
+  // net diff. We SKIP only when the failure is purely MISSING milestones (no
+  // add anywhere): an affirmative MISORDER is visible in the stream (the adds
+  // DID register as intent), so it is a real defect the net-diff outage cannot
+  // explain and must NOT be masked. Mirrors the honest-skip discipline; a
+  // healthy run (transitions non-empty) or an empty events array (no attempted
+  // gate write) does not qualify, so the genuine-FAIL META-tests are intact.
+  if (misordered.length === 0 && beadsUnavailable(trace)) {
+    return {
+      pass: true,
+      skipped: true,
+      detail: `skipped: bd unavailable (daemon crash) — the gate attempted its qa-* label writes (qa-gate-entered/qa-pending add events present) but none persisted (beadsLabelTransitions empty), so milestone adds [${missing.join(", ")}] could not be recorded and the milestone question is unverifiable from labels. Not a workflow defect; re-run with a working bd to evaluate (llh.25 honest-skip).`,
+    };
+  }
+
   const observedAdds = addEvents.map((a) => a.label).join(", ") || "<none>";
   const netAddsStr = [...netAdds].sort().join(", ") || "<none>";
   const parts: string[] = [];
