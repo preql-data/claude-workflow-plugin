@@ -1,6 +1,6 @@
 # Architecture
 
-Deep dive into the Ultimate Workflow Plugin system design.
+Deep dive into the claude-workflow plugin system design.
 
 ---
 
@@ -67,7 +67,11 @@ The plugin implements an **orchestrator-first architecture** where:
 
 ## Hooks
 
-The plugin uses 5 Claude Code hooks:
+The plugin wires 6 Claude Code hook events in `.claude/settings.json`
+(SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
+SessionEnd); the plugin-manifest `.claude/hooks/hooks.json` adds a 7th,
+SubagentStart, for plugin-scoped installs. The numbered subsections below
+cover the load-bearing ones:
 
 ### 1. SessionStart
 
@@ -95,27 +99,28 @@ BD_PRIME=$(bd prime)
 
 **Trigger**: When user submits a prompt
 
-**Purpose**: Detect intent and inject domain-specific workflow
+**Purpose**: Surface the workflow contract so Claude routes the work by
+intent — NOT by keyword matching.
 
-**What it does**:
+**What it does**: `intent-router.sh` injects the orchestrator-first
+workflow guidance (delegation contract, specialist roles, the QA gate)
+into the prompt as `additionalContext`. It does **not** grep the prompt
+for `bug|api|deploy`-style keywords and pick a specialist; the earlier
+v2 keyword-routing design was **removed** (principle 5: intent-based
+routing, never keyword-based — keyword routers misfire under paraphrase).
+Claude's own language understanding selects the specialist from the
+injected contract. (Verified: `intent-router.sh` contains no
+work-type/domain keyword regex; see HOOKS.md "Intent Router" and the H4
+ledger row.)
+
 ```bash
-# 1. Parse user prompt
-# 2. Detect work type:
-#    - "bug|error|fix" → bug
-#    - "add|create|build" → feature
-#    - "improve|optimize" → improvement
-#    - "test|verify" → testing
-#    - "plan|design" → planning
-
-# 3. Detect domains:
-#    - "api|database|auth" → backend
-#    - "ui|component|css" → frontend
-#    - "deploy|docker|ci" → devops
-
-# 4. Inject appropriate workflow context
+# 1. Read the user prompt from stdin
+# 2. Emit additionalContext describing the orchestrator -> specialist
+#    -> QA workflow and the available specialist roles
+# 3. Let Claude route by intent (no keyword regex, no forced specialist)
 ```
 
-**Output**: JSON with domain-specific instructions
+**Output**: JSON with `additionalContext` carrying the workflow contract
 
 ### 3. PostToolUse
 
@@ -125,14 +130,21 @@ BD_PRIME=$(bd prime)
 
 **What it does**:
 ```bash
-# 1. Extract file path from tool input
-# 2. Filter for code files only (.ts, .tsx, .js, .py, etc.)
-# 3. Add to tracking file (deduplicated)
-# 4. Cap tracking file at 500 entries
+# 1. Extract file path from tool input (.tool_input.file_path // .path)
+# 2. Apply a build-artifact DENYLIST (node_modules/, dist/, build/,
+#    *.lock, *.min.js, lockfiles, ...) — everything NOT matched is
+#    tracked, including .md/.json/.yaml/.toml/.tf/.proto. (Not an
+#    extension allowlist: a narrow allowlist was the B6 antipattern this
+#    hook was rewritten to avoid — see CLAUDE.md and HOOKS.md.)
+# 3. Add to tracking file (deduplicated, flock-guarded when available)
+# 4. Trim only when the file exceeds 1000 entries, keeping the last 500
+#    (race-tolerant: 2x headroom so concurrent appenders don't lose data)
 # 5. Update Beads with progress (batched every 10 edits)
 ```
 
-**Output**: Reminder that changes require QA approval
+**Output**: `{}` — a valid empty `hookSpecificOutput` no-op. This hook only
+records state; the Stop hook surfaces the "changes require QA review"
+context. (`post-edit.sh:53` `emit_empty() { echo '{}'; }`.)
 
 ### 4. Stop
 
@@ -320,10 +332,14 @@ fi
 
 ### Size Cap
 
-Tracking file is capped at 500 entries for large codebases:
+The tracking file is trimmed only when it grows past **1000** entries, and
+is then reduced to the last 500 (deduplicated). The 2x headroom is
+deliberate: it keeps the trim race-tolerant so concurrent appenders don't
+lose data (`post-edit.sh:98-105`):
 ```bash
-if [ "$LINE_COUNT" -gt 500 ]; then
-    tail -500 "$TRACKING_FILE" > "$TRACKING_FILE.tmp"
+if [ "${LINE_COUNT:-0}" -gt 1000 ]; then
+    # (flock-guarded when available)
+    sort -u "$TRACKING_FILE" | tail -500 > "$TRACKING_FILE.tmp"
     mv "$TRACKING_FILE.tmp" "$TRACKING_FILE"
 fi
 ```
@@ -413,7 +429,7 @@ This data is gitignored and not persisted.
 ### File Tracking
 
 - Deduplication prevents unbounded growth
-- 500 file cap for large codebases
+- Tracking file trimmed to the last 500 entries once it exceeds 1000
 - Beads updates batched (every 10 edits)
 
 ### Git Hooks
@@ -445,9 +461,9 @@ only, and the goldens are kept as debugging-only references
 (`.github/workflows/test.yml:13,19`). A normal PR or push consumes zero API
 spend.
 
-### Six live fixtures
+### Seven live fixtures
 
-L3-live runs against six representative fixtures:
+L3-live runs against seven representative fixtures:
 
 1. `node-react-auth` — end-to-end happy path (orchestrator → backend +
    frontend → QA on a JWT-auth feature).
@@ -460,16 +476,25 @@ L3-live runs against six representative fixtures:
    devops) on a signup epic.
 6. `qa-block-recovery` — QA blocks, specialist iterates, QA re-approves
    (proves the gate's `qa-blocked` → `qa-approved` round-trip).
+7. `rubric-revision-loop` — exercises the rubric grader relay (grade →
+   `rubric-pending`/`rubric-satisfied` → revision loop).
 
-### Golden cassette workflow
+### Golden cassettes (debugging references)
 
-Each live fixture has a committed `cassettes/golden/<fixture>.jsonl` that
-captures the structural fingerprint of a known-good run (tool sequence,
+Each live fixture has a committed `cassettes/golden/<fixture>.jsonl`
+capturing the structural fingerprint of a known-good run (tool sequence,
 subagent tree shape, hook firing sequence, label transitions, Beads task
-IDs created, plugin loader status). Replays normalise away the noise (tool
+IDs created, plugin loader status), with the noise normalised away (tool
 durations, costs, token counts, run IDs, raw file contents, free-form
-prose) so the diff is reliable. `cassette-diff` surfaces the structural
-delta; PR reviewers see this rather than 50 MB of raw cassette JSON.
+prose). Per phase 0.8 the **live gate is invariant-based, not
+cassette-diff-based**: the spec invariants (orchestrator never edits, QA
+approval gates Stop, only declared specialists run) are what a live run is
+judged against, and the goldens are kept as **debugging-only references**
+for inspecting a run by hand — not a PR-time artifact. There is no
+PR-time cassette diff because there is no PR-time live run (the live tier
+is `workflow_dispatch`-only, zero API spend per PR; see
+`.github/workflows/test.yml:13,19`). `cassette-diff` remains available as
+a manual debugging aid.
 
 The CI workflow tallies META-TEST pass/fail counts as a distinct line in
 the L2 job summary. A META-TEST is a self-test that proves the assertion

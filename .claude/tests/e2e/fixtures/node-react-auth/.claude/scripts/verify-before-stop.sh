@@ -91,11 +91,29 @@ log_sync_error() {
 # reverts it minutes later) used to trip CODE_CHANGES_DETECTED and produce a
 # false QA-required block. Classifying it here keeps it out of the change-set
 # entirely (same treatment as node_modules / build artifacts). NOTE: we do
-# NOT denylist `.beads/` or `.qa-tracking/` here — those are handled by the
-# fast-path classifier below (is_fastpath_only_change), which auto-approves
-# with an audited comment rather than silently dropping the paths, so the
-# beads-state churn still appears in the audit trail.
-DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
+# NOT denylist the PROJECT-ROOT `.beads/` or `.qa-tracking/` here — those are
+# handled by the fast-path classifier below (is_fastpath_only_change), which
+# auto-approves with an audited comment rather than silently dropping the
+# paths, so the beads-state churn still appears in the audit trail.
+#
+# G2.gate-friction residual (claude-workflow-plugin-llh.17): added the e2e
+# FIXTURE-INTERNAL transient-churn alternative
+# `.claude/tests/e2e/fixtures/<f>/(.claude/{scripts,beads}|.beads)/`.
+# `make test-live` runs sync the canonical hook scripts into each fixture's
+# `.claude/scripts/` (the llh.8 run-start sync) and the live run mutates the
+# fixture's own `.beads/` ledger. The ORCHESTRATOR session driving the live
+# run then fires its Stop gate while those fixture paths are dirty; with an
+# empty changed-files.txt the git-status fallback below would pick them up
+# via is_tracked_change and false-block "QA approval required" (observed 5x).
+# These are test fixtures, not orchestrator deliverables — the run's own
+# teardown re-syncs them. Unlike the project-root `.beads/`
+# (audit-trail-relevant, left to the fast-path classifier), fixture-internal
+# churn carries no reviewable intent, so denylisting it outright is correct.
+# ANTI-OVERREACH: scoped to the fixtures' `.claude/scripts`/`.beads` subtrees
+# only — a real edit to a fixture's `fixture.yaml`, `src/`, etc. (a genuine
+# fixture deliverable) is NOT matched and still goes through the gate
+# (regression: vbs-llh17 spec META).
+DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
 
 is_tracked_change() {
     local p="$1"
@@ -386,6 +404,59 @@ task_has_label() {
     echo ",$labels," | grep -q ",$label,"
 }
 
+# llh.18 (red-team P0/P1): the change-set-bound approval check.
+#
+# The Stop hook used to release on label-presence alone (GATE_STATUS ==
+# approved == has_label qa-approved). That label is forgeable by any agent
+# (`bd label add <task> qa-approved`, bypassing qa-gate.sh approve — P0) and
+# is never bound to the tracked changed files (approve a decoy, redirect
+# current-task — P1). We now ADDITIONALLY require a tamper-evident approval
+# record on the current task whose change_set_hash matches the CURRENT
+# change-set. qa-gate.sh approve writes that record (a
+# `QA-GATE APPROVED change_set_hash=<h>` comment); a bare label-add does not.
+IMPACT_REPORT_SCRIPT="$PROJECT_DIR/.claude/scripts/impact-report.sh"
+
+# current_change_set_hash — the canonical sha256 of the current,
+# denylist-filtered, sorted changed-files list. Sourced from the ONE place
+# that defines the canonicalisation (impact-report.sh --hash-only), the same
+# computation qa-gate.sh approve recorded. We do NOT re-implement the
+# sort/denylist/sha here — sharing the function is what keeps the recorded
+# hash and the recomputed hash from drifting. Prints empty on failure; the
+# caller treats an unverifiable hash as a hard "cannot confirm" (block),
+# never as a pass.
+current_change_set_hash() {
+    [ -f "$IMPACT_REPORT_SCRIPT" ] || { printf ''; return 1; }
+    CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || printf ''
+}
+
+# task_has_matching_approval_record <task-id> <expected-hash> — 0 when the
+# task carries a `QA-GATE APPROVED change_set_hash=<h>` comment whose <h>
+# equals <expected-hash>, 1 otherwise (incl. bd unavailable / empty hash).
+# This is the tamper-evident half of the gate: it reads the approval RECORD
+# qa-gate.sh approve wrote, not the (forgeable) label. An empty expected hash
+# never matches (so an unverifiable current hash cannot accidentally pass).
+task_has_matching_approval_record() {
+    local tid="$1" expected="$2"
+    [ -z "$tid" ] && return 1
+    [ -z "$expected" ] && return 1
+    command -v bd >/dev/null 2>&1 || return 1
+    [ -d "$PROJECT_DIR/.beads" ] || return 1
+    # Pull every comment's text, keep the QA-GATE APPROVED records, extract
+    # each record's change_set_hash token, and look for an exact match. The
+    # `change_set_hash=` prefix is matched literally so a summary that merely
+    # mentions a hex string cannot satisfy the gate.
+    local recorded_hashes
+    recorded_hashes=$(bd show "$tid" --json 2>/dev/null \
+        | jq -r '
+            (if type == "array" then .[0].comments else .comments end) // []
+            | .[].text
+            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h
+        ' 2>/dev/null || echo "")
+    [ -z "$recorded_hashes" ] && return 1
+    printf '%s\n' "$recorded_hashes" | grep -qxF "$expected"
+}
+
 # Spec 0.2: classify a test failure as a runner/infrastructure issue vs.
 # assertion failure. Conservative heuristic — when in doubt we say
 # "assertion" (the existing wording) so we never mis-direct an
@@ -660,8 +731,16 @@ if [ -n "$FASTPATH_CLASS" ]; then
                 # Mark task as closed if bd is available. Beads 0.47.x uses
                 # status=closed (not "completed"); using the wrong value used
                 # to silently fail under `|| true`, so we log to sync-errors.log.
+                #
+                # llh.20: redirect STDOUT to /dev/null too (not just stderr).
+                # `bd update` prints a `✓ Updated issue: <id>` banner to STDOUT
+                # on success; with only `2>/dev/null` that banner reaches the
+                # hook's stdout and prefixes the `{}` verdict, so `jq` over the
+                # whole stdout fails — the documented "raw text -> Claude ignores
+                # output" antipattern. `>/dev/null 2>&1` silences both streams;
+                # the `|| log_sync_error` on non-zero exit is preserved as-is.
                 if command -v bd >/dev/null 2>&1; then
-                    bd update "$CURRENT_TASK" --status closed 2>/dev/null \
+                    bd update "$CURRENT_TASK" --status closed >/dev/null 2>&1 \
                         || log_sync_error "bd update --status closed failed for $CURRENT_TASK during F1 $FASTPATH_CLASS fast path"
                 fi
                 # Clean up tracking artifacts. Includes per-task iteration
@@ -980,15 +1059,92 @@ $(j21_options_block "${CURRENT_TASK:-<TASK_ID_NEEDED>}")"
 fi
 
 # All technical checks passed. Now check QA approval.
+#
+# llh.18 (red-team P0/P1): the release predicate is NO LONGER "the
+# qa-approved label is present". The label is a forgeable token the gated
+# process can mint (`bd label add` — P0) and says nothing about WHICH change
+# set was reviewed (P1). Release now requires BOTH:
+#   (1) GATE_STATUS == approved  (the qa-approved label — still necessary for
+#       status precedence + idempotency), AND
+#   (2) a tamper-evident `QA-GATE APPROVED change_set_hash=<h>` record on the
+#       current task whose <h> matches the CURRENT change-set hash.
+# Condition (2) is what qa-gate.sh approve writes and a bare label-add does
+# not. It also re-arms the gate after any post-approval edit (the current
+# hash drifts away from the recorded one).
 QA_APPROVED=false
+# Distinguishes "label present but no change-set-bound record matches" (the
+# forged-label / decoy-redirect / post-approval-edit cases) from "no approval
+# at all", so we can give a precise block reason for the former.
+LABEL_WITHOUT_RECORD=false
+APPROVAL_RECORD_DETAIL=""
 
 if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
     if [ -n "$CURRENT_TASK" ] && [ -x "$QA_GATE" ]; then
         GATE_STATUS=$("$QA_GATE" status "$CURRENT_TASK" 2>/dev/null | jq -r '.status // "error"' 2>/dev/null || echo "error")
         if [ "$GATE_STATUS" = "approved" ]; then
-            QA_APPROVED=true
+            # The label is set. Now demand the change-set-bound record.
+            #
+            # `|| true` is LOAD-BEARING under `set -e` (line 25), not cosmetic:
+            # current_change_set_hash() returns 1 when impact-report.sh is
+            # MISSING (it `printf ''; return 1`s). A bare command-substitution
+            # ASSIGNMENT whose RHS exits non-zero trips set -e and ABORTS the
+            # whole script -> empty stdout + exit 1, which the hooks contract
+            # treats as NON-blocking (only exit 2 / decision:block blocks) ->
+            # the Stop would FAIL OPEN, releasing unreviewed code (re-opening
+            # the very P0 this gate closes; QA block, bd note 355). With the
+            # guard the assignment yields rc 0 + an empty hash, so the
+            # missing-script case falls into the fail-CLOSED LABEL_WITHOUT_RECORD
+            # branch below (its `[ -z "$CURRENT_CS_HASH" ]` arm). The
+            # present-but-failing case already fails closed (the function body
+            # ends `|| printf ''` -> rc 0); this makes the MISSING case match.
+            # Regression: verify-before-stop.sh spec, "vbs-llh18-miss" cases.
+            CURRENT_CS_HASH=$(current_change_set_hash) || true
+            if [ -n "$CURRENT_CS_HASH" ] && task_has_matching_approval_record "$CURRENT_TASK" "$CURRENT_CS_HASH"; then
+                QA_APPROVED=true
+            else
+                # qa-approved present, but no matching record. This is the
+                # forged bare label (no record at all), the decoy redirect
+                # (record's hash != current change-set), or a post-approval
+                # edit (current hash drifted). Block with a precise reason.
+                LABEL_WITHOUT_RECORD=true
+                if [ -z "$CURRENT_CS_HASH" ]; then
+                    APPROVAL_RECORD_DETAIL="the current change-set hash could not be recomputed (impact-report.sh missing/failing), so a change-set-bound approval cannot be verified"
+                else
+                    APPROVAL_RECORD_DETAIL="current change-set hash is $CURRENT_CS_HASH but no QA-GATE APPROVED record on $CURRENT_TASK carries a matching change_set_hash"
+                fi
+                log_sync_error "Stop blocked: qa-approved label present on $CURRENT_TASK but no change-set-bound approval record matches ($APPROVAL_RECORD_DETAIL) — forged bare label, decoy-task redirect, or post-approval edit (llh.18)"
+            fi
         fi
     fi
+fi
+
+# llh.18: the label-without-record block. Emitted BEFORE the generic
+# QA-required messaging so the reason names the exact failure mode and the
+# correct remediation (approve via qa-gate.sh, not a bare label add). This is
+# the load-bearing assertion the META-TEST strips to prove the check matters.
+if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
+    emit_block "qa-approved label present but no change-set-bound approval record matches the current changes — approve via qa-gate.sh approve, not a bare label add.
+
+Why this blocks ($APPROVAL_RECORD_DETAIL):
+  - A bare \`bd label add $CURRENT_TASK qa-approved\` sets the label but writes
+    NO change-set-bound record, so it cannot release (red-team P0).
+  - Approving a decoy task and redirecting current-task records the DECOY's
+    change-set hash, which will not match what is actually shipping (P1).
+  - Editing a tracked file AFTER approval shifts the current change-set hash
+    away from the approved one — the change must be re-reviewed.
+
+The release path requires a tamper-evident record that qa-gate.sh approve
+writes (a \`QA-GATE APPROVED change_set_hash=<h>\` comment) AND a matching
+current change-set. Re-run the gate properly:
+
+  bash .claude/scripts/qa-gate.sh enter $CURRENT_TASK
+  # regenerate the impact report so approve's freshness check passes:
+  bash .claude/scripts/impact-report.sh $CURRENT_TASK
+  bash .claude/scripts/qa-gate.sh approve $CURRENT_TASK '<approval summary>'
+
+Note: this binds approval to the reviewed files and defeats a forged or stale
+label, but is not a cryptographic sandbox against an adversary with arbitrary
+shell who reproduces the record by hand (documented residual, llh.18)."
 fi
 
 if [ "$QA_APPROVED" = false ]; then
@@ -1000,7 +1156,14 @@ if [ "$QA_APPROVED" = false ]; then
     mark_escalation_if_capped "${CURRENT_TASK:-}"
 
     # J18: surface intent-routing payload (LLM, not regex, decides scope).
-    INTENT_JSON=$(compute_intent_payload)
+    # Defensive `|| INTENT_JSON='{}'` for the same set -e fail-open class as
+    # the CURRENT_CS_HASH guard above: compute_intent_payload ends in a bare
+    # `jq -nc ...` whose non-zero exit (however unlikely with literal args)
+    # would otherwise abort this QA-required BLOCK mid-emission under set -e
+    # -> empty stdout -> fail open. The fallback keeps the block firing with a
+    # valid (if empty) payload rather than aborting. This path is only reached
+    # when NOT approved, so the conservative outcome is "still block".
+    INTENT_JSON=$(compute_intent_payload) || INTENT_JSON='{}'
 
     # Get changed files for display.
     CHANGED_FILES=""
@@ -1169,8 +1332,16 @@ fi
 
 # Mark the task closed (idempotent if already closed). Beads 0.47.x rejects
 # "completed" — valid status is "closed".
+#
+# llh.20: STDOUT -> /dev/null as well as stderr. `bd update` prints a
+# `✓ Updated issue: <id>` banner to STDOUT on success; with only `2>/dev/null`
+# that banner reaches the hook's stdout and prefixes the final `{}` /
+# hookSpecificOutput envelope, so `jq` over the whole stdout fails (the
+# "raw text -> Claude ignores the verdict" antipattern). `>/dev/null 2>&1`
+# keeps the stdout clean for the envelope while preserving the
+# `|| log_sync_error` fallback on a genuine non-zero exit.
 if [ -n "$CURRENT_TASK" ] && command -v bd >/dev/null 2>&1; then
-    bd update "$CURRENT_TASK" --status closed 2>/dev/null \
+    bd update "$CURRENT_TASK" --status closed >/dev/null 2>&1 \
         || log_sync_error "bd update --status closed failed for $CURRENT_TASK at end of QA-approved flow"
 fi
 

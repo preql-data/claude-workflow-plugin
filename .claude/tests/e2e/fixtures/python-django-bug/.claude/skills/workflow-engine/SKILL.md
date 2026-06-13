@@ -217,7 +217,7 @@ bash .claude/scripts/github-link.sh pr_created <pr-url> | task_closed <id>   # I
 | Server           | Tools                                                    | Notes                                       |
 | ---------------- | -------------------------------------------------------- | ------------------------------------------- |
 | `bd-mcp`         | bd_create_task, bd_create_epic, bd_show_task, bd_list_tasks, bd_update_task, bd_close_task, bd_add_label, bd_remove_label, bd_list_labels, bd_add_comment, bd_list_comments, bd_add_dep, bd_list_deps, bd_get_ready, bd_get_blocked, bd_doc_write, bd_doc_read, bd_qa_enter, bd_qa_status, bd_qa_approve, bd_qa_block | Phase 6a / J29.                             |
-| `code-graph-mcp`   | code_search, code_context, symbol_callers, impact_of, dead_code, dependency_path, code_index_health | Phase B / v3.3.0 (tree-sitter + SQLite). Stable surface (`code_search` / `code_context` / `code_index_health`) is byte-compatible with the retired `code-context-mcp`; impact-analysis tools are new. Orchestrator pre-delegation queries `impact_of` for likely-touched symbols; QA queries `impact_of` for every changed symbol during regression assessment (extends J19). |
+| `code-context-mcp` | code_search, code_context, code_index_health         | Phase 6b / J30 (tree-sitter-only version).  |
 
 ## Beads features used
 

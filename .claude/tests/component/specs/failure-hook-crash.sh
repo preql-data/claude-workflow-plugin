@@ -112,6 +112,13 @@ assert_eq "failure-hook-crash: subagent-start stub exits non-zero" "2" "$RC"
 # --------------------------------------------------------------------------
 TID=$(cd "$FIXTURE" && bd create "Hook-crash failure-injection task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 assert_match "failure-hook-crash: task created" '^[a-z0-9-]+\.' "$TID"
+# llh.18: seed the change-set BEFORE enter/approve so the change-set-bound
+# approval record carries the SAME hash verify-before-stop will recompute
+# below. (Approval is now bound to the reviewed files: approving an empty
+# change-set then introducing src/handler.ts is a post-approval edit that
+# correctly re-blocks. The real flow always reviews the actual changed
+# files, which is what seeding-before-approve models here.)
+printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID" >/dev/null
 # Approve the task so the gate's QA-required path doesn't drown out the
 # graceful-degrade signal. The gate's happy path is then `decision: approve`
@@ -120,6 +127,8 @@ bash "$QG" approve "$TID" "Approved for hook-crash failure-injection" >/dev/null
 # qa-gate.sh approve clears current-task; we re-set it so the gate sees
 # the approval (matches the existing verify-before-stop.sh spec pattern).
 bash "$CT" set "$TID"
+# approve truncated the tracker (0wk.2); restore the SAME reviewed change-set
+# so the recomputed hash matches the recorded one.
 printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 
 # --------------------------------------------------------------------------

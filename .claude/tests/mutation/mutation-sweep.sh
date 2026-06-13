@@ -164,7 +164,12 @@ mkdir -p "$OUTPUT_DIR" "$WORKTREE_ROOT"
 
 CREATED_WORKTREES=()
 
-# shellcheck disable=SC2329  # invoked via `trap` below; shellcheck can't see it.
+# cleanup_worktrees is reached only through the `trap ... EXIT INT TERM`
+# below — never by a direct call. The static analyzer can't follow that
+# indirection: newer shellchecks emit SC2329 on the function definition,
+# older ones (what CI runs) emit SC2317 on every statement in the body.
+# Suppress both for the whole function; scoped here, not globally.
+# shellcheck disable=SC2329,SC2317
 cleanup_worktrees() {
     if [ "$ARG_KEEP_WORKTREES" = "1" ]; then
         log "# mutation-sweep: --keep-worktrees set; preserving ${#CREATED_WORKTREES[@]} worktree(s) under $WORKTREE_ROOT"

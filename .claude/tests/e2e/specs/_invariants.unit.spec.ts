@@ -233,16 +233,262 @@ describe("invariant: stop-requires-approval", () => {
     expect(r.pass).toBe(true);
   });
 
-  it("META-TEST: fails when Stop:allow fires without any qa-approved/qa-deferred", () => {
+  it("META-TEST: fails when a RELEASE allow fires without any qa-approved/qa-deferred (genuine leak)", () => {
+    // llh.25: the leak signature is now precise — a NON-H3 release allow (an
+    // allow NOT preceded by a Stop:block) WITH unreviewed changes present AND
+    // bd observably healthy AND no approval. goodTrace's lone Stop:allow has
+    // no preceding block (so it is a release allow, not an H3 re-entry guard);
+    // we strip the approval, ensure a file was changed, and keep bd healthy
+    // (events present + a persisted non-approval transition). That is the real
+    // gate leak the invariant must still catch.
     const t = goodTrace();
-    // Strip the approval transition; Stop:allow remains.
+    t.fileWrites = [
+      { path: "server/index.js", bytesWritten: 100, changeType: "modified" },
+    ];
+    // Strip the approval transition but keep a persisted label (bd healthy —
+    // SOMETHING landed in the net diff, so this is NOT the bd-unavailable skip).
     t.beadsLabelTransitions = [
       { taskId: "good-1", added: ["qa-pending"], removed: [] },
     ];
     const agg = evaluateAll(t, [{ name: "stop-requires-approval" }]);
     expect(agg.allPassed).toBe(false);
     expect(agg.failed).toEqual(["stop-requires-approval"]);
-    expect(agg.results[0]?.result.detail).toMatch(/gate may have leaked/);
+    expect(agg.results[0]?.result.detail).toMatch(/gate leaked/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stop-requires-approval — llh.25 invariant-hardening (H3 re-entry guards +
+// bd-unavailable honest-skip).
+//
+// FORENSIC CONTEXT (claude-workflow-plugin-llh.25): the python-django-bug
+// live run FAILED stop-requires-approval + label-milestones, but the gate did
+// NOT leak. It BLOCKED the unreviewed accounts/models.py change twice; the 2
+// "allow" decisions the invariant counted were 16-17ms H3 stop_hook_active
+// re-entry guards (verify-before-stop.sh 553-558) firing on teardown after
+// those blocks, and a bd daemon stack-overflow crashed ALL label persistence
+// (beadsLabelTransitions=[]) so no qa-* label could be recorded regardless of
+// correct gate behavior. The pre-llh.25 invariant over-counted the H3 {}
+// re-entries as leak-allows and did not account for bd-unavailable runs.
+//
+// `stop_hook_active` is NOT captured per-event (the recorder sees only the
+// hook's STDOUT `{}`, never its STDIN — trace.ts HookOutputSchema), so the H3
+// signal is the cleanest available proxy: a bare {} allow preceded by a
+// Stop:block (the block is what set stop_hook_active and forced the re-entry).
+// ---------------------------------------------------------------------------
+
+/** Build a trace that BLOCKED an unreviewed change, then emitted two terminal
+ *  bare {} allows — the H3 re-entry guards firing on teardown. No approval
+ *  ever persisted (bd had no label activity, NOT a crash). This is the shape
+ *  of the python-django-bug live run (minus the bd-crash signature). */
+function h3TeardownAfterBlockTrace(): Trace {
+  const t = createEmptyTrace("synthetic-h3-teardown", "prompt", "claude-opus-4-7");
+  t.fileWrites = [
+    { path: "accounts/models.py", bytesWritten: 897, changeType: "modified" },
+  ];
+  t.hookOutputs = [
+    {
+      event: "Stop",
+      script: "verify-before-stop.sh",
+      decision: "block",
+      reason: "QA approval required (iteration 3). 1 file changed.",
+      durationMs: 1471,
+      response: { decision: "block", reason: "QA approval required" },
+    },
+    {
+      event: "Stop",
+      script: "verify-before-stop.sh",
+      decision: "block",
+      reason: "QA approval required (iteration 3). 1 file changed.",
+      durationMs: 45823,
+      response: { decision: "block", reason: "QA approval required" },
+    },
+    // The two terminal H3 re-entry guards: bare {} after the blocks.
+    { event: "Stop", script: "verify-before-stop.sh", durationMs: 16, response: {} },
+    { event: "Stop", script: "verify-before-stop.sh", durationMs: 17, response: {} },
+  ];
+  t.beadsLabelTransitions = [];
+  t.beadsLabelEvents = []; // recorder ran, saw no label activity (not a crash)
+  return t;
+}
+
+describe("invariant: stop-requires-approval (llh.25: H3 re-entry + bd-unavailable)", () => {
+  it("H3 re-entry guard allows are NOT counted as releases — block-then-teardown PASSES with no approval", () => {
+    // Both terminal {} allows fire after a Stop:block, so they are H3
+    // re-entry guards (anti-infinite-loop), not release decisions. The gate
+    // blocked the unreviewed change and never released it -> no leak.
+    const t = h3TeardownAfterBlockTrace();
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/H3 re-entry guard/i);
+  });
+
+  it("META-TEST: the H3-exclusion is load-bearing — a bare {} allow with NO preceding block is treated as a release (not excluded)", () => {
+    // Remove the blocks so the bare {} allows are no longer preceded by a
+    // block. They can no longer be H3 re-entry guards; with changes present,
+    // bd healthy (events present + a persisted non-approval transition) and no
+    // approval, the engine must NOT silently pass — it must FAIL as a leak.
+    const t = h3TeardownAfterBlockTrace();
+    t.hookOutputs = t.hookOutputs.filter((h) => h.decision !== "block");
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-pending", taskId: "x", source: "create" },
+    ];
+    t.beadsLabelTransitions = [
+      { taskId: "x", added: ["qa-pending"], removed: [] },
+    ];
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/gate leaked/);
+  });
+
+  it("bd-UNAVAILABLE run SKIPS (not fails): attempted qa-gate-entered add but empty net diff, even with a non-H3 allow", () => {
+    // The gate attempted its writes (qa-gate-entered add event) but bd crashed
+    // so nothing persisted (empty transitions). Even a non-H3 release allow
+    // does not flip this to FAIL — label state cannot answer the question, so
+    // the honest verdict is SKIP, not a false leak.
+    const t = createEmptyTrace("synthetic-bdcrash", "prompt", "claude-opus-4-7");
+    t.fileWrites = [{ path: "x.py", bytesWritten: 100, changeType: "modified" }];
+    t.hookOutputs = [
+      { event: "Stop", script: "verify-before-stop.sh", durationMs: 16, response: {} },
+    ];
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "c1", source: "enter" },
+      { action: "add", label: "rubric-pending", taskId: "c1", source: "enter" },
+    ];
+    t.beadsLabelTransitions = []; // crashed — nothing persisted
+    const agg = evaluateAll(t, [{ name: "stop-requires-approval" }]);
+    expect(agg.allPassed).toBe(true);
+    expect(agg.skipped).toContain("stop-requires-approval");
+    expect(agg.failed).toEqual([]);
+    expect(agg.results[0]?.result.detail).toMatch(/bd unavailable/i);
+  });
+
+  it("GENUINE LEAK still FAILS: non-H3 release allow + unreviewed changes + bd healthy + no approval (proves the invariant wasn't neutered)", () => {
+    // The load-bearing negative: an allow with NO preceding block (so it is a
+    // release, not an H3 guard), unreviewed source changed, bd observably
+    // healthy (events present AND a persisted non-approval transition — so NOT
+    // the bd-unavailable skip and NOT a pre-3.5 trace), and no qa-approved.
+    const t = createEmptyTrace("synthetic-real-leak", "prompt", "claude-opus-4-7");
+    t.fileWrites = [
+      { path: "server/index.js", bytesWritten: 100, changeType: "modified" },
+    ];
+    t.hookOutputs = [
+      { event: "Stop", script: "verify-before-stop.sh", durationMs: 1, response: {} },
+    ];
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-pending", taskId: "leak-1", source: "create" },
+    ];
+    t.beadsLabelTransitions = [
+      { taskId: "leak-1", added: ["qa-pending", "backend"], removed: [] },
+    ];
+    const agg = evaluateAll(t, [{ name: "stop-requires-approval" }]);
+    expect(agg.allPassed).toBe(false);
+    expect(agg.failed).toEqual(["stop-requires-approval"]);
+    expect(agg.results[0]?.result.detail).toMatch(/gate leaked/);
+  });
+
+  it("pre-3.5 recording with a non-H3 bare {} allow and no approval SKIPS (approval unobservable; mirrors label-milestones)", () => {
+    // A release-shaped bare {} allow with no preceding block, no approval, and
+    // NO beadsLabelEvents field at all (pre-3.5). A release allow is a bare {}
+    // indistinguishable from a benign QA-approved release, and the recorder of
+    // the day captured no labels — so approval is unobservable. SKIP, not FAIL.
+    const t = createEmptyTrace("synthetic-pre35", "prompt", "claude-opus-4-7");
+    t.fileWrites = [{ path: "x.js", bytesWritten: 100, changeType: "modified" }];
+    t.hookOutputs = [
+      { event: "Stop", script: "verify-before-stop.sh", durationMs: 59, response: {} },
+    ];
+    t.beadsLabelTransitions = [];
+    // No beadsLabelEvents field at all (pre-3.5).
+    delete (t as { beadsLabelEvents?: unknown }).beadsLabelEvents;
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/pre-3\.5 recording/);
+  });
+
+  // -- THE KEY EVIDENCE: the actual python-django-bug live trace ------------
+  // Re-evaluate the real failing cassette. Before llh.25 this trace FAILED
+  // stop-requires-approval ("gate may have leaked") and label-milestones.
+  // After the fix both must PASS-or-SKIP, because the gate did NOT leak (it
+  // blocked the unreviewed change; the {} allows were H3 re-entry guards and
+  // bd crashed). This anchors the fix against the ground-truth trace, not just
+  // synthetics.
+  //
+  // The trace is pinned in cassettes/seed/ (a committed, allowlisted
+  // regression anchor — same seed-corpus pattern as _phase-a-trace /
+  // _phase-b-trace). cassettes/replays/ is gitignored, so a replays/ path
+  // would ENOENT on a fresh CI checkout; seed/ is the durable evidence home.
+  const DJANGO_TRACE = path.resolve(
+    __dirname,
+    "..",
+    "cassettes",
+    "seed",
+    "python-django-bug-2026-06-13T19-56-33-557Z.jsonl",
+  );
+
+  it("THE llh.25 EVIDENCE: the python-django-bug live trace no longer FAILS stop-requires-approval (PASS — all allows are H3 re-entry guards)", () => {
+    expect(existsSync(DJANGO_TRACE)).toBe(true);
+    const parsed = TraceSchema.safeParse(
+      JSON.parse(readFileSync(DJANGO_TRACE, "utf8").trim()),
+    );
+    expect(parsed.success).toBe(true);
+    const t = parsed.data!;
+    const r = INVARIANTS["stop-requires-approval"]!(t);
+    // Gate did NOT leak: the 2 terminal {} allows are H3 re-entry guards after
+    // the iteration-3 BLOCK on accounts/models.py.
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/H3 re-entry guard/i);
+  });
+
+  it("THE llh.25 EVIDENCE: the python-django-bug live trace no longer FAILS label-milestones (SKIP — bd unavailable)", () => {
+    const parsed = TraceSchema.safeParse(
+      JSON.parse(readFileSync(DJANGO_TRACE, "utf8").trim()),
+    );
+    expect(parsed.success).toBe(true);
+    const t = parsed.data!;
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    // bd crashed: the gate attempted qa-gate-entered adds but nothing
+    // persisted, so the milestones are unverifiable from labels -> SKIP.
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/bd unavailable/i);
+  });
+
+  it("THE llh.25 EVIDENCE: both django invariants FAILED before the fix (regression-anchor the before/after)", () => {
+    // Reproduce the pre-llh.25 verdict logic inline so the before-state is
+    // pinned in-repo: the OLD stop-requires-approval counted EVERY bare {}
+    // Stop as an allow and required a qa-approved/qa-deferred net-diff add.
+    const parsed = TraceSchema.safeParse(
+      JSON.parse(readFileSync(DJANGO_TRACE, "utf8").trim()),
+    );
+    const t = parsed.data!;
+    const oldStopAllows = t.hookOutputs.filter(
+      (h) =>
+        h.event === "Stop" &&
+        (h.decision === "approve" ||
+          h.decision === undefined ||
+          h.decision === null),
+    );
+    const oldSawApproval = t.beadsLabelTransitions.some(
+      (x) => x.added.includes("qa-approved") || x.added.includes("qa-deferred"),
+    );
+    // OLD verdict: allows present (2) AND no approval -> FAIL.
+    expect(oldStopAllows.length).toBeGreaterThan(0);
+    expect(oldSawApproval).toBe(false);
+    const oldVerdict = oldStopAllows.length > 0 && !oldSawApproval ? "FAIL" : "PASS";
+    expect(oldVerdict).toBe("FAIL");
+    // And the bd-crash signature that explains the empty net diff is present:
+    expect(
+      (t.beadsLabelEvents ?? []).some(
+        (e) => e.action === "add" && e.label === "qa-gate-entered",
+      ),
+    ).toBe(true);
+    expect(t.beadsLabelTransitions.length).toBe(0);
   });
 });
 
@@ -421,6 +667,68 @@ describe("invariant: label-milestones (event-stream semantics, G2.9ke)", () => {
       "trace lacks beadsLabelEvents (pre-3.5 recording)",
     );
   });
+
+  // -- llh.25: bd-unavailable honest-skip (the python-django-bug case) -------
+  it("llh.25: SKIPS (not fails) when bd crashed — gate-enter attempted but empty net diff means milestones could not persist", () => {
+    // The gate ran `qa-gate.sh enter` (qa-gate-entered/rubric-pending add
+    // events present in the stream) but the bd daemon crashed, so NOTHING
+    // persisted to the net diff. qa-pending/qa-approved never landed — an
+    // infra fault, not a workflow defect — so the milestone question is
+    // unverifiable from labels and the honest verdict is SKIP.
+    const t = goodTrace();
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "good-1", source: "enter" },
+      { action: "add", label: "rubric-pending", taskId: "good-1", source: "enter" },
+    ];
+    t.beadsLabelTransitions = []; // bd crashed — nothing persisted
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/bd unavailable/i);
+  });
+
+  it("llh.25: the bd-unavailable skip is NARROW — bd healthy (a persisted transition) with a missing milestone still FAILS", () => {
+    // Same attempted gate-enter events, but a transition DID persist (bd
+    // healthy). qa-approved is still missing -> this is a real milestone gap,
+    // not an infra fault, so it must FAIL (the skip must not mask it).
+    const t = goodTrace();
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "good-1", source: "enter" },
+      { action: "add", label: "qa-pending", taskId: "good-1", source: "create" },
+    ];
+    t.beadsLabelTransitions = [
+      { taskId: "good-1", added: ["qa-pending"], removed: [] },
+    ]; // persisted -> bd healthy
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.pass).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/missing milestone/);
+  });
+
+  it("llh.25: the bd-unavailable skip does NOT mask an affirmative MISORDER (visible in the stream = real defect)", () => {
+    // qa-approved is added BEFORE qa-pending in the stream (a real ordering
+    // violation the stream can see), and transitions are empty. Even though
+    // the bd-unavailable structural signature is present, an affirmative
+    // misorder is a workflow defect the net-diff outage cannot explain, so it
+    // must still FAIL — the skip only covers purely-MISSING milestones.
+    const t = goodTrace();
+    t.beadsLabelEvents = [
+      { action: "add", label: "qa-gate-entered", taskId: "good-1", source: "enter" },
+      { action: "add", label: "qa-approved", taskId: "good-1", source: "x" },
+      { action: "add", label: "qa-pending", taskId: "good-1", source: "y" },
+    ];
+    t.beadsLabelTransitions = [];
+    const r = INVARIANTS["label-milestones"]!(t, {
+      milestones: ["qa-pending", "qa-approved"],
+    });
+    expect(r.pass).toBe(false);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/out of declared order/);
+  });
 });
 
 describe("invariant: declared-subagents-only", () => {
@@ -513,20 +821,51 @@ describe("invariant: declared-subagents-only", () => {
 });
 
 // ---------------------------------------------------------------------------
-// qa-queried-impact-of (verification-suite Phase B). The trace must
-// show a code-graph `impact_of` call attributable to a QA subagent when
-// the run produced any file writes. Skip semantics: no code-graph in
-// toolsAvailable (server absent by design) OR no fileWrites (vacuous).
+// qa-queried-impact-of (verification-suite Phase B, REWRITTEN for n6d /
+// claude-workflow-plugin-llh.2 + llh.15). The invariant no longer counts
+// QA-attributed `impact_of` MCP tool_uses — n6d moved impact analysis OUT
+// of Claude's tool interface into the deterministic `impact-report.sh`
+// (invoked by `qa-gate.sh enter`, enforced by `qa-gate.sh approve`'s
+// refusal). Those stdio code-graph calls are NOT Claude tool_uses, so a
+// correct n6d run shows 0 `impact_of` tool_uses by construction.
+//
+// The trace-observable n6d MECHANICAL signature this invariant now
+// asserts (see lib/invariants.ts docstring):
+//   - PASS: code-graph present + fileWrites>0 + a QA-attributable n6d
+//     ARTIFACT FOOTPRINT (a Bash/Read referencing the
+//     `impact-report-<taskid>.json` path — qa.md's mandated FIRST ACTION
+//     is `cat .claude/.qa-tracking/impact-report-<task-id>.json` — or an
+//     `impact-report.sh` invocation) AND a QA-attributable
+//     `qa-gate.sh approve` with NO `--no-impact-report` bypass (an
+//     unbypassed successful approve mechanically proves a fresh artifact
+//     existed, since approve REFUSES without one).
+//   - FAIL: code-graph present + fileWrites>0 + a QA-attributable
+//     `qa-gate.sh approve … --no-impact-report <reason>` whose reason is
+//     NOT a code-graph-absent reason → analysis genuinely skipped via the
+//     bypass. (`--no-impact-report` is a post-n6d-only construct, so it is
+//     an unambiguous post-n6d signal.)
+//   - SKIP "code-graph absent": no code-graph in toolsAvailable, OR the
+//     footprint shows `server: "absent"`, OR the bypass reason names
+//     code-graph absence.
+//   - SKIP vacuous: fileWrites empty (no diff to assess).
+//   - SKIP "pre-n6d recording": code-graph present + fileWrites>0 but NO
+//     artifact footprint AND NO bypass flag — the n6d mechanic did not
+//     exist when the trace was recorded (every pre-llh.2 seed trace lands
+//     here). Mirrors the llh.4 "pre-3.5 recording" skip; do NOT retro-fail.
 // ---------------------------------------------------------------------------
 
-/** Build a synthetic trace where QA calls impact_of via the code-graph
- *  MCP server after backend writes a file. Mirrors the SDK's rewritten
- *  tool-name shape (`mcp__plugin_<plugin>_<server>__<tool>`) so the
- *  pattern matcher in the invariant is exercised against the realistic
- *  form, not just the bare `impact_of` shorthand. */
-function impactPositiveTrace(): Trace {
+/** Build a synthetic trace modeling a CORRECT n6d live run: code-graph
+ *  present; backend writes a file; QA spawns, reads the mechanical impact
+ *  report artifact (qa.md's FIRST ACTION `cat …impact-report-<taskid>.json`),
+ *  enters the gate, and approves WITHOUT the `--no-impact-report` bypass.
+ *  NOTE the deliberate absence of any `impact_of` tool_use — n6d makes the
+ *  impact_of calls invisible to the trace (they happen inside
+ *  impact-report.sh over stdio), so the OLD invariant FAILS this trace and
+ *  the NEW invariant PASSES it. */
+const N6D_TASK_ID = "impact-good-1";
+function impactN6dPositiveTrace(): Trace {
   const t = createEmptyTrace(
-    "synthetic-impact-positive",
+    "synthetic-impact-n6d-positive",
     "prompt",
     "claude-opus-4-7",
   );
@@ -553,8 +892,7 @@ function impactPositiveTrace(): Trace {
       parentToolUseId: "task-backend",
       durationMs: 0,
     },
-    // QA spawns and calls impact_of on a real symbol from the fixture
-    // (the createApp factory in server/index.js).
+    // QA spawns.
     {
       id: "task-qa",
       name: "Task",
@@ -563,10 +901,35 @@ function impactPositiveTrace(): Trace {
       subagentType: "qa",
       durationMs: 0,
     },
+    // QA enters the gate — mechanically generates the impact-report artifact.
     {
-      id: "qa-impact-call",
-      name: "mcp__plugin_claude-workflow_code-graph__impact_of",
-      input: { symbol: "createApp" },
+      id: "qa-gate-enter",
+      name: "Bash",
+      input: {
+        command: `bash .claude/scripts/qa-gate.sh enter ${N6D_TASK_ID}`,
+      },
+      parentToolUseId: "task-qa",
+      durationMs: 0,
+    },
+    // QA's FIRST ACTION: cat the mechanical impact report (the n6d artifact
+    // footprint). This is the post-n6d-only signal the invariant keys on.
+    {
+      id: "qa-cat-report",
+      name: "Bash",
+      input: {
+        command: `cat .claude/.qa-tracking/impact-report-${N6D_TASK_ID}.json`,
+      },
+      parentToolUseId: "task-qa",
+      durationMs: 0,
+    },
+    // QA approves WITHOUT the bypass — the unbypassed approve proves a
+    // fresh artifact existed (approve refuses otherwise).
+    {
+      id: "qa-gate-approve",
+      name: "Bash",
+      input: {
+        command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} 'auth endpoint + login form verified; impact report consulted'`,
+      },
       parentToolUseId: "task-qa",
       durationMs: 0,
     },
@@ -587,7 +950,7 @@ function impactPositiveTrace(): Trace {
   ];
   t.beadsLabelTransitions = [
     {
-      taskId: "impact-good-1",
+      taskId: N6D_TASK_ID,
       added: ["qa-pending", "qa-approved"],
       removed: [],
     },
@@ -595,17 +958,25 @@ function impactPositiveTrace(): Trace {
   return t;
 }
 
-describe("invariant: qa-queried-impact-of", () => {
-  it("passes when QA called impact_of and fileWrites is non-empty", () => {
-    const t = impactPositiveTrace();
+describe("invariant: qa-queried-impact-of (n6d mechanical signature)", () => {
+  it("RED-ANCHOR / POSITIVE: PASSES on a correct n6d run (artifact consulted + unbypassed approve), with ZERO impact_of tool_uses", () => {
+    const t = impactN6dPositiveTrace();
+    // Guard: the positive trace deliberately contains no impact_of
+    // tool_use — proving the new invariant does NOT depend on the
+    // disproven signal (the OLD invariant FAILED exactly here).
+    expect(
+      t.toolCalls.some((c) =>
+        /code-graph.*impact_of|^impact_of$/.test(c.name),
+      ),
+    ).toBe(false);
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(true);
-    expect(r.skipped).toBeUndefined();
-    expect(r.detail).toMatch(/impact_of call/);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/impact report/i);
   });
 
   it("matches the plugin-qualifier-tolerant subagent typing (claude-workflow:qa)", () => {
-    const t = impactPositiveTrace();
+    const t = impactN6dPositiveTrace();
     t.subagentInvocations = [
       {
         type: "claude-workflow:backend",
@@ -622,38 +993,84 @@ describe("invariant: qa-queried-impact-of", () => {
     expect(r.pass).toBe(true);
   });
 
-  it("also matches the bare `impact_of` tool-name form (in-process direct callers)", () => {
-    const t = impactPositiveTrace();
-    // Swap the SDK-rewritten name for the bare server-side form. The
-    // pattern matcher accepts both.
+  it("accepts a Read tool_use of the artifact path as the footprint (qa.md may Read instead of cat)", () => {
+    const t = impactN6dPositiveTrace();
+    // Swap the `cat` Bash footprint for a Read tool_use on the same path.
     t.toolCalls = t.toolCalls.map((c) =>
-      c.id === "qa-impact-call" ? { ...c, name: "impact_of" } : c,
+      c.id === "qa-cat-report"
+        ? {
+            ...c,
+            name: "Read",
+            input: {
+              file_path: `.claude/.qa-tracking/impact-report-${N6D_TASK_ID}.json`,
+            },
+          }
+        : c,
     );
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(true);
   });
 
-  it("respects the min_calls param when set (e.g. require ≥2 impact_of calls from QA)", () => {
-    const t = impactPositiveTrace();
-    // Only one impact_of call attributable to QA — should fail with min_calls=2.
-    const r1 = INVARIANTS["qa-queried-impact-of"]!(t, { min_calls: 2 });
-    expect(r1.pass).toBe(false);
-    expect(r1.detail).toMatch(/expected at least 2/);
-    // Add a second call → passes.
-    t.toolCalls.push({
-      id: "qa-impact-call-2",
-      name: "mcp__plugin_claude-workflow_code-graph__impact_of",
-      input: { symbol: "express" },
-      parentToolUseId: "task-qa",
-      durationMs: 0,
-    });
-    const r2 = INVARIANTS["qa-queried-impact-of"]!(t, { min_calls: 2 });
-    expect(r2.pass).toBe(true);
+  it("accepts an impact-report.sh invocation as the footprint (manual regenerate before approve)", () => {
+    const t = impactN6dPositiveTrace();
+    // Replace the cat with an explicit regenerate call.
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-cat-report"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/impact-report.sh ${N6D_TASK_ID}`,
+            },
+          }
+        : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(true);
   });
 
-  it("skips with a documented reason when the code-graph server is absent", () => {
-    const t = impactPositiveTrace();
-    // Server not loaded — agents degrade to search-only flow.
+  it("FAIL: approve used --no-impact-report bypass with a non-degradation reason (analysis genuinely skipped)", () => {
+    const t = impactN6dPositiveTrace();
+    // Drop the artifact footprint and bypass the refusal with a
+    // non-code-graph-absent reason. This is the headline post-n6d failure
+    // mode: the mechanical gate was waived without justification.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-gate-approve"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} --no-impact-report 'in a hurry' 'shipping anyway'`,
+            },
+          }
+        : c,
+    );
+    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
+    expect(agg.allPassed).toBe(false);
+    expect(agg.failed).toEqual(["qa-queried-impact-of"]);
+    expect(agg.results[0]?.result.detail).toMatch(/--no-impact-report|bypass/i);
+  });
+
+  it("SKIP code-graph-absent: the impact bypass reason names code-graph absence (documented degradation)", () => {
+    const t = impactN6dPositiveTrace();
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-gate-approve"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} --no-impact-report 'code-graph server absent on this host' 'verified manually'`,
+            },
+          }
+        : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/code-graph|absent/i);
+  });
+
+  it("SKIP code-graph-absent: trace.toolsAvailable shows no code-graph tools (server not loaded)", () => {
+    const t = impactN6dPositiveTrace();
     t.toolsAvailable = ["Write", "Edit", "Bash", "Read"];
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.skipped).toBe(true);
@@ -662,20 +1079,31 @@ describe("invariant: qa-queried-impact-of", () => {
     expect(r.detail).toMatch(/search-only/);
   });
 
-  it("skips vacuously when fileWrites is empty (no diff for QA to assess)", () => {
-    const t = impactPositiveTrace();
+  it("SKIP vacuous: fileWrites empty (no diff for QA to assess)", () => {
+    const t = impactN6dPositiveTrace();
     t.fileWrites = [];
-    // Also strip the impact_of call to prove the skip path doesn't
-    // depend on impact_of being present.
-    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-impact-call");
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.skipped).toBe(true);
     expect(r.pass).toBe(true);
     expect(r.detail).toMatch(/vacuous/);
   });
 
-  it("evaluateAll surfaces the skip in `skipped`, not `failed`", () => {
-    const t = impactPositiveTrace();
+  it("SKIP pre-n6d: code-graph present + fileWrites>0 but no artifact footprint and no bypass (mechanic did not exist when recorded)", () => {
+    const t = impactN6dPositiveTrace();
+    // Strip the artifact footprint but KEEP the QA-attributable enter +
+    // unbypassed approve — exactly the shape of the existing pre-n6d seed
+    // traces. With no impact-report footprint and no bypass flag, the
+    // invariant cannot tell the mechanic was exercised, so it SKIPS as a
+    // pre-n6d recording rather than retro-failing (llh.4 precedent).
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/pre-n6d recording/);
+  });
+
+  it("evaluateAll surfaces the code-graph-absent skip in `skipped`, not `failed`", () => {
+    const t = impactN6dPositiveTrace();
     t.toolsAvailable = []; // code-graph absent
     const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
     expect(agg.allPassed).toBe(true);
@@ -683,52 +1111,116 @@ describe("invariant: qa-queried-impact-of", () => {
     expect(agg.failed).toEqual([]);
   });
 
-  it("META-TEST: fails when the QA-attributable impact_of call is stripped from a passing trace", () => {
-    const t = impactPositiveTrace();
-    // Remove only the impact_of call — keep code-graph in toolsAvailable
-    // and fileWrites populated so the invariant cannot fall back to
-    // either skip branch. This is the headline failure mode: QA
-    // approved a diff without consulting the impact graph.
-    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-impact-call");
-    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
-    expect(agg.allPassed).toBe(false);
-    expect(agg.failed).toEqual(["qa-queried-impact-of"]);
-    expect(agg.results[0]?.result.detail).toMatch(/0 impact_of call/);
-    expect(agg.results[0]?.result.detail).toMatch(/expected at least 1/);
+  it("META-TEST: the footprint signal is load-bearing — removing it from a passing trace flips it off PASS (to SKIP pre-n6d)", () => {
+    const t = impactN6dPositiveTrace();
+    const pass = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(pass.pass).toBe(true);
+    expect(pass.skipped).toBeFalsy();
+    // Remove the artifact footprint (the cat of impact-report-*.json).
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    const mutated = INVARIANTS["qa-queried-impact-of"]!(t);
+    // The engine must NOT still report a clean PASS — the n6d signature is
+    // gone. (It degrades to an honest pre-n6d SKIP, not a false green.)
+    expect(mutated.pass && !mutated.skipped).toBe(false);
+    expect(mutated.skipped).toBe(true);
+    expect(mutated.detail).toMatch(/pre-n6d recording/);
   });
 
-  it("META-TEST: fails when impact_of is called by a non-QA subagent (e.g. orchestrator at root)", () => {
-    const t = impactPositiveTrace();
-    // Reattribute the impact_of call to the orchestrator (parent=null).
+  it("FAIL: footprint present (post-n6d run) but the QA-attributable approve is bypassed without a valid reason", () => {
+    const t = impactN6dPositiveTrace();
+    // Keep the cat footprint (so it is unambiguously a post-n6d run) yet
+    // bypass the gate without a degradation reason → genuine skip → FAIL.
     t.toolCalls = t.toolCalls.map((c) =>
-      c.id === "qa-impact-call" ? { ...c, parentToolUseId: null } : c,
-    );
-    const r = INVARIANTS["qa-queried-impact-of"]!(t);
-    expect(r.pass).toBe(false);
-    expect(r.detail).toMatch(/0 impact_of call/);
-  });
-
-  it("META-TEST: fails when impact_of is called by a backend subagent rather than QA", () => {
-    const t = impactPositiveTrace();
-    // Move the impact_of call under the backend Task instead of QA.
-    t.toolCalls = t.toolCalls.map((c) =>
-      c.id === "qa-impact-call"
-        ? { ...c, parentToolUseId: "task-backend" }
+      c.id === "qa-gate-approve"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} --no-impact-report 'skip it' 'done'`,
+            },
+          }
         : c,
     );
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(false);
-    expect(r.detail).toMatch(/0 impact_of call/);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/--no-impact-report|bypass/i);
+  });
+
+  // -- llh.16: Branch B tightening (footprint-alone is no longer a PASS) ------
+  // A hand-built trace that merely MENTIONS the artifact path (echo/grep) with
+  // NO unbypassed approve used to trip the loose artifactPattern and green the
+  // invariant via the footprint-alone branch. It now SKIPs ("consultation
+  // footprint present but no in-scope approve to confirm"): the only defensible
+  // PASS is footprint + an unbypassed approve (Branch A), because approve
+  // refuses without a fresh artifact.
+  it("OVER-MATCH (llh.16): a bare echo/grep mention of impact-report-*.json with NO approve -> SKIP, not PASS", () => {
+    const t = impactN6dPositiveTrace();
+    // Drop the real unbypassed approve so only a footprint-shaped MENTION
+    // remains — the over-match the loose artifactPattern is vulnerable to.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-gate-approve");
+    // Swap the genuine `cat` for a no-op `echo`/`grep` that merely NAMES the
+    // artifact path: a hand-built mention, not a real consultation.
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-cat-report"
+        ? {
+            ...c,
+            input: {
+              command: `echo "see .claude/.qa-tracking/impact-report-${N6D_TASK_ID}.json" && grep -l impact-report.sh /dev/null || true`,
+            },
+          }
+        : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    // The headline assertion: a mention alone must NOT green the invariant.
+    expect(r.pass && !r.skipped).toBe(false);
+    expect(r.skipped).toBe(true);
+    expect(r.detail).toMatch(/footprint present.*no in-scope|consultation footprint/i);
+    // And it must NOT be reported as a failure (the approve may simply be out
+    // of the captured QA scope — under-claim to SKIP, do not retro-FAIL).
+    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
+    expect(agg.failed).toEqual([]);
+    expect(agg.skipped).toContain("qa-queried-impact-of");
+  });
+
+  it("POSITIVE stays PASS (llh.16): footprint + unbypassed approve still greens via Branch A (legit live signature unaffected)", () => {
+    // The exact live signature: artifact footprint AND an unbypassed approve.
+    // The Branch B tightening must NOT touch this — it PASSes via Branch A
+    // before footprint-alone is ever consulted.
+    const t = impactN6dPositiveTrace();
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/unbypassed|without the --no-impact-report|impact report/i);
+  });
+
+  it("META-TEST (llh.16): the unbypassed-approve co-signal is load-bearing on the footprint PASS — removing it drops PASS to SKIP", () => {
+    // Start from the live PASS signature (footprint + unbypassed approve).
+    const t = impactN6dPositiveTrace();
+    const pass = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(pass.pass).toBe(true);
+    expect(pass.skipped).toBeFalsy();
+    // Remove ONLY the unbypassed approve, leaving the genuine artifact
+    // footprint intact. Pre-llh.16 the footprint-alone branch still returned a
+    // clean PASS here; post-llh.16 it must degrade to a SKIP, never a green.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-gate-approve");
+    const mutated = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(mutated.pass && !mutated.skipped).toBe(false);
+    expect(mutated.skipped).toBe(true);
+    expect(mutated.detail).toMatch(/consultation footprint|no in-scope/i);
   });
 
   it("fails loudly when no QA subagent appears in the trace at all (gate would have been bypassed)", () => {
-    const t = impactPositiveTrace();
+    const t = impactN6dPositiveTrace();
     t.subagentInvocations = t.subagentInvocations.filter(
       (s) => stripQualifier(s.type) !== "qa",
     );
-    // Also drop the QA Task call itself.
+    // Drop the QA Task + all QA-scoped calls.
     t.toolCalls = t.toolCalls.filter(
-      (c) => c.id !== "task-qa" && c.id !== "qa-impact-call",
+      (c) =>
+        c.id !== "task-qa" &&
+        c.id !== "qa-gate-enter" &&
+        c.id !== "qa-cat-report" &&
+        c.id !== "qa-gate-approve",
     );
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(false);

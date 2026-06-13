@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Get the Ultimate Workflow Plugin running in 5 minutes.
+Get the claude-workflow plugin installed and verified.
 
 ---
 
@@ -158,7 +158,14 @@ Now just describe what you want to build:
 bd doctor
 ```
 
-Should show all green checks.
+Core checks (database, schema, git hooks) should pass. Some checks are
+advisory and environment-dependent — on a real working tree `bd doctor`
+commonly emits warnings (e.g. a newer `bd` CLI available upstream, a
+transient DB↔JSONL count mismatch before the next sync, a stale daemon
+socket). Those are informational; the plugin tolerates them (the
+bd-compat smoke spec deliberately runs `bd doctor --quiet` at any exit
+code). Treat the CORE SYSTEM and GIT INTEGRATION sections as the
+must-pass set; warnings elsewhere are not a failed install.
 
 ### Check Available Work
 
@@ -206,7 +213,10 @@ Check settings.json:
 cat .claude/settings.json | jq '.hooks'
 ```
 
-Should show SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd hooks.
+Should show SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+Stop, and SessionEnd hooks (six event types in `settings.json`). The
+plugin manifest's `hooks.json` wires one more event, SubagentStart, for
+plugin-scoped installs.
 
 ---
 

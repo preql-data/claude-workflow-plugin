@@ -271,4 +271,271 @@ else
     printf '  FAIL: impact-report META: sentinels missing — strip meta-test skipped\n'
 fi
 
+# ===========================================================================
+# Mutation-survivor kill (G2.6ix / claude-workflow-plugin-llh.5).
+#
+# generate_impact_report's success guard (qa-gate.sh ~line 245):
+#   if [ "$rc" -eq 0 ] && [ -s "$report" ]; then ... "Impact report generated"
+# Re-sweep (.claude/.mutation-runs/20260613T102846Z) surfaced the F1 mutant
+# `rc -ne 0` as a survivor: when impact-report.sh SUCCEEDS, the mutant skips
+# the success branch and sets IMPACT_REPORT_OBS to the "impact-report.sh
+# failed" WARNING even though the report WAS written — a misreport on enter's
+# observation surface. The existing tests assert the artifact EXISTS but never
+# assert enter's observation TEXT, so the mutant survived. Kill it by asserting
+# enter's success observation on the (server-absent) happy path.
+TID_GIR=$(cd "$FIXTURE" && bd create "generate_impact_report success obs" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/gir-edit.ts\n' > "$TRACK/changed-files.txt"
+GIR_OUT=$(bash "$QG" enter "$TID_GIR" 2>/dev/null)
+GIR_OBS=$(printf '%s' "$GIR_OUT" | jq -r '.observations // ""')
+# Sanity: the artifact really was generated (so we're on the success path).
+assert_eq "qa-gate mut(gen-impact L245): artifact present after enter (success path)" "0" \
+    "$([ -f "$(report_path_for "$TID_GIR")" ] && echo 0 || echo 1)"
+# id(L245): the success observation MUST report generation, NOT the failure WARNING.
+assert_contains "qa-gate mut(gen-impact L245): enter obs reports 'Impact report generated' on success" \
+    "Impact report generated" "$GIR_OBS"
+GIR_FALSE_WARN=$(printf '%s' "$GIR_OBS" | grep -c 'impact-report.sh failed' || true)
+GIR_FALSE_WARN=$(printf '%s' "$GIR_FALSE_WARN" | tr -d '[:space:]')
+assert_eq "qa-gate mut(gen-impact L245): enter obs does NOT falsely warn 'failed' on success" \
+    "0" "$GIR_FALSE_WARN"
+
+# --- write_current_task helper-success guard (qa-gate.sh ~line 83) --------
+# `if [ "$helper_rc" -eq 0 ] && [ -s ".../current-task" ]; then return 0; fi`
+# Re-sweep survivor: the F1 mutant `helper_rc -ne 0` makes a SUCCESSFUL
+# current-task.sh helper call skip the early return, so write_current_task
+# logs a spurious "falling back to direct write" sync-error and does a
+# redundant write. The file still lands (so existing tests pass), but the
+# audit trail gains a false fallback record. Kill it: with a WORKING helper,
+# sync-errors.log must NOT carry the fallback line.
+TID_WCT=$(cd "$FIXTURE" && bd create "write_current_task helper-success" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+# Fresh sync-errors.log for a clean read.
+: > "$TRACK/sync-errors.log"
+bash "$QG" enter "$TID_WCT" >/dev/null 2>&1
+# Sanity: helper path works in this fixture (current-task is written).
+WCT_FILE_OK=$([ -s "$TRACK/current-task" ] && echo yes || echo no)
+assert_eq "qa-gate mut(wct L83): current-task written (helper-success path exercised)" "yes" "$WCT_FILE_OK"
+WCT_FELLBACK=$(grep -c 'falling back to direct write' "$TRACK/sync-errors.log" 2>/dev/null || true)
+WCT_FELLBACK=$(printf '%s' "$WCT_FELLBACK" | tr -d '[:space:]')
+assert_eq "qa-gate mut(wct L83): working helper does NOT log a spurious 'falling back' fallback" \
+    "0" "$WCT_FELLBACK"
+
+# --- write_current_task fallback-success guard (qa-gate.sh ~line 91) ------
+# `if [ "$fallback_rc" -ne 0 ] || [ ! -s ".../current-task" ]; then return 1`
+# Re-sweep survivor: the F1 mutant `fallback_rc -eq 0` makes a SUCCESSFUL
+# direct-write fallback return 1 (false failure), so enter reports the
+# "hooks will see no active task" WARNING even though current-task WAS
+# written. Reaching the fallback needs the current-task.sh HELPER to FAIL
+# first. qa-gate.sh resolves the helper at $PROJECT_DIR/.claude/scripts/
+# current-task.sh, so we replace THAT symlink with a broken stub (exit 1,
+# writes nothing) in a dedicated fixture, then assert: file written AND no
+# false "no active task" warning.
+mk_fixture
+FIXTURE_FB="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+QG_FB="$FIXTURE_FB/.claude/scripts/qa-gate.sh"
+TRACK_FB="$FIXTURE_FB/.claude/.qa-tracking"
+# Replace the helper the gate actually invokes with a broken stub. Removing
+# the symlink and writing a real file shadows the plugin's current-task.sh.
+rm -f "$FIXTURE_FB/.claude/scripts/current-task.sh"
+printf '#!/bin/bash\nexit 1\n' > "$FIXTURE_FB/.claude/scripts/current-task.sh"
+chmod +x "$FIXTURE_FB/.claude/scripts/current-task.sh"
+TID_FB=$(cd "$FIXTURE_FB" && bd create "write_current_task fallback-success" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+: > "$TRACK_FB/current-task"   # start empty so the fallback write is observable
+FB_OUT=$(bash "$QG_FB" enter "$TID_FB" 2>/dev/null)
+FB_OBS=$(printf '%s' "$FB_OUT" | jq -r '.observations // ""')
+# Sanity: even via the broken helper, the direct-write fallback lands the file.
+FB_FILE_OK=$([ -s "$TRACK_FB/current-task" ] && echo yes || echo no)
+assert_eq "qa-gate mut(wct L91): broken helper -> fallback still writes current-task" "yes" "$FB_FILE_OK"
+# id(L91): a SUCCESSFUL fallback must NOT report the 'no active task' failure.
+FB_FALSE_WARN=$(printf '%s' "$FB_OBS" | grep -c 'hooks will see no active task' || true)
+FB_FALSE_WARN=$(printf '%s' "$FB_FALSE_WARN" | tr -d '[:space:]')
+assert_eq "qa-gate mut(wct L91): successful fallback does NOT falsely warn 'no active task'" \
+    "0" "$FB_FALSE_WARN"
+
+# ===========================================================================
+# cmd_enter escalation/rubric label-cleanup cluster (G2.6ix / llh.5).
+#
+# Re-sweep (.claude/.mutation-runs/20260613T112947Z and ...102846Z) surfaced a
+# CLUSTER of F1 survivors in cmd_enter's `was_escalated/was_deferred/
+# was_rubric_satisfied` guards: lines ~396 (functional remove_escalation_
+# labels), ~410 (functional remove_rubric_satisfied), ~426/429 (re-enter
+# observation text), ~478/481 (new-enter observation text). escalation-binding's
+# esc-resume re-enters a task carrying qa-DEFERRED, so the `|| [ was_deferred
+# = 1 ]` clause short-circuits the guards true regardless of the FIRST clause's
+# polarity — the qa-ESCALATED-only and rubric-satisfied isolations were never
+# exercised. We isolate each clause:
+#   - re-enter a task carrying ONLY qa-escalated  -> kills 396 (functional) + 426 (obs)
+#   - re-enter a task carrying rubric-satisfied   -> kills 410 (functional) + 429 (obs)
+#   - FRESH-enter a task pre-carrying qa-escalated + rubric-satisfied (no
+#     qa-gate-entered yet) -> kills 478 + 481 (new-enter obs)
+mk_fixture
+FIXTURE_CL="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+QG_CL="$FIXTURE_CL/.claude/scripts/qa-gate.sh"
+labels_join() {
+    bd show "$1" --json 2>/dev/null \
+        | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null || echo ""
+}
+has_lbl() { printf '%s' ",$(labels_join "$1")," | grep -q ",$2,"; }
+
+# --- 396 (functional) + 426 (obs): re-enter w/ ONLY qa-escalated ----------
+TID_ESC=$(cd "$FIXTURE_CL" && bd create "enter-clear qa-escalated" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_CL" enter "$TID_ESC" >/dev/null 2>&1          # sets qa-gate-entered (so the re-enter is idempotent path)
+bd label add "$TID_ESC" qa-escalated >/dev/null 2>&1     # ONLY qa-escalated, NOT qa-deferred
+ESC_OUT=$(bash "$QG_CL" enter "$TID_ESC" 2>/dev/null)    # re-enter
+ESC_OBS=$(printf '%s' "$ESC_OUT" | jq -r '.observations // ""')
+# id396 (functional): qa-escalated MUST be cleared by the re-enter.
+ESC_STILL=$(has_lbl "$TID_ESC" "qa-escalated" && echo present || echo cleared)
+assert_eq "qa-gate mut(enter L396): re-enter clears a qa-escalated-only task's escalation label" \
+    "cleared" "$ESC_STILL"
+# id426 (obs): the re-enter observation reports the escalation clear.
+assert_contains "qa-gate mut(enter L426): re-enter obs reports 'cleared prior escalation labels'" \
+    "cleared prior escalation labels" "$ESC_OBS"
+
+# --- 410 (functional) + 429 (obs): re-enter w/ rubric-satisfied -----------
+TID_RUB=$(cd "$FIXTURE_CL" && bd create "enter-clear rubric-satisfied" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_CL" enter "$TID_RUB" >/dev/null 2>&1
+bd label add "$TID_RUB" rubric-satisfied >/dev/null 2>&1
+RUB_OUT=$(bash "$QG_CL" enter "$TID_RUB" 2>/dev/null)
+RUB_OBS=$(printf '%s' "$RUB_OUT" | jq -r '.observations // ""')
+# id410 (functional): rubric-satisfied MUST be cleared by the re-enter.
+RUB_STILL=$(has_lbl "$TID_RUB" "rubric-satisfied" && echo present || echo cleared)
+assert_eq "qa-gate mut(enter L410): re-enter clears a stale rubric-satisfied label" \
+    "cleared" "$RUB_STILL"
+# id429 (obs): the re-enter observation reports the rubric clear.
+assert_contains "qa-gate mut(enter L429): re-enter obs reports 'cleared stale rubric-satisfied'" \
+    "cleared stale rubric-satisfied" "$RUB_OBS"
+
+# --- 478 + 481 (new-enter obs): FRESH enter w/ labels pre-set -------------
+# Pre-set qa-escalated + rubric-satisfied WITHOUT entering (no qa-gate-entered)
+# so the first enter takes the NEW path and emits the extra_obs trailer.
+TID_NE=$(cd "$FIXTURE_CL" && bd create "new-enter clears labels" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bd label add "$TID_NE" qa-escalated >/dev/null 2>&1
+bd label add "$TID_NE" rubric-satisfied >/dev/null 2>&1
+NE_OUT=$(bash "$QG_CL" enter "$TID_NE" 2>/dev/null)
+NE_OBS=$(printf '%s' "$NE_OUT" | jq -r '.observations // ""')
+# id478 (new-enter escalation obs).
+assert_contains "qa-gate mut(enter L478): new-enter obs reports 'cleared prior escalation labels'" \
+    "cleared prior escalation labels" "$NE_OBS"
+# id481 (new-enter rubric obs).
+assert_contains "qa-gate mut(enter L481): new-enter obs reports 'cleared stale rubric-satisfied'" \
+    "cleared stale rubric-satisfied" "$NE_OBS"
+
+# --- META-TEST: prove the L396 functional assertion is load-bearing -------
+# Mutate line 396's guard to `was_escalated != "1"` in a copy, re-run the
+# qa-escalated-only re-enter; the label must then remain (so the L396
+# assertion would FAIL), confirming sensitivity.
+REAL_QG_CL=$(readlink "$QG_CL" || printf '%s' "$QG_CL")
+QG_CL_MUT="$FIXTURE_CL/qa-gate-enter396mut.sh"
+awk 'NR==408 && /was_escalated" = "1"/ {print "    if [ \"$was_escalated\" != \"1\" ] || [ \"$was_deferred\" = \"1\" ]; then"; next} {print}' \
+    "$REAL_QG_CL" > "$QG_CL_MUT"
+chmod +x "$QG_CL_MUT"
+QG_CL_MUT_LANDED=$(sed -n '408p' "$QG_CL_MUT" | grep -c 'was_escalated" != "1"' || true)
+QG_CL_MUT_LANDED=$(printf '%s' "$QG_CL_MUT_LANDED" | tr -d '[:space:]')
+assert_eq "qa-gate META: L396 guard mutation applied to copy" "1" "$QG_CL_MUT_LANDED"
+TID_META396=$(cd "$FIXTURE_CL" && bd create "meta L396" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+CLAUDE_PROJECT_DIR="$FIXTURE_CL" bash "$QG_CL_MUT" enter "$TID_META396" >/dev/null 2>&1
+bd label add "$TID_META396" qa-escalated >/dev/null 2>&1
+CLAUDE_PROJECT_DIR="$FIXTURE_CL" bash "$QG_CL_MUT" enter "$TID_META396" >/dev/null 2>&1
+META396_STILL=$(has_lbl "$TID_META396" "qa-escalated" && echo present || echo cleared)
+assert_eq "qa-gate META: under L396 mutant a qa-escalated-only re-enter leaves the label (L396 assertion WOULD fail)" \
+    "present" "$META396_STILL"
+
+# --- approve Step-3 rollback guard (qa-gate.sh ~line 680) -----------------
+# `if [ "$removed_entered" = "1" ]; then add_label qa-gate-entered; fi`
+# Re-sweep survivor: this branch only runs on the approve ROLLBACK path —
+# when removing qa-pending fails after qa-gate-entered was already removed.
+# The original re-adds qa-gate-entered to restore the pre-approve state; the
+# F1 mutant `!= "1"` skips the re-add, leaving the task with NEITHER
+# qa-gate-entered NOR qa-approved (a corrupt lifecycle state) after a failed
+# approve. No test induced a mid-approve bd failure, so it survived. We inject
+# it: a bd shim that fails ONLY `label remove <tid> qa-pending`, forcing the
+# Step-3 rollback, then assert qa-gate-entered is restored.
+mk_fixture
+FIXTURE_RB="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+QG_RB="$FIXTURE_RB/.claude/scripts/qa-gate.sh"
+TRACK_RB="$FIXTURE_RB/.claude/.qa-tracking"
+# Selective bd shim: delegate to the real bd EXCEPT `label remove ... qa-pending`
+# which exits 1. Overwrites the fixture's bd shim (same bin/ dir, on PATH).
+REAL_BD_RB=$(command -v bd)
+# command -v bd here resolves the fixture shim; read the real bd it wraps.
+REAL_BD_RB=$(sed -n 's/^exec \(.*\) --no-daemon.*/\1/p' "$FIXTURE_RB/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+[ -z "$REAL_BD_RB" ] && REAL_BD_RB=$(command -v bd)
+cat > "$FIXTURE_RB/bin/bd" <<EOF
+#!/bin/bash
+if [ "\$1" = "label" ] && [ "\$2" = "remove" ] && [ "\$4" = "qa-pending" ]; then exit 1; fi
+exec $REAL_BD_RB --no-daemon "\$@"
+EOF
+chmod +x "$FIXTURE_RB/bin/bd"
+TID_RB=$(cd "$FIXTURE_RB" && bd create "approve rollback" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/rb-edit.ts\n' > "$TRACK_RB/changed-files.txt"
+bash "$QG_RB" enter "$TID_RB" >/dev/null 2>&1   # sets qa-gate-entered (+ generates impact report)
+bd label add "$TID_RB" qa-pending >/dev/null 2>&1
+# approve: add qa-approved OK, remove qa-gate-entered OK, remove qa-pending FAILS -> rollback -> exit 3.
+RB_RC=0
+bash "$QG_RB" approve "$TID_RB" "trigger Step-3 rollback" >/dev/null 2>&1 || RB_RC=$?
+assert_eq "qa-gate mut(approve-rollback L680): failed approve exits 3 (atomic rollback)" "3" "$RB_RC"
+# id680: the rollback MUST re-add qa-gate-entered (restore pre-approve state).
+RB_ENTERED=$(has_lbl "$TID_RB" "qa-gate-entered" && echo present || echo absent)
+assert_eq "qa-gate mut(approve-rollback L680): rollback re-adds qa-gate-entered (state restored)" \
+    "present" "$RB_ENTERED"
+# And qa-approved must NOT remain (it was rolled back).
+RB_APPROVED=$(has_lbl "$TID_RB" "qa-approved" && echo present || echo absent)
+assert_eq "qa-gate mut(approve-rollback L680): qa-approved rolled back" "absent" "$RB_APPROVED"
+
+# ===========================================================================
+# Change-set-bound approval record (G2 red-team / claude-workflow-plugin-llh.18).
+#
+# approve must write a TAMPER-EVIDENT record carrying the change_set_hash of
+# the approved change-set — the binding that lets verify-before-stop.sh
+# distinguish a real qa-gate.sh approve from a forged bare `bd label add
+# qa-approved`. The hash MUST equal impact-report.sh --hash-only of the
+# change-set that was current at approve time.
+mk_fixture
+FIXTURE_BIND="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+QG_BIND="$FIXTURE_BIND/.claude/scripts/qa-gate.sh"
+IR_BIND="$FIXTURE_BIND/.claude/scripts/impact-report.sh"
+TRACK_BIND="$FIXTURE_BIND/.claude/.qa-tracking"
+bind_hash_of_record() {
+    bd show "$1" --json 2>/dev/null \
+        | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
+                 | select(test("QA-GATE APPROVED .*change_set_hash="))
+                 | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | head -1
+}
+TID_BIND=$(cd "$FIXTURE_BIND" && bd create "approve writes bound record" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/bound-change.ts\n' > "$TRACK_BIND/changed-files.txt"
+bash "$QG_BIND" enter "$TID_BIND" >/dev/null 2>&1   # generates a fresh impact report
+# Capture the EXPECTED hash BEFORE approve runs — approve truncates
+# changed-files.txt as a last step (0wk.2), so a post-approve --hash-only
+# would return the empty-set hash, not the approved change-set's.
+BIND_EXP_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_BIND" bash "$IR_BIND" --hash-only 2>/dev/null || echo "")
+BIND_OUT=$(bash "$QG_BIND" approve "$TID_BIND" "reviewed; binding test" 2>/dev/null)
+assert_json_field "qa-gate llh18: approve succeeds (fresh report)" "$BIND_OUT" '.status' "approved"
+# The approval comment carries a change_set_hash token.
+BIND_REC_HASH=$(bind_hash_of_record "$TID_BIND")
+assert_eq "qa-gate llh18: approve wrote a change_set_hash record" "0" \
+    "$([ -n "$BIND_REC_HASH" ] && echo 0 || echo 1)"
+# And that recorded hash equals the canonical --hash-only of the change-set
+# that was current at approve time.
+assert_eq "qa-gate llh18: recorded change_set_hash == impact-report.sh --hash-only (at approve time)" \
+    "$BIND_EXP_HASH" "$BIND_REC_HASH"
+# approve's observations surface the binding.
+assert_contains "qa-gate llh18: approve obs reports the change-set binding" \
+    "change-set-bound approval record written" "$BIND_OUT"
+
+# Bypass path (--no-impact-report) still binds: the hash is the current
+# change-set's, recorded even though the impact-report refusal was waived.
+TID_BIND_BP=$(cd "$FIXTURE_BIND" && bd create "bypass still binds" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/bypass-bound.ts\n' > "$TRACK_BIND/changed-files.txt"
+bash "$QG_BIND" enter "$TID_BIND_BP" >/dev/null 2>&1
+rm -f "$TRACK_BIND/impact-report-$(printf '%s' "$TID_BIND_BP" | tr -c 'A-Za-z0-9._-' '_').json"
+# Capture the expected hash before approve truncates the tracker.
+BP_EXP_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_BIND" bash "$IR_BIND" --hash-only 2>/dev/null || echo "")
+BP_OUT=$(bash "$QG_BIND" approve "$TID_BIND_BP" --no-impact-report "ops emergency" "bypass approval" 2>/dev/null)
+assert_json_field "qa-gate llh18: bypass approve succeeds" "$BP_OUT" '.status' "approved"
+BP_REC_HASH=$(bind_hash_of_record "$TID_BIND_BP")
+assert_eq "qa-gate llh18: bypass path still writes a matching change_set_hash record" \
+    "$BP_EXP_HASH" "$BP_REC_HASH"
+
 [ "$FAIL" -eq 0 ]

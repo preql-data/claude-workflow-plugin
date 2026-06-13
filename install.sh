@@ -771,7 +771,7 @@ if [ "$V2_UPGRADE" = true ]; then
     fi
 else
     echo -e "${CYAN}What's new in v3:${NC}"
-    echo "  - Plugin manifest (.claude-plugin/plugin.json) with v3.0.0"
+    echo "  - Plugin manifest (.claude-plugin/plugin.json) — see it for the version"
     echo "  - Model pinning per agent + /workflow-model upgrade command"
     echo "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
     echo "  - Parent-folder access via additionalDirectories (../)"

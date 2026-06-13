@@ -52,6 +52,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SEED_DIR = path.resolve(__dirname, "..", "cassettes", "seed");
+const REPLAY_DIR = path.resolve(__dirname, "..", "cassettes", "replays");
 const RUN4_TRACE = path.join(
   SEED_DIR,
   "node-react-auth-2026-06-12T02-18-12-871Z.jsonl",
@@ -59,6 +60,12 @@ const RUN4_TRACE = path.join(
 const RUN3_TRACE = path.join(
   SEED_DIR,
   "node-react-auth-2026-06-12T00-50-56-312Z.jsonl",
+);
+// llh.23: the paid live run whose qa-pending arrived exclusively via the
+// `"$BD" create -l …,qa-pending` variable-indirected shape.
+const LLH23_TRACE = path.join(
+  REPLAY_DIR,
+  "node-react-auth-2026-06-13T16-52-03-909Z.jsonl",
 );
 
 // ---------------------------------------------------------------------------
@@ -349,6 +356,124 @@ describe("deriveBeadsLabelEvents: bd create -l / bd update --add-label", () => {
       bash("c3", 'bd create "plain task with no labels" -t task -p 2'),
     ];
     expect(deriveBeadsLabelEvents(calls)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. BD-BOUND VARIABLE INDIRECTION (claude-workflow-plugin-llh.23).
+//
+// The orchestrator's own observed flow aliases the bd binary and invokes
+// through the variable:
+//   BD=./.claude/bin/bd
+//   BE=$("$BD" create "Backend: …" -t feature -p 2 -l backend,feature,qa-pending …)
+// The pre-llh.23 deriver anchored every bd scanner on a LITERAL `bd`
+// token, so `"$BD" create …` matched NOTHING and the qa-pending
+// creation-label add vanished — `label-milestones` FAILED on the real
+// paid trace (3rd live run; node-react-auth-2026-06-13T16-52-03-909Z)
+// even though the workflow genuinely set qa-pending at creation.
+//
+// The shapes below are VERBATIM (or minimally trimmed) from that trace,
+// plus the over-match guards that keep an arbitrary `"$FOO" create` from
+// being mistaken for a bd call.
+// ---------------------------------------------------------------------------
+
+describe("deriveBeadsLabelEvents: bd-bound variable indirection (llh.23)", () => {
+  it("the real paid-trace shape: BD=./.claude/bin/bd; \"$BD\" create … -l backend,feature,qa-pending (creation adds, taskId '')", () => {
+    const calls = [
+      bash(
+        "v1",
+        'BD=./.claude/bin/bd\nBE=$("$BD" create "Backend: POST /auth/login with JWT issuance" -t feature -p 2 \\\n  -l backend,feature,qa-pending \\\n  --description "Add POST /auth/login to createApp() in server/index.js." \\\n  --json | jq -r \'.id\')\necho "BE=$BE"',
+      ),
+    ];
+    expect(deriveBeadsLabelEvents(calls)).toEqual([
+      ev("add", "backend", "", "v1"),
+      ev("add", "feature", "", "v1"),
+      ev("add", "qa-pending", "", "v1"),
+    ]);
+  });
+
+  it("unquoted $BD label add resolves through the in-command bd binding", () => {
+    const calls = [
+      bash("v2", "BD=bd; $BD label add auth-6p2 qa-pending"),
+    ];
+    expect(deriveBeadsLabelEvents(calls)).toEqual([
+      ev("add", "qa-pending", "auth-6p2", "v2"),
+    ]);
+  });
+
+  it("${BD} update --add-label / --remove-label resolves through the binding", () => {
+    const calls = [
+      bash(
+        "v3",
+        "BD=./.claude/bin/bd; ${BD} update auth-2s9 --add-label qa-pending --remove-label qa-blocked",
+      ),
+    ];
+    expect(deriveBeadsLabelEvents(calls)).toEqual([
+      ev("add", "qa-pending", "auth-2s9", "v3"),
+      ev("remove", "qa-blocked", "auth-2s9", "v3"),
+    ]);
+  });
+
+  it("command-substitution bindings: BD=$(which bd) and BD=\"$(command -v bd)\"", () => {
+    expect(
+      deriveBeadsLabelEvents([
+        bash("v4", "BD=$(which bd); ${BD} label add t-1 qa-pending"),
+      ]),
+    ).toEqual([ev("add", "qa-pending", "t-1", "v4")]);
+    expect(
+      deriveBeadsLabelEvents([
+        bash(
+          "v5",
+          'BD="$(command -v bd)"\n"$BD" label add t-2 qa-approved',
+        ),
+      ]),
+    ).toEqual([ev("add", "qa-approved", "t-2", "v5")]);
+  });
+
+  it("literal bd and a $BD var in the SAME command both resolve (mixed head)", () => {
+    const calls = [
+      bash(
+        "v6",
+        "BD=./.claude/bin/bd; bd label add t-1 qa-pending && \"$BD\" label add t-2 qa-pending",
+      ),
+    ];
+    expect(deriveBeadsLabelEvents(calls)).toEqual([
+      ev("add", "qa-pending", "t-1", "v6"),
+      ev("add", "qa-pending", "t-2", "v6"),
+    ]);
+  });
+
+  it("GUARD: a non-bd var is NOT a bd head — FOO=git; \"$FOO\" create … derives nothing", () => {
+    const calls = [
+      bash("g1", 'FOO=git; "$FOO" create branch -l backend,qa-pending'),
+    ];
+    expect(deriveBeadsLabelEvents(calls)).toEqual([]);
+  });
+
+  it("GUARD: a var with NO in-command bd binding derives nothing (\"$BD\" create with no BD=)", () => {
+    const calls = [
+      bash("g2", '"$BD" create "x" -t feature -l backend,qa-pending'),
+    ];
+    expect(deriveBeadsLabelEvents(calls)).toEqual([]);
+  });
+
+  it("GUARD: a near-miss binding (BDX=foo, X=/usr/bin/abd, X=git_bd) does not enable the var", () => {
+    expect(
+      deriveBeadsLabelEvents([
+        bash("g3", 'BDX=foo; "$BDX" create "x" -l qa-pending'),
+      ]),
+    ).toEqual([]);
+    expect(
+      deriveBeadsLabelEvents([
+        bash("g4", 'X=/usr/bin/abd; "$X" label add t-3 qa-pending'),
+      ]),
+    ).toEqual([]);
+    // `_` is a word char, so `\bbd` finds no boundary in `git_bd`.
+    expect(
+      deriveBeadsLabelEvents([
+        bash("g5", 'X=git_bd; "$X" label add t-5 qa-pending'),
+      ]),
+    ).toEqual([]);
   });
 });
 
@@ -732,6 +857,76 @@ describe.skipIf(!existsSync(RUN3_TRACE))(
       });
       expect(r.pass).toBe(true);
       expect(r.skipped).toBeFalsy();
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 8. Real-trace grounding: the llh.23 paid live run. This is the
+//    regression that drove the fix — qa-pending arrived ONLY via
+//    `"$BD" create -l backend,feature,qa-pending`, invisible to the
+//    pre-llh.23 literal-`bd` anchor. We RE-DERIVE events offline from the
+//    recorded tool calls (the legitimate offline-re-eval path — a fresh
+//    recording would populate the field this way) and assert the
+//    previously-failing invariant now PASSES on the real trace.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!existsSync(LLH23_TRACE))(
+  "real-trace grounding: llh.23 paid run (node-react-auth 2026-06-13T16-52-03-909Z)",
+  () => {
+    function loadLlh23(): Trace {
+      return JSON.parse(readFileSync(LLH23_TRACE, "utf8").trim()) as Trace;
+    }
+
+    it("re-derivation surfaces the qa-pending creation add the literal-`bd` anchor missed (via `\"$BD\" create -l …,qa-pending`)", () => {
+      const trace = loadLlh23();
+      const events = deriveBeadsLabelEvents(trace.toolCalls);
+      const pendingAdds = events.filter(
+        (e) => e.action === "add" && e.label === "qa-pending",
+      );
+      // Two children were created with qa-pending via the $BD-indirected
+      // `create -l backend,feature,qa-pending` / `… frontend,…` shapes.
+      expect(pendingAdds.length).toBeGreaterThanOrEqual(2);
+      expect(pendingAdds.every((e) => e.taskId === "")).toBe(true);
+      // The net diff demonstrably lacks qa-pending (approve removed it in
+      // every cycle) — the original FAIL evidence.
+      const netAdds = new Set(
+        trace.beadsLabelTransitions.flatMap((t) => t.added),
+      );
+      expect(netAdds.has("qa-pending")).toBe(false);
+      expect(netAdds.has("qa-approved")).toBe(true);
+    });
+
+    it("BEFORE (recorded field): the trace's own beadsLabelEvents carries NO qa-pending add — the recorded FAIL", () => {
+      const trace = loadLlh23();
+      const recordedPendingAdds = (trace.beadsLabelEvents ?? []).filter(
+        (e) => e.action === "add" && e.label === "qa-pending",
+      );
+      // The trace was recorded by the pre-llh.23 deriver, so its baked-in
+      // event field has the bug frozen in: zero qa-pending adds.
+      expect(recordedPendingAdds.length).toBe(0);
+      const r = INVARIANTS["label-milestones"]!(trace, {
+        milestones: ["qa-pending", "qa-approved"],
+      });
+      expect(r.pass).toBe(false);
+      expect(r.detail).toMatch(/missing milestone label add\(s\): \[qa-pending\]/);
+    });
+
+    it("AFTER (re-derived): the previously-failing invariant PASSES on the real trace once events are re-derived", () => {
+      const trace = loadLlh23();
+      const withEvents: Trace = {
+        ...trace,
+        beadsLabelEvents: deriveBeadsLabelEvents(trace.toolCalls),
+      };
+      const r = INVARIANTS["label-milestones"]!(withEvents, {
+        milestones: ["qa-pending", "qa-approved"],
+      });
+      expect(r.pass).toBe(true);
+      expect(r.skipped).toBeFalsy();
+      // Proven as a real ordered transition (event-stream match), not a
+      // vacuous/net-diff rescue.
+      expect(r.detail).toMatch(/qa-pending@event\[\d+\]/);
+      expect(r.detail).toMatch(/qa-approved@event\[\d+\]/);
     });
   },
 );

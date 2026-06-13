@@ -17,11 +17,16 @@ every step.
 - **A QA gate that's a real Stop hook.** Claude literally cannot release
   the conversation without `qa-approved` on the active task. The decision
   is recorded in Beads as a label and a comment — full audit trail, no
-  honour system. Bypass attempts are visible in the hook log.
+  honour system. The label alone is not enough: the Stop hook releases
+  only when the approval comment carries a `change_set_hash` matching the
+  current diff, so a forged `qa-approved` label (added without
+  `qa-gate.sh approve`) does not pass the gate.
 - **Tasks survive sessions.** Specialists auto-claim work via
-  `bd update --status in_progress`. PRs and Beads tasks auto-link to
-  GitHub (issues, PRs, close-on-merge). Pick up tomorrow where you left
-  off tonight.
+  `bd update --status in_progress`. GitHub issue auto-linking is provided
+  (`bd-github-link.sh`: posts a back-link comment on task close and parses
+  `Closes #N`); its call shapes are verified by the `bd-github-link` L1
+  test against a stubbed `gh`, not a live round-trip. Pick up tomorrow
+  where you left off tonight.
 - **A separate-context rubric grader gates every QA approval.** Before
   QA signs off, a read-only `grader` subagent scores the work against
   a versioned rubric (default + per-domain overlays + a bugfix overlay

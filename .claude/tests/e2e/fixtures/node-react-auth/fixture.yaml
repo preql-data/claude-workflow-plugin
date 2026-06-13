@@ -46,12 +46,23 @@ expected_label_progression:
 # See .claude/tests/e2e/lib/invariants.ts for the implementations and
 # .claude/tests/README.md for the schema.
 #
-# qa-queried-impact-of is added by claude-workflow-plugin-366.6 as the
-# Phase B regression anchor: QA's frontmatter now grants code-graph MCP
-# tools, so on a future live run QA can call impact_of and this
-# invariant flips green. Before the 366.6 fix QA's `tools:` allowlist
-# omitted all `mcp__*` entries and the SDK stripped MCP tools from QA's
-# surface entirely — 0 impact_of calls in the seed trace.
+# qa-queried-impact-of asserts QA's regression-impact analysis ran for the
+# landed diff. It does NOT count QA-attributed `impact_of` MCP tool_uses:
+# the 366.6 theory ("QA's frontmatter grants code-graph tools, so a future
+# live run will call impact_of and flip this green") was DISPROVEN — across
+# four paid live runs QA made ZERO impact_of calls regardless of prompt
+# strength. n6d (claude-workflow-plugin-llh.2) therefore moved the impact
+# analysis OUT of Claude's tool interface into the deterministic
+# `.claude/scripts/impact-report.sh`, which `qa-gate.sh enter` invokes (it
+# writes .claude/.qa-tracking/impact-report-<task-id>.json) and `qa-gate.sh
+# approve` ENFORCES (refuses without a fresh artifact; `--no-impact-report
+# '<reason>'` bypasses). Those code-graph calls run over stdio inside the
+# script and are NOT Claude tool_uses, so a correct n6d run shows 0
+# impact_of tool_uses by construction. The invariant now keys on the n6d
+# MECHANICAL signature observable in the trace — QA consulted the
+# impact-report artifact and approved without the bypass — and SKIPS pre-n6d
+# recordings (every current seed trace) that predate the mechanic. See
+# .claude/tests/e2e/lib/invariants.ts for the full contract.
 invariants:
   - name: stop-requires-approval
   - name: orchestrator-no-edits
