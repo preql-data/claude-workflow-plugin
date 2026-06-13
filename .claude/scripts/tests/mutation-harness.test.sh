@@ -160,7 +160,10 @@ SH
 
 # Cleanup tempdirs at the end.
 TEMP_DIRS=()
-# shellcheck disable=SC2329  # invoked via trap.
+# cleanup_all runs only via the trap below; the static analyzer can't see
+# that indirection. Newer shellchecks emit SC2329 on the definition, older
+# ones (CI) emit SC2317 on every statement in the body. Suppress both.
+# shellcheck disable=SC2329,SC2317
 cleanup_all() {
     local d
     for d in "${TEMP_DIRS[@]:-}"; do

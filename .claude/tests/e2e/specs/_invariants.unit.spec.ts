@@ -415,11 +415,16 @@ describe("invariant: stop-requires-approval (llh.25: H3 re-entry + bd-unavailabl
   // blocked the unreviewed change; the {} allows were H3 re-entry guards and
   // bd crashed). This anchors the fix against the ground-truth trace, not just
   // synthetics.
+  //
+  // The trace is pinned in cassettes/seed/ (a committed, allowlisted
+  // regression anchor — same seed-corpus pattern as _phase-a-trace /
+  // _phase-b-trace). cassettes/replays/ is gitignored, so a replays/ path
+  // would ENOENT on a fresh CI checkout; seed/ is the durable evidence home.
   const DJANGO_TRACE = path.resolve(
     __dirname,
     "..",
     "cassettes",
-    "replays",
+    "seed",
     "python-django-bug-2026-06-13T19-56-33-557Z.jsonl",
   );
 

@@ -67,7 +67,10 @@ assert_contains() {
 # Fixture helpers: each test reseeds the ledger from the committed
 # seed so dedup/append tests have a known starting state.
 FIXTURE=$(mktemp -d -t lessons-test.XXXXXX)
-# shellcheck disable=SC2329  # cleanup invoked via trap.
+# cleanup runs only via the EXIT trap below; the static analyzer can't see
+# that indirection. Newer shellchecks emit SC2329 on the definition, older
+# ones (CI) emit SC2317 on every statement in the body. Suppress both.
+# shellcheck disable=SC2329,SC2317
 cleanup() {
     if [ "$KEEP_FIXTURE" = "1" ]; then
         printf '\nFixture kept at: %s\n' "$FIXTURE"
