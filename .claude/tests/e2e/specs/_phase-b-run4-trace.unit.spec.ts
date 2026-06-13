@@ -272,7 +272,7 @@ describe.skipIf(!HAVE_TRACE)(
       // The model still did not call it.
     });
 
-    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 2 skip + 1 fail (label-milestones now SKIPS on this pre-3.5 trace — G2.9ke)", () => {
+    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 3 skip + 0 fail (qa-queried-impact-of now SKIPS on this pre-n6d trace — llh.15; label-milestones SKIPS per G2.9ke)", () => {
       const trace = loadTrace();
       const yamlContent = readFileSync(FIXTURE_YAML_PATH, "utf8");
       const specs = parseInvariantsFromYaml(yamlContent);
@@ -295,25 +295,36 @@ describe.skipIf(!HAVE_TRACE)(
       );
 
       const agg = evaluateAll(trace, specs);
-      // G2.9ke (claude-workflow-plugin-llh.4) UPDATED THE STATE THIS
-      // ANCHOR PINS. The run-4 trace was recorded BEFORE the
-      // beadsLabelEvents field existed, so the rewritten label-milestones
-      // invariant SKIPS it ("trace lacks beadsLabelEvents (pre-3.5
-      // recording)") instead of emitting the old structural FAIL. This
-      // is the honest fallback the fix mandates: the original FAIL was a
-      // recording-layer artifact (net diff cannot see qa-pending added
-      // then removed in-run), NOT a workflow defect, so retro-failing
-      // this old trace would re-assert the very bug 9ke removed. The
-      // event-stream PASS is proven against this same trace in
-      // `_label-events.unit.spec.ts` ("the previously-impossible
-      // invariant PASSES on run 4 once events are derived"), which
-      // derives the events the old recorder never wrote.
+      // TWO recording-layer SKIPs now apply to this old trace:
       //
-      // Aggregate now: 1 failed (qa-queried-impact-of, unchanged),
-      // 2 skipped (completion-contract + label-milestones), allPassed=false.
-      expect(agg.allPassed).toBe(false);
-      expect(agg.skipped).toEqual(["completion-contract", "label-milestones"]);
-      expect(agg.failed).toEqual(["qa-queried-impact-of"]);
+      // 1. G2.9ke (claude-workflow-plugin-llh.4): the run-4 trace predates
+      //    the beadsLabelEvents field, so label-milestones SKIPS ("trace
+      //    lacks beadsLabelEvents (pre-3.5 recording)") instead of the old
+      //    structural FAIL. The original FAIL was a recording-layer
+      //    artifact (net diff cannot see qa-pending added then removed
+      //    in-run), NOT a workflow defect. The event-stream PASS is proven
+      //    against this same trace in `_label-events.unit.spec.ts`.
+      //
+      // 2. n6d (claude-workflow-plugin-llh.2, invariant rewrite in
+      //    llh.15): qa-queried-impact-of no longer counts QA-attributed
+      //    impact_of MCP tool_uses (disproven signal — this very run's
+      //    forensic below shows the orchestrator's QA prompt DID name
+      //    impact_of and yet 0 calls were made). n6d moved impact analysis
+      //    into the deterministic impact-report.sh (code-graph stdio, NOT
+      //    Claude tool_uses). Run 4 predates n6d, so it carries no
+      //    impact-report footprint and no --no-impact-report flag → the
+      //    invariant SKIPS it as a "pre-n6d recording" (mirroring the
+      //    llh.4 pre-3.5 skip) rather than the old structural FAIL.
+      //
+      // Aggregate now: 0 failed, 3 skipped (completion-contract +
+      // label-milestones + qa-queried-impact-of), allPassed=true.
+      expect(agg.allPassed).toBe(true);
+      expect(agg.skipped).toEqual([
+        "completion-contract",
+        "label-milestones",
+        "qa-queried-impact-of",
+      ]);
+      expect(agg.failed).toEqual([]);
 
       // Per-invariant verdicts — pin each one including the exact detail
       // substring so an engine change that subtly reshapes the message
@@ -345,14 +356,15 @@ describe.skipIf(!HAVE_TRACE)(
 
       expect(resultsByName["declared-subagents-only"]?.pass).toBe(true);
 
-      expect(resultsByName["qa-queried-impact-of"]?.pass).toBe(false);
-      // The skip branch did NOT fire (structural availability satisfied).
-      expect(resultsByName["qa-queried-impact-of"]?.skipped).toBeFalsy();
+      // UPDATED PIN (was: pass=false + "0 impact_of call(s) from QA" +
+      // "fileWrites=7"). The new state is an honest SKIP on a pre-n6d
+      // trace — pin the exact skip reason so a future re-record under the
+      // n6d plugin (which WOULD carry the impact-report footprint and must
+      // then PASS) flips this loud.
+      expect(resultsByName["qa-queried-impact-of"]?.skipped).toBe(true);
+      expect(resultsByName["qa-queried-impact-of"]?.pass).toBe(true);
       expect(resultsByName["qa-queried-impact-of"]?.detail ?? "").toContain(
-        "0 impact_of call(s) from QA",
-      );
-      expect(resultsByName["qa-queried-impact-of"]?.detail ?? "").toContain(
-        "fileWrites=7",
+        "pre-n6d recording",
       );
     });
 

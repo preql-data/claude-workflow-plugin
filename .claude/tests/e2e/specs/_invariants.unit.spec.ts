@@ -513,20 +513,51 @@ describe("invariant: declared-subagents-only", () => {
 });
 
 // ---------------------------------------------------------------------------
-// qa-queried-impact-of (verification-suite Phase B). The trace must
-// show a code-graph `impact_of` call attributable to a QA subagent when
-// the run produced any file writes. Skip semantics: no code-graph in
-// toolsAvailable (server absent by design) OR no fileWrites (vacuous).
+// qa-queried-impact-of (verification-suite Phase B, REWRITTEN for n6d /
+// claude-workflow-plugin-llh.2 + llh.15). The invariant no longer counts
+// QA-attributed `impact_of` MCP tool_uses — n6d moved impact analysis OUT
+// of Claude's tool interface into the deterministic `impact-report.sh`
+// (invoked by `qa-gate.sh enter`, enforced by `qa-gate.sh approve`'s
+// refusal). Those stdio code-graph calls are NOT Claude tool_uses, so a
+// correct n6d run shows 0 `impact_of` tool_uses by construction.
+//
+// The trace-observable n6d MECHANICAL signature this invariant now
+// asserts (see lib/invariants.ts docstring):
+//   - PASS: code-graph present + fileWrites>0 + a QA-attributable n6d
+//     ARTIFACT FOOTPRINT (a Bash/Read referencing the
+//     `impact-report-<taskid>.json` path — qa.md's mandated FIRST ACTION
+//     is `cat .claude/.qa-tracking/impact-report-<task-id>.json` — or an
+//     `impact-report.sh` invocation) AND a QA-attributable
+//     `qa-gate.sh approve` with NO `--no-impact-report` bypass (an
+//     unbypassed successful approve mechanically proves a fresh artifact
+//     existed, since approve REFUSES without one).
+//   - FAIL: code-graph present + fileWrites>0 + a QA-attributable
+//     `qa-gate.sh approve … --no-impact-report <reason>` whose reason is
+//     NOT a code-graph-absent reason → analysis genuinely skipped via the
+//     bypass. (`--no-impact-report` is a post-n6d-only construct, so it is
+//     an unambiguous post-n6d signal.)
+//   - SKIP "code-graph absent": no code-graph in toolsAvailable, OR the
+//     footprint shows `server: "absent"`, OR the bypass reason names
+//     code-graph absence.
+//   - SKIP vacuous: fileWrites empty (no diff to assess).
+//   - SKIP "pre-n6d recording": code-graph present + fileWrites>0 but NO
+//     artifact footprint AND NO bypass flag — the n6d mechanic did not
+//     exist when the trace was recorded (every pre-llh.2 seed trace lands
+//     here). Mirrors the llh.4 "pre-3.5 recording" skip; do NOT retro-fail.
 // ---------------------------------------------------------------------------
 
-/** Build a synthetic trace where QA calls impact_of via the code-graph
- *  MCP server after backend writes a file. Mirrors the SDK's rewritten
- *  tool-name shape (`mcp__plugin_<plugin>_<server>__<tool>`) so the
- *  pattern matcher in the invariant is exercised against the realistic
- *  form, not just the bare `impact_of` shorthand. */
-function impactPositiveTrace(): Trace {
+/** Build a synthetic trace modeling a CORRECT n6d live run: code-graph
+ *  present; backend writes a file; QA spawns, reads the mechanical impact
+ *  report artifact (qa.md's FIRST ACTION `cat …impact-report-<taskid>.json`),
+ *  enters the gate, and approves WITHOUT the `--no-impact-report` bypass.
+ *  NOTE the deliberate absence of any `impact_of` tool_use — n6d makes the
+ *  impact_of calls invisible to the trace (they happen inside
+ *  impact-report.sh over stdio), so the OLD invariant FAILS this trace and
+ *  the NEW invariant PASSES it. */
+const N6D_TASK_ID = "impact-good-1";
+function impactN6dPositiveTrace(): Trace {
   const t = createEmptyTrace(
-    "synthetic-impact-positive",
+    "synthetic-impact-n6d-positive",
     "prompt",
     "claude-opus-4-7",
   );
@@ -553,8 +584,7 @@ function impactPositiveTrace(): Trace {
       parentToolUseId: "task-backend",
       durationMs: 0,
     },
-    // QA spawns and calls impact_of on a real symbol from the fixture
-    // (the createApp factory in server/index.js).
+    // QA spawns.
     {
       id: "task-qa",
       name: "Task",
@@ -563,10 +593,35 @@ function impactPositiveTrace(): Trace {
       subagentType: "qa",
       durationMs: 0,
     },
+    // QA enters the gate — mechanically generates the impact-report artifact.
     {
-      id: "qa-impact-call",
-      name: "mcp__plugin_claude-workflow_code-graph__impact_of",
-      input: { symbol: "createApp" },
+      id: "qa-gate-enter",
+      name: "Bash",
+      input: {
+        command: `bash .claude/scripts/qa-gate.sh enter ${N6D_TASK_ID}`,
+      },
+      parentToolUseId: "task-qa",
+      durationMs: 0,
+    },
+    // QA's FIRST ACTION: cat the mechanical impact report (the n6d artifact
+    // footprint). This is the post-n6d-only signal the invariant keys on.
+    {
+      id: "qa-cat-report",
+      name: "Bash",
+      input: {
+        command: `cat .claude/.qa-tracking/impact-report-${N6D_TASK_ID}.json`,
+      },
+      parentToolUseId: "task-qa",
+      durationMs: 0,
+    },
+    // QA approves WITHOUT the bypass — the unbypassed approve proves a
+    // fresh artifact existed (approve refuses otherwise).
+    {
+      id: "qa-gate-approve",
+      name: "Bash",
+      input: {
+        command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} 'auth endpoint + login form verified; impact report consulted'`,
+      },
       parentToolUseId: "task-qa",
       durationMs: 0,
     },
@@ -587,7 +642,7 @@ function impactPositiveTrace(): Trace {
   ];
   t.beadsLabelTransitions = [
     {
-      taskId: "impact-good-1",
+      taskId: N6D_TASK_ID,
       added: ["qa-pending", "qa-approved"],
       removed: [],
     },
@@ -595,17 +650,25 @@ function impactPositiveTrace(): Trace {
   return t;
 }
 
-describe("invariant: qa-queried-impact-of", () => {
-  it("passes when QA called impact_of and fileWrites is non-empty", () => {
-    const t = impactPositiveTrace();
+describe("invariant: qa-queried-impact-of (n6d mechanical signature)", () => {
+  it("RED-ANCHOR / POSITIVE: PASSES on a correct n6d run (artifact consulted + unbypassed approve), with ZERO impact_of tool_uses", () => {
+    const t = impactN6dPositiveTrace();
+    // Guard: the positive trace deliberately contains no impact_of
+    // tool_use — proving the new invariant does NOT depend on the
+    // disproven signal (the OLD invariant FAILED exactly here).
+    expect(
+      t.toolCalls.some((c) =>
+        /code-graph.*impact_of|^impact_of$/.test(c.name),
+      ),
+    ).toBe(false);
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(true);
-    expect(r.skipped).toBeUndefined();
-    expect(r.detail).toMatch(/impact_of call/);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/impact report/i);
   });
 
   it("matches the plugin-qualifier-tolerant subagent typing (claude-workflow:qa)", () => {
-    const t = impactPositiveTrace();
+    const t = impactN6dPositiveTrace();
     t.subagentInvocations = [
       {
         type: "claude-workflow:backend",
@@ -622,38 +685,84 @@ describe("invariant: qa-queried-impact-of", () => {
     expect(r.pass).toBe(true);
   });
 
-  it("also matches the bare `impact_of` tool-name form (in-process direct callers)", () => {
-    const t = impactPositiveTrace();
-    // Swap the SDK-rewritten name for the bare server-side form. The
-    // pattern matcher accepts both.
+  it("accepts a Read tool_use of the artifact path as the footprint (qa.md may Read instead of cat)", () => {
+    const t = impactN6dPositiveTrace();
+    // Swap the `cat` Bash footprint for a Read tool_use on the same path.
     t.toolCalls = t.toolCalls.map((c) =>
-      c.id === "qa-impact-call" ? { ...c, name: "impact_of" } : c,
+      c.id === "qa-cat-report"
+        ? {
+            ...c,
+            name: "Read",
+            input: {
+              file_path: `.claude/.qa-tracking/impact-report-${N6D_TASK_ID}.json`,
+            },
+          }
+        : c,
     );
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(true);
   });
 
-  it("respects the min_calls param when set (e.g. require ≥2 impact_of calls from QA)", () => {
-    const t = impactPositiveTrace();
-    // Only one impact_of call attributable to QA — should fail with min_calls=2.
-    const r1 = INVARIANTS["qa-queried-impact-of"]!(t, { min_calls: 2 });
-    expect(r1.pass).toBe(false);
-    expect(r1.detail).toMatch(/expected at least 2/);
-    // Add a second call → passes.
-    t.toolCalls.push({
-      id: "qa-impact-call-2",
-      name: "mcp__plugin_claude-workflow_code-graph__impact_of",
-      input: { symbol: "express" },
-      parentToolUseId: "task-qa",
-      durationMs: 0,
-    });
-    const r2 = INVARIANTS["qa-queried-impact-of"]!(t, { min_calls: 2 });
-    expect(r2.pass).toBe(true);
+  it("accepts an impact-report.sh invocation as the footprint (manual regenerate before approve)", () => {
+    const t = impactN6dPositiveTrace();
+    // Replace the cat with an explicit regenerate call.
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-cat-report"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/impact-report.sh ${N6D_TASK_ID}`,
+            },
+          }
+        : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.pass).toBe(true);
   });
 
-  it("skips with a documented reason when the code-graph server is absent", () => {
-    const t = impactPositiveTrace();
-    // Server not loaded — agents degrade to search-only flow.
+  it("FAIL: approve used --no-impact-report bypass with a non-degradation reason (analysis genuinely skipped)", () => {
+    const t = impactN6dPositiveTrace();
+    // Drop the artifact footprint and bypass the refusal with a
+    // non-code-graph-absent reason. This is the headline post-n6d failure
+    // mode: the mechanical gate was waived without justification.
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-gate-approve"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} --no-impact-report 'in a hurry' 'shipping anyway'`,
+            },
+          }
+        : c,
+    );
+    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
+    expect(agg.allPassed).toBe(false);
+    expect(agg.failed).toEqual(["qa-queried-impact-of"]);
+    expect(agg.results[0]?.result.detail).toMatch(/--no-impact-report|bypass/i);
+  });
+
+  it("SKIP code-graph-absent: the impact bypass reason names code-graph absence (documented degradation)", () => {
+    const t = impactN6dPositiveTrace();
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    t.toolCalls = t.toolCalls.map((c) =>
+      c.id === "qa-gate-approve"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} --no-impact-report 'code-graph server absent on this host' 'verified manually'`,
+            },
+          }
+        : c,
+    );
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/code-graph|absent/i);
+  });
+
+  it("SKIP code-graph-absent: trace.toolsAvailable shows no code-graph tools (server not loaded)", () => {
+    const t = impactN6dPositiveTrace();
     t.toolsAvailable = ["Write", "Edit", "Bash", "Read"];
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.skipped).toBe(true);
@@ -662,20 +771,31 @@ describe("invariant: qa-queried-impact-of", () => {
     expect(r.detail).toMatch(/search-only/);
   });
 
-  it("skips vacuously when fileWrites is empty (no diff for QA to assess)", () => {
-    const t = impactPositiveTrace();
+  it("SKIP vacuous: fileWrites empty (no diff for QA to assess)", () => {
+    const t = impactN6dPositiveTrace();
     t.fileWrites = [];
-    // Also strip the impact_of call to prove the skip path doesn't
-    // depend on impact_of being present.
-    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-impact-call");
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.skipped).toBe(true);
     expect(r.pass).toBe(true);
     expect(r.detail).toMatch(/vacuous/);
   });
 
-  it("evaluateAll surfaces the skip in `skipped`, not `failed`", () => {
-    const t = impactPositiveTrace();
+  it("SKIP pre-n6d: code-graph present + fileWrites>0 but no artifact footprint and no bypass (mechanic did not exist when recorded)", () => {
+    const t = impactN6dPositiveTrace();
+    // Strip the artifact footprint but KEEP the QA-attributable enter +
+    // unbypassed approve — exactly the shape of the existing pre-n6d seed
+    // traces. With no impact-report footprint and no bypass flag, the
+    // invariant cannot tell the mechanic was exercised, so it SKIPS as a
+    // pre-n6d recording rather than retro-failing (llh.4 precedent).
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    const r = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(r.skipped).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/pre-n6d recording/);
+  });
+
+  it("evaluateAll surfaces the code-graph-absent skip in `skipped`, not `failed`", () => {
+    const t = impactN6dPositiveTrace();
     t.toolsAvailable = []; // code-graph absent
     const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
     expect(agg.allPassed).toBe(true);
@@ -683,52 +803,53 @@ describe("invariant: qa-queried-impact-of", () => {
     expect(agg.failed).toEqual([]);
   });
 
-  it("META-TEST: fails when the QA-attributable impact_of call is stripped from a passing trace", () => {
-    const t = impactPositiveTrace();
-    // Remove only the impact_of call — keep code-graph in toolsAvailable
-    // and fileWrites populated so the invariant cannot fall back to
-    // either skip branch. This is the headline failure mode: QA
-    // approved a diff without consulting the impact graph.
-    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-impact-call");
-    const agg = evaluateAll(t, [{ name: "qa-queried-impact-of" }]);
-    expect(agg.allPassed).toBe(false);
-    expect(agg.failed).toEqual(["qa-queried-impact-of"]);
-    expect(agg.results[0]?.result.detail).toMatch(/0 impact_of call/);
-    expect(agg.results[0]?.result.detail).toMatch(/expected at least 1/);
+  it("META-TEST: the footprint signal is load-bearing — removing it from a passing trace flips it off PASS (to SKIP pre-n6d)", () => {
+    const t = impactN6dPositiveTrace();
+    const pass = INVARIANTS["qa-queried-impact-of"]!(t);
+    expect(pass.pass).toBe(true);
+    expect(pass.skipped).toBeFalsy();
+    // Remove the artifact footprint (the cat of impact-report-*.json).
+    t.toolCalls = t.toolCalls.filter((c) => c.id !== "qa-cat-report");
+    const mutated = INVARIANTS["qa-queried-impact-of"]!(t);
+    // The engine must NOT still report a clean PASS — the n6d signature is
+    // gone. (It degrades to an honest pre-n6d SKIP, not a false green.)
+    expect(mutated.pass && !mutated.skipped).toBe(false);
+    expect(mutated.skipped).toBe(true);
+    expect(mutated.detail).toMatch(/pre-n6d recording/);
   });
 
-  it("META-TEST: fails when impact_of is called by a non-QA subagent (e.g. orchestrator at root)", () => {
-    const t = impactPositiveTrace();
-    // Reattribute the impact_of call to the orchestrator (parent=null).
+  it("FAIL: footprint present (post-n6d run) but the QA-attributable approve is bypassed without a valid reason", () => {
+    const t = impactN6dPositiveTrace();
+    // Keep the cat footprint (so it is unambiguously a post-n6d run) yet
+    // bypass the gate without a degradation reason → genuine skip → FAIL.
     t.toolCalls = t.toolCalls.map((c) =>
-      c.id === "qa-impact-call" ? { ...c, parentToolUseId: null } : c,
-    );
-    const r = INVARIANTS["qa-queried-impact-of"]!(t);
-    expect(r.pass).toBe(false);
-    expect(r.detail).toMatch(/0 impact_of call/);
-  });
-
-  it("META-TEST: fails when impact_of is called by a backend subagent rather than QA", () => {
-    const t = impactPositiveTrace();
-    // Move the impact_of call under the backend Task instead of QA.
-    t.toolCalls = t.toolCalls.map((c) =>
-      c.id === "qa-impact-call"
-        ? { ...c, parentToolUseId: "task-backend" }
+      c.id === "qa-gate-approve"
+        ? {
+            ...c,
+            input: {
+              command: `bash .claude/scripts/qa-gate.sh approve ${N6D_TASK_ID} --no-impact-report 'skip it' 'done'`,
+            },
+          }
         : c,
     );
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(false);
-    expect(r.detail).toMatch(/0 impact_of call/);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/--no-impact-report|bypass/i);
   });
 
   it("fails loudly when no QA subagent appears in the trace at all (gate would have been bypassed)", () => {
-    const t = impactPositiveTrace();
+    const t = impactN6dPositiveTrace();
     t.subagentInvocations = t.subagentInvocations.filter(
       (s) => stripQualifier(s.type) !== "qa",
     );
-    // Also drop the QA Task call itself.
+    // Drop the QA Task + all QA-scoped calls.
     t.toolCalls = t.toolCalls.filter(
-      (c) => c.id !== "task-qa" && c.id !== "qa-impact-call",
+      (c) =>
+        c.id !== "task-qa" &&
+        c.id !== "qa-gate-enter" &&
+        c.id !== "qa-cat-report" &&
+        c.id !== "qa-gate-approve",
     );
     const r = INVARIANTS["qa-queried-impact-of"]!(t);
     expect(r.pass).toBe(false);
