@@ -110,6 +110,125 @@ log() {
 trap '' PIPE
 
 # ---------------------------------------------------------------------------
+# Path relativisation for impact_of.
+#
+# The code-graph index keys every file by its path RELATIVE TO THE PROJECT
+# ROOT (resolveProjectRoot = CLAUDE_PROJECT_DIR; see
+# .claude/mcp/code-graph-mcp/src/lib/resolve.js). validateScopePath
+# REJECTS absolute paths outright ("file must be a project-relative path,
+# not absolute"; src/lib/validate.js). So every path we hand to impact_of
+# MUST be project-relative or every call errors — which is exactly how the
+# artifact silently degraded (preql-backend-9n5: the c0l run errored on
+# 29/29 files identically, hash-valid but caller-data-empty).
+#
+# The changed-files list is NOT confined to the analyzed checkout. A live
+# run mixes paths from:
+#   - the analyzed project itself        -> $PROJECT_DIR/src/...
+#   - a SIBLING WORKTREE of the same repo -> $PROJECT_DIR-<feature>/src/...
+#   - genuinely foreign repos             -> .../genie-joindataset/...
+#   - non-git scratch                     -> /tmp/..., ~/.claude/...
+# A naive "strip $PROJECT_DIR/" prefix (the previous behaviour) only ever
+# matched the first bucket; everything else stayed absolute and errored.
+#
+# Correct relativisation: ask git itself for each file's repo-relative
+# path. Two worktrees of one repo share a git COMMON-DIR (the main .git),
+# and the same repo-relative path resolves to the same index key — so a
+# file under a sibling worktree relativises to a key that IS in this
+# project's index. A file in a DIFFERENT repo (or no repo at all) cannot
+# be in this index; we record it as an explicit per-file skip rather than
+# fire a guaranteed-to-error absolute-path call (which also wastes the
+# call budget and pollutes the report with the noisy validation message).
+#
+# Symlink hygiene: git's --show-toplevel / worktree gitdir pointers return
+# fully symlink-resolved paths (e.g. /private/var/... on macOS) while
+# CLAUDE_PROJECT_DIR and the changed-files entries may be the un-resolved
+# spelling (/var/...). We therefore (a) compare common-dirs only after
+# normalising BOTH through `pwd -P`, and (b) build the relative path from
+# git's `--show-prefix` + basename rather than string-stripping a prefix
+# off the raw path — so neither comparison nor relativisation depends on
+# how the path happened to be spelled.
+
+# canon_dir <path> -> absolute, symlink-resolved directory (empty on failure)
+canon_dir() { ( cd "$1" 2>/dev/null && pwd -P ); }
+
+# git common-dir of the analyzed project, normalised — the identity we
+# match sibling worktrees against. Empty when $PROJECT_DIR is not a git
+# checkout (then relativize_for_impact falls back to a literal prefix
+# strip so a non-git install still works for files under $PROJECT_DIR).
+PROJECT_COMMON_DIR=""
+if _pcd_raw=$(git -C "$PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null) && [ -n "$_pcd_raw" ]; then
+    # --git-common-dir may be relative to PROJECT_DIR; resolve from there.
+    PROJECT_COMMON_DIR=$(canon_dir "$PROJECT_DIR/$_pcd_raw")
+    [ -n "$PROJECT_COMMON_DIR" ] || PROJECT_COMMON_DIR=$(canon_dir "$_pcd_raw")
+fi
+unset _pcd_raw
+
+# Per-directory memo: the changed-files list is sort -u'd (see
+# canonical_changed_files), so files in the same directory are contiguous
+# and caching the previous directory's git lookup avoids re-forking git
+# per file on large change sets. bash-3.2 safe (no associative arrays).
+_GIT_MEMO_DIR=""
+_GIT_MEMO_COMMON=""   # normalised common-dir of the memoised directory ("" = not in a git repo)
+_GIT_MEMO_PREFIX=""   # `git rev-parse --show-prefix` for the memoised directory (dir relative to its toplevel)
+
+_git_lookup_dir() {
+    # _git_lookup_dir <dir> — populate _GIT_MEMO_COMMON / _GIT_MEMO_PREFIX.
+    # Memoised on the last directory queried.
+    local dir="$1"
+    if [ "$dir" = "$_GIT_MEMO_DIR" ]; then
+        return 0
+    fi
+    _GIT_MEMO_DIR="$dir"
+    _GIT_MEMO_COMMON=""
+    _GIT_MEMO_PREFIX=""
+    [ -d "$dir" ] || return 0
+    local common
+    common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 0
+    [ -n "$common" ] || return 0
+    # --git-common-dir is relative to the dir's gitdir resolution; resolve
+    # from <dir> (covers both the "../../.git" and absolute-pointer forms).
+    _GIT_MEMO_COMMON=$(canon_dir "$dir/$common")
+    [ -n "$_GIT_MEMO_COMMON" ] || _GIT_MEMO_COMMON=$(canon_dir "$common")
+    # --show-prefix: the dir's path relative to its own toplevel, e.g.
+    # "src/configs/". Empty at a repo root. git-supplied, so symlink-safe.
+    _GIT_MEMO_PREFIX=$(git -C "$dir" rev-parse --show-prefix 2>/dev/null) || _GIT_MEMO_PREFIX=""
+}
+
+relativize_for_impact() {
+    # relativize_for_impact <file> -> prints the project-relative path on
+    # stdout and returns 0 when <file> belongs to the analyzed project
+    # (directly OR via a sibling worktree of the same repo); returns 1
+    # (printing nothing) when <file> is outside the analyzed project and
+    # must NOT be sent to impact_of.
+    local f="$1"
+    local dir base
+    dir=$(dirname "$f")
+    base=$(basename "$f")
+    _git_lookup_dir "$dir"
+
+    # Same git repo as the analyzed project (covers $PROJECT_DIR itself and
+    # every sibling worktree): the repo-relative path = show-prefix + base.
+    if [ -n "$PROJECT_COMMON_DIR" ] && [ -n "$_GIT_MEMO_COMMON" ] && \
+       [ "$_GIT_MEMO_COMMON" = "$PROJECT_COMMON_DIR" ]; then
+        printf '%s%s\n' "$_GIT_MEMO_PREFIX" "$base"
+        return 0
+    fi
+
+    # Fallback when we cannot use git (PROJECT_DIR not a checkout): keep the
+    # original literal-prefix behaviour so a non-git install still works for
+    # files that genuinely sit under $PROJECT_DIR.
+    if [ -z "$PROJECT_COMMON_DIR" ]; then
+        case "$f" in
+            "$PROJECT_DIR"/*) printf '%s\n' "${f#"$PROJECT_DIR"/}"; return 0 ;;
+        esac
+    fi
+
+    # Different repo, non-git scratch (/tmp, ~/.claude), or otherwise not
+    # part of the analyzed project: not in this index, do not call.
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Canonical change set + hash. ONE implementation, used by both the
 # generator below and `qa-gate.sh approve` (via --hash-only).
 
@@ -350,13 +469,18 @@ for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
     IDX=$((IDX + 1))
     REQ_ID=$((99 + IDX))
 
-    # Project-relative path for the tool (the index keys files relative
-    # to the project root; absolute paths are rejected by validation —
-    # a rejection we record per-file rather than fail on).
-    REL="$f"
-    case "$f" in
-        "$PROJECT_DIR"/*) REL="${f#"$PROJECT_DIR"/}" ;;
-    esac
+    # Project-relative path for the tool (the index keys files relative to
+    # the project root; absolute paths are rejected by validation). A file
+    # that belongs to the analyzed project — directly or via a sibling
+    # worktree of the same repo — relativises to a real index key; a file
+    # in a different repo or in non-git scratch (/tmp, ~/.claude) can never
+    # be in this index, so we record an explicit skip instead of firing a
+    # guaranteed-to-error absolute-path call.
+    if ! REL=$(relativize_for_impact "$f"); then
+        log "($IDX/$TOTAL) SKIP $f — outside the analyzed project (different repo or non-git path); not in this index"
+        append_entry "$f" "$(jq -nc --arg m "skipped: path is outside the analyzed project (different repo or non-git scratch path) and cannot be in this project code-graph index" '{ok:false, error:{message:$m}}')"
+        continue
+    fi
 
     ELAPSED=$(( $(NOW_EPOCH) - START_EPOCH ))
     REMAINING=$(( OVERALL_TIMEOUT_S - ELAPSED ))

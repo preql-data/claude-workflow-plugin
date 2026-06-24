@@ -2,7 +2,7 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff lint shellcheck check install-test clean
+.PHONY: help test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check install-test clean
 
 help:
 	@echo "Targets:"
@@ -18,6 +18,7 @@ help:
 	@echo "  manifest-validate — validate .claude-plugin/plugin.json (offline)"
 	@echo "  test-ci           — run every offline tier (L1 + L2 + L3-unit + manifest); 'what CI runs without API key'"
 	@echo "  cassette-diff     — diff the most recent replay vs its committed golden (set FIXTURE=name to scope)"
+	@echo "  sync-fixtures     — re-sync every e2e fixture's committed .claude/scripts/ copies to the canonical scripts (heals the drift guard)"
 	@echo "  lint              — alias for shellcheck"
 	@echo "  shellcheck        — run shellcheck on every hook script"
 	@echo "  check             — run AgentLint against this repo"
@@ -220,3 +221,37 @@ install-test:
 
 clean:
 	rm -rf .claude/.qa-tracking
+
+# Re-sync the COMMITTED fixture hook-script copies to the canonical
+# .claude/scripts/ set. This is the durable "sync step 4" bulk copy that
+# heals the offline drift guard in
+# .claude/tests/e2e/specs/_fixture-script-sync.unit.spec.ts (the
+# "committed fixture scripts match canonical" describe) — distinct from
+# runFixture's run-start syncFixtureScripts, which writes the same bytes
+# but inside a git stash/restore lifecycle that rolls them back at end of
+# run (so it never mutates the committed copies).
+#
+# The synced set MUST equal listCanonicalHookScripts(): every
+# `.claude/scripts/*.sh` EXCEPT the harness-only resolve-fixture-spec.sh
+# (the Makefile fixture->spec resolver, never invoked by a fixture hook).
+# Copying it in would trip the guard's "no EXTRA .sh script" assertion, so
+# the exclusion below is load-bearing and mirrors FIXTURE_SYNC_EXCLUDES in
+# lib/runFixture.ts. Idempotent: re-running after a clean sync is a no-op.
+sync-fixtures:
+	@canon=".claude/scripts" ; \
+	fixroot=".claude/tests/e2e/fixtures" ; \
+	if [ ! -d "$$canon" ]; then echo "sync-fixtures: canonical $$canon not found" ; exit 2 ; fi ; \
+	if [ ! -d "$$fixroot" ]; then echo "sync-fixtures: $$fixroot not found" ; exit 2 ; fi ; \
+	count=0 ; \
+	for dir in "$$fixroot"/*/.claude/scripts; do \
+		[ -d "$$dir" ] || continue ; \
+		for src in "$$canon"/*.sh; do \
+			base=$$(basename "$$src") ; \
+			if [ "$$base" = "resolve-fixture-spec.sh" ]; then continue ; fi ; \
+			cp "$$src" "$$dir/$$base" ; \
+			chmod 0755 "$$dir/$$base" ; \
+		done ; \
+		count=$$((count + 1)) ; \
+		echo "sync-fixtures: synced $$dir" ; \
+	done ; \
+	echo "sync-fixtures: re-synced $$count fixture script dir(s) to canonical $$canon"
