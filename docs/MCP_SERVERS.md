@@ -63,6 +63,19 @@ Plugin-scope manifests substitute `${CLAUDE_PLUGIN_ROOT}` (and `${CLAUDE_PROJECT
 
 The two manifests should always agree on server set and tool surface; if you change one, change the other in the same commit. The L2 spec `.claude/tests/component/specs/installer-mcp-config.sh` enforces this for the rendered install (no bare `${VAR}` references, both servers wired, the retired `code-context` entry absent).
 
+## Troubleshooting: bd (or code-graph) shows failed / not spawned
+
+If `/mcp` lists a server as failed, or the `bd_*` / `code_*` tools are missing in an installed project, check these two things first — in this order.
+
+1. **Untrusted workspace (v2.1.196+).** Since v2.1.196, Claude Code does not spawn self-approved project `.mcp.json` servers in an untrusted workspace; `/mcp` shows the server as **"⏸ Pending approval"**. Fix: re-accept the workspace trust (reopen the folder and confirm the trust prompt, or approve the server from `/mcp`). This is a trust-state issue, not a config error — the manifest is fine and needs no edit.
+
+2. **Hand-written config drift.** A config you edited by hand (rather than one the installer rendered) must match the plugin's form exactly:
+   - Use the literal `${CLAUDE_PROJECT_DIR:-.}` in `.mcp.json` args. A bare `${CLAUDE_PROJECT_DIR}` does **not** expand at substitution time (the variable lives in the *spawned server's* environment, not Claude Code's own) and produces a "Missing environment variables: CLAUDE_PROJECT_DIR" diagnostic. See the Wiring summary above.
+   - Set `"type": "stdio"` on every entry. A missing or mistyped transport type leaves the server unspawned.
+   - No hidden whitespace in values — a trailing space or stray tab inside the `command`/`args` strings breaks the spawn silently. Re-render from the installer if unsure.
+
+See also the Caveats section of [`README.md`](../README.md).
+
 ## Migration from code-context-mcp (3.3.0)
 
 Phase B of the verification-suite plan (v3.3.0) retired `code-context-mcp` and replaced it with `code-graph-mcp`. Concretely, what changed:

@@ -103,6 +103,17 @@ if [ -z "$AGENT_TYPE" ]; then
     emit_empty
 fi
 
+# V0 (cnz.1): fail-open spawn-evidence log. Append one TSV line
+# "<utc-ts>\t<agent_type>" for EVERY spawn (specialists AND built-ins like
+# general-purpose/Explore/Plan/grader/judge) — the effort A/B interference
+# test (cnz.2) reads this to prove which agent types the runtime spawned and
+# to catch ultracode's dynamic workflow layer spawning generic agents. This
+# runs BEFORE the is_specialist filter on purpose. It never blocks the spawn:
+# any failure is swallowed and the existing JSON output below is unchanged.
+mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
+printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" "$AGENT_TYPE" \
+    >> "$QA_TRACKING_DIR/subagent-spawns.log" 2>/dev/null || true
+
 CANON=$(normalize_agent_type "$AGENT_TYPE")
 if ! is_specialist "$CANON"; then
     # Not a specialist. Nothing to inject.

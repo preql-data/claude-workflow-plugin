@@ -72,10 +72,11 @@ Conventions to keep:
    agent is the only one that flips `qa-pending` -> `qa-approved`.
 5. **Tone.** Plain prose. Emoji only at H1/H2 markers. No ALL CAPS WALLS OF
    TEXT. Phase 2 (C6) will tighten the existing prompts further.
-6. **Effort level.** Set `effort: max` in frontmatter. `max` is the highest
-   level subagent frontmatter accepts (per
-   [docs/en/sub-agents](https://code.claude.com/docs/en/sub-agents)); the
-   session-wide knobs go above it but can't be persisted in frontmatter.
+6. **Effort level.** Set `effort: max` in frontmatter — the highest level
+   subagent frontmatter accepts (per
+   [docs/en/sub-agents](https://code.claude.com/docs/en/sub-agents)) and the
+   durable per-agent ceiling. The session-wide level is chosen at launch, not
+   in frontmatter — see "Why ultracode cannot be the durable default" below.
 
 ### Why ultracode cannot be the durable default
 
@@ -91,22 +92,31 @@ effort level):
 > the `effortLevel` setting, the `--effort` flag, or
 > `CLAUDE_CODE_EFFORT_LEVEL`.**
 
-So the highest persistable configuration is what the plugin ships:
+So the effort recipe the plugin ships is three layers — a persistable floor,
+a per-session launch level, and a durable per-agent ceiling:
 
-- `.claude/settings.json` `effortLevel`: `"xhigh"` (the cap that
-  `effortLevel` accepts; `max` is invalid in this field and is silently
-  ignored by some runtimes).
-- `.claude/settings.json` `env.CLAUDE_CODE_EFFORT_LEVEL`: `"max"` (the
-  env var accepts `max` and persists across sessions, unlike the
-  `--effort` flag).
-- `.claude/agents/*.md` frontmatter `effort`: `max` (subagent
-  frontmatter caps at `max`).
+- **Floor — `.claude/settings.json` `effortLevel`: `"xhigh"`.** The highest
+  value the `effortLevel` field accepts (`max` is invalid here and is
+  silently ignored by some runtimes). v4.0.0 removed the old
+  `env.CLAUDE_CODE_EFFORT_LEVEL` pin: the docs are explicit that any
+  non-xhigh value there deactivates ultracode's workflow orchestration, so
+  the env var is no longer part of the recipe.
+- **Session level — `.claude/effort-verdict` + `make session`.** The recorded
+  A/B verdict (`max` or `ultracode`; see
+  [`docs/EFFORT-AB-TEST.md`](docs/EFFORT-AB-TEST.md)) is the level a real
+  session launches at — `make session` reads the verdict and runs
+  `claude --effort <verdict>`. SessionStart Warning 4 reconciles the live
+  session effort against the verdict and the floor.
+- **Ceiling — `.claude/agents/*.md` frontmatter `effort`: `max`.** The durable
+  per-agent cap (subagent frontmatter tops out at `max`). Correct under either
+  verdict, since ultracode is session-level and cannot be expressed in
+  frontmatter at all.
 
-To opt into ultracode for a session, the operator runs `/effort
-ultracode` interactively, or passes `--settings '{"ultracode":true}'`
-to a one-shot run, or adds `ultracode: true` to a control request when
-embedding via the Agent SDK. The SessionStart hook surfaces a one-liner
-naming what was applied so the operator sees the active level on every
+To opt into ultracode for a session, launch it deliberately — `make session`
+when the verdict is `ultracode`, `/effort ultracode` interactively,
+`--settings '{"ultracode":true}'` for a one-shot run, or `ultracode: true` in
+an Agent SDK control request. The SessionStart hook surfaces a one-liner
+naming the applied level (and flagging any live-vs-verdict mismatch) on every
 load.
 
 Then register the agent in `.claude-plugin/plugin.json`:

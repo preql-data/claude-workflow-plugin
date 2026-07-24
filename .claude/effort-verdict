@@ -1,0 +1,19 @@
+# .claude/effort-verdict — recorded output of the effort A/B interference test.
+#
+# WHAT: the single effort level a real working session should launch at.
+# WHO CONSUMES IT:
+#   - `make session`  -> exec claude --effort <first-non-comment-line>
+#   - .claude/scripts/session-start.sh Warning 4, which reconciles this
+#     verdict against the live session effort and the effortLevel floor.
+# HOW IT IS PRODUCED: docs/EFFORT-AB-TEST.md, executed under the paid,
+#   cost-gated task claude-workflow-plugin-cnz.2 (NOT cnz.1).
+#
+# FORMAT: the first non-comment, non-blank line is the verdict. Valid values:
+#   max        — persistable everywhere; the safe default.
+#   ultracode  — session-only (claude --effort ultracode); adds dynamic
+#                workflow orchestration but cannot be pinned in settings.
+# ultracode's hook-env proxy is xhigh, so a session launched at ultracode is
+# indistinguishable from a plain xhigh session inside the hooks — session-start
+# is honest about that.
+max
+# PROVISIONAL until docs/EFFORT-AB-TEST.md is executed (cnz.2)

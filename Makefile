@@ -2,10 +2,11 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff lint shellcheck check install-test clean
+.PHONY: help session test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff lint shellcheck check install-test clean
 
 help:
 	@echo "Targets:"
+	@echo "  session           — launch Claude at the recorded effort verdict (.claude/effort-verdict; see docs/EFFORT-AB-TEST.md)"
 	@echo "  test              — run the plugin's bash test suite (L1 unit)"
 	@echo "  test-component    — run hook-pipeline component tests (L2; Phase B)"
 	@echo "  test-all          — run L1 unit + L2 component tiers (offline; CI-friendly)"
@@ -23,6 +24,16 @@ help:
 	@echo "  check             — run AgentLint against this repo"
 	@echo "  install-test      — install into a tempdir and verify"
 	@echo "  clean             — remove transient .qa-tracking state"
+
+# Launch a working session at the effort level the A/B interference test
+# (docs/EFFORT-AB-TEST.md) recorded in .claude/effort-verdict. The verdict is
+# the first non-comment, non-blank line; defaults to `max` when the file is
+# missing or empty. `exec` replaces make so Claude owns the tty directly.
+session:
+	@v=$$(grep -v '^[[:space:]]*#' .claude/effort-verdict 2>/dev/null | grep -v '^[[:space:]]*$$' | head -1 | tr -d '[:space:]'); \
+	[ -n "$$v" ] || v=max; \
+	echo "session: launching 'claude --effort $$v' (from .claude/effort-verdict; see docs/EFFORT-AB-TEST.md)"; \
+	exec claude --effort "$$v"
 
 test:
 	bash .claude/scripts/tests/run-tests.sh

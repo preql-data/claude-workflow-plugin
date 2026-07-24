@@ -585,6 +585,14 @@ if [ -f "$SOURCE_DIR/.claude/model-ranking" ]; then
     copy_file "$SOURCE_DIR/.claude/model-ranking" "$TARGET/.claude/model-ranking"
 fi
 
+# Effort verdict (v4.0.0 V0 / cnz.1) -------------------------------------------
+# The effort A/B interference-test output consumed by `make session` and the
+# session-start Warning 4 reconciliation. Single file, plain text. Deliberately
+# NOT in the required-source check — a source tree without it still installs.
+if [ -f "$SOURCE_DIR/.claude/effort-verdict" ]; then
+    copy_file "$SOURCE_DIR/.claude/effort-verdict" "$TARGET/.claude/effort-verdict"
+fi
+
 # Mutation tier (Phase C / v3.4.0) ---------------------------------------------
 # The /mutation-sweep command and the @judge subagent both expect this
 # tier on disk. We ship the catalog, config, harness, judge-gate, and the
@@ -634,19 +642,30 @@ if [ -f "$SETTINGS_FILE" ]; then
     if [ "$UPDATE_MODE" = true ]; then
         echo -e "${YELLOW}Merging settings.json (preserving non-workflow keys)...${NC}"
         cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
+        # v4.0.0 (cnz.1): detect a legacy env.CLAUDE_CODE_EFFORT_LEVEL pin in
+        # the EXISTING settings before the merge. The env union below can only
+        # ADD keys, so without the explicit del the legacy pin survives an
+        # Update — and any non-xhigh value there deactivates ultracode
+        # orchestration. We print a one-line notice when we actually remove it.
+        HAD_EFFORT_ENV=$(jq -r 'if (.env // {} | has("CLAUDE_CODE_EFFORT_LEVEL")) then "yes" else "no" end' "$SETTINGS_FILE" 2>/dev/null || echo "no")
         # Replace workflow-owned keys (hooks, env, additionalDirectories) but keep others.
+        # The env union merges existing + new, then deletes the retired
+        # CLAUDE_CODE_EFFORT_LEVEL key (idempotent — a no-op when absent).
         MERGED=$(jq -s '
             .[0] as $existing |
             .[1] as $new |
             $existing
             | .hooks = $new.hooks
-            | .env = (($existing.env // {}) + ($new.env // {}))
+            | .env = ((($existing.env // {}) + ($new.env // {})) | del(.CLAUDE_CODE_EFFORT_LEVEL))
             | .additionalDirectories = ($new.additionalDirectories // $existing.additionalDirectories)
             | (if $existing.permissions then . else .permissions = $new.permissions end)
         ' "$SETTINGS_FILE" "$SOURCE_SETTINGS" 2>/dev/null) || MERGED=""
         if [ -n "$MERGED" ]; then
             echo "$MERGED" > "$SETTINGS_FILE"
             echo -e "${GREEN}OK${NC}   settings.json merged"
+            if [ "$HAD_EFFORT_ENV" = "yes" ]; then
+                echo -e "${CYAN}note${NC} removed legacy env.CLAUDE_CODE_EFFORT_LEVEL (v4: a non-xhigh value deactivates ultracode orchestration; effortLevel is now the floor)"
+            fi
         else
             echo -e "${RED}Could not merge settings.json - manual review needed${NC}"
         fi

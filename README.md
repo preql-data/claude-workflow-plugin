@@ -231,6 +231,11 @@ tier) read [`CHANGELOG.md`](CHANGELOG.md).
 - AgentLint flags a few intentional design choices (Bash auto-approve,
   tag-pinned actions); rationale is in [`CONTRIBUTING.md`](CONTRIBUTING.md)
   under "Design overrides vs. AgentLint".
+- If `bd` or `code-graph` show as failed or not spawned after install (e.g.
+  `/mcp` lists them as "⏸ Pending approval"), see the **Troubleshooting**
+  subsection in [`docs/MCP_SERVERS.md`](docs/MCP_SERVERS.md) — usually a
+  workspace-trust re-accept (v2.1.196+) or a hand-edited `.mcp.json` missing
+  the `${CLAUDE_PROJECT_DIR:-.}` form or `"type":"stdio"`.
 
 ---
 

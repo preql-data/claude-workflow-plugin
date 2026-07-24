@@ -5,6 +5,23 @@ work on this repository.
 
 ## Current state
 
+- **v4.0.0 (Phase V0 — platform restore, in progress)** — parent epic
+  `claude-workflow-plugin-cnz`; offline wiring `claude-workflow-plugin-cnz.1`.
+  Removed the `env.CLAUDE_CODE_EFFORT_LEVEL` pin: the live docs are explicit
+  that any non-xhigh value there deactivates ultracode's workflow
+  orchestration, so the durable effort FLOOR is now `effortLevel: xhigh`
+  alone. The per-session effort is chosen at launch via
+  `.claude/effort-verdict` + `make session` (verdict PROVISIONALLY `max`
+  until the paid A/B interference test `claude-workflow-plugin-cnz.2` runs —
+  runbook `docs/EFFORT-AB-TEST.md`). Pinned
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (v2.1.219 defaulted nested subagent
+  spawning to depth 3). Wired `SubagentStart` in `settings.json` to match
+  `hooks.json`; `subagent-start.sh` now appends every spawn to
+  `.claude/.qa-tracking/subagent-spawns.log`. `session-start.sh` Warning 4
+  reconciles effort floor/live/verdict and Warning 5 guards
+  `CLAUDE_CODE_SUBAGENT_MODEL` / the spawn-depth pin. New L1
+  `platform-audit.test.sh`; `effort-fail-open.test.sh` inverted for the
+  removed pin. **Plugin version NOT bumped** — a later phase owns the bump.
 - **v3.5.0** — the Release Acceptance Gauntlet — closeout complete
   2026-06-14; awaiting the orchestrator commit + first git tag. Parent
   epic `claude-workflow-plugin-llh`. The gauntlet put every shipped

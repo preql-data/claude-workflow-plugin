@@ -439,6 +439,7 @@ build/
     foreach ($asset in @(
         @{ Src = ".claude/rubric-config"; Dst = "$ClaudeDir\rubric-config" },
         @{ Src = ".claude/model-ranking"; Dst = "$ClaudeDir\model-ranking" },
+        @{ Src = ".claude/effort-verdict"; Dst = "$ClaudeDir\effort-verdict" },
         @{ Src = "LESSONS.md";            Dst = (Join-Path $Target "LESSONS.md") },
         @{ Src = ".worktreeinclude";       Dst = (Join-Path $Target ".worktreeinclude") }
     )) {
@@ -473,12 +474,18 @@ build/
         if ($UpdateMode) {
             Write-Color "Merging settings.json (preserving non-workflow keys)..." Yellow
             Copy-Item -Path $SettingsFile -Destination "$SettingsFile.bak" -Force
+            # v4.0.0 (cnz.1): detect a legacy env.CLAUDE_CODE_EFFORT_LEVEL pin
+            # in the existing settings before the merge. The env union can only
+            # ADD keys, so the explicit del below is what removes it; we print a
+            # one-line notice when it was present. Keep this jq expression
+            # equivalent to install.sh's.
+            $hadEffortEnv = (& jq -r 'if (.env // {} | has("CLAUDE_CODE_EFFORT_LEVEL")) then "yes" else "no" end' $SettingsFile 2>$null)
             $jqExpr = '
                 .[0] as $existing |
                 .[1] as $new |
                 $existing
                 | .hooks = $new.hooks
-                | .env = (($existing.env // {}) + ($new.env // {}))
+                | .env = ((($existing.env // {}) + ($new.env // {})) | del(.CLAUDE_CODE_EFFORT_LEVEL))
                 | .additionalDirectories = ($new.additionalDirectories // $existing.additionalDirectories)
                 | (if $existing.permissions then . else .permissions = $new.permissions end)
             '
@@ -486,6 +493,9 @@ build/
             if ($LASTEXITCODE -eq 0 -and $merged) {
                 $merged | Out-File -FilePath $SettingsFile -Encoding UTF8 -NoNewline
                 Write-Color "OK   settings.json merged" Green
+                if ($hadEffortEnv -eq "yes") {
+                    Write-Color "note removed legacy env.CLAUDE_CODE_EFFORT_LEVEL (v4: a non-xhigh value deactivates ultracode orchestration; effortLevel is now the floor)" Cyan
+                }
             } else {
                 Write-Color "Could not merge settings.json - manual review needed" Red
             }
