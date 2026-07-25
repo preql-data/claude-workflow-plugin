@@ -5,7 +5,7 @@ tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSe
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.
-model: claude-opus-4-8
+model: claude-fable-5
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. The session-level effort (launch wiring — `make session` /
 # `claude --effort` — or /effort) takes precedence per session; this

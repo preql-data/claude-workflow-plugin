@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, LS
 # /workflow-model remains the manual override path. workflow-model-apply.sh
 # includes `judge` in its agent list so this pin tracks the others
 # automatically.
-model: claude-opus-4-8
+model: claude-fable-5
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. The session-level effort (launch wiring — `make session` /
 # `claude --effort` — or /effort) takes precedence per session; this

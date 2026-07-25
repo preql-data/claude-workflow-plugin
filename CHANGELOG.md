@@ -36,6 +36,22 @@ v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`)
   `max` remains the verdict per the runbook's conjunctive rule (details on
   meta-task `claude-workflow-plugin-4o2`).
 
+### Added (Phase V1 — role-aware model selection, epic bi3, 2026-07-25)
+- `.claude/model-roles` config (orchestrator=top, implementer=opus-class,
+  reviewer=top; all-top reproduces v3.5). `model-select.sh` resolves per role
+  with an all-or-nothing MANUAL gate, writes
+  `.claude/.qa-tracking/model-roles-resolved.json` (atomic, stale-beats-none),
+  gains `roles` subcommand and per-role `status`; `workflow-model-apply.sh`
+  gains `--role <role> <id>` and `--print-role-map` (bare `<id>` remains the
+  pin-everything rollback); statusline renders `orch:/impl:/rev:` when roles
+  diverge (v3.5 collapse when they don't); reviewer-lane seam for Phase V2.
+- Tests: L1 `model-roles.test.sh` (40), L2 model-select `ms-R1..R6` (+23),
+  L2 `model-roles-parity.sh` (10, incl. the liar-misroute META).
+- `!claude-fable` regional exclusion lifted from `.claude/model-ranking`
+  (evidence-gated, dated, with rollback line; `!claude-mythos` kept). The
+  live role split: orchestrator/qa/grader/judge -> `claude-fable-5`,
+  backend/frontend/devops -> newest opus-class in the account listing.
+
 ### Changed (Phase V0)
 - `settings.json`: removed `env.CLAUDE_CODE_EFFORT_LEVEL` (a non-xhigh value
   deactivates ultracode's orchestration layer per live docs); pinned

@@ -11,10 +11,16 @@ work on this repository.
   (recorded in `.claude/effort-verdict`; per-criterion table on meta-task
   `claude-workflow-plugin-4o2` — the pre-registered ultracode-interference
   expectation was NOT confirmed, but max wins on the conjunctive rule).
-  Launch a working session via `make session`. Next: Phase V1 (role-aware
-  model selection, epic `claude-workflow-plugin-bi3`) — implementers move to
-  the newest Opus-class (Opus 5 per operator note of 2026-07-25), orchestrator
-  to the resolver top pick.
+  Launch a working session via `make session`.
+- **v4.0.0 (Phase V1 — role-aware model selection, COMPLETE 2026-07-25)** —
+  epic `claude-workflow-plugin-bi3` closed (bi3.1 machinery, bi3.2 fable
+  un-exclusion), both qa-approved. Live split: orchestrator/qa/grader/judge on
+  `claude-fable-5`, implementers on the newest opus-class the resolver can see
+  (opus-4-8 from the June cache; PENDING OPERATOR STEP for Opus 5: run
+  `ANTHROPIC_API_KEY=<key> bash .claude/scripts/model-select.sh resolve --refresh`
+  once — the next apply then lands implementers on `claude-opus-5-*`
+  automatically). Next: Phase V2 (Sol reviewer lane, epic
+  `claude-workflow-plugin-1vq`).
 - **v4.0.0 (Phase V0 — original in-progress note)** — parent epic
   `claude-workflow-plugin-cnz`; offline wiring `claude-workflow-plugin-cnz.1`.
   Removed the `env.CLAUDE_CODE_EFFORT_LEVEL` pin: the live docs are explicit

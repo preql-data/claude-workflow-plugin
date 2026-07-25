@@ -43,15 +43,41 @@
 # Tier list (tertiary tie-break order; from best to worst when dates
 # are identical):
 
-# --- Regional exclusions (added 2026-06-13) ---
-# Fable and Mythos are unreachable in this account's region — subagent
-# spawns against claude-fable-5 fail ("may not exist or you may not have
-# access to it"). Excluded so the resolver auto-selects the best
-# REACHABLE model (Opus) instead of re-adopting an unspawnable pin and
-# bricking the workflow. This is a SOFT pin: the resolver still
-# auto-upgrades among reachable families and to any future Opus by
-# recency. Delete a line if/when that family becomes reachable for you.
-!claude-fable
+# --- Regional exclusions ---
+#
+# 2026-06-13: `!claude-fable` AND `!claude-mythos` were both added here —
+# subagent spawns against claude-fable-5 were failing in this account's
+# region ("may not exist or you may not have access to it"), so the
+# resolver was pinned to the best REACHABLE model (Opus) to avoid
+# re-adopting an unspawnable pin and bricking the workflow.
+#
+# 2026-07-25 (bi3.2): `!claude-fable` LIFTED. The regional outage has
+# cleared and the exclusion had gone STALE — it was masking the v4 role
+# split by collapsing top == opus-class onto Opus. Evidence for lifting:
+#   (a) The operator has run claude-fable-5 as the MAIN session model
+#       throughout 2026-07-24 and 2026-07-25 with dozens of HEALTHY
+#       subagent spawns across the Explore / Plan / devops / qa / grader
+#       agents in this workspace (.claude/.qa-tracking/subagent-spawns.log),
+#       plus two headless fable-5 sessions in the V0 effort A/B — with
+#       zero "may not exist / no access" failures.
+#   (b) claude-fable-5 is present in the account's model listing: it
+#       appears in .claude/.qa-tracking/model-select-cache.json
+#       (created_at 2026-06-07), so the resolver can adopt it.
+# With the exclusion gone, the `top` strategy (orchestrator + reviewer
+# lanes) resolves to claude-fable-5 while the implementer lane stays on
+# the newest claude-opus-* — the intended v4 role split.
+#
+# Rollback (if claude-fable subagent spawns regress): re-add the
+# `!claude-fable` line here and re-run `.claude/scripts/model-select.sh
+# apply`, which auto-reverts the orchestrator + reviewer lanes to the
+# newest reachable Opus. To revert one lane by hand instead (the pre-lift
+# pin was claude-opus-4-8):
+#   /workflow-model --role orchestrator claude-opus-4-8
+#   /workflow-model --role reviewer     claude-opus-4-8
+#
+# Mythos stays excluded: it has NOT been spawn-verified on this account.
+# Lift `!claude-mythos` the same way (evidence of healthy spawns) if it
+# becomes reachable for you.
 !claude-mythos
 
 # Tier 1: Fable family — Claude's most capable in-cycle model (per
