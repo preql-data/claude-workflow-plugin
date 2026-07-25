@@ -1,30 +1,47 @@
 #!/bin/bash
-# model-select.sh — automatic best-model selection (spec 0.3 + hotfix vlp.1).
+# model-select.sh — automatic best-model selection (spec 0.3 + hotfix vlp.1
+# + v4.0.0 Phase V1 role-aware resolution / bi3.1).
 #
 # Resolves the best model available to this account, ranks it against
-# .claude/model-ranking, and (in the `apply` path) rewrites every agent's
-# model: pin via the shared workflow-model-apply.sh helper.
+# .claude/model-ranking, and (in the `apply` path) rewrites each agent's
+# model: pin PER ROLE via the shared workflow-model-apply.sh helper.
+#
+# Role-aware resolution (V1):
+#   .claude/model-roles maps each role to a strategy — orchestrator/reviewer
+#   default to `top` (the single best pick, exactly v3.5), implementer to
+#   `opus-class` (the newest claude-opus-* in the listing, auto-adopting the
+#   next Opus generation the moment the account lists it). `resolve` still
+#   prints the account-wide top pick; `apply` resolves all three roles and
+#   rewrites each lane independently; the resolved mapping is written to
+#   .claude/.qa-tracking/model-roles-resolved.json for the statusline.
 #
 # Subcommands:
 #   resolve [--quiet] [--refresh]
 #       Print "<model-id>\t<source>" on stdout (source is one of
-#       "cache","api"). Returns 0 if a model was resolved or the operator
-#       wanted a fail-open warning; exits 0 either way so SessionStart
-#       never blocks on an enumeration failure (spec principle: "never
-#       block the session"). On fail-open, the message goes to stderr and
-#       stdout is empty. --refresh bypasses the cache and forces an API
-#       round-trip (no-op without an API key).
+#       "cache","api"). This is the account-wide TOP pick (role-agnostic),
+#       preserved for the smoke path and backward-compat. Returns 0 if a
+#       model was resolved or the operator wanted a fail-open warning; exits
+#       0 either way so SessionStart never blocks on an enumeration failure
+#       (spec principle: "never block the session"). On fail-open, the
+#       message goes to stderr and stdout is empty. --refresh bypasses the
+#       cache and forces an API round-trip (no-op without an API key).
 #
 #   apply [--quiet] [--refresh]
-#       Resolve as above; if the resolved id differs from the current
-#       pin, invoke workflow-model-apply.sh and record the switch on the
-#       standing "Model selection log" Beads meta-task. Quiet suppresses
-#       per-file rewrite chatter; the one-line summary still prints.
-#       --refresh bypasses the cache (same semantics as resolve).
+#       Resolve ALL THREE roles first; if a role's resolved id differs from
+#       that lane's current pin, invoke workflow-model-apply.sh --role and
+#       record a role-tagged switch on the standing "Model selection log"
+#       Beads meta-task. All-or-nothing on a manual-adopt/no-candidate
+#       listing (keep every pin, no artifact). Quiet suppresses per-file
+#       rewrite chatter; the one-line summary still prints. --refresh
+#       bypasses the cache (same semantics as resolve).
 #
 #   status
-#       Print current pin (from orchestrator.md), cached best (if cache
-#       is fresh), and cache age.
+#       Print the per-role table (role, strategy, pinned id, resolved id),
+#       cache state, reviewer lane, and any intra-role lockstep drift.
+#
+#   roles
+#       Print "role\tstrategy\tresolved-id" (strategy from model-roles,
+#       resolved id from the resolved-mapping artifact).
 #
 # Caching:
 #   .claude/.qa-tracking/model-select-cache.json
@@ -79,6 +96,20 @@ RANKING_FILE="$PROJECT_DIR/.claude/model-ranking"
 META_TASK_FILE="$PROJECT_DIR/.claude/.model-select-meta-task"
 APPLY_HELPER="$PROJECT_DIR/.claude/scripts/workflow-model-apply.sh"
 ORCH_AGENT="$PROJECT_DIR/.claude/agents/orchestrator.md"
+
+# v4.0.0 Phase V1 (bi3.1): role-aware resolution surfaces.
+IMPL_AGENT="$PROJECT_DIR/.claude/agents/backend.md"   # implementer lane representative
+REVIEWER_AGENT="$PROJECT_DIR/.claude/agents/qa.md"    # reviewer lane representative
+MODEL_ROLES_FILE="$PROJECT_DIR/.claude/model-roles"
+ROLES_ARTIFACT="$PROJECT_DIR/.claude/.qa-tracking/model-roles-resolved.json"
+CODEX_DETECT="$PROJECT_DIR/.claude/scripts/codex-detect.sh"
+# Filesystem side-channel: pick_for_role writes "true"/"false" here so
+# cmd_apply can read the implementer opus-class fallback flag across the
+# $(...) subshell boundary (a shell variable set inside command
+# substitution never propagates to the parent — the same subshell-loss
+# constraint that shaped pick_best's MANUAL stdout contract). Empty by
+# default so pick_for_role is a silent no-op writer outside apply.
+ROLE_FALLBACK_FILE=""
 
 QUIET=0
 REFRESH=0
@@ -402,15 +433,174 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Role-aware resolution (v4.0.0 Phase V1 / bi3.1).
+# ---------------------------------------------------------------------------
+
+# _model_roles_value <key> — print the raw value for a key= line in
+# .claude/model-roles, whitespace-tolerant around the `=`. Empty when the
+# file or key is absent. Mirrors the rubric-config parse discipline.
+_model_roles_value() {
+    local key="$1"
+    [ -f "$MODEL_ROLES_FILE" ] || return 0
+    # Strip comments, trim, match "key = value", print the value.
+    sed -E -e 's/#.*$//' "$MODEL_ROLES_FILE" 2>/dev/null \
+        | grep -E "^[[:space:]]*${key}[[:space:]]*=" \
+        | head -1 \
+        | sed -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//"
+}
+
+# role_strategy <role> — resolve a role to its selection strategy
+# (top|opus-class). Fail-open: a missing file or missing key is the quiet
+# v3.5-parity default of `top`; a PRESENT-but-unrecognised value is a
+# surprising misconfiguration, so that path warns loudly before falling
+# back to `top`.
+role_strategy() {
+    local role="$1" val
+    val=$(_model_roles_value "$role")
+    case "$val" in
+        top|opus-class) printf '%s' "$val" ;;
+        "")             printf 'top' ;;   # missing key/file: quiet v3.5 default
+        *)
+            _warn "unknown strategy '$val' for role '$role' in $MODEL_ROLES_FILE; falling back to top"
+            printf 'top'
+            ;;
+    esac
+}
+
+# reviewer_lane_config — read the reviewer_lane key (auto|claude), default
+# auto. An unrecognised value warns and falls back to auto.
+reviewer_lane_config() {
+    local val
+    val=$(_model_roles_value "reviewer_lane")
+    case "$val" in
+        auto|claude) printf '%s' "$val" ;;
+        "")          printf 'auto' ;;
+        *)
+            _warn "unknown reviewer_lane '$val' in $MODEL_ROLES_FILE; falling back to auto"
+            printf 'auto'
+            ;;
+    esac
+}
+
+# detect_reviewer_lane — resolve the effective reviewer lane. Never blocks;
+# never runs in the statusline. Precedence:
+#   (a) WORKFLOW_REVIEWER_LANE env non-empty -> use verbatim (test/operator seam).
+#   (b) model-roles reviewer_lane=claude     -> claude (force the Claude path).
+#   (c) executable .claude/scripts/codex-detect.sh (ships V2) -> defer to it.
+#   (d) otherwise                            -> claude (V1 default).
+# The reviewer agents always carry a Claude model: pin regardless of lane;
+# the lane only decides which reviewer is engaged and how the statusline
+# renders (claude vs the literal `sol`).
+detect_reviewer_lane() {
+    if [ -n "${WORKFLOW_REVIEWER_LANE:-}" ]; then
+        printf '%s' "$WORKFLOW_REVIEWER_LANE"
+        return
+    fi
+    if [ "$(reviewer_lane_config)" = "claude" ]; then
+        printf 'claude'
+        return
+    fi
+    if [ -x "$CODEX_DETECT" ]; then
+        local probed
+        probed=$(bash "$CODEX_DETECT" 2>/dev/null || true)
+        if [ -n "$probed" ]; then
+            printf '%s' "$probed"
+            return
+        fi
+    fi
+    printf 'claude'
+}
+
+# pick_for_role <models-json> <strategy> — resolve one role's best id,
+# preserving pick_best's stdout contract (`<id>` | `MANUAL\t<id>` | rc=1).
+#
+#   top         -> pick_best over the full listing (unchanged).
+#   opus-class  -> pick_best over the claude-opus-* subset. Ranking
+#                  exclusions still apply (pick_best applies them inside the
+#                  subset). An empty subset OR a fully-excluded subset warns
+#                  and falls back to pick_best over the full listing.
+#
+# When ROLE_FALLBACK_FILE is set, writes "true" on the opus-class fallback
+# path and "false" otherwise so cmd_apply can record implementer_fallback
+# in the artifact (see the constant's comment for the subshell rationale).
+pick_for_role() {
+    local models="$1" strategy="$2"
+    case "$strategy" in
+        opus-class)
+            local subset n
+            subset=$(printf '%s' "$models" \
+                | jq -c '[.[] | select(.id | startswith("claude-opus-"))]' 2>/dev/null)
+            n=$(printf '%s' "$subset" | jq -r 'length' 2>/dev/null)
+            if [ -z "$n" ] || [ "$n" = "0" ]; then
+                _warn "no claude-opus-* model in listing; implementer falls back to top"
+                [ -n "$ROLE_FALLBACK_FILE" ] && printf 'true' > "$ROLE_FALLBACK_FILE"
+                pick_best "$models"
+                return
+            fi
+            local sub_pick sub_rc
+            sub_pick=$(pick_best "$subset")
+            sub_rc=$?
+            if [ "$sub_rc" -ne 0 ] || [ -z "$sub_pick" ]; then
+                _warn "all claude-opus-* models excluded by ranking; implementer falls back to top"
+                [ -n "$ROLE_FALLBACK_FILE" ] && printf 'true' > "$ROLE_FALLBACK_FILE"
+                pick_best "$models"
+                return
+            fi
+            [ -n "$ROLE_FALLBACK_FILE" ] && printf 'false' > "$ROLE_FALLBACK_FILE"
+            printf '%s\n' "$sub_pick"
+            ;;
+        top|*)
+            [ -n "$ROLE_FALLBACK_FILE" ] && printf 'false' > "$ROLE_FALLBACK_FILE"
+            pick_best "$models"
+            ;;
+    esac
+}
+
+# write_roles_artifact — atomically write the resolved-mapping artifact.
+# Args: orch_id impl_id rev_id orch_strat impl_strat rev_strat impl_fallback lane source
+# On any failure the previous artifact is left untouched (stale-beats-none).
+write_roles_artifact() {
+    local orch="$1" impl="$2" rev="$3" os="$4" is="$5" rs="$6" fb="$7" lane="$8" src="$9"
+    mkdir -p "$(dirname "$ROLES_ARTIFACT")"
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if jq -n \
+        --arg ts "$ts" --arg src "$src" \
+        --arg orch "$orch" --arg impl "$impl" --arg rev "$rev" \
+        --arg os "$os" --arg is "$is" --arg rs "$rs" \
+        --argjson fb "$fb" --arg lane "$lane" \
+        '{resolved_at:$ts, listing_source:$src,
+          roles:{orchestrator:$orch, implementer:$impl, reviewer:$rev},
+          strategies:{orchestrator:$os, implementer:$is, reviewer:$rs},
+          implementer_fallback:$fb, reviewer_lane:$lane}' \
+        > "$ROLES_ARTIFACT.tmp" 2>/dev/null; then
+        mv "$ROLES_ARTIFACT.tmp" "$ROLES_ARTIFACT"
+    else
+        rm -f "$ROLES_ARTIFACT.tmp"
+        _warn "failed to write $ROLES_ARTIFACT (kept previous artifact)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Pin reading.
 # ---------------------------------------------------------------------------
 
-# current_pin — read model: from the orchestrator agent file. We treat the
-# orchestrator as the source of truth; workflow-model-apply.sh enforces all
-# agents stay in lockstep, so reading one is enough.
+# current_pin [role] — read model: from a representative agent file for the
+# given role. Roles map to one representative file each (the whole class is
+# kept in lockstep by workflow-model-apply.sh --role, so reading one member
+# is enough). The no-arg form defaults to `orchestrator` — that preserves
+# the pre-V1 contract (current_pin == orchestrator pin) for any caller or
+# test wrapper that invokes it without a role.
 current_pin() {
-    [ -f "$ORCH_AGENT" ] || return 0
-    grep -E '^model:' "$ORCH_AGENT" | head -1 | awk '{print $2}'
+    local role="${1:-orchestrator}"
+    local f
+    case "$role" in
+        implementer) f="$IMPL_AGENT" ;;
+        reviewer)    f="$REVIEWER_AGENT" ;;
+        orchestrator|*) f="$ORCH_AGENT" ;;
+    esac
+    [ -f "$f" ] || return 0
+    grep -E '^model:' "$f" | head -1 | awk '{print $2}'
 }
 
 # ---------------------------------------------------------------------------
@@ -456,7 +646,12 @@ find_or_create_meta_task() {
 }
 
 # record_switch <old> <new> — write a comment on the meta-task with the
-# old->new transition plus the rollback /workflow-model line.
+# old->new transition plus the rollback /workflow-model line. The V1 apply
+# path uses record_switch_role below; this un-tagged variant is retained
+# for the manual /workflow-model flow and for the model-select spec's
+# stripped/liar wrappers, which source this file's prefix and invoke it
+# indirectly (hence the SC2329 suppression — it is NOT dead code).
+# shellcheck disable=SC2329
 record_switch() {
     local old="$1" new="$2"
     local meta
@@ -467,6 +662,22 @@ record_switch() {
     bd comment "$meta" "MODEL SWITCH ${old:-<none>} -> $new
 Timestamp: $ts
 Rollback: /workflow-model ${old:-<unknown>}
+Source: SessionStart (.claude/scripts/model-select.sh apply)" >/dev/null 2>&1 || true
+}
+
+# record_switch_role <role> <old> <new> — role-tagged variant of
+# record_switch. The rollback line carries the `--role <role>` scope so
+# reverting one lane doesn't disturb the others.
+record_switch_role() {
+    local role="$1" old="$2" new="$3"
+    local meta
+    meta=$(find_or_create_meta_task) || return 0  # silent fail; not fatal
+    [ -z "$meta" ] && return 0
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    bd comment "$meta" "MODEL SWITCH [$role] ${old:-<none>} -> $new
+Timestamp: $ts
+Rollback: /workflow-model --role $role ${old:-<unknown>}
 Source: SessionStart (.claude/scripts/model-select.sh apply)" >/dev/null 2>&1 || true
 }
 
@@ -506,6 +717,26 @@ cmd_resolve() {
 # Subcommand: apply.
 # ---------------------------------------------------------------------------
 
+# _apply_role <role> <new-id> — rewrite one lane when its representative
+# pin differs from <new-id>, and record a role-tagged switch. Returns 0
+# when a switch happened (so the caller can count switches), 1 on no-op or
+# a rewrite failure. Honors QUIET for the per-file rewrite chatter.
+_apply_role() {
+    local role="$1" new="$2" cur apply_out
+    cur=$(current_pin "$role")
+    if [ "$cur" = "$new" ]; then
+        return 1
+    fi
+    if ! apply_out=$(bash "$APPLY_HELPER" --role "$role" "$new" 2>&1); then
+        _result "rewrite helper failed for role $role (kept pin ${cur:-<none>})"
+        [ "$QUIET" -ne 1 ] && printf '%s\n' "$apply_out" >&2
+        return 1
+    fi
+    [ "$QUIET" -ne 1 ] && printf '%s\n' "$apply_out" >&2
+    record_switch_role "$role" "$cur" "$new"
+    return 0
+}
+
 cmd_apply() {
     local models rc
     models=$(get_models)
@@ -518,95 +749,174 @@ cmd_apply() {
         return 0
     fi
     unknown_families_warning "$models"
-    local raw_best best
-    raw_best=$(pick_best "$models")
-    if [ -z "$raw_best" ]; then
-        _result "ranking produced no candidate; keeping current pin"
+
+    # Strategy per role (fail-open to top on a missing/bad model-roles).
+    local orch_strat impl_strat rev_strat
+    orch_strat=$(role_strategy orchestrator)
+    impl_strat=$(role_strategy implementer)
+    rev_strat=$(role_strategy reviewer)
+
+    # Resolve ALL THREE roles FIRST, before touching any pin. The
+    # implementer opus-class fallback flag rides a filesystem side-channel
+    # (ROLE_FALLBACK_FILE) so it survives the pick_for_role $(...) subshell.
+    ROLE_FALLBACK_FILE=$(mktemp "${TMPDIR:-/tmp}/model-roles-fb.XXXXXX" 2>/dev/null || true)
+    if [ -z "$ROLE_FALLBACK_FILE" ]; then
+        mkdir -p "$PROJECT_DIR/.claude/.qa-tracking" 2>/dev/null || true
+        ROLE_FALLBACK_FILE="$PROJECT_DIR/.claude/.qa-tracking/.model-roles-fb"
+    fi
+    : > "$ROLE_FALLBACK_FILE" 2>/dev/null || true
+
+    local orch_pick impl_pick rev_pick impl_fallback
+    orch_pick=$(pick_for_role "$models" "$orch_strat")
+    impl_pick=$(pick_for_role "$models" "$impl_strat")
+    impl_fallback=$(cat "$ROLE_FALLBACK_FILE" 2>/dev/null || printf 'false')
+    rev_pick=$(pick_for_role "$models" "$rev_strat")
+    rm -f "$ROLE_FALLBACK_FILE" 2>/dev/null || true
+    ROLE_FALLBACK_FILE=""
+    [ -n "$impl_fallback" ] || impl_fallback="false"
+
+    # No-candidate on ANY role -> fail-open, keep every pin, no artifact.
+    if [ -z "$orch_pick" ] || [ -z "$impl_pick" ] || [ -z "$rev_pick" ]; then
+        _result "ranking produced no candidate for one or more roles; keeping current pin"
         return 0
     fi
-    # Manual-adopt gate (defect 3fn fix): pick_best emits "MANUAL\t<id>"
-    # when the winner's created_at is missing/unparseable. We parse the
-    # prefix here BEFORE current-pin comparison and BEFORE any rewrite.
-    # The session keeps the current pin and surfaces the LOUD adopt
-    # instruction so a malformed listing can never silently switch us.
-    # Previous implementation used a parent-shell global; that variable
-    # was set inside a $(...) subshell and was invisible here, leaving
-    # this gate unreachable and rewrites silent.
-    case "$raw_best" in
+
+    # All-or-nothing manual-adopt gate: if ANY role's winner needs manual
+    # adoption (unparseable created_at, surfaced by pick_best as a MANUAL\t
+    # stdout prefix), emit a loud per-role notice, keep EVERY pin unchanged,
+    # and do NOT write the artifact. A partially-bogus listing must never
+    # leave the lanes straddling mixed model generations.
+    local manual=0 mid
+    case "$orch_pick" in
         MANUAL$'\t'*)
-            local manual_id="${raw_best#MANUAL$'\t'}"
-            _result "manual adoption required for '$manual_id' (unparseable created_at) — run /workflow-model $manual_id"
-            return 0
-            ;;
-        *)
-            best="$raw_best"
+            manual=1; mid="${orch_pick#MANUAL$'\t'}"
+            _result "manual adoption required for orchestrator '$mid' — run /workflow-model --role orchestrator $mid"
             ;;
     esac
-    local cur
-    cur=$(current_pin)
-    if [ "$cur" = "$best" ]; then
-        _result "no change (current pin already $cur)"
+    case "$impl_pick" in
+        MANUAL$'\t'*)
+            manual=1; mid="${impl_pick#MANUAL$'\t'}"
+            _result "manual adoption required for implementer '$mid' — run /workflow-model --role implementer $mid"
+            ;;
+    esac
+    case "$rev_pick" in
+        MANUAL$'\t'*)
+            manual=1; mid="${rev_pick#MANUAL$'\t'}"
+            _result "manual adoption required for reviewer '$mid' — run /workflow-model --role reviewer $mid"
+            ;;
+    esac
+    if [ "$manual" -eq 1 ]; then
+        _result "manual adoption required for one or more roles; keeping ALL pins unchanged (no artifact written)"
         return 0
     fi
-    # Post-switch validation (free): confirm the resolved id is in the
-    # listing. Strip any [1m] suffix for the comparison.
-    local stripped
-    stripped=$(printf '%s' "$best" | sed -E 's/\[1m\]$//')
-    if ! printf '%s' "$models" | jq -e --arg id "$stripped" 'any(.id == $id)' >/dev/null 2>&1; then
-        _result "resolved $best but it is not in the listing — refusing to switch (fail-open)"
-        return 0
-    fi
+
     if [ ! -x "$APPLY_HELPER" ]; then
         _result "missing apply helper at $APPLY_HELPER; skipping rewrite"
         return 0
     fi
-    local apply_out
-    if ! apply_out=$(bash "$APPLY_HELPER" "$best" 2>&1); then
-        _result "rewrite helper failed (kept pin $cur)"
-        if [ "$QUIET" -ne 1 ]; then
-            printf '%s\n' "$apply_out" >&2
-        fi
-        return 0
-    fi
-    if [ "$QUIET" -ne 1 ]; then
-        printf '%s\n' "$apply_out" >&2
-    fi
-    record_switch "$cur" "$best"
-    _result "switched ${cur:-<none>} -> $best"
+
+    # Determine the reviewer lane, then persist the resolved mapping
+    # atomically BEFORE the rewrites (a rewrite crash still leaves a
+    # truthful artifact of intent; fail-open paths above leave the previous
+    # artifact untouched — stale beats none).
+    local lane source
+    lane=$(detect_reviewer_lane)
+    source="api"; cache_fresh && source="cache"
+    write_roles_artifact "$orch_pick" "$impl_pick" "$rev_pick" \
+        "$orch_strat" "$impl_strat" "$rev_strat" "$impl_fallback" "$lane" "$source"
+
+    # Per-role apply.
+    local switched=0
+    _apply_role orchestrator "$orch_pick" && switched=$((switched + 1))
+    _apply_role implementer  "$impl_pick" && switched=$((switched + 1))
+    _apply_role reviewer     "$rev_pick"  && switched=$((switched + 1))
+
+    local lane_note=""
+    [ "$lane" != "claude" ] && lane_note=" lane=$lane"
+    _result "roles: orch=$orch_pick impl=$impl_pick rev=$rev_pick${lane_note} ($switched switched)"
 }
 
 # ---------------------------------------------------------------------------
 # Subcommand: status.
 # ---------------------------------------------------------------------------
 
+# _drift_check <role> <agent...> — warn when members of a role class hold
+# different pins (intra-role lockstep drift). Silent when they agree or a
+# member file is absent.
+_drift_check() {
+    local role="$1"; shift
+    local first="" agent pin f
+    for agent in "$@"; do
+        f="$PROJECT_DIR/.claude/agents/$agent.md"
+        [ -f "$f" ] || continue
+        pin=$(grep -E '^model:' "$f" | head -1 | awk '{print $2}')
+        if [ -z "$first" ]; then
+            first="$pin"
+        elif [ "$pin" != "$first" ]; then
+            _warn "intra-role drift in '$role': $agent pinned '$pin' but '$first' expected — run model-select.sh apply or /workflow-model --role $role <id>"
+        fi
+    done
+}
+
 cmd_status() {
-    local cur raw_best best age
-    cur=$(current_pin)
+    local age models role strat pin resolved raw
     age=$(cache_age_s)
-    printf 'current pin: %s\n' "${cur:-<unset>}"
-    if [ "$age" -lt 0 ]; then
-        printf 'cache:       absent\n'
-    elif cache_fresh; then
-        local models
+
+    models=""
+    if [ -f "$CACHE_FILE" ]; then
         models=$(read_cache_models)
-        # Run pick_best with stderr preserved (defect 3fn fix): the LOUD
-        # manual-adopt notice surfaces here so the operator gets the
-        # adopt instruction from `model-select.sh status` as well. The
-        # previous `2>/dev/null` swallowed it.
-        raw_best=$(pick_best "$models") || raw_best=""
-        case "$raw_best" in
-            MANUAL$'\t'*)
-                best="${raw_best#MANUAL$'\t'} (manual adopt required)"
-                ;;
-            *)
-                best="$raw_best"
-                ;;
-        esac
-        printf 'cache:       fresh (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
-        printf 'cached best: %s\n' "${best:-<unranked>}"
-    else
-        printf 'cache:       stale (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
     fi
+
+    printf 'role           strategy    pinned                    resolved\n'
+    for role in orchestrator implementer reviewer; do
+        strat=$(role_strategy "$role")
+        pin=$(current_pin "$role")
+        resolved="<no cache>"
+        if [ -n "$models" ] && [ "$models" != "[]" ]; then
+            # stderr from pick_best/pick_for_role (incl. the LOUD manual-adopt
+            # notice) is intentionally preserved so `status` surfaces it too.
+            raw=$(pick_for_role "$models" "$strat") || raw=""
+            case "$raw" in
+                MANUAL$'\t'*) resolved="${raw#MANUAL$'\t'} (manual adopt required)" ;;
+                "")           resolved="<no candidate>" ;;
+                *)            resolved="$raw" ;;
+            esac
+        fi
+        printf '  %-13s%-12s%-26s%s\n' "$role" "$strat" "${pin:-<unset>}" "$resolved"
+    done
+
+    if [ "$age" -lt 0 ]; then
+        printf 'cache:         absent\n'
+    elif cache_fresh; then
+        printf 'cache:         fresh (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
+    else
+        printf 'cache:         stale (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
+    fi
+    printf 'reviewer lane: %s\n' "$(detect_reviewer_lane)"
+
+    # Intra-role lockstep drift warnings (implementer/reviewer classes).
+    _drift_check implementer backend frontend devops
+    _drift_check reviewer qa grader judge
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: roles.
+# ---------------------------------------------------------------------------
+
+# cmd_roles — print `role<TAB>strategy<TAB>resolved-id` for each role. The
+# strategy comes from .claude/model-roles; the resolved id from the last
+# written artifact (model-roles-resolved.json). A stable, greppable read
+# interface for tests and operators.
+cmd_roles() {
+    local role strat rid
+    for role in orchestrator implementer reviewer; do
+        strat=$(role_strategy "$role")
+        rid=""
+        if [ -f "$ROLES_ARTIFACT" ]; then
+            rid=$(jq -r --arg r "$role" '.roles[$r] // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        fi
+        printf '%s\t%s\t%s\n' "$role" "$strat" "${rid:-<unresolved>}"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -617,18 +927,29 @@ case "$SUBCMD" in
     resolve)  cmd_resolve ;;
     apply)    cmd_apply ;;
     status)   cmd_status ;;
+    roles)    cmd_roles ;;
     ""|help|-h|--help)
         cat <<'USAGE'
-model-select.sh — automatic best-model selection (spec 0.3).
+model-select.sh — automatic best-model selection (spec 0.3 + V1 roles).
 
 Usage:
-  model-select.sh resolve [--quiet]   print "<id>\t<source>" on stdout
-  model-select.sh apply   [--quiet]   resolve + rewrite pins + record switch
-  model-select.sh status              print current pin / cache state
+  model-select.sh resolve [--quiet] [--refresh]
+      print "<id>\t<source>" on stdout (the top pick for the whole account)
+  model-select.sh apply   [--quiet] [--refresh]
+      resolve every role -> rewrite each lane's pins -> record switches
+  model-select.sh status
+      print the per-role table (role, strategy, pinned id, resolved id),
+      cache state, reviewer lane, and any intra-role drift
+  model-select.sh roles
+      print "role\tstrategy\tresolved-id" (config + resolved artifact)
+
+Roles and strategies live in .claude/model-roles (orchestrator/implementer/
+reviewer -> top|opus-class; optional reviewer_lane=auto|claude). The
+resolved mapping is written to .claude/.qa-tracking/model-roles-resolved.json.
 
 Honors $ANTHROPIC_API_KEY for the /v1/models lookup. Caches results in
 .claude/.qa-tracking/model-select-cache.json for 3600 seconds. Fails open
-on any error: prints a warning, leaves the pin alone, exits 0.
+on any error: prints a warning, leaves the pins alone, exits 0.
 USAGE
         ;;
     *)

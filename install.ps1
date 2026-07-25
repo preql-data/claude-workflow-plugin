@@ -435,10 +435,11 @@ build/
         }
     }
 
-    # Rubric config + model-ranking + LESSONS + .worktreeinclude ----------
+    # Rubric config + model-ranking + model-roles + LESSONS + .worktreeinclude
     foreach ($asset in @(
         @{ Src = ".claude/rubric-config"; Dst = "$ClaudeDir\rubric-config" },
         @{ Src = ".claude/model-ranking"; Dst = "$ClaudeDir\model-ranking" },
+        @{ Src = ".claude/model-roles";   Dst = "$ClaudeDir\model-roles" },
         @{ Src = ".claude/effort-verdict"; Dst = "$ClaudeDir\effort-verdict" },
         @{ Src = "LESSONS.md";            Dst = (Join-Path $Target "LESSONS.md") },
         @{ Src = ".worktreeinclude";       Dst = (Join-Path $Target ".worktreeinclude") }

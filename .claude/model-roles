@@ -1,0 +1,50 @@
+# Model roles — v4.0.0 Phase V1 (role-aware model selection).
+#
+# Maps each workflow ROLE to a selection STRATEGY. model-select.sh reads
+# this on SessionStart and rewrites every agent's `model:` pin per its
+# role, so different classes of agent can ride different model tiers while
+# each class still auto-adopts the newest model in its lane.
+#
+# Format
+# ------
+# Simple `key=value` lines. Comments (`#`) and blank lines are ignored.
+# Whitespace around the `=` is tolerated. Same shape as .claude/rubric-config.
+#
+# Roles (fixed set)
+# -----------------
+#   orchestrator   the planning/delegation agent (orchestrator.md).
+#   implementer    the writing agents (backend.md, frontend.md, devops.md).
+#   reviewer       the read-only review agents (qa.md, grader.md, judge.md).
+#
+# Strategies
+# ----------
+#   top          the resolver's single best pick — newest, most capable
+#                family in the listing (Fable-class today), exactly the
+#                v3.5 behavior. Honours .claude/model-ranking exclusions.
+#   opus-class   the newest claude-opus-* model in the listing (Opus 4.8
+#                today; auto-adopts Opus 5 the moment the account lists it).
+#                Ranking exclusions still apply inside the Opus subset. If
+#                no Opus-class model is listed (or all are excluded), the
+#                implementer lane falls back to `top`.
+#
+# A missing file, a missing key, or an unrecognised strategy value all
+# resolve to `top` (fail-open) — setting every role to `top` reproduces
+# v3.5 single-pin behavior exactly.
+#
+# Reviewer lane (optional)
+# ------------------------
+#   reviewer_lane=auto|claude
+#     auto    (default) let the workflow detect a review lane. V1 always
+#             resolves to the Claude review path; V2 adds the Sol-via-Codex
+#             probe (.claude/scripts/codex-detect.sh) behind this same key.
+#     claude  force the Claude review path regardless of any probe.
+#   The WORKFLOW_REVIEWER_LANE environment variable overrides this key
+#   (test/operator seam). The reviewer agents ALWAYS carry a Claude `model:`
+#   pin in frontmatter — the lane only affects which reviewer is engaged,
+#   never the frontmatter pin, and never blocks the session.
+
+orchestrator=top
+implementer=opus-class
+reviewer=top
+
+# reviewer_lane=auto

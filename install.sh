@@ -585,6 +585,15 @@ if [ -f "$SOURCE_DIR/.claude/model-ranking" ]; then
     copy_file "$SOURCE_DIR/.claude/model-ranking" "$TARGET/.claude/model-ranking"
 fi
 
+# Model-roles (v4.0.0 Phase V1) ------------------------------------------------
+# Role -> selection-strategy map read by model-select.sh on SessionStart.
+# Single file, plain text. Deliberately NOT in the required-source check —
+# a source tree without it still installs (model-select.sh fails open to the
+# all-`top` v3.5 behavior when the file is absent).
+if [ -f "$SOURCE_DIR/.claude/model-roles" ]; then
+    copy_file "$SOURCE_DIR/.claude/model-roles" "$TARGET/.claude/model-roles"
+fi
+
 # Effort verdict (v4.0.0 V0 / cnz.1) -------------------------------------------
 # The effort A/B interference-test output consumed by `make session` and the
 # session-start Warning 4 reconciliation. Single file, plain text. Deliberately

@@ -283,8 +283,10 @@ assert_match "ms-F: meta-task id is a valid bd id" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-
 COMMENT=$(bd show "$META_ID" 2>/dev/null | grep -A3 'MODEL SWITCH' | head -4)
 assert_contains "ms-F: comment records the old->new transition" \
     "claude-opus-4-7 -> claude-fable-5" "$COMMENT"
-assert_contains "ms-F: comment carries the rollback line" \
-    "/workflow-model claude-opus-4-7" "$COMMENT"
+# V1 (bi3.1): the auto-switch comment is role-tagged and its rollback line
+# carries the `--role <role>` scope so a single lane can be reverted.
+assert_contains "ms-F: comment carries the role-tagged rollback line" \
+    "/workflow-model --role orchestrator claude-opus-4-7" "$COMMENT"
 
 # ---------------------------------------------------------------------------
 # Spec G: idempotent — apply when pin already matches is a no-op.
@@ -296,7 +298,9 @@ PIN_G_AFTER=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{
 assert_eq "ms-G: apply exit 0 on no-op" "0" "$RC_G"
 assert_eq "ms-G: pin unchanged on no-op" "$PIN_G_BEFORE" "$PIN_G_AFTER"
 RESULT_G=$(grep '^model-select:' /tmp/ms-g.err | tail -1)
-assert_contains "ms-G: no-change result line" "no change" "$RESULT_G"
+# V1 (bi3.1): the role-aware apply summarises with "(N switched)"; a no-op
+# run reports "(0 switched)".
+assert_contains "ms-G: no-op result line reports zero switches" "(0 switched)" "$RESULT_G"
 
 # ---------------------------------------------------------------------------
 # Spec H (FLIPPED): META-TEST — a "!claude-fable" exclusion correctly
@@ -840,3 +844,203 @@ else
     PASS=$((PASS + 1))
     printf '  PASS: ms-I: META-TEST — lying picker propagates to the pin (spec F is sensitive to pick_best output)\n'
 fi
+
+# ===========================================================================
+# Spec R-block: role-aware resolution (v4.0.0 Phase V1 / bi3.1).
+#
+# These extend the spec to the model-roles surface. Everything reuses the
+# curl-shim + LISTING fixture pattern above. A `.claude/model-roles` file is
+# seeded per case (the earlier specs run with NO model-roles, i.e. all-`top`,
+# which is exactly the single-pin behavior they assert).
+# ===========================================================================
+
+ARTIFACT="$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json"
+
+# The R-block asserts on all SEVEN agents; seed grader/judge alongside the
+# five the earlier specs use so the parity + byte-unchanged checks are real.
+for agent in grader judge; do
+    cat > "$AGENTS_DIR/$agent.md" <<EOF
+---
+name: $agent
+description: stub
+model: claude-opus-4-7
+---
+stub body for $agent
+EOF
+done
+
+# Default V1 role map for the R-block: orchestrator/reviewer top, implementer
+# opus-class.
+seed_role_map() {
+    cat > "$FIXTURE/.claude/model-roles" <<'ROLES'
+orchestrator=top
+implementer=opus-class
+reviewer=top
+ROLES
+}
+
+# LISTING_OPUS_PRESENT: a newer NON-opus family (fable-9) plus two opus
+# generations. top -> fable-9; opus-class -> opus-5-0 (newest opus).
+LISTING_OPUS_PRESENT='{
+  "data": [
+    {"id":"claude-fable-9","max_input_tokens":1000000,"created_at":"2026-07-01T00:00:00Z","capabilities":{}},
+    {"id":"claude-opus-5-0","max_input_tokens":400000,"created_at":"2026-06-01T00:00:00Z","capabilities":{}},
+    {"id":"claude-opus-4-8","max_input_tokens":200000,"created_at":"2026-05-01T00:00:00Z","capabilities":{}}
+  ],
+  "has_more":false
+}'
+
+# LISTING_NO_OPUS: no claude-opus-* at all -> implementer must fall back to
+# top and record implementer_fallback:true.
+LISTING_NO_OPUS='{
+  "data": [
+    {"id":"claude-fable-9","max_input_tokens":1000000,"created_at":"2026-07-01T00:00:00Z","capabilities":{}},
+    {"id":"claude-sonnet-4","max_input_tokens":200000,"created_at":"2026-06-01T00:00:00Z","capabilities":{}}
+  ],
+  "has_more":false
+}'
+
+# ---------------------------------------------------------------------------
+# Spec R1 (LISTING_OPUS_PRESENT): implementer gets the opus id while
+# orchestrator/reviewer get the top pick; artifact records the split.
+# ---------------------------------------------------------------------------
+seed_role_map
+cat > "$RANKING" <<'RANKING'
+claude-opus
+RANKING
+rm -f "$CACHE" "$ARTIFACT"
+ms_set_curl_payload "$LISTING_OPUS_PRESENT"
+for agent in orchestrator qa backend frontend devops grader judge; do
+    awk '/^model:/{print "model: claude-opus-4-7"; next} {print}' \
+        "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
+        && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
+done
+bash "$MS" apply --quiet 2>/tmp/ms-r1.err >/dev/null
+PIN_R1_ORCH=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
+PIN_R1_IMPL=$(grep -E '^model:' "$AGENTS_DIR/backend.md" | head -1 | awk '{print $2}')
+PIN_R1_REV=$(grep -E '^model:' "$AGENTS_DIR/qa.md" | head -1 | awk '{print $2}')
+assert_eq "ms-R1: orchestrator gets the top pick (fable-9)" "claude-fable-9" "$PIN_R1_ORCH"
+assert_eq "ms-R1: implementer gets the newest opus (opus-5-0)" "claude-opus-5-0" "$PIN_R1_IMPL"
+assert_eq "ms-R1: reviewer gets the top pick (fable-9)" "claude-fable-9" "$PIN_R1_REV"
+assert_eq "ms-R1: frontend rides the implementer lane too" "claude-opus-5-0" \
+    "$(grep -E '^model:' "$AGENTS_DIR/frontend.md" | head -1 | awk '{print $2}')"
+assert_json_field "ms-R1: artifact records implementer opus id" \
+    "$(cat "$ARTIFACT")" ".roles.implementer" "claude-opus-5-0"
+assert_json_field "ms-R1: artifact records orchestrator top id" \
+    "$(cat "$ARTIFACT")" ".roles.orchestrator" "claude-fable-9"
+# NB: pipe through tostring — assert_json_field appends `// empty`, and jq's
+# `//` treats a boolean `false` as empty (so a raw `.implementer_fallback`
+# would read as ""). `tostring` yields the literal "false"/"true".
+assert_json_field "ms-R1: artifact implementer_fallback is false" \
+    "$(cat "$ARTIFACT")" ".implementer_fallback | tostring" "false"
+assert_json_field "ms-R1: artifact reviewer_lane defaults to claude" \
+    "$(cat "$ARTIFACT")" ".reviewer_lane" "claude"
+
+# ---------------------------------------------------------------------------
+# Spec R2 (LISTING_NO_OPUS): implementer falls back to top; artifact says so.
+# ---------------------------------------------------------------------------
+seed_role_map
+rm -f "$CACHE" "$ARTIFACT"
+ms_set_curl_payload "$LISTING_NO_OPUS"
+bash "$MS" apply --quiet 2>/tmp/ms-r2.err >/dev/null
+assert_eq "ms-R2: implementer falls back to the top pick (fable-9)" "claude-fable-9" \
+    "$(grep -E '^model:' "$AGENTS_DIR/backend.md" | head -1 | awk '{print $2}')"
+assert_json_field "ms-R2: artifact flags implementer_fallback true" \
+    "$(cat "$ARTIFACT")" ".implementer_fallback | tostring" "true"
+assert_json_field "ms-R2: artifact implementer id is the top pick" \
+    "$(cat "$ARTIFACT")" ".roles.implementer" "claude-fable-9"
+
+# ---------------------------------------------------------------------------
+# Spec R3 (subset exclusion): "!claude-opus-5" drops opus-5 from the opus
+# subset, so the implementer lands the surviving older opus (opus-4-8) while
+# orchestrator still gets the top pick. Proves the ranking exclusion is
+# applied INSIDE the opus-class subset.
+# ---------------------------------------------------------------------------
+seed_role_map
+cat > "$RANKING" <<'RANKING'
+!claude-opus-5
+claude-opus
+RANKING
+rm -f "$CACHE" "$ARTIFACT"
+ms_set_curl_payload "$LISTING_OPUS_PRESENT"
+bash "$MS" apply --quiet 2>/tmp/ms-r3.err >/dev/null
+assert_eq "ms-R3: exclusion inside subset -> implementer gets surviving opus (opus-4-8)" \
+    "claude-opus-4-8" "$(grep -E '^model:' "$AGENTS_DIR/backend.md" | head -1 | awk '{print $2}')"
+assert_eq "ms-R3: orchestrator still gets the top pick (fable-9)" \
+    "claude-fable-9" "$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')"
+# Restore the non-exclusion ranking for later cases.
+cat > "$RANKING" <<'RANKING'
+claude-opus
+RANKING
+
+# ---------------------------------------------------------------------------
+# Spec R4 (all-or-nothing MANUAL): a manual-adopt listing (winner has an
+# unparseable created_at) must leave ALL SEVEN pins byte-unchanged AND write
+# NO artifact. Reuses LISTING_MANUAL_ADOPT from the M-block.
+# ---------------------------------------------------------------------------
+seed_role_map
+rm -f "$CACHE" "$ARTIFACT"
+ms_set_curl_payload "$LISTING_MANUAL_ADOPT"
+for agent in orchestrator qa backend frontend devops grader judge; do
+    awk '/^model:/{print "model: claude-opus-4-7"; next} {print}' \
+        "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
+        && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
+done
+# Snapshot all seven files (whole file, not just the pin).
+R4_UNCHANGED=1
+R4_DRIFT=""
+for agent in orchestrator qa backend frontend devops grader judge; do
+    eval "PRE_R4_${agent}=\$(shasum -a 256 \"\$AGENTS_DIR/\$agent.md\" | awk '{print \$1}')"
+done
+bash "$MS" apply --quiet 2>/tmp/ms-r4.err >/dev/null
+RC_R4=$?
+for agent in orchestrator qa backend frontend devops grader judge; do
+    NOW=$(shasum -a 256 "$AGENTS_DIR/$agent.md" | awk '{print $1}')
+    eval "PRE=\$PRE_R4_${agent}"
+    if [ "$NOW" != "$PRE" ]; then
+        R4_UNCHANGED=0; R4_DRIFT="${R4_DRIFT:+$R4_DRIFT,}$agent"
+    fi
+done
+assert_eq "ms-R4: apply exit 0 under all-or-nothing manual-adopt" "0" "$RC_R4"
+assert_eq "ms-R4: all seven agent files byte-identical (no drift: '$R4_DRIFT')" "1" "$R4_UNCHANGED"
+assert_eq "ms-R4: NO artifact written on the manual-adopt path" "1" \
+    "$([ ! -f "$ARTIFACT" ] && echo 1 || echo 0)"
+RESULT_R4=$(grep '^model-select:' /tmp/ms-r4.err | tail -1)
+assert_contains "ms-R4: result line names the manual-adopt outcome" \
+    "manual adoption required" "$RESULT_R4"
+
+# ms-R4b: stale-beats-none. Pre-seed an artifact, then a manual-adopt apply
+# must LEAVE IT in place (fail-open never clobbers the prior mapping).
+printf '{"roles":{"orchestrator":"claude-prev-1","implementer":"claude-prev-1","reviewer":"claude-prev-1"},"reviewer_lane":"claude"}' > "$ARTIFACT"
+ms_set_curl_payload "$LISTING_MANUAL_ADOPT"
+rm -f "$CACHE"
+bash "$MS" apply --quiet 2>/dev/null >/dev/null
+assert_json_field "ms-R4b: stale-beats-none — prior artifact preserved on fail-open" \
+    "$(cat "$ARTIFACT")" ".roles.orchestrator" "claude-prev-1"
+
+# ---------------------------------------------------------------------------
+# Spec R5 (lane flip): WORKFLOW_REVIEWER_LANE=codex must land in the artifact
+# and drive the statusline reviewer segment to the literal `sol`.
+# ---------------------------------------------------------------------------
+seed_role_map
+rm -f "$CACHE" "$ARTIFACT"
+ms_set_curl_payload "$LISTING_OPUS_PRESENT"
+WORKFLOW_REVIEWER_LANE=codex bash "$MS" apply --quiet 2>/tmp/ms-r5.err >/dev/null
+assert_json_field "ms-R5: env seam flips artifact reviewer_lane to codex" \
+    "$(cat "$ARTIFACT")" ".reviewer_lane" "codex"
+STATUS_R5=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh" 2>/dev/null)
+assert_contains "ms-R5: statusline renders reviewer lane as sol" "rev:sol" "$STATUS_R5"
+
+# ---------------------------------------------------------------------------
+# Spec R6 (roles subcommand): after an apply the `roles` output reports the
+# resolved id per role from the artifact.
+# ---------------------------------------------------------------------------
+seed_role_map
+rm -f "$CACHE" "$ARTIFACT"
+ms_set_curl_payload "$LISTING_OPUS_PRESENT"
+bash "$MS" apply --quiet 2>/dev/null >/dev/null
+ROLES_OUT=$(bash "$MS" roles 2>/dev/null)
+assert_contains "ms-R6: roles reports implementer strategy+resolved id" \
+    "implementer	opus-class	claude-opus-5-0" "$ROLES_OUT"
+assert_contains "ms-R6: roles reports orchestrator strategy+resolved id" \
+    "orchestrator	top	claude-fable-9" "$ROLES_OUT"

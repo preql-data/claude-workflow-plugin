@@ -60,12 +60,13 @@ Conventions to keep:
    ("Use extended thinking for all non-trivial work."). Phase 0 added this
    to all five existing agents.
 3. **Always include the `model:` field** in frontmatter. SessionStart's
-   `model-select.sh` resolver rewrites every agent's `model:` line in
-   lockstep (see `workflow-model-apply.sh`'s `AGENTS` array — add the
-   new agent there too). The `/workflow-model` slash command and `make
+   `model-select.sh` resolver rewrites each agent's `model:` line per its
+   ROLE class (see `workflow-model-apply.sh`'s `role_agents()` — add the new
+   agent to the right class there, and it will flow into `--print-role-map`
+   automatically). The `/workflow-model` slash command and `make
    workflow-model` provide the manual override. Use whatever value the
-   other agents currently carry — the resolver will normalise it on the
-   next session start.
+   other agents in the same role currently carry — the resolver will
+   normalise it on the next session start. See "Model roles" below.
 4. **Beads lifecycle.** Every specialist starts with
    `bd update $TASK_ID --status in_progress` and ends with
    `bd label add $TASK_ID qa-pending` (so the QA agent sees it). The QA
@@ -135,6 +136,46 @@ Then register the agent in `.claude-plugin/plugin.json`:
 The orchestrator's prompt has a Domain -> Delegate-To table; if your new
 specialist owns a clear domain, add a row to that table so the orchestrator
 knows when to spawn it.
+
+## Model roles
+
+Since v4.0.0 the model resolver is role-aware. `.claude/model-roles` maps
+each ROLE class to a selection STRATEGY; `model-select.sh apply` resolves
+every role and rewrites each lane's `model:` pins independently.
+
+`.claude/model-roles` file format (key=value, `#` comments, whitespace
+around `=` tolerated — same shape as `.claude/rubric-config`):
+
+```
+orchestrator=top          # single best pick (newest family) — v3.5 behavior
+implementer=opus-class    # newest claude-opus-* model, else falls back to top
+reviewer=top
+# reviewer_lane=auto|claude   (optional; default auto — V2 adds a Sol lane)
+```
+
+Roles are a fixed set — `orchestrator` (orchestrator.md), `implementer`
+(backend/frontend/devops), `reviewer` (qa/grader/judge). Strategies are
+`top` and `opus-class`. A missing file, missing key, or unrecognised value
+resolves to `top` (fail-open); setting every role to `top` reproduces v3.5
+single-pin behavior exactly. The class->agent mapping lives in one place —
+`workflow-model-apply.sh`'s `role_agents()` (surfaced via
+`workflow-model-apply.sh --print-role-map`).
+
+Resolved-artifact contract. Every successful apply writes
+`.claude/.qa-tracking/model-roles-resolved.json` atomically (tmp + mv); on
+any fail-open path the previous artifact is left in place (stale beats
+none). The statusline reads it to render the role view. Shape:
+
+```json
+{"resolved_at":"<iso-ts>","listing_source":"cache|api",
+ "roles":{"orchestrator":"<id>","implementer":"<id>","reviewer":"<id>"},
+ "strategies":{"orchestrator":"top","implementer":"opus-class","reviewer":"top"},
+ "implementer_fallback":false,"reviewer_lane":"claude"}
+```
+
+`bash .claude/scripts/model-select.sh roles` prints
+`role<TAB>strategy<TAB>resolved-id` if you just want the mapping; `status`
+prints the full per-role table plus intra-role drift warnings.
 
 ## Extending hooks
 
