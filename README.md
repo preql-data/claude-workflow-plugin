@@ -34,6 +34,17 @@ every step.
   and the lessons ledger — no specialist conversation context — so its
   verdict is independent. Iteration cap is binding and engages the
   escalation path on cap-hit.
+- **Optional: an external reviewer lane (Sol via Codex).** Every QA
+  cycle records an independent review artifact. By default the
+  plugin's own fresh-context Claude path authors it, for free. If you
+  install and register the OpenAI Codex CLI at user scope, that same
+  artifact comes from Sol instead — a second model family reading the
+  same diff. It is strictly optional and purely advisory: it writes no
+  labels, records no approval, and with Codex absent the workflow is
+  byte-identical (proved by a degradation spec, not asserted). The
+  review turn is manual and cost-confirmed, and it meters your own
+  OpenAI account. Setup, billing, and troubleshooting:
+  [`docs/CODEX_SETUP.md`](docs/CODEX_SETUP.md).
 - **Two MCP servers ship in the box.** `bd-mcp` exposes 21 typed Beads
   tools (no shell quoting bugs). `code-graph-mcp` exposes 7 graph tools
   (`code_search`, `code_context`, `symbol_callers`, `impact_of`,

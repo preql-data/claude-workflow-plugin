@@ -42,7 +42,7 @@ If the packet is missing a piece you need to evaluate a criterion, that is itsel
 
 ## Input contract — the grading packet
 
-The QA agent assembles a structured grading packet and writes it to the Beads task as a `grading-packet` doc (`bd_doc_write(task_id, name="grading-packet", ...)`). The root orchestrator reads that doc and pastes its contents verbatim into your prompt. Expect the following items, in this order:
+The QA agent assembles a structured grading packet and writes it to the Beads task as a `grading-packet` doc (`bd_doc_write(task_id, name="grading-packet", ...)`). The root orchestrator reads that doc and pastes its contents verbatim into your prompt. Expect eight items, in this order — items 1-7 are mandatory, item 8 is advisory:
 
 1. **`bd show <task-id>` output** — the canonical task record: description, type, labels, dependencies, comments.
 2. **The SPEC doc** — what the orchestrator wrote via `bd_doc_write(name="spec")`. Goal, acceptance criteria, constraints, out-of-scope notes. Read this first; it is the contract the diff must satisfy.
@@ -50,8 +50,12 @@ The QA agent assembles a structured grading packet and writes it to the Beads ta
 4. **The F7 completion contract** — the specialist's structured return payload with `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`. QA-specific extensions may be present when the specialist was QA itself; the base six are mandatory.
 5. **`LESSONS.md` contents** — the institutional-memory ledger. Lessons are criteria-by-reference: work re-introducing a recorded lesson's anti-pattern fails the relevant rubric criterion with the lesson cited in the justification.
 6. **The rubric file(s) to apply** — the `version: N` declaration plus the criteria. Composition: default + the domain overlay matching the task's label (`backend`, `frontend`, `devops`) + the bugfix overlay when the task type is `bug` (created with `-t bug` or carrying the `bug` label). Apply every applicable rubric — the overlays do not replace default; they add to it.
+7. **The mechanical impact report** — the per-file `impact_of` artifact the gate generated for this change set (`{generated_at, task_id, change_set_hash, files: [{file, impact}], server}`). Score the packet's regression-coverage claims against this caller data rather than against prose: a claim that a change is "internal" is falsified by a high-fan-in caller set here. A report with `server: "absent"` is the documented degradation — the packet should say the impact pass was manual, and a claim of thorough regression analysis with neither the report nor a manual account is a fail.
+8. **The independent review artifact (ADVISORY)** — a second reviewer's strict-JSON verdict on the same change set: `{reviewer_identity, reviewer_model, reviewed_hash, risk_threshold, stop_condition, verdict, findings: [{id, severity, location, evidence, description}], iterations, stopped_by}`. `reviewer_identity` is `qa-claude` (the fresh-context Claude review lane) or `sol-codex` (the optional external reviewer). This item is OPTIONAL and its verdict is NEVER a criterion.
 
-If any of items 1-6 is missing, fail the affected criterion with the justification naming the missing item and ask QA in `required_fixes` to re-spawn you with the complete packet.
+**Item 8 is evidence, not a criterion.** Weigh its findings the way you weigh anything else in the packet — a well-evidenced finding is a reason to look harder at the criterion it touches, and it may be what tips an uncertain criterion to fail. But: a `findings` verdict does not by itself fail any criterion, an `approve` verdict does not satisfy one, and "the reviewer disagreed" is never a `required_fixes` entry on its own. Never invent a criterion for it, and never let its absence fail a criterion — item 8 is the one packet item whose absence is not itself a finding.
+
+If any of items 1-7 is missing, fail the affected criterion with the justification naming the missing item and ask QA in `required_fixes` to re-spawn you with the complete packet.
 
 ## Evaluation rules
 
@@ -104,9 +108,11 @@ Do not invent fields the schema does not have. `qa-gate.sh grade-record` ignores
 3. Read the diff. For each file in the diff, decide which criteria apply.
 4. Read the F7 completion contract. Cross-check `files_changed` against the diff (they should match); cross-check `decisions` against the SPEC (the calls should be coherent with the brief); read `llm_observations` for substantive content.
 5. Read `LESSONS.md`. For each lesson, ask: does the diff re-introduce this anti-pattern?
-6. Read each applicable rubric. For every criterion, write a one-line pass/fail justification keyed to the artefact in the packet.
-7. Compose the JSON object. If any criterion failed, set `verdict: needs_revision` and write a concrete `required_fixes` entry per failure.
-8. Return the JSON object as your final message — nothing else.
+6. Read the mechanical impact report (item 7). Note the high-fan-in callers; they are what the packet's regression claims have to answer for.
+7. Read the independent review artifact (item 8) if present. Treat every finding as a pointer worth checking against the diff yourself — never as a verdict you adopt.
+8. Read each applicable rubric. For every criterion, write a one-line pass/fail justification keyed to the artefact in the packet.
+9. Compose the JSON object. If any criterion failed, set `verdict: needs_revision` and write a concrete `required_fixes` entry per failure.
+10. Return the JSON object as your final message — nothing else.
 
 If you find yourself wanting to add prose around the JSON, stop. The contract is "JSON only" because `grade-record` is the consumer and it does not parse prose. The QA agent reads the recorded comment afterwards if it needs the narrative.
 

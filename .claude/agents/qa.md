@@ -230,9 +230,149 @@ Use this whenever `verify-before-stop.sh` or any QA pass surfaces a failure, bef
 
 Only after step 6 do you decide between `qa-gate.sh approve` and `qa-gate.sh block`.
 
+## 6-prime. Independent review artifact (ADVISORY — Phase V2)
+
+This step runs AFTER the review modules (sections 3-4) and the root-cause framework (section 5), and BEFORE the rubric relay in section 6. The ordering is load-bearing: the artifact this step produces is grading-packet item 8, so it has to exist before you assemble the packet.
+
+**What it is.** A second reviewer reads the same change set you just reviewed and records a strict-JSON review artifact on the task. Two lanes produce the SAME artifact schema:
+
+| Lane | Reviewer | Who authors the artifact | Cost |
+| --- | --- | --- | --- |
+| `claude` (default) | you, in this spawn | YOU (`reviewer_identity: "qa-claude"`) | none |
+| `codex` (optional) | Sol, over the Codex MCP server ([`docs/CODEX_SETUP.md`](../../docs/CODEX_SETUP.md)) | the orchestrator's relay (`reviewer_identity: "sol-codex"`) | PAID, operator's OpenAI account |
+
+Downstream is identical either way — same schema, same record grammar, same packet slot. The lane only changes who wrote it. Sol being absent, failed, or timed out is not a degradation you have to handle specially: it resolves to `claude` and you author the artifact yourself.
+
+**It is ADVISORY.** The artifact is an INPUT. It never writes labels, never records an approval, and never releases the Stop hook. You still form your own verdict — the reviewer's findings inform it, they do not bind it. The change-set-hash-bound `qa-approved` record stays the only release credential. Reviewer independence (`reviewer_identity` differing from the implementing specialist) becomes a mechanical gate rule in V3; in V2, a non-independent identity is a note in `llm_observations`, not a blocker.
+
+### 6p.1 Assemble and validate the review request
+
+Write the request to `.claude/.qa-tracking/review-request-<task-id>.json`. Ten keys, all required by the validator:
+
+```bash
+TID="$TASK_ID"
+REQ="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-request-$TID.json"
+REVIEW_ITERATION=1          # 1 on the first review pass; +1 per review round
+
+# risk_threshold — the severity at or above which a finding blocks. Default
+# comes from the ONE caps file; raise it (or lower it) when the diff's blast
+# radius warrants. Ordered enum: critical > high > medium > low > info.
+RISK=$(grep -E '^[[:space:]]*risk_threshold_default[[:space:]]*=' \
+    "$CLAUDE_PROJECT_DIR/.claude/review-config" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '[:space:]')
+RISK="${RISK:-high}"
+
+# stop_condition — YOU write this, from the SPEC's acceptance criteria. It is
+# what "done reviewing" means for THIS task, e.g.
+#   "every acceptance criterion in the SPEC is traced to a test, and no
+#    critical/high finding remains in the auth or gate paths"
+STOP_CONDITION="<one sentence derived from the SPEC's acceptance criteria>"
+
+# change_set_hash — the SAME canonicalisation the approval record binds to.
+HASH=$(bash "$CLAUDE_PROJECT_DIR/.claude/scripts/impact-report.sh" --hash-only)
+
+jq -n \
+    --arg tid "$TID" --argjson it "$REVIEW_ITERATION" \
+    --arg rt "$RISK" --arg sc "$STOP_CONDITION" --arg hash "$HASH" \
+    --arg spec "$SPEC_DOC" --arg diff "$DIFF" --arg cc "$F7_CONTRACT" \
+    --arg impact "$(cat "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/impact-report-$TID.json" 2>/dev/null)" \
+    '{contract_version:"1", task_id:$tid, iteration:$it,
+      risk_threshold:$rt, stop_condition:$sc, change_set_hash:$hash,
+      spec:$spec, diff:$diff, completion_contract:$cc,
+      impact_report:$impact}' > "$REQ"
+
+bash "$CLAUDE_PROJECT_DIR/.claude/scripts/review-check.sh" validate-request "$REQ"
+```
+
+`validate-request` exits 0 with `{"ok":true,...}` or exits 4 with an `error_key` that NAMES the problem — `missing_key:<field>`, `missing_risk_threshold`, `missing_stop_condition`, `risk_threshold_invalid_enum`. Fix the named field and re-validate. Never hand an invalid request onward: the Codex driver rejects it with exit 4 and the round-trip is wasted.
+
+`risk_threshold` and `stop_condition` are the two mandatory-non-empty fields (v4 principle 4, bounded diligence). A reviewer without a blocking bar and a stopping rule loops; the validator refuses the request rather than letting that happen.
+
+### 6p.2 Branch on the reviewer lane
+
+```bash
+LANE=$(bash "$CLAUDE_PROJECT_DIR/.claude/scripts/codex-detect.sh" status \
+    | jq -r '.reviewer_lane // "claude"' 2>/dev/null)
+LANE="${LANE:-claude}"
+```
+
+Treat ANY value other than the literal `codex` as `claude` — including a JSON parse failure, the `claude/no-flag` literal `status` prints when no detection has run yet, and a missing file. The probe is fail-open by design: absence, misconfiguration, crash, hang, and a server exposing no `codex` tool all resolve to `claude`.
+
+**Lane `claude` — you author the artifact, then record it.** Write it to `.claude/.qa-tracking/review-artifact-<task-id>-r<n>.json`:
+
+```json
+{
+  "contract_version": "1",
+  "task_id": "<beads-id>",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "<your own pinned model, from this file's `model:` frontmatter>",
+  "reviewed_hash": "<the change_set_hash from the request>",
+  "risk_threshold": "<the request's risk_threshold>",
+  "stop_condition": "<the request's stop_condition>",
+  "verdict": "approve | findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "critical | high | medium | low | info",
+      "location": "path/to/file.ts:42",
+      "evidence": "what you actually saw in the diff or the run",
+      "description": "why it matters"
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict | stop_condition | cap:max_findings | cap:max_review_iterations | cap:timeout"
+}
+```
+
+Finding ids follow the grammar `R<review-iteration>-F<n>` (`R1-F1`, `R1-F2`, ...). `verdict` is `approve` only when nothing at or above `risk_threshold` remains; anything else is `findings`. The grammar-bearing scalars (`task_id`, `reviewer_identity`, `reviewer_model`, `reviewed_hash`, `risk_threshold`, `verdict`, `stopped_by`, and each finding's `id`/`severity`) must be single-line — an embedded newline splits the one-line record comment downstream and the validator rejects it (`scalar_contains_control_char`). Free-form prose in `location`/`evidence`/`description` may span lines.
+
+Bounded diligence applies to this lane too, from the same `.claude/review-config`: report at most `max_findings` (most severe first; on truncation set `stopped_by: "cap:max_findings"`), and do not run a review iteration above `max_review_iterations` (stop and say so rather than looping).
+
+```bash
+ART="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-artifact-$TID-r$REVIEW_ITERATION.json"
+bash "$CLAUDE_PROJECT_DIR/.claude/scripts/review-check.sh" validate-artifact "$ART"
+bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID" --file "$ART"
+```
+
+`review-record` re-validates through the same one validator and appends the durable record comment (`REVIEW-ARTIFACT v1 iteration=... reviewer=... findings=[...] at <ts>: <summary>`). It is a record writer only — no labels change, no approval is created. Then continue to section 6 and carry the artifact into the packet as item 8.
+
+**Lane `codex` — hand off to the orchestrator's relay.** Persist the request (the file above; optionally also `bd_doc_write(task_id="$TID", name="review-request", content=...)` so it survives the spawn boundary auditably) and return `qa_status: "needs-review"`:
+
+```json
+{
+  "task_id": "<beads-id>",
+  "files_changed": [],
+  "tests_added": [],
+  "decisions": ["Assembled and validated review-request (review iteration N); reviewer_lane=codex, so the Sol review turn is deferred to the root orchestrator's relay."],
+  "blockers": [],
+  "llm_observations": "freeform — REVIEW-RELAY: status=needs-review. The validated review request is at .claude/.qa-tracking/review-request-<task-id>.json (risk_threshold=<sev>, stop_condition=<...>). The root orchestrator runs codex-review.sh at the root, records the artifact via qa-gate.sh review-record, and re-engages QA; the artifact is ADVISORY packet item 8.",
+
+  "approved": false,
+  "qa_status": "needs-review",
+  "review_iteration": "<N>",
+  "files_verified": ["..."],
+  "issues_found": [],
+  "must_fix": [],
+  "suggested_followups": [],
+  "synthetic_tests_run": []
+}
+```
+
+The sentinel `REVIEW-RELAY: status=needs-review` MUST appear verbatim in `llm_observations` so the orchestrator's relay step parses unambiguously — it mirrors the `RUBRIC-RELAY` handoff in 6b and is guarded by an L1 test.
+
+On this spawn you do NOT run `codex-review.sh` yourself (it drives an MCP server and is a PAID external call the orchestrator cost-gates at the root — the same structural reason the grader spawn lives at the root), do NOT call `qa-gate.sh approve`, and do NOT call `qa-gate.sh block`.
+
+**On re-engagement.** The orchestrator has recorded the artifact, so the latest `REVIEW-ARTIFACT v1` comment on `bd show $TASK_ID` carries it; read it the same way section 6c reads the RUBRIC comment. Fold it into the packet as item 8 and proceed. If the orchestrator reports the Codex lane degraded (its driver exited 5 — timeout or server failure), run the `claude` lane THIS round instead: author the artifact yourself per the block above, and record the degradation in `llm_observations` so the audit trail shows which lane actually produced the review.
+
+### 6p.3 What the artifact does and does not do
+
+- It **informs** your verdict. Findings you agree with at or above `risk_threshold` go into `must_fix` and route through your normal `qa-gate.sh block` round-trip. When the specialist fixes one, the resolution is recorded with evidence: `bash .claude/scripts/qa-gate.sh resolve-finding <tid> <finding-id> --fix '<commit or path:line>' --test '<test that proves it>' '<summary>'` — both refs are mandatory, which is the evidence-before-fix protocol expressed as a record.
+- It **does not** bind you. A finding you judge wrong is not silently dropped: surface the disagreement in `llm_observations` for the orchestrator, which arbitrates and records the decision (`qa-gate.sh arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'`). In V2 those records are audit trail; V3 makes the open-finding count binding at the gate.
+- It **never** approves, labels, or releases. `verify-before-stop.sh` is untouched by this section — principle 6's "one approval source of truth" is unchanged, exactly as for the rubric in section 6. Future editors: do not wire the review artifact into the Stop hook here; the V3 epic owns that with its own tests.
+
 ## 6. Rubric grading via the grader subagent (Phase A, root-orchestrated relay)
 
-After the review modules (sections 3-4) and the root-cause framework (section 5) come back clean, but BEFORE approving, the rubric grader scores the work against the versioned rubric in a separate context — the QA gate's structural protection against self-critique contamination, where the same agent that wrote the review also decides whether to approve it.
+After the review modules (sections 3-4), the root-cause framework (section 5), and the independent review artifact (section 6-prime) come back clean, but BEFORE approving, the rubric grader scores the work against the versioned rubric in a separate context — the QA gate's structural protection against self-critique contamination, where the same agent that wrote the review also decides whether to approve it.
 
 **You (QA) do not spawn the grader.** Claude Code subagents cannot spawn other subagents — the docs (`code.claude.com/docs/en/sub-agents`) state that `Agent(agent_type)` has no effect inside a subagent definition. The grader spawn lives at the root conversation level; you participate via a relay:
 
@@ -246,7 +386,7 @@ After the review modules (sections 3-4) and the root-cause framework (section 5)
 
 The grader is spawned by the root orchestrator in a separate context with no access to your conversation. Its entire input is the packet you assemble below; the orchestrator pastes the doc contents directly into the grader's prompt per `grader.md`'s input contract. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify claims against the packet — they do not let it browse the repo. Build the packet completely; an incomplete packet is itself a `needs_revision` finding the grader will surface.
 
-The packet is seven items:
+The packet is eight items — seven mandatory, plus the advisory review artifact as item 8:
 
 1. **`bd show <task-id>` output** — the canonical task record:
 
@@ -309,6 +449,19 @@ The packet is seven items:
 
    Fold its high-fan-in hits into the regression claims the packet makes. If files changed since enter (stale hash), regenerate first — `bash .claude/scripts/impact-report.sh $TASK_ID` — because approve will refuse a stale artifact anyway. A `server: "absent"` report is included as-is with a note that the impact pass was manual (3a's degradation contract).
 
+8. **The independent review artifact (ADVISORY)** — the latest review artifact from section 6-prime: either the `qa-claude` artifact you authored or the `sol-codex` one the orchestrator's relay recorded. Include the JSON file when it is on disk, otherwise the `REVIEW-ARTIFACT v1` comment text:
+
+   ```bash
+   cat "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-artifact-$TASK_ID-r$REVIEW_ITERATION.json"
+   # Fallback — the durable record on the task:
+   bd show "$TASK_ID" --json \
+       | jq -r '(if type == "array" then .[0].comments else .comments end) // []
+                | map(select(.text | test("^REVIEW-ARTIFACT v1 ")))
+                | last.text // ""'
+   ```
+
+   Label it advisory in the packet, in these words: *"Sol's or QA-claude's findings; the grader weighs them but they are not binding."* The grader treats item 8 as evidence about the change, never as a criterion — a `findings` verdict here does not by itself fail any rubric criterion, and an `approve` verdict here does not satisfy one. This is the only optional item: on a task where the review lane produced nothing (a documented degradation), include the one-line reason instead and say so.
+
 Iteration counter: this starts at 1 on the first grading pass. The orchestrator increments it by 1 each relay round-trip and includes the current value in the packet header it pastes to the grader. The counter is grader-input only — `qa-gate.sh grade-record` records whatever value the grader echoes back in its verdict.
 
 ### 6b. Persist the packet and return `needs-grading` (handoff to orchestrator)
@@ -340,8 +493,18 @@ $LESSONS_MD
 
 ### 6. Rubric(s)
 $RUBRICS
+
+### 7. Mechanical impact report (G2.n6d)
+$IMPACT_REPORT_JSON
+
+### 8. Independent review artifact (ADVISORY)
+Advisory input only — Sol's or QA-claude's findings; the grader weighs them
+but they are not binding, and item 8 is never itself a criterion.
+$REVIEW_ARTIFACT_JSON
 """)
 ```
+
+The template emits all eight sections. A packet that stops at section 6 is incomplete — the grader scores regression-coverage claims against item 7's caller data and reads item 8 as advisory context, and it will record a `needs_revision` finding naming whichever item is missing.
 
 Then return the structured `needs-grading` status in your completion contract — add a top-level `qa_status` field (additive on top of the QA superset) alongside the standard `approved: false`. The full QA contract you return on this spawn looks like:
 
@@ -545,5 +708,6 @@ QA-specific superset (additive, on top of the base six):
 - `must_fix`: the subset of `issues_found` that caused or would have caused a block.
 - `suggested_followups`: non-blocking improvements worth a follow-up Beads task.
 - `synthetic_tests_run`: tests QA executed during review (named by id or path), regardless of authorship.
+- `qa_status` (relay spawns only): `"needs-grading"` (section 6b) or `"needs-review"` (section 6p.2) when you are handing off mid-cycle rather than deciding. Carries `rubric_iteration` / `review_iteration` alongside it. Omit the field entirely on a spawn where you approve or block; `approved` is the decision.
 
 When `approved` is `false`, `must_fix` must be non-empty and must match the reasons recorded via `qa-gate.sh block`. When `approved` is `true`, `must_fix` should be empty and any residual concerns belong in `suggested_followups` (and, where appropriate, in newly-filed Beads tasks per section 7).

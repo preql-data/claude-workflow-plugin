@@ -36,6 +36,33 @@ v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`)
   `max` remains the verdict per the runbook's conjunctive rule (details on
   meta-task `claude-workflow-plugin-4o2`).
 
+### Added (Phase V2 — Sol reviewer lane, epic 1vq, 2026-07-25)
+- Optional, advisory external reviewer lane (GPT-5.6-Sol via the Codex CLI's
+  MCP server mode). Absent/failed/timeout Codex behaves identically to
+  "not connected" — the plugin's fresh-context Claude review path covers the
+  role, proven byte-identical by a degradation spec.
+- Helpers (1vq.1): `codex-detect.sh` (layered feature-detect, atomic
+  reviewer-lane flag), `.claude/review-config` (the one place for caps),
+  `review-check.sh` (validate-request/-artifact/gate — the one counter,
+  structurally codex-free), `codex-review.sh` (FIFO JSON-RPC driver, caps +
+  cap-truncation + timeout, advisory-only), and `qa-gate.sh` record subcommands
+  `review-record`/`resolve-finding`/`arbitrate` (byte-exact V3 contract
+  grammars, no gate enforcement yet). Stub-Codex L2 harness + a byte-identical
+  degradation spec; two mid-review defects (a silently-non-executing test, a
+  gate finding-suppression hole) found and closed with load-bearing METAs.
+- Prompt wiring (1vq.2): qa.md §6-prime advisory review-artifact step,
+  orchestrator.md §5c REVIEW-RELAY relay (paid, cost-confirmed), grading packet
+  reconciled to eight items (item 8 advisory/non-criterion), and
+  `docs/CODEX_SETUP.md` (every command live-verified; user-scope registration is
+  mechanically required — the detector reads only top-level `.mcpServers.codex`).
+
+### Fixed (Phase V1 follow-up — model resolver, bug en9, 2026-07-25)
+- `model-select.sh` top-pick sorted recency-primary, so Opus 5 (newer) beat
+  Fable 5 for the "top" lane. Fix: capability CLASS is now the primary sort key
+  (tier order beats recency for known families; unknown families stay top-class
+  for day-zero adoption). Result: orchestrator/reviewers on the newest top-tier
+  family, implementers on the newest Opus-class. Regression + META pinned.
+
 ### Added (Phase V1 — role-aware model selection, epic bi3, 2026-07-25)
 - `.claude/model-roles` config (orchestrator=top, implementer=opus-class,
   reviewer=top; all-top reproduces v3.5). `model-select.sh` resolves per role
