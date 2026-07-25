@@ -52,6 +52,27 @@ v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`)
   live role split: orchestrator/qa/grader/judge -> `claude-fable-5`,
   backend/frontend/devops -> newest opus-class in the account listing.
 
+### Fixed (Phase V1 follow-up — resolver capability class, en9, 2026-07-25)
+- `model-select.sh`'s `pick_best` sorted by recency FIRST, so a newer but
+  less capable family took the `top` lane: with `claude-opus-5` (created
+  2026-07-24) in the same listing as `claude-fable-5` (2026-06-07),
+  orchestrator/qa/grader/judge were dragged onto Opus and the v4 role split
+  collapsed to a single model. The sort is now
+  `[._class, -(._ts), -(._ctx)]` — capability class (the family's position in
+  `.claude/model-ranking`) PRIMARY, recency only WITHIN a class. An UNKNOWN
+  family is ranked in the TOP class, so day-zero adoption of a genuinely-new
+  above-Fable tier still wins on recency; the documented residual (a new
+  BELOW-Fable family also lands in the top class) is covered by the
+  unknown-family warning and a `!<family>` exclusion. Exclusions still filter
+  first; the MANUAL-adopt and fail-open contracts are unchanged.
+- Tests: L2 `ms-T1..T5` (tier-vs-recency regression on the real listing shape,
+  the end-to-end role split, unknown-newer/unknown-older, and the top-class
+  bogus-date manual-adopt consequence) plus the required `ms-TM` META — a
+  `pick_best` reverted to the recency-primary sort must make `ms-T1` fail.
+  Verified RED against the pre-fix resolver (pass=76 fail=12), GREEN after
+  (pass=88 fail=0). `ms-Y` re-scoped from cross-family to intra-class recency
+  (it asserted the pre-en9 contract); it passes against both resolvers.
+
 ### Changed (Phase V0)
 - `settings.json`: removed `env.CLAUDE_CODE_EFFORT_LEVEL` (a non-xhigh value
   deactivates ultracode's orchestration layer per live docs); pinned

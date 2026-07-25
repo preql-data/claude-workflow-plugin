@@ -49,24 +49,39 @@
 #   TTL is 3600s. A stale cache is ignored (we refresh); a missing cache
 #   triggers an API fetch. --refresh ignores TTL outright.
 #
-# Ranking semantics (hotfix vlp.1):
-#   `.claude/model-ranking` is an EXCLUSION + TERTIARY-TIE-BREAK file.
-#   Lines starting with `!` are exclusion patterns ("!claude-haiku" drops
-#   every id whose family prefix is `claude-haiku-`). All other lines are
-#   family prefixes used only to break ties when two surviving entries
-#   have identical `created_at` AND `max_input_tokens`. The picker DOES
-#   NOT restrict candidates to ranked families; unknown families are
-#   first-class candidates so a newly-launched tier above Fable wins
-#   automatically without editing this file.
+# Ranking semantics (hotfix vlp.1; capability-class fix en9):
+#   `.claude/model-ranking` is an EXCLUSION list plus a CAPABILITY-TIER
+#   order. Lines starting with `!` are exclusion patterns ("!claude-haiku"
+#   drops every id whose family prefix is `claude-haiku-`) and are applied
+#   FIRST, before any ranking. Every other line is a family prefix, listed
+#   best-tier-first (fable > mythos > opus > sonnet > haiku today); a
+#   candidate's position in that list is its capability CLASS. The picker
+#   still does NOT restrict candidates to ranked families: an UNKNOWN
+#   family is given the TOP class, so a newly-launched tier above Fable
+#   still wins on recency without editing this file (day-zero adoption).
 #
-# Sort (primary -> tertiary):
-#   1. created_at DESC (newest first; parsed as ISO 8601).
-#   2. max_input_tokens DESC (larger context wins on tie).
-#   3. Ranking-file position ASC (families listed earlier preferred).
+# Sort (primary -> tertiary) — en9:
+#   1. capability class ASC (ranking-file tier position; unknown family =
+#      top class). A KNOWN lower-tier family NEVER outranks a known
+#      higher-tier family however much newer it is. That was the en9
+#      defect: with recency primary, claude-opus-5 (2026-07-24) displaced
+#      claude-fable-5 (2026-06-07) as `top` and dragged the orchestrator
+#      and reviewer lanes onto Opus, collapsing the v4 role split.
+#   2. created_at DESC (newest first WITHIN the class; parsed ISO 8601).
+#   3. max_input_tokens DESC (larger context wins on a date tie).
+#   Residual (deliberate, documented): a brand-new family name that is
+#   really BELOW Fable also lands in the top class and would win on
+#   recency. The "new family/families in listing" warning names every
+#   unknown family so the operator can place it in the tier order or drop
+#   it with `!<family>`.
 #   When a winner's created_at is missing or unparseable, the helper
 #   emits a LOUD notice naming the id and the `/workflow-model <id>`
 #   adopt command — and refuses to auto-adopt. The session keeps the
 #   current pin until the operator runs the adopt command explicitly.
+#   Because class outranks recency, a TOP-class entry with an unparseable
+#   created_at now beats a well-formed LOWER-class entry and so takes that
+#   manual-adopt path instead of silently falling through to the lower
+#   tier — loud-and-unchanged beats a silent downgrade.
 #
 # pick_best stdout contract (defect 3fn fix — never silent stale pin):
 #   Happy path:        `<id>\n`
@@ -284,8 +299,10 @@ load_exclusions() {
 }
 
 # load_tiers — print one family prefix per line, in file order, of the
-# non-exclusion entries. These are the tertiary tie-break preference;
-# they no longer restrict candidate selection.
+# non-exclusion entries. File order IS the capability-tier order (best
+# first): a line's index is the class pick_best sorts on FIRST (en9).
+# They still do not restrict candidate selection — an id matching no
+# prefix is an unknown family and gets the TOP class (see pick_best).
 load_tiers() {
     load_ranking_raw | grep -v '^!'
 }
@@ -303,23 +320,37 @@ load_tiers() {
 # is NOT used because pick_best is always invoked via `$(...)` and
 # Bash subshell assignments do not propagate.
 #
-# Algorithm (hotfix vlp.1):
+# Algorithm (hotfix vlp.1; capability-class primary since en9):
 #   1. Drop entries whose id starts with any "!<excl>-" prefix from the
-#      ranking file.
+#      ranking file. Exclusions are applied FIRST, before any ranking.
 #   2. Sort surviving entries by:
-#        primary:   created_at DESC (parsed as ISO 8601; unparseable
-#                   gets -1 so it sorts to the bottom — but if it ends
-#                   up the winner anyway, the MANUAL prefix is emitted
-#                   on stdout and the apply path refuses auto-rewrite).
-#        secondary: max_input_tokens DESC (larger context wins on tie).
-#        tertiary:  ranking-file position ASC (families listed earlier
-#                   preferred; unknown families slot after every listed
-#                   family for the tie-break).
+#        primary:   capability class ASC — the index of the first
+#                   ranking-file tier prefix the id matches (fable=0,
+#                   mythos=1, opus=2, sonnet=3, haiku=4 with the shipped
+#                   file). An id matching NO tier prefix is an unknown
+#                   family and gets class 0, the same class as the top
+#                   tier, so it competes for the win on recency.
+#        secondary: created_at DESC within the class (parsed as ISO 8601;
+#                   unparseable gets -1 so it sorts to the bottom of its
+#                   class — but if it ends up the winner anyway, the
+#                   MANUAL prefix is emitted on stdout and the apply path
+#                   refuses auto-rewrite).
+#        tertiary:  max_input_tokens DESC (larger context wins on a tie).
 #   3. Emit the head's id (with the MANUAL prefix when appropriate).
 #
-# We deliberately DO NOT family-gate. Unknown families are first-class
-# candidates so a newly-launched tier above the listed families wins
-# without an edit to the ranking file. The header doc covers this.
+# Why class is primary (en9): the tri-model design wants `top` to be the
+# newest model in the MOST CAPABLE family, not the newest model overall.
+# With recency primary, claude-opus-5 (2026-07-24) beat claude-fable-5
+# (2026-06-07) and the orchestrator + reviewer lanes silently collapsed
+# onto the implementer's Opus lane.
+#
+# We still deliberately DO NOT family-gate. Unknown families are
+# first-class candidates AT THE TOP CLASS, so a newly-launched tier above
+# the listed families wins by recency without an edit to the ranking file.
+# The residual — an unknown family that is actually BELOW Fable also
+# lands in the top class — is handled by the operator: the helper
+# unknown_families_warning() names every unknown family and `!<family>`
+# excludes it. The file-header doc covers this trade-off in full.
 pick_best() {
     local models="$1"
 
@@ -329,26 +360,36 @@ pick_best() {
 
     # Single-pass jq:
     #   - Filter out excluded ids (any id starting with "<excl>-").
-    #   - Annotate each with _ts (created_at parsed to epoch via fromdate?,
-    #     or -1 when missing/unparseable), _ctx (max_input_tokens), and
-    #     _rank (lowest index of a tier whose prefix matches, or
-    #     |tiers| for "unranked" — places unknown families at the back
-    #     of the tertiary tie-break).
-    #   - Sort by _ts DESC, _ctx DESC, _rank ASC.
+    #   - Annotate each with _class (capability tier: the index of the
+    #     first ranking-file tier prefix the id matches, or 0 — the TOP
+    #     class — for an unknown family), _ts (created_at parsed to epoch
+    #     via fromdate?, or -1 when missing/unparseable) and _ctx
+    #     (max_input_tokens).
+    #   - Sort by _class ASC, then _ts DESC, then _ctx DESC (en9: class is
+    #     PRIMARY so a newer LOWER-tier family can never take the top lane;
+    #     recency only decides inside a class, which is where day-zero
+    #     adoption of a new top-class family happens).
     #   - Emit the head (or null when no candidates).
     local pick
     pick=$(jq -n -c \
         --argjson models "$models" \
         --argjson excludes "$exclusions_json" \
         --argjson tiers "$tiers_json" '
-        def rank_for($id; $tiers):
+        def class_for($id; $tiers):
             # Bind each tier entry as $e before the pipe — `.value` inside
             # a `select($id | ...)` body would be evaluated against $id (a
             # string), tripping "Cannot index string with string". The
             # `as $e` binding scopes the lookup outside the pipe.
+            #
+            # No match -> 0. jq only treats null/false as falsy, so a
+            # genuine index of 0 (the top tier) survives the `//` intact;
+            # only the null from an empty match list falls through. That
+            # is the en9 unknown-family rule: an unrecognised family is
+            # ranked WITH the top tier and wins on recency, never below a
+            # known lower tier.
             ($tiers | to_entries
              | map(. as $e | select($id | startswith($e.value + "-")))
-             | (first | .key) // ($tiers | length));
+             | (first | .key) // 0);
 
         def excluded($id; $excludes):
             ($excludes | any(. as $e | $id | startswith($e + "-")));
@@ -356,14 +397,14 @@ pick_best() {
         ($models // [])
         | map(select(excluded(.id; $excludes) | not))
         | map(. + {
+            _class: class_for(.id; $tiers),
             _ts: ((.created_at // "")
                   | if . == "" then -1
                     else (fromdate? // -1)
                     end),
-            _ctx: (.max_input_tokens // 0),
-            _rank: rank_for(.id; $tiers)
+            _ctx: (.max_input_tokens // 0)
           })
-        | sort_by([-(._ts), -(._ctx), ._rank])
+        | sort_by([._class, -(._ts), -(._ctx)])
         | (first // null)
     ' 2>/dev/null)
 
@@ -401,11 +442,14 @@ pick_best() {
 # unknown_families_warning <models-json> — surface families seen in the
 # listing that are NOT in the ranking file's tier list (exclusions are
 # omitted from this check; an explicitly-excluded family is intentional).
-# This is the "brand-new family is here, you may want to bump its rank"
-# affordance — it never blocks selection. Under the new contract,
-# unknown families are SELECTED automatically; the warning is just a
-# heads-up so the operator can curate the tier list if they want a
-# different tie-break order in the future.
+# This is the "brand-new family is here, you may want to place it in the
+# tier order" affordance — it never blocks selection. Under the en9
+# contract an unknown family is ranked in the TOP capability class, so it
+# is SELECTED automatically as soon as it is newer than the top tier
+# (day-zero adoption). That is also the residual this warning exists to
+# cover: a new family that is really BELOW Fable gets the same top class,
+# so the operator needs to see the name to either place it in the tier
+# list or drop it with `!<family>`.
 unknown_families_warning() {
     local models="$1"
     local tiers excluded
@@ -428,7 +472,7 @@ unknown_families_warning() {
 $listed
 EOF
     if [ -n "$unknown" ]; then
-        _warn "new family/families in listing (selected when newest, add to $RANKING_FILE to influence tie-break order or exclude with '!<family>'): $unknown"
+        _warn "new family/families in listing (ranked in the TOP capability class, so they are selected as soon as they are newer than the top tier — add to $RANKING_FILE to place them in the tier order, or exclude with '!<family>'): $unknown"
     fi
 }
 
