@@ -18,7 +18,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No unreleased changes. The next release entry will go here.
+v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`).
+
+### Added (Phase V0 — platform restore and effort verdict, epic cnz, 2026-07-25)
+- Effort-verdict launch wiring: committed `.claude/effort-verdict` (verdict: `max`,
+  recorded by the cnz.2 A/B interference test) + `make session` launch target +
+  session-start Warning 4 verdict reconciliation and Warning 5 platform guards
+  (`CLAUDE_CODE_SUBAGENT_MODEL` override, subagent spawn-depth drift).
+- Subagent spawn evidence log (`.claude/.qa-tracking/subagent-spawns.log`, written
+  by `subagent-start.sh`) and SubagentStart wiring in `settings.json` (parity with
+  `hooks.json`).
+- New L1 tests: `platform-audit.test.sh` (18 assertions + 2 META),
+  `make-session.test.sh` (7 assertions + META); `effort-fail-open.test.sh` inverted
+  to the new baseline.
+- `docs/EFFORT-AB-TEST.md` runbook and the recorded A/B outcome: ultracode showed
+  ZERO orchestration interference (pre-registered expectation NOT confirmed), but
+  `max` remains the verdict per the runbook's conjunctive rule (details on
+  meta-task `claude-workflow-plugin-4o2`).
+
+### Changed (Phase V0)
+- `settings.json`: removed `env.CLAUDE_CODE_EFFORT_LEVEL` (a non-xhigh value
+  deactivates ultracode's orchestration layer per live docs); pinned
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (v2.1.219 flipped the platform default
+  to depth 3; the relay architecture assumes depth 1).
+- Installers (`install.sh`/`install.ps1`): Update-mode settings merge now deletes
+  the legacy `env.CLAUDE_CODE_EFFORT_LEVEL` key (with a notice) — installed
+  projects migrate on their next update.
+- `docs/MCP_SERVERS.md`: bd-mcp troubleshooting for installed projects (v2.1.196
+  workspace-trust behavior, `${CLAUDE_PROJECT_DIR:-.}` form), cross-linked from
+  README Caveats; CONTRIBUTING effort recipe rewritten to the three-layer model
+  (floor `effortLevel: xhigh` / session verdict via `make session` / frontmatter
+  `effort: max` ceiling).
 
 ## [3.5.0] - 2026-06-14
 

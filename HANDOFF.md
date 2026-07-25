@@ -5,7 +5,17 @@ work on this repository.
 
 ## Current state
 
-- **v4.0.0 (Phase V0 — platform restore, in progress)** — parent epic
+- **v4.0.0 (Phase V0 — platform restore, COMPLETE 2026-07-25)** — epic
+  `claude-workflow-plugin-cnz` closed; both children (cnz.1 offline wiring,
+  cnz.2 paid A/B) qa-approved with hash-bound records. Effort verdict: `max`
+  (recorded in `.claude/effort-verdict`; per-criterion table on meta-task
+  `claude-workflow-plugin-4o2` — the pre-registered ultracode-interference
+  expectation was NOT confirmed, but max wins on the conjunctive rule).
+  Launch a working session via `make session`. Next: Phase V1 (role-aware
+  model selection, epic `claude-workflow-plugin-bi3`) — implementers move to
+  the newest Opus-class (Opus 5 per operator note of 2026-07-25), orchestrator
+  to the resolver top pick.
+- **v4.0.0 (Phase V0 — original in-progress note)** — parent epic
   `claude-workflow-plugin-cnz`; offline wiring `claude-workflow-plugin-cnz.1`.
   Removed the `env.CLAUDE_CODE_EFFORT_LEVEL` pin: the live docs are explicit
   that any non-xhigh value there deactivates ultracode's workflow

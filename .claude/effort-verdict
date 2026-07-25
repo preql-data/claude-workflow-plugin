@@ -16,4 +16,15 @@
 # indistinguishable from a plain xhigh session inside the hooks — session-start
 # is honest about that.
 max
-# PROVISIONAL until docs/EFFORT-AB-TEST.md is executed (cnz.2)
+# RECORDED 2026-07-25 by the cnz.2 A/B run (see the per-criterion table on
+# meta-task claude-workflow-plugin-4o2). Arm B (max): all four criteria PASS,
+# full run. Arm A (ultracode): time-boxed 39 min per operator cost decision —
+# ZERO orchestration interference observed (no Workflow-layer engagement, all
+# spawns on-list, plugin flow faithful), so the pre-registered expectation of
+# a criterion-4 failure was NOT confirmed. Verdict stays `max` because the
+# runbook requires ultracode to pass all four fully-observed criteria AND
+# offer a real benefit: criteria 2-3 were not fully re-verified under the
+# time-box, and no benefit was observed — ultracode runs the model at its
+# fixed xhigh proxy, below the max this verdict pins, with identical
+# orchestration behavior. Rollback/revisit: re-run the full arm A per
+# docs/EFFORT-AB-TEST.md and update this line if it passes all four.
