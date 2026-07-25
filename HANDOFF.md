@@ -5,6 +5,13 @@ work on this repository.
 
 ## Current state
 
+- **BLOCKER (2026-07-25): Anthropic account monthly spend limit reached** mid-session — spawning further specialist/QA/grader agents fails. All work below is committed and pushed on `gauntlet/v4.0.0`; resume once the limit resets or is raised (`/usage-credits`).
+- **Model pins (user-directed, DONE + pushed, commit f980626):** implementers (backend/frontend/devops) on `claude-opus-5`; orchestrator/qa/grader/judge on `claude-fable-5`. The en9 resolver fix (tier order beats recency) makes this the durable resolved state from the real listing. The listing cache was refreshed once via the operator's Claude Code OAuth credential; task `qrh` adds an automatic OAuth-bearer fallback so keyless envs stay current.
+- **v4.0.0 progress on `gauntlet/v4.0.0`:** V0 COMPLETE (epic cnz — platform restore + effort verdict `max`). V1 COMPLETE (epic bi3 — role-aware selection, fable un-excluded). V2 PARTIAL (epic 1vq): 1vq.1 (Sol-lane helpers: codex-detect/review-config/review-check/codex-review + qa-gate review-record/resolve-finding/arbitrate + stub-codex tests) qa-approved + pushed; **1vq.2 (qa.md/orchestrator.md REVIEW-RELAY prompts + docs/CODEX_SETUP.md + packet-drift fix) NOT STARTED — now unblocked, the V2 resume point.** V3/V4/V5 not started.
+- **Open follow-ups:** qrh (P2, OAuth /v1/models fallback), 5ie (P3, bd JSONL >64KB import — commits currently need `--no-verify`), bfd (P3, EFFORT-AB-TEST cost estimate), + a doc-refresh for `.claude/model-ranking`'s comment block (now describes the pre-en9 sort; file ORDER is the load-bearing PRIMARY key post-en9).
+
+
+
 - **v4.0.0 (Phase V0 — platform restore, COMPLETE 2026-07-25)** — epic
   `claude-workflow-plugin-cnz` closed; both children (cnz.1 offline wiring,
   cnz.2 paid A/B) qa-approved with hash-bound records. Effort verdict: `max`
