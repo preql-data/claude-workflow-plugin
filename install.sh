@@ -579,6 +579,15 @@ if [ -f "$SOURCE_DIR/.claude/rubric-config" ]; then
     copy_file "$SOURCE_DIR/.claude/rubric-config" "$TARGET/.claude/rubric-config"
 fi
 
+# Review config (v4.0.0 Phase V2) ----------------------------------------------
+# Bounded-diligence caps for the optional Sol reviewer lane, read by
+# codex-review.sh (the ONE place caps live). Single file, plain text.
+# Deliberately NOT in the required-source check — codex-review.sh fails open to
+# the documented defaults when the file is absent.
+if [ -f "$SOURCE_DIR/.claude/review-config" ]; then
+    copy_file "$SOURCE_DIR/.claude/review-config" "$TARGET/.claude/review-config"
+fi
+
 # Model-ranking (Phase 0 / v3.1.0) ---------------------------------------------
 # Read by model-select.sh on SessionStart. Single file, plain text.
 if [ -f "$SOURCE_DIR/.claude/model-ranking" ]; then

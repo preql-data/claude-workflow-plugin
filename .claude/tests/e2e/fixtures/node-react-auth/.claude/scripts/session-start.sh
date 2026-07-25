@@ -99,6 +99,36 @@ if [ -x "$MODEL_SELECT_SH" ]; then
     MODEL_SELECT_MSG=$(printf '%s' "$MODEL_SELECT_STDERR" | grep '^model-select:' | tail -1 || true)
 fi
 
+# v4.0.0 Phase V2 (1vq.1): resolve the reviewer lane via codex-detect.sh under
+# the SAME bounded timeout/gtimeout guard as model-select (5s). Sol (the Codex
+# review path) is ADVISORY and STRICTLY OPTIONAL — codex-detect.sh always exits
+# 0 and resolves absence/failure/timeout to lane=claude, so this never blocks
+# the session. The resolved lane is folded into the context as a single line;
+# a probe that fails to answer becomes a non-blocking warning.
+CODEX_DETECT_SH="$PROJECT_DIR/.claude/scripts/codex-detect.sh"
+REVIEWER_LANE=""
+if [ -x "$CODEX_DETECT_SH" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        REVIEWER_LANE=$(timeout 5 bash "$CODEX_DETECT_SH" detect 2>/dev/null || true)
+    elif command -v gtimeout >/dev/null 2>&1; then
+        REVIEWER_LANE=$(gtimeout 5 bash "$CODEX_DETECT_SH" detect 2>/dev/null || true)
+    else
+        REVIEWER_LANE=$(bash "$CODEX_DETECT_SH" detect 2>/dev/null || true)
+    fi
+    REVIEWER_LANE=$(printf '%s' "$REVIEWER_LANE" | tr -d '[:space:]')
+    case "$REVIEWER_LANE" in
+        codex|claude) ;;  # resolved cleanly; folded into context below
+        *)
+            # Empty/garbled == the probe hung past 5s or was killed. Fail-open
+            # to claude; surface a non-blocking note so the operator knows the
+            # advisory lane could not be resolved this session.
+            WARNINGS+="
+- reviewer-lane: codex-detect probe did not resolve within 5s; defaulting to the Claude review path (advisory Sol lane unavailable this session)."
+            REVIEWER_LANE="claude"
+            ;;
+    esac
+fi
+
 # Warning 1: Beads version pin (D6) -------------------------------------------
 BD_VERSION_RAW=$(bd --version 2>/dev/null | head -1 || echo "")
 BD_VERSION_NUM=$(echo "$BD_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
@@ -318,6 +348,18 @@ if [ -n "$WARNINGS" ]; then
 ## Workflow warnings (non-blocking)
 $WARNINGS
 </workflow_warnings>
+"
+fi
+
+# 5a. Phase V2 (1vq.1): fold the resolved reviewer lane into the context so the
+# orchestrator/QA prompts can engage the Sol lane when it is `codex`. This is a
+# single advisory line; the lane never gates the session (claude is the default
+# and identical-to-absent behaviour).
+if [ -n "$REVIEWER_LANE" ]; then
+    CONTEXT+="
+<reviewer_lane>
+reviewer_lane: $REVIEWER_LANE
+</reviewer_lane>
 "
 fi
 

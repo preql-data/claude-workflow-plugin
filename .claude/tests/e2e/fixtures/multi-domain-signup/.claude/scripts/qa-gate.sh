@@ -29,6 +29,15 @@
 #                                           Reads strict-JSON verdict from --file or stdin.
 #                                           Appends a Beads comment; on satisfied flips
 #                                           rubric-pending -> rubric-satisfied.
+#   review-record <task-id> [--file <path>] Phase V2: validate a reviewer artifact via
+#                                           review-check.sh then append the REVIEW-ARTIFACT
+#                                           v1 record comment (record writer only).
+#   resolve-finding <tid> <fid> --fix <ref> --test <ref> <summary>
+#                                           Phase V2: append a RESOLVED <fid> comment
+#                                           (id must be in the latest REVIEW-ARTIFACT).
+#   arbitrate <tid> <fid> <overrule|sustain> <rationale>
+#                                           Phase V2: append an ARBITRATION <fid> comment
+#                                           (id must be in the latest REVIEW-ARTIFACT).
 #
 # Output: every subcommand prints structured JSON to stdout. Errors go to stderr.
 # JSON shape (per principle #9 - free-form `observations` for LLM-side context):
@@ -214,6 +223,12 @@ remove_rubric_satisfied() {
 # one. Path uses the same task-id sanitisation as the iteration counter.
 IMPACT_REPORT_SCRIPT="$PROJECT_DIR/.claude/scripts/impact-report.sh"
 
+# Phase V2 (1vq.1): the ONE reviewer-record validator/counter. review-record
+# validates artifacts through this subprocess rather than carrying a second
+# schema validator (mirrors how compute_change_set_hash defers to
+# impact-report.sh --hash-only). This script is reviewer-transport-agnostic.
+REVIEW_CHECK_SCRIPT="$PROJECT_DIR/.claude/scripts/review-check.sh"
+
 impact_report_path_for() {
     local sanitized
     sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
@@ -324,6 +339,24 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                   is the QA agent's move, not this script's)
               Malformed input exits non-zero with a structured JSON error
               naming the offending key.
+  review-record <task-id> [--file <path>]
+              Phase V2: record a reviewer artifact. Validates the artifact
+              JSON via review-check.sh (the ONE validator) then appends the
+              load-bearing comment:
+                REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> model=<m>
+                reviewed_hash=<h> risk_threshold=<sev> verdict=<v>
+                stopped_by=<s> findings=[<id>:<sev>,...] at <ts>: <summary>
+              (empty findings render as findings=[]). Record writer only —
+              no approve/Stop enforcement.
+  resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
+              Phase V2: mark a review finding resolved. The id must appear in
+              the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
+              Appends: RESOLVED <id> at <ts>: fix=<ref> test=<ref> — <summary>
+  arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'
+              Phase V2: record an arbitration decision on a review finding.
+              The id must appear in the latest REVIEW-ARTIFACT comment; empty
+              rationale exits 1. Appends:
+                ARBITRATION <id> decision=<d> at <ts>: <rationale>
 USAGE
 }
 
@@ -1346,6 +1379,227 @@ cmd_grade_record() {
 }
 
 # ---------------------------------------------------------------------------
+# Phase V2 (1vq.1): reviewer-record writers. These append the LOAD-BEARING
+# review record grammars (byte-exact V3 contracts) as Beads comments. They are
+# record writers ONLY — no approve/Stop enforcement lives here (that is V3).
+# Validation is delegated to review-check.sh (the ONE validator); this file
+# never re-implements the schema and never references any reviewer transport.
+
+# finding_id_in_latest_artifact <tid> <finding-id> -> 0 if the id appears in the
+# findings=[...] token of the LATEST /^REVIEW-ARTIFACT v1 / comment.
+finding_id_in_latest_artifact() {
+    local tid="$1" fid="$2"
+    local comments art token
+    comments=$(bd show "$tid" --json 2>/dev/null \
+        | jq -r 'if type=="array" then .[0].comments else .comments end | (.[]?.text // empty)' 2>/dev/null || echo "")
+    art=$(printf '%s\n' "$comments" | grep -E '^REVIEW-ARTIFACT v1 ' | tail -1 || true)
+    [ -z "$art" ] && return 1
+    token=$(printf '%s' "$art" | sed -nE 's/.*findings=\[([^]]*)\].*/\1/p' || true)
+    [ -z "$token" ] && return 1
+    # One id per line (strip the :severity and any intra-token spaces). Use
+    # sed (line-oriented) NOT `tr -d` so the per-id newlines survive — merging
+    # the ids onto one line would make the exact-match grep below never hit.
+    printf '%s' "$token" | tr ',' '\n' | sed -E 's/:.*//; s/[[:space:]]//g' | grep -qxF "$fid"
+}
+
+# review-record <tid> [--file <path>]: validate an artifact via review-check.sh
+# then post the REVIEW-ARTIFACT v1 record comment. Mirrors grade-record's shape.
+cmd_review_record() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "review-record" "" "missing_task_id" \
+            "review-record requires <task-id> as first positional argument" \
+            "qa-gate.sh review-record <task-id> [--file <path>]"
+        exit 1
+    fi
+    shift || true
+
+    local input_path=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                input_path="${2:-}"
+                if [ -z "$input_path" ]; then
+                    emit_error_json "review-record" "$tid" "missing_file_path" \
+                        "--file requires a path argument" \
+                        "qa-gate.sh review-record $tid --file <path>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                emit_error_json "review-record" "$tid" "unknown_flag" \
+                    "unknown argument: $1 (expected --file <path> or stdin)" \
+                    "qa-gate.sh review-record $tid [--file <path>]"
+                exit 1
+                ;;
+        esac
+    done
+
+    require_bd "review-record" "$tid"
+
+    local raw=""
+    if [ -n "$input_path" ]; then
+        if [ ! -f "$input_path" ]; then
+            emit_error_json "review-record" "$tid" "file_not_found" \
+                "artifact file does not exist: $input_path" \
+                "qa-gate.sh review-record $tid --file <existing-path>"
+            exit 1
+        fi
+        if ! raw=$(cat -- "$input_path" 2>/dev/null); then
+            emit_error_json "review-record" "$tid" "file_unreadable" \
+                "could not read artifact file: $input_path" \
+                "qa-gate.sh review-record $tid --file <readable-path>"
+            exit 1
+        fi
+    else
+        if [ -t 0 ]; then
+            emit_error_json "review-record" "$tid" "no_input" \
+                "no --file given and stdin is a terminal; pipe the artifact JSON or pass --file <path>" \
+                "qa-gate.sh review-record $tid --file <path>  OR  printf '%s' \"\$JSON\" | qa-gate.sh review-record $tid"
+            exit 1
+        fi
+        raw=$(cat)
+    fi
+
+    if [ -z "$raw" ]; then
+        emit_error_json "review-record" "$tid" "empty_input" \
+            "artifact input is empty" \
+            "qa-gate.sh review-record $tid --file <path>  OR  stdin pipe"
+        exit 1
+    fi
+
+    # Validate via the ONE validator (subprocess). No second schema here.
+    local tmpf vout ok ekey
+    tmpf=$(mktemp -t qa-gate-review.XXXXXX 2>/dev/null) || tmpf="$QA_TRACKING_DIR/.review-record-$$.json"
+    printf '%s' "$raw" > "$tmpf"
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-artifact "$tmpf" 2>/dev/null || true)
+    rm -f "$tmpf" 2>/dev/null || true
+    ok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
+    if [ "$ok" != "true" ]; then
+        ekey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_artifact"' 2>/dev/null || echo "invalid_artifact")
+        emit_error_json "review-record" "$tid" "$ekey" \
+            "artifact failed validation via review-check.sh: $ekey" \
+            "provide a valid review artifact (see review-check.sh validate-artifact schema)"
+        exit 1
+    fi
+
+    # Extract the grammar fields from the validated artifact.
+    local iter reviewer model hash rt verdict stopped findings_token fc summary ts comment_text
+    iter=$(printf '%s' "$raw" | jq -r '.iterations' 2>/dev/null)
+    reviewer=$(printf '%s' "$raw" | jq -r '.reviewer_identity' 2>/dev/null)
+    model=$(printf '%s' "$raw" | jq -r '.reviewer_model' 2>/dev/null)
+    hash=$(printf '%s' "$raw" | jq -r '.reviewed_hash' 2>/dev/null)
+    rt=$(printf '%s' "$raw" | jq -r '.risk_threshold' 2>/dev/null)
+    verdict=$(printf '%s' "$raw" | jq -r '.verdict' 2>/dev/null)
+    stopped=$(printf '%s' "$raw" | jq -r '.stopped_by' 2>/dev/null)
+    findings_token=$(printf '%s' "$raw" | jq -r 'if (.findings|length)==0 then "" else (.findings|map(.id+":"+.severity)|join(",")) end' 2>/dev/null)
+    fc=$(printf '%s' "$raw" | jq -r '.findings | length' 2>/dev/null)
+    if [ "$verdict" = "approve" ]; then
+        summary="approve — no findings at/above $rt"
+    else
+        summary="findings — $fc finding(s) reported"
+    fi
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="REVIEW-ARTIFACT v1 iteration=$iter reviewer=$reviewer model=$model reviewed_hash=$hash risk_threshold=$rt verdict=$verdict stopped_by=$stopped findings=[$findings_token] at $ts: $summary"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "review-record" "$tid" "recorded" "comment posted at $ts: $comment_text"
+}
+
+# resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
+cmd_resolve_finding() {
+    local tid="${1:-}" fid="${2:-}"
+    if [ -z "$tid" ] || [ -z "$fid" ]; then
+        usage
+        emit_error_json "resolve-finding" "$tid" "missing_args" \
+            "resolve-finding requires <task-id> <finding-id> --fix <ref> --test <ref> <summary>" \
+            "qa-gate.sh resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'"
+        exit 1
+    fi
+    shift 2 || true
+    local fix="" testref="" summary=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --fix)  fix="${2:-}"; shift 2 || true ;;
+            --test) testref="${2:-}"; shift 2 || true ;;
+            -h|--help) usage; exit 1 ;;
+            *) summary="$1"; shift || true ;;
+        esac
+    done
+
+    require_bd "resolve-finding" "$tid"
+
+    if [ -z "$fix" ]; then
+        emit_error_json "resolve-finding" "$tid" "empty_fix" \
+            "--fix reference is empty; a resolution must cite the fix" \
+            "qa-gate.sh resolve-finding $tid $fid --fix '<commit/path:line>' --test '<ref>' '<summary>'"
+        exit 1
+    fi
+    if [ -z "$testref" ]; then
+        emit_error_json "resolve-finding" "$tid" "empty_test" \
+            "--test reference is empty; a resolution must cite the covering test" \
+            "qa-gate.sh resolve-finding $tid $fid --fix '<ref>' --test '<test path/name>' '<summary>'"
+        exit 1
+    fi
+    if ! finding_id_in_latest_artifact "$tid" "$fid"; then
+        emit_error_json "resolve-finding" "$tid" "finding_id_not_found" \
+            "finding id '$fid' is not present in the latest REVIEW-ARTIFACT comment for $tid" \
+            "resolve only ids that appear in the latest review artifact's findings=[...] token"
+        exit 1
+    fi
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="RESOLVED $fid at $ts: fix=$fix test=$testref — $summary"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "resolve-finding" "$tid" "resolved" "comment posted at $ts: $comment_text"
+}
+
+# arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'
+cmd_arbitrate() {
+    local tid="${1:-}" fid="${2:-}" decision="${3:-}" rationale="${4:-}"
+    if [ -z "$tid" ] || [ -z "$fid" ] || [ -z "$decision" ]; then
+        usage
+        emit_error_json "arbitrate" "$tid" "missing_args" \
+            "arbitrate requires <task-id> <finding-id> <overrule|sustain> <rationale>" \
+            "qa-gate.sh arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'"
+        exit 1
+    fi
+    case "$decision" in
+        overrule|sustain) ;;
+        *)
+            emit_error_json "arbitrate" "$tid" "decision_invalid_enum" \
+                "decision '$decision' is not in {overrule, sustain}" \
+                "qa-gate.sh arbitrate $tid $fid <overrule|sustain> '<rationale>'"
+            exit 1
+            ;;
+    esac
+
+    require_bd "arbitrate" "$tid"
+
+    if [ -z "$rationale" ]; then
+        emit_error_json "arbitrate" "$tid" "empty_rationale" \
+            "arbitration rationale is empty; an arbitration decision must be justified" \
+            "qa-gate.sh arbitrate $tid $fid $decision '<rationale>'"
+        exit 1
+    fi
+    if ! finding_id_in_latest_artifact "$tid" "$fid"; then
+        emit_error_json "arbitrate" "$tid" "finding_id_not_found" \
+            "finding id '$fid' is not present in the latest REVIEW-ARTIFACT comment for $tid" \
+            "arbitrate only ids that appear in the latest review artifact's findings=[...] token"
+        exit 1
+    fi
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="ARBITRATION $fid decision=$decision at $ts: $rationale"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "arbitrate" "$tid" "arbitrated" "comment posted at $ts: $comment_text"
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 
 SUB="${1:-}"
@@ -1358,6 +1612,9 @@ case "$SUB" in
     block)        cmd_block "$@" ;;
     choose)       cmd_choose "$@" ;;
     grade-record) cmd_grade_record "$@" ;;
+    review-record)   cmd_review_record "$@" ;;
+    resolve-finding) cmd_resolve_finding "$@" ;;
+    arbitrate)       cmd_arbitrate "$@" ;;
     ""|-h|--help|help)
         usage
         exit 1

@@ -426,10 +426,15 @@ assert_contains "qa-gate mut(enter L481): new-enter obs reports 'cleared stale r
 # assertion would FAIL), confirming sensitivity.
 REAL_QG_CL=$(readlink "$QG_CL" || printf '%s' "$QG_CL")
 QG_CL_MUT="$FIXTURE_CL/qa-gate-enter396mut.sh"
-awk 'NR==408 && /was_escalated" = "1"/ {print "    if [ \"$was_escalated\" != \"1\" ] || [ \"$was_deferred\" = \"1\" ]; then"; next} {print}' \
+# TEXT-anchored (not line-number): mutate the FIRST occurrence of the functional
+# escalation guard so this survives unrelated line shifts elsewhere in
+# qa-gate.sh (e.g. the Phase V2 record-writer additions). The first match is the
+# remove_escalation_labels guard in cmd_enter; the later occurrences (the
+# re-enter obs + the new-enter path) are intentionally left intact.
+awk 'guard_done!=1 && /was_escalated" = "1"/ {print "    if [ \"$was_escalated\" != \"1\" ] || [ \"$was_deferred\" = \"1\" ]; then"; guard_done=1; next} {print}' \
     "$REAL_QG_CL" > "$QG_CL_MUT"
 chmod +x "$QG_CL_MUT"
-QG_CL_MUT_LANDED=$(sed -n '408p' "$QG_CL_MUT" | grep -c 'was_escalated" != "1"' || true)
+QG_CL_MUT_LANDED=$(grep -c 'was_escalated" != "1"' "$QG_CL_MUT" || true)
 QG_CL_MUT_LANDED=$(printf '%s' "$QG_CL_MUT_LANDED" | tr -d '[:space:]')
 assert_eq "qa-gate META: L396 guard mutation applied to copy" "1" "$QG_CL_MUT_LANDED"
 TID_META396=$(cd "$FIXTURE_CL" && bd create "meta L396" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')

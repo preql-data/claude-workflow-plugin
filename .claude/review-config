@@ -1,0 +1,37 @@
+# .claude/review-config — Sol reviewer lane bounded-diligence caps
+# (v4.0.0 Phase V2). Same key=value format as .claude/rubric-config.
+#
+# THE ONE PLACE caps live. codex-review.sh reads these to bound the Sol
+# (Codex) review turn: it never loops past a cap; a cap-hit sets the
+# artifact's `stopped_by` field (cap:max_findings | cap:max_review_iterations
+# | cap:timeout) and stops. Sol is ADVISORY and STRICTLY OPTIONAL — these
+# caps only shape the optional Codex turn; the Claude review path and the
+# qa-gate release credential are unaffected.
+#
+# Comments (lines starting with #) and blank lines are ignored. Whitespace
+# around the = is tolerated. Unrecognised keys are ignored; a missing key
+# or file resolves to the built-in default noted below (fail-open).
+#
+# Recognised keys:
+#   risk_threshold_default   default blocking bar when a review request omits
+#                            one. Ordered severity enum
+#                            critical>high>medium>low>info. Default: high.
+#   max_findings             hard cap on findings in one artifact. Excess is
+#                            truncated (most-severe-first) and stopped_by is
+#                            set to cap:max_findings. Default: 10.
+#   max_review_iterations    hard cap on review iterations for a task; an
+#                            iteration above this exits before any Codex call.
+#                            Default: 3.
+#   timeout_seconds          overall wall-clock budget for one Codex turn;
+#                            exceeding it kills the server and writes no
+#                            artifact (the caller degrades to the Claude
+#                            path). Default: 300.
+#   malformed_retry          number of corrective codex-reply turns allowed
+#                            when the model's first message fails artifact
+#                            validation. Default: 1.
+
+risk_threshold_default=high
+max_findings=10
+max_review_iterations=3
+timeout_seconds=300
+malformed_retry=1

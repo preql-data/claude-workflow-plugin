@@ -193,6 +193,18 @@ JSON
     export PATH="$root/bin:$PATH"
     export CLAUDE_PROJECT_DIR="$root"
 
+    # Phase V2 (1vq.1): host isolation for the optional Codex reviewer lane.
+    # codex-detect.sh (invoked by session-start.sh and by model-select.sh's
+    # detect_reviewer_lane seam) reads the Codex MCP registration from
+    # ${CODEX_USER_CONFIG:-$HOME/.claude.json}. Pin it to a NONEXISTENT
+    # in-fixture path so component specs never depend on the host developer's
+    # ~/.claude.json (which may or may not register codex): the reviewer lane
+    # then deterministically resolves to config-absent -> claude. Specs that
+    # exercise the codex lane override CODEX_USER_CONFIG / CODEX_MCP_BIN
+    # themselves. The ONLY consumer of this var is codex-detect.sh, so this is
+    # purely additive host-isolation.
+    export CODEX_USER_CONFIG="$root/.claude/.no-codex-config.json"
+
     # Initialise Beads inside the fixture. Use the wrapper so --no-daemon
     # is injected. Cd into the project for the init; cd back so we don't
     # surprise the caller. `bd init` is silent on success.
