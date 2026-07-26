@@ -7,6 +7,22 @@ session that produced them ends.
 
 ## Index
 
+- `v4.1-upgrade-wave.md` — v4.1.0 minor release: U0 installer v3.5→v4
+  upgrade path (priority), U1 follow-up burn-down (gz3/gl6/bjx), U2
+  worktree sweeper + scratchpad denylist (prm), U3 context-gathering
+  ledger, U4 vendored superpowers skills, U5 staging e2e QA, U6 gated
+  depth-3 migration.
+  **Status**: In progress (started 2026-07-26); session plan mirror at
+  `~/.claude/plans/v4-1-0-upgrade-gleaming-karp.md`; epics
+  claude-workflow-plugin-0jk (U0), -waz (U1), -0yg (U2), -gio (U3), -q37
+  (U4), -f2t (U5), -7be (U6 gate pre-checked FAILING → deferral path),
+  -uvk (closeout). The U6 gate was pre-checked against the live
+  changelog on 2026-07-26 and **fails**: the depth-3 default was 2 days
+  old and the prior flip landed 3 days before it, far short of the
+  30-day hold. U6 therefore executes as its documented deferral path —
+  the `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` pin stays, with the
+  evidence and a next-check date recorded on the standing task.
+
 - `v4-trimodel.md` — the v4.0.0 tri-model workflow: Fable-class orchestrator,
   Opus-class implementers, optional GPT-5.6-Sol reviewer lane via Codex MCP;
   mechanical sign-off separation ("nobody signs off on their own work"),
