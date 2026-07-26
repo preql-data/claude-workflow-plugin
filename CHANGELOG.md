@@ -20,6 +20,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`).
 
+### Changed (Phase V4 pt1 — one denylist, gate-baseline v2, I8 repo identity, epic 3mg, 2026-07-26)
+
+> **UPGRADE NOTE — one-time hash migration.** The change-set denylist changed,
+> so the Stop hook recomputes a DIFFERENT `change_set_hash` for any change set
+> containing a newly-filtered path. An approval recorded before this landing no
+> longer matches that hash: the gate emits `LABEL_WITHOUT_RECORD` and re-blocks
+> until the cycle is re-approved. That is the correct fail-closed direction — a
+> stale approval must not release — and every denylist addition in this release
+> ships in ONE landing, so an in-flight cycle pays the migration exactly once.
+> Recovery for a cycle caught mid-flight (see `docs/HOOKS.md`, "Denylist changes
+> are a hash migration"):
+>
+> ```bash
+> bd label remove <task-id> qa-approved     # retire the stale approval
+> bash .claude/scripts/qa-gate.sh enter <task-id>
+> bash .claude/scripts/impact-report.sh <task-id>
+> bash .claude/scripts/qa-gate.sh approve <task-id> '<summary>'
+> ```
+>
+> The `bd label remove` step is required: `enter` does not clear `qa-approved`,
+> and `approve` short-circuits as an idempotent no-op while that label is
+> present. (Pinned by `denylist-shared.sh` section C.)
+
+- **ONE denylist, three consumers.** New `.claude/scripts/workflow-denylist.sh`
+  defines `WORKFLOW_DENYLIST_REGEX` + `workflow_denylisted()`; `post-edit.sh`
+  (what gets TRACKED), `impact-report.sh` (what enters the change set and its
+  HASH) and `verify-before-stop.sh` (what needs REVIEW) all source it,
+  BASH_SOURCE-relative. The three copies had drifted: only the Stop hook's knew
+  about `.claude/worktrees/` and the e2e fixture churn, so post-edit tracked
+  worktree paths INTO the hash that the gate could not see — the hash and the
+  gate disagreed about what "the changes" were. Desirable effects, all now
+  guaranteed to move together: harness-worktree paths leave the tracked set,
+  the hash and the gate's view agree, and a change-set of only build/workflow
+  churn is `empty` rather than half-visible.
+- **Memory files are no longer reviewable work.** `MEMORY.md` and
+  `.claude/memory/` join the denylist, so they exit the change set BEFORE F1
+  doc-only classification: a memory-only change set now takes the `empty` fast
+  path (release, no gate record) instead of being auto-approved as `doc-only`
+  with a `[review bypass: F1 doc-only ...]` record about agent recall state.
+  `CLAUDE.md` (behaviour-bearing — session-start injects it), `LESSONS.md` and
+  `HANDOFF.md` (audit deliverables) are deliberately NOT denylisted.
+- **Missing-lib behaviour is fail-closed per consumer**: `impact-report.sh`
+  exits 3 (no hash, which upstream already treats as refuse-to-release),
+  `verify-before-stop.sh` BLOCKS with a remediation reason (after the
+  `stop_hook_active` circuit breaker, never before it), and `post-edit.sh`
+  tracks the path unfiltered — over-tracking is the fail-closed side for a hook
+  whose output feeds the gate.
+- **gate-baseline v2.** `.claude/.qa-tracking/approved-baseline` (a bare line
+  list, one writer) is superseded by `.claude/.qa-tracking/gate-baseline`, a
+  versioned file with a provenance header (`head=`, `captured_at=`,
+  `captured_by=`) over the `LC_ALL=C`-sorted `git status --porcelain` snapshot.
+  Three writers now: `session-start.sh` on arrival (only when no review cycle is
+  active — baselining an in-flight cycle would release its work unreviewed),
+  `qa-gate.sh enter` (write-if-missing, minus paths already in
+  `changed-files.txt` so the session's own edits are never baselined), and
+  `qa-gate.sh approve` (full refresh, as before). New subcommand
+  `qa-gate.sh baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]`
+  so session-start has one implementation to call. The legacy file is read as a
+  fallback for one release and deleted on the first v2 write. Closes the
+  "session opened in an already-dirty repo blocks on dirt the session never
+  made" case; there is deliberately NO hash-side subtraction (the baseline is
+  subtracted only in the git fallback, so editing an already-dirty file still
+  gates).
+- **`-d "$PROJECT_DIR/.git"` replaced by `git rev-parse --git-dir`** in
+  `verify-before-stop.sh` and `qa-gate.sh`. In a LINKED WORKTREE `.git` is a
+  FILE, so the old predicate answered "not a git repo" and silently disabled
+  both the baseline writer and the Stop gate's git-status fallback — with an
+  empty `changed-files.txt` the gate then had no detector at all and FAILED
+  OPEN, in exactly the `isolation: "worktree"` topology the plugin tells agents
+  to use.
+- **I8 cross-repo guard compares REPOSITORY identity, not checkout identity.**
+  `detect_cross_repo` used `git rev-parse --show-toplevel`, which is
+  per-checkout, so a Stop fired from a linked worktree of the SAME repo the task
+  was claimed in tripped the cross-repo block. It now compares the
+  symlink-resolved `git rev-parse --git-common-dir`, which every worktree of a
+  repo shares and which differs across repos. A genuinely different repo still
+  blocks; a recorded repo path that no longer resolves is still a mismatch
+  (fail closed).
+- Tests: new L1 `denylist-source.test.sh` (structural — all three consumers
+  source the lib, none carries a literal regex; 3 METAs) and new L2
+  `denylist-shared.sh` (canary sensitivity across all three consumers, memory
+  patterns, hash migration) + `gate-baseline-v2.sh` (transcript scenario 1 with
+  the spec-mandated truncate-the-baseline META, the three writers, the legacy
+  fallback, the linked-worktree case). `failure-cross-repo.sh` gains the
+  worktree cases; `qa-gate-baseline.sh` is retargeted at the v2 file; four
+  existing METAs that copied a hook to a fixture ROOT now copy it into
+  `.claude/scripts/` (outside that directory the copy cannot find the shared
+  lib and blocks for the wrong reason — a silent false pass).
+- Verified PR #2 (`impact-report.sh` path relativisation): reconciled
+  `impact-report.test.sh` section 4, which still asserted the pre-PR#2 contract
+  and only ran where a code-graph server is present (it skips in CI, so the
+  divergence was invisible there). Out-of-project and unanchorable-relative
+  entries are recorded as explicit `skipped: path is outside the analyzed
+  project ...` entries rather than being sent to the tool; the report can no
+  longer contain the server's absolute-path validation error.
+
 ### Added (Phase V0 — platform restore and effort verdict, epic cnz, 2026-07-25)
 - Effort-verdict launch wiring: committed `.claude/effort-verdict` (verdict: `max`,
   recorded by the cnz.2 A/B interference test) + `make session` launch target +

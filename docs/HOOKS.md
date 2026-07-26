@@ -143,6 +143,15 @@ touch "$PROJECT_DIR/.claude/.session-start"
 rm -f "$QA_TRACKING_DIR/approved"
 rm -f "$QA_TRACKING_DIR/changed-files.txt"
 
+# 5b. Capture the gate baseline (v4) — ONLY when no review cycle is active.
+#     Records "this dirt was already here on arrival" so the Stop gate
+#     evaluates the session's delta. Fails OPEN: SessionStart must never
+#     break a session, so a failure is one sync-errors.log line and nothing
+#     more. See "The gate baseline" under the PostToolUse hook.
+if [ -z "$(current-task.sh get)" ]; then
+    qa-gate.sh baseline-capture --by session-start
+fi
+
 # 6. Get bd prime output (Beads' agent context)
 BD_PRIME=$(bd prime)
 
@@ -346,6 +355,82 @@ markup (`.html`, `.md`, `.yaml`, `.toml`), infra (`Dockerfile`, `.tf`,
 inside `node_modules/`, `dist/`, `build/`, `coverage/`, `.git/`, `.next/`,
 plus `*.lock`, `*.pyc`, `*.map`, `*.min.{js,css}`, and the major lockfiles.
 
+### The shared denylist (`workflow-denylist.sh`)
+
+The denylist is **one definition with three consumers**, and it lives in
+`.claude/scripts/workflow-denylist.sh`:
+
+| Consumer | Question it answers |
+| --- | --- |
+| `post-edit.sh` | what gets TRACKED into `changed-files.txt` |
+| `impact-report.sh` | what enters the canonical change set and its HASH |
+| `verify-before-stop.sh` | what the Stop gate treats as needing REVIEW |
+
+Before v4 each script carried its own copy and they drifted: only the Stop
+hook's knew about `.claude/worktrees/` and the e2e fixture churn, so post-edit
+tracked worktree paths **into the change-set hash that the gate could not
+see**. The hash and the gate disagreed about what "the changes" were, and the
+only symptom was an occasional un-releasable approval nobody could explain.
+
+The lib is FLAT under `.claude/scripts/` on purpose: `make sync-fixtures` and
+the vitest drift guard enumerate `.claude/scripts/*.sh`, so a nested `lib/`
+would silently not sync into the e2e fixtures and their sourced hooks would
+break. Each consumer resolves it **relative to its own `${BASH_SOURCE[0]}`**,
+never to `$CLAUDE_PROJECT_DIR` — a hook may legitimately run with
+`CLAUDE_PROJECT_DIR` pointing at a different checkout than the install the
+script lives in.
+
+Beyond build artifacts and lockfiles the regex also drops:
+
+- `.claude/worktrees/` — parallel-agent scratch checkouts. Never a
+  deliverable; the worktree's own gate reviews its work in situ.
+- `.claude/tests/e2e/fixtures/<f>/{.claude/{scripts,beads},.beads}/` — churn
+  the harness rewrites mechanically. Scoped to those subtrees only, so a real
+  edit to a fixture's `fixture.yaml` or `src/` is still reviewable.
+- `MEMORY.md` and `.claude/memory/` — agent recall state, not deliverables.
+  They leave the reviewable set BEFORE the F1 doc-only classification, so a
+  memory-only change set is `empty` (release, no gate record) rather than
+  `doc-only` (auto-approved WITH a `[review bypass: ...]` record about nothing).
+
+Deliberately **not** denylisted: `CLAUDE.md` (behaviour-bearing — SessionStart
+injects it), `LESSONS.md` and `HANDOFF.md` (audit deliverables). The `*.md`
+doc-only fast path already handles those when they change alone.
+
+If the lib is missing, each consumer fails closed in its own idiom:
+`impact-report.sh` exits 3 and emits no hash (upstream treats an empty hash as
+refuse-to-release); `verify-before-stop.sh` BLOCKS with a remediation reason
+(emitted **after** the `stop_hook_active` circuit breaker, never before it);
+`post-edit.sh` tracks the path unfiltered, because for a hook that feeds the
+gate, over-tracking is the fail-closed side.
+
+#### Denylist changes are a hash migration
+
+`change_set_hash` is a sha256 over the **denylist-filtered** changed-files
+list. Editing the regex therefore changes the recomputed hash of any change
+set containing a newly-(un)matched path. An approval recorded before the edit
+no longer matches what the Stop hook recomputes after it, so the gate emits
+`LABEL_WITHOUT_RECORD` and re-blocks.
+
+That is the correct direction — a stale approval must not release — but it is
+user-visible friction, so **ship every denylist addition in ONE landing**: one
+landing costs in-flight cycles exactly one migration.
+
+Recovery for a cycle caught mid-flight:
+
+```bash
+bd label remove <task-id> qa-approved     # retire the stale approval FIRST
+bash .claude/scripts/qa-gate.sh enter <task-id>
+bash .claude/scripts/impact-report.sh <task-id>
+bash .claude/scripts/qa-gate.sh approve <task-id> '<approval summary>'
+```
+
+The `bd label remove` step is **required** and is not yet printed in the
+gate's own block reason: `enter` does not clear `qa-approved`, and `approve`
+short-circuits as an "idempotent no-op" while that label is present, so
+`enter` + `approve` alone writes no new record and the gate stays blocked.
+(Behaviour pinned by `.claude/tests/component/specs/denylist-shared.sh`
+section C.)
+
 ### Tracking File Location
 
 ```
@@ -354,10 +439,55 @@ plus `*.lock`, `*.pyc`, `*.map`, `*.min.{js,css}`, and the major lockfiles.
 ├── edit-count               # Counter for the every-10-edits batched bd comments
 ├── current-task             # Single source of truth: active task id (F3)
 ├── current-task.repo        # Repo fingerprint at set time (I8 cross-repo guard)
-├── approved-baseline        # git status --porcelain snapshot at approval time (0wk.2)
+├── gate-baseline            # Versioned git-status snapshot the Stop gate subtracts (v4)
+├── approved-baseline        # LEGACY (0wk.2) pre-v4 snapshot; read for one release, then deleted
 ├── sync-errors.log          # Best-effort bd-call failures surfaced by SessionStart
 └── .changed-files.lock      # flock target (only on systems with flock)
 ```
+
+### The gate baseline (`gate-baseline`)
+
+A snapshot of `git status --porcelain` that says "this dirt was already here;
+it is not this session's work". The Stop hook's git-status fallback subtracts
+it, so the gate evaluates the session **delta** rather than the whole working
+tree. Without one, opening a session in a repo that is merely dirty — a
+half-finished refactor, a vendored file, an unstaged config tweak — made every
+Stop report "N file(s) changed - all require QA review" for changes the
+session never made.
+
+```
+# gate-baseline v1
+head=<sha|none>
+captured_at=<ISO-8601 UTC>
+captured_by=session-start|qa-gate-enter|qa-gate-approve
+--
+<LC_ALL=C-sorted `git status --porcelain` lines>
+```
+
+`LC_ALL=C` is load-bearing on both ends: the reader uses `comm -23`, which
+requires both inputs in the same collation.
+
+Three writers, each with a different rule:
+
+| Writer | Rule | Why |
+| --- | --- | --- |
+| `session-start.sh` | full snapshot, **only when no review cycle is active** | an in-flight cycle's work is dirty right now; baselining it would release it unreviewed |
+| `qa-gate.sh enter` | **write-if-missing**, minus paths already in `changed-files.txt` | a cycle opened mid-session must not baseline the edits that session already made |
+| `qa-gate.sh approve` | full refresh | approve means "everything dirty right now has been reviewed" |
+
+`qa-gate.sh baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]`
+is the entry point session-start calls; it takes no task id and touches no
+labels.
+
+There is deliberately **no hash-side subtraction**. `changed-files.txt` is fed
+only by post-edit from actual tool edits, so pre-existing dirt cannot enter it,
+and an edit to an already-dirty file must still gate.
+
+Both the writer and the Stop hook's fallback ask `git rev-parse --git-dir`
+rather than testing `-d "$PROJECT_DIR/.git"`. In a linked worktree `.git` is a
+FILE, so the old test answered "not a git repo" and silently switched off both
+the snapshot and the fallback — with an empty `changed-files.txt` the gate then
+had no detector at all and failed OPEN.
 
 ---
 
@@ -375,9 +505,23 @@ if [[ "$STOP_REASON" == "user_interrupt" ]]; then
     echo "{}"; exit 0
 fi
 
-# 2. Check for tracked changes
+# 1b. Fail closed if the shared denylist lib is unreachable — without it,
+#     "which paths are reviewable" is unknowable. Emitted AFTER the
+#     stop_hook_active circuit breaker above, never before it (a block
+#     ahead of that guard re-enters the Stop hook forever).
+if [ -z "$WORKFLOW_DENYLIST_REGEX" ]; then emit_block "..."; fi
+
+# 2. Check for tracked changes (denylist-filtered)
 if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
     CODE_CHANGES_DETECTED=true
+fi
+
+# 2b. Fallback: git status MINUS the gate baseline, so only entries NEW
+#     since the baseline count. Requires `git rev-parse --git-dir`, not
+#     `-d .git` (linked worktrees). See "The gate baseline".
+if [ "$CODE_CHANGES_DETECTED" = false ] && has_git_repo; then
+    comm -23 <(git status --porcelain | LC_ALL=C sort) \
+             <(gate_baseline_entries | LC_ALL=C sort)
 fi
 
 # 3. If no changes, allow
@@ -633,7 +777,8 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 
 | Script | Purpose |
 |--------|---------|
-| `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`, `choose` (spec 0.2). Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`, plus `qa-escalated` and `qa-deferred` after spec 0.2). On `approve` writes `approved-baseline` snapshot + truncates `changed-files.txt` (closes 0wk.2). |
+| `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`, `choose` (spec 0.2), `baseline-capture` (v4). Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`, plus `qa-escalated` and `qa-deferred` after spec 0.2). `enter` writes the `gate-baseline` snapshot if one is missing (minus already-tracked paths); `approve` refreshes it in full + truncates `changed-files.txt` (closes 0wk.2). See "The gate baseline". |
+| `workflow-denylist.sh` | Not a hook and not executable on its own — the ONE definition of which paths the workflow treats as reviewable (`WORKFLOW_DENYLIST_REGEX` + `workflow_denylisted`). Sourced BASH_SOURCE-relative by `post-edit.sh`, `impact-report.sh` and `verify-before-stop.sh`. Editing it is a change-set-hash migration; see "Denylist changes are a hash migration". |
 | `current-task.sh` | F3 single source of truth for the active Beads task id. Subcommands: `set`, `get`, `get-repo`. Persists task id at `.qa-tracking/current-task` plus repo fingerprint at `.qa-tracking/current-task.repo` (I8 cross-repo guard). |
 | `prevent-orchestrator-edits.sh` | PreToolUse hook (matcher `^(Write\|Edit\|MultiEdit\|Bash)$`) blocking code edits by the `orchestrator`. Denies the Write/Edit/MultiEdit tools AND *write-shaped* Bash (redirection into source, `tee`, `sed -i`, `dd of=`, `cp`/`mv` into the tree) so the orchestrator cannot launder a write through Bash (llh.19). Legitimate orchestrator Bash (git/bd/reads/test-runs, redirects into `/tmp`/`/dev/null`) is allowed (anti-overreach). For a WRITE with no probeable agent identity it fails CLOSED (deny) — an unattributed write is treated as a possible mis-attributed orchestrator edit. Emits `hookSpecificOutput.permissionDecision: deny`. Defense in depth (the Bash detector is a raise-the-bar heuristic, not airtight); the primary guard is the orchestrator's omitted Write/Edit tools. |
 | `epic-gate.sh` | Epic-level QA gate (B2). Subcommands: `check`, `siblings`, `shared-files`. Returns `pass`/`defer`/`block` based on sibling status and file-intersection across in-progress tasks under the same epic. |

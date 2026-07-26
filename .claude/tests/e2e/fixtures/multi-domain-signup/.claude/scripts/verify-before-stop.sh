@@ -84,40 +84,45 @@ log_sync_error() {
 
 # Denylist (B6).
 #
-# G2.gate-friction (claude-workflow-plugin-llh.3): added `.claude/worktrees/`.
-# Worktree scratch dirs are harness-internal transient state created by
-# isolation:"worktree" agents and the e2e fixture runner — never code under
-# review. A Stop firing while such a path is dirty (the run's own teardown
-# reverts it minutes later) used to trip CODE_CHANGES_DETECTED and produce a
-# false QA-required block. Classifying it here keeps it out of the change-set
-# entirely (same treatment as node_modules / build artifacts). NOTE: we do
-# NOT denylist the PROJECT-ROOT `.beads/` or `.qa-tracking/` here — those are
-# handled by the fast-path classifier below (is_fastpath_only_change), which
-# auto-approves with an audited comment rather than silently dropping the
-# paths, so the beads-state churn still appears in the audit trail.
+# 3mg.1: the regex itself moved to `.claude/scripts/workflow-denylist.sh` —
+# ONE definition shared with post-edit.sh (what gets tracked) and
+# impact-report.sh (what enters the change-set hash). Before that, this copy
+# was the only one carrying `.claude/worktrees/` and the e2e fixture-churn
+# alternation, so post-edit tracked worktree paths INTO the hash that this
+# gate could not see: the hash and the gate disagreed about the change set.
+# The rationale for each pattern now lives in the lib's header.
 #
-# G2.gate-friction residual (claude-workflow-plugin-llh.17): added the e2e
-# FIXTURE-INTERNAL transient-churn alternative
-# `.claude/tests/e2e/fixtures/<f>/(.claude/{scripts,beads}|.beads)/`.
-# `make test-live` runs sync the canonical hook scripts into each fixture's
-# `.claude/scripts/` (the llh.8 run-start sync) and the live run mutates the
-# fixture's own `.beads/` ledger. The ORCHESTRATOR session driving the live
-# run then fires its Stop gate while those fixture paths are dirty; with an
-# empty changed-files.txt the git-status fallback below would pick them up
-# via is_tracked_change and false-block "QA approval required" (observed 5x).
-# These are test fixtures, not orchestrator deliverables — the run's own
-# teardown re-syncs them. Unlike the project-root `.beads/`
-# (audit-trail-relevant, left to the fast-path classifier), fixture-internal
-# churn carries no reviewable intent, so denylisting it outright is correct.
-# ANTI-OVERREACH: scoped to the fixtures' `.claude/scripts`/`.beads` subtrees
-# only — a real edit to a fixture's `fixture.yaml`, `src/`, etc. (a genuine
-# fixture deliverable) is NOT matched and still goes through the gate
-# (regression: vbs-llh17 spec META).
-DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
+# Resolved relative to THIS script (BASH_SOURCE), not $PROJECT_DIR: the gate
+# may run with CLAUDE_PROJECT_DIR pointing at a different checkout than the
+# install it was launched from.
+#
+# Missing lib: BLOCK (fail closed). Without the filter we cannot tell
+# reviewable work from build churn, which makes the change set — and every
+# decision derived from it — unverifiable. The block is emitted AFTER the
+# stop_hook_active circuit breaker below, never before it: blocking ahead of
+# that guard would re-enter the Stop hook forever (AgentLint H3). Until then
+# is_tracked_change treats EVERYTHING as reviewable, which is the fail-closed
+# direction if any caller runs before the block.
+WORKFLOW_DENYLIST_MISSING=0
+_WFDL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || _WFDL_DIR=""
+if [ -n "$_WFDL_DIR" ] && [ -f "$_WFDL_DIR/workflow-denylist.sh" ]; then
+    # shellcheck source=.claude/scripts/workflow-denylist.sh
+    . "$_WFDL_DIR/workflow-denylist.sh"
+fi
+if [ -n "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
+    DENYLIST_REGEX="$WORKFLOW_DENYLIST_REGEX"
+else
+    WORKFLOW_DENYLIST_MISSING=1
+    DENYLIST_REGEX=""
+fi
 
 is_tracked_change() {
     local p="$1"
     [ -z "$p" ] && return 1
+    if [ "$WORKFLOW_DENYLIST_MISSING" = "1" ]; then
+        # Unfiltered: treat every path as reviewable rather than guess.
+        return 0
+    fi
     if [[ "$p" =~ $DENYLIST_REGEX ]]; then
         return 1
     fi
@@ -234,29 +239,105 @@ get_recorded_repo() {
 }
 
 # Returns the current cwd's git toplevel. Empty if not a git repo.
+# Display-only (the I8 block reason names it); the mismatch DECISION uses
+# repo_identity below, not this.
 get_current_repo_root() {
     if command -v git >/dev/null 2>&1; then
         git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo ""
     fi
 }
 
+# repo_identity <dir> — the canonical, symlink-resolved git COMMON-DIR of
+# <dir>, i.e. the identity of the REPOSITORY rather than of the checkout.
+# Prints empty (rc 0) when <dir> does not exist or is not a git checkout.
+#
+# 3mg.1 (I8 fix): the identity used to be `rev-parse --show-toplevel`, which
+# is per-CHECKOUT. Two linked worktrees of ONE repo have different toplevels,
+# so a Stop fired from a worktree of the same repo the task was claimed in
+# tripped the cross-repo block — exactly the isolation:"worktree" topology
+# the plugin itself tells agents to use. `--git-common-dir` is shared by every
+# worktree of a repo and differs across repos, which is the property I8
+# actually wants.
+#
+# Two normalisations are load-bearing:
+#   - `--git-common-dir` is RELATIVE to the queried dir in a primary checkout
+#     (".git") and typically ABSOLUTE in a linked worktree; resolve both.
+#   - `pwd -P` strips symlinks, so /var/... and /private/var/... (macOS) or a
+#     symlinked project root compare equal instead of spuriously mismatching.
+repo_identity() {
+    local dir="$1" raw candidate resolved
+    [ -n "$dir" ] || return 0
+    command -v git >/dev/null 2>&1 || return 0
+    [ -d "$dir" ] || return 0
+    raw=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 0
+    [ -n "$raw" ] || return 0
+    case "$raw" in
+        /*) candidate="$raw" ;;
+        *)  candidate="$dir/$raw" ;;
+    esac
+    resolved=$(cd "$candidate" 2>/dev/null && pwd -P) || resolved=""
+    printf '%s' "$resolved"
+}
+
 # Decide whether the active task is cross-repo relative to the cwd. We
 # return the recorded repo path when there's a mismatch, empty otherwise.
 # A missing recorded repo (i.e., set under pre-I8 schema) is NOT a mismatch
 # -- we degrade silently to the legacy single-repo behaviour.
+#
+# 3mg.1: the comparison is now between REPOSITORY identities (see
+# repo_identity). Consequences, all intended:
+#   - same repo via a linked worktree  -> no block (was: false block)
+#   - genuinely different repo         -> still blocks
+#   - recorded path deleted/unresolvable -> MISMATCH, fail closed. We cannot
+#     prove the recorded repo is this one, and the whole point of I8 is to
+#     refuse to auto-close a task whose home repo we cannot identify.
 detect_cross_repo() {
-    local recorded current
+    local recorded recorded_id current_id
     recorded=$(get_recorded_repo)
     [ -z "$recorded" ] && return 0   # no recorded repo -> no mismatch claim
-    current=$(get_current_repo_root)
-    [ -z "$current" ] && return 0    # cwd not a git repo -> no mismatch claim
-
-    # Normalize trailing slashes before comparing.
     recorded="${recorded%/}"
-    current="${current%/}"
-    if [ "$recorded" != "$current" ]; then
+
+    current_id=$(repo_identity "$PROJECT_DIR")
+    [ -z "$current_id" ] && return 0 # cwd not a git repo -> no mismatch claim
+
+    recorded_id=$(repo_identity "$recorded")
+    if [ -z "$recorded_id" ] || [ "$recorded_id" != "$current_id" ]; then
         printf '%s' "$recorded"
         return 1
+    fi
+    return 0
+}
+
+# has_git_repo — is $PROJECT_DIR inside a git checkout we can query?
+#
+# 3mg.1: the old test was `[ -d "$PROJECT_DIR/.git" ]`, which is FALSE in a
+# LINKED WORKTREE (there `.git` is a FILE containing `gitdir: ...`), so the
+# git-status fallback and the diff summary silently disabled themselves in
+# exactly the topology the plugin tells agents to use — the gate then had NO
+# detector at all when changed-files.txt was empty, i.e. it failed OPEN.
+# The identical predicate lives in qa-gate.sh; keep them in sync.
+has_git_repo() {
+    command -v git >/dev/null 2>&1 || return 1
+    git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1
+}
+
+# gate_baseline_entries — the porcelain lines of the current gate baseline,
+# or empty when there is none.
+#
+# v2 file (`gate-baseline`, 3mg.1) carries a provenance header terminated by a
+# lone `--`; everything after it is the snapshot. The v1 file
+# (`approved-baseline`, 0wk.2) was a bare line list and is read as a fallback
+# for ONE release — any v2 write deletes it, so this arm only ever serves an
+# install that upgraded mid-cycle.
+gate_baseline_entries() {
+    local v2="$QA_TRACKING_DIR/gate-baseline"
+    local legacy="$QA_TRACKING_DIR/approved-baseline"
+    if [ -f "$v2" ]; then
+        awk 'body { print; next } /^--$/ { body = 1 }' "$v2" 2>/dev/null || true
+        return 0
+    fi
+    if [ -f "$legacy" ]; then
+        cat "$legacy" 2>/dev/null || true
     fi
     return 0
 }
@@ -538,7 +619,7 @@ compute_intent_payload() {
     # Generate a small diff summary if git is available. Cap at 80 lines so
     # we don't blow up the block reason. Set principled output: file:lines.
     local summary=""
-    if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+    if has_git_repo; then
         summary=$(git -C "$PROJECT_DIR" diff --stat HEAD 2>/dev/null | head -80 || echo "")
         [ -z "$summary" ] && summary=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | head -80 || echo "")
     fi
@@ -592,6 +673,29 @@ if [[ "$STOP_REASON" == "user_interrupt" ]] || [[ "$STOP_REASON" == "max_turns" 
     echo "{}"; exit 0
 fi
 
+# 3mg.1 fail-closed: the shared denylist lib is missing, so "which paths are
+# reviewable" is unknowable and every downstream classification (change set,
+# doc-only, fast-path, change-set hash) is unverifiable. Refuse to release.
+# Deliberately placed AFTER the stop_hook_active circuit breaker above — a
+# block emitted before it would loop the Stop hook forever.
+if [ "$WORKFLOW_DENYLIST_MISSING" = "1" ]; then
+    log_sync_error "Stop blocked: workflow-denylist.sh missing (looked in ${_WFDL_DIR:-<unresolvable script dir>}); the reviewable change set is unverifiable"
+    emit_block "QA gate cannot run: the shared path denylist is missing.
+
+verify-before-stop.sh could not load its sibling \`workflow-denylist.sh\` from:
+  ${_WFDL_DIR:-<unresolvable script dir>}
+
+That file defines which paths count as reviewable work. Without it the gate
+cannot classify the change set, compute a comparable change-set hash, or tell
+build churn from deliverables — so it refuses to release rather than guess.
+
+Fix (one of):
+  1. Restore the file: it ships with the plugin at .claude/scripts/workflow-denylist.sh
+     (re-run the plugin installer, or 'git checkout -- .claude/scripts/workflow-denylist.sh').
+  2. If you are running a partially-synced fixture or worktree, re-sync the
+     canonical hook scripts into it (make sync-fixtures)."
+fi
+
 # Detect tracked changes via tracking file (post-edit.sh) first, then git.
 CODE_CHANGES_DETECTED=false
 ALL_CHANGED_FILES=()
@@ -611,24 +715,36 @@ if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
 fi
 
 # 0wk.2 fix: git-status fallback - but ONLY surface entries NEW since the
-# last qa-gate approval. The approved-baseline (written by qa-gate approve)
-# captures the git state that was approved. Subsequent stops are allowed
-# to slip through if the working tree matches the baseline (i.e., the
-# user opened the session, the gate fires, but nothing has been edited
-# since the last approval). Without this, every Stop hook fired
-# "0 file(s) changed - all require QA review" against the same
+# baseline. The gate baseline (written by session-start, qa-gate enter and
+# qa-gate approve — see write_gate_baseline) captures the git state that was
+# already accounted for. Subsequent stops are allowed to slip through if the
+# working tree matches the baseline (i.e., the user opened the session, the
+# gate fires, but nothing has been edited since). Without this, every Stop
+# hook fired "0 file(s) changed - all require QA review" against the same
 # pre-existing uncommitted state -- the bug 0wk.2 closed.
+#
+# 3mg.1 widened WHEN a baseline exists: session-start now captures one on
+# arrival (when no review cycle is active), so a repo that was ALREADY dirty
+# before the session cannot gate it. Previously only an approve wrote a
+# baseline, so a first-ever session in a dirty repo blocked on dirt the user
+# never touched.
 #
 # Strategy: diff CURRENT git status against BASELINE. If a line is in
 # current but not in baseline, it's a NEW change requiring review.
-# `comm -23 <a> <b>` prints lines in a but not in b; we sort both inputs.
+# `comm -23 <a> <b>` prints lines in a but not in b; both inputs must be
+# sorted IN THE SAME COLLATION — hence LC_ALL=C on both sides, matching the
+# writer. (A locale difference between write and read would silently corrupt
+# the diff and surface phantom "new" entries.)
 # Bash 3.2 supports process substitution (verified on macOS bash 3.2.57).
-if [ "$CODE_CHANGES_DETECTED" = false ] && [ -d "$PROJECT_DIR/.git" ]; then
-    baseline_file="$QA_TRACKING_DIR/approved-baseline"
-    baseline=""
-    [ -f "$baseline_file" ] && baseline=$(cat "$baseline_file" 2>/dev/null || echo "")
+#
+# NO HASH-SIDE SUBTRACTION, deliberately: the baseline is subtracted ONLY
+# here, in the git fallback. changed-files.txt is fed exclusively by
+# post-edit.sh from actual tool edits, so pre-existing dirt cannot enter it —
+# and an edit to an already-dirty file must still gate.
+if [ "$CODE_CHANGES_DETECTED" = false ] && has_git_repo; then
+    baseline=$(gate_baseline_entries | LC_ALL=C sort)
 
-    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | sort)
+    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort)
 
     # Diff: only entries in current that aren't in baseline.
     if [ -z "$baseline" ]; then

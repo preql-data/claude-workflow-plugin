@@ -28,6 +28,11 @@
 #                                           --no-review '<reason>' is the audited
 #                                           bypass for that check.
 #   block   <task-id> <reason>              Add qa-blocked label + comment. Keeps qa-gate-entered.
+#   baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
+#                                           Write .qa-tracking/gate-baseline (3mg.1): the
+#                                           `git status --porcelain` snapshot the Stop gate
+#                                           subtracts so it evaluates the session DELTA, not a
+#                                           tree that was dirty on arrival. No task, no bd.
 #   choose  <approve|continue|tech-debt|defer> <task-id> <note> [extra args for tech-debt]
 #                                           Spec 0.2: record a J21 decision while qa-escalated.
 #                                           Each choice records a comment + acts on labels/state.
@@ -125,40 +130,170 @@ clear_current_task() {
     rm -f "$QA_TRACKING_DIR/current-task" 2>/dev/null || true
 }
 
-# 0wk.2 fix: snapshot `git status --porcelain` so verify-before-stop.sh can
-# distinguish NEW uncommitted entries (those that should re-trigger the
-# gate) from PRE-EXISTING ones (already approved in this approval cycle).
-# Without this, every Stop hook fire surfaced the same uncommitted set
-# even when the user hadn't touched anything in the current turn.
+# has_git_repo — is $PROJECT_DIR inside a git checkout we can query?
 #
-# Contract:
-#   - Writes `$QA_TRACKING_DIR/approved-baseline` containing the SORTED
-#     output of `git status --porcelain`. Sorted so verify-before-stop's
-#     `comm -23` (sorted-input requirement) can diff against it directly.
-#   - On no-git-repo: remove any stale baseline so a later git-init won't
-#     inherit a baseline taken before the repo existed.
-#   - On git-not-on-PATH: log and return 1; the gate stays correct (no
-#     baseline means verify-before-stop falls back to legacy "all new").
-#   - mkdir -p before write so a fresh project without .qa-tracking can
-#     still approve.
-write_approved_baseline() {
-    local tid="$1"
-    local baseline="$QA_TRACKING_DIR/approved-baseline"
-    if [ ! -d "$PROJECT_DIR/.git" ]; then
-        # No git repo - remove any stale baseline; nothing to snapshot.
-        rm -f "$baseline" 2>/dev/null || true
+# 3mg.1: the old test was `[ -d "$PROJECT_DIR/.git" ]`, which is FALSE in a
+# LINKED WORKTREE (there `.git` is a FILE containing `gitdir: ...`). The
+# baseline mechanism therefore silently disabled itself in exactly the
+# topology the plugin tells agents to use — no snapshot on approve, and
+# verify-before-stop's git fallback skipped entirely. Ask git instead.
+# The identical predicate lives in verify-before-stop.sh; keep them in sync.
+#
+# Consequence worth naming: `rev-parse --git-dir` also succeeds when
+# $PROJECT_DIR is a SUBDIRECTORY of a repo (git walks up), where `-d .git`
+# failed. Porcelain output is repo-root-relative in that case — self-
+# consistent between the baseline and the later comparison, and it moves the
+# nested-subdir case from "fallback disabled => gate could release unreviewed
+# work" to "fallback active", i.e. from fail-open to fail-closed.
+has_git_repo() {
+    command -v git >/dev/null 2>&1 || return 1
+    git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1
+}
+
+# gate-baseline v2 (3mg.1), superseding the 0wk.2 `approved-baseline`.
+#
+# WHAT IT IS: a snapshot of `git status --porcelain` that says "this dirt was
+# already here; it is not this session's work". verify-before-stop.sh's git
+# fallback subtracts it, so the gate evaluates the DELTA rather than the whole
+# working tree. Without it, a repo that is merely dirty on arrival makes every
+# Stop fire "N file(s) changed - all require QA review" forever.
+#
+# WHY IT IS VERSIONED AND HEADERED: the 0wk.2 file was a bare line list with
+# no provenance, so nothing could tell an approve-time snapshot from a
+# session-start one, or detect a snapshot taken against a different HEAD.
+#
+#   # gate-baseline v1
+#   head=<sha|none>
+#   captured_at=<ISO-8601 UTC>
+#   captured_by=session-start|qa-gate-enter|qa-gate-approve
+#   --
+#   <LC_ALL=C-sorted `git status --porcelain` lines>
+#
+# LC_ALL=C is load-bearing: the reader uses `comm -23`, which requires both
+# inputs in the SAME collation. The writer and verify-before-stop.sh both pin
+# C so a locale change between write and read cannot corrupt the diff.
+#
+# Options:
+#   --if-missing        do nothing when a baseline already exists (enter).
+#   --exclude-tracked   drop entries whose path is already in
+#                       changed-files.txt, so work the session has ALREADY
+#                       done can never be baselined as pre-existing (enter).
+#
+# Tolerances (unchanged from 0wk.2): no git repo -> remove stale baselines and
+# succeed; git missing -> log + return 1 (no baseline means the reader treats
+# everything as new, which is the fail-closed direction).
+GATE_BASELINE_FILE="$QA_TRACKING_DIR/gate-baseline"
+LEGACY_APPROVED_BASELINE="$QA_TRACKING_DIR/approved-baseline"
+
+write_gate_baseline() {
+    local captured_by="$1"; shift
+    local if_missing=0 exclude_tracked=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --if-missing)      if_missing=1 ;;
+            --exclude-tracked) exclude_tracked=1 ;;
+        esac
+        shift
+    done
+
+    if ! has_git_repo; then
+        # No git repo (or no git): remove stale baselines so a later
+        # git-init cannot inherit a snapshot from before the repo existed.
+        rm -f "$GATE_BASELINE_FILE" "$LEGACY_APPROVED_BASELINE" 2>/dev/null || true
+        command -v git >/dev/null 2>&1 || {
+            log_sync_error "write_gate_baseline: git not on PATH (captured_by=$captured_by)"
+            return 1
+        }
         return 0
     fi
-    if ! command -v git >/dev/null 2>&1; then
-        log_sync_error "write_approved_baseline: git not on PATH for $tid"
-        return 1
+
+    if [ "$if_missing" = "1" ] && [ -f "$GATE_BASELINE_FILE" ]; then
+        return 0
     fi
+
     mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
-    if ! git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | sort > "$baseline"; then
-        log_sync_error "write_approved_baseline: git status failed for $tid"
+
+    local status_out head ts
+    status_out=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort) || {
+        log_sync_error "write_gate_baseline: git status failed (captured_by=$captured_by)"
         return 1
+    }
+    head=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null) || head=""
+    [ -n "$head" ] || head="none"
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+
+    if [ "$exclude_tracked" = "1" ]; then
+        status_out=$(gate_baseline_exclude_tracked "$status_out")
     fi
+
+    local tmp="$GATE_BASELINE_FILE.tmp.$$"
+    {
+        printf '# gate-baseline v1\n'
+        printf 'head=%s\n' "$head"
+        printf 'captured_at=%s\n' "$ts"
+        printf 'captured_by=%s\n' "$captured_by"
+        printf -- '--\n'
+        [ -n "$status_out" ] && printf '%s\n' "$status_out"
+    } > "$tmp" 2>/dev/null || {
+        rm -f "$tmp" 2>/dev/null || true
+        log_sync_error "write_gate_baseline: could not write $tmp (captured_by=$captured_by)"
+        return 1
+    }
+    mv -f "$tmp" "$GATE_BASELINE_FILE" 2>/dev/null || {
+        rm -f "$tmp" 2>/dev/null || true
+        log_sync_error "write_gate_baseline: could not install $GATE_BASELINE_FILE (captured_by=$captured_by)"
+        return 1
+    }
+
+    # First v2 write retires the legacy file. verify-before-stop.sh reads the
+    # legacy one only when no v2 baseline exists (one-release fallback), so
+    # leaving it behind would just be a confusing stale artifact.
+    rm -f "$LEGACY_APPROVED_BASELINE" 2>/dev/null || true
     return 0
+}
+
+# gate_baseline_exclude_tracked <porcelain-lines> — drop the lines whose path
+# is already in changed-files.txt.
+#
+# `enter` arms a review cycle mid-session: files the session ALREADY edited
+# are dirty in git AND recorded by post-edit.sh. Baselining them would mark
+# the session's own work "pre-existing" and hand it a free pass. Tracked
+# entries are absolute (post-edit records `tool_input.file_path` verbatim)
+# while porcelain paths are repo-relative, so we match on both spellings.
+gate_baseline_exclude_tracked() {
+    local status_out="$1"
+    local tracking="$QA_TRACKING_DIR/changed-files.txt"
+    [ -s "$tracking" ] || { printf '%s' "$status_out"; return 0; }
+
+    local tmp_tracked
+    tmp_tracked=$(mktemp -t gate-baseline-tracked.XXXXXX 2>/dev/null) || {
+        printf '%s' "$status_out"; return 0
+    }
+    local t
+    while IFS= read -r t; do
+        [ -z "$t" ] && continue
+        printf '%s\n' "$t"
+        case "$t" in
+            "$PROJECT_DIR"/*) printf '%s\n' "${t#"$PROJECT_DIR"/}" ;;
+        esac
+    done < "$tracking" | LC_ALL=C sort -u > "$tmp_tracked"
+
+    local line p kept=""
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        p="${line#???}"
+        # Rename/copy entries are "R  old -> new"; the destination is the
+        # path a tracker entry would name.
+        case "$p" in *" -> "*) p="${p##* -> }" ;; esac
+        if grep -qxF "$p" "$tmp_tracked" 2>/dev/null; then
+            continue
+        fi
+        kept="$kept$line
+"
+    done <<< "$status_out"
+    rm -f "$tmp_tracked" 2>/dev/null || true
+    # Trim the single trailing newline the accumulator adds.
+    printf '%s' "${kept%$'\n'}"
 }
 
 # 0wk.2 fix: paired with write_approved_baseline. The legacy approve path
@@ -373,6 +508,14 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                 QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>:
                 <summary>[ [impact-report bypass: ...]][ [review bypass: ...]]
   block   <task-id> <reason>
+  baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
+              Write .claude/.qa-tracking/gate-baseline — the snapshot of
+              `git status --porcelain` that verify-before-stop.sh subtracts
+              so the Stop gate evaluates this session's DELTA rather than a
+              working tree that was already dirty on arrival. No task id, no
+              bd, no labels. session-start.sh calls this (--by session-start)
+              when no review cycle is active; `enter` and `approve` write it
+              themselves.
   choose  <approve|continue|tech-debt|defer> <task-id> <note> [tech-debt: severity file:line effort]
               Record a J21 decision while qa-escalated. The note is the
               human-readable rationale; for `tech-debt` the note becomes
@@ -559,11 +702,27 @@ cmd_enter() {
         log_sync_error "enter: failed to add rubric-pending label on $tid"
     fi
 
-    # 0wk.2 fix: a new gate cycle invalidates the previous approval's
-    # baseline. Without this, an approve from cycle N would leave its
-    # baseline behind so verify-before-stop in cycle N+1 (post re-enter)
-    # would treat ALL N+1 edits as already-approved.
-    rm -f "$QA_TRACKING_DIR/approved-baseline" 2>/dev/null || true
+    # 0wk.2 fix: a new gate cycle invalidates the previous approval's LEGACY
+    # baseline. Without this, an approve from cycle N would leave its baseline
+    # behind so verify-before-stop in cycle N+1 (post re-enter) would treat
+    # ALL N+1 edits as already-approved.
+    rm -f "$LEGACY_APPROVED_BASELINE" 2>/dev/null || true
+
+    # gate-baseline v2 (3mg.1): WRITE-IF-MISSING, minus already-tracked files.
+    #
+    # Not an unconditional refresh, and not a delete either:
+    #   - refresh would baseline the whole dirty tree at the moment a review
+    #     cycle opens, i.e. hand this cycle's own work a free pass;
+    #   - delete would leave the cycle with no reference point at all, so a
+    #     repo that was merely dirty on arrival re-blocks every Stop (the
+    #     0wk.2 symptom, and transcript scenario 1).
+    # Write-if-missing gives a cycle started in a fresh session the
+    # session-start baseline, and a cycle started in a session that never had
+    # one a baseline captured now — with the session's ALREADY-tracked edits
+    # excluded so they stay gated. Best-effort: enter never fails on it.
+    if ! write_gate_baseline "qa-gate-enter" --if-missing --exclude-tracked; then
+        log_sync_error "enter: gate-baseline capture failed for $tid (gate still correct; the Stop fallback treats all git dirt as new)"
+    fi
 
     # F3: persist active task as side effect so hooks can find it. Failures
     # are logged to sync-errors.log AND surfaced in the JSON observation
@@ -1016,10 +1175,17 @@ cmd_approve() {
     # trail showing the final verdict that backed this approval.
     remove_rubric_pending "$tid"
 
-    # 0wk.2 fix: snapshot current git status to approved-baseline. Subsequent
+    # 0wk.2 fix: snapshot current git status to the gate baseline. Subsequent
     # Stop hook fires compare git status against this baseline and only
     # block if NEW uncommitted entries appear. Closes 0wk.2.
-    write_approved_baseline "$tid"
+    #
+    # FULL refresh (no --if-missing, no --exclude-tracked): approve means
+    # "everything dirty right now has been reviewed", so the whole working
+    # tree is the new reference point. Paired with the tracker truncation
+    # below, a fresh approval starts a clean cycle.
+    if ! write_gate_baseline "qa-gate-approve"; then
+        log_sync_error "approve: gate-baseline refresh failed for $tid (subsequent Stops will treat existing git dirt as new)"
+    fi
 
     # 0wk.2 fix: truncate changed-files.txt - paired with the baseline, this
     # means a fresh approval starts a clean tracker. Closes 0wk.2.
@@ -1814,6 +1980,44 @@ cmd_arbitrate() {
     emit_json 1 "arbitrate" "$tid" "arbitrated" "comment posted at $ts: $comment_text"
 }
 
+# cmd_baseline_capture — write the gate baseline outside the enter/approve
+# lifecycle (3mg.1). Exists so session-start.sh has ONE implementation to call
+# instead of a second copy of the format; deliberately does NOT require bd
+# (no task is involved) and never touches labels.
+#
+# Usage: qa-gate.sh baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
+cmd_baseline_capture() {
+    local by="manual"
+    local -a passthru
+    passthru=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --by) by="${2:-manual}"; shift ;;
+            --if-missing|--exclude-tracked) passthru+=("$1") ;;
+            *)
+                emit_error_json "baseline-capture" "" "unknown_flag" \
+                    "unknown flag '$1'" \
+                    "qa-gate.sh baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]"
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    if write_gate_baseline "$by" ${passthru[@]+"${passthru[@]}"}; then
+        local n="0"
+        if [ -f "$GATE_BASELINE_FILE" ]; then
+            n=$(awk 'body { c++ } /^--$/ { body = 1 } END { print c + 0 }' "$GATE_BASELINE_FILE" 2>/dev/null || echo "0")
+        fi
+        emit_json 1 "baseline-capture" "" "captured" \
+            "gate-baseline captured_by=$by entries=$n at $GATE_BASELINE_FILE"
+        return 0
+    fi
+    emit_json 0 "baseline-capture" "" "error" \
+        "gate-baseline capture failed (captured_by=$by); see sync-errors.log"
+    exit 2
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 
@@ -1822,6 +2026,7 @@ shift || true
 
 case "$SUB" in
     enter)        cmd_enter "$@" ;;
+    baseline-capture) cmd_baseline_capture "$@" ;;
     status)       cmd_status "$@" ;;
     approve)      cmd_approve "$@" ;;
     block)        cmd_block "$@" ;;

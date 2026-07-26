@@ -18,10 +18,17 @@
 #      changed-files list (LC_ALL=C sort -u + the post-edit denylist),
 #      byte-identical to what `--hash-only` recomputes (the staleness
 #      check in qa-gate.sh approve depends on this equivalence).
-#   3. Per-file tool errors are TOLERATED: an entry the server rejects
-#      (absolute path outside the project) records {ok:false, error:{...}}
-#      for that file while its neighbours still get real impact data and
-#      the run exits 0.
+#   3. Out-of-project entries are SKIPPED LOCALLY and never sent to the
+#      tool (PR #2 / preql-backend-9n5). impact-report.sh relativises
+#      every path through git identity (relativize_for_impact) BEFORE
+#      calling impact_of; anything that cannot belong to this index —
+#      a foreign repo, non-git scratch, or a bare-relative path the
+#      non-git fallback cannot anchor — is recorded as
+#      {ok:false, error:{message:"skipped: path is outside the analyzed
+#      project ..."}} while its neighbours still get real impact data and
+#      the run exits 0. Corollary the report must uphold: it never
+#      contains the server's "project-relative path, not absolute"
+#      validation error, because no absolute path is ever handed over.
 #
 # The server-present sections drive the REAL code-graph-mcp server from
 # this repo over stdio (free, local; no model calls) against a tiny
@@ -188,8 +195,23 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Section 4: server PRESENT (real code-graph) — impact data + per-file error tolerance ==="
+echo "=== Section 4: server PRESENT (real code-graph) — impact data + out-of-project skips ==="
 
+# PR #2 (relativize_for_impact) made relativisation GIT-IDENTITY driven: a
+# path is sent to impact_of only when its directory is in the same git repo
+# (same --git-common-dir) as $PROJECT_DIR; when $PROJECT_DIR is not a git
+# checkout at all the code falls back to a literal "$PROJECT_DIR/" prefix
+# strip. This fixture is a mktemp dir, so it exercises the NON-GIT FALLBACK
+# branch (the git branch, incl. sibling worktrees, is owned by the L2 spec
+# .claude/tests/component/specs/impact-report-paths.sh, which drives a stub
+# server against a real worktree topology).
+#
+# That contract only holds while the fixture really is outside any git
+# checkout. If the tempdir happens to live inside a repo, PROJECT_COMMON_DIR
+# is non-empty and every expectation below flips (including the pre-existing
+# a.ts ones) — so we measure the ACTUAL fixture and skip loudly rather than
+# emit a baffling failure.
+F4_GIT_HOST=""
 if ! command -v node >/dev/null 2>&1; then
     printf 'SKIPPED: section 4 (node not on PATH)\n'
 elif [ ! -f "$MCP_BIN" ] || [ ! -d "$MCP_DIR/node_modules" ]; then
@@ -198,6 +220,13 @@ elif [ ! -f "$MCP_BIN" ] || [ ! -d "$MCP_DIR/node_modules" ]; then
         "$MCP_DIR" "$MCP_DIR"
 else
     F4=$(mk_proj)
+    F4_GIT_HOST=$(git -C "$F4" rev-parse --git-common-dir 2>/dev/null || echo "")
+fi
+
+if [ -n "$F4_GIT_HOST" ]; then
+    printf 'SKIPPED: section 4 (fixture tempdir is inside a git checkout: %s — this section pins the NON-GIT relativisation fallback and needs a fixture outside any repo)\n' \
+        "$F4_GIT_HOST"
+elif [ -n "${F4:-}" ]; then
     mkdir -p "$F4/.claude/mcp" "$F4/src"
     # Symlink the real server tree; node resolves imports via realpath so
     # src/ and node_modules/ load from the actual install.
@@ -213,9 +242,12 @@ export function consumer(): string {
     return flagshipSymbol();
 }
 TS
-    # Tracker mixes: an ABSOLUTE in-project path (must be converted to
-    # project-relative), a relative path, and an absolute OUT-OF-PROJECT
-    # path (the server rejects absolute seeds -> per-file error).
+    # Tracker mixes the three shapes the non-git fallback must separate:
+    #   - an ABSOLUTE in-project path  -> anchored by the prefix strip, SENT
+    #   - a BARE-RELATIVE path         -> unanchorable here, SKIPPED
+    #   - an absolute OUT-OF-PROJECT path -> not in this index, SKIPPED
+    # (Production tracker entries are absolute: post-edit.sh records
+    # `tool_input.file_path` verbatim, which Claude Code supplies absolute.)
     printf '%s/src/a.ts\nsrc/b.ts\n/outside/impact-report-test-abs.ts\n' "$F4" \
         > "$F4/.claude/.qa-tracking/changed-files.txt"
 
@@ -228,11 +260,20 @@ TS
     assert_eq "live: server=code-graph" "code-graph" "$(printf '%s' "$J4" | jq -r '.server')"
     assert_eq "live: all 3 files present in report" "3" "$(printf '%s' "$J4" | jq -r '.files | length')"
 
-    # Per-file error tolerated: the out-of-project absolute path is
-    # rejected by the server's validation, recorded, run continued.
+    # Out-of-project absolute path: recorded as an explicit LOCAL skip and
+    # never sent to the server; the run continues with its neighbours.
+    OUT_OK=$(printf '%s' "$J4" | jq -r '.files[] | select(.file == "/outside/impact-report-test-abs.ts") | .impact.ok')
+    assert_eq "live: out-of-project entry recorded ok=false" "false" "$OUT_OK"
     ERR_MSG=$(printf '%s' "$J4" | jq -r '.files[] | select(.file == "/outside/impact-report-test-abs.ts") | .impact.error.message // empty')
-    assert_match "live: rejected entry carries impact.error.message" \
-        'project-relative' "$ERR_MSG"
+    assert_match "live: out-of-project entry carries the explicit skip record" \
+        '^skipped: path is outside the analyzed project' "$ERR_MSG"
+
+    # PR #2's core invariant, restated at L1: because relativisation happens
+    # BEFORE the call, no absolute path is ever handed to impact_of, so the
+    # server's absolute-path validation error can never appear in a report.
+    # (Pre-PR#2 this count was 1 — the out-of-project entry produced it.)
+    ABS_ERRS=$(printf '%s' "$J4" | jq -r '[.files[] | select((.impact.error.message // "") | test("project-relative path, not absolute"))] | length')
+    assert_eq "live: zero absolute-path validation errors in the report" "0" "$ABS_ERRS"
 
     # The absolute in-project entry was converted to a relative seed and
     # produced REAL graph data: b.ts imports a.ts -> 1 file dependent,
@@ -245,8 +286,23 @@ TS
     A_CALLERS=$(printf '%s' "$J4" | jq -r --arg f "$F4/src/a.ts" '.files[] | select(.file == $f) | [.impact.data.nodes[] | select(.relation == "caller")] | length')
     assert_match "live: a.ts has >=1 transitive caller (consumer)" '^[1-9][0-9]*$' "$A_CALLERS"
 
+    # Bare-relative entry. The non-git fallback can only anchor the literal
+    # "$PROJECT_DIR/" prefix, so a relative path has no resolvable identity
+    # here and is skipped rather than guessed at — the same explicit record
+    # the foreign path gets. (In a real git checkout the git branch anchors
+    # it against the process cwd instead; that path is L2-covered.)
     B_OK=$(printf '%s' "$J4" | jq -r '.files[] | select(.file == "src/b.ts") | .impact.ok')
-    assert_eq "live: relative entry resolved (impact.ok=true)" "true" "$B_OK"
+    assert_eq "live: bare-relative entry not resolvable under a non-git project root (ok=false)" \
+        "false" "$B_OK"
+    B_ERR=$(printf '%s' "$J4" | jq -r '.files[] | select(.file == "src/b.ts") | .impact.error.message // empty')
+    assert_match "live: bare-relative entry carries the explicit skip record" \
+        '^skipped: path is outside the analyzed project' "$B_ERR"
+
+    # The entry is recorded, not dropped: the report still describes the
+    # whole change set (already asserted as 3 above) and the file key is the
+    # path AS TRACKED, unmodified by relativisation.
+    B_KEY=$(printf '%s' "$J4" | jq -r '[.files[] | select(.file == "src/b.ts")] | length')
+    assert_eq "live: skipped entry keeps its as-tracked path key" "1" "$B_KEY"
 
     # Hash agreement under the live fixture too.
     H4_REPORT=$(printf '%s' "$J4" | jq -r '.change_set_hash')

@@ -93,13 +93,35 @@ FIRST_CALL_TIMEOUT_S="${IMPACT_REPORT_FIRST_CALL_TIMEOUT_S:-300}"
 CALL_TIMEOUT_S="${IMPACT_REPORT_CALL_TIMEOUT_S:-60}"
 BOOT_TIMEOUT_S="${IMPACT_REPORT_BOOT_TIMEOUT_S:-30}"
 
-# Denylist over build/lock artifacts — the SAME regex post-edit.sh uses
-# to decide what to track and verify-before-stop.sh uses to decide what
-# needs review. The canonical change set here must match the gate's
-# notion of "changed" or hash comparisons drift. (Three copies of this
-# regex now exist; they were already duplicated pre-llh.2 — see the
-# tech-debt note on the Beads task.)
-DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
+# Denylist over build artifacts + workflow-internal churn — the SAME
+# definition post-edit.sh uses to decide what to track and
+# verify-before-stop.sh uses to decide what needs review. The canonical
+# change set here MUST match the gate's notion of "changed" or hash
+# comparisons drift; 3mg.1 replaced the three drifted copies of this regex
+# with the single source below.
+#
+# Resolved relative to THIS script (BASH_SOURCE), not $PROJECT_DIR: the
+# generator may run with CLAUDE_PROJECT_DIR pointing at a different checkout
+# than the install it was launched from.
+#
+# FAIL CLOSED on a missing lib: without the denylist we cannot compute the
+# canonical hash the gate binds approvals to, and an unverifiable hash must
+# never be silently replaced by a plausible-looking one. Exiting 3 here means
+# `--hash-only` prints nothing and the generator writes no artifact, both of
+# which upstream (qa-gate.sh compute_change_set_hash -> approve's refusal,
+# verify-before-stop.sh's LABEL_WITHOUT_RECORD arm) already treats as
+# refuse-to-release.
+_WFDL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || _WFDL_DIR=""
+if [ -n "$_WFDL_DIR" ] && [ -f "$_WFDL_DIR/workflow-denylist.sh" ]; then
+    # shellcheck source=.claude/scripts/workflow-denylist.sh
+    . "$_WFDL_DIR/workflow-denylist.sh"
+fi
+if [ -z "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
+    printf '[impact-report] FATAL: workflow-denylist.sh not found or did not define WORKFLOW_DENYLIST_REGEX (looked in %s). Refusing to emit a change-set hash computed with an unknown filter.\n' \
+        "${_WFDL_DIR:-<unresolvable script dir>}" >&2
+    exit 3
+fi
+DENYLIST_REGEX="$WORKFLOW_DENYLIST_REGEX"
 
 log() {
     printf '[impact-report] %s\n' "$1" >&2

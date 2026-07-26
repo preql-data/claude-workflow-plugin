@@ -56,6 +56,48 @@ if [ -s "$SYNC_ERROR_LOG" ]; then
     : > "$SYNC_ERROR_LOG"
 fi
 
+# gate-baseline v2 (3mg.1): capture "what was already dirty when this session
+# started" so the Stop gate evaluates THIS session's delta.
+#
+# The bug this closes: open a session in a repo that is merely dirty (a
+# half-finished refactor, a vendored file, an unstaged config tweak) and the
+# Stop hook's git fallback counted every one of those paths as unreviewed work
+# — "N file(s) changed - all require QA review" — with no way out except
+# approving a task for changes the session never made.
+#
+# ONLY WHEN NO REVIEW CYCLE IS ACTIVE. If current-task names a task, a gate
+# cycle is in flight and its work is (by construction) dirty right now;
+# baselining it would mark that work pre-existing and release it unreviewed.
+# In that case we write nothing and the cycle stays gated — the fail-closed
+# direction. (This hook also clears changed-files.txt above, so an in-flight
+# cycle resumed in a new session runs on the git fallback with whatever
+# baseline the cycle already had: every path dirtied since then reads as new.
+# Correct, if noisy.)
+#
+# Runs AFTER the B11 truncate above on purpose: a failure logged here belongs
+# to THIS session and should surface at the NEXT SessionStart, not be consumed
+# (and mis-attributed to the previous session) by the snapshot we just took.
+#
+# FAIL OPEN: SessionStart must never break a session. Every step is
+# best-effort; a failure is one sync-errors.log line and nothing more. The
+# normal "cycle in flight, nothing captured" case is not an error and is not
+# logged — it would fire on every resumed session.
+SS_SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || SS_SCRIPT_DIR=""
+if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/qa-gate.sh" ]; then
+    SS_ACTIVE_TASK=""
+    if [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
+        SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
+    fi
+    if [ -z "$SS_ACTIVE_TASK" ]; then
+        CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/qa-gate.sh" \
+            baseline-capture --by session-start >/dev/null 2>&1 \
+            || printf '%s\t[session-start]\t%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
+                "gate-baseline capture failed; the Stop gate will treat pre-existing git dirt as new work this session" \
+                >> "$SYNC_ERROR_LOG" 2>/dev/null || true
+    fi
+fi
+
 # Helpers ---------------------------------------------------------------------
 
 # Compare two dotted versions (a, b). Echoes "older", "equal", or "newer".

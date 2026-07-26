@@ -57,9 +57,29 @@ if [ -z "$FILE_PATH" ]; then
 fi
 
 # B6: denylist (regex against the path). Anything not matched is tracked.
-DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
-if [[ "$FILE_PATH" =~ $DENYLIST_REGEX ]]; then
-    emit_empty; exit 0
+#
+# 3mg.1: the regex now lives in ONE place, shared with impact-report.sh (what
+# enters the change-set hash) and verify-before-stop.sh (what needs review).
+# Resolved relative to THIS script (BASH_SOURCE), not $PROJECT_DIR — a hook
+# may run with CLAUDE_PROJECT_DIR pointing at a different checkout than the
+# install it lives in.
+#
+# Missing lib: TRACK ANYWAY. Over-tracking is the fail-closed side for a hook
+# whose output feeds the gate — an untracked edit is an edit the Stop gate
+# never sees, while an over-tracked one merely costs a review look. We still
+# emit the `{}` envelope so the hook never blocks the user (advisory hook).
+_WFDL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || _WFDL_DIR=""
+if [ -n "$_WFDL_DIR" ] && [ -f "$_WFDL_DIR/workflow-denylist.sh" ]; then
+    # shellcheck source=.claude/scripts/workflow-denylist.sh
+    . "$_WFDL_DIR/workflow-denylist.sh"
+fi
+if [ -n "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
+    DENYLIST_REGEX="$WORKFLOW_DENYLIST_REGEX"
+    if [[ "$FILE_PATH" =~ $DENYLIST_REGEX ]]; then
+        emit_empty; exit 0
+    fi
+else
+    log_sync_error "workflow-denylist.sh missing or empty (looked in ${_WFDL_DIR:-<unresolvable script dir>}); tracking '$FILE_PATH' unfiltered (over-tracking is the fail-closed side for the gate)"
 fi
 
 mkdir -p "$QA_TRACKING_DIR"

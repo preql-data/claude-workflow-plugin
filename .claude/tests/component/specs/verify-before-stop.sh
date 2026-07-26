@@ -503,45 +503,63 @@ assert_decision "vbs-llh17 anti-overreach: fixture DELIVERABLE (fixture.yaml) ST
 printf 'name: node-react-auth\ninvariants: []\n' > "$NESTED_YAML"
 
 # --- META-TEST: prove the fixtures-denylist ALLOW assertions are load-bearing.
-# Build a COPY of verify-before-stop.sh with the fixtures alternative stripped
-# from DENYLIST_REGEX (the pre-llh.17 world) and re-run repro 1. The
-# fixture-script-churn case must then BLOCK — proving the ALLOW assertion above
-# is sensitive to the denylist extension, not passing for some incidental
-# reason. Pattern-anchored python strip over the unique fixtures sub-pattern.
-REAL_VBS_FX=$(readlink "$VBS_FX" || printf '%s' "$VBS_FX")
-VBS_FX_MUT="$FIXTURE_FX/vbs-fxmut.sh"
+# Strip the fixtures alternative from the DENYLIST REGEX (the pre-llh.17
+# world) and re-run repro 1. The fixture-script-churn case must then BLOCK —
+# proving the ALLOW assertion above is sensitive to the denylist extension,
+# not passing for some incidental reason. Pattern-anchored python strip over
+# the unique fixtures sub-pattern; never a line number.
+#
+# 3mg.1 CHANGED WHAT IS MUTATED, not the force of the assertion. The regex
+# moved out of verify-before-stop.sh into the shared
+# `.claude/scripts/workflow-denylist.sh`, so the mutation now targets the LIB
+# — which is exactly right: the lib is the single definition all three
+# consumers read. We overwrite the FIXTURE's symlink with a mutated regular
+# file (rm first, so the edit can never reach the real plugin script through
+# the link) and run the UNMODIFIED hook against it, then restore the symlink.
+DENYLIST_LIB_FX="$FIXTURE_FX/.claude/scripts/workflow-denylist.sh"
+REAL_DENYLIST_FX=$(readlink "$DENYLIST_LIB_FX" || printf '%s' "$DENYLIST_LIB_FX")
+rm -f "$DENYLIST_LIB_FX"
 FIXTURES_ALT='|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/' \
-    REAL_VBS_FX="$REAL_VBS_FX" VBS_FX_MUT="$VBS_FX_MUT" python3 - <<'PYEOF'
+    REAL_DENYLIST_FX="$REAL_DENYLIST_FX" DENYLIST_LIB_FX="$DENYLIST_LIB_FX" python3 - <<'PYEOF'
 import io, os
-real = os.environ["REAL_VBS_FX"]; out = os.environ["VBS_FX_MUT"]; alt = os.environ["FIXTURES_ALT"]
+real = os.environ["REAL_DENYLIST_FX"]; out = os.environ["DENYLIST_LIB_FX"]; alt = os.environ["FIXTURES_ALT"]
 with io.open(real, "r", encoding="utf-8") as f:
     s = f.read()
 if alt not in s:
-    raise SystemExit("META precondition failed: fixtures alternative not found in script under test")
+    raise SystemExit("META precondition failed: fixtures alternative not found in workflow-denylist.sh")
 s = s.replace(alt, "", 1)
 with io.open(out, "w", encoding="utf-8") as f:
     f.write(s)
 PYEOF
-chmod +x "$VBS_FX_MUT"
-# Confirm the alternative was actually removed from the copy. Anchor on the
-# regex-only token `fixtures/[^/]+/` (the `[^/]+` bracket-class appears ONLY
-# in the DENYLIST_REGEX line, never in the prose comment that also mentions
-# "tests/e2e/fixtures") so the precondition checks the LOAD-BEARING regex,
-# not the doc comment.
-FX_MUT_STRIPPED=$(grep -cF 'fixtures/[^/]+/' "$VBS_FX_MUT" || true)
+chmod +x "$DENYLIST_LIB_FX"
+# Confirm the alternative was actually removed from the mutated lib. Anchor on
+# the regex-only token `fixtures/[^/]+/` (the `[^/]+` bracket-class appears
+# ONLY in WORKFLOW_DENYLIST_REGEX, never in the prose header that also
+# mentions "tests/e2e/fixtures") so the precondition checks the LOAD-BEARING
+# regex, not the doc comment.
+FX_MUT_STRIPPED=$(grep -cF 'fixtures/[^/]+/' "$DENYLIST_LIB_FX" || true)
 FX_MUT_STRIPPED=$(printf '%s' "$FX_MUT_STRIPPED" | tr -d '[:space:]')
-assert_eq "vbs-llh17 META: fixtures denylist alternative stripped from copy (regex token gone)" \
+assert_eq "vbs-llh17 META: fixtures denylist alternative stripped from the lib (regex token gone)" \
     "0" "$FX_MUT_STRIPPED"
-run_vbs_fx_mut() {
-    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_FX_MUT" 2>&1 | tail -1
-}
+# And the lib is still a VALID lib — otherwise the hook would take the
+# missing-denylist fail-closed arm and BLOCK for the wrong reason, turning
+# the assertion below into a false pass.
+FX_MUT_STILL_DEFINES=$(grep -c '^WORKFLOW_DENYLIST_REGEX=' "$DENYLIST_LIB_FX" || true)
+FX_MUT_STILL_DEFINES=$(printf '%s' "$FX_MUT_STILL_DEFINES" | tr -d '[:space:]')
+assert_eq "vbs-llh17 META: mutated lib still defines WORKFLOW_DENYLIST_REGEX (block is not the missing-lib arm)" \
+    "1" "$FX_MUT_STILL_DEFINES"
 bash "$CT_FX" clear
 : > "$TRACK_FX/changed-files.txt"
 printf '#!/bin/bash\n# synced qa-gate (mutated again)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
-OUT_FX_MUT=$(run_vbs_fx_mut)
+OUT_FX_MUT=$(run_vbs_fx)
 assert_decision "vbs-llh17 META: with fixtures denylist stripped, fixture-script churn BLOCKS (ALLOW assertion WOULD fail)" \
     "$OUT_FX_MUT" "block"
-# Restore baseline script.
+REASON_FX_MUT=$(printf '%s' "$OUT_FX_MUT" | jq -r '.reason // empty')
+assert_contains "vbs-llh17 META: the block is the QA-review block, not the missing-denylist block" \
+    "QA approval required" "$REASON_FX_MUT"
+# Restore the real lib symlink + the baseline script.
+rm -f "$DENYLIST_LIB_FX"
+ln -sf "$REAL_DENYLIST_FX" "$DENYLIST_LIB_FX"
 printf '#!/bin/bash\n# canonical-synced qa-gate (baseline)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
 
 # ===========================================================================
@@ -701,8 +719,15 @@ assert_empty_envelope "vbs mut(line677): no-task beads-only change-set -> ALLOW"
 # moving this guard 882->890, the kind of drift that used to silently un-land
 # a fixed-line mutation (same lesson the truncation META-TEST below records).
 # It still mutates the SAME guard, so the assertion is identical in force.
+#
+# 3mg.1: the mutant copy lives in the fixture's `.claude/scripts/`, NOT the
+# fixture root. verify-before-stop.sh now loads `workflow-denylist.sh` from
+# its OWN directory (BASH_SOURCE-relative) and BLOCKS with the
+# "shared path denylist is missing" reason when it cannot. A copy parked
+# outside scripts/ would take that arm and satisfy this assertion's
+# "the lint bullet vanished" check for entirely the wrong reason.
 REAL_VBS3=$(readlink "$VBS3" || printf '%s' "$VBS3")
-VBS3_MUT="$FIXTURE3/vbs-lintmut.sh"
+VBS3_MUT="$FIXTURE3/.claude/scripts/vbs-lintmut.sh"
 awk '/lint_rc" -ne 0/ {print "        if [ \"$lint_rc\" -eq 0 ]; then"; next} {print}' \
     "$REAL_VBS3" > "$VBS3_MUT"
 chmod +x "$VBS3_MUT"
@@ -719,6 +744,13 @@ LTM_HAS_LINT=$(printf '%s' "$REASON_LTM" | grep -c 'Lint errors (exit 1)' || tru
 LTM_HAS_LINT=$(printf '%s' "$LTM_HAS_LINT" | tr -d '[:space:]')
 assert_eq "vbs META: under lint-guard mutant the 'Lint errors (exit 1)' bullet VANISHES (mut16 assertion WOULD fail)" \
     "0" "$LTM_HAS_LINT"
+# Discriminator (3mg.1): the bullet must be absent because the guard was
+# mutated, NOT because the mutant fell into the missing-denylist fail-closed
+# arm (whose reason contains none of the check bullets either).
+LTM_NOT_DENYLIST=$(printf '%s' "$REASON_LTM" | grep -c 'shared path denylist is missing' || true)
+LTM_NOT_DENYLIST=$(printf '%s' "$LTM_NOT_DENYLIST" | tr -d '[:space:]')
+assert_eq "vbs META: lint mutant ran the real gate (not the missing-denylist arm)" \
+    "0" "$LTM_NOT_DENYLIST"
 
 # --- changed-files truncation at >15 (QA-required path, line ~1016) -------
 # Re-sweep survivor (exposed once the per-file cap was raised past line 884):
@@ -754,8 +786,13 @@ assert_contains "vbs mut1016: truncation reports the correct overflow count (20-
 # the kind of drift that used to silently un-land the mutation). It still
 # mutates the SAME guard (`-gt 15` -> `-le 15`), so the assertion is identical
 # in force.
+#
+# 3mg.1: the copy lives in the fixture's `.claude/scripts/` for the same
+# reason as the lint mutant above — a hook parked outside scripts/ can no
+# longer find its `workflow-denylist.sh` sibling and blocks on THAT instead,
+# which would make "the truncation marker vanished" trivially true.
 REAL_VBS4=$(readlink "$VBS4" || printf '%s' "$VBS4")
-VBS4_MUT="$FIXTURE4/vbs-truncmut.sh"
+VBS4_MUT="$FIXTURE4/.claude/scripts/vbs-truncmut.sh"
 awk '/CHANGE_COUNT" -gt 15/ {print "        if [ \"$CHANGE_COUNT\" -le 15 ]; then"; next} {print}' \
     "$REAL_VBS4" > "$VBS4_MUT"
 chmod +x "$VBS4_MUT"
@@ -769,6 +806,12 @@ TRUNCM_MORE=$(printf '%s' "$REASON_TRUNCM" | grep -c 'more files' || true)
 TRUNCM_MORE=$(printf '%s' "$TRUNCM_MORE" | tr -d '[:space:]')
 assert_eq "vbs META: under -le 15 mutant the truncation marker VANISHES (mut1016 assertion WOULD fail)" \
     "0" "$TRUNCM_MORE"
+# Discriminator (3mg.1): the marker is absent because the guard was inverted
+# and the FULL list printed — not because the mutant blocked on a missing
+# denylist before ever rendering a file list.
+TRUNCM_LISTED=$(printf '%s' "$REASON_TRUNCM" | grep -q 'src/mod20\.ts' && echo yes || echo no)
+assert_eq "vbs META: trunc mutant printed the FULL file list (ran the real gate)" \
+    "yes" "$TRUNCM_LISTED"
 
 # ===========================================================================
 # claude-workflow-plugin-llh.18 (red-team P0/P1) — change-set-bound approval.

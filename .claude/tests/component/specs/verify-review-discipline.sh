@@ -202,7 +202,13 @@ assert_eq "D5: restoring review-check.sh restores the release" "ALLOW" "$(stop_d
 # finding). Under the stripped copy the release SUCCEEDS, i.e. D2's "block"
 # assertion would fail — so D2 is testing the block, not a side effect.
 # TEXT-anchored on the sentinels (LESSONS llh.20), never on line numbers.
-VBS_STRIPPED="$FIXTURE/verify-before-stop-nodiscipline.sh"
+#
+# 3mg.1: the stripped copy lives in the fixture's `.claude/scripts/`, next to
+# the `workflow-denylist.sh` the hook now sources BASH_SOURCE-relative. Parked
+# at the fixture root it would take the missing-denylist fail-closed arm and
+# BLOCK — inverting this META's expected ALLOW and hiding whether the
+# REVIEW-DISCIPLINE block is load-bearing at all.
+VBS_STRIPPED="$FIXTURE/.claude/scripts/verify-before-stop-nodiscipline.sh"
 REAL_VBS=$(readlink "$VBS" 2>/dev/null || printf '%s' "$VBS")
 STRIP_RC=0
 awk '

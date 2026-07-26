@@ -228,15 +228,37 @@ assert_eq "post-edit mut29: empty LINE_COUNT does NOT trip an integer-expression
 # the increment scenario; the edit-count must read 2 (so the mut32 assertion
 # would FAIL). This proves the assertion is sensitive to the regression it
 # names, not passing for an incidental reason.
+#
+# TEXT-anchored on the increment statement, never on a line number (LESSONS
+# llh.20). The previous `NR==114` form silently un-landed the moment 3mg.1
+# added the shared-denylist source block above it: the mutation never
+# applied, and only the sanity assertion caught it.
+#
+# The copy lives in the fixture's `.claude/scripts/` — NOT the fixture root.
+# Since 3mg.1 post-edit.sh loads `workflow-denylist.sh` from its OWN
+# directory (BASH_SOURCE-relative); a copy parked anywhere else loses the
+# denylist and takes the degraded "track everything" arm, so the mutant
+# would no longer be a faithful copy of the script under test.
 PE2_REAL=$(readlink "$PE2" || printf '%s' "$PE2")
-PE2_MUT="$FIXTURE2/post-edit-mut32.sh"
-awk 'NR==114 && /EDIT_COUNT \+ 1/ {print "    EDIT_COUNT=$((EDIT_COUNT + 2))"; next} {print}' \
-    "$PE2_REAL" > "$PE2_MUT"
+PE2_MUT="$FIXTURE2/.claude/scripts/post-edit-mut32.sh"
+awk '
+    !done && /^[[:space:]]*EDIT_COUNT=\$\(\(EDIT_COUNT \+ 1\)\)[[:space:]]*$/ {
+        print "    EDIT_COUNT=$((EDIT_COUNT + 2))"; done=1; next
+    }
+    { print }
+' "$PE2_REAL" > "$PE2_MUT"
 chmod +x "$PE2_MUT"
-# Sanity: the mutation actually landed (line 114 now reads + 2).
-MUT_LANDED=$(sed -n '114p' "$PE2_MUT" | grep -c 'EDIT_COUNT + 2' || true)
+# Sanity: the mutation landed exactly once and the original statement is gone.
+MUT_LANDED=$(grep -c 'EDIT_COUNT + 2' "$PE2_MUT" || true)
 MUT_LANDED=$(printf '%s' "$MUT_LANDED" | tr -d '[:space:]')
-assert_eq "post-edit META: +2 mutation applied to copy at line 114" "1" "$MUT_LANDED"
+assert_eq "post-edit META: +2 mutation applied to copy (text-anchored)" "1" "$MUT_LANDED"
+MUT_ORIG_GONE=$(grep -c 'EDIT_COUNT=\$((EDIT_COUNT + 1))' "$PE2_MUT" || true)
+MUT_ORIG_GONE=$(printf '%s' "$MUT_ORIG_GONE" | tr -d '[:space:]')
+assert_eq "post-edit META: original +1 increment replaced in the copy" "0" "$MUT_ORIG_GONE"
+# Sanity: the mutant still resolves the shared denylist (it is a sibling of
+# the fixture's workflow-denylist.sh), so it exercises the real filter path.
+MUT_LIB_SIBLING=$([ -e "$FIXTURE2/.claude/scripts/workflow-denylist.sh" ] && echo yes || echo no)
+assert_eq "post-edit META: mutant copy sits next to workflow-denylist.sh" "yes" "$MUT_LIB_SIBLING"
 TID_META=$(cd "$FIXTURE2" && bd create "pe meta increment" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 printf '%s\n' "$TID_META" > "$TRACK2/current-task"
 rm -f "$ECF"
