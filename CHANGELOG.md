@@ -20,6 +20,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`).
 
+### Added (Phase V4 pt2 — cross-worktree approval bridge, epic 3mg, 2026-07-26)
+
+Closes transcript scenario 2: a review performed in a linked worktree recorded a
+change-set hash the primary checkout could never reproduce, so its Stop hook
+reported "qa-approved label present but no change-set-bound approval record
+matches" forever — the work was reviewed, the record was on the task, and
+nothing done in the primary checkout could make the hashes agree. Reproduced
+live before the fix; the L2 spec drives a REAL `git worktree add`.
+
+- **Approval records name the approving checkout.** `qa-gate.sh approve` appends
+  a `worktree=<tok>` token — the checkout's git toplevel, spaces `%20`-encoded so
+  it stays ONE space-terminated token, `none` off a git checkout (never omitted:
+  a stable grammar is what lets a reader tell "no worktree recorded" from
+  "recorded but unresolvable"). Every approve path reaches the one record writer,
+  including the F1 fast path and both audited bypasses:
+
+  ```
+  QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok> at <ts>: <summary>
+  ```
+
+  Token ORDER is the compatibility contract: every addition since llh.18 goes
+  AFTER the hash token, space-separated, so the v3.5 `change_set_hash` and V3
+  `reviewed_by` captures extract identical values from the old and new shapes.
+  Pinned by a differential META (`review-separation.test.sh` 4.2b) that strips
+  the `WORKTREE-TOKEN` sentinels from a copy of `qa-gate.sh`, approves with it,
+  and runs BOTH reader expressions over BOTH record shapes plus a renamed token.
+- **The Stop hook resolves cross-worktree approvals** (`WORKTREE-RESOLUTION` in
+  `verify-before-stop.sh`). Only on the path that already blocks, it tries the
+  recorded token first (O(1)), then `git worktree list --porcelain`, skipping the
+  current checkout, capped at 16 candidates. A candidate releases only when ALL
+  of these are positively proven: it is a worktree of this repo (symlink-resolved
+  `--git-common-dir`, never a toplevel string compare); its persisted
+  `impact-report-<tid>.json` carries a `change_set_hash` that a real approval
+  record on the task cites; its own `git status` minus its own `gate-baseline` is
+  empty (no post-approval drift there); every reviewable path in THIS checkout is
+  inside that report's approved file set, compared repo-relative; and the V3
+  `review-check.sh gate` predicate is still clean (same audited `[review bypass:`
+  escape) — so a finding recorded after the approval re-arms this path too.
+- **Record-based, not recomputed.** `approve` truncates `changed-files.txt` in the
+  approving checkout, so a recompute there returns the sha256 of the empty list —
+  the approved hash is unreproducible even in the worktree that produced it. The
+  resolution therefore reads the persisted impact report, which survives approve.
+  The L2 spec asserts the truncation and the diverging recompute, so making that
+  truncation conditional fails loudly instead of silently disabling resolution.
+- **Read-only, fail-closed, no MCP boot.** File reads plus
+  `git worktree list` / `git rev-parse` / `git status` / `jq`. Nothing is written
+  anywhere (the spec re-checksums the candidate worktree), and the code-graph MCP
+  server is never booted (asserted with an armed canary that is proved live on an
+  `enter` and silent on every Stop). Any error, unreadable artifact or ambiguity
+  falls through to the block. A removed worktree is named in the block reason
+  ("bound in worktree `<path>`, which no longer exists"); otherwise the reason
+  gains "(checked N worktree(s))".
+- New L2 spec `.claude/tests/component/specs/worktree-approval-resolution.sh`
+  (real linked worktree; 55 assertions): the release case in both delta
+  spellings, four negatives (drift in the worktree, non-subset delta, a
+  post-approval finding, a deleted worktree), pre-3mg.2 token-less records still
+  resolving via the bounded scan, and the spec-mandated sentinel-strip META.
+  `docs/HOOKS.md` documents the verified topology and the fail-closed guarantee.
+
 ### Changed (Phase V4 pt1 — one denylist, gate-baseline v2, I8 repo identity, epic 3mg, 2026-07-26)
 
 > **UPGRADE NOTE — one-time hash migration.** The change-set denylist changed,

@@ -23,9 +23,13 @@
 #        3.1 --no-review '<reason>'  -> approves, records reason + reviewed_by=none
 #        3.2 --no-review with empty reason -> exit 1, bypass_reason_required
 #   4. Record grammar / backward compatibility
-#        4.1 the approval comment carries reviewed_by=<identity>
+#        4.1 the approval comment carries reviewed_by=<identity> and, since
+#            3mg.2, worktree=<tok> (`none` off a git checkout)
 #        4.2 the llh.18 change_set_hash capture STILL extracts the same hash
-#            (reviewed_by is space-separated AFTER the hash token)
+#            (both later tokens are space-separated AFTER the hash token)
+#        4.2b META: strip the WORKTREE-TOKEN sentinels from a COPY -> it writes
+#            the pre-3mg.2 shape, and BOTH reader expressions extract identical
+#            values from both shapes (and from a renamed token region)
 #        4.3 the review scratch files are cleaned up on approve
 #   5. FAIL CLOSED
 #        5.1 review-check.sh missing -> exit 4, review_check_unavailable
@@ -360,16 +364,37 @@ REC_EXPECTED_HASH=$(current_hash)
 bash "$QG" approve "$TID_REC" "clean independent review" >/dev/null 2>&1
 REC_CMT=$(comments_of "$TID_REC" | grep 'QA-GATE APPROVED' | tail -1)
 
+# The two READER expressions, verbatim. Every compat assertion below runs these
+# rather than a paraphrase, so a record-grammar change that breaks a real reader
+# cannot pass here:
+#   capture_hash        — verify-before-stop.sh task_has_matching_approval_record
+#   capture_reviewed_by — invariants.ts REVIEWED_BY (/\breviewed_by=(\S+)/)
+capture_hash() {
+    printf '%s' "$1" | jq -Rr 'capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null || echo ""
+}
+capture_reviewed_by() {
+    printf '%s' "$1" | jq -Rr 'capture("reviewed_by=(?<r>[^ ]+)").r' 2>/dev/null || echo ""
+}
+
 # 4.1 reviewed_by is present and names the artifact's reviewer.
 assert_contains "4.1 approval comment carries reviewed_by=qa-claude" \
     "reviewed_by=qa-claude" "$REC_CMT"
-# Full grammar, byte-anchored: hash token, THEN reviewed_by, THEN `at <ts>:`.
-assert_match "4.1 approval record grammar (hash then reviewed_by then timestamp)" \
-    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
+# Full grammar, byte-anchored: hash token, THEN reviewed_by, THEN worktree
+# (3mg.2), THEN `at <ts>:`. Token order is the compatibility contract — every
+# addition goes AFTER the hash, space-separated.
+assert_match "4.1 approval record grammar (hash, reviewed_by, worktree, timestamp)" \
+    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
     "$REC_CMT"
+# This fixture is a bare tempdir, NOT a git checkout, so the token records the
+# unresolvable case. `none` rather than an omitted token is the point: a stable
+# grammar lets a reader tell "no worktree recorded" from "recorded, but
+# unresolvable". (The resolvable spelling is covered against a REAL linked
+# worktree by the L2 spec worktree-approval-resolution.sh.)
+assert_contains "4.1 non-git checkout records worktree=none (never an omitted token)" \
+    "worktree=none " "$REC_CMT"
 
 # 4.2 THE compatibility assertion: the llh.18 capture the Stop hook uses is
-# UNCHANGED by the inserted token. Run the hook's exact jq, not a paraphrase.
+# UNCHANGED by the inserted tokens. Run the hook's exact jq, not a paraphrase.
 REC_CAPTURED=$(bd show "$TID_REC" --json 2>/dev/null \
     | jq -r '(if type == "array" then .[0].comments else .comments end) // []
              | .[].text
@@ -379,6 +404,70 @@ assert_eq "4.2 llh.18 hash capture still extracts the approved change_set_hash" 
     "$REC_EXPECTED_HASH" "$REC_CAPTURED"
 assert_not_contains "4.2 captured hash did NOT swallow the reviewed_by token" \
     "reviewed_by" "$REC_CAPTURED"
+assert_not_contains "4.2 captured hash did NOT swallow the worktree token" \
+    "worktree" "$REC_CAPTURED"
+assert_eq "4.2 the V3 reviewed_by capture stops before worktree=" \
+    "qa-claude" "$(capture_reviewed_by "$REC_CMT")"
+
+# 4.2b META (3mg.2, TEXT-anchored on the WORKTREE-TOKEN sentinels): strip the
+# token region from a COPY of qa-gate.sh and approve a fresh task with it. That
+# copy writes the PRE-3mg.2 record shape, so running BOTH readers over BOTH
+# shapes proves the captures are invariant to the token region — which is the
+# whole back-compat claim. Without this, "the old regex still works" would rest
+# on inspection of one record rather than on a differential test.
+QG_NOTOKEN="$FIXTURE/qa-gate-noworktreetoken.sh"
+TOKSTRIP_RC=0
+awk '
+    /# WORKTREE-TOKEN BEGIN/ { skipping=1; found=1; next }
+    /# WORKTREE-TOKEN END/   { skipping=0; next }
+    skipping { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$QG" > "$QG_NOTOKEN" || TOKSTRIP_RC=$?
+chmod +x "$QG_NOTOKEN"
+assert_eq "4.2b META: WORKTREE-TOKEN sentinels present in qa-gate.sh" "0" "$TOKSTRIP_RC"
+
+if [ "$TOKSTRIP_RC" -eq 0 ]; then
+    PARSE_RC=0
+    bash -n "$QG_NOTOKEN" 2>/dev/null || PARSE_RC=$?
+    assert_eq "4.2b META: stripped copy parses (worktree_field defaults empty outside the block)" \
+        "0" "$PARSE_RC"
+
+    TID_NOTOK=$(new_task "review-sep: pre-3mg.2 record shape" "src/eight-b.ts")
+    record_implementer "$TID_NOTOK" "backend"
+    record_artifact "$TID_NOTOK" "qa-claude" "[]"
+    NOTOK_EXPECTED_HASH=$(current_hash)
+    bash "$QG_NOTOKEN" approve "$TID_NOTOK" "clean independent review" >/dev/null 2>&1
+    NOTOK_CMT=$(comments_of "$TID_NOTOK" | grep 'QA-GATE APPROVED' | tail -1)
+
+    assert_not_contains "4.2b META: the stripped writer emits NO worktree token" \
+        "worktree=" "$NOTOK_CMT"
+    # The pre-3mg.2 grammar, exactly — no dangling token, no double space.
+    assert_match "4.2b META: ...and the record is otherwise byte-shaped as v3.5" \
+        "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
+        "$NOTOK_CMT"
+    # THE differential: both readers, both shapes, same extractions.
+    assert_eq "4.2b META: the hash capture is IDENTICAL on the token-less record" \
+        "$NOTOK_EXPECTED_HASH" "$(capture_hash "$NOTOK_CMT")"
+    assert_eq "4.2b META: the hash capture is IDENTICAL on the token-bearing record" \
+        "$REC_EXPECTED_HASH" "$(capture_hash "$REC_CMT")"
+    assert_eq "4.2b META: the reviewed_by capture is IDENTICAL on the token-less record" \
+        "qa-claude" "$(capture_reviewed_by "$NOTOK_CMT")"
+    assert_eq "4.2b META: the reviewed_by capture is IDENTICAL on the token-bearing record" \
+        "qa-claude" "$(capture_reviewed_by "$REC_CMT")"
+    # And the reverse direction: a RENAMED token region must be equally
+    # invisible to both readers (proving they key on their own token, not on
+    # position or field count).
+    RENAMED_CMT=$(printf '%s' "$REC_CMT" | sed 's/ worktree=/ approving_checkout=/')
+    assert_eq "4.2b META: renaming the token leaves the hash capture unchanged" \
+        "$REC_EXPECTED_HASH" "$(capture_hash "$RENAMED_CMT")"
+    assert_eq "4.2b META: renaming the token leaves the reviewed_by capture unchanged" \
+        "qa-claude" "$(capture_reviewed_by "$RENAMED_CMT")"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("4.2b META: WORKTREE-TOKEN sentinels missing — strip meta-test skipped")
+    printf '  FAIL: 4.2b META: WORKTREE-TOKEN sentinels missing — strip meta-test skipped\n'
+fi
 
 # 4.3 approve cleans up the review round's on-disk scratch files (the Beads
 # comments remain the durable record).

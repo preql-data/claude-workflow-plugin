@@ -421,6 +421,43 @@ compute_change_set_hash() {
     CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || printf ''
 }
 
+# 3mg.2 (Phase V4 pt2): WHERE this approval was reviewed — the approving
+# checkout's absolute git toplevel, recorded in the approval comment as a
+# `worktree=<tok>` token.
+#
+# WHY: the change-set hash is PER-CHECKOUT (it hashes the checkout's own
+# changed-files list), so an approval granted inside a linked worktree can
+# never match the hash a Stop hook computes in the primary checkout. The Stop
+# hook's WORKTREE-RESOLUTION block (verify-before-stop.sh) uses this token to
+# find the approving worktree in O(1) instead of scanning, and to name it when
+# it has since been deleted.
+#
+# GRAMMAR CONTRACT — one space-terminated token:
+#   - spaces become %20 and tabs %09, so `worktree=` never splits into two
+#     fields and the v3.5 readers (which stop at whitespace) stay correct;
+#   - a literal `%` becomes %25 FIRST, so the encoding is unambiguous: without
+#     it a real path containing "%20" would decode to a space and the reader
+#     would look for a directory that never existed;
+#   - a path containing a NEWLINE is unrepresentable in a line-oriented record,
+#     so we record `none` rather than emit something the reader could misparse;
+#   - non-git / unresolvable checkout -> `none`. The token is NEVER omitted:
+#     a stable grammar is what lets the reader tell "no worktree recorded"
+#     (pre-3mg.2 record) from "recorded as unresolvable".
+# The decoder is verify-before-stop.sh's wtres_decode; keep the two in step.
+approval_worktree_token() {
+    local top
+    command -v git >/dev/null 2>&1 || { printf 'none'; return 0; }
+    top=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || top=""
+    [ -n "$top" ] || { printf 'none'; return 0; }
+    case "$top" in
+        *$'\n'*) printf 'none'; return 0 ;;
+    esac
+    top="${top//%/%25}"
+    top="${top// /%20}"
+    top="${top//$'\t'/%09}"
+    printf '%s' "$top"
+}
+
 # generate_impact_report <task-id> — best-effort invocation for enter.
 # Sets IMPACT_REPORT_OBS (appended to enter's JSON observations) and
 # returns 0/1. NEVER allowed to fail the enter flow: failures are logged
@@ -504,9 +541,13 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               approval comment as `[review bypass: <reason>]` (which the Stop
               hook's review-discipline check honours) and in the gate JSON.
 
-              The approval comment records the reviewer:
-                QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>:
-                <summary>[ [impact-report bypass: ...]][ [review bypass: ...]]
+              The approval comment records the reviewer AND the approving
+              checkout (3mg.2 — `worktree=` is the %20-encoded git toplevel,
+              or `none`; the Stop hook resolves cross-worktree approvals
+              through it):
+                QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id>
+                worktree=<tok> at <ts>: <summary>
+                [ [impact-report bypass: ...]][ [review bypass: ...]]
   block   <task-id> <reason>
   baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
               Write .claude/.qa-tracking/gate-baseline — the snapshot of
@@ -1123,13 +1164,18 @@ cmd_approve() {
     #
     # V3 (jio.1): the record additionally names WHO reviewed
     # (`reviewed_by=<identity>`, or `none` on the audited --no-review bypass).
-    # Token ORDER is a compatibility contract: reviewed_by comes AFTER the
-    # change_set_hash token and is separated by a SPACE, so the Stop hook's
-    # existing `capture("change_set_hash=(?<h>[A-Za-z0-9-]+)")` still stops at
-    # that space and reads the same hash it always did. Prepending it, or
-    # joining the tokens with anything in [A-Za-z0-9-], would silently corrupt
-    # every hash comparison. Final shape:
-    #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>
+    # 3mg.2 (V4 pt2): and WHERE — `worktree=<tok>`, the approving checkout.
+    #
+    # Token ORDER is a compatibility contract: every token added since llh.18
+    # goes AFTER the change_set_hash token, separated by a SPACE, so the Stop
+    # hook's existing `capture("change_set_hash=(?<h>[A-Za-z0-9-]+)")` still
+    # stops at that space and reads the same hash it always did — and the V3
+    # `\breviewed_by=(\S+)` capture likewise stops before `worktree=`.
+    # Prepending a token, or joining two with anything in [A-Za-z0-9-], would
+    # silently corrupt every hash comparison. Regression: the L1
+    # review-separation.test.sh section 4 compat + META assertions run the
+    # readers' EXACT expressions against a freshly written record. Final shape:
+    #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok> at <ts>: <summary>
     #     [ [impact-report bypass: <reason>]][ [review bypass: <reason>]]
     local ts comment_suffix=""
     if [ "$bypass_impact" = "1" ]; then
@@ -1146,7 +1192,25 @@ cmd_approve() {
     if [ -n "$approved_hash" ]; then
         hash_field="change_set_hash=$approved_hash "
     fi
-    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by at $ts: $summary$comment_suffix"
+
+    # Declared with an EMPTY default outside the sentinel block below (same
+    # discipline as reviewed_by / approved_hash): stripping the block must
+    # leave a coherent record — the pre-3mg.2 grammar, with no dangling
+    # `worktree=` and no double space.
+    local worktree_field=""
+    # WORKTREE-TOKEN BEGIN (v4 V4 / claude-workflow-plugin-3mg.2)
+    #
+    # Every approve path reaches this ONE add_comment — the normal path, the
+    # F1 `--no-review` fast path, and both audited bypasses — so recording the
+    # token here covers all of them without a second write site.
+    #
+    # The L1 META strips these sentinels and asserts (a) the copy still
+    # approves and writes the pre-3mg.2 record, and (b) the change_set_hash /
+    # reviewed_by captures extract IDENTICAL values from both shapes. That is
+    # the falsifiable form of "adding this token cannot regress the readers".
+    worktree_field="worktree=$(approval_worktree_token) "
+    # WORKTREE-TOKEN END (v4 V4 / claude-workflow-plugin-3mg.2)
+    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}at $ts: $summary$comment_suffix"
 
     # F3 + F4: clear active task and wipe per-iteration state. These are
     # the last-step side effects: if a previous step failed and rolled back,
@@ -1189,6 +1253,14 @@ cmd_approve() {
 
     # 0wk.2 fix: truncate changed-files.txt - paired with the baseline, this
     # means a fresh approval starts a clean tracker. Closes 0wk.2.
+    #
+    # 3mg.2, load-bearing consequence (verified live): after this truncation a
+    # recompute IN THIS CHECKOUT yields the EMPTY-LIST hash, never the approved
+    # one. So the Stop hook's cross-worktree resolution can NOT re-derive an
+    # approval by re-running --hash-only in the approving worktree; it must read
+    # the persisted `impact-report-<tid>.json` (which survives approve and
+    # carries both the approved hash and the approved file list). If you ever
+    # make this truncation conditional, re-check that assumption first.
     truncate_changed_files_tracker
 
     # Spec Phase A: build the rubric observation. The WARNING is the

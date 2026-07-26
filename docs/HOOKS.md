@@ -441,9 +441,17 @@ section C.)
 ├── current-task.repo        # Repo fingerprint at set time (I8 cross-repo guard)
 ├── gate-baseline            # Versioned git-status snapshot the Stop gate subtracts (v4)
 ├── approved-baseline        # LEGACY (0wk.2) pre-v4 snapshot; read for one release, then deleted
+├── impact-report-<tid>.json # Mechanical impact_of artifact; SURVIVES approve, so it is
+│                            # also the approved-file-set record another checkout reads
+│                            # (see "Cross-worktree approval resolution")
 ├── sync-errors.log          # Best-effort bd-call failures surfaced by SessionStart
 └── .changed-files.lock      # flock target (only on systems with flock)
 ```
+
+Everything here is **per-checkout**. A linked worktree has its own
+`.claude/.qa-tracking/`, hence its own tracker, hash, baseline and impact
+report — which is exactly why a cross-checkout approval needs the resolution
+step described under the Stop hook.
 
 ### The gate baseline (`gate-baseline`)
 
@@ -551,6 +559,11 @@ fi
 # (verify-before-stop.sh:20-22); a comment that merely says "QA APPROVED"
 # does NOT release the gate, and `.qa-tracking/approved` is never read.
 
+# 6b. Label present but no record matches this checkout's hash? Before
+#     blocking, try to bind the approval to another WORKTREE of the same repo
+#     (read-only, bounded, fail-closed). See "Cross-worktree approval
+#     resolution" below.
+
 # 7. If not approved, BLOCK
 if [ "$QA_APPROVED" = false ]; then
     echo '{"decision": "block", "reason": "QA approval required..."}'
@@ -629,11 +642,21 @@ record on the task, and is every finding at or above the artifact's
 `ARBITRATION ... decision=overrule`. The implementer records are written by
 `subagent-start.sh` at spawn time for the three implementing roles only
 (backend / frontend / devops — `qa` reviews, so recording it would make every
-single-agent review non-independent). The approval comment names the reviewer:
+single-agent review non-independent). The approval comment names the reviewer
+and, since v4 pt2, **where** the review happened:
 
 ```
-QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>
+QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok> at <ts>: <summary>
 ```
+
+`worktree=<tok>` is the approving checkout's git toplevel with `%` → `%25`,
+spaces → `%20` and tabs → `%09` so it stays one space-terminated token; off a
+git checkout it records `none` rather than being omitted, so a reader can tell
+"no worktree recorded" (a pre-v4-pt2 record) from "recorded but unresolvable".
+Every token added since llh.18 goes *after* the `change_set_hash` token,
+separated by a space — that ordering is the compatibility contract, and it is
+why the v3.5 hash reader and the V3 `reviewed_by` reader still extract the same
+values from both record shapes.
 
 The Stop hook re-runs the same predicate before releasing (the
 `REVIEW-DISCIPLINE` block in `verify-before-stop.sh`), because findings can be
@@ -641,6 +664,61 @@ recorded *after* an approval — a second review round, a re-opened issue — an
 the approval record, written once, cannot know about them. Both sides fail
 CLOSED: a missing or unrunnable `review-check.sh` refuses/blocks rather than
 waving the change through.
+
+### Cross-worktree approval resolution (`WORKTREE-RESOLUTION`)
+
+The change-set hash is **per-checkout** — it hashes that checkout's own
+`changed-files.txt`. The tri-model workflow runs implementers and reviewers in
+linked worktrees, so a review performed in `wt-<task>` records a hash the
+primary checkout can never reproduce. Before v4 pt2 the primary's Stop then
+reported "qa-approved label present but no change-set-bound approval record
+matches" forever: the work *was* reviewed, the record *was* on the task, and
+nothing done in the primary checkout could make the hashes agree.
+
+**Verified topology.** A worktree-isolated specialist's tool-call hooks fire in
+the PARENT session (`CLAUDE_PROJECT_DIR=<primary>`, so `post-edit.sh` records
+absolute paths that point *into* the worktree), while gate commands run against
+the worktree get `CLAUDE_PROJECT_DIR=<worktree>` and therefore keep their
+tracking dir, their change-set hash, their impact report and their gate baseline
+*there*. One Beads database is shared, so the approval record is visible from
+both. The L2 spec
+`.claude/tests/component/specs/worktree-approval-resolution.sh` drives this
+against a **real** `git worktree add` (never a simulated one) and is the
+empirical probe for it.
+
+**The bridge.** Only on the already-blocking `LABEL_WITHOUT_RECORD` path, the
+Stop hook tries to bind the approval to another worktree of the same repo. It
+tries the recorded `worktree=` token first (O(1) in the common case), then
+`git worktree list --porcelain`, skipping the current checkout and capped at 16
+candidates. A candidate `W` releases only when **all** of these are positively
+proven:
+
+| Requirement | Evidence |
+| --- | --- |
+| `W` is a worktree of *this* repo | symlink-resolved `--git-common-dir` identity (never a `--show-toplevel` string compare) |
+| the approval really happened in `W` | `W/.claude/.qa-tracking/impact-report-<tid>.json` exists and its `.change_set_hash` is one a real `QA-GATE APPROVED` record on the task carries |
+| nothing changed in `W` after the approval | `W`'s `git status --porcelain` minus `W`'s own `gate-baseline` is empty |
+| this checkout ships nothing extra | every reviewable path here is inside that report's `.files[].file` set, compared repo-relative |
+| the review is still clean | the same `review-check.sh gate` predicate the same-checkout path re-runs, with the same `[review bypass:` escape |
+
+**Record-based, never recomputed.** `approve` truncates `changed-files.txt` in
+the approving checkout, so re-running `impact-report.sh --hash-only` in `W`
+returns the sha256 of the empty list — the approved hash is unreproducible even
+there. The persisted `impact-report-<tid>.json` survives approve and is the
+evidence; that is why the resolution reads a record instead of recomputing.
+
+**Read-only and fail-closed.** The resolution only reads files and runs
+`git worktree list` / `git rev-parse` / `git status` / `jq`. It writes nothing —
+in particular nothing inside the candidate worktree — and never boots the
+code-graph MCP server. Every error, unreadable artifact or ambiguity falls
+through to the block; a resolution must be proven, never assumed. When the
+recorded worktree has been **removed**, the block names it explicitly
+("bound in worktree `<path>`, which no longer exists — re-enter + re-review
+here") instead of leaving the operator with an unreproducible hash; otherwise
+the reason gains "(checked N worktree(s))" so the search is visible.
+
+The block is sentinel-wrapped (`# WORKTREE-RESOLUTION BEGIN` … `END`) and an L2
+META-TEST strips it to prove the cross-worktree release depends on it.
 
 The audited escape is `approve --no-review '<reason>'`, which records
 `reviewed_by=none` plus a `[review bypass: <reason>]` marker on the approval
