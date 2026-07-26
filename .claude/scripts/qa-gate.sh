@@ -11,7 +11,8 @@
 #                                           report via impact-report.sh (G2.n6d;
 #                                           tolerant — enter never fails on it).
 #   status  <task-id>                       Print one of: not-entered, entered, approved, blocked.
-#   approve <task-id> [--no-impact-report '<reason>'] <approval-summary>
+#   approve <task-id> [--no-impact-report '<reason>'] [--no-review '<reason>']
+#           <approval-summary>
 #                                           Atomic: -qa-gate-entered, -qa-pending, +qa-approved, comment.
 #                                           REFUSES (exit 2) when the impact report
 #                                           (.qa-tracking/impact-report-<task-id>.json)
@@ -21,6 +22,11 @@
 #                                           documented degradation). The bypass flag
 #                                           approves anyway and records the reason in
 #                                           the approval comment + gate JSON.
+#                                           ALSO REFUSES (exit 4) when independent
+#                                           review is missing/non-independent/has open
+#                                           findings, per review-check.sh gate (V3).
+#                                           --no-review '<reason>' is the audited
+#                                           bypass for that check.
 #   block   <task-id> <reason>              Add qa-blocked label + comment. Keeps qa-gate-entered.
 #   choose  <approve|continue|tech-debt|defer> <task-id> <note> [extra args for tech-debt]
 #                                           Spec 0.2: record a J21 decision while qa-escalated.
@@ -49,6 +55,12 @@
 #   2   bd unavailable, task lookup failed, or approve REFUSED for a
 #       missing/invalid/stale impact report (error_key names which)
 #   3   atomic operation rolled back
+#   4   approve REFUSED by the V3 review-separation gate: no independent
+#       review artifact, the reviewer is also an implementer, findings at or
+#       above the risk_threshold are still open, or the review predicate
+#       itself is unavailable (fail-closed). error_key names which; the
+#       remediation names the resolve-finding / arbitrate / review-record
+#       command that clears it.
 
 set -e
 
@@ -189,6 +201,33 @@ wipe_iteration_state() {
     rm -f "$QA_TRACKING_DIR/tech-debt-draft.md" 2>/dev/null || true
 }
 
+# V3 (claude-workflow-plugin-jio.1): drop the review round's on-disk scratch
+# files once an approval completes. The durable record is the Beads comment
+# set (REVIEW-ARTIFACT / RESOLVED / ARBITRATION) — these JSON files are only
+# the hand-off medium between the request author, the reviewer, and the record
+# writer, so leaving them behind means the next cycle's reviewer can pick up a
+# previous round's artifact by path and record it as if it were fresh.
+#
+# Two naming conventions are cleaned because two producers exist: qa.md's
+# section 6-prime writes `review-request-<task-id>.json` with the RAW id,
+# while the driver writes `review-artifact-<sanitized>-r<n>.json`. We remove
+# both spellings rather than assume. Idempotent and silent by design.
+wipe_review_artifacts() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    local sanitized f
+    sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    rm -f "$QA_TRACKING_DIR/review-request-$tid.json" 2>/dev/null || true
+    rm -f "$QA_TRACKING_DIR/review-request-$sanitized.json" 2>/dev/null || true
+    # Iteration-suffixed artifacts. The `[ -e ]` guard handles the no-match
+    # case (bash leaves the literal pattern when nothing matches).
+    for f in "$QA_TRACKING_DIR/review-artifact-$tid"-r*.json \
+             "$QA_TRACKING_DIR/review-artifact-$sanitized"-r*.json; do
+        [ -e "$f" ] && rm -f "$f" 2>/dev/null
+    done
+    return 0
+}
+
 # Spec 0.2: best-effort label clears for escalation labels. Used by approve,
 # enter, and the choose subcommand for the "continue"/"approve" paths.
 # We intentionally swallow errors — these labels may not be present and
@@ -303,7 +342,8 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               (.claude/.qa-tracking/impact-report-<task-id>.json) via
               impact-report.sh — tolerant, enter never fails because of it.
   status  <task-id>
-  approve <task-id> [--no-impact-report '<reason>'] <approval-summary>
+  approve <task-id> [--no-impact-report '<reason>'] [--no-review '<reason>']
+          <approval-summary>
               REFUSES (exit 2, structured error) when the impact report is
               missing or stale (change_set_hash != current changed-files
               list). Regenerate with:
@@ -311,6 +351,27 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               server:"absent" reports are accepted (documented degradation).
               --no-impact-report '<reason>' bypasses the refusal; the reason
               is recorded in the approval comment and the gate JSON.
+
+              ALSO REFUSES (exit 4) when independent review is not satisfied,
+              as decided by the ONE predicate `review-check.sh gate <task-id>`:
+                review_artifact_missing   no REVIEW-ARTIFACT v1 record — an
+                                          independent reviewer must review and
+                                          `qa-gate.sh review-record` it
+                reviewer_not_independent  the reviewer is also a recorded
+                                          IMPLEMENTER of this task
+                unresolved_findings       finding(s) at/above the artifact's
+                                          risk_threshold are still open —
+                                          `resolve-finding` (with fix+test) or
+                                          `arbitrate <id> overrule` each one
+                review_check_unavailable  the predicate could not run — this
+                                          FAILS CLOSED on purpose
+              --no-review '<reason>' bypasses it; the reason lands in the
+              approval comment as `[review bypass: <reason>]` (which the Stop
+              hook's review-discipline check honours) and in the gate JSON.
+
+              The approval comment records the reviewer:
+                QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>:
+                <summary>[ [impact-report bypass: ...]][ [review bypass: ...]]
   block   <task-id> <reason>
   choose  <approve|continue|tech-debt|defer> <task-id> <note> [tech-debt: severity file:line effort]
               Record a J21 decision while qa-escalated. The note is the
@@ -318,7 +379,10 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               the description and the optional trailing args are passed
               through to .claude/scripts/tech-debt.sh add.
               Effects:
-                approve    -> delegates to `approve` (same atomic flow)
+                approve    -> delegates to `approve` (same atomic flow, so it
+                              inherits BOTH refusals: a J21 decision does not
+                              exempt the task from a fresh impact report or
+                              from independent review)
                 continue   -> clears qa-escalated + resets iteration counter
                 tech-debt  -> tech-debt.sh add --bd-task + clears escalation
                 defer      -> sets qa-deferred (allows Stop next time)
@@ -574,6 +638,8 @@ cmd_approve() {
     # for multi-word callers).
     local bypass_impact=0
     local bypass_reason=""
+    local bypass_review=0
+    local review_bypass_reason=""
     local summary=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -584,6 +650,21 @@ cmd_approve() {
                     emit_error_json "approve" "$tid" "bypass_reason_required" \
                         "--no-impact-report requires a non-empty reason; the bypass is recorded in the audit trail and an unexplained bypass is indistinguishable from gate evasion" \
                         "qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --no-review)
+                # V3 (jio.1): the audited review-separation bypass. Mirrors
+                # --no-impact-report exactly, including the empty-reason
+                # refusal: a bypass with no recorded reason is
+                # indistinguishable from gate evasion.
+                bypass_review=1
+                review_bypass_reason="${2:-}"
+                if [ -z "$review_bypass_reason" ]; then
+                    emit_error_json "approve" "$tid" "bypass_reason_required" \
+                        "--no-review requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the independent-review requirement is indistinguishable from signing off on your own work" \
+                        "qa-gate.sh approve $tid --no-review '<reason>' '<summary>'"
                     exit 1
                 fi
                 shift 2 || true
@@ -705,6 +786,116 @@ cmd_approve() {
         log_sync_error "approve: could not compute change_set_hash for $tid (impact-report.sh missing/failing); writing approval comment WITHOUT a change-set binding — verify-before-stop will not be able to match it (re-run approve once impact-report.sh is restored)"
     fi
 
+    # V3 (claude-workflow-plugin-jio.1): the review-separation audit fields.
+    # Declared OUTSIDE the sentinel block below for the same two reasons
+    # impact_obs is: (a) the --no-review bypass path skips the block but must
+    # still record WHO (nobody) reviewed and WHY it was waived, and (b) the
+    # META-TEST's stripped copy stays syntactically coherent and still writes a
+    # well-formed `reviewed_by=` token.
+    local reviewed_by="none"
+    local review_obs=""
+    local review_artifact_hash=""
+    if [ "$bypass_review" = "1" ]; then
+        review_obs="; review-bypass: $review_bypass_reason (independent-review refusal bypassed via --no-review; reason recorded per V3)"
+    fi
+
+    # REVIEW-SEPARATION BEGIN (v4 V3 / claude-workflow-plugin-jio.1)
+    #
+    # Mechanical gate: NOBODY SIGNS OFF ON THEIR OWN WORK. approve refuses
+    # unless the task carries a review record whose reviewer_identity differs
+    # from EVERY recorded implementer, and no finding at/above the artifact's
+    # risk_threshold is still unresolved and un-arbitrated.
+    #
+    # The predicate is NOT reimplemented here. review-check.sh `gate` is the
+    # ONE place that parses the record grammars and counts — exactly like
+    # compute_change_set_hash defers to impact-report.sh --hash-only. A second
+    # counter would be a second thing to drift.
+    #
+    # FAIL CLOSED, deliberately: a MISSING or unrunnable helper refuses
+    # (exit 4) rather than waving the approval through. An enforcement whose
+    # absence is silently equivalent to a pass is not an enforcement — and
+    # `rm .claude/scripts/review-check.sh` would otherwise be a one-line
+    # bypass of the whole contract.
+    #
+    # Ordering: this runs AFTER the impact-report refusal on purpose. That one
+    # is cheaper and its remediation is mechanical (re-run one script); this
+    # one costs a human/agent review round-trip, so it should not fire while a
+    # more basic artifact is still missing.
+    #
+    # The sentinel comments wrapping this block are load-bearing: an L2
+    # META-TEST strips everything between them and asserts approve then
+    # succeeds with NO review artifact at all. Do not rename them.
+    if [ "$bypass_review" != "1" ]; then
+        if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+            emit_error_json "approve" "$tid" "review_check_unavailable" \
+                "approve refused: the review predicate is unavailable — $REVIEW_CHECK_SCRIPT is missing, so independent review cannot be verified. This FAILS CLOSED by design (a deleted checker must not read as a passing check). Restore the script, or bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --no-review '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--no-review '<reason>'] <summary>"
+            exit 4
+        fi
+        local review_out review_rc=0 review_key review_open
+        review_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$tid" 2>&1) || review_rc=$?
+        case "$review_rc" in
+            0)
+                reviewed_by=$(printf '%s' "$review_out" | jq -r '.reviewer_identity // "unknown"' 2>/dev/null || echo "unknown")
+                [ -z "$reviewed_by" ] && reviewed_by="unknown"
+                review_artifact_hash=$(printf '%s' "$review_out" | jq -r '.artifact.reviewed_hash // ""' 2>/dev/null || echo "")
+                review_obs="; independent review verified (reviewed_by=$reviewed_by; no open findings at/above the artifact's risk_threshold)"
+                # D6: the artifact may legitimately predate the current
+                # change-set — resolving a finding CHANGES the files, hence the
+                # hash. That is a normal, healthy review loop, so staleness is
+                # AUDITED, never blocking. (A stale-artifact refusal here would
+                # make every resolve-then-approve cycle unclosable.)
+                if [ -n "$review_artifact_hash" ] && [ -n "$approved_hash" ] \
+                    && [ "$review_artifact_hash" != "$approved_hash" ]; then
+                    review_obs="$review_obs; WARNING the review artifact recorded reviewed_hash=$review_artifact_hash but this approval binds change_set_hash=$approved_hash — the reviewed change-set is not byte-identical to the approved one (expected after a resolve-finding round; re-review if the delta is substantive)"
+                fi
+                ;;
+            2)
+                # bd unreachable — the same class require_bd refuses on.
+                emit_error_json "approve" "$tid" "review_check_bd_unavailable" \
+                    "approve refused: review-check.sh could not read $tid's records (bd unavailable). Independent review is unverifiable, so the gate fails closed. Restore bd, or bypass: bash .claude/scripts/qa-gate.sh approve $tid --no-review '<reason>' '<summary>'" \
+                    "qa-gate.sh approve <task-id> [--no-review '<reason>'] <summary>"
+                exit 2
+                ;;
+            4)
+                review_key=$(printf '%s' "$review_out" | jq -r '.error_key // "review_check_violation"' 2>/dev/null || echo "review_check_violation")
+                [ -z "$review_key" ] && review_key="review_check_violation"
+                review_open=$(printf '%s' "$review_out" | jq -r '(.open_finding_ids // []) | join(", ")' 2>/dev/null || echo "")
+                local review_remedy=""
+                case "$review_key" in
+                    review_artifact_missing)
+                        review_remedy="No REVIEW-ARTIFACT v1 record exists for $tid. An independent reviewer must review this change set and record the artifact — QA's section 6-prime authors it (reviewer_identity=qa-claude) and records it with: bash .claude/scripts/qa-gate.sh review-record $tid --file <artifact.json>"
+                        ;;
+                    reviewer_not_independent)
+                        review_remedy="The recorded reviewer is also a recorded IMPLEMENTER of this task, i.e. the change would be signed off by whoever wrote it. Have a DIFFERENT identity review the change set and record a fresh artifact (a QA-authored qa-claude artifact is independent of backend/frontend/devops implementers)."
+                        ;;
+                    unresolved_findings)
+                        review_remedy="Open finding(s) at/above the artifact's risk_threshold: ${review_open:-<none reported>}. Each must be closed with evidence — bash .claude/scripts/qa-gate.sh resolve-finding $tid <finding-id> --fix '<ref>' --test '<ref>' '<summary>' — or explicitly overruled: bash .claude/scripts/qa-gate.sh arbitrate $tid <finding-id> overrule '<rationale>'"
+                        ;;
+                    review_artifact_malformed)
+                        review_remedy="The latest review record is corrupted (no well-formed findings=[...] token), so it cannot be read as a clean review. Re-record a valid artifact via: bash .claude/scripts/qa-gate.sh review-record $tid --file <artifact.json>"
+                        ;;
+                    *)
+                        review_remedy="review-check.sh gate $tid reported: $review_key. Re-run it directly for the full envelope."
+                        ;;
+                esac
+                emit_error_json "approve" "$tid" "$review_key" \
+                    "approve refused (review separation): $review_remedy — or bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --no-review '<reason>' '<summary>'" \
+                    "qa-gate.sh approve <task-id> [--no-review '<reason>'] <summary>"
+                exit 4
+                ;;
+            *)
+                # Usage error (1) or anything unexpected: still fail closed —
+                # an unreadable verdict is not a passing verdict.
+                emit_error_json "approve" "$tid" "review_check_unavailable" \
+                    "approve refused: review-check.sh gate $tid exited $review_rc without a usable verdict, so independent review is unverifiable (fail-closed). Run it directly to see why, or bypass: bash .claude/scripts/qa-gate.sh approve $tid --no-review '<reason>' '<summary>'" \
+                    "qa-gate.sh approve <task-id> [--no-review '<reason>'] <summary>"
+                exit 4
+                ;;
+        esac
+    fi
+    # REVIEW-SEPARATION END (v4 V3 / claude-workflow-plugin-jio.1)
+
     # Step 1: add qa-approved (the source of truth).
     if ! add_label "$tid" "qa-approved"; then
         emit_json 0 "approve" "$tid" "error" "failed to add qa-approved; nothing changed"
@@ -770,16 +961,33 @@ cmd_approve() {
     # determined adversary. A signed/HMAC'd record keyed on a secret the
     # gated process cannot read would be required for that, which the
     # full-shell autonomy model (no secrets withheld from agents) precludes.
+    #
+    # V3 (jio.1): the record additionally names WHO reviewed
+    # (`reviewed_by=<identity>`, or `none` on the audited --no-review bypass).
+    # Token ORDER is a compatibility contract: reviewed_by comes AFTER the
+    # change_set_hash token and is separated by a SPACE, so the Stop hook's
+    # existing `capture("change_set_hash=(?<h>[A-Za-z0-9-]+)")` still stops at
+    # that space and reads the same hash it always did. Prepending it, or
+    # joining the tokens with anything in [A-Za-z0-9-], would silently corrupt
+    # every hash comparison. Final shape:
+    #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>
+    #     [ [impact-report bypass: <reason>]][ [review bypass: <reason>]]
     local ts comment_suffix=""
     if [ "$bypass_impact" = "1" ]; then
         comment_suffix=" [impact-report bypass: $bypass_reason]"
+    fi
+    if [ "$bypass_review" = "1" ]; then
+        # The literal `[review bypass:` marker is what verify-before-stop.sh
+        # reads to skip its own review-discipline check for this record (the
+        # F1 doc-only fast path is the intended producer).
+        comment_suffix="$comment_suffix [review bypass: $review_bypass_reason]"
     fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local hash_field=""
     if [ -n "$approved_hash" ]; then
         hash_field="change_set_hash=$approved_hash "
     fi
-    add_comment "$tid" "QA-GATE APPROVED ${hash_field}at $ts: $summary$comment_suffix"
+    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by at $ts: $summary$comment_suffix"
 
     # F3 + F4: clear active task and wipe per-iteration state. These are
     # the last-step side effects: if a previous step failed and rolled back,
@@ -788,6 +996,13 @@ cmd_approve() {
     # (Phase 4 fix pass / MATERIAL 5).
     clear_current_task
     wipe_iteration_state "$tid"
+
+    # V3 (jio.1): the review round is over — drop its on-disk scratch files.
+    # Deliberately NOT folded into wipe_iteration_state: that helper also runs
+    # on `enter` and `choose continue`, and a continuing review round still
+    # wants its request/artifact files on disk for the packet. Only a
+    # COMPLETED approval ends the round.
+    wipe_review_artifacts "$tid"
 
     # Spec 0.2: also clear any qa-escalated / qa-deferred labels so a
     # subsequent re-enter on this task (or a future bug regression) starts
@@ -831,7 +1046,7 @@ cmd_approve() {
         binding_obs="; WARNING approval comment written WITHOUT a change-set binding (hash unavailable) — verify-before-stop cannot match it; re-run approve once impact-report.sh is restored"
     fi
 
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs$binding_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs$review_obs$binding_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The

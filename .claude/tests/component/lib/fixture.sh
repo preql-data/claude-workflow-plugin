@@ -35,6 +35,11 @@
 #   plugin_root
 #       Absolute path of the plugin root (computed once, cached). Used for
 #       resolving the real hook scripts to symlink/copy into the fixture.
+#
+#   seed_review_records <task-id> [reviewer] [implementer-role] [root]
+#       V3 (jio.1): seed the IMPLEMENTER + REVIEW-ARTIFACT records a task
+#       needs before `qa-gate.sh approve` will succeed. See the function's
+#       own header for the contract.
 
 if [ -n "${__COMPONENT_FIXTURE_SH_SOURCED:-}" ]; then
     return 0 2>/dev/null || true
@@ -133,6 +138,76 @@ bd_required_or_skip() {
     printf 'bd_required_or_skip: %s requires the real `bd` CLI on PATH.\n' "$spec_name" >&2
     printf '  Install Beads (https://github.com/beads-tracker/beads) or run with BD_SHIM_ONLY=1 to skip-with-log in CI.\n' >&2
     exit 1
+}
+
+# seed_review_records <task-id> [reviewer-identity] [implementer-role] [root]
+#
+# V3 (claude-workflow-plugin-jio.1): make a task APPROVABLE under the
+# review-separation gate. Since V3, `qa-gate.sh approve` refuses unless the
+# task carries a review artifact whose reviewer differs from every recorded
+# implementer and has no open finding at/above its risk_threshold — so every
+# spec whose flow reaches a SUCCESSFUL approve has to model the real review
+# flow first. This helper is that model, in one line per call site.
+#
+# It deliberately goes through the REAL writers rather than hand-crafting
+# comment text: `bd comments add` for the IMPLEMENTER record that
+# subagent-start.sh writes on spawn, and `qa-gate.sh review-record` (which
+# re-validates through review-check.sh) for the artifact. If either grammar
+# ever changes, these seeds change with it instead of silently drifting into
+# a shape the gate no longer recognises.
+#
+# Defaults model the common single-agent flow: a backend implementer and the
+# QA agent's own `qa-claude` artifact (section 6-prime), which is independent.
+# Pass an empty implementer-role ('') to seed a reviewer with NO implementer
+# on file; pass reviewer == role to build the non-independent case.
+#
+# reviewed_hash is pinned to the CURRENT canonical change-set hash so the
+# seeded artifact does not trip approve's staleness WARNING. Specs asserting
+# on that warning should seed and then mutate the change set themselves.
+#
+# Returns non-zero (and prints to stderr) if the artifact could not be
+# recorded, so a spec that silently lost its seed fails loudly.
+seed_review_records() {
+    local tid="$1"
+    local reviewer="${2:-qa-claude}"
+    local role="${3:-backend}"
+    local root="${4:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+    if [ -z "$tid" ]; then
+        printf 'seed_review_records: <task-id> is required\n' >&2
+        return 1
+    fi
+
+    local sanitized
+    sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+
+    if [ -n "$role" ]; then
+        local ts
+        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
+        (cd "$root" && bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1) \
+            || (cd "$root" && bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1) \
+            || { printf 'seed_review_records: could not add IMPLEMENTER comment on %s\n' "$tid" >&2; return 1; }
+    fi
+
+    local hash=""
+    if [ -f "$root/.claude/scripts/impact-report.sh" ]; then
+        hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
+    fi
+    [ -z "$hash" ] && hash="unverified"
+
+    # Real artifact path convention (review-artifact-<sanitized>-r<n>.json) so
+    # approve's post-approval scratch-file cleanup is exercised too.
+    local art="$root/.claude/.qa-tracking/review-artifact-$sanitized-r1.json"
+    mkdir -p "$root/.claude/.qa-tracking" 2>/dev/null || true
+    cat > "$art" <<JSON
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"seeded-fixture","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"seeded fixture: every acceptance criterion traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
+JSON
+
+    if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
+            review-record "$tid" --file "$art" >/dev/null 2>&1; then
+        printf 'seed_review_records: qa-gate.sh review-record failed for %s\n' "$tid" >&2
+        return 1
+    fi
+    return 0
 }
 
 mk_fixture() {

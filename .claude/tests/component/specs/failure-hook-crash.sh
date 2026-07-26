@@ -120,6 +120,10 @@ assert_match "failure-hook-crash: task created" '^[a-z0-9-]+\.' "$TID"
 # files, which is what seeding-before-approve models here.)
 printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID" >/dev/null
+# V3 (jio.1) MIGRATION: approve refuses without an independent review
+# artifact, and the Stop hook re-checks the same predicate before releasing.
+# Seed both records so this spec still isolates the hook-crash signal.
+seed_review_records "$TID"
 # Approve the task so the gate's QA-required path doesn't drown out the
 # graceful-degrade signal. The gate's happy path is then `decision: approve`
 # implicit (empty envelope).
@@ -222,6 +226,7 @@ printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 # Re-enter the gate; previous approval cleared the current-task.
 TID2=$(cd "$FIXTURE" && bd create "Hook-crash restore meta-test task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID2" >/dev/null
+seed_review_records "$TID2"   # V3 (jio.1) MIGRATION
 bash "$QG" approve "$TID2" "Approved for restore meta-test" >/dev/null
 bash "$CT" set "$TID2"
 printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"

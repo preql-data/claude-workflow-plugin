@@ -243,7 +243,9 @@ This step runs AFTER the review modules (sections 3-4) and the root-cause framew
 
 Downstream is identical either way — same schema, same record grammar, same packet slot. The lane only changes who wrote it. Sol being absent, failed, or timed out is not a degradation you have to handle specially: it resolves to `claude` and you author the artifact yourself.
 
-**It is ADVISORY.** The artifact is an INPUT. It never writes labels, never records an approval, and never releases the Stop hook. You still form your own verdict — the reviewer's findings inform it, they do not bind it. The change-set-hash-bound `qa-approved` record stays the only release credential. Reviewer independence (`reviewer_identity` differing from the implementing specialist) becomes a mechanical gate rule in V3; in V2, a non-independent identity is a note in `llm_observations`, not a blocker.
+**It is ADVISORY as a VERDICT, MANDATORY as an ARTIFACT.** The findings are an INPUT: the artifact never writes labels, never records an approval, and never releases the Stop hook, and you still form your own verdict — the reviewer's findings inform it, they do not bind it. The change-set-hash-bound `qa-approved` record stays the only release credential.
+
+But since V3 the artifact's EXISTENCE and INDEPENDENCE are mechanically enforced (`review-check.sh gate`, called by both `qa-gate.sh approve` and the Stop hook). If you skip this step, `approve` refuses with exit 4 and `error_key=review_artifact_missing`; if `reviewer_identity` matches a recorded implementer role, `reviewer_not_independent`; if a finding at or above `risk_threshold` is neither resolved (`qa-gate.sh resolve-finding <id> --fix ... --test ...`) nor overruled (`qa-gate.sh arbitrate <id> overrule '<rationale>'`), `unresolved_findings`. Authoring the `qa-claude` artifact below satisfies all three in the default single-agent flow, because the implementer roles recorded at spawn are backend/frontend/devops and you are `qa-claude`.
 
 ### 6p.1 Assemble and validate the review request
 

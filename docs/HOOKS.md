@@ -475,6 +475,36 @@ One more precondition on the label itself: `qa-gate.sh approve` refuses
 `qa-approved` (short of the audited `approve --no-impact-report '<reason>'`
 override) is with the regression-impact artifact present and current.
 
+**Review separation (v4 V3).** A second precondition: approve also refuses
+(exit 4) unless the task carries an independent review. The predicate is the
+one shipped counter, `review-check.sh gate <task-id>`, which reads the record
+comments and answers three questions — is there a `REVIEW-ARTIFACT v1` record
+at all, is its `reviewer_identity` different from every `IMPLEMENTER: role=...`
+record on the task, and is every finding at or above the artifact's
+`risk_threshold` either `RESOLVED` (with fix + test evidence) or
+`ARBITRATION ... decision=overrule`. The implementer records are written by
+`subagent-start.sh` at spawn time for the three implementing roles only
+(backend / frontend / devops — `qa` reviews, so recording it would make every
+single-agent review non-independent). The approval comment names the reviewer:
+
+```
+QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>
+```
+
+The Stop hook re-runs the same predicate before releasing (the
+`REVIEW-DISCIPLINE` block in `verify-before-stop.sh`), because findings can be
+recorded *after* an approval — a second review round, a re-opened issue — and
+the approval record, written once, cannot know about them. Both sides fail
+CLOSED: a missing or unrunnable `review-check.sh` refuses/blocks rather than
+waving the change through.
+
+The audited escape is `approve --no-review '<reason>'`, which records
+`reviewed_by=none` plus a `[review bypass: <reason>]` marker on the approval
+comment; the Stop hook honours that marker and skips its re-check. The F1 fast
+path above uses it automatically (a doc-only change has no implementer and
+nothing to review, so without the flag every documentation commit would
+deadlock on the review refusal).
+
 ### Escalation State Machine (spec 0.2)
 
 The Stop hook tracks a per-task iteration counter at

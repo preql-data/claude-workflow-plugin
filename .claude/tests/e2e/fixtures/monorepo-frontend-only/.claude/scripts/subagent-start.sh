@@ -20,6 +20,13 @@
 #      a brief summary pulled from `bd show <id>` (header lines only).
 #   3. Otherwise emit `{}` and exit cleanly.
 #
+# V3 (claude-workflow-plugin-jio.1) adds one side effect between 2 and 3: for
+# the three IMPLEMENTING roles (backend/frontend/devops — never qa) the hook
+# appends an `IMPLEMENTER: role=<r> task=<t> at <ts>` Beads comment, once per
+# (role, task). That record is the implementer set `review-check.sh gate`
+# reads, which `qa-gate.sh approve` and the Stop hook use to refuse a
+# self-review. It is best-effort: a failure logs and never blocks the spawn.
+#
 # Autonomy: this hook is silent on every error (per principle #3 — full
 # autonomy, no user prompts). Failures fall through to the empty-output
 # path so subagent creation never gets blocked or noisy.
@@ -83,6 +90,68 @@ is_specialist() {
     esac
 }
 
+# V3 (claude-workflow-plugin-jio.1): is this agent_type an IMPLEMENTING role?
+#
+# The review-separation gate needs to know WHO wrote the code so it can refuse
+# an approval whose reviewer is one of them. Only the three implementing
+# specialists count. qa (and the grader/judge relays) REVIEW — recording them
+# as implementers would make every single-agent review non-independent and the
+# gate would refuse every approval.
+is_implementer_role() {
+    case "$1" in
+        backend|frontend|devops) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# record_implementer <role> <task-id> — append the IMPLEMENTER identity record
+# that `review-check.sh gate` greps for the implementer set.
+#
+# Grammar (load-bearing, matched by `^IMPLEMENTER: role=([a-z]+) ` in the
+# shipped counter — the trailing space after the role is part of the contract):
+#   IMPLEMENTER: role=<backend|frontend|devops> task=<tid> at <ISO8601-UTC>
+#
+# Contract:
+#   - IDEMPOTENT per (role, task): a re-spawn of the same specialist on the
+#     same task posts nothing. A multi-domain task spawning backend AND
+#     frontend gets ONE record per distinct role (the gate de-dupes anyway,
+#     but a clean audit trail beats a noisy one).
+#   - BEST-EFFORT: every failure path logs to sync-errors.log and returns
+#     non-zero; the caller ignores the result. A SubagentStart hook must never
+#     block or slow a spawn, and the additionalContext envelope below is
+#     emitted regardless.
+record_implementer() {
+    local role="$1" tid="$2"
+    [ -n "$role" ] && [ -n "$tid" ] || return 1
+    command -v bd >/dev/null 2>&1 || return 1
+    [ -d "$PROJECT_DIR/.beads" ] || return 1
+
+    # Existing records for this task, first line of each comment (all the
+    # grammar records are single-line, so line-oriented matching is correct).
+    local existing=""
+    existing=$(bd show "$tid" --json 2>/dev/null \
+        | jq -r '(if type=="array" then .[0].comments else .comments end) // []
+                 | .[].text | split("\n")[0]' 2>/dev/null || echo "")
+
+    # IMPLEMENTER-IDEMPOTENCY-GUARD (load-bearing; the L2 META mutates this
+    # grep so duplicates post, which must break the "posted exactly once"
+    # assertion). The pattern mirrors the gate's own capture.
+    if printf '%s\n' "$existing" | grep -qE "^IMPLEMENTER: role=${role} "; then
+        return 0
+    fi
+
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
+    local record="IMPLEMENTER: role=$role task=$tid at $ts"
+    # Newer Beads: `bd comments add` (plural). Older: `bd comment add`.
+    if bd comments add "$tid" "$record" >/dev/null 2>&1 \
+        || bd comment add "$tid" "$record" >/dev/null 2>&1; then
+        return 0
+    fi
+    log_sync_error "failed to record implementer identity ($role) on $tid; review-check gate will see an incomplete implementer set"
+    return 1
+}
+
 # Read the input. If stdin is empty (script invoked manually for testing),
 # fall through to the empty-output path.
 INPUT=$(cat 2>/dev/null || echo "")
@@ -125,6 +194,22 @@ if [ -z "$CURRENT_TASK" ]; then
     # No active task to assign. Don't surface anything; the spawned
     # specialist will see SessionStart's pending list and pick on its own.
     emit_empty
+fi
+
+# V3 (claude-workflow-plugin-jio.1): record WHO is about to implement.
+#
+# This is the input half of "nobody signs off on their own work". The spawn is
+# the only moment the workflow knows, mechanically, which role touched the
+# task — an after-the-fact heuristic (label, comment prose, git author) is
+# guessable at best and forgeable at worst. `qa-gate.sh approve` and the Stop
+# hook both refuse when the recorded reviewer is in this set.
+#
+# `|| true` is load-bearing under `set -e` (line 31): a bd hiccup here must
+# NEVER block a subagent spawn. record_implementer already logs its own
+# failures to sync-errors.log; the additionalContext emission below is
+# unaffected either way.
+if is_implementer_role "$CANON"; then
+    record_implementer "$CANON" "$CURRENT_TASK" || true
 fi
 
 # Pull a short summary of the task. We keep this conservative — no full

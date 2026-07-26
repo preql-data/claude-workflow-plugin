@@ -105,6 +105,32 @@ fi
 cd "$FIXTURE" && bd init >/dev/null 2>&1
 
 export CLAUDE_PROJECT_DIR="$FIXTURE"
+
+# V3 (claude-workflow-plugin-jio.1): seed the records that make a task
+# APPROVABLE. `qa-gate.sh approve` now REFUSES unless the task carries a review
+# artifact whose reviewer differs from every recorded IMPLEMENTER and has no
+# open finding at/above its risk_threshold (review-check.sh gate). This fixture
+# has no live spawn and no reviewer, so the approve-path assertions below have
+# to model the real flow: the IMPLEMENTER comment subagent-start.sh writes on
+# spawn, plus a qa-claude artifact recorded through the REAL review-record
+# writer (so a grammar change breaks the seed loudly instead of silently
+# drifting). reviewed_hash is pinned to the current canonical change-set hash
+# so no staleness warning is emitted into the observations under test.
+seed_review_records() {
+    local tid="$1" reviewer="${2:-qa-claude}" role="${3:-backend}"
+    local ts hash art
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
+        || bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
+        || return 1
+    hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
+    [ -z "$hash" ] && hash="unverified"
+    art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+        "$tid" "$reviewer" "$hash" > "$art"
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        review-record "$tid" --file "$art" >/dev/null 2>&1
+}
 export HOME="$TEST_HOME"
 
 # ---------------------------------------------------------------------------
@@ -175,6 +201,7 @@ assert_eq "statusline: pre-approve (gate-entered, rubric-pending, 2 files)" \
 
 # Approve clears current-task and truncates changed-files.txt as side effects,
 # so we re-set the task before reading statusline.
+seed_review_records "$TASK"   # V3 (jio.1) MIGRATION
 bash "$FIXTURE/.claude/scripts/qa-gate.sh" approve "$TASK" "Test approval" >/dev/null 2>&1
 bash "$FIXTURE/.claude/scripts/current-task.sh" set "$TASK"
 OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh")

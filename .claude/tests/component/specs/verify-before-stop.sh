@@ -66,6 +66,11 @@ assert_contains "vbs: QA-required block names code-graph MCP (366.9)" \
 # 6. Changed files + task qa-approved -> {} (allow). Need bd-real task.
 TID=$(cd "$FIXTURE" && bd create "Approved-path task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID" >/dev/null
+# V3 (jio.1) MIGRATION: BOTH ends of this flow now demand an independent
+# review — approve refuses without the artifact, and the Stop hook re-runs the
+# same predicate before releasing. Seed the real records (backend implementer
+# + qa-claude review, no findings) so the release path under test is reachable.
+seed_review_records "$TID"
 bash "$QG" approve "$TID" "Component-spec auto-approve" >/dev/null
 # qa-gate approve clears current-task; the gate path requires CURRENT_TASK
 # to be set for the QA-approved short-circuit. Re-set it.
@@ -128,6 +133,7 @@ chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
 printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID_STDOUT" >/dev/null 2>&1
 bash "$CT" set "$TID_STDOUT"
+seed_review_records "$TID_STDOUT"   # V3 (jio.1) MIGRATION (approve + release)
 bash "$QG" approve "$TID_STDOUT" "reviewed; ships safely" >/dev/null 2>&1
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set so the legit Stop fires against the same reviewed files.
@@ -838,6 +844,10 @@ printf 'src/handler.ts\n' > "$TRACK_CSB/changed-files.txt"
 bash "$QG_CSB" enter "$TID_POS" >/dev/null 2>&1   # generates a fresh impact report for this change-set
 bash "$CT_CSB" set "$TID_POS"
 assert_eq "vbs-llh18: positive control (entered, not approved) blocks" "block" "$(csb_decision)"
+# V3 (jio.1) MIGRATION: seed the independent-review records so both approve
+# and the Stop hook's review-discipline re-check are satisfied; the case under
+# test is still the change-set BINDING.
+seed_review_records "$TID_POS" "qa-claude" "backend" "$FIXTURE_CSB"
 # Legit approve writes the change-set-bound record.
 POS_APPROVE=$(bash "$QG_CSB" approve "$TID_POS" "reviewed; ships safely" 2>&1)
 assert_json_field "vbs-llh18: legit approve succeeds" "$POS_APPROVE" '.status' "approved"
@@ -882,6 +892,7 @@ assert_eq "vbs-llh18: P1 real unreviewed change blocks first" "block" "$(csb_dec
 TID_DECOY=$(cd "$FIXTURE_CSB" && bd create "P1 trivial decoy" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
 printf 'src/trivial-decoy.ts\n' > "$TRACK_CSB/changed-files.txt"
 bash "$QG_CSB" enter "$TID_DECOY" >/dev/null 2>&1
+seed_review_records "$TID_DECOY" "qa-claude" "backend" "$FIXTURE_CSB"   # V3 (jio.1) MIGRATION
 bash "$QG_CSB" approve "$TID_DECOY" "decoy reviewed (trivial)" >/dev/null 2>&1
 assert_eq "vbs-llh18: P1 decoy genuinely approved" "approved" \
     "$(bash "$QG_CSB" status "$TID_DECOY" | jq -r '.status' 2>/dev/null)"
@@ -979,6 +990,7 @@ miss_decision() {
 TID_MISS=$(cd "$FIXTURE_MISS" && bd create "missing impact-report fail-closed" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
 printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
 bash "$QG_MISS" enter "$TID_MISS" >/dev/null 2>&1     # generates the impact report
+seed_review_records "$TID_MISS" "qa-claude" "backend" "$FIXTURE_MISS"   # V3 (jio.1) MIGRATION
 bash "$QG_MISS" approve "$TID_MISS" "reviewed; ships safely" >/dev/null 2>&1
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set so the legit Stop fires against the same reviewed files.
@@ -1065,6 +1077,12 @@ printf 'src/handler.ts\n' > "$TRACK_MM18/changed-files.txt"
 bash "$QG_MM18" enter "$TID_MM18" >/dev/null 2>&1
 bash "$CT_MM18" set "$TID_MM18"
 bd label add "$TID_MM18" qa-approved >/dev/null 2>&1   # forged bare label
+# V3 (jio.1) MIGRATION: the release path now has TWO independent gates — the
+# llh.18 change-set binding (neutralized above) and the review-discipline
+# re-check. Seed clean review records so the ONLY thing this META isolates is
+# still the binding check; without this the forged label would block for the
+# review reason and the META would prove nothing about llh.18.
+seed_review_records "$TID_MM18" "qa-claude" "backend" "$FIXTURE_MM18"
 MM18_DEC=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
     | bash "$VBS_MM18" 2>/dev/null | tail -1 | jq -r '.decision // "ALLOW"' 2>/dev/null)
 # Under the neutralized check the forged label RELEASES (the P0 assertion

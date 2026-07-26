@@ -457,6 +457,36 @@ task_has_matching_approval_record() {
     printf '%s\n' "$recorded_hashes" | grep -qxF "$expected"
 }
 
+# V3 (claude-workflow-plugin-jio.1): the ONE review-separation predicate.
+# The Stop hook CALLS it; it does not reimplement the counting (same
+# discipline as current_change_set_hash deferring to impact-report.sh).
+REVIEW_CHECK_SCRIPT="$PROJECT_DIR/.claude/scripts/review-check.sh"
+
+# matching_approval_record_text <task-id> <expected-hash> — print the LAST
+# `QA-GATE APPROVED ... change_set_hash=<expected-hash> ...` comment TEXT
+# (empty when none matches). Same source and same literal-prefix matching as
+# task_has_matching_approval_record; a separate function because the
+# review-discipline check needs the record's text — specifically whether it
+# carries the audited `[review bypass:` marker — not just a yes/no.
+#
+# Never fails the caller: every failure path (no bd, no Beads dir, jq error)
+# yields empty output with rc 0, which the caller treats as "no marker", i.e.
+# the check RUNS. Fail-closed by construction.
+matching_approval_record_text() {
+    local tid="$1" expected="$2"
+    [ -z "$tid" ] && return 0
+    [ -z "$expected" ] && return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    [ -d "$PROJECT_DIR/.beads" ] || return 0
+    bd show "$tid" --json 2>/dev/null \
+        | jq -r --arg h "$expected" '
+            (if type == "array" then .[0].comments else .comments end) // []
+            | .[].text
+            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | select(capture("change_set_hash=(?<rh>[A-Za-z0-9-]+)").rh == $h)
+        ' 2>/dev/null | tail -1 || true
+}
+
 # Spec 0.2: classify a test failure as a runner/infrastructure issue vs.
 # assertion failure. Conservative heuristic — when in doubt we say
 # "assertion" (the existing wording) so we never mis-direct an
@@ -727,7 +757,18 @@ if [ -n "$FASTPATH_CLASS" ]; then
             not-entered|entered|pending)
                 # Ensure the gate is entered first (so approve is well-formed).
                 "$QA_GATE" enter "$CURRENT_TASK" >/dev/null 2>&1 || log_sync_error "qa-gate enter failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
-                "$QA_GATE" approve "$CURRENT_TASK" "$FASTPATH_REASON" >/dev/null 2>&1 || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
+                # V3 (jio.1): --no-review is REQUIRED on this path. A doc-only
+                # / beads-state / empty change-set has no implementer and
+                # nothing for an independent reviewer to review, so approve's
+                # review-separation refusal would deadlock every documentation
+                # commit. The flag records WHY in the approval comment
+                # (`[review bypass: ...]`), which is also the marker the Stop
+                # hook's review-discipline check skips on — so the audited
+                # decision is made once, here, and honoured downstream.
+                "$QA_GATE" approve "$CURRENT_TASK" \
+                    --no-review "F1 $FASTPATH_CLASS fast path: no reviewable source changed" \
+                    "$FASTPATH_REASON" >/dev/null 2>&1 \
+                    || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
                 # Mark task as closed if bd is available. Beads 0.47.x uses
                 # status=closed (not "completed"); using the wrong value used
                 # to silently fail under `|| true`, so we log to sync-errors.log.
@@ -1078,6 +1119,14 @@ QA_APPROVED=false
 LABEL_WITHOUT_RECORD=false
 APPROVAL_RECORD_DETAIL=""
 
+# V3 (jio.1): review-discipline outcome. Declared OUTSIDE the sentinel block
+# below (like APPROVAL_RECORD_DETAIL) with a RELEASING default, so the
+# META-TEST's stripped copy stays coherent — with the check removed nothing
+# ever sets these, the dedicated block below never fires, and the forged
+# open-finding release succeeds. That is exactly what the META proves.
+REVIEW_DISCIPLINE_BLOCKED=false
+REVIEW_DISCIPLINE_DETAIL=""
+
 if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
     if [ -n "$CURRENT_TASK" ] && [ -x "$QA_GATE" ]; then
         GATE_STATUS=$("$QA_GATE" status "$CURRENT_TASK" 2>/dev/null | jq -r '.status // "error"' 2>/dev/null || echo "error")
@@ -1101,6 +1150,66 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
             CURRENT_CS_HASH=$(current_change_set_hash) || true
             if [ -n "$CURRENT_CS_HASH" ] && task_has_matching_approval_record "$CURRENT_TASK" "$CURRENT_CS_HASH"; then
                 QA_APPROVED=true
+
+                # REVIEW-DISCIPLINE BEGIN (v4 V3 / claude-workflow-plugin-jio.1)
+                #
+                # The approval record matches the change-set — but an approval
+                # is only as good as the review behind it. Before releasing we
+                # re-run the SAME independent-review predicate `qa-gate.sh
+                # approve` ran (review-check.sh gate: reviewer independence +
+                # zero open findings at/above the artifact's risk_threshold).
+                #
+                # Why re-check at Stop rather than trusting the approval: the
+                # record is written once, but findings keep arriving. A review
+                # finding recorded AFTER the approval (a second review round, a
+                # re-opened issue) must re-arm the gate — otherwise "approve
+                # early, discover later" silently ships the finding. This is
+                # the same re-arming logic the change-set-hash comparison
+                # applies to files, applied to review state.
+                #
+                # AUDITED ESCAPE: a record carrying the literal
+                # `[review bypass:` marker was approved with --no-review, whose
+                # reason is already in the audit trail. The F1 doc-only fast
+                # path is the intended producer (a doc-only change has no
+                # implementer and no reviewer, so demanding an artifact would
+                # deadlock every doc commit). Re-litigating that decision here
+                # would just make the bypass useless.
+                #
+                # FAIL CLOSED: a missing/unrunnable predicate BLOCKS. The `||`
+                # guards are load-bearing under `set -e` (line 25) for the same
+                # reason the CURRENT_CS_HASH guard above is — a bare assignment
+                # whose RHS exits non-zero aborts the script, which the hooks
+                # contract reads as NON-blocking, i.e. fails OPEN. Every
+                # non-zero outcome here must land in the block branch instead.
+                #
+                # The sentinel comments are load-bearing: an L2 META-TEST
+                # strips this block and asserts a task with an OPEN finding
+                # then releases. Do not rename them.
+                MATCHED_APPROVAL_TEXT=$(matching_approval_record_text "$CURRENT_TASK" "$CURRENT_CS_HASH") || true
+                if printf '%s' "$MATCHED_APPROVAL_TEXT" | grep -qF '[review bypass:'; then
+                    log_sync_error "Stop release: review-discipline SKIPPED for $CURRENT_TASK — the matching approval record carries an audited [review bypass:] marker (F1/doc-only class)"
+                elif [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+                    QA_APPROVED=false
+                    REVIEW_DISCIPLINE_BLOCKED=true
+                    REVIEW_DISCIPLINE_DETAIL="the review predicate is missing ($REVIEW_CHECK_SCRIPT), so independent review cannot be verified (error_key=review_check_unavailable)"
+                    log_sync_error "Stop blocked: review-check.sh missing; review-discipline fails closed for $CURRENT_TASK"
+                else
+                    REVIEW_GATE_RC=0
+                    REVIEW_GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$CURRENT_TASK" 2>&1) || REVIEW_GATE_RC=$?
+                    if [ "$REVIEW_GATE_RC" -ne 0 ]; then
+                        REVIEW_GATE_KEY=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '.error_key // ""' 2>/dev/null || echo "")
+                        [ -z "$REVIEW_GATE_KEY" ] && REVIEW_GATE_KEY="review_check_unavailable"
+                        REVIEW_GATE_OPEN=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '(.open_finding_ids // []) | join(", ")' 2>/dev/null || echo "")
+                        QA_APPROVED=false
+                        REVIEW_DISCIPLINE_BLOCKED=true
+                        REVIEW_DISCIPLINE_DETAIL="review-check.sh gate exited $REVIEW_GATE_RC with error_key=$REVIEW_GATE_KEY"
+                        if [ -n "$REVIEW_GATE_OPEN" ]; then
+                            REVIEW_DISCIPLINE_DETAIL="$REVIEW_DISCIPLINE_DETAIL; open finding(s): $REVIEW_GATE_OPEN"
+                        fi
+                        log_sync_error "Stop blocked: review-discipline violation on $CURRENT_TASK ($REVIEW_DISCIPLINE_DETAIL)"
+                    fi
+                fi
+                # REVIEW-DISCIPLINE END (v4 V3 / claude-workflow-plugin-jio.1)
             else
                 # qa-approved present, but no matching record. This is the
                 # forged bare label (no record at all), the decoy redirect
@@ -1145,6 +1254,52 @@ current change-set. Re-run the gate properly:
 Note: this binds approval to the reviewed files and defeats a forged or stale
 label, but is not a cryptographic sandbox against an adversary with arbitrary
 shell who reproduces the record by hand (documented residual, llh.18)."
+fi
+
+# V3 (jio.1): the review-discipline block. Emitted BEFORE the generic
+# QA-required messaging so the reason names the review state (which finding is
+# open, or which predicate failed) rather than the generic "QA approval
+# required" — the change IS approved; what is missing is a clean independent
+# review. The flags default to the releasing values and are only set inside
+# the sentinel-wrapped check above, so stripping that check makes this branch
+# unreachable (which is what the META-TEST proves).
+if [ "$REVIEW_DISCIPLINE_BLOCKED" = "true" ]; then
+    emit_block "Approved change-set, but the INDEPENDENT REVIEW is not clean — release refused.
+
+Nobody signs off on their own work, and no approval releases while a review
+finding at or above the artifact's risk_threshold is still open. The check
+runs at Stop as well as at approve because a finding can be
+recorded AFTER an approval (a second review round, a re-opened issue), and the
+approval record — written once — cannot know about it. So the gate re-arms.
+
+Why this blocks:
+  $REVIEW_DISCIPLINE_DETAIL
+
+Run the predicate directly for the full envelope:
+  bash .claude/scripts/review-check.sh gate $CURRENT_TASK
+
+Then clear it, by error_key:
+  review_artifact_missing    an independent reviewer (identity != every
+                             recorded IMPLEMENTER role) must review the change
+                             set and record the artifact:
+                               bash .claude/scripts/qa-gate.sh review-record $CURRENT_TASK --file <artifact.json>
+  reviewer_not_independent   the recorded reviewer also implemented this task;
+                             a different identity must review it.
+  unresolved_findings        close each open finding with evidence:
+                               bash .claude/scripts/qa-gate.sh resolve-finding $CURRENT_TASK <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
+                             or record an explicit, justified overrule:
+                               bash .claude/scripts/qa-gate.sh arbitrate $CURRENT_TASK <finding-id> overrule '<rationale>'
+  review_check_unavailable   the predicate itself could not run. This fails
+                             CLOSED on purpose — restore
+                             .claude/scripts/review-check.sh.
+
+Once the review is clean, re-approve so the record carries the reviewer:
+  bash .claude/scripts/qa-gate.sh approve $CURRENT_TASK '<approval summary>'
+
+The audited escape is \`approve --no-review '<reason>'\`, which stamps
+\`[review bypass: <reason>]\` on the approval record and skips this check. Use
+it only when there is genuinely nothing to review (the doc-only fast path uses
+it automatically); the reason is permanent in the audit trail."
 fi
 
 if [ "$QA_APPROVED" = false ]; then

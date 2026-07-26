@@ -221,6 +221,12 @@ fi
 # Sanity-check the source layout
 # Critical-path scripts are explicitly required; the rest of .claude/scripts/*.sh
 # rides the glob copy below so the installer stays in sync as helpers are added.
+#
+# review-check.sh and impact-report.sh are on this list because BOTH gate ends
+# fail CLOSED without them (v4 V3 / G2.n6d): a partial install missing either
+# one leaves `qa-gate.sh approve` refusing and the Stop hook blocking, with no
+# way to tell from inside the loop that the cause is a missing file. Failing
+# loudly here turns a permanent gate deadlock into an install-time error.
 for required in \
     ".claude/agents/orchestrator.md" \
     ".claude/agents/qa.md" \
@@ -233,6 +239,8 @@ for required in \
     ".claude/scripts/verify-before-stop.sh" \
     ".claude/scripts/session-end.sh" \
     ".claude/scripts/qa-gate.sh" \
+    ".claude/scripts/review-check.sh" \
+    ".claude/scripts/impact-report.sh" \
     ".claude/scripts/current-task.sh" \
     ".claude/scripts/prevent-orchestrator-edits.sh" \
     ".claude/hooks/hooks.json" \

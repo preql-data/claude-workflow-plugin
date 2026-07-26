@@ -36,6 +36,41 @@ v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`)
   `max` remains the verdict per the runbook's conjunctive rule (details on
   meta-task `claude-workflow-plugin-4o2`).
 
+### Added (Phase V3 — sign-off separation is mechanical, epic jio, 2026-07-26)
+- **Nobody signs off on their own work, enforced by the gate.** `qa-gate.sh
+  approve` now REFUSES (exit 4) unless the task carries a review artifact whose
+  `reviewer_identity` differs from every recorded implementer and has zero
+  findings at/above the artifact's `risk_threshold` still open. The Stop hook
+  (`verify-before-stop.sh`) re-runs the SAME predicate before releasing, because
+  findings can be recorded AFTER an approval and the write-once approval record
+  cannot know about them. Both ends CALL the one shipped counter
+  (`review-check.sh gate`, V2) — no second implementation of the counting.
+- Implementer identity is recorded at spawn: `subagent-start.sh` appends
+  `IMPLEMENTER: role=<backend|frontend|devops> task=<tid> at <ts>` (once per
+  role+task, best-effort, never blocks a spawn). `qa` is deliberately excluded —
+  it reviews, and recording it would make every single-agent review
+  non-independent.
+- Approval records name the reviewer:
+  `QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>`.
+  The new token is space-separated AFTER the hash, so the llh.18 hash capture is
+  byte-compatible (pinned by a test running the Stop hook's exact jq).
+- Audited bypass `approve --no-review '<reason>'` (mirrors `--no-impact-report`;
+  empty reason → exit 1). It stamps `[review bypass: <reason>]` on the approval
+  record, which is the marker the Stop hook's discipline check skips on. The F1
+  doc-only / beads-state / empty fast path uses it automatically — a doc-only
+  change has no implementer and nothing to review.
+- Both new checks FAIL CLOSED: a missing/unrunnable `review-check.sh` refuses at
+  approve and blocks at Stop. `review-check.sh` and `impact-report.sh` were
+  added to the installers' critical-path file list so a partial install fails
+  loudly at install time instead of deadlocking the gate later.
+- Tests: L1 `review-separation.test.sh` (47 assertions incl. the strip-META),
+  L2 `verify-review-discipline.sh` (24 incl. the strip-META), L2
+  `subagent-start.sh` extended with 13 identity assertions incl. an
+  idempotency-break META. Both sentinel blocks and the idempotency guard were
+  removed from the real scripts to prove the protected assertions go red (25 /
+  10 / 4 failures respectively). Existing approve-reaching specs migrated to
+  seed real review records via a shared `seed_review_records` fixture helper.
+
 ### Added (Phase V2 — Sol reviewer lane, epic 1vq, 2026-07-25)
 - Optional, advisory external reviewer lane (GPT-5.6-Sol via the Codex CLI's
   MCP server mode). Absent/failed/timeout Codex behaves identically to

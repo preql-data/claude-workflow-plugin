@@ -142,7 +142,10 @@ try {
     # Sanity-check
     # Critical-path scripts are explicitly required; the rest of
     # .claude/scripts/*.sh rides the glob copy below so the installer stays in
-    # sync as helpers are added.
+    # sync as helpers are added. review-check.sh and impact-report.sh are
+    # listed because both gate ends fail CLOSED without them (v4 V3 / G2.n6d):
+    # a partial install missing either leaves approve refusing and the Stop
+    # hook blocking with no in-loop way to diagnose it.
     $Required = @(
         ".claude/agents/orchestrator.md",
         ".claude/agents/qa.md",
@@ -155,6 +158,8 @@ try {
         ".claude/scripts/verify-before-stop.sh",
         ".claude/scripts/session-end.sh",
         ".claude/scripts/qa-gate.sh",
+        ".claude/scripts/review-check.sh",
+        ".claude/scripts/impact-report.sh",
         ".claude/scripts/current-task.sh",
         ".claude/scripts/prevent-orchestrator-edits.sh",
         ".claude/hooks/hooks.json",

@@ -68,6 +68,9 @@ printf 'export const original = 0;\nexport const a = 1;\n' > "$FIXTURE/src/commi
 # ---------------------------------------------------------------------------
 TID_A=$(cd "$FIXTURE" && bd create "baseline write test" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID_A" >/dev/null
+# V3 (jio.1) MIGRATION: approve now refuses without an independent review
+# artifact; seed the real records so this baseline spec still reaches approve.
+seed_review_records "$TID_A"
 # Baseline must not exist yet (enter deletes a stale one).
 assert_eq "baseline-A: baseline absent post-enter" "1" \
     "$([ -f "$BASELINE" ] && echo 0 || echo 1)"
@@ -92,6 +95,7 @@ assert_eq "baseline-A: baseline content == sorted git status" "$EXPECTED" "$ACTU
 printf '/path/stale1.ts\n/path/stale2.ts\n' > "$TRACKING_FILE"
 TID_B=$(cd "$FIXTURE" && bd create "baseline truncate test" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID_B" >/dev/null
+seed_review_records "$TID_B"   # V3 (jio.1) MIGRATION
 bash "$QG" approve "$TID_B" "Test approve truncates tracker" >/dev/null
 # Spec B.1: file still exists (post-edit.sh appends to it; it would be
 # wasteful to recreate every approval).
@@ -155,6 +159,7 @@ GIT_BACKUP=$(mktemp -d -t qg-baseline-git-backup.XXXXXX)
 mv "$FIXTURE/.git" "$GIT_BACKUP/.git"
 TID_F=$(cd "$FIXTURE" && bd create "baseline no-git tolerance" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID_F" >/dev/null
+seed_review_records "$TID_F"   # V3 (jio.1) MIGRATION
 # Run approve - should succeed AND remove the stale baseline.
 APPROVE_F=$(bash "$QG" approve "$TID_F" "no-git approve" 2>&1)
 APPROVE_F_OK=$(printf '%s' "$APPROVE_F" | tail -1 | jq -r '.ok // "false"' 2>/dev/null || echo "false")
@@ -247,6 +252,7 @@ assert_match "baseline-H: stub installed (body == return 0)" \
 # baseline file should NOT be written by approve.
 TID_HA=$(cd "$FIXTURE_H" && bd create "META: stubbed approve A" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG_H" enter "$TID_HA" >/dev/null
+seed_review_records "$TID_HA" "qa-claude" "backend" "$FIXTURE_H"   # V3 (jio.1) MIGRATION
 bash "$QG_H" approve "$TID_HA" "Stubbed approve - baseline should NOT appear" >/dev/null
 
 # Spec A's invariant: baseline exists. With the stub it does NOT exist.
