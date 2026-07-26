@@ -553,9 +553,99 @@ if [ -d "$SOURCE_DIR/.claude/mcp" ]; then
     done
 fi
 
+# Shared merge-input validity gate (v4.1 / R1-F1) ------------------------------
+# `jq empty` is NOT a validity check for a merge input: it exits 0 for an EMPTY
+# file AND for a MULTI-DOCUMENT stream. Both Update-mode merges below slurp with
+# `jq -s` and index .[0] (existing) / .[1] (new) — so a target holding two
+# documents pushes the SHIPPED file out to .[2], silently binding $new to the
+# operator's second document. Proven outcome for .mcp.json: the merged config
+# comes out with none of the shipped bd / code-graph servers. The only contract
+# that makes the positional binding sound is "exactly ONE JSON document, and
+# that document is an object" — which also rejects a top-level array or scalar,
+# neither of which either merge can index.
+# BEGIN JSON_SINGLE_OBJECT_JQ (packaging-parity.test.sh extracts this block; keep the sentinels)
+JSON_SINGLE_OBJECT_JQ='length == 1 and (.[0] | type == "object")'
+# END JSON_SINGLE_OBJECT_JQ
+
+# json_single_object <file> — 0 when the file holds exactly one JSON document
+# and that document is an object; non-zero for empty, multi-document, malformed,
+# array/scalar, or unreadable input. Both mode-2 merges gate on this.
+json_single_object() {
+    jq -s -e "$JSON_SINGLE_OBJECT_JQ" "$1" >/dev/null 2>&1
+}
+
 # Root MCP config ------------------------------------------------------------
+# Mode 1 (backup-and-install-fresh) and mode 3 (merge/skip-existing) go through
+# copy_file exactly as before. Mode 2 (Update) MERGES instead of overwriting, so
+# an operator's own MCP servers survive a plugin upgrade:
+#
+#   mcpServers    — union with the SHIPPED entries winning on collision. That
+#                   union IS the v3.5 -> v4 rewrite of `bd` / `code-graph` to
+#                   the `${CLAUDE_PROJECT_DIR:-.}` form (the shipped entries
+#                   carry it), and it drops nothing the operator added.
+#   code-context  — the server retired in 3.3.0 is deleted outright; leaving it
+#                   shadows code-graph and points at a launcher directory the
+#                   installer no longer copies.
+#   top-level keys — untouched (the merge base is $existing), so an operator's
+#                   own comment/config blocks survive.
+#
+# Hoisted and sentinel-delimited so packaging-parity.test.sh executes the REAL
+# expression rather than a copied literal. Keep this jq expression equivalent
+# to install.ps1's.
+# shellcheck disable=SC2016  # jq program text: $existing/$new are jq bindings, not shell vars
+# BEGIN MCP_MERGE_JQ (packaging-parity.test.sh extracts this block; keep the sentinels)
+MCP_MERGE_JQ='
+    .[0] as $existing |
+    .[1] as $new |
+    $existing
+    | .mcpServers = (($existing.mcpServers // {}) + ($new.mcpServers // {}))
+    | del(.mcpServers["code-context"])
+'
+# END MCP_MERGE_JQ
+
+# Operator-owned servers pass through verbatim — including any bare `${VAR}`
+# reference, which Claude Code does NOT expand in a project-scoped .mcp.json
+# (https://code.claude.com/docs/en/mcp — the documented form is
+# `${VAR:-default}`). We never rewrite operator config; we name the server so
+# the operator can decide. Emits one server key per line, shipped keys excluded.
+# shellcheck disable=SC2016  # jq program text: $merged/$new/$shipped are jq bindings
+MCP_BARE_VAR_JQ='
+    .[0] as $merged |
+    .[1] as $new |
+    ($new.mcpServers // {}) as $shipped |
+    ($merged.mcpServers // {}) | to_entries
+    | map(select($shipped[.key] == null))
+    | map(select([.value | .. | strings] | any(test("\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}"))))
+    | .[].key
+'
+
 if [ -f "$SOURCE_DIR/.mcp.json" ]; then
-    copy_file "$SOURCE_DIR/.mcp.json" "$TARGET/.mcp.json"
+    MCP_FILE="$TARGET/.mcp.json"
+    if [ "$UPDATE_MODE" = true ] && [ -f "$MCP_FILE" ]; then
+        cp "$MCP_FILE" "$MCP_FILE.bak"
+        if json_single_object "$MCP_FILE"; then
+            echo -e "${YELLOW}Merging .mcp.json (preserving operator-added servers)...${NC}"
+            MCP_MERGED=$(jq -s "$MCP_MERGE_JQ" "$MCP_FILE" "$SOURCE_DIR/.mcp.json" 2>/dev/null) || MCP_MERGED=""
+            if [ -n "$MCP_MERGED" ]; then
+                echo "$MCP_MERGED" > "$MCP_FILE"
+                echo -e "${GREEN}OK${NC}   .mcp.json merged (previous file at .mcp.json.bak)"
+                MCP_BARE_VARS=$(jq -s -r "$MCP_BARE_VAR_JQ" "$MCP_FILE" "$SOURCE_DIR/.mcp.json" 2>/dev/null || true)
+                if [ -n "$MCP_BARE_VARS" ]; then
+                    while IFS= read -r mcp_srv; do
+                        [ -n "$mcp_srv" ] || continue
+                        echo -e "${YELLOW}note${NC} .mcp.json server '$mcp_srv' carries a bare \${VAR} reference; project-scoped configs need the \${VAR:-default} form. Left unchanged (operator-owned)."
+                    done <<< "$MCP_BARE_VARS"
+                fi
+            else
+                echo -e "${RED}Could not merge .mcp.json - manual review needed (previous file at .mcp.json.bak)${NC}"
+            fi
+        else
+            cp "$SOURCE_DIR/.mcp.json" "$MCP_FILE"
+            echo -e "${RED}.mcp.json was not a single JSON object (empty, multi-document, or malformed) - installed the shipped config (previous file saved to .mcp.json.bak)${NC}"
+        fi
+    else
+        copy_file "$SOURCE_DIR/.mcp.json" "$MCP_FILE"
+    fi
 fi
 
 # Hooks ------------------------------------------------------------------------
@@ -664,6 +754,47 @@ copy_file "$SOURCE_DIR/.claude-plugin/plugin.json" "$TARGET/.claude-plugin/plugi
 SETTINGS_FILE="$TARGET/.claude/settings.json"
 SOURCE_SETTINGS="$SOURCE_DIR/.claude/settings.json"
 
+# The Update-mode merge expression. Replace workflow-owned keys, keep the rest:
+#
+#   hooks                 — always replaced (workflow-owned wholesale).
+#   env                   — union with the SHIPPED values winning on collision,
+#                           then the retired CLAUDE_CODE_EFFORT_LEVEL pin is
+#                           deleted (idempotent — a no-op when absent). The
+#                           union can only ADD keys, so that del is the only
+#                           thing that removes a legacy pin on an Update.
+#   additionalDirectories — replaced when shipped, else kept.
+#   permissions           — add-if-absent: an operator's list is never widened
+#                           or narrowed by an upgrade.
+#   effortLevel           — add-if-absent (v4.1): a settings file of pre-v3.5
+#                           lineage gains the shipped floor, while an
+#                           operator's own pin survives untouched.
+#   statusLine            — add-if-absent (v4.1): same contract.
+#
+# "add-if-absent" is keyed on PRESENCE (`has`), never on truthiness (R1-F2).
+# `if $existing.effortLevel then` would read an explicit `null` or `false` as
+# absent and overwrite it — a present operator-owned key is operator-owned
+# whatever its value. The permissions clause carried the same latent defect
+# since v4.0.0 and is converted here too, so one expression cannot hold two
+# different notions of "absent".
+#
+# Hoisted and sentinel-delimited so packaging-parity.test.sh executes the REAL
+# expression rather than a copied literal. Keep this jq expression equivalent
+# to install.ps1's.
+# shellcheck disable=SC2016  # jq program text: $existing/$new are jq bindings, not shell vars
+# BEGIN SETTINGS_MERGE_JQ (packaging-parity.test.sh extracts this block; keep the sentinels)
+SETTINGS_MERGE_JQ='
+    .[0] as $existing |
+    .[1] as $new |
+    $existing
+    | .hooks = $new.hooks
+    | .env = ((($existing.env // {}) + ($new.env // {})) | del(.CLAUDE_CODE_EFFORT_LEVEL))
+    | .additionalDirectories = ($new.additionalDirectories // $existing.additionalDirectories)
+    | (if ($existing | has("permissions")) then . else .permissions = $new.permissions end)
+    | (if ($existing | has("effortLevel")) then . else .effortLevel = $new.effortLevel end)
+    | (if ($existing | has("statusLine"))  then . else .statusLine  = $new.statusLine  end)
+'
+# END SETTINGS_MERGE_JQ
+
 if [ -f "$SETTINGS_FILE" ]; then
     if [ "$UPDATE_MODE" = true ]; then
         echo -e "${YELLOW}Merging settings.json (preserving non-workflow keys)...${NC}"
@@ -674,18 +805,20 @@ if [ -f "$SETTINGS_FILE" ]; then
         # Update — and any non-xhigh value there deactivates ultracode
         # orchestration. We print a one-line notice when we actually remove it.
         HAD_EFFORT_ENV=$(jq -r 'if (.env // {} | has("CLAUDE_CODE_EFFORT_LEVEL")) then "yes" else "no" end' "$SETTINGS_FILE" 2>/dev/null || echo "no")
-        # Replace workflow-owned keys (hooks, env, additionalDirectories) but keep others.
-        # The env union merges existing + new, then deletes the retired
-        # CLAUDE_CODE_EFFORT_LEVEL key (idempotent — a no-op when absent).
-        MERGED=$(jq -s '
-            .[0] as $existing |
-            .[1] as $new |
-            $existing
-            | .hooks = $new.hooks
-            | .env = ((($existing.env // {}) + ($new.env // {})) | del(.CLAUDE_CODE_EFFORT_LEVEL))
-            | .additionalDirectories = ($new.additionalDirectories // $existing.additionalDirectories)
-            | (if $existing.permissions then . else .permissions = $new.permissions end)
-        ' "$SETTINGS_FILE" "$SOURCE_SETTINGS" 2>/dev/null) || MERGED=""
+        # R1-F1, same class as .mcp.json above: the merge indexes .[0]/.[1], so
+        # a settings.json holding two documents would bind $new to the operator's
+        # SECOND document and silently drop every shipped hook. Refuse anything
+        # that is not exactly one JSON object. Unlike .mcp.json we do NOT install
+        # a fresh copy — settings.json is operator-owned, so the file is left
+        # untouched (the .bak above is already taken) and the operator is told
+        # why on the existing manual-review line.
+        SETTINGS_SKIP_REASON=""
+        if json_single_object "$SETTINGS_FILE"; then
+            MERGED=$(jq -s "$SETTINGS_MERGE_JQ" "$SETTINGS_FILE" "$SOURCE_SETTINGS" 2>/dev/null) || MERGED=""
+        else
+            MERGED=""
+            SETTINGS_SKIP_REASON=" (not a single JSON object: empty, multi-document, or malformed)"
+        fi
         if [ -n "$MERGED" ]; then
             echo "$MERGED" > "$SETTINGS_FILE"
             echo -e "${GREEN}OK${NC}   settings.json merged"
@@ -693,7 +826,7 @@ if [ -f "$SETTINGS_FILE" ]; then
                 echo -e "${CYAN}note${NC} removed legacy env.CLAUDE_CODE_EFFORT_LEVEL (v4: a non-xhigh value deactivates ultracode orchestration; effortLevel is now the floor)"
             fi
         else
-            echo -e "${RED}Could not merge settings.json - manual review needed${NC}"
+            echo -e "${RED}Could not merge settings.json${SETTINGS_SKIP_REASON} - manual review needed; your file is unchanged (copy at .claude/settings.json.bak)${NC}"
         fi
     elif [ "$MERGE_MODE" = true ]; then
         echo -e "${YELLOW}skip${NC} settings.json (exists, merge mode)"
