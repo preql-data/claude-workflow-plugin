@@ -275,11 +275,14 @@ After a session restart (SessionStart re-runs detection and refreshes the role a
 statusline reviewer segment collapses to the literal `sol`:
 
 ```
- • orch:fable-5 impl:opus-4-8 rev:sol
+ • orch:<orchestrator-role pick> impl:<implementer-role pick> rev:sol
 ```
 
-`rev:` showing a Claude model id instead means the lane resolved to `claude` — walk the
-troubleshooting table.
+The two Claude segments render whatever `model-select.sh` resolved for the `orchestrator` and
+`implementer` roles on this machine (`bash .claude/scripts/model-select.sh roles` prints the live
+mapping; see `.claude/model-roles`) — they are resolver output, not a pin, and they will change as
+your account listing does. Only `rev:sol` is the signal this section is about. `rev:` showing a
+Claude model id instead means the lane resolved to `claude` — walk the troubleshooting table.
 
 The SessionStart probe is bounded at 5 seconds and fails open: a Codex binary that is slow to boot
 costs you a few seconds of session start and a non-blocking warning, never a hung session. On a

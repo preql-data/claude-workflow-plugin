@@ -16,70 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
-## [Unreleased]
+## [4.0.0] - 2026-07-26
 
-v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`).
+**The tri-model workflow.** The orchestrator plans on the newest, most
+capable Claude family; implementation specialists build on the newest
+Opus-class model; an optional external reviewer lane reads the same diff on
+a second model family (Sol, through the Codex CLI's MCP-server mode). The
+governing rule is **nobody signs off on their own work**, and as of this
+release that is mechanical rather than advisory: `qa-gate.sh approve`
+REFUSES unless the task carries a review artifact whose reviewer identity
+differs from every recorded implementer, and the Stop hook re-runs the same
+predicate before releasing. The change-set-hash-bound `qa-approved` record
+from 3.5.0 remains the **only** release credential — the Sol lane, the
+second opinion, and arbitration are inputs feeding that one gate, never a
+parallel approval path. Alongside it, the gate learned to evaluate work
+*where it happened*: baseline-scoped change sets, one shared denylist, and
+a cross-worktree approval bridge, because the tri-model loop runs
+implementers and reviewers in parallel linked worktrees.
 
-### Added (Phase V4 pt2 — cross-worktree approval bridge, epic 3mg, 2026-07-26)
-
-Closes transcript scenario 2: a review performed in a linked worktree recorded a
-change-set hash the primary checkout could never reproduce, so its Stop hook
-reported "qa-approved label present but no change-set-bound approval record
-matches" forever — the work was reviewed, the record was on the task, and
-nothing done in the primary checkout could make the hashes agree. Reproduced
-live before the fix; the L2 spec drives a REAL `git worktree add`.
-
-- **Approval records name the approving checkout.** `qa-gate.sh approve` appends
-  a `worktree=<tok>` token — the checkout's git toplevel, spaces `%20`-encoded so
-  it stays ONE space-terminated token, `none` off a git checkout (never omitted:
-  a stable grammar is what lets a reader tell "no worktree recorded" from
-  "recorded but unresolvable"). Every approve path reaches the one record writer,
-  including the F1 fast path and both audited bypasses:
-
-  ```
-  QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok> at <ts>: <summary>
-  ```
-
-  Token ORDER is the compatibility contract: every addition since llh.18 goes
-  AFTER the hash token, space-separated, so the v3.5 `change_set_hash` and V3
-  `reviewed_by` captures extract identical values from the old and new shapes.
-  Pinned by a differential META (`review-separation.test.sh` 4.2b) that strips
-  the `WORKTREE-TOKEN` sentinels from a copy of `qa-gate.sh`, approves with it,
-  and runs BOTH reader expressions over BOTH record shapes plus a renamed token.
-- **The Stop hook resolves cross-worktree approvals** (`WORKTREE-RESOLUTION` in
-  `verify-before-stop.sh`). Only on the path that already blocks, it tries the
-  recorded token first (O(1)), then `git worktree list --porcelain`, skipping the
-  current checkout, capped at 16 candidates. A candidate releases only when ALL
-  of these are positively proven: it is a worktree of this repo (symlink-resolved
-  `--git-common-dir`, never a toplevel string compare); its persisted
-  `impact-report-<tid>.json` carries a `change_set_hash` that a real approval
-  record on the task cites; its own `git status` minus its own `gate-baseline` is
-  empty (no post-approval drift there); every reviewable path in THIS checkout is
-  inside that report's approved file set, compared repo-relative; and the V3
-  `review-check.sh gate` predicate is still clean (same audited `[review bypass:`
-  escape) — so a finding recorded after the approval re-arms this path too.
-- **Record-based, not recomputed.** `approve` truncates `changed-files.txt` in the
-  approving checkout, so a recompute there returns the sha256 of the empty list —
-  the approved hash is unreproducible even in the worktree that produced it. The
-  resolution therefore reads the persisted impact report, which survives approve.
-  The L2 spec asserts the truncation and the diverging recompute, so making that
-  truncation conditional fails loudly instead of silently disabling resolution.
-- **Read-only, fail-closed, no MCP boot.** File reads plus
-  `git worktree list` / `git rev-parse` / `git status` / `jq`. Nothing is written
-  anywhere (the spec re-checksums the candidate worktree), and the code-graph MCP
-  server is never booted (asserted with an armed canary that is proved live on an
-  `enter` and silent on every Stop). Any error, unreadable artifact or ambiguity
-  falls through to the block. A removed worktree is named in the block reason
-  ("bound in worktree `<path>`, which no longer exists"); otherwise the reason
-  gains "(checked N worktree(s))".
-- New L2 spec `.claude/tests/component/specs/worktree-approval-resolution.sh`
-  (real linked worktree; 55 assertions): the release case in both delta
-  spellings, four negatives (drift in the worktree, non-subset delta, a
-  post-approval finding, a deleted worktree), pre-3mg.2 token-less records still
-  resolving via the bounded scan, and the spec-mandated sentinel-strip META.
-  `docs/HOOKS.md` documents the verified topology and the fail-closed guarantee.
-
-### Changed (Phase V4 pt1 — one denylist, gate-baseline v2, I8 repo identity, epic 3mg, 2026-07-26)
+**Why this is a major.** The Stop-gate release predicate gained two new
+necessary conditions (an independent review artifact whose reviewer is not
+an implementer, and zero unresolved at-or-above-threshold findings), and
+the change-set denylist changed — so an approval recorded under 3.5.0 no
+longer releases without a re-approve. Operators of installed projects
+should re-run the installer in update mode to pick up the settings
+migration below.
 
 > **UPGRADE NOTE — one-time hash migration.** The change-set denylist changed,
 > so the Stop hook recomputes a DIFFERENT `change_set_hash` for any change set
@@ -102,259 +63,380 @@ live before the fix; the L2 spec drives a REAL `git worktree add`.
 > and `approve` short-circuits as an idempotent no-op while that label is
 > present. (Pinned by `denylist-shared.sh` section C.)
 
-- **ONE denylist, three consumers.** New `.claude/scripts/workflow-denylist.sh`
-  defines `WORKFLOW_DENYLIST_REGEX` + `workflow_denylisted()`; `post-edit.sh`
-  (what gets TRACKED), `impact-report.sh` (what enters the change set and its
-  HASH) and `verify-before-stop.sh` (what needs REVIEW) all source it,
-  BASH_SOURCE-relative. The three copies had drifted: only the Stop hook's knew
-  about `.claude/worktrees/` and the e2e fixture churn, so post-edit tracked
-  worktree paths INTO the hash that the gate could not see — the hash and the
-  gate disagreed about what "the changes" were. Desirable effects, all now
-  guaranteed to move together: harness-worktree paths leave the tracked set,
-  the hash and the gate's view agree, and a change-set of only build/workflow
-  churn is `empty` rather than half-visible.
+### Added
+
+#### Role-aware model selection (Phase V1, epic `bi3`)
+
+- `.claude/model-roles` config maps each ROLE to a selection STRATEGY —
+  `orchestrator=top` (the resolver's single best pick: newest, most capable
+  family), `implementer=opus-class` (the newest `claude-opus-*` in the
+  listing, falling back to `top` when none is listed), `reviewer=top`.
+  Setting every role to `top` reproduces v3.5 single-pin behavior exactly;
+  a missing file, missing key, or unrecognised value fails open to `top`.
+- `model-select.sh` resolves per role behind an all-or-nothing MANUAL gate
+  and writes `.claude/.qa-tracking/model-roles-resolved.json` atomically
+  (stale beats none); it gains a `roles` subcommand and per-role `status`.
+  `workflow-model-apply.sh` gains `--role <role> <id>` and
+  `--print-role-map` (a bare `<id>` remains the pin-everything rollback).
+  The statusline renders `orch:/impl:/rev:` when the roles diverge and
+  collapses to the v3.5 single-model display when they don't.
+- Day-zero adoption is preserved *within* each class: newest by release
+  metadata, largest context variant, ranking file as override/exclusion
+  only, unrecognized families as first-class candidates, and a Beads
+  meta-task comment with a rollback command on every switch.
+- The `!claude-fable` regional exclusion was lifted from
+  `.claude/model-ranking` (evidence-gated, dated, with a rollback line;
+  `!claude-mythos` kept).
+
+#### The optional Sol reviewer lane (Phase V2, epic `1vq`)
+
+- An **advisory, strictly optional** external reviewer lane: GPT-5.6-Sol
+  reached through the Codex CLI's MCP-server mode. Absent, failed, or
+  timed-out Codex behaves identically to "not connected" — the plugin's
+  fresh-context Claude review path covers the reviewer role, proven
+  byte-identical by a dedicated degradation spec. Sol writes no labels and
+  records no approval; its artifact is grading-packet item 8.
+- Helpers: `codex-detect.sh` (a layered, bounded, fail-open feature-detect
+  writing an atomic reviewer-lane flag), `.claude/review-config` (the ONE
+  place bounded-diligence caps live), `review-check.sh`
+  (`validate-request` / `validate-artifact` / `gate` — the one counter,
+  structurally codex-free), and `codex-review.sh` (a FIFO JSON-RPC driver
+  with caps, cap-truncation, and a timeout).
+- **Bounded diligence is mechanical.** Every review delegation carries a
+  mandatory `risk_threshold` and `stop_condition` (the harness rejects a
+  request missing either), and the caps in `.claude/review-config`
+  (`max_findings`, `max_review_iterations`, `timeout_seconds`,
+  `malformed_retry`) bound the turn: hitting one sets the artifact's
+  `stopped_by` (`cap:max_findings` | `cap:max_review_iterations` |
+  `cap:timeout`) instead of looping.
+- Review artifact schema, strict JSON, recorded on the Beads task:
+  `{reviewer_identity, reviewer_model, findings:[{severity, location,
+  evidence, description}], verdict, iterations, stopped_by}`.
+- Prompt wiring: `qa.md` §6-prime (the advisory review-artifact step),
+  `orchestrator.md` §5c REVIEW-RELAY (paid, cost-confirmed), and the
+  grading packet reconciled to eight items (item 8 advisory,
+  non-criterion).
+- `docs/CODEX_SETUP.md` — the operator setup doc, a first-class
+  deliverable: every command live-verified; both auth paths and their
+  billing implications; user-scope registration (mechanically required —
+  the detector reads only top-level `.mcpServers.codex`); model-pinning
+  guidance that extends day-zero adoption across the vendor boundary;
+  verification and troubleshooting tables.
+
+#### Sign-off separation and arbitration (Phase V3, epic `jio`)
+
+- **Nobody signs off on their own work, enforced by the gate.**
+  `qa-gate.sh approve` now REFUSES (exit 4) unless the task carries a
+  review artifact whose `reviewer_identity` differs from every recorded
+  implementer AND has zero findings at/above the artifact's
+  `risk_threshold` still open. `verify-before-stop.sh` re-runs the SAME
+  predicate before releasing, because findings can be recorded AFTER an
+  approval and the write-once approval record cannot know about them. Both
+  ends CALL the one shipped counter (`review-check.sh gate`) — there is no
+  second implementation of the counting.
+- Implementer identity is recorded at spawn: `subagent-start.sh` appends
+  `IMPLEMENTER: role=<backend|frontend|devops> task=<tid> at <ts>` (once
+  per role+task, best-effort, never blocks a spawn). `qa` is deliberately
+  excluded — it reviews, and recording it would make every single-agent
+  review non-independent.
+- Approval records name the reviewer:
+  `QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>`.
+  The new token is space-separated AFTER the hash, so the llh.18 hash
+  capture is byte-compatible (pinned by a test running the Stop hook's
+  exact `jq`).
+- Audited bypass `approve --no-review '<reason>'` (mirrors
+  `--no-impact-report`; an empty reason exits 1). It stamps
+  `[review bypass: <reason>]` on the approval record, which is the marker
+  the Stop hook's discipline check skips on. The F1 doc-only /
+  beads-state / empty fast path uses it automatically — a doc-only change
+  has no implementer and nothing to review.
+- Both new checks FAIL CLOSED: a missing or unrunnable `review-check.sh`
+  refuses at approve and blocks at Stop. `review-check.sh` and
+  `impact-report.sh` joined the installers' critical-path file list, so a
+  partial install fails loudly at install time instead of deadlocking the
+  gate later.
+- **Arbitration of disputed findings** (`orchestrator.md` §5d). When the
+  implementing specialist disputes an at-threshold finding, exactly two
+  things clear it: RESOLVE with evidence (`qa-gate.sh resolve-finding
+  <tid> <fid> --fix '<ref>' --test '<ref>' '<summary>'` — both refs
+  mandatory, evidence-before-fix as a record) or ARBITRATE (`qa-gate.sh
+  arbitrate <tid> <fid> <overrule|sustain> '<rationale>'`). `overrule`
+  clears the gate count; `sustain` keeps the finding OPEN as the audit
+  record of a dispute that was heard and upheld — which is what makes an
+  overrule mean anything. Arbitration is the ORCHESTRATOR's job: the
+  reviewer and the author are the two parties, so only the third can
+  adjudicate, and the rationale must cite both positions. The prompt is
+  guidance; the enforcement is the gate count.
+- **Live-harness invariant `approval-cites-independent-review`** — the
+  trace-side proof that the mechanism held during a real run. For EVERY
+  `QA-GATE APPROVED` record: it names a reviewer (or carries the audited
+  `[review bypass:` marker), an EARLIER `REVIEW-ARTIFACT v1` exists whose
+  `reviewer=` is not one of the task's `IMPLEMENTER: role=` identities,
+  and replaying the preceding records leaves zero open at-threshold
+  findings (`RESOLVED … fix= test=` and a latest `ARBITRATION …
+  decision=overrule` clear; `sustain` does not). It is a deliberate SECOND
+  implementation of `review-check.sh gate`'s predicate, in TypeScript over
+  a different input — if the shell counter is subverted or a fixture ships
+  a stale copy of the gate, the two disagree and that disagreement is the
+  signal. Declared in all seven fixture `invariants:` blocks.
+- The e2e trace gained an OPTIONAL `beadsComments` field
+  (`{task, text, order}`), captured post-run by `readBeadsComments()` from
+  the same already-flushed `.beads/issues.jsonl` the label capture reads
+  (no extra `bd` invocation). ABSENT means "not captured" and the
+  invariant SKIPS (pre-jio.2 traces are not retro-failed); an EMPTY ARRAY
+  means "captured, bd held nothing". Approvals with no `reviewed_by=`
+  token skip as a pre-V3 recording.
+
+#### Worktree-aware gate scoping (Phase V4, epic `3mg`)
+
+The tri-model loop runs implementers and reviewers in parallel worktrees, so
+the gate must evaluate work where it happened. Three production transcript
+scenarios are closed.
+
+- **Approval records name the approving checkout.** `qa-gate.sh approve`
+  appends a `worktree=<tok>` token — the checkout's git toplevel, spaces
+  `%20`-encoded so it stays ONE space-terminated token, `none` off a git
+  checkout (never omitted: a stable grammar is what lets a reader tell "no
+  worktree recorded" from "recorded but unresolvable"). Every approve path
+  reaches the one record writer, including the F1 fast path and both
+  audited bypasses:
+
+  ```
+  QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok> at <ts>: <summary>
+  ```
+
+  Token ORDER is the compatibility contract: every addition since llh.18
+  goes AFTER the hash token, space-separated, so the v3.5
+  `change_set_hash` and V3 `reviewed_by` captures extract identical values
+  from the old and new shapes. Pinned by a differential META
+  (`review-separation.test.sh` 4.2b) that strips the `WORKTREE-TOKEN`
+  sentinels from a copy of `qa-gate.sh`, approves with it, and runs BOTH
+  reader expressions over BOTH record shapes plus a renamed token.
+- **The Stop hook resolves cross-worktree approvals**
+  (`WORKTREE-RESOLUTION` in `verify-before-stop.sh`). This closes the
+  deadlock where a review performed in a linked worktree recorded a
+  change-set hash the primary checkout could never reproduce, so its Stop
+  hook reported "qa-approved label present but no change-set-bound
+  approval record matches" forever. Only on the path that already blocks,
+  the hook tries the recorded token first (O(1)), then `git worktree list
+  --porcelain`, skipping the current checkout, capped at 16 candidates. A
+  candidate releases only when ALL of these are positively proven: it is a
+  worktree of this repo (symlink-resolved `--git-common-dir`, never a
+  toplevel string compare); its persisted `impact-report-<tid>.json`
+  carries a `change_set_hash` that a real approval record on the task
+  cites; its own `git status` minus its own `gate-baseline` is empty (no
+  post-approval drift there); every reviewable path in THIS checkout is
+  inside that report's approved file set, compared repo-relative; and the
+  V3 `review-check.sh gate` predicate is still clean (same audited
+  `[review bypass:` escape) — so a finding recorded after the approval
+  re-arms this path too.
+- **Record-based, not recomputed.** `approve` truncates
+  `changed-files.txt` in the approving checkout, so a recompute there
+  returns the sha256 of the empty list — the approved hash is
+  unreproducible even in the worktree that produced it. The resolution
+  therefore reads the persisted impact report, which survives approve. The
+  L2 spec asserts both the truncation and the diverging recompute, so
+  making that truncation conditional fails loudly instead of silently
+  disabling resolution.
+- **Read-only, fail-closed, no MCP boot.** File reads plus `git worktree
+  list` / `git rev-parse` / `git status` / `jq`. Nothing is written
+  anywhere (the spec re-checksums the candidate worktree), and the
+  code-graph MCP server is never booted (asserted with an armed canary
+  that is proved live on an `enter` and silent on every Stop). Any error,
+  unreadable artifact, or ambiguity falls through to the block. A removed
+  worktree is named in the block reason ("bound in worktree `<path>`,
+  which no longer exists"); otherwise the reason gains "(checked N
+  worktree(s))".
+
+#### Platform restore and the effort verdict (Phase V0, epic `cnz`)
+
+- Effort-verdict launch wiring: a committed `.claude/effort-verdict`
+  (verdict `max`, recorded by the cnz.2 A/B interference test), a
+  `make session` launch target that execs `claude --effort <verdict>`, and
+  session-start Warning 4 verdict reconciliation plus Warning 5 platform
+  guards (`CLAUDE_CODE_SUBAGENT_MODEL` override, subagent spawn-depth
+  drift).
+- Subagent spawn evidence log
+  (`.claude/.qa-tracking/subagent-spawns.log`, written by
+  `subagent-start.sh`) and SubagentStart wiring in `settings.json` (parity
+  with `hooks.json`).
+- `docs/EFFORT-AB-TEST.md` runbook and the recorded A/B outcome:
+  ultracode showed ZERO orchestration interference (the pre-registered
+  expectation was NOT confirmed), but `max` remains the verdict per the
+  runbook's conjunctive rule — criteria 2-3 were not fully re-verified
+  under the operator's time-box and no benefit was observed, since
+  ultracode runs the model at a fixed `xhigh` proxy below the `max` this
+  verdict pins. Details on meta-task `claude-workflow-plugin-4o2`.
+
+#### Tests
+
+Every count below was re-executed on 2026-07-26 for the release audit; see
+`docs/RELEASE_AUDIT.md` rows TM1-TM14 for the per-claim evidence pointers.
+
+- New L1: `model-roles.test.sh` (40), `review-check.test.sh` (39),
+  `review-count.test.sh` (38), `review-separation.test.sh` (60 incl. the
+  strip-META and the 4.2b differential token META),
+  `denylist-source.test.sh` (20 incl. 4 METAs), `platform-audit.test.sh`
+  (18 incl. two META groups), `make-session.test.sh` (7 incl. the
+  verdict-ignoring-stub META). `effort-fail-open.test.sh` (14) was
+  inverted to the new no-env-pin baseline.
+- New L2: `codex-detect.sh` (24), `codex-review.sh` (25),
+  `reviewer-lane-degradation.sh` (8), `review-separation-records.sh` (16),
+  `verify-review-discipline.sh` (24), `arbitration-acceptance.sh` (33),
+  `model-roles-parity.sh` (10 incl. the liar-misroute META),
+  `denylist-shared.sh` (33), `gate-baseline-v2.sh` (46),
+  `worktree-approval-resolution.sh` (**67 assertions authored, 65
+  executed** against a REAL `git worktree add` — the two `wtres-2.1`
+  pre-fix legs are conditional on the committed HEAD predating the fix and
+  are permanently superseded by the section-8 sentinel-strip META; this
+  corrects the pre-release dev note's "55", 3mg.2 QA finding R1-F1).
+  `model-select.sh` grew the `ms-R1..R6` role cases and the `ms-T1..T5`
+  tier-vs-recency regression (88 total); `subagent-start.sh` grew 13
+  identity assertions incl. an idempotency-break META (30 total);
+  `failure-cross-repo.sh` gained the worktree cases (19);
+  `qa-gate-baseline.sh` was retargeted at the v2 baseline file (23).
+- L3 unit: `_invariants.unit.spec.ts` (102) covers
+  `approval-cites-independent-review` with both plan-mandated METAs plus a
+  mechanical META-COVERAGE assertion — every `INVARIANTS` row must ship a
+  META-TEST or a documented exemption (only `completion-contract`, which
+  is always skipped). Sensitivity was proven by mutation: neutering
+  independence, making open findings non-fatal, letting `sustain` clear,
+  flipping the skip to a silent pass, and registering a META-less
+  invariant each turned the matching test red; every mutation was
+  byte-restored. `_beads-capture.unit.spec.ts` gained a real-`bd` round
+  trip proving the three record grammars survive capture in write order.
+- Load-bearing METAs were verified by removal, not assertion: both
+  sentinel blocks and the `subagent-start.sh` idempotency guard were
+  stripped from the real scripts to prove the protected assertions go red
+  — 25 / 10 / 4 failures respectively, as recorded by the implementing
+  tasks (`jio.1`/`jio.2`) at the time; the release audit re-ran the suites
+  green rather than re-running those one-off mutations. Four existing
+  METAs that copied a hook to a fixture ROOT now copy it into
+  `.claude/scripts/` — outside that directory the copy cannot find the
+  shared denylist lib and blocks for the wrong reason, a silent false
+  pass.
+- Existing approve-reaching specs migrated to seed real review records via
+  a shared `seed_review_records` fixture helper.
+
+### Changed
+
+- **ONE denylist, three consumers.** New
+  `.claude/scripts/workflow-denylist.sh` defines
+  `WORKFLOW_DENYLIST_REGEX` + `workflow_denylisted()`; `post-edit.sh`
+  (what gets TRACKED), `impact-report.sh` (what enters the change set and
+  its HASH) and `verify-before-stop.sh` (what needs REVIEW) all source it,
+  BASH_SOURCE-relative. The three copies had drifted: only the Stop hook's
+  knew about `.claude/worktrees/` and the e2e fixture churn, so post-edit
+  tracked worktree paths INTO the hash that the gate could not see — the
+  hash and the gate disagreed about what "the changes" were. Now
+  guaranteed to move together: harness-worktree paths leave the tracked
+  set, the hash and the gate's view agree, and a change set of only
+  build/workflow churn is `empty` rather than half-visible.
 - **Memory files are no longer reviewable work.** `MEMORY.md` and
-  `.claude/memory/` join the denylist, so they exit the change set BEFORE F1
-  doc-only classification: a memory-only change set now takes the `empty` fast
-  path (release, no gate record) instead of being auto-approved as `doc-only`
-  with a `[review bypass: F1 doc-only ...]` record about agent recall state.
-  `CLAUDE.md` (behaviour-bearing — session-start injects it), `LESSONS.md` and
-  `HANDOFF.md` (audit deliverables) are deliberately NOT denylisted.
+  `.claude/memory/` join the denylist, so they exit the change set BEFORE
+  F1 doc-only classification: a memory-only change set now takes the
+  `empty` fast path (release, no gate record) instead of being
+  auto-approved as `doc-only` with a `[review bypass: F1 doc-only ...]`
+  record about agent recall state. `CLAUDE.md` (behaviour-bearing —
+  session-start injects it), `LESSONS.md` and `HANDOFF.md` (audit
+  deliverables) are deliberately NOT denylisted.
 - **Missing-lib behaviour is fail-closed per consumer**: `impact-report.sh`
   exits 3 (no hash, which upstream already treats as refuse-to-release),
   `verify-before-stop.sh` BLOCKS with a remediation reason (after the
   `stop_hook_active` circuit breaker, never before it), and `post-edit.sh`
-  tracks the path unfiltered — over-tracking is the fail-closed side for a hook
-  whose output feeds the gate.
-- **gate-baseline v2.** `.claude/.qa-tracking/approved-baseline` (a bare line
-  list, one writer) is superseded by `.claude/.qa-tracking/gate-baseline`, a
-  versioned file with a provenance header (`head=`, `captured_at=`,
-  `captured_by=`) over the `LC_ALL=C`-sorted `git status --porcelain` snapshot.
-  Three writers now: `session-start.sh` on arrival (only when no review cycle is
-  active — baselining an in-flight cycle would release its work unreviewed),
+  tracks the path unfiltered — over-tracking is the fail-closed side for a
+  hook whose output feeds the gate.
+- **gate-baseline v2.** `.claude/.qa-tracking/approved-baseline` (a bare
+  line list, one writer) is superseded by
+  `.claude/.qa-tracking/gate-baseline`, a versioned file with a provenance
+  header (`head=`, `captured_at=`, `captured_by=`) over the
+  `LC_ALL=C`-sorted `git status --porcelain` snapshot. Three writers now:
+  `session-start.sh` on arrival (only when no review cycle is active —
+  baselining an in-flight cycle would release its work unreviewed),
   `qa-gate.sh enter` (write-if-missing, minus paths already in
   `changed-files.txt` so the session's own edits are never baselined), and
   `qa-gate.sh approve` (full refresh, as before). New subcommand
-  `qa-gate.sh baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]`
-  so session-start has one implementation to call. The legacy file is read as a
-  fallback for one release and deleted on the first v2 write. Closes the
-  "session opened in an already-dirty repo blocks on dirt the session never
-  made" case; there is deliberately NO hash-side subtraction (the baseline is
-  subtracted only in the git fallback, so editing an already-dirty file still
-  gates).
+  `qa-gate.sh baseline-capture [--by <who>] [--if-missing]
+  [--exclude-tracked]` so session-start has one implementation to call.
+  The legacy file is read as a fallback for one release and deleted on the
+  first v2 write. This closes the "session opened in an already-dirty repo
+  blocks on dirt the session never made" case; there is deliberately NO
+  hash-side subtraction (the baseline is subtracted only in the git
+  fallback, so editing an already-dirty file still gates).
 - **`-d "$PROJECT_DIR/.git"` replaced by `git rev-parse --git-dir`** in
-  `verify-before-stop.sh` and `qa-gate.sh`. In a LINKED WORKTREE `.git` is a
-  FILE, so the old predicate answered "not a git repo" and silently disabled
-  both the baseline writer and the Stop gate's git-status fallback — with an
-  empty `changed-files.txt` the gate then had no detector at all and FAILED
-  OPEN, in exactly the `isolation: "worktree"` topology the plugin tells agents
-  to use.
-- **I8 cross-repo guard compares REPOSITORY identity, not checkout identity.**
-  `detect_cross_repo` used `git rev-parse --show-toplevel`, which is
-  per-checkout, so a Stop fired from a linked worktree of the SAME repo the task
-  was claimed in tripped the cross-repo block. It now compares the
-  symlink-resolved `git rev-parse --git-common-dir`, which every worktree of a
-  repo shares and which differs across repos. A genuinely different repo still
-  blocks; a recorded repo path that no longer resolves is still a mismatch
-  (fail closed).
-- Tests: new L1 `denylist-source.test.sh` (structural — all three consumers
-  source the lib, none carries a literal regex; 3 METAs) and new L2
-  `denylist-shared.sh` (canary sensitivity across all three consumers, memory
-  patterns, hash migration) + `gate-baseline-v2.sh` (transcript scenario 1 with
-  the spec-mandated truncate-the-baseline META, the three writers, the legacy
-  fallback, the linked-worktree case). `failure-cross-repo.sh` gains the
-  worktree cases; `qa-gate-baseline.sh` is retargeted at the v2 file; four
-  existing METAs that copied a hook to a fixture ROOT now copy it into
-  `.claude/scripts/` (outside that directory the copy cannot find the shared
-  lib and blocks for the wrong reason — a silent false pass).
-- Verified PR #2 (`impact-report.sh` path relativisation): reconciled
-  `impact-report.test.sh` section 4, which still asserted the pre-PR#2 contract
-  and only ran where a code-graph server is present (it skips in CI, so the
-  divergence was invisible there). Out-of-project and unanchorable-relative
-  entries are recorded as explicit `skipped: path is outside the analyzed
-  project ...` entries rather than being sent to the tool; the report can no
-  longer contain the server's absolute-path validation error.
+  `verify-before-stop.sh` and `qa-gate.sh`. In a LINKED WORKTREE `.git` is
+  a FILE, so the old predicate answered "not a git repo" and silently
+  disabled both the baseline writer and the Stop gate's git-status
+  fallback — with an empty `changed-files.txt` the gate then had no
+  detector at all and FAILED OPEN, in exactly the
+  `isolation: "worktree"` topology the plugin tells agents to use.
+- **The I8 cross-repo guard compares REPOSITORY identity, not checkout
+  identity.** `detect_cross_repo` used `git rev-parse --show-toplevel`,
+  which is per-checkout, so a Stop fired from a linked worktree of the
+  SAME repo the task was claimed in tripped the cross-repo block. It now
+  compares the symlink-resolved `git rev-parse --git-common-dir`, which
+  every worktree of a repo shares and which differs across repos. A
+  genuinely different repo still blocks; a recorded repo path that no
+  longer resolves is still a mismatch (fail closed).
+- **`qa-gate.sh choose approve` is no longer an unconditional escape**
+  (J21 correction, `orchestrator.md` / `qa.md`). It delegates to the same
+  `cmd_approve` as a direct approve, so it refuses while an at-threshold
+  finding is open — a cap-hit escalation does not dissolve a dispute;
+  arbitrate or resolve first. The same correction was applied to the
+  rubric override in `qa.md` 6f (a judgment override does not satisfy a
+  mechanical gate) and to the then-stale V2 scope notes in
+  `orchestrator.md` 5c / `qa.md` 6p.3.
+- `settings.json`: removed `env.CLAUDE_CODE_EFFORT_LEVEL` (a non-xhigh
+  value there deactivates ultracode's orchestration layer per the live
+  docs, leaving `effortLevel: "xhigh"` as the durable floor); pinned
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (v2.1.219 flipped the platform
+  default to depth 3; the relay architecture assumes depth 1).
+- Installers (`install.sh` / `install.ps1`): the update-mode settings
+  merge now deletes the legacy `env.CLAUDE_CODE_EFFORT_LEVEL` key (with a
+  one-line notice), so installed projects migrate on their next update;
+  the operator's own `env` keys and the `effortLevel` floor survive the
+  merge and the deletion is idempotent. Both installers ship the new
+  configs (`.claude/model-roles`, `.claude/review-config`,
+  `.claude/effort-verdict`).
+- `docs/MCP_SERVERS.md`: bd-mcp troubleshooting for installed projects
+  (v2.1.196 workspace-trust behavior, the `${CLAUDE_PROJECT_DIR:-.}`
+  form), cross-linked from README Caveats. The CONTRIBUTING effort recipe
+  was rewritten to the three-layer model (floor `effortLevel: xhigh` /
+  session verdict via `make session` / frontmatter `effort: max` ceiling).
+- `docs/HOOKS.md` documents the verified cross-worktree topology, the
+  fail-closed guarantee, and "Denylist changes are a hash migration".
 
-### Added (Phase V0 — platform restore and effort verdict, epic cnz, 2026-07-25)
-- Effort-verdict launch wiring: committed `.claude/effort-verdict` (verdict: `max`,
-  recorded by the cnz.2 A/B interference test) + `make session` launch target +
-  session-start Warning 4 verdict reconciliation and Warning 5 platform guards
-  (`CLAUDE_CODE_SUBAGENT_MODEL` override, subagent spawn-depth drift).
-- Subagent spawn evidence log (`.claude/.qa-tracking/subagent-spawns.log`, written
-  by `subagent-start.sh`) and SubagentStart wiring in `settings.json` (parity with
-  `hooks.json`).
-- New L1 tests: `platform-audit.test.sh` (18 assertions + 2 META),
-  `make-session.test.sh` (7 assertions + META); `effort-fail-open.test.sh` inverted
-  to the new baseline.
-- `docs/EFFORT-AB-TEST.md` runbook and the recorded A/B outcome: ultracode showed
-  ZERO orchestration interference (pre-registered expectation NOT confirmed), but
-  `max` remains the verdict per the runbook's conjunctive rule (details on
-  meta-task `claude-workflow-plugin-4o2`).
+### Fixed
 
-### Added (Phase V3 — sign-off separation is mechanical, epic jio, 2026-07-26)
-- **Nobody signs off on their own work, enforced by the gate.** `qa-gate.sh
-  approve` now REFUSES (exit 4) unless the task carries a review artifact whose
-  `reviewer_identity` differs from every recorded implementer and has zero
-  findings at/above the artifact's `risk_threshold` still open. The Stop hook
-  (`verify-before-stop.sh`) re-runs the SAME predicate before releasing, because
-  findings can be recorded AFTER an approval and the write-once approval record
-  cannot know about them. Both ends CALL the one shipped counter
-  (`review-check.sh gate`, V2) — no second implementation of the counting.
-- Implementer identity is recorded at spawn: `subagent-start.sh` appends
-  `IMPLEMENTER: role=<backend|frontend|devops> task=<tid> at <ts>` (once per
-  role+task, best-effort, never blocks a spawn). `qa` is deliberately excluded —
-  it reviews, and recording it would make every single-agent review
-  non-independent.
-- Approval records name the reviewer:
-  `QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>`.
-  The new token is space-separated AFTER the hash, so the llh.18 hash capture is
-  byte-compatible (pinned by a test running the Stop hook's exact jq).
-- Audited bypass `approve --no-review '<reason>'` (mirrors `--no-impact-report`;
-  empty reason → exit 1). It stamps `[review bypass: <reason>]` on the approval
-  record, which is the marker the Stop hook's discipline check skips on. The F1
-  doc-only / beads-state / empty fast path uses it automatically — a doc-only
-  change has no implementer and nothing to review.
-- Both new checks FAIL CLOSED: a missing/unrunnable `review-check.sh` refuses at
-  approve and blocks at Stop. `review-check.sh` and `impact-report.sh` were
-  added to the installers' critical-path file list so a partial install fails
-  loudly at install time instead of deadlocking the gate later.
-- Tests: L1 `review-separation.test.sh` (47 assertions incl. the strip-META),
-  L2 `verify-review-discipline.sh` (24 incl. the strip-META), L2
-  `subagent-start.sh` extended with 13 identity assertions incl. an
-  idempotency-break META. Both sentinel blocks and the idempotency guard were
-  removed from the real scripts to prove the protected assertions go red (25 /
-  10 / 4 failures respectively). Existing approve-reaching specs migrated to
-  seed real review records via a shared `seed_review_records` fixture helper.
-- **Arbitration of disputed findings (`orchestrator.md` section 5d).** When the
-  implementing specialist disputes an at-threshold finding, two things clear it
-  and nothing else does: RESOLVE with evidence (`qa-gate.sh resolve-finding
-  <tid> <fid> --fix '<ref>' --test '<ref>' '<summary>'` — both refs mandatory,
-  evidence-before-fix as a record) or ARBITRATE (`qa-gate.sh arbitrate <tid>
-  <fid> <overrule|sustain> '<rationale>'`). `overrule` clears the gate count;
-  `sustain` keeps the finding OPEN as the audit record of a dispute that was
-  heard and upheld — which is what makes an overrule mean anything. Arbitration
-  is the ORCHESTRATOR's job: the reviewer and the author are the two parties, so
-  only the third can adjudicate, and the rationale must cite BOTH positions.
-  Guidance only — the enforcement is the gate count that shipped above.
-- **J21 correction (`orchestrator.md`, `qa.md`):** `qa-gate.sh choose approve`
-  delegates to the same `cmd_approve` as a direct approve, so it is no longer an
-  unconditional escape — it refuses while an at-threshold finding is open. A
-  cap-hit escalation does not dissolve a dispute; arbitrate or resolve first.
-  Same correction applied to the rubric override in `qa.md` 6f (a judgment
-  override does not satisfy a mechanical gate) and to the now-stale V2 scope
-  notes in `orchestrator.md` 5c / `qa.md` 6p.3.
-- **Live-harness invariant `approval-cites-independent-review`** — the trace-side
-  proof that the mechanism actually held during a real run. For EVERY
-  `QA-GATE APPROVED` record: it names a reviewer (or carries the audited
-  `[review bypass:` marker), an EARLIER `REVIEW-ARTIFACT v1` exists whose
-  `reviewer=` is not one of the task's `IMPLEMENTER: role=` identities, and
-  replaying the preceding records leaves zero open at-threshold findings
-  (`RESOLVED … fix= test=` and a latest `ARBITRATION … decision=overrule` clear;
-  `sustain` does not). It is a deliberate SECOND implementation of
-  `review-check.sh gate`'s predicate in TypeScript over a different input — if
-  the shell counter is subverted or a fixture ships a stale copy of the gate,
-  the two disagree and that disagreement is the signal. Declared in all seven
-  fixture `invariants:` blocks.
-- Trace gained an OPTIONAL `beadsComments` field ({task, text, order}), captured
-  post-run by `readBeadsComments()` from the same already-flushed
-  `.beads/issues.jsonl` the label capture reads (no extra bd invocation). ABSENT
-  means "not captured" and the invariant SKIPS (pre-jio.2 traces are not
-  retro-failed); an EMPTY ARRAY means "captured, bd held nothing". Approvals
-  with no `reviewed_by=` token skip as a pre-V3 recording.
-- Tests: `_invariants.unit.spec.ts` +21 cases (positive, both plan-mandated
-  METAs, the skip, sustain-vs-overrule, latest-decision-wins, resolve-with-
-  evidence, below-threshold, malformed-artifact, per-task scoping) and a new
-  mechanical META-COVERAGE assertion — every `INVARIANTS` row must ship a
-  META-TEST or a documented exemption (only `completion-contract`, which is
-  always skipped). Sensitivity proven by mutation: neutering independence,
-  making open findings non-fatal, letting `sustain` clear, flipping the skip to
-  a silent pass, and registering a META-less invariant each turn the matching
-  test red; every mutation byte-restored. New L2 `arbitration-acceptance.sh`
-  (33 assertions) drives the whole decision flow on one task with the REAL
-  writers: self-review refuses at both ends, a disputed finding refuses,
-  `sustain` still refuses, `overrule` approves AND releases the Stop hook, the
-  audit trail keeps both decisions, and `resolve-finding` clears an equivalent
-  dispute with no arbitration at all. `_beads-capture.unit.spec.ts` gained a
-  real-bd round trip proving the three record grammars survive capture in write
-  order.
-
-### Added (Phase V2 — Sol reviewer lane, epic 1vq, 2026-07-25)
-- Optional, advisory external reviewer lane (GPT-5.6-Sol via the Codex CLI's
-  MCP server mode). Absent/failed/timeout Codex behaves identically to
-  "not connected" — the plugin's fresh-context Claude review path covers the
-  role, proven byte-identical by a degradation spec.
-- Helpers (1vq.1): `codex-detect.sh` (layered feature-detect, atomic
-  reviewer-lane flag), `.claude/review-config` (the one place for caps),
-  `review-check.sh` (validate-request/-artifact/gate — the one counter,
-  structurally codex-free), `codex-review.sh` (FIFO JSON-RPC driver, caps +
-  cap-truncation + timeout, advisory-only), and `qa-gate.sh` record subcommands
-  `review-record`/`resolve-finding`/`arbitrate` (byte-exact V3 contract
-  grammars, no gate enforcement yet). Stub-Codex L2 harness + a byte-identical
-  degradation spec; two mid-review defects (a silently-non-executing test, a
-  gate finding-suppression hole) found and closed with load-bearing METAs.
-- Prompt wiring (1vq.2): qa.md §6-prime advisory review-artifact step,
-  orchestrator.md §5c REVIEW-RELAY relay (paid, cost-confirmed), grading packet
-  reconciled to eight items (item 8 advisory/non-criterion), and
-  `docs/CODEX_SETUP.md` (every command live-verified; user-scope registration is
-  mechanically required — the detector reads only top-level `.mcpServers.codex`).
-
-### Fixed (Phase V1 follow-up — model resolver, bug en9, 2026-07-25)
-- `model-select.sh` top-pick sorted recency-primary, so Opus 5 (newer) beat
-  Fable 5 for the "top" lane. Fix: capability CLASS is now the primary sort key
-  (tier order beats recency for known families; unknown families stay top-class
-  for day-zero adoption). Result: orchestrator/reviewers on the newest top-tier
-  family, implementers on the newest Opus-class. Regression + META pinned.
-
-### Added (Phase V1 — role-aware model selection, epic bi3, 2026-07-25)
-- `.claude/model-roles` config (orchestrator=top, implementer=opus-class,
-  reviewer=top; all-top reproduces v3.5). `model-select.sh` resolves per role
-  with an all-or-nothing MANUAL gate, writes
-  `.claude/.qa-tracking/model-roles-resolved.json` (atomic, stale-beats-none),
-  gains `roles` subcommand and per-role `status`; `workflow-model-apply.sh`
-  gains `--role <role> <id>` and `--print-role-map` (bare `<id>` remains the
-  pin-everything rollback); statusline renders `orch:/impl:/rev:` when roles
-  diverge (v3.5 collapse when they don't); reviewer-lane seam for Phase V2.
-- Tests: L1 `model-roles.test.sh` (40), L2 model-select `ms-R1..R6` (+23),
-  L2 `model-roles-parity.sh` (10, incl. the liar-misroute META).
-- `!claude-fable` regional exclusion lifted from `.claude/model-ranking`
-  (evidence-gated, dated, with rollback line; `!claude-mythos` kept). The
-  live role split: orchestrator/qa/grader/judge -> `claude-fable-5`,
-  backend/frontend/devops -> newest opus-class in the account listing.
-
-### Fixed (Phase V1 follow-up — resolver capability class, en9, 2026-07-25)
-- `model-select.sh`'s `pick_best` sorted by recency FIRST, so a newer but
-  less capable family took the `top` lane: with `claude-opus-5` (created
-  2026-07-24) in the same listing as `claude-fable-5` (2026-06-07),
-  orchestrator/qa/grader/judge were dragged onto Opus and the v4 role split
-  collapsed to a single model. The sort is now
-  `[._class, -(._ts), -(._ctx)]` — capability class (the family's position in
-  `.claude/model-ranking`) PRIMARY, recency only WITHIN a class. An UNKNOWN
-  family is ranked in the TOP class, so day-zero adoption of a genuinely-new
-  above-Fable tier still wins on recency; the documented residual (a new
-  BELOW-Fable family also lands in the top class) is covered by the
-  unknown-family warning and a `!<family>` exclusion. Exclusions still filter
-  first; the MANUAL-adopt and fail-open contracts are unchanged.
-- Tests: L2 `ms-T1..T5` (tier-vs-recency regression on the real listing shape,
-  the end-to-end role split, unknown-newer/unknown-older, and the top-class
-  bogus-date manual-adopt consequence) plus the required `ms-TM` META — a
-  `pick_best` reverted to the recency-primary sort must make `ms-T1` fail.
-  Verified RED against the pre-fix resolver (pass=76 fail=12), GREEN after
-  (pass=88 fail=0). `ms-Y` re-scoped from cross-family to intra-class recency
-  (it asserted the pre-en9 contract); it passes against both resolvers.
-
-### Changed (Phase V0)
-- `settings.json`: removed `env.CLAUDE_CODE_EFFORT_LEVEL` (a non-xhigh value
-  deactivates ultracode's orchestration layer per live docs); pinned
-  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (v2.1.219 flipped the platform default
-  to depth 3; the relay architecture assumes depth 1).
-- Installers (`install.sh`/`install.ps1`): Update-mode settings merge now deletes
-  the legacy `env.CLAUDE_CODE_EFFORT_LEVEL` key (with a notice) — installed
-  projects migrate on their next update.
-- `docs/MCP_SERVERS.md`: bd-mcp troubleshooting for installed projects (v2.1.196
-  workspace-trust behavior, `${CLAUDE_PROJECT_DIR:-.}` form), cross-linked from
-  README Caveats; CONTRIBUTING effort recipe rewritten to the three-layer model
-  (floor `effortLevel: xhigh` / session verdict via `make session` / frontmatter
-  `effort: max` ceiling).
+- **The model resolver ranked recency above capability class (bug `en9`).**
+  `pick_best` sorted by recency FIRST, so a newer but less capable family
+  took the `top` lane: with `claude-opus-5` (created 2026-07-24) in the
+  same listing as `claude-fable-5` (2026-06-07), orchestrator/qa/grader/
+  judge were dragged onto Opus and the v4 role split collapsed to a single
+  model. The sort is now `[._class, -(._ts), -(._ctx)]` — capability class
+  (the family's position in `.claude/model-ranking`) PRIMARY, recency only
+  WITHIN a class. An UNKNOWN family is ranked in the TOP class, so
+  day-zero adoption of a genuinely-new above-Fable tier still wins on
+  recency; the documented residual (a new BELOW-Fable family also landing
+  in the top class) is covered by the unknown-family warning and a
+  `!<family>` exclusion. Exclusions still filter first; the MANUAL-adopt
+  and fail-open contracts are unchanged. Verified RED against the pre-fix
+  resolver (pass=76 fail=12) and GREEN after (pass=88 fail=0), with the
+  required `ms-TM` META — a `pick_best` reverted to the recency-primary
+  sort must make `ms-T1` fail. `ms-Y` was re-scoped from cross-family to
+  intra-class recency (it asserted the pre-en9 contract) and passes
+  against both resolvers.
+- **Two mid-review defects in the Sol lane** — a silently-non-executing
+  test and a gate finding-suppression hole — were found during 1vq.1 and
+  closed with load-bearing METAs.
+- **PR #2 (`impact-report.sh` path relativisation) reconciled.**
+  `impact-report.test.sh` section 4 still asserted the pre-PR#2 contract
+  and only ran where a code-graph server is present (it skips in CI, so
+  the divergence was invisible there). Out-of-project and
+  unanchorable-relative entries are now recorded as explicit
+  `skipped: path is outside the analyzed project ...` entries rather than
+  being sent to the tool, so the report can no longer contain the server's
+  absolute-path validation error.
 
 ## [3.5.0] - 2026-06-14
 

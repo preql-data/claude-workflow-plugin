@@ -30,10 +30,13 @@ Drop a new file under `.claude/agents/<name>.md` with this frontmatter:
 name: <name>
 description: <one-sentence description used by intent-based routing>
 tools: Read, Glob, Grep, LS, Bash, Write, Edit
-# model: pinned to a static identifier. SessionStart resolves the best
-# available model and rewrites these pins via model-select.sh; the
-# /workflow-model slash command is the manual override path.
-model: claude-fable-5
+# model: a static identifier, but OWNED BY THE RESOLVER — do not hand-pin a
+# version here. SessionStart runs model-select.sh, which rewrites this line
+# with whatever the agent's ROLE class resolves to (see "Model roles" below);
+# /workflow-model is the manual override path. Seed it with the current id
+# for your class — `bash .claude/scripts/model-select.sh roles` prints
+# `role  strategy  resolved-id` — or copy an existing agent in the same class.
+model: <resolved id for this agent's role class>
 ---
 
 You are a **<Domain> Engineering Specialist** using Beads for tracking.

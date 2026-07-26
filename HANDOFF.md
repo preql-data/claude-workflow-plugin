@@ -5,6 +5,17 @@ work on this repository.
 
 ## Current state
 
+- **v4.0.0 RELEASE DOCS LANDED (2026-07-26, task `claude-workflow-plugin-d2j.1`).**
+  Supersedes the 2026-07-25 progress bullet below: V0-V4 are all COMPLETE and
+  committed on `gauntlet/v4.0.0`, and Phase V5 items 1-4 (version bump to
+  **4.0.0**, the consolidated CHANGELOG entry, the README tri-model section +
+  effort policy, the 14-row `TM1`-`TM14` RELEASE_AUDIT ledger, and the
+  model-version doc sweep) shipped with this task. **STILL OPEN — V5 item 5:**
+  the two cost-gated live tri-model validations (`claude-workflow-plugin-d2j.2`,
+  Codex-connected and Codex-absent) have NOT been run; RELEASE_AUDIT rows TM7
+  and TM14 carry an explicit `live validation: pending d2j.2` note and assert no
+  live result. The release tag itself is the orchestrator's to apply — d2j.1
+  makes no commit and no approval.
 - **BLOCKER (2026-07-25): Anthropic account monthly spend limit reached** mid-session — spawning further specialist/QA/grader agents fails. All work below is committed and pushed on `gauntlet/v4.0.0`; resume once the limit resets or is raised (`/usage-credits`).
 - **Model pins (user-directed, DONE + pushed, commit f980626):** implementers (backend/frontend/devops) on `claude-opus-5`; orchestrator/qa/grader/judge on `claude-fable-5`. The en9 resolver fix (tier order beats recency) makes this the durable resolved state from the real listing. The listing cache was refreshed once via the operator's Claude Code OAuth credential; task `qrh` adds an automatic OAuth-bearer fallback so keyless envs stay current.
 - **v4.0.0 progress on `gauntlet/v4.0.0`:** V0 COMPLETE (epic cnz — platform restore + effort verdict `max`). V1 COMPLETE (epic bi3 — role-aware selection, fable un-excluded). V2 PARTIAL (epic 1vq): 1vq.1 (Sol-lane helpers: codex-detect/review-config/review-check/codex-review + qa-gate review-record/resolve-finding/arbitrate + stub-codex tests) qa-approved + pushed; **1vq.2 (qa.md/orchestrator.md REVIEW-RELAY prompts + docs/CODEX_SETUP.md + packet-drift fix) NOT STARTED — now unblocked, the V2 resume point.** V3/V4/V5 not started.
@@ -233,7 +244,78 @@ release notes — each has a concrete flip-to-PROVEN path in its
   deriver to map the worktree task-creation command shape, then the
   label-milestone invariant passes on the seed cassette.
 
+## Verify conditions for "v4.0.0 (tri-model workflow) shipped"
+
+Every number below was measured on 2026-07-26 by `claude-workflow-plugin-d2j.1`
+on `gauntlet/v4.0.0`. A new session can confirm readiness by re-running them.
+
+- assert: `.claude-plugin/plugin.json` `version` equals `4.0.0`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `4.0.0`.
+- assert: both MCP manifests agree. `.mcp.json` and
+  `.claude-plugin/plugin.json` declare the SAME server name set
+  (`bd`, `code-graph`), both as `"type": "stdio"`, with `.mcp.json` keeping
+  the literal `${CLAUDE_PROJECT_DIR:-.}` form. Mechanically asserted by L1
+  `platform-audit.test.sh` section (d).
+- assert: `make test` exits 0. v4.0.0 L1 baseline is **23 test files / 0
+  failures** (+7 over v3.5.0's 16: `model-roles`, `review-check`,
+  `review-count`, `review-separation`, `denylist-source`, `platform-audit`,
+  `make-session`).
+- assert: `bash .claude/tests/component/run.sh` exits 0. v4.0.0 L2 baseline is
+  **33 specs / 1011 assertions / 0 fail** (+11 specs and +369 assertions over
+  v3.5.0's 22 / 642).
+- assert: `cd .claude/tests/e2e && npm run test:unit` reports **430 passed /
+  5 skipped** across 15 files (+62 over v3.5.0's 368, chiefly the 102-case
+  `_invariants.unit.spec.ts` incl. `approval-cites-independent-review`). The
+  five skips are the same honest invariant-engine / trace-anchor
+  artifact-missing skips, not green-washed.
+- assert: `make lint` clean (shellcheck over all hook + test + mutation
+  scripts + install/uninstall).
+- assert: `docs/RELEASE_AUDIT.md` now holds TWO ledgers, so its greps are
+  **section-scoped** (this supersedes the file-wide greps in the v3.5.0 block
+  below — the frozen counts are unchanged, the command is not). Run:
+  - frozen v3.5.0 ledger →
+    `awk '/^# Release Audit/,/^## v4\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    and the three sibling statuses → confirm `51 / 47 / 0 / 23`, row-id count
+    `121`.
+  - v4.0.0 ledger →
+    `awk '/^## v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    → confirm `14 / 0 / 0 / 0`, and
+    `grep -cE '^\| TM[0-9]+ \|'` over the same range → `14`.
+- assert: sign-off separation is mechanical at BOTH gate ends. Run
+  `grep -c 'REVIEW-SEPARATION' .claude/scripts/qa-gate.sh` (≥ 1) and
+  `grep -c 'REVIEW-DISCIPLINE' .claude/scripts/verify-before-stop.sh` (≥ 1);
+  a self-review (reviewer identity == a recorded implementer) must fail
+  `approve` with exit 4 and must not release the Stop hook.
+- assert: cross-worktree approval resolution ships. Run
+  `grep -c 'WORKTREE-RESOLUTION' .claude/scripts/verify-before-stop.sh` and
+  `grep -c 'WORKTREE-TOKEN' .claude/scripts/qa-gate.sh` (both ≥ 1).
+- assert: one denylist, three consumers.
+  `grep -l 'workflow-denylist.sh' .claude/scripts/{post-edit,impact-report,verify-before-stop}.sh | wc -l`
+  is `3`.
+- assert: the effort verdict is readable and `make session` honours it. The
+  first non-comment line of `.claude/effort-verdict` is `max`; L1
+  `make-session.test.sh` runs the real Makefile target against a stub
+  `claude` and asserts the argv.
+- assert: `README.md` carries a "The tri-model workflow" section linking
+  `docs/CODEX_SETUP.md`, and no living doc names 3.5.0 as the CURRENT version
+  (dated per-release records below deliberately still do).
+
+**Not yet done at this point:** the two paid live tri-model validations
+(`claude-workflow-plugin-d2j.2`) — the full loop with Codex connected
+(plan → implement → Sol review with a declared `risk_threshold` and a
+deliberately disputed finding → arbitration → gate release) and the identical
+flow with Codex absent. RELEASE_AUDIT rows TM7/TM14 say so explicitly rather
+than claiming a live result.
+
 ## Verify conditions for "v3.5.0 (Release Acceptance Gauntlet) shipped"
+
+> **HISTORICAL SNAPSHOT — as-of 2026-06-14, kept unedited.** Like the
+> v3.4.1 block further down, this section records what the tree looked
+> like at *that* release; it is not a statement about the current tree.
+> The version and RELEASE_AUDIT-grep assertions below are stale by design
+> — for the current tree use the v4.0.0 block above (`version` is `4.0.0`,
+> and the RELEASE_AUDIT greps are section-scoped).
 
 A new session can confirm readiness without re-running the gauntlet by
 checking these assertions:
