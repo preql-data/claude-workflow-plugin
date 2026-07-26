@@ -17,6 +17,7 @@
 #   assert_eq       <name> <expected> <actual>
 #   assert_match    <name> <pattern>  <actual>     # extended regex
 #   assert_contains <name> <substring> <actual>    # plain substring
+#   assert_not_contains <name> <substring> <actual> # plain substring, negated
 #   assert_json_field <name> <json> <jq-path> <expected>
 #
 # Each helper bumps PASS or FAIL exactly once. Failures print expected/actual
@@ -66,6 +67,25 @@ assert_contains() {
         FAILED_TESTS+=("$name")
         printf '  FAIL: %s\n    needle:   %s\n    haystack: %s\n' \
             "$name" "$needle" "$haystack"
+    fi
+}
+
+assert_not_contains() {
+    # assert_not_contains <name> <needle> <haystack>
+    # The NEGATIVE counterpart of assert_contains: PASS when the needle is
+    # ABSENT. Added after a spec called this helper before it existed — under
+    # the runner's `set +e` the missing function was a silent exit-127 no-op, so
+    # the negative guard never executed and its spec passed vacuously. Every
+    # negative assertion in this tier must go through here so it is COUNTED.
+    local name="$1" needle="$2" haystack="$3"
+    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        printf '  FAIL: %s\n    forbidden: %s\n    haystack:  %s\n' \
+            "$name" "$needle" "$haystack"
+    else
+        PASS=$((PASS + 1))
+        printf '  PASS: %s\n' "$name"
     fi
 }
 

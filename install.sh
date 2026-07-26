@@ -221,6 +221,12 @@ fi
 # Sanity-check the source layout
 # Critical-path scripts are explicitly required; the rest of .claude/scripts/*.sh
 # rides the glob copy below so the installer stays in sync as helpers are added.
+#
+# review-check.sh and impact-report.sh are on this list because BOTH gate ends
+# fail CLOSED without them (v4 V3 / G2.n6d): a partial install missing either
+# one leaves `qa-gate.sh approve` refusing and the Stop hook blocking, with no
+# way to tell from inside the loop that the cause is a missing file. Failing
+# loudly here turns a permanent gate deadlock into an install-time error.
 for required in \
     ".claude/agents/orchestrator.md" \
     ".claude/agents/qa.md" \
@@ -233,6 +239,8 @@ for required in \
     ".claude/scripts/verify-before-stop.sh" \
     ".claude/scripts/session-end.sh" \
     ".claude/scripts/qa-gate.sh" \
+    ".claude/scripts/review-check.sh" \
+    ".claude/scripts/impact-report.sh" \
     ".claude/scripts/current-task.sh" \
     ".claude/scripts/prevent-orchestrator-edits.sh" \
     ".claude/hooks/hooks.json" \
@@ -579,10 +587,36 @@ if [ -f "$SOURCE_DIR/.claude/rubric-config" ]; then
     copy_file "$SOURCE_DIR/.claude/rubric-config" "$TARGET/.claude/rubric-config"
 fi
 
+# Review config (v4.0.0 Phase V2) ----------------------------------------------
+# Bounded-diligence caps for the optional Sol reviewer lane, read by
+# codex-review.sh (the ONE place caps live). Single file, plain text.
+# Deliberately NOT in the required-source check — codex-review.sh fails open to
+# the documented defaults when the file is absent.
+if [ -f "$SOURCE_DIR/.claude/review-config" ]; then
+    copy_file "$SOURCE_DIR/.claude/review-config" "$TARGET/.claude/review-config"
+fi
+
 # Model-ranking (Phase 0 / v3.1.0) ---------------------------------------------
 # Read by model-select.sh on SessionStart. Single file, plain text.
 if [ -f "$SOURCE_DIR/.claude/model-ranking" ]; then
     copy_file "$SOURCE_DIR/.claude/model-ranking" "$TARGET/.claude/model-ranking"
+fi
+
+# Model-roles (v4.0.0 Phase V1) ------------------------------------------------
+# Role -> selection-strategy map read by model-select.sh on SessionStart.
+# Single file, plain text. Deliberately NOT in the required-source check —
+# a source tree without it still installs (model-select.sh fails open to the
+# all-`top` v3.5 behavior when the file is absent).
+if [ -f "$SOURCE_DIR/.claude/model-roles" ]; then
+    copy_file "$SOURCE_DIR/.claude/model-roles" "$TARGET/.claude/model-roles"
+fi
+
+# Effort verdict (v4.0.0 V0 / cnz.1) -------------------------------------------
+# The effort A/B interference-test output consumed by `make session` and the
+# session-start Warning 4 reconciliation. Single file, plain text. Deliberately
+# NOT in the required-source check — a source tree without it still installs.
+if [ -f "$SOURCE_DIR/.claude/effort-verdict" ]; then
+    copy_file "$SOURCE_DIR/.claude/effort-verdict" "$TARGET/.claude/effort-verdict"
 fi
 
 # Mutation tier (Phase C / v3.4.0) ---------------------------------------------
@@ -634,19 +668,30 @@ if [ -f "$SETTINGS_FILE" ]; then
     if [ "$UPDATE_MODE" = true ]; then
         echo -e "${YELLOW}Merging settings.json (preserving non-workflow keys)...${NC}"
         cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
+        # v4.0.0 (cnz.1): detect a legacy env.CLAUDE_CODE_EFFORT_LEVEL pin in
+        # the EXISTING settings before the merge. The env union below can only
+        # ADD keys, so without the explicit del the legacy pin survives an
+        # Update — and any non-xhigh value there deactivates ultracode
+        # orchestration. We print a one-line notice when we actually remove it.
+        HAD_EFFORT_ENV=$(jq -r 'if (.env // {} | has("CLAUDE_CODE_EFFORT_LEVEL")) then "yes" else "no" end' "$SETTINGS_FILE" 2>/dev/null || echo "no")
         # Replace workflow-owned keys (hooks, env, additionalDirectories) but keep others.
+        # The env union merges existing + new, then deletes the retired
+        # CLAUDE_CODE_EFFORT_LEVEL key (idempotent — a no-op when absent).
         MERGED=$(jq -s '
             .[0] as $existing |
             .[1] as $new |
             $existing
             | .hooks = $new.hooks
-            | .env = (($existing.env // {}) + ($new.env // {}))
+            | .env = ((($existing.env // {}) + ($new.env // {})) | del(.CLAUDE_CODE_EFFORT_LEVEL))
             | .additionalDirectories = ($new.additionalDirectories // $existing.additionalDirectories)
             | (if $existing.permissions then . else .permissions = $new.permissions end)
         ' "$SETTINGS_FILE" "$SOURCE_SETTINGS" 2>/dev/null) || MERGED=""
         if [ -n "$MERGED" ]; then
             echo "$MERGED" > "$SETTINGS_FILE"
             echo -e "${GREEN}OK${NC}   settings.json merged"
+            if [ "$HAD_EFFORT_ENV" = "yes" ]; then
+                echo -e "${CYAN}note${NC} removed legacy env.CLAUDE_CODE_EFFORT_LEVEL (v4: a non-xhigh value deactivates ultracode orchestration; effortLevel is now the floor)"
+            fi
         else
             echo -e "${RED}Could not merge settings.json - manual review needed${NC}"
         fi

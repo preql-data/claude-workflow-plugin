@@ -1,29 +1,25 @@
 #!/bin/bash
-# effort-fail-open.test.sh — hotfix vlp.2.
+# effort-fail-open.test.sh — v4.0.0 Phase V0 (cnz.1), inverted from vlp.2.
 #
-# Covers the spec's fail-open + one-line-notice path for the persistable
-# effort default. The settings.json carries effortLevel: "xhigh" and
-# env.CLAUDE_CODE_EFFORT_LEVEL: "max". Per docs/en/model-config the
-# levels actually supported by the resolved model vary; vlp.2's contract
-# is that when the runtime can't honor the configured level, the helper:
-#   (a) surfaces a single LOUD warning naming the applied level, and
-#   (b) leaves the existing effort knob alone (no silent downgrade).
+# v4 REMOVED the persistable env pin env.CLAUDE_CODE_EFFORT_LEVEL: the live
+# docs are explicit that any non-xhigh value there deactivates ultracode's
+# workflow orchestration. The durable FLOOR is now effortLevel: "xhigh"
+# alone; the live SESSION level is chosen at launch (`make session` ->
+# `claude --effort <verdict>`), where <verdict> is the first non-comment line
+# of .claude/effort-verdict (the A/B interference-test output). session-start.sh
+# Warning 4 reconciles floor vs live vs verdict; Warning 5 guards the
+# v2.1.219 nested-subagent-spawn platform knobs.
 #
-# Section 1: positive coverage. settings.json + the effort-level surfacing
-# in session-start.sh produces a single "effort: applied <level>" line in
-# the warnings envelope.
-#
-# Section 2: META-TEST. Stub session-start.sh's settings read to point at
-# an UNSUPPORTED-model fixture (claude-sonnet-4-5; docs table omits
-# effort entirely for this generation), assert the helper still emits
-# the level + opt-in hint (it cannot prevent the runtime mismatch — the
-# warning is the user-visible fail-open signal so the operator sees the
-# disparity).
-#
-# Section 3: sensitivity META-TEST. Replace the surfacing block with a
-# stripped variant that does NOT emit the line; assert section 1's
-# expectation fails — proving the assertion is sensitive to the code
-# under test, not vacuous.
+# Sections:
+#   0. settings.json baseline — effortLevel==xhigh AND env.CLAUDE_CODE_EFFORT_LEVEL ABSENT.
+#   1. positive — v4 fixture (no env pin, no verdict file): the effort line
+#      names the effortLevel floor + "A/B verdict not recorded" + `make session`,
+#      and the legacy-pin warning is ABSENT.
+#   1b. verdict present (max) + injected CLAUDE_EFFORT=medium -> mismatch warning.
+#   1c. legacy env pin present -> the 4a "settings still pin ..." warning fires.
+#   2. META-TEST — strip the Warning 4/5 block from session-start.sh, assert the
+#      effort line disappears (proves section 1 is sensitive to the block, not
+#      vacuous). Anchored to TEXT patterns, never line numbers.
 
 set -u
 
@@ -34,6 +30,12 @@ FAILED_TESTS=()
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 SESSION_START="$PROJECT_DIR/.claude/scripts/session-start.sh"
 SETTINGS_REAL="$PROJECT_DIR/.claude/settings.json"
+
+# Determinism: this session's own hook env may carry CLAUDE_EFFORT (the live
+# effort of the harness's session). Drop it so the "floor / verdict" branches
+# are not polluted by an ambient live value; sections that need it inject it
+# explicitly per-invocation.
+unset CLAUDE_EFFORT 2>/dev/null || true
 
 assert_eq() {
     local name="$1" expected="$2" actual="$3"
@@ -75,9 +77,8 @@ assert_not_contains() {
 }
 
 # ---------------------------------------------------------------------------
-# Section 0: settings.json baseline check (vlp.2 deliberate write).
-# Confirms the file actually carries the values the rest of the test
-# assumes. This is the trivial "the change landed" check.
+# Section 0: settings.json baseline check (V0 deliberate write).
+# The FLOOR is effortLevel=xhigh; the legacy env pin must be GONE.
 # ---------------------------------------------------------------------------
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -88,42 +89,37 @@ fi
 EL_VAL=$(jq -r '.effortLevel // "<missing>"' "$SETTINGS_REAL" 2>/dev/null)
 EL_ENV=$(jq -r '.env.CLAUDE_CODE_EFFORT_LEVEL // "<missing>"' "$SETTINGS_REAL" 2>/dev/null)
 
-assert_eq "settings.effortLevel == xhigh (vlp.2 deliberate write)" "xhigh" "$EL_VAL"
-assert_eq "settings.env.CLAUDE_CODE_EFFORT_LEVEL == max (vlp.2 deliberate write)" "max" "$EL_ENV"
+assert_eq "settings.effortLevel == xhigh (V0 floor)" "xhigh" "$EL_VAL"
+assert_eq "settings.env.CLAUDE_CODE_EFFORT_LEVEL is ABSENT (V0 removed the pin)" \
+    "<missing>" "$EL_ENV"
 
 # ---------------------------------------------------------------------------
-# Section 1: positive — session-start.sh surfaces the applied effort
-# level and the ultracode opt-in hint.
+# Shared fixture: a tempdir project layout enough for session-start.sh to run,
+# with a fake bd on PATH that answers the few commands the script invokes.
 # ---------------------------------------------------------------------------
 
-# Build a tempdir fixture that mimics the project layout enough for
-# session-start.sh to run. We pass a fake bd via PATH that responds to
-# the few commands the script invokes.
 FIXTURE=$(mktemp -d -t effort-fail-open.XXXXXX)
 trap 'rm -rf "$FIXTURE"' EXIT
 
 mkdir -p "$FIXTURE/.claude/scripts" "$FIXTURE/.claude/.qa-tracking" \
     "$FIXTURE/.claude/skills/workflow-engine" "$FIXTURE/.beads" "$FIXTURE/bin"
 
-# Copy the real session-start.sh so the test runs the real surface, not
-# a symlink (we want the test isolated from the project's settings).
 cp "$SESSION_START" "$FIXTURE/.claude/scripts/session-start.sh"
 chmod +x "$FIXTURE/.claude/scripts/session-start.sh"
 
-# Settings.json mirror of vlp.2 baseline.
+# v4 settings.json mirror: effortLevel floor, NO env.CLAUDE_CODE_EFFORT_LEVEL.
 cat > "$FIXTURE/.claude/settings.json" <<'SETTINGS'
 {
   "additionalDirectories": ["../"],
   "effortLevel": "xhigh",
   "env": {
     "MAX_THINKING_TOKENS": "64000",
-    "CLAUDE_CODE_EFFORT_LEVEL": "max",
-    "CLAUDE_LATEST_OPUS": "claude-opus-4-7"
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+    "CLAUDE_LATEST_OPUS": "claude-opus-4-8"
   }
 }
 SETTINGS
 
-# Minimal SKILL.md so the workflow-engine block doesn't bail.
 cat > "$FIXTURE/.claude/skills/workflow-engine/SKILL.md" <<'SKILL'
 ---
 name: workflow-engine
@@ -133,12 +129,8 @@ description: stub
 stub body
 SKILL
 
-# Empty CLAUDE.md so the project_memory section is a no-op.
 : > "$FIXTURE/CLAUDE.md"
 
-# Fake bd: stubs out every subcommand session-start.sh invokes. We use
-# a small case dispatcher: --version returns a high enough version,
-# prime returns a short context, every other command emits empty.
 cat > "$FIXTURE/bin/bd" <<'BDSHIM'
 #!/bin/bash
 case "$1" in
@@ -156,96 +148,119 @@ chmod +x "$FIXTURE/bin/bd"
 export CLAUDE_PROJECT_DIR="$FIXTURE"
 export PATH="$FIXTURE/bin:$PATH"
 
-# Run session-start.sh with empty stdin. We do not need its JSON
-# envelope to be VALID for downstream consumers; we just need its
-# additionalContext payload to contain the effort line.
-OUT=$(echo '{}' | bash "$FIXTURE/.claude/scripts/session-start.sh" 2>&1 || true)
-
-assert_contains "vlp.2: effort line names the applied level (max)" \
-    "effort: applied 'max'" "$OUT"
-assert_contains "vlp.2: effort line names the ultracode runtime opt-in" \
-    "/effort ultracode" "$OUT"
-assert_contains "vlp.2: effort line documents cannot-persist constraint" \
-    "cannot be persisted" "$OUT"
+# Run session-start.sh with empty stdin. We do not need its JSON envelope to
+# be valid for downstream consumers; we just need the additionalContext to
+# carry (or omit) the effort line.
+run_ss() { echo '{}' | bash "$FIXTURE/.claude/scripts/session-start.sh" 2>&1 || true; }
 
 # ---------------------------------------------------------------------------
-# Section 2: fail-open under unsupported-model fixture. Stub the
-# settings.json to declare a model the docs explicitly do NOT support
-# effort levels for (sonnet-4-5 / haiku — docs table omits them). The
-# surfacing helper has no model-aware downgrade today; the warning
-# remains the operator-visible signal and the effort knob is preserved.
+# Section 1: positive — no verdict file, no legacy env. The effort line names
+# the effortLevel floor, says the verdict isn't recorded yet, and points at
+# `make session`. The legacy-pin warning must NOT appear.
 # ---------------------------------------------------------------------------
 
-# Same fixture; tweak the settings to point at an unsupported model
-# alias so the operator sees the level + the hint regardless of model
-# support. The docs table tells us claude-sonnet-4-5 / claude-haiku
-# generations have NO effort knob; we mirror that as an env override.
+rm -f "$FIXTURE/.claude/effort-verdict"
+OUT=$(run_ss)
+
+assert_contains "V0: effort line names the effortLevel floor (xhigh)" \
+    "floor is effortLevel='xhigh'" "$OUT"
+assert_contains "V0: effort line says the A/B verdict is not recorded yet" \
+    "A/B verdict not recorded yet" "$OUT"
+assert_contains "V0: effort line points at the make session launch path" \
+    "make session" "$OUT"
+assert_contains "V0: effort line references the runbook" \
+    "docs/EFFORT-AB-TEST.md" "$OUT"
+assert_not_contains "V0: no legacy-pin warning when env key is absent" \
+    "settings still pin env.CLAUDE_CODE_EFFORT_LEVEL" "$OUT"
+
+# ---------------------------------------------------------------------------
+# Section 1b: verdict present (max) + injected CLAUDE_EFFORT=medium. Warning 4
+# must flag the mismatch and name the corrective launch command.
+# ---------------------------------------------------------------------------
+
+cat > "$FIXTURE/.claude/effort-verdict" <<'VERDICT'
+# effort-verdict test fixture
+max
+# PROVISIONAL until docs/EFFORT-AB-TEST.md is executed (cnz.2)
+VERDICT
+
+OUT_MISMATCH=$(echo '{}' | CLAUDE_EFFORT=medium bash "$FIXTURE/.claude/scripts/session-start.sh" 2>&1 || true)
+
+assert_contains "V0: verdict mismatch names live vs verdict" \
+    "live session effort='medium' != A/B verdict 'max'" "$OUT_MISMATCH"
+assert_contains "V0: verdict mismatch names the corrective launch command" \
+    "claude --effort max" "$OUT_MISMATCH"
+
+# Same verdict, live effort MATCHES (max==max): no mismatch warning.
+OUT_MATCH=$(echo '{}' | CLAUDE_EFFORT=max bash "$FIXTURE/.claude/scripts/session-start.sh" 2>&1 || true)
+assert_not_contains "V0: no mismatch warning when live == verdict" \
+    "!= A/B verdict" "$OUT_MATCH"
+
+# ---------------------------------------------------------------------------
+# Section 1c: legacy env pin present -> the 4a warning fires (migration nudge).
+# ---------------------------------------------------------------------------
+
 cat > "$FIXTURE/.claude/settings.json" <<'SETTINGS'
 {
   "additionalDirectories": ["../"],
   "effortLevel": "xhigh",
   "env": {
     "CLAUDE_CODE_EFFORT_LEVEL": "max",
-    "CLAUDE_LATEST_OPUS": "claude-sonnet-4-5"
+    "CLAUDE_LATEST_OPUS": "claude-opus-4-8"
   }
 }
 SETTINGS
+rm -f "$FIXTURE/.claude/effort-verdict"
 
-OUT_FAILOPEN=$(echo '{}' | bash "$FIXTURE/.claude/scripts/session-start.sh" 2>&1 || true)
+OUT_LEGACY=$(run_ss)
+assert_contains "V0: legacy env pin trips the 4a migration warning" \
+    "settings still pin env.CLAUDE_CODE_EFFORT_LEVEL='max'" "$OUT_LEGACY"
+assert_contains "V0: legacy warning names the install.sh Update remediation" \
+    "install.sh in Update mode" "$OUT_LEGACY"
 
-# The warning MUST still fire — the surfacing path is independent of the
-# resolved model. Sensitivity: the operator sees the line whether the
-# model supports max or not, so they can spot the mismatch themselves.
-assert_contains "vlp.2 (fail-open): effort line still emitted under unsupported-model fixture" \
-    "effort: applied 'max'" "$OUT_FAILOPEN"
-assert_contains "vlp.2 (fail-open): ultracode opt-in still surfaced" \
-    "/effort ultracode" "$OUT_FAILOPEN"
-
-# ---------------------------------------------------------------------------
-# Section 3: META-TEST — strip the effort block from session-start.sh,
-# rerun, assert the assertion in section 1 would have failed. Proves
-# section 1 is sensitive to the surfacing block, not vacuous.
-# ---------------------------------------------------------------------------
-
-# Build a stripped copy of session-start.sh whose effort surfacing block
-# is removed. The block starts at "# Warning 4: hotfix vlp.2" and ends
-# at "fi" before the bd_prime section. We use awk to skip lines between
-# those markers.
-STRIPPED="$FIXTURE/.claude/scripts/session-start-stripped.sh"
-awk '
-    /^# Warning 4: hotfix vlp.2/ { inblock=1; next }
-    inblock && /^# 1\. Get bd prime output/ { inblock=0 }
-    !inblock { print }
-' "$FIXTURE/.claude/scripts/session-start.sh" > "$STRIPPED"
-chmod +x "$STRIPPED"
-
-# Restore the supported settings so the only difference is the script.
+# Restore the v4 (no-legacy) settings for the META section.
 cat > "$FIXTURE/.claude/settings.json" <<'SETTINGS'
 {
   "additionalDirectories": ["../"],
   "effortLevel": "xhigh",
   "env": {
     "MAX_THINKING_TOKENS": "64000",
-    "CLAUDE_CODE_EFFORT_LEVEL": "max",
-    "CLAUDE_LATEST_OPUS": "claude-opus-4-7"
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+    "CLAUDE_LATEST_OPUS": "claude-opus-4-8"
   }
 }
 SETTINGS
 
+# ---------------------------------------------------------------------------
+# Section 2: META-TEST — strip the Warning 4/5 block from session-start.sh,
+# rerun, assert the effort line is gone. Proves section 1's assertion is
+# sensitive to the surfacing block. The strip is anchored to the block's
+# header TEXT ("# Warning 4:") and the first line after the block
+# ("# 1. Get bd prime output") — never to line numbers (LESSONS: line
+# anchors go stale).
+# ---------------------------------------------------------------------------
+
+STRIPPED="$FIXTURE/.claude/scripts/session-start-stripped.sh"
+awk '
+    /^# Warning 4:/ { inblock=1; next }
+    inblock && /^# 1\. Get bd prime output/ { inblock=0 }
+    !inblock { print }
+' "$FIXTURE/.claude/scripts/session-start.sh" > "$STRIPPED"
+chmod +x "$STRIPPED"
+
+rm -f "$FIXTURE/.claude/effort-verdict"
 OUT_STRIPPED=$(echo '{}' | bash "$STRIPPED" 2>&1 || true)
 
-# META-TEST: the stripped script MUST NOT emit the effort line; if it
-# does (e.g. someone moved the surfacing logic out of the block markers
-# without updating this test), this assertion fails and the META-TEST
-# correctly flags the gap.
-assert_not_contains "META-TEST: stripped session-start.sh omits effort line (assertion is sensitive to the block)" \
-    "effort: applied" "$OUT_STRIPPED"
+# The stripped script MUST NOT emit the effort line. "A/B verdict" is a phrase
+# unique to Warning 4; if it survives the strip, the block markers drifted
+# from the surfacing logic and this META-TEST correctly flags the gap.
+assert_not_contains "META-TEST: stripped session-start.sh omits the effort line" \
+    "A/B verdict" "$OUT_STRIPPED"
 
-# Closure: section 1's primary contract MUST hold against the unstripped
-# script. Re-run as a regression check.
-OUT_FINAL=$(echo '{}' | bash "$FIXTURE/.claude/scripts/session-start.sh" 2>&1 || true)
-assert_contains "META-TEST closure: unstripped session-start still emits effort line" \
-    "effort: applied 'max'" "$OUT_FINAL"
+# Closure: the unstripped script still emits the effort line (regression check).
+OUT_FINAL=$(run_ss)
+assert_contains "META-TEST closure: unstripped session-start still emits the effort line" \
+    "A/B verdict not recorded yet" "$OUT_FINAL"
 
 # ---------------------------------------------------------------------------
 # Summary

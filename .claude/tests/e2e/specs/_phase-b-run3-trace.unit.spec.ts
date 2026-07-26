@@ -255,12 +255,12 @@ describe.skipIf(!HAVE_TRACE)(
       expect(qaImpactCalls.length).toBe(0);
     });
 
-    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 3 skip + 0 fail (qa-queried-impact-of now SKIPS on this pre-n6d trace — llh.15; label-milestones SKIPS per G2.9ke)", () => {
+    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 4 skip + 0 fail (qa-queried-impact-of now SKIPS on this pre-n6d trace — llh.15; label-milestones SKIPS per G2.9ke; approval-cites-independent-review SKIPS per jio.2)", () => {
       const trace = loadTrace();
       const yamlContent = readFileSync(FIXTURE_YAML_PATH, "utf8");
       const specs = parseInvariantsFromYaml(yamlContent);
       // Sanity check the parse succeeded.
-      expect(specs.length).toBe(6);
+      expect(specs.length).toBe(7);
 
       const agg = evaluateAll(trace, specs);
 
@@ -286,13 +286,22 @@ describe.skipIf(!HAVE_TRACE)(
       //    structural FAIL. Retro-failing it would re-assert a
       //    recording-layer gap as a workflow defect.
       //
-      // Aggregate now: 0 failed, 3 skipped (completion-contract +
-      // label-milestones + qa-queried-impact-of), allPassed=true.
+      // 3. jio.2 (v4.0.0 Phase V3): approval-cites-independent-review reads
+      //    the gate's bd COMMENT records (QA-GATE APPROVED reviewed_by= /
+      //    REVIEW-ARTIFACT v1 / IMPLEMENTER / RESOLVED / ARBITRATION). Run 3
+      //    predates the `beadsComments` capture field entirely, so the
+      //    invariant SKIPS ("trace lacks beadsComments") rather than
+      //    retro-failing a run recorded before the records existed.
+      //
+      // Aggregate now: 0 failed, 4 skipped (completion-contract +
+      // label-milestones + qa-queried-impact-of +
+      // approval-cites-independent-review), allPassed=true.
       expect(agg.allPassed).toBe(true);
       expect(agg.skipped).toEqual([
         "completion-contract",
         "label-milestones",
         "qa-queried-impact-of",
+        "approval-cites-independent-review",
       ]);
       expect(agg.failed).toEqual([]);
 
@@ -325,6 +334,18 @@ describe.skipIf(!HAVE_TRACE)(
       expect(resultsByName["qa-queried-impact-of"]?.detail ?? "").toContain(
         "pre-n6d recording",
       );
+      // NEW PIN (jio.2): unevaluable on a trace recorded before bd comments
+      // were captured — pinned so a future re-record (which WOULD carry
+      // beadsComments and must then PASS) flips this loud.
+      expect(
+        resultsByName["approval-cites-independent-review"]?.skipped,
+      ).toBe(true);
+      expect(resultsByName["approval-cites-independent-review"]?.pass).toBe(
+        true,
+      );
+      expect(
+        resultsByName["approval-cites-independent-review"]?.detail ?? "",
+      ).toContain("trace lacks beadsComments");
     });
 
     it("no permission denials: autonomy principle holds", () => {

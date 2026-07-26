@@ -466,11 +466,33 @@ bd create "Bug: [description]" -t bug -p 1 \
 5. **Creates discovered bugs** linked to parent task
 6. **Regression impact scan (verification-suite Phase B, v3.3.0 — extends J19)** — for every changed symbol in the diff, queries the `code-graph` MCP server's `impact_of` tool and treats high-fan-in callers as mandatory regression candidates. Pairs with the orchestrator's pre-delegation pass: orchestrator scores intended impact, QA scores landed impact. Conditional on the server being available; degrades gracefully and records the degradation in `llm_observations`. Canonical instructions in `.claude/agents/qa.md` section 3a.
 
+### QA independent-review step (Phase V2, v4.0.0 — advisory, root-orchestrated relay)
+
+Before the rubric step, QA records an independent review artifact against the same change set (`qa.md` section 6-prime). QA writes a review request — `{contract_version, task_id, iteration, risk_threshold, stop_condition, change_set_hash, spec, diff, completion_contract, impact_report}` — and validates it with `review-check.sh validate-request`; `risk_threshold` (the severity at or above which findings block) and `stop_condition` (what "done reviewing" means) are mandatory-non-empty, which is bounded diligence expressed as a schema rather than a style note.
+
+Two lanes produce the same artifact schema. `codex-detect.sh status` picks between them and is fail-open — absence, misconfiguration, crash, hang, or a server without a `codex` tool all resolve to `claude`:
+
+- **`claude` (default).** QA authors the artifact itself (`reviewer_identity: "qa-claude"`) and records it with `qa-gate.sh review-record`.
+- **`codex` (optional, per-operator).** QA returns `qa_status: "needs-review"` with the sentinel `REVIEW-RELAY: status=needs-review`; the root orchestrator runs `codex-review.sh` (PAID, cost-confirmed — it meters the operator's own OpenAI account), records the artifact, and re-engages QA. Same structural reason as the grader relay: a subagent can neither spawn a subagent nor cost-gate a paid MCP-driving helper. The orchestrator's `REVIEW-RELAY: review-relay` step is canonical in `orchestrator.md` section 5c; setup is in [`CODEX_SETUP.md`](CODEX_SETUP.md).
+
+The artifact is **advisory as a VERDICT, mandatory as an ARTIFACT**: it is grading-packet item 8, writes no labels, records no approval, and the change-set-hash-bound `qa-approved` record remains the only release credential — QA still forms its own verdict. But since Phase V3 the artifact's existence and independence are mechanically enforced at both gate ends (`review-check.sh gate`, called by `qa-gate.sh approve` and by `verify-before-stop.sh`). Both relay sentinels are guarded at L1 by `no-nested-spawn-instructions.test.sh`.
+
+### Arbitration of disputed findings (Phase V3, v4.0.0 — orchestrator section 5d)
+
+A finding at or above the artifact's `risk_threshold` shuts the gate until it is cleared, and exactly two records clear it:
+
+- **RESOLVE** — `qa-gate.sh resolve-finding <tid> <fid> --fix '<ref>' --test '<ref>' '<summary>'`. Both refs are mandatory (the writer refuses an empty one), which is the evidence-before-fix protocol expressed as a record: a fix nobody can point a test at is a claim, not a resolution. The implementer does this.
+- **ARBITRATE** — `qa-gate.sh arbitrate <tid> <fid> <overrule|sustain> '<rationale citing BOTH positions>'`. `overrule` clears the finding in the gate count (the only path that dismisses a finding without a fix, which is why it costs a written rationale); `sustain` leaves it OPEN as the audit record of a dispute that was heard and upheld. The latest decision per finding id wins.
+
+**Arbitration belongs to the ORCHESTRATOR.** The reviewer (QA or the Sol lane) is one party and the implementing specialist is the other; letting either adjudicate recreates the self-sign-off V3 exists to prevent. QA surfaces the disagreement in `llm_observations`, the orchestrator reads both positions and records the decision. `qa-gate.sh choose approve` delegates to the same `cmd_approve`, so a J21 cap-hit escalation does not bypass any of this.
+
+Live runs are audited by the `approval-cites-independent-review` invariant (`.claude/tests/e2e/lib/invariants.ts`, declared in every fixture): each `QA-GATE APPROVED` record in a recorded trace must cite an independent reviewer and leave zero at-threshold findings open, counting `RESOLVED … fix= test=` and a latest `ARBITRATION … decision=overrule` as clearing. It is a deliberate second implementation of the shell predicate — the two agreeing on a real run is the evidence.
+
 ### QA rubric-grading step (Phase A, spec v3.2.0 — root-orchestrated relay)
 
 Before approval, the rubric grader scores the work in a separate context. **The grader is spawned by the root orchestrator, not by QA** — Claude Code subagents cannot spawn other subagents (`code.claude.com/docs/en/sub-agents`: `Agent(agent_type)` has no effect inside a subagent definition), so the QA-to-grader handoff is implemented as a relay that the orchestrator drives. The institutional memory is `LESSONS.md` lesson 4; the regression that motivated the relay is `claude-workflow-plugin-l1r.6`. The rubric is composed from `.claude/rubrics/default.md` plus a domain overlay (`backend.md`, `frontend.md`, or `devops.md`) plus the `bugfix.md` overlay when the task type is `bug`. Every grader verdict — `satisfied` or `needs_revision` — is recorded via `qa-gate.sh grade-record`, which appends a Beads comment of the shape `RUBRIC <version> iteration <n>: <verdict> — <summary>` and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`.
 
-The grading packet is six items: `bd show` output, the SPEC doc, the diff scoped to `.qa-tracking/changed-files.txt`, the specialist's F7 completion contract, `LESSONS.md`, and the rubric file(s) being applied. QA assembles the packet and persists it as a `grading-packet` bd_doc on the task; the orchestrator reads that doc and pastes it into the grader's prompt. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify packet claims against the files the diff references — never to browse the repo or propose fixes beyond `required_fixes`.
+The grading packet is eight items: `bd show` output, the SPEC doc, the diff scoped to `.qa-tracking/changed-files.txt`, the specialist's F7 completion contract, `LESSONS.md`, the rubric file(s) being applied, the mechanical impact report (v3.3.0 / G2.n6d), and the independent review artifact (v4 Phase V2 — ADVISORY). Items 1-7 are mandatory; item 8 is advisory input the grader weighs but never scores as a criterion. QA assembles the packet and persists it as a `grading-packet` bd_doc on the task; the orchestrator reads that doc and pastes it into the grader's prompt. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify packet claims against the files the diff references — never to browse the repo or propose fixes beyond `required_fixes`.
 
 Loop wiring (root-orchestrated relay):
 
@@ -500,7 +522,7 @@ Principle 6 is preserved: `verify-before-stop.sh` is unchanged. The rubric is an
 
 ### Input contract — the grading packet
 
-QA assembles the packet and persists it as a `grading-packet` doc on the Beads task (`bd_doc_write`). The root orchestrator reads that doc and pastes its contents verbatim into the grader's prompt. Six items, in order:
+QA assembles the packet and persists it as a `grading-packet` doc on the Beads task (`bd_doc_write`). The root orchestrator reads that doc and pastes its contents verbatim into the grader's prompt. Eight items, in order:
 
 1. `bd show <task-id>` output — task record, labels, comments.
 2. The SPEC doc — what the orchestrator wrote via `bd_doc_write(name="spec")`.
@@ -508,8 +530,10 @@ QA assembles the packet and persists it as a `grading-packet` doc on the Beads t
 4. The F7 completion contract — the specialist's structured return payload.
 5. `LESSONS.md` contents — institutional memory, graded as criteria-by-reference.
 6. The rubric file(s) — default + the domain overlay matching the task label + the bugfix overlay if the task type is `bug`.
+7. The mechanical impact report — `.qa-tracking/impact-report-<task-id>.json`, the per-file `impact_of` artifact `qa-gate.sh enter` generates for the cycle. Lets the grader score regression-coverage claims against actual caller data instead of prose. Guaranteed present for any task that entered the gate (approve refuses a missing or stale one).
+8. The independent review artifact — **ADVISORY**. A second reviewer's strict-JSON verdict on the same change set (`reviewer_identity` = `qa-claude` or `sol-codex`). Optional, and never a criterion: a `findings` verdict does not fail a criterion and an `approve` verdict does not satisfy one. Its absence is the one packet gap that is not itself a finding.
 
-The grader does NOT see the specialist's conversation, the orchestrator's plan, prior QA notes, or anything else outside the packet. The separation is the mechanism — it prevents the self-critique contamination where the reviewing agent's own framing colours the verdict.
+Items 1-7 are mandatory — a missing one fails the affected criterion with the gap named. The grader does NOT see the specialist's conversation, the orchestrator's plan, prior QA notes, or anything else outside the packet. The separation is the mechanism — it prevents the self-critique contamination where the reviewing agent's own framing colours the verdict.
 
 ### Output contract — STRICT JSON only
 

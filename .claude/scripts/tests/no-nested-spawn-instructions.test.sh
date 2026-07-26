@@ -30,6 +30,13 @@
 #   (c) orchestrator.md MUST contain the relay-pickup sentinel
 #       `RUBRIC-RELAY: grading-relay` — proves the orchestrator is wired
 #       to spawn the grader at root after a needs-grading return.
+#   (d) qa.md MUST contain `REVIEW-RELAY: status=needs-review` and
+#       orchestrator.md MUST contain `REVIEW-RELAY: review-relay` —
+#       the Phase V2 independent-review relay (claude-workflow-plugin-
+#       1vq.2) has the SAME structural shape: the Codex review turn is
+#       driven from the root (a subagent can neither spawn nor
+#       cost-gate a paid MCP-driving helper), so QA hands off with a
+#       sentinel and the orchestrator picks it up.
 #
 # Sentinels are the same-shape guard pattern used by
 # evidence-before-fix.test.sh and agents-manifest-parity.test.sh.
@@ -41,8 +48,8 @@
 #
 # Exit codes:
 #   0  every non-orchestrator agent file is free of spawn-directives,
-#      qa.md has the relay handoff sentinel, orchestrator.md has the
-#      relay-pickup sentinel, AND the META-TEST fixture is flagged
+#      qa.md has both relay handoff sentinels, orchestrator.md has all
+#      three relay-pickup sentinels, AND the META-TEST fixture is flagged
 #   1  one or more assertions failed
 #   2  invocation error (missing files)
 
@@ -83,6 +90,14 @@ ORCH_RELAY_SENTINEL='RUBRIC-RELAY: grading-relay'
 # future refactor that strips the section is caught at L1, parallel
 # to the rubric-grader guard above.
 ORCH_JUDGE_RELAY_SENTINEL='JUDGE-RELAY: judging-relay'
+# REVIEW-RELAY (claude-workflow-plugin-1vq.2): the Phase V2 independent-
+# review relay. QA assembles + validates a review request and returns
+# `needs-review`; the ROOT orchestrator drives codex-review.sh (a paid,
+# MCP-driving helper a subagent can neither reach nor cost-gate),
+# records the artifact, and re-engages QA. Same guard shape as the two
+# relays above — a refactor that strips either half is caught at L1.
+QA_REVIEW_RELAY_SENTINEL='REVIEW-RELAY: status=needs-review'
+ORCH_REVIEW_RELAY_SENTINEL='REVIEW-RELAY: review-relay'
 
 # Spawn-directive patterns. Each is an extended regex; a match in a
 # non-orchestrator agent file means that file is instructing the agent
@@ -194,6 +209,24 @@ else
 fi
 assert_eq "no-nested-spawn: orchestrator.md contains JUDGE-RELAY anchor" "0" "$orch_judge_sentinel_rc"
 
+# REVIEW-RELAY pair (claude-workflow-plugin-1vq.2). Both halves must be
+# present or the Phase V2 handoff is broken in one direction: QA would
+# return a status nobody picks up, or the orchestrator would wait for a
+# sentinel QA never emits.
+if [ -f "$QA_FILE" ] && grep -qF -- "$QA_REVIEW_RELAY_SENTINEL" "$QA_FILE"; then
+    qa_review_sentinel_rc=0
+else
+    qa_review_sentinel_rc=1
+fi
+assert_eq "no-nested-spawn: qa.md contains REVIEW-RELAY handoff sentinel" "0" "$qa_review_sentinel_rc"
+
+if [ -f "$ORCH_FILE" ] && grep -qF -- "$ORCH_REVIEW_RELAY_SENTINEL" "$ORCH_FILE"; then
+    orch_review_sentinel_rc=0
+else
+    orch_review_sentinel_rc=1
+fi
+assert_eq "no-nested-spawn: orchestrator.md contains REVIEW-RELAY anchor" "0" "$orch_review_sentinel_rc"
+
 # --- META-TEST ------------------------------------------------------------
 #
 # Build a fixture agent file that DOES contain a nested-spawn directive
@@ -227,7 +260,9 @@ MD
 # reason (the assertion checks a different invariant than expected).
 if grep -qF -- "$QA_RELAY_SENTINEL" "$META_TMP" \
     || grep -qF -- "$ORCH_RELAY_SENTINEL" "$META_TMP" \
-    || grep -qF -- "$ORCH_JUDGE_RELAY_SENTINEL" "$META_TMP"; then
+    || grep -qF -- "$ORCH_JUDGE_RELAY_SENTINEL" "$META_TMP" \
+    || grep -qF -- "$QA_REVIEW_RELAY_SENTINEL" "$META_TMP" \
+    || grep -qF -- "$ORCH_REVIEW_RELAY_SENTINEL" "$META_TMP"; then
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("META-TEST fixture inadvertently contains a relay sentinel")
     printf '  FAIL: META-TEST fixture inadvertently contains a relay sentinel\n'

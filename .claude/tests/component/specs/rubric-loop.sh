@@ -290,6 +290,10 @@ assert_eq "rubric-loop-5: RUBRIC iteration-2 satisfied comment posted" "1" \
 # trail; the approval comment cites the verdict. Stop-hook contract is
 # untouched (principle 6).
 
+# V3 (jio.1) MIGRATION: approve refuses without an independent review
+# artifact. Seed the real flow (backend implementer + qa-claude review) so
+# section 6 still exercises the RUBRIC audit-trail behaviour it tests.
+seed_review_records "$TID"
 APPROVE_OUT=$(bash "$QG" approve "$TID" "Rubric v1 satisfied at iteration 2 (all default criteria pass). Verified: login handles invalid email with clear error.")
 assert_json_field "rubric-loop-6: approve ok=true" "$APPROVE_OUT" '.ok' "true"
 assert_json_field "rubric-loop-6: approve status=approved" "$APPROVE_OUT" '.status' "approved"

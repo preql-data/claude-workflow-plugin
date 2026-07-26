@@ -126,6 +126,8 @@ invariants:
 | `completion-contract` | Every specialist completion payload carries all six F7 fields | Implemented as `skipped` with a documented trace-gap reason — the trace doesn't capture structured completion payloads yet. Faking it would make the gate worthless |
 | `label-milestones` | Fixture-declared milestone labels all appear as label adds across the run | Replaces `expected_label_progression` exact-equality. Extra intermediate adds are allowed |
 | `declared-subagents-only` | Every subagent invocation matches the fixture's declared specialist set | Plugin-qualifier tolerant (`backend` matches `claude-workflow:backend`); orchestrator and `general-purpose` are always allowed |
+| `qa-queried-impact-of` | QA consulted the mechanical impact report before approving (n6d artifact footprint + an unbypassed approve) | Skips when code-graph is absent, when there is no diff, or on pre-n6d recordings; fails on a `--no-impact-report` bypass without a code-graph-absent reason |
+| `approval-cites-independent-review` | Every `QA-GATE APPROVED` record names a reviewer who is not a recorded implementer, cites an EARLIER `REVIEW-ARTIFACT v1`, and leaves zero findings open at/above its `risk_threshold` | Reads `trace.beadsComments` (V3 / jio.2) — a deliberate second implementation of `review-check.sh gate`. `RESOLVED … fix= test=` and a latest `ARBITRATION … decision=overrule` clear a finding; `sustain` does not. The audited `[review bypass:` marker exempts a record. Skips when the trace carries no `beadsComments` or when no approval names a `reviewed_by=` (pre-V3 recording) |
 
 ### Adding an invariant
 
@@ -280,7 +282,14 @@ it("META-TEST: fails when a root-level Write is injected (orchestrator-attributa
 ```
 
 Every invariant must arrive with this pair. Adding a check without its
-META-TEST is the same gap as a regular assertion without one.
+META-TEST is the same gap as a regular assertion without one — and since
+v4.0.0 Phase V3 that rule is MECHANICAL, not prose: the
+`invariant engine: META-TEST coverage` block in the same file enumerates
+`listInvariants()` and fails when a registered invariant has no
+`it("META-TEST: …")` inside its `describe("invariant: <name> …")` block.
+The only escape is a documented row in that file's `META_EXEMPT` map, and
+the only defensible reason for one is "there is no observable property to
+violate" (today: `completion-contract`, which is always skipped).
 
 ## Known gotchas
 

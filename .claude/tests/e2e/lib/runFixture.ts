@@ -58,6 +58,7 @@ import {
 import { ensureFixtureGitInit } from "./fixtureInit.js";
 import {
   readBeadsIssues,
+  readBeadsComments,
   diffBeadsIssues,
   flushFixtureBeads,
 } from "./beadsCapture.js";
@@ -1228,6 +1229,22 @@ export async function runFixture(opts: RunFixtureOptions): Promise<Trace> {
     // before this field existed simply lack it, and consumers treat
     // absence as "pre-3.5 recording" (skip), NOT as "no label activity".
     trace.beadsLabelEvents = deriveBeadsLabelEvents(trace.toolCalls);
+    // V3.jio.2: capture the bd COMMENT stream from the same (already
+    // flushed) JSONL export. The gate's audit records — QA-GATE APPROVED
+    // reviewed_by=, REVIEW-ARTIFACT v1, IMPLEMENTER: role=, RESOLVED,
+    // ARBITRATION — are comments, so the
+    // `approval-cites-independent-review` invariant cannot see the review
+    // chain without them. BEST-EFFORT: a throw here must not lose the run,
+    // and leaving the field UNDEFINED is meaningful (the invariant SKIPs,
+    // exactly as it does for pre-jio.2 traces) whereas an empty array
+    // would claim "the recorder looked and bd had no comments".
+    try {
+      trace.beadsComments = readBeadsComments(opts.fixturePath);
+    } catch (commentErr) {
+      process.stderr.write(
+        `[runFixture] WARNING: bd comment capture failed (approval-cites-independent-review will SKIP): ${(commentErr as Error).message}\n`,
+      );
+    }
   } finally {
     // ALWAYS restore — even on throw — so the fixture is reusable.
     try {

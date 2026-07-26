@@ -11,10 +11,11 @@ permissionMode: plan
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.
-model: claude-opus-4-8
+model: claude-fable-5
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
-# supports. CLAUDE_CODE_EFFORT_LEVEL env var (in settings.json) takes
-# precedence on a per-session basis; this is the durable fallback.
+# supports. The session-level effort (launch wiring — `make session` /
+# `claude --effort` — or /effort) takes precedence per session; this
+# frontmatter value is the durable ceiling.
 effort: max
 ---
 
@@ -344,6 +345,8 @@ On `needs_revision`, the specialist round-trip lands and the gate re-enters; QA'
 Task("@qa", "Rubric cap reached at iteration $ITERATION_CAP. Do NOT request another grading relay; record a J21 decision via qa-gate.sh choose <approve|continue|tech-debt|defer> per qa.md section 6e.")
 ```
 
+`choose approve` is NOT an unconditional escape: it delegates to the same `cmd_approve` a direct approve uses, so it still refuses while an at-threshold review finding is open (section 5d). A cap-hit does not dissolve a dispute — arbitrate or resolve it first, then record the choice.
+
 **Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
 
 - QA returned `needs-grading` but the `grading-packet` doc is empty or unreadable → malformed handoff; re-engage QA asking it to reassemble the packet before the next relay round.
@@ -456,6 +459,142 @@ The audit trail must show: which mode the relay ran in, where the verdict landed
 - `judge-gate.sh` exit code 3 (precision undefined; zero genuine predictions) → judge is too cautious or the calibration set is dominated by equivalents. Surface to operator; rebalancing the calibration set is a separate task.
 - Repeat invocation on the same packet without operator consent → v3 principle 9 violation. Do not retry the judge without explicit re-confirmation; the cost gate's `--confirm-judge` is the single source of operator intent.
 
+#### 5c. Independent-review relay (REVIEW-RELAY: review-relay)
+
+QA produces an independent review artifact before it approves (per `qa.md` section 6-prime). When the optional Sol reviewer lane is connected, that artifact comes from the Codex MCP server — and driving an MCP server is a ROOT activity for the same structural reason the grader spawn is (`code.claude.com/docs/en/sub-agents`: subagents cannot spawn other subagents, and a subagent cannot cost-gate a paid external call on the operator's behalf). QA therefore assembles the request and hands off; you drive the review turn. This subsection is the canonical REVIEW-RELAY: review-relay procedure.
+
+**The artifact is ADVISORY as a VERDICT, MANDATORY as an ARTIFACT.** It lands in the grading packet as item 8, never writes labels, and never records an approval; the change-set-hash-bound `qa-approved` record remains the only release credential, and a `findings` verdict is not itself a block — QA decides what to do with the findings. But since V3 the artifact's EXISTENCE and INDEPENDENCE are mechanically enforced at BOTH gate ends (`review-check.sh gate`, called by `qa-gate.sh approve` and by the Stop hook): with no artifact, a reviewer who is also a recorded implementer, or an unresolved at-threshold finding, approve refuses and Stop blocks. Clearing a disputed finding is section 5d.
+
+**Cost gate.** `codex-review.sh` is a PAID external call — it meters the operator's OWN OpenAI account, separate from Anthropic spend. It is dev-cycle-manual and cost-confirmed, exactly like the grader's and judge's paid runs (v3 principle 9: no automatic paid runs). Confirm the spend with the operator before the first relay of a session, and never re-run the same review iteration without fresh consent. If the operator declines, tell QA to run the CLAUDE lane instead (Step D, exit-5 branch) — the review still happens, for free, with the same schema.
+
+**Trigger.** The QA specialist returns `qa_status: "needs-review"` in its completion contract, with the sentinel `REVIEW-RELAY: status=needs-review` in `llm_observations`. QA has written and validated a review request at `.claude/.qa-tracking/review-request-<task-id>.json`. The review iteration is in QA's `review_iteration` field; if absent, default to 1 on the first relay round and increment by 1 per subsequent round.
+
+**Step A — read the caps and the lane.**
+
+```bash
+# Bounded-diligence caps live in ONE file. codex-review.sh reads them itself;
+# you read them to interpret a cap-hit and to know the iteration ceiling.
+REVIEW_CONFIG="$CLAUDE_PROJECT_DIR/.claude/review-config"
+MAX_REVIEW_ITERS=$(grep -E '^[[:space:]]*max_review_iterations[[:space:]]*=' "$REVIEW_CONFIG" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '[:space:]')
+MAX_REVIEW_ITERS="${MAX_REVIEW_ITERS:-3}"
+
+# Confirm the lane is still `codex` at relay time — the probe is fail-open and
+# ANY non-`codex` value (including the `claude/no-flag` literal when no
+# detection has run) means run the Claude lane instead of this relay.
+LANE=$(bash "$CLAUDE_PROJECT_DIR/.claude/scripts/codex-detect.sh" status \
+    | jq -r '.reviewer_lane // "claude"' 2>/dev/null)
+LANE="${LANE:-claude}"
+```
+
+If `LANE` is not `codex`, do NOT run Step B. Re-engage QA telling it to author the artifact itself on the Claude lane (`qa.md` 6p.2). If `REVIEW_ITERATION` > `MAX_REVIEW_ITERS`, jump to the exit-6 branch in Step D — the driver would refuse the call anyway.
+
+**Step B — run the review driver at the ROOT.**
+
+```bash
+REQ="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-request-$TASK_ID.json"
+ART=$(bash "$CLAUDE_PROJECT_DIR/.claude/scripts/codex-review.sh" "$TASK_ID" \
+    --request "$REQ" --iteration "$REVIEW_ITERATION")
+RC=$?
+# Always surface both — the exit code is the branch selector in Step D, and a
+# truncated tool output must not hide which branch you are on.
+printf 'codex-review exit=%s artifact=%s\n' "$RC" "${ART:-<none>}"
+```
+
+On success the driver prints the artifact path on stdout and exits 0. It validates the request through `review-check.sh`, drives the Codex MCP server over JSON-RPC in a read-only sandbox, bounds the turn by every cap in `review-config`, and writes a schema-valid artifact to `.claude/.qa-tracking/review-artifact-<task-id>-r<n>.json`. You do not paste a prompt or parse model output — the driver owns the transport.
+
+**Step C — record the artifact, then re-engage QA.**
+
+```bash
+bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TASK_ID" --file "$ART"
+```
+
+`review-record` re-validates through the same one validator and appends the durable `REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> ... findings=[<id>:<sev>,...] at <ts>: <summary>` comment. It is a record writer only: no labels change, no approval is created. Then re-engage QA with a fresh spawn so it folds the artifact into the packet:
+
+```
+Task("@qa", "Independent review recorded for $TASK_ID (review iteration $REVIEW_ITERATION, reviewer=sol-codex). Read the latest REVIEW-ARTIFACT comment, fold it into the grading packet as ADVISORY item 8 per qa.md section 6-prime, and continue the gate. The artifact informs your verdict; it does not bind it.")
+```
+
+**Step D — failure modes, by exit code.** The driver's exit codes are the contract; do not re-derive intent from its stderr.
+
+| Exit | Meaning | Your move |
+| --- | --- | --- |
+| 0 | artifact written | Step C. |
+| 4 | the review request failed schema validation | Return to QA to fix the named field. Do NOT edit the request yourself — QA owns `risk_threshold` and `stop_condition`. Re-run Step B after QA re-validates. |
+| 5 | timeout, server gone, or no valid artifact within budget — NO artifact written | Record a one-line degradation note on the task, then instruct QA to run the CLAUDE lane this round (author the artifact itself). Do not retry the paid call in the same round. |
+| 6 | iteration exceeds `max_review_iterations` | Stop relaying. J21-style escalation per spec 0.2 — surface the cap state to QA and let it record a J21 choice via `qa-gate.sh choose` (approve / continue / tech-debt / defer). Never loop. A cap-hit does not clear an open finding: `choose approve` routes through `cmd_approve` and still refuses (section 5d). |
+| 1 | usage error (bad flags/paths) | Your invocation is wrong; fix the command, not the workflow. |
+
+```bash
+# Exit 5 — the degradation note. One line, on the task, so the audit trail
+# shows which lane actually produced the review.
+bd update "$TASK_ID" --notes "REVIEW-RELAY: codex lane degraded (codex-review.sh exit 5) at review iteration $REVIEW_ITERATION; falling back to the Claude review lane this round. Artifact schema and packet slot are unchanged."
+```
+
+**Optional Playwright UI verification (manual-gated).** When the review scope includes frontend changes and the operator has a headless Playwright MCP server configured, the reviewer MAY drive it to verify rendered behaviour rather than reasoning about the diff alone. It is manual-gated and cost-confirmed like every paid activity, it is never a required dependency, and its absence changes nothing — the review proceeds on the diff. Do not add it to the plugin's shipped MCP set or to any install path.
+
+**Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
+
+- QA returned `needs-review` but the review-request file is missing or unreadable → malformed handoff; re-engage QA to re-assemble and re-validate the request before the next relay round.
+- `review-record` returns `ok:false` with an `error_key` → the artifact is schema-invalid. That is a driver bug or a corrupted file, not something to hand-patch; capture the `error_key`, do not edit the artifact to make it pass.
+- The `REVIEW-ARTIFACT` comment count does not increment after Step C → `review-record` silently failed; check `bd` connectivity before retrying.
+- Two consecutive exit-5 rounds → stop paying for the Codex lane on this task; run the Claude lane and note it. A third paid attempt without new evidence is a symptom-patching chain with a bill attached.
+
+**Scope boundary.** This relay drives the review artifact and nothing else. Adjudicating a DISPUTED finding is section 5d; the gate enforcement those records feed shipped in V3 (`review-check.sh gate`, wired into `qa-gate.sh approve` and the Stop hook).
+
+#### 5d. Arbitration of disputed findings
+
+A review finding at or above the artifact's `risk_threshold` shuts the gate: `qa-gate.sh approve` refuses with `error_key=unresolved_findings` and the Stop hook blocks, until that finding is either RESOLVED with evidence or ARBITRATED. When the implementing specialist DISPUTES the finding — its F7 `decisions` / `blockers` contests the reviewer's reading, or QA and the specialist simply disagree — somebody has to decide. That somebody is YOU.
+
+**Why you.** The reviewer (QA, or the Sol lane relayed through you) is one party; the specialist that wrote the code is the other. Neither can adjudicate its own dispute without recreating exactly the self-sign-off V3 exists to prevent. You are the only participant who is neither, so arbitration is an ORCHESTRATOR responsibility — not QA's, not the implementer's. You still do not write code to settle it; you read both positions and record a decision.
+
+**Two legitimate resolutions.** Either one clears the finding from the gate count. Choose by asking whether the finding is TRUE.
+
+1. **RESOLVE — the finding is right; the implementer fixes it.** The specialist does the work and records the closure with evidence:
+
+```bash
+bash .claude/scripts/qa-gate.sh resolve-finding "$TASK_ID" <finding-id> \
+    --fix '<commit sha or path:line>' \
+    --test '<the test that proves it>' \
+    '<one-line summary>'
+```
+
+   Both refs are MANDATORY and the writer refuses an empty one (`error_key=empty_fix` / `empty_test`). That is the evidence-before-fix protocol expressed as a record: a fix nobody can point a test at is a claim, not a resolution. Send this back to the specialist — you do not author the fix.
+
+2. **ARBITRATE — you read both positions and decide.** Read the finding's evidence in the `REVIEW-ARTIFACT` comment AND the specialist's rebuttal in its F7 contract, then record:
+
+```bash
+bash .claude/scripts/qa-gate.sh arbitrate "$TASK_ID" <finding-id> <overrule|sustain> \
+    '<rationale citing BOTH positions>'
+```
+
+   - `overrule` — the finding is not blocking. It CLEARS the finding in the gate count, so this is the only path in the workflow that dismisses a finding without a fix. It costs a written rationale, and that is deliberate.
+   - `sustain` — the finding stands. It does NOT clear the count; the gate stays shut and the implementer must resolve it. The record is the audit trail of a dispute that was heard and upheld, which is what makes an overrule mean something.
+   - The LATEST decision per finding id wins, so reversing yourself on new evidence is legitimate — record the new decision, do not delete the old one.
+
+**The rationale must cite both sides.** State the reviewer's claim and its evidence, state the specialist's rebuttal, then state your decision and what settled it. A rationale that only says "accepted, not blocking" is a rubber stamp with a timestamp on it, and an auditor reading the trail six months from now cannot tell whether the dispute was adjudicated or waved through. Shape:
+
+```
+'reviewer position: <claim + the evidence line from the artifact>.
+ specialist position: <the rebuttal from its F7 decisions/blockers>.
+ decision: OVERRULE — <what settled it>; <follow-up filed, if any>.'
+```
+
+**Do not.** Do not re-review the code yourself to break the tie — request another review round (section 5c) if the evidence is genuinely insufficient. Do not reach for `approve --no-review`: that bypasses the whole review check with a recorded reason and is for the doc-only / nothing-reviewable case, not for a dispute you would rather not adjudicate. Do not arbitrate a finding you cannot explain in both directions; ask the operator via `AskUserQuestion` instead.
+
+**J21 interaction.** `qa-gate.sh choose approve` delegates to the same `cmd_approve` a direct approve uses, so it is NOT an unconditional escape hatch: it refuses while an unresolved at-threshold finding exists, exactly as the direct form does. A J21 "accept and move on" decision therefore does not bypass review separation. Arbitrate (overrule) or have the implementer resolve FIRST, then record the J21 choice.
+
+**Reading the refusal.** `approve` names the reason in `error_key`; each maps to one move:
+
+| `error_key` | What it means | Your move |
+| --- | --- | --- |
+| `unresolved_findings` | at-threshold finding(s) open (ids are in `open_finding_ids`) | this section: resolve with evidence, or arbitrate `overrule` |
+| `reviewer_not_independent` | the recorded reviewer is also a recorded implementer | a DIFFERENT identity must review; re-run section 5c or have QA author the `qa-claude` artifact |
+| `review_artifact_missing` | no review happened | section 5c / `qa.md` 6-prime — arbitration cannot substitute for a review that never ran |
+| `review_artifact_malformed` | the latest record is corrupted (no well-formed `findings=[...]`) | re-record the artifact; never read it as "no findings" |
+
+**Trace-level proof.** The `approval-cites-independent-review` invariant (`.claude/tests/e2e/lib/invariants.ts`) replays this whole chain over a recorded run: every `QA-GATE APPROVED` record must cite an independent reviewer and leave zero at-threshold findings open, counting a `RESOLVED … fix= test=` or a latest `ARBITRATION … decision=overrule` as clearing and a `sustain` as not. If you arbitrate honestly, it stays green for free.
+
 ## Self-check
 
 Before responding, verify:
@@ -486,6 +625,17 @@ bash .claude/scripts/qa-gate.sh enter | status | approve | block <id> [args]
 bash .claude/scripts/epic-gate.sh check | siblings | shared-files <id>   # B2
 bash .claude/scripts/detect-stack.sh                          # F8/J17
 bash .claude/scripts/tech-debt.sh add <severity> <file:line> <effort> '<desc>' [--bd-task]   # J22
+```
+
+Reviewer-lane scripts (Phase V2 — the REVIEW-RELAY in section 5c). All are optional-lane machinery: with no Codex server registered they resolve to the Claude lane and change nothing.
+
+```bash
+bash .claude/scripts/codex-detect.sh detect [--refresh] | status   # fail-open lane probe; always exits 0
+bash .claude/scripts/codex-review.sh <id> --request <file> --iteration <n>   # PAID; root-only; 0 ok | 4 bad request | 5 degrade | 6 cap
+bash .claude/scripts/review-check.sh validate-request <file> | validate-artifact <file> | gate <id>   # the ONE validator
+bash .claude/scripts/qa-gate.sh review-record <id> --file <artifact>          # record writer — no labels, no approval
+bash .claude/scripts/qa-gate.sh resolve-finding <id> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
+bash .claude/scripts/qa-gate.sh arbitrate <id> <finding-id> <overrule|sustain> '<rationale>'
 ```
 
 ## Escape hatch

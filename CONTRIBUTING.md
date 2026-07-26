@@ -30,10 +30,13 @@ Drop a new file under `.claude/agents/<name>.md` with this frontmatter:
 name: <name>
 description: <one-sentence description used by intent-based routing>
 tools: Read, Glob, Grep, LS, Bash, Write, Edit
-# model: pinned to a static identifier. SessionStart resolves the best
-# available model and rewrites these pins via model-select.sh; the
-# /workflow-model slash command is the manual override path.
-model: claude-fable-5
+# model: a static identifier, but OWNED BY THE RESOLVER — do not hand-pin a
+# version here. SessionStart runs model-select.sh, which rewrites this line
+# with whatever the agent's ROLE class resolves to (see "Model roles" below);
+# /workflow-model is the manual override path. Seed it with the current id
+# for your class — `bash .claude/scripts/model-select.sh roles` prints
+# `role  strategy  resolved-id` — or copy an existing agent in the same class.
+model: <resolved id for this agent's role class>
 ---
 
 You are a **<Domain> Engineering Specialist** using Beads for tracking.
@@ -60,22 +63,24 @@ Conventions to keep:
    ("Use extended thinking for all non-trivial work."). Phase 0 added this
    to all five existing agents.
 3. **Always include the `model:` field** in frontmatter. SessionStart's
-   `model-select.sh` resolver rewrites every agent's `model:` line in
-   lockstep (see `workflow-model-apply.sh`'s `AGENTS` array — add the
-   new agent there too). The `/workflow-model` slash command and `make
+   `model-select.sh` resolver rewrites each agent's `model:` line per its
+   ROLE class (see `workflow-model-apply.sh`'s `role_agents()` — add the new
+   agent to the right class there, and it will flow into `--print-role-map`
+   automatically). The `/workflow-model` slash command and `make
    workflow-model` provide the manual override. Use whatever value the
-   other agents currently carry — the resolver will normalise it on the
-   next session start.
+   other agents in the same role currently carry — the resolver will
+   normalise it on the next session start. See "Model roles" below.
 4. **Beads lifecycle.** Every specialist starts with
    `bd update $TASK_ID --status in_progress` and ends with
    `bd label add $TASK_ID qa-pending` (so the QA agent sees it). The QA
    agent is the only one that flips `qa-pending` -> `qa-approved`.
 5. **Tone.** Plain prose. Emoji only at H1/H2 markers. No ALL CAPS WALLS OF
    TEXT. Phase 2 (C6) will tighten the existing prompts further.
-6. **Effort level.** Set `effort: max` in frontmatter. `max` is the highest
-   level subagent frontmatter accepts (per
-   [docs/en/sub-agents](https://code.claude.com/docs/en/sub-agents)); the
-   session-wide knobs go above it but can't be persisted in frontmatter.
+6. **Effort level.** Set `effort: max` in frontmatter — the highest level
+   subagent frontmatter accepts (per
+   [docs/en/sub-agents](https://code.claude.com/docs/en/sub-agents)) and the
+   durable per-agent ceiling. The session-wide level is chosen at launch, not
+   in frontmatter — see "Why ultracode cannot be the durable default" below.
 
 ### Why ultracode cannot be the durable default
 
@@ -91,22 +96,31 @@ effort level):
 > the `effortLevel` setting, the `--effort` flag, or
 > `CLAUDE_CODE_EFFORT_LEVEL`.**
 
-So the highest persistable configuration is what the plugin ships:
+So the effort recipe the plugin ships is three layers — a persistable floor,
+a per-session launch level, and a durable per-agent ceiling:
 
-- `.claude/settings.json` `effortLevel`: `"xhigh"` (the cap that
-  `effortLevel` accepts; `max` is invalid in this field and is silently
-  ignored by some runtimes).
-- `.claude/settings.json` `env.CLAUDE_CODE_EFFORT_LEVEL`: `"max"` (the
-  env var accepts `max` and persists across sessions, unlike the
-  `--effort` flag).
-- `.claude/agents/*.md` frontmatter `effort`: `max` (subagent
-  frontmatter caps at `max`).
+- **Floor — `.claude/settings.json` `effortLevel`: `"xhigh"`.** The highest
+  value the `effortLevel` field accepts (`max` is invalid here and is
+  silently ignored by some runtimes). v4.0.0 removed the old
+  `env.CLAUDE_CODE_EFFORT_LEVEL` pin: the docs are explicit that any
+  non-xhigh value there deactivates ultracode's workflow orchestration, so
+  the env var is no longer part of the recipe.
+- **Session level — `.claude/effort-verdict` + `make session`.** The recorded
+  A/B verdict (`max` or `ultracode`; see
+  [`docs/EFFORT-AB-TEST.md`](docs/EFFORT-AB-TEST.md)) is the level a real
+  session launches at — `make session` reads the verdict and runs
+  `claude --effort <verdict>`. SessionStart Warning 4 reconciles the live
+  session effort against the verdict and the floor.
+- **Ceiling — `.claude/agents/*.md` frontmatter `effort`: `max`.** The durable
+  per-agent cap (subagent frontmatter tops out at `max`). Correct under either
+  verdict, since ultracode is session-level and cannot be expressed in
+  frontmatter at all.
 
-To opt into ultracode for a session, the operator runs `/effort
-ultracode` interactively, or passes `--settings '{"ultracode":true}'`
-to a one-shot run, or adds `ultracode: true` to a control request when
-embedding via the Agent SDK. The SessionStart hook surfaces a one-liner
-naming what was applied so the operator sees the active level on every
+To opt into ultracode for a session, launch it deliberately — `make session`
+when the verdict is `ultracode`, `/effort ultracode` interactively,
+`--settings '{"ultracode":true}'` for a one-shot run, or `ultracode: true` in
+an Agent SDK control request. The SessionStart hook surfaces a one-liner
+naming the applied level (and flagging any live-vs-verdict mismatch) on every
 load.
 
 Then register the agent in `.claude-plugin/plugin.json`:
@@ -125,6 +139,46 @@ Then register the agent in `.claude-plugin/plugin.json`:
 The orchestrator's prompt has a Domain -> Delegate-To table; if your new
 specialist owns a clear domain, add a row to that table so the orchestrator
 knows when to spawn it.
+
+## Model roles
+
+Since v4.0.0 the model resolver is role-aware. `.claude/model-roles` maps
+each ROLE class to a selection STRATEGY; `model-select.sh apply` resolves
+every role and rewrites each lane's `model:` pins independently.
+
+`.claude/model-roles` file format (key=value, `#` comments, whitespace
+around `=` tolerated — same shape as `.claude/rubric-config`):
+
+```
+orchestrator=top          # single best pick (newest family) — v3.5 behavior
+implementer=opus-class    # newest claude-opus-* model, else falls back to top
+reviewer=top
+# reviewer_lane=auto|claude   (optional; default auto — V2 adds a Sol lane)
+```
+
+Roles are a fixed set — `orchestrator` (orchestrator.md), `implementer`
+(backend/frontend/devops), `reviewer` (qa/grader/judge). Strategies are
+`top` and `opus-class`. A missing file, missing key, or unrecognised value
+resolves to `top` (fail-open); setting every role to `top` reproduces v3.5
+single-pin behavior exactly. The class->agent mapping lives in one place —
+`workflow-model-apply.sh`'s `role_agents()` (surfaced via
+`workflow-model-apply.sh --print-role-map`).
+
+Resolved-artifact contract. Every successful apply writes
+`.claude/.qa-tracking/model-roles-resolved.json` atomically (tmp + mv); on
+any fail-open path the previous artifact is left in place (stale beats
+none). The statusline reads it to render the role view. Shape:
+
+```json
+{"resolved_at":"<iso-ts>","listing_source":"cache|api",
+ "roles":{"orchestrator":"<id>","implementer":"<id>","reviewer":"<id>"},
+ "strategies":{"orchestrator":"top","implementer":"opus-class","reviewer":"top"},
+ "implementer_fallback":false,"reviewer_lane":"claude"}
+```
+
+`bash .claude/scripts/model-select.sh roles` prints
+`role<TAB>strategy<TAB>resolved-id` if you just want the mapping; `status`
+prints the full per-role table plus intra-role drift warnings.
 
 ## Extending hooks
 

@@ -66,11 +66,19 @@ bash "$QG" enter "$TID2" >/dev/null
 # Add the pending label by hand so the approve path exercises all three
 # label removals.
 (cd "$FIXTURE" && bd label add "$TID2" qa-pending >/dev/null 2>&1)
+# V3 (jio.1) MIGRATION: approve now REFUSES without an independent review
+# artifact. Seed the real flow (backend implementer + qa-claude review, no
+# findings) so this case still exercises the LABEL atomicity it was written
+# for rather than dying at the new refusal.
+seed_review_records "$TID2"
 
 # 8. approve -> +qa-approved, -qa-gate-entered, -qa-pending, current-task cleared.
 OUT=$(bash "$QG" approve "$TID2" "Looks good after review")
 assert_json_field "qa-gate: approve ok=true" "$OUT" '.ok' "true"
 assert_json_field "qa-gate: approve status=approved" "$OUT" '.status' "approved"
+# V3 (jio.1): the approval names its reviewer, in the JSON and the record.
+assert_contains "qa-gate: approve obs names the verified reviewer (V3)" \
+    "independent review verified (reviewed_by=qa-claude" "$OUT"
 LABELS=$(cd "$FIXTURE" && bd show "$TID2" --json 2>/dev/null | jq -r 'if type == "array" then .[0].labels else .labels end | join(",")')
 assert_contains "qa-gate: qa-approved label set" "qa-approved" "$LABELS"
 # qa-gate-entered should be removed.
@@ -93,6 +101,7 @@ assert_json_field "qa-gate: re-approve idempotent" "$OUT" '.status' "approved"
 # task short-circuits to idempotent no-op and skips the wipe).
 TID_F4=$(cd "$FIXTURE" && bd create "F4 cleanup test" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID_F4" >/dev/null
+seed_review_records "$TID_F4"    # V3 (jio.1) MIGRATION: approve needs a review artifact
 SANITIZED=$(printf '%s' "$TID_F4" | tr -c 'A-Za-z0-9._-' '_')
 COUNTER="$TRACK/iteration-count.$SANITIZED"
 printf '3\n' > "$COUNTER"
@@ -210,6 +219,10 @@ assert_json_field "impact-report: stale refusal error_key=impact_report_stale" \
     "$IR2_OUT" '.error_key' "impact_report_stale"
 # Regenerate -> approve proceeds (server-absent report ACCEPTED).
 CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR_SCRIPT" "$TID_IR2" >/dev/null 2>&1 || true
+# V3 (jio.1) MIGRATION: seeded AFTER the regenerate so the artifact's
+# reviewed_hash matches the change-set this approval binds (no staleness
+# warning); the case under test is still the impact-report freshness one.
+seed_review_records "$TID_IR2"
 IR2B_RC=0
 IR2B_OUT=$(bash "$QG" approve "$TID_IR2" "Approve after regenerate" 2>/dev/null) || IR2B_RC=$?
 assert_eq "impact-report: approve succeeds after regenerate (rc=0)" "0" "$IR2B_RC"
@@ -224,6 +237,10 @@ TID_IR3=$(cd "$FIXTURE" && bd create "impact-report bypass" -t task -p 1 --json 
 printf 'src/bypass-edit.ts\n' > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID_IR3" >/dev/null
 rm -f "$(report_path_for "$TID_IR3")"
+# V3 (jio.1) MIGRATION: the case under test is the IMPACT bypass, so satisfy
+# the (independent) review requirement legitimately rather than stacking a
+# second bypass on top of it.
+seed_review_records "$TID_IR3"
 IR3_RC=0
 IR3_OUT=$(bash "$QG" approve "$TID_IR3" --no-impact-report "emergency: server bin quarantined by ops" "Bypass-path approval" 2>/dev/null) || IR3_RC=$?
 assert_eq "impact-report: bypass approve succeeds (rc=0)" "0" "$IR3_RC"
@@ -257,6 +274,10 @@ if [ "$STRIP_RC" -eq 0 ]; then
     printf 'src/meta-edit.ts\n' > "$TRACK/changed-files.txt"
     bash "$QG" enter "$TID_IR4" >/dev/null
     rm -f "$(report_path_for "$TID_IR4")"
+    # V3 (jio.1) MIGRATION: the stripped copy loses ONLY the impact-report
+    # refusal — its review-separation block is intact — so the review records
+    # still have to be real for this META to isolate the impact sentinel.
+    seed_review_records "$TID_IR4"
     IR4_RC=0
     IR4_OUT=$(bash "$QG_STRIPPED" approve "$TID_IR4" "Stripped copy must NOT refuse" 2>/dev/null) || IR4_RC=$?
     # Under the stripped copy the refusal disappears: approve succeeds.
@@ -426,10 +447,15 @@ assert_contains "qa-gate mut(enter L481): new-enter obs reports 'cleared stale r
 # assertion would FAIL), confirming sensitivity.
 REAL_QG_CL=$(readlink "$QG_CL" || printf '%s' "$QG_CL")
 QG_CL_MUT="$FIXTURE_CL/qa-gate-enter396mut.sh"
-awk 'NR==408 && /was_escalated" = "1"/ {print "    if [ \"$was_escalated\" != \"1\" ] || [ \"$was_deferred\" = \"1\" ]; then"; next} {print}' \
+# TEXT-anchored (not line-number): mutate the FIRST occurrence of the functional
+# escalation guard so this survives unrelated line shifts elsewhere in
+# qa-gate.sh (e.g. the Phase V2 record-writer additions). The first match is the
+# remove_escalation_labels guard in cmd_enter; the later occurrences (the
+# re-enter obs + the new-enter path) are intentionally left intact.
+awk 'guard_done!=1 && /was_escalated" = "1"/ {print "    if [ \"$was_escalated\" != \"1\" ] || [ \"$was_deferred\" = \"1\" ]; then"; guard_done=1; next} {print}' \
     "$REAL_QG_CL" > "$QG_CL_MUT"
 chmod +x "$QG_CL_MUT"
-QG_CL_MUT_LANDED=$(sed -n '408p' "$QG_CL_MUT" | grep -c 'was_escalated" != "1"' || true)
+QG_CL_MUT_LANDED=$(grep -c 'was_escalated" != "1"' "$QG_CL_MUT" || true)
 QG_CL_MUT_LANDED=$(printf '%s' "$QG_CL_MUT_LANDED" | tr -d '[:space:]')
 assert_eq "qa-gate META: L396 guard mutation applied to copy" "1" "$QG_CL_MUT_LANDED"
 TID_META396=$(cd "$FIXTURE_CL" && bd create "meta L396" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
@@ -471,6 +497,9 @@ TID_RB=$(cd "$FIXTURE_RB" && bd create "approve rollback" -t task -p 1 --json 2>
 printf 'src/rb-edit.ts\n' > "$TRACK_RB/changed-files.txt"
 bash "$QG_RB" enter "$TID_RB" >/dev/null 2>&1   # sets qa-gate-entered (+ generates impact report)
 bd label add "$TID_RB" qa-pending >/dev/null 2>&1
+# V3 (jio.1) MIGRATION: the rollback only happens at Step 3, so approve has to
+# get PAST both refusals first — seed the review records.
+seed_review_records "$TID_RB" "qa-claude" "backend" "$FIXTURE_RB"
 # approve: add qa-approved OK, remove qa-gate-entered OK, remove qa-pending FAILS -> rollback -> exit 3.
 RB_RC=0
 bash "$QG_RB" approve "$TID_RB" "trigger Step-3 rollback" >/dev/null 2>&1 || RB_RC=$?
@@ -506,6 +535,7 @@ bind_hash_of_record() {
 TID_BIND=$(cd "$FIXTURE_BIND" && bd create "approve writes bound record" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 printf 'src/bound-change.ts\n' > "$TRACK_BIND/changed-files.txt"
 bash "$QG_BIND" enter "$TID_BIND" >/dev/null 2>&1   # generates a fresh impact report
+seed_review_records "$TID_BIND" "qa-claude" "backend" "$FIXTURE_BIND"   # V3 (jio.1) MIGRATION
 # Capture the EXPECTED hash BEFORE approve runs — approve truncates
 # changed-files.txt as a last step (0wk.2), so a post-approve --hash-only
 # would return the empty-set hash, not the approved change-set's.
@@ -530,6 +560,7 @@ TID_BIND_BP=$(cd "$FIXTURE_BIND" && bd create "bypass still binds" -t task -p 1 
 printf 'src/bypass-bound.ts\n' > "$TRACK_BIND/changed-files.txt"
 bash "$QG_BIND" enter "$TID_BIND_BP" >/dev/null 2>&1
 rm -f "$TRACK_BIND/impact-report-$(printf '%s' "$TID_BIND_BP" | tr -c 'A-Za-z0-9._-' '_').json"
+seed_review_records "$TID_BIND_BP" "qa-claude" "backend" "$FIXTURE_BIND"   # V3 (jio.1) MIGRATION
 # Capture the expected hash before approve truncates the tracker.
 BP_EXP_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_BIND" bash "$IR_BIND" --hash-only 2>/dev/null || echo "")
 BP_OUT=$(bash "$QG_BIND" approve "$TID_BIND_BP" --no-impact-report "ops emergency" "bypass approval" 2>/dev/null)

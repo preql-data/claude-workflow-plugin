@@ -34,6 +34,18 @@ every step.
   and the lessons ledger — no specialist conversation context — so its
   verdict is independent. Iteration cap is binding and engages the
   escalation path on cap-hit.
+- **Optional: an external reviewer lane (Sol via Codex).** Every QA
+  cycle records an independent review artifact. By default the
+  plugin's own fresh-context Claude path authors it, for free. If you
+  install and register the OpenAI Codex CLI at user scope, that same
+  artifact comes from Sol instead — a second model family reading the
+  same diff. It is strictly optional and purely advisory: it writes no
+  labels, records no approval, and with Codex absent the workflow is
+  byte-identical (proved by a degradation spec, not asserted). The
+  review turn is manual and cost-confirmed, and it meters your own
+  OpenAI account. See [The tri-model workflow](#-the-tri-model-workflow)
+  below; setup, billing, and troubleshooting:
+  [`docs/CODEX_SETUP.md`](docs/CODEX_SETUP.md).
 - **Two MCP servers ship in the box.** `bd-mcp` exposes 21 typed Beads
   tools (no shell quoting bugs). `code-graph-mcp` exposes 7 graph tools
   (`code_search`, `code_context`, `symbol_callers`, `impact_of`,
@@ -58,6 +70,98 @@ every step.
   decomposing non-trivial work; the grader reads it as part of every
   grading packet. The two seed lessons (parallel-agent worktree
   isolation; boundary-mock fidelity) shipped with v3.1.0.
+
+## 🧠 The tri-model workflow
+
+Three classes of agent, three model lanes, one gate. `.claude/model-roles`
+maps each **role** to a selection **strategy**, and `model-select.sh`
+re-resolves every lane at session start — so each class auto-adopts the
+newest model in its own tier without anyone editing a version string.
+
+| Role | Agents | Strategy | Resolves to |
+|------|--------|----------|-------------|
+| `orchestrator` | `orchestrator` | `top` | the resolver's single best pick — the newest, most capable family in your account listing |
+| `implementer` | `backend`, `frontend`, `devops` | `opus-class` | the newest `claude-opus-*` model listed, falling back to `top` when your account lists none |
+| `reviewer` | `qa`, `grader`, `judge` | `top` | the top pick for the fresh-context Claude review path; the optional external lane routes the review turn to Sol via Codex when connected |
+
+The model each lane lands on is **resolver output, not configuration**.
+Read the live mapping with `bash .claude/scripts/model-select.sh roles`
+(prints `role  strategy  resolved-id`), see it in the statusline
+(`orch:… impl:… rev:…`, collapsing to the single-model shape only when all
+three lanes resolved to the same id *and* the reviewer lane is `claude`),
+and override with `/workflow-model`. Setting every role to `top` in
+`.claude/model-roles` reproduces the v3.5 single-model behavior exactly.
+
+### Nobody signs off on their own work
+
+This is a gate rule, not a prompt. The change-set-hash-bound `qa-approved`
+record is the **only** release credential, and since v4.0.0
+`qa-gate.sh approve` refuses (exit 4) unless both hold:
+
+1. the task carries a **review artifact** whose `reviewer_identity` differs
+   from every implementer recorded for that task — `subagent-start.sh`
+   writes `IMPLEMENTER: role=<backend|frontend|devops> task=<id>` at spawn,
+   so identity is captured by the harness, not self-declared; and
+2. **zero findings** at or above the review's `risk_threshold` are still
+   open.
+
+`verify-before-stop.sh` re-runs the *same* predicate before releasing the
+Stop hook, because findings can arrive after an approval and a write-once
+record cannot know about them. Both ends call one counter
+(`review-check.sh gate`) — there is no second implementation of it, and no
+second way to release. A missing or unrunnable counter fails **closed** at
+both ends.
+
+### Arbitration
+
+When the implementing specialist disputes a finding, exactly two things
+clear it and nothing else does:
+
+- **Resolve with evidence** — `qa-gate.sh resolve-finding <tid> <finding-id>
+  --fix '<ref>' --test '<ref>' '<summary>'`. Both refs are mandatory; this
+  is the evidence-before-fix protocol as a record.
+- **Arbitrate** — `qa-gate.sh arbitrate <tid> <finding-id>
+  <overrule|sustain> '<rationale>'`. `overrule` clears the gate count;
+  `sustain` keeps the finding OPEN as the audit record of a dispute that was
+  heard and upheld — which is what makes an overrule mean anything.
+
+Arbitration is the **orchestrator's** job: the reviewer and the author are
+the two parties, so only the third can adjudicate, and the rationale must
+cite both positions.
+
+### The optional Sol lane
+
+The reviewer role runs on the plugin's own fresh-context Claude path by
+default, for free. Install and register the OpenAI Codex CLI at user scope
+and the same artifact comes from Sol instead — a second model family reading
+the same diff. It is strictly optional and purely advisory: it writes no
+labels, records no approval, the review turn is manual and cost-confirmed,
+and it meters your own OpenAI account. With Codex absent, failed, or timed
+out, the workflow is byte-identical (proved by a degradation spec, not
+asserted). Setup, billing, model tracking, and troubleshooting:
+[`docs/CODEX_SETUP.md`](docs/CODEX_SETUP.md).
+
+### Effort policy
+
+Three layers, and none of them is a model-version pin:
+
+- **Floor** — `.claude/settings.json` `effortLevel: "xhigh"`, the highest
+  value that field accepts. Persists across sessions.
+- **Session level** — `.claude/effort-verdict`, currently **`max`**,
+  recorded by the A/B interference test in
+  [`docs/EFFORT-AB-TEST.md`](docs/EFFORT-AB-TEST.md). Launch a working
+  session with `make session`, which reads the first non-comment line of
+  that file and execs `claude --effort <verdict>` (defaulting to `max` when
+  the file is missing or empty).
+- **Ceiling** — every agent's frontmatter `effort: max`, the durable
+  per-agent maximum.
+
+Honest limit: `ultracode` is session-only and its hook-environment proxy is
+`xhigh`, so a session launched at ultracode is indistinguishable from a
+plain xhigh session from inside the plugin. SessionStart therefore *detects
+and warns* when the live effort, the floor, and the verdict disagree —
+detect-and-warn is the ceiling here, and the plugin does not claim to
+enforce the session level.
 
 ## ⚡ Install
 
@@ -196,17 +300,23 @@ spawn other subagents — both arrive via root-orchestrated relays
 
 For the deep dive, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 For the test pyramid that gates every change, read
-[`.claude/tests/README.md`](.claude/tests/README.md). For the v3 release
-notes (G8 harness, MCP servers, rubric loop, code-graph MCP, mutation
-tier) read [`CHANGELOG.md`](CHANGELOG.md).
+[`.claude/tests/README.md`](.claude/tests/README.md). For the release
+notes — v4 (tri-model workflow, role-aware models, the Sol lane, sign-off
+separation, worktree-aware gate scoping) and the v3 line (G8 harness, MCP
+servers, rubric loop, code-graph MCP, mutation tier) — read
+[`CHANGELOG.md`](CHANGELOG.md). Every shipped claim is tracked with its
+evidence pointer in [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md).
 
 ## ⚠ Caveats
 
 - Live e2e runs cost roughly $5–10 per fixture against the
-  SessionStart-resolved model (whichever family/tier the resolver picks
-  per `.claude/model-ranking`; the active pin is shown in the statusline
-  and tracked on the "Model selection log" Beads meta-task). The
-  offline gate (`make test-all`) is free and covers L1 + L2. As of
+  SessionStart-resolved models (whichever family/tier the resolver picks
+  for each role per `.claude/model-roles`, honouring the exclusions in
+  `.claude/model-ranking`; the active pins are shown in the statusline
+  and tracked on the "Model selection log" Beads meta-task). Since v4.0.0
+  the implementer lane can ride a different tier from the orchestrator
+  and reviewer lanes, so per-fixture cost varies with the resolved split.
+  The offline gate (`make test-all`) is free and covers L1 + L2. As of
   v3.1.0, live runs are MANUAL ONLY: `make test-live FIXTURE=<name>`
   prints the estimated cost and prompts for confirmation before
   spending. There is no scheduled CI run that consumes API spend, and
@@ -231,6 +341,11 @@ tier) read [`CHANGELOG.md`](CHANGELOG.md).
 - AgentLint flags a few intentional design choices (Bash auto-approve,
   tag-pinned actions); rationale is in [`CONTRIBUTING.md`](CONTRIBUTING.md)
   under "Design overrides vs. AgentLint".
+- If `bd` or `code-graph` show as failed or not spawned after install (e.g.
+  `/mcp` lists them as "⏸ Pending approval"), see the **Troubleshooting**
+  subsection in [`docs/MCP_SERVERS.md`](docs/MCP_SERVERS.md) — usually a
+  workspace-trust re-accept (v2.1.196+) or a hand-edited `.mcp.json` missing
+  the `${CLAUDE_PROJECT_DIR:-.}` form or `"type":"stdio"`.
 
 ---
 

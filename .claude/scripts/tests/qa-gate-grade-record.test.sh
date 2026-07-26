@@ -161,6 +161,32 @@ export HOME="$TEST_HOME"
 
 QG="$FIXTURE/.claude/scripts/qa-gate.sh"
 
+# V3 (claude-workflow-plugin-jio.1): seed the records that make a task
+# APPROVABLE. `qa-gate.sh approve` now REFUSES unless the task carries a review
+# artifact whose reviewer differs from every recorded IMPLEMENTER and has no
+# open finding at/above its risk_threshold (review-check.sh gate). This fixture
+# has no live spawn and no reviewer, so the approve-path assertions below have
+# to model the real flow: the IMPLEMENTER comment subagent-start.sh writes on
+# spawn, plus a qa-claude artifact recorded through the REAL review-record
+# writer (so a grammar change breaks the seed loudly instead of silently
+# drifting). reviewed_hash is pinned to the current canonical change-set hash
+# so no staleness warning is emitted into the observations under test.
+seed_review_records() {
+    local tid="$1" reviewer="${2:-qa-claude}" role="${3:-backend}"
+    local ts hash art
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
+        || bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
+        || return 1
+    hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
+    [ -z "$hash" ] && hash="unverified"
+    art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+        "$tid" "$reviewer" "$hash" > "$art"
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        review-record "$tid" --file "$art" >/dev/null 2>&1
+}
+
 # Helper: read the current labels for a task as a comma-joined string.
 labels_for() {
     local tid="$1"
@@ -236,6 +262,7 @@ assert_contains "enter fresh: observations mention rubric-pending" \
 # is cleared (a fresh cycle is not yet satisfied), rubric-pending re-added.
 TID_E2=$(bd create "enter stale rubric-satisfied test" -t task -p 1 --json | jq -r '.id')
 bash "$QG" enter "$TID_E2" >/dev/null
+seed_review_records "$TID_E2"   # V3 (jio.1) MIGRATION
 # Approve to clear the gate then plant rubric-satisfied as if from a
 # prior cycle. We use bd label directly to avoid triggering the approve
 # path's rubric-pending cleanup.
@@ -475,6 +502,7 @@ assert_contains "approve-warn: pre-condition rubric-pending set" \
 assert_not_contains "approve-warn: pre-condition rubric-satisfied absent" \
     "rubric-satisfied" "$PRE_LABELS"
 
+seed_review_records "$TID_AW"   # V3 (jio.1) MIGRATION
 OUT=$(bash "$QG" approve "$TID_AW" "Override: deferred Phase A rubric for plumbing-only commit.")
 STATUS=$(printf '%s' "$OUT" | jq -r '.status')
 OK=$(printf '%s' "$OUT" | jq -r '.ok')
@@ -508,6 +536,7 @@ bd label add "$TID_AS" qa-pending >/dev/null 2>&1
 VERDICT=$(build_verdict "satisfied" 1 "v1")
 printf '%s' "$VERDICT" | bash "$QG" grade-record "$TID_AS" >/dev/null
 
+seed_review_records "$TID_AS"   # V3 (jio.1) MIGRATION
 OUT=$(bash "$QG" approve "$TID_AS" "All criteria passed per RUBRIC v1 iteration 1.")
 STATUS=$(printf '%s' "$OUT" | jq -r '.status')
 assert_eq "approve-sat: status=approved" "approved" "$STATUS"

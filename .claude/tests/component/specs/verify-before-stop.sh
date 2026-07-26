@@ -66,6 +66,11 @@ assert_contains "vbs: QA-required block names code-graph MCP (366.9)" \
 # 6. Changed files + task qa-approved -> {} (allow). Need bd-real task.
 TID=$(cd "$FIXTURE" && bd create "Approved-path task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
 bash "$QG" enter "$TID" >/dev/null
+# V3 (jio.1) MIGRATION: BOTH ends of this flow now demand an independent
+# review — approve refuses without the artifact, and the Stop hook re-runs the
+# same predicate before releasing. Seed the real records (backend implementer
+# + qa-claude review, no findings) so the release path under test is reachable.
+seed_review_records "$TID"
 bash "$QG" approve "$TID" "Component-spec auto-approve" >/dev/null
 # qa-gate approve clears current-task; the gate path requires CURRENT_TASK
 # to be set for the QA-approved short-circuit. Re-set it.
@@ -128,6 +133,7 @@ chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
 printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID_STDOUT" >/dev/null 2>&1
 bash "$CT" set "$TID_STDOUT"
+seed_review_records "$TID_STDOUT"   # V3 (jio.1) MIGRATION (approve + release)
 bash "$QG" approve "$TID_STDOUT" "reviewed; ships safely" >/dev/null 2>&1
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set so the legit Stop fires against the same reviewed files.
@@ -497,45 +503,63 @@ assert_decision "vbs-llh17 anti-overreach: fixture DELIVERABLE (fixture.yaml) ST
 printf 'name: node-react-auth\ninvariants: []\n' > "$NESTED_YAML"
 
 # --- META-TEST: prove the fixtures-denylist ALLOW assertions are load-bearing.
-# Build a COPY of verify-before-stop.sh with the fixtures alternative stripped
-# from DENYLIST_REGEX (the pre-llh.17 world) and re-run repro 1. The
-# fixture-script-churn case must then BLOCK — proving the ALLOW assertion above
-# is sensitive to the denylist extension, not passing for some incidental
-# reason. Pattern-anchored python strip over the unique fixtures sub-pattern.
-REAL_VBS_FX=$(readlink "$VBS_FX" || printf '%s' "$VBS_FX")
-VBS_FX_MUT="$FIXTURE_FX/vbs-fxmut.sh"
+# Strip the fixtures alternative from the DENYLIST REGEX (the pre-llh.17
+# world) and re-run repro 1. The fixture-script-churn case must then BLOCK —
+# proving the ALLOW assertion above is sensitive to the denylist extension,
+# not passing for some incidental reason. Pattern-anchored python strip over
+# the unique fixtures sub-pattern; never a line number.
+#
+# 3mg.1 CHANGED WHAT IS MUTATED, not the force of the assertion. The regex
+# moved out of verify-before-stop.sh into the shared
+# `.claude/scripts/workflow-denylist.sh`, so the mutation now targets the LIB
+# — which is exactly right: the lib is the single definition all three
+# consumers read. We overwrite the FIXTURE's symlink with a mutated regular
+# file (rm first, so the edit can never reach the real plugin script through
+# the link) and run the UNMODIFIED hook against it, then restore the symlink.
+DENYLIST_LIB_FX="$FIXTURE_FX/.claude/scripts/workflow-denylist.sh"
+REAL_DENYLIST_FX=$(readlink "$DENYLIST_LIB_FX" || printf '%s' "$DENYLIST_LIB_FX")
+rm -f "$DENYLIST_LIB_FX"
 FIXTURES_ALT='|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/' \
-    REAL_VBS_FX="$REAL_VBS_FX" VBS_FX_MUT="$VBS_FX_MUT" python3 - <<'PYEOF'
+    REAL_DENYLIST_FX="$REAL_DENYLIST_FX" DENYLIST_LIB_FX="$DENYLIST_LIB_FX" python3 - <<'PYEOF'
 import io, os
-real = os.environ["REAL_VBS_FX"]; out = os.environ["VBS_FX_MUT"]; alt = os.environ["FIXTURES_ALT"]
+real = os.environ["REAL_DENYLIST_FX"]; out = os.environ["DENYLIST_LIB_FX"]; alt = os.environ["FIXTURES_ALT"]
 with io.open(real, "r", encoding="utf-8") as f:
     s = f.read()
 if alt not in s:
-    raise SystemExit("META precondition failed: fixtures alternative not found in script under test")
+    raise SystemExit("META precondition failed: fixtures alternative not found in workflow-denylist.sh")
 s = s.replace(alt, "", 1)
 with io.open(out, "w", encoding="utf-8") as f:
     f.write(s)
 PYEOF
-chmod +x "$VBS_FX_MUT"
-# Confirm the alternative was actually removed from the copy. Anchor on the
-# regex-only token `fixtures/[^/]+/` (the `[^/]+` bracket-class appears ONLY
-# in the DENYLIST_REGEX line, never in the prose comment that also mentions
-# "tests/e2e/fixtures") so the precondition checks the LOAD-BEARING regex,
-# not the doc comment.
-FX_MUT_STRIPPED=$(grep -cF 'fixtures/[^/]+/' "$VBS_FX_MUT" || true)
+chmod +x "$DENYLIST_LIB_FX"
+# Confirm the alternative was actually removed from the mutated lib. Anchor on
+# the regex-only token `fixtures/[^/]+/` (the `[^/]+` bracket-class appears
+# ONLY in WORKFLOW_DENYLIST_REGEX, never in the prose header that also
+# mentions "tests/e2e/fixtures") so the precondition checks the LOAD-BEARING
+# regex, not the doc comment.
+FX_MUT_STRIPPED=$(grep -cF 'fixtures/[^/]+/' "$DENYLIST_LIB_FX" || true)
 FX_MUT_STRIPPED=$(printf '%s' "$FX_MUT_STRIPPED" | tr -d '[:space:]')
-assert_eq "vbs-llh17 META: fixtures denylist alternative stripped from copy (regex token gone)" \
+assert_eq "vbs-llh17 META: fixtures denylist alternative stripped from the lib (regex token gone)" \
     "0" "$FX_MUT_STRIPPED"
-run_vbs_fx_mut() {
-    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_FX_MUT" 2>&1 | tail -1
-}
+# And the lib is still a VALID lib — otherwise the hook would take the
+# missing-denylist fail-closed arm and BLOCK for the wrong reason, turning
+# the assertion below into a false pass.
+FX_MUT_STILL_DEFINES=$(grep -c '^WORKFLOW_DENYLIST_REGEX=' "$DENYLIST_LIB_FX" || true)
+FX_MUT_STILL_DEFINES=$(printf '%s' "$FX_MUT_STILL_DEFINES" | tr -d '[:space:]')
+assert_eq "vbs-llh17 META: mutated lib still defines WORKFLOW_DENYLIST_REGEX (block is not the missing-lib arm)" \
+    "1" "$FX_MUT_STILL_DEFINES"
 bash "$CT_FX" clear
 : > "$TRACK_FX/changed-files.txt"
 printf '#!/bin/bash\n# synced qa-gate (mutated again)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
-OUT_FX_MUT=$(run_vbs_fx_mut)
+OUT_FX_MUT=$(run_vbs_fx)
 assert_decision "vbs-llh17 META: with fixtures denylist stripped, fixture-script churn BLOCKS (ALLOW assertion WOULD fail)" \
     "$OUT_FX_MUT" "block"
-# Restore baseline script.
+REASON_FX_MUT=$(printf '%s' "$OUT_FX_MUT" | jq -r '.reason // empty')
+assert_contains "vbs-llh17 META: the block is the QA-review block, not the missing-denylist block" \
+    "QA approval required" "$REASON_FX_MUT"
+# Restore the real lib symlink + the baseline script.
+rm -f "$DENYLIST_LIB_FX"
+ln -sf "$REAL_DENYLIST_FX" "$DENYLIST_LIB_FX"
 printf '#!/bin/bash\n# canonical-synced qa-gate (baseline)\n' > "$NESTED_SCRIPTS/qa-gate.sh"
 
 # ===========================================================================
@@ -695,8 +719,15 @@ assert_empty_envelope "vbs mut(line677): no-task beads-only change-set -> ALLOW"
 # moving this guard 882->890, the kind of drift that used to silently un-land
 # a fixed-line mutation (same lesson the truncation META-TEST below records).
 # It still mutates the SAME guard, so the assertion is identical in force.
+#
+# 3mg.1: the mutant copy lives in the fixture's `.claude/scripts/`, NOT the
+# fixture root. verify-before-stop.sh now loads `workflow-denylist.sh` from
+# its OWN directory (BASH_SOURCE-relative) and BLOCKS with the
+# "shared path denylist is missing" reason when it cannot. A copy parked
+# outside scripts/ would take that arm and satisfy this assertion's
+# "the lint bullet vanished" check for entirely the wrong reason.
 REAL_VBS3=$(readlink "$VBS3" || printf '%s' "$VBS3")
-VBS3_MUT="$FIXTURE3/vbs-lintmut.sh"
+VBS3_MUT="$FIXTURE3/.claude/scripts/vbs-lintmut.sh"
 awk '/lint_rc" -ne 0/ {print "        if [ \"$lint_rc\" -eq 0 ]; then"; next} {print}' \
     "$REAL_VBS3" > "$VBS3_MUT"
 chmod +x "$VBS3_MUT"
@@ -713,6 +744,13 @@ LTM_HAS_LINT=$(printf '%s' "$REASON_LTM" | grep -c 'Lint errors (exit 1)' || tru
 LTM_HAS_LINT=$(printf '%s' "$LTM_HAS_LINT" | tr -d '[:space:]')
 assert_eq "vbs META: under lint-guard mutant the 'Lint errors (exit 1)' bullet VANISHES (mut16 assertion WOULD fail)" \
     "0" "$LTM_HAS_LINT"
+# Discriminator (3mg.1): the bullet must be absent because the guard was
+# mutated, NOT because the mutant fell into the missing-denylist fail-closed
+# arm (whose reason contains none of the check bullets either).
+LTM_NOT_DENYLIST=$(printf '%s' "$REASON_LTM" | grep -c 'shared path denylist is missing' || true)
+LTM_NOT_DENYLIST=$(printf '%s' "$LTM_NOT_DENYLIST" | tr -d '[:space:]')
+assert_eq "vbs META: lint mutant ran the real gate (not the missing-denylist arm)" \
+    "0" "$LTM_NOT_DENYLIST"
 
 # --- changed-files truncation at >15 (QA-required path, line ~1016) -------
 # Re-sweep survivor (exposed once the per-file cap was raised past line 884):
@@ -748,8 +786,13 @@ assert_contains "vbs mut1016: truncation reports the correct overflow count (20-
 # the kind of drift that used to silently un-land the mutation). It still
 # mutates the SAME guard (`-gt 15` -> `-le 15`), so the assertion is identical
 # in force.
+#
+# 3mg.1: the copy lives in the fixture's `.claude/scripts/` for the same
+# reason as the lint mutant above — a hook parked outside scripts/ can no
+# longer find its `workflow-denylist.sh` sibling and blocks on THAT instead,
+# which would make "the truncation marker vanished" trivially true.
 REAL_VBS4=$(readlink "$VBS4" || printf '%s' "$VBS4")
-VBS4_MUT="$FIXTURE4/vbs-truncmut.sh"
+VBS4_MUT="$FIXTURE4/.claude/scripts/vbs-truncmut.sh"
 awk '/CHANGE_COUNT" -gt 15/ {print "        if [ \"$CHANGE_COUNT\" -le 15 ]; then"; next} {print}' \
     "$REAL_VBS4" > "$VBS4_MUT"
 chmod +x "$VBS4_MUT"
@@ -763,6 +806,12 @@ TRUNCM_MORE=$(printf '%s' "$REASON_TRUNCM" | grep -c 'more files' || true)
 TRUNCM_MORE=$(printf '%s' "$TRUNCM_MORE" | tr -d '[:space:]')
 assert_eq "vbs META: under -le 15 mutant the truncation marker VANISHES (mut1016 assertion WOULD fail)" \
     "0" "$TRUNCM_MORE"
+# Discriminator (3mg.1): the marker is absent because the guard was inverted
+# and the FULL list printed — not because the mutant blocked on a missing
+# denylist before ever rendering a file list.
+TRUNCM_LISTED=$(printf '%s' "$REASON_TRUNCM" | grep -q 'src/mod20\.ts' && echo yes || echo no)
+assert_eq "vbs META: trunc mutant printed the FULL file list (ran the real gate)" \
+    "yes" "$TRUNCM_LISTED"
 
 # ===========================================================================
 # claude-workflow-plugin-llh.18 (red-team P0/P1) — change-set-bound approval.
@@ -838,6 +887,10 @@ printf 'src/handler.ts\n' > "$TRACK_CSB/changed-files.txt"
 bash "$QG_CSB" enter "$TID_POS" >/dev/null 2>&1   # generates a fresh impact report for this change-set
 bash "$CT_CSB" set "$TID_POS"
 assert_eq "vbs-llh18: positive control (entered, not approved) blocks" "block" "$(csb_decision)"
+# V3 (jio.1) MIGRATION: seed the independent-review records so both approve
+# and the Stop hook's review-discipline re-check are satisfied; the case under
+# test is still the change-set BINDING.
+seed_review_records "$TID_POS" "qa-claude" "backend" "$FIXTURE_CSB"
 # Legit approve writes the change-set-bound record.
 POS_APPROVE=$(bash "$QG_CSB" approve "$TID_POS" "reviewed; ships safely" 2>&1)
 assert_json_field "vbs-llh18: legit approve succeeds" "$POS_APPROVE" '.status' "approved"
@@ -882,6 +935,7 @@ assert_eq "vbs-llh18: P1 real unreviewed change blocks first" "block" "$(csb_dec
 TID_DECOY=$(cd "$FIXTURE_CSB" && bd create "P1 trivial decoy" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
 printf 'src/trivial-decoy.ts\n' > "$TRACK_CSB/changed-files.txt"
 bash "$QG_CSB" enter "$TID_DECOY" >/dev/null 2>&1
+seed_review_records "$TID_DECOY" "qa-claude" "backend" "$FIXTURE_CSB"   # V3 (jio.1) MIGRATION
 bash "$QG_CSB" approve "$TID_DECOY" "decoy reviewed (trivial)" >/dev/null 2>&1
 assert_eq "vbs-llh18: P1 decoy genuinely approved" "approved" \
     "$(bash "$QG_CSB" status "$TID_DECOY" | jq -r '.status' 2>/dev/null)"
@@ -979,6 +1033,7 @@ miss_decision() {
 TID_MISS=$(cd "$FIXTURE_MISS" && bd create "missing impact-report fail-closed" -t task -p 1 -l backend,qa-pending --json 2>/dev/null | jq -r '.id // empty')
 printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
 bash "$QG_MISS" enter "$TID_MISS" >/dev/null 2>&1     # generates the impact report
+seed_review_records "$TID_MISS" "qa-claude" "backend" "$FIXTURE_MISS"   # V3 (jio.1) MIGRATION
 bash "$QG_MISS" approve "$TID_MISS" "reviewed; ships safely" >/dev/null 2>&1
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set so the legit Stop fires against the same reviewed files.
@@ -1065,6 +1120,12 @@ printf 'src/handler.ts\n' > "$TRACK_MM18/changed-files.txt"
 bash "$QG_MM18" enter "$TID_MM18" >/dev/null 2>&1
 bash "$CT_MM18" set "$TID_MM18"
 bd label add "$TID_MM18" qa-approved >/dev/null 2>&1   # forged bare label
+# V3 (jio.1) MIGRATION: the release path now has TWO independent gates — the
+# llh.18 change-set binding (neutralized above) and the review-discipline
+# re-check. Seed clean review records so the ONLY thing this META isolates is
+# still the binding check; without this the forged label would block for the
+# review reason and the META would prove nothing about llh.18.
+seed_review_records "$TID_MM18" "qa-claude" "backend" "$FIXTURE_MM18"
 MM18_DEC=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
     | bash "$VBS_MM18" 2>/dev/null | tail -1 | jq -r '.decision // "ALLOW"' 2>/dev/null)
 # Under the neutralized check the forged label RELEASES (the P0 assertion

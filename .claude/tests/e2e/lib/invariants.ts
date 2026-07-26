@@ -961,6 +961,326 @@ function invQaQueriedImpactOf(
 }
 
 // ============================================================================
+// Invariant 7: approval-cites-independent-review
+// ============================================================================
+/**
+ * NOBODY SIGNS OFF ON THEIR OWN WORK — asserted over the live trace.
+ *
+ * v4.0.0 Phase V3 (claude-workflow-plugin-jio.2). jio.1 made the property
+ * mechanical inside the gate (`qa-gate.sh approve` and the Stop hook both
+ * call `review-check.sh gate` and refuse); THIS is the trace-side proof
+ * that the mechanism actually held during a real run — that no approval
+ * slipped through by another path (a hand-written `bd comment add`, a
+ * stripped sentinel block, a fixture shipping a stale gate copy).
+ *
+ * THE PROPERTY. For EVERY `QA-GATE APPROVED …` record in the run:
+ *
+ *   (a) the record names a reviewer — `reviewed_by=<x>` with `x != none`
+ *       — OR it carries the audited `[review bypass: …]` marker, in which
+ *       case the record is EXEMPT (the F1 doc-only fast path and the
+ *       `--no-review` escape both write it, and the escape is the audit
+ *       trail working as designed, not a violation);
+ *   (b) an EARLIER `REVIEW-ARTIFACT v1 …` record exists on the same task
+ *       whose `reviewer=` is NOT one of the `IMPLEMENTER: role=<role>`
+ *       identities recorded for that task (and neither is the approval's
+ *       own `reviewed_by=`);
+ *   (c) replaying the records that PRECEDE the approval leaves ZERO open
+ *       findings at or above the artifact's `risk_threshold` — a finding
+ *       is open unless a `RESOLVED <id> … fix=<ref> test=<ref>` record
+ *       (both refs non-empty) or a LATEST `ARBITRATION <id>
+ *       decision=overrule` cleared it.
+ *
+ * A SECOND, INDEPENDENT IMPLEMENTATION — ON PURPOSE. `review-check.sh
+ * gate` is the ONE counter the gate calls; this is a re-expression of the
+ * same predicate in a different language, over a different input (the
+ * recorded trace, not live bd). That duplication is the whole value of a
+ * live invariant: if the shell counter is subverted, mis-wired, or simply
+ * absent from a fixture's synced script set, the shell says "clean" and
+ * this says "open finding". The two agreeing is the evidence. Keep them
+ * behaviourally identical (see the parity notes inline) — the goal is a
+ * second witness, not a second opinion.
+ *
+ * BYTE-EXACT GRAMMARS. Every pattern below mirrors what the shipped
+ * writers emit (`qa-gate.sh` approve / review-record / resolve-finding /
+ * arbitrate, and `subagent-start.sh`'s IMPLEMENTER record) and what
+ * `review-check.sh gate` parses:
+ *   - `QA-GATE APPROVED [change_set_hash=<h> ]reviewed_by=<id> at <ts>: <summary>[ [impact-report bypass: …]][ [review bypass: …]]`
+ *   - `REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> model=<m> reviewed_hash=<h> risk_threshold=<t> verdict=<v> stopped_by=<s> findings=[<id>:<sev>,…] at <ts>: <summary>`
+ *   - `IMPLEMENTER: role=<role> task=<tid> at <ts>`
+ *   - `RESOLVED <id> at <ts>: fix=<ref> test=<ref> — <summary>`
+ *   - `ARBITRATION <id> decision=<overrule|sustain> at <ts>: <rationale>`
+ * Records are single-line by contract (review-check.sh rejects control
+ * characters in the grammar-bearing scalars — claude-workflow-plugin-vg8),
+ * so like the shell we read only `text.split("\n")[0]` of each comment.
+ *
+ * SKIPS (documented trace gaps, house pattern — `completion-contract` is
+ * always skipped, `label-milestones` skips pre-3.5 recordings):
+ *   - `trace.beadsComments` ABSENT → the recorder never captured comment
+ *     text (any trace recorded before jio.2, or a run whose capture
+ *     failed). SKIP; re-record under the current recorder to evaluate.
+ *     An EMPTY ARRAY is NOT absence — the recorder looked and bd held no
+ *     comments, and the check proceeds (vacuously, since there is no
+ *     approval record to audit).
+ *   - Approvals exist but NONE carries `reviewed_by=` or the bypass
+ *     marker → a pre-V3 recording (the token did not exist before jio.1).
+ *     SKIP rather than retro-fail, mirroring the pre-n6d skip in
+ *     `qa-queried-impact-of`.
+ *
+ * WHAT IT IS NOT. Comments are forgeable by anything with shell access —
+ * the same threat boundary jio.1 documented and did not overclaim. This
+ * invariant proves the RECORD SET IS COHERENT for the run, which defeats
+ * accidental drift, a stripped enforcement block, and a stale fixture
+ * copy of the gate; it is not a cryptographic attestation.
+ */
+
+/** Severity enum rank, D8: critical > high > medium > low > info.
+ *  Mirrors `review-check.sh sev_rank` (0 = unknown/invalid). */
+const REVIEW_SEV_RANK: Record<string, number> = {
+  critical: 5,
+  high: 4,
+  medium: 3,
+  low: 2,
+  info: 1,
+};
+
+/** Threshold rank; an unknown threshold defaults to `high` so the count
+ *  never silently under-counts. Mirrors `review-check.sh threshold_rank`. */
+function reviewThresholdRank(threshold: string): number {
+  const r = REVIEW_SEV_RANK[threshold] ?? 0;
+  return r === 0 ? 4 : r;
+}
+
+/** Escape a finding id for use inside a RegExp (ids are `R<n>-F<n>` by
+ *  schema, but never build a pattern from untrusted text unescaped). */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function invApprovalCitesIndependentReview(
+  trace: Trace,
+  _params?: Record<string, unknown>,
+): InvariantResult {
+  const captured = Array.isArray(trace.beadsComments)
+    ? trace.beadsComments
+    : undefined;
+  if (captured === undefined) {
+    return {
+      pass: true,
+      skipped: true,
+      detail:
+        "skipped: trace lacks beadsComments — the recorder did not capture bd comment text (pre-jio.2 recording, or the post-run capture failed), and the review chain (QA-GATE APPROVED reviewed_by= / REVIEW-ARTIFACT v1 / IMPLEMENTER / RESOLVED / ARBITRATION) lives ENTIRELY in comments. Labels cannot answer the independence question, so this is unevaluable on this trace; re-record under the current recorder to evaluate (claude-workflow-plugin-jio.2).",
+    };
+  }
+
+  // Single-line record view, in captured order. Same slice the shell
+  // counter takes (`jq -r '.[] | split("\n")[0]'`).
+  const records = [...captured]
+    .sort((a, b) => a.order - b.order)
+    .map((c) => ({
+      task: c.task,
+      order: c.order,
+      line: (c.text ?? "").split("\n")[0] ?? "",
+    }));
+
+  const APPROVED = /^QA-GATE APPROVED /;
+  const REVIEWED_BY = /\breviewed_by=(\S+)/;
+  const REVIEW_BYPASS = "[review bypass:";
+  const ARTIFACT = /^REVIEW-ARTIFACT v1 /;
+  const ART_REVIEWER = /\breviewer=([A-Za-z0-9._-]+)/;
+  const ART_THRESHOLD = /\brisk_threshold=([A-Za-z0-9_]+)/;
+  const ART_FINDINGS = /findings=\[([^\]]*)\]/;
+  const IMPLEMENTER = /^IMPLEMENTER: role=([a-z]+)\b/;
+  const ARB_DECISION = /decision=([a-z]+)/;
+
+  const approvals = records.filter((r) => APPROVED.test(r.line));
+  if (approvals.length === 0) {
+    // bd-UNAVAILABLE → SKIP, not vacuous-PASS (llh.25 honest-skip, applied
+    // here). NOTHING was captured AND the trace shows the gate ATTEMPTED
+    // its qa-* label writes with nothing persisting — the python-django-bug
+    // daemon-crash signature. Under that failure the records could not have
+    // been written OR read regardless of how the gate behaved, so "no
+    // approval to audit" is a recording outage, not evidence. Narrow on
+    // purpose: it needs an EMPTY capture, so a run that captured comments
+    // (the healthy case) can never reach it.
+    if (records.length === 0 && beadsUnavailable(trace)) {
+      return {
+        pass: true,
+        skipped: true,
+        detail:
+          "skipped: bd unavailable (daemon crash) — the gate attempted its qa-* label writes (qa-gate-entered/qa-pending add events present) but none persisted (beadsLabelTransitions empty), and ZERO bd comments were captured. The review records live in comments, so with bd down the review chain is unobservable rather than absent; re-run with a working bd to evaluate (llh.25 honest-skip).",
+      };
+    }
+    return {
+      pass: true,
+      detail: `vacuously satisfied: ${records.length} captured bd comment(s), none of them a "QA-GATE APPROVED" record — there is no approval to audit. (Whether this run SHOULD have approved is the job of stop-requires-approval / label-milestones, not of this invariant.)`,
+    };
+  }
+
+  // Pre-V3 recording guard: `reviewed_by=` and the `[review bypass:`
+  // marker are both jio.1 constructs. An approval set with neither means
+  // the run predates V3 — SKIP, don't retro-fail (the pre-n6d precedent).
+  const v3Aware = approvals.some(
+    (a) => REVIEWED_BY.test(a.line) || a.line.includes(REVIEW_BYPASS),
+  );
+  if (!v3Aware) {
+    return {
+      pass: true,
+      skipped: true,
+      detail: `skipped: pre-V3 recording — ${approvals.length} QA-GATE APPROVED record(s) captured, none carrying a reviewed_by= token or a [review bypass:] marker. Both are Phase V3 (claude-workflow-plugin-jio.1) constructs, so this run was recorded before the review-separation gate existed and its approvals cannot be audited for reviewer independence. Re-record under the current plugin to evaluate.`,
+    };
+  }
+
+  const violations: string[] = [];
+  const notes: string[] = [];
+  let exempted = 0;
+  let audited = 0;
+
+  for (const ap of approvals) {
+    const where = `${ap.task}@comment[${ap.order}]`;
+
+    // (a) the audited escape — EXEMPT, by design.
+    if (ap.line.includes(REVIEW_BYPASS)) {
+      exempted++;
+      notes.push(`${where}: exempt via the audited [review bypass:] marker`);
+      continue;
+    }
+
+    const reviewedBy = REVIEWED_BY.exec(ap.line)?.[1] ?? "";
+    if (!reviewedBy) {
+      violations.push(
+        `${where}: approval record carries NO reviewed_by= token and no [review bypass:] marker — it was not written by qa-gate.sh approve (V3 always emits one). Record line: "${ap.line.slice(0, 160)}"`,
+      );
+      continue;
+    }
+    if (reviewedBy === "none") {
+      violations.push(
+        `${where}: approval records reviewed_by=none WITHOUT the audited [review bypass: <reason>] marker — an unreviewed approval with no recorded justification. Approve after an independent review, or take the escape explicitly (qa-gate.sh approve <id> --no-review '<reason>' '<summary>').`,
+      );
+      continue;
+    }
+
+    // Records that PRECEDE this approval on the SAME task. Restricting to
+    // the prior slice is deliberate and STRICTER than the shell counter
+    // (which reads current state): a resolution or arbitration recorded
+    // AFTER the fact cannot retroactively justify an approval that was
+    // already written.
+    const prior = records.filter(
+      (r) => r.task === ap.task && r.order < ap.order,
+    );
+
+    // (b) an EARLIER independent review artifact. Latest wins, exactly as
+    // `review-check.sh gate` takes `grep … | tail -1`.
+    const artifacts = prior.filter((r) => ARTIFACT.test(r.line));
+    const art = artifacts[artifacts.length - 1];
+    if (!art) {
+      violations.push(
+        `${where}: approval claims reviewed_by=${reviewedBy} but NO "REVIEW-ARTIFACT v1" record precedes it on ${ap.task} — the cited review does not exist in the trace. (qa-gate.sh review-record writes it; approve refuses with review_artifact_missing when it is absent, so an approval without one means the gate was bypassed.)`,
+      );
+      continue;
+    }
+
+    const findingsMatch = ART_FINDINGS.exec(art.line);
+    if (!findingsMatch) {
+      // Parity with the vg8 MALFORMED-ARTIFACT-GUARD: a record with no
+      // well-formed findings=[…] token must NEVER be read as zero findings.
+      violations.push(
+        `${where}: the latest preceding REVIEW-ARTIFACT (comment[${art.order}]) carries no well-formed findings=[…] token — a corrupted/truncated record, which must not be read as "no findings" (claude-workflow-plugin-vg8). Re-record a valid artifact.`,
+      );
+      continue;
+    }
+
+    const reviewer = ART_REVIEWER.exec(art.line)?.[1] ?? "";
+    const threshold = ART_THRESHOLD.exec(art.line)?.[1] ?? "";
+
+    const implementers = new Set<string>();
+    for (const r of prior) {
+      const m = IMPLEMENTER.exec(r.line);
+      if (m?.[1]) implementers.add(m[1]);
+    }
+    const implList = [...implementers].sort().join(", ") || "<none recorded>";
+
+    if (reviewer && implementers.has(reviewer)) {
+      violations.push(
+        `approval-cites-independent-review: ${where}: the review artifact at comment[${art.order}] was authored by reviewer=${reviewer}, which is ALSO a recorded IMPLEMENTER of ${ap.task} (implementers: [${implList}]) — the change was signed off by whoever wrote it. A DIFFERENT identity must review and record a fresh artifact.`,
+      );
+      continue;
+    }
+    if (implementers.has(reviewedBy)) {
+      violations.push(
+        `approval-cites-independent-review: ${where}: the approval names reviewed_by=${reviewedBy}, which is a recorded IMPLEMENTER of ${ap.task} (implementers: [${implList}]) — a self-signed approval record.`,
+      );
+      continue;
+    }
+    if (reviewer && reviewer !== reviewedBy) {
+      // Not fatal: independence held for BOTH identities above. Surface it
+      // — under the real writer approve copies reviewer_identity straight
+      // out of the gate verdict, so a divergence means hand-editing.
+      notes.push(
+        `${where}: reviewed_by=${reviewedBy} does not match the latest preceding artifact's reviewer=${reviewer} (both are independent of [${implList}], so not a violation — but qa-gate.sh approve copies the reviewer verbatim, so a mismatch suggests a hand-written record)`,
+      );
+    }
+
+    // (c) zero open findings at/above the artifact's threshold.
+    const tr = reviewThresholdRank(threshold);
+    const open: string[] = [];
+    for (const rawItem of (findingsMatch[1] ?? "").split(",")) {
+      const item = rawItem.replace(/\s+/g, "");
+      if (!item) continue;
+      // `${item%%:*}` / `${item#*:}` semantics: with no colon, severity ==
+      // the whole token, which ranks 0 and falls below every threshold.
+      const ci = item.indexOf(":");
+      const fid = ci === -1 ? item : item.slice(0, ci);
+      const fsev = ci === -1 ? item : item.slice(ci + 1);
+      if (!fid) continue;
+      if ((REVIEW_SEV_RANK[fsev] ?? 0) < tr) continue; // below threshold
+
+      const resolvedRe = new RegExp(`^RESOLVED ${escapeRe(fid)} `);
+      const resolved = prior.filter((r) => resolvedRe.test(r.line)).pop();
+      // Same non-emptiness test the shell applies (`fix=[^[:space:]]`,
+      // `test=[^[:space:]]`) — unanchored, because a fix reference may
+      // itself contain spaces.
+      if (resolved && /fix=\S/.test(resolved.line) && /test=\S/.test(resolved.line)) {
+        continue;
+      }
+
+      const arbRe = new RegExp(`^ARBITRATION ${escapeRe(fid)} `);
+      const arbitrated = prior.filter((r) => arbRe.test(r.line)).pop();
+      if (arbitrated) {
+        const decision = ARB_DECISION.exec(arbitrated.line)?.[1] ?? "";
+        // LATEST decision wins; `sustain` deliberately does NOT clear —
+        // it is a considered-and-upheld dispute, so the finding stays open.
+        if (decision === "overrule") continue;
+      }
+      open.push(`${fid}:${fsev}`);
+    }
+
+    if (open.length > 0) {
+      violations.push(
+        `approval-cites-independent-review: ${where}: approved with ${open.length} finding(s) still OPEN at/above risk_threshold=${threshold || "<unset, treated as high>"} — [${open.join(", ")}] (artifact at comment[${art.order}], reviewer=${reviewer || "<unparsed>"}). Each must be closed with evidence (qa-gate.sh resolve-finding <id> --fix '<ref>' --test '<ref>' '<summary>') or explicitly overruled by the orchestrator (qa-gate.sh arbitrate <id> overrule '<rationale citing both positions>'); an ARBITRATION … decision=sustain does NOT clear a finding.`,
+      );
+      continue;
+    }
+
+    audited++;
+    notes.push(
+      `${where}: reviewed_by=${reviewedBy}, artifact comment[${art.order}] reviewer=${reviewer || "<unparsed>"} independent of implementers [${implList}], 0 open findings at/above ${threshold || "high(default)"}`,
+    );
+  }
+
+  if (violations.length > 0) {
+    return {
+      pass: false,
+      detail: `approval-cites-independent-review: ${violations.length} of ${approvals.length} approval record(s) violate the review-separation contract — ${violations.join(" | ")}`,
+    };
+  }
+
+  return {
+    pass: true,
+    detail: `all ${approvals.length} QA-GATE APPROVED record(s) cite an independent review with no open at-threshold findings (${audited} audited, ${exempted} exempt via the audited [review bypass:] marker): ${notes.join("; ") || "<no detail>"}`,
+  };
+}
+
+// ============================================================================
 // Registry
 // ============================================================================
 /**
@@ -978,6 +1298,7 @@ export const INVARIANTS: Record<string, InvariantImpl> = {
   "label-milestones": invLabelMilestones,
   "declared-subagents-only": invDeclaredSubagentsOnly,
   "qa-queried-impact-of": invQaQueriedImpactOf,
+  "approval-cites-independent-review": invApprovalCitesIndependentReview,
 };
 
 /** Returns the sorted list of registered invariant names. Useful for

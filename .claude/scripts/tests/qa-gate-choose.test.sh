@@ -137,6 +137,32 @@ export CLAUDE_PROJECT_DIR="$FIXTURE"
 export HOME="$TEST_HOME"
 
 QG="$FIXTURE/.claude/scripts/qa-gate.sh"
+
+# V3 (claude-workflow-plugin-jio.1): seed the records that make a task
+# APPROVABLE. `qa-gate.sh approve` now REFUSES unless the task carries a review
+# artifact whose reviewer differs from every recorded IMPLEMENTER and has no
+# open finding at/above its risk_threshold (review-check.sh gate). This fixture
+# has no live spawn and no reviewer, so the approve-path assertions below have
+# to model the real flow: the IMPLEMENTER comment subagent-start.sh writes on
+# spawn, plus a qa-claude artifact recorded through the REAL review-record
+# writer (so a grammar change breaks the seed loudly instead of silently
+# drifting). reviewed_hash is pinned to the current canonical change-set hash
+# so no staleness warning is emitted into the observations under test.
+seed_review_records() {
+    local tid="$1" reviewer="${2:-qa-claude}" role="${3:-backend}"
+    local ts hash art
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
+        || bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
+        || return 1
+    hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
+    [ -z "$hash" ] && hash="unverified"
+    art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+        "$tid" "$reviewer" "$hash" > "$art"
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        review-record "$tid" --file "$art" >/dev/null 2>&1
+}
 TRACK="$FIXTURE/.claude/.qa-tracking"
 
 # Helper: read the current labels for a task as a comma-joined string.
@@ -264,6 +290,10 @@ bd label add "$TID_APP" qa-escalated >/dev/null 2>&1
 SANITIZED_APP=$(printf '%s' "$TID_APP" | tr -c 'A-Za-z0-9._-' '_')
 printf '3\n' > "$TRACK/iteration-count.$SANITIZED_APP"
 
+# V3 (jio.1) MIGRATION: `choose approve` delegates to cmd_approve, which now
+# refuses without an independent review artifact. `choose` has no bypass
+# flag to pass through, so the records must be real.
+seed_review_records "$TID_APP"
 OUT=$(bash "$QG" choose approve "$TID_APP" "Findings accepted as non-blocking")
 STATUS=$(printf '%s' "$OUT" | jq -r '.status')
 assert_eq "choose approve: status=approved" "approved" "$STATUS"

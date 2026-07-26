@@ -56,6 +56,48 @@ if [ -s "$SYNC_ERROR_LOG" ]; then
     : > "$SYNC_ERROR_LOG"
 fi
 
+# gate-baseline v2 (3mg.1): capture "what was already dirty when this session
+# started" so the Stop gate evaluates THIS session's delta.
+#
+# The bug this closes: open a session in a repo that is merely dirty (a
+# half-finished refactor, a vendored file, an unstaged config tweak) and the
+# Stop hook's git fallback counted every one of those paths as unreviewed work
+# — "N file(s) changed - all require QA review" — with no way out except
+# approving a task for changes the session never made.
+#
+# ONLY WHEN NO REVIEW CYCLE IS ACTIVE. If current-task names a task, a gate
+# cycle is in flight and its work is (by construction) dirty right now;
+# baselining it would mark that work pre-existing and release it unreviewed.
+# In that case we write nothing and the cycle stays gated — the fail-closed
+# direction. (This hook also clears changed-files.txt above, so an in-flight
+# cycle resumed in a new session runs on the git fallback with whatever
+# baseline the cycle already had: every path dirtied since then reads as new.
+# Correct, if noisy.)
+#
+# Runs AFTER the B11 truncate above on purpose: a failure logged here belongs
+# to THIS session and should surface at the NEXT SessionStart, not be consumed
+# (and mis-attributed to the previous session) by the snapshot we just took.
+#
+# FAIL OPEN: SessionStart must never break a session. Every step is
+# best-effort; a failure is one sync-errors.log line and nothing more. The
+# normal "cycle in flight, nothing captured" case is not an error and is not
+# logged — it would fire on every resumed session.
+SS_SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || SS_SCRIPT_DIR=""
+if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/qa-gate.sh" ]; then
+    SS_ACTIVE_TASK=""
+    if [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
+        SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
+    fi
+    if [ -z "$SS_ACTIVE_TASK" ]; then
+        CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/qa-gate.sh" \
+            baseline-capture --by session-start >/dev/null 2>&1 \
+            || printf '%s\t[session-start]\t%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
+                "gate-baseline capture failed; the Stop gate will treat pre-existing git dirt as new work this session" \
+                >> "$SYNC_ERROR_LOG" 2>/dev/null || true
+    fi
+fi
+
 # Helpers ---------------------------------------------------------------------
 
 # Compare two dotted versions (a, b). Echoes "older", "equal", or "newer".
@@ -99,6 +141,36 @@ if [ -x "$MODEL_SELECT_SH" ]; then
     MODEL_SELECT_MSG=$(printf '%s' "$MODEL_SELECT_STDERR" | grep '^model-select:' | tail -1 || true)
 fi
 
+# v4.0.0 Phase V2 (1vq.1): resolve the reviewer lane via codex-detect.sh under
+# the SAME bounded timeout/gtimeout guard as model-select (5s). Sol (the Codex
+# review path) is ADVISORY and STRICTLY OPTIONAL — codex-detect.sh always exits
+# 0 and resolves absence/failure/timeout to lane=claude, so this never blocks
+# the session. The resolved lane is folded into the context as a single line;
+# a probe that fails to answer becomes a non-blocking warning.
+CODEX_DETECT_SH="$PROJECT_DIR/.claude/scripts/codex-detect.sh"
+REVIEWER_LANE=""
+if [ -x "$CODEX_DETECT_SH" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        REVIEWER_LANE=$(timeout 5 bash "$CODEX_DETECT_SH" detect 2>/dev/null || true)
+    elif command -v gtimeout >/dev/null 2>&1; then
+        REVIEWER_LANE=$(gtimeout 5 bash "$CODEX_DETECT_SH" detect 2>/dev/null || true)
+    else
+        REVIEWER_LANE=$(bash "$CODEX_DETECT_SH" detect 2>/dev/null || true)
+    fi
+    REVIEWER_LANE=$(printf '%s' "$REVIEWER_LANE" | tr -d '[:space:]')
+    case "$REVIEWER_LANE" in
+        codex|claude) ;;  # resolved cleanly; folded into context below
+        *)
+            # Empty/garbled == the probe hung past 5s or was killed. Fail-open
+            # to claude; surface a non-blocking note so the operator knows the
+            # advisory lane could not be resolved this session.
+            WARNINGS+="
+- reviewer-lane: codex-detect probe did not resolve within 5s; defaulting to the Claude review path (advisory Sol lane unavailable this session)."
+            REVIEWER_LANE="claude"
+            ;;
+    esac
+fi
+
 # Warning 1: Beads version pin (D6) -------------------------------------------
 BD_VERSION_RAW=$(bd --version 2>/dev/null | head -1 || echo "")
 BD_VERSION_NUM=$(echo "$BD_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
@@ -127,32 +199,75 @@ if [ -n "$SYNC_ERROR_LINE" ]; then
 - Last session's bd sync failed at ${SYNC_TS:-an unknown time}; see .claude/.qa-tracking/sync-errors.log"
 fi
 
-# Warning 4: hotfix vlp.2 — name the applied effort level and the
-# ultracode opt-in path. Reads the configured level from settings.json
-# (effortLevel) AND the env override (CLAUDE_CODE_EFFORT_LEVEL); the env
-# var takes precedence per docs. Best-effort: missing jq or unreadable
-# settings.json falls through silently rather than failing the session.
+# Warning 4: effort floor + A/B verdict reconciliation (v4.0.0 V0 / cnz.1).
+# v4 removed the env.CLAUDE_CODE_EFFORT_LEVEL pin: docs are explicit that any
+# non-xhigh value there deactivates ultracode's workflow orchestration, so the
+# durable FLOOR is now effortLevel alone. The live SESSION level is chosen at
+# launch (`make session` -> `claude --effort <verdict>`); this block reconciles
+# what's declared (floor), what's live, and the recorded A/B verdict. File/env
+# reads only — no subprocess beyond jq — and every path is fail-open (a missing
+# jq, unreadable settings, or absent verdict file just drops the warning).
 SETTINGS_FILE="$PROJECT_DIR/.claude/settings.json"
-EFFORT_DECLARED=""
-EFFORT_ENV=""
+EFFORT_VERDICT_FILE="$PROJECT_DIR/.claude/effort-verdict"
+EFFORT_DECLARED=""   # settings effortLevel — the persistable floor (low|medium|high|xhigh)
+EFFORT_LEGACY=""     # settings env.CLAUDE_CODE_EFFORT_LEVEL — expected ABSENT in v4
 if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
     EFFORT_DECLARED=$(jq -r '.effortLevel // ""' "$SETTINGS_FILE" 2>/dev/null || echo "")
-    EFFORT_ENV=$(jq -r '.env.CLAUDE_CODE_EFFORT_LEVEL // ""' "$SETTINGS_FILE" 2>/dev/null || echo "")
+    EFFORT_LEGACY=$(jq -r '.env.CLAUDE_CODE_EFFORT_LEVEL // ""' "$SETTINGS_FILE" 2>/dev/null || echo "")
 fi
-# Precedence per docs/en/env-vars: CLAUDE_CODE_EFFORT_LEVEL > /effort > effortLevel.
-EFFORT_APPLIED="$EFFORT_ENV"
-[ -z "$EFFORT_APPLIED" ] && EFFORT_APPLIED="$EFFORT_DECLARED"
-if [ -n "$EFFORT_APPLIED" ]; then
-    # Mention BOTH the env var and effortLevel only when they differ;
-    # otherwise the message stays one line. The ultracode hint is always
-    # included so operators learn the runtime-only opt-in path.
-    if [ -n "$EFFORT_DECLARED" ] && [ -n "$EFFORT_ENV" ] && [ "$EFFORT_DECLARED" != "$EFFORT_ENV" ]; then
+# Live session effort from the hook env. ultracode's proxy value here is
+# xhigh, so ultracode vs a plain xhigh session is NOT distinguishable from
+# the hook env — the warnings/docs say so honestly.
+EFFORT_LIVE="${CLAUDE_EFFORT:-}"
+# Verdict = first non-comment, non-blank line of .claude/effort-verdict
+# (max | ultracode | empty when the file/line is missing).
+EFFORT_VERDICT=""
+if [ -f "$EFFORT_VERDICT_FILE" ]; then
+    EFFORT_VERDICT=$(grep -v '^[[:space:]]*#' "$EFFORT_VERDICT_FILE" 2>/dev/null \
+        | grep -v '^[[:space:]]*$' | head -1 | tr -d '[:space:]' || echo "")
+fi
+
+# 4a: a lingering legacy env pin silently deactivates ultracode orchestration.
+if [ -n "$EFFORT_LEGACY" ]; then
+    WARNINGS+="
+- effort: settings still pin env.CLAUDE_CODE_EFFORT_LEVEL='$EFFORT_LEGACY'. v4 removed this key because any non-xhigh value deactivates ultracode's workflow orchestration. Rerun install.sh in Update mode (it deletes the key) or delete it from .claude/settings.json by hand."
+fi
+
+# 4b: report the floor + live level, then reconcile against the A/B verdict.
+if [ -z "$EFFORT_VERDICT" ]; then
+    # Build the optional "live session effort" clause separately so the
+    # inner single quotes stay literal without tripping SC2016.
+    EFFORT_LIVE_NOTE=""
+    [ -n "$EFFORT_LIVE" ] && EFFORT_LIVE_NOTE=", live session effort='$EFFORT_LIVE'"
+    WARNINGS+="
+- effort: floor is effortLevel='${EFFORT_DECLARED:-unset}'$EFFORT_LIVE_NOTE. A/B verdict not recorded yet — see docs/EFFORT-AB-TEST.md and launch this session via 'make session'."
+else
+    # Map the verdict to the effort level a real session should carry.
+    # ultracode sends xhigh to the model (hook-env proxy = xhigh), so its
+    # expected proxy is xhigh; max maps to max.
+    EFFORT_EXPECTED="$EFFORT_VERDICT"
+    [ "$EFFORT_VERDICT" = "ultracode" ] && EFFORT_EXPECTED="xhigh"
+    if [ -n "$EFFORT_LIVE" ] && [ "$EFFORT_LIVE" != "$EFFORT_EXPECTED" ]; then
         WARNINGS+="
-- effort: applied '$EFFORT_APPLIED' via CLAUDE_CODE_EFFORT_LEVEL (settings effortLevel='$EFFORT_DECLARED' overridden by env). For dynamic workflow orchestration, opt in this session with /effort ultracode (cannot be persisted)."
-    else
+- effort: live session effort='$EFFORT_LIVE' != A/B verdict '$EFFORT_VERDICT' (expected proxy '$EFFORT_EXPECTED'). Launch with 'make session' (claude --effort $EFFORT_VERDICT) so the recorded verdict is the one actually applied."
+    elif [ "$EFFORT_VERDICT" = "ultracode" ]; then
         WARNINGS+="
-- effort: applied '$EFFORT_APPLIED' (persisted via settings + env). For dynamic workflow orchestration, opt in this session with /effort ultracode (cannot be persisted)."
+- effort: A/B verdict is 'ultracode' (floor effortLevel='${EFFORT_DECLARED:-unset}'). ultracode cannot be verified from the hook env — it and a plain xhigh session both report '${EFFORT_LIVE:-unset}' here — so trust the launch path ('make session')."
     fi
+fi
+
+# Warning 5: platform guards for the v2.1.219 nested-subagent-spawn changes.
+# These read the LIVE process env (what the runtime actually applied), NOT
+# settings.json: a real session inherits the settings env, so a MISSING var
+# means "settings supplied it, nothing to warn about" — only a present, wrong
+# value is actionable. Fail-open throughout.
+if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ]; then
+    WARNINGS+="
+- PLATFORM GUARD: CLAUDE_CODE_SUBAGENT_MODEL='$CLAUDE_CODE_SUBAGENT_MODEL' is set — it overrides EVERY agent's frontmatter model: pin (orchestrator/qa/backend/frontend/devops/grader/judge would all run on that one model). Unset it unless you are deliberately forcing a single model."
+fi
+if [ -n "${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-}" ] && [ "${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-}" != "1" ]; then
+    WARNINGS+="
+- PLATFORM GUARD: CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH='$CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH' (expected '1'). v2.1.219 defaults nested subagent spawning to depth 3; the workflow's relay invariants (grader/judge spawned only from root) assume depth 1. Restore the pin in .claude/settings.json env."
 fi
 
 # 1. Get bd prime output (Beads' built-in agent context)
@@ -275,6 +390,18 @@ if [ -n "$WARNINGS" ]; then
 ## Workflow warnings (non-blocking)
 $WARNINGS
 </workflow_warnings>
+"
+fi
+
+# 5a. Phase V2 (1vq.1): fold the resolved reviewer lane into the context so the
+# orchestrator/QA prompts can engage the Sol lane when it is `codex`. This is a
+# single advisory line; the lane never gates the session (claude is the default
+# and identical-to-absent behaviour).
+if [ -n "$REVIEWER_LANE" ]; then
+    CONTEXT+="
+<reviewer_lane>
+reviewer_lane: $REVIEWER_LANE
+</reviewer_lane>
 "
 fi
 

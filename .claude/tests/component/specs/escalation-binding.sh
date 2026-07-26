@@ -440,8 +440,14 @@ assert_contains "vbs mut1114: QA-required escalated reason includes the J21 opti
 # the llh.20/llh.17 comment additions); pattern-anchoring ends the churn while
 # mutating the SAME guard with identical force. The assertion NAME keeps the
 # historical mut921 tag.
+#
+# 3mg.1: the copy lives in the fixture's `.claude/scripts/`. verify-before-
+# stop.sh now loads `workflow-denylist.sh` from its OWN directory
+# (BASH_SOURCE-relative) and blocks with a denylist-missing reason when it
+# cannot — a mutant parked at the fixture ROOT would satisfy the "banner
+# vanished" assertion below without ever reaching the escalation replay.
 REAL_VBS_W=$(readlink "$VBS_W" || printf '%s' "$VBS_W")
-VBS_W_MUT="$FIXTURE_W/vbs-suitereuse-mut.sh"
+VBS_W_MUT="$FIXTURE_W/.claude/scripts/vbs-suitereuse-mut.sh"
 awk '/SUITE_REUSED" = "true"/ {print "        if [ \"$SUITE_REUSED\" != \"true\" ]; then"; next} {print}' \
     "$REAL_VBS_W" > "$VBS_W_MUT"
 chmod +x "$VBS_W_MUT"
@@ -458,6 +464,13 @@ WM_CACHED=$(printf '%s' "$REASON_WM" | grep -c 'Cached failure summary' || true)
 WM_CACHED=$(printf '%s' "$WM_CACHED" | tr -d '[:space:]')
 assert_eq "vbs META: under SUITE_REUSED mutant the 'Cached failure summary' banner VANISHES (mut921 assertion WOULD fail)" \
     "0" "$WM_CACHED"
+# Discriminator (3mg.1): the banner is absent because the guard was inverted,
+# not because the mutant took the missing-denylist fail-closed arm — that arm
+# never renders an escalation reason at all.
+WM_ESCALATED=$(printf '%s' "$REASON_WM" | grep -c 'ESCALATION: Iteration' || true)
+WM_ESCALATED=$(printf '%s' "$WM_ESCALATED" | tr -d '[:space:]')
+assert_eq "vbs META: SUITE_REUSED mutant still reached the escalation replay (ran the real gate)" \
+    "1" "$WM_ESCALATED"
 
 # --- J21 placeholder when no active task (FAILED_CHECKS path, line ~976) ---
 # Re-sweep survivor: `j21_options_block "${CURRENT_TASK:-<TASK_ID_NEEDED>}"`.

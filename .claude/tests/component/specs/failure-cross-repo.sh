@@ -35,6 +35,18 @@
 #      block above is being driven by the cross-repo branch
 #      specifically, not by some unrelated block path that happened to
 #      fire.
+#
+#   4. (3mg.1) The LINKED-WORKTREE case, both directions. I8 used to
+#      compare `git rev-parse --show-toplevel`, which is per-CHECKOUT: two
+#      linked worktrees of ONE repo have different toplevels, so a Stop
+#      fired from a worktree of the same repo the task was claimed in
+#      tripped the cross-repo block — precisely the isolation:"worktree"
+#      topology the plugin tells agents to use. The comparison is now over
+#      `git rev-parse --git-common-dir`, which every worktree of a repo
+#      shares and which differs across repos. Section 5 asserts BOTH
+#      halves: a same-repo worktree no longer trips I8, and a genuinely
+#      different repo — asserted from inside that same worktree, so the
+#      only variable is which repo is recorded — still does.
 
 set -u
 
@@ -169,5 +181,89 @@ else
     PASS=$((PASS + 1))
     printf '  PASS: failure-cross-repo: META-TEST — removing recorded-repo file disables cross-repo branch\n'
 fi
+
+# --------------------------------------------------------------------------
+# 5. (3mg.1) LINKED WORKTREE — same repo must NOT trip I8; a different repo
+# still must.
+#
+# The worktree is created OUTSIDE the fixture: a checkout under
+# `.claude/worktrees/` is denylisted, and the point here is the REPO IDENTITY
+# comparison, not the denylist.
+# --------------------------------------------------------------------------
+XR_PARENT=$(mktemp -d -t xrepo-worktree.XXXXXX)
+XR_WT="$XR_PARENT/linked"
+XR_OTHER="$XR_PARENT/other-repo"
+XR_OK=1
+# `git worktree add` needs at least one commit; the fixture was only git-init'd
+# above. --allow-empty keeps this independent of what is on disk.
+(cd "$FIXTURE" && git config user.email t@t.t && git config user.name t \
+    && git commit -q --allow-empty -m xrepo-base) >/dev/null 2>&1 || true
+(cd "$FIXTURE" && git worktree add -q "$XR_WT" -b xrepo-linked) >/dev/null 2>&1 || XR_OK=0
+
+if [ "$XR_OK" != "1" ] || [ ! -e "$XR_WT/.git" ]; then
+    printf 'SKIPPED: failure-cross-repo section 5 (git worktree add unavailable in this environment)\n'
+else
+    # Give the worktree the hook surface a real checkout has.
+    mkdir -p "$XR_WT/.claude/scripts" "$XR_WT/.claude/.qa-tracking"
+    for s in "$(plugin_root)"/.claude/scripts/*.sh; do
+        [ -f "$s" ] || continue
+        ln -sf "$s" "$XR_WT/.claude/scripts/$(basename "$s")"
+    done
+    rm -f "$XR_WT/.claude/scripts/detect-stack.sh"
+    printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint_cmd\":\"\",\"type_cmd\":\"\"}'" \
+        > "$XR_WT/.claude/scripts/detect-stack.sh"
+    chmod +x "$XR_WT/.claude/scripts/detect-stack.sh"
+    XR_TRACK="$XR_WT/.claude/.qa-tracking"
+    printf '%s\n' "$TID" > "$XR_TRACK/current-task"
+    printf 'src/handler.ts\n' > "$XR_TRACK/changed-files.txt"
+
+    xr_reason() {
+        printf '%s' '{"stop_reason":"end_turn"}' \
+            | CLAUDE_PROJECT_DIR="$XR_WT" bash "$XR_WT/.claude/scripts/verify-before-stop.sh" 2>/dev/null \
+            | tail -1 | jq -r '.reason // empty' 2>/dev/null
+    }
+
+    # 5.0 Preconditions that made the old comparison wrong: the two checkouts
+    # have DIFFERENT toplevels (what I8 used to compare) but the SAME
+    # git-common-dir (what it compares now).
+    XR_TOP_PRIMARY=$(cd "$FIXTURE" && git rev-parse --show-toplevel 2>/dev/null)
+    XR_TOP_WT=$(git -C "$XR_WT" rev-parse --show-toplevel 2>/dev/null)
+    assert_eq "failure-cross-repo 5.0: worktree toplevel DIFFERS from the primary's (old basis)" \
+        "differs" "$([ "$XR_TOP_PRIMARY" != "$XR_TOP_WT" ] && echo differs || echo same)"
+    XR_COMMON_PRIMARY=$(cd "$FIXTURE" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+    XR_COMMON_WT=$(cd "$XR_WT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+    assert_eq "failure-cross-repo 5.0: ...but the git-common-dir is the SAME (new basis)" \
+        "same" "$([ "$XR_COMMON_PRIMARY" = "$XR_COMMON_WT" ] && echo same || echo differs)"
+
+    # 5.1 Task claimed in the PRIMARY, Stop fired from a linked worktree of
+    # the SAME repo -> no cross-repo block. (Pre-fix: blocked.)
+    printf '%s\n' "$XR_TOP_PRIMARY" > "$XR_TRACK/current-task.repo"
+    XR_SAME_REASON=$(xr_reason)
+    assert_not_contains "failure-cross-repo 5.1: same-repo linked worktree does NOT trip I8" \
+        "Cross-repo" "$XR_SAME_REASON"
+
+    # 5.2 ANTI-OVERREACH, from the SAME worktree so the ONLY variable is the
+    # recorded repo: a genuinely different repo still blocks.
+    mkdir -p "$XR_OTHER"
+    (cd "$XR_OTHER" && git init -q && git config user.email t@t.t && git config user.name t \
+        && git commit -q --allow-empty -m other) >/dev/null 2>&1
+    XR_OTHER_TOP=$(cd "$XR_OTHER" && git rev-parse --show-toplevel 2>/dev/null)
+    printf '%s\n' "$XR_OTHER_TOP" > "$XR_TRACK/current-task.repo"
+    XR_DIFF_REASON=$(xr_reason)
+    assert_contains "failure-cross-repo 5.2: a genuinely different repo STILL trips I8" \
+        "Cross-repo" "$XR_DIFF_REASON"
+    assert_contains "failure-cross-repo 5.2: ...and the reason names the recorded repo" \
+        "$XR_OTHER_TOP" "$XR_DIFF_REASON"
+
+    # 5.3 FAIL CLOSED: a recorded repo that no longer resolves is a mismatch.
+    # We cannot prove it is this repo, and I8's whole job is refusing to
+    # auto-close a task whose home repo we cannot identify.
+    printf '%s\n' "$XR_PARENT/deleted-repo" > "$XR_TRACK/current-task.repo"
+    assert_contains "failure-cross-repo 5.3: an unresolvable recorded repo blocks (fail closed)" \
+        "Cross-repo" "$(xr_reason)"
+
+    (cd "$FIXTURE" && git worktree remove --force "$XR_WT") >/dev/null 2>&1 || true
+fi
+rm -rf "$XR_PARENT"
 
 [ "$FAIL" -eq 0 ]

@@ -84,40 +84,45 @@ log_sync_error() {
 
 # Denylist (B6).
 #
-# G2.gate-friction (claude-workflow-plugin-llh.3): added `.claude/worktrees/`.
-# Worktree scratch dirs are harness-internal transient state created by
-# isolation:"worktree" agents and the e2e fixture runner — never code under
-# review. A Stop firing while such a path is dirty (the run's own teardown
-# reverts it minutes later) used to trip CODE_CHANGES_DETECTED and produce a
-# false QA-required block. Classifying it here keeps it out of the change-set
-# entirely (same treatment as node_modules / build artifacts). NOTE: we do
-# NOT denylist the PROJECT-ROOT `.beads/` or `.qa-tracking/` here — those are
-# handled by the fast-path classifier below (is_fastpath_only_change), which
-# auto-approves with an audited comment rather than silently dropping the
-# paths, so the beads-state churn still appears in the audit trail.
+# 3mg.1: the regex itself moved to `.claude/scripts/workflow-denylist.sh` —
+# ONE definition shared with post-edit.sh (what gets tracked) and
+# impact-report.sh (what enters the change-set hash). Before that, this copy
+# was the only one carrying `.claude/worktrees/` and the e2e fixture-churn
+# alternation, so post-edit tracked worktree paths INTO the hash that this
+# gate could not see: the hash and the gate disagreed about the change set.
+# The rationale for each pattern now lives in the lib's header.
 #
-# G2.gate-friction residual (claude-workflow-plugin-llh.17): added the e2e
-# FIXTURE-INTERNAL transient-churn alternative
-# `.claude/tests/e2e/fixtures/<f>/(.claude/{scripts,beads}|.beads)/`.
-# `make test-live` runs sync the canonical hook scripts into each fixture's
-# `.claude/scripts/` (the llh.8 run-start sync) and the live run mutates the
-# fixture's own `.beads/` ledger. The ORCHESTRATOR session driving the live
-# run then fires its Stop gate while those fixture paths are dirty; with an
-# empty changed-files.txt the git-status fallback below would pick them up
-# via is_tracked_change and false-block "QA approval required" (observed 5x).
-# These are test fixtures, not orchestrator deliverables — the run's own
-# teardown re-syncs them. Unlike the project-root `.beads/`
-# (audit-trail-relevant, left to the fast-path classifier), fixture-internal
-# churn carries no reviewable intent, so denylisting it outright is correct.
-# ANTI-OVERREACH: scoped to the fixtures' `.claude/scripts`/`.beads` subtrees
-# only — a real edit to a fixture's `fixture.yaml`, `src/`, etc. (a genuine
-# fixture deliverable) is NOT matched and still goes through the gate
-# (regression: vbs-llh17 spec META).
-DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
+# Resolved relative to THIS script (BASH_SOURCE), not $PROJECT_DIR: the gate
+# may run with CLAUDE_PROJECT_DIR pointing at a different checkout than the
+# install it was launched from.
+#
+# Missing lib: BLOCK (fail closed). Without the filter we cannot tell
+# reviewable work from build churn, which makes the change set — and every
+# decision derived from it — unverifiable. The block is emitted AFTER the
+# stop_hook_active circuit breaker below, never before it: blocking ahead of
+# that guard would re-enter the Stop hook forever (AgentLint H3). Until then
+# is_tracked_change treats EVERYTHING as reviewable, which is the fail-closed
+# direction if any caller runs before the block.
+WORKFLOW_DENYLIST_MISSING=0
+_WFDL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || _WFDL_DIR=""
+if [ -n "$_WFDL_DIR" ] && [ -f "$_WFDL_DIR/workflow-denylist.sh" ]; then
+    # shellcheck source=.claude/scripts/workflow-denylist.sh
+    . "$_WFDL_DIR/workflow-denylist.sh"
+fi
+if [ -n "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
+    DENYLIST_REGEX="$WORKFLOW_DENYLIST_REGEX"
+else
+    WORKFLOW_DENYLIST_MISSING=1
+    DENYLIST_REGEX=""
+fi
 
 is_tracked_change() {
     local p="$1"
     [ -z "$p" ] && return 1
+    if [ "$WORKFLOW_DENYLIST_MISSING" = "1" ]; then
+        # Unfiltered: treat every path as reviewable rather than guess.
+        return 0
+    fi
     if [[ "$p" =~ $DENYLIST_REGEX ]]; then
         return 1
     fi
@@ -234,29 +239,105 @@ get_recorded_repo() {
 }
 
 # Returns the current cwd's git toplevel. Empty if not a git repo.
+# Display-only (the I8 block reason names it); the mismatch DECISION uses
+# repo_identity below, not this.
 get_current_repo_root() {
     if command -v git >/dev/null 2>&1; then
         git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || echo ""
     fi
 }
 
+# repo_identity <dir> — the canonical, symlink-resolved git COMMON-DIR of
+# <dir>, i.e. the identity of the REPOSITORY rather than of the checkout.
+# Prints empty (rc 0) when <dir> does not exist or is not a git checkout.
+#
+# 3mg.1 (I8 fix): the identity used to be `rev-parse --show-toplevel`, which
+# is per-CHECKOUT. Two linked worktrees of ONE repo have different toplevels,
+# so a Stop fired from a worktree of the same repo the task was claimed in
+# tripped the cross-repo block — exactly the isolation:"worktree" topology
+# the plugin itself tells agents to use. `--git-common-dir` is shared by every
+# worktree of a repo and differs across repos, which is the property I8
+# actually wants.
+#
+# Two normalisations are load-bearing:
+#   - `--git-common-dir` is RELATIVE to the queried dir in a primary checkout
+#     (".git") and typically ABSOLUTE in a linked worktree; resolve both.
+#   - `pwd -P` strips symlinks, so /var/... and /private/var/... (macOS) or a
+#     symlinked project root compare equal instead of spuriously mismatching.
+repo_identity() {
+    local dir="$1" raw candidate resolved
+    [ -n "$dir" ] || return 0
+    command -v git >/dev/null 2>&1 || return 0
+    [ -d "$dir" ] || return 0
+    raw=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 0
+    [ -n "$raw" ] || return 0
+    case "$raw" in
+        /*) candidate="$raw" ;;
+        *)  candidate="$dir/$raw" ;;
+    esac
+    resolved=$(cd "$candidate" 2>/dev/null && pwd -P) || resolved=""
+    printf '%s' "$resolved"
+}
+
 # Decide whether the active task is cross-repo relative to the cwd. We
 # return the recorded repo path when there's a mismatch, empty otherwise.
 # A missing recorded repo (i.e., set under pre-I8 schema) is NOT a mismatch
 # -- we degrade silently to the legacy single-repo behaviour.
+#
+# 3mg.1: the comparison is now between REPOSITORY identities (see
+# repo_identity). Consequences, all intended:
+#   - same repo via a linked worktree  -> no block (was: false block)
+#   - genuinely different repo         -> still blocks
+#   - recorded path deleted/unresolvable -> MISMATCH, fail closed. We cannot
+#     prove the recorded repo is this one, and the whole point of I8 is to
+#     refuse to auto-close a task whose home repo we cannot identify.
 detect_cross_repo() {
-    local recorded current
+    local recorded recorded_id current_id
     recorded=$(get_recorded_repo)
     [ -z "$recorded" ] && return 0   # no recorded repo -> no mismatch claim
-    current=$(get_current_repo_root)
-    [ -z "$current" ] && return 0    # cwd not a git repo -> no mismatch claim
-
-    # Normalize trailing slashes before comparing.
     recorded="${recorded%/}"
-    current="${current%/}"
-    if [ "$recorded" != "$current" ]; then
+
+    current_id=$(repo_identity "$PROJECT_DIR")
+    [ -z "$current_id" ] && return 0 # cwd not a git repo -> no mismatch claim
+
+    recorded_id=$(repo_identity "$recorded")
+    if [ -z "$recorded_id" ] || [ "$recorded_id" != "$current_id" ]; then
         printf '%s' "$recorded"
         return 1
+    fi
+    return 0
+}
+
+# has_git_repo — is $PROJECT_DIR inside a git checkout we can query?
+#
+# 3mg.1: the old test was `[ -d "$PROJECT_DIR/.git" ]`, which is FALSE in a
+# LINKED WORKTREE (there `.git` is a FILE containing `gitdir: ...`), so the
+# git-status fallback and the diff summary silently disabled themselves in
+# exactly the topology the plugin tells agents to use — the gate then had NO
+# detector at all when changed-files.txt was empty, i.e. it failed OPEN.
+# The identical predicate lives in qa-gate.sh; keep them in sync.
+has_git_repo() {
+    command -v git >/dev/null 2>&1 || return 1
+    git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1
+}
+
+# gate_baseline_entries — the porcelain lines of the current gate baseline,
+# or empty when there is none.
+#
+# v2 file (`gate-baseline`, 3mg.1) carries a provenance header terminated by a
+# lone `--`; everything after it is the snapshot. The v1 file
+# (`approved-baseline`, 0wk.2) was a bare line list and is read as a fallback
+# for ONE release — any v2 write deletes it, so this arm only ever serves an
+# install that upgraded mid-cycle.
+gate_baseline_entries() {
+    local v2="$QA_TRACKING_DIR/gate-baseline"
+    local legacy="$QA_TRACKING_DIR/approved-baseline"
+    if [ -f "$v2" ]; then
+        awk 'body { print; next } /^--$/ { body = 1 }' "$v2" 2>/dev/null || true
+        return 0
+    fi
+    if [ -f "$legacy" ]; then
+        cat "$legacy" 2>/dev/null || true
     fi
     return 0
 }
@@ -457,6 +538,36 @@ task_has_matching_approval_record() {
     printf '%s\n' "$recorded_hashes" | grep -qxF "$expected"
 }
 
+# V3 (claude-workflow-plugin-jio.1): the ONE review-separation predicate.
+# The Stop hook CALLS it; it does not reimplement the counting (same
+# discipline as current_change_set_hash deferring to impact-report.sh).
+REVIEW_CHECK_SCRIPT="$PROJECT_DIR/.claude/scripts/review-check.sh"
+
+# matching_approval_record_text <task-id> <expected-hash> — print the LAST
+# `QA-GATE APPROVED ... change_set_hash=<expected-hash> ...` comment TEXT
+# (empty when none matches). Same source and same literal-prefix matching as
+# task_has_matching_approval_record; a separate function because the
+# review-discipline check needs the record's text — specifically whether it
+# carries the audited `[review bypass:` marker — not just a yes/no.
+#
+# Never fails the caller: every failure path (no bd, no Beads dir, jq error)
+# yields empty output with rc 0, which the caller treats as "no marker", i.e.
+# the check RUNS. Fail-closed by construction.
+matching_approval_record_text() {
+    local tid="$1" expected="$2"
+    [ -z "$tid" ] && return 0
+    [ -z "$expected" ] && return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    [ -d "$PROJECT_DIR/.beads" ] || return 0
+    bd show "$tid" --json 2>/dev/null \
+        | jq -r --arg h "$expected" '
+            (if type == "array" then .[0].comments else .comments end) // []
+            | .[].text
+            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | select(capture("change_set_hash=(?<rh>[A-Za-z0-9-]+)").rh == $h)
+        ' 2>/dev/null | tail -1 || true
+}
+
 # Spec 0.2: classify a test failure as a runner/infrastructure issue vs.
 # assertion failure. Conservative heuristic — when in doubt we say
 # "assertion" (the existing wording) so we never mis-direct an
@@ -508,7 +619,7 @@ compute_intent_payload() {
     # Generate a small diff summary if git is available. Cap at 80 lines so
     # we don't blow up the block reason. Set principled output: file:lines.
     local summary=""
-    if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+    if has_git_repo; then
         summary=$(git -C "$PROJECT_DIR" diff --stat HEAD 2>/dev/null | head -80 || echo "")
         [ -z "$summary" ] && summary=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | head -80 || echo "")
     fi
@@ -562,6 +673,29 @@ if [[ "$STOP_REASON" == "user_interrupt" ]] || [[ "$STOP_REASON" == "max_turns" 
     echo "{}"; exit 0
 fi
 
+# 3mg.1 fail-closed: the shared denylist lib is missing, so "which paths are
+# reviewable" is unknowable and every downstream classification (change set,
+# doc-only, fast-path, change-set hash) is unverifiable. Refuse to release.
+# Deliberately placed AFTER the stop_hook_active circuit breaker above — a
+# block emitted before it would loop the Stop hook forever.
+if [ "$WORKFLOW_DENYLIST_MISSING" = "1" ]; then
+    log_sync_error "Stop blocked: workflow-denylist.sh missing (looked in ${_WFDL_DIR:-<unresolvable script dir>}); the reviewable change set is unverifiable"
+    emit_block "QA gate cannot run: the shared path denylist is missing.
+
+verify-before-stop.sh could not load its sibling \`workflow-denylist.sh\` from:
+  ${_WFDL_DIR:-<unresolvable script dir>}
+
+That file defines which paths count as reviewable work. Without it the gate
+cannot classify the change set, compute a comparable change-set hash, or tell
+build churn from deliverables — so it refuses to release rather than guess.
+
+Fix (one of):
+  1. Restore the file: it ships with the plugin at .claude/scripts/workflow-denylist.sh
+     (re-run the plugin installer, or 'git checkout -- .claude/scripts/workflow-denylist.sh').
+  2. If you are running a partially-synced fixture or worktree, re-sync the
+     canonical hook scripts into it (make sync-fixtures)."
+fi
+
 # Detect tracked changes via tracking file (post-edit.sh) first, then git.
 CODE_CHANGES_DETECTED=false
 ALL_CHANGED_FILES=()
@@ -581,24 +715,36 @@ if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
 fi
 
 # 0wk.2 fix: git-status fallback - but ONLY surface entries NEW since the
-# last qa-gate approval. The approved-baseline (written by qa-gate approve)
-# captures the git state that was approved. Subsequent stops are allowed
-# to slip through if the working tree matches the baseline (i.e., the
-# user opened the session, the gate fires, but nothing has been edited
-# since the last approval). Without this, every Stop hook fired
-# "0 file(s) changed - all require QA review" against the same
+# baseline. The gate baseline (written by session-start, qa-gate enter and
+# qa-gate approve — see write_gate_baseline) captures the git state that was
+# already accounted for. Subsequent stops are allowed to slip through if the
+# working tree matches the baseline (i.e., the user opened the session, the
+# gate fires, but nothing has been edited since). Without this, every Stop
+# hook fired "0 file(s) changed - all require QA review" against the same
 # pre-existing uncommitted state -- the bug 0wk.2 closed.
+#
+# 3mg.1 widened WHEN a baseline exists: session-start now captures one on
+# arrival (when no review cycle is active), so a repo that was ALREADY dirty
+# before the session cannot gate it. Previously only an approve wrote a
+# baseline, so a first-ever session in a dirty repo blocked on dirt the user
+# never touched.
 #
 # Strategy: diff CURRENT git status against BASELINE. If a line is in
 # current but not in baseline, it's a NEW change requiring review.
-# `comm -23 <a> <b>` prints lines in a but not in b; we sort both inputs.
+# `comm -23 <a> <b>` prints lines in a but not in b; both inputs must be
+# sorted IN THE SAME COLLATION — hence LC_ALL=C on both sides, matching the
+# writer. (A locale difference between write and read would silently corrupt
+# the diff and surface phantom "new" entries.)
 # Bash 3.2 supports process substitution (verified on macOS bash 3.2.57).
-if [ "$CODE_CHANGES_DETECTED" = false ] && [ -d "$PROJECT_DIR/.git" ]; then
-    baseline_file="$QA_TRACKING_DIR/approved-baseline"
-    baseline=""
-    [ -f "$baseline_file" ] && baseline=$(cat "$baseline_file" 2>/dev/null || echo "")
+#
+# NO HASH-SIDE SUBTRACTION, deliberately: the baseline is subtracted ONLY
+# here, in the git fallback. changed-files.txt is fed exclusively by
+# post-edit.sh from actual tool edits, so pre-existing dirt cannot enter it —
+# and an edit to an already-dirty file must still gate.
+if [ "$CODE_CHANGES_DETECTED" = false ] && has_git_repo; then
+    baseline=$(gate_baseline_entries | LC_ALL=C sort)
 
-    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | sort)
+    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort)
 
     # Diff: only entries in current that aren't in baseline.
     if [ -z "$baseline" ]; then
@@ -727,7 +873,18 @@ if [ -n "$FASTPATH_CLASS" ]; then
             not-entered|entered|pending)
                 # Ensure the gate is entered first (so approve is well-formed).
                 "$QA_GATE" enter "$CURRENT_TASK" >/dev/null 2>&1 || log_sync_error "qa-gate enter failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
-                "$QA_GATE" approve "$CURRENT_TASK" "$FASTPATH_REASON" >/dev/null 2>&1 || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
+                # V3 (jio.1): --no-review is REQUIRED on this path. A doc-only
+                # / beads-state / empty change-set has no implementer and
+                # nothing for an independent reviewer to review, so approve's
+                # review-separation refusal would deadlock every documentation
+                # commit. The flag records WHY in the approval comment
+                # (`[review bypass: ...]`), which is also the marker the Stop
+                # hook's review-discipline check skips on — so the audited
+                # decision is made once, here, and honoured downstream.
+                "$QA_GATE" approve "$CURRENT_TASK" \
+                    --no-review "F1 $FASTPATH_CLASS fast path: no reviewable source changed" \
+                    "$FASTPATH_REASON" >/dev/null 2>&1 \
+                    || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
                 # Mark task as closed if bd is available. Beads 0.47.x uses
                 # status=closed (not "completed"); using the wrong value used
                 # to silently fail under `|| true`, so we log to sync-errors.log.
@@ -1078,6 +1235,14 @@ QA_APPROVED=false
 LABEL_WITHOUT_RECORD=false
 APPROVAL_RECORD_DETAIL=""
 
+# V3 (jio.1): review-discipline outcome. Declared OUTSIDE the sentinel block
+# below (like APPROVAL_RECORD_DETAIL) with a RELEASING default, so the
+# META-TEST's stripped copy stays coherent — with the check removed nothing
+# ever sets these, the dedicated block below never fires, and the forged
+# open-finding release succeeds. That is exactly what the META proves.
+REVIEW_DISCIPLINE_BLOCKED=false
+REVIEW_DISCIPLINE_DETAIL=""
+
 if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
     if [ -n "$CURRENT_TASK" ] && [ -x "$QA_GATE" ]; then
         GATE_STATUS=$("$QA_GATE" status "$CURRENT_TASK" 2>/dev/null | jq -r '.status // "error"' 2>/dev/null || echo "error")
@@ -1101,6 +1266,66 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
             CURRENT_CS_HASH=$(current_change_set_hash) || true
             if [ -n "$CURRENT_CS_HASH" ] && task_has_matching_approval_record "$CURRENT_TASK" "$CURRENT_CS_HASH"; then
                 QA_APPROVED=true
+
+                # REVIEW-DISCIPLINE BEGIN (v4 V3 / claude-workflow-plugin-jio.1)
+                #
+                # The approval record matches the change-set — but an approval
+                # is only as good as the review behind it. Before releasing we
+                # re-run the SAME independent-review predicate `qa-gate.sh
+                # approve` ran (review-check.sh gate: reviewer independence +
+                # zero open findings at/above the artifact's risk_threshold).
+                #
+                # Why re-check at Stop rather than trusting the approval: the
+                # record is written once, but findings keep arriving. A review
+                # finding recorded AFTER the approval (a second review round, a
+                # re-opened issue) must re-arm the gate — otherwise "approve
+                # early, discover later" silently ships the finding. This is
+                # the same re-arming logic the change-set-hash comparison
+                # applies to files, applied to review state.
+                #
+                # AUDITED ESCAPE: a record carrying the literal
+                # `[review bypass:` marker was approved with --no-review, whose
+                # reason is already in the audit trail. The F1 doc-only fast
+                # path is the intended producer (a doc-only change has no
+                # implementer and no reviewer, so demanding an artifact would
+                # deadlock every doc commit). Re-litigating that decision here
+                # would just make the bypass useless.
+                #
+                # FAIL CLOSED: a missing/unrunnable predicate BLOCKS. The `||`
+                # guards are load-bearing under `set -e` (line 25) for the same
+                # reason the CURRENT_CS_HASH guard above is — a bare assignment
+                # whose RHS exits non-zero aborts the script, which the hooks
+                # contract reads as NON-blocking, i.e. fails OPEN. Every
+                # non-zero outcome here must land in the block branch instead.
+                #
+                # The sentinel comments are load-bearing: an L2 META-TEST
+                # strips this block and asserts a task with an OPEN finding
+                # then releases. Do not rename them.
+                MATCHED_APPROVAL_TEXT=$(matching_approval_record_text "$CURRENT_TASK" "$CURRENT_CS_HASH") || true
+                if printf '%s' "$MATCHED_APPROVAL_TEXT" | grep -qF '[review bypass:'; then
+                    log_sync_error "Stop release: review-discipline SKIPPED for $CURRENT_TASK — the matching approval record carries an audited [review bypass:] marker (F1/doc-only class)"
+                elif [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+                    QA_APPROVED=false
+                    REVIEW_DISCIPLINE_BLOCKED=true
+                    REVIEW_DISCIPLINE_DETAIL="the review predicate is missing ($REVIEW_CHECK_SCRIPT), so independent review cannot be verified (error_key=review_check_unavailable)"
+                    log_sync_error "Stop blocked: review-check.sh missing; review-discipline fails closed for $CURRENT_TASK"
+                else
+                    REVIEW_GATE_RC=0
+                    REVIEW_GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$CURRENT_TASK" 2>&1) || REVIEW_GATE_RC=$?
+                    if [ "$REVIEW_GATE_RC" -ne 0 ]; then
+                        REVIEW_GATE_KEY=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '.error_key // ""' 2>/dev/null || echo "")
+                        [ -z "$REVIEW_GATE_KEY" ] && REVIEW_GATE_KEY="review_check_unavailable"
+                        REVIEW_GATE_OPEN=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '(.open_finding_ids // []) | join(", ")' 2>/dev/null || echo "")
+                        QA_APPROVED=false
+                        REVIEW_DISCIPLINE_BLOCKED=true
+                        REVIEW_DISCIPLINE_DETAIL="review-check.sh gate exited $REVIEW_GATE_RC with error_key=$REVIEW_GATE_KEY"
+                        if [ -n "$REVIEW_GATE_OPEN" ]; then
+                            REVIEW_DISCIPLINE_DETAIL="$REVIEW_DISCIPLINE_DETAIL; open finding(s): $REVIEW_GATE_OPEN"
+                        fi
+                        log_sync_error "Stop blocked: review-discipline violation on $CURRENT_TASK ($REVIEW_DISCIPLINE_DETAIL)"
+                    fi
+                fi
+                # REVIEW-DISCIPLINE END (v4 V3 / claude-workflow-plugin-jio.1)
             else
                 # qa-approved present, but no matching record. This is the
                 # forged bare label (no record at all), the decoy redirect
@@ -1117,6 +1342,354 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
         fi
     fi
 fi
+
+# WORKTREE-RESOLUTION BEGIN (v4 V4 / claude-workflow-plugin-3mg.2)
+#
+# WHY THIS EXISTS. The change-set hash is PER-CHECKOUT: it hashes the
+# checkout's OWN changed-files list. The tri-model workflow runs implementers
+# and reviewers in linked worktrees, so a review that happened in `wt-<task>`
+# records a hash that the primary checkout can never reproduce — the same
+# reviewed work reads as "qa-approved label present but no matching record"
+# (the LABEL_WITHOUT_RECORD branch above) and the session deadlocks: nothing
+# the operator does in the primary checkout can produce the approved hash.
+# Reproduced live before this block existed (transcript scenario 2).
+#
+# WHAT IT DOES. Only on that already-blocking path, try to bind the approval to
+# ANOTHER worktree of the SAME repo before giving up. Release requires all four
+# of the following to hold for one candidate worktree W, each POSITIVELY proven:
+#   1. W's persisted impact report for THIS task exists and its
+#      `.change_set_hash` is one of the hashes a real QA-GATE APPROVED record
+#      on this task carries (so W's report corresponds to an actual approval);
+#   2. W has no post-approval drift: W's own `git status --porcelain` minus W's
+#      own gate-baseline is empty (approve refreshes that baseline, so any edit
+#      in W after the approval shows up here);
+#   3. every reviewable path in THIS checkout's change set is inside the file
+#      set that report approved, compared REPO-RELATIVE (PR#2 technique: two
+#      worktrees of one repo share a git common-dir, so the same repo-relative
+#      key identifies the same file in both);
+#   4. W really is a worktree of this repo (`--git-common-dir` identity, not a
+#      toplevel string compare — 3mg.1/I8).
+#
+# RECORD-BASED, NOT RECOMPUTED — the constraint that shapes everything here:
+# `qa-gate.sh approve` TRUNCATES changed-files.txt in the approving checkout,
+# so re-running `impact-report.sh --hash-only` in W yields the EMPTY-LIST hash
+# and can never reproduce the approved hash. The persisted
+# `impact-report-<tid>.json` survives approve and carries both the approved
+# hash and the approved file list; that file is the evidence. (Verified live:
+# post-approve recompute in W returned the sha256 of the empty string.)
+#
+# READ-ONLY: file reads, `git worktree list`, `git rev-parse`, `git status`, jq.
+# It writes NOTHING anywhere — in particular nothing in the candidate worktree
+# — and NEVER boots the code-graph MCP server (no impact-report.sh invocation
+# at all on this path).
+#
+# FAIL CLOSED: every failure, ambiguity or unreadable artifact `continue`s or
+# returns 1, which falls through to the block below. A resolution must be
+# proven; it is never assumed. The helpers are called from an `if` CONDITION,
+# which suspends `set -e` inside them, so a non-zero rc from any probe cannot
+# abort the hook mid-flight (an aborted hook emits nothing, and the hooks
+# contract reads "no output" as NON-blocking — i.e. it would fail OPEN).
+#
+# THREAT-MODEL BOUNDARY (documented, not overclaimed — same boundary llh.18
+# names for the approval record itself). The evidence here is an on-disk file in
+# a sibling worktree, so an agent with arbitrary shell could hand-write an
+# `impact-report-<tid>.json` citing a hash from a REAL earlier approval, list
+# whatever files it wants approved, and drop a matching gate-baseline. That is
+# the SAME adversary who can already forge the approval comment
+# (`bd comment add "QA-GATE APPROVED change_set_hash=$(impact-report.sh
+# --hash-only)"`) — this block does not lower that bar, and it does not raise it
+# either. What it defends against is the accidental and structural case this
+# release exists for: real work, really reviewed, in the wrong checkout. Sealing
+# the forgery case needs a record signed with a secret the gated process cannot
+# read, which the full-shell autonomy model precludes.
+#
+# The sentinel comments are load-bearing: an L2 META-TEST strips this whole
+# block and asserts the cross-worktree release then BLOCKS. Do not rename them.
+
+# Bounded search: at most this many candidate worktrees are probed.
+WTRES_MAX_CANDIDATES=16
+# Set by try_worktree_resolution for the log line / block reason.
+WTRES_WORKTREE=""
+WTRES_HASH=""
+WTRES_CHECKED=0
+WTRES_DELETED_TOKEN=""
+# Non-empty when a resolvable approval was refused on REVIEW state (below).
+WTRES_REVIEW_DETAIL=""
+
+# wtres_decode <token> — the `worktree=` token's path spelling. Mirror of
+# qa-gate.sh approval_worktree_token: %20/%09 first, then %25 back to `%`, so a
+# path that genuinely contains "%20" round-trips instead of decoding to a space.
+wtres_decode() {
+    local t="$1"
+    t="${t//%20/ }"
+    t="${t//%09/	}"
+    t="${t//%25/%}"
+    printf '%s' "$t"
+}
+
+# Per-directory memo for wtres_repo_relative (bash 3.2: no associative arrays).
+_WTRES_MEMO_DIR=""
+_WTRES_MEMO_COMMON=""
+_WTRES_MEMO_PREFIX=""
+
+# wtres_repo_relative <path> <want-common-dir> — print <path>'s REPO-RELATIVE
+# key, i.e. the spelling that identifies the same file in every worktree of the
+# repo whose canonical common-dir is <want-common-dir>. rc 1 + no output when
+# the path cannot be proven to belong to that repo (caller must fail closed).
+#
+# Three input spellings occur in practice:
+#   - absolute, under this checkout       (post-edit records tool_input verbatim)
+#   - absolute, under a SIBLING worktree  (the parent session's hooks record the
+#                                          specialist's worktree path)
+#   - already repo-relative               (the git-status fallback's `${line#???}`)
+# git supplies the mapping (`--show-prefix` + basename) so nothing depends on
+# how a path happened to be spelled (/var vs /private/var on macOS, symlinked
+# project roots, trailing slashes).
+wtres_repo_relative() {
+    local p="$1" want="$2" d b
+    [ -n "$p" ] || return 1
+    [ -n "$want" ] || return 1
+    case "$p" in
+        /*) ;;
+        *) printf '%s' "$p"; return 0 ;;
+    esac
+    d=$(dirname "$p") || return 1
+    b=$(basename "$p") || return 1
+    if [ "$d" != "$_WTRES_MEMO_DIR" ]; then
+        _WTRES_MEMO_DIR="$d"
+        _WTRES_MEMO_COMMON=$(repo_identity "$d")
+        _WTRES_MEMO_PREFIX=$(git -C "$d" rev-parse --show-prefix 2>/dev/null) || _WTRES_MEMO_PREFIX=""
+    fi
+    [ -n "$_WTRES_MEMO_COMMON" ] || return 1
+    [ "$_WTRES_MEMO_COMMON" = "$want" ] || return 1
+    printf '%s%s' "$_WTRES_MEMO_PREFIX" "$b"
+}
+
+# wtres_no_drift_in <worktree> — 0 when <worktree> has NOTHING dirty beyond its
+# own gate-baseline, i.e. nothing changed there after the approval refreshed it.
+# A missing baseline returns 1: absence of evidence is not evidence of absence.
+wtres_no_drift_in() {
+    local w="$1" raw wstatus wbase leftover cmp_rc=0
+    local v2="$w/.claude/.qa-tracking/gate-baseline"
+    local legacy="$w/.claude/.qa-tracking/approved-baseline"
+    # `git status` is captured on its OWN, not piped straight into sort: a
+    # pipeline's rc is the LAST command's, so `git ... | sort` would report
+    # success for a failed git and hand us an empty status — which reads as
+    # "nothing dirty", i.e. it would fail OPEN on exactly the error case.
+    raw=$(git -C "$w" status --porcelain 2>/dev/null) || return 1
+    wstatus=$(printf '%s' "$raw" | LC_ALL=C sort) || return 1
+    if [ -f "$v2" ]; then
+        wbase=$(awk 'body { print; next } /^--$/ { body = 1 }' "$v2" 2>/dev/null | LC_ALL=C sort) || return 1
+    elif [ -f "$legacy" ]; then
+        wbase=$(LC_ALL=C sort "$legacy" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+    # Same collation on both sides as the writer used (see gate_baseline_entries).
+    # comm's own failure must REFUSE, not read as an empty difference — same
+    # fail-open trap as the pipeline above.
+    leftover=$(comm -23 <(printf '%s\n' "$wstatus") <(printf '%s\n' "$wbase") 2>/dev/null) || cmp_rc=$?
+    [ "$cmp_rc" -eq 0 ] || return 1
+    leftover=$(printf '%s' "$leftover" | grep -v '^$') || leftover=""
+    [ -z "$leftover" ]
+}
+
+# wtres_delta_is_subset <report-json> <want-common-dir> — 0 when EVERY path in
+# this checkout's reviewable change set is in the file set that report approved.
+# Empty on either side returns 1: a vacuous subset proves nothing.
+wtres_delta_is_subset() {
+    local j="$1" want="$2"
+    local approved="" f key n=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        # An approved path we cannot map is DROPPED, which shrinks the approved
+        # set — the fail-closed direction.
+        key=$(wtres_repo_relative "$f" "$want") || continue
+        approved="$approved$key
+"
+    done < <(jq -r '(.files // [])[] | .file // empty' "$j" 2>/dev/null)
+    [ -n "$approved" ] || return 1
+    for f in ${ALL_CHANGED_FILES[@]+"${ALL_CHANGED_FILES[@]}"}; do
+        [ -n "$f" ] || continue
+        n=$((n + 1))
+        # A current path we cannot map is UNPROVABLE -> refuse outright.
+        key=$(wtres_repo_relative "$f" "$want") || return 1
+        printf '%s' "$approved" | grep -qxF "$key" || return 1
+    done
+    [ "$n" -gt 0 ]
+}
+
+# try_worktree_resolution — 0 (and WTRES_WORKTREE/WTRES_HASH set) when the
+# approval on $CURRENT_TASK is proven to be bound to another worktree of this
+# repo whose approved file set covers this checkout's change set.
+try_worktree_resolution() {
+    WTRES_WORKTREE=""; WTRES_HASH=""; WTRES_CHECKED=0; WTRES_DELETED_TOKEN=""
+
+    [ -n "$CURRENT_TASK" ] || return 1
+    # This bridge exists for a hash MISMATCH, never for a hash we could not
+    # compute: an empty CURRENT_CS_HASH means the local machinery is broken
+    # (impact-report.sh missing/failing), and a gate that cannot measure its own
+    # checkout must not go looking for permission elsewhere.
+    [ -n "${CURRENT_CS_HASH:-}" ] || return 1
+    command -v git >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    command -v bd >/dev/null 2>&1 || return 1
+    [ -d "$PROJECT_DIR/.beads" ] || return 1
+
+    local current_id current_top
+    current_id=$(repo_identity "$PROJECT_DIR")
+    [ -n "$current_id" ] || return 1
+    current_top=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || return 1
+    current_top=$(cd "$current_top" 2>/dev/null && pwd -P) || return 1
+    [ -n "$current_top" ] || return 1
+
+    # The approval records. `gsub("\n"; " ")` flattens a multi-line summary so
+    # the token scans below stay line-oriented.
+    local approvals
+    approvals=$(bd show "$CURRENT_TASK" --json 2>/dev/null \
+        | jq -r '
+            (if type == "array" then .[0].comments else .comments end) // []
+            | .[].text
+            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | gsub("\n"; " ")
+        ' 2>/dev/null) || approvals=""
+    [ -n "$approvals" ] || return 1
+
+    # First match per record, matching the readers' `capture(...)` semantics.
+    local recorded_hashes recorded_token
+    recorded_hashes=$(printf '%s\n' "$approvals" \
+        | awk '{ if (match($0, /change_set_hash=[A-Za-z0-9-]+/)) print substr($0, RSTART + 16, RLENGTH - 16) }') \
+        || recorded_hashes=""
+    [ -n "$recorded_hashes" ] || return 1
+    # The LATEST record that carries a token (bd returns comments in order).
+    # Records written before 3mg.2 carry none, which just costs us the O(1)
+    # short-cut — the bounded scan below still finds the worktree.
+    recorded_token=$(printf '%s\n' "$approvals" \
+        | awk '{ if (match($0, /worktree=[^ ]+/)) print substr($0, RSTART + 9, RLENGTH - 9) }' \
+        | tail -1) || recorded_token=""
+
+    local decoded="" decoded_canon=""
+    if [ -n "$recorded_token" ] && [ "$recorded_token" != "none" ]; then
+        decoded=$(wtres_decode "$recorded_token")
+        decoded_canon=$(cd "$decoded" 2>/dev/null && pwd -P) || decoded_canon=""
+    fi
+
+    # Live worktrees of this repo, minus the current checkout.
+    local wt_list c canon
+    wt_list=$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null) || return 1
+    [ -n "$wt_list" ] || return 1
+    local cands=()
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        canon=$(cd "$c" 2>/dev/null && pwd -P) || canon=""
+        [ -n "$canon" ] || continue                 # pruned / vanished entry
+        [ "$canon" = "$current_top" ] && continue   # never resolve against ourselves
+        cands+=("$canon")
+    done < <(printf '%s\n' "$wt_list" | sed -n 's/^worktree //p')
+
+    # Record-first ordering: the recorded worktree is tried before the scan, so
+    # the common case costs one candidate.
+    local recorded_live=0
+    if [ -n "$decoded_canon" ]; then
+        for c in ${cands[@]+"${cands[@]}"}; do
+            if [ "$c" = "$decoded_canon" ]; then recorded_live=1; fi
+        done
+    fi
+    local ordered=()
+    if [ "$recorded_live" = "1" ]; then
+        ordered+=("$decoded_canon")
+    fi
+    for c in ${cands[@]+"${cands[@]}"}; do
+        if [ "$recorded_live" = "1" ] && [ "$c" = "$decoded_canon" ]; then
+            continue
+        fi
+        ordered+=("$c")
+    done
+
+    # A recorded token that names neither a live worktree nor THIS checkout is
+    # gone — removed, moved, or never a worktree of this repo. Naming it in the
+    # block reason is the difference between an actionable message and a dead
+    # end. (The token pointing at this very checkout is the ordinary
+    # post-approval-edit case, which the existing reason already explains.)
+    if [ -n "$decoded" ] && [ "$recorded_live" != "1" ] \
+        && [ "$decoded_canon" != "$current_top" ]; then
+        WTRES_DELETED_TOKEN="$decoded"
+    fi
+
+    local w j wh
+    for w in ${ordered[@]+"${ordered[@]}"}; do
+        [ "$WTRES_CHECKED" -ge "$WTRES_MAX_CANDIDATES" ] && break
+        WTRES_CHECKED=$((WTRES_CHECKED + 1))
+        # 4. Same repo (a `worktree list` entry always is; a foreign or
+        #    unreadable entry must not slip through). 3mg.1 identity, never a
+        #    --show-toplevel string compare.
+        [ "$(repo_identity "$w")" = "$current_id" ] || continue
+        # 1. W's persisted approval evidence, which survives approve.
+        j="$w/.claude/.qa-tracking/impact-report-$(sanitize_task_id "$CURRENT_TASK").json"
+        [ -f "$j" ] || continue
+        wh=$(jq -r '.change_set_hash // empty' "$j" 2>/dev/null) || continue
+        [ -n "$wh" ] || continue
+        printf '%s\n' "$recorded_hashes" | grep -qxF "$wh" || continue
+        # 2. No post-approval drift in W.
+        wtres_no_drift_in "$w" || continue
+        # 3. This checkout's delta is covered by what W approved.
+        wtres_delta_is_subset "$j" "$current_id" || continue
+        WTRES_WORKTREE="$w"
+        WTRES_HASH="$wh"
+        return 0
+    done
+    return 1
+}
+
+# wtres_review_is_clean — the V3 review-discipline predicate, applied to the
+# RESOLVED record. Same predicate, same audited `[review bypass:` escape, same
+# fail-closed stance as the same-checkout release path above.
+#
+# WHY IT IS HERE (a deliberate strengthening, not in the pt2 spec's algorithm):
+# without it, the cross-worktree release would be the ONE release path that does
+# not re-check review state, and a finding recorded AFTER the approval would
+# stop re-arming the gate — reopening the exact "approve early, discover later"
+# hole V3 closed, in precisely the worktree flow V4 exists to support. It can
+# only ever REFUSE a release, never grant one, so it cannot widen the gate.
+wtres_review_is_clean() {
+    WTRES_REVIEW_DETAIL=""
+    local text rc=0 out key open
+    text=$(matching_approval_record_text "$CURRENT_TASK" "$WTRES_HASH") || text=""
+    if printf '%s' "$text" | grep -qF '[review bypass:'; then
+        return 0    # audited escape (F1 / --no-review), honoured as upstream
+    fi
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        WTRES_REVIEW_DETAIL="the review predicate is missing ($REVIEW_CHECK_SCRIPT), so independent review cannot be verified (error_key=review_check_unavailable)"
+        return 1
+    fi
+    out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$CURRENT_TASK" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    key=$(printf '%s' "$out" | jq -r '.error_key // ""' 2>/dev/null) || key=""
+    [ -n "$key" ] || key="review_check_unavailable"
+    open=$(printf '%s' "$out" | jq -r '(.open_finding_ids // []) | join(", ")' 2>/dev/null) || open=""
+    WTRES_REVIEW_DETAIL="review-check.sh gate exited $rc with error_key=$key"
+    [ -n "$open" ] && WTRES_REVIEW_DETAIL="$WTRES_REVIEW_DETAIL; open finding(s): $open"
+    return 1
+}
+
+if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
+    if try_worktree_resolution; then
+        if wtres_review_is_clean; then
+            log_sync_error "Stop released via worktree resolution: the approval on $CURRENT_TASK is bound in $WTRES_WORKTREE (change_set_hash=$WTRES_HASH); that worktree has no post-approval drift and this checkout's change set is inside its approved file set (3mg.2)"
+            echo "{}"
+            exit 0
+        fi
+        log_sync_error "Stop blocked: worktree resolution matched $WTRES_WORKTREE for $CURRENT_TASK but the independent review is not clean ($WTRES_REVIEW_DETAIL) — refusing to release (3mg.2)"
+    fi
+    if [ -n "$WTRES_REVIEW_DETAIL" ]; then
+        APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL; an approval bound in worktree $WTRES_WORKTREE DOES cover this change set, but its independent review is not clean ($WTRES_REVIEW_DETAIL) — resolve-finding or arbitrate, then re-run"
+    elif [ -n "$WTRES_DELETED_TOKEN" ]; then
+        APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL; the approval was bound in worktree $WTRES_DELETED_TOKEN, which no longer exists as a live worktree of this repo (removed or moved) — re-enter + re-review here"
+    else
+        APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL (checked $WTRES_CHECKED worktree(s))"
+    fi
+fi
+# WORKTREE-RESOLUTION END (v4 V4 / claude-workflow-plugin-3mg.2)
 
 # llh.18: the label-without-record block. Emitted BEFORE the generic
 # QA-required messaging so the reason names the exact failure mode and the
@@ -1145,6 +1718,52 @@ current change-set. Re-run the gate properly:
 Note: this binds approval to the reviewed files and defeats a forged or stale
 label, but is not a cryptographic sandbox against an adversary with arbitrary
 shell who reproduces the record by hand (documented residual, llh.18)."
+fi
+
+# V3 (jio.1): the review-discipline block. Emitted BEFORE the generic
+# QA-required messaging so the reason names the review state (which finding is
+# open, or which predicate failed) rather than the generic "QA approval
+# required" — the change IS approved; what is missing is a clean independent
+# review. The flags default to the releasing values and are only set inside
+# the sentinel-wrapped check above, so stripping that check makes this branch
+# unreachable (which is what the META-TEST proves).
+if [ "$REVIEW_DISCIPLINE_BLOCKED" = "true" ]; then
+    emit_block "Approved change-set, but the INDEPENDENT REVIEW is not clean — release refused.
+
+Nobody signs off on their own work, and no approval releases while a review
+finding at or above the artifact's risk_threshold is still open. The check
+runs at Stop as well as at approve because a finding can be
+recorded AFTER an approval (a second review round, a re-opened issue), and the
+approval record — written once — cannot know about it. So the gate re-arms.
+
+Why this blocks:
+  $REVIEW_DISCIPLINE_DETAIL
+
+Run the predicate directly for the full envelope:
+  bash .claude/scripts/review-check.sh gate $CURRENT_TASK
+
+Then clear it, by error_key:
+  review_artifact_missing    an independent reviewer (identity != every
+                             recorded IMPLEMENTER role) must review the change
+                             set and record the artifact:
+                               bash .claude/scripts/qa-gate.sh review-record $CURRENT_TASK --file <artifact.json>
+  reviewer_not_independent   the recorded reviewer also implemented this task;
+                             a different identity must review it.
+  unresolved_findings        close each open finding with evidence:
+                               bash .claude/scripts/qa-gate.sh resolve-finding $CURRENT_TASK <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
+                             or record an explicit, justified overrule:
+                               bash .claude/scripts/qa-gate.sh arbitrate $CURRENT_TASK <finding-id> overrule '<rationale>'
+  review_check_unavailable   the predicate itself could not run. This fails
+                             CLOSED on purpose — restore
+                             .claude/scripts/review-check.sh.
+
+Once the review is clean, re-approve so the record carries the reviewer:
+  bash .claude/scripts/qa-gate.sh approve $CURRENT_TASK '<approval summary>'
+
+The audited escape is \`approve --no-review '<reason>'\`, which stamps
+\`[review bypass: <reason>]\` on the approval record and skips this check. Use
+it only when there is genuinely nothing to review (the doc-only fast path uses
+it automatically); the reason is permanent in the audit trail."
 fi
 
 if [ "$QA_APPROVED" = false ]; then

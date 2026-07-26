@@ -29,6 +29,10 @@ QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 CURRENT_TASK_HELPER="$PROJECT_DIR/.claude/scripts/current-task.sh"
 TRACKING_FILE="$QA_TRACKING_DIR/changed-files.txt"
 ORCH_AGENT_FILE="$PROJECT_DIR/.claude/agents/orchestrator.md"
+# v4.0.0 Phase V1 (bi3.1): the resolved role->model mapping written by
+# model-select.sh apply. Artifact-first render; absent/unparseable falls
+# back to today's single orchestrator.md pin (visual v3.5 parity).
+ROLES_ARTIFACT="$QA_TRACKING_DIR/model-roles-resolved.json"
 
 # Hotfix vlp.1: read the active model pin from orchestrator.md frontmatter
 # (no network). All seven agent pins are kept in lockstep by
@@ -41,6 +45,62 @@ read_model_pin() {
     local pin
     pin=$(grep -E '^model:' "$ORCH_AGENT_FILE" 2>/dev/null | head -1 | awk '{print $2}')
     printf '%s' "$pin"
+}
+
+# short_id <model-id> — compact a model id for the statusline: strip the
+# leading `claude-`, strip a trailing `-2NNNNNNN` release-date suffix
+# (preserving any `[1m]` context-window marker), and hard-cap at 16 chars.
+# Examples: claude-opus-4-8 -> opus-4-8; claude-opus-4-8[1m] -> opus-4-8[1m];
+# claude-opus-4-20260514 -> opus-4; claude-opus-4-20260514[1m] -> opus-4[1m].
+short_id() {
+    local id="$1"
+    id="${id#claude-}"
+    id=$(printf '%s' "$id" | sed -E 's/-2[0-9]{7}(\[1m\])?$/\1/')
+    if [ "${#id}" -gt 16 ]; then
+        id="${id:0:16}"
+    fi
+    printf '%s' "$id"
+}
+
+# compute_model_suffix — the " • model: ..." / " • orch:.. impl:.. rev:.."
+# segment appended to every statusline branch.
+#
+# Artifact-first: when model-roles-resolved.json parses and carries all
+# three role ids, render the compact role view. When all three roles are
+# equal AND the reviewer lane is claude, collapse to the single-model shape
+# (` • model: <short>`) for visual v3.5 parity; otherwise render the triple
+# (` • orch:<short> impl:<short> rev:<short|sol>`, where a non-claude lane
+# shows the literal `sol`). Artifact missing/unparseable -> today's
+# orchestrator.md-pin fallback, byte-for-byte unchanged.
+compute_model_suffix() {
+    if [ -f "$ROLES_ARTIFACT" ] && command -v jq >/dev/null 2>&1 \
+        && jq -e . "$ROLES_ARTIFACT" >/dev/null 2>&1; then
+        local orch impl rev lane
+        orch=$(jq -r '.roles.orchestrator // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        impl=$(jq -r '.roles.implementer // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        rev=$(jq -r '.roles.reviewer // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        lane=$(jq -r '.reviewer_lane // "claude"' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        [ -z "$lane" ] && lane="claude"
+        if [ -n "$orch" ] && [ -n "$impl" ] && [ -n "$rev" ]; then
+            if [ "$orch" = "$impl" ] && [ "$impl" = "$rev" ] && [ "$lane" = "claude" ]; then
+                printf ' • model: %s' "$(short_id "$orch")"
+                return
+            fi
+            local rev_disp
+            if [ "$lane" = "claude" ]; then
+                rev_disp=$(short_id "$rev")
+            else
+                rev_disp="sol"
+            fi
+            printf ' • orch:%s impl:%s rev:%s' \
+                "$(short_id "$orch")" "$(short_id "$impl")" "$rev_disp"
+            return
+        fi
+    fi
+    # Fallback: today's single orchestrator.md pin (unchanged).
+    local pin
+    pin=$(read_model_pin)
+    printf ' • model: %s' "${pin:-(no model pin)}"
 }
 
 # ---------------------------------------------------------------------------
@@ -177,11 +237,11 @@ FILE_COUNT=$(count_changed_files)
 FILE_COUNT=$(printf '%s' "$FILE_COUNT" | tr -d '[:space:]')
 [ -z "$FILE_COUNT" ] && FILE_COUNT=0
 
-# Hotfix vlp.1: read the model pin once; append " • model: <id>" to every
-# branch below so visibility is consistent across task-active /
-# no-active-task / bd-unavailable states. Empty pin -> "(no model pin)".
-MODEL_PIN=$(read_model_pin)
-MODEL_SUFFIX=" • model: ${MODEL_PIN:-(no model pin)}"
+# Hotfix vlp.1 + V1 (bi3.1): compute the model segment once and append it
+# to every branch below so visibility is consistent across task-active /
+# no-active-task / bd-unavailable states. Artifact-first (role view) with a
+# fallback to the single orchestrator.md pin -> "(no model pin)".
+MODEL_SUFFIX=$(compute_model_suffix)
 
 if [ -z "$CURRENT_TASK" ]; then
     # No active task — still report file count (useful when changes are
