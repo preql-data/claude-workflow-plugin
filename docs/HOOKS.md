@@ -505,6 +505,36 @@ path above uses it automatically (a doc-only change has no implementer and
 nothing to review, so without the flag every documentation commit would
 deadlock on the review refusal).
 
+**Clearing a disputed finding.** Only two records clear an open at-threshold
+finding, and both are written by existing `qa-gate.sh` subcommands:
+
+```bash
+# 1. The finding is right — fix it and cite the evidence (both refs mandatory).
+bash .claude/scripts/qa-gate.sh resolve-finding <tid> <finding-id> \
+    --fix '<commit or path:line>' --test '<test that proves it>' '<summary>'
+
+# 2. The finding is disputed — the ORCHESTRATOR adjudicates and records why.
+bash .claude/scripts/qa-gate.sh arbitrate <tid> <finding-id> \
+    <overrule|sustain> '<rationale citing BOTH positions>'
+```
+
+`overrule` clears the finding in the gate count; `sustain` deliberately does
+NOT — it is the audit record of a dispute that was heard and upheld, so the
+gate stays shut until the implementer resolves it. The LATEST decision per
+finding id wins. Arbitration is an orchestrator responsibility (the reviewer
+and the author are the two parties to the dispute); the procedure and the
+rationale shape live in `.claude/agents/orchestrator.md` section 5d. Note that
+`qa-gate.sh choose approve` routes through the same `cmd_approve`, so a J21
+escalation does not bypass any of this.
+
+Live runs are audited by the `approval-cites-independent-review` invariant
+(`.claude/tests/e2e/lib/invariants.ts`), which replays this chain over the
+recorded trace: every `QA-GATE APPROVED` record must cite an independent
+reviewer and leave zero at-threshold findings open. It is a second,
+independent implementation of the `review-check.sh gate` predicate — the two
+agreeing on a real run is the evidence; a trace recorded before the harness
+captured bd comments skips rather than retro-failing.
+
 ### Escalation State Machine (spec 0.2)
 
 The Stop hook tracks a per-task iteration counter at

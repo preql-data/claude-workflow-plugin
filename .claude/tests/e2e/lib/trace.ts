@@ -143,6 +143,40 @@ export const BeadsLabelEventSchema = z.object({
 export type BeadsLabelEvent = z.infer<typeof BeadsLabelEventSchema>;
 
 /**
+ * One Beads COMMENT captured from the fixture's `.beads/issues.jsonl`
+ * (v4.0.0 Phase V3 / claude-workflow-plugin-jio.2).
+ *
+ * WHY THIS EXISTS: the gate's V2/V3 audit records are COMMENTS, not
+ * labels — `QA-GATE APPROVED … reviewed_by=<id>`, `REVIEW-ARTIFACT v1 …`,
+ * `IMPLEMENTER: role=<role>`, `RESOLVED <id> …`, `ARBITRATION <id>
+ * decision=<d>`. Labels alone cannot answer "did an INDEPENDENT reviewer
+ * sign this off, with no at-threshold finding left open?", so the
+ * `approval-cites-independent-review` invariant needs the comment text.
+ *
+ * MINIMAL BY DESIGN: `task` + `text` + `order` is everything the
+ * invariant reads. Author/timestamp are deliberately NOT captured — they
+ * drift run-to-run and the record grammars already carry their own `at
+ * <ts>` token inside `text`.
+ *
+ * `order` is a dense 0-based rank over the captured set, assigned by the
+ * recorder in the order bd holds the comments (see
+ * `beadsCapture.readBeadsComments`). It is comparable ACROSS tasks but
+ * only *within one recorded run*; consumers should compare orders, never
+ * treat them as bd comment ids.
+ */
+export const BeadsCommentSchema = z.object({
+  /** Beads task id the comment is attached to. */
+  task: z.string(),
+  /** Verbatim comment body. Record grammars are single-line, so
+   *  consumers parse `text.split("\n")[0]` exactly as
+   *  `review-check.sh gate` does. */
+  text: z.string(),
+  /** Chronological rank within the captured set (0-based, ascending). */
+  order: z.number().int().nonnegative(),
+});
+export type BeadsComment = z.infer<typeof BeadsCommentSchema>;
+
+/**
  * Plugin-load error as surfaced by the SDK at `system/init`.
  *
  * Two shapes occur in the wild:
@@ -249,6 +283,16 @@ export const TraceSchema = z.object({
    *  and derived no label activity. Changing this to `.default([])`
    *  would erase that distinction at parse time — don't. */
   beadsLabelEvents: z.array(BeadsLabelEventSchema).optional(),
+  /** Beads COMMENT text captured post-run from the fixture's
+   *  `.beads/issues.jsonl` (see BeadsCommentSchema). OPTIONAL ON PURPOSE
+   *  — not defaulted, for the same reason `beadsLabelEvents` isn't:
+   *  ABSENCE means the recorder never captured comments (a trace
+   *  recorded before jio.2, or a run whose capture failed) and consumers
+   *  (the `approval-cites-independent-review` invariant) SKIP rather
+   *  than retro-fail; an EMPTY ARRAY means the recorder ran and bd held
+   *  no comments. `.default([])` would erase that distinction at parse
+   *  time — don't. */
+  beadsComments: z.array(BeadsCommentSchema).optional(),
   /** Plugin loader status from the SDK init event. Cassette-stable; if
    *  this drifts, the harness is loading the plugin wrong. */
   pluginsLoaded: z

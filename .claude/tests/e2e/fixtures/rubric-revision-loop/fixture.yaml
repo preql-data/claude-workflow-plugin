@@ -113,6 +113,14 @@ invariants:
         - backend
         - qa
         - grader
+  # V3 sign-off separation (claude-workflow-plugin-jio.2). Every
+  # QA-GATE APPROVED record in the run must cite an INDEPENDENT review
+  # artifact (reviewer != any recorded IMPLEMENTER role) with zero open
+  # findings at/above its risk_threshold. Skip-safe by construction: a
+  # trace whose recorder captured no bd comments SKIPS, and a run with no
+  # approval record is vacuously satisfied — so declaring it here can
+  # only ever turn a REAL broken review chain red.
+  - name: approval-cites-independent-review
 
 notes: |
   - This fixture is BUILT NOW, RUN LATER. Spec Phase A calls for one

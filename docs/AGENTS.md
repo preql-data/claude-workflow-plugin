@@ -475,7 +475,18 @@ Two lanes produce the same artifact schema. `codex-detect.sh status` picks betwe
 - **`claude` (default).** QA authors the artifact itself (`reviewer_identity: "qa-claude"`) and records it with `qa-gate.sh review-record`.
 - **`codex` (optional, per-operator).** QA returns `qa_status: "needs-review"` with the sentinel `REVIEW-RELAY: status=needs-review`; the root orchestrator runs `codex-review.sh` (PAID, cost-confirmed — it meters the operator's own OpenAI account), records the artifact, and re-engages QA. Same structural reason as the grader relay: a subagent can neither spawn a subagent nor cost-gate a paid MCP-driving helper. The orchestrator's `REVIEW-RELAY: review-relay` step is canonical in `orchestrator.md` section 5c; setup is in [`CODEX_SETUP.md`](CODEX_SETUP.md).
 
-The artifact is **advisory**: it is grading-packet item 8, it writes no labels, records no approval, and the Stop hook does not consider it. The change-set-hash-bound `qa-approved` record remains the only release credential. Mechanical enforcement of reviewer independence and of the open-finding count is Phase V3. Both relay sentinels are guarded at L1 by `no-nested-spawn-instructions.test.sh`.
+The artifact is **advisory as a VERDICT, mandatory as an ARTIFACT**: it is grading-packet item 8, writes no labels, records no approval, and the change-set-hash-bound `qa-approved` record remains the only release credential — QA still forms its own verdict. But since Phase V3 the artifact's existence and independence are mechanically enforced at both gate ends (`review-check.sh gate`, called by `qa-gate.sh approve` and by `verify-before-stop.sh`). Both relay sentinels are guarded at L1 by `no-nested-spawn-instructions.test.sh`.
+
+### Arbitration of disputed findings (Phase V3, v4.0.0 — orchestrator section 5d)
+
+A finding at or above the artifact's `risk_threshold` shuts the gate until it is cleared, and exactly two records clear it:
+
+- **RESOLVE** — `qa-gate.sh resolve-finding <tid> <fid> --fix '<ref>' --test '<ref>' '<summary>'`. Both refs are mandatory (the writer refuses an empty one), which is the evidence-before-fix protocol expressed as a record: a fix nobody can point a test at is a claim, not a resolution. The implementer does this.
+- **ARBITRATE** — `qa-gate.sh arbitrate <tid> <fid> <overrule|sustain> '<rationale citing BOTH positions>'`. `overrule` clears the finding in the gate count (the only path that dismisses a finding without a fix, which is why it costs a written rationale); `sustain` leaves it OPEN as the audit record of a dispute that was heard and upheld. The latest decision per finding id wins.
+
+**Arbitration belongs to the ORCHESTRATOR.** The reviewer (QA or the Sol lane) is one party and the implementing specialist is the other; letting either adjudicate recreates the self-sign-off V3 exists to prevent. QA surfaces the disagreement in `llm_observations`, the orchestrator reads both positions and records the decision. `qa-gate.sh choose approve` delegates to the same `cmd_approve`, so a J21 cap-hit escalation does not bypass any of this.
+
+Live runs are audited by the `approval-cites-independent-review` invariant (`.claude/tests/e2e/lib/invariants.ts`, declared in every fixture): each `QA-GATE APPROVED` record in a recorded trace must cite an independent reviewer and leave zero at-threshold findings open, counting `RESOLVED … fix= test=` and a latest `ARBITRATION … decision=overrule` as clearing. It is a deliberate second implementation of the shell predicate — the two agreeing on a real run is the evidence.
 
 ### QA rubric-grading step (Phase A, spec v3.2.0 — root-orchestrated relay)
 

@@ -70,6 +70,58 @@ v4.0.0 work in progress on `gauntlet/v4.0.0` (plan: `docs/plans/v4-trimodel.md`)
   removed from the real scripts to prove the protected assertions go red (25 /
   10 / 4 failures respectively). Existing approve-reaching specs migrated to
   seed real review records via a shared `seed_review_records` fixture helper.
+- **Arbitration of disputed findings (`orchestrator.md` section 5d).** When the
+  implementing specialist disputes an at-threshold finding, two things clear it
+  and nothing else does: RESOLVE with evidence (`qa-gate.sh resolve-finding
+  <tid> <fid> --fix '<ref>' --test '<ref>' '<summary>'` — both refs mandatory,
+  evidence-before-fix as a record) or ARBITRATE (`qa-gate.sh arbitrate <tid>
+  <fid> <overrule|sustain> '<rationale>'`). `overrule` clears the gate count;
+  `sustain` keeps the finding OPEN as the audit record of a dispute that was
+  heard and upheld — which is what makes an overrule mean anything. Arbitration
+  is the ORCHESTRATOR's job: the reviewer and the author are the two parties, so
+  only the third can adjudicate, and the rationale must cite BOTH positions.
+  Guidance only — the enforcement is the gate count that shipped above.
+- **J21 correction (`orchestrator.md`, `qa.md`):** `qa-gate.sh choose approve`
+  delegates to the same `cmd_approve` as a direct approve, so it is no longer an
+  unconditional escape — it refuses while an at-threshold finding is open. A
+  cap-hit escalation does not dissolve a dispute; arbitrate or resolve first.
+  Same correction applied to the rubric override in `qa.md` 6f (a judgment
+  override does not satisfy a mechanical gate) and to the now-stale V2 scope
+  notes in `orchestrator.md` 5c / `qa.md` 6p.3.
+- **Live-harness invariant `approval-cites-independent-review`** — the trace-side
+  proof that the mechanism actually held during a real run. For EVERY
+  `QA-GATE APPROVED` record: it names a reviewer (or carries the audited
+  `[review bypass:` marker), an EARLIER `REVIEW-ARTIFACT v1` exists whose
+  `reviewer=` is not one of the task's `IMPLEMENTER: role=` identities, and
+  replaying the preceding records leaves zero open at-threshold findings
+  (`RESOLVED … fix= test=` and a latest `ARBITRATION … decision=overrule` clear;
+  `sustain` does not). It is a deliberate SECOND implementation of
+  `review-check.sh gate`'s predicate in TypeScript over a different input — if
+  the shell counter is subverted or a fixture ships a stale copy of the gate,
+  the two disagree and that disagreement is the signal. Declared in all seven
+  fixture `invariants:` blocks.
+- Trace gained an OPTIONAL `beadsComments` field ({task, text, order}), captured
+  post-run by `readBeadsComments()` from the same already-flushed
+  `.beads/issues.jsonl` the label capture reads (no extra bd invocation). ABSENT
+  means "not captured" and the invariant SKIPS (pre-jio.2 traces are not
+  retro-failed); an EMPTY ARRAY means "captured, bd held nothing". Approvals
+  with no `reviewed_by=` token skip as a pre-V3 recording.
+- Tests: `_invariants.unit.spec.ts` +21 cases (positive, both plan-mandated
+  METAs, the skip, sustain-vs-overrule, latest-decision-wins, resolve-with-
+  evidence, below-threshold, malformed-artifact, per-task scoping) and a new
+  mechanical META-COVERAGE assertion — every `INVARIANTS` row must ship a
+  META-TEST or a documented exemption (only `completion-contract`, which is
+  always skipped). Sensitivity proven by mutation: neutering independence,
+  making open findings non-fatal, letting `sustain` clear, flipping the skip to
+  a silent pass, and registering a META-less invariant each turn the matching
+  test red; every mutation byte-restored. New L2 `arbitration-acceptance.sh`
+  (33 assertions) drives the whole decision flow on one task with the REAL
+  writers: self-review refuses at both ends, a disputed finding refuses,
+  `sustain` still refuses, `overrule` approves AND releases the Stop hook, the
+  audit trail keeps both decisions, and `resolve-finding` clears an equivalent
+  dispute with no arbitration at all. `_beads-capture.unit.spec.ts` gained a
+  real-bd round trip proving the three record grammars survive capture in write
+  order.
 
 ### Added (Phase V2 — Sol reviewer lane, epic 1vq, 2026-07-25)
 - Optional, advisory external reviewer lane (GPT-5.6-Sol via the Codex CLI's

@@ -1234,6 +1234,454 @@ function stripQualifier(type: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// approval-cites-independent-review (v4.0.0 Phase V3 / jio.2)
+//
+// The trace-side proof of "nobody signs off on their own work". The record
+// GRAMMARS below are copied byte-for-byte from the shipped writers — if a
+// writer's format changes, these builders keep asserting against the dead
+// shape until someone updates both, which is exactly the coupling we want
+// (a silent grammar drift must break a test, not a gate).
+//
+//   qa-gate.sh approve         -> "QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> at <ts>: <summary>[ [review bypass: <r>]]"
+//   qa-gate.sh review-record   -> "REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> model=<m> reviewed_hash=<h> risk_threshold=<t> verdict=<v> stopped_by=<s> findings=[<id>:<sev>,…] at <ts>: <summary>"
+//   subagent-start.sh          -> "IMPLEMENTER: role=<role> task=<tid> at <ts>"
+//   qa-gate.sh resolve-finding -> "RESOLVED <id> at <ts>: fix=<ref> test=<ref> — <summary>"
+//   qa-gate.sh arbitrate       -> "ARBITRATION <id> decision=<overrule|sustain> at <ts>: <rationale>"
+// ---------------------------------------------------------------------------
+
+const REVIEW_TASK_ID = "review-good-1";
+
+/** Append comments to a trace in call order, assigning dense `order`
+ *  ranks exactly as `beadsCapture.readBeadsComments` does. */
+function withComments(t: Trace, lines: string[], task = REVIEW_TASK_ID): Trace {
+  t.beadsComments = lines.map((text, order) => ({ task, text, order }));
+  return t;
+}
+
+function implementerRecord(role: string, task = REVIEW_TASK_ID): string {
+  return `IMPLEMENTER: role=${role} task=${task} at 2026-07-26T00:00:00Z`;
+}
+
+function artifactRecord(
+  reviewer: string,
+  findingsToken: string,
+  opts: { iteration?: number; threshold?: string } = {},
+): string {
+  const iteration = opts.iteration ?? 1;
+  const threshold = opts.threshold ?? "high";
+  const verdict = findingsToken === "" ? "approve" : "findings";
+  return `REVIEW-ARTIFACT v1 iteration=${iteration} reviewer=${reviewer} model=test-model reviewed_hash=h${iteration} risk_threshold=${threshold} verdict=${verdict} stopped_by=verdict findings=[${findingsToken}] at 2026-07-26T00:01:0${iteration}Z: ${verdict === "approve" ? `approve — no findings at/above ${threshold}` : "findings — 1 finding(s) reported"}`;
+}
+
+function approvalRecord(reviewedBy: string, suffix = ""): string {
+  return `QA-GATE APPROVED change_set_hash=abc123 reviewed_by=${reviewedBy} at 2026-07-26T00:02:00Z: verified end to end${suffix}`;
+}
+
+/** The canonical clean flow: backend implements, qa-claude reviews with
+ *  zero findings, QA approves citing that reviewer. */
+function reviewPositiveTrace(): Trace {
+  const t = createEmptyTrace(
+    "synthetic-review-separation",
+    "prompt",
+    "claude-opus-4-7",
+  );
+  return withComments(t, [
+    implementerRecord("backend"),
+    artifactRecord("qa-claude", ""),
+    approvalRecord("qa-claude"),
+  ]);
+}
+
+describe("invariant: approval-cites-independent-review (V3 sign-off separation)", () => {
+  it("POSITIVE: backend implementer + qa-claude reviewer + zero findings + approval citing that reviewer -> PASS", () => {
+    const t = reviewPositiveTrace();
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/1 QA-GATE APPROVED record\(s\) cite an independent review/);
+  });
+
+  it("SKIP: a trace without beadsComments is unevaluable (pre-jio.2 recorder) — skipped, not failed", () => {
+    const t = createEmptyTrace("synthetic-no-comments", "p", "claude-opus-4-7");
+    expect(t.beadsComments).toBeUndefined();
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBe(true);
+    expect(r.detail).toMatch(/lacks beadsComments/);
+    // And evaluateAll must report it as skipped, never as a failure.
+    const agg = evaluateAll(t, [{ name: "approval-cites-independent-review" }]);
+    expect(agg.failed).toEqual([]);
+    expect(agg.skipped).toContain("approval-cites-independent-review");
+  });
+
+  it("EMPTY comment array is NOT absence: the recorder ran, saw nothing, and the check proceeds (vacuous PASS, not skip)", () => {
+    const t = createEmptyTrace("synthetic-empty-comments", "p", "claude-opus-4-7");
+    t.beadsComments = [];
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBeFalsy();
+    expect(r.detail).toMatch(/vacuously satisfied/);
+  });
+
+  it("llh.25 honest-skip: EMPTY capture + bd-unavailable signature SKIPS instead of claiming a vacuous pass", () => {
+    const t = createEmptyTrace("synthetic-bdcrash-comments", "p", "claude-opus-4-7");
+    t.beadsComments = [];
+    // The bd-unavailable signature: the gate ATTEMPTED its qa-* writes but
+    // the post-run net diff is empty (daemon crash — python-django-bug).
+    t.beadsLabelEvents = [
+      {
+        action: "add",
+        label: "qa-gate-entered",
+        taskId: "crash-1",
+        source: "bash-gate-enter",
+      },
+    ];
+    t.beadsLabelTransitions = [];
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBe(true);
+    expect(r.detail).toMatch(/bd unavailable/);
+  });
+
+  it("the bd-unavailable skip is NARROW: a captured comment set never reaches it (no masking of a real chain)", () => {
+    const t = reviewPositiveTrace();
+    // Same crash signature, but comments WERE captured — the healthy path
+    // must still evaluate (and here, pass on its merits).
+    t.beadsLabelEvents = [
+      {
+        action: "add",
+        label: "qa-gate-entered",
+        taskId: REVIEW_TASK_ID,
+        source: "bash-gate-enter",
+      },
+    ];
+    t.beadsLabelTransitions = [];
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.skipped).toBeFalsy();
+    expect(r.pass).toBe(true);
+
+    // And a BROKEN chain under the same signature still FAILS — the skip
+    // cannot be used to launder a self-review through a bd outage.
+    const broken = reviewPositiveTrace();
+    broken.beadsComments = broken.beadsComments!.map((c) =>
+      c.text.startsWith("REVIEW-ARTIFACT")
+        ? { ...c, text: artifactRecord("backend", "") }
+        : c,
+    );
+    broken.beadsLabelEvents = t.beadsLabelEvents;
+    broken.beadsLabelTransitions = [];
+    const rb = INVARIANTS["approval-cites-independent-review"]!(broken);
+    expect(rb.skipped).toBeFalsy();
+    expect(rb.pass).toBe(false);
+  });
+
+  it("SKIP: pre-V3 approval records (no reviewed_by=, no bypass marker) are not retro-failed", () => {
+    const t = createEmptyTrace("synthetic-preV3", "p", "claude-opus-4-7");
+    withComments(t, [
+      "QA-GATE APPROVED change_set_hash=abc123 at 2026-05-01T00:00:00Z: shipped before V3 existed",
+    ]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBe(true);
+    expect(r.detail).toMatch(/pre-V3 recording/);
+  });
+
+  it("EXEMPT: the audited [review bypass:] marker (F1 doc-only / --no-review) passes with reviewed_by=none", () => {
+    const t = createEmptyTrace("synthetic-bypass", "p", "claude-opus-4-7");
+    withComments(t, [
+      approvalRecord(
+        "none",
+        " [review bypass: F1 doc-only fast path (no reviewable change)]",
+      ),
+    ]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/1 exempt via the audited/);
+  });
+
+  it("FAIL: reviewed_by=none WITHOUT the bypass marker is an unaudited unreviewed approval", () => {
+    const t = createEmptyTrace("synthetic-none", "p", "claude-opus-4-7");
+    withComments(t, [implementerRecord("backend"), approvalRecord("none")]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/reviewed_by=none WITHOUT the audited/);
+  });
+
+  it("FAIL: an approval with no preceding REVIEW-ARTIFACT cites a review that does not exist", () => {
+    const t = createEmptyTrace("synthetic-noartifact", "p", "claude-opus-4-7");
+    withComments(t, [implementerRecord("backend"), approvalRecord("qa-claude")]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/NO "REVIEW-ARTIFACT v1" record precedes it/);
+  });
+
+  it("ORDERING is load-bearing: an artifact recorded AFTER the approval does not justify it", () => {
+    const t = createEmptyTrace("synthetic-lateartifact", "p", "claude-opus-4-7");
+    withComments(t, [
+      implementerRecord("backend"),
+      approvalRecord("qa-claude"),
+      artifactRecord("qa-claude", ""), // recorded after the fact
+    ]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/NO "REVIEW-ARTIFACT v1" record precedes it/);
+  });
+
+  it("META-TEST 1 (plan-mandated): forge reviewer == implementer -> FAIL, naming the invariant and both identities", () => {
+    const t = reviewPositiveTrace();
+    // The ONLY mutation: the review artifact is authored by the same role
+    // that implemented the change (self-review).
+    t.beadsComments = t.beadsComments!.map((c) =>
+      c.text.startsWith("REVIEW-ARTIFACT")
+        ? { ...c, text: artifactRecord("backend", "") }
+        : c,
+    );
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/approval-cites-independent-review/);
+    expect(r.detail).toMatch(/reviewer=backend/);
+    expect(r.detail).toMatch(/ALSO a recorded IMPLEMENTER/);
+  });
+
+  it("META-TEST 1b: a forged approval naming an implementer as reviewed_by is caught even when the artifact is independent", () => {
+    const t = createEmptyTrace("synthetic-forged-rb", "p", "claude-opus-4-7");
+    withComments(t, [
+      implementerRecord("devops"),
+      artifactRecord("qa-claude", ""),
+      approvalRecord("devops"), // hand-written record claiming self-review
+    ]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/self-signed approval record/);
+  });
+
+  it("META-TEST 2 (plan-mandated): strip the arbitration -> an at-threshold finding is OPEN -> FAIL; restoring `decision=overrule` -> PASS", () => {
+    // Base: a high finding on a high-threshold artifact, cleared by an
+    // orchestrator overrule recorded before the approval.
+    const base = () => {
+      const t = createEmptyTrace("synthetic-arbitration", "p", "claude-opus-4-7");
+      return withComments(t, [
+        implementerRecord("backend"),
+        artifactRecord("qa-claude", "R1-F1:high"),
+        "ARBITRATION R1-F1 decision=overrule at 2026-07-26T00:01:30Z: the n+1 runs over a bounded 3-element config list (reviewer's evidence) and the specialist's rebuttal cites the fixed-size config; accepted as non-blocking, tech-debt row filed",
+        approvalRecord("qa-claude"),
+      ]);
+    };
+
+    // Control: with the arbitration present the approval is legitimate.
+    const withArb = INVARIANTS["approval-cites-independent-review"]!(base());
+    expect(withArb.pass).toBe(true);
+    expect(withArb.skipped).toBeFalsy();
+
+    // THE MUTATION: strip the ARBITRATION comment. Nothing else changes.
+    const stripped = base();
+    stripped.beadsComments = stripped
+      .beadsComments!.filter((c) => !c.text.startsWith("ARBITRATION "))
+      .map((c, order) => ({ ...c, order }));
+    const r = INVARIANTS["approval-cites-independent-review"]!(stripped);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/approval-cites-independent-review/);
+    expect(r.detail).toMatch(/R1-F1:high/);
+    expect(r.detail).toMatch(/still OPEN at\/above risk_threshold=high/);
+  });
+
+  it("SUSTAIN does not clear: an arbitrated-and-upheld finding is still open (the audit record is not a pass)", () => {
+    const t = createEmptyTrace("synthetic-sustain", "p", "claude-opus-4-7");
+    withComments(t, [
+      implementerRecord("backend"),
+      artifactRecord("qa-claude", "R1-F1:critical"),
+      "ARBITRATION R1-F1 decision=sustain at 2026-07-26T00:01:30Z: the reviewer's evidence stands; the specialist's rebuttal does not address the unsanitised path",
+      approvalRecord("qa-claude"),
+    ]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/R1-F1:critical/);
+    expect(r.detail).toMatch(/decision=sustain does NOT clear/);
+  });
+
+  it("LATEST arbitration wins: sustain then overrule clears; overrule then sustain does not", () => {
+    const sustainThenOverrule = createEmptyTrace("synthetic-s-then-o", "p", "claude-opus-4-7");
+    withComments(sustainThenOverrule, [
+      implementerRecord("backend"),
+      artifactRecord("qa-claude", "R1-F1:high"),
+      "ARBITRATION R1-F1 decision=sustain at 2026-07-26T00:01:10Z: upheld on first read",
+      "ARBITRATION R1-F1 decision=overrule at 2026-07-26T00:01:20Z: reversed after the specialist produced the covering test",
+      approvalRecord("qa-claude"),
+    ]);
+    expect(
+      INVARIANTS["approval-cites-independent-review"]!(sustainThenOverrule).pass,
+    ).toBe(true);
+
+    const overruleThenSustain = createEmptyTrace("synthetic-o-then-s", "p", "claude-opus-4-7");
+    withComments(overruleThenSustain, [
+      implementerRecord("backend"),
+      artifactRecord("qa-claude", "R1-F1:high"),
+      "ARBITRATION R1-F1 decision=overrule at 2026-07-26T00:01:10Z: initially accepted",
+      "ARBITRATION R1-F1 decision=sustain at 2026-07-26T00:01:20Z: reinstated — the rebuttal was wrong",
+      approvalRecord("qa-claude"),
+    ]);
+    expect(
+      INVARIANTS["approval-cites-independent-review"]!(overruleThenSustain).pass,
+    ).toBe(false);
+  });
+
+  it("RESOLVED with fix + test evidence clears a finding; an evidence-free RESOLVED does not", () => {
+    const resolved = createEmptyTrace("synthetic-resolved", "p", "claude-opus-4-7");
+    withComments(resolved, [
+      implementerRecord("backend"),
+      artifactRecord("qa-claude", "R1-F1:high"),
+      "RESOLVED R1-F1 at 2026-07-26T00:01:30Z: fix=commit:deadbeef src/three.ts:10 test=tests/sqli.test.sh::rejects-unsanitised — parameterised the query",
+      approvalRecord("qa-claude"),
+    ]);
+    expect(INVARIANTS["approval-cites-independent-review"]!(resolved).pass).toBe(
+      true,
+    );
+
+    // The writer refuses an empty --fix/--test; a hand-written record with
+    // no evidence must not clear the finding either.
+    const bogus = createEmptyTrace("synthetic-bogus-resolve", "p", "claude-opus-4-7");
+    withComments(bogus, [
+      implementerRecord("backend"),
+      artifactRecord("qa-claude", "R1-F1:high"),
+      "RESOLVED R1-F1 at 2026-07-26T00:01:30Z: trust me",
+      approvalRecord("qa-claude"),
+    ]);
+    expect(INVARIANTS["approval-cites-independent-review"]!(bogus).pass).toBe(
+      false,
+    );
+  });
+
+  it("BELOW-threshold findings do not block (parity with review-check.sh's own rule)", () => {
+    const t = createEmptyTrace("synthetic-lowsev", "p", "claude-opus-4-7");
+    withComments(t, [
+      implementerRecord("backend"),
+      artifactRecord("qa-claude", "R1-F1:low,R1-F2:info"),
+      approvalRecord("qa-claude"),
+    ]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+  });
+
+  it("MALFORMED artifact (no well-formed findings=[…] token) must not read as zero findings (vg8 parity)", () => {
+    const t = createEmptyTrace("synthetic-malformed", "p", "claude-opus-4-7");
+    withComments(t, [
+      implementerRecord("backend"),
+      // The control character split the record: the findings token landed
+      // on a later line, so the FIRST line carries none.
+      "REVIEW-ARTIFACT v1 iteration=1 reviewer=qa-claude model=m reviewed_hash=h1 risk_threshold=high verdict=findings stopped_by=verdict\nfindings=[R1-F1:critical] at 2026-07-26T00:01:00Z: split record",
+      approvalRecord("qa-claude"),
+    ]);
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/no well-formed findings=/);
+  });
+
+  it("is PER-TASK: another task's clean artifact cannot justify this task's approval", () => {
+    const t = createEmptyTrace("synthetic-crosstask", "p", "claude-opus-4-7");
+    t.beadsComments = [
+      { task: "other-task", text: artifactRecord("qa-claude", ""), order: 0 },
+      { task: REVIEW_TASK_ID, text: implementerRecord("backend"), order: 1 },
+      { task: REVIEW_TASK_ID, text: approvalRecord("qa-claude"), order: 2 },
+    ];
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(false);
+    expect(r.detail).toMatch(/NO "REVIEW-ARTIFACT v1" record precedes it/);
+  });
+
+  it("multi-record run: a per-task independent review on EVERY approved task passes", () => {
+    const t = createEmptyTrace("synthetic-multi", "p", "claude-opus-4-7");
+    t.beadsComments = [
+      { task: "epic-1.1", text: implementerRecord("backend", "epic-1.1"), order: 0 },
+      { task: "epic-1.2", text: implementerRecord("frontend", "epic-1.2"), order: 1 },
+      { task: "epic-1.1", text: artifactRecord("qa-claude", ""), order: 2 },
+      { task: "epic-1.1", text: approvalRecord("qa-claude"), order: 3 },
+      { task: "epic-1.2", text: artifactRecord("qa-claude", ""), order: 4 },
+      { task: "epic-1.2", text: approvalRecord("qa-claude"), order: 5 },
+    ];
+    const r = INVARIANTS["approval-cites-independent-review"]!(t);
+    expect(r.pass).toBe(true);
+    expect(r.detail).toMatch(/all 2 QA-GATE APPROVED record\(s\)/);
+  });
+
+  it("registry: the invariant is registered and reachable through evaluateAll", () => {
+    expect(listInvariants()).toContain("approval-cites-independent-review");
+    const agg = evaluateAll(reviewPositiveTrace(), [
+      { name: "approval-cites-independent-review" },
+    ]);
+    expect(agg.allPassed).toBe(true);
+    expect(agg.skipped).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// META-COVERAGE: every registered invariant must ship with a META-TEST.
+//
+// The convention (.claude/tests/README.md, "META-TEST convention") is that
+// each invariant arrives with a POSITIVE case AND a violation mutation that
+// asserts the engine catches it. That convention was prose until now — this
+// test makes it mechanical, so adding a row to INVARIANTS without a
+// sensitivity proof fails the unit tier instead of silently shipping a
+// check nobody has ever seen go red.
+//
+// TEXT-anchored on this file's own source (LESSONS llh.20: anchor on text,
+// never on line numbers).
+// ---------------------------------------------------------------------------
+
+/** Invariants deliberately exempt from the META requirement, each with the
+ *  reason. Keep this list SHORT — an exemption is a hole in the convention,
+ *  and the only defensible one is "there is no observable property to
+ *  violate". */
+const META_EXEMPT: Record<string, string> = {
+  "completion-contract":
+    "always returns skipped (documented trace gap: the trace carries no structured completion payloads), so no mutation can flip it to pass:false",
+};
+
+describe("invariant engine: META-TEST coverage", () => {
+  const SPEC_SRC = readFileSync(
+    path.join(__dirname, "_invariants.unit.spec.ts"),
+    "utf8",
+  );
+
+  /** META-TEST titles declared inside a `describe("invariant: <name>…")`
+   *  block for the given invariant. */
+  function metaTestsFor(name: string): string[] {
+    const hits: string[] = [];
+    for (const chunk of SPEC_SRC.split("\ndescribe(")) {
+      const header = chunk.slice(0, chunk.indexOf("\n"));
+      if (!header.includes(`invariant: ${name}`)) continue;
+      for (const m of chunk.matchAll(/\bit\(\s*"([^"]*META-TEST[^"]*)"/g)) {
+        if (m[1]) hits.push(m[1]);
+      }
+    }
+    return hits;
+  }
+
+  it("this file is readable and describes at least one invariant (guards against a vacuous green)", () => {
+    expect(SPEC_SRC.length).toBeGreaterThan(1000);
+    expect(metaTestsFor("orchestrator-no-edits").length).toBeGreaterThan(0);
+    // Negative control: a name nobody describes has no META-TESTs, so the
+    // matcher cannot be trivially true.
+    expect(metaTestsFor("no-such-invariant")).toEqual([]);
+  });
+
+  it.each(listInvariants())(
+    "%s ships with a META-TEST (or a documented exemption)",
+    (name) => {
+      const exemption = META_EXEMPT[name];
+      if (exemption) {
+        expect(exemption.length).toBeGreaterThan(20);
+        return;
+      }
+      const metas = metaTestsFor(name);
+      expect(
+        metas.length,
+        `invariant '${name}' has no META-TEST in _invariants.unit.spec.ts. Add a mutation that violates it and asserts pass:false (see .claude/tests/README.md), or add a documented row to META_EXEMPT.`,
+      ).toBeGreaterThan(0);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Seed-corpus validation: retained replays should satisfy the universal
 // invariants. We pick the LATEST replay per fixture (stable signal of
 // the most recent known-good run) and run the engine over each.

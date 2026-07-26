@@ -345,6 +345,8 @@ On `needs_revision`, the specialist round-trip lands and the gate re-enters; QA'
 Task("@qa", "Rubric cap reached at iteration $ITERATION_CAP. Do NOT request another grading relay; record a J21 decision via qa-gate.sh choose <approve|continue|tech-debt|defer> per qa.md section 6e.")
 ```
 
+`choose approve` is NOT an unconditional escape: it delegates to the same `cmd_approve` a direct approve uses, so it still refuses while an at-threshold review finding is open (section 5d). A cap-hit does not dissolve a dispute — arbitrate or resolve it first, then record the choice.
+
 **Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
 
 - QA returned `needs-grading` but the `grading-packet` doc is empty or unreadable → malformed handoff; re-engage QA asking it to reassemble the packet before the next relay round.
@@ -461,7 +463,7 @@ The audit trail must show: which mode the relay ran in, where the verdict landed
 
 QA produces an independent review artifact before it approves (per `qa.md` section 6-prime). When the optional Sol reviewer lane is connected, that artifact comes from the Codex MCP server — and driving an MCP server is a ROOT activity for the same structural reason the grader spawn is (`code.claude.com/docs/en/sub-agents`: subagents cannot spawn other subagents, and a subagent cannot cost-gate a paid external call on the operator's behalf). QA therefore assembles the request and hands off; you drive the review turn. This subsection is the canonical REVIEW-RELAY: review-relay procedure.
 
-**The artifact is ADVISORY.** It lands in the grading packet as item 8. It never writes labels, never records an approval, and the Stop gate does not (yet) refuse on it — the change-set-hash-bound `qa-approved` record remains the only release credential. Do not treat a `findings` verdict as a block; QA decides what to do with the findings.
+**The artifact is ADVISORY as a VERDICT, MANDATORY as an ARTIFACT.** It lands in the grading packet as item 8, never writes labels, and never records an approval; the change-set-hash-bound `qa-approved` record remains the only release credential, and a `findings` verdict is not itself a block — QA decides what to do with the findings. But since V3 the artifact's EXISTENCE and INDEPENDENCE are mechanically enforced at BOTH gate ends (`review-check.sh gate`, called by `qa-gate.sh approve` and by the Stop hook): with no artifact, a reviewer who is also a recorded implementer, or an unresolved at-threshold finding, approve refuses and Stop blocks. Clearing a disputed finding is section 5d.
 
 **Cost gate.** `codex-review.sh` is a PAID external call — it meters the operator's OWN OpenAI account, separate from Anthropic spend. It is dev-cycle-manual and cost-confirmed, exactly like the grader's and judge's paid runs (v3 principle 9: no automatic paid runs). Confirm the spend with the operator before the first relay of a session, and never re-run the same review iteration without fresh consent. If the operator declines, tell QA to run the CLAUDE lane instead (Step D, exit-5 branch) — the review still happens, for free, with the same schema.
 
@@ -520,7 +522,7 @@ Task("@qa", "Independent review recorded for $TASK_ID (review iteration $REVIEW_
 | 0 | artifact written | Step C. |
 | 4 | the review request failed schema validation | Return to QA to fix the named field. Do NOT edit the request yourself — QA owns `risk_threshold` and `stop_condition`. Re-run Step B after QA re-validates. |
 | 5 | timeout, server gone, or no valid artifact within budget — NO artifact written | Record a one-line degradation note on the task, then instruct QA to run the CLAUDE lane this round (author the artifact itself). Do not retry the paid call in the same round. |
-| 6 | iteration exceeds `max_review_iterations` | Stop relaying. J21-style escalation per spec 0.2 — surface the cap state to QA and let it record a J21 choice via `qa-gate.sh choose` (approve / continue / tech-debt / defer). Never loop. |
+| 6 | iteration exceeds `max_review_iterations` | Stop relaying. J21-style escalation per spec 0.2 — surface the cap state to QA and let it record a J21 choice via `qa-gate.sh choose` (approve / continue / tech-debt / defer). Never loop. A cap-hit does not clear an open finding: `choose approve` routes through `cmd_approve` and still refuses (section 5d). |
 | 1 | usage error (bad flags/paths) | Your invocation is wrong; fix the command, not the workflow. |
 
 ```bash
@@ -538,7 +540,60 @@ bd update "$TASK_ID" --notes "REVIEW-RELAY: codex lane degraded (codex-review.sh
 - The `REVIEW-ARTIFACT` comment count does not increment after Step C → `review-record` silently failed; check `bd` connectivity before retrying.
 - Two consecutive exit-5 rounds → stop paying for the Codex lane on this task; run the Claude lane and note it. A third paid attempt without new evidence is a symptom-patching chain with a bill attached.
 
-**Scope boundary (V2).** This relay drives the ADVISORY artifact and nothing else. Arbitration of disputed findings and gate ENFORCEMENT (approve/Stop refusing on reviewer independence or open findings) are Phase V3 and ship with their own tests; do not anticipate them here. The record writers `qa-gate.sh resolve-finding` and `qa-gate.sh arbitrate` already exist and are safe to use as audit records today — they change no labels and gate nothing.
+**Scope boundary.** This relay drives the review artifact and nothing else. Adjudicating a DISPUTED finding is section 5d; the gate enforcement those records feed shipped in V3 (`review-check.sh gate`, wired into `qa-gate.sh approve` and the Stop hook).
+
+#### 5d. Arbitration of disputed findings
+
+A review finding at or above the artifact's `risk_threshold` shuts the gate: `qa-gate.sh approve` refuses with `error_key=unresolved_findings` and the Stop hook blocks, until that finding is either RESOLVED with evidence or ARBITRATED. When the implementing specialist DISPUTES the finding — its F7 `decisions` / `blockers` contests the reviewer's reading, or QA and the specialist simply disagree — somebody has to decide. That somebody is YOU.
+
+**Why you.** The reviewer (QA, or the Sol lane relayed through you) is one party; the specialist that wrote the code is the other. Neither can adjudicate its own dispute without recreating exactly the self-sign-off V3 exists to prevent. You are the only participant who is neither, so arbitration is an ORCHESTRATOR responsibility — not QA's, not the implementer's. You still do not write code to settle it; you read both positions and record a decision.
+
+**Two legitimate resolutions.** Either one clears the finding from the gate count. Choose by asking whether the finding is TRUE.
+
+1. **RESOLVE — the finding is right; the implementer fixes it.** The specialist does the work and records the closure with evidence:
+
+```bash
+bash .claude/scripts/qa-gate.sh resolve-finding "$TASK_ID" <finding-id> \
+    --fix '<commit sha or path:line>' \
+    --test '<the test that proves it>' \
+    '<one-line summary>'
+```
+
+   Both refs are MANDATORY and the writer refuses an empty one (`error_key=empty_fix` / `empty_test`). That is the evidence-before-fix protocol expressed as a record: a fix nobody can point a test at is a claim, not a resolution. Send this back to the specialist — you do not author the fix.
+
+2. **ARBITRATE — you read both positions and decide.** Read the finding's evidence in the `REVIEW-ARTIFACT` comment AND the specialist's rebuttal in its F7 contract, then record:
+
+```bash
+bash .claude/scripts/qa-gate.sh arbitrate "$TASK_ID" <finding-id> <overrule|sustain> \
+    '<rationale citing BOTH positions>'
+```
+
+   - `overrule` — the finding is not blocking. It CLEARS the finding in the gate count, so this is the only path in the workflow that dismisses a finding without a fix. It costs a written rationale, and that is deliberate.
+   - `sustain` — the finding stands. It does NOT clear the count; the gate stays shut and the implementer must resolve it. The record is the audit trail of a dispute that was heard and upheld, which is what makes an overrule mean something.
+   - The LATEST decision per finding id wins, so reversing yourself on new evidence is legitimate — record the new decision, do not delete the old one.
+
+**The rationale must cite both sides.** State the reviewer's claim and its evidence, state the specialist's rebuttal, then state your decision and what settled it. A rationale that only says "accepted, not blocking" is a rubber stamp with a timestamp on it, and an auditor reading the trail six months from now cannot tell whether the dispute was adjudicated or waved through. Shape:
+
+```
+'reviewer position: <claim + the evidence line from the artifact>.
+ specialist position: <the rebuttal from its F7 decisions/blockers>.
+ decision: OVERRULE — <what settled it>; <follow-up filed, if any>.'
+```
+
+**Do not.** Do not re-review the code yourself to break the tie — request another review round (section 5c) if the evidence is genuinely insufficient. Do not reach for `approve --no-review`: that bypasses the whole review check with a recorded reason and is for the doc-only / nothing-reviewable case, not for a dispute you would rather not adjudicate. Do not arbitrate a finding you cannot explain in both directions; ask the operator via `AskUserQuestion` instead.
+
+**J21 interaction.** `qa-gate.sh choose approve` delegates to the same `cmd_approve` a direct approve uses, so it is NOT an unconditional escape hatch: it refuses while an unresolved at-threshold finding exists, exactly as the direct form does. A J21 "accept and move on" decision therefore does not bypass review separation. Arbitrate (overrule) or have the implementer resolve FIRST, then record the J21 choice.
+
+**Reading the refusal.** `approve` names the reason in `error_key`; each maps to one move:
+
+| `error_key` | What it means | Your move |
+| --- | --- | --- |
+| `unresolved_findings` | at-threshold finding(s) open (ids are in `open_finding_ids`) | this section: resolve with evidence, or arbitrate `overrule` |
+| `reviewer_not_independent` | the recorded reviewer is also a recorded implementer | a DIFFERENT identity must review; re-run section 5c or have QA author the `qa-claude` artifact |
+| `review_artifact_missing` | no review happened | section 5c / `qa.md` 6-prime — arbitration cannot substitute for a review that never ran |
+| `review_artifact_malformed` | the latest record is corrupted (no well-formed `findings=[...]`) | re-record the artifact; never read it as "no findings" |
+
+**Trace-level proof.** The `approval-cites-independent-review` invariant (`.claude/tests/e2e/lib/invariants.ts`) replays this whole chain over a recorded run: every `QA-GATE APPROVED` record must cite an independent reviewer and leave zero at-threshold findings open, counting a `RESOLVED … fix= test=` or a latest `ARBITRATION … decision=overrule` as clearing and a `sustain` as not. If you arbitrate honestly, it stays green for free.
 
 ## Self-check
 

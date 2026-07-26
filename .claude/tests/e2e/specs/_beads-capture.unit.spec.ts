@@ -49,6 +49,7 @@ import path from "node:path";
 
 import {
   readBeadsIssues,
+  readBeadsComments,
   diffBeadsIssues,
   flushFixtureBeads,
 } from "../lib/beadsCapture.js";
@@ -182,6 +183,168 @@ describe("beadsCapture: reading and diffing issues.jsonl", () => {
     expect(x2?.added).toEqual(["backend"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// readBeadsComments (v4.0.0 Phase V3 / claude-workflow-plugin-jio.2)
+//
+// The `approval-cites-independent-review` invariant reads the gate's audit
+// RECORDS, and those are bd COMMENTS (QA-GATE APPROVED reviewed_by= /
+// REVIEW-ARTIFACT v1 / IMPLEMENTER / RESOLVED / ARBITRATION), not labels.
+// These specs pin the capture contract: order, tolerance, and — under real
+// bd — that a comment written through the CLI actually lands in the trace.
+// ---------------------------------------------------------------------------
+describe("beadsCapture: readBeadsComments", () => {
+  it("returns [] for a fixture with no .beads/ (absence is the caller's signal to SKIP)", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "beads-comments-none-"));
+    try {
+      expect(readBeadsComments(dir)).toEqual([]);
+    } finally {
+      cleanupSandbox(dir);
+    }
+  });
+
+  it("flattens comments across issues and ranks them by bd's own comment id", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "beads-comments-order-"));
+    try {
+      mkdirSync(path.join(dir, ".beads"), { recursive: true });
+      // Deliberately out of id order within and across issues, and with a
+      // shared created_at second — the id is what disambiguates.
+      const jsonl =
+        JSON.stringify({
+          id: "x-2",
+          labels: [],
+          comments: [
+            { id: 4, text: "second on x-2", created_at: "2026-07-26T00:00:02Z" },
+            { id: 2, text: "first on x-2", created_at: "2026-07-26T00:00:01Z" },
+          ],
+        }) +
+        "\n" +
+        JSON.stringify({
+          id: "x-1",
+          labels: [],
+          comments: [
+            { id: 3, text: "second on x-1", created_at: "2026-07-26T00:00:01Z" },
+            { id: 1, text: "first on x-1", created_at: "2026-07-26T00:00:01Z" },
+          ],
+        }) +
+        "\n";
+      writeFileSync(path.join(dir, ".beads", "issues.jsonl"), jsonl);
+      const comments = readBeadsComments(dir);
+      expect(comments.map((c) => c.text)).toEqual([
+        "first on x-1",
+        "first on x-2",
+        "second on x-1",
+        "second on x-2",
+      ]);
+      // `order` is a dense 0-based rank, not the bd id.
+      expect(comments.map((c) => c.order)).toEqual([0, 1, 2, 3]);
+      expect(comments.map((c) => c.task)).toEqual(["x-1", "x-2", "x-1", "x-2"]);
+    } finally {
+      cleanupSandbox(dir);
+    }
+  });
+
+  it("falls back to created_at when a comment carries no numeric id", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "beads-comments-ts-"));
+    try {
+      mkdirSync(path.join(dir, ".beads"), { recursive: true });
+      writeFileSync(
+        path.join(dir, ".beads", "issues.jsonl"),
+        JSON.stringify({
+          id: "x-1",
+          comments: [
+            { text: "later", created_at: "2026-07-26T00:00:09Z" },
+            // Mixed offset form must still compare chronologically.
+            { text: "earlier", created_at: "2026-07-26T04:00:01+04:00" },
+          ],
+        }) + "\n",
+      );
+      expect(readBeadsComments(dir).map((c) => c.text)).toEqual([
+        "earlier",
+        "later",
+      ]);
+    } finally {
+      cleanupSandbox(dir);
+    }
+  });
+
+  it("tolerates corrupt lines, issues without comments, and non-object comment rows", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "beads-comments-tolerant-"));
+    try {
+      mkdirSync(path.join(dir, ".beads"), { recursive: true });
+      const jsonl =
+        "{not json}\n\n" +
+        JSON.stringify({ id: "x-1", labels: ["a"] }) +
+        "\n" +
+        JSON.stringify({ id: "x-2", comments: "not-an-array" }) +
+        "\n" +
+        JSON.stringify({
+          id: "x-3",
+          comments: [null, 7, { id: 1, text: "survivor" }, { id: 2 }],
+        }) +
+        "\n";
+      writeFileSync(path.join(dir, ".beads", "issues.jsonl"), jsonl);
+      const comments = readBeadsComments(dir);
+      expect(comments).toEqual([{ task: "x-3", text: "survivor", order: 0 }]);
+    } finally {
+      cleanupSandbox(dir);
+    }
+  });
+});
+
+describe.skipIf(!BD_AVAILABLE)(
+  "beadsCapture: readBeadsComments against real bd",
+  () => {
+    it("captures gate RECORD comments in write order (the invariant's live input)", () => {
+      const dir = makeSandbox("comments-live");
+      try {
+        const shim = path.join(dir, ".claude", "bin", "bd");
+        spawnSync(shim, ["init", "--prefix", "u3"], {
+          cwd: dir,
+          encoding: "utf8",
+          timeout: 15_000,
+        });
+        const create = spawnSync(
+          shim,
+          ["create", "Comment-capture task", "-t", "task", "-p", "2", "--json"],
+          {
+            cwd: dir,
+            encoding: "utf8",
+            timeout: 15_000,
+            env: { ...process.env, BD_NO_DAEMON: "1" },
+          },
+        );
+        expect(create.status).toBe(0);
+        const tid = JSON.parse(create.stdout).id as string;
+
+        // The three record shapes the invariant reads, in the order the
+        // gate writes them. Verbatim grammars (jio.1 / 1vq.1 writers).
+        const records = [
+          `IMPLEMENTER: role=backend task=${tid} at 2026-07-26T00:00:00Z`,
+          `REVIEW-ARTIFACT v1 iteration=1 reviewer=qa-claude model=m reviewed_hash=h1 risk_threshold=high verdict=approve stopped_by=verdict findings=[] at 2026-07-26T00:01:00Z: approve — no findings at/above high`,
+          `QA-GATE APPROVED change_set_hash=abc123 reviewed_by=qa-claude at 2026-07-26T00:02:00Z: verified`,
+        ];
+        for (const text of records) {
+          const res = spawnSync(shim, ["comments", "add", tid, text], {
+            cwd: dir,
+            encoding: "utf8",
+            timeout: 15_000,
+            env: { ...process.env, BD_NO_DAEMON: "1" },
+          });
+          expect(res.status).toBe(0);
+        }
+
+        flushFixtureBeads(dir);
+        const captured = readBeadsComments(dir);
+        expect(captured.map((c) => c.text)).toEqual(records);
+        expect(captured.every((c) => c.task === tid)).toBe(true);
+        expect(captured.map((c) => c.order)).toEqual([0, 1, 2]);
+      } finally {
+        cleanupSandbox(dir);
+      }
+    });
+  },
+);
 
 describe("beadsCapture: flushFixtureBeads tolerance", () => {
   it("returns noBeadsDir:true when the fixture has no .beads/ directory yet", () => {

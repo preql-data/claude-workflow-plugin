@@ -272,12 +272,12 @@ describe.skipIf(!HAVE_TRACE)(
       // The model still did not call it.
     });
 
-    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 3 skip + 0 fail (qa-queried-impact-of now SKIPS on this pre-n6d trace — llh.15; label-milestones SKIPS per G2.9ke)", () => {
+    it("invariant verdicts against HEAD fixture.yaml: 3 pass + 4 skip + 0 fail (qa-queried-impact-of now SKIPS on this pre-n6d trace — llh.15; label-milestones SKIPS per G2.9ke; approval-cites-independent-review SKIPS per jio.2)", () => {
       const trace = loadTrace();
       const yamlContent = readFileSync(FIXTURE_YAML_PATH, "utf8");
       const specs = parseInvariantsFromYaml(yamlContent);
       // Sanity check the parse succeeded.
-      expect(specs.length).toBe(6);
+      expect(specs.length).toBe(7);
       // Sanity check the fixture.yaml carries the expected invariants
       // (the 366.8 fix-effect we are anchoring is that this block is
       // not wiped by the dirty-on-entry self-heal; the run-3 anchor's
@@ -291,6 +291,7 @@ describe.skipIf(!HAVE_TRACE)(
           "label-milestones",
           "declared-subagents-only",
           "qa-queried-impact-of",
+          "approval-cites-independent-review",
         ].sort(),
       );
 
@@ -316,13 +317,23 @@ describe.skipIf(!HAVE_TRACE)(
       //    invariant SKIPS it as a "pre-n6d recording" (mirroring the
       //    llh.4 pre-3.5 skip) rather than the old structural FAIL.
       //
-      // Aggregate now: 0 failed, 3 skipped (completion-contract +
-      // label-milestones + qa-queried-impact-of), allPassed=true.
+      // 3. jio.2 (v4.0.0 Phase V3): approval-cites-independent-review reads
+      //    the gate's bd COMMENT records (QA-GATE APPROVED reviewed_by= /
+      //    REVIEW-ARTIFACT v1 / IMPLEMENTER / RESOLVED / ARBITRATION). Run 4
+      //    predates the `beadsComments` capture field entirely, so the
+      //    invariant SKIPS ("trace lacks beadsComments") rather than
+      //    retro-failing a run recorded before the records existed — the
+      //    same recording-layer honesty as skips 1 and 2.
+      //
+      // Aggregate now: 0 failed, 4 skipped (completion-contract +
+      // label-milestones + qa-queried-impact-of +
+      // approval-cites-independent-review), allPassed=true.
       expect(agg.allPassed).toBe(true);
       expect(agg.skipped).toEqual([
         "completion-contract",
         "label-milestones",
         "qa-queried-impact-of",
+        "approval-cites-independent-review",
       ]);
       expect(agg.failed).toEqual([]);
 
@@ -366,6 +377,20 @@ describe.skipIf(!HAVE_TRACE)(
       expect(resultsByName["qa-queried-impact-of"]?.detail ?? "").toContain(
         "pre-n6d recording",
       );
+
+      // NEW PIN (jio.2): the review-separation invariant is unevaluable on a
+      // trace recorded before the recorder captured bd comments. Pinning the
+      // exact skip reason means a future re-record — which WOULD carry
+      // beadsComments and must then PASS — flips this loud.
+      expect(
+        resultsByName["approval-cites-independent-review"]?.skipped,
+      ).toBe(true);
+      expect(resultsByName["approval-cites-independent-review"]?.pass).toBe(
+        true,
+      );
+      expect(
+        resultsByName["approval-cites-independent-review"]?.detail ?? "",
+      ).toContain("trace lacks beadsComments");
     });
 
     it("workflow shipped: 7 fileWrites, 41 turns, success, $5.46 cost, durationMs=1330711 (~22 min)", () => {

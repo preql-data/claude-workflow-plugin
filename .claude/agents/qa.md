@@ -53,6 +53,8 @@ Block-reason shapes you may see and what to do with each:
    ```
    You (the QA agent) read this and pick one — never the human. Pick `approve` only if your structured judgment of the diff says the failures are non-blocking; pick `tech-debt` for defer-with-record; pick `defer` only when you genuinely cannot proceed and need user direction.
 
+   `choose approve` is **not** an unconditional escape. It delegates to the same `cmd_approve` a direct approve uses, so it still refuses (exit 4) while the task has no independent review artifact or an unresolved finding at/above `risk_threshold`. Escalation does not dissolve a dispute: the finding must be resolved with evidence (`qa-gate.sh resolve-finding`) or overruled by the orchestrator (`qa-gate.sh arbitrate … overrule`) first — see `orchestrator.md` section 5d.
+
 4. **QA approval required (technical checks passed, J18 intent payload)** — the gate ran tests/lint/type successfully and is now waiting on QA. The block-reason includes a JSON block:
    ```json
    {
@@ -369,8 +371,8 @@ On this spawn you do NOT run `codex-review.sh` yourself (it drives an MCP server
 ### 6p.3 What the artifact does and does not do
 
 - It **informs** your verdict. Findings you agree with at or above `risk_threshold` go into `must_fix` and route through your normal `qa-gate.sh block` round-trip. When the specialist fixes one, the resolution is recorded with evidence: `bash .claude/scripts/qa-gate.sh resolve-finding <tid> <finding-id> --fix '<commit or path:line>' --test '<test that proves it>' '<summary>'` — both refs are mandatory, which is the evidence-before-fix protocol expressed as a record.
-- It **does not** bind you. A finding you judge wrong is not silently dropped: surface the disagreement in `llm_observations` for the orchestrator, which arbitrates and records the decision (`qa-gate.sh arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'`). In V2 those records are audit trail; V3 makes the open-finding count binding at the gate.
-- It **never** approves, labels, or releases. `verify-before-stop.sh` is untouched by this section — principle 6's "one approval source of truth" is unchanged, exactly as for the rubric in section 6. Future editors: do not wire the review artifact into the Stop hook here; the V3 epic owns that with its own tests.
+- It **does not** bind you. A finding you judge wrong is not silently dropped: surface the disagreement in `llm_observations` for the orchestrator, which arbitrates and records the decision (`qa-gate.sh arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'` — see `orchestrator.md` section 5d). Arbitration is the ORCHESTRATOR's call, not yours and not the implementer's: it is the only party to the dispute that is neither reviewer nor author. Since V3 the count is binding — `overrule` clears the finding, `sustain` leaves it open and blocking.
+- It **never** approves, labels, or releases *by itself*. Your `qa-approved` record is still the only release credential and principle 6's "one approval source of truth" is unchanged. What V3 added is a NECESSARY condition, not a second approval path: `verify-before-stop.sh` re-runs the same `review-check.sh gate` predicate before releasing, so a finding recorded AFTER your approval re-arms the gate. Future editors: the review artifact is wired into both gate ends deliberately (claude-workflow-plugin-jio.1) — do not add a THIRD place that reads these records.
 
 ## 6. Rubric grading via the grader subagent (Phase A, root-orchestrated relay)
 
@@ -604,6 +606,8 @@ Approving WITHOUT `rubric-satisfied` (e.g. via the J21 escalation `approve` choi
 bash .claude/scripts/qa-gate.sh approve $TASK_ID \
     'OVERRIDE: approving without rubric-satisfied. Reason: iteration cap reached after 3 needs_revision rounds on criterion C7 (boundary-mock fidelity); the seeded upstream API has no public OpenAPI spec to derive a fixture from, and the team accepts the documented mock per the deferral in `decisions`. J21 choice: approve. Follow-up Beads task filed: claude-workflow-plugin-XYZ.'
 ```
+
+The rubric override is a JUDGMENT call and stops there — it does not, and cannot, wave through the review-separation rule. An override reason in the approval comment satisfies this prompt; it does not satisfy `review-check.sh gate`, which still refuses on a missing/non-independent artifact or an open at-threshold finding regardless of what the comment says (section 6-prime). Two different gates, one of them mechanical.
 
 The override-reason rule is enforced by THIS prompt, not by the script (the gate is a single source of truth — adding script-side denial of approve-without-satisfied would create a parallel gate and violate principle 6). A reviewer auditing the trail reads the rubric label state, the RUBRIC comments, and the approve comment; if the approve comment lacks an override reason and the label state is not satisfied, the QA-of-QA reviewer flags it.
 

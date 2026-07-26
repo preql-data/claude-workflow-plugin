@@ -78,6 +78,102 @@ export function readBeadsIssues(fixturePath: string): Map<string, BeadsIssue> {
 }
 
 /**
+ * Read the fixture's bd COMMENT stream out of `.beads/issues.jsonl`
+ * (v4.0.0 Phase V3 / claude-workflow-plugin-jio.2).
+ *
+ * WHY: the gate's audit records — `QA-GATE APPROVED … reviewed_by=<id>`,
+ * `REVIEW-ARTIFACT v1 …`, `IMPLEMENTER: role=<role>`, `RESOLVED <id> …`,
+ * `ARBITRATION <id> decision=<d>` — live in comments, not labels. The
+ * `approval-cites-independent-review` invariant replays them; without
+ * this capture it has nothing to read and skips.
+ *
+ * SAME CHANNEL AS `readBeadsIssues`: the JSONL export, which the caller
+ * has already flushed via `flushFixtureBeads`. No extra bd invocation, no
+ * new failure mode — if the flush was stale the labels are stale too, and
+ * both degrade together (visibly).
+ *
+ * ORDERING: bd assigns each comment a globally-increasing integer id, so
+ * when every captured row has a numeric id we sort by it — that is the
+ * DB's own insertion order, and it is exactly the order the gate wrote
+ * the records in. Only when an id is missing/non-numeric (a bd version
+ * that omits it) do we fall back to `created_at` (parsed, so mixed
+ * `Z`/offset forms compare correctly) with the file order as the final
+ * tie-break. The returned `order` field is a dense 0-based rank, NOT the
+ * bd id — consumers compare ranks, never arithmetic on them.
+ *
+ * Tolerant of everything `readBeadsIssues` is: missing file, corrupt
+ * lines, issues with no `comments` array, comment rows that aren't
+ * objects. A capture problem must degrade to "fewer comments" (the
+ * invariant then reports what it can see), never to a throw inside the
+ * post-run capture block.
+ */
+export function readBeadsComments(
+  fixturePath: string,
+): Array<{ task: string; text: string; order: number }> {
+  const issuesPath = path.join(fixturePath, ".beads", "issues.jsonl");
+  if (!existsSync(issuesPath)) return [];
+  let raw: string;
+  try {
+    raw = readFileSync(issuesPath, "utf8");
+  } catch {
+    return [];
+  }
+
+  const rows: Array<{
+    task: string;
+    text: string;
+    id: number | null;
+    at: number | null;
+    seen: number;
+  }> = [];
+  let seen = 0;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue; // same tolerance as readBeadsIssues
+    }
+    const issue = parsed as { id?: unknown; comments?: unknown };
+    if (!issue || typeof issue.id !== "string") continue;
+    if (!Array.isArray(issue.comments)) continue;
+    for (const c of issue.comments) {
+      if (!c || typeof c !== "object") continue;
+      const row = c as { id?: unknown; text?: unknown; created_at?: unknown };
+      if (typeof row.text !== "string") continue;
+      const numericId =
+        typeof row.id === "number" && Number.isFinite(row.id)
+          ? row.id
+          : typeof row.id === "string" && /^[0-9]+$/.test(row.id)
+            ? Number(row.id)
+            : null;
+      const parsedAt =
+        typeof row.created_at === "string" ? Date.parse(row.created_at) : NaN;
+      rows.push({
+        task: issue.id,
+        text: row.text,
+        id: numericId,
+        at: Number.isFinite(parsedAt) ? parsedAt : null,
+        seen: seen++,
+      });
+    }
+  }
+
+  const everyRowHasId = rows.every((r) => r.id !== null);
+  rows.sort((a, b) => {
+    if (everyRowHasId) return (a.id as number) - (b.id as number) || a.seen - b.seen;
+    const at = a.at ?? 0;
+    const bt = b.at ?? 0;
+    if (at !== bt) return at - bt;
+    return a.seen - b.seen;
+  });
+
+  return rows.map((r, i) => ({ task: r.task, text: r.text, order: i }));
+}
+
+/**
  * Compute the diff between pre- and post-run beads state.
  *
  * "Created": present in `after`, absent in `before`. Carries the full
