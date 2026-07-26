@@ -5,7 +5,38 @@ work on this repository.
 
 ## Current state
 
+- **v4.0.0 IS COMPLETE AND READY TO TAG (2026-07-26, tasks
+  `claude-workflow-plugin-d2j.2` live validations + `d2j.3` docs sweep).**
+  Supersedes the d2j.1 bullet immediately below — its "STILL OPEN — V5 item 5"
+  no longer holds. **All six phases V0-V5 are done**, and the two cost-gated
+  live tri-model validations BOTH PASSED: (a) Codex CONNECTED —
+  `codex-review.sh` drove the REAL Codex MCP server on `gpt-5.6-sol`
+  (read-only sandbox, no subagent spawning), Sol returned a schema-valid
+  `verdict=findings` artifact with a genuine MEDIUM finding, and the real gate
+  scripts BLOCKED (`independent:true`, `open_findings:1`) until an
+  orchestrator `arbitrate R1-F1 overrule` cleared the count and the gate
+  PASSED; (b) Codex ABSENT — `codex-detect` resolved `reviewer_lane=claude`
+  and a same-schema `qa-claude`/`claude-fable-5` artifact drove the IDENTICAL
+  BLOCK → overrule → PASS sequence on twin task `d2j.2.1`. Reviewer identity,
+  model and finding quality differed; the gate DECISIONS were byte-identical —
+  the v4 core claim, now shown live. **Scope, stated rather than buried:** the
+  subject was a small synthetic `count_files` harness and the implementer
+  identity was posted directly, not produced by a full specialist→QA→grader
+  cycle, and the flow ran through the gate scripts directly, so NO e2e trace
+  was captured and the `approval-cites-independent-review` invariant is still
+  proven offline only. `docs/RELEASE_AUDIT.md` TM7/TM14 carry the live result
+  with that caveat; the full record is the `validation-results` doc on
+  `d2j.2`. One finding filed, operator-scope and NOT a plugin defect:
+  `claude-workflow-plugin-gl6` — the Codex model pin is authoritative in
+  `~/.codex/config.toml` (codex-cli 0.145.0 `mcp-server` ignores the
+  registration's `-m`), and `gpt-5.2-codex` is rejected by ChatGPT-account
+  backends, which is what made the first Sol turn exit 5;
+  `docs/CODEX_SETUP.md` §5 + §7 now document the diagnosis, fix and a free
+  verification command. **The release tag remains the orchestrator's to
+  apply** — neither d2j.2 nor d2j.3 commits or tags.
 - **v4.0.0 RELEASE DOCS LANDED (2026-07-26, task `claude-workflow-plugin-d2j.1`).**
+  *[SUPERSEDED by the bullet above — V5 item 5 has since RUN and PASSED. Kept
+  unedited as the record of what was true when d2j.1 landed.]*
   Supersedes the 2026-07-25 progress bullet below: V0-V4 are all COMPLETE and
   committed on `gauntlet/v4.0.0`, and Phase V5 items 1-4 (version bump to
   **4.0.0**, the consolidated CHANGELOG entry, the README tri-model section +
@@ -301,12 +332,29 @@ on `gauntlet/v4.0.0`. A new session can confirm readiness by re-running them.
   `docs/CODEX_SETUP.md`, and no living doc names 3.5.0 as the CURRENT version
   (dated per-release records below deliberately still do).
 
-**Not yet done at this point:** the two paid live tri-model validations
-(`claude-workflow-plugin-d2j.2`) — the full loop with Codex connected
-(plan → implement → Sol review with a declared `risk_threshold` and a
-deliberately disputed finding → arbitration → gate release) and the identical
-flow with Codex absent. RELEASE_AUDIT rows TM7/TM14 say so explicitly rather
-than claiming a live result.
+**DONE since, 2026-07-26 (`claude-workflow-plugin-d2j.2`):** the two paid live
+tri-model validations both PASSED — Codex connected (a real `gpt-5.6-sol`
+review turn → a genuine medium finding → gate BLOCK → arbitration overrule →
+gate PASS) and the identical flow with Codex absent (Claude lane, same
+artifact schema, same two decisions). RELEASE_AUDIT rows TM7/TM14 now carry
+the live result together with its scope caveat: the subject was a small
+synthetic harness driven through the gate scripts directly, so no e2e trace
+was captured and the `approval-cites-independent-review` invariant remains
+proven offline only. Two free, re-runnable assertions over committed Beads
+state (the review artifact JSON itself is per-session ephemera under the
+gitignored `.claude/.qa-tracking/`, so it is deliberately NOT the durable
+evidence):
+
+- assert: the Sol-lane record survives in Beads. Run
+  `bd show claude-workflow-plugin-d2j.2 --json | jq -r '.[].comments[]?.text' | grep -cE 'REVIEW-ARTIFACT v1 .*reviewer=sol-codex model=gpt-5\.6-sol .*verdict=findings'`
+  → `1`, and the same pipeline with `-cE '^ARBITRATION R1-F1 decision=overrule'`
+  → `1`.
+- assert: the Codex-absent twin used the same grammar on the Claude lane. Run
+  the same pipeline against `claude-workflow-plugin-d2j.2.1` with
+  `-cE 'REVIEW-ARTIFACT v1 .*reviewer=qa-claude model=claude-fable-5'` → `1`.
+
+**Remaining before the tag:** nothing in the plan — the tag itself is the
+orchestrator's step.
 
 ## Verify conditions for "v3.5.0 (Release Acceptance Gauntlet) shipped"
 

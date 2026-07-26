@@ -122,6 +122,19 @@ migration below.
   the detector reads only top-level `.mcpServers.codex`); model-pinning
   guidance that extends day-zero adoption across the vendor boundary;
   verification and troubleshooting tables.
+- **The Codex model pin lives in `~/.codex/config.toml`, not in the
+  registration** (`docs/CODEX_SETUP.md` §5 and §7; finding
+  `claude-workflow-plugin-gl6`, from the live validation below). codex-cli
+  0.145.0's `mcp-server` mode ignores the registration's `-m <slug>` flag,
+  and a `-c model=…` override does not stick either — the config file is
+  authoritative, while `-m` only supplies the `reviewer_model` string the
+  artifact records. A slug the ChatGPT-account backend rejects (e.g.
+  `gpt-5.2-codex`, HTTP 400 "not supported when using Codex with a ChatGPT
+  account") therefore fails the review turn with `codex-review.sh` exit 5.
+  That path degrades to the Claude lane with zero behaviour change, as
+  designed, so this is an operator-config trap rather than a plugin defect —
+  the setup doc now carries the diagnosis, the one-line fix, and a free
+  `codex doctor --json` check for the resolved model.
 
 #### Sign-off separation and arbitration (Phase V3, epic `jio`)
 
@@ -317,6 +330,23 @@ Every count below was re-executed on 2026-07-26 for the release audit; see
   pass.
 - Existing approve-reaching specs migrated to seed real review records via
   a shared `seed_review_records` fixture helper.
+- **Live tri-model validation ran 2026-07-26
+  (`claude-workflow-plugin-d2j.2`) — both legs PASSED.** Codex CONNECTED:
+  `codex-review.sh` drove the REAL Codex MCP server on `gpt-5.6-sol`
+  (read-only sandbox, no subagent spawning), Sol returned a schema-valid
+  `verdict=findings` artifact with a genuine medium finding, and the real
+  gate scripts BLOCKED it (`independent:true`, one open at-threshold
+  finding) until an orchestrator `arbitrate … overrule` cleared the count.
+  Codex ABSENT: feature-detect resolved `reviewer_lane=claude` and a
+  same-schema `qa-claude`/`claude-fable-5` artifact drove the IDENTICAL
+  sequence. Reviewer identity, model and finding quality differed; the gate
+  DECISIONS were byte-identical — which is the release claim, confirmed
+  live rather than only by the offline degradation spec. Scope stated
+  plainly: the subject was a small synthetic harness driven through the gate
+  scripts directly, not a full specialist→QA→grader cycle, so no e2e trace
+  was captured and the `approval-cites-independent-review` invariant remains
+  proven offline only. `docs/RELEASE_AUDIT.md` rows TM7/TM14 carry the
+  result and that caveat.
 
 ### Changed
 

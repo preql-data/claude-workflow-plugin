@@ -14,11 +14,15 @@ session that produced them ends.
   verdict. Phases V0-V5, one Beads epic per phase. Verified platform facts
   and the executable step plan live in the session plan mirror
   (`~/.claude/plans/v4-0-0-tri-model-lively-deer.md`).
-  **Status**: Active (started 2026-07-24). Phases V0-V4 complete; V5 items
-  1-4 (version bump, CHANGELOG, README tri-model section, RELEASE_AUDIT
-  `TM1`-`TM14`, model-version doc sweep) shipped 2026-07-26 as v4.0.0. V5
-  item 5 — the two cost-gated live tri-model validations
-  (`claude-workflow-plugin-d2j.2`) — is outstanding.
+  **Status**: Complete (2026-07-24 → 2026-07-26). **All phases V0-V5 are
+  done** and shipped as v4.0.0, including V5 item 5 — the two cost-gated live
+  tri-model validations (`claude-workflow-plugin-d2j.2`), which both PASSED on
+  2026-07-26: a real `gpt-5.6-sol` review turn with Codex connected, and the
+  Claude lane with Codex absent, producing byte-identical gate decisions from
+  two different reviewers. Scope of that validation, per
+  `docs/RELEASE_AUDIT.md` rows TM7/TM14: a small synthetic subject driven
+  through the gate scripts directly, so no live e2e trace was captured.
+  Awaiting only the release tag.
 
 - `verification-suite.md` — Phases 0/A/B/C shipping v3.1.0 through v3.4.0:
   MCP path hotfix, binding QA-gate escalation, best-model auto-selection,

@@ -129,7 +129,7 @@ Read the parts:
 | `--scope user` | **Load-bearing — see the warning below.** |
 | `codex` (server name) | The probe looks for a server named exactly `codex`. Renaming it disables the lane. |
 | `--` | Everything after it is the subprocess command, not a flag for `claude`. |
-| `codex -m gpt-5.6-sol mcp-server` | Runs the Codex CLI in stdio MCP-server mode, pinning the model for this invocation. `mcp-server` must come after the flags. |
+| `codex -m gpt-5.6-sol mcp-server` | Runs the Codex CLI in stdio MCP-server mode. **`-m` does not choose the model here** — in `mcp-server` mode the model comes from `~/.codex/config.toml` ([§5](#5-model-pinning-and-tracking-the-newest-model)); `-m` is what the plugin records as the artifact's `reviewer_model`, so keep it and keep it in sync. `mcp-server` must come after the flags. |
 
 stdio is the default transport, so no `--transport` is needed. Verify the entry:
 
@@ -222,12 +222,18 @@ Two mechanisms, verified:
    model_reasoning_effort = "max"
    ```
 
-2. **Keep `-m <slug>` in the registration anyway.** It overrides the config default per invocation,
-   and — this is the part that is easy to get wrong — it is also where the plugin reads the model id
-   it records in the artifact's `reviewer_model` field. `codex-review.sh` resolves that id from
-   `CODEX_MCP_MODEL`, else from a `-m` / `--model` pair in the registered args, else it falls back to
-   the literal string `codex`. So a registration with no `-m` still *runs* your `config.toml` model,
-   but the audit trail records `reviewer_model: "codex"` — true, and useless six months later.
+2. **Keep `-m <slug>` in the registration — but know what it does and what it does not do.** It does
+   **not** select the model: verified live on codex-cli 0.145.0, `mcp-server` mode ignores the
+   registration's `-m`, and a `-c model=…` override does not stick either. `config.toml` wins. What
+   `-m` is genuinely for is the audit trail — it is where the plugin reads the model id it records in
+   the artifact's `reviewer_model` field. `codex-review.sh` resolves that id from `CODEX_MCP_MODEL`,
+   else from a `-m` / `--model` pair in the registered args, else it falls back to the literal string
+   `codex`. So a registration with no `-m` still *runs* your `config.toml` model, but the audit trail
+   records `reviewer_model: "codex"` — true, and useless six months later.
+
+   The corollary is the trap: because `-m` feeds the RECORD while `config.toml` drives the RUN, a
+   mismatch between the two produces an artifact naming a model that did not perform the review. Set
+   both to the same slug — step 1 writes the config, the snippet below rewrites the registration.
 
    Re-running one command when the catalog moves keeps the record precise:
 
@@ -239,10 +245,12 @@ Two mechanisms, verified:
    bash .claude/scripts/codex-detect.sh detect --refresh     # -> codex
    ```
 
-**Check your config default when you set this up.** A `config.toml` carrying an older pin (for
-example `model = "gpt-5.2-codex"`, a slug that is no longer even in the catalog) is easy to miss
-because the registration's `-m` masks it for MCP runs while every *interactive* `codex` session
-keeps using the stale model. Reconcile both.
+**Check your config default when you set this up — it is the one that actually runs.** A
+`config.toml` carrying an older pin (for example `model = "gpt-5.2-codex"`) is easy to miss and is
+the single most likely reason a correctly-registered lane still fails: the registration's `-m` does
+*not* mask it, and on a ChatGPT-account login that particular slug is rejected by the backend
+outright. This is exactly what broke the first live Sol turn during the v4.0.0 validation — see
+[The model pin lives in `config.toml`](#the-model-pin-lives-in-configtoml-not-in-the-registration).
 
 ---
 
@@ -302,7 +310,50 @@ process at all.
 | Lane stays `claude`, server connects | `no-codex-tool` | The server answered but advertises no tool named `codex` — usually a wrapper package rather than the official CLI, or a version that renamed the tool. | Use the official CLI's own `codex mcp-server` mode. Confirm the surface: it should advertise exactly `codex` and `codex-reply`. |
 | Everything looks right, lane still `claude` | any | `reviewer_lane=claude` is pinned in `.claude/model-roles`, or `WORKFLOW_REVIEWER_LANE` is exported in your environment. Both intentionally force the free lane. | Remove the pin / unset the variable, or leave it — this is the supported opt-out. |
 | Probe prints `claude` with no artifact written | n/a | `jq` is missing. The probe cannot parse a registration without it and resolves to `claude` by design. | Install `jq` (the plugin requires it anyway). |
-| A relay round returns exit 5 | n/a | The review turn timed out or the server died mid-turn. No artifact is written. | Nothing to repair — the orchestrator records a degradation note and QA authors the artifact on the Claude lane that round. Raise `timeout_seconds` in `.claude/review-config` if it recurs on large diffs. |
+| A relay round returns exit 5 | n/a | The review turn timed out, the server died mid-turn, **or the model resolved from `~/.codex/config.toml` is one your account cannot use.** No artifact is written. | Discriminate by timing: slow-then-fail on large diffs is the timeout — raise `timeout_seconds` in `.claude/review-config`. Instant and every time is the model pin — see [The model pin lives in `config.toml`](#the-model-pin-lives-in-configtoml-not-in-the-registration). Either way nothing is broken: the orchestrator records a degradation note and QA authors the artifact on the Claude lane that round. |
+
+### The model pin lives in `config.toml`, not in the registration
+
+Found the hard way during the v4.0.0 live validation (finding
+`claude-workflow-plugin-gl6`, 2026-07-26, codex-cli 0.145.0). Three facts, in the order they bite:
+
+1. **`~/.codex/config.toml`'s `model` is authoritative for `mcp-server` mode.** The registration's
+   `-m <slug>` is ignored there, and a `-c model=…` override does not stick either. Established by
+   direct JSON-RPC probes against the running server, not inferred: the configured session reported
+   the *config file's* model while the registration asked for a different one. Keep `-m` anyway —
+   [§5](#5-model-pinning-and-tracking-the-newest-model) explains why (it is the `reviewer_model` the
+   artifact records), and keep it equal to the config value.
+2. **A model your account cannot use fails the whole turn.** On a ChatGPT-account login,
+   `model = "gpt-5.2-codex"` draws
+   `400 invalid_request_error: The 'gpt-5.2-codex' model is not supported when using Codex with a
+   ChatGPT account.` What you actually observe is `codex-review.sh` exiting 5 with no artifact —
+   the error is upstream of the plugin and never reaches your terminal on its own.
+3. **Fix in one line, then verify the model that was actually resolved.**
+
+   ```bash
+   # 1. Point the config at a model your account supports. Back it up first —
+   #    this file also holds your reasoning-effort setting.
+   cp ~/.codex/config.toml ~/.codex/config.toml.bak
+   #    ...then edit it:   model = "gpt-5.6-sol"
+
+   # 2. Confirm what Codex resolved. Free: a local diagnostic, no model call.
+   codex doctor --json | jq -r '.checks["config.load"].details.model'
+   # -> gpt-5.6-sol
+
+   # 3. Re-check the lane end to end (also free; detect never invokes the tool).
+   bash .claude/scripts/codex-detect.sh detect --refresh   # -> codex
+   ```
+
+   The definitive in-band check is the server's own `session_configured` event, whose `model` field
+   names what the session will really use. `codex doctor` is the cheap version of the same question
+   and does not start a session; use it first.
+
+**This is an operator-config problem, not a plugin failure, and the plugin's behaviour under it is
+the designed one.** Through the whole episode `codex-review.sh` and `codex-detect.sh` were correct:
+transport, `.result.content[].text` extraction, and the exit-5 degradation all worked. A rejected
+model lands on the same row of the table below as any other mid-flight failure — the turn exits 5,
+QA authors the artifact on the Claude lane that round, and the release mechanics do not change. You
+lose the second opinion for one round; you lose nothing else.
 
 ### Graceful degradation, in full
 
