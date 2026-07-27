@@ -47,10 +47,16 @@
 #   7. META-TESTs          — a second fixture proves the preservation is
 #                            detector-driven (not unconditional), a third
 #                            proves the backup checker can fail.
+#   8. Re-runs (v4.1 / U0.4) — the second run on an already-upgraded tree:
+#                            no-change probe skips the backup, a customization
+#                            made AFTER the upgrade is preserved rather than
+#                            re-clobbered, and two METAs prove both of those
+#                            assertions can fail.
 #
-# Runtime is dominated by three v3.5 installs plus three upgrades; each is well
-# under two seconds because the installer copies a ~10 MB tree and hashes ~250
-# files, with no network and no LLM calls.
+# Runtime is dominated by three v3.5 installs plus three upgrades, and (section
+# 8) two fresh v4 installs plus four re-runs; each is well under two seconds
+# because the installer copies a ~10 MB tree and hashes ~250 files, with no
+# network and no LLM calls.
 
 set -u
 
@@ -496,3 +502,315 @@ assert_eq "installer-v3-upgrade 7b: third fixture produced a backup directory" \
     "yes" "$(yesno test -d "$BACKUP_DIR_3")"
 assert_eq "installer-v3-upgrade 7b META-TEST: the backup checker reports ABSENT when .qa-tracking was removed" \
     "no" "$(yesno backup_has_seeded_record "$BACKUP_DIR_3")"
+
+# ===========================================================================
+# Section 8: re-runs (v4.1 / U0.4)
+# ===========================================================================
+# Sections 1-7 prove ONE run. The gap they leave is the second one: an upgraded
+# tree is a v4 tree, so detect_v3_install correctly declines and the run falls
+# to the flat mode-2 Update — which through v4.0 plain-copied every shipped
+# file and re-clobbered anything the operator had changed since the upgrade.
+# The same clobber the whole flow exists to prevent, one run later.
+#
+# Two behaviours are under test here:
+#   the no-change probe   same release + zero write verdicts -> no backup dir,
+#                         because a timestamped backup per re-run is noise the
+#                         operator has to clean up by hand;
+#   the verdict walk      mode 2 classifies against the target's OWN
+#                         .claude/install-manifest, so operator files get the
+#                         same preserve-and-write-.new treatment as an upgrade.
+#
+# WHY --mode=2 RATHER THAN NO FLAGS. Section 5 deliberately passes no flags
+# because auto-detection is part of what it proves. Here it cannot: on a v4
+# target the mode PROMPT is reachable, and the installer reads it from
+# /dev/tty whenever a controlling terminal is openable — so a bare re-run would
+# block forever on a developer's machine while passing in CI. --mode=2 selects
+# the identical branch the non-interactive default picks (case 2), which is
+# exactly what the flag is documented for.
+#
+# WHY 8a RUNS ON THE PRISTINE FIXTURE. The probe skips the backup only when the
+# plan carries ZERO write verdicts, and preserve-custom is a write (it puts a
+# <path>.new on disk). T still carries two preserved customizations from
+# section 4, so a re-run there legitimately writes and legitimately backs up —
+# that is 8b. The pristine fixture T2 is the tree where "nothing to do" is
+# literally true, so it is the one that must skip its backup.
+
+# update_backup_count_of <target> — how many mode-1/2 .claude-backup-* dirs
+# exist. Deliberately a DIFFERENT prefix from backup_count_of's
+# .claude-v3-backup-*: the two mechanisms must be counted separately or "no new
+# backup" would be satisfied by the upgrade's own backup from section 5.
+update_backup_count_of() {
+    find "$1" -maxdepth 1 -type d -name '.claude-backup-*' 2>/dev/null \
+        | grep -c . | tr -d ' \n'
+}
+
+# run_update_with <installer> <target> <logfile> — a mode-2 Update run. Every
+# re-run in this section (real installer AND the two section-8c mutants) goes
+# through this one function, so a mutant can never differ from the subject by
+# how it was invoked.
+run_update_with() {
+    bash "$1" --mode=2 "$2" </dev/null >"$3" 2>&1
+}
+
+run_update() {
+    run_update_with "$PLUGIN_ROOT/install.sh" "$1" "$2"
+}
+
+# workflow_rows_to <target> <outfile> — the workflow-class rows of the target's
+# generated manifest (path + sha256). Comparing this file across a re-run is
+# how "no plugin-owned file changed" is proven by hash rather than by mtime.
+workflow_rows_to() {
+    bash "$MANIFEST_TOOL" generate "$1" 2>/dev/null | awk -F'\t' '$2 == "workflow"' > "$2"
+}
+
+# seed_v4_install <dir> <installer> — a fresh v4 install with <installer>.
+# git-init FIRST for the same reason seed_v35_install does: the installer's
+# "Initialize git repository?" prompt also falls through to /dev/tty.
+seed_v4_install() {
+    local dir="$1"
+    local installer="$2"
+    mkdir -p "$dir"
+    (
+        cd "$dir" || exit 1
+        git init -q >/dev/null 2>&1 || true
+        git -c user.email=test@example.com -c user.name=test \
+            commit --allow-empty -q -m "v4 baseline" >/dev/null 2>&1 || true
+    )
+    bash "$installer" "$dir" </dev/null \
+        >"$WORK/$(basename "$dir")-install-v4.log" 2>&1
+}
+
+# The readout line the probe prints, built from the version the source
+# plugin.json declares — never a hardcoded release number.
+SKIP_BACKUP_LINE="already at $SOURCE_VERSION; no file changes — skipping backup"
+
+# --- 8a. idempotency: re-running an unchanged tree writes nothing -----------
+T2_WORKFLOW_PRE="$WORK/t2-workflow-pre.tsv"
+T2_WORKFLOW_POST="$WORK/t2-workflow-post.tsv"
+workflow_rows_to "$T2" "$T2_WORKFLOW_PRE"
+T2_WORKFLOW_ROWS=$(grep -c . "$T2_WORKFLOW_PRE" | tr -d ' \n')
+# Guard against a vacuous comparison: an empty pre-file would make the cmp
+# below trivially true.
+assert_eq "installer-v3-upgrade 8a: the upgraded pristine tree lists a plausible number of workflow files (>90)" \
+    "yes" "$(yesno test "${T2_WORKFLOW_ROWS:-0}" -gt 90)"
+
+RERUN_RC=0
+run_update "$T2" "$WORK/rerun-idempotent.log" || RERUN_RC=$?
+RERUN_LOG=$(cat "$WORK/rerun-idempotent.log" 2>/dev/null || echo "")
+if [ "$RERUN_RC" -ne 0 ]; then
+    printf '  diagnostic: idempotent re-run exited %s; tail of log:\n' "$RERUN_RC"
+    tail -20 "$WORK/rerun-idempotent.log" 2>/dev/null | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 8a: a second run on the upgraded tree exits 0" \
+    "0" "$RERUN_RC"
+# The Update was verdict-driven, not a plain copy: this line is the whole of
+# U0.4 deliverable 1 showing up in the readout.
+assert_contains "installer-v3-upgrade 8a: the re-run classified against the target's own install-manifest" \
+    "classified against .claude/install-manifest" "$RERUN_LOG"
+assert_contains "installer-v3-upgrade 8a: the re-run reports the no-change probe skipping the backup" \
+    "$SKIP_BACKUP_LINE" "$RERUN_LOG"
+assert_eq "installer-v3-upgrade 8a: no mode-2 .claude-backup-* directory was created" \
+    "0" "$(update_backup_count_of "$T2")"
+assert_eq "installer-v3-upgrade 8a: still exactly one .claude-v3-backup-* directory" \
+    "1" "$(backup_count_of "$T2")"
+# The v3 flow must NOT have re-fired on a tree it already upgraded.
+assert_not_contains "installer-v3-upgrade 8a: the re-run did not re-enter the v3 upgrade flow" \
+    "Backing up the installed plugin to" "$RERUN_LOG"
+
+workflow_rows_to "$T2" "$T2_WORKFLOW_POST"
+T2_ROWS_CMP_RC=0
+cmp -s "$T2_WORKFLOW_PRE" "$T2_WORKFLOW_POST" || T2_ROWS_CMP_RC=$?
+if [ "$T2_ROWS_CMP_RC" -ne 0 ]; then
+    printf '  diagnostic: workflow rows that changed across the re-run:\n'
+    diff "$T2_WORKFLOW_PRE" "$T2_WORKFLOW_POST" 2>/dev/null | head -10 | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 8a: every workflow-class file hash is unchanged by the re-run" \
+    "0" "$T2_ROWS_CMP_RC"
+# No spurious .new litter: the pristine fixture had none after section 7a and
+# a no-op re-run must not invent one.
+assert_eq "installer-v3-upgrade 8a: no default.md.new appeared on the uncustomized tree" \
+    "no" "$(yesno preserved_new_exists "$T2" ".claude/rubrics/default.md")"
+assert_eq "installer-v3-upgrade 8a: the re-run wrote no .new file anywhere in the tree" \
+    "0" "$(find "$T2" -name '*.new' -type f 2>/dev/null | grep -c . | tr -d ' \n')"
+# The manifest is rewritten even when the backup is skipped — the probe gates
+# the backup, nothing else.
+assert_eq "installer-v3-upgrade 8a: install-manifest still names the installed version after the re-run" \
+    "# claude-workflow-plugin $SOURCE_VERSION" \
+    "$(head -1 "$T2/.claude/install-manifest" 2>/dev/null || echo "")"
+
+# --- 8b. a customization made AFTER the upgrade is preserved, not clobbered -
+# The re-clobber regression itself. T already carries the section-4 sentinel
+# (which section 6b proved survived the upgrade); this adds a SECOND, freshly
+# written one so the assertion cannot pass on the strength of the first.
+POST_UPGRADE_SENTINEL="OPERATOR-SENTINEL-RUBRIC-POST-UPGRADE"
+printf '\n- %s: an edit made after the upgrade, before the next run.\n' \
+    "$POST_UPGRADE_SENTINEL" >> "$T/.claude/rubrics/default.md"
+assert_contains "installer-v3-upgrade 8b: the post-upgrade rubric edit is in place before the re-run" \
+    "$POST_UPGRADE_SENTINEL" "$(cat "$T/.claude/rubrics/default.md" 2>/dev/null || echo "")"
+
+RECUSTOM_RC=0
+run_update "$T" "$WORK/rerun-recustomized.log" || RECUSTOM_RC=$?
+RECUSTOM_LOG=$(cat "$WORK/rerun-recustomized.log" 2>/dev/null || echo "")
+if [ "$RECUSTOM_RC" -ne 0 ]; then
+    printf '  diagnostic: re-customized re-run exited %s; tail of log:\n' "$RECUSTOM_RC"
+    tail -20 "$WORK/rerun-recustomized.log" 2>/dev/null | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 8b: the re-run on a re-customized tree exits 0" \
+    "0" "$RECUSTOM_RC"
+POST_RERUN_RUBRIC=$(cat "$T/.claude/rubrics/default.md" 2>/dev/null || echo "")
+assert_contains "installer-v3-upgrade 8b: the post-upgrade rubric edit SURVIVED the re-run (re-clobber regression)" \
+    "$POST_UPGRADE_SENTINEL" "$POST_RERUN_RUBRIC"
+assert_contains "installer-v3-upgrade 8b: the original pre-upgrade rubric rule is still there too" \
+    "$RUBRIC_SENTINEL" "$POST_RERUN_RUBRIC"
+assert_eq "installer-v3-upgrade 8b: the shipped rubric is alongside as default.md.new" \
+    "yes" "$(yesno preserved_new_exists "$T" ".claude/rubrics/default.md")"
+RERUN_NEW_CMP_RC=0
+cmp -s "$T/.claude/rubrics/default.md.new" "$PLUGIN_ROOT/.claude/rubrics/default.md" \
+    || RERUN_NEW_CMP_RC=$?
+assert_eq "installer-v3-upgrade 8b: default.md.new still carries the shipped bytes" \
+    "0" "$RERUN_NEW_CMP_RC"
+# A .new must never be treated as a shipped path in its own right.
+assert_eq "installer-v3-upgrade 8b: no default.md.new.new was produced" \
+    "no" "$(yesno test -e "$T/.claude/rubrics/default.md.new.new")"
+assert_eq "installer-v3-upgrade 8b: exactly one .new file under .claude/rubrics/" \
+    "1" "$(find "$T/.claude/rubrics" -name '*.new' -type f 2>/dev/null | grep -c . | tr -d ' \n')"
+# This run HAD something to write, so the probe must decline and the backup
+# must be taken — the complement of 8a, and what 8c mutates.
+assert_not_contains "installer-v3-upgrade 8b: the no-change probe did NOT fire (there was work to do)" \
+    "$SKIP_BACKUP_LINE" "$RECUSTOM_LOG"
+assert_eq "installer-v3-upgrade 8b: a mode-2 .claude-backup-* directory WAS created" \
+    "1" "$(update_backup_count_of "$T")"
+RECUSTOM_BACKUP=$(find "$T" -maxdepth 1 -type d -name '.claude-backup-*' 2>/dev/null | sort | head -1)
+assert_contains "installer-v3-upgrade 8b: that backup holds the operator's rubric as it was" \
+    "$POST_UPGRADE_SENTINEL" "$(cat "$RECUSTOM_BACKUP/rubrics/default.md" 2>/dev/null || echo "")"
+assert_contains "installer-v3-upgrade 8b: the readout names the preserved rubric and its .new" \
+    ".claude/rubrics/default.md.new" "$RECUSTOM_LOG"
+
+# --- 8c. META-TESTs: both 8b assertions can fail ---------------------------
+# Each mutant is a COPY of the shipped installer with ONE sentinel-delimited
+# region changed, run against a fixture of the same shape as 8b: a v4 tree
+# carrying an install-manifest and an operator-customized rubric.
+#
+# THE CONTROL IS THE POINT. A mutation META is only worth its runtime if the
+# fixture would have produced the OTHER outcome under the unmutated installer —
+# otherwise "0 backups" could simply mean "this tree had nothing to write".
+# So one fixture is built, cloned three ways byte-for-byte, and run through the
+# real installer and the two mutants. One variable, three outcomes.
+#
+# The mutants need a source tree to install FROM: install.sh uses its own
+# directory when that directory looks like a plugin checkout, and CLONES FROM
+# THE NETWORK when it does not — which a spec must never do. So extract HEAD
+# once, drop the installer under test into it, and swap the mutants in there.
+# install.sh is not part of the shipped surface, so swapping it perturbs no
+# hash and no verdict.
+META_SRC="$WORK/meta-src"
+mkdir -p "$META_SRC"
+META_ARCHIVE_RC=0
+( set -o pipefail; git -C "$PLUGIN_ROOT" archive HEAD | tar -x -C "$META_SRC" ) \
+    || META_ARCHIVE_RC=$?
+assert_eq "installer-v3-upgrade 8c: git archive HEAD extracts a source tree for the mutants" \
+    "0" "$META_ARCHIVE_RC"
+cp "$PLUGIN_ROOT/install.sh" "$META_SRC/install.sh"
+
+# clone_meta_fixture <name> — a byte-for-byte copy of the base fixture at
+# $WORK/<name>, printed on stdout. `cp -R src/. dst/` and not `src/*`: the
+# whole tree under test is dotfiles (.claude/, .claude-plugin/, .git/), which
+# the glob form silently skips — the same trap the installer's own backups hit.
+clone_meta_fixture() {
+    local dst="$WORK/$1"
+    rm -rf "$dst"
+    mkdir -p "$dst"
+    cp -R "$META_BASE/." "$dst/" 2>/dev/null || true
+    printf '%s' "$dst"
+}
+
+META_BASE="$WORK/meta-base"
+META_BASE_RC=0
+seed_v4_install "$META_BASE" "$META_SRC/install.sh" || META_BASE_RC=$?
+if [ "$META_BASE_RC" -ne 0 ]; then
+    printf '  diagnostic: fresh v4 META fixture install exited %s; tail of log:\n' "$META_BASE_RC"
+    tail -15 "$WORK/meta-base-install-v4.log" 2>/dev/null | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 8c: the fresh v4 META fixture installs cleanly" \
+    "0" "$META_BASE_RC"
+printf '\n- %s: operator rule written on a fresh v4 tree.\n' "$POST_UPGRADE_SENTINEL" \
+    >> "$META_BASE/.claude/rubrics/default.md"
+# Pre-condition: without the customization in place every assertion below
+# would pass for the wrong reason.
+assert_contains "installer-v3-upgrade 8c: the META fixture carries the operator rule before any run" \
+    "$POST_UPGRADE_SENTINEL" "$(cat "$META_BASE/.claude/rubrics/default.md" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 8c: the META fixture carries an install-manifest to classify against" \
+    "yes" "$(yesno test -f "$META_BASE/.claude/install-manifest")"
+
+# CONTROL: the unmutated installer on this exact tree. Backs up AND preserves.
+META_CONTROL=$(clone_meta_fixture "meta-control")
+META_CONTROL_RC=0
+run_update_with "$META_SRC/install.sh" "$META_CONTROL" "$WORK/meta-control.log" \
+    || META_CONTROL_RC=$?
+assert_eq "installer-v3-upgrade 8c CONTROL: the shipped installer completes on the META fixture" \
+    "0" "$META_CONTROL_RC"
+assert_contains "installer-v3-upgrade 8c CONTROL: the shipped installer PRESERVES the operator rule" \
+    "$POST_UPGRADE_SENTINEL" "$(cat "$META_CONTROL/.claude/rubrics/default.md" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 8c CONTROL: the shipped installer TAKES a backup (there was work)" \
+    "1" "$(update_backup_count_of "$META_CONTROL")"
+
+# META (a): force the no-change probe TRUE, anchored inside the NOCHANGE-PROBE
+# sentinels so the mutation cannot drift onto another line.
+META_PROBE="$WORK/install-probe-forced.sh"
+sed '/# NOCHANGE-PROBE-START/,/# NOCHANGE-PROBE-END/ s/UPDATE_SKIP_BACKUP=false/UPDATE_SKIP_BACKUP=true/' \
+    "$PLUGIN_ROOT/install.sh" > "$META_PROBE"
+# One rewritten line shows up as a < / > pair. Zero would mean the sentinels
+# drifted and the mutation silently did nothing — the way a META rots.
+PROBE_DIFF_LINES=$(diff "$PLUGIN_ROOT/install.sh" "$META_PROBE" 2>/dev/null | grep -c '^[<>]' | tr -d ' \n')
+assert_eq "installer-v3-upgrade 8c META-TEST: the probe mutation rewrote exactly one line (one < / > pair)" \
+    "2" "$PROBE_DIFF_LINES"
+assert_eq "installer-v3-upgrade 8c META-TEST: the probe-forced copy is still valid bash" \
+    "yes" "$(yesno bash -n "$META_PROBE")"
+
+META_A=$(clone_meta_fixture "meta-probe-forced")
+cp "$META_PROBE" "$META_SRC/install.sh"
+META_A_RC=0
+run_update_with "$META_SRC/install.sh" "$META_A" "$WORK/meta-probe-rerun.log" || META_A_RC=$?
+assert_eq "installer-v3-upgrade 8c: the probe-forced copy still completes" "0" "$META_A_RC"
+# The CONTROL took a backup on this identical tree; the mutant does not.
+assert_eq "installer-v3-upgrade 8c META-TEST: probe forced TRUE -> 8b's backup assertion FAILS (0 backups, control had 1)" \
+    "0" "$(update_backup_count_of "$META_A")"
+assert_contains "installer-v3-upgrade 8c META-TEST: the forced probe prints the skip line with work still pending" \
+    "$SKIP_BACKUP_LINE" "$(cat "$WORK/meta-probe-rerun.log" 2>/dev/null || echo "")"
+# Scope check: the probe gates the BACKUP and nothing else, so preservation is
+# unaffected. If this flipped too, the mutation would be proving two things at
+# once and neither cleanly.
+assert_contains "installer-v3-upgrade 8c META-TEST: the forced probe does NOT affect preservation" \
+    "$POST_UPGRADE_SENTINEL" "$(cat "$META_A/.claude/rubrics/default.md" 2>/dev/null || echo "")"
+
+# META (b): delete the verdict-driven Update block. The mutant falls back to
+# the pre-v4.1 plain-copy Update — precisely the re-clobber this task fixed —
+# so 8b's preservation assertion must fail against it.
+META_LEGACY="$WORK/install-verdict-stripped.sh"
+sed '/# UPDATE-VERDICT-START/,/# UPDATE-VERDICT-END/d' "$PLUGIN_ROOT/install.sh" > "$META_LEGACY"
+SUT_LINES=$(wc -l < "$PLUGIN_ROOT/install.sh" | tr -d ' ')
+LEGACY_LINES=$(wc -l < "$META_LEGACY" | tr -d ' ')
+assert_eq "installer-v3-upgrade 8c META-TEST: the strip removed the verdict block (fewer lines)" \
+    "yes" "$(yesno test "$LEGACY_LINES" -lt "$SUT_LINES")"
+assert_eq "installer-v3-upgrade 8c META-TEST: the stripped copy is still valid bash" \
+    "yes" "$(yesno bash -n "$META_LEGACY")"
+
+META_B=$(clone_meta_fixture "meta-verdict-stripped")
+cp "$META_LEGACY" "$META_SRC/install.sh"
+META_B_RC=0
+run_update_with "$META_SRC/install.sh" "$META_B" "$WORK/meta-legacy-rerun.log" || META_B_RC=$?
+assert_eq "installer-v3-upgrade 8c: the verdict-stripped copy still completes" "0" "$META_B_RC"
+# The CONTROL preserved the rule on this identical tree; the mutant overwrites
+# it with the shipped rubric. That is the whole U0.4 regression, on the record.
+assert_not_contains "installer-v3-upgrade 8c META-TEST: verdict block stripped -> 8b's preservation assertion FAILS (rubric clobbered)" \
+    "$POST_UPGRADE_SENTINEL" "$(cat "$META_B/.claude/rubrics/default.md" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 8c META-TEST: the stripped copy wrote no .new alongside either" \
+    "no" "$(yesno preserved_new_exists "$META_B" ".claude/rubrics/default.md")"
+# ...and it got there by losing the classification, not by some other route:
+# the line 8a asserts is present must be absent here.
+assert_not_contains "installer-v3-upgrade 8c META-TEST: the stripped copy never classified against the install-manifest" \
+    "classified against .claude/install-manifest" \
+    "$(cat "$WORK/meta-legacy-rerun.log" 2>/dev/null || echo "")"
+# The backup is untouched by this mutation — it is the preservation that moved.
+assert_eq "installer-v3-upgrade 8c META-TEST: the stripped copy still took its backup" \
+    "1" "$(update_backup_count_of "$META_B")"

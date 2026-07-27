@@ -27,6 +27,13 @@
 #              key-wise instead of clobbering them.
 # `--upgrade` forces whichever migration the target's signals point at; it may
 # not be combined with `--mode`.
+#
+# Re-runs (v4.1 / U0.4): a target this installer has already written carries
+# .claude/install-manifest, which records the release and the per-file hashes
+# it installed. Mode 2 (Update) uses it as the classify old-table, so a second
+# run gets the SAME per-file treatment as an upgrade — operator edits preserved
+# with a .new alongside instead of overwritten — and skips its backup entirely
+# when the tree is already at this release with nothing to write.
 
 set -e
 
@@ -71,11 +78,14 @@ Flags:
                    v3 -> v4 upgrade. Cannot be combined with --mode.
   --mode=<1|2|3>   Explicitly choose the install mode for existing .claude/:
                      1 = Backup and install fresh
-                     2 = Update workflow (keeps CLAUDE.md, merges settings)
+                     2 = Update workflow (keeps CLAUDE.md, merges settings;
+                         when the target carries .claude/install-manifest it
+                         also preserves your edits per file, .new alongside,
+                         and skips the backup when nothing changed)
                      3 = Merge only (skip existing files)
                    Useful when running under `curl ... | bash` where the
-                   interactive prompt has no usable stdin. Cannot be combined
-                   with --upgrade.
+                   interactive prompt has no usable stdin.
+                   Cannot be combined with --upgrade.
   -h, --help       Print this message and exit 0.
 
 Curl-pipe forms:
@@ -485,13 +495,19 @@ detect_v2_install() {
 #       sufficient on its own — the installed manifest is the one artifact that
 #       states, on the record, which release wrote the tree.
 #   (b) That version is missing/unreadable/empty AND neither v4 marker is
-#       present (.claude/scripts/review-check.sh, .claude/model-roles). This
-#       covers an install whose manifest was deleted or hand-edited. It reuses
-#       v2 signal 3's "not just an empty stub" guard, so a fresh or empty
-#       target can never take this branch.
+#       present (.claude/scripts/review-check.sh, .claude/model-roles). It
+#       reuses v2 signal 3's "not just an empty stub" guard, so a fresh or
+#       empty target can never take this branch.
 #
-# A v2 layout also satisfies (b) — which is why the caller tries
-# detect_v2_install FIRST and only falls through to here.
+#       What (b) actually covers is a manifest whose VERSION FIELD is
+#       unreadable or hand-edited — the file is there, jq gets nothing out of
+#       it. A DELETED manifest is NOT this branch's case in practice: v2
+#       signal 2 ("hooks.json present, no .claude-plugin/plugin.json") fires
+#       first on any real installed tree, and the caller tries
+#       detect_v2_install FIRST, so a manifest-less install routes to the v2
+#       flow for as long as .claude/hooks/hooks.json survives. (b) sees a
+#       deleted manifest only when hooks.json is gone too. Do not delete v2
+#       signal 2 on the strength of this branch — they cover different trees.
 #
 # Sets V3_DETECTED_VERSION (may be "" under signal b) and V3_SIGNALS.
 detect_v3_install() {
@@ -534,14 +550,26 @@ V3_UPGRADE=false
 V3_SIGNALS=""
 V3_DETECTED_VERSION=""
 V3_BACKUP_DIR=""
-# The classify plan (path/class/verdict TSV) the v3 flow's writes consume.
-# Empty on every other path, which is what makes copy_file's verdict lookup a
-# no-op for fresh installs and the three flat modes.
-V3_PLAN=""
-# The frozen hash table the plan was built against; named in the readout.
-V3_OLD_TABLE=""
-V3_PRESERVED_FILES=()
-V3_REPLACED_FILES=()
+# Verdict-driven writes: copies go through place_by_verdict instead of a flat
+# cp. TRUE for the v3 -> v4 upgrade flow, and (v4.1 / U0.4) for a mode-2 Update
+# whose target carries a usable .claude/install-manifest. False everywhere
+# else, which is what keeps copy_file's verdict lookup a no-op for fresh
+# installs, mode 1 and mode 3.
+VERDICT_MODE=false
+# The classify plan (path/class/verdict TSV) those writes consume. Empty when
+# no plan was built.
+PLAN_FILE=""
+# The hash table the plan was built against; named in the readout. Two
+# sources, one code path: the frozen manifests/v<release>.sha256 table (v3
+# flow) or the target's own install-manifest body (mode-2 Update).
+PLAN_OLD_TABLE=""
+# The install-manifest body of the tree being updated, and the release its
+# header names. Set by install_manifest_old_table; "" when the target has no
+# usable manifest (every pre-v4.1 install).
+INSTALLED_MANIFEST_BODY=""
+INSTALLED_MANIFEST_VERSION=""
+PRESERVED_FILES=()
+REPLACED_FILES=()
 
 if [ "$FORCE_UPGRADE" = true ]; then
     # --upgrade forces A migration; WHICH one is still a detection question.
@@ -576,6 +604,118 @@ elif detect_v3_install; then
     echo -e "  Signals: $V3_SIGNALS"
 fi
 
+# Upgrade-plan helpers (v4.1 / U0.3, generalised in U0.4) ----------------------
+# ONE classify call site, TWO old-table sources:
+#   - manifests/v<release>.sha256, the frozen table for the release a v3.x
+#     target was installed from (the v3 -> v4 upgrade flow); and
+#   - $TARGET/.claude/install-manifest, written by every v4.1+ install, for a
+#     mode-2 Update of a tree this installer already wrote.
+# Both produce the same path/class/verdict plan and both feed the same
+# place_by_verdict walk further down, so the preservation rules cannot drift
+# between an upgrade and a re-run. That single walk is the whole design: the
+# second run on an upgraded tree used to plain-copy every shipped file and
+# re-clobber anything the operator had changed since.
+
+# build_plan <old-table> — classify $TARGET against $SOURCE_DIR using
+# <old-table>, leaving the plan at $PLAN_FILE. Returns non-zero (with
+# PLAN_FILE reset to "") when the generator or the table is missing, or when
+# classify fails; callers decide whether that is fatal. MUST be used as an
+# `if` condition — a non-zero return is a normal outcome, not an error.
+build_plan() {
+    local old="$1"
+    if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$old" ]; then
+        PLAN_FILE=""
+        return 1
+    fi
+    ensure_work_dir
+    local out="$INSTALL_WORK_DIR/upgrade-plan.tsv"
+    if ! bash "$MANIFEST_TOOL" classify \
+            --target "$TARGET" --source "$SOURCE_DIR" --old-table "$old" \
+            > "$out"; then
+        PLAN_FILE=""
+        return 1
+    fi
+    PLAN_FILE="$out"
+    PLAN_OLD_TABLE="$old"
+    return 0
+}
+
+# install_manifest_old_table — 0 when $TARGET/.claude/install-manifest is one
+# of ours AND usable as a classify old-table. On success sets
+# INSTALLED_MANIFEST_BODY (a temp copy of the manifest minus its header line)
+# and INSTALLED_MANIFEST_VERSION (the release the header names).
+#
+# Globals rather than stdout on purpose: a `$(...)` form would run the whole
+# function in a SUBSHELL and both assignments would evaporate (LESSONS.md,
+# 2026-06-12 — the same trap as `die` inside a command substitution).
+#
+# Every failure arm is a legitimate tree, not an error: no manifest at all
+# (every pre-v4.1 install), a foreign header, or a body with no valid row.
+# The row check matters — a header-only or truncated file would otherwise
+# classify every shipped file as "not in the old table" and turn a routine
+# Update into a wall of .new litter.
+install_manifest_old_table() {
+    local mf="$TARGET/.claude/install-manifest"
+    [ -f "$mf" ] || return 1
+    local header
+    header=$(head -1 "$mf" 2>/dev/null || echo "")
+    case "$header" in
+        "# claude-workflow-plugin "*) ;;
+        *) return 1 ;;
+    esac
+    ensure_work_dir
+    local body="$INSTALL_WORK_DIR/installed-manifest.tsv"
+    tail -n +2 "$mf" > "$body" 2>/dev/null || return 1
+    # The generator's own row grammar: <path><TAB><class><TAB><64 lowercase
+    # hex>. No {64} interval in the regex — BSD awk's support for those is not
+    # something an installer should bet on; length() is portable everywhere.
+    local rows
+    rows=$(awk -F'\t' '
+        $1 != "" &&
+        ($2 == "workflow" || $2 == "operator" || $2 == "merged") &&
+        $3 ~ /^[0-9a-f]+$/ && length($3) == 64 { n++ }
+        END { printf "%d", n + 0 }' "$body")
+    [ "${rows:-0}" -ge 1 ] || return 1
+    INSTALLED_MANIFEST_BODY="$body"
+    INSTALLED_MANIFEST_VERSION="${header#\# claude-workflow-plugin }"
+    return 0
+}
+
+# plan_row_count — rows in the plan; 0 when there is none. An EMPTY plan must
+# never read as "nothing to do": with no rows, every path falls through
+# place_by_verdict's unknown-verdict arm and gets COPIED, so skipping the
+# backup on an empty plan would clobber the tree without a snapshot. The probe
+# requires at least one row for exactly that reason — the same "degrade to
+# nothing is known, never to nothing to do" rule workflow-manifest.sh applies
+# to an empty old table.
+plan_row_count() {
+    if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
+        printf '0'
+        return 0
+    fi
+    awk 'END { printf "%d", NR + 0 }' "$PLAN_FILE"
+}
+
+# plan_write_count — how many plan rows would put bytes on disk: copy-new,
+# replace-stock, replace-custom (all three write the shipped file) and
+# preserve-custom (writes a <path>.new sidecar). skip-current writes nothing;
+# merge is reconciled by the two jq merges, which are idempotent and run on
+# every Update regardless. Prints 0 when there is no plan — every caller must
+# therefore check VERDICT_MODE first, or "no plan" would read as "no work".
+#
+# Standalone awk rather than four plan_count calls: this runs inside the mode
+# block, before plan_count is defined further down.
+plan_write_count() {
+    if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
+        printf '0'
+        return 0
+    fi
+    awk -F'\t' '
+        $3 == "copy-new" || $3 == "replace-stock" ||
+        $3 == "replace-custom" || $3 == "preserve-custom" { n++ }
+        END { printf "%d", n + 0 }' "$PLAN_FILE"
+}
+
 # Mode selection (interactive) -------------------------------------------------
 BACKUP_DIR="$TARGET/.claude-backup-$(date +%Y%m%d-%H%M%S)"
 MERGE_MODE=false
@@ -608,7 +748,7 @@ elif [ "$V3_UPGRADE" = true ]; then
     #   1. BACK UP. Nothing below is reversible without it.
     #   2. CLASSIFY. `classify` hashes the target, so it has to run before the
     #      first write.
-    #   3. Copy loops consume the plan through copy_file -> v3_place_file.
+    #   3. Copy loops consume the plan through copy_file -> place_by_verdict.
     V3_BACKUP_DIR="$TARGET/.claude-v3-backup-$(date +%Y%m%d-%H%M%S)"
     echo -e "${YELLOW}Backing up the installed plugin to $V3_BACKUP_DIR${NC}"
     mkdir -p "$V3_BACKUP_DIR"
@@ -646,33 +786,30 @@ elif [ "$V3_UPGRADE" = true ]; then
     # v3.5.0 is the default (the only release with a frozen table today); a
     # future manifests/v<version>.sha256 is picked up automatically, which is
     # how this flow stays honest for 3.2 / 3.3 / 4.x targets later.
-    V3_OLD_TABLE="$SOURCE_DIR/manifests/v3.5.0.sha256"
+    V3_FROZEN_TABLE="$SOURCE_DIR/manifests/v3.5.0.sha256"
     if [ -n "$V3_DETECTED_VERSION" ] && [ -f "$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256" ]; then
-        V3_OLD_TABLE="$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256"
+        V3_FROZEN_TABLE="$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256"
     fi
 
-    if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$V3_OLD_TABLE" ]; then
+    if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$V3_FROZEN_TABLE" ]; then
         echo -e "${RED}The upgrade flow needs both .claude/scripts/workflow-manifest.sh and a frozen hash table.${NC}"
         echo "  generator: $MANIFEST_TOOL"
-        echo "  old table: $V3_OLD_TABLE"
+        echo "  old table: $V3_FROZEN_TABLE"
         echo "This source tree has neither, so customized files cannot be told from"
         echo "stock ones. Your backup is at $V3_BACKUP_DIR."
         echo "Rerun with --mode=2 for the flat non-destructive update instead."
         exit 1
     fi
 
-    ensure_work_dir
-    V3_PLAN="$INSTALL_WORK_DIR/upgrade-plan.tsv"
-    echo -e "${YELLOW}Classifying the installed tree against $(basename "$V3_OLD_TABLE")...${NC}"
-    if ! bash "$MANIFEST_TOOL" classify \
-            --target "$TARGET" --source "$SOURCE_DIR" --old-table "$V3_OLD_TABLE" \
-            > "$V3_PLAN"; then
+    echo -e "${YELLOW}Classifying the installed tree against $(basename "$V3_FROZEN_TABLE")...${NC}"
+    if ! build_plan "$V3_FROZEN_TABLE"; then
         echo -e "${RED}Could not classify the installed tree; refusing to write a partial upgrade.${NC}"
         echo "Your backup is at $V3_BACKUP_DIR. Rerun with --mode=2 to take the flat"
         echo "non-destructive update path instead."
         exit 1
     fi
-    echo -e "${GREEN}OK${NC} upgrade plan: $(wc -l < "$V3_PLAN" | tr -d ' ') file(s) classified"
+    VERDICT_MODE=true
+    echo -e "${GREEN}OK${NC} upgrade plan: $(wc -l < "$PLAN_FILE" | tr -d ' ') file(s) classified"
 elif [ -d "$TARGET/.claude" ]; then
     echo -e "${YELLOW}Existing .claude/ directory found.${NC}"
 
@@ -719,6 +856,11 @@ elif [ -d "$TARGET/.claude" ]; then
 
         case $INSTALL_MODE in
             1)
+                # Mode 1 is the explicit "back up and install fresh" choice, so
+                # its backup is the POINT of the mode rather than a safety net
+                # for whatever this run happens to write. It therefore keeps its
+                # unconditional backup and its flat overwrite; the no-change
+                # probe below is deliberately mode-2 only (v4.1 / U0.4).
                 echo -e "${YELLOW}Creating backup at $BACKUP_DIR${NC}"
                 mkdir -p "$BACKUP_DIR"
                 # Dotfile-inclusive form; see the v2 backup above for why.
@@ -728,11 +870,75 @@ elif [ -d "$TARGET/.claude" ]; then
                 ;;
             2)
                 echo -e "${YELLOW}Update mode: updating workflow, preserving CLAUDE.md${NC}"
-                mkdir -p "$BACKUP_DIR"
-                # Dotfile-inclusive form; see the v2 backup above for why.
-                cp -R "$TARGET/.claude/." "$BACKUP_DIR/" 2>/dev/null || true
-                echo -e "${GREEN}OK${NC} Backup created"
                 UPDATE_MODE=true
+
+                # Verdict-driven Update (v4.1 / U0.4) --------------------------
+                # Through v4.0 this branch plain-copied every shipped file, so
+                # the SECOND run on a tree the installer had already written
+                # silently overwrote anything the operator changed in between —
+                # the very clobber the v3 -> v4 flow exists to prevent, one run
+                # later. $TARGET/.claude/install-manifest names the release that
+                # wrote the tree and carries its per-file hashes, which is
+                # exactly the old table classify needs, so the Update reuses the
+                # upgrade flow's verdict walk rather than a second copy of it.
+                #
+                # No usable manifest (every pre-v4.1 install) -> the legacy
+                # plain-copy behaviour, unchanged. The note says so, and points
+                # out that this run writes the manifest the NEXT one will use.
+                # Classification runs BEFORE the backup because it only reads,
+                # and the probe below needs its verdicts to decide.
+                # UPDATE-VERDICT-START (load-bearing; the L2 META-TEST DELETES
+                # this block to prove the preservation comes from here — the
+                # stripped copy falls back to the pre-v4.1 plain-copy Update and
+                # re-clobbers the operator's file, which is the whole regression.
+                # Keep both sentinels, and keep deletion fail-safe: without this
+                # block VERDICT_MODE stays false and the legacy path runs.)
+                if install_manifest_old_table; then
+                    if build_plan "$INSTALLED_MANIFEST_BODY"; then
+                        VERDICT_MODE=true
+                        echo -e "${GREEN}OK${NC} classified against .claude/install-manifest (v$INSTALLED_MANIFEST_VERSION): $(wc -l < "$PLAN_FILE" | tr -d ' ') file(s)"
+                    else
+                        echo -e "${YELLOW}note${NC} could not classify against .claude/install-manifest; updating with plain copies (your tree is backed up below)"
+                    fi
+                else
+                    echo -e "${YELLOW}note${NC} no usable .claude/install-manifest in the target; updating with plain copies. This run writes one, so the next update preserves your per-file edits."
+                fi
+                # UPDATE-VERDICT-END
+
+                # No-change probe. Re-running the SAME release over an unchanged
+                # tree writes nothing, and a timestamped backup dir per re-run is
+                # noise the operator has to clean up by hand. Skip the backup
+                # only when BOTH hold: the manifest header names the release we
+                # are installing, and the plan carries zero write verdicts. The
+                # merges and the install-manifest rewrite still run either way —
+                # both are idempotent.
+                #
+                # A preserved customization (preserve-custom) counts as a write,
+                # so a tree with one still gets its backup: "wrote nothing" has
+                # to mean nothing, not almost nothing.
+                # NOCHANGE-PROBE-START (load-bearing; the L2 META-TEST rewrites
+                # the initialiser inside these sentinels to force the probe TRUE
+                # and asserts the backup assertion flips. Keep both sentinels,
+                # and keep the fail-safe default false: deleting this block must
+                # leave the backup unconditional, never the other way round.)
+                UPDATE_SKIP_BACKUP=false
+                if [ "$VERDICT_MODE" = true ] &&
+                   [ -n "$INSTALLED_MANIFEST_VERSION" ] &&
+                   [ "$INSTALLED_MANIFEST_VERSION" = "$SOURCE_VERSION_LABEL" ] &&
+                   [ "$(plan_row_count)" -ge 1 ] &&
+                   [ "$(plan_write_count)" = "0" ]; then
+                    UPDATE_SKIP_BACKUP=true
+                fi
+                # NOCHANGE-PROBE-END
+
+                if [ "$UPDATE_SKIP_BACKUP" = true ]; then
+                    echo -e "${CYAN}note${NC} already at $SOURCE_VERSION_LABEL; no file changes — skipping backup"
+                else
+                    mkdir -p "$BACKUP_DIR"
+                    # Dotfile-inclusive form; see the v2 backup above for why.
+                    cp -R "$TARGET/.claude/." "$BACKUP_DIR/" 2>/dev/null || true
+                    echo -e "${GREEN}OK${NC} Backup created"
+                fi
                 ;;
             3)
                 echo -e "${YELLOW}Merge mode: will skip existing files${NC}"
@@ -758,33 +964,37 @@ mkdir -p "$TARGET/.claude/rubrics"
 mkdir -p "$TARGET/.claude/tests/mutation"
 mkdir -p "$TARGET/.claude-plugin"
 
-# Verdict lookup for the v3 upgrade flow (v4.1 / U0.3) ------------------------
-# v3_verdict <path-relative-to-target> — the classify verdict, or "" when the
-# path is not in the plan (no plan at all on non-upgrade paths).
+# Verdict lookup for the verdict-driven flows (v4.1 / U0.3, U0.4) -------------
+# plan_verdict <path-relative-to-target> — the classify verdict, or "" when the
+# path is not in the plan (no plan at all on non-verdict paths).
 #
 # awk with a field-1 EQUALITY test rather than grep: shipped paths are full of
 # regex metacharacters (`.claude/...`), and awk exits 0 when nothing matched,
 # so this needs no `|| true` to survive `set -e`. No associative arrays — the
 # installer has to run under macOS's bash 3.2.
-v3_verdict() {
-    if [ -z "$V3_PLAN" ] || [ ! -f "$V3_PLAN" ]; then
+plan_verdict() {
+    if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
         return 0
     fi
-    awk -F'\t' -v p="$1" '$1 == p { print $3; exit }' "$V3_PLAN"
+    awk -F'\t' -v p="$1" '$1 == p { print $3; exit }' "$PLAN_FILE"
 }
 
-# v3_count <verdict> — how many plan rows carry that verdict. Counted from the
+# plan_count <verdict> — how many plan rows carry that verdict. Counted from the
 # plan (not from what the copy loops did) so the readout reports the actual
 # classification, including the two rsync'd directory trees.
-v3_count() {
-    if [ -z "$V3_PLAN" ] || [ ! -f "$V3_PLAN" ]; then
+plan_count() {
+    if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
         printf '0'
         return 0
     fi
-    awk -F'\t' -v v="$1" '$3 == v { n++ } END { printf "%d", n + 0 }' "$V3_PLAN"
+    awk -F'\t' -v v="$1" '$3 == v { n++ } END { printf "%d", n + 0 }' "$PLAN_FILE"
 }
 
-# v3_place_file <src> <dst> — verdict-driven placement, v3 upgrade flow only.
+# place_by_verdict <src> <dst> — verdict-driven placement. Reached from
+# copy_file whenever VERDICT_MODE is on: the v3 -> v4 upgrade flow, and a
+# mode-2 Update classified against the target's own install-manifest. ONE walk
+# for both, so an upgrade and a re-run can never disagree about what is safe to
+# overwrite.
 #
 #   copy-new / replace-stock  copy (new file, or untouched stock)
 #   skip-current              nothing to do (target already byte-identical)
@@ -798,12 +1008,12 @@ v3_count() {
 #   "" (not in the plan)      copy, with a note: the manifest is supposed to
 #                             enumerate everything the copy loops touch, so an
 #                             unlisted path means the two have drifted
-v3_place_file() {
+place_by_verdict() {
     local src="$1"
     local dst="$2"
     local rel verdict
     rel="${dst#"$TARGET"/}"
-    verdict=$(v3_verdict "$rel")
+    verdict=$(plan_verdict "$rel")
 
     # plugin.json is the version marker the NEXT upgrade's detection reads, so
     # it is copied on every verdict. A customized one is still reported (the
@@ -811,7 +1021,7 @@ v3_place_file() {
     if [ "$rel" = ".claude-plugin/plugin.json" ]; then
         cp "$src" "$dst"
         if [ "$verdict" = "replace-custom" ]; then
-            V3_REPLACED_FILES+=("$rel")
+            REPLACED_FILES+=("$rel")
             echo -e "${YELLOW}OK${NC}   $rel (replaced; yours is in the backup)"
         else
             echo -e "${GREEN}OK${NC}   $rel"
@@ -825,12 +1035,12 @@ v3_place_file() {
             ;;
         preserve-custom)
             cp "$src" "$dst.new"
-            V3_PRESERVED_FILES+=("$rel")
+            PRESERVED_FILES+=("$rel")
             echo -e "${YELLOW}keep${NC} $rel (yours; shipped version written to $rel.new)"
             ;;
         replace-custom)
             cp "$src" "$dst"
-            V3_REPLACED_FILES+=("$rel")
+            REPLACED_FILES+=("$rel")
             echo -e "${YELLOW}OK${NC}   $rel (replaced; yours is in the backup)"
             ;;
         copy-new|replace-stock|merge)
@@ -857,12 +1067,14 @@ copy_file() {
         echo -e "${YELLOW}skip${NC} $(basename "$dst") (exists)"
         return 0
     fi
-    # The v3 upgrade flow decides per file. Routing it through copy_file rather
-    # than rewriting each copy loop keeps ONE decision point: every loop below
-    # (agents, scripts, commands, rubrics, single config files) gets the
-    # verdict treatment for free, and no future loop can forget it.
-    if [ "$V3_UPGRADE" = true ]; then
-        v3_place_file "$src" "$dst"
+    # The verdict-driven flows decide per file. Routing that through copy_file
+    # rather than rewriting each copy loop keeps ONE decision point: every loop
+    # below (agents, scripts, commands, rubrics, single config files) gets the
+    # verdict treatment for free, and no future loop can forget it. Gating on
+    # VERDICT_MODE rather than V3_UPGRADE is what lets the mode-2 Update reuse
+    # the walk unchanged (v4.1 / U0.4).
+    if [ "$VERDICT_MODE" = true ]; then
+        place_by_verdict "$src" "$dst"
         return 0
     fi
     cp "$src" "$dst"
@@ -1326,7 +1538,7 @@ v3_write_report() {
         from_label="an unidentified v3.x install"
     fi
     local total_classified
-    total_classified=$(wc -l < "$V3_PLAN" | tr -d ' ')
+    total_classified=$(wc -l < "$PLAN_FILE" | tr -d ' ')
     local f
 
     cat <<REPORT
@@ -1336,13 +1548,13 @@ Target:           $TARGET
 Backup:           $V3_BACKUP_DIR
 Install manifest: $TARGET/.claude/install-manifest
 
-Files by upgrade verdict (workflow-manifest.sh classify, hashed against $(basename "$V3_OLD_TABLE")):
-  copied (new)           $(v3_count copy-new)
-  replaced (stock)       $(v3_count replace-stock)
-  already current        $(v3_count skip-current)
-  replaced (customized)  $(v3_count replace-custom)
-  preserved (yours)      $(v3_count preserve-custom)
-  merged key-wise        $(v3_count merge)
+Files by upgrade verdict (workflow-manifest.sh classify, hashed against $(basename "$PLAN_OLD_TABLE")):
+  copied (new)           $(plan_count copy-new)
+  replaced (stock)       $(plan_count replace-stock)
+  already current        $(plan_count skip-current)
+  replaced (customized)  $(plan_count replace-custom)
+  preserved (yours)      $(plan_count preserve-custom)
+  merged key-wise        $(plan_count merge)
   ---------------------- ---
   total classified       $total_classified
 
@@ -1364,21 +1576,21 @@ REPORT
     fi
 
     printf '\nPreserved your version, shipped version written alongside as *.new (%s):\n' \
-        "${#V3_PRESERVED_FILES[@]}"
-    if [ "${#V3_PRESERVED_FILES[@]}" -eq 0 ]; then
+        "${#PRESERVED_FILES[@]}"
+    if [ "${#PRESERVED_FILES[@]}" -eq 0 ]; then
         printf '  (none — no operator-owned file differed from the shipped one)\n'
     else
-        for f in "${V3_PRESERVED_FILES[@]}"; do
+        for f in "${PRESERVED_FILES[@]}"; do
             printf '  %s\n      -> shipped version at %s.new\n' "$f" "$f"
         done
     fi
 
     printf '\nReplaced, and yours was customized (your version is in the backup) (%s):\n' \
-        "${#V3_REPLACED_FILES[@]}"
-    if [ "${#V3_REPLACED_FILES[@]}" -eq 0 ]; then
+        "${#REPLACED_FILES[@]}"
+    if [ "${#REPLACED_FILES[@]}" -eq 0 ]; then
         printf '  (none)\n'
     else
-        for f in "${V3_REPLACED_FILES[@]}"; do
+        for f in "${REPLACED_FILES[@]}"; do
             printf '  %s\n' "$f"
         done
     fi
@@ -1432,6 +1644,38 @@ else
     fi
     if [ -d "$BACKUP_DIR" ]; then
         echo -e "Backup at:    ${BLUE}$BACKUP_DIR${NC}"
+    fi
+
+    # Verdict-driven Update summary (v4.1 / U0.4). Only a mode-2 Update with a
+    # usable install-manifest reaches this: the v3 flow prints its own full
+    # report in the branch above, and every other path has no plan to
+    # summarise. Deliberately short — the per-file `keep` / `OK` lines are
+    # already in the scrollback; what an operator cannot reconstruct from those
+    # is the count and the list of .new files still waiting for a decision.
+    if [ "$VERDICT_MODE" = true ]; then
+        echo ""
+        echo -e "${CYAN}Classified against .claude/install-manifest (v$INSTALLED_MANIFEST_VERSION):${NC}"
+        echo "  already current        $(plan_count skip-current)"
+        echo "  copied (new)           $(plan_count copy-new)"
+        echo "  replaced (stock)       $(plan_count replace-stock)"
+        echo "  replaced (customized)  $(plan_count replace-custom)"
+        echo "  preserved (yours)      $(plan_count preserve-custom)"
+        echo "  merged key-wise        $(plan_count merge)"
+        if [ "${#PRESERVED_FILES[@]}" -gt 0 ]; then
+            echo ""
+            echo "Your version was kept; the shipped version is alongside as *.new:"
+            for preserved_file in "${PRESERVED_FILES[@]}"; do
+                echo "  $preserved_file  ->  $preserved_file.new"
+            done
+            echo "Review each *.new, merge what you want, then delete it."
+        fi
+        if [ "${#REPLACED_FILES[@]}" -gt 0 ]; then
+            echo ""
+            echo "Replaced, and yours was customized (your version is in the backup):"
+            for replaced_file in "${REPLACED_FILES[@]}"; do
+                echo "  $replaced_file"
+            done
+        fi
     fi
 
     echo ""
