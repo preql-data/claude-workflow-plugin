@@ -415,21 +415,26 @@ That is the correct direction — a stale approval must not release — but it i
 user-visible friction, so **ship every denylist addition in ONE landing**: one
 landing costs in-flight cycles exactly one migration.
 
-Recovery for a cycle caught mid-flight:
+Recovery for a cycle caught mid-flight is exactly what the block reason prints —
+no extra step:
 
 ```bash
-bd label remove <task-id> qa-approved     # retire the stale approval FIRST
 bash .claude/scripts/qa-gate.sh enter <task-id>
 bash .claude/scripts/impact-report.sh <task-id>
 bash .claude/scripts/qa-gate.sh approve <task-id> '<approval summary>'
 ```
 
-The `bd label remove` step is **required** and is not yet printed in the
-gate's own block reason: `enter` does not clear `qa-approved`, and `approve`
-short-circuits as an "idempotent no-op" while that label is present, so
-`enter` + `approve` alone writes no new record and the gate stays blocked.
-(Behaviour pinned by `.claude/tests/component/specs/denylist-shared.sh`
-section C.)
+Do **not** remove the `qa-approved` label first. Until v4.1 that removal was
+mandatory and undocumented in the block reason (`enter` does not clear
+`qa-approved`, and `approve` short-circuited as an "idempotent no-op" while it
+was present, so the printed recipe wrote no new record and the gate stayed
+blocked — claude-workflow-plugin-gz3). `approve`'s idempotency is now hash-aware,
+so a stale label no longer stops it; see
+[Approve idempotency is hash-aware](#approve-idempotency-is-hash-aware).
+Re-review the change set before re-approving: the guard removes a dead end, it
+does not waive a check. (Pinned by
+`.claude/tests/component/specs/denylist-shared.sh` C4/C5, which drive the
+commands extracted from the block text.)
 
 ### Tracking File Location
 
@@ -519,18 +524,17 @@ fi
 #     ahead of that guard re-enters the Stop hook forever).
 if [ -z "$WORKFLOW_DENYLIST_REGEX" ]; then emit_block "..."; fi
 
-# 2. Check for tracked changes (denylist-filtered)
-if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
-    CODE_CHANGES_DETECTED=true
-fi
+# 2. Check for tracked changes. `reviewable_changes` is the ONE definition of
+#    "what counts as a change right now": the denylist-filtered tracker, or —
+#    only when that yields nothing — 2b's git fallback. Step 6a re-reads it.
+while IFS= read -r f; do CODE_CHANGES_DETECTED=true; done < <(reviewable_changes)
 
-# 2b. Fallback: git status MINUS the gate baseline, so only entries NEW
-#     since the baseline count. Requires `git rev-parse --git-dir`, not
-#     `-d .git` (linked worktrees). See "The gate baseline".
-if [ "$CODE_CHANGES_DETECTED" = false ] && has_git_repo; then
-    comm -23 <(git status --porcelain | LC_ALL=C sort) \
-             <(gate_baseline_entries | LC_ALL=C sort)
-fi
+# 2b. Fallback (inside reviewable_changes): git status MINUS the gate baseline,
+#     so only entries NEW since the baseline count. Requires
+#     `git rev-parse --git-dir`, not `-d .git` (linked worktrees). See "The gate
+#     baseline".
+#     comm -23 <(git status --porcelain | LC_ALL=C sort) \
+#              <(gate_baseline_entries | LC_ALL=C sort)
 
 # 3. If no changes, allow
 if [ "$CODE_CHANGES_DETECTED" = false ]; then
@@ -559,9 +563,13 @@ fi
 # (verify-before-stop.sh:20-22); a comment that merely says "QA APPROVED"
 # does NOT release the gate, and `.qa-tracking/approved` is never read.
 
-# 6b. Label present but no record matches this checkout's hash? Before
-#     blocking, try to bind the approval to another WORKTREE of the same repo
-#     (read-only, bounded, fail-closed). See "Cross-worktree approval
+# 6a. Label present but no record matches? Re-read reviewable_changes from
+#     FRESH state first: if there is nothing left to review, an `approve` landed
+#     while this hook was running and the block would be transient noise.
+#     See "The vanished-change-set release" below.
+
+# 6b. Still blocking? Try to bind the approval to another WORKTREE of the same
+#     repo (read-only, bounded, fail-closed). See "Cross-worktree approval
 #     resolution" below.
 
 # 7. If not approved, BLOCK
@@ -664,6 +672,89 @@ recorded *after* an approval — a second review round, a re-opened issue — an
 the approval record, written once, cannot know about them. Both sides fail
 CLOSED: a missing or unrunnable `review-check.sh` refuses/blocks rather than
 waving the change through.
+
+### Approve idempotency is hash-aware
+
+`qa-gate.sh approve` used to no-op whenever the `qa-approved` label was already
+present. That made the LABEL mean "already approved" on the writer side while the
+Stop hook had moved to a RECORD bound to the current change-set hash — and the
+disagreement deadlocked recovery. A `LABEL_WITHOUT_RECORD` block prints
+`enter -> impact-report -> approve`; `enter` does not clear `qa-approved`; so
+`approve` short-circuited, wrote no fresh record, and the same block fired again
+forever. The only escape was an undocumented `bd label remove <tid> qa-approved`
+(claude-workflow-plugin-gz3).
+
+Since v4.1 the guard compares hashes:
+
+| State | Behaviour |
+| --- | --- |
+| label set **and** a `QA-GATE APPROVED` record binds the change set this approve would bind | success **no-op** (`observations` say `idempotent no-op`), no second record |
+| label set, no record binds it (post-approval edit, denylist hash migration, forged/stale label) | **proceeds**: re-runs the impact-freshness refusal, the independent-review refusal and the rubric snapshot, then writes a FRESH bound record (`observations` say `stale-label re-bind`) |
+| label set, change set moved, impact report NOT regenerated | still **refused** (exit 2, `impact_report_stale`) — the guard removes a dead end, it does not skip a check |
+
+"The change set this approve would bind" is the live `--hash-only` recompute,
+except when `changed-files.txt` is empty — the state a previous `approve` leaves
+behind, since it truncates the tracker. There the persisted
+`impact-report-<tid>.json` is the only surviving witness of the approved change
+set, so that is what the comparison reads. This is why a plain double `approve`
+is still a no-op rather than a staleness refusal, and it is the same
+read-the-persisted-record rule the cross-worktree resolution follows. Both
+envelopes name which of the two references they compared against, so the
+comparison is never invisible.
+
+**Known residual of the empty-tracker arm** (reproduced and pinned as section H
+of the spec below): if the tracker is empty *and* real un-baselined dirt exists —
+work written by a helper rather than the Edit tool, which never reaches
+`changed-files.txt` — the Stop hook blocks on the git half of its predicate while
+the persisted report still witnesses the *previous* approval, so a bare `approve`
+no-ops and the block stands. Run the remediation the block prints, all three
+lines of it: step 2 (`impact-report.sh`) re-persists the report, after which no
+record binds it and `approve` proceeds. Closing this inside `approve` would mean a
+second copy of the Stop hook's baseline-relative git walk, and that walk lives in
+exactly one place (`reviewable_changes`) on purpose.
+
+The contract change is reflected in the `bd_qa_approve` MCP tool description and
+pinned by `.claude/tests/component/specs/approve-idempotency.sh` (sections A-C
+and H, plus a META that reverts the guard and shows the deadlock return).
+
+### The vanished-change-set release (`VANISHED-CHANGE-SET`)
+
+The Stop hook reads the change set **twice**: once at its detection stage, and
+again — after the test/lint pass — when it recomputes the hash to match against
+the approval record. `qa-gate.sh approve` runs in a different process (the QA
+subagent) and finishes by truncating `changed-files.txt` and refreshing the gate
+baseline. A Stop whose two reads straddle that finalization recomputes the
+**empty-list** hash, matches no record, and prints the forged-label block for an
+approval that landed seconds earlier. Observed live during the v4.1 upgrade wave
+(recorded on `claude-workflow-plugin-gz3`) and since reproduced deterministically
+at a drive point; the empty-set hash `e3b0c44298fc…` appearing as the *current*
+hash in a block reason is the fingerprint.
+
+So before emitting that block the hook re-derives `reviewable_changes` from fresh
+state and releases when it is empty — the same decision the detection stage makes
+on the next fire. It grants nothing new: "nothing to review -> allow" is already
+the detection stage's rule, reached before any label is consulted. In particular
+it does **not** release when the tracker is empty but real un-baselined dirt
+exists (work written by a helper rather than the Edit tool never reaches the
+tracker), because the git half of `reviewable_changes` still reports it.
+
+Three ordering rules in `qa-gate.sh approve` support this (see its
+`APPROVE-COMMIT ORDER` note; all three are pinned by
+`specs/approve-idempotency.sh` section E — the two reorderings functionally at
+their drive points, the source order structurally):
+
+- the **record** is written before the `qa-approved` **label** (changed in v4.1),
+  so a concurrent Stop never sees the label without a record;
+- the gate **baseline** is refreshed before the **tracker** is truncated
+  (unchanged since 0wk.2, but now load-bearing), so an empty tracker always pairs
+  with a fresh baseline — flipping those two lines re-opens the race;
+- and `current-task` is cleared **after** the truncation (changed in v4.1), so a
+  mid-approve Stop cannot block with "No active Beads task detected".
+
+The tracking-state finalization deliberately stays **after** every step that can
+roll back: a rollback that had already truncated the tracker would leave the
+session's work invisible to the gate, i.e. fail OPEN on the next "no changes"
+fast path.
 
 ### Cross-worktree approval resolution (`WORKTREE-RESOLUTION`)
 

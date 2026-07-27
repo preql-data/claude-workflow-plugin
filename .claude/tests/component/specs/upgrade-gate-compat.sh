@@ -622,15 +622,22 @@ assert_contains "upgrade-gate 3: ...which steers to qa-gate.sh approve, not a ba
 # Section 4: the legitimate v4 path releases the SAME task, and the record it
 #            writes carries both v4 tokens.
 #
-# THE ONE CLEANUP STEP, AND WHY IT IS HERE: approve is idempotent on the LABEL
-# ("qa-approved already set; idempotent no-op"), so while section 3's forged
-# label is present a legitimate approve writes no record and the task stays
-# blocked forever. Removing the forged label is therefore the first move of any
-# real recovery from that block, and it is spelled out rather than hidden in a
-# helper because it is the only reason this section can reuse section 3's row.
+# THE ONE CLEANUP STEP, AND WHY IT IS HERE: it puts section 3's row back into the
+# not-approved state, so what this section measures is the LEGITIMATE v4 path from
+# a clean start rather than a recovery-from-forgery. Historically it was also
+# mandatory — approve used to no-op on the mere presence of qa-approved
+# ("qa-approved already set; idempotent no-op"), so a legitimate approve under
+# section 3's forged label wrote no record and the task stayed blocked forever.
+# Since claude-workflow-plugin-gz3 approve's idempotency is HASH-AWARE (it no-ops
+# only when a record already binds the current change set), so recovery THROUGH a
+# stale/forged label now works too — that path is pinned in
+# specs/approve-idempotency.sh (section A) and specs/denylist-shared.sh (C4). The
+# removal stays here on purpose: this section's subject is the upgraded tree's
+# happy path, and it is spelled out rather than hidden in a helper because it is
+# the only reason this section can reuse section 3's row.
 # ===========================================================================
 bdt label remove "$TID_OPEN" qa-approved >/dev/null 2>&1
-assert_eq "upgrade-gate 4: precondition - the forged label is cleared (approve no-ops while it is set)" \
+assert_eq "upgrade-gate 4: precondition - the forged label is cleared (the row is back to entered)" \
     "entered" "$(bash "$QG" status "$TID_OPEN" 2>/dev/null | jq -r '.status // empty' 2>/dev/null || echo "")"
 
 APPROVE_OUT=$(gate_cycle "$TID_OPEN" "$WORK_PATH" "reviewed after the upgrade; ships safely")

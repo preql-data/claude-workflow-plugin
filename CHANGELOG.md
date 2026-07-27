@@ -53,15 +53,19 @@ migration below.
 > are a hash migration"):
 >
 > ```bash
-> bd label remove <task-id> qa-approved     # retire the stale approval
 > bash .claude/scripts/qa-gate.sh enter <task-id>
 > bash .claude/scripts/impact-report.sh <task-id>
 > bash .claude/scripts/qa-gate.sh approve <task-id> '<summary>'
 > ```
 >
-> The `bd label remove` step is required: `enter` does not clear `qa-approved`,
-> and `approve` short-circuits as an idempotent no-op while that label is
-> present. (Pinned by `denylist-shared.sh` section C.)
+> That is the whole recipe — the same three commands the block reason prints, and
+> no `bd label remove` step. On 4.0.0 exactly, retiring the stale `qa-approved`
+> label first WAS required, because `enter` does not clear it and `approve`
+> short-circuited on its mere presence; `approve`'s idempotency is now hash-aware,
+> so a stale label no longer stops it (see `docs/HOOKS.md`, "Approve idempotency
+> is hash-aware", and `claude-workflow-plugin-gz3`). Both routes are pinned by
+> `denylist-shared.sh` section C: C4 drives the commands extracted from the block
+> reason, C5 keeps the explicit-label-removal variant working.
 
 ### Added
 

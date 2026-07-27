@@ -342,6 +342,66 @@ gate_baseline_entries() {
     return 0
 }
 
+# reviewable_changes — the CURRENT reviewable change set, one path per line.
+# Empty output means "there is nothing to review right now".
+#
+# THE RULE, in ONE place (gz3 / v4.1 U1). Two callers read it:
+#   1. the detection stage in the main flow, which also derives
+#      ALL_CHANGED_FILES / DOC_ONLY / CODE_CHANGES_DETECTED from it;
+#   2. the vanished-change-set re-read on the LABEL_WITHOUT_RECORD path, which
+#      only needs to know whether the set is empty.
+# It is one function because a Stop that answered "there ARE changes" from one
+# rule and "the approval does not bind them" from a differently-derived one is
+# exactly the incoherence gz3 fixed — a second copy of this walk would be a
+# second thing to drift (same reason the denylist regex lives in one lib).
+#
+# ORDER MATTERS: the tracker (post-edit.sh's record of actual tool edits) is
+# authoritative; `git status --porcelain` minus the gate baseline is the FALLBACK
+# consulted only when the tracker yields nothing. That is the pre-existing
+# behaviour, preserved verbatim — the baseline is subtracted only on the git
+# side, because pre-existing dirt cannot enter the tracker and an edit to an
+# already-dirty file must still gate.
+#
+# `comm -23 a b` prints lines in a but not in b and needs both inputs in the
+# SAME collation, hence LC_ALL=C on both sides, matching write_gate_baseline.
+# (A locale difference between write and read would surface phantom "new"
+# entries.) Bash 3.2 supports the process substitution used here (verified on
+# macOS bash 3.2.57).
+reviewable_changes() {
+    local line path found=0
+    if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if is_tracked_change "$line"; then
+                printf '%s\n' "$line"
+                found=1
+            fi
+        done < <(sort -u "$TRACKING_FILE" 2>/dev/null)
+    fi
+    [ "$found" = "1" ] && return 0
+    has_git_repo || return 0
+
+    local baseline current new_entries
+    baseline=$(gate_baseline_entries | LC_ALL=C sort)
+    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort)
+    if [ -z "$baseline" ]; then
+        # No baseline — any git-detected change is "new". Preserves the
+        # pre-0wk.2 behaviour for users who have not approved anything yet.
+        new_entries=$(printf '%s\n' "$current" | grep -v '^$' || true)
+    else
+        new_entries=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
+    fi
+    [ -n "$new_entries" ] || return 0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        path="${line#???}"
+        if is_tracked_change "$path"; then
+            printf '%s\n' "$path"
+        fi
+    done <<< "$new_entries"
+    return 0
+}
+
 # Run a command with optional `timeout` if available. Returns the
 # command's exit code. Streams combined stdout+stderr to the given log file.
 run_with_timeout() {
@@ -696,80 +756,32 @@ Fix (one of):
      canonical hook scripts into it (make sync-fixtures)."
 fi
 
-# Detect tracked changes via tracking file (post-edit.sh) first, then git.
+# Detect tracked changes. The rule — tracker first, then the baseline-relative
+# git-status fallback — lives in reviewable_changes() (ONE definition, two
+# readers; see its header). This loop only derives the three things the rest of
+# the flow needs from that set.
+#
+# 0wk.2 / 3mg.1 context for the fallback half, kept here because it is where a
+# reader looks for it: the gate baseline (written by session-start, qa-gate
+# enter and qa-gate approve) captures the git state already accounted for, so
+# the gate evaluates the session DELTA. Without it every Stop fired
+# "N file(s) changed - all require QA review" against the same pre-existing
+# uncommitted state. There is deliberately NO hash-side subtraction: the
+# baseline is subtracted only in the git fallback, because changed-files.txt is
+# fed exclusively by post-edit.sh from actual tool edits (pre-existing dirt
+# cannot enter it) and an edit to an already-dirty file must still gate.
 CODE_CHANGES_DETECTED=false
 ALL_CHANGED_FILES=()
 DOC_ONLY=true   # F1: stays true only if every changed file is doc-only.
 
-if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        if is_tracked_change "$line"; then
-            CODE_CHANGES_DETECTED=true
-            ALL_CHANGED_FILES+=("$line")
-            if ! is_doc_only_path "$line"; then
-                DOC_ONLY=false
-            fi
-        fi
-    done < <(sort -u "$TRACKING_FILE" 2>/dev/null)
-fi
-
-# 0wk.2 fix: git-status fallback - but ONLY surface entries NEW since the
-# baseline. The gate baseline (written by session-start, qa-gate enter and
-# qa-gate approve — see write_gate_baseline) captures the git state that was
-# already accounted for. Subsequent stops are allowed to slip through if the
-# working tree matches the baseline (i.e., the user opened the session, the
-# gate fires, but nothing has been edited since). Without this, every Stop
-# hook fired "0 file(s) changed - all require QA review" against the same
-# pre-existing uncommitted state -- the bug 0wk.2 closed.
-#
-# 3mg.1 widened WHEN a baseline exists: session-start now captures one on
-# arrival (when no review cycle is active), so a repo that was ALREADY dirty
-# before the session cannot gate it. Previously only an approve wrote a
-# baseline, so a first-ever session in a dirty repo blocked on dirt the user
-# never touched.
-#
-# Strategy: diff CURRENT git status against BASELINE. If a line is in
-# current but not in baseline, it's a NEW change requiring review.
-# `comm -23 <a> <b>` prints lines in a but not in b; both inputs must be
-# sorted IN THE SAME COLLATION — hence LC_ALL=C on both sides, matching the
-# writer. (A locale difference between write and read would silently corrupt
-# the diff and surface phantom "new" entries.)
-# Bash 3.2 supports process substitution (verified on macOS bash 3.2.57).
-#
-# NO HASH-SIDE SUBTRACTION, deliberately: the baseline is subtracted ONLY
-# here, in the git fallback. changed-files.txt is fed exclusively by
-# post-edit.sh from actual tool edits, so pre-existing dirt cannot enter it —
-# and an edit to an already-dirty file must still gate.
-if [ "$CODE_CHANGES_DETECTED" = false ] && has_git_repo; then
-    baseline=$(gate_baseline_entries | LC_ALL=C sort)
-
-    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort)
-
-    # Diff: only entries in current that aren't in baseline.
-    if [ -z "$baseline" ]; then
-        # No baseline - any git-detected change is "new". This preserves
-        # the pre-0wk.2 behaviour for users who haven't yet approved
-        # anything (the gate fires on first edit, as expected).
-        new_entries=$(printf '%s\n' "$current" | grep -v '^$' || true)
-    else
-        new_entries=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    CODE_CHANGES_DETECTED=true
+    ALL_CHANGED_FILES+=("$line")
+    if ! is_doc_only_path "$line"; then
+        DOC_ONLY=false
     fi
-
-    if [ -n "$new_entries" ]; then
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            path="${line#???}"
-            if is_tracked_change "$path"; then
-                CODE_CHANGES_DETECTED=true
-                ALL_CHANGED_FILES+=("$path")
-                if ! is_doc_only_path "$path"; then
-                    DOC_ONLY=false
-                fi
-            fi
-        done <<< "$new_entries"
-    fi
-fi
+done < <(reviewable_changes)
 
 # If no changes at all, allow.
 if [ "$CODE_CHANGES_DETECTED" = false ]; then
@@ -1343,6 +1355,67 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
     fi
 fi
 
+# VANISHED-CHANGE-SET BEGIN (gz3 / v4.1 U1)
+#
+# A change set that has VANISHED cannot be unapproved.
+#
+# THE RACE THIS CLOSES. Observed live during the v4.1 upgrade wave (the block
+# reason named the empty-set hash e3b0c44298fc… as "current"; occurrence recorded
+# on claude-workflow-plugin-gz3) and then reproduced deterministically at a drive
+# point rather than with sleeps — see the spec named at the end of this note.
+# This hook reads the change set TWICE: once at the
+# detection stage above, and again — minutes later, after the test/lint pass —
+# when it recomputes the change-set hash to match against the approval record.
+# `qa-gate.sh approve` runs in a different process (the QA subagent) and, as its
+# final act, TRUNCATES changed-files.txt and refreshes the gate baseline. A Stop
+# whose two reads straddle that finalization therefore recomputes the EMPTY-LIST
+# hash — a hash no honest approval of real work can carry — and concludes
+# "label present, nothing binds it", i.e. it prints the forged-label block for a
+# legitimate approval that landed seconds earlier. No approve-side ordering can
+# close this: the two reads belong to THIS process and straddle whatever approve
+# does in between.
+#
+# THE FIX. Before blocking, re-derive the very predicate the detection stage
+# used — reviewable_changes(), the same one function — from FRESH state. If
+# there is no longer anything to review, release: that is precisely the decision
+# the detection stage would have made had it run now (line ~740's
+# "no changes -> allow"), and it is the decision the NEXT Stop fire makes
+# anyway. The block was transient; this just stops charging the operator a
+# confusing round trip for it.
+#
+# WHY THIS IS NOT A HOLE. It grants nothing the gate does not already grant:
+# "nothing to review -> allow" is the detection stage's own rule, reached before
+# any label is consulted. In particular it does NOT release when the tracker is
+# empty but real un-baselined dirt exists (the class where files are written by
+# a helper rather than the Edit tool — LESSONS.md/bi3.2), because the git-status
+# half of reviewable_changes still reports those. Both halves must come up
+# empty. Pinned as an anti-overreach assertion in
+# .claude/tests/component/specs/approve-idempotency.sh.
+#
+# ORDER DEPENDENCY: approve refreshes the baseline BEFORE truncating the tracker
+# (see the APPROVE-COMMIT ORDER note in qa-gate.sh), so an empty tracker always
+# pairs with a refreshed baseline and this re-read cannot see a half-finalized
+# state. Flipping those two lines re-opens the race.
+#
+# Placed BEFORE the cross-worktree resolution on purpose: this is cheaper (two
+# file reads and one `git status`, no worktree scan) and more fundamental — if
+# there is nothing to review, there is nothing to go looking for an approval OF.
+#
+# The sentinel comments are load-bearing: an L2 META-TEST strips this block and
+# asserts the raced Stop blocks again. Do not rename them.
+if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
+    # Command substitution, so a non-zero rc inside cannot abort the hook under
+    # `set -e` (an aborted hook emits nothing, which the hooks contract reads as
+    # NON-blocking — i.e. it would fail OPEN).
+    VANISHED_PROBE=$(reviewable_changes 2>/dev/null || true)
+    if [ -z "$VANISHED_PROBE" ]; then
+        log_sync_error "Stop released: the change set VANISHED between this hook's detection stage and its gate evaluation on $CURRENT_TASK (approve landed concurrently — it truncates changed-files.txt and refreshes the gate baseline), so the recomputed hash was the empty-set hash and no record could match it. Nothing is left to review; releasing instead of emitting a transient LABEL_WITHOUT_RECORD block (gz3)"
+        echo "{}"
+        exit 0
+    fi
+fi
+# VANISHED-CHANGE-SET END (gz3 / v4.1 U1)
+
 # WORKTREE-RESOLUTION BEGIN (v4 V4 / claude-workflow-plugin-3mg.2)
 #
 # WHY THIS EXISTS. The change-set hash is PER-CHECKOUT: it hashes the
@@ -1695,6 +1768,19 @@ fi
 # QA-required messaging so the reason names the exact failure mode and the
 # correct remediation (approve via qa-gate.sh, not a bare label add). This is
 # the load-bearing assertion the META-TEST strips to prove the check matters.
+#
+# gz3 (v4.1 U1): the printed remediation below is now COMPLETE, and that is a
+# behavioural claim, not a wording one. It used to print `enter ->
+# impact-report -> approve` while `approve` short-circuited on the mere presence
+# of qa-approved — so following it exactly wrote no new record and this block
+# fired again, unchanged, forever. The recipe worked only with an undocumented
+# `bd label remove <tid> qa-approved` first. approve's idempotency guard is now
+# hash-aware (it no-ops only when a record already binds the current change set),
+# which is what makes these three lines a real recovery. Regression:
+# .claude/tests/component/specs/approve-idempotency.sh drives the commands
+# EXTRACTED FROM THIS TEXT, and denylist-shared.sh section C4 does the same after
+# a denylist hash migration — so editing the recipe here without editing the
+# behaviour fails a test.
 if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     emit_block "qa-approved label present but no change-set-bound approval record matches the current changes — approve via qa-gate.sh approve, not a bare label add.
 
@@ -1705,6 +1791,8 @@ Why this blocks ($APPROVAL_RECORD_DETAIL):
     change-set hash, which will not match what is actually shipping (P1).
   - Editing a tracked file AFTER approval shifts the current change-set hash
     away from the approved one — the change must be re-reviewed.
+  - A denylist change re-hashes the whole change set, so an approval recorded
+    before it no longer matches (one migration per landing; see docs/HOOKS.md).
 
 The release path requires a tamper-evident record that qa-gate.sh approve
 writes (a \`QA-GATE APPROVED change_set_hash=<h>\` comment) AND a matching
@@ -1714,6 +1802,13 @@ current change-set. Re-run the gate properly:
   # regenerate the impact report so approve's freshness check passes:
   bash .claude/scripts/impact-report.sh $CURRENT_TASK
   bash .claude/scripts/qa-gate.sh approve $CURRENT_TASK '<approval summary>'
+
+That is the WHOLE recipe: do NOT remove the qa-approved label first. Since
+v4.1 approve's idempotency is hash-aware — with the label already set but no
+record binding the current change set, it re-verifies every precondition
+(impact-report freshness, independent review, rubric state) and writes a FRESH
+bound record rather than reporting an idempotent no-op. Re-review the change set
+before you run it; nothing here waives that.
 
 Note: this binds approval to the reviewed files and defeats a forged or stale
 label, but is not a cryptographic sandbox against an adversary with arbitrary

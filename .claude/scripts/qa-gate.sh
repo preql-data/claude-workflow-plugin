@@ -421,6 +421,106 @@ compute_change_set_hash() {
     CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || printf ''
 }
 
+# gz3 (v4.1 U1): the approval records THIS task already carries — one
+# change_set_hash per `QA-GATE APPROVED ... change_set_hash=<h> ...` comment.
+#
+# The `select` + `capture` pair below is BYTE-IDENTICAL to
+# verify-before-stop.sh's task_has_matching_approval_record. That is deliberate
+# and load-bearing: this is the WRITER reading its own records back to decide
+# whether an approval already covers the current change set, and if it used a
+# looser or stricter grammar than the reader that decides RELEASE, the two would
+# disagree about what counts as an approval — which is the class of bug gz3 is.
+# The parity is asserted textually (both expressions extracted from the two
+# scripts and compared) in
+# .claude/tests/component/specs/approve-idempotency.sh.
+#
+# Never fails the caller: no bd, no task, unparseable JSON -> empty output,
+# rc 0. An empty answer means "no record found", which makes approve PROCEED
+# (write a fresh binding) rather than claim idempotency it cannot prove.
+recorded_approval_hashes() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    bd show "$tid" --json 2>/dev/null \
+        | jq -r '
+            (if type == "array" then .[0].comments else .comments end) // []
+            | .[].text
+            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h
+        ' 2>/dev/null || true
+    return 0
+}
+
+# gz3: does <tid> already carry an approval record bound to <hash>?
+# An empty <hash> never matches (an unverifiable hash must not read as covered).
+task_has_approval_record_for() {
+    local tid="$1" hash="$2"
+    [ -n "$hash" ] || return 1
+    recorded_approval_hashes "$tid" | grep -qxF "$hash"
+}
+
+# gz3: the change_set_hash of the PERSISTED impact report for <tid>, or empty.
+persisted_report_hash() {
+    local report
+    report=$(impact_report_path_for "$1")
+    [ -f "$report" ] || { printf ''; return 0; }
+    jq -r '.change_set_hash // empty' "$report" 2>/dev/null || printf ''
+    return 0
+}
+
+# gz3: the hash an existing approval must carry for THIS approve to be a
+# genuine no-op — i.e. the change set this approve would bind.
+#
+# Normally that is the live recompute. The exception is the state a PREVIOUS
+# approve leaves behind: approve TRUNCATES changed-files.txt (0wk.2), so a
+# recompute in this checkout answers with the EMPTY-LIST hash and the tracker no
+# longer witnesses what was approved. LESSONS.md records the rule that follows
+# from that ("any cross-checkout or after-the-fact verification must read the
+# PERSISTED record — impact-report-<tid>.json, which survives approve — never
+# recompute"), and this is an after-the-fact verification: with an empty tracker
+# the persisted report is the only surviving witness of the approved change set.
+#
+# Consequence, and the reason the split exists: a plain double `approve` stays an
+# idempotent no-op (report hash == the recorded hash), while an approve run after
+# the change set MOVED compares against the live recompute and therefore
+# proceeds. Always rc 0 — compute_change_set_hash returns 1 when
+# impact-report.sh is missing, and a bare `x=$(f)` whose RHS exits non-zero
+# aborts the script under `set -e` (line 70).
+#
+# KNOWN RESIDUAL of the empty-tracker arm, reproduced and pinned (section H of
+# specs/approve-idempotency.sh): when the tracker is empty AND real
+# un-baselined dirt exists — work written by a helper rather than the Edit tool,
+# which never reaches changed-files.txt (LESSONS.md / bi3.2) — the Stop hook
+# blocks on the git half of its predicate while the persisted report still
+# witnesses the PREVIOUS approval, so a bare `approve` no-ops and the block
+# stands. Following the remediation the block PRINTS resolves it: step 2
+# (impact-report.sh) re-persists the report, after which no record binds it and
+# approve proceeds. That is why the source of the reference hash is named in the
+# no-op's observations — the operator can see that regenerating the report is
+# the move. Closing it inside approve would mean a second copy of the Stop
+# hook's baseline-relative git walk, i.e. a second thing to drift; the one place
+# that walk lives is verify-before-stop.sh's reviewable_changes().
+# RETURNS BY GLOBAL, and prints nothing, deliberately: the caller needs the hash
+# AND the name of the reference it came from, and `h=$(f)` runs f in a SUBSHELL
+# where the second value dies silently — the envelope then reads "... via )".
+# (That is not hypothetical: this function was written to print, section H's
+# assertion on the source name caught it immediately.) Same reason
+# verify-before-stop.sh hands APPROVAL_RECORD_DETAIL back through a global.
+IDEM_REF_HASH=""
+IDEM_REF_SOURCE=""
+set_idempotency_reference() {
+    local tid="$1"
+    IDEM_REF_HASH=""
+    if [ -s "$QA_TRACKING_DIR/changed-files.txt" ]; then
+        IDEM_REF_SOURCE="live recompute of the tracked change set"
+        IDEM_REF_HASH=$(compute_change_set_hash) || IDEM_REF_HASH=""
+    else
+        IDEM_REF_SOURCE="persisted impact report (tracker empty, as approve leaves it)"
+        IDEM_REF_HASH=$(persisted_report_hash "$tid") || IDEM_REF_HASH=""
+    fi
+    return 0
+}
+
 # 3mg.2 (Phase V4 pt2): WHERE this approval was reviewed — the approving
 # checkout's absolute git toplevel, recorded in the approval comment as a
 # `worktree=<tok>` token.
@@ -903,9 +1003,55 @@ cmd_approve() {
     has_label "$tid" "rubric-pending" && had_rubric_pending=1
     has_label "$tid" "rubric-satisfied" && had_rubric_satisfied=1
 
+    # IDEMPOTENCY (gz3 / v4.1 U1) — HASH-AWARE, not label-aware.
+    #
+    # WAS: `had_approved = 1 -> no-op`. That made the LABEL mean "already
+    # approved", which is exactly what llh.18 stopped believing on the Stop
+    # side: release requires a RECORD bound to the current change set, because
+    # the label is forgeable and says nothing about WHICH files were reviewed.
+    # The two halves disagreeing produced a deadlock. A Stop blocked with
+    # LABEL_WITHOUT_RECORD prints `enter -> impact-report -> approve`; `enter`
+    # does not clear qa-approved; approve then short-circuited — so following
+    # the printed remediation wrote no new record and the gate re-blocked
+    # forever. The only working recovery was an undocumented
+    # `bd label remove <tid> qa-approved` first.
+    #
+    # NOW: the no-op fires only when an existing record already binds the change
+    # set this approve would bind (see set_idempotency_reference for which hash
+    # that is, and why an empty tracker reads the persisted report instead of
+    # recomputing). Otherwise approve PROCEEDS and re-verifies every
+    # precondition — impact-report freshness, independent review, rubric state —
+    # before writing a FRESH bound record. Nothing is waved through: a stale
+    # label buys no exemption from the checks, it just stops being a dead end.
+    #
+    # The advertised contract ("re-approving an already-approved task is a
+    # success no-op") is preserved for the case it was written for and dropped
+    # exactly where it was wrong. Pinned in
+    # .claude/tests/component/specs/approve-idempotency.sh (with a META that
+    # reverts this guard to had_approved-only and shows the deadlock return).
+    #
+    # Both envelopes NAME THE REFERENCE they compared against
+    # ($IDEM_REF_SOURCE). That is the diagnostic for the residual documented on
+    # set_idempotency_reference: an operator staring at a gate that still
+    # blocks after a no-op can see that approve matched the PERSISTED report and
+    # that regenerating it (step 2 of the printed remediation) is the move.
+    local stale_label_obs=""
     if [ "$had_approved" = "1" ]; then
-        emit_json 1 "approve" "$tid" "approved" "qa-approved already set; idempotent no-op"
-        return 0
+        local idem_ref=""
+        set_idempotency_reference "$tid"
+        idem_ref="$IDEM_REF_HASH"
+        if [ -n "$idem_ref" ] && task_has_approval_record_for "$tid" "$idem_ref"; then
+            emit_json 1 "approve" "$tid" "approved" "qa-approved already set and an approval record already binds this change set (change_set_hash=$idem_ref via $IDEM_REF_SOURCE); idempotent no-op — nothing rewritten. If a Stop is still blocking, the change set has moved since that record: re-run impact-report.sh (step 2 of the block's remediation) and approve again"
+            return 0
+        fi
+        # Fall through, loudly. The label is stale relative to the change set
+        # this approve would bind, so a fresh record is exactly what is needed.
+        log_sync_error "approve: qa-approved was already set on $tid but no approval record binds the current change set (reference hash=${idem_ref:-<unavailable>} via ${IDEM_REF_SOURCE:-<unavailable>}) — re-verifying preconditions and writing a fresh bound record instead of no-op'ing (gz3)"
+        # The literal string "idempotent no-op" is deliberately NOT used here:
+        # it is the discriminator for the no-op envelope above (tests and
+        # operators grep for it), so reusing it in the OPPOSITE outcome's text
+        # would make every such grep a silent false positive.
+        stale_label_obs="; NOTE qa-approved was already set but no approval record bound this change set (reference hash=${idem_ref:-<unavailable>} via ${IDEM_REF_SOURCE:-<unavailable>}) — preconditions re-verified and a FRESH record written (stale-label re-bind, gz3)"
     fi
 
     # G2.n6d: impact-report audit note. Declared OUTSIDE the sentinel
@@ -1096,47 +1242,61 @@ cmd_approve() {
     fi
     # REVIEW-SEPARATION END (v4 V3 / claude-workflow-plugin-jio.1)
 
-    # Step 1: add qa-approved (the source of truth).
-    if ! add_label "$tid" "qa-approved"; then
-        emit_json 0 "approve" "$tid" "error" "failed to add qa-approved; nothing changed"
-        exit 3
-    fi
+    # ---- APPROVE-COMMIT ORDER (gz3 / v4.1 U1) -----------------------------
+    #
+    # The steps below are ordered so that a Stop hook firing CONCURRENTLY never
+    # observes a state that reads as "approved, but the change set is
+    # unbindable". The gate has two processes and no lock: `qa-gate.sh approve`
+    # runs in the QA subagent while the Stop hook runs in the parent session, so
+    # every intermediate state of this function is observable. THREE such states
+    # produced transient false blocks; all three were reproduced deterministically
+    # against the pre-fix scripts before anything here moved (drive points, not
+    # sleeps — see the spec named at the end of this note).
+    #
+    #   W1  a Stop between the label add and the record write -> the
+    #       forged-label LABEL_WITHOUT_RECORD block, for a legitimate approval.
+    #   W2  a Stop between clear_current_task and the truncation -> the
+    #       "No active Beads task detected" block, for work just approved.
+    #   W3  a Stop whose OWN two change-set reads straddle the truncation ->
+    #       recomputes the empty-set hash, matches no record, same block.
+    #
+    # W1 and W2 are closed by the reordering below (rules 1 and 3). W3 cannot be:
+    # both reads belong to the Stop process and straddle whatever approve does in
+    # between, so it is closed on the Stop side by the VANISHED-CHANGE-SET
+    # re-read in verify-before-stop.sh — which depends on rule 2 holding here.
+    #
+    #   1. RECORD BEFORE LABEL (CHANGED here). The Stop's release predicate is
+    #      (label AND a record matching the current hash). Writing the label
+    #      first opened W1 — two bd label calls wide. A record with no label is
+    #      inert (the label is still required), so this direction has no
+    #      symmetric hazard: a Stop landing there sees the ordinary
+    #      not-yet-approved block instead of the alarming forged-label one.
+    #   2. BASELINE BEFORE TRACKER (UNCHANGED, and now load-bearing). This was
+    #      already the order 0wk.2 shipped; what is new is that something DEPENDS
+    #      on it. Both are state a Stop reads to answer "is there anything to
+    #      review?", and in this order an empty tracker always implies a
+    #      refreshed baseline — so the Stop-side re-read that closes W3 cannot
+    #      observe a half-finalized pair and conclude that un-baselined dirt is
+    #      unreviewed. Flipping these two lines re-opens W3; that is why the
+    #      order is pinned by a test rather than left to chance.
+    #   3. SESSION STATE LAST (CHANGED here). clear_current_task used to run
+    #      BEFORE the truncation, which is W2. After the truncation there is
+    #      nothing left to review, so a missing task id cannot produce a block.
+    #   4. NOTHING DESTRUCTIVE BEFORE THE LABELS LAND (UNCHANGED). The
+    #      tracking-state finalization (baseline refresh + truncate) stays AFTER
+    #      every step that can roll back. This is why the finalization is not
+    #      simply hoisted to the top to make the whole thing look atomic: a
+    #      rollback that had already truncated the tracker and refreshed the
+    #      baseline would leave a session whose work is invisible to the gate —
+    #      the next Stop would release unreviewed code on the "no changes" fast
+    #      path. Fail-closed beats atomic-looking.
+    #
+    # Reproductions + regression coverage (W1/W2 at their drive points, W3, and
+    # the source order): .claude/tests/component/specs/approve-idempotency.sh
+    # sections E and F.
 
-    # Step 2: remove qa-gate-entered (best-effort but tracked for rollback).
-    local removed_entered=0
-    if [ "$had_entered" = "1" ]; then
-        if remove_label "$tid" "qa-gate-entered"; then
-            removed_entered=1
-        else
-            # Roll back qa-approved.
-            remove_label "$tid" "qa-approved" || true
-            emit_json 0 "approve" "$tid" "error" "failed to remove qa-gate-entered; rolled back qa-approved"
-            exit 3
-        fi
-    fi
-
-    # Step 3: remove qa-pending.
-    local removed_pending=0
-    if [ "$had_pending" = "1" ]; then
-        if remove_label "$tid" "qa-pending"; then
-            removed_pending=1
-        else
-            # Roll back: re-add qa-gate-entered if we removed it, drop qa-approved.
-            # NB: the older `[ X ] && Y || true` shorthand here trips shellcheck
-            # SC2015 because `Y` is allowed to exit non-zero (add_label returns
-            # the bd exit code), in which case the `|| true` would mask it AND
-            # the meaning isn't quite if/then/else. The explicit `if` is what
-            # the SC2015 advice recommends.
-            if [ "$removed_entered" = "1" ]; then
-                add_label "$tid" "qa-gate-entered" || true
-            fi
-            remove_label "$tid" "qa-approved" || true
-            emit_json 0 "approve" "$tid" "error" "failed to remove qa-pending; rolled back"
-            exit 3
-        fi
-    fi
-
-    # Step 4: comment with summary (non-fatal — labels are the source of truth).
+    # Step 1 (gz3: record BEFORE label): the approval record.
+    # Non-fatal — labels remain the lifecycle source of truth.
     # G2.n6d: a bypass reason is appended so the audit trail names WHY the
     # mechanical impact gate was waived for this approval.
     #
@@ -1212,20 +1372,52 @@ cmd_approve() {
     # WORKTREE-TOKEN END (v4 V4 / claude-workflow-plugin-3mg.2)
     add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}at $ts: $summary$comment_suffix"
 
-    # F3 + F4: clear active task and wipe per-iteration state. These are
-    # the last-step side effects: if a previous step failed and rolled back,
-    # we don't reach here, so we never wipe state on a failed approval.
-    # Pass tid so wipe_iteration_state can clear the per-task counter
-    # (Phase 4 fix pass / MATERIAL 5).
-    clear_current_task
-    wipe_iteration_state "$tid"
+    # Step 2 (gz3: after the record): add qa-approved — the release-enabling
+    # label. From here the {label, record} pair is coherent, so a concurrent
+    # Stop either sees no approval yet or sees a complete one.
+    if ! add_label "$tid" "qa-approved"; then
+        # The record is already on the task and comments are append-only, so we
+        # say so rather than claiming "nothing changed": without the label the
+        # record cannot release anything (the Stop needs both), and re-running
+        # approve writes a fresh record.
+        log_sync_error "approve: qa-approved label add FAILED for $tid after the approval record was written; the record cannot release without the label — re-run approve (gz3 ordering)"
+        emit_json 0 "approve" "$tid" "error" "failed to add qa-approved; no labels changed (the approval record was already written and cannot be unwritten — it is inert without the label; re-run approve)"
+        exit 3
+    fi
 
-    # V3 (jio.1): the review round is over — drop its on-disk scratch files.
-    # Deliberately NOT folded into wipe_iteration_state: that helper also runs
-    # on `enter` and `choose continue`, and a continuing review round still
-    # wants its request/artifact files on disk for the packet. Only a
-    # COMPLETED approval ends the round.
-    wipe_review_artifacts "$tid"
+    # Step 3: remove qa-gate-entered (best-effort but tracked for rollback).
+    local removed_entered=0
+    if [ "$had_entered" = "1" ]; then
+        if remove_label "$tid" "qa-gate-entered"; then
+            removed_entered=1
+        else
+            # Roll back qa-approved.
+            remove_label "$tid" "qa-approved" || true
+            emit_json 0 "approve" "$tid" "error" "failed to remove qa-gate-entered; rolled back qa-approved"
+            exit 3
+        fi
+    fi
+
+    # Step 4: remove qa-pending.
+    local removed_pending=0
+    if [ "$had_pending" = "1" ]; then
+        if remove_label "$tid" "qa-pending"; then
+            removed_pending=1
+        else
+            # Roll back: re-add qa-gate-entered if we removed it, drop qa-approved.
+            # NB: the older `[ X ] && Y || true` shorthand here trips shellcheck
+            # SC2015 because `Y` is allowed to exit non-zero (add_label returns
+            # the bd exit code), in which case the `|| true` would mask it AND
+            # the meaning isn't quite if/then/else. The explicit `if` is what
+            # the SC2015 advice recommends.
+            if [ "$removed_entered" = "1" ]; then
+                add_label "$tid" "qa-gate-entered" || true
+            fi
+            remove_label "$tid" "qa-approved" || true
+            emit_json 0 "approve" "$tid" "error" "failed to remove qa-pending; rolled back"
+            exit 3
+        fi
+    fi
 
     # Spec 0.2: also clear any qa-escalated / qa-deferred labels so a
     # subsequent re-enter on this task (or a future bug regression) starts
@@ -1239,6 +1431,11 @@ cmd_approve() {
     # trail showing the final verdict that backed this approval.
     remove_rubric_pending "$tid"
 
+    # ---- TRACKING-STATE FINALIZATION (gz3 ordering rules 2 and 4) ---------
+    # Runs AFTER every step that can roll back (rule 4), and in the order
+    # baseline-then-tracker (rule 2). Read the APPROVE-COMMIT ORDER note above
+    # before reordering either of these two lines.
+
     # 0wk.2 fix: snapshot current git status to the gate baseline. Subsequent
     # Stop hook fires compare git status against this baseline and only
     # block if NEW uncommitted entries appear. Closes 0wk.2.
@@ -1247,6 +1444,11 @@ cmd_approve() {
     # "everything dirty right now has been reviewed", so the whole working
     # tree is the new reference point. Paired with the tracker truncation
     # below, a fresh approval starts a clean cycle.
+    #
+    # gz3: this MUST precede truncate_changed_files_tracker. An empty tracker
+    # paired with a stale baseline is the state that made a Stop conclude
+    # "un-baselined dirt, no bound approval" for work that had just been
+    # approved; in this order that pairing is unreachable.
     if ! write_gate_baseline "qa-gate-approve"; then
         log_sync_error "approve: gate-baseline refresh failed for $tid (subsequent Stops will treat existing git dirt as new)"
     fi
@@ -1262,6 +1464,28 @@ cmd_approve() {
     # carries both the approved hash and the approved file list). If you ever
     # make this truncation conditional, re-check that assumption first.
     truncate_changed_files_tracker
+
+    # ---- SESSION STATE (gz3 ordering rule 3) ------------------------------
+    # F3 + F4: clear active task and wipe per-iteration state. Still the LAST
+    # side effects — if a previous step failed and rolled back we never reach
+    # here, so a failed approval never wipes state — but now also strictly after
+    # the tracking-state finalization above. Clearing current-task while a change
+    # set was still visible made a concurrent Stop block with "No active Beads
+    # task detected"; after the truncation there is nothing left to gate, so a
+    # missing task id cannot produce a block.
+    # Pass tid so wipe_iteration_state can clear the per-task counter
+    # (Phase 4 fix pass / MATERIAL 5).
+    clear_current_task
+    wipe_iteration_state "$tid"
+
+    # V3 (jio.1): the review round is over — drop its on-disk scratch files.
+    # Deliberately NOT folded into wipe_iteration_state: that helper also runs
+    # on `enter` and `choose continue`, and a continuing review round still
+    # wants its request/artifact files on disk for the packet. Only a
+    # COMPLETED approval ends the round. (Safe here: the review predicate reads
+    # the durable Beads REVIEW-ARTIFACT records, never these files, so wiping
+    # them cannot flip a concurrent Stop's review-discipline verdict.)
+    wipe_review_artifacts "$tid"
 
     # Spec Phase A: build the rubric observation. The WARNING is the
     # loud signal the spec asks for when approve runs without a
@@ -1284,7 +1508,7 @@ cmd_approve() {
         binding_obs="; WARNING approval comment written WITHOUT a change-set binding (hash unavailable) — verify-before-stop cannot match it; re-run approve once impact-report.sh is restored"
     fi
 
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs$review_obs$binding_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs$review_obs$binding_obs$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The

@@ -35,10 +35,13 @@
 #   C. HASH MIGRATION. Changing the denylist re-hashes recomputed change sets,
 #      so an approval recorded before the change no longer matches and the
 #      gate re-blocks (LABEL_WITHOUT_RECORD). That is the correct fail-closed
-#      direction; this section pins BOTH the block and the recovery path that
-#      actually works. See the C4 note — the remediation the block reason
-#      prints is incomplete, and this spec pins that gap rather than papering
-#      over it.
+#      direction; this section pins BOTH the block and the recovery. C4 drives
+#      the remediation the block reason PRINTS (extracted from the reason text,
+#      not paraphrased) and C5 keeps the explicit-label-removal path pinned
+#      alongside it. Until gz3, C4 was a KNOWN-GAP pin: the printed recipe could
+#      not recover, because approve short-circuited on the stale qa-approved
+#      label. It recovers now; the guard's own contract lives in
+#      specs/approve-idempotency.sh.
 #
 # THE SYMLINK HAZARD (read before editing this file)
 # --------------------------------------------------
@@ -347,29 +350,54 @@ assert_eq "denylist-C3: the pre-migration approval no longer releases (fail clos
 assert_contains "denylist-C3: the block names the change-set binding, not a generic QA-required" \
     "no change-set-bound approval record matches" "$C3_REASON"
 
-# C4. KNOWN GAP, pinned deliberately (claude-workflow-plugin-3mg.1 finding).
+# C4. THE PRINTED REMEDIATION RECOVERS (claude-workflow-plugin-gz3).
 #
-# The block reason above prints this remediation:
+# This was pinned as a KNOWN GAP by 3mg.1: the block reason above printed
 #     qa-gate.sh enter <id> ; impact-report.sh <id> ; qa-gate.sh approve <id>
-# It does not work. `enter` does not clear `qa-approved`, and `approve`
-# short-circuits as an "idempotent no-op" whenever that label is already
-# present — so no new change-set-bound record is written and the gate stays
-# blocked. This predates 3mg.1 (it is the llh.18 approve-idempotency guard
-# meeting the llh.18 hash binding), but a denylist landing is the first event
-# that puts EVERY in-flight cycle on this path at once, which is why it is
-# pinned here. Asserting the wished-for behaviour would just hide it.
-bash "$QG_C" enter "$TID_MIG" >/dev/null 2>&1
-CLAUDE_PROJECT_DIR="$FC" bash "$FC/.claude/scripts/impact-report.sh" "$TID_MIG" >/dev/null 2>&1
-C4_APPROVE=$(bash "$QG_C" approve "$TID_MIG" "re-approved after the migration" 2>&1 | tail -1)
-assert_contains "denylist-C4: bare enter+approve is an idempotent no-op (KNOWN GAP)" \
+# and that sequence could not recover, because `enter` does not clear
+# `qa-approved` and `approve` short-circuited as an "idempotent no-op" whenever
+# that label was present — so no new change-set-bound record was written and the
+# gate stayed blocked on a correct-looking recipe. A denylist landing is the
+# event that puts EVERY in-flight cycle on that path at once, which is why the
+# gap was pinned here rather than papered over.
+#
+# gz3 made approve's idempotency HASH-AWARE (it no-ops only when a record
+# already binds the current change set), so the printed recipe is now a real
+# recovery. The commands below are EXTRACTED FROM THE BLOCK REASON captured in
+# C3 and executed verbatim — the assertion is about the recipe the operator is
+# actually handed, not a paraphrase of it. The explicit-label-removal path stays
+# pinned in C5; the guard's own contract (matching-hash re-approve is still a
+# no-op) and the approve/Stop race live in
+# .claude/tests/component/specs/approve-idempotency.sh.
+C4_REMEDY="$FC/.claude/.qa-tracking/c4-printed-remediation.txt"
+printf '%s\n' "$C3_REASON" | grep -E '^[[:space:]]*bash \.claude/scripts/' \
+    | sed 's/^[[:space:]]*//' > "$C4_REMEDY"
+assert_eq "denylist-C4: the migration block prints a 3-command remediation" \
+    "3" "$(grep -c . "$C4_REMEDY" | tr -d '[:space:]')"
+assert_eq "denylist-C4: ...and it needs no 'bd label remove' step" \
+    "0" "$(grep -c 'bd label remove' "$C4_REMEDY" | tr -d '[:space:]')"
+C4_APPROVE=""
+while IFS= read -r c4_cmd; do
+    [ -z "$c4_cmd" ] && continue
+    c4_cmd=${c4_cmd//\'<approval summary>\'/\'re-reviewed against the post-migration change set\'}
+    C4_LINE=$(cd "$FC" && CLAUDE_PROJECT_DIR="$FC" eval "$c4_cmd" 2>&1 | tail -1)
+    case "$c4_cmd" in *"qa-gate.sh approve"*) C4_APPROVE="$C4_LINE" ;; esac
+done < "$C4_REMEDY"
+assert_contains "denylist-C4: the printed approve writes a freshly-bound record (was: idempotent no-op)" \
+    "change-set-bound approval record written" "$C4_APPROVE"
+assert_not_contains "denylist-C4: ...and is NOT reported as an idempotent no-op" \
     "idempotent no-op" "$C4_APPROVE"
 seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
 bash "$CT_C" set "$TID_MIG"
-assert_eq "denylist-C4: ...so the gate is STILL blocked after it (KNOWN GAP)" \
-    "block" "$(stop_decision "$FC")"
+assert_eq "denylist-C4: ...so following the printed remediation RELEASES the migrated cycle" \
+    "ALLOW" "$(stop_decision "$FC")"
 
-# C5. The recovery that does work: retire the stale label, re-enter, re-review,
-# re-approve. The new record is bound to the POST-migration hash.
+# C5. The OTHER recovery, still supported: retire the stale label explicitly,
+# then re-enter, re-review, re-approve. Since gz3 this is no longer the ONLY way
+# out (C4 covers the printed recipe), but it stays pinned — an operator who has
+# already dropped the label, or a cycle that genuinely wants to start from a
+# not-approved state, must still land on a release. The new record is bound to
+# the POST-migration hash either way.
 (cd "$FC" && bd label remove "$TID_MIG" qa-approved >/dev/null 2>&1)
 bash "$QG_C" enter "$TID_MIG" >/dev/null 2>&1
 bash "$CT_C" set "$TID_MIG"

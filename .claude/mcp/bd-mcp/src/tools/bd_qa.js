@@ -244,11 +244,24 @@ export function registerQaTools(server) {
         {
             title: 'Approve the QA gate for a task',
             description:
-                "Atomic operation: add qa-approved, remove qa-gate-entered, remove qa-pending, write an " +
-                "audit comment with the approval summary. On any failure, all label changes are rolled " +
-                "back. Also clears .claude/.qa-tracking/current-task and per-task iteration counters.\n\n" +
-                "Idempotent: if qa-approved is already present, returns success no-op without re-doing " +
-                "anything.\n\n" +
+                "Atomic operation: write the change-set-bound approval record, add qa-approved, remove " +
+                "qa-gate-entered, remove qa-pending. On any failure, all label changes are rolled back. " +
+                "Also refreshes the gate baseline, truncates the changed-files tracker, and clears " +
+                ".claude/.qa-tracking/current-task plus per-task iteration counters.\n\n" +
+                "Idempotent, HASH-AWARE (v4.1): if qa-approved is already present AND an existing " +
+                "`QA-GATE APPROVED` record binds the change set this approve would bind, it returns a " +
+                "success no-op without re-doing anything. If the label is present but NO record binds " +
+                "the current change set — a post-approval edit, a denylist hash migration, or a stale/" +
+                "forged label — it PROCEEDS instead: it re-verifies every precondition (impact-report " +
+                "freshness, independent review) and writes a fresh bound record. Before v4.1 it no-op'd " +
+                "on the label alone, which deadlocked the Stop hook's own printed recovery recipe " +
+                "(claude-workflow-plugin-gz3). Nothing is waived either way: a stale impact report is " +
+                "still refused, and a missing independent review still fails closed.\n\n" +
+                "The no-op names which reference it compared against — the live recompute, or the " +
+                "persisted impact-report-<id>.json when the tracker is empty (the state a previous " +
+                "approve leaves behind). If a Stop still blocks after a no-op, re-run " +
+                "`impact-report.sh <id>` and approve again; that re-persists the report so the " +
+                "comparison sees the current change set.\n\n" +
                 "Replaces shell: `bash .claude/scripts/qa-gate.sh approve <id> '<summary>'`",
             inputSchema: {
                 task_id: z.string().min(1).max(256),
@@ -273,7 +286,15 @@ export function registerQaTools(server) {
                     `QA approved ${tid} (fallback path)`,
                     { task_id: tid, ...direct, fallback: true },
                     `qa-gate.sh not found (${result.reason}); used direct bd-label fallback. ` +
-                    "current-task helper + iteration-counter wipe were SKIPPED.",
+                    "current-task helper + iteration-counter wipe were SKIPPED. " +
+                    // gz3-adjacent: say the quiet part out loud. The fallback's comment carries NO
+                    // `change_set_hash=` token, and the Stop hook releases only on a record whose
+                    // hash matches the current change set — so this path sets the label but CANNOT
+                    // release the gate. Reporting bare success here reproduces exactly the shape
+                    // gz3 was: an approval that looks done while the gate keeps blocking.
+                    "IMPORTANT: the fallback's approval comment carries NO change_set_hash binding, " +
+                    "so the Stop hook will still BLOCK (it requires a matching bound record). Restore " +
+                    "qa-gate.sh and re-run approve to produce a releasing approval.",
                 );
             }
             const p = result.payload;
