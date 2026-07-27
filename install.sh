@@ -561,8 +561,11 @@ VERDICT_MODE=false
 PLAN_FILE=""
 # The hash table the plan was built against; named in the readout. Two
 # sources, one code path: the frozen manifests/v<release>.sha256 table (v3
-# flow) or the target's own install-manifest body (mode-2 Update).
+# flow) or the target's own install-manifest body (mode-2 Update, and a v4 -> v4
+# --upgrade since U0.5). PLAN_OLD_TABLE is the PATH; PLAN_OLD_TABLE_LABEL is
+# what the readouts call it, since one of the two sources is a temp file.
 PLAN_OLD_TABLE=""
+PLAN_OLD_TABLE_LABEL=""
 # The install-manifest body of the tree being updated, and the release its
 # header names. Set by install_manifest_old_table; "" when the target has no
 # usable manifest (every pre-v4.1 install).
@@ -588,7 +591,13 @@ if [ "$FORCE_UPGRADE" = true ]; then
         else
             V3_DETECTED_VERSION=$(target_plugin_version)
             echo -e "${YELLOW}Upgrade mode forced (--upgrade). Target declares v${V3_DETECTED_VERSION:-unknown}; running the upgrade flow anyway.${NC}"
-            echo -e "  Files the shipped release changed since the frozen table are treated as customized (replaced with a report line, or preserved as .new)."
+            # Deliberately does NOT name the old table: which one this run uses
+            # is decided further down (the target's own install-manifest when it
+            # has a usable one, else the frozen release table) and the
+            # "Classifying the installed tree against ..." line reports it for
+            # real. Naming "the frozen table" here was wrong for a v4 -> v4
+            # upgrade the moment U0.5 taught the flow to prefer the manifest.
+            echo -e "  Anything that differs from both the shipped file and the reference table named below is treated as customized (replaced with a report line, or preserved as .new)."
         fi
     else
         V2_UPGRADE=true
@@ -616,13 +625,21 @@ fi
 # second run on an upgraded tree used to plain-copy every shipped file and
 # re-clobber anything the operator had changed since.
 
-# build_plan <old-table> — classify $TARGET against $SOURCE_DIR using
+# build_plan <old-table> [label] — classify $TARGET against $SOURCE_DIR using
 # <old-table>, leaving the plan at $PLAN_FILE. Returns non-zero (with
 # PLAN_FILE reset to "") when the generator or the table is missing, or when
 # classify fails; callers decide whether that is fatal. MUST be used as an
 # `if` condition — a non-zero return is a normal outcome, not an error.
+#
+# [label] is what the readouts CALL the old table. It exists because one of the
+# two sources is a temp file: an install-manifest body lives at
+# $INSTALL_WORK_DIR/installed-manifest.tsv, and a report line reading "hashed
+# against installed-manifest.tsv" names a path the operator has never seen and
+# cannot inspect. Defaults to the table's basename, which is the right answer
+# for the frozen manifests/v<release>.sha256 tables.
 build_plan() {
     local old="$1"
+    local label="${2:-}"
     if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$old" ]; then
         PLAN_FILE=""
         return 1
@@ -637,6 +654,11 @@ build_plan() {
     fi
     PLAN_FILE="$out"
     PLAN_OLD_TABLE="$old"
+    if [ -n "$label" ]; then
+        PLAN_OLD_TABLE_LABEL="$label"
+    else
+        PLAN_OLD_TABLE_LABEL=$(basename "$old")
+    fi
     return 0
 }
 
@@ -696,12 +718,34 @@ plan_row_count() {
     awk 'END { printf "%d", NR + 0 }' "$PLAN_FILE"
 }
 
-# plan_write_count — how many plan rows would put bytes on disk: copy-new,
-# replace-stock, replace-custom (all three write the shipped file) and
-# preserve-custom (writes a <path>.new sidecar). skip-current writes nothing;
-# merge is reconciled by the two jq merges, which are idempotent and run on
-# every Update regardless. Prints 0 when there is no plan — every caller must
-# therefore check VERDICT_MODE first, or "no plan" would read as "no work".
+# plan_write_count — how many plan rows would put bytes on disk. TWO terms:
+#
+#   1. Verdict rows: copy-new, replace-stock and replace-custom (all three
+#      write the shipped file) plus preserve-custom (writes a <path>.new
+#      sidecar). skip-current writes nothing.
+#   2. `merged`-class rows whose file is ABSENT from the target (v4.1 / U0.5).
+#      classify emits `merge` for settings.json / .mcp.json unconditionally,
+#      because the installer reconciles them with jq instead of copying — but
+#      the two jq merge sections only own the case where the file EXISTS. When
+#      it does not, the path falls through to a plain copy (place_by_verdict's
+#      `merge` arm for .mcp.json, the else arm of the settings block), and that
+#      copy is a write the first term cannot see.
+#
+# TERM 2 IS THE U0.5 RIDER ON U0.4's PROBE, and the alternative was to soften
+# the readout to "no tracked file changes". Counting the write won because the
+# probe's contract is "it fired => this run put no bytes on disk", and that
+# sentence is what the backup decision rests on. An operator who deleted
+# .mcp.json and re-ran the same release was told "no file changes" while the
+# installer recreated the file. Nothing was ever at risk — an absent file
+# cannot be lost, and a mode-2 backup only ever snapshots .claude/ — but an
+# invariant that is only NEARLY true is one a future change can break without
+# failing a test. So the write is counted: the readout stays literally
+# accurate, the backup falls on the conservative side, and the cost is one
+# timestamped backup directory in the rare case where a config file was
+# deleted before a re-run.
+#
+# Prints 0 when there is no plan — every caller must therefore check
+# VERDICT_MODE first, or "no plan" would read as "no work".
 #
 # Standalone awk rather than four plan_count calls: this runs inside the mode
 # block, before plan_count is defined further down.
@@ -710,10 +754,23 @@ plan_write_count() {
         printf '0'
         return 0
     fi
-    awk -F'\t' '
+    local n
+    n=$(awk -F'\t' '
         $3 == "copy-new" || $3 == "replace-stock" ||
         $3 == "replace-custom" || $3 == "preserve-custom" { n++ }
-        END { printf "%d", n + 0 }' "$PLAN_FILE"
+        END { printf "%d", n + 0 }' "$PLAN_FILE")
+    # MERGED-ABSENT-START (load-bearing; the L2 META-TEST DELETES this block and
+    # asserts the probe goes back to firing on a tree that is about to gain a
+    # file. Keep both sentinels, and keep the deletion fail-safe: without this
+    # loop the count can only get SMALLER — i.e. back to the pre-U0.5 readout,
+    # never to a spuriously skipped backup.)
+    local merged_rel
+    while IFS= read -r merged_rel; do
+        [ -n "$merged_rel" ] || continue
+        [ -f "$TARGET/$merged_rel" ] || n=$((n + 1))
+    done < <(awk -F'\t' '$2 == "merged" { print $1 }' "$PLAN_FILE")
+    # MERGED-ABSENT-END
+    printf '%d' "$n"
 }
 
 # Mode selection (interactive) -------------------------------------------------
@@ -782,27 +839,66 @@ elif [ "$V3_UPGRADE" = true ]; then
     # what classify's `merge` verdict for both `merged`-class files means.
     UPDATE_MODE=true
 
-    # Pick the frozen hash table for the release the target was installed from.
-    # v3.5.0 is the default (the only release with a frozen table today); a
-    # future manifests/v<version>.sha256 is picked up automatically, which is
-    # how this flow stays honest for 3.2 / 3.3 / 4.x targets later.
-    V3_FROZEN_TABLE="$SOURCE_DIR/manifests/v3.5.0.sha256"
-    if [ -n "$V3_DETECTED_VERSION" ] && [ -f "$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256" ]; then
-        V3_FROZEN_TABLE="$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256"
+    # Pick the old table this upgrade classifies against. TWO sources, in
+    # preference order (v4.1 / U0.5):
+    #
+    #   1. $TARGET/.claude/install-manifest, when the target is NOT a 3.x
+    #      install and the manifest parses. It records the exact per-file hashes
+    #      THIS tree was installed with, so "stock" and "customized" are
+    #      answered from the tree's own history rather than inferred from a
+    #      release table that predates it. Reached by `--upgrade` on a 4.x
+    #      target: without it, every file that changed between v3.5 and the
+    #      installed release looks customized, so stock operator files collect
+    #      spurious .new sidecars and stock workflow files get reported as
+    #      "replaced; yours is in the backup" — the lossless-but-noisy behaviour
+    #      U0.4 documented and left open.
+    #
+    #   2. manifests/v<release>.sha256 — the frozen table for the release a
+    #      target was installed from. This is the ONLY option for a genuine 3.x
+    #      tree (no install-manifest existed before v4.1) and the fallback for
+    #      any target whose manifest is missing or unreadable. v3.5.0 is the
+    #      default; a future manifests/v<version>.sha256 is picked up
+    #      automatically, which is how this flow stays honest for 3.2 / 3.3
+    #      targets later.
+    #
+    # A 3.x version pins source 2 explicitly rather than by accident: if some
+    # hand-built 3.x tree ever carried an install-manifest, the frozen table is
+    # still the right answer for it, because the v3.5 -> v4 verdicts that
+    # sections 1-7 of the L2 spec pin are defined against that table.
+    UPGRADE_OLD_TABLE=""
+    UPGRADE_OLD_TABLE_LABEL=""
+    case "$V3_DETECTED_VERSION" in
+        3.*|"")
+            ;;
+        *)
+            if install_manifest_old_table; then
+                UPGRADE_OLD_TABLE="$INSTALLED_MANIFEST_BODY"
+                UPGRADE_OLD_TABLE_LABEL=".claude/install-manifest (v$INSTALLED_MANIFEST_VERSION)"
+            fi
+            ;;
+    esac
+
+    if [ -z "$UPGRADE_OLD_TABLE" ]; then
+        V3_FROZEN_TABLE="$SOURCE_DIR/manifests/v3.5.0.sha256"
+        if [ -n "$V3_DETECTED_VERSION" ] && [ -f "$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256" ]; then
+            V3_FROZEN_TABLE="$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256"
+        fi
+        UPGRADE_OLD_TABLE="$V3_FROZEN_TABLE"
+        UPGRADE_OLD_TABLE_LABEL=$(basename "$V3_FROZEN_TABLE")
     fi
 
-    if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$V3_FROZEN_TABLE" ]; then
+    if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$UPGRADE_OLD_TABLE" ]; then
         echo -e "${RED}The upgrade flow needs both .claude/scripts/workflow-manifest.sh and a frozen hash table.${NC}"
         echo "  generator: $MANIFEST_TOOL"
-        echo "  old table: $V3_FROZEN_TABLE"
+        echo "  old table: $UPGRADE_OLD_TABLE"
         echo "This source tree has neither, so customized files cannot be told from"
         echo "stock ones. Your backup is at $V3_BACKUP_DIR."
         echo "Rerun with --mode=2 for the flat non-destructive update instead."
         exit 1
     fi
 
-    echo -e "${YELLOW}Classifying the installed tree against $(basename "$V3_FROZEN_TABLE")...${NC}"
-    if ! build_plan "$V3_FROZEN_TABLE"; then
+    echo -e "${YELLOW}Classifying the installed tree against $UPGRADE_OLD_TABLE_LABEL...${NC}"
+    if ! build_plan "$UPGRADE_OLD_TABLE" "$UPGRADE_OLD_TABLE_LABEL"; then
         echo -e "${RED}Could not classify the installed tree; refusing to write a partial upgrade.${NC}"
         echo "Your backup is at $V3_BACKUP_DIR. Rerun with --mode=2 to take the flat"
         echo "non-destructive update path instead."
@@ -894,7 +990,12 @@ elif [ -d "$TARGET/.claude" ]; then
                 # Keep both sentinels, and keep deletion fail-safe: without this
                 # block VERDICT_MODE stays false and the legacy path runs.)
                 if install_manifest_old_table; then
-                    if build_plan "$INSTALLED_MANIFEST_BODY"; then
+                    # The label is what a readout would CALL this table; the
+                    # path itself is a temp file. Passed here as well as on the
+                    # upgrade path so the two call sites cannot drift into
+                    # naming the same source two different ways.
+                    if build_plan "$INSTALLED_MANIFEST_BODY" \
+                            ".claude/install-manifest (v$INSTALLED_MANIFEST_VERSION)"; then
                         VERDICT_MODE=true
                         echo -e "${GREEN}OK${NC} classified against .claude/install-manifest (v$INSTALLED_MANIFEST_VERSION): $(wc -l < "$PLAN_FILE" | tr -d ' ') file(s)"
                     else
@@ -1548,7 +1649,7 @@ Target:           $TARGET
 Backup:           $V3_BACKUP_DIR
 Install manifest: $TARGET/.claude/install-manifest
 
-Files by upgrade verdict (workflow-manifest.sh classify, hashed against $(basename "$PLAN_OLD_TABLE")):
+Files by upgrade verdict (workflow-manifest.sh classify, hashed against ${PLAN_OLD_TABLE_LABEL:-$(basename "$PLAN_OLD_TABLE")}):
   copied (new)           $(plan_count copy-new)
   replaced (stock)       $(plan_count replace-stock)
   already current        $(plan_count skip-current)

@@ -51,12 +51,23 @@
 #                            no-change probe skips the backup, a customization
 #                            made AFTER the upgrade is preserved rather than
 #                            re-clobbered, and two METAs prove both of those
-#                            assertions can fail.
+#                            assertions can fail. Sections 8d and 8e (v4.1 /
+#                            U0.5) add the two riders U0.4 left open: the probe
+#                            counting a re-created merged-class file as a write,
+#                            and a v4 -> v4 --upgrade classifying against the
+#                            target's own install-manifest instead of the frozen
+#                            v3.5 table.
+#   9. Fresh vs upgraded    — the upgraded tree and a FRESH install of the same
+#                            source differ in EXACTLY the expected places
+#                            (preserved operator files + the two merged files)
+#                            and nowhere else, with a META that plants a
+#                            divergent workflow file and watches the assertion
+#                            fail.
 #
-# Runtime is dominated by three v3.5 installs plus three upgrades, and (section
-# 8) two fresh v4 installs plus four re-runs; each is well under two seconds
-# because the installer copies a ~10 MB tree and hashes ~250 files, with no
-# network and no LLM calls.
+# Runtime is dominated by three v3.5 installs plus three upgrades, and (sections
+# 8-9) four fresh v4 installs plus eight re-runs/upgrades; each is well under two
+# seconds because the installer copies a ~10 MB tree and hashes ~250 files, with
+# no network and no LLM calls.
 
 set -u
 
@@ -814,3 +825,379 @@ assert_not_contains "installer-v3-upgrade 8c META-TEST: the stripped copy never 
 # The backup is untouched by this mutation — it is the preservation that moved.
 assert_eq "installer-v3-upgrade 8c META-TEST: the stripped copy still took its backup" \
     "1" "$(update_backup_count_of "$META_B")"
+
+# ===========================================================================
+# Section 8d: the probe counts a re-created merged-class file as a write
+# ===========================================================================
+# U0.4 shipped the no-change probe with a documented hole (pnf probe (h)).
+# classify emits `merge` for the two merged-class files unconditionally,
+# plan_write_count counted only verdict rows, and the two jq merges own only the
+# case where the file EXISTS — so an operator who DELETED .mcp.json and re-ran
+# the same release was told "no file changes" while the installer put the file
+# back. Nothing could be lost (an absent file has nothing to lose, and a mode-2
+# backup snapshots only .claude/), but the probe's contract — "it fired, so this
+# run wrote nothing" — stopped being exactly true, and an invariant that is only
+# nearly true is one a future change can break without failing a test.
+#
+# U0.5 counts the write rather than softening the readout to "no tracked file
+# changes". This is that choice on the record: ONE fixture, cloned three ways,
+# one variable per clone.
+#
+#   CONTROL   untouched tree            -> probe fires, no backup. Proves this
+#                                          fixture is one where "nothing to do"
+#                                          is literally true, so the SUBJECT's
+#                                          decline cannot be for another reason.
+#   SUBJECT   .mcp.json deleted         -> probe declines, backup taken, file
+#                                          re-created.
+#   MUTANT    .mcp.json deleted, and the MERGED-ABSENT block deleted from the
+#             installer                 -> probe fires while the file is
+#                                          re-created. The pre-U0.5 behaviour,
+#                                          asserted so the fix cannot silently
+#                                          regress.
+
+# clone_tree <src> <name> — a byte-for-byte copy of <src> at $WORK/<name>,
+# printed on stdout. The general form of clone_meta_fixture, which is pinned to
+# META_BASE. `cp -R src/. dst/` and not `src/*`: the whole tree under test is
+# dotfiles (.claude/, .claude-plugin/, .git/), which the glob form silently
+# skips — the same trap the installer's own backups hit.
+clone_tree() {
+    local dst="$WORK/$2"
+    rm -rf "$dst"
+    mkdir -p "$dst"
+    cp -R "$1/." "$dst/" 2>/dev/null || true
+    printf '%s' "$dst"
+}
+
+# use_meta_installer <path> — install <path> into the META source tree as the
+# installer under test. Section 8c leaves a MUTANT sitting there, so every later
+# section that wants the real one has to say so out loud.
+use_meta_installer() {
+    cp "$1" "$META_SRC/install.sh"
+}
+
+# run_forced_upgrade_with <installer> <target> <logfile> — a `--upgrade` run.
+# Section 5 deliberately passes no flags because auto-detection is what it
+# proves; sections 8e cannot, because the subject there IS the forced flow on a
+# target auto-detection would decline (a 4.x tree is not a v3 install).
+run_forced_upgrade_with() {
+    bash "$1" --upgrade "$2" </dev/null >"$3" 2>&1
+}
+
+use_meta_installer "$PLUGIN_ROOT/install.sh"
+PROBE_BASE="$WORK/probe-base"
+PROBE_BASE_RC=0
+seed_v4_install "$PROBE_BASE" "$META_SRC/install.sh" || PROBE_BASE_RC=$?
+if [ "$PROBE_BASE_RC" -ne 0 ]; then
+    printf '  diagnostic: the 8d fixture install exited %s; tail of log:\n' "$PROBE_BASE_RC"
+    tail -15 "$WORK/probe-base-install-v4.log" 2>/dev/null | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 8d: the fresh v4 fixture for the probe installs cleanly" \
+    "0" "$PROBE_BASE_RC"
+assert_eq "installer-v3-upgrade 8d: it carries .mcp.json (the merged-class file under test)" \
+    "yes" "$(yesno test -f "$PROBE_BASE/.mcp.json")"
+assert_eq "installer-v3-upgrade 8d: it carries an install-manifest to classify against" \
+    "yes" "$(yesno test -f "$PROBE_BASE/.claude/install-manifest")"
+
+# CONTROL: nothing removed, nothing customized.
+PROBE_CONTROL=$(clone_tree "$PROBE_BASE" "probe-control")
+PROBE_CONTROL_RC=0
+run_update_with "$META_SRC/install.sh" "$PROBE_CONTROL" "$WORK/probe-control.log" \
+    || PROBE_CONTROL_RC=$?
+assert_eq "installer-v3-upgrade 8d CONTROL: the re-run on an untouched clone completes" \
+    "0" "$PROBE_CONTROL_RC"
+assert_contains "installer-v3-upgrade 8d CONTROL: an untouched tree still skips its backup" \
+    "$SKIP_BACKUP_LINE" "$(cat "$WORK/probe-control.log" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 8d CONTROL: and creates no .claude-backup-* directory" \
+    "0" "$(update_backup_count_of "$PROBE_CONTROL")"
+
+# SUBJECT: the merged-class file is gone before the re-run.
+PROBE_SUBJECT=$(clone_tree "$PROBE_BASE" "probe-deleted-mcp")
+rm -f "$PROBE_SUBJECT/.mcp.json"
+assert_eq "installer-v3-upgrade 8d: the subject clone really has no .mcp.json before the re-run" \
+    "no" "$(yesno test -e "$PROBE_SUBJECT/.mcp.json")"
+PROBE_SUBJECT_RC=0
+run_update_with "$META_SRC/install.sh" "$PROBE_SUBJECT" "$WORK/probe-subject.log" \
+    || PROBE_SUBJECT_RC=$?
+PROBE_SUBJECT_LOG=$(cat "$WORK/probe-subject.log" 2>/dev/null || echo "")
+assert_eq "installer-v3-upgrade 8d: the re-run on the subject clone completes" \
+    "0" "$PROBE_SUBJECT_RC"
+assert_eq "installer-v3-upgrade 8d: the re-run re-created .mcp.json" \
+    "yes" "$(yesno test -f "$PROBE_SUBJECT/.mcp.json")"
+PROBE_MCP_CMP_RC=0
+cmp -s "$PROBE_SUBJECT/.mcp.json" "$META_SRC/.mcp.json" || PROBE_MCP_CMP_RC=$?
+assert_eq "installer-v3-upgrade 8d: and it re-created the SHIPPED bytes" \
+    "0" "$PROBE_MCP_CMP_RC"
+assert_not_contains "installer-v3-upgrade 8d: the probe did NOT claim 'no file changes' while writing one" \
+    "$SKIP_BACKUP_LINE" "$PROBE_SUBJECT_LOG"
+assert_eq "installer-v3-upgrade 8d: and the backup was taken" \
+    "1" "$(update_backup_count_of "$PROBE_SUBJECT")"
+
+# MUTANT: the counting term is deleted, anchored inside its sentinels.
+META_MERGED="$WORK/install-merged-absent-stripped.sh"
+sed '/# MERGED-ABSENT-START/,/# MERGED-ABSENT-END/d' "$PLUGIN_ROOT/install.sh" > "$META_MERGED"
+MERGED_STRIP_LINES=$(diff "$PLUGIN_ROOT/install.sh" "$META_MERGED" 2>/dev/null | grep -c '^<' | tr -d ' \n')
+assert_eq "installer-v3-upgrade 8d META-TEST: the strip removed the sentinel block (lines deleted)" \
+    "yes" "$(yesno test "${MERGED_STRIP_LINES:-0}" -ge 5)"
+assert_eq "installer-v3-upgrade 8d META-TEST: the stripped copy is still valid bash" \
+    "yes" "$(yesno bash -n "$META_MERGED")"
+
+PROBE_MUTANT=$(clone_tree "$PROBE_BASE" "probe-mutant")
+rm -f "$PROBE_MUTANT/.mcp.json"
+use_meta_installer "$META_MERGED"
+PROBE_MUTANT_RC=0
+run_update_with "$META_SRC/install.sh" "$PROBE_MUTANT" "$WORK/probe-mutant.log" \
+    || PROBE_MUTANT_RC=$?
+assert_eq "installer-v3-upgrade 8d: the stripped copy still completes" "0" "$PROBE_MUTANT_RC"
+# Same tree, same deleted file: the real installer declined and backed up, the
+# mutant announces "no file changes" and skips — while re-creating the file.
+assert_contains "installer-v3-upgrade 8d META-TEST: MERGED-ABSENT stripped -> the probe fires with a write pending" \
+    "$SKIP_BACKUP_LINE" "$(cat "$WORK/probe-mutant.log" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 8d META-TEST: -> and 8d's backup assertion FAILS (0 backups, subject had 1)" \
+    "0" "$(update_backup_count_of "$PROBE_MUTANT")"
+assert_eq "installer-v3-upgrade 8d META-TEST: the file is re-created either way (the readout was the defect, not the write)" \
+    "yes" "$(yesno test -f "$PROBE_MUTANT/.mcp.json")"
+
+# ===========================================================================
+# Section 8e: a v4 -> v4 --upgrade classifies against the target's OWN manifest
+# ===========================================================================
+# `--upgrade` on a 4.x target takes the v3 flow deliberately (backup + verdict
+# walk), but through U0.4 it could only pick its old table from
+# manifests/v<release>.sha256 — in practice the frozen v3.5 table. Every file
+# that changed between v3.5 and the release the target actually runs then differs
+# from BOTH the shipped copy and the old table, so STOCK files are classified as
+# customized: operator-class ones collect a spurious .new and are LEFT STALE
+# (the operator's "version" is the shipped v4 file they never edited), and
+# workflow-class ones are reported as "replaced; yours is in the backup".
+#
+# U0.5 prefers $TARGET/.claude/install-manifest whenever the target is not 3.x
+# and the manifest parses. Same fixture shape, two runs, one variable (whether
+# the manifest is there), which is the only way to show that the noise was real
+# and is gone.
+#
+# The two source-side edits are made to files that are ABSENT from the frozen
+# v3.5 table by construction (both arrived in v4). That is asserted below, not
+# assumed: if either ever appeared in the frozen table the discrimination would
+# quietly weaken and this META would stop proving anything.
+FROZEN_ABSENT_OPERATOR=".claude/model-roles"
+FROZEN_ABSENT_WORKFLOW=".claude/scripts/review-check.sh"
+assert_eq "installer-v3-upgrade 8e: $FROZEN_ABSENT_OPERATOR is absent from the frozen v3.5 table" \
+    "0" "$(awk -F'\t' -v p="$FROZEN_ABSENT_OPERATOR" '$1 == p { n++ } END { printf "%d", n + 0 }' "$FROZEN_TABLE")"
+assert_eq "installer-v3-upgrade 8e: $FROZEN_ABSENT_WORKFLOW is absent from the frozen v3.5 table" \
+    "0" "$(awk -F'\t' -v p="$FROZEN_ABSENT_WORKFLOW" '$1 == p { n++ } END { printf "%d", n + 0 }' "$FROZEN_TABLE")"
+
+use_meta_installer "$PLUGIN_ROOT/install.sh"
+UPG44_BASE="$WORK/v4-upgrade-base"
+UPG44_BASE_RC=0
+seed_v4_install "$UPG44_BASE" "$META_SRC/install.sh" || UPG44_BASE_RC=$?
+assert_eq "installer-v3-upgrade 8e: the fresh v4 fixture for the 4->4 upgrade installs cleanly" \
+    "0" "$UPG44_BASE_RC"
+# One genuine operator customization, so "preserved (yours)" has a legitimate
+# member and the assertion is about the SPURIOUS ones.
+printf '\n- %s: operator rule on a v4 tree, before a 4 -> 4 upgrade.\n' "$POST_UPGRADE_SENTINEL" \
+    >> "$UPG44_BASE/.claude/rubrics/default.md"
+UPG44_MF_VERSION=$(head -1 "$UPG44_BASE/.claude/install-manifest" 2>/dev/null \
+    | sed 's/^# claude-workflow-plugin //')
+assert_eq "installer-v3-upgrade 8e: the fixture's install-manifest names a version" \
+    "yes" "$(yesno test -n "$UPG44_MF_VERSION")"
+
+# Now the SOURCE moves on, exactly as a 4.0 -> 4.1 release does. The fixture's
+# manifest already recorded the pre-edit hashes, so these two files are stock in
+# the target and changed in the source — the only shape in which the two old
+# tables disagree.
+printf '\n# source-side change, 8e\n' >> "$META_SRC/$FROZEN_ABSENT_OPERATOR"
+printf '\n# source-side change, 8e\n' >> "$META_SRC/$FROZEN_ABSENT_WORKFLOW"
+
+# SUBJECT: the manifest is present, so it is preferred.
+UPG44_SUBJECT=$(clone_tree "$UPG44_BASE" "v4-upgrade-manifest")
+UPG44_SUBJECT_RC=0
+run_forced_upgrade_with "$META_SRC/install.sh" "$UPG44_SUBJECT" "$WORK/v4-upgrade-manifest.log" \
+    || UPG44_SUBJECT_RC=$?
+UPG44_SUBJECT_LOG=$(cat "$WORK/v4-upgrade-manifest.log" 2>/dev/null || echo "")
+if [ "$UPG44_SUBJECT_RC" -ne 0 ]; then
+    printf '  diagnostic: the 4->4 upgrade exited %s; tail of log:\n' "$UPG44_SUBJECT_RC"
+    tail -20 "$WORK/v4-upgrade-manifest.log" 2>/dev/null | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 8e: --upgrade on a v4 target exits 0" "0" "$UPG44_SUBJECT_RC"
+assert_contains "installer-v3-upgrade 8e: it classified against the target's own install-manifest" \
+    "Classifying the installed tree against .claude/install-manifest (v$UPG44_MF_VERSION)" \
+    "$UPG44_SUBJECT_LOG"
+assert_contains "installer-v3-upgrade 8e: and the report names that table rather than a temp path" \
+    "hashed against .claude/install-manifest (v$UPG44_MF_VERSION)" "$UPG44_SUBJECT_LOG"
+# The two stock-but-changed files are replace-stock: replaced silently, no .new,
+# no "yours is in the backup" line.
+assert_contains "installer-v3-upgrade 8e: both stock-but-changed files are classified replaced (stock)" \
+    "replaced (stock)       2" "$UPG44_SUBJECT_LOG"
+assert_contains "installer-v3-upgrade 8e: nothing is misreported as replaced (customized)" \
+    "replaced (customized)  0" "$UPG44_SUBJECT_LOG"
+assert_contains "installer-v3-upgrade 8e: exactly the one real customization is preserved" \
+    "preserved (yours)      1" "$UPG44_SUBJECT_LOG"
+assert_eq "installer-v3-upgrade 8e: no spurious $FROZEN_ABSENT_OPERATOR.new was written" \
+    "no" "$(yesno preserved_new_exists "$UPG44_SUBJECT" "$FROZEN_ABSENT_OPERATOR")"
+UPG44_ROLES_CMP_RC=0
+cmp -s "$UPG44_SUBJECT/$FROZEN_ABSENT_OPERATOR" "$META_SRC/$FROZEN_ABSENT_OPERATOR" \
+    || UPG44_ROLES_CMP_RC=$?
+assert_eq "installer-v3-upgrade 8e: the stock operator file actually got the new shipped bytes" \
+    "0" "$UPG44_ROLES_CMP_RC"
+UPG44_REVIEW_CMP_RC=0
+cmp -s "$UPG44_SUBJECT/$FROZEN_ABSENT_WORKFLOW" "$META_SRC/$FROZEN_ABSENT_WORKFLOW" \
+    || UPG44_REVIEW_CMP_RC=$?
+assert_eq "installer-v3-upgrade 8e: the stock workflow file did too" "0" "$UPG44_REVIEW_CMP_RC"
+# Preservation is unaffected: the rider changes WHICH table is consulted, not
+# what happens to a file the operator really did edit.
+assert_contains "installer-v3-upgrade 8e: the genuine operator rule survived" \
+    "$POST_UPGRADE_SENTINEL" "$(cat "$UPG44_SUBJECT/.claude/rubrics/default.md" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 8e: with the shipped rubric alongside as .new" \
+    "yes" "$(yesno preserved_new_exists "$UPG44_SUBJECT" ".claude/rubrics/default.md")"
+
+# CONTROL: the identical tree with the manifest DELETED falls back to the frozen
+# table — the pre-U0.5 behaviour, and the proof that the noise above was real.
+UPG44_CONTROL=$(clone_tree "$UPG44_BASE" "v4-upgrade-frozen")
+rm -f "$UPG44_CONTROL/.claude/install-manifest"
+UPG44_CONTROL_RC=0
+run_forced_upgrade_with "$META_SRC/install.sh" "$UPG44_CONTROL" "$WORK/v4-upgrade-frozen.log" \
+    || UPG44_CONTROL_RC=$?
+UPG44_CONTROL_LOG=$(cat "$WORK/v4-upgrade-frozen.log" 2>/dev/null || echo "")
+assert_eq "installer-v3-upgrade 8e CONTROL: the manifest-less clone still upgrades cleanly" \
+    "0" "$UPG44_CONTROL_RC"
+assert_contains "installer-v3-upgrade 8e CONTROL: with no manifest it falls back to the frozen table" \
+    "Classifying the installed tree against $(basename "$FROZEN_TABLE")" "$UPG44_CONTROL_LOG"
+assert_contains "installer-v3-upgrade 8e CONTROL: which misreports the stock operator file as preserved (2, not 1)" \
+    "preserved (yours)      2" "$UPG44_CONTROL_LOG"
+assert_eq "installer-v3-upgrade 8e CONTROL: and litters the spurious $FROZEN_ABSENT_OPERATOR.new" \
+    "yes" "$(yesno preserved_new_exists "$UPG44_CONTROL" "$FROZEN_ABSENT_OPERATOR")"
+# The real cost of the noise: the stock file is left STALE, so the operator has
+# to merge a file they never edited.
+UPG44_STALE_CMP_RC=0
+cmp -s "$UPG44_CONTROL/$FROZEN_ABSENT_OPERATOR" "$META_SRC/$FROZEN_ABSENT_OPERATOR" \
+    || UPG44_STALE_CMP_RC=$?
+assert_eq "installer-v3-upgrade 8e CONTROL: leaving the stock operator file stale (differs from shipped)" \
+    "yes" "$(yesno test "$UPG44_STALE_CMP_RC" -ne 0)"
+
+# ===========================================================================
+# Section 9: fresh vs upgraded equivalence
+# ===========================================================================
+# "Installs cleanly" has to mean the upgraded tree and a FRESH install of the
+# same source are the same product. Sections 6a and 8a prove the parts; this is
+# the whole: every path in the source manifest compared byte-for-byte between
+# the upgraded T (v3.5 install -> upgrade -> mode-2 re-run, with two operator
+# customizations along the way) and a fresh F, with the differing set asserted
+# to be EXACTLY the four paths that have a reason to differ:
+#
+#   .claude/rubrics/default.md  preserved operator file (sections 4 + 8b)
+#   LESSONS.md                  preserved operator file (section 4)
+#   .claude/settings.json       merged key-wise in T, copied verbatim into F
+#   .mcp.json                   merged key-wise in T, copied verbatim into F
+#
+# Anything else in that set is a real defect: a file the upgrade forgot to
+# replace, a stale v3.5 file that survived, or a merge that leaked into a path it
+# does not own. An EMPTY set would be a defect too — it would mean the
+# customizations did not survive — so the assertion is equality with the exact
+# list, not a subset check.
+F="$WORK/fresh-v4"
+FRESH_RC=0
+seed_v4_install "$F" "$PLUGIN_ROOT/install.sh" || FRESH_RC=$?
+if [ "$FRESH_RC" -ne 0 ]; then
+    printf '  diagnostic: the fresh v4 install exited %s; tail of log:\n' "$FRESH_RC"
+    tail -15 "$WORK/fresh-v4-install-v4.log" 2>/dev/null | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 9: a fresh v4 install of the same source exits 0" "0" "$FRESH_RC"
+
+# CHECKER (shared with the section 9 META): the source-manifest paths whose
+# BYTES differ between two installs, one per line, sorted. Driven from the
+# manifest so it covers every shipped class — including the two merged files,
+# which is what makes the expected set explicit rather than exempted.
+equivalence_diff() {
+    local manifest="$1"
+    local a="$2"
+    local b="$3"
+    local epath eclass ehash
+    while IFS=$'\t' read -r epath eclass ehash; do
+        [ -n "$epath" ] || continue
+        : "$eclass" "$ehash"
+        if [ ! -f "$a/$epath" ] || [ ! -f "$b/$epath" ]; then
+            printf '%s (missing on one side)\n' "$epath"
+        elif ! cmp -s "$a/$epath" "$b/$epath"; then
+            printf '%s\n' "$epath"
+        fi
+    done < "$manifest" | LC_ALL=C sort
+}
+
+# Expected side built from an explicit list run through the same sort, so the
+# assertion names the four files without hardcoding a collation order.
+EXPECTED_DIFF=$(printf '%s\n' \
+    ".claude/rubrics/default.md" \
+    "LESSONS.md" \
+    ".claude/settings.json" \
+    ".mcp.json" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
+ACTUAL_DIFF=$(equivalence_diff "$SRC_MANIFEST" "$T" "$F" | tr '\n' ' ' | sed 's/ *$//')
+if [ "$ACTUAL_DIFF" != "$EXPECTED_DIFF" ]; then
+    printf '  diagnostic: upgraded-vs-fresh differences, one per line:\n'
+    equivalence_diff "$SRC_MANIFEST" "$T" "$F" | head -15 | sed 's/^/    /'
+fi
+assert_eq "installer-v3-upgrade 9: upgraded and fresh differ in EXACTLY the four expected paths" \
+    "$EXPECTED_DIFF" "$ACTUAL_DIFF"
+
+# The two merged files differ because they were MERGED, and the merge kept the
+# operator's content — asserted here so their membership in the set above is
+# accounted for rather than tolerated.
+assert_json_field "installer-v3-upgrade 9: the upgraded settings.json carries the operator key the fresh one cannot" \
+    "$(cat "$T/.claude/settings.json" 2>/dev/null || echo '{}')" '.env.OPERATOR_KEY' "op-1"
+assert_eq "installer-v3-upgrade 9: the fresh settings.json does not" \
+    "" "$(jq -r '.env.OPERATOR_KEY // empty' "$F/.claude/settings.json" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 9: the upgraded .mcp.json carries the operator server the fresh one cannot" \
+    "$(printf '%s' "$OPERATOR_SERVER_JSON" | jq -cS .)" \
+    "$(jq -cS '.mcpServers["operator-thing"]' "$T/.mcp.json" 2>/dev/null || echo "")"
+assert_eq "installer-v3-upgrade 9: the fresh .mcp.json does not" \
+    "no" "$(jq -r 'if (.mcpServers // {} | has("operator-thing")) then "yes" else "no" end' \
+        "$F/.mcp.json" 2>/dev/null || echo "err")"
+
+# new_sidecars_of <tree> — the *.new files in the LIVE tree, space-joined and
+# sorted, with the backup and trash directories pruned.
+#
+# The prune is load-bearing rather than cosmetic: T's section-8b mode-2 backup
+# was taken AFTER the section-5 upgrade had already written
+# .claude/rubrics/default.md.new, so the backup legitimately holds a copy of that
+# sidecar. A bare `find` over the tree therefore reports three sidecars for two
+# real ones, and "no .new litter" would be asserted against snapshots of the tree
+# rather than the tree.
+new_sidecars_of() {
+    ( cd "$1" && find . \
+        \( -name '.claude-backup-*' -o -name '.claude-v2-backup-*' \
+           -o -name '.claude-v3-backup-*' -o -name '.claude-uninstall-trash-*' \) -prune \
+        -o -name '*.new' -type f -print 2>/dev/null ) \
+        | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# .new sidecars are an UPGRADE artifact only. A fresh install has nothing to
+# preserve, so one appearing there would mean the verdict walk had leaked onto a
+# path where every file is new by definition.
+assert_eq "installer-v3-upgrade 9: the fresh install wrote no .new file anywhere" \
+    "" "$(new_sidecars_of "$F")"
+assert_eq "installer-v3-upgrade 9: the upgraded tree carries exactly the two expected .new sidecars" \
+    "$(printf '%s\n' ".claude/rubrics/default.md.new" "LESSONS.md.new" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" \
+    "$(new_sidecars_of "$T")"
+
+# Both trees were written by the same source, so the record of WHAT was written
+# has to be identical — byte for byte, header included. This is also what lets a
+# later upgrade treat an upgraded tree and a fresh one identically.
+EQ_MANIFEST_CMP_RC=0
+cmp -s "$T/.claude/install-manifest" "$F/.claude/install-manifest" || EQ_MANIFEST_CMP_RC=$?
+assert_eq "installer-v3-upgrade 9: both trees carry a byte-identical .claude/install-manifest" \
+    "0" "$EQ_MANIFEST_CMP_RC"
+
+# --- 9b META-TEST: the equivalence checker can FAIL -------------------------
+# A byte appended to one workflow file in the upgraded tree — the shape of "the
+# upgrade left a stale file behind". The checker must report that path, and the
+# assertion above must stop holding. Restoring the file from F (byte-identical by
+# construction, since the assertion above just proved it) puts the tree back, and
+# the checker going quiet again proves the META did not simply latch.
+META_DIVERGENT=".claude/scripts/session-start.sh"
+printf '\n# 9b META-TEST divergence\n' >> "$T/$META_DIVERGENT"
+META_DIFF=$(equivalence_diff "$SRC_MANIFEST" "$T" "$F" | tr '\n' ' ' | sed 's/ *$//')
+assert_contains "installer-v3-upgrade 9b META-TEST: a planted divergent workflow file is reported" \
+    "$META_DIVERGENT" "$META_DIFF"
+assert_eq "installer-v3-upgrade 9b META-TEST: -> section 9's equality assertion FAILS on it" \
+    "no" "$(yesno test "$META_DIFF" = "$EXPECTED_DIFF")"
+cp "$F/$META_DIVERGENT" "$T/$META_DIVERGENT"
+assert_eq "installer-v3-upgrade 9b META-TEST: and holds again once the divergence is undone" \
+    "$EXPECTED_DIFF" "$(equivalence_diff "$SRC_MANIFEST" "$T" "$F" | tr '\n' ' ' | sed 's/ *$//')"
