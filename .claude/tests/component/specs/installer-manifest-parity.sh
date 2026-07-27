@@ -86,15 +86,20 @@
 #                             files left behind. This pins back-compat.
 #   8. Uninstall leg D      — manifest MALFORMED (foreign header): the same
 #                             legacy behaviour, via the other failure arm.
-#   9. Synthetic edge cases — the two guards on the destructive path that a
+#   9. Synthetic edge cases — the three guards on the destructive path that a
 #                             real install cannot produce: a hash-MATCHING
-#                             path-traversal row, and --restore-backup with only
-#                             a migration snapshot to restore from. Built by
-#                             hand (a .claude/ directory and a manifest is all
-#                             uninstall.sh needs), so they cost no install.
+#                             path-traversal row, a hash-MATCHING row under a
+#                             SYMLINKED parent (claude-workflow-plugin-wn4), and
+#                             --restore-backup with only a migration snapshot to
+#                             restore from. Built by hand (a .claude/ directory
+#                             and a manifest is all uninstall.sh needs), so they
+#                             cost no install.
+#      9c META-TEST         — the containment block is deleted from a COPY of
+#                             uninstall.sh and the symlinked-parent row moves the
+#                             outside file again: wn4's defect, mechanically.
 #
 # Runtime is dominated by four installs (~1.5s each: a ~10 MB copy plus ~250
-# hashes) and six uninstalls. No network, no LLM calls.
+# hashes) and eight uninstalls. No network, no LLM calls.
 
 set -u
 
@@ -670,39 +675,68 @@ assert_not_contains "installer-manifest-parity 8: no root file was listed as unm
 # cannot produce, which is exactly why they need a hand-built tree: they are
 # what a CORRUPTED or hand-edited manifest does to a script that calls `mv`.
 
-# --- 9a. a hash-MATCHING traversal row must not move a file outside ---------
-# The dangerous version of the case, not the easy one: the rows carry the
-# victims' REAL hashes, so the hash check would wave them through and only the
-# path rule stands between a manifest row and `mv /etc/hosts`. A legitimate row
-# is included alongside so the assertions can tell "the traversal rows were
-# dropped" from "the whole manifest was rejected" — if the manifest had been
-# thrown out wholesale, .mcp.json would still be sitting in the project and this
-# section would prove nothing about the path rule.
-# BOTH victims live inside $WORK — the relative row escapes only as far as the
-# fixture's parent, and the absolute row points at another fixture file rather
-# than at a real system path. That is deliberate: anyone probing this guard by
-# MUTATING the path rule would otherwise have the mutant attempt `mv` on a
-# system file, and a spec must not depend on the host's permissions to stay
-# harmless.
+# --- 9a. a hash-MATCHING escaping row must not move a file outside ----------
+# The dangerous version of the case, not the easy one: every row carries its
+# victim's REAL hash, so the hash check would wave them all through and only the
+# two containment guards stand between a manifest row and `mv /etc/hosts`:
+#
+#   the LEXICAL path rule    (in manifest_root_rows' awk filter) drops absolute
+#                            rows and rows carrying a `..` segment.
+#   PHYSICAL containment     (row_contained, the WN4-CONTAINMENT block) drops a
+#                            row whose parent directory resolves outside the
+#                            target — which is what a SYMLINKED parent does, and
+#                            what the lexical rule alone cannot see
+#                            (claude-workflow-plugin-wn4: `[ -f ]` and hashing
+#                            both follow symlinks, so a lexically-clean row
+#                            reached a file outside the project and moved it).
+#
+# A legitimate row is included alongside so the assertions can tell "the
+# escaping rows were dropped" from "the whole manifest was rejected" — if the
+# manifest had been thrown out wholesale, .mcp.json would still be sitting in the
+# project and this section would prove nothing about either rule.
+# ALL THREE victims live inside $WORK — the relative row escapes only as far as
+# the fixture's parent, the absolute row points at another fixture file rather
+# than at a real system path, and the symlink points at a fixture directory. That
+# is deliberate: anyone probing these guards by MUTATING them (9c below does
+# exactly that) would otherwise have the mutant attempt `mv` on a system file,
+# and a spec must not depend on the host's permissions to stay harmless.
 TS="$WORK/synthetic-traversal"
 mkdir -p "$TS/.claude"
 VICTIM_REL="$WORK/outside-victim.txt"
 VICTIM_ABS="$WORK/absolute-victim.txt"
+# wn4: a directory OUTSIDE the target, reached through a symlink INSIDE it. The
+# row spelling ("data/symlink-victim.txt") is relative and carries no `..`, so it
+# passes the lexical rule untouched.
+VICTIM_LINK_DIR="$WORK/outside-symlinked"
+VICTIM_LINK="$VICTIM_LINK_DIR/symlink-victim.txt"
+SYMLINK_ROW="data/symlink-victim.txt"
 printf 'a file one level OUTSIDE the project\n' > "$VICTIM_REL"
 printf 'a file named by ABSOLUTE path\n' > "$VICTIM_ABS"
+mkdir -p "$VICTIM_LINK_DIR"
+printf 'a file reached through a SYMLINKED parent directory\n' > "$VICTIM_LINK"
+ln -s "$VICTIM_LINK_DIR" "$TS/data"
 printf '{"mcpServers":{}}\n' > "$TS/.mcp.json"
 {
     printf '# claude-workflow-plugin 4.0.0\n'
     printf '.mcp.json\tmerged\t%s\n' "$(hash_of "$TS/.mcp.json")"
     printf '../outside-victim.txt\toperator\t%s\n' "$(hash_of "$VICTIM_REL")"
     printf '%s\tworkflow\t%s\n' "$VICTIM_ABS" "$(hash_of "$VICTIM_ABS")"
+    printf '%s\toperator\t%s\n' "$SYMLINK_ROW" "$(hash_of "$VICTIM_LINK")"
 } > "$TS/.claude/install-manifest"
+# Pre-conditions: the symlink really resolves outside, and the row's hash really
+# matches the victim. Without both, 9a's symlink assertions would pass because
+# the row never had a chance, not because the guard stopped it.
+assert_eq "installer-manifest-parity 9a: the fixture's symlinked parent resolves outside the target" \
+    "yes" "$(yesno test -f "$TS/$SYMLINK_ROW")"
+assert_eq "installer-manifest-parity 9a: and the symlink row carries the victim's REAL hash" \
+    "$(hash_of "$VICTIM_LINK")" \
+    "$(awk -F'\t' -v p="$SYMLINK_ROW" '$1 == p { print $3 }' "$TS/.claude/install-manifest")"
 
 UNINSTALL_TS_LOG="$WORK/uninstall-traversal.log"
 UNINSTALL_TS_RC=0
 uninstall_of "$TS" "$UNINSTALL_TS_LOG" || UNINSTALL_TS_RC=$?
 UNINSTALL_TS_TEXT=$(cat "$UNINSTALL_TS_LOG" 2>/dev/null || echo "")
-assert_eq "installer-manifest-parity 9a: uninstall.sh exits 0 on a manifest with traversal rows" \
+assert_eq "installer-manifest-parity 9a: uninstall.sh exits 0 on a manifest with escaping rows" \
     "0" "$UNINSTALL_TS_RC"
 assert_eq "installer-manifest-parity 9a: the file OUTSIDE the project still exists" \
     "yes" "$(yesno test -f "$VICTIM_REL")"
@@ -717,9 +751,28 @@ assert_not_contains "installer-manifest-parity 9a: the traversal row is not even
     "outside-victim" "$UNINSTALL_TS_TEXT"
 assert_not_contains "installer-manifest-parity 9a: nor is the absolute one" \
     "absolute-victim" "$UNINSTALL_TS_TEXT"
-# The control half: the legitimate row WAS consumed, so the manifest was parsed
-# and it is the path rule doing the work.
+# wn4, the load-bearing half of the new guard: the symlinked-parent row is
+# REFUSED. The victim stays where it was, nothing of it reaches the trash, and
+# the row is never presented as something that will move.
 TRASH_TS=$(trash_dir_of "$TS")
+assert_eq "installer-manifest-parity 9a (wn4): the file behind the symlinked parent still exists" \
+    "yes" "$(yesno test -f "$VICTIM_LINK")"
+assert_contains "installer-manifest-parity 9a (wn4): and still carries its content" \
+    "a file reached through a SYMLINKED parent directory" \
+    "$(cat "$VICTIM_LINK" 2>/dev/null || echo "")"
+assert_eq "installer-manifest-parity 9a (wn4): nothing named symlink-victim.txt reached the trash" \
+    "no" "$(yesno test -e "$TRASH_TS/symlink-victim.txt")"
+assert_not_contains "installer-manifest-parity 9a (wn4): the row was NOT listed as something that will move" \
+    "$SYMLINK_ROW (unmodified since install)" "$UNINSTALL_TS_TEXT"
+assert_not_contains "installer-manifest-parity 9a (wn4): nor was it reported as moved" \
+    "moved symlink-victim.txt" "$UNINSTALL_TS_TEXT"
+# It is REFUSED OUT LOUD rather than silently skipped: a manifest row that
+# resolves outside the project is the corrupted-manifest case, and an operator
+# running a destructive op has to be told which row was ignored and why.
+assert_contains "installer-manifest-parity 9a (wn4): the readout names the refused row" \
+    "$SYMLINK_ROW (resolves outside the project" "$UNINSTALL_TS_TEXT"
+# The control half: the legitimate row WAS consumed, so the manifest was parsed
+# and it is the two containment rules doing the work.
 assert_eq "installer-manifest-parity 9a: the legitimate root row was still consumed" \
     "yes" "$(yesno test -f "$TRASH_TS/.mcp.json")"
 
@@ -747,3 +800,62 @@ assert_eq "installer-manifest-parity 9b: nothing from it was splattered into the
     "no" "$(yesno test -e "$TR9/agents-marker.txt")"
 assert_eq "installer-manifest-parity 9b: and the snapshot itself is untouched" \
     "yes" "$(yesno test -f "$TR9/.claude-v3-backup-20260101-000000/agents-marker.txt")"
+
+# --- 9c META-TEST: the containment guard can actually fail -------------------
+# claude-workflow-plugin-wn4 was a REAL escape, reproduced before it was fixed:
+# with only the lexical path rule in place, the symlinked-parent row of 9a moved
+# the outside file into the in-project trash and the readout called it
+# "unmodified since install". This META keeps that proof mechanical — the block
+# is deleted from a COPY of uninstall.sh (anchored on its own sentinels, so a
+# rename breaks the META loudly instead of silently making it a no-op) and the
+# same fixture shape is run through the mutant.
+#
+# A SECOND fixture, not 9a's: the mutant is expected to consume its victim, and
+# reusing 9a's tree would leave the section's own assertions depending on run
+# order.
+MUTANT_UNINSTALL="$WORK/uninstall-no-containment.sh"
+sed '/# WN4-CONTAINMENT-START/,/# WN4-CONTAINMENT-END/d' \
+    "$PLUGIN_ROOT/uninstall.sh" > "$MUTANT_UNINSTALL"
+assert_eq "installer-manifest-parity 9c META-TEST: the mutated copy really differs from uninstall.sh" \
+    "no" "$(yesno cmp -s "$MUTANT_UNINSTALL" "$PLUGIN_ROOT/uninstall.sh")"
+assert_eq "installer-manifest-parity 9c META-TEST: the strip removed the containment block (fewer lines)" \
+    "yes" "$(yesno test "$(grep -c . "$MUTANT_UNINSTALL" | tr -d ' \n')" -lt "$(grep -c . "$PLUGIN_ROOT/uninstall.sh" | tr -d ' \n')")"
+assert_eq "installer-manifest-parity 9c META-TEST: the mutated copy is still valid bash" \
+    "yes" "$(yesno bash -n "$MUTANT_UNINSTALL")"
+
+TSM="$WORK/synthetic-symlink-mutant"
+mkdir -p "$TSM/.claude"
+MUTANT_LINK_DIR="$WORK/outside-symlinked-mutant"
+MUTANT_VICTIM="$MUTANT_LINK_DIR/symlink-victim-mutant.txt"
+mkdir -p "$MUTANT_LINK_DIR"
+printf 'the mutant is expected to move this one\n' > "$MUTANT_VICTIM"
+ln -s "$MUTANT_LINK_DIR" "$TSM/data"
+printf '{"mcpServers":{}}\n' > "$TSM/.mcp.json"
+{
+    printf '# claude-workflow-plugin 4.0.0\n'
+    printf '.mcp.json\tmerged\t%s\n' "$(hash_of "$TSM/.mcp.json")"
+    printf 'data/symlink-victim-mutant.txt\toperator\t%s\n' "$(hash_of "$MUTANT_VICTIM")"
+} > "$TSM/.claude/install-manifest"
+
+UNINSTALL_TSM_LOG="$WORK/uninstall-symlink-mutant.log"
+UNINSTALL_TSM_RC=0
+printf 'y\n' | bash "$MUTANT_UNINSTALL" "$TSM" >"$UNINSTALL_TSM_LOG" 2>&1 || UNINSTALL_TSM_RC=$?
+UNINSTALL_TSM_TEXT=$(cat "$UNINSTALL_TSM_LOG" 2>/dev/null || echo "")
+assert_eq "installer-manifest-parity 9c META-TEST: the mutant still runs to completion" \
+    "0" "$UNINSTALL_TSM_RC"
+# THE FLIP. 9a asserts the victim survives; without the block the same shape of
+# row takes it out of its directory entirely.
+assert_eq "installer-manifest-parity 9c META-TEST: without the block the outside file is GONE from its own directory" \
+    "no" "$(yesno test -f "$MUTANT_VICTIM")"
+TRASH_TSM=$(trash_dir_of "$TSM")
+assert_eq "installer-manifest-parity 9c META-TEST: and it sits in the project's trash instead" \
+    "yes" "$(yesno test -f "$TRASH_TSM/symlink-victim-mutant.txt")"
+assert_contains "installer-manifest-parity 9c META-TEST: the mutant even called it unmodified since install" \
+    "data/symlink-victim-mutant.txt (unmodified since install)" "$UNINSTALL_TSM_TEXT"
+assert_not_contains "installer-manifest-parity 9c META-TEST: and printed no refusal" \
+    "resolves outside the project" "$UNINSTALL_TSM_TEXT"
+# The mutation is SURGICAL: deleting the containment block must not disturb the
+# lexical rule or the legitimate row, or the flip above could be a side effect of
+# breaking the walk wholesale.
+assert_eq "installer-manifest-parity 9c META-TEST: the mutant still consumed the legitimate row" \
+    "yes" "$(yesno test -f "$TRASH_TSM/.mcp.json")"

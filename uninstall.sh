@@ -34,6 +34,29 @@
 # behaviour, unchanged: the three directories move and root files stay. That is
 # the only correct fallback — with no table of hashes there is no way to tell a
 # stock file from an operator's, and this is a destructive operation.
+#
+# CONTAINMENT (v4.1 / U0.7, claude-workflow-plugin-wn4)
+# ----------------------------------------------------
+# A manifest row is UNTRUSTED INPUT to a script that calls `mv`, so a row has to
+# be proven to name a file inside the project before it is acted on. That takes
+# TWO rules, because the first one is not enough:
+#
+#   lexical   manifest_root_rows' awk filter drops absolute rows and rows
+#             carrying a `..` segment.
+#   physical  row_contained resolves the row's PARENT DIRECTORY with `cd`/`pwd -P`
+#             and requires the result to be inside the resolved target.
+#
+# The second rule exists because the first is a string test, and `[ -f ]` and
+# hashing both FOLLOW SYMLINKS: a row like `data/thing.txt`, where `data` is a
+# symlink to somewhere else on the disk, is lexically spotless and still reached
+# a file outside the project and moved it (wn4, reproduced before the fix — the
+# readout even called it "unmodified since install"). Physical containment is
+# what makes the file header's invariant true rather than nearly true.
+#
+# Deliberately NOT the cheaper "root rows must be FLAT" rule: root scope is flat
+# in TODAY's surface only, and the generator already documents a shipped-docs
+# subset (docs/) arriving in a later phase. A flat-only rule would silently stop
+# consuming those rows the release they appear.
 
 set -e
 
@@ -60,6 +83,14 @@ if [ ! -d "$TARGET" ]; then
     exit 1
 fi
 TARGET=$(cd "$TARGET" && pwd)
+# The same target with every symlink in it RESOLVED. `cd` + `pwd -P` is the
+# portable way to get it: realpath(1) is absent on older macOS, readlink -f is
+# GNU-only, and a destructive uninstaller may not require python3. Computed once;
+# row_contained compares against it. Falls back to the logical path if the cd
+# fails, which cannot happen here (the -d test above just succeeded) but would
+# leave the comparison strict rather than empty if it ever did.
+TARGET_PHYS=$(cd "$TARGET" 2>/dev/null && pwd -P) || TARGET_PHYS=""
+[ -n "$TARGET_PHYS" ] || TARGET_PHYS="$TARGET"
 
 echo ""
 echo -e "${BLUE}Claude Workflow Plugin - Uninstaller${NC}"
@@ -166,6 +197,31 @@ manifest_root_rows() {
     return 0
 }
 
+# row_contained <relative-path> — 0 when $TARGET/<relative-path>'s PARENT
+# DIRECTORY resolves physically inside $TARGET_PHYS (or IS $TARGET_PHYS), 1
+# otherwise. The wn4 guard; see the CONTAINMENT block in the file header.
+#
+# The PARENT is what is resolved, not the file: a candidate that is itself a
+# symlink is safe to hand to `mv`, which relocates the LINK and leaves the file it
+# points at alone. A symlinked parent is the dangerous shape, because then `mv`
+# operates on a real file that lives somewhere else.
+#
+# Callers only reach this for rows whose file EXISTS, so a failing `cd` means a
+# genuinely unreadable parent rather than a routine absent file — and that is
+# refused too (fail closed: never move what cannot be located).
+row_contained() {
+    local rel="$1"
+    local parent parent_phys
+    parent=$(dirname "$TARGET/$rel")
+    parent_phys=$(cd "$parent" 2>/dev/null && pwd -P) || parent_phys=""
+    [ -n "$parent_phys" ] || return 1
+    case "$parent_phys" in
+        "$TARGET_PHYS")   return 0 ;;
+        "$TARGET_PHYS"/*) return 0 ;;
+    esac
+    return 1
+}
+
 # Discover what's installed ---------------------------------------------------
 TO_REMOVE=()
 DESCRIPTIONS=()
@@ -174,6 +230,10 @@ DESCRIPTIONS=()
 # record of what went.
 ROOT_KEPT_MODIFIED=()
 ROOT_KEPT_UNVERIFIED=()
+# Rows REFUSED because they resolve outside the project (wn4). Kept separate from
+# the two "kept" lists on purpose: those are files the operator owns, this is a
+# manifest we do not trust.
+ROOT_REFUSED_OUTSIDE=()
 
 if [ -d "$TARGET/.claude" ]; then
     TO_REMOVE+=("$TARGET/.claude")
@@ -208,6 +268,16 @@ fi
 while IFS=$'\t' read -r mf_path mf_hash; do
     [ -n "$mf_path" ] || continue
     [ -f "$TARGET/$mf_path" ] || continue
+    # WN4-CONTAINMENT-START (load-bearing; the L2 META-TEST at
+    # installer-manifest-parity.sh 9c DELETES this block and asserts the
+    # symlinked-parent row moves the outside file again — wn4's defect. Keep both
+    # sentinels, and keep the deletion fail-OPEN: without this block the script
+    # degrades to the pre-hardening behaviour, never to refusing legitimate rows.)
+    if ! row_contained "$mf_path"; then
+        ROOT_REFUSED_OUTSIDE+=("$mf_path")
+        continue
+    fi
+    # WN4-CONTAINMENT-END
     ACTUAL_HASH=$(hash_of "$TARGET/$mf_path")
     if [ -z "$ACTUAL_HASH" ]; then
         ROOT_KEPT_UNVERIFIED+=("$mf_path")
@@ -265,6 +335,18 @@ if [ "${#ROOT_KEPT_MODIFIED[@]}" -gt 0 ] || [ "${#ROOT_KEPT_UNVERIFIED[@]}" -gt 
     echo ""
 fi
 
+# Refused rows (wn4). Printed BEFORE the confirmation and in their own block: an
+# operator staring at the last screen of a destructive op needs to see that a row
+# was ignored — and needs it NOT to appear in the "will be moved" list above.
+if [ "${#ROOT_REFUSED_OUTSIDE[@]}" -gt 0 ]; then
+    echo -e "${YELLOW}Refused (the install manifest names a path outside this project):${NC}"
+    for refused in "${ROOT_REFUSED_OUTSIDE[@]}"; do
+        echo "  - $refused (resolves outside the project; not touched)"
+    done
+    echo "  The manifest has been edited or a directory in the path is a symlink."
+    echo ""
+fi
+
 # Gated on EXISTING_BACKUPS rather than LATEST_BACKUP: a project whose only
 # backup is a v2/v3 migration snapshot still has backups to report, and it is
 # the one that most needs to hear so.
@@ -318,6 +400,11 @@ fi
 if [ "${#ROOT_KEPT_UNVERIFIED[@]}" -gt 0 ]; then
     for kept in "${ROOT_KEPT_UNVERIFIED[@]}"; do
         echo -e "${CYAN}note${NC} $kept left in place (could not verify it against the install manifest)"
+    done
+fi
+if [ "${#ROOT_REFUSED_OUTSIDE[@]}" -gt 0 ]; then
+    for refused in "${ROOT_REFUSED_OUTSIDE[@]}"; do
+        echo -e "${YELLOW}note${NC} $refused (resolves outside the project; refused, nothing was moved for that row)"
     done
 fi
 

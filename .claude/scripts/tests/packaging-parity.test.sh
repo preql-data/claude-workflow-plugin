@@ -64,6 +64,40 @@
 #      accepting a multi-document target is demonstrated end-to-end.
 #   4. Expression identity bash <-> ps1 (whitespace-normalised).
 #   5. META-TESTs: each proves a check above is capable of failing.
+#   6. install.ps1 UPGRADE-MACHINERY parity (v4.1 / U0.7) — see the block below.
+#   7. META-TESTs for section 6.
+#
+# WHY SECTION 6 IS TEXTUAL AND NOT EXECUTED (U0.7)
+# -----------------------------------------------
+# U0.7 ported install.sh's whole v3 -> v4 upgrade machinery into install.ps1:
+# the -Upgrade switch and its exclusivity with -Mode, Detect-V3Install, the
+# dotfile-inclusive backup, a PS-NATIVE reimplementation of
+# workflow-manifest.sh's generate/classify (Get-FileHash instead of shasum), the
+# verdict walk, the no-change probe, and the LF-only install-manifest writer.
+# That is ~600 lines of duplicated contract, and NOTHING in `make test` can run
+# it: the L2/L3 tiers execute bash only, .github/workflows/windows-install.yml is
+# workflow_dispatch-only, and there is no PowerShell on the dev/CI lane that runs
+# this suite.
+#
+# So the checks below pin the parts of the port that a silent divergence would
+# make WRONG rather than merely different, and they pin them FILE-TO-FILE
+# wherever the two dialects allow it (extract from both, compare) rather than
+# against literals typed here:
+#
+#   * both installers agree on the shipped SURFACE (extracted from
+#     workflow-manifest.sh's generate_rows and from install.ps1's
+#     Get-WorkflowSurfaceRows and compared as sets) — the one that drifts when a
+#     future release adds a file to one side only;
+#   * the no-change probe's readout is byte-identical, because the L2 spec
+#     asserts on that exact sentence;
+#   * the jq merge operand ORDER is existing-then-shipped in both, because
+#     swapping it stays valid jq and silently reverses the union direction
+#     (claude-workflow-plugin-3t1);
+#   * no Out-File / -NoNewline survives on a JSON or manifest write path, because
+#     under Windows PowerShell 5.1 that means a BOM and a single-line body, and a
+#     CRLF manifest silently degrades the next Update to plain copies (3t1
+#     facets 1-2);
+#   * the wn4 containment rule is present in BOTH uninstall scripts.
 #
 # Exit codes:
 #   0  all assertions pass
@@ -80,6 +114,11 @@ INSTALL_SH="$PROJECT_DIR/install.sh"
 INSTALL_PS1="$PROJECT_DIR/install.ps1"
 SHIPPED_MCP="$PROJECT_DIR/.mcp.json"
 SHIPPED_SETTINGS="$PROJECT_DIR/.claude/settings.json"
+# Section 6 subjects: the surface generator both installers must agree with, and
+# the two uninstallers that share the wn4 containment rule.
+MANIFEST_TOOL="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+UNINSTALL_SH="$PROJECT_DIR/uninstall.sh"
+UNINSTALL_PS1="$PROJECT_DIR/uninstall.ps1"
 
 WORK=$(mktemp -d -t packaging-parity-test.XXXXXX)
 # Invoked indirectly, by the EXIT trap immediately below.
@@ -872,6 +911,636 @@ assert_eq "META 7: under truthiness the operator's statusLine:false is CLOBBERED
 # survives — a blanket breakage would have taken it out too.
 assert_eq "META 7: the mutation is surgical — permissions:null still preserved" "null" \
     "$(jq -c '.permissions' "$META_MERGED_3" 2>/dev/null)"
+
+# ===========================================================================
+echo ""
+echo "=== Section 6: install.ps1 upgrade-machinery parity (U0.7) ==="
+
+# --- helpers used only by sections 6 and 7 ---------------------------------
+
+# text_line_count <file> <literal> — fixed-string line count over ALL lines,
+# comments included. The companion to code_line_count: some of the parity
+# subjects below ARE prose (the corrected signal-(b) explanation, the sentinel
+# comments), and those must be counted where they live.
+text_line_count() {
+    grep -c -F -- "$2" "$1" 2>/dev/null | tr -d ' \n'
+}
+
+# probe_readout <file> — the no-change probe's message from the first `;` to the
+# end of the sentence, extracted FROM THE FILE. Everything before that point is
+# the interpolated version variable, spelled differently in the two dialects
+# ($SOURCE_VERSION_LABEL vs $SourceVersionLabel), so the tail is the comparable
+# part. Only the anchor `already at ` is typed here.
+#
+# The final substitution RESOLVES install.ps1's composed em dash (R1-F1): that
+# file has no byte-order mark, so a literal UTF-8 em dash would be decoded by
+# Windows PowerShell 5.1 as cp1252 and its trailing 0x94 byte — U+201D, a
+# DOUBLE-QUOTE CHARACTER in the PowerShell grammar — would close the string and
+# break the whole script's parse. The character is therefore built at output time
+# and resolved back here, so this assertion still compares the sentence the two
+# installers RENDER rather than the way each spells it.
+probe_readout() {
+    # shellcheck disable=SC2016 # the sed script matches literal PowerShell source, never an expansion
+    grep -F -- 'already at ' "$1" 2>/dev/null \
+        | grep -v '^[[:space:]]*#' \
+        | head -1 \
+        | sed -e 's/^.*already at //' -e 's/".*$//' -e 's/^[^;]*//' \
+              -e 's/\$(\[char\]0x2014)/—/g'
+}
+
+# nonascii_outside_comments <file> — how many lines carry a byte above 0x7F while
+# NOT being a whole-line comment. MUST be 0 for both .ps1 files (R1-F1).
+#
+# THE RULE AND WHY IT IS THIS SHAPE. Windows PowerShell 5.1 decodes a BOM-less
+# .ps1 as the ANSI code page. A UTF-8 em dash (E2 80 94) becomes three cp1252
+# characters ending in 0x94 = U+201D; an en dash (E2 80 93) ends in 0x93 =
+# U+201C. The PowerShell grammar counts U+201C/201D/201E as double-quote
+# characters and U+2018/2019/201A/201B as single-quote characters, so such a byte
+# inside a string literal TERMINATES it and the rest of the file mis-parses —
+# a silent, whole-script failure on the only platform this file exists for.
+#
+# Inside a COMMENT the tokenizer consumes to end of line whatever the bytes are,
+# so comment prose is inert and stays exempt (both installers are written in the
+# repo's em-dash-heavy comment style, and rewriting that would bury the diff).
+# The rule is deliberately a SUPERSET of the dangerous set — it also forbids
+# non-ASCII in a TRAILING comment, which is harmless — because "every non-ASCII
+# byte lives on a whole-line comment" is checkable in three lines and cannot have
+# a false negative, whereas a string-state tracker in a test can.
+#
+# The alternative fix (BOM the files) was rejected: a BOM is a byte any editor or
+# pipeline can strip, and stripping it silently restores the parse failure. ASCII
+# source cannot be broken that way.
+nonascii_outside_comments() {
+    LC_ALL=C awk '
+        BEGIN { ascii = "\t"; for (i = 32; i <= 126; i++) ascii = ascii sprintf("%c", i) }
+        /^[[:space:]]*#/ { next }
+        {
+            for (j = 1; j <= length($0); j++) {
+                if (index(ascii, substr($0, j, 1)) == 0) { print FNR; next }
+            }
+        }
+    ' "$1" 2>/dev/null | grep -c . | tr -d ' \n'
+}
+
+# arg_role_order <file> <anchor> <existing-token> <shipped-token> — the ORDER in
+# which a merge invocation names its two operands, as "existing shipped" or
+# "shipped existing" ("" when the line or a token is missing).
+#
+# This is the 3t1 rider: both merges bind .[0] as $existing and .[1] as $new, so
+# the operand order IS the union direction. A swapped pair stays valid jq, keeps
+# every expression-identity assertion above green, and silently makes the
+# operator's config win over the shipped one.
+arg_role_order() {
+    local file="$1" anchor="$2" existing="$3" shipped="$4" line pe ps
+    line=$(grep -v '^[[:space:]]*#' "$file" 2>/dev/null | grep -F -- "$anchor" | head -1)
+    [ -n "$line" ] || { printf 'NO-INVOCATION-LINE'; return 0; }
+    pe=$(awk -v s="$line" -v t="$existing" 'BEGIN { print index(s, t) }')
+    ps=$(awk -v s="$line" -v t="$shipped"  'BEGIN { print index(s, t) }')
+    if [ "$pe" = "0" ] || [ "$ps" = "0" ]; then printf 'TOKEN-MISSING'; return 0; fi
+    if [ "$pe" -lt "$ps" ]; then printf 'existing shipped'; else printf 'shipped existing'; fi
+}
+
+# surface_pairs_sh <workflow-manifest.sh> — "<class>:<path>" per surface rule in
+# the generator's generate_rows body, sorted.
+surface_pairs_sh() {
+    awk '/^generate_rows\(\) \{/, /^\}/' "$1" 2>/dev/null \
+        | grep -E '^[[:space:]]*(emit_row|scan_flat|scan_tree)[[:space:]]' \
+        | sed -E 's/^[[:space:]]*(emit_row|scan_flat|scan_tree)[[:space:]]+([a-z]+)[[:space:]]+"([^"]+)".*/\2:\3/' \
+        | LC_ALL=C sort
+}
+
+# surface_pairs_ps <install.ps1> — the same pairs from install.ps1's
+# Get-WorkflowSurfaceRows body, sorted. The two lists must be EQUAL: that is the
+# assertion that fails when a release adds a shipped file to one implementation
+# and not the other.
+surface_pairs_ps() {
+    awk '/function Get-WorkflowSurfaceRows/, /^    }$/' "$1" 2>/dev/null \
+        | grep -E 'Get-Surface(FileRow|FlatRows|TreeRows)[[:space:]]+-Root' \
+        | sed -E 's/.*-Class "([a-z]+)".*-(Dir|Rel) "([^"]+)".*/\1:\3/' \
+        | LC_ALL=C sort
+}
+
+# outfile_on_json_paths <file> — code lines that write one of the three
+# byte-sensitive targets through Out-File. MUST be zero: `Out-File -Encoding
+# UTF8` writes a BOM under Windows PowerShell 5.1, and the array-valued jq output
+# these sites carry comes back as a single concatenated line under -NoNewline.
+outfile_on_json_paths() {
+    grep -v '^[[:space:]]*#' "$1" 2>/dev/null \
+        | grep -F -- 'Out-File' \
+        | grep -E 'SettingsFile|TargetMcpJson|install-manifest' \
+        | grep -c . | tr -d ' \n'
+}
+
+# nonewline_on_json_paths <file> — same shape, for the -NoNewline flag.
+nonewline_on_json_paths() {
+    grep -v '^[[:space:]]*#' "$1" 2>/dev/null \
+        | grep -F -- '-NoNewline' \
+        | grep -E 'SettingsFile|TargetMcpJson|install-manifest' \
+        | grep -c . | tr -d ' \n'
+}
+
+# jq_stderr_null <file> — jq invocations that redirect stderr with 2>$null. MUST
+# be zero in install.ps1: under $ErrorActionPreference = 'Stop', Windows
+# PowerShell 5.1 turns a redirected native stderr into a TERMINATING
+# NativeCommandError, so the malformed-JSON arm crashed the installer instead of
+# taking its documented fallback (3t1 facet 3).
+jq_stderr_null() {
+    # shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+    grep -v '^[[:space:]]*#' "$1" 2>/dev/null \
+        | grep -F -- 'jq ' \
+        | grep -c -F -- '2>$null' | tr -d ' \n'
+}
+
+# --- 6a. preflight for this section ---------------------------------------
+assert_eq "6a: workflow-manifest.sh exists (the surface generator)" "yes" \
+    "$([ -f "$MANIFEST_TOOL" ] && echo yes || echo no)"
+assert_eq "6a: uninstall.sh exists" "yes" \
+    "$([ -f "$UNINSTALL_SH" ] && echo yes || echo no)"
+assert_eq "6a: uninstall.ps1 exists" "yes" \
+    "$([ -f "$UNINSTALL_PS1" ] && echo yes || echo no)"
+
+# --- 6b. the -Upgrade switch and its exclusivity with -Mode ----------------
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6b: install.ps1 declares the -Upgrade switch parameter" "1" \
+    "$(code_line_count "$INSTALL_PS1" '[switch]$Upgrade')"
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell condition
+assert_eq "6b: install.ps1 tests -Upgrade against -Mode exactly once" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'if ($Upgrade -and $Mode)')"
+assert_eq "6b: install.ps1 refuses the combination (the message line)" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'cannot be combined.')"
+assert_eq "6b: install.sh refuses the combination too" "1" \
+    "$(code_line_count "$INSTALL_SH" 'cannot be combined.')"
+# The remediation sentence is byte-identical in both installers, so it is pinned
+# file-to-file rather than against a literal typed here.
+assert_eq "6b: the 'pass exactly one' remediation line is byte-identical in both installers" \
+    "$(grep -F -- 'Pass exactly one of them.' "$INSTALL_SH" | sed -e 's/^[[:space:]]*//' -e 's/^echo "//' -e 's/" >&2$//')" \
+    "$(grep -F -- 'Pass exactly one of them.' "$INSTALL_PS1" | sed -e 's/^[[:space:]]*//' -e 's/^Write-Host "//' -e 's/"$//')"
+# The refusal has to EXIT 1, not warn: assert an `exit 1` inside the block.
+assert_eq "6b: the ps1 refusal block exits 1" "yes" \
+    "$(awk '/if \(\$Upgrade -and \$Mode\)/,/^}/' "$INSTALL_PS1" | grep -q 'exit 1' && echo yes || echo no)"
+
+# --- 6c. Detect-V3Install and the detection ladder -------------------------
+assert_eq "6c: install.ps1 defines Detect-V3Install exactly once" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Detect-V3Install {')"
+assert_eq "6c: install.ps1 CALLS Detect-V3Install (twice: forced and auto)" "2" \
+    "$(code_line_count "$INSTALL_PS1" '(Detect-V3Install)')"
+assert_eq "6c: install.sh defines detect_v3_install exactly once" "1" \
+    "$(code_line_count "$INSTALL_SH" 'detect_v3_install() {')"
+# Signal (a), the PRIMARY one, is the same sentence in both installers.
+assert_eq "6c: the 3.x primary signal string is byte-identical in both installers" \
+    "$(grep -o -F -- '.claude-plugin/plugin.json declares version' "$INSTALL_SH" | head -1)" \
+    "$(grep -o -F -- '.claude-plugin/plugin.json declares version' "$INSTALL_PS1" | head -1)"
+assert_eq "6c: ...and it is present at all (not two empty extractions)" "1" \
+    "$(grep -c -F -- '.claude-plugin/plugin.json declares version' "$INSTALL_PS1" | tr -d ' \n')"
+# Signal (b): the marker-absent fallback, whose signal text names both v4 markers.
+SIGNAL_B='no readable plugin version; no .claude/scripts/review-check.sh and no .claude/model-roles (both v4)'
+assert_eq "6c: the marker-absent signal (b) text is present in install.sh" "1" \
+    "$(text_line_count "$INSTALL_SH" "$SIGNAL_B")"
+assert_eq "6c: ...and byte-identically in install.ps1" "1" \
+    "$(text_line_count "$INSTALL_PS1" "$SIGNAL_B")"
+# The CORRECTED signal-(b) explanation from U0.4 — the paragraph that records why
+# v2 signal 2 must not be deleted on the strength of this branch. Prose, so
+# text_line_count; carried by both files.
+SIGNAL_B_COMMENT='What (b) actually covers is a manifest whose VERSION FIELD is'
+assert_eq "6c: install.sh carries the corrected signal-(b) explanation" "1" \
+    "$(text_line_count "$INSTALL_SH" "$SIGNAL_B_COMMENT")"
+assert_eq "6c: install.ps1 carries it too (the U0.4 correction was mirrored, not re-derived)" "1" \
+    "$(text_line_count "$INSTALL_PS1" "$SIGNAL_B_COMMENT")"
+assert_eq "6c: install.ps1 keeps the do-not-delete-v2-signal-2 warning" "1" \
+    "$(text_line_count "$INSTALL_PS1" 'Do not delete v2 signal 2 on the strength')"
+
+# --- 6d. the v3 backup ----------------------------------------------------
+assert_eq "6d: install.sh names the .claude-v3-backup- prefix" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '.claude-v3-backup-')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6d: install.ps1 names the .claude-v3-backup- prefix" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '.claude-v3-backup-')" -ge 1 ] && echo yes || echo no)"
+# Dotfile inclusion is the load-bearing part: .claude/.qa-tracking/ is every gate
+# record in a live install, and the bash side reached it by moving from
+# `cp -r dir/*` to `cp -R dir/.`. The PowerShell spelling of that same mistake is
+# a wildcard Copy-Item without -Force, so all three ps1 backup sites go through
+# ONE helper that enumerates with Get-ChildItem -Force.
+assert_eq "6d: install.ps1 defines the dotfile-inclusive backup helper once" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Copy-ClaudeTree {')"
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "6d: ...and every backup site uses it (v3 flow, mode 1, mode 2)" "3" \
+    "$(code_line_count "$INSTALL_PS1" 'Copy-ClaudeTree -SourceTree')"
+# The forbidden form is copying the DIRECTORY ITSELF (`Copy-Item -Path $ClaudeDir
+# ... -Recurse`), which is what install.ps1 did through v4.0 and what skips hidden
+# children. Copying each ENUMERATED child recursively is fine and is what the
+# helper does — so the anchor is the source operand, not the -Recurse flag.
+# shellcheck disable=SC2016 # the searched-for text is the dotfile-BLIND form being forbidden
+assert_eq "6d: ...and the dotfile-blind whole-directory Copy-Item is gone" "0" \
+    "$(code_line_count "$INSTALL_PS1" 'Copy-Item -Path $ClaudeDir')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6d: the helper enumerates with -Force (hidden items included)" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'Get-ChildItem -LiteralPath $SourceTree -Force')"
+# The four root-level files plus plugin.json, stored FLAT in the backup root.
+for v3_root in "CLAUDE.md" ".mcp.json" "LESSONS.md" ".worktreeinclude"; do
+    assert_eq "6d: install.ps1's v3 backup covers the root file $v3_root" "yes" \
+        "$(awk '/Root-level files the upgrade may touch/,/plugin.json" -Force/' "$INSTALL_PS1" \
+            | grep -q -F -- "$v3_root" && echo yes || echo no)"
+done
+
+# --- 6e. the PS-native manifest machinery ---------------------------------
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6e: install.ps1 hashes with Get-FileHash -Algorithm SHA256" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'Get-FileHash -LiteralPath $FilePath -Algorithm SHA256')" -ge 1 ] && echo yes || echo no)"
+# Get-FileHash returns UPPERCASE; the manifest and every comparison are lowercase.
+assert_eq "6e: ...and lowercases the digest (the manifest is lowercase hex)" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'ToLowerInvariant')" -ge 1 ] && echo yes || echo no)"
+# LC_ALL=C on the bash side; ordinal on the PowerShell side. A culture-aware sort
+# would reorder `.claude-plugin/...` against `.claude/...` and the install-manifest
+# body would stop byte-equalling the generated one.
+assert_eq "6e: install.ps1 sorts the manifest ORDINALLY (= LC_ALL=C)" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '[System.StringComparer]::Ordinal')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6e: workflow-manifest.sh sorts with LC_ALL=C" "yes" \
+    "$([ "$(code_line_count "$MANIFEST_TOOL" 'LC_ALL=C sort')" -ge 1 ] && echo yes || echo no)"
+# THE SURFACE ITSELF, extracted from both implementations and compared as sets.
+SURFACE_SH=$(surface_pairs_sh "$MANIFEST_TOOL")
+SURFACE_PS=$(surface_pairs_ps "$INSTALL_PS1")
+assert_eq "6e: the generator's surface rule list is substantial (>=15 rules)" "yes" \
+    "$([ "$(printf '%s\n' "$SURFACE_SH" | grep -c . | tr -d ' \n')" -ge 15 ] && echo yes || echo no)"
+assert_eq "6e: install.ps1 enumerates the SAME class:path surface as workflow-manifest.sh" \
+    "$(printf '%s' "$SURFACE_SH" | tr '\n' ' ')" \
+    "$(printf '%s' "$SURFACE_PS" | tr '\n' ' ')"
+# The two wholesale-copied trees carry prune sets; both files must name them.
+for prune_name in "node_modules" ".tmp" "runs"; do
+    assert_eq "6e: install.ps1 prunes $prune_name in the tree walk" "yes" \
+        "$([ "$(code_line_count "$INSTALL_PS1" "$prune_name")" -ge 1 ] && echo yes || echo no)"
+    assert_eq "6e: workflow-manifest.sh prunes $prune_name too" "yes" \
+        "$([ "$(code_line_count "$MANIFEST_TOOL" "$prune_name")" -ge 1 ] && echo yes || echo no)"
+done
+# The classify contract: the same six verdict TOKENS in both implementations.
+for verdict in "copy-new" "skip-current" "replace-stock" "replace-custom" "preserve-custom" "merge"; do
+    assert_eq "6e: workflow-manifest.sh emits the verdict token '$verdict'" "yes" \
+        "$([ "$(code_line_count "$MANIFEST_TOOL" "$verdict")" -ge 1 ] && echo yes || echo no)"
+    assert_eq "6e: install.ps1 handles the verdict token '$verdict'" "yes" \
+        "$([ "$(code_line_count "$INSTALL_PS1" "$verdict")" -ge 1 ] && echo yes || echo no)"
+done
+# The plan self-check: one plan row per source row, in both implementations.
+assert_eq "6e: install.ps1 keeps the row-count self-check on the plan" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'internal: classify produced')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6e: workflow-manifest.sh keeps its join row-count self-check" "yes" \
+    "$([ "$(code_line_count "$MANIFEST_TOOL" 'internal: old-table join produced')" -ge 1 ] && echo yes || echo no)"
+
+# --- 6f. the verdict walk and its six readout labels ----------------------
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "6f: install.ps1 routes copies through the verdict walk exactly once" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'Copy-ByVerdict -Src $Src -Dst $Dst')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6f: install.sh routes copies through place_by_verdict exactly once" "1" \
+    "$(code_line_count "$INSTALL_SH" 'place_by_verdict "$src" "$dst"')"
+# preserve-custom writes a sidecar rather than touching the operator's file.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6f: install.ps1 writes the shipped file to <path>.new on preserve-custom" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '"$Dst.new"')" -ge 1 ] && echo yes || echo no)"
+# The six readout labels, present in BOTH installers. These are what an operator
+# reads after an upgrade, and the L2 spec asserts on them for the bash side.
+for label in "copied (new)" "replaced (stock)" "already current" \
+             "replaced (customized)" "preserved (yours)" "merged key-wise"; do
+    assert_eq "6f: install.sh carries the verdict label '$label'" "yes" \
+        "$([ "$(text_line_count "$INSTALL_SH" "$label")" -ge 1 ] && echo yes || echo no)"
+    assert_eq "6f: install.ps1 carries the verdict label '$label'" "yes" \
+        "$([ "$(text_line_count "$INSTALL_PS1" "$label")" -ge 1 ] && echo yes || echo no)"
+done
+# The MERGED-ABSENT term is a v4.1 addition to the write count, not a label: it is
+# what keeps "no file changes" literally true when a merged-class file is missing.
+assert_eq "6f: install.sh names the MERGED-ABSENT term" "yes" \
+    "$([ "$(text_line_count "$INSTALL_SH" 'MERGED-ABSENT-START')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6f: install.ps1 names it too" "yes" \
+    "$([ "$(text_line_count "$INSTALL_PS1" 'MERGED-ABSENT-START')" -ge 1 ] && echo yes || echo no)"
+# The upgrade report goes to the backup as a file, not just to the console.
+assert_eq "6f: install.ps1 saves upgrade-report.txt into the backup" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'upgrade-report.txt')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6f: install.sh does too" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'upgrade-report.txt')" -ge 1 ] && echo yes || echo no)"
+
+# --- 6g. the no-change probe and both sentinel pairs ----------------------
+# The readout sentence is asserted VERBATIM by the L2 spec
+# (installer-v3-upgrade.sh 8a/8b/8c/8d), so a paraphrase on either side is a
+# silent divergence between what the two installers claim to have done.
+SH_PROBE=$(probe_readout "$INSTALL_SH")
+PS_PROBE=$(probe_readout "$INSTALL_PS1")
+assert_eq "6g: the probe readout extracted from install.sh is substantial" "yes" \
+    "$([ "${#SH_PROBE}" -gt 20 ] && echo yes || echo no)"
+assert_eq "6g: ...and mentions 'no file changes'" "yes" \
+    "$(printf '%s' "$SH_PROBE" | grep -qF 'no file changes' && echo yes || echo no)"
+assert_eq "6g: the no-change probe readout is byte-identical in both installers" \
+    "$SH_PROBE" "$PS_PROBE"
+# Both sentinel pairs, in both installers, exactly once each. The L2 METAs delete
+# or rewrite these blocks by name on the bash side; the ps1 copies exist so the
+# two can be diffed by eye and so a future strip does not miss one.
+for sentinel in "NOCHANGE-PROBE-START" "NOCHANGE-PROBE-END" \
+                "MERGED-ABSENT-START" "MERGED-ABSENT-END"; do
+    assert_eq "6g: install.sh carries '$sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_SH" "$sentinel")"
+    assert_eq "6g: install.ps1 carries '$sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_PS1" "$sentinel")"
+done
+# The probe is mode-2 only and gated on all four conjuncts, including the
+# row-count floor that stops an EMPTY plan from reading as "nothing to do".
+assert_eq "6g: the ps1 probe requires a non-empty plan" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '(Get-PlanRowCount) -ge 1')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6g: the ps1 probe requires zero write verdicts" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '(Get-PlanWriteCount) -eq 0')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6g: the bash probe requires the same non-empty plan" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'plan_row_count)" -ge 1')" -ge 1 ] && echo yes || echo no)"
+
+# --- 6h. v4 -> v4 install-manifest old-table preference ------------------
+assert_eq "6h: install.ps1 defines the install-manifest old-table reader once" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Get-InstalledManifestOldTable {')"
+assert_eq "6h: ...and consults it from BOTH the upgrade flow and the mode-2 Update" "2" \
+    "$(code_line_count "$INSTALL_PS1" 'if (Get-InstalledManifestOldTable)')"
+assert_eq "6h: install.sh consults its equivalent from both places too" "2" \
+    "$(code_line_count "$INSTALL_SH" 'if install_manifest_old_table; then')"
+assert_eq "6h: install.ps1 labels that table the way the readouts name it" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '.claude/install-manifest (v')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6h: install.sh uses the same label" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '.claude/install-manifest (v')" -ge 1 ] && echo yes || echo no)"
+# A 3.x target must pin the FROZEN table even if it somehow carries a manifest.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6h: install.ps1 excludes 3.x targets from the manifest preference" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '-not ($script:V3DetectedVersion -like "3.*")')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6h: install.ps1 falls back to the frozen manifests/ table" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'manifests\v3.5.0.sha256')" -ge 1 ] && echo yes || echo no)"
+
+# --- 6i. LF / BOM discipline on every byte-sensitive write ---------------
+assert_eq "6i: install.ps1 defines exactly one LF writer" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Write-LfFile {')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6i: ...which writes with WriteAllText (not a cmdlet that appends a newline policy)" "1" \
+    "$(code_line_count "$INSTALL_PS1" '[System.IO.File]::WriteAllText($FilePath')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6i: ...with a BOM-LESS UTF8 encoder" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'New-Object System.Text.UTF8Encoding($false)')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6i: ...joining lines with LF" "yes" \
+    "$(grep -v '^[[:space:]]*#' "$INSTALL_PS1" | grep -F -- '$Lines -join' | grep -qF '`n' && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "6i: the .mcp.json merge writes through it" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'Write-LfFile -FilePath $TargetMcpJson')"
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "6i: the settings.json merge writes through it" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'Write-LfFile -FilePath $SettingsFile')"
+assert_eq "6i: the install-manifest writes through it" "yes" \
+    "$(grep -v '^[[:space:]]*#' "$INSTALL_PS1" | grep -F -- 'Write-LfFile' | grep -qF 'install-manifest' && echo yes || echo no)"
+# THE REGRESSION THIS SECTION EXISTS FOR: no Out-File / -NoNewline on a JSON or
+# manifest write path (3t1 facets 1-2). Section 7's META reintroduces one.
+assert_eq "6i: NO Out-File on a JSON or manifest write path" "0" \
+    "$(outfile_on_json_paths "$INSTALL_PS1")"
+assert_eq "6i: NO -NoNewline on a JSON or manifest write path" "0" \
+    "$(nonewline_on_json_paths "$INSTALL_PS1")"
+# The manifest header both implementations write and read. Anchored on the WRITE
+# expression, not on the bare token: install.ps1 also names the token in the
+# reader (StartsWith / Substring), so a token-anywhere check would stay green with
+# the writer's header broken.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6i: install.ps1 writes the shared install-manifest header" "1" \
+    "$(code_line_count "$INSTALL_PS1" '@("# claude-workflow-plugin $SourceVersionLabel")')"
+assert_eq "6i: install.sh writes the same header token" "1" \
+    "$(code_line_count "$INSTALL_SH" '# claude-workflow-plugin %s')"
+assert_eq "6i: and install.ps1's reader gates on that same header token" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'StartsWith("# claude-workflow-plugin ")')" -ge 1 ] && echo yes || echo no)"
+
+# --- 6j. 3t1: the WinPS 5.1 stderr trap and the jq operand order ---------
+assert_eq "6j: install.ps1 no longer redirects jq's stderr with 2>\$null" "0" \
+    "$(jq_stderr_null "$INSTALL_PS1")"
+assert_eq "6j: the validity gate scopes ErrorActionPreference to Continue" "yes" \
+    "$(awk '/function Test-JsonSingleObject/,/^    }$/' "$INSTALL_PS1" \
+        | grep -qF "ErrorActionPreference = 'Continue'" && echo yes || echo no)"
+assert_eq "6j: ...and captures jq's stderr into the discarded stream instead" "yes" \
+    "$(awk '/function Test-JsonSingleObject/,/^    }$/' "$INSTALL_PS1" \
+        | grep -qF '2>&1' && echo yes || echo no)"
+# The operand ORDER pin. Roles are read from each installer's own invocation line;
+# only the variable spellings are named here.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+SH_SETTINGS_ORDER=$(arg_role_order "$INSTALL_SH" 'jq -s "$SETTINGS_MERGE_JQ"' '"$SETTINGS_FILE"' '"$SOURCE_SETTINGS"')
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+PS_SETTINGS_ORDER=$(arg_role_order "$INSTALL_PS1" 'jq -s $SettingsMergeJq' '$SettingsFile' '$SourceSettings')
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+SH_MCP_ORDER=$(arg_role_order "$INSTALL_SH" 'jq -s "$MCP_MERGE_JQ"' '"$MCP_FILE"' '"$SOURCE_DIR/.mcp.json"')
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+PS_MCP_ORDER=$(arg_role_order "$INSTALL_PS1" 'jq -s $McpMergeJq' '$TargetMcpJson' '$SourceMcpJson')
+assert_eq "6j: install.sh's settings merge binds existing-then-shipped" \
+    "existing shipped" "$SH_SETTINGS_ORDER"
+assert_eq "6j: install.ps1's settings merge binds existing-then-shipped" \
+    "existing shipped" "$PS_SETTINGS_ORDER"
+assert_eq "6j: the settings operand order matches file-to-file" \
+    "$SH_SETTINGS_ORDER" "$PS_SETTINGS_ORDER"
+assert_eq "6j: install.sh's .mcp.json merge binds existing-then-shipped" \
+    "existing shipped" "$SH_MCP_ORDER"
+assert_eq "6j: install.ps1's .mcp.json merge binds existing-then-shipped" \
+    "existing shipped" "$PS_MCP_ORDER"
+assert_eq "6j: the .mcp.json operand order matches file-to-file" \
+    "$SH_MCP_ORDER" "$PS_MCP_ORDER"
+
+# --- 6k. wn4: the containment rule is in BOTH uninstallers ---------------
+# The bash guard was proven to be load-bearing by an executed L2 META
+# (installer-manifest-parity.sh 9c). Nothing can execute the ps1 one, so its
+# presence is pinned here — wn4's acceptance criterion 4.
+for sentinel in "WN4-CONTAINMENT-START" "WN4-CONTAINMENT-END"; do
+    assert_eq "6k: uninstall.sh carries '$sentinel' exactly once" "1" \
+        "$(text_line_count "$UNINSTALL_SH" "$sentinel")"
+    assert_eq "6k: uninstall.ps1 carries '$sentinel' exactly once" "1" \
+        "$(text_line_count "$UNINSTALL_PS1" "$sentinel")"
+done
+assert_eq "6k: uninstall.sh resolves the row's parent physically (pwd -P)" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_SH" 'pwd -P')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6k: uninstall.ps1 refuses a reparse point in the row's directory chain" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" '[System.IO.FileAttributes]::ReparsePoint')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6k: uninstall.ps1 compares the resolved parent against the resolved target" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" 'StartsWith($script:TargetRoot')" -ge 1 ] && echo yes || echo no)"
+# The refusal is REPORTED, in the same words, by both scripts.
+REFUSAL_TEXT='resolves outside the project'
+assert_eq "6k: uninstall.sh reports a refused row" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_SH" "$REFUSAL_TEXT")" -ge 1 ] && echo yes || echo no)"
+assert_eq "6k: uninstall.ps1 reports it in the same words" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" "$REFUSAL_TEXT")" -ge 1 ] && echo yes || echo no)"
+# The manifest-driven root walk itself, mirrored: header check, class grammar,
+# 64-hex hashes, and the lowercase-sensitive comparison PowerShell gets wrong by
+# default.
+assert_eq "6k: uninstall.ps1 gates on the shared manifest header" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" '# claude-workflow-plugin ')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6k: uninstall.ps1 matches the 64-hex hash grammar CASE-SENSITIVELY (-cnotmatch)" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" '-cnotmatch')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6k: uninstall.ps1 lists all three backup prefixes" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" '.claude-v2-backup-*')" -ge 1 ] &&
+       [ "$(code_line_count "$UNINSTALL_PS1" '.claude-v3-backup-*')" -ge 1 ] &&
+       [ "$(code_line_count "$UNINSTALL_PS1" '.claude-backup-*')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "6k: uninstall.ps1 still restores ONLY from a .claude-backup-* snapshot" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" '$RestorableBackups')" -ge 2 ] && echo yes || echo no)"
+
+# --- 6l. R1-F1: no non-ASCII byte outside a whole-line comment -------------
+# The WinPS 5.1 ANSI-decode trap, mechanically. See nonascii_outside_comments for
+# the full mechanism; the short version is that one UTF-8 em dash inside a
+# double-quoted string is a whole-script parse failure on Windows PowerShell 5.1,
+# and BOTH files carried one before this check existed (install.ps1 since before
+# U0.7 — its pre-existing site is why the file could never have parsed on 5.1).
+assert_eq "6l: install.ps1 has no non-ASCII byte outside a whole-line comment" "0" \
+    "$(nonascii_outside_comments "$INSTALL_PS1")"
+assert_eq "6l: uninstall.ps1 has no non-ASCII byte outside a whole-line comment" "0" \
+    "$(nonascii_outside_comments "$UNINSTALL_PS1")"
+# Vacuity guard: the checker must be looking at files that DO carry non-ASCII in
+# their comments, or "0 outside comments" would be trivially true of any ASCII
+# file and the META below would be the only thing keeping it honest.
+assert_eq "6l: ...and both files really do carry non-ASCII comment prose (so the exemption is doing work)" "yes" \
+    "$([ "$(LC_ALL=C grep -c '[^ -~	]' "$INSTALL_PS1" | tr -d ' \n')" -ge 1 ] &&
+       [ "$(LC_ALL=C grep -c '[^ -~	]' "$UNINSTALL_PS1" | tr -d ' \n')" -ge 1 ] && echo yes || echo no)"
+# The byte-pinned readout is the one place the character is REQUIRED, so it is
+# composed at output time instead of written. Assert the composition is there:
+# without it, either the sentence drifts from install.sh's or the em dash comes
+# back as a literal.
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell subexpression
+assert_eq "6l: install.ps1 composes the probe's em dash at output time" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'no file changes $([char]0x2014) skipping backup')"
+
+# ===========================================================================
+echo ""
+echo "=== Section 7: META-TESTs for the U0.7 parity checks ==="
+# Each mutates a COPY of install.ps1 (or uninstall.ps1) and asserts the matching
+# section-6 check FAILS. Without them, a checker anchored on a string that no
+# longer exists would look identical to a passing suite.
+
+PS_COPY="$WORK/install-mutant.ps1"
+
+# --- META 8: break one verdict label -------------------------------------
+sed 's/preserved (yours)/preserved (theirs)/' "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 8: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 8: the broken label makes the verdict-label check FAIL (count 0)" "0" \
+    "$(text_line_count "$PS_COPY" 'preserved (yours)')"
+assert_eq "META 8: and the mutation is surgical — the other five labels survive" "yes" \
+    "$([ "$(text_line_count "$PS_COPY" 'merged key-wise')" -ge 1 ] &&
+       [ "$(text_line_count "$PS_COPY" 'already current')" -ge 1 ] && echo yes || echo no)"
+
+# --- META 9 (3t1): reintroduce Out-File at a merge write site ------------
+# The exact pre-fix line, restored: `Out-File -Encoding UTF8` is a BOM under
+# Windows PowerShell 5.1 and `-NoNewline` concatenates jq's output lines.
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's#^\( *\)Write-LfFile -FilePath \$TargetMcpJson -Lines @(\$mcpMerged)#\1$mcpMerged | Out-File -FilePath $TargetMcpJson -Encoding UTF8 -NoNewline#' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 9: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "META 9: the pre-fix Out-File line really is back" "1" \
+    "$(code_line_count "$PS_COPY" '$mcpMerged | Out-File -FilePath $TargetMcpJson')"
+assert_eq "META 9: the Out-File-on-JSON-path check FAILS (1, not 0)" "1" \
+    "$(outfile_on_json_paths "$PS_COPY")"
+assert_eq "META 9: the -NoNewline-on-JSON-path check FAILS too" "1" \
+    "$(nonewline_on_json_paths "$PS_COPY")"
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "META 9: and the .mcp.json LF-writer assertion FAILS (0, not 1)" "0" \
+    "$(code_line_count "$PS_COPY" 'Write-LfFile -FilePath $TargetMcpJson')"
+# Surgical: the settings write site is untouched, so 6i's other half still holds.
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "META 9: the mutation is surgical — the settings LF write survives" "1" \
+    "$(code_line_count "$PS_COPY" 'Write-LfFile -FilePath $SettingsFile')"
+
+# --- META 10 (3t1): swap the jq merge operands ---------------------------
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's#jq -s \$McpMergeJq \$TargetMcpJson \$SourceMcpJson#jq -s $McpMergeJq $SourceMcpJson $TargetMcpJson#' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 10: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "META 10: the swapped operands flip the union direction (shipped first)" \
+    "shipped existing" \
+    "$(arg_role_order "$PS_COPY" 'jq -s $McpMergeJq' '$TargetMcpJson' '$SourceMcpJson')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "META 10: which no longer matches install.sh's order" "no" \
+    "$([ "$SH_MCP_ORDER" = "$(arg_role_order "$PS_COPY" 'jq -s $McpMergeJq' '$TargetMcpJson' '$SourceMcpJson')" ] && echo yes || echo no)"
+
+# --- META 11: rename a sentinel -----------------------------------------
+sed 's/NOCHANGE-PROBE-START/NOCHANGE-PROBE-BEGIN/' "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 11: renaming the sentinel makes the exactly-once check FAIL (count 0)" "0" \
+    "$(text_line_count "$PS_COPY" 'NOCHANGE-PROBE-START')"
+assert_eq "META 11: and its END partner is still there (so the pair check is what catches it)" "1" \
+    "$(text_line_count "$PS_COPY" 'NOCHANGE-PROBE-END')"
+
+# --- META 12: drop one surface rule from the ps1 enumeration -------------
+# The drift shape this section exists to catch: a release adds (or removes) a
+# shipped file on one side only. Here the model-roles rule is deleted from the
+# PowerShell surface; the set comparison must stop matching.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+sed '/Get-SurfaceFileRow  -Root $Root -Class "operator" -Rel ".claude\/model-roles"/d' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 12: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+META_SURFACE_PS=$(surface_pairs_ps "$PS_COPY")
+assert_eq "META 12: the mutated copy really lost exactly one surface rule" \
+    "$(( $(printf '%s\n' "$SURFACE_PS" | grep -c . | tr -d ' \n') - 1 ))" \
+    "$(printf '%s\n' "$META_SURFACE_PS" | grep -c . | tr -d ' \n')"
+assert_eq "META 12: and the surface-parity assertion FAILS" "different" \
+    "$([ "$SURFACE_SH" = "$META_SURFACE_PS" ] && echo same || echo different)"
+
+# --- META 13b: restore the dotfile-blind backup form --------------------
+# The pre-U0.7 line, put back at the mode-1 site. It is the PowerShell spelling of
+# `cp -r dir/*`: hidden children — .claude/.qa-tracking/, the entire gate history
+# of a live install — never reach the backup.
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's#^\( *\)Copy-ClaudeTree -SourceTree \$ClaudeDir -BackupDir \$BackupDir#\1Copy-Item -Path $ClaudeDir -Destination $BackupDir -Recurse#' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 13b: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
+assert_eq "META 13b: the dotfile-blind form is detected (count >= 1, not 0)" "yes" \
+    "$([ "$(code_line_count "$PS_COPY" 'Copy-Item -Path $ClaudeDir')" -ge 1 ] && echo yes || echo no)"
+assert_eq "META 13b: and the all-sites-use-the-helper count FAILS (fewer than 3)" "yes" \
+    "$([ "$(code_line_count "$PS_COPY" 'Copy-ClaudeTree -SourceTree')" -lt 3 ] && echo yes || echo no)"
+
+# --- META 14 (R1-F1): plant an em dash inside a string -------------------
+# The exact defect QA found: a UTF-8 em dash inside a double-quoted string of a
+# BOM-less .ps1. Planted in a COPY, the guard must catch it — and must go on
+# ignoring the file's em-dash-heavy COMMENT prose, or it would be a rule nobody
+# could keep.
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's#^\( *\)Write-Color "Merge mode: will skip existing files" Yellow#\1Write-Color "Merge mode — will skip existing files" Yellow#' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 14: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 14: the planted em dash really is inside a double-quoted string" "1" \
+    "$(grep -c 'Write-Color "Merge mode — will skip existing files"' "$PS_COPY" | tr -d ' \n')"
+assert_eq "META 14: the ASCII guard FAILS on the planted copy (1, not 0)" "1" \
+    "$(nonascii_outside_comments "$PS_COPY")"
+assert_eq "META 14: and the unmutated file still passes (the guard is not just counting em dashes)" "0" \
+    "$(nonascii_outside_comments "$INSTALL_PS1")"
+# The same guard applied to uninstall.ps1, whose HEAD version was ASCII-clean and
+# which this change set is what put non-ASCII comment prose into.
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's#^\( *\)Write-Host "Cancelled."#\1Write-Host "Cancelled — nothing was moved."#' \
+    "$UNINSTALL_PS1" > "$WORK/uninstall-emdash.ps1"
+assert_eq "META 14: the uninstall.ps1 mutation actually changed the copy" "1" \
+    "$(cmp -s "$WORK/uninstall-emdash.ps1" "$UNINSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 14: the guard FAILS there too (1, not 0)" "1" \
+    "$(nonascii_outside_comments "$WORK/uninstall-emdash.ps1")"
+
+# --- META 15 (R1-F1): the composed dash is resolved, not rubber-stamped --
+# probe_readout resolves `$([char]0x2014)` back to an em dash so 6g compares the
+# RENDERED sentences. Compose a DIFFERENT character (0x2013, en dash) and the
+# comparison must stop matching — otherwise the resolve step would be hiding any
+# drift at that site rather than normalising a known spelling.
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's/\$(\[char\]0x2014)/$([char]0x2013)/' "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 15: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 15: the wrong code point survives the resolve step unresolved" "yes" \
+    "$(probe_readout "$PS_COPY" | grep -qF '0x2013' && echo yes || echo no)"
+assert_eq "META 15: so the byte-identity assertion FAILS" "different" \
+    "$([ "$SH_PROBE" = "$(probe_readout "$PS_COPY")" ] && echo same || echo different)"
+assert_eq "META 15 companion: the unmutated file still matches after the same resolve" "same" \
+    "$([ "$SH_PROBE" = "$(probe_readout "$INSTALL_PS1")" ] && echo same || echo different)"
+
+# --- META 13 (wn4): strip the containment block from uninstall.ps1 -------
+UNINSTALL_COPY="$WORK/uninstall-mutant.ps1"
+sed '/# WN4-CONTAINMENT-START/,/# WN4-CONTAINMENT-END/d' "$UNINSTALL_PS1" > "$UNINSTALL_COPY"
+assert_eq "META 13: the mutation actually changed the uninstall.ps1 copy" "1" \
+    "$(cmp -s "$UNINSTALL_COPY" "$UNINSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 13: the stripped copy fails the sentinel check (count 0)" "0" \
+    "$(text_line_count "$UNINSTALL_COPY" 'WN4-CONTAINMENT-START')"
+assert_eq "META 13: and loses the reparse-point refusal entirely" "0" \
+    "$(code_line_count "$UNINSTALL_COPY" '[System.IO.FileAttributes]::ReparsePoint')"
 
 # --- Summary ---------------------------------------------------------------
 
