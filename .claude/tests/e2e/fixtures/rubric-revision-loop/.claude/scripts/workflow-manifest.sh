@@ -291,9 +291,14 @@ scan_tree() {
 #                          not seed it and an upgrade must not consider it.
 #   .claude/scripts/tests/ the plugin's own L1 suite is repo-only; install.sh
 #                          copies flat .claude/scripts/*.sh only.
-#   docs/                  the shipped-docs subset lands in U0.8; adding it
-#                          here before then would make the frozen tables
-#                          disagree with the installer.
+#   docs/ (all but two)    the shipped-docs subset is NAMED file by file below,
+#                          never scanned. docs/ in an install target is the
+#                          OPERATOR's directory; the plugin borrows exactly two
+#                          filenames in it. A scan_flat over docs/*.md would
+#                          enumerate the repo's own 14 references plus every
+#                          dated AgentLint report, and — worse — the uninstall
+#                          root-scope walk would then offer to move an
+#                          operator's docs out of their own project.
 #   .claude/settings.local.json, .claude/.session-start, and every other
 #                          per-machine artifact: not copied, not classified.
 generate_rows() {
@@ -307,6 +312,15 @@ generate_rows() {
     scan_tree workflow ".claude/tests/mutation" "runs"
     emit_row  workflow ".worktreeinclude"
     emit_row  workflow ".claude-plugin/plugin.json"
+    # The shipped-docs subset (v4.1 / U0.8). Two files, named individually —
+    # see the docs/ note above for why this is not a directory scan. Class
+    # `workflow`: they are plugin-owned reference material that a release
+    # rewrites, not operator content, so an operator edit gets the same
+    # replace-custom + "yours is in the backup" treatment every other
+    # plugin-owned file gets. Absent files are simply omitted, which is how a
+    # pre-U0.8 tag (docs/HOOKS.md yes, docs/CODEX_SETUP.md no) still freezes.
+    emit_row  workflow "docs/CODEX_SETUP.md"
+    emit_row  workflow "docs/HOOKS.md"
 
     # --- operator: seeded once, never clobbered ---------------------------
     scan_flat operator ".claude/rubrics" '*.md'

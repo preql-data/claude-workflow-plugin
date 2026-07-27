@@ -33,8 +33,11 @@
 #   3. Real-repo sanity: named assets present, operator memory and the
 #      plugin's own L1 suite absent.
 #   4. Classify decision table: all six verdicts, one assertion each.
+#   4d. The shipped-docs subset (v4.1 / U0.8): the four verdicts its
+#      asymmetric old-table membership makes reachable.
 #   5. Frozen-table format: manifests/v3.5.0.sha256 row grammar, sort order,
-#      v3.5 sentinels present, v4 markers absent.
+#      v3.5 sentinels present, v4 markers absent, and the U0.8 refreeze
+#      (docs/HOOKS.md in, docs/CODEX_SETUP.md out) from both sides.
 #   6. META-TESTs: each proves a check above is capable of failing.
 #
 # Exit codes:
@@ -162,6 +165,8 @@ mkfile "$SYN" ".claude/mcp/demo-mcp/src/server.js"      "// synthetic mcp"
 mkfile "$SYN" ".claude/tests/mutation/mutation-sweep.sh" "#!/bin/bash"
 mkfile "$SYN" ".worktreeinclude"                        ".env"
 mkfile "$SYN" ".claude-plugin/plugin.json"              '{"name":"synthetic"}'
+mkfile "$SYN" "docs/CODEX_SETUP.md"                     "synthetic codex setup"
+mkfile "$SYN" "docs/HOOKS.md"                           "synthetic hooks reference"
 mkfile "$SYN" ".claude/rubrics/default.md"              "synthetic rubric"
 mkfile "$SYN" ".claude/rubric-config"                   "default"
 mkfile "$SYN" ".claude/model-ranking"                   "opus"
@@ -181,8 +186,15 @@ mkfile "$SYN" ".claude/mcp/demo-mcp/node_modules/pkg/index.js"        "// vendor
 mkfile "$SYN" ".claude/mcp/demo-mcp/debug.log"                        "noise"
 mkfile "$SYN" ".claude/tests/mutation/calibration/runs/report.json"   '{"run":1}'
 mkfile "$SYN" "CLAUDE.md"                                             "# operator memory"
-mkfile "$SYN" "docs/HOOKS.md"                                         "# docs subset ships in U0.8"
 mkfile "$SYN" ".claude/settings.local.json"                           '{"local":true}'
+# docs/ is a NAMED SUBSET, never a scan (v4.1 / U0.8). These three are real
+# repo docs that sit next to the two shipped ones and must stay out: docs/ in an
+# install target belongs to the operator, and a scan_flat over docs/*.md would
+# both bloat every frozen table and let the uninstaller's root-scope walk offer
+# to move an operator's own docs out of their project.
+mkfile "$SYN" "docs/ARCHITECTURE.md"                                  "# not shipped"
+mkfile "$SYN" "docs/al-2026-01-01-000000-deadbeef.md"                 "# dated agentlint report"
+mkfile "$SYN" "docs/plans/README.md"                                  "# not shipped"
 
 SYN_TSV="$WORK/synthetic.tsv"
 bash "$SCRIPT" generate "$SYN" > "$SYN_TSV" 2>"$WORK/synthetic.err" && RC=0 || RC=$?
@@ -213,6 +225,14 @@ assert_eq "surface: .worktreeinclude is class workflow" \
     "workflow" "$(field_of "$SYN_TSV" ".worktreeinclude" 2)"
 assert_eq "surface: .claude-plugin/plugin.json is class workflow" \
     "workflow" "$(field_of "$SYN_TSV" ".claude-plugin/plugin.json" 2)"
+# The shipped-docs subset (v4.1 / U0.8). Class `workflow` on purpose: these are
+# plugin-owned reference material a release rewrites, so an operator edit is
+# reported and replaced with their copy in the backup — not preserved with a
+# .new sidecar the way an operator-class file is.
+assert_eq "surface: docs/CODEX_SETUP.md is class workflow" \
+    "workflow" "$(field_of "$SYN_TSV" "docs/CODEX_SETUP.md" 2)"
+assert_eq "surface: docs/HOOKS.md is class workflow" \
+    "workflow" "$(field_of "$SYN_TSV" "docs/HOOKS.md" 2)"
 assert_eq "surface: .claude/rubrics/default.md is class operator" \
     "operator" "$(field_of "$SYN_TSV" ".claude/rubrics/default.md" 2)"
 assert_eq "surface: .claude/rubric-config is class operator" \
@@ -237,10 +257,19 @@ assert_eq "excluded: calibration/runs/ under .claude/tests/mutation is pruned" \
     "0" "$(row_count "$SYN_TSV" ".claude/tests/mutation/calibration/runs/report.json")"
 assert_eq "excluded: CLAUDE.md (never-touched operator memory)" \
     "0" "$(row_count "$SYN_TSV" "CLAUDE.md")"
-assert_eq "excluded: docs/ (the shipped-docs subset lands in U0.8)" \
-    "0" "$(prefix_count "$SYN_TSV" "docs/")"
 assert_eq "excluded: .claude/settings.local.json (per-machine, never copied)" \
     "0" "$(row_count "$SYN_TSV" ".claude/settings.local.json")"
+# docs/ is a NAMED SUBSET, not a directory scan. The count assertion is the one
+# that matters: a future `scan_flat workflow docs '*.md'` would still satisfy
+# every per-file presence check above and would be caught only here.
+assert_eq "docs/ subset: EXACTLY two docs rows, never a directory scan" \
+    "2" "$(prefix_count "$SYN_TSV" "docs/")"
+assert_eq "excluded: docs/ARCHITECTURE.md (a repo doc that is not shipped)" \
+    "0" "$(row_count "$SYN_TSV" "docs/ARCHITECTURE.md")"
+assert_eq "excluded: docs/al-*.md (dated AgentLint reports are not shipped)" \
+    "0" "$(row_count "$SYN_TSV" "docs/al-2026-01-01-000000-deadbeef.md")"
+assert_eq "excluded: docs/plans/ (no recursion under docs/)" \
+    "0" "$(row_count "$SYN_TSV" "docs/plans/README.md")"
 
 # Absent optional single files are omitted rather than erroring.
 assert_eq "absent optional file .claude/model-roles is omitted, not errored" \
@@ -248,11 +277,11 @@ assert_eq "absent optional file .claude/model-roles is omitted, not errored" \
 assert_eq "absent optional file .claude/effort-verdict is omitted, not errored" \
     "0" "$(row_count "$SYN_TSV" ".claude/effort-verdict")"
 
-# Exact row count: 9 workflow + 4 operator + 2 merged. A bare "did my file
+# Exact row count: 11 workflow + 4 operator + 2 merged. A bare "did my file
 # appear" check cannot see a rule that started matching TOO MUCH.
-assert_eq "synthetic tree yields exactly 15 rows" "15" \
+assert_eq "synthetic tree yields exactly 17 rows" "17" \
     "$(wc -l < "$SYN_TSV" | tr -d ' ')"
-assert_eq "synthetic tree yields 9 workflow rows" "9" \
+assert_eq "synthetic tree yields 11 workflow rows" "11" \
     "$(awk -F'\t' '$2 == "workflow"' "$SYN_TSV" | wc -l | tr -d ' ')"
 assert_eq "synthetic tree yields 4 operator rows" "4" \
     "$(awk -F'\t' '$2 == "operator"' "$SYN_TSV" | wc -l | tr -d ' ')"
@@ -285,7 +314,9 @@ for p in \
     ".claude/scripts/qa-gate.sh" \
     ".claude/agents/grader.md" \
     ".claude/scripts/workflow-denylist.sh" \
-    ".claude-plugin/plugin.json"
+    ".claude-plugin/plugin.json" \
+    "docs/CODEX_SETUP.md" \
+    "docs/HOOKS.md"
 do
     assert_eq "real repo: manifest lists $p" "1" "$(row_count "$REPO_TSV" "$p")"
 done
@@ -294,6 +325,24 @@ assert_eq "real repo: manifest does NOT list CLAUDE.md" \
     "0" "$(row_count "$REPO_TSV" "CLAUDE.md")"
 assert_eq "real repo: manifest lists no .claude/scripts/tests/ path" \
     "0" "$(prefix_count "$REPO_TSV" ".claude/scripts/tests/")"
+# The docs subset, against the REAL docs/ directory — which holds 14 references
+# plus a growing pile of dated AgentLint reports. Two rows and no more.
+assert_eq "real repo: EXACTLY two docs/ rows (the named subset, not a scan)" \
+    "2" "$(prefix_count "$REPO_TSV" "docs/")"
+for notshipped in \
+    "docs/ARCHITECTURE.md" \
+    "docs/WORKFLOW.md" \
+    "docs/AGENTS.md" \
+    "docs/AGENTLINT_REPORT.md" \
+    "docs/plans/README.md"
+do
+    assert_eq "real repo: manifest does NOT list $notshipped" \
+        "0" "$(row_count "$REPO_TSV" "$notshipped")"
+done
+assert_eq "real repo: both docs rows are class workflow" "workflow workflow" \
+    "$(printf '%s %s' \
+        "$(field_of "$REPO_TSV" "docs/CODEX_SETUP.md" 2)" \
+        "$(field_of "$REPO_TSV" "docs/HOOKS.md" 2)")"
 assert_eq "real repo: manifest rows satisfy the row grammar" \
     "0" "$(check_table_format "$REPO_TSV" && echo 0 || echo $?)"
 
@@ -461,6 +510,74 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 4d: the shipped-docs subset classifies correctly (U0.8) ==="
+
+# The docs subset is the first surface entry whose OLD-TABLE membership is
+# asymmetric: docs/HOOKS.md existed at v3.5 and docs/CODEX_SETUP.md did not.
+# That asymmetry is the whole reason the refreeze had to happen in the same
+# commit as the surface change, so the four reachable verdicts are pinned here
+# against a purpose-built fixture rather than inferred from section 5's
+# presence checks.
+#
+# Four target shapes, one old table generated FROM the "v3.5" tree, so the
+# fixture exercises generate -> classify composition:
+#
+#   target                             CODEX_SETUP.md  HOOKS.md
+#   no docs/ at all                    copy-new        copy-new
+#   carries the stock v3.5 HOOKS.md    copy-new        replace-stock
+#   carries an EDITED HOOKS.md         copy-new        replace-custom
+#   already at the shipped bytes       skip-current    skip-current
+DOC_OLD="$WORK/docs/old"     # stands in for the v3.5.0 tag tree
+DOC_SRC="$WORK/docs/src"     # stands in for HEAD
+mkfile "$DOC_OLD" "docs/HOOKS.md"       "hooks reference v3.5"
+mkfile "$DOC_SRC" "docs/HOOKS.md"       "hooks reference v4"
+mkfile "$DOC_SRC" "docs/CODEX_SETUP.md" "codex setup v4"
+
+DOC_TABLE="$WORK/docs/old-table.sha256"
+bash "$SCRIPT" generate "$DOC_OLD" > "$DOC_TABLE"
+assert_eq "docs classify: the stand-in old table has HOOKS.md but not CODEX_SETUP.md" \
+    "1 0" "$(printf '%s %s' \
+        "$(row_count "$DOC_TABLE" "docs/HOOKS.md")" \
+        "$(row_count "$DOC_TABLE" "docs/CODEX_SETUP.md")")"
+
+# doc_verdict <target-dir> <path> — the classify verdict for one docs row.
+doc_verdict() {
+    bash "$SCRIPT" classify --target "$1" --source "$DOC_SRC" --old-table "$DOC_TABLE" 2>/dev/null \
+        | awk -F'\t' -v p="$2" '$1 == p { print $3; exit }'
+}
+
+DOC_T_NONE="$WORK/docs/tgt-none"
+mkdir -p "$DOC_T_NONE"
+assert_eq "docs classify: CODEX_SETUP.md is copy-new when the target has no docs/" \
+    "copy-new" "$(doc_verdict "$DOC_T_NONE" "docs/CODEX_SETUP.md")"
+assert_eq "docs classify: HOOKS.md is copy-new too when the target has no docs/" \
+    "copy-new" "$(doc_verdict "$DOC_T_NONE" "docs/HOOKS.md")"
+
+DOC_T_STOCK="$WORK/docs/tgt-stock"
+mkfile "$DOC_T_STOCK" "docs/HOOKS.md" "hooks reference v3.5"
+assert_eq "docs classify: an untouched v3.5 HOOKS.md is replace-stock (the refreeze is what makes this reachable)" \
+    "replace-stock" "$(doc_verdict "$DOC_T_STOCK" "docs/HOOKS.md")"
+assert_eq "docs classify: ...and CODEX_SETUP.md is still copy-new (no v3.5 hash to match)" \
+    "copy-new" "$(doc_verdict "$DOC_T_STOCK" "docs/CODEX_SETUP.md")"
+
+DOC_T_EDITED="$WORK/docs/tgt-edited"
+mkfile "$DOC_T_EDITED" "docs/HOOKS.md" "hooks reference v3.5 WITH AN OPERATOR EDIT"
+# workflow class, so the plugin's product wins and the operator's copy goes to
+# the backup. NOT preserve-custom: a .new sidecar next to a reference doc would
+# be litter nobody reads, and the doc has to match the code it documents.
+assert_eq "docs classify: an EDITED HOOKS.md is replace-custom, not preserve-custom" \
+    "replace-custom" "$(doc_verdict "$DOC_T_EDITED" "docs/HOOKS.md")"
+
+DOC_T_CURRENT="$WORK/docs/tgt-current"
+mkfile "$DOC_T_CURRENT" "docs/HOOKS.md"       "hooks reference v4"
+mkfile "$DOC_T_CURRENT" "docs/CODEX_SETUP.md" "codex setup v4"
+assert_eq "docs classify: a target already at the shipped bytes is skip-current (HOOKS.md)" \
+    "skip-current" "$(doc_verdict "$DOC_T_CURRENT" "docs/HOOKS.md")"
+assert_eq "docs classify: a target already at the shipped bytes is skip-current (CODEX_SETUP.md)" \
+    "skip-current" "$(doc_verdict "$DOC_T_CURRENT" "docs/CODEX_SETUP.md")"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Section 5: frozen table manifests/v3.5.0.sha256 ==="
 
 assert_eq "frozen table exists at manifests/v3.5.0.sha256" \
@@ -479,6 +596,28 @@ if [ -f "$FROZEN" ]; then
         "1" "$(row_count "$FROZEN" ".claude/agents/grader.md")"
     assert_eq "frozen table: contains .claude/scripts/qa-gate.sh" \
         "1" "$(row_count "$FROZEN" ".claude/scripts/qa-gate.sh")"
+
+    # THE U0.8 REFREEZE, pinned from both sides. Extending the generate surface
+    # without regenerating this table in the SAME commit breaks the flagship L2
+    # spec's byte-integrity check (installer-v3-upgrade.sh section 2 regenerates
+    # from the tag and cmp's), and these two rows are exactly what that refreeze
+    # changed. They also pin that the table came from the TAG rather than from
+    # HEAD: the v3.5.0 tree has docs/HOOKS.md and has never had CODEX_SETUP.md,
+    # so the asymmetry below is only reproducible from the tag.
+    #
+    # Downstream, the asymmetry is what makes the two docs rows classify
+    # DIFFERENTLY on a v3.5 -> v4 upgrade: HOOKS.md has a v3.5 hash, so a target
+    # still carrying the untouched v3.5 file is replace-stock (section 4d proves
+    # it); CODEX_SETUP.md has none, so it can only ever be copy-new or, once
+    # installed, skip-current.
+    assert_eq "frozen table: contains docs/HOOKS.md (the v3.5.0 tag shipped it)" \
+        "1" "$(row_count "$FROZEN" "docs/HOOKS.md")"
+    assert_eq "frozen table: does NOT contain docs/CODEX_SETUP.md (absent from the tag, so omitted)" \
+        "0" "$(row_count "$FROZEN" "docs/CODEX_SETUP.md")"
+    assert_eq "frozen table: docs/HOOKS.md is class workflow there too" \
+        "workflow" "$(field_of "$FROZEN" "docs/HOOKS.md" 2)"
+    assert_eq "frozen table: EXACTLY one docs/ row (the tag had no other shipped doc)" \
+        "1" "$(prefix_count "$FROZEN" "docs/")"
 
     # v4-only markers — their presence would mean the table was generated
     # from the wrong tree (e.g. HEAD instead of the tag), which would make
@@ -546,6 +685,39 @@ bash "$SCRIPT" generate "$SYN" > "$META_IGNORED"
 assert_eq "META: adding an out-of-surface file leaves the output unchanged" \
     "0" "$(cmp -s "$META_IGNORED" "$SYN_TSV" && echo 0 || echo 1)"
 rm -f "$SYN/.claude/scripts/tests/meta-extra.test.sh"
+
+# META 2b — the same sensitivity probe for the docs subset specifically (v4.1 /
+# U0.8), because docs/ is the one directory where "in the surface" and "in the
+# directory" come apart. A new .md dropped into docs/ must NOT change the
+# output; EDITING one of the two named files must. Without the second arm the
+# subset rule would be satisfiable by a generator that had stopped hashing docs
+# at all, and without the first the rule would be satisfiable by a directory
+# scan — the exact thing the named list exists to prevent.
+mkfile "$SYN" "docs/META_NEW_DOC.md" "a doc that arrived later and is not shipped"
+META_DOCS_ADDED="$WORK/synthetic-docs-added.tsv"
+bash "$SCRIPT" generate "$SYN" > "$META_DOCS_ADDED"
+assert_eq "META: a NEW file in docs/ leaves the output unchanged (subset, not a scan)" \
+    "0" "$(cmp -s "$META_DOCS_ADDED" "$SYN_TSV" && echo 0 || echo 1)"
+rm -f "$SYN/docs/META_NEW_DOC.md"
+
+printf 'META edit\n' >> "$SYN/docs/HOOKS.md"
+META_DOCS_EDITED="$WORK/synthetic-docs-edited.tsv"
+bash "$SCRIPT" generate "$SYN" > "$META_DOCS_EDITED"
+assert_eq "META: EDITING docs/HOOKS.md DOES change the output (the row is really hashed)" \
+    "1" "$(cmp -s "$META_DOCS_EDITED" "$SYN_TSV" && echo 0 || echo 1)"
+# Confinement stated as "every changed line is the HOOKS.md row" rather than as
+# a fixed count: a one-row hash change is a `NcN` hunk, so diff emits BOTH a `<`
+# and a `>` line for it, and hardcoding 2 would silently start passing if a
+# second row ever joined the hunk.
+META_DOCS_CHANGED_LINES=$(diff "$META_DOCS_EDITED" "$SYN_TSV" 2>/dev/null | grep -c '^[<>]' | tr -d ' \n')
+META_DOCS_CHANGED_HOOKS=$(diff "$META_DOCS_EDITED" "$SYN_TSV" 2>/dev/null | grep -c '^[<>].*docs/HOOKS\.md' | tr -d ' \n')
+assert_eq "META: ...and EVERY changed line is the docs/HOOKS.md row (nothing else moved)" \
+    "$META_DOCS_CHANGED_LINES" "$META_DOCS_CHANGED_HOOKS"
+assert_eq "META: ...on a diff that really has changed lines (not a vacuous 0 == 0)" "yes" \
+    "$([ "${META_DOCS_CHANGED_LINES:-0}" -ge 2 ] && echo yes || echo no)"
+mkfile "$SYN" "docs/HOOKS.md" "synthetic hooks reference"
+assert_eq "META: restoring the file restores byte-identical output" \
+    "0" "$(bash "$SCRIPT" generate "$SYN" | cmp -s - "$SYN_TSV" && echo 0 || echo 1)"
 
 # META 3 — the operator branch in classify is load-bearing. Strip the
 # sentinel-delimited block from a COPY and the operator fixture that differs

@@ -38,7 +38,8 @@ session that produced them ends.
   two different reviewers. Scope of that validation, per
   `docs/RELEASE_AUDIT.md` rows TM7/TM14: a small synthetic subject driven
   through the gate scripts directly, so no live e2e trace was captured.
-  Awaiting only the release tag.
+  Tagged and released as `v4.0.0` on 2026-07-26 (commit `7b57a13`); the
+  epic-closing bd sync is `86d238c`.
 
 - `verification-suite.md` — Phases 0/A/B/C shipping v3.1.0 through v3.4.0:
   MCP path hotfix, binding QA-gate escalation, best-model auto-selection,

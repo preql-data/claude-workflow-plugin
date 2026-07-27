@@ -159,8 +159,26 @@ assert_eq "--help lists all three mode values" "yes" \
 # -h is the same door.
 run_installer "$INSTALL_SH" -h
 assert_eq "-h exits 0 as well" "0" "$RUN_RC"
-assert_eq "-h prints the same usage block" "yes" \
-    "$(contains "$RUN_OUT" "Claude Workflow Plugin v3 installer")"
+# The usage HEADER is version-dynamic (v4.1 / U0.8): it interpolates the version
+# read from the source .claude-plugin/plugin.json, so the expected string is
+# built from that same manifest rather than typed here. Through v4.0 this file
+# asserted the literal "Claude Workflow Plugin v3 installer" — which is how a
+# stale major survived two releases with a green suite.
+PLUGIN_JSON="$PROJECT_DIR/.claude-plugin/plugin.json"
+EXPECTED_VERSION=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$PLUGIN_JSON" 2>/dev/null | head -1)
+assert_eq "the plugin manifest declares a readable version (guards the two checks below)" \
+    "yes" "$([ -n "$EXPECTED_VERSION" ] && echo yes || echo no)"
+assert_eq "-h prints the same usage block, naming the version from plugin.json" "yes" \
+    "$(contains "$RUN_OUT" "Claude Workflow Plugin v$EXPECTED_VERSION installer")"
+# And the retired hardcode is really gone — "no v3 anywhere in the header" is the
+# regression, and it cannot be seen by a check that only looks for the right
+# string. Skipped rather than inverted if the repo is ever legitimately on 3.x.
+case "$EXPECTED_VERSION" in
+    3.*) echo "  SKIPPED: the repo is on a 3.x version; the stale-v3 check is not meaningful" ;;
+    *)   assert_eq "-h no longer carries the hardcoded v3 header" "no" \
+             "$(contains "$RUN_OUT" "Claude Workflow Plugin v3 installer")" ;;
+esac
 # Printing usage must not be a side-effecting run.
 assert_eq "--help never reaches the prerequisite checks" "no" \
     "$(contains "$RUN_OUT" "Checking prerequisites")"
@@ -303,7 +321,7 @@ assert_eq "META: the mutated copy no longer carries the refusal message" "no" \
 SYNTH="$WORK/synthetic-source"
 mkdir -p "$SYNTH/.claude/agents" "$SYNTH/.claude/scripts" "$SYNTH/.claude/hooks" \
     "$SYNTH/.claude/commands" "$SYNTH/.claude/skills/workflow-engine" \
-    "$SYNTH/.claude-plugin" "$SYNTH/bin"
+    "$SYNTH/.claude-plugin" "$SYNTH/docs" "$SYNTH/bin"
 for agent in orchestrator qa backend frontend devops; do
     printf -- '---\nmodel: test\n---\nsynthetic %s agent\n' "$agent" \
         > "$SYNTH/.claude/agents/$agent.md"
@@ -319,6 +337,10 @@ printf 'synthetic skill\n'         > "$SYNTH/.claude/skills/workflow-engine/SKIL
 printf 'synthetic command\n'       > "$SYNTH/.claude/commands/workflow-model.md"
 printf '{"env":{}}\n'              > "$SYNTH/.claude/settings.json"
 printf '{"name":"synthetic","version":"9.9.9-test"}\n' > "$SYNTH/.claude-plugin/plugin.json"
+# The shipped-docs subset (v4.1 / U0.8) joined the required-source list, so a
+# synthetic source without it aborts before the mutant can demonstrate the flip.
+printf 'synthetic codex setup\n' > "$SYNTH/docs/CODEX_SETUP.md"
+printf 'synthetic hooks reference\n' > "$SYNTH/docs/HOOKS.md"
 
 # fake-bd: the whole `bd` surface install.sh touches (--version, init, hooks,
 # doctor). `doctor` must never print the string 'error' — install.sh greps for

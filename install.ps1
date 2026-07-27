@@ -1,4 +1,9 @@
-# Claude Workflow Plugin v3 - Windows installer (PowerShell)
+# Claude Workflow Plugin - Windows installer (PowerShell)
+#
+# NO RELEASE NUMBER IS WRITTEN IN THIS FILE (v4.1 / U0.8). The banner and the
+# fresh-install readout interpolate the version read from the SOURCE
+# .claude-plugin/plugin.json, so a release bump needs no installer edit and
+# cannot leave a stale "v3" on an operator's screen.
 #
 # Single-source-of-truth: this script copies the canonical agent/script/hook
 # definitions from the repo (alongside this file, or freshly cloned to a temp
@@ -66,6 +71,31 @@ function Write-Color {
     Write-Host $Message -ForegroundColor $Color
 }
 
+# Branding, version-dynamic (v4.1 / U0.8) -------------------------------------
+# The banner prints before the source has been located, so the version comes
+# from the clone this script is sitting in. $PSScriptRoot is empty under
+# `irm | iex` (there is no file), in which case the label degrades to the
+# unnumbered product name; the authoritative number for that run is
+# $SourceVersionLabel, read once the source has been fetched.
+#
+# ConvertFrom-Json rather than a regex: it ships with PowerShell, so unlike the
+# bash side there is no "the JSON parser may not be installed yet" problem.
+$ScriptDir = $PSScriptRoot
+$BrandVersion = ""
+if ($ScriptDir) {
+    $brandManifest = Join-Path $ScriptDir ".claude-plugin/plugin.json"
+    if (Test-Path -LiteralPath $brandManifest) {
+        try {
+            $BrandVersion = (Get-Content -Raw -LiteralPath $brandManifest |
+                ConvertFrom-Json).version
+        } catch {
+            $BrandVersion = ""
+        }
+    }
+}
+$BrandName = "Claude Workflow Plugin"
+$BrandLabel = if ($BrandVersion) { "$BrandName v$BrandVersion" } else { $BrandName }
+
 # -Upgrade and -Mode are mutually exclusive (v4.1 / U0.7) ---------------------
 # They answer the same question with different mechanisms, and silently letting
 # one win would make the destructive choice unpredictable: -Upgrade owns the
@@ -94,7 +124,7 @@ if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Path $Path -Force | 
 $Target = (Resolve-Path $Path).Path
 
 Write-Host ""
-Write-Color "Claude Workflow Plugin v3" Cyan
+Write-Color $BrandLabel Cyan
 Write-Color "Orchestrator-first workflow with mandatory QA gate" Cyan
 Write-Host ""
 Write-Host "Installing to: " -NoNewline
@@ -219,7 +249,9 @@ try {
         ".claude/skills/workflow-engine/SKILL.md",
         ".claude/settings.json",
         ".claude-plugin/plugin.json",
-        ".claude/commands/workflow-model.md"
+        ".claude/commands/workflow-model.md",
+        "docs/CODEX_SETUP.md",
+        "docs/HOOKS.md"
     )
     foreach ($r in $Required) {
         if (-not (Test-Path (Join-Path $SourceDir $r))) {
@@ -340,9 +372,10 @@ try {
     #
     # DELIBERATELY EXCLUDED (same list as the generator): CLAUDE.md (never-touched
     # operator memory, seeded from a template and never upgraded),
-    # .claude/scripts/tests/ (repo-only), docs/ (the shipped-docs subset lands in
-    # a later phase; adding it early would make the frozen tables disagree with
-    # the installer), and every per-machine artifact.
+    # .claude/scripts/tests/ (repo-only), all of docs/ EXCEPT the two files named
+    # below (docs/ in an install target is the operator's directory; the plugin
+    # borrows exactly two filenames in it, so they are named individually and
+    # never scanned), and every per-machine artifact.
     function Get-WorkflowSurfaceRows {
         param([string]$Root)
         $rows = @(
@@ -356,6 +389,13 @@ try {
             Get-SurfaceTreeRows -Root $Root -Class "workflow" -Dir ".claude/tests/mutation" -Prune @("runs")
             Get-SurfaceFileRow  -Root $Root -Class "workflow" -Rel ".worktreeinclude"
             Get-SurfaceFileRow  -Root $Root -Class "workflow" -Rel ".claude-plugin/plugin.json"
+            # The shipped-docs subset (v4.1 / U0.8). Class workflow: plugin-owned
+            # reference material a release rewrites, so an operator edit is
+            # reported and replaced with their copy in the backup, exactly like
+            # any other plugin-owned file. Absent files are omitted, which is how
+            # a pre-U0.8 tag still freezes.
+            Get-SurfaceFileRow  -Root $Root -Class "workflow" -Rel "docs/CODEX_SETUP.md"
+            Get-SurfaceFileRow  -Root $Root -Class "workflow" -Rel "docs/HOOKS.md"
             # --- operator: seeded once, never clobbered -------------------
             Get-SurfaceFlatRows -Root $Root -Class "operator" -Dir ".claude/rubrics" -Glob "*.md"
             Get-SurfaceFileRow  -Root $Root -Class "operator" -Rel ".claude/rubric-config"
@@ -453,12 +493,30 @@ try {
     $script:InstalledManifestTable = $null
     $script:PreservedFiles = @()
     $script:ReplacedFiles = @()
-    # Set true by the two Update-mode jq merges below. The upgrade report
-    # distinguishes "merged key-wise" from "installed as shipped" on the strength
-    # of these rather than by looking for a leftover .bak, which a previous run
+    # What actually happened to each merged-class file, set by the two
+    # Update-mode jq merges below. The upgrade report renders one line per file
+    # from these rather than looking for a leftover .bak, which a previous run
     # could also have left behind.
-    $script:SettingsMergeDone = $false
-    $script:McpMergeDone = $false
+    #
+    # FOUR states, not a boolean (v4.1 / U0.8, R1-F2; mirrors install.sh's
+    # SETTINGS_MERGE_STATUS / MCP_MERGE_STATUS). Through v4.0 the report said
+    # "installed as shipped; nothing to merge" whenever the flag was false --
+    # true when the target had no such file, false-and-misleading when the merge
+    # was ATTEMPTED AND FAILED. The console shows that failure in red as it
+    # happens; the report saved into the backup is what an operator reads days
+    # later, and it was claiming the shipped file had been installed when in
+    # fact their own file was still sitting there unmerged (settings.json) or
+    # had been replaced wholesale (.mcp.json).
+    #
+    #   shipped           no such file in the target; the shipped one was copied.
+    #   merged            merge succeeded; the pre-merge copy is at <file>.bak.
+    #   failed-untouched  merge attempted and failed; the operator's file is
+    #                     UNCHANGED on disk.
+    #   failed-replaced   merge refused (target was not a single JSON object);
+    #                     the SHIPPED file was installed over it and the
+    #                     operator's is at <file>.bak.
+    $script:SettingsMergeStatus = "shipped"
+    $script:McpMergeStatus = "shipped"
 
     # Get-InstalledManifestOldTable — $true when $Target\.claude\install-manifest
     # is one of ours AND usable as a classify old-table. On success sets
@@ -703,6 +761,76 @@ try {
         }
     }
 
+    # Shipped docs subset (v4.1 / U0.8) ------------------------------------
+    # TWO files, named individually -- NOT docs\*.md. docs\ in an install target
+    # belongs to the operator; the plugin borrows exactly these two filenames in
+    # it: CODEX_SETUP.md (how to wire the optional reviewer lane through the
+    # Codex CLI) and HOOKS.md (the hook reference the gate messages point at by
+    # name, including the denylist hash-migration recovery the v4 upgrade note
+    # cites). Class workflow in the surface manifest.
+    #
+    # DEFINED HERE, ABOVE EVERY BACKUP LEG, so the backup list below and the copy
+    # loop far later in this file read the SAME variable. Keep this list,
+    # install.sh's $SHIPPED_DOCS, the required-source entries in both installers,
+    # and the two docs rows in Get-WorkflowSurfaceRows / workflow-manifest.sh in
+    # sync -- packaging-parity.test.sh set-compares all six.
+    # BEGIN SHIPPED_DOCS (packaging-parity.test.sh extracts this block; keep the sentinels)
+    $ShippedDocs = @("docs/CODEX_SETUP.md", "docs/HOOKS.md")
+    # END SHIPPED_DOCS
+
+    # Root-level files any install path may overwrite, and which therefore have
+    # to reach that path's backup. Mirrors install.sh's $BACKUP_ROOT_FILES, and
+    # $ShippedDocs is the SAME variable the copy loop iterates -- that sharing is
+    # the fix for a HIGH data-loss defect QA found in the first cut of U0.8 (the
+    # subset was named in six places but no backup leg was extended, so an
+    # operator-edited docs/HOOKS.md was overwritten while the readout claimed
+    # "yours is in the backup" and the backup held no such file).
+    #
+    # CLAUDE.md is here despite being outside the shipped surface: the mode-1
+    # path replaces it, so a snapshot omitting it would lose operator memory.
+    # .claude-plugin\plugin.json is deliberately absent -- the v3 leg backs it up
+    # under its flat basename for historical reasons the L2 spec pins.
+    $BackupRootFiles = @("CLAUDE.md", ".mcp.json", "LESSONS.md", ".worktreeinclude") + $ShippedDocs
+
+    # Copy-RootFiles <backup-dir> — copy every root-level file the run may
+    # overwrite into <backup-dir>, PRESERVING each file's relative path.
+    #
+    # LAYOUT: MIRRORED, not flat (v4.1 / U0.8) — same decision and same reasoning
+    # as install.sh's backup_root_files, and the same rule this change set gave
+    # the uninstaller's trash: A ROOT ROW KEEPS ITS RELATIVE PATH, so the four
+    # pre-U0.8 bare filenames still land exactly where they always did and only
+    # the nested docs rows are new. Flattening docs\HOOKS.md to HOOKS.md would be
+    # ambiguous against any root-level HOOKS.md and would make the report's
+    # Compare-Object advice point at the wrong tree.
+    #
+    # Per-file failures are swallowed: a backup that could not capture one file
+    # must not abort a run whose caller already decided the tree is
+    # snapshot-worthy. Copy-ClaudeTree is the one that is allowed to be fatal.
+    function Copy-RootFiles {
+        param([string]$BackupDir)
+        if (-not $BackupDir) { return }
+        # ROOT-BACKUP-START (load-bearing; the bash twin is stripped by the L2
+        # META-TEST at installer-v3-upgrade.sh 11d. Keep both sentinels INSIDE
+        # the function in both files, so a strip degrades to "no root-level file
+        # reaches the backup" -- the pre-U0.8 behaviour -- rather than leaving
+        # call sites pointing at a function that no longer exists.)
+        foreach ($rootRel in $script:BackupRootFiles) {
+            $rootSrc = Join-Path $Target $rootRel
+            if (-not (Test-Path -LiteralPath $rootSrc -PathType Leaf)) { continue }
+            $rootDst = Join-Path $BackupDir ($rootRel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+            $rootParent = Split-Path $rootDst -Parent
+            try {
+                if (-not (Test-Path -LiteralPath $rootParent)) {
+                    New-Item -ItemType Directory -Path $rootParent -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $rootSrc -Destination $rootDst -Force
+            } catch {
+                Write-Color "note could not back up $rootRel ($($_.Exception.Message))" Yellow
+            }
+        }
+        # ROOT-BACKUP-END
+    }
+
     # --- version + upgrade detection --------------------------------------
 
     # The version this run is INSTALLING, read from the source manifest rather
@@ -811,21 +939,78 @@ try {
             git init
             $GitignoreFile = Join-Path $Target ".gitignore"
             if (-not (Test-Path $GitignoreFile)) {
-                @"
-node_modules/
-.venv/
-__pycache__/
-dist/
-build/
-.env
-.env.local
-*.log
-.idea/
-.vscode/
-.DS_Store
-.claude/.session-start
-.claude/.qa-tracking/
-"@ | Out-File -FilePath $GitignoreFile -Encoding UTF8
+                # Written through Write-LfFile, NOT `Out-File -Encoding UTF8`
+                # (v4.1 / U0.8). Under Windows PowerShell 5.1 that cmdlet means
+                # UTF-8 WITH BOM and host-native CRLF, and a BOM on the first
+                # line of a .gitignore is a pattern git may not match — so the
+                # very first rule, node_modules/, could silently stop working on
+                # exactly the platform this file exists for. Same writer the
+                # manifest and the merged JSON use; the reasoning is in its
+                # header.
+                #
+                # An explicit string ARRAY rather than a here-string: the join is
+                # then LF by construction, independent of the line endings THIS
+                # file happens to be checked out with.
+                #
+                # packaging-parity.test.sh extracts the sentinel-delimited list
+                # below and compares it line-for-line against the .gitignore
+                # install.sh's heredoc actually PRODUCES. Keep the sentinels on
+                # their own lines and keep one single-quoted entry per line.
+                # BEGIN GENERATED_GITIGNORE
+                Write-LfFile -FilePath $GitignoreFile -Lines @(
+                    '# Dependencies'
+                    'node_modules/'
+                    'vendor/'
+                    '.venv/'
+                    '__pycache__/'
+                    ''
+                    '# Build outputs'
+                    'dist/'
+                    'build/'
+                    '*.egg-info/'
+                    ''
+                    '# Environment'
+                    '.env'
+                    '.env.local'
+                    '*.log'
+                    ''
+                    '# IDE'
+                    '.idea/'
+                    '.vscode/'
+                    '*.swp'
+                    '*.swo'
+                    ''
+                    '# OS'
+                    '.DS_Store'
+                    'Thumbs.db'
+                    ''
+                    '# Claude workflow (session-specific, not committed)'
+                    '.claude/.session-start'
+                    '.claude/.qa-tracking/'
+                    '.claude/.mutation-runs/'
+                    '.claude/.mutation-worktrees/'
+                    ''
+                    '# Claude workflow (installer/uninstaller artifacts, not committed).'
+                    '# Every one of these is written by install.sh or uninstall.sh into the'
+                    '# project root, and every one of them was previously untracked-and-unignored'
+                    '# noise an operator had to notice and exclude by hand:'
+                    '#   .claude-backup-*/          mode 1 / mode 2 pre-write snapshot'
+                    '#   .claude-v2-backup-*/       v2 -> v3 migration snapshot'
+                    '#   .claude-v3-backup-*/       v3 -> v4 migration snapshot (holds upgrade-report.txt)'
+                    '#   .claude-uninstall-trash-*/ uninstall.sh''s recoverable trash'
+                    '#   *.new                      the upgrade''s operator-file sidecars, written'
+                    '#                              next to the file they did NOT overwrite; deleted'
+                    '#                              by the operator once reviewed'
+                    '#   *.json.bak                 the pre-merge copies of settings.json / .mcp.json'
+                    '.claude-backup-*/'
+                    '.claude-v2-backup-*/'
+                    '.claude-v3-backup-*/'
+                    '.claude-uninstall-trash-*/'
+                    '*.new'
+                    '.claude/settings.json.bak'
+                    '.mcp.json.bak'
+                )
+                # END GENERATED_GITIGNORE
                 git add .gitignore 2>$null
             }
             git commit -m "Initial commit" --allow-empty 2>$null
@@ -987,16 +1172,16 @@ build/
         } else {
             New-Item -ItemType Directory -Path $V3BackupDir -Force | Out-Null
         }
-        # Root-level files the upgrade may touch. Stored FLAT in the backup root:
-        # the backup is already a snapshot of .claude/, so mirroring paths would
-        # nest a confusing second .claude-plugin/ inside it. plugin.json is the
-        # only name that could collide, and it keeps its basename.
-        foreach ($rootFile in @("CLAUDE.md", ".mcp.json", "LESSONS.md", ".worktreeinclude")) {
-            $rootPath = Join-Path $Target $rootFile
-            if (Test-Path -LiteralPath $rootPath -PathType Leaf) {
-                Copy-Item -LiteralPath $rootPath -Destination (Join-Path $V3BackupDir $rootFile) -Force
-            }
-        }
+        # Root-level files the upgrade may touch, each at its own relative path --
+        # see Copy-RootFiles for the mirrored-layout decision and the data-loss
+        # defect that forced it. The four pre-U0.8 names are bare filenames, so
+        # they still land flat exactly as before; only the nested docs rows are
+        # new.
+        Copy-RootFiles -BackupDir $V3BackupDir
+        # plugin.json keeps its FLAT basename rather than nesting a second
+        # .claude-plugin\ inside what is already a snapshot of .claude\. This is
+        # the one deliberate exception to the mirroring rule, and the L2 spec
+        # pins it.
         $installedManifestJson = Join-Path $Target ".claude-plugin\plugin.json"
         if (Test-Path -LiteralPath $installedManifestJson -PathType Leaf) {
             Copy-Item -LiteralPath $installedManifestJson -Destination (Join-Path $V3BackupDir "plugin.json") -Force
@@ -1047,9 +1232,16 @@ build/
                 $versioned = Join-Path $SourceDir "manifests\v$($script:V3DetectedVersion).sha256"
                 if (Test-Path -LiteralPath $versioned -PathType Leaf) { $frozenTable = $versioned }
             }
+            # ONE prerequisite here, not two: this file reimplements the surface
+            # generator natively, so there is no workflow-manifest.sh to be
+            # missing and the only thing that can be absent is the table. That is
+            # why the sentence names the table specifically and install.sh's
+            # names whichever of ITS two halves actually failed (v4.1 / U0.8,
+            # R1-F3 — install.sh said "has neither" on an OR). Do not "restore
+            # parity" by re-adding a generator clause that cannot fire.
             if (-not (Test-Path -LiteralPath $frozenTable -PathType Leaf)) {
                 Write-Color "The upgrade flow needs a frozen hash table and this source tree has none." Red
-                Write-Host "  old table: $frozenTable"
+                Write-Host "  old table: $frozenTable (MISSING)"
                 Write-Host "Without it, customized files cannot be told from stock ones."
                 Write-Host "Your backup is at $V3BackupDir."
                 Write-Host "Rerun with -Mode 2 for the flat non-destructive update instead."
@@ -1121,9 +1313,11 @@ build/
                     # probe below is deliberately mode-2 only.
                     Write-Color "Creating backup at $BackupDir" Yellow
                     Copy-ClaudeTree -SourceTree $ClaudeDir -BackupDir $BackupDir
-                    if (Test-Path (Join-Path $Target "CLAUDE.md")) {
-                        Copy-Item -Path (Join-Path $Target "CLAUDE.md") -Destination $BackupDir
-                    }
+                    # Root-level files too (v4.1 / U0.8): mode 1 overwrites every
+                    # one of them, so its backup -- which is the POINT of the mode
+                    # -- has to hold them. Supersedes the CLAUDE.md-only copy that
+                    # used to be here; CLAUDE.md is the first entry in the list.
+                    Copy-RootFiles -BackupDir $BackupDir
                     Write-Color "OK Backup created" Green
                 }
                 "2" {
@@ -1220,6 +1414,15 @@ build/
                         $BackupDir = $null
                     } else {
                         Copy-ClaudeTree -SourceTree $ClaudeDir -BackupDir $BackupDir
+                        # Root-level files too (v4.1 / U0.8). This leg took
+                        # NOTHING outside .claude\ before, which made it the worst
+                        # of the three: a mode-2 Update is what the v4.0 -> v4.1
+                        # population actually runs, and classify hands
+                        # replace-custom to any target file differing from both
+                        # the shipped bytes and the old table -- including paths
+                        # the old table never listed, so an operator's own
+                        # docs\HOOKS.md qualified.
+                        Copy-RootFiles -BackupDir $BackupDir
                         Write-Color "OK Backup created" Green
                     }
                 }
@@ -1248,7 +1451,11 @@ build/
         "$ClaudeDir\tests\mutation",
         "$ClaudeDir\tests\mutation\calibration",
         "$ClaudeDir\tests\mutation\lib",
-        (Join-Path $Target ".claude-plugin")
+        (Join-Path $Target ".claude-plugin"),
+        # docs/ is the OPERATOR's directory; the plugin borrows exactly two
+        # filenames in it (see the docs subset copy block below). -Force makes
+        # this a no-op for a project that already has one.
+        (Join-Path $Target "docs")
     )) {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
     }
@@ -1434,7 +1641,7 @@ build/
                     # concatenated jq's output lines into a single unreadable line,
                     # which is diff-hostile for an operator who commits .mcp.json.
                     Write-LfFile -FilePath $TargetMcpJson -Lines @($mcpMerged)
-                    $script:McpMergeDone = $true
+                    $script:McpMergeStatus = "merged"
                     Write-Color "OK   .mcp.json merged (previous file at .mcp.json.bak)" Green
                     $mcpBareVars = & jq -s -r $McpBareVarJq $TargetMcpJson $SourceMcpJson
                     foreach ($mcpSrv in $mcpBareVars) {
@@ -1447,10 +1654,12 @@ build/
                         }
                     }
                 } else {
+                    $script:McpMergeStatus = "failed-untouched"
                     Write-Color "Could not merge .mcp.json - manual review needed (previous file at .mcp.json.bak)" Red
                 }
             } else {
                 Copy-Item -Path $SourceMcpJson -Destination $TargetMcpJson -Force
+                $script:McpMergeStatus = "failed-replaced"
                 Write-Color ".mcp.json was not a single JSON object (empty, multi-document, or malformed) - installed the shipped config (previous file saved to .mcp.json.bak)" Red
             }
         } else {
@@ -1505,6 +1714,72 @@ build/
         }
         $global:LASTEXITCODE = 0
         Write-Color "OK   tests/mutation/" Green
+    }
+
+    # Shipped docs subset (v4.1 / U0.8) ------------------------------------
+    # The list itself is $ShippedDocs, defined far above because every backup leg
+    # reads it; see there for what the two files are.
+    #
+    # THE PRE-COPY GUARD (v4.1 / U0.8, QA cycle 1). docs\ is the ONLY shipped
+    # scope where a NEVER-INSTALLED project can already own a file at a path the
+    # plugin wants: everything else lives under .claude\ or is a plugin-specific
+    # root dotfile. On a fresh install there is no plan, no verdict walk and no
+    # backup directory, so a pre-existing docs\HOOKS.md was silently overwritten
+    # under a generic "OK   HOOKS.md" line.
+    #
+    # WHY .bak AND NOT .new: the shipped doc has to win the canonical path (the
+    # gate messages point operators at docs/HOOKS.md BY NAME), so the operator's
+    # copy is preserved beside it instead. `.new` is the operator-class
+    # convention, where the operator's content wins; these are workflow class.
+    # `.bak` is what this installer already uses for the pre-merge copies of
+    # settings.json and .mcp.json, and the generated .gitignore covers it.
+    #
+    # Gated on exists-AND-DIFFERS, and skipped under $script:VerdictMode (those
+    # paths take a real backup) and $script:MergeMode (mode 3 skips existing
+    # files outright). Returns $false when the old bytes could NOT be saved, and
+    # the caller then refuses the copy: losing the plugin's doc is recoverable
+    # from the source tree, losing the operator's is not.
+    function Save-PreExistingDoc {
+        param([string]$Src, [string]$Dst)
+        $rel = $Dst
+        if ($rel.StartsWith($script:Target, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = $rel.Substring($script:Target.Length).TrimStart('\', '/') -replace '\\', '/'
+        }
+        if ($script:VerdictMode) { return $true }
+        if ($script:MergeMode) { return $true }
+        if (-not (Test-Path -LiteralPath $Dst -PathType Leaf)) { return $true }
+        # Get-FileSha256 THROWS by design (a wrong hash would silently overwrite
+        # a customized file), and $ErrorActionPreference is 'Stop', so both calls
+        # are wrapped. An unreadable file degrades to "differs", which takes the
+        # PRESERVING branch -- the safe direction on a destructive decision.
+        $alreadyShipped = $false
+        try {
+            $alreadyShipped = ((Get-FileSha256 $Dst) -eq (Get-FileSha256 $Src))
+        } catch {
+            $alreadyShipped = $false
+        }
+        if ($alreadyShipped) { return $true }
+        try {
+            Copy-Item -LiteralPath $Dst -Destination "$Dst.bak" -Force
+            Write-Color "keep $rel was already here and differs; your copy saved as $rel.bak" Yellow
+            return $true
+        } catch {
+            Write-Color "warn $rel was already here and differs, and your copy could NOT be saved to $rel.bak -- not overwriting it" Red
+            return $false
+        }
+    }
+
+    foreach ($shippedDoc in $ShippedDocs) {
+        $docSrc = Join-Path $SourceDir $shippedDoc
+        if (-not (Test-Path -LiteralPath $docSrc -PathType Leaf)) { continue }
+        $docDst = Join-Path $Target $shippedDoc
+        $docParent = Split-Path $docDst -Parent
+        if (-not (Test-Path -LiteralPath $docParent)) {
+            New-Item -ItemType Directory -Path $docParent -Force | Out-Null
+        }
+        if (Save-PreExistingDoc -Src $docSrc -Dst $docDst) {
+            Copy-WorkflowFile -Src $docSrc -Dst $docDst
+        }
     }
 
     Copy-WorkflowFile `
@@ -1576,12 +1851,13 @@ build/
                 # settings.json is worse here than for .mcp.json: Claude Code itself
                 # reads this file.
                 Write-LfFile -FilePath $SettingsFile -Lines @($merged)
-                $script:SettingsMergeDone = $true
+                $script:SettingsMergeStatus = "merged"
                 Write-Color "OK   settings.json merged" Green
                 if ($hadEffortEnv -eq "yes") {
                     Write-Color "note removed legacy env.CLAUDE_CODE_EFFORT_LEVEL (v4: a non-xhigh value deactivates ultracode orchestration; effortLevel is now the floor)" Cyan
                 }
             } else {
+                $script:SettingsMergeStatus = "failed-untouched"
                 Write-Color "Could not merge settings.json$settingsSkipReason - manual review needed; your file is unchanged (copy at .claude\settings.json.bak)" Red
             }
         } elseif ($MergeMode) {
@@ -1705,17 +1981,44 @@ build/
         $lines.Add("are copied wholesale (plugin-owned product, never operator-owned), so their files")
         $lines.Add("are counted above but not listed one by one.")
         $lines.Add("")
+        # One line per merged-class file, from its four-state status (R1-F2).
+        # The failure sentences are the point: a saved report that says
+        # "installed as shipped" about a file the merge could not touch sends an
+        # operator looking for a problem that is not there, and away from the one
+        # that is. Same four arms and the same sentences as install.sh's.
+        # The sentinels below are load-bearing: packaging-parity.test.sh extracts
+        # this block from BOTH installers and compares the sentences
+        # file-to-file, path separators folded. Keep each sentinel alone on its
+        # line, and keep the sentences byte-equal to install.sh's -- an executed
+        # L2 META asserts on the bash ones.
+        # MERGE-STATUS-LINES-START
         $lines.Add("Merged key-wise instead of overwritten:")
-        if ($script:SettingsMergeDone) {
-            $lines.Add("  .claude\settings.json  (your pre-upgrade copy: .claude\settings.json.bak)")
-        } else {
-            $lines.Add("  .claude\settings.json  (installed as shipped; nothing to merge)")
+        switch ($script:SettingsMergeStatus) {
+            "merged" {
+                $lines.Add("  .claude\settings.json  (your pre-upgrade copy: .claude\settings.json.bak)")
+            }
+            "failed-untouched" {
+                $lines.Add("  .claude\settings.json  (MERGE FAILED - your file was left UNCHANGED, not replaced; copy at .claude\settings.json.bak. Merge the shipped keys in by hand.)")
+            }
+            default {
+                $lines.Add("  .claude\settings.json  (installed as shipped; nothing to merge)")
+            }
         }
-        if ($script:McpMergeDone) {
-            $lines.Add("  .mcp.json              (your pre-upgrade copy: .mcp.json.bak)")
-        } else {
-            $lines.Add("  .mcp.json              (installed as shipped; nothing to merge)")
+        switch ($script:McpMergeStatus) {
+            "merged" {
+                $lines.Add("  .mcp.json              (your pre-upgrade copy: .mcp.json.bak)")
+            }
+            "failed-untouched" {
+                $lines.Add("  .mcp.json              (MERGE FAILED - your file was left UNCHANGED, not replaced; copy at .mcp.json.bak. Merge the shipped servers in by hand.)")
+            }
+            "failed-replaced" {
+                $lines.Add("  .mcp.json              (MERGE REFUSED - yours was not a single JSON object, so the SHIPPED config was installed over it; yours is at .mcp.json.bak. Re-add your own servers from there.)")
+            }
+            default {
+                $lines.Add("  .mcp.json              (installed as shipped; nothing to merge)")
+            }
         }
+        # MERGE-STATUS-LINES-END
         $lines.Add("")
         $lines.Add("Preserved your version, shipped version written alongside as *.new ($(@($script:PreservedFiles).Count)):")
         if (@($script:PreservedFiles).Count -eq 0) {
@@ -1818,19 +2121,41 @@ build/
             }
         }
 
+        # FRESH-INSTALL "what you just got" list (v4.1 / U0.8). The v3 upgrade
+        # path prints its own report in the branch above; this one is what a
+        # first-time operator sees, so it describes the CURRENT product rather
+        # than a release note. Same content as install.sh's, ASCII-only (the
+        # R1-F1 rule: no non-ASCII byte outside a whole-line comment).
+        #
+        # The heading interpolates the MAJOR of the version being installed --
+        # no release number is typed here, and a bump needs no edit. When the
+        # source plugin.json could not be read, $SourceVersion is empty and the
+        # heading degrades to the unnumbered form rather than printing "v".
+        #
+        # The BRACES in "v${freshMajor}:" are load-bearing, not style: a bare
+        # "$freshMajor:" is parsed as a scope/drive-qualified variable reference
+        # (the colon is part of the name token), so the heading would come out
+        # empty. Do not "simplify" them away.
         Write-Host ""
-        Write-Color "What's new in v3:" Cyan
-        # ASCII hyphen, not an em dash: see the R1-F1 note at the no-change probe.
-    # This line PRE-DATES U0.7 and is fixed in the same pass — with it left as it
-    # was, install.ps1 would still fail to parse under Windows PowerShell 5.1 and
-    # every other fix in this file would be unreachable.
-    Write-Host "  - Plugin manifest (.claude-plugin/plugin.json) - see it for the version"
-        Write-Host "  - Model pinning per agent + /workflow-model upgrade command"
-        Write-Host "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
-        Write-Host "  - Parent-folder access via additionalDirectories ('../')"
-        Write-Host "  - SessionStart warns on stale model + old bd"
-        Write-Host "  - Single-source-of-truth installer (no embedded duplication)"
-        Write-Host "  - uninstall.ps1 for clean removal"
+        $freshMajor = if ($SourceVersion) { ($SourceVersion -split '\.')[0] } else { "" }
+        if ($freshMajor) {
+            Write-Color "What's new in v${freshMajor}:" Cyan
+        } else {
+            Write-Color "What's in this release:" Cyan
+        }
+        Write-Host "  - Tri-model workflow: the orchestrator plans, Opus-class specialists build,"
+        Write-Host "    and an optional second-family reviewer lane reads the same diff"
+        Write-Host "  - Nobody signs off on their own work: qa-gate.sh approve REFUSES without an"
+        Write-Host "    independent review artifact, and the Stop hook re-checks before releasing"
+        Write-Host "  - Approvals are bound to a change-set hash, so a stale one cannot release work"
+        Write-Host "  - Role-aware model selection (.claude/model-roles) + /workflow-model"
+        Write-Host "  - Rubric-graded QA loop and a mutation tier (/mutation-sweep) with an LLM judge"
+        Write-Host "  - Two MCP servers: bd-mcp (typed Beads tools), code-graph-mcp (impact_of, dead_code)"
+        Write-Host "  - Hash-based re-runs and upgrades: .claude/install-manifest records what was"
+        Write-Host "    installed, so your edits are preserved with the shipped copy alongside as *.new"
+        Write-Host "  - uninstall.ps1 removes exactly what the installer wrote, into a recoverable trash"
+        Write-Host ""
+        Write-Host "Full release notes: CHANGELOG.md"
         Write-Host ""
         Write-Color "Requirements:" Yellow
         Write-Host "  - Git Bash (comes with Git for Windows) - the workflow scripts run via bash"

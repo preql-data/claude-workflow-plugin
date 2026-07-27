@@ -53,10 +53,23 @@
 # readout even called it "unmodified since install"). Physical containment is
 # what makes the file header's invariant true rather than nearly true.
 #
-# Deliberately NOT the cheaper "root rows must be FLAT" rule: root scope is flat
-# in TODAY's surface only, and the generator already documents a shipped-docs
-# subset (docs/) arriving in a later phase. A flat-only rule would silently stop
-# consuming those rows the release they appear.
+# Deliberately NOT the cheaper "root rows must be FLAT" rule: root scope stopped
+# being flat in v4.1 / U0.8, which added the shipped-docs subset
+# (docs/CODEX_SETUP.md, docs/HOOKS.md) to the surface. A flat-only rule would
+# have silently stopped consuming those rows the release they appeared. Nested
+# rows also keep their SUBPATH inside the trash directory (see the move loop):
+# flattening docs/HOOKS.md to HOOKS.md would collide with any root-level file of
+# the same name and would make the printed recovery command restore it to the
+# wrong place.
+#
+# CRLF TOLERANCE DIVERGES FROM uninstall.ps1 (v4.1 / U0.8, m7e R1-F3): this
+# script parses the manifest with awk, so a CRLF-line-ended install-manifest
+# leaves \r on field 3, no row satisfies the 64-hex grammar, and the walk
+# degrades to the legacy "leave every root file" behaviour; uninstall.ps1 reads
+# it with [IO.File]::ReadAllLines, which strips the \r, so it consumes the same
+# manifest normally. Both directions are safe (bash leaves more behind than it
+# needs to), the installers only ever write LF, and neither script rewrites a
+# manifest — so this is recorded rather than fixed.
 
 set -e
 
@@ -381,10 +394,22 @@ fi
 TRASH_DIR="$TARGET/.claude-uninstall-trash-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$TRASH_DIR"
 
+# The trash MIRRORS the project layout rather than flattening into it (v4.1 /
+# U0.8). Every entry in TO_REMOVE is "$TARGET/<relative-path>", and a manifest
+# root row may now be NESTED (docs/HOOKS.md), so `mv "$path" "$TRASH_DIR/"`
+# would drop it at the trash root: it would collide with a same-named file from
+# another directory, and the recovery command printed at the end would restore
+# it to the project root instead of back into docs/. Stripping the target prefix
+# and recreating the parent keeps the trash a faithful, restorable snapshot.
+# The three directories and the flat root files are unaffected — their relative
+# path IS their basename.
 for path in "${TO_REMOVE[@]}"; do
     if [ -e "$path" ]; then
-        mv "$path" "$TRASH_DIR/"
-        echo -e "${GREEN}OK${NC} moved $(basename "$path") -> $TRASH_DIR/"
+        rel="${path#"$TARGET"/}"
+        dest_parent=$(dirname "$TRASH_DIR/$rel")
+        [ "$dest_parent" = "$TRASH_DIR" ] || mkdir -p "$dest_parent"
+        mv "$path" "$TRASH_DIR/$rel"
+        echo -e "${GREEN}OK${NC} moved $rel -> $TRASH_DIR/"
     fi
 done
 
@@ -437,6 +462,11 @@ echo ""
 echo -e "${GREEN}Uninstall complete.${NC}"
 echo ""
 echo -e "Trash:  ${CYAN}$TRASH_DIR${NC}"
-echo "  -> Recover with: mv \"$TRASH_DIR\"/.* \"$TARGET\"/  (or copy specific files back)"
+# `cp -R dir/. dst/` and not `mv dir/* dst/` (v4.1 / U0.8): the glob form is
+# dotfile-blind — and .claude/, .claude-plugin/, .beads/ and .mcp.json are ALL
+# dotfiles — while the old `/.*` spelling was the mirror-image mistake, catching
+# only the dotfiles and leaving LESSONS.md, CLAUDE.md and the nested docs/ subset
+# behind. The `/.` form copies every child, hidden and nested alike.
+echo "  -> Recover everything: cp -R \"$TRASH_DIR\"/. \"$TARGET\"/  (or copy specific files back)"
 echo "  -> Permanently delete with: rm -rf \"$TRASH_DIR\""
 echo ""

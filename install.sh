@@ -1,5 +1,11 @@
 #!/bin/bash
-# Claude Workflow Plugin v3 - Linux/macOS installer
+# Claude Workflow Plugin - Linux/macOS installer
+#
+# NO RELEASE NUMBER IS WRITTEN IN THIS FILE (v4.1 / U0.8). The banner, the
+# usage header and the fresh-install readout all interpolate the version read
+# from the SOURCE .claude-plugin/plugin.json, so a release bump needs no
+# installer edit and cannot leave a stale "v3" on an operator's screen — which
+# is exactly what shipped for the whole of v4.0.
 #
 # Single-source-of-truth: this script copies the canonical agent/script/hook
 # definitions from the repo (alongside this file, or freshly cloned to a temp
@@ -50,6 +56,60 @@ MIN_BD_VERSION="0.47"
 REPO_URL="${CLAUDE_WORKFLOW_REPO:-https://github.com/preql-data/claude-workflow-plugin.git}"
 REPO_BRANCH="${CLAUDE_WORKFLOW_BRANCH:-main}"
 
+# Branding, version-dynamic (v4.1 / U0.8) -------------------------------------
+# The banner and the usage header both name the release, and both can be
+# reached BEFORE the prerequisite checks have proven jq exists (`--help` never
+# reaches them at all). So the version is read here with a jq-free extractor,
+# from the clone this script is sitting in.
+#
+# SCRIPT_DIR is resolved here rather than at the source-location block further
+# down because the banner needs it first; that block reuses this value instead
+# of recomputing it.
+#
+# Under `curl ... | bash` there is no local clone yet, so BRAND_VERSION comes
+# back empty and every consumer degrades to the unnumbered product name. The
+# authoritative number for that run is $SOURCE_VERSION_LABEL, read with jq once
+# the source has been fetched — this one is for the two lines that print first.
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "")
+fi
+
+# plugin_json_version <file> — the TOP-LEVEL "version" string, or "" if the file
+# is missing or does not carry one at that depth. Deliberately jq-free (see
+# above).
+#
+# ANCHORED ON EXACTLY TWO SPACES, which is the top-level depth of this
+# 2-space-indented manifest — not on `[[:space:]]*`. The loose anchor took the
+# FIRST own-line "version" key at ANY depth, so a manifest that listed a nested
+# one before the top-level key (mcpServers entries carry their own versions in
+# some ecosystems) would have returned the wrong string and branded every run
+# with it. Verified: with the loose anchor the fixture
+# `{mcpServers:{a:{version:0.0.1}}, version:9.9.9}` yields 0.0.1; with this one
+# it yields 9.9.9.
+#
+# A reformat of plugin.json to another indent width makes this return EMPTY, not
+# wrong — the label then degrades to the unnumbered product name, and
+# packaging-parity's EXECUTED `--help` check (which compares against jq's answer)
+# fails loudly. Empty-or-loud is the right failure mode for a branding string;
+# silently-wrong is not.
+plugin_json_version() {
+    [ -f "$1" ] || return 0
+    sed -n 's/^  "version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" \
+        | head -1
+}
+
+BRAND_VERSION=""
+if [ -n "$SCRIPT_DIR" ]; then
+    BRAND_VERSION=$(plugin_json_version "$SCRIPT_DIR/.claude-plugin/plugin.json")
+fi
+BRAND_NAME="Claude Workflow Plugin"
+if [ -n "$BRAND_VERSION" ]; then
+    BRAND_LABEL="$BRAND_NAME v$BRAND_VERSION"
+else
+    BRAND_LABEL="$BRAND_NAME"
+fi
+
 # Argument parsing ------------------------------------------------------------
 # Supports:
 #   --upgrade   force the v2->v3 upgrade flow even if auto-detection is fuzzy
@@ -61,8 +121,8 @@ TARGET=""
 INSTALL_MODE_OVERRIDE=""
 
 print_usage() {
+    printf '%s installer\n' "$BRAND_LABEL"
     cat <<'USAGE'
-Claude Workflow Plugin v3 installer
 
 Usage:
   bash install.sh [project-path]                Install (auto-detects upgrades)
@@ -173,7 +233,7 @@ mkdir -p "$TARGET"
 TARGET=$(cd "$TARGET" && pwd)
 
 echo ""
-echo -e "${BLUE}Claude Workflow Plugin v3${NC}"
+echo -e "${BLUE}${BRAND_LABEL}${NC}"
 echo -e "Orchestrator-first workflow with mandatory QA gate"
 echo ""
 echo -e "Installing to: ${GREEN}$TARGET${NC}"
@@ -231,12 +291,8 @@ echo ""
 
 # Locate source-of-truth files -------------------------------------------------
 # If this script lives inside a clone of the plugin repo, use that. Otherwise
-# clone the repo into a temp directory.
-SCRIPT_DIR=""
-if [ -n "${BASH_SOURCE[0]:-}" ]; then
-    SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "")
-fi
-
+# clone the repo into a temp directory. $SCRIPT_DIR was resolved at the top of
+# the file, where the version-dynamic banner needed it first.
 SOURCE_DIR=""
 TMP_CLONE=""
 # Scratch space for the generated surface manifest, the upgrade plan, and the
@@ -301,6 +357,8 @@ for required in \
     ".claude/settings.json" \
     ".claude-plugin/plugin.json" \
     ".claude/commands/workflow-model.md" \
+    "docs/CODEX_SETUP.md" \
+    "docs/HOOKS.md" \
     ; do
     if [ ! -e "$SOURCE_DIR/$required" ]; then
         echo -e "${RED}Plugin source missing: $required${NC}"
@@ -308,6 +366,83 @@ for required in \
         exit 1
     fi
 done
+
+# Shipped docs subset (v4.1 / U0.8) --------------------------------------------
+# TWO files, named individually — NOT `docs/*.md`. docs/ in an install target
+# belongs to the operator; the plugin borrows exactly these two filenames in it:
+#
+#   docs/CODEX_SETUP.md  how to wire the optional Sol reviewer lane through the
+#                        Codex CLI. Without it, an operator who sees the
+#                        reviewer-lane messages has no on-disk instructions.
+#   docs/HOOKS.md        the hook reference the gate messages point at by name,
+#                        including the "Denylist changes are a hash migration"
+#                        recovery the v4 upgrade note in CHANGELOG.md cites.
+#
+# Class `workflow` in the surface manifest, so an operator edit is reported and
+# replaced (their copy preserved) exactly like any other plugin-owned file.
+#
+# DEFINED HERE, ABOVE EVERY BACKUP LEG, and that placement is the fix for a
+# HIGH data-loss defect QA found in the first cut of U0.8: the subset was named
+# in six places (both surfaces, both copy loops, both required-source lists) but
+# the backup legs enumerated root-level files from a list written before docs/
+# was shipped. An operator-edited docs/HOOKS.md was therefore classified
+# replace-custom, overwritten, and reported as "yours is in the backup" while
+# the backup held no such file — the bytes were gone from the whole tree. Every
+# leg that snapshots root-level files now reads THIS variable, so a future
+# addition to the subset cannot go missing from a backup again.
+# BEGIN SHIPPED_DOCS (packaging-parity.test.sh extracts this block; keep the sentinels)
+SHIPPED_DOCS="docs/CODEX_SETUP.md docs/HOOKS.md"
+# END SHIPPED_DOCS
+
+# Root-level files any install path may overwrite, and which therefore have to
+# reach that path's backup. CLAUDE.md is here despite being outside the shipped
+# surface: the v2 migration and mode 1 both replace it, so a snapshot that
+# omitted it would lose operator memory.
+#
+# .claude-plugin/plugin.json is deliberately NOT in this list — the v3 leg backs
+# it up under its flat basename for historical reasons the L2 spec pins.
+BACKUP_ROOT_FILES="CLAUDE.md .mcp.json LESSONS.md .worktreeinclude $SHIPPED_DOCS"
+
+# backup_root_files <backup-dir> — copy every root-level file the run may
+# overwrite into <backup-dir>, PRESERVING each file's relative path.
+#
+# LAYOUT: MIRRORED, not flat (v4.1 / U0.8). The pre-U0.8 legs stored these flat
+# because every one of them was a bare filename, so "flat" and "mirrored" were
+# the same thing and the comment justifying flatness was really about
+# .claude-plugin/plugin.json (which would otherwise nest a confusing second
+# .claude-plugin/ inside a snapshot of .claude/). The docs subset made the two
+# spellings differ, and flattening docs/HOOKS.md to HOOKS.md would be ambiguous
+# against any root-level HOOKS.md AND would make the `diff -r <backup> <target>`
+# advice the upgrade report prints wrong. Mirroring is also what this change set
+# chose for the uninstaller's trash, so the two destructive paths now agree:
+# A ROOT ROW KEEPS ITS RELATIVE PATH, and a flat row's relative path IS its
+# basename — so the four pre-U0.8 entries land exactly where they always did.
+#
+# Failures are tolerated per file (`|| true`): a backup that could not capture
+# one file must not abort a run whose caller has already decided the tree is
+# snapshot-worthy. The v3 leg's own `cp -R` of .claude/ is the fatal one.
+backup_root_files() {
+    local dest="$1"
+    local rel parent
+    [ -n "$dest" ] || return 0
+    # ROOT-BACKUP-START (load-bearing; the L2 META-TEST at
+    # installer-v3-upgrade.sh 11d DELETES this block and asserts the operator's
+    # docs bytes become unrecoverable while the readout still claims they are in
+    # the backup — the defect, mechanically. Keep both sentinels, and keep them
+    # INSIDE the function: wrapping the whole definition would make the strip
+    # fail-CLOSED (four call sites to a now-undefined function, aborting the run
+    # under `set -e`), and a META has to leave a runnable installer to compare
+    # against. Stripped, this degrades to "no root-level file reaches the
+    # backup" — the pre-U0.8 behaviour, never a crash.)
+    for rel in $BACKUP_ROOT_FILES; do
+        [ -f "$TARGET/$rel" ] || continue
+        parent=$(dirname "$dest/$rel")
+        [ "$parent" = "$dest" ] || mkdir -p "$parent" 2>/dev/null || true
+        cp "$TARGET/$rel" "$dest/$rel" 2>/dev/null || true
+    done
+    # ROOT-BACKUP-END
+    return 0
+}
 
 # Surface manifest helpers (v4.1 / U0.3) --------------------------------------
 # .claude/scripts/workflow-manifest.sh is the ONE machine-readable enumeration
@@ -392,6 +527,13 @@ if [ ! -d "$TARGET/.git" ]; then
         git init
 
         if [ ! -f ".gitignore" ]; then
+            # packaging-parity.test.sh EXECUTES the sentinel-delimited block
+            # below in a tempdir and compares the .gitignore it produces
+            # line-for-line against install.ps1's list. Keep the sentinels on
+            # their own lines, and keep the body a plain quoted heredoc that
+            # runs standalone — the test runs the REAL bytes rather than a
+            # copied literal.
+            # BEGIN GENERATED_GITIGNORE
             cat > ".gitignore" << 'GITIGNORE_EOF'
 # Dependencies
 node_modules/
@@ -422,7 +564,30 @@ Thumbs.db
 # Claude workflow (session-specific, not committed)
 .claude/.session-start
 .claude/.qa-tracking/
+.claude/.mutation-runs/
+.claude/.mutation-worktrees/
+
+# Claude workflow (installer/uninstaller artifacts, not committed).
+# Every one of these is written by install.sh or uninstall.sh into the
+# project root, and every one of them was previously untracked-and-unignored
+# noise an operator had to notice and exclude by hand:
+#   .claude-backup-*/          mode 1 / mode 2 pre-write snapshot
+#   .claude-v2-backup-*/       v2 -> v3 migration snapshot
+#   .claude-v3-backup-*/       v3 -> v4 migration snapshot (holds upgrade-report.txt)
+#   .claude-uninstall-trash-*/ uninstall.sh's recoverable trash
+#   *.new                      the upgrade's operator-file sidecars, written
+#                              next to the file they did NOT overwrite; deleted
+#                              by the operator once reviewed
+#   *.json.bak                 the pre-merge copies of settings.json / .mcp.json
+.claude-backup-*/
+.claude-v2-backup-*/
+.claude-v3-backup-*/
+.claude-uninstall-trash-*/
+*.new
+.claude/settings.json.bak
+.mcp.json.bak
 GITIGNORE_EOF
+            # END GENERATED_GITIGNORE
             git add .gitignore
         fi
 
@@ -777,12 +942,33 @@ plan_write_count() {
 BACKUP_DIR="$TARGET/.claude-backup-$(date +%Y%m%d-%H%M%S)"
 MERGE_MODE=false
 UPDATE_MODE=false
-# Set true by the two Update-mode jq merges below. The v3 upgrade report
-# distinguishes "merged key-wise" from "installed as shipped" on the strength
-# of these rather than by looking for a leftover .bak, which a previous run
+# What actually happened to each `merged`-class file, set by the two
+# Update-mode jq merges below. The v3 upgrade report renders one line per file
+# from these rather than looking for a leftover .bak, which a previous run
 # could also have left behind.
-SETTINGS_MERGE_DONE=false
-MCP_MERGE_DONE=false
+#
+# FOUR states, not a boolean (v4.1 / U0.8, closing x15 review finding R1-F2).
+# Through v4.0 the report printed "installed as shipped; nothing to merge"
+# whenever the merge flag was false — which is TRUE when the target had no such
+# file, and FALSE-AND-MISLEADING when the merge was ATTEMPTED AND FAILED. The
+# terminal shows that failure in red as it happens, but the report saved into
+# the backup is what an operator reads days later, and it was telling them the
+# shipped file had been installed when in fact their own file was still sitting
+# there unmerged (settings.json) or had been replaced wholesale (.mcp.json).
+# Those are three different states with three different follow-up actions, so
+# they get three different sentences.
+#
+#   shipped           no such file in the target; the shipped one was copied.
+#   merged            jq merge succeeded; the pre-merge copy is at <file>.bak.
+#   failed-untouched  merge attempted and failed; the operator's file is
+#                     UNCHANGED on disk (settings.json's arm — it is
+#                     operator-owned, so a failed merge must not clobber it).
+#   failed-replaced   merge refused because the target was not a single JSON
+#                     object; the SHIPPED file was installed over it and the
+#                     operator's is at <file>.bak (.mcp.json's arm — it must
+#                     end up valid or Claude Code cannot start the servers).
+SETTINGS_MERGE_STATUS="shipped"
+MCP_MERGE_STATUS="shipped"
 
 # v2 upgrade path: back up the v2 .claude/ to .claude-v2-backup-<ts>/ and
 # fall through to a fresh install. We do not invoke the interactive mode
@@ -795,7 +981,11 @@ if [ "$V2_UPGRADE" = true ] && [ -d "$TARGET/.claude" ]; then
     # silently dotfile-blind, so .claude/.qa-tracking/ — every gate record and
     # review artifact in a live install — never reached the backup.
     cp -R "$TARGET/.claude/." "$V2_BACKUP_DIR/" 2>/dev/null || true
-    [ -f "$TARGET/CLAUDE.md" ] && cp "$TARGET/CLAUDE.md" "$V2_BACKUP_DIR/"
+    # Root-level files too (v4.1 / U0.8). This leg used to take CLAUDE.md alone,
+    # which was complete while every other root-level file was written only by
+    # paths that had their own backup — the docs subset broke that, and a v2
+    # tree can perfectly well own a docs/HOOKS.md of its own.
+    backup_root_files "$V2_BACKUP_DIR"
     echo -e "${GREEN}OK${NC} v2 backup created"
     # UPDATE_MODE preserves CLAUDE.md and merges settings non-destructively.
     UPDATE_MODE=true
@@ -820,15 +1010,14 @@ elif [ "$V3_UPGRADE" = true ]; then
             exit 1
         fi
     fi
-    # Root-level files the upgrade may touch. Stored FLAT in the backup root:
-    # the backup is already a snapshot of .claude/, so mirroring paths would
-    # nest a confusing second .claude-plugin/ inside it. plugin.json is the
-    # only name that could collide, and it keeps its basename.
-    for v3_root_file in CLAUDE.md .mcp.json LESSONS.md .worktreeinclude; do
-        if [ -f "$TARGET/$v3_root_file" ]; then
-            cp "$TARGET/$v3_root_file" "$V3_BACKUP_DIR/$v3_root_file"
-        fi
-    done
+    # Root-level files the upgrade may touch, each at its own relative path —
+    # see backup_root_files for the mirrored-layout decision and the data-loss
+    # defect that forced it. The four pre-U0.8 names are bare filenames, so they
+    # still land flat exactly as before; only the nested docs rows are new.
+    backup_root_files "$V3_BACKUP_DIR"
+    # plugin.json keeps its FLAT basename rather than nesting a second
+    # .claude-plugin/ inside what is already a snapshot of .claude/. This is the
+    # one deliberate exception to the mirroring rule, and the L2 spec pins it.
     if [ -f "$TARGET/.claude-plugin/plugin.json" ]; then
         cp "$TARGET/.claude-plugin/plugin.json" "$V3_BACKUP_DIR/plugin.json"
     fi
@@ -887,12 +1076,29 @@ elif [ "$V3_UPGRADE" = true ]; then
         UPGRADE_OLD_TABLE_LABEL=$(basename "$V3_FROZEN_TABLE")
     fi
 
-    if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$UPGRADE_OLD_TABLE" ]; then
+    # The precondition is a CONJUNCTION, so the diagnosis has to name which half
+    # actually failed (v4.1 / U0.8, closing x15 review finding R1-F3). Through
+    # v4.0 this said "This source tree has neither" on an OR — so a tree that
+    # had a perfectly good generator and was merely missing manifests/vX.sha256
+    # was told both files were absent, and the operator went looking for the
+    # wrong thing. Each line now reports its own state and the sentence names
+    # only what is really missing.
+    UPGRADE_PREREQ_MISSING=""
+    if [ ! -f "$MANIFEST_TOOL" ]; then
+        UPGRADE_PREREQ_MISSING="generator"
+    fi
+    if [ ! -f "$UPGRADE_OLD_TABLE" ]; then
+        case "$UPGRADE_PREREQ_MISSING" in
+            "") UPGRADE_PREREQ_MISSING="old table" ;;
+            *)  UPGRADE_PREREQ_MISSING="$UPGRADE_PREREQ_MISSING and the old table" ;;
+        esac
+    fi
+    if [ -n "$UPGRADE_PREREQ_MISSING" ]; then
         echo -e "${RED}The upgrade flow needs both .claude/scripts/workflow-manifest.sh and a frozen hash table.${NC}"
-        echo "  generator: $MANIFEST_TOOL"
-        echo "  old table: $UPGRADE_OLD_TABLE"
-        echo "This source tree has neither, so customized files cannot be told from"
-        echo "stock ones. Your backup is at $V3_BACKUP_DIR."
+        echo "  generator: $MANIFEST_TOOL ($([ -f "$MANIFEST_TOOL" ] && echo "found" || echo "MISSING"))"
+        echo "  old table: $UPGRADE_OLD_TABLE ($([ -f "$UPGRADE_OLD_TABLE" ] && echo "found" || echo "MISSING"))"
+        echo "This source tree is missing the $UPGRADE_PREREQ_MISSING, so customized files"
+        echo "cannot be told from stock ones. Your backup is at $V3_BACKUP_DIR."
         echo "Rerun with --mode=2 for the flat non-destructive update instead."
         exit 1
     fi
@@ -961,7 +1167,10 @@ elif [ -d "$TARGET/.claude" ]; then
                 mkdir -p "$BACKUP_DIR"
                 # Dotfile-inclusive form; see the v2 backup above for why.
                 cp -R "$TARGET/.claude/." "$BACKUP_DIR/" 2>/dev/null || true
-                [ -f "$TARGET/CLAUDE.md" ] && cp "$TARGET/CLAUDE.md" "$BACKUP_DIR/"
+                # Root-level files too (v4.1 / U0.8): mode 1 overwrites every one
+                # of them, so its backup — which is the POINT of the mode — has
+                # to hold them.
+                backup_root_files "$BACKUP_DIR"
                 echo -e "${GREEN}OK${NC} Backup created"
                 ;;
             2)
@@ -1038,6 +1247,14 @@ elif [ -d "$TARGET/.claude" ]; then
                     mkdir -p "$BACKUP_DIR"
                     # Dotfile-inclusive form; see the v2 backup above for why.
                     cp -R "$TARGET/.claude/." "$BACKUP_DIR/" 2>/dev/null || true
+                    # Root-level files too (v4.1 / U0.8). This leg took NOTHING
+                    # outside .claude/ before, which made it the worst of the
+                    # four: a mode-2 Update is what the v4.0 -> v4.1 population
+                    # actually runs, and classify hands replace-custom to any
+                    # target file differing from both the shipped bytes and the
+                    # old table — including paths the old table never listed, so
+                    # an operator's own docs/HOOKS.md qualified.
+                    backup_root_files "$BACKUP_DIR"
                     echo -e "${GREEN}OK${NC} Backup created"
                 fi
                 ;;
@@ -1064,6 +1281,10 @@ mkdir -p "$TARGET/.claude/commands"
 mkdir -p "$TARGET/.claude/rubrics"
 mkdir -p "$TARGET/.claude/tests/mutation"
 mkdir -p "$TARGET/.claude-plugin"
+# docs/ is the OPERATOR's directory; the plugin borrows exactly two filenames
+# in it (see the docs subset copy block below). mkdir -p is idempotent, so a
+# project that already has docs/ is untouched.
+mkdir -p "$TARGET/docs"
 
 # Verdict lookup for the verdict-driven flows (v4.1 / U0.3, U0.4) -------------
 # plan_verdict <path-relative-to-target> — the classify verdict, or "" when the
@@ -1313,7 +1534,7 @@ if [ -f "$SOURCE_DIR/.mcp.json" ]; then
             MCP_MERGED=$(jq -s "$MCP_MERGE_JQ" "$MCP_FILE" "$SOURCE_DIR/.mcp.json" 2>/dev/null) || MCP_MERGED=""
             if [ -n "$MCP_MERGED" ]; then
                 echo "$MCP_MERGED" > "$MCP_FILE"
-                MCP_MERGE_DONE=true
+                MCP_MERGE_STATUS="merged"
                 echo -e "${GREEN}OK${NC}   .mcp.json merged (previous file at .mcp.json.bak)"
                 MCP_BARE_VARS=$(jq -s -r "$MCP_BARE_VAR_JQ" "$MCP_FILE" "$SOURCE_DIR/.mcp.json" 2>/dev/null || true)
                 if [ -n "$MCP_BARE_VARS" ]; then
@@ -1323,10 +1544,12 @@ if [ -f "$SOURCE_DIR/.mcp.json" ]; then
                     done <<< "$MCP_BARE_VARS"
                 fi
             else
+                MCP_MERGE_STATUS="failed-untouched"
                 echo -e "${RED}Could not merge .mcp.json - manual review needed (previous file at .mcp.json.bak)${NC}"
             fi
         else
             cp "$SOURCE_DIR/.mcp.json" "$MCP_FILE"
+            MCP_MERGE_STATUS="failed-replaced"
             echo -e "${RED}.mcp.json was not a single JSON object (empty, multi-document, or malformed) - installed the shipped config (previous file saved to .mcp.json.bak)${NC}"
         fi
     else
@@ -1435,6 +1658,60 @@ if [ -f "$SOURCE_DIR/.worktreeinclude" ]; then
     copy_file "$SOURCE_DIR/.worktreeinclude" "$TARGET/.worktreeinclude"
 fi
 
+# Shipped docs subset (v4.1 / U0.8) --------------------------------------------
+# The list itself is $SHIPPED_DOCS, defined near the top of this file because
+# every backup leg reads it; see there for what the two files are and why they
+# are named individually rather than globbed.
+#
+# THE PRE-COPY GUARD (v4.1 / U0.8, QA cycle 1). docs/ is the ONLY shipped scope
+# where a NEVER-INSTALLED project can already own a file at a path the plugin
+# wants: every other shipped path is inside .claude/ or is a plugin-specific
+# root dotfile. On a fresh install there is no plan, no verdict walk and no
+# backup directory, so a pre-existing docs/HOOKS.md was silently overwritten
+# under a generic `OK   HOOKS.md` line — the operator had no way to know a file
+# of theirs had just been replaced, and no copy to go back to.
+#
+# WHY .bak AND NOT .new. The shipped doc has to win the canonical path: the gate
+# messages and the CHANGELOG upgrade note point operators at docs/HOOKS.md BY
+# NAME, so leaving the operator's version there and parking the plugin's at
+# docs/HOOKS.md.new would send them to the wrong file. The `.new` convention is
+# for `operator`-class files, where the operator's content wins; these are
+# `workflow` class, where the plugin's product wins and the operator's copy is
+# preserved beside it. `.bak` is the suffix this installer already uses for
+# exactly that (the pre-merge copies of settings.json and .mcp.json), and the
+# generated .gitignore already covers the sidecars.
+#
+# Gated on exists-AND-DIFFERS, so a re-run over a doc that is already the
+# shipped bytes leaves no litter, and skipped entirely under VERDICT_MODE (the
+# plan-driven paths take a real backup, which is the better artifact) and under
+# MERGE_MODE (mode 3 skips existing files outright).
+preserve_pre_existing_doc() {
+    local src="$1" dst="$2" rel
+    rel="${dst#"$TARGET"/}"
+    [ "$VERDICT_MODE" = true ] && return 0
+    [ "$MERGE_MODE" = true ] && return 0
+    [ -f "$dst" ] || return 0
+    cmp -s "$dst" "$src" && return 0
+    if cp "$dst" "$dst.bak" 2>/dev/null; then
+        echo -e "${YELLOW}keep${NC} $rel was already here and differs; your copy saved as $rel.bak"
+    else
+        echo -e "${RED}warn${NC} $rel was already here and differs, and your copy could NOT be saved to $rel.bak — not overwriting it"
+        return 1
+    fi
+    return 0
+}
+
+for shipped_doc in $SHIPPED_DOCS; do
+    [ -f "$SOURCE_DIR/$shipped_doc" ] || continue
+    mkdir -p "$TARGET/$(dirname "$shipped_doc")"
+    # A failed preservation REFUSES the copy rather than overwriting anyway:
+    # losing the plugin's doc is recoverable from the source tree, losing the
+    # operator's is not.
+    if preserve_pre_existing_doc "$SOURCE_DIR/$shipped_doc" "$TARGET/$shipped_doc"; then
+        copy_file "$SOURCE_DIR/$shipped_doc" "$TARGET/$shipped_doc"
+    fi
+done
+
 # Plugin manifest --------------------------------------------------------------
 copy_file "$SOURCE_DIR/.claude-plugin/plugin.json" "$TARGET/.claude-plugin/plugin.json"
 
@@ -1509,12 +1786,13 @@ if [ -f "$SETTINGS_FILE" ]; then
         fi
         if [ -n "$MERGED" ]; then
             echo "$MERGED" > "$SETTINGS_FILE"
-            SETTINGS_MERGE_DONE=true
+            SETTINGS_MERGE_STATUS="merged"
             echo -e "${GREEN}OK${NC}   settings.json merged"
             if [ "$HAD_EFFORT_ENV" = "yes" ]; then
                 echo -e "${CYAN}note${NC} removed legacy env.CLAUDE_CODE_EFFORT_LEVEL (v4: a non-xhigh value deactivates ultracode orchestration; effortLevel is now the floor)"
             fi
         else
+            SETTINGS_MERGE_STATUS="failed-untouched"
             echo -e "${RED}Could not merge settings.json${SETTINGS_SKIP_REASON} - manual review needed; your file is unchanged (copy at .claude/settings.json.bak)${NC}"
         fi
     elif [ "$MERGE_MODE" = true ]; then
@@ -1664,17 +1942,36 @@ are copied wholesale with rsync (plugin-owned product, never operator-owned), so
 their files are counted above but not listed one by one.
 REPORT
 
+    # One line per merged-class file, from its four-state status (R1-F2). The
+    # failure sentences are the point: a saved report that says "installed as
+    # shipped" about a file the merge could not touch sends an operator looking
+    # for a problem that is not there, and away from the one that is.
+    # The sentinels below are load-bearing twice over: the L2 META at
+    # installer-v3-upgrade.sh 10c DELETES the block and asserts the report loses
+    # both sentences, and packaging-parity.test.sh extracts it from BOTH
+    # installers and compares the sentences file-to-file. Keep each sentinel
+    # alone on its line.
+    # MERGE-STATUS-LINES-START
     printf '\nMerged key-wise instead of overwritten:\n'
-    if [ "$SETTINGS_MERGE_DONE" = true ]; then
-        printf '  .claude/settings.json  (your pre-upgrade copy: .claude/settings.json.bak)\n'
-    else
-        printf '  .claude/settings.json  (installed as shipped; nothing to merge)\n'
-    fi
-    if [ "$MCP_MERGE_DONE" = true ]; then
-        printf '  .mcp.json              (your pre-upgrade copy: .mcp.json.bak)\n'
-    else
-        printf '  .mcp.json              (installed as shipped; nothing to merge)\n'
-    fi
+    case "$SETTINGS_MERGE_STATUS" in
+        merged)
+            printf '  .claude/settings.json  (your pre-upgrade copy: .claude/settings.json.bak)\n' ;;
+        failed-untouched)
+            printf '  .claude/settings.json  (MERGE FAILED - your file was left UNCHANGED, not replaced; copy at .claude/settings.json.bak. Merge the shipped keys in by hand.)\n' ;;
+        *)
+            printf '  .claude/settings.json  (installed as shipped; nothing to merge)\n' ;;
+    esac
+    case "$MCP_MERGE_STATUS" in
+        merged)
+            printf '  .mcp.json              (your pre-upgrade copy: .mcp.json.bak)\n' ;;
+        failed-untouched)
+            printf '  .mcp.json              (MERGE FAILED - your file was left UNCHANGED, not replaced; copy at .mcp.json.bak. Merge the shipped servers in by hand.)\n' ;;
+        failed-replaced)
+            printf '  .mcp.json              (MERGE REFUSED - yours was not a single JSON object, so the SHIPPED config was installed over it; yours is at .mcp.json.bak. Re-add your own servers from there.)\n' ;;
+        *)
+            printf '  .mcp.json              (installed as shipped; nothing to merge)\n' ;;
+    esac
+    # MERGE-STATUS-LINES-END
 
     printf '\nPreserved your version, shipped version written alongside as *.new (%s):\n' \
         "${#PRESERVED_FILES[@]}"
@@ -1796,14 +2093,36 @@ else
             echo -e "Diff your customizations: ${BLUE}diff -r $V2_BACKUP_DIR $TARGET/.claude${NC}"
         fi
     else
-        echo -e "${CYAN}What's new in v3:${NC}"
-        echo "  - Plugin manifest (.claude-plugin/plugin.json) — see it for the version"
-        echo "  - Model pinning per agent + /workflow-model upgrade command"
-        echo "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
-        echo "  - Parent-folder access via additionalDirectories (../)"
-        echo "  - SessionStart warns on stale model + old bd"
-        echo "  - Single-source-of-truth installer (no heredoc duplication)"
-        echo "  - uninstall.sh for clean removal"
+        # FRESH-INSTALL "what you just got" list (v4.1 / U0.8). The upgrade
+        # paths print their own readouts (the v2 branch above, and the v3 -> v4
+        # report in the branch further up); this one is what a first-time
+        # operator sees, so it describes the CURRENT product rather than a
+        # release note.
+        #
+        # The heading interpolates the MAJOR of the version being installed —
+        # no release number is typed here, and a bump to 4.1 / 4.2 needs no
+        # edit. Under `curl | bash` against a source whose plugin.json could not
+        # be read, SOURCE_VERSION is empty and the heading degrades to the
+        # unnumbered form rather than printing "v".
+        FRESH_MAJOR="${SOURCE_VERSION%%.*}"
+        if [ -n "$FRESH_MAJOR" ]; then
+            echo -e "${CYAN}What's new in v$FRESH_MAJOR:${NC}"
+        else
+            echo -e "${CYAN}What's in this release:${NC}"
+        fi
+        echo "  - Tri-model workflow: the orchestrator plans, Opus-class specialists build,"
+        echo "    and an optional second-family reviewer lane reads the same diff"
+        echo "  - Nobody signs off on their own work: qa-gate.sh approve REFUSES without an"
+        echo "    independent review artifact, and the Stop hook re-checks before releasing"
+        echo "  - Approvals are bound to a change-set hash, so a stale one cannot release work"
+        echo "  - Role-aware model selection (.claude/model-roles) + /workflow-model"
+        echo "  - Rubric-graded QA loop and a mutation tier (/mutation-sweep) with an LLM judge"
+        echo "  - Two MCP servers: bd-mcp (typed Beads tools), code-graph-mcp (impact_of, dead_code)"
+        echo "  - Hash-based re-runs and upgrades: .claude/install-manifest records what was"
+        echo "    installed, so your edits are preserved with the shipped copy alongside as *.new"
+        echo "  - uninstall.sh removes exactly what the installer wrote, into a recoverable trash"
+        echo ""
+        echo -e "Full release notes: ${BLUE}CHANGELOG.md${NC}"
     fi
 fi
 echo ""

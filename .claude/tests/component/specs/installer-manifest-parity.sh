@@ -433,6 +433,42 @@ assert_eq "installer-manifest-parity 3b META-TEST: the checker is quiet again on
     "" "$(extra_files "$MANIFEST" "$T" | tr '\n' ' ' | sed 's/ *$//')"
 
 # ===========================================================================
+# Section 3c: the shipped-docs subset is a SUBSET (v4.1 / U0.8)
+# ===========================================================================
+# docs/ is deliberately NOT one of the no-extras scopes above, and cannot be:
+# an install target's docs/ belongs to the operator, so "every file here is in
+# the manifest" is false by design. The invariant that DOES hold is the mirror
+# image — the installer put exactly the two files it ships there and nothing
+# else — and it needs its own leg because both `extra_files` (wrong direction)
+# and section 2's parity walk (would pass just as well if the installer had
+# copied all 30 docs) are blind to it.
+#
+# The failure this catches is a future `cp docs/*.md`: section 2 stays green,
+# section 3 stays green, and every install starts dumping the repo's internal
+# design notes and dated AgentLint reports into the operator's project.
+INSTALLED_DOCS=$( (cd "$T" && find docs -type f 2>/dev/null | LC_ALL=C sort) \
+    | tr '\n' ' ' | sed 's/ *$//')
+assert_eq "installer-manifest-parity 3c: the fresh install put EXACTLY the two shipped docs in docs/" \
+    "$(printf '%s\n' "docs/CODEX_SETUP.md" "docs/HOOKS.md" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" \
+    "$INSTALLED_DOCS"
+# Named negatives, so the assertion above reads as a claim about specific files
+# a scan WOULD have brought along rather than only as a count.
+for unshipped in docs/ARCHITECTURE.md docs/WORKFLOW.md docs/AGENTLINT_REPORT.md docs/plans/README.md; do
+    assert_eq "installer-manifest-parity 3c: the install did NOT bring $unshipped along" \
+        "no" "$(yesno test -e "$T/$unshipped")"
+done
+# Byte-equality is section 2's job (both rows are in the manifest), but the two
+# docs are the newest surface members, so their presence is called out by name
+# here — this is the leg that fails if a future installer edit drops the copy
+# block while leaving the manifest rows in place.
+for shipped_doc in docs/CODEX_SETUP.md docs/HOOKS.md; do
+    assert_eq "installer-manifest-parity 3c: $shipped_doc is present and byte-equal to the source" \
+        "yes" "$(yesno cmp -s "$T/$shipped_doc" "$PLUGIN_ROOT/$shipped_doc")"
+    assert_eq "installer-manifest-parity 3c: ...and the manifest carries a row for it" \
+        "yes" "$(yesno manifest_has_path "$MANIFEST" "$shipped_doc")"
+done
+
+# ===========================================================================
 # Section 4: the install-manifest the run wrote
 # ===========================================================================
 INSTALL_MANIFEST="$T/.claude/install-manifest"
@@ -472,11 +508,30 @@ ROOT_PATHS=$(awk -F'\t' '$1 !~ /^\.claude\// && $1 !~ /^\.claude-plugin\// { pri
 ROOT_PATHS_FLAT=$(printf '%s' "$ROOT_PATHS" | tr '\n' ' ' | sed 's/ *$//')
 # Expected side built from an explicit literal list run through the same sort, so
 # the assertion states WHICH files it means without hardcoding a collation order.
-assert_eq "installer-manifest-parity 5: the manifest's root scope is exactly the three known files" \
-    "$(printf '%s\n' ".mcp.json" ".worktreeinclude" "LESSONS.md" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" \
+#
+# FIVE since v4.1 / U0.8: the shipped-docs subset (docs/CODEX_SETUP.md,
+# docs/HOOKS.md) is root scope too, and root scope therefore stopped being FLAT.
+# uninstall.sh's header records that it deliberately never adopted a
+# "root rows must be flat" rule for exactly this release; the legs below are
+# where that pays off, because they are driven from this list and so cover the
+# nested rows without an edit.
+assert_eq "installer-manifest-parity 5: the manifest's root scope is exactly the five known files" \
+    "$(printf '%s\n' ".mcp.json" ".worktreeinclude" "LESSONS.md" \
+        "docs/CODEX_SETUP.md" "docs/HOOKS.md" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" \
     "$ROOT_PATHS_FLAT"
+# At least one root row is NESTED, which is what makes the trash-layout
+# assertions below non-vacuous. Without this, a future release that dropped the
+# docs subset would silently turn those legs back into flat-file checks.
+assert_eq "installer-manifest-parity 5: at least one root row is nested (the docs subset)" \
+    "yes" "$(yesno test "$(printf '%s\n' "$ROOT_PATHS" | grep -c '/' | tr -d ' \n')" -ge 1)"
 
 seed_beads "$T"
+# An operator's OWN doc, sitting in the same directory as the two shipped ones.
+# It has no manifest row, so the root-scope walk must not touch it — the
+# uninstaller may only take what the installer wrote, and docs/ is the first
+# shipped scope where the operator has files of their own next to the plugin's.
+printf 'notes the operator wrote (never installed by the plugin)\n' \
+    > "$T/docs/OPERATOR_NOTES.md"
 # Backup directories from all THREE mechanisms, so the "kept in place" listing is
 # asserted for each. The two migration prefixes were invisible to the pre-U0.5
 # listing, which is the worst case to be silent about: a project that took the
@@ -516,17 +571,39 @@ assert_eq "installer-manifest-parity 5: the trashed .beads/ still carries its ma
 
 # The root files: driven from the manifest's own root scope, one assertion pair
 # each. This is the leg that used to leak.
+#
+# "in the trash" is asserted at the row's OWN RELATIVE PATH, not at its
+# basename: the trash mirrors the project layout (v4.1 / U0.8) so that
+# docs/HOOKS.md comes back to docs/ and cannot collide with a same-named file
+# from elsewhere. The readout names the relative path for the same reason.
 while IFS= read -r root_path; do
     [ -n "$root_path" ] || continue
     assert_eq "installer-manifest-parity 5: unmodified $root_path left the project" \
         "no" "$(yesno test -e "$T/$root_path")"
-    assert_eq "installer-manifest-parity 5: unmodified $root_path is in the trash" \
+    assert_eq "installer-manifest-parity 5: unmodified $root_path is in the trash at its own relative path" \
         "yes" "$(yesno test -f "$TRASH_A/$root_path")"
     assert_contains "installer-manifest-parity 5: the readout listed $root_path as unmodified before asking" \
         "$root_path (unmodified since install)" "$UNINSTALL_A_TEXT"
     assert_contains "installer-manifest-parity 5: the readout records moving $root_path" \
         "moved $root_path ->" "$UNINSTALL_A_TEXT"
 done <<< "$ROOT_PATHS"
+
+# The nested rows, stated positively AND negatively. The negative half is the
+# regression: `mv "$path" "$TRASH_DIR/"` put docs/HOOKS.md at the trash ROOT,
+# where the printed recovery command would have restored it into the project
+# root instead of back into docs/.
+for nested_doc in docs/CODEX_SETUP.md docs/HOOKS.md; do
+    assert_eq "installer-manifest-parity 5: $nested_doc is in the trash UNDER docs/" \
+        "yes" "$(yesno test -f "$TRASH_A/$nested_doc")"
+    assert_eq "installer-manifest-parity 5: ...and NOT flattened to the trash root" \
+        "no" "$(yesno test -e "$TRASH_A/$(basename "$nested_doc")")"
+done
+# The operator's own docs are none of the uninstaller's business: only manifest
+# rows move, so a doc the plugin never installed stays where it is.
+assert_eq "installer-manifest-parity 5: an operator doc the plugin never installed is untouched" \
+    "yes" "$(yesno test -f "$T/docs/OPERATOR_NOTES.md")"
+assert_eq "installer-manifest-parity 5: ...and did not reach the trash" \
+    "no" "$(yesno test -e "$TRASH_A/docs/OPERATOR_NOTES.md")"
 
 # Every backup directory is NAMED in the listing and LEFT WHERE IT IS. Naming
 # matters because this is the last screen before a destructive op: an operator
@@ -848,8 +925,11 @@ assert_eq "installer-manifest-parity 9c META-TEST: the mutant still runs to comp
 assert_eq "installer-manifest-parity 9c META-TEST: without the block the outside file is GONE from its own directory" \
     "no" "$(yesno test -f "$MUTANT_VICTIM")"
 TRASH_TSM=$(trash_dir_of "$TSM")
+# Under the row's own relative path, because the trash mirrors the project
+# layout (v4.1 / U0.8) — the mutant follows the symlink, so the victim is
+# relocated out of its real directory and lands at <trash>/data/<name>.
 assert_eq "installer-manifest-parity 9c META-TEST: and it sits in the project's trash instead" \
-    "yes" "$(yesno test -f "$TRASH_TSM/symlink-victim-mutant.txt")"
+    "yes" "$(yesno test -f "$TRASH_TSM/data/symlink-victim-mutant.txt")"
 assert_contains "installer-manifest-parity 9c META-TEST: the mutant even called it unmodified since install" \
     "data/symlink-victim-mutant.txt (unmodified since install)" "$UNINSTALL_TSM_TEXT"
 assert_not_contains "installer-manifest-parity 9c META-TEST: and printed no refusal" \

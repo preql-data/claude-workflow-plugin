@@ -63,6 +63,13 @@
 #                            and nowhere else, with a META that plants a
 #                            divergent workflow file and watches the assertion
 #                            fail.
+#  10. Truthful failure report (v4.1 / U0.8, x15 review finding R1-F2) — a
+#                            fixture whose settings.json AND .mcp.json are both
+#                            unmergeable: the on-disk outcomes DIFFER (one left
+#                            untouched, one replaced by the shipped config) and
+#                            the saved report has to say which, instead of
+#                            calling both "installed as shipped". 10c strips the
+#                            renderer from a copy and watches 10b fail.
 #
 # Runtime is dominated by three v3.5 installs plus three upgrades, and (sections
 # 8-9) four fresh v4 installs plus eight re-runs/upgrades; each is well under two
@@ -467,6 +474,66 @@ assert_contains "installer-v3-upgrade 6h: the saved report names the preserved r
     ".claude/rubrics/default.md" "$REPORT_TEXT"
 assert_contains "installer-v3-upgrade 6h: the saved report carries the same upgrade line" \
     "Upgrade complete: v3.5.0 -> v$SOURCE_VERSION" "$REPORT_TEXT"
+# R1-F2, the SUCCESS half. Both merges really ran on this fixture (6d/6e just
+# proved the operator's key and server survived), so the report has to say so
+# per file and must NOT fall back to the "nothing to merge" sentence. Section 10
+# takes the failure half.
+assert_contains "installer-v3-upgrade 6h (R1-F2): the report reports settings.json as merged, naming the .bak" \
+    ".claude/settings.json  (your pre-upgrade copy: .claude/settings.json.bak)" "$REPORT_TEXT"
+assert_contains "installer-v3-upgrade 6h (R1-F2): ...and .mcp.json the same way" \
+    ".mcp.json              (your pre-upgrade copy: .mcp.json.bak)" "$REPORT_TEXT"
+assert_not_contains "installer-v3-upgrade 6h (R1-F2): neither merged file is described as installed-as-shipped" \
+    "installed as shipped" "$REPORT_TEXT"
+assert_not_contains "installer-v3-upgrade 6h (R1-F2): and no merge-failure sentence appears on a successful run" \
+    "MERGE FAILED" "$REPORT_TEXT"
+
+# --- 6i. the shipped-docs subset landed (v4.1 / U0.8) -----------------------
+# 6a already covers these two through the manifest-driven parity walk; they are
+# called out by name because they are the newest surface members and because the
+# SUBSET property (exactly two, not all of docs/) has no other home on the
+# upgrade path. A v3.5 target has no docs/ directory at all, so the upgrade also
+# has to CREATE it — the failure mode being an installer that copies into a
+# parent that does not exist and dies mid-upgrade.
+for upgraded_doc in docs/CODEX_SETUP.md docs/HOOKS.md; do
+    assert_eq "installer-v3-upgrade 6i: the upgrade installed $upgraded_doc" \
+        "yes" "$(yesno test -f "$T/$upgraded_doc")"
+    assert_eq "installer-v3-upgrade 6i: ...byte-identical to the shipped copy" \
+        "yes" "$(yesno cmp -s "$T/$upgraded_doc" "$PLUGIN_ROOT/$upgraded_doc")"
+done
+UPGRADED_DOCS=$( (cd "$T" && find docs -type f 2>/dev/null | LC_ALL=C sort) \
+    | tr '\n' ' ' | sed 's/ *$//')
+assert_eq "installer-v3-upgrade 6i: docs/ holds EXACTLY the two shipped files (a subset, never a scan)" \
+    "$(printf '%s\n' "docs/CODEX_SETUP.md" "docs/HOOKS.md" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" \
+    "$UPGRADED_DOCS"
+# Both are class workflow, so neither may produce an operator-style sidecar.
+for upgraded_doc in docs/CODEX_SETUP.md docs/HOOKS.md; do
+    assert_eq "installer-v3-upgrade 6i: no .new sidecar for $upgraded_doc (workflow class, not operator)" \
+        "no" "$(yesno preserved_new_exists "$T" "$upgraded_doc")"
+done
+# The per-file readout named them, and named them as WRITTEN. On this fixture the
+# v3.5 installer left no docs/ behind, so both rows classify copy-new and
+# place_by_verdict prints the plain `OK   <rel>` line; the two prefixes asserted
+# absent are the ones that would mean the verdict had come out
+# skip-current (`same`) or preserve-custom (`keep`) instead. The distinction
+# matters because replace-stock IS reachable for docs/HOOKS.md — on a target that
+# carries the untouched v3.5 file — and that is exactly what the refreeze
+# enables; workflow-manifest.test.sh section 4d pins all four reachable verdicts
+# against a purpose-built fixture.
+#
+# The log is ANSI-stripped first: the installer colours these lines, so the
+# escape sequence sits between `OK` and the path and a fixed-string match on the
+# rendered prefix would silently never fire.
+UPGRADE_LOG_PLAIN=$(printf '%s' "$UPGRADE_LOG" | sed 's/'"$(printf '\033')"'\[[0-9;]*m//g')
+assert_contains "installer-v3-upgrade 6i: the ANSI-stripped readout is non-empty (guards the two checks below)" \
+    "Upgrade complete:" "$UPGRADE_LOG_PLAIN"
+for upgraded_doc in docs/CODEX_SETUP.md docs/HOOKS.md; do
+    assert_eq "installer-v3-upgrade 6i: the readout reports $upgraded_doc as written (OK, exactly once)" \
+        "1" "$(printf '%s\n' "$UPGRADE_LOG_PLAIN" | grep -c -F -- "OK   $upgraded_doc" | tr -d ' \n')"
+    assert_not_contains "installer-v3-upgrade 6i: ...not as already-current" \
+        "same $upgraded_doc" "$UPGRADE_LOG_PLAIN"
+    assert_not_contains "installer-v3-upgrade 6i: ...and not as an operator file kept back" \
+        "keep $upgraded_doc" "$UPGRADE_LOG_PLAIN"
+done
 
 # ===========================================================================
 # Section 7: META-TESTs
@@ -1201,3 +1268,411 @@ assert_eq "installer-v3-upgrade 9b META-TEST: -> section 9's equality assertion 
 cp "$F/$META_DIVERGENT" "$T/$META_DIVERGENT"
 assert_eq "installer-v3-upgrade 9b META-TEST: and holds again once the divergence is undone" \
     "$EXPECTED_DIFF" "$(equivalence_diff "$SRC_MANIFEST" "$T" "$F" | tr '\n' ' ' | sed 's/ *$//')"
+
+# ===========================================================================
+# Section 10: the saved report is TRUTHFUL when a merge fails (R1-F2)
+# ===========================================================================
+# THE DEFECT, reproduced. Through v4.0 the report rendered one boolean per
+# merged-class file: true -> "your pre-upgrade copy: <file>.bak", false ->
+# "installed as shipped; nothing to merge". False is also what an ATTEMPTED AND
+# FAILED merge leaves behind, so the saved report told an operator the shipped
+# file had been installed when in fact:
+#
+#   settings.json  their own file was still on disk, unmerged (that arm is
+#                  deliberately non-destructive — settings.json is
+#                  operator-owned), so they were missing every v4 hook and had
+#                  no line in the report pointing at it; and
+#   .mcp.json      the SHIPPED config had replaced theirs wholesale, so their
+#                  own servers were gone from the live file and only recoverable
+#                  from .mcp.json.bak — which the report never mentioned.
+#
+# The terminal shows both failures in red as they happen. The report saved into
+# the backup is what gets read days later, and it is the artifact this section
+# holds to the truth.
+#
+# THE FIXTURE. A fresh genuine v3.5 install whose two merge inputs are made
+# MULTI-DOCUMENT (two JSON objects concatenated) before the upgrade. That is a
+# real shape — a bad hand-edit, a conflict marker resolution gone wrong, two
+# tools appending to the same file — and it is the input the R1-F1 validity gate
+# was added for, so it reaches both failure arms through the SAME door the
+# shipped gate uses rather than through a mocked one.
+T10="$WORK/target-merge-fail"
+V35_RC_10=0
+seed_v35_install "$T10" || V35_RC_10=$?
+assert_eq "installer-v3-upgrade 10: the merge-failure fixture installs v3.5 cleanly" "0" "$V35_RC_10"
+
+# Two documents in each file. `jq -s` slurps them into a 2-element array, so
+# JSON_SINGLE_OBJECT_JQ's `length == 1` is false and both merges take their
+# refusal arm.
+printf '{"env":{"OPERATOR_KEY":"op-10"}}\n{"second":"document"}\n' > "$T10/.claude/settings.json"
+printf '{"mcpServers":{"operator-only":{"type":"stdio","command":"node"}}}\n{"second":"document"}\n' \
+    > "$T10/.mcp.json"
+# Pre-conditions: both really are multi-document, or the section proves nothing.
+assert_eq "installer-v3-upgrade 10: the seeded settings.json really is multi-document" \
+    "no" "$(yesno jq -s -e 'length == 1 and (.[0] | type == "object")' "$T10/.claude/settings.json")"
+assert_eq "installer-v3-upgrade 10: the seeded .mcp.json really is multi-document" \
+    "no" "$(yesno jq -s -e 'length == 1 and (.[0] | type == "object")' "$T10/.mcp.json")"
+SETTINGS_PRE_10="$WORK/settings-pre-10.json"
+cp "$T10/.claude/settings.json" "$SETTINGS_PRE_10"
+
+UPGRADE_RC_10=0
+run_upgrade "$T10" "$WORK/upgrade10.log" || UPGRADE_RC_10=$?
+UPGRADE_LOG_10=$(cat "$WORK/upgrade10.log" 2>/dev/null || echo "")
+if [ "$UPGRADE_RC_10" -ne 0 ]; then
+    printf '  diagnostic: merge-failure upgrade exited %s; tail of log:\n' "$UPGRADE_RC_10"
+    tail -20 "$WORK/upgrade10.log" 2>/dev/null | sed 's/^/    /'
+fi
+# A bad merge input is an operator problem, not an installer crash: the run
+# still completes so the rest of the upgrade lands.
+assert_eq "installer-v3-upgrade 10: the upgrade still exits 0 with two unmergeable inputs" \
+    "0" "$UPGRADE_RC_10"
+
+BACKUP_DIR_10=$(backup_dir_of "$T10")
+REPORT_10=$(cat "$BACKUP_DIR_10/upgrade-report.txt" 2>/dev/null || echo "")
+assert_eq "installer-v3-upgrade 10: a report was still saved into the backup" \
+    "yes" "$(yesno test -f "$BACKUP_DIR_10/upgrade-report.txt")"
+
+# --- 10a. the ON-DISK truth, established first ------------------------------
+# The report's claims are only checkable against what actually happened, so the
+# disk state is asserted before the wording.
+assert_eq "installer-v3-upgrade 10a: settings.json was left EXACTLY as the operator had it" \
+    "yes" "$(yesno cmp -s "$T10/.claude/settings.json" "$SETTINGS_PRE_10")"
+assert_eq "installer-v3-upgrade 10a: ...with the pre-merge copy alongside as .bak" \
+    "yes" "$(yesno test -f "$T10/.claude/settings.json.bak")"
+assert_eq "installer-v3-upgrade 10a: .mcp.json WAS replaced by the shipped config (it must parse)" \
+    "yes" "$(yesno cmp -s "$T10/.mcp.json" "$PLUGIN_ROOT/.mcp.json")"
+assert_eq "installer-v3-upgrade 10a: ...and the operator's version is recoverable from .mcp.json.bak" \
+    "yes" "$(yesno grep -qF 'operator-only' "$T10/.mcp.json.bak")"
+
+# --- 10b. THE FIX: the report says which of those two things happened -------
+assert_contains "installer-v3-upgrade 10b (R1-F2): the report says settings.json was left UNCHANGED by a failed merge" \
+    ".claude/settings.json  (MERGE FAILED - your file was left UNCHANGED, not replaced; copy at .claude/settings.json.bak." \
+    "$REPORT_10"
+assert_contains "installer-v3-upgrade 10b (R1-F2): the report says the SHIPPED .mcp.json was installed over the operator's" \
+    ".mcp.json              (MERGE REFUSED - yours was not a single JSON object, so the SHIPPED config was installed over it; yours is at .mcp.json.bak." \
+    "$REPORT_10"
+# THE REGRESSION WITNESS. This is the exact sentence v4.0 printed for both of
+# them, and printing it here is the defect: it is the one string that must not
+# appear in a report about two files the merge could not complete.
+assert_not_contains "installer-v3-upgrade 10b (R1-F2): and NEITHER is described as 'installed as shipped; nothing to merge'" \
+    "installed as shipped; nothing to merge" "$REPORT_10"
+# The two failure sentences are DIFFERENT sentences, because the follow-up
+# actions differ (merge the shipped keys in by hand vs re-add your servers from
+# the .bak). A report that used one wording for both would satisfy the two
+# assertions above only by accident of substring matching, so the .bak each one
+# names is asserted distinctly.
+assert_contains "installer-v3-upgrade 10b (R1-F2): the settings line tells the operator to merge the shipped keys in" \
+    "Merge the shipped keys in by hand." "$REPORT_10"
+assert_contains "installer-v3-upgrade 10b (R1-F2): the .mcp.json line tells them to re-add their servers from the .bak" \
+    "Re-add your own servers from there." "$REPORT_10"
+# And the terminal said so too, in red, as it happened — the report is the
+# durable copy of a message the operator may have scrolled past, not a
+# replacement for it.
+assert_contains "installer-v3-upgrade 10b: the live readout also reported the settings merge failure" \
+    "Could not merge settings.json" "$UPGRADE_LOG_10"
+assert_contains "installer-v3-upgrade 10b: ...and the .mcp.json refusal" \
+    ".mcp.json was not a single JSON object" "$UPGRADE_LOG_10"
+
+# --- 10c. META-TEST: the wording check can actually fail --------------------
+# The four-arm renderer is deleted from a COPY of install.sh, anchored on its own
+# sentinels, and replaced by nothing — so the report loses both merged-class
+# lines entirely. The 10b assertions must stop holding. Without this, a checker
+# looking for a sentence that no longer exists anywhere would be indistinguishable
+# from a passing suite, and the whole section would be pinning a string rather
+# than a behaviour.
+MUTANT_INSTALL_10="$WORK/install-no-merge-status.sh"
+sed '/# MERGE-STATUS-LINES-START/,/# MERGE-STATUS-LINES-END/d' \
+    "$PLUGIN_ROOT/install.sh" > "$MUTANT_INSTALL_10"
+assert_eq "installer-v3-upgrade 10c META-TEST: the mutated copy really differs from install.sh" \
+    "no" "$(yesno cmp -s "$MUTANT_INSTALL_10" "$PLUGIN_ROOT/install.sh")"
+assert_eq "installer-v3-upgrade 10c META-TEST: the strip removed the block (fewer lines)" \
+    "yes" "$(yesno test "$(grep -c . "$MUTANT_INSTALL_10" | tr -d ' \n')" -lt "$(grep -c . "$PLUGIN_ROOT/install.sh" | tr -d ' \n')")"
+assert_eq "installer-v3-upgrade 10c META-TEST: the mutated copy is still valid bash" \
+    "yes" "$(yesno bash -n "$MUTANT_INSTALL_10")"
+# A second v3.5 fixture with the same two unmergeable inputs, run through the
+# mutant. A separate tree because the mutant is expected to produce a DIFFERENT
+# report and reusing T10 would make section 10b depend on run order.
+T10M="$WORK/target-merge-fail-mutant"
+V35_RC_10M=0
+seed_v35_install "$T10M" || V35_RC_10M=$?
+assert_eq "installer-v3-upgrade 10c META-TEST: the mutant fixture installs v3.5 cleanly" "0" "$V35_RC_10M"
+printf '{"env":{"OPERATOR_KEY":"op-10m"}}\n{"second":"document"}\n' > "$T10M/.claude/settings.json"
+printf '{"mcpServers":{"operator-only":{"type":"stdio","command":"node"}}}\n{"second":"document"}\n' \
+    > "$T10M/.mcp.json"
+# The mutant is invoked from the repo root as install.sh's own basename would
+# be, but from a COPY — so it is pointed at the real plugin tree via the same
+# mechanism the control uses: it is copied INTO the plugin root under a
+# throwaway name, run, and removed. install.sh treats its own directory as the
+# source when that directory looks like a checkout, and would otherwise clone
+# from the network, which a component spec must never do.
+MUTANT_IN_PLACE="$PLUGIN_ROOT/.install-mutant-u08.sh"
+cp "$MUTANT_INSTALL_10" "$MUTANT_IN_PLACE"
+UPGRADE_RC_10M=0
+bash "$MUTANT_IN_PLACE" "$T10M" </dev/null >"$WORK/upgrade10m.log" 2>&1 || UPGRADE_RC_10M=$?
+rm -f "$MUTANT_IN_PLACE"
+assert_eq "installer-v3-upgrade 10c META-TEST: the mutant still runs to completion" \
+    "0" "$UPGRADE_RC_10M"
+BACKUP_DIR_10M=$(backup_dir_of "$T10M")
+REPORT_10M=$(cat "$BACKUP_DIR_10M/upgrade-report.txt" 2>/dev/null || echo "")
+assert_eq "installer-v3-upgrade 10c META-TEST: the mutant still saved a report" \
+    "yes" "$(yesno test -f "$BACKUP_DIR_10M/upgrade-report.txt")"
+# THE FLIP: 10b's two assertions no longer hold against the mutant's report.
+assert_not_contains "installer-v3-upgrade 10c META-TEST: -> the settings failure sentence is GONE" \
+    "MERGE FAILED - your file was left UNCHANGED" "$REPORT_10M"
+assert_not_contains "installer-v3-upgrade 10c META-TEST: -> and the .mcp.json refusal sentence is GONE" \
+    "MERGE REFUSED - yours was not a single JSON object" "$REPORT_10M"
+# Surgical: the rest of the report is intact, so the flip above is about the
+# renderer and not about a mutant that failed to produce a report at all.
+assert_contains "installer-v3-upgrade 10c META-TEST: the mutant's report still carries the upgrade line" \
+    "Upgrade complete: v3.5.0 -> v$SOURCE_VERSION" "$REPORT_10M"
+assert_contains "installer-v3-upgrade 10c META-TEST: ...and the ACTION REQUIRED block" \
+    "ACTION REQUIRED" "$REPORT_10M"
+
+# ===========================================================================
+# Section 11: "yours is in the backup" must be TRUE for every replaced row
+# ===========================================================================
+# THE DEFECT THIS SECTION EXISTS FOR (QA cycle 1, HIGH, data loss). U0.8 added
+# docs/CODEX_SETUP.md + docs/HOOKS.md to the copy surface and synced SIX places
+# that name the subset — both manifest surfaces, both copy loops, both
+# required-source lists — but NOT the backup legs, which enumerated root-level
+# files from a hardcoded list written before docs/ was shipped. Result: an
+# operator-edited docs/HOOKS.md classified replace-custom, was overwritten, and
+# the readout AND the saved report both said "yours is in the backup" while the
+# backup contained no such file. The bytes were gone from the entire tree.
+#
+# 1437 assertions passed over it, because every existing assertion checked the
+# REPORT STRING or the absence of a .new sidecar. Nothing asserted that the
+# backup CONTAINS the replaced bytes. So that is what this section asserts, in
+# all three arms that can replace a file, and it asserts it on CONTENT rather
+# than on any readout wording — a fix that only reworded the claim would leave
+# these red.
+#
+# THE CONTRACT: if any install path overwrites a file the operator had, the
+# operator's exact bytes are recoverable afterwards. Where they are recoverable
+# FROM differs per arm (a timestamped backup directory when the path takes one,
+# a .bak sidecar on the fresh path which takes none) — the contract is
+# recoverability, not a location.
+DOC_SENTINEL="OPERATOR-DOCS-SENTINEL-BACKUP-MUST-HOLD-THIS"
+
+# CHECKER (shared with the 11d META): the operator's pre-upgrade bytes for
+# <rel> exist SOMEWHERE recoverable under <target>, byte-identical to <expected>.
+# Prints the path that matched, or nothing.
+#
+# Deliberately a CONTENT search rather than a path assertion: the point is that
+# the bytes survive, and an implementation that put them somewhere sensible but
+# unexpected should pass. The mirrored-path assertions below pin the layout
+# separately, so a regression tells you WHICH property broke.
+operator_bytes_recoverable() {
+    local target="$1" expected="$2" f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if cmp -s "$f" "$expected"; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+    done < <(find "$target" -type f -name '*HOOKS.md*' 2>/dev/null)
+    return 1
+}
+
+# --- 11a. the v3.5 -> v4 upgrade arm ---------------------------------------
+# A dedicated fixture rather than reusing T: sections 6/8/9 pin T's state
+# precisely (section 9 asserts the upgraded-vs-fresh diff is EXACTLY four
+# paths), and seeding a fifth customization there would make a failure in this
+# section read as a failure in those.
+T11="$WORK/target-docs-backup"
+V35_RC_11=0
+seed_v35_install "$T11" || V35_RC_11=$?
+assert_eq "installer-v3-upgrade 11a: the fixture installs v3.5 cleanly" "0" "$V35_RC_11"
+# The v3.5 tag's own docs/HOOKS.md, then an operator edit on top. Using the tag's
+# bytes as the base is what makes this replace-CUSTOM rather than copy-new: the
+# file exists, and it matches neither the shipped v4 bytes nor the frozen v3.5
+# hash.
+mkdir -p "$T11/docs"
+git -C "$PLUGIN_ROOT" show "$TAG:docs/HOOKS.md" > "$T11/docs/HOOKS.md" 2>/dev/null || true
+printf '\n<!-- %s -->\n' "$DOC_SENTINEL" >> "$T11/docs/HOOKS.md"
+DOC_PRE_11="$WORK/docs-hooks-pre-11.md"
+cp "$T11/docs/HOOKS.md" "$DOC_PRE_11"
+assert_contains "installer-v3-upgrade 11a: the fixture's docs/HOOKS.md carries the operator sentinel pre-upgrade" \
+    "$DOC_SENTINEL" "$(cat "$T11/docs/HOOKS.md" 2>/dev/null || echo "")"
+# Pre-condition: it must differ from the shipped copy, or the upgrade has
+# nothing to replace and 11a would pass vacuously.
+assert_eq "installer-v3-upgrade 11a: ...and really differs from the shipped doc" \
+    "no" "$(yesno cmp -s "$T11/docs/HOOKS.md" "$PLUGIN_ROOT/docs/HOOKS.md")"
+
+UPGRADE_RC_11=0
+run_upgrade "$T11" "$WORK/upgrade11.log" || UPGRADE_RC_11=$?
+UPGRADE_LOG_11=$(cat "$WORK/upgrade11.log" 2>/dev/null || echo "")
+assert_eq "installer-v3-upgrade 11a: the upgrade exits 0" "0" "$UPGRADE_RC_11"
+BACKUP_DIR_11=$(backup_dir_of "$T11")
+assert_eq "installer-v3-upgrade 11a: a backup directory was created" \
+    "yes" "$(yesno test -d "$BACKUP_DIR_11")"
+
+# The verdict really was replace-custom (not copy-new, not skip-current), so the
+# "replaced" claim below is the one under test.
+assert_contains "installer-v3-upgrade 11a: the readout reports docs/HOOKS.md as replaced-and-customized" \
+    "docs/HOOKS.md (replaced; yours is in the backup)" \
+    "$(printf '%s' "$UPGRADE_LOG_11" | sed 's/'"$(printf '\033')"'\[[0-9;]*m//g')"
+# The live file is now the shipped doc — the plugin's product wins for a
+# workflow-class row, which is correct and is NOT what was broken.
+assert_eq "installer-v3-upgrade 11a: the live docs/HOOKS.md is now the shipped copy" \
+    "yes" "$(yesno cmp -s "$T11/docs/HOOKS.md" "$PLUGIN_ROOT/docs/HOOKS.md")"
+
+# THE ASSERTION THE DEFECT FAILED. The operator's bytes are still somewhere.
+DOC_FOUND_11=$(operator_bytes_recoverable "$T11" "$DOC_PRE_11" || printf '')
+if [ -z "$DOC_FOUND_11" ]; then
+    printf '  diagnostic: the operator bytes are NOT recoverable anywhere under the target.\n'
+    printf '  diagnostic: backup dir holds: %s\n' \
+        "$(find "$BACKUP_DIR_11" -maxdepth 2 2>/dev/null | head -12 | tr '\n' ' ')"
+fi
+assert_eq "installer-v3-upgrade 11a: the operator's pre-upgrade docs/HOOKS.md bytes are RECOVERABLE" \
+    "yes" "$([ -n "$DOC_FOUND_11" ] && echo yes || echo no)"
+# And at the MIRRORED path inside the backup, which is the layout decision
+# (documented in install.sh's backup leg): a root row keeps its relative path, so
+# a flat row's path IS its basename and a nested one keeps its subdirectory.
+# Flattening docs/HOOKS.md to HOOKS.md would be ambiguous against any
+# root-level HOOKS.md and would make the report's `diff -r` advice wrong.
+assert_eq "installer-v3-upgrade 11a: the backup holds it at the MIRRORED path docs/HOOKS.md" \
+    "yes" "$(yesno cmp -s "$BACKUP_DIR_11/docs/HOOKS.md" "$DOC_PRE_11")"
+assert_eq "installer-v3-upgrade 11a: ...and did NOT flatten it to the backup root" \
+    "no" "$(yesno test -e "$BACKUP_DIR_11/HOOKS.md")"
+# The pre-U0.8 flat entries keep their existing spelling — the layout change is
+# additive, and 6f already depends on plugin.json being flat.
+assert_eq "installer-v3-upgrade 11a: the four flat root files still land flat (back-compat)" \
+    "yes" "$(yesno test -f "$BACKUP_DIR_11/LESSONS.md")"
+assert_eq "installer-v3-upgrade 11a: ...and plugin.json keeps its flat basename" \
+    "yes" "$(yesno test -f "$BACKUP_DIR_11/plugin.json")"
+
+# --- 11b. the mode-2 Update arm -------------------------------------------
+# The realistic v4.0 -> v4.1 population, and the arm QA called out as the one
+# most operators will hit: classify hands replace-custom to ANY target file that
+# differs from both the shipped bytes and the old table — including a path the
+# old table never listed, which is exactly a v4.0 operator's own docs/HOOKS.md.
+T11B="$WORK/target-docs-backup-mode2"
+FRESH_RC_11B=0
+seed_v4_install "$T11B" "$PLUGIN_ROOT/install.sh" || FRESH_RC_11B=$?
+assert_eq "installer-v3-upgrade 11b: the fixture takes a fresh v4 install cleanly" "0" "$FRESH_RC_11B"
+# The operator edits the installed doc AFTER the install — so the tree has a
+# valid install-manifest and the edit is genuinely post-install.
+printf '\n<!-- %s -->\n' "$DOC_SENTINEL" >> "$T11B/docs/HOOKS.md"
+DOC_PRE_11B="$WORK/docs-hooks-pre-11b.md"
+cp "$T11B/docs/HOOKS.md" "$DOC_PRE_11B"
+assert_eq "installer-v3-upgrade 11b: the edited doc differs from the shipped copy" \
+    "no" "$(yesno cmp -s "$T11B/docs/HOOKS.md" "$PLUGIN_ROOT/docs/HOOKS.md")"
+
+MODE2_RC_11B=0
+bash "$PLUGIN_ROOT/install.sh" --mode=2 "$T11B" </dev/null >"$WORK/mode2-11b.log" 2>&1 || MODE2_RC_11B=$?
+assert_eq "installer-v3-upgrade 11b: the mode-2 Update exits 0" "0" "$MODE2_RC_11B"
+MODE2_BACKUP_11B=$(find "$T11B" -maxdepth 1 -type d -name '.claude-backup-*' 2>/dev/null | LC_ALL=C sort | head -1)
+assert_eq "installer-v3-upgrade 11b: the Update took a backup (a write verdict is present)" \
+    "yes" "$(yesno test -d "$MODE2_BACKUP_11B")"
+DOC_FOUND_11B=$(operator_bytes_recoverable "$T11B" "$DOC_PRE_11B" || printf '')
+if [ -z "$DOC_FOUND_11B" ]; then
+    printf '  diagnostic: mode-2 backup holds: %s\n' \
+        "$(find "$MODE2_BACKUP_11B" -maxdepth 2 2>/dev/null | head -12 | tr '\n' ' ')"
+fi
+assert_eq "installer-v3-upgrade 11b: the operator's post-install docs edit is RECOVERABLE after the Update" \
+    "yes" "$([ -n "$DOC_FOUND_11B" ] && echo yes || echo no)"
+assert_eq "installer-v3-upgrade 11b: ...at the mirrored path inside the mode-2 backup" \
+    "yes" "$(yesno cmp -s "$MODE2_BACKUP_11B/docs/HOOKS.md" "$DOC_PRE_11B")"
+
+# --- 11c. the FRESH-install arm (no verdict walk, no backup directory) -----
+# A never-installed project that happens to own a docs/HOOKS.md. There is no
+# plan, no backup directory and no .new convention on this path, so the guard is
+# a plain exists-and-differs check before the copy. docs/ is the ONLY shipped
+# scope where this can happen: every other shipped path lives under .claude/ or
+# is a plugin-specific root dotfile, so docs/ is the only place the plugin
+# borrows a filename in a directory the operator owns.
+T11C="$WORK/target-docs-fresh"
+mkdir -p "$T11C/docs"
+(
+    cd "$T11C" || exit 1
+    git init -q >/dev/null 2>&1 || true
+    git -c user.email=test@example.com -c user.name=test \
+        commit --allow-empty -q -m "fresh baseline" >/dev/null 2>&1 || true
+)
+printf '# my own hooks notes\n<!-- %s -->\n' "$DOC_SENTINEL" > "$T11C/docs/HOOKS.md"
+DOC_PRE_11C="$WORK/docs-hooks-pre-11c.md"
+cp "$T11C/docs/HOOKS.md" "$DOC_PRE_11C"
+FRESH_RC_11C=0
+bash "$PLUGIN_ROOT/install.sh" --mode=1 "$T11C" </dev/null >"$WORK/fresh-11c.log" 2>&1 || FRESH_RC_11C=$?
+FRESH_LOG_11C=$(cat "$WORK/fresh-11c.log" 2>/dev/null | sed 's/'"$(printf '\033')"'\[[0-9;]*m//g' || echo "")
+assert_eq "installer-v3-upgrade 11c: the fresh install exits 0" "0" "$FRESH_RC_11C"
+assert_eq "installer-v3-upgrade 11c: no backup directory exists on this path (nothing to snapshot)" \
+    "0" "$(find "$T11C" -maxdepth 1 -type d -name '.claude*backup*' 2>/dev/null | grep -c . | tr -d ' \n')"
+# The shipped doc wins the canonical path — the gate messages point operators at
+# docs/HOOKS.md by name, so the plugin's copy has to be there.
+assert_eq "installer-v3-upgrade 11c: the live docs/HOOKS.md is the shipped copy" \
+    "yes" "$(yesno cmp -s "$T11C/docs/HOOKS.md" "$PLUGIN_ROOT/docs/HOOKS.md")"
+# ...and the operator's bytes are alongside as .bak, the suffix the installer
+# already uses for the pre-merge copies of settings.json / .mcp.json.
+DOC_FOUND_11C=$(operator_bytes_recoverable "$T11C" "$DOC_PRE_11C" || printf '')
+assert_eq "installer-v3-upgrade 11c: the operator's pre-existing doc is RECOVERABLE" \
+    "yes" "$([ -n "$DOC_FOUND_11C" ] && echo yes || echo no)"
+assert_eq "installer-v3-upgrade 11c: ...specifically at docs/HOOKS.md.bak" \
+    "yes" "$(yesno cmp -s "$T11C/docs/HOOKS.md.bak" "$DOC_PRE_11C")"
+# It is REPORTED, not silent: a generic "OK   HOOKS.md" line was the whole
+# problem on this arm — the operator had no way to know a file of theirs had
+# just been replaced.
+assert_contains "installer-v3-upgrade 11c: the readout names the file it preserved" \
+    "docs/HOOKS.md" "$FRESH_LOG_11C"
+assert_contains "installer-v3-upgrade 11c: ...and says where the old bytes went" \
+    "docs/HOOKS.md.bak" "$FRESH_LOG_11C"
+# A pre-existing doc that is ALREADY the shipped bytes must not collect a
+# pointless .bak — the guard is exists-AND-DIFFERS, not exists.
+T11D="$WORK/target-docs-fresh-identical"
+mkdir -p "$T11D/docs"
+(
+    cd "$T11D" || exit 1
+    git init -q >/dev/null 2>&1 || true
+    git -c user.email=test@example.com -c user.name=test \
+        commit --allow-empty -q -m "fresh baseline" >/dev/null 2>&1 || true
+)
+cp "$PLUGIN_ROOT/docs/HOOKS.md" "$T11D/docs/HOOKS.md"
+bash "$PLUGIN_ROOT/install.sh" --mode=1 "$T11D" </dev/null >"$WORK/fresh-11d.log" 2>&1 || true
+assert_eq "installer-v3-upgrade 11c: an identical pre-existing doc collects NO .bak" \
+    "no" "$(yesno test -e "$T11D/docs/HOOKS.md.bak")"
+
+# --- 11d META-TEST: the backup leg is load-bearing -------------------------
+# The root-file backup helper is deleted from a COPY of install.sh, anchored on
+# its own sentinels, and 11a is re-run against the mutant. The operator bytes
+# must become unrecoverable — which is the defect, mechanically reproduced. A
+# checker that could not see this would be exactly as blind as the 1437
+# assertions that passed over the original bug.
+MUTANT_BACKUP="$WORK/install-no-root-backup.sh"
+sed '/# ROOT-BACKUP-START/,/# ROOT-BACKUP-END/d' "$PLUGIN_ROOT/install.sh" > "$MUTANT_BACKUP"
+assert_eq "installer-v3-upgrade 11d META-TEST: the mutated copy really differs from install.sh" \
+    "no" "$(yesno cmp -s "$MUTANT_BACKUP" "$PLUGIN_ROOT/install.sh")"
+assert_eq "installer-v3-upgrade 11d META-TEST: the strip removed the block (fewer lines)" \
+    "yes" "$(yesno test "$(grep -c . "$MUTANT_BACKUP" | tr -d ' \n')" -lt "$(grep -c . "$PLUGIN_ROOT/install.sh" | tr -d ' \n')")"
+assert_eq "installer-v3-upgrade 11d META-TEST: the mutated copy is still valid bash" \
+    "yes" "$(yesno bash -n "$MUTANT_BACKUP")"
+T11M="$WORK/target-docs-backup-mutant"
+V35_RC_11M=0
+seed_v35_install "$T11M" || V35_RC_11M=$?
+assert_eq "installer-v3-upgrade 11d META-TEST: the mutant fixture installs v3.5 cleanly" "0" "$V35_RC_11M"
+mkdir -p "$T11M/docs"
+git -C "$PLUGIN_ROOT" show "$TAG:docs/HOOKS.md" > "$T11M/docs/HOOKS.md" 2>/dev/null || true
+printf '\n<!-- %s -->\n' "$DOC_SENTINEL" >> "$T11M/docs/HOOKS.md"
+DOC_PRE_11M="$WORK/docs-hooks-pre-11m.md"
+cp "$T11M/docs/HOOKS.md" "$DOC_PRE_11M"
+# Run from inside the plugin root under a throwaway name so the mutant resolves
+# the real tree as its source instead of cloning from the network.
+MUTANT_IN_PLACE_11="$PLUGIN_ROOT/.install-mutant-u08-backup.sh"
+cp "$MUTANT_BACKUP" "$MUTANT_IN_PLACE_11"
+MUTANT_RC_11=0
+bash "$MUTANT_IN_PLACE_11" "$T11M" </dev/null >"$WORK/upgrade11m.log" 2>&1 || MUTANT_RC_11=$?
+rm -f "$MUTANT_IN_PLACE_11"
+assert_eq "installer-v3-upgrade 11d META-TEST: the mutant still runs to completion" "0" "$MUTANT_RC_11"
+# THE FLIP.
+assert_eq "installer-v3-upgrade 11d META-TEST: -> without the block the operator bytes are UNRECOVERABLE" \
+    "no" "$([ -n "$(operator_bytes_recoverable "$T11M" "$DOC_PRE_11M" || printf '')" ] && echo yes || echo no)"
+# ...while the mutant STILL prints the false claim, which is precisely why the
+# report string was never a usable oracle for this contract.
+assert_contains "installer-v3-upgrade 11d META-TEST: ...and it still claims 'yours is in the backup'" \
+    "docs/HOOKS.md (replaced; yours is in the backup)" \
+    "$(cat "$WORK/upgrade11m.log" 2>/dev/null | sed 's/'"$(printf '\033')"'\[[0-9;]*m//g' || echo "")"
+# Surgical: the mutant still backs up the .claude/ tree, so the flip above is
+# about the ROOT-scope leg and not about a backup that failed wholesale.
+BACKUP_DIR_11M=$(backup_dir_of "$T11M")
+assert_eq "installer-v3-upgrade 11d META-TEST: the mutation is surgical — .claude/ still reached the backup" \
+    "yes" "$(yesno test -f "$BACKUP_DIR_11M/scripts/qa-gate.sh")"

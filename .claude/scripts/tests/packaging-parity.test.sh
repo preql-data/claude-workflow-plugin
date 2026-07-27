@@ -65,7 +65,25 @@
 #   4. Expression identity bash <-> ps1 (whitespace-normalised).
 #   5. META-TESTs: each proves a check above is capable of failing.
 #   6. install.ps1 UPGRADE-MACHINERY parity (v4.1 / U0.7) — see the block below.
+#   6m-6q. v4.1 / U0.8 additions:
+#      6m  version-dynamic branding — no hardcoded major in either installer,
+#          the banner/usage header/readout heading all interpolate a version read
+#          from .claude-plugin/plugin.json, and `--help` is EXECUTED to prove it.
+#      6n  the generated .gitignore — install.sh's heredoc is EXECUTED and the
+#          file it produces is compared line-for-line against install.ps1's list,
+#          plus per-entry checks for the nine artifacts the plugin itself writes.
+#      6o  the shipped-docs subset — the same two paths in FIVE places (both
+#          surfaces, both copy loops, both required-source lists) plus the frozen
+#          v3.5 table's refreeze evidence, and a rule that neither installer
+#          globs docs/.
+#      6p  R1-F2 / R1-F3 readout wording — the seven merged-file report
+#          sentences compared file-to-file with path separators folded, the four
+#          merge states present in both, the retired booleans gone, and the
+#          prerequisite diagnosis naming whichever half actually failed.
+#      6q  uninstaller nested rows + the m7e R1-F3 CRLF-tolerance divergence,
+#          recorded in both uninstaller headers.
 #   7. META-TESTs for section 6.
+#   7b. META-TESTs for the U0.8 checkers (16-20).
 #
 # WHY SECTION 6 IS TEXTUAL AND NOT EXECUTED (U0.7)
 # -----------------------------------------------
@@ -242,6 +260,129 @@ jq_get() {
 # deep-equality comparisons.
 jq_sorted() {
     jq -S -c "$2" "$1" 2>/dev/null || echo "ERR"
+}
+
+# --- U0.8 helpers (sections 6m-6q) ------------------------------------------
+
+# extract_dashed_block <file> <name> — the lines strictly between
+# `# <name>-START` and `# <name>-END`.
+#
+# The repo uses TWO sentinel spellings and they are not interchangeable:
+# `# BEGIN <name>` / `# END <name>` marks a block a test EXTRACTS, while
+# `# <name>-START` / `# <name>-END` marks a block a META-TEST DELETES with sed.
+# MERGE-STATUS-LINES is the second kind (an L2 META strips it) and is also
+# extracted here, so it needs this reader rather than extract_block.
+extract_dashed_block() {
+    local file="$1" name="$2"
+    [ -f "$file" ] || return 1
+    awk -v b="# $name-START" -v e="# $name-END" '
+        !inb && index($0, b) { inb = 1; next }
+        inb && index($0, e)  { exit }
+        inb                  { print }
+    ' "$file"
+}
+
+# gitignore_from_sh <install.sh> — the .gitignore install.sh ACTUALLY PRODUCES,
+# on stdout.
+#
+# The sentinel block is EXECUTED, not scraped: it is a `cat > .gitignore <<
+# 'EOF'` heredoc, and running it is the only way to prove the file that lands on
+# an operator's disk carries these lines. Scraping the body would test the test's
+# own idea of where a heredoc starts and ends. Runs in a scratch subdirectory
+# with `cd`, since the block writes to a relative path exactly as the installer
+# does (it runs after `cd "$TARGET"`).
+gitignore_from_sh() {
+    local file="$1"
+    local dir="$WORK/gitignore-exec-$$-$RANDOM"
+    mkdir -p "$dir" || return 1
+    extract_block "$file" "GENERATED_GITIGNORE" > "$dir/block.sh" || return 1
+    ( cd "$dir" && bash ./block.sh >/dev/null 2>&1 ) || return 1
+    [ -f "$dir/.gitignore" ] || return 1
+    cat "$dir/.gitignore"
+    rm -rf "$dir"
+}
+
+# gitignore_from_ps <install.ps1> — the same file as install.ps1's line list
+# would render it.
+#
+# One single-quoted entry per line inside the sentinels; `''` is PowerShell's
+# escape for a literal quote, so it is un-doubled here. Anything that is not a
+# quoted entry (the Write-LfFile call, the closing paren) is skipped, so the
+# extraction cannot silently absorb code.
+gitignore_from_ps() {
+    extract_block "$1" "GENERATED_GITIGNORE" 2>/dev/null \
+        | sed -n "s/^[[:space:]]*'\(.*\)'[[:space:]]*$/\1/p" \
+        | sed "s/''/'/g"
+}
+
+# gitignore_entries — stdin to stdout: the PATTERN lines only (comments and
+# blanks dropped), sorted. Used for the "these entries are present" assertions,
+# where order is irrelevant; the full-body comparison above is order-sensitive
+# on purpose.
+gitignore_entries() {
+    grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | LC_ALL=C sort
+}
+
+# docs_from_surface_sh <workflow-manifest.sh> — the docs/ paths the generator's
+# surface enumerates, sorted and space-joined.
+docs_from_surface_sh() {
+    surface_pairs_sh "$1" | sed -n 's|^workflow:\(docs/.*\)$|\1|p' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# docs_from_surface_ps <install.ps1> — the same, from the PowerShell surface.
+docs_from_surface_ps() {
+    surface_pairs_ps "$1" | sed -n 's|^workflow:\(docs/.*\)$|\1|p' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# docs_from_copy_block <file> — the docs the COPY LOOP iterates, read from the
+# SHIPPED_DOCS sentinel block. Works for both dialects: bash writes
+# `SHIPPED_DOCS="a b"`, PowerShell `$ShippedDocs = @("a", "b")`, so every
+# docs/-looking token inside the block is collected.
+docs_from_copy_block() {
+    extract_block "$1" "SHIPPED_DOCS" 2>/dev/null \
+        | tr -s ' ",()=' '\n' \
+        | grep '^docs/' \
+        | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# docs_from_required_sh <install.sh> — the docs entries in install.sh's
+# required-source list (the `for required in \` block).
+docs_from_required_sh() {
+    awk '/^for required in \\$/, /^    ; do$/' "$1" 2>/dev/null \
+        | sed -n 's|^[[:space:]]*"\(docs/[^"]*\)".*|\1|p' \
+        | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# docs_from_required_ps <install.ps1> — the same, from the $Required array.
+docs_from_required_ps() {
+    awk '/\$Required = @\(/, /^    \)$/' "$1" 2>/dev/null \
+        | sed -n 's|^[[:space:]]*"\(docs/[^"]*\)".*|\1|p' \
+        | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# merge_status_lines <file> — the merged-class report SENTENCES a file renders,
+# extracted from the MERGE-STATUS-LINES sentinel block and normalised so the two
+# dialects are directly comparable. Sorted, one sentence per line.
+#
+# Normalisation, in order:
+#   1. keep only the lines that name one of the two files (the `case` / `switch`
+#      scaffolding and the section heading carry no ".json");
+#   2. drop everything up to and including the opening quote — `printf '` in
+#      bash, `$lines.Add("` in PowerShell;
+#   3. drop each dialect's trailing scaffolding: `\n' ;;` / `")`. The two
+#      patterns cannot collide, because a bash line never ends `")` and a
+#      PowerShell one never ends `\n' ;;`;
+#   4. turn Windows separators into forward slashes. That is the ONLY difference
+#      the two blocks are allowed to have, so folding it here is what makes the
+#      remaining comparison meaningful rather than trivially false.
+merge_status_lines() {
+    extract_dashed_block "$1" "MERGE-STATUS-LINES" 2>/dev/null \
+        | grep -F -- '.json' \
+        | sed -e "s/^[^\"']*[\"']//" \
+              -e "s/\\\\n' ;;\$//" \
+              -e 's/")$//' \
+              -e 's/\\/\//g' \
+        | LC_ALL=C sort
 }
 
 # ===========================================================================
@@ -1398,6 +1539,488 @@ assert_eq "6l: install.ps1 composes the probe's em dash at output time" "1" \
 
 # ===========================================================================
 echo ""
+echo "=== Section 6m: version-dynamic branding (U0.8) ==="
+# For the whole of v4.0 both installers greeted the operator with "Claude
+# Workflow Plugin v3" and the fresh-install readout listed v3 features, on a 4.x
+# release. Nothing caught it: the L1 spec that reads the usage header asserted
+# the literal v3 string, so the stale major was PINNED rather than detected.
+#
+# Both halves are checked here — the hardcode is gone AND the version is read
+# from the manifest — because either alone is satisfiable by the wrong file
+# (a hardcode removed and nothing put back prints a bare product name forever).
+BRAND_STALE='Claude Workflow Plugin v3'
+assert_eq "6m: install.sh carries no hardcoded '$BRAND_STALE'" "0" \
+    "$(text_line_count "$INSTALL_SH" "$BRAND_STALE")"
+assert_eq "6m: install.ps1 carries no hardcoded '$BRAND_STALE'" "0" \
+    "$(text_line_count "$INSTALL_PS1" "$BRAND_STALE")"
+assert_eq "6m: neither installer hardcodes the v3 what's-new heading" "0 0" \
+    "$(printf '%s %s' \
+        "$(text_line_count "$INSTALL_SH" "What's new in v3:")" \
+        "$(text_line_count "$INSTALL_PS1" "What's new in v3:")")"
+# The banner interpolates a label built from the manifest.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6m: install.sh's banner prints the interpolated brand label" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '${BRAND_LABEL}')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6m: install.sh's usage header prints it too" "1" \
+    "$(code_line_count "$INSTALL_SH" 'printf '"'"'%s installer\n'"'"' "$BRAND_LABEL"')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6m: install.ps1's banner prints the interpolated brand label" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'Write-Color $BrandLabel Cyan')"
+# ...and the label really comes from plugin.json in both.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6m: install.sh reads the branding version from .claude-plugin/plugin.json" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'plugin_json_version "$SCRIPT_DIR/.claude-plugin/plugin.json"')" -ge 1 ] && echo yes || echo no)"
+# jq-free on the bash side, because --help and the banner both run BEFORE the
+# prerequisite block has proven jq exists.
+assert_eq "6m: ...with a jq-free extractor (the banner precedes the jq prereq check)" "1" \
+    "$(code_line_count "$INSTALL_SH" 'plugin_json_version() {')"
+assert_eq "6m: install.ps1 reads it from the same manifest" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '".claude-plugin/plugin.json"')" -ge 1 ] && echo yes || echo no)"
+# The fresh readout heading interpolates the MAJOR rather than naming one.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6m: install.sh's fresh readout heading interpolates the major" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" "What's new in v\$FRESH_MAJOR:")" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6m: install.ps1's does too" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" "What's new in v\${freshMajor}:")" -ge 1 ] && echo yes || echo no)"
+# EXECUTED, on the bash side: --help must actually render the version the
+# manifest declares. This is the only leg of 6m that proves the wiring rather
+# than the presence of the wiring.
+BRAND_EXPECTED_VERSION=$(jq -r '.version // empty' "$PROJECT_DIR/.claude-plugin/plugin.json" 2>/dev/null || echo "")
+assert_eq "6m: the plugin manifest declares a version (guards the executed check)" "yes" \
+    "$([ -n "$BRAND_EXPECTED_VERSION" ] && echo yes || echo no)"
+BRAND_HELP_OUT=$(bash "$INSTALL_SH" --help 2>&1 || true)
+assert_eq "6m: install.sh --help renders the manifest's version in the header" "yes" \
+    "$(printf '%s' "$BRAND_HELP_OUT" | grep -qF "Claude Workflow Plugin v$BRAND_EXPECTED_VERSION installer" && echo yes || echo no)"
+
+# ===========================================================================
+echo ""
+echo "=== Section 6n: the generated .gitignore (U0.8) ==="
+# install.sh and install.ps1 each write a .gitignore into a project they had to
+# `git init` themselves, and through v4.0 the two lists had drifted (the ps1 one
+# was missing vendor/, *.egg-info/, Thumbs.db and every section comment) while
+# NEITHER covered the artifacts the plugin itself writes: four backup/trash
+# directory prefixes, the *.new upgrade sidecars, and the two pre-merge .bak
+# files. CHANGELOG.md's 3.4.0 entry has claimed since June that
+# .claude/.mutation-runs/ and .claude/.mutation-worktrees/ are "added to the
+# install-time .gitignore" — they were not. That is the doc/code divergence this
+# section closes.
+#
+# WHY THE FRESH-INSTALL L2 SPEC DOES NOT DO THIS. The heredoc is only reached
+# when the target has no .git, and install.sh's git-init prompt falls through to
+# reading /dev/tty whenever a controlling terminal is openable — so an L2 fixture
+# that reached this block would HANG on a developer's machine while passing in
+# CI. installer-manifest-parity.sh's fresh_install git-inits first for exactly
+# that reason. The block is therefore EXECUTED here instead, which tests the same
+# bytes without needing an installer run.
+GITIGNORE_SH=$(gitignore_from_sh "$INSTALL_SH" || echo "")
+GITIGNORE_PS=$(gitignore_from_ps "$INSTALL_PS1")
+assert_eq "6n: executing install.sh's heredoc really produced a .gitignore" "yes" \
+    "$([ -n "$GITIGNORE_SH" ] && echo yes || echo no)"
+assert_eq "6n: install.ps1's line list is non-empty too" "yes" \
+    "$([ -n "$GITIGNORE_PS" ] && echo yes || echo no)"
+# Vacuity guard: both sides must be substantial, or the equality below could be
+# "" == "".
+assert_eq "6n: the produced file has a plausible number of lines (>=40)" "yes" \
+    "$([ "$(printf '%s\n' "$GITIGNORE_SH" | grep -c . | tr -d ' \n')" -ge 40 ] && echo yes || echo no)"
+# ORDER-SENSITIVE full-body equality: a .gitignore is read top to bottom and the
+# section comments are part of what an operator sees, so this is a byte
+# comparison and not a set comparison.
+assert_eq "6n: install.ps1's .gitignore is line-for-line what install.sh's heredoc produces" \
+    "$GITIGNORE_SH" "$GITIGNORE_PS"
+# The individual entries this task added, named one at a time so a failure says
+# WHICH one went missing rather than dumping a 51-line diff.
+GITIGNORE_SH_ENTRIES=$(printf '%s\n' "$GITIGNORE_SH" | gitignore_entries)
+for gi_entry in \
+    '.claude-backup-*/' \
+    '.claude-v2-backup-*/' \
+    '.claude-v3-backup-*/' \
+    '.claude-uninstall-trash-*/' \
+    '*.new' \
+    '.claude/settings.json.bak' \
+    '.mcp.json.bak' \
+    '.claude/.mutation-runs/' \
+    '.claude/.mutation-worktrees/'
+do
+    assert_eq "6n: the generated .gitignore ignores $gi_entry" "yes" \
+        "$(printf '%s\n' "$GITIGNORE_SH_ENTRIES" | grep -qxF -- "$gi_entry" && echo yes || echo no)"
+done
+# The pre-existing entries are still there — the additions were additive, and a
+# .gitignore that lost node_modules/ would be a much worse regression than the
+# one this section fixes.
+for gi_kept in 'node_modules/' '.env' '.claude/.session-start' '.claude/.qa-tracking/'; do
+    assert_eq "6n: ...and still ignores $gi_kept" "yes" \
+        "$(printf '%s\n' "$GITIGNORE_SH_ENTRIES" | grep -qxF -- "$gi_kept" && echo yes || echo no)"
+done
+# LF / BOM discipline on the ps1 side (U0.7 convention). `Out-File -Encoding
+# UTF8` means UTF-8 WITH BOM under Windows PowerShell 5.1, and a BOM on the first
+# line of a .gitignore is a pattern git may not match — so the very first rule
+# could silently stop working on the one platform this file exists for.
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell invocation
+assert_eq "6n: install.ps1 writes the .gitignore through the LF writer" "yes" \
+    "$(extract_block "$INSTALL_PS1" "GENERATED_GITIGNORE" | grep -qF -- 'Write-LfFile -FilePath $GitignoreFile' && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is the FORBIDDEN Out-File form
+assert_eq "6n: ...and no longer through Out-File" "0" \
+    "$(code_line_count "$INSTALL_PS1" 'Out-File -FilePath $GitignoreFile')"
+# Both sentinel pairs, exactly once each, in both files.
+for gi_sentinel in "BEGIN GENERATED_GITIGNORE" "END GENERATED_GITIGNORE"; do
+    assert_eq "6n: install.sh carries '$gi_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_SH" "$gi_sentinel")"
+    assert_eq "6n: install.ps1 carries '$gi_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_PS1" "$gi_sentinel")"
+done
+
+# ===========================================================================
+echo ""
+echo "=== Section 6o: the shipped-docs subset, five ways (U0.8) ==="
+# docs/CODEX_SETUP.md and docs/HOOKS.md are named in FIVE places, and every one
+# of them has to agree or the install is wrong in a different way each time:
+#
+#   workflow-manifest.sh generate_rows   the manifest row (bash surface)
+#   install.ps1 Get-WorkflowSurfaceRows  the manifest row (PowerShell surface)
+#   install.sh $SHIPPED_DOCS             the bash copy loop
+#   install.ps1 $ShippedDocs             the PowerShell copy loop
+#   the required-source list in both     the fail-fast preflight
+#
+# A row without a copy loop makes every parity spec fail loudly (good). A copy
+# loop without a row makes the installer write a file no upgrade will ever
+# classify or uninstall (silent). One installer's list without the other's is the
+# grader.md failure mode with a second platform attached.
+DOCS_EXPECTED="docs/CODEX_SETUP.md docs/HOOKS.md"
+assert_eq "6o: workflow-manifest.sh's surface enumerates exactly the two shipped docs" \
+    "$DOCS_EXPECTED" "$(docs_from_surface_sh "$MANIFEST_TOOL")"
+assert_eq "6o: install.ps1's surface enumerates the same two" \
+    "$DOCS_EXPECTED" "$(docs_from_surface_ps "$INSTALL_PS1")"
+assert_eq "6o: install.sh's copy loop iterates the same two" \
+    "$DOCS_EXPECTED" "$(docs_from_copy_block "$INSTALL_SH")"
+assert_eq "6o: install.ps1's copy loop iterates the same two" \
+    "$DOCS_EXPECTED" "$(docs_from_copy_block "$INSTALL_PS1")"
+assert_eq "6o: install.sh's required-source list names the same two" \
+    "$DOCS_EXPECTED" "$(docs_from_required_sh "$INSTALL_SH")"
+assert_eq "6o: install.ps1's required-source list names the same two" \
+    "$DOCS_EXPECTED" "$(docs_from_required_ps "$INSTALL_PS1")"
+# And the two files exist, so the required-source check cannot abort every
+# install the moment this lands.
+for shipped_doc in docs/CODEX_SETUP.md docs/HOOKS.md; do
+    assert_eq "6o: $shipped_doc exists in the repo (the preflight would abort otherwise)" "yes" \
+        "$([ -f "$PROJECT_DIR/$shipped_doc" ] && echo yes || echo no)"
+done
+# NEITHER installer may glob docs/. The subset is a subset because docs/ in an
+# install target belongs to the operator — a glob would ship the repo's internal
+# design notes and every dated AgentLint report into their project, and would put
+# them in the manifest, which would let the uninstaller offer to move an
+# operator's own docs.
+for docs_glob in 'docs/*.md' 'docs\*.md' 'docs/*'; do
+    assert_eq "6o: install.sh does not copy docs with the glob '$docs_glob'" "0" \
+        "$(code_line_count "$INSTALL_SH" "$docs_glob")"
+    assert_eq "6o: install.ps1 does not either ('$docs_glob')" "0" \
+        "$(code_line_count "$INSTALL_PS1" "$docs_glob")"
+done
+assert_eq "6o: the generator does not scan docs/ as a directory" "0" \
+    "$(code_line_count "$MANIFEST_TOOL" 'scan_flat workflow "docs"')"
+# The docs rows are class workflow in BOTH surfaces — the class decides whether an
+# operator edit is replaced (with their copy in the backup) or preserved behind a
+# .new sidecar, and a reference doc that disagreed with the code it documents
+# would be worse than a lost edit.
+assert_eq "6o: both docs rows are class workflow in the bash surface" "2" \
+    "$(surface_pairs_sh "$MANIFEST_TOOL" | grep -c '^workflow:docs/' | tr -d ' \n')"
+assert_eq "6o: and in the PowerShell surface" "2" \
+    "$(surface_pairs_ps "$INSTALL_PS1" | grep -c '^workflow:docs/' | tr -d ' \n')"
+# Both sentinel pairs, exactly once each.
+for docs_sentinel in "BEGIN SHIPPED_DOCS" "END SHIPPED_DOCS"; do
+    assert_eq "6o: install.sh carries '$docs_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_SH" "$docs_sentinel")"
+    assert_eq "6o: install.ps1 carries '$docs_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_PS1" "$docs_sentinel")"
+done
+# The frozen v3.5 table had to be REGENERATED in the same commit as the surface
+# change, or the flagship L2 spec's byte-integrity check (which regenerates from
+# the v3.5.0 tag and cmp's) breaks. The table is the artifact, so the evidence
+# that the refreeze happened is in it: the tag carried docs/HOOKS.md and never
+# carried docs/CODEX_SETUP.md.
+FROZEN_TABLE_U08="$PROJECT_DIR/manifests/v3.5.0.sha256"
+assert_eq "6o: the frozen v3.5.0 table was refrozen WITH the docs row" "1" \
+    "$(awk -F'\t' '$1 == "docs/HOOKS.md"' "$FROZEN_TABLE_U08" 2>/dev/null | grep -c . | tr -d ' \n')"
+assert_eq "6o: ...and without the one the tag never had" "0" \
+    "$(awk -F'\t' '$1 == "docs/CODEX_SETUP.md"' "$FROZEN_TABLE_U08" 2>/dev/null | grep -c . | tr -d ' \n')"
+
+# ===========================================================================
+echo ""
+echo "=== Section 6p: R1-F2 / R1-F3 readout wording (U0.8) ==="
+# R1-F2: the saved upgrade report rendered ONE BOOLEAN per merged-class file, so
+# "the merge was attempted and failed" printed the same sentence as "there was
+# nothing to merge" — while the two on-disk outcomes differ completely (one file
+# left untouched and unmerged, the other replaced wholesale by the shipped
+# config). The terminal shows the failure in red; the SAVED report is what gets
+# read days later, and it was wrong. installer-v3-upgrade.sh section 10 proves
+# the behaviour end-to-end on the bash side; this pins the two installers to the
+# SAME sentences, because nothing can execute the ps1 one.
+MERGE_LINES_SH=$(merge_status_lines "$INSTALL_SH")
+MERGE_LINES_PS=$(merge_status_lines "$INSTALL_PS1")
+assert_eq "6p: install.sh's merged-file report block yields sentences" "yes" \
+    "$([ -n "$MERGE_LINES_SH" ] && echo yes || echo no)"
+# SEVEN: three settings arms + four .mcp.json arms. Counted so a block that
+# collapsed back to one sentence per file cannot pass the equality below.
+assert_eq "6p: install.sh renders all seven merged-file arms" "7" \
+    "$(printf '%s\n' "$MERGE_LINES_SH" | grep -c . | tr -d ' \n')"
+assert_eq "6p: install.ps1 renders the same seven" "7" \
+    "$(printf '%s\n' "$MERGE_LINES_PS" | grep -c . | tr -d ' \n')"
+assert_eq "6p: and the sentences are identical file-to-file (path separators folded)" \
+    "$MERGE_LINES_SH" "$MERGE_LINES_PS"
+# The four status tokens, in both. These are what the report switches on, so a
+# missing one is a silently unreachable arm.
+for merge_state in "shipped" "merged" "failed-untouched" "failed-replaced"; do
+    assert_eq "6p: install.sh knows the merge state '$merge_state'" "yes" \
+        "$([ "$(code_line_count "$INSTALL_SH" "$merge_state")" -ge 1 ] && echo yes || echo no)"
+    assert_eq "6p: install.ps1 knows it too" "yes" \
+        "$([ "$(code_line_count "$INSTALL_PS1" "$merge_state")" -ge 1 ] && echo yes || echo no)"
+done
+# The retired booleans are GONE from both, not merely unused: a leftover
+# SETTINGS_MERGE_DONE would be a second source of truth for the same question.
+for retired_flag in "SETTINGS_MERGE_DONE" "MCP_MERGE_DONE"; do
+    assert_eq "6p: install.sh no longer carries the retired flag $retired_flag" "0" \
+        "$(code_line_count "$INSTALL_SH" "$retired_flag")"
+done
+for retired_flag in "SettingsMergeDone" "McpMergeDone"; do
+    assert_eq "6p: install.ps1 no longer carries the retired flag $retired_flag" "0" \
+        "$(code_line_count "$INSTALL_PS1" "$retired_flag")"
+done
+# Both sentinel pairs, exactly once each (the L2 META at section 10c deletes the
+# bash block by name).
+for merge_sentinel in "MERGE-STATUS-LINES-START" "MERGE-STATUS-LINES-END"; do
+    assert_eq "6p: install.sh carries '$merge_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_SH" "$merge_sentinel")"
+    assert_eq "6p: install.ps1 carries '$merge_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_PS1" "$merge_sentinel")"
+done
+
+# R1-F3: the upgrade-prerequisite failure said "This source tree has neither" on
+# an OR, so a tree with a working generator and merely no frozen table was told
+# both were missing. The wording now names whichever half actually failed, and
+# each line reports its own state.
+# code_line_count, not text_line_count: install.sh's comment explains the retired
+# wording verbatim, and that prose is the record of why the fix exists. What must
+# be gone is the `echo` that PRINTED it.
+assert_eq "6p (R1-F3): install.sh no longer PRINTS 'has neither'" "0" \
+    "$(code_line_count "$INSTALL_SH" "has neither")"
+assert_eq "6p (R1-F3): ...and the retired wording is still documented as the reason" "yes" \
+    "$([ "$(text_line_count "$INSTALL_SH" "has neither")" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6p (R1-F3): it names the missing half from a computed variable instead" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'is missing the $UPGRADE_PREREQ_MISSING')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6p (R1-F3): both halves can be named (generator / old table)" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'UPGRADE_PREREQ_MISSING="generator"')" -ge 1 ] &&
+       [ "$(code_line_count "$INSTALL_SH" 'UPGRADE_PREREQ_MISSING="old table"')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6p (R1-F3): ...and both at once, when both are absent" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'and the old table')" -ge 1 ] && echo yes || echo no)"
+# Each of the two diagnostic lines reports found-vs-MISSING for its OWN path, so
+# the operator does not have to infer it from the sentence.
+assert_eq "6p (R1-F3): each prerequisite line reports its own found/MISSING state" "2" \
+    "$(code_line_count "$INSTALL_SH" 'echo "found" || echo "MISSING"')"
+# install.ps1 has ONE prerequisite here by construction (it reimplements the
+# generator natively, so there is no script to be missing) and its sentence
+# already named the table. Pinned so the divergence stays deliberate: a future
+# "restore parity" edit that re-added a generator clause would be adding a branch
+# that cannot fire.
+assert_eq "6p (R1-F3): install.ps1's single-prerequisite arm names the table" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'needs a frozen hash table and this source tree has none')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6p (R1-F3): ...and marks it MISSING on the path line" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '$frozenTable (MISSING)')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6p (R1-F3): ...and records why it has only one prerequisite" "yes" \
+    "$([ "$(text_line_count "$INSTALL_PS1" 'ONE prerequisite here, not two')" -ge 1 ] && echo yes || echo no)"
+
+# ===========================================================================
+echo ""
+echo "=== Section 6q: uninstaller nested rows + the CRLF divergence (U0.8) ==="
+# Root scope stopped being FLAT when the docs subset joined the surface, and
+# `mv "$path" "$TRASH_DIR/"` flattens: docs/HOOKS.md would land at the trash root,
+# collide with any same-named file from another directory, and the recovery
+# command printed at the end would restore it to the project root. Both
+# uninstallers now mirror the project layout inside the trash.
+# installer-manifest-parity.sh section 5 proves the bash behaviour by executing
+# it; this pins the ps1 mirror.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6q: uninstall.sh moves each entry to its own relative path in the trash" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_SH" 'mv "$path" "$TRASH_DIR/$rel"')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6q: ...creating the parent first" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_SH" 'mkdir -p "$dest_parent"')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is the FORBIDDEN flattening form
+assert_eq "6q: ...and the flattening form is gone" "0" \
+    "$(code_line_count "$UNINSTALL_SH" 'mv "$path" "$TRASH_DIR/"')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6q: uninstall.ps1 mirrors the layout too" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" 'Move-Item -LiteralPath $p -Destination $dest')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6q: ...creating the parent first" "yes" \
+    "$([ "$(code_line_count "$UNINSTALL_PS1" 'New-Item -ItemType Directory -Path $destParent -Force')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is the FORBIDDEN flattening form
+assert_eq "6q: ...and the flattening form is gone there as well" "0" \
+    "$(code_line_count "$UNINSTALL_PS1" 'Move-Item -LiteralPath $p -Destination $TrashDir')"
+# The readout names the RELATIVE path, not the basename — otherwise the operator
+# reading "moved HOOKS.md" cannot tell which HOOKS.md moved.
+# shellcheck disable=SC2016 # the searched-for text is the FORBIDDEN basename readout form
+assert_eq "6q: uninstall.sh's move line names the relative path" "0" \
+    "$(code_line_count "$UNINSTALL_SH" 'moved $(basename "$path")')"
+# The m7e R1-F3 rider: the two uninstallers do NOT tolerate a CRLF install-manifest
+# equally, and that has to be written down where a maintainer will meet it. Both
+# headers carry the note; the anchor is a phrase, so a reword that keeps the
+# meaning keeps the assertion.
+CRLF_NOTE_ANCHOR='CRLF TOLERANCE DIVERGES FROM'
+assert_eq "6q: uninstall.sh's header records the CRLF-manifest divergence" "1" \
+    "$(text_line_count "$UNINSTALL_SH" "$CRLF_NOTE_ANCHOR")"
+assert_eq "6q: uninstall.ps1's header records it too" "1" \
+    "$(text_line_count "$UNINSTALL_PS1" "$CRLF_NOTE_ANCHOR")"
+# The note has to say WHICH WAY each side goes, or it is a label rather than a
+# record: bash degrades to the legacy leave-everything behaviour, PowerShell
+# consumes the manifest normally.
+assert_eq "6q: the bash note names its awk field-3 mechanism" "yes" \
+    "$([ "$(text_line_count "$UNINSTALL_SH" 'leaves \r on field 3')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6q: the ps1 note names ReadAllLines as the reason it differs" "yes" \
+    "$([ "$(text_line_count "$UNINSTALL_PS1" 'ReadAllLines, which strips the \r')" -ge 1 ] && echo yes || echo no)"
+# Anchored on a fragment SHORT ENOUGH to survive comment reflow in both files:
+# the full sentence wraps differently in each, and a whole-line fixed-string
+# match on it would be a line-wrap assertion rather than a content one.
+assert_eq "6q: both notes state the direction is SAFE (bash leaves more behind)" "yes" \
+    "$([ "$(text_line_count "$UNINSTALL_SH" 'bash leaves more behind than it')" -ge 1 ] &&
+       [ "$(text_line_count "$UNINSTALL_PS1" 'bash leaves more behind than it')" -ge 1 ] && echo yes || echo no)"
+
+# ===========================================================================
+echo ""
+echo "=== Section 6r: every backup leg covers the ROOT scope (U0.8, QA cycle 1) ==="
+# THE DEFECT. U0.8's first cut added the docs subset to the copy surface and
+# synced six places that name it — but the backup legs enumerated root-level
+# files from a hardcoded list written before docs/ was shipped. An
+# operator-edited docs/HOOKS.md was classified replace-custom, overwritten, and
+# reported as "yours is in the backup" while the backup held no such file. Three
+# arms reproduced it (v3 upgrade, mode-2 Update, fresh install).
+#
+# installer-v3-upgrade.sh section 11 proves the CONTRACT by execution on the bash
+# side — the operator's bytes are recoverable, byte-exact, in all three arms.
+# Nothing can execute the ps1, so its mirror is pinned textually here, and the
+# structural properties that made the bug possible are pinned for BOTH: one
+# helper, called from every leg, reading the SAME list the copy loop reads.
+assert_eq "6r: install.sh defines the root-file backup helper exactly once" "1" \
+    "$(code_line_count "$INSTALL_SH" 'backup_root_files() {')"
+assert_eq "6r: install.ps1 defines its mirror exactly once" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Copy-RootFiles {')"
+# EVERY leg calls it. bash has four (v2 migration, v3 upgrade, mode 1, mode 2);
+# install.ps1 has three because it redirects the v2 migration to install.sh
+# rather than reimplementing it. The counts are asserted exactly: a leg that
+# stops calling the helper is the defect returning.
+assert_eq "6r: install.sh calls it from all FOUR backup legs (v2, v3, mode 1, mode 2)" "4" \
+    "$(code_line_count "$INSTALL_SH" 'backup_root_files "')"
+assert_eq "6r: install.ps1 calls it from all THREE of its legs (v3, mode 1, mode 2)" "3" \
+    "$(code_line_count "$INSTALL_PS1" 'Copy-RootFiles -BackupDir')"
+# ...and install.ps1 really does have only three, because the v2 path redirects.
+assert_eq "6r: install.ps1 has exactly three .claude-tree backup sites to match" "3" \
+    "$(code_line_count "$INSTALL_PS1" 'Copy-ClaudeTree -SourceTree')"
+# THE STRUCTURAL FIX: the backup list is BUILT FROM the shipped-docs variable,
+# not from a second literal. This is what makes a future addition to the subset
+# impossible to omit from a backup — the property the original bug lacked.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6r: install.sh's backup list is derived from \$SHIPPED_DOCS" "1" \
+    "$(code_line_count "$INSTALL_SH" 'BACKUP_ROOT_FILES="CLAUDE.md .mcp.json LESSONS.md .worktreeinclude $SHIPPED_DOCS"')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6r: install.ps1's is derived from \$ShippedDocs" "1" \
+    "$(code_line_count "$INSTALL_PS1" '+ $ShippedDocs')"
+# The docs list must be defined ABOVE the first backup leg in both files, or the
+# derivation above reads an empty variable and the bug is back with the fix
+# apparently in place. Line-order assertion, which is the only way to see it.
+SH_DOCS_LINE=$(grep -n '^SHIPPED_DOCS=' "$INSTALL_SH" | head -1 | cut -d: -f1)
+SH_FIRST_BACKUP=$(grep -n 'backup_root_files "' "$INSTALL_SH" | head -1 | cut -d: -f1)
+assert_eq "6r: install.sh defines \$SHIPPED_DOCS before the first backup leg" "yes" \
+    "$([ -n "$SH_DOCS_LINE" ] && [ -n "$SH_FIRST_BACKUP" ] && [ "$SH_DOCS_LINE" -lt "$SH_FIRST_BACKUP" ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+PS_DOCS_LINE=$(grep -n '\$ShippedDocs = @(' "$INSTALL_PS1" | head -1 | cut -d: -f1)
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+PS_LIST_LINE=$(grep -n '\$BackupRootFiles = @(' "$INSTALL_PS1" | head -1 | cut -d: -f1)
+PS_FIRST_BACKUP=$(grep -n 'Copy-RootFiles -BackupDir' "$INSTALL_PS1" | head -1 | cut -d: -f1)
+assert_eq "6r: install.ps1 defines \$ShippedDocs before \$BackupRootFiles before the first leg" "yes" \
+    "$([ -n "$PS_DOCS_LINE" ] && [ -n "$PS_LIST_LINE" ] && [ -n "$PS_FIRST_BACKUP" ] &&
+       [ "$PS_DOCS_LINE" -lt "$PS_LIST_LINE" ] && [ "$PS_LIST_LINE" -lt "$PS_FIRST_BACKUP" ] && echo yes || echo no)"
+# The retired hardcoded root lists are GONE from both — a leftover would be a
+# second source of truth for the same question.
+assert_eq "6r: install.sh no longer iterates a hardcoded v3 root list" "0" \
+    "$(code_line_count "$INSTALL_SH" 'for v3_root_file in CLAUDE.md .mcp.json LESSONS.md .worktreeinclude')"
+# shellcheck disable=SC2016 # the searched-for text is the RETIRED hardcoded list being forbidden
+assert_eq "6r: install.ps1 no longer iterates one either" "0" \
+    "$(code_line_count "$INSTALL_PS1" 'foreach ($rootFile in @("CLAUDE.md", ".mcp.json", "LESSONS.md", ".worktreeinclude"))')"
+# MIRRORED LAYOUT, the decision this change set made twice (trash + backup).
+# Documented in both, so the next maintainer meets the reasoning rather than the
+# rule alone.
+for layout_anchor in 'A ROOT ROW KEEPS ITS RELATIVE PATH' 'MIRRORED'; do
+    assert_eq "6r: install.sh documents the backup layout ('$layout_anchor')" "yes" \
+        "$([ "$(text_line_count "$INSTALL_SH" "$layout_anchor")" -ge 1 ] && echo yes || echo no)"
+    assert_eq "6r: install.ps1 documents it too" "yes" \
+        "$([ "$(text_line_count "$INSTALL_PS1" "$layout_anchor")" -ge 1 ] && echo yes || echo no)"
+done
+# plugin.json stays FLAT — the one deliberate exception, which the L2 spec's 6f
+# leg depends on. Pinned so "make it all mirrored" cannot quietly break 6f.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6r: install.sh keeps plugin.json flat in the v3 backup" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '"$V3_BACKUP_DIR/plugin.json"')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6r: install.ps1 does too" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '(Join-Path $V3BackupDir "plugin.json")')" -ge 1 ] && echo yes || echo no)"
+# Both ROOT-BACKUP sentinel pairs, exactly once each. The L2 META at
+# installer-v3-upgrade.sh 11d deletes the bash block by name.
+for root_sentinel in "ROOT-BACKUP-START" "ROOT-BACKUP-END"; do
+    assert_eq "6r: install.sh carries '$root_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_SH" "$root_sentinel")"
+    assert_eq "6r: install.ps1 carries '$root_sentinel' exactly once" "1" \
+        "$(text_line_count "$INSTALL_PS1" "$root_sentinel")"
+done
+# The strip has to stay FAIL-OPEN: the sentinels sit INSIDE the helper, so
+# deleting the block leaves a runnable no-op rather than call sites pointing at a
+# function that no longer exists (which would abort the run under `set -e` and
+# make the META unable to compare anything).
+SH_STRIPPED_BACKUP="$WORK/install-root-backup-stripped.sh"
+sed '/# ROOT-BACKUP-START/,/# ROOT-BACKUP-END/d' "$INSTALL_SH" > "$SH_STRIPPED_BACKUP"
+assert_eq "6r: stripping the block leaves install.sh valid bash (fail-open)" "yes" \
+    "$(bash -n "$SH_STRIPPED_BACKUP" 2>/dev/null && echo yes || echo no)"
+assert_eq "6r: ...with the helper still DEFINED (so the four call sites resolve)" "1" \
+    "$(code_line_count "$SH_STRIPPED_BACKUP" 'backup_root_files() {')"
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6r: ...and the copy loop inside it gone" "0" \
+    "$(code_line_count "$SH_STRIPPED_BACKUP" 'for rel in $BACKUP_ROOT_FILES; do')"
+
+# --- the fresh-install guard (arm C) --------------------------------------
+# The fresh path has no plan, no verdict walk and no backup directory, so the
+# guard is a pre-copy exists-and-differs check that parks the operator's bytes at
+# <path>.bak. docs/ is the only shipped scope where this can happen at all.
+assert_eq "6r: install.sh defines the fresh-install docs guard once" "1" \
+    "$(code_line_count "$INSTALL_SH" 'preserve_pre_existing_doc() {')"
+assert_eq "6r: install.ps1 defines its mirror once" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Save-PreExistingDoc {')"
+# The copy is CONDITIONAL on the guard succeeding in both: a failed preservation
+# refuses the copy rather than overwriting anyway.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6r: install.sh only copies a doc when preservation succeeded" "1" \
+    "$(code_line_count "$INSTALL_SH" 'if preserve_pre_existing_doc "$SOURCE_DIR/$shipped_doc" "$TARGET/$shipped_doc"; then')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6r: install.ps1 does the same" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'if (Save-PreExistingDoc -Src $docSrc -Dst $docDst) {')"
+# Both use the .bak suffix (the installer's existing convention for a preserved
+# pre-write copy), and both say so on the readout — a silent overwrite was the
+# whole problem on this arm.
+assert_eq "6r: install.sh names the .bak sidecar on the readout" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'your copy saved as')" -ge 1 ] && echo yes || echo no)"
+assert_eq "6r: install.ps1 uses the same wording" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'your copy saved as')" -ge 1 ] && echo yes || echo no)"
+# Gated on exists-AND-DIFFERS, so a re-run over an already-shipped doc leaves no
+# litter; and skipped on the verdict paths, which take a real backup instead.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
+assert_eq "6r: install.sh's guard is a no-op under VERDICT_MODE" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '[ "$VERDICT_MODE" = true ] && return 0')" -ge 1 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6r: install.ps1's guard is a no-op under \$script:VerdictMode" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'if ($script:VerdictMode) { return $true }')" -ge 1 ] && echo yes || echo no)"
+
+# ===========================================================================
+echo ""
 echo "=== Section 7: META-TESTs for the U0.7 parity checks ==="
 # Each mutates a COPY of install.ps1 (or uninstall.ps1) and asserts the matching
 # section-6 check FAILS. Without them, a checker anchored on a string that no
@@ -1541,6 +2164,189 @@ assert_eq "META 13: the stripped copy fails the sentinel check (count 0)" "0" \
     "$(text_line_count "$UNINSTALL_COPY" 'WN4-CONTAINMENT-START')"
 assert_eq "META 13: and loses the reparse-point refusal entirely" "0" \
     "$(code_line_count "$UNINSTALL_COPY" '[System.IO.FileAttributes]::ReparsePoint')"
+
+# ===========================================================================
+echo ""
+echo "=== Section 7b: META-TESTs for the U0.8 parity checks ==="
+# Same discipline as section 7: every checker added by U0.8 gets a mutation that
+# makes it fail. Four new checkers, four METAs — 6n's gitignore comparison, 6o's
+# five-way docs set, 6p's merged-file sentence identity, and 6m's branding rule.
+
+# --- META 16 (6n): drop one entry from the ps1 .gitignore list ------------
+# The drift shape 6n exists for: an entry added to one installer and not the
+# other. *.new is the one to remove — it is the entry an operator most notices
+# when it is missing, because every upgrade leaves sidecars behind.
+sed "/^ *'\*\.new'\$/d" "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 16: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+META_GITIGNORE_PS=$(gitignore_from_ps "$PS_COPY")
+assert_eq "META 16: the mutated list really lost exactly one line" \
+    "$(( $(printf '%s\n' "$GITIGNORE_PS" | grep -c . | tr -d ' \n') - 1 ))" \
+    "$(printf '%s\n' "$META_GITIGNORE_PS" | grep -c . | tr -d ' \n')"
+assert_eq "META 16: and it was the *.new entry" "no" \
+    "$(printf '%s\n' "$META_GITIGNORE_PS" | gitignore_entries | grep -qxF -- '*.new' && echo yes || echo no)"
+assert_eq "META 16: -> 6n's line-for-line equality FAILS" "different" \
+    "$([ "$GITIGNORE_SH" = "$META_GITIGNORE_PS" ] && echo same || echo different)"
+
+# --- META 17 (6o): drop one doc from the ps1 copy loop --------------------
+# A copy loop that stops shipping a file the manifest still enumerates. Every
+# parity spec downstream would fail on a real install, which is the point — but
+# the FIVE-WAY set check is what names the cause in one line instead of leaving a
+# "docs/CODEX_SETUP.md (absent)" to be traced back by hand.
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's#^\( *\)\$ShippedDocs = @("docs/CODEX_SETUP.md", "docs/HOOKS.md")#\1$ShippedDocs = @("docs/HOOKS.md")#' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 17: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 17: the mutated copy loop iterates only one doc" \
+    "docs/HOOKS.md" "$(docs_from_copy_block "$PS_COPY")"
+assert_eq "META 17: -> 6o's five-way agreement FAILS" "different" \
+    "$([ "$DOCS_EXPECTED" = "$(docs_from_copy_block "$PS_COPY")" ] && echo same || echo different)"
+# Surgical: the SURFACE still enumerates both, which is precisely the
+# manifest-says-yes / installer-says-no state 6o detects.
+assert_eq "META 17: the mutation is surgical — the ps1 SURFACE still names both" \
+    "$DOCS_EXPECTED" "$(docs_from_surface_ps "$PS_COPY")"
+
+# --- META 18 (6p): reword one merged-file sentence in the ps1 ------------
+# The R1-F2 regression, restored on one arm: the .mcp.json refusal goes back to
+# claiming the shipped file was installed with nothing to merge. That is the
+# sentence v4.0 printed for a file whose merge had FAILED, so the mutation is the
+# defect itself rather than an arbitrary string change.
+sed 's/MERGE REFUSED - yours was not a single JSON object, so the SHIPPED config was installed over it; yours is at .mcp.json.bak. Re-add your own servers from there./installed as shipped; nothing to merge/' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 18: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+META_MERGE_LINES=$(merge_status_lines "$PS_COPY")
+assert_eq "META 18: the reworded arm lost the MERGE REFUSED sentence" "no" \
+    "$(printf '%s\n' "$META_MERGE_LINES" | grep -qF 'MERGE REFUSED' && echo yes || echo no)"
+assert_eq "META 18: -> 6p's file-to-file sentence identity FAILS" "different" \
+    "$([ "$MERGE_LINES_SH" = "$META_MERGE_LINES" ] && echo same || echo different)"
+# The collapse is visible in the DISTINCT count, not the line count: the reworded
+# arm now renders the same sentence as the shipped-nothing-to-merge arm, so seven
+# arms still emit seven lines but only six different sentences. Stated as
+# distinct-vs-total because that IS the defect — two states the operator has to
+# tell apart, printing identical text.
+assert_eq "META 18: ...and two arms now render the SAME sentence (6 distinct of 7)" "6" \
+    "$(printf '%s\n' "$META_MERGE_LINES" | LC_ALL=C sort -u | grep -c . | tr -d ' \n')"
+assert_eq "META 18 companion: the real installers render seven DISTINCT sentences" "7" \
+    "$(printf '%s\n' "$MERGE_LINES_SH" | LC_ALL=C sort -u | grep -c . | tr -d ' \n')"
+
+# --- META 19 (6m): put the stale v3 branding back -----------------------
+# Restored at the ps1 banner, which is where it actually lived for the whole of
+# v4.0. Both halves of 6m must react: the hardcode check finds it, and the
+# interpolation check stops finding the label.
+# shellcheck disable=SC2016 # the replacement text IS PowerShell source
+sed 's/^Write-Color \$BrandLabel Cyan$/Write-Color "Claude Workflow Plugin v3" Cyan/' \
+    "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 19: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 19: -> the no-hardcode check FAILS (count 1, not 0)" "1" \
+    "$(text_line_count "$PS_COPY" 'Claude Workflow Plugin v3')"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "META 19: -> and the interpolated-banner check FAILS (count 0, not 1)" "0" \
+    "$(code_line_count "$PS_COPY" 'Write-Color $BrandLabel Cyan')"
+# The unmutated file still passes both, so META 19 is about the mutation and not
+# about a checker that flags everything.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "META 19 companion: the real install.ps1 still passes both halves" "0 1" \
+    "$(printf '%s %s' \
+        "$(text_line_count "$INSTALL_PS1" 'Claude Workflow Plugin v3')" \
+        "$(code_line_count "$INSTALL_PS1" 'Write-Color $BrandLabel Cyan')")"
+
+# --- META 20 (6n): the gitignore block is EXECUTED, not scraped ----------
+# gitignore_from_sh runs the real heredoc. If it ever degraded to "print the
+# lines between the sentinels", a body that no longer wrote a .gitignore at all
+# would still produce output and 6n would pass on a broken installer. Mutate a
+# COPY so the heredoc writes to a DIFFERENT filename and the extractor must come
+# back empty — which only an executing extractor can notice.
+SH_COPY_GI="$WORK/install-gitignore-mutant.sh"
+sed 's/^            cat > "\.gitignore" << '"'"'GITIGNORE_EOF'"'"'$/            cat > ".not-a-gitignore" << '"'"'GITIGNORE_EOF'"'"'/' \
+    "$INSTALL_SH" > "$SH_COPY_GI"
+assert_eq "META 20: the mutation actually changed the sh copy" "1" \
+    "$(cmp -s "$SH_COPY_GI" "$INSTALL_SH" && echo 0 || echo 1)"
+assert_eq "META 20: the mutant no longer writes .gitignore" "0" \
+    "$(code_line_count "$SH_COPY_GI" 'cat > ".gitignore" <<')"
+assert_eq "META 20: -> the executing extractor returns NOTHING for it" "" \
+    "$(gitignore_from_sh "$SH_COPY_GI" 2>/dev/null || printf '')"
+assert_eq "META 20: -> so 6n's equality FAILS" "different" \
+    "$([ "$(gitignore_from_sh "$SH_COPY_GI" 2>/dev/null || printf '')" = "$GITIGNORE_PS" ] && echo same || echo different)"
+
+# --- META 21 (6r): drop the root-file backup call from one ps1 leg --------
+# THE DEFECT SHAPE, on the side nothing can execute: a backup leg that stops
+# covering the root scope. QA reproduced this on the bash mode-2 leg — the arm the
+# v4.0 -> v4.1 population actually runs — so the mutation targets the ps1 mirror
+# of exactly that leg. 6r's exact-count assertion is what has to notice.
+# The call site is located by NUMBER rather than by an indentation-sensitive
+# pattern: the three legs sit at three different nesting depths, and a literal
+# leading-space count in a sed script is exactly the kind of anchor that rots
+# into a silent no-op after a reindent. The LAST occurrence is the mode-2 leg,
+# asserted below rather than assumed.
+META21_LINE=$(grep -n 'Copy-RootFiles -BackupDir' "$INSTALL_PS1" | tail -1 | cut -d: -f1)
+assert_eq "META 21: the targeted call site was located" "yes" \
+    "$([ -n "$META21_LINE" ] && echo yes || echo no)"
+# It really is the mode-2 leg: the line after it is that leg's own readout.
+assert_eq "META 21: ...and it is the mode-2 leg (its readout follows)" "yes" \
+    "$(sed -n "$((META21_LINE + 1))p" "$INSTALL_PS1" | grep -qF 'OK Backup created' && echo yes || echo no)"
+awk -v skip="$META21_LINE" 'NR != skip' "$INSTALL_PS1" > "$PS_COPY"
+assert_eq "META 21: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+assert_eq "META 21: the mutant really lost exactly one call site (3 -> 2)" "2" \
+    "$(code_line_count "$PS_COPY" 'Copy-RootFiles -BackupDir')"
+assert_eq "META 21: -> 6r's all-legs-covered count FAILS" "no" \
+    "$([ "$(code_line_count "$PS_COPY" 'Copy-RootFiles -BackupDir')" = "3" ] && echo yes || echo no)"
+# Surgical: the helper and the other legs survive, so the flip is about the
+# missing call and not about a mutant that lost the whole mechanism.
+assert_eq "META 21: the mutation is surgical — the helper is still defined" "1" \
+    "$(code_line_count "$PS_COPY" 'function Copy-RootFiles {')"
+assert_eq "META 21: ...and the .claude-tree backup sites are untouched" "3" \
+    "$(code_line_count "$PS_COPY" 'Copy-ClaudeTree -SourceTree')"
+
+# --- META 22 (6m): plugin_json_version reads the TOP-LEVEL version --------
+# QA raised this as non-blocking: the extractor is `sed -n | head -1`, so a loose
+# `^[[:space:]]*"version"` anchor takes the FIRST own-line "version" key at ANY
+# depth — correct today only because the shipped manifest happens to list the
+# top-level key first. The anchor was tightened to the top-level indent depth
+# instead of leaving the behaviour to file layout, and this META is the witness
+# for both halves: the tightened anchor is right, and the loose one really was
+# wrong on the same fixture (so the tightening is not cosmetic).
+#
+# The EXTRACTOR IS TAKEN FROM install.sh, not retyped: a copied regex would test
+# this file's idea of the rule rather than the shipped one.
+PJV_SCRATCH="$WORK/pjv"
+mkdir -p "$PJV_SCRATCH"
+PJV_SED=$(awk '/^plugin_json_version\(\) \{/, /^\}/' "$INSTALL_SH" \
+    | sed -n "s/^[[:space:]]*sed -n '\(.*\)'.*/\1/p" | head -1)
+assert_eq "META 22: the extractor's sed program was extracted from install.sh" "yes" \
+    "$([ -n "$PJV_SED" ] && echo yes || echo no)"
+# The dangerous fixture: a nested "version" on its OWN line, BEFORE the
+# top-level one. (An INLINE nested key was never a risk — the anchor requires
+# "version" to be the first token on its line — which is why the fixture nests it
+# across lines.)
+printf '{\n  "mcpServers": {\n    "a": {\n      "version": "0.0.1"\n    }\n  },\n  "version": "9.9.9"\n}\n' \
+    > "$PJV_SCRATCH/nested-first.json"
+assert_eq "META 22: the SHIPPED extractor returns the top-level version on the hostile fixture" "9.9.9" \
+    "$(sed -n "$PJV_SED" "$PJV_SCRATCH/nested-first.json" | head -1)"
+# The regression witness: the anchor it replaced returns the WRONG string on that
+# same fixture. Without this the tightening would look like a style change.
+assert_eq "META 22: the retired loose anchor returned the NESTED version instead" "0.0.1" \
+    "$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$PJV_SCRATCH/nested-first.json" | head -1)"
+# ...and the loose anchor is no longer in install.sh.
+assert_eq "META 22: install.sh no longer carries the loose anchor" "0" \
+    "$(code_line_count "$INSTALL_SH" 's/^[[:space:]]*"version"')"
+# On the REAL manifest the shipped extractor agrees with jq — the two independent
+# readers of the same field.
+assert_eq "META 22: on the real plugin.json the extractor agrees with jq" \
+    "$BRAND_EXPECTED_VERSION" \
+    "$(sed -n "$PJV_SED" "$PROJECT_DIR/.claude-plugin/plugin.json" | head -1)"
+# A reformat to another indent width yields EMPTY rather than a wrong value, and
+# 6m's EXECUTED --help check then fails loudly. Empty-or-loud is the correct
+# failure mode for a branding string.
+printf '{\n    "version": "9.9.9"\n}\n' > "$PJV_SCRATCH/four-space.json"
+assert_eq "META 22: a differently-indented manifest yields EMPTY, never a wrong version" "" \
+    "$(sed -n "$PJV_SED" "$PJV_SCRATCH/four-space.json" | head -1)"
+assert_eq "META 22: ...and 6m's executed --help check is what catches that" "yes" \
+    "$(printf '%s' "$BRAND_HELP_OUT" | grep -qF "Claude Workflow Plugin v$BRAND_EXPECTED_VERSION installer" && echo yes || echo no)"
 
 # --- Summary ---------------------------------------------------------------
 

@@ -38,6 +38,20 @@
 # implementation of one contract; packaging-parity.test.sh pins the shared rules
 # textually because there is no PowerShell on the CI lane that runs the L2 specs.
 #
+# Root scope stopped being FLAT in v4.1 / U0.8, which added the shipped-docs
+# subset (docs/CODEX_SETUP.md, docs/HOOKS.md) to the surface. Nested rows keep
+# their SUBPATH inside the trash directory (see the move loop): flattening
+# docs\HOOKS.md to HOOKS.md would collide with any root-level file of the same
+# name and would make the printed recovery command restore it to the wrong place.
+#
+# CRLF TOLERANCE DIVERGES FROM uninstall.sh (v4.1 / U0.8, m7e R1-F3): this script
+# reads the manifest with [IO.File]::ReadAllLines, which strips the \r of a CRLF
+# line ending, so a CRLF-line-ended install-manifest is consumed normally; the
+# bash script parses with awk, keeps the \r on field 3, validates no row, and
+# degrades to the legacy "leave every root file" behaviour. Both directions are
+# safe (bash leaves more behind than it needs to), the installers only ever write
+# LF, and neither script rewrites a manifest -- so this is recorded, not fixed.
+#
 # CONTAINMENT (v4.1 / U0.7, claude-workflow-plugin-wn4)
 # ----------------------------------------------------
 # A manifest row is UNTRUSTED INPUT to a script that MOVES files, so a row has to
@@ -348,10 +362,36 @@ $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $TrashDir = Join-Path $Target ".claude-uninstall-trash-$Stamp"
 New-Item -ItemType Directory -Path $TrashDir -Force | Out-Null
 
+# The trash MIRRORS the project layout rather than flattening into it (v4.1 /
+# U0.8). Every entry in $ToRemove is "$Target\<relative-path>", and a manifest
+# root row may now be NESTED (docs/HOOKS.md), so moving to $TrashDir directly
+# would drop it at the trash root: it would collide with a same-named file from
+# another directory, and the recovery command printed at the end would restore it
+# to the project root instead of back into docs\. Stripping the target prefix and
+# recreating the parent keeps the trash a faithful, restorable snapshot. The three
+# directories and the flat root files are unaffected -- their relative path IS
+# their leaf name.
 foreach ($p in $ToRemove) {
     if (Test-Path -LiteralPath $p) {
-        Move-Item -LiteralPath $p -Destination $TrashDir
-        Write-Color ("OK moved {0} -> {1}\" -f (Split-Path $p -Leaf), $TrashDir) Green
+        $rel = $p
+        if ($rel.StartsWith($TargetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = $rel.Substring($TargetRoot.Length).TrimStart('\', '/')
+        }
+        # Manifest rows are written with FORWARD slashes (the same rows are read
+        # by the bash side), and Join-Path preserved them into $p, so the
+        # relative path can arrive mixed-separator. Normalise before joining and
+        # splitting -- the same -replace install.ps1 does wherever a plan path
+        # meets the filesystem.
+        $rel = $rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar
+        $dest = Join-Path $TrashDir $rel
+        $destParent = Split-Path $dest -Parent
+        if (-not (Test-Path -LiteralPath $destParent)) {
+            New-Item -ItemType Directory -Path $destParent -Force | Out-Null
+        }
+        Move-Item -LiteralPath $p -Destination $dest
+        # The readout names the row as the MANIFEST spells it (forward slashes),
+        # so it matches the pre-confirmation listing above line for line.
+        Write-Color ("OK moved {0} -> {1}\" -f ($rel -replace '\\', '/'), $TrashDir) Green
     }
 }
 
@@ -398,6 +438,9 @@ Write-Color "Uninstall complete." Green
 Write-Host ""
 Write-Host "Trash:  " -NoNewline
 Write-Color $TrashDir Cyan
-Write-Host "  -> Recover with: Move-Item ""$TrashDir\*"" ""$Target\"" -Force"
+# -Force on Get-ChildItem so the hidden children (.claude\, .claude-plugin\,
+# .beads\, .mcp.json) are enumerated, and Copy-Item -Recurse so the nested docs\
+# subset lands back where it came from. `Move-Item "$TrashDir\*"` did neither.
+Write-Host "  -> Recover everything: Get-ChildItem -Force ""$TrashDir"" | Copy-Item -Destination ""$Target"" -Recurse -Force"
 Write-Host "  -> Permanently delete with: Remove-Item -Recurse -Force ""$TrashDir"""
 Write-Host ""
