@@ -11,11 +11,22 @@
 #
 # Usage:
 #   bash install.sh [project-path]                   # from a local clone
-#   bash install.sh --upgrade [project-path]         # force v2->v3 upgrade flow
+#   bash install.sh --upgrade [project-path]         # force the migration flow
 #   bash install.sh --help                           # print usage
 #   curl -fsSL <url>/install.sh | bash               # via curl (auto-clones)
 #   curl -fsSL <url>/install.sh | bash -s -- /path   # specify target path
 #   curl -fsSL <url>/install.sh | bash -s -- --upgrade
+#
+# Upgrades are auto-detected, and there are two of them (v4.1 / U0.3):
+#   v2 -> v3   no `model:` frontmatter / no plugin manifest / no .claude/mcp/.
+#   v3 -> v4   an installed .claude-plugin/plugin.json declaring 3.x. Backs the
+#              tree up, classifies every shipped file by hash against the
+#              release the target was installed from, replaces plugin-owned
+#              files, preserves operator-owned edits (shipped copy written
+#              alongside as <file>.new), and merges settings.json / .mcp.json
+#              key-wise instead of clobbering them.
+# `--upgrade` forces whichever migration the target's signals point at; it may
+# not be combined with `--mode`.
 
 set -e
 
@@ -47,20 +58,24 @@ print_usage() {
 Claude Workflow Plugin v3 installer
 
 Usage:
-  bash install.sh [project-path]                Install (auto-detects v2)
-  bash install.sh --upgrade [project-path]      Force the v2->v3 upgrade flow
+  bash install.sh [project-path]                Install (auto-detects upgrades)
+  bash install.sh --upgrade [project-path]      Force the migration flow
   bash install.sh --help                        Print this message
 
 Flags:
-  --upgrade        Run the v2->v3 migration even if auto-detection is fuzzy.
-                   Backs up .claude/ to .claude-v2-backup-<timestamp>/ before
-                   writing v3 files.
+  --upgrade        Run the migration flow even if auto-detection is fuzzy.
+                   Which migration depends on the target's signals: a v2
+                   layout backs up to .claude-v2-backup-<timestamp>/, an
+                   installed plugin manifest backs up to
+                   .claude-v3-backup-<timestamp>/ and runs the hash-based
+                   v3 -> v4 upgrade. Cannot be combined with --mode.
   --mode=<1|2|3>   Explicitly choose the install mode for existing .claude/:
                      1 = Backup and install fresh
                      2 = Update workflow (keeps CLAUDE.md, merges settings)
                      3 = Merge only (skip existing files)
                    Useful when running under `curl ... | bash` where the
-                   interactive prompt has no usable stdin.
+                   interactive prompt has no usable stdin. Cannot be combined
+                   with --upgrade.
   -h, --help       Print this message and exit 0.
 
 Curl-pipe forms:
@@ -68,8 +83,12 @@ Curl-pipe forms:
   curl -fsSL <url>/install.sh | bash -s -- /path/to/project
   curl -fsSL <url>/install.sh | bash -s -- --upgrade
 
-The default (no flag) auto-detects v2 layouts (no model: frontmatter, no
-.claude-plugin/plugin.json, no .claude/mcp/) and migrates them.
+The default (no flag) auto-detects both upgrades: v2 layouts (no model:
+frontmatter, no .claude-plugin/plugin.json, no .claude/mcp/) migrate to v3,
+and an installed .claude-plugin/plugin.json declaring 3.x takes the v3 -> v4
+upgrade flow (backup, per-file hash classification, operator files preserved
+with a .new alongside, settings.json / .mcp.json merged key-wise). Anything
+else falls through to the three existing install modes.
 USAGE
 }
 
@@ -121,6 +140,21 @@ if [ -n "$INSTALL_MODE_OVERRIDE" ]; then
             exit 1
             ;;
     esac
+fi
+
+# --upgrade and --mode are mutually exclusive (v4.1 / U0.3) -------------------
+# They answer the same question with different mechanisms, and silently
+# letting one win would make the destructive choice unpredictable: --upgrade
+# owns the whole decision (timestamped backup, per-file hash classification,
+# verdict-driven writes) while --mode picks one of the three flat
+# existing-install behaviours. Refuse rather than guess.
+if [ "$FORCE_UPGRADE" = true ] && [ -n "$INSTALL_MODE_OVERRIDE" ]; then
+    echo -e "${RED}--upgrade and --mode=$INSTALL_MODE_OVERRIDE cannot be combined.${NC}" >&2
+    echo "  --upgrade runs a migration flow that decides per file (backup," >&2
+    echo "  classify, replace / preserve / merge)." >&2
+    echo "  --mode picks one flat behaviour for an existing .claude/." >&2
+    echo "Pass exactly one of them." >&2
+    exit 1
 fi
 
 # Resolve target ---------------------------------------------------------------
@@ -195,12 +229,21 @@ fi
 
 SOURCE_DIR=""
 TMP_CLONE=""
-cleanup_clone() {
+# Scratch space for the generated surface manifest, the upgrade plan, and the
+# upgrade report (v4.1 / U0.3). Created on demand by ensure_work_dir.
+INSTALL_WORK_DIR=""
+cleanup_install_tmp() {
     if [ -n "$TMP_CLONE" ] && [ -d "$TMP_CLONE" ]; then
         rm -rf "$TMP_CLONE"
     fi
+    if [ -n "$INSTALL_WORK_DIR" ] && [ -d "$INSTALL_WORK_DIR" ]; then
+        rm -rf "$INSTALL_WORK_DIR"
+    fi
+    # Explicit success: an EXIT trap whose last command fails under `set -e`
+    # would rewrite the script's exit status.
+    return 0
 }
-trap cleanup_clone EXIT
+trap cleanup_install_tmp EXIT
 
 if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/.claude/agents" ] && [ -f "$SCRIPT_DIR/.claude-plugin/plugin.json" ]; then
     SOURCE_DIR="$SCRIPT_DIR"
@@ -255,6 +298,64 @@ for required in \
         exit 1
     fi
 done
+
+# Surface manifest helpers (v4.1 / U0.3) --------------------------------------
+# .claude/scripts/workflow-manifest.sh is the ONE machine-readable enumeration
+# of what this plugin ships (path / class / sha256). Two consumers here:
+#   - the install-manifest written into every target, so a later upgrade (and
+#     the L2/L3 parity specs) can tell exactly which release wrote the tree;
+#   - the v3 -> v4 upgrade flow's `classify` call, which needs the same
+#     enumeration to decide replace / preserve / merge per file.
+MANIFEST_TOOL="$SOURCE_DIR/.claude/scripts/workflow-manifest.sh"
+
+# The version this run is INSTALLING, read from the source manifest rather
+# than hardcoded — every readout and the install-manifest header interpolate
+# it, so a release bump needs no installer edit.
+SOURCE_VERSION=$(jq -r '.version // empty' "$SOURCE_DIR/.claude-plugin/plugin.json" 2>/dev/null || echo "")
+SOURCE_VERSION_LABEL="${SOURCE_VERSION:-unknown}"
+
+SOURCE_MANIFEST=""
+
+ensure_work_dir() {
+    if [ -z "$INSTALL_WORK_DIR" ]; then
+        INSTALL_WORK_DIR=$(mktemp -d)
+    fi
+    return 0
+}
+
+# ensure_source_manifest — generate the source surface manifest ONCE per run
+# into $SOURCE_MANIFEST. Returns non-zero (leaving $SOURCE_MANIFEST empty)
+# when the generator is missing or fails, so callers degrade with a note
+# instead of aborting an otherwise-good install. Callers MUST use it as an
+# `if` condition; the non-zero return is a normal outcome, not an error.
+ensure_source_manifest() {
+    if [ -n "$SOURCE_MANIFEST" ]; then
+        return 0
+    fi
+    if [ ! -f "$MANIFEST_TOOL" ]; then
+        return 1
+    fi
+    ensure_work_dir
+    local out="$INSTALL_WORK_DIR/source-manifest.tsv"
+    if ! bash "$MANIFEST_TOOL" generate "$SOURCE_DIR" > "$out" 2>/dev/null; then
+        return 1
+    fi
+    SOURCE_MANIFEST="$out"
+    return 0
+}
+
+# target_plugin_version — the `version` field of the manifest ALREADY installed
+# in the target, or "" when there is none / it is unreadable. Every caller runs
+# before the copy loops overwrite it; once plugin.json has been replaced this
+# function reports the new version, which is why the v3 flow captures it during
+# detection.
+target_plugin_version() {
+    local installed="$TARGET/.claude-plugin/plugin.json"
+    if [ ! -f "$installed" ]; then
+        return 0
+    fi
+    jq -r '.version // empty' "$installed" 2>/dev/null || true
+}
 
 # Git repo init ----------------------------------------------------------------
 if [ ! -d "$TARGET/.git" ]; then
@@ -378,27 +479,113 @@ detect_v2_install() {
     return 1
 }
 
+# v3 detection (v4.1 / U0.3) --------------------------------------------------
+# Signals, in decision order:
+#   (a) $TARGET/.claude-plugin/plugin.json declares a 3.x version. PRIMARY and
+#       sufficient on its own — the installed manifest is the one artifact that
+#       states, on the record, which release wrote the tree.
+#   (b) That version is missing/unreadable/empty AND neither v4 marker is
+#       present (.claude/scripts/review-check.sh, .claude/model-roles). This
+#       covers an install whose manifest was deleted or hand-edited. It reuses
+#       v2 signal 3's "not just an empty stub" guard, so a fresh or empty
+#       target can never take this branch.
+#
+# A v2 layout also satisfies (b) — which is why the caller tries
+# detect_v2_install FIRST and only falls through to here.
+#
+# Sets V3_DETECTED_VERSION (may be "" under signal b) and V3_SIGNALS.
+detect_v3_install() {
+    local claude_dir="$TARGET/.claude"
+    local ver
+    ver=$(target_plugin_version)
+
+    case "$ver" in
+        3.*)
+            V3_DETECTED_VERSION="$ver"
+            V3_SIGNALS=".claude-plugin/plugin.json declares version $ver"
+            return 0
+            ;;
+    esac
+
+    # A readable non-3.x version (4.x, or anything else) is NOT this flow.
+    if [ -n "$ver" ]; then
+        return 1
+    fi
+    if [ ! -d "$claude_dir" ]; then
+        return 1
+    fi
+    # Either v4 marker means the target is already v4 or newer.
+    if [ -f "$claude_dir/scripts/review-check.sh" ] || [ -f "$claude_dir/model-roles" ]; then
+        return 1
+    fi
+    # "Not just an empty stub": .claude/ has to hold real installed content.
+    if [ -d "$claude_dir/agents" ] || [ -d "$claude_dir/scripts" ] || [ -f "$claude_dir/settings.json" ]; then
+        V3_DETECTED_VERSION=""
+        V3_SIGNALS="no readable plugin version; no .claude/scripts/review-check.sh and no .claude/model-roles (both v4)"
+        return 0
+    fi
+    return 1
+}
+
 V2_UPGRADE=false
 V2_SIGNALS=""
 V2_BACKUP_DIR=""
+V3_UPGRADE=false
+V3_SIGNALS=""
+V3_DETECTED_VERSION=""
+V3_BACKUP_DIR=""
+# The classify plan (path/class/verdict TSV) the v3 flow's writes consume.
+# Empty on every other path, which is what makes copy_file's verdict lookup a
+# no-op for fresh installs and the three flat modes.
+V3_PLAN=""
+# The frozen hash table the plan was built against; named in the readout.
+V3_OLD_TABLE=""
+V3_PRESERVED_FILES=()
+V3_REPLACED_FILES=()
 
 if [ "$FORCE_UPGRADE" = true ]; then
-    V2_UPGRADE=true
+    # --upgrade forces A migration; WHICH one is still a detection question.
+    # v2 signals win (that layout predates the manifest entirely), then an
+    # installed plugin manifest of any version takes the v3 flow, and a target
+    # we cannot read at all keeps the legacy "treat .claude/ as v2" behaviour
+    # --upgrade has had since v3.0.
     if detect_v2_install; then
+        V2_UPGRADE=true
         echo -e "${YELLOW}Upgrade mode forced (--upgrade). Detected signals: $V2_SIGNALS${NC}"
+    elif [ -f "$TARGET/.claude-plugin/plugin.json" ]; then
+        V3_UPGRADE=true
+        if detect_v3_install; then
+            echo -e "${YELLOW}Upgrade mode forced (--upgrade). Running the v3 -> v${SOURCE_VERSION_LABEL} upgrade flow.${NC}"
+            echo -e "  Signals: $V3_SIGNALS"
+        else
+            V3_DETECTED_VERSION=$(target_plugin_version)
+            echo -e "${YELLOW}Upgrade mode forced (--upgrade). Target declares v${V3_DETECTED_VERSION:-unknown}; running the upgrade flow anyway.${NC}"
+            echo -e "  Files the shipped release changed since the frozen table are treated as customized (replaced with a report line, or preserved as .new)."
+        fi
     else
+        V2_UPGRADE=true
         echo -e "${YELLOW}Upgrade mode forced (--upgrade). No v2 signals detected; treating .claude/ as v2 anyway.${NC}"
     fi
 elif detect_v2_install; then
     V2_UPGRADE=true
     echo -e "${CYAN}Detected v2 plugin installation. Upgrading to v3...${NC}"
     echo -e "  Signals: $V2_SIGNALS"
+elif detect_v3_install; then
+    V3_UPGRADE=true
+    echo -e "${CYAN}Detected v${V3_DETECTED_VERSION:-3.x} plugin installation. Upgrading to v${SOURCE_VERSION_LABEL}...${NC}"
+    echo -e "  Signals: $V3_SIGNALS"
 fi
 
 # Mode selection (interactive) -------------------------------------------------
 BACKUP_DIR="$TARGET/.claude-backup-$(date +%Y%m%d-%H%M%S)"
 MERGE_MODE=false
 UPDATE_MODE=false
+# Set true by the two Update-mode jq merges below. The v3 upgrade report
+# distinguishes "merged key-wise" from "installed as shipped" on the strength
+# of these rather than by looking for a leftover .bak, which a previous run
+# could also have left behind.
+SETTINGS_MERGE_DONE=false
+MCP_MERGE_DONE=false
 
 # v2 upgrade path: back up the v2 .claude/ to .claude-v2-backup-<ts>/ and
 # fall through to a fresh install. We do not invoke the interactive mode
@@ -407,11 +594,85 @@ if [ "$V2_UPGRADE" = true ] && [ -d "$TARGET/.claude" ]; then
     V2_BACKUP_DIR="$TARGET/.claude-v2-backup-$(date +%Y%m%d-%H%M%S)"
     echo -e "${YELLOW}Backing up v2 install to $V2_BACKUP_DIR${NC}"
     mkdir -p "$V2_BACKUP_DIR"
-    cp -r "$TARGET/.claude/"* "$V2_BACKUP_DIR/" 2>/dev/null || true
+    # `cp -R dir/.` rather than `cp -r dir/*` (v4.1 / U0.3): the glob form is
+    # silently dotfile-blind, so .claude/.qa-tracking/ — every gate record and
+    # review artifact in a live install — never reached the backup.
+    cp -R "$TARGET/.claude/." "$V2_BACKUP_DIR/" 2>/dev/null || true
     [ -f "$TARGET/CLAUDE.md" ] && cp "$TARGET/CLAUDE.md" "$V2_BACKUP_DIR/"
     echo -e "${GREEN}OK${NC} v2 backup created"
     # UPDATE_MODE preserves CLAUDE.md and merges settings non-destructively.
     UPDATE_MODE=true
+elif [ "$V3_UPGRADE" = true ]; then
+    # ---- v3.x -> v4 upgrade flow (v4.1 / U0.3) ------------------------------
+    # Order is load-bearing:
+    #   1. BACK UP. Nothing below is reversible without it.
+    #   2. CLASSIFY. `classify` hashes the target, so it has to run before the
+    #      first write.
+    #   3. Copy loops consume the plan through copy_file -> v3_place_file.
+    V3_BACKUP_DIR="$TARGET/.claude-v3-backup-$(date +%Y%m%d-%H%M%S)"
+    echo -e "${YELLOW}Backing up the installed plugin to $V3_BACKUP_DIR${NC}"
+    mkdir -p "$V3_BACKUP_DIR"
+    if [ -d "$TARGET/.claude" ]; then
+        # Same dotfile-blindness fix as the v2 path above, and here the backup
+        # is the ONLY copy of a replaced file — so a failure is fatal rather
+        # than `|| true`. Upgrading a tree we could not snapshot is exactly the
+        # unrecoverable case this flow exists to prevent.
+        if ! cp -R "$TARGET/.claude/." "$V3_BACKUP_DIR/"; then
+            echo -e "${RED}Could not back up $TARGET/.claude — refusing to upgrade in place.${NC}"
+            echo "Free the disk space (or fix the permissions) and rerun."
+            exit 1
+        fi
+    fi
+    # Root-level files the upgrade may touch. Stored FLAT in the backup root:
+    # the backup is already a snapshot of .claude/, so mirroring paths would
+    # nest a confusing second .claude-plugin/ inside it. plugin.json is the
+    # only name that could collide, and it keeps its basename.
+    for v3_root_file in CLAUDE.md .mcp.json LESSONS.md .worktreeinclude; do
+        if [ -f "$TARGET/$v3_root_file" ]; then
+            cp "$TARGET/$v3_root_file" "$V3_BACKUP_DIR/$v3_root_file"
+        fi
+    done
+    if [ -f "$TARGET/.claude-plugin/plugin.json" ]; then
+        cp "$TARGET/.claude-plugin/plugin.json" "$V3_BACKUP_DIR/plugin.json"
+    fi
+    echo -e "${GREEN}OK${NC} backup created (includes dotfiles: .qa-tracking/ and friends)"
+
+    # UPDATE_MODE is what routes settings.json and .mcp.json through the
+    # key-wise jq merges below instead of a clobbering copy — which is exactly
+    # what classify's `merge` verdict for both `merged`-class files means.
+    UPDATE_MODE=true
+
+    # Pick the frozen hash table for the release the target was installed from.
+    # v3.5.0 is the default (the only release with a frozen table today); a
+    # future manifests/v<version>.sha256 is picked up automatically, which is
+    # how this flow stays honest for 3.2 / 3.3 / 4.x targets later.
+    V3_OLD_TABLE="$SOURCE_DIR/manifests/v3.5.0.sha256"
+    if [ -n "$V3_DETECTED_VERSION" ] && [ -f "$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256" ]; then
+        V3_OLD_TABLE="$SOURCE_DIR/manifests/v$V3_DETECTED_VERSION.sha256"
+    fi
+
+    if [ ! -f "$MANIFEST_TOOL" ] || [ ! -f "$V3_OLD_TABLE" ]; then
+        echo -e "${RED}The upgrade flow needs both .claude/scripts/workflow-manifest.sh and a frozen hash table.${NC}"
+        echo "  generator: $MANIFEST_TOOL"
+        echo "  old table: $V3_OLD_TABLE"
+        echo "This source tree has neither, so customized files cannot be told from"
+        echo "stock ones. Your backup is at $V3_BACKUP_DIR."
+        echo "Rerun with --mode=2 for the flat non-destructive update instead."
+        exit 1
+    fi
+
+    ensure_work_dir
+    V3_PLAN="$INSTALL_WORK_DIR/upgrade-plan.tsv"
+    echo -e "${YELLOW}Classifying the installed tree against $(basename "$V3_OLD_TABLE")...${NC}"
+    if ! bash "$MANIFEST_TOOL" classify \
+            --target "$TARGET" --source "$SOURCE_DIR" --old-table "$V3_OLD_TABLE" \
+            > "$V3_PLAN"; then
+        echo -e "${RED}Could not classify the installed tree; refusing to write a partial upgrade.${NC}"
+        echo "Your backup is at $V3_BACKUP_DIR. Rerun with --mode=2 to take the flat"
+        echo "non-destructive update path instead."
+        exit 1
+    fi
+    echo -e "${GREEN}OK${NC} upgrade plan: $(wc -l < "$V3_PLAN" | tr -d ' ') file(s) classified"
 elif [ -d "$TARGET/.claude" ]; then
     echo -e "${YELLOW}Existing .claude/ directory found.${NC}"
 
@@ -460,14 +721,16 @@ elif [ -d "$TARGET/.claude" ]; then
             1)
                 echo -e "${YELLOW}Creating backup at $BACKUP_DIR${NC}"
                 mkdir -p "$BACKUP_DIR"
-                cp -r "$TARGET/.claude/"* "$BACKUP_DIR/" 2>/dev/null || true
+                # Dotfile-inclusive form; see the v2 backup above for why.
+                cp -R "$TARGET/.claude/." "$BACKUP_DIR/" 2>/dev/null || true
                 [ -f "$TARGET/CLAUDE.md" ] && cp "$TARGET/CLAUDE.md" "$BACKUP_DIR/"
                 echo -e "${GREEN}OK${NC} Backup created"
                 ;;
             2)
                 echo -e "${YELLOW}Update mode: updating workflow, preserving CLAUDE.md${NC}"
                 mkdir -p "$BACKUP_DIR"
-                cp -r "$TARGET/.claude/"* "$BACKUP_DIR/" 2>/dev/null || true
+                # Dotfile-inclusive form; see the v2 backup above for why.
+                cp -R "$TARGET/.claude/." "$BACKUP_DIR/" 2>/dev/null || true
                 echo -e "${GREEN}OK${NC} Backup created"
                 UPDATE_MODE=true
                 ;;
@@ -495,12 +758,111 @@ mkdir -p "$TARGET/.claude/rubrics"
 mkdir -p "$TARGET/.claude/tests/mutation"
 mkdir -p "$TARGET/.claude-plugin"
 
+# Verdict lookup for the v3 upgrade flow (v4.1 / U0.3) ------------------------
+# v3_verdict <path-relative-to-target> — the classify verdict, or "" when the
+# path is not in the plan (no plan at all on non-upgrade paths).
+#
+# awk with a field-1 EQUALITY test rather than grep: shipped paths are full of
+# regex metacharacters (`.claude/...`), and awk exits 0 when nothing matched,
+# so this needs no `|| true` to survive `set -e`. No associative arrays — the
+# installer has to run under macOS's bash 3.2.
+v3_verdict() {
+    if [ -z "$V3_PLAN" ] || [ ! -f "$V3_PLAN" ]; then
+        return 0
+    fi
+    awk -F'\t' -v p="$1" '$1 == p { print $3; exit }' "$V3_PLAN"
+}
+
+# v3_count <verdict> — how many plan rows carry that verdict. Counted from the
+# plan (not from what the copy loops did) so the readout reports the actual
+# classification, including the two rsync'd directory trees.
+v3_count() {
+    if [ -z "$V3_PLAN" ] || [ ! -f "$V3_PLAN" ]; then
+        printf '0'
+        return 0
+    fi
+    awk -F'\t' -v v="$1" '$3 == v { n++ } END { printf "%d", n + 0 }' "$V3_PLAN"
+}
+
+# v3_place_file <src> <dst> — verdict-driven placement, v3 upgrade flow only.
+#
+#   copy-new / replace-stock  copy (new file, or untouched stock)
+#   skip-current              nothing to do (target already byte-identical)
+#   replace-custom            copy AND report; the operator's version is in the
+#                             backup (plugin-owned product wins)
+#   preserve-custom           do NOT touch the operator's file; write the
+#                             shipped content to <path>.new and report
+#   merge                     plain copy — reachable only when a `merged`-class
+#                             file is ABSENT from the target, since the jq
+#                             merge sections own the exists case
+#   "" (not in the plan)      copy, with a note: the manifest is supposed to
+#                             enumerate everything the copy loops touch, so an
+#                             unlisted path means the two have drifted
+v3_place_file() {
+    local src="$1"
+    local dst="$2"
+    local rel verdict
+    rel="${dst#"$TARGET"/}"
+    verdict=$(v3_verdict "$rel")
+
+    # plugin.json is the version marker the NEXT upgrade's detection reads, so
+    # it is copied on every verdict. A customized one is still reported (the
+    # original is in the backup).
+    if [ "$rel" = ".claude-plugin/plugin.json" ]; then
+        cp "$src" "$dst"
+        if [ "$verdict" = "replace-custom" ]; then
+            V3_REPLACED_FILES+=("$rel")
+            echo -e "${YELLOW}OK${NC}   $rel (replaced; yours is in the backup)"
+        else
+            echo -e "${GREEN}OK${NC}   $rel"
+        fi
+        return 0
+    fi
+
+    case "$verdict" in
+        skip-current)
+            echo -e "${CYAN}same${NC} $rel (already current)"
+            ;;
+        preserve-custom)
+            cp "$src" "$dst.new"
+            V3_PRESERVED_FILES+=("$rel")
+            echo -e "${YELLOW}keep${NC} $rel (yours; shipped version written to $rel.new)"
+            ;;
+        replace-custom)
+            cp "$src" "$dst"
+            V3_REPLACED_FILES+=("$rel")
+            echo -e "${YELLOW}OK${NC}   $rel (replaced; yours is in the backup)"
+            ;;
+        copy-new|replace-stock|merge)
+            cp "$src" "$dst"
+            echo -e "${GREEN}OK${NC}   $rel"
+            ;;
+        "")
+            cp "$src" "$dst"
+            echo -e "${YELLOW}OK${NC}   $rel (not in the shipped manifest; copied)"
+            ;;
+        *)
+            cp "$src" "$dst"
+            echo -e "${YELLOW}OK${NC}   $rel (unrecognised verdict '$verdict'; copied)"
+            ;;
+    esac
+    return 0
+}
+
 # Idempotent file copy with merge-mode awareness ------------------------------
 copy_file() {
     local src="$1"
     local dst="$2"
     if [ "$MERGE_MODE" = true ] && [ -f "$dst" ]; then
         echo -e "${YELLOW}skip${NC} $(basename "$dst") (exists)"
+        return 0
+    fi
+    # The v3 upgrade flow decides per file. Routing it through copy_file rather
+    # than rewriting each copy loop keeps ONE decision point: every loop below
+    # (agents, scripts, commands, rubrics, single config files) gets the
+    # verdict treatment for free, and no future loop can forget it.
+    if [ "$V3_UPGRADE" = true ]; then
+        v3_place_file "$src" "$dst"
         return 0
     fi
     cp "$src" "$dst"
@@ -533,6 +895,16 @@ chmod +x "$TARGET/.claude/scripts/"*.sh 2>/dev/null || true
 # Copy each MCP server directory wholesale (source files + package.json +
 # package-lock.json + tests/). node_modules will be installed by the operator
 # if they want to run the servers locally; ship-time we just copy the source.
+#
+# v3 upgrade flow (v4.1 / U0.3): this tree stays a DIRECTORY UNIT. The manifest
+# enumerates its files (so the parity assertions cover them) and classify emits
+# a verdict per file, but rsync wins here and those verdicts are not consulted —
+# a per-file walk would mean reimplementing rsync's delete/exclude semantics in
+# the installer. Sound because the whole tree is `workflow` class: vendored
+# server source is plugin product, never operator-owned, so the only verdicts it
+# can produce are copy-new / skip-current / replace-stock / replace-custom, and
+# rsync's outcome matches all four. The upgrade report names it as a directory
+# unit rather than pretending it went file by file. Same for tests/mutation/.
 if [ -d "$SOURCE_DIR/.claude/mcp" ]; then
     mkdir -p "$TARGET/.claude/mcp"
     for mcp_dir in "$SOURCE_DIR/.claude/mcp"/*/; do
@@ -628,6 +1000,7 @@ if [ -f "$SOURCE_DIR/.mcp.json" ]; then
             MCP_MERGED=$(jq -s "$MCP_MERGE_JQ" "$MCP_FILE" "$SOURCE_DIR/.mcp.json" 2>/dev/null) || MCP_MERGED=""
             if [ -n "$MCP_MERGED" ]; then
                 echo "$MCP_MERGED" > "$MCP_FILE"
+                MCP_MERGE_DONE=true
                 echo -e "${GREEN}OK${NC}   .mcp.json merged (previous file at .mcp.json.bak)"
                 MCP_BARE_VARS=$(jq -s -r "$MCP_BARE_VAR_JQ" "$MCP_FILE" "$SOURCE_DIR/.mcp.json" 2>/dev/null || true)
                 if [ -n "$MCP_BARE_VARS" ]; then
@@ -710,6 +1083,8 @@ if [ -f "$SOURCE_DIR/.claude/effort-verdict" ]; then
 fi
 
 # Mutation tier (Phase C / v3.4.0) ---------------------------------------------
+# Directory unit, exactly like .claude/mcp/ above: rsync wholesale, per-file
+# upgrade verdicts deliberately not consulted (all `workflow` class).
 # The /mutation-sweep command and the @judge subagent both expect this
 # tier on disk. We ship the catalog, config, harness, judge-gate, and the
 # hand-labeled calibration set. Per-run output dirs
@@ -821,6 +1196,7 @@ if [ -f "$SETTINGS_FILE" ]; then
         fi
         if [ -n "$MERGED" ]; then
             echo "$MERGED" > "$SETTINGS_FILE"
+            SETTINGS_MERGE_DONE=true
             echo -e "${GREEN}OK${NC}   settings.json merged"
             if [ "$HAD_EFFORT_ENV" = "yes" ]; then
                 echo -e "${CYAN}note${NC} removed legacy env.CLAUDE_CODE_EFFORT_LEVEL (v4: a non-xhigh value deactivates ultracode orchestration; effortLevel is now the floor)"
@@ -838,6 +1214,27 @@ if [ -f "$SETTINGS_FILE" ]; then
 else
     cp "$SOURCE_SETTINGS" "$SETTINGS_FILE"
     echo -e "${GREEN}OK${NC}   settings.json"
+fi
+
+# Install manifest (v4.1 / U0.3) ----------------------------------------------
+# Written on EVERY install path — fresh, modes 1/2/3, the v2 migration and the
+# v3 upgrade — right after the last copy. It records the SOURCE surface this run
+# installed from: one header line naming the version, then the generated
+# path/class/sha256 TSV verbatim.
+#
+# Two consumers depend on it and both compare bytes, so this file carries NO
+# timestamp, no hostname and no install-path: the next upgrade reads the header
+# to know which release wrote the tree, and the parity/equivalence specs
+# regenerate the manifest and diff it against the body. Adding "installed at
+# <date>" here would break both.
+if ensure_source_manifest; then
+    {
+        printf '# claude-workflow-plugin %s\n' "$SOURCE_VERSION_LABEL"
+        cat "$SOURCE_MANIFEST"
+    } > "$TARGET/.claude/install-manifest"
+    echo -e "${GREEN}OK${NC}   .claude/install-manifest ($SOURCE_VERSION_LABEL)"
+else
+    echo -e "${YELLOW}note${NC} could not write .claude/install-manifest (workflow-manifest.sh unavailable in $SOURCE_DIR)"
 fi
 
 # CLAUDE.md template (only if missing) ----------------------------------------
@@ -917,45 +1314,152 @@ else
     echo -e "${GREEN}OK${NC} Beads health check passed"
 fi
 
+# v3 upgrade readout (v4.1 / U0.3) --------------------------------------------
+# Plain text on purpose: the same bytes go to the terminal AND to
+# $V3_BACKUP_DIR/upgrade-report.txt, and ANSI escapes in a saved report are
+# noise. Both version numbers are read from the two plugin.json files — the
+# installed one was captured during detection, before the copy loops replaced
+# it — so no release number is hardcoded here.
+v3_write_report() {
+    local from_label="v$V3_DETECTED_VERSION"
+    if [ -z "$V3_DETECTED_VERSION" ]; then
+        from_label="an unidentified v3.x install"
+    fi
+    local total_classified
+    total_classified=$(wc -l < "$V3_PLAN" | tr -d ' ')
+    local f
+
+    cat <<REPORT
+Upgrade complete: $from_label -> v$SOURCE_VERSION_LABEL
+
+Target:           $TARGET
+Backup:           $V3_BACKUP_DIR
+Install manifest: $TARGET/.claude/install-manifest
+
+Files by upgrade verdict (workflow-manifest.sh classify, hashed against $(basename "$V3_OLD_TABLE")):
+  copied (new)           $(v3_count copy-new)
+  replaced (stock)       $(v3_count replace-stock)
+  already current        $(v3_count skip-current)
+  replaced (customized)  $(v3_count replace-custom)
+  preserved (yours)      $(v3_count preserve-custom)
+  merged key-wise        $(v3_count merge)
+  ---------------------- ---
+  total classified       $total_classified
+
+The lists below cover the per-file walk. .claude/mcp/ and .claude/tests/mutation/
+are copied wholesale with rsync (plugin-owned product, never operator-owned), so
+their files are counted above but not listed one by one.
+REPORT
+
+    printf '\nMerged key-wise instead of overwritten:\n'
+    if [ "$SETTINGS_MERGE_DONE" = true ]; then
+        printf '  .claude/settings.json  (your pre-upgrade copy: .claude/settings.json.bak)\n'
+    else
+        printf '  .claude/settings.json  (installed as shipped; nothing to merge)\n'
+    fi
+    if [ "$MCP_MERGE_DONE" = true ]; then
+        printf '  .mcp.json              (your pre-upgrade copy: .mcp.json.bak)\n'
+    else
+        printf '  .mcp.json              (installed as shipped; nothing to merge)\n'
+    fi
+
+    printf '\nPreserved your version, shipped version written alongside as *.new (%s):\n' \
+        "${#V3_PRESERVED_FILES[@]}"
+    if [ "${#V3_PRESERVED_FILES[@]}" -eq 0 ]; then
+        printf '  (none — no operator-owned file differed from the shipped one)\n'
+    else
+        for f in "${V3_PRESERVED_FILES[@]}"; do
+            printf '  %s\n      -> shipped version at %s.new\n' "$f" "$f"
+        done
+    fi
+
+    printf '\nReplaced, and yours was customized (your version is in the backup) (%s):\n' \
+        "${#V3_REPLACED_FILES[@]}"
+    if [ "${#V3_REPLACED_FILES[@]}" -eq 0 ]; then
+        printf '  (none)\n'
+    else
+        for f in "${V3_REPLACED_FILES[@]}"; do
+            printf '  %s\n' "$f"
+        done
+    fi
+
+    cat <<REPORT
+
+ACTION REQUIRED
+
+  1. Review each *.new file, merge what you want into your own copy, then
+     delete the *.new file. Nothing reads them; they exist so an upgrade never
+     silently overwrites something you wrote.
+
+  2. Pre-v4 approvals on OPEN tasks re-block once, on purpose. The v4
+     change-set denylist changed, so the Stop hook now recomputes a different
+     change_set_hash: a task still carrying a qa-approved label from before
+     this upgrade reports LABEL_WITHOUT_RECORD and has to be re-approved. That
+     is the correct fail-closed direction — a stale approval must not release
+     work. CLOSED tasks are historical and are never re-blocked. The exact
+     recovery commands are in CHANGELOG.md under
+     "UPGRADE NOTE — one-time hash migration".
+
+  3. If anything looks wrong, your pre-upgrade tree is intact:
+       diff -r $V3_BACKUP_DIR $TARGET/.claude
+REPORT
+}
+
 # Done -------------------------------------------------------------------------
 echo ""
-echo -e "${GREEN}Installation complete.${NC}"
-echo ""
-echo -e "Installed to: ${BLUE}$TARGET/.claude/${NC}"
-echo -e "Manifest:     ${BLUE}$TARGET/.claude-plugin/plugin.json${NC}"
-
-if [ -n "$V2_BACKUP_DIR" ] && [ -d "$V2_BACKUP_DIR" ]; then
-    echo -e "v2 backup:    ${BLUE}$V2_BACKUP_DIR${NC}"
-fi
-if [ -d "$BACKUP_DIR" ]; then
-    echo -e "Backup at:    ${BLUE}$BACKUP_DIR${NC}"
-fi
-
-echo ""
-if [ "$V2_UPGRADE" = true ]; then
-    echo -e "${CYAN}What changed in the v2 -> v3 upgrade:${NC}"
-    echo "  - .claude-plugin/plugin.json: first-class Claude Code plugin manifest"
-    echo "  - Agent files now pin 'model:' (run /workflow-model to bump)"
-    echo "  - Two MCP servers: bd-mcp (21 typed Beads tools), code-graph-mcp (7 graph tools incl. impact_of / dead_code)"
-    echo "  - QA gate is now Beads-label-driven (qa-approved), no longer marker-file"
-    echo "  - Hook output uses hookSpecificOutput envelope; PreToolUse blocks orchestrator edits"
-    echo "  - SessionStart warns on stale model / old bd; SessionEnd writes a structured summary"
-    echo "  - 5-tier test pyramid under .claude/tests/ + GitHub Actions CI"
-    echo "  - Single-source-of-truth installer (no embedded heredoc agent prompts)"
-    echo ""
-    echo -e "Full release notes: ${BLUE}CHANGELOG.md${NC}"
-    if [ -n "$V2_BACKUP_DIR" ]; then
-        echo -e "Diff your customizations: ${BLUE}diff -r $V2_BACKUP_DIR $TARGET/.claude${NC}"
+if [ "$V3_UPGRADE" = true ]; then
+    ensure_work_dir
+    V3_REPORT_FILE="$INSTALL_WORK_DIR/upgrade-report.txt"
+    v3_write_report > "$V3_REPORT_FILE"
+    cat "$V3_REPORT_FILE"
+    if cp "$V3_REPORT_FILE" "$V3_BACKUP_DIR/upgrade-report.txt" 2>/dev/null; then
+        echo ""
+        echo -e "This report: ${BLUE}$V3_BACKUP_DIR/upgrade-report.txt${NC}"
+    else
+        echo ""
+        echo -e "${YELLOW}note${NC} could not save the report into $V3_BACKUP_DIR"
     fi
 else
-    echo -e "${CYAN}What's new in v3:${NC}"
-    echo "  - Plugin manifest (.claude-plugin/plugin.json) — see it for the version"
-    echo "  - Model pinning per agent + /workflow-model upgrade command"
-    echo "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
-    echo "  - Parent-folder access via additionalDirectories (../)"
-    echo "  - SessionStart warns on stale model + old bd"
-    echo "  - Single-source-of-truth installer (no heredoc duplication)"
-    echo "  - uninstall.sh for clean removal"
+    # Fresh installs and the three flat modes keep the readout they have had
+    # since v3.0 (the v4 rebrand of this block is U0.8).
+    echo -e "${GREEN}Installation complete.${NC}"
+    echo ""
+    echo -e "Installed to: ${BLUE}$TARGET/.claude/${NC}"
+    echo -e "Manifest:     ${BLUE}$TARGET/.claude-plugin/plugin.json${NC}"
+
+    if [ -n "$V2_BACKUP_DIR" ] && [ -d "$V2_BACKUP_DIR" ]; then
+        echo -e "v2 backup:    ${BLUE}$V2_BACKUP_DIR${NC}"
+    fi
+    if [ -d "$BACKUP_DIR" ]; then
+        echo -e "Backup at:    ${BLUE}$BACKUP_DIR${NC}"
+    fi
+
+    echo ""
+    if [ "$V2_UPGRADE" = true ]; then
+        echo -e "${CYAN}What changed in the v2 -> v3 upgrade:${NC}"
+        echo "  - .claude-plugin/plugin.json: first-class Claude Code plugin manifest"
+        echo "  - Agent files now pin 'model:' (run /workflow-model to bump)"
+        echo "  - Two MCP servers: bd-mcp (21 typed Beads tools), code-graph-mcp (7 graph tools incl. impact_of / dead_code)"
+        echo "  - QA gate is now Beads-label-driven (qa-approved), no longer marker-file"
+        echo "  - Hook output uses hookSpecificOutput envelope; PreToolUse blocks orchestrator edits"
+        echo "  - SessionStart warns on stale model / old bd; SessionEnd writes a structured summary"
+        echo "  - 5-tier test pyramid under .claude/tests/ + GitHub Actions CI"
+        echo "  - Single-source-of-truth installer (no embedded heredoc agent prompts)"
+        echo ""
+        echo -e "Full release notes: ${BLUE}CHANGELOG.md${NC}"
+        if [ -n "$V2_BACKUP_DIR" ]; then
+            echo -e "Diff your customizations: ${BLUE}diff -r $V2_BACKUP_DIR $TARGET/.claude${NC}"
+        fi
+    else
+        echo -e "${CYAN}What's new in v3:${NC}"
+        echo "  - Plugin manifest (.claude-plugin/plugin.json) — see it for the version"
+        echo "  - Model pinning per agent + /workflow-model upgrade command"
+        echo "  - MAX_THINKING_TOKENS at 64000 + extended-thinking instruction in every agent"
+        echo "  - Parent-folder access via additionalDirectories (../)"
+        echo "  - SessionStart warns on stale model + old bd"
+        echo "  - Single-source-of-truth installer (no heredoc duplication)"
+        echo "  - uninstall.sh for clean removal"
+    fi
 fi
 echo ""
 echo -e "${YELLOW}Usage:${NC}"

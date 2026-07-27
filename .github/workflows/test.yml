@@ -107,6 +107,11 @@ jobs:
       BD_SHIM_ONLY: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: specs/installer-v3-upgrade.sh builds its
+          # fixture from the v3.5.0 tag (git archive), and the default
+          # shallow single-branch checkout has no tags to archive.
+          fetch-depth: 0
       - name: Verify dependencies
         run: |
           jq --version
