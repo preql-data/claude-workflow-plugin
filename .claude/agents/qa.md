@@ -479,6 +479,7 @@ bd_doc_write(task_id="$TASK_ID", name="grading-packet", content="""
 Task type: $TASK_TYPE
 Task labels: $LABELS
 Applicable rubrics: default, $DOMAIN_OVERLAY[, bugfix]
+Graded change set: $IMPACT_REPORT_CHANGE_SET_HASH
 
 ### 1. bd show output
 $BD_SHOW_OUTPUT
@@ -509,6 +510,8 @@ $REVIEW_ARTIFACT_JSON
 ```
 
 The template emits all eight sections. A packet that stops at section 6 is incomplete — the grader scores regression-coverage claims against item 7's caller data and reads item 8 as advisory context, and it will record a `needs_revision` finding naming whichever item is missing.
+
+`Graded change set:` is the `change_set_hash` from the impact report you paste as item 7 — copy it verbatim into the header so it is readable without parsing the embedded JSON. It is the value the orchestrator passes to `grade-record --graded-hash`, and it is what makes the recorded verdict bind **what the grader was shown** rather than whatever happens to be in the tracker when the verdict is written. Omit it and the verdict is still recorded, but it binds only if nothing moved in the meantime; if work landed while the grader ran, the record is written unbound and the next relay round re-grades.
 
 Then return the structured `needs-grading` status in your completion contract — add a top-level `qa_status` field (additive on top of the QA superset) alongside the standard `approved: false`. The full QA contract you return on this spawn looks like:
 
@@ -549,12 +552,16 @@ LATEST_RUBRIC=$(bd show "$TASK_ID" --json \
              | last.text // ""')
 ```
 
-Branch on the verdict carried in that comment (the `grade-record` shape is `RUBRIC <version> iteration <n>: <verdict> — <summary>`, with the structured JSON pasted below the summary by the helper):
+Branch on the verdict carried in that comment (the `grade-record` shape is `RUBRIC <version> iteration <n>: <verdict> change_set_hash=<h> — <summary>`, with the structured JSON pasted below the summary by the helper):
 
 - **`satisfied`** — the label `rubric-satisfied` is already set by `grade-record`. Proceed to subsection 6f's approval-cites-verdict block. Your completion contract on this spawn carries `qa_status: "approved"` (or simply omit `qa_status` and rely on `approved: true`).
 - **`needs_revision`** — extract `required_fixes` from the RUBRIC comment's JSON block and route through the existing `qa-gate.sh block` round-trip (subsection 6d). After the specialist fixes the task and the gate re-enters, the orchestrator will run another relay (assemble a fresh packet via this prompt on the next QA spawn, persist it, return `needs-grading` again).
 
 If the RUBRIC comment is absent on a spawn that is not the very first QA pass for this task, treat that as a malformed relay state and surface it via `llm_observations` for the orchestrator to triage — do NOT silently proceed to approval or block.
+
+**Re-entering the gate does not throw the verdict away** (bjx). The `change_set_hash` in the record names the change set that was graded; `qa-gate.sh enter` keeps `rubric-satisfied` when that hash still matches the current change set, and clears it when the change set has moved since grading. So an `enter` between the verdict and your approval — including the one the Stop hook prints while you are mid-relay — is safe, and if you DO find `rubric-pending` back on a task you know was graded satisfied, read `enter`'s `observations`: it says which of the two happened. A cleared label after a genuine change means the change set grew since it was graded; ask the orchestrator for another relay rather than overriding.
+
+Know the limit before you lean on it: that hash covers the changed-file **list**, not file contents (the same path-scoped canonicalisation your `reviewed_hash` uses). If the specialist rewrote a file that was already in the change set after the verdict was recorded, the label is preserved and the grader never saw that content — a preserved `rubric-satisfied` is evidence about *which files* were graded, not a guarantee that every byte under review was. Your own review still has to read the diff.
 
 ### 6d. needs_revision: block the specialist and iterate
 

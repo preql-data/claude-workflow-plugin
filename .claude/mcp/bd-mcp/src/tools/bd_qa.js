@@ -162,8 +162,15 @@ export function registerQaTools(server) {
                 "Mark a task as having entered the QA gate. Adds the qa-gate-entered label, persists " +
                 "the active task id to .claude/.qa-tracking/current-task (so hooks can find it), and " +
                 "writes an audit comment.\n\n" +
-                "Idempotent: re-entering refreshes the current-task helper but is otherwise a no-op " +
-                "if the label is already present.\n\n" +
+                "Re-entering an already-entered task is safe, but it is not a no-op: it refreshes " +
+                "current-task, resets the per-iteration state, clears any qa-escalated/qa-deferred " +
+                "labels, and regenerates the mechanical impact report for the CURRENT change set.\n\n" +
+                "Rubric state (v4.1, bjx): `rubric-satisfied` is KEPT when the gate is already open " +
+                "and the latest RUBRIC record's `change_set_hash` still matches the current change " +
+                "set — so an enter between a grader verdict and QA's approval no longer costs a " +
+                "re-grade. It is cleared as stale on a fresh cycle, on an unbound or superseded " +
+                "verdict, or once the change set has moved since grading; `rubric-pending` is " +
+                "re-armed only in that case. The returned `observations` name which happened.\n\n" +
                 "Replaces shell: `bash .claude/scripts/qa-gate.sh enter <id>`",
             inputSchema: {
                 task_id: z.string().min(1).max(256),

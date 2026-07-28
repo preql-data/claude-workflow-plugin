@@ -717,6 +717,136 @@ The contract change is reflected in the `bd_qa_approve` MCP tool description and
 pinned by `.claude/tests/component/specs/approve-idempotency.sh` (sections A-C
 and H, plus a META that reverts the guard and shows the deadlock return).
 
+### Rubric verdicts are bound to the change set they graded
+
+`qa-gate.sh enter` used to clear `rubric-satisfied` unconditionally, on the
+principle that a satisfied verdict from a previous change set must never carry
+into a new review cycle. The principle is right; the implementation could not
+tell "previous" from "this one, thirty seconds ago".
+
+That mattered because of *where* `enter` gets called. `grade-record` runs in the
+orchestrator's turn (RUBRIC-RELAY step C) and QA acts on the verdict in a later
+spawn (step D). Any Stop in between blocks and **prints** `qa-gate.sh enter <id>`
+— both the QA-required block ("when entering review, mark the gate") and the
+`LABEL_WITHOUT_RECORD` remediation do. Following the gate's own printed
+instruction destroyed the verdict recorded seconds earlier against the identical
+diff, and the `approve` that followed warned *"no satisfied verdict on file"* —
+false, and the thing `qa.md` 6f answers with a written OVERRIDE reason. The gate
+was manufacturing overrides against its own audit trail and driving paid
+re-grades of an already-graded change set (claude-workflow-plugin-bjx).
+
+Since v4.1 `grade-record` writes the change set into the record, exactly as
+`approve` binds `change_set_hash` and `review-record` binds `reviewed_hash`:
+
+```
+RUBRIC <version> iteration <n>: <verdict> change_set_hash=<h> — <summary>
+```
+
+The token sits between the verdict and the em-dash — ahead of all grader-authored
+free text, so every existing reader that keys on the prefix through the verdict
+still matches, and the machine field is never buried inside prose. It is recorded
+on both verdicts: "which change set was found wanting" is as much an audit
+question as "which one passed". It is omitted, not faked, when the hash cannot be
+computed.
+
+`enter` then decides rather than wipes. It keeps `rubric-satisfied` only when
+**both** hold:
+
+| Test | Why |
+| --- | --- |
+| the gate is already open (`qa-gate-entered` set) | a fresh `enter` opens a NEW cycle and always clears — unchanged behaviour, and the case the original clear existed for. `approve` deliberately leaves `rubric-satisfied` behind as audit trail, so a surviving label is the normal input here |
+| the latest RUBRIC record is a `satisfied` one whose `change_set_hash` equals the hash right now | a verdict recorded before the specialist touched three more files does not cover them |
+
+Preservation needs positive evidence, so every way of failing to produce it
+degrades to the old behaviour: a pre-v4.1 record carries no token, a `satisfied`
+superseded by a later `needs_revision` does not answer, a version outside the
+validated class does not parse, and an unavailable hash — in either spelling,
+see below — is refused. All of them clear. When the label is kept,
+`rubric-pending` is deliberately *not* re-armed — a graded cycle is not awaiting
+anything, and both labels at once would tell `qa-gate.sh status` the wrong thing.
+
+Both outcomes are named in `enter`'s `observations` (`kept rubric-satisfied — the
+recorded verdict binds this exact change set` / `cleared stale rubric-satisfied
+(...)`), so the decision is never invisible.
+
+**`rubric_version` is validated, and that is a security boundary, not tidiness.**
+It is the only machine-prefix field that comes from the grader, and it is
+interpolated into the record with a space on each side. Validated merely as
+"non-empty string" it was a **grammar injection**: the reader parses the verdict
+from immediately after the record's first colon, so a version of the form
+`1 iteration 1: satisfied change_set_hash=<real>` relocated that colon into the
+injected text and a `needs_revision` verdict was read back as `satisfied` **and**
+bound to the current change set. `grade-record` now refuses any version outside
+`^[A-Za-z0-9._+-]+$` with `error_key: rubric_version_invalid_chars`; the class
+has no space and no colon, so nothing that passes can move a field boundary. The
+reader carries the same class for parity. (A hand-written `bd comments add` can
+still fabricate a record — that is the llh.18 threat-model boundary, unchanged.
+What is closed is forging through the tool's own validated input.)
+
+**Two spellings of "no hash", both refused.** `impact-report.sh` returns empty
+when it cannot run, and the literal `sha256-unavailable` on a host carrying
+neither `shasum` nor `sha256sum`. The second is a non-empty *constant*, so it
+would be recorded as a binding and then compare equal to itself at `enter` time
+— preserving every verdict on the one class of machine where the hash means
+nothing. The writer omits the token for both, and `enter` refuses both.
+
+**Known limit, inherited and deliberately not narrowed here.** The hash is over
+the changed-file **list**, not file contents. Rewriting an already-tracked file
+after grading does not move it, so a verdict can be preserved over content the
+grader never saw. That is the single canonicalisation shared with the
+`qa-approved` record (llh.18) and `reviewed_hash` (jio.1); computing a content
+hash inside `cmd_enter` would be a fourth definition of "the change set", which
+is what llh.18 exists to forbid. It is pinned as documented behaviour (section
+B3) rather than left latent.
+
+**Where the graded hash comes from.** `grade-record` runs *after* QA assembled
+the packet and *after* the grader ran, so a live recompute at record time is not
+"the change set that was graded" — a path landing in between was silently folded
+in, and a verdict for set A was recorded as covering A+B (R2-F1; a **path** leak,
+distinct from the content-only limit below). Three sources, in descending
+authority:
+
+1. `--graded-hash`, passed by the relay from the packet's `Graded change set:`
+   header (`orchestrator.md` 5a step C). The only value that witnesses what the
+   grader was shown. Deliberately not read from the grader's own JSON — that
+   would let the graded party state what it graded.
+2. A live recompute **corroborated** by the persisted impact report. If the
+   report the packet was built from still describes the current change set,
+   nothing was added in between. This keeps the ordinary relay binding without
+   the flag.
+3. Nothing. If they disagree, the record is written **unbound**, with both
+   hashes named. `enter` then treats it as stale and clears — the pre-bjx
+   behaviour, and the next relay round re-grades.
+
+**`approve` cross-checks the verdict it cites.** The rubric audit line used to be
+emitted from the *label*, so this purely sequential flow produced an approval
+claiming a verdict it did not have: grade set A → `enter` (preserves, correctly)
+→ add path B → regenerate the report → `approve` binds A+B and reports
+"rubric-satisfied preserved (audit trail)" (R2-F2). `cmd_approve` now compares
+`approved_hash` against the satisfied verdict's binding and reports one of three
+states — verified, unbound-so-uncheckable, or **mismatch**. A mismatch warns and
+is recorded in the durable approval comment as
+`[rubric mismatch: graded=<h> approved=<h>]`; it does **not** refuse. That is
+deliberate: `qa.md` 6f states that script-side rubric denial "would create a
+parallel gate and violate principle 6", `verify-before-stop.sh` reads neither
+rubric label nor RUBRIC comment, and the only remediations a refusal could print
+are a paid re-grade or the label-removal dead end 3.5.0/gz3 eliminated. The harm
+was the audit trail lying; that is what is fixed.
+
+**Superseded verdicts.** The reader selects the **latest** RUBRIC record and then
+parses it. It used to `capture` across every comment and take the last *result*,
+so an unparseable latest record fell out and the reader answered with an older
+one — a `satisfied` followed by a `needs_revision` at iteration `1.5` kept the
+stale hash (R2-F3). `iteration` is now validated as a non-negative integer at the
+writer too, but that half is defence-in-depth: it cannot reach a record the
+writer never created (a legacy one, a hand-written comment), and that case
+reproduced on the shipped script. The selector is the load-bearing half.
+
+Pinned by `.claude/tests/component/specs/rubric-binding.sh` (sections A-L, plus
+METAs that revert each half of the preservation fix, the version validation, and
+the sentinel refusals, and a reader differential that attributes R2-F3 to the
+selector rather than to the writer check).
+
 ### The vanished-change-set release (`VANISHED-CHANGE-SET`)
 
 The Stop hook reads the change set **twice**: once at its detection stage, and

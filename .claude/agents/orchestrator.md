@@ -326,10 +326,21 @@ The grader returns a single JSON object as its final message — capture it verb
 **Step C — record the verdict.**
 
 ```bash
-printf '%s' "$GRADER_JSON" | bash .claude/scripts/qa-gate.sh grade-record "$TASK_ID"
+# The change set the GRADER SAW — read it from the packet's header line
+# ("Graded change set: <hash>"), NOT from the current impact report on disk:
+# an `enter` between Steps C and D regenerates that file, and the point of the
+# token is what was graded, not what is live.
+GRADED_HASH="<the packet's 'Graded change set' value>"
+
+printf '%s' "$GRADER_JSON" \
+    | bash .claude/scripts/qa-gate.sh grade-record "$TASK_ID" --graded-hash "$GRADED_HASH"
 ```
 
-`grade-record` appends a `RUBRIC <version> iteration <n>: <verdict> — <summary>` comment to the Beads task and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`. The Beads comment is the durable audit trail QA reads on its next spawn.
+`grade-record` appends a `RUBRIC <version> iteration <n>: <verdict> change_set_hash=<h> — <summary>` comment to the Beads task and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`. The Beads comment is the durable audit trail QA reads on its next spawn.
+
+The `change_set_hash` binds the verdict to the **changed-file list** it graded — the same canonicalisation, and the same scope, as the approval record's hash and the review artifact's `reviewed_hash` (bjx). It is a hash of the file LIST, not of file contents: a content-only edit to an already-tracked file does not move it. You do not need to order Step C against anyone's `qa-gate.sh enter`: `enter` keeps `rubric-satisfied` while the hash still matches and clears it when the changed-file list has moved, so a Stop firing between Steps C and D — which prints `qa-gate.sh enter <id>` — no longer costs you a re-grade.
+
+**Pass `--graded-hash` and the token means what it says.** Without it `grade-record` falls back to the live change set, and binds only when the persisted impact report still corroborates it (R2-F1) — safe, but it costs you a relay round whenever a path landed while the grader was running, because the record is then written UNBOUND and `enter` will clear the label as stale. Read the envelope: it names the binding's source, or says the two hashes disagreed. The same goes for a verdict recorded with no binding at all (impact-report.sh unavailable, or a host with no sha tool) — expect the label cleared on the next `enter` and plan for one more round.
 
 **Step D — re-engage QA (fresh Task).** The verdict is now on the task; QA will branch on it per `qa.md` section 6c:
 

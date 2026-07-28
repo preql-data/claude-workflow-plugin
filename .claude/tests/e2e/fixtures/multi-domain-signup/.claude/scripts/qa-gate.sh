@@ -38,7 +38,8 @@
 #                                           Each choice records a comment + acts on labels/state.
 #   grade-record <task-id> [--file <path>]  Spec Phase A: record a grader verdict.
 #                                           Reads strict-JSON verdict from --file or stdin.
-#                                           Appends a Beads comment; on satisfied flips
+#                                           Appends a Beads comment bound to the graded
+#                                           change set; on satisfied flips
 #                                           rubric-pending -> rubric-satisfied.
 #   review-record <task-id> [--file <path>] Phase V2: validate a reviewer artifact via
 #                                           review-check.sh then append the REVIEW-ARTIFACT
@@ -421,6 +422,22 @@ compute_change_set_hash() {
     CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || printf ''
 }
 
+# bjx: the literal impact-report.sh prints when NEITHER shasum NOR sha256sum is
+# on PATH (see its sha256_stdin). It is a non-empty string, so every `[ -n
+# "$h" ]` guard in this file reads it as a usable hash — and, being CONSTANT, it
+# compares EQUAL to itself across two calls. That is harmless where a hash is
+# only recorded, and NOT harmless where two hashes are compared to decide
+# whether a verdict still covers the current work: on such a host the rubric
+# preservation guard would match unconditionally. Both the writer and the reader
+# below therefore treat this value as "no hash", which is what the surrounding
+# contract already claims ("omitted, not faked, when the hash cannot be
+# computed"). Named once so the two sites cannot drift apart.
+#
+# Deliberately NOT a fix to the sentinel itself: impact-report.sh owns the
+# canonicalisation and its degraded-mode return is shared with approve and the
+# Stop hook, so changing it belongs to that script's contract, not to this one.
+CHANGE_SET_HASH_UNAVAILABLE="sha256-unavailable"
+
 # gz3 (v4.1 U1): the approval records THIS task already carries — one
 # change_set_hash per `QA-GATE APPROVED ... change_set_hash=<h> ...` comment.
 #
@@ -457,6 +474,108 @@ task_has_approval_record_for() {
     local tid="$1" hash="$2"
     [ -n "$hash" ] || return 1
     recorded_approval_hashes "$tid" | grep -qxF "$hash"
+}
+
+# bjx (v4.1 U1): the change set the task's CURRENT rubric verdict was graded
+# against — empty unless the LATEST RUBRIC record is a `satisfied` one AND it
+# carries a change_set_hash.
+#
+# Same shape, and the same reason, as recorded_approval_hashes above. llh.18
+# stopped believing that the qa-approved LABEL meant "approved" because a label
+# says an event happened and says nothing about WHICH files it covered;
+# rubric-satisfied is the same kind of label, and `enter` needs the second
+# question answered before it can tell a verdict that still covers the current
+# work from one left over from a previous change set.
+#
+# Three deliberate properties:
+#   - LATEST-WINS, not latest-satisfied-wins, and — R2-F3 — not last-PARSEABLE
+#     either. A `satisfied` later superseded by a `needs_revision` must not read
+#     as bound: the needs_revision path leaves labels alone (rubric-satisfied
+#     would still be sitting on the task), so keying on "is there a satisfied
+#     record anywhere" would resurrect an overruled verdict.
+#
+#     The first version of this got the SELECTOR wrong in a way that produced
+#     exactly that resurrection. It applied `capture` across every comment and
+#     took `last` of the RESULTS, so an unparseable latest record simply fell
+#     out of the array and `last` silently returned an OLDER one. A `satisfied`
+#     iteration 1 followed by a `needs_revision` iteration `1.5` (the writer
+#     accepted any JSON number; the reader requires `[0-9]+`) therefore kept the
+#     stale satisfied hash across re-entry. Reproduced, with an integer control.
+#
+#     So: SELECT the latest record FIRST (every comment that starts a RUBRIC
+#     record), and only then parse it. An unparseable latest record now yields
+#     unbound — stale — instead of deferring to its predecessor. This half is
+#     the load-bearing one: validating `iteration` at the writer (which we also
+#     do, below) cannot help for a record the writer never created — a legacy
+#     one, or a hand-written comment — and that case was reproduced on the
+#     shipped script. Pinned with a META in section J of
+#     .claude/tests/component/specs/rubric-binding.sh.
+#
+#     `startswith("RUBRIC ")` rather than a regex: the selector must not itself
+#     be a place where a metacharacter can change the meaning. A comment that
+#     merely QUOTES a record mid-text does not start with the prefix and so is
+#     not a record — correct, a quoted mention must not invalidate a verdict.
+#   - ANCHORED at ^, walking the whole machine prefix rather than grepping for
+#     the token anywhere on the line. The line's tail is the grader's free-text
+#     summary; the anchor is what stops a summary that happens to contain the
+#     token's spelling from being read as a binding. jq's `^` is STRING-anchored
+#     (Oniguruma, no `m` flag), so a multi-line comment whose interior line
+#     starts with a RUBRIC record does not match either — load-bearing, because
+#     agents do paste RUBRIC text into ordinary comments.
+#   - The version class is `[A-Za-z0-9._+-]+`, the SAME class cmd_grade_record
+#     validates `.rubric_version` against, and the reason both exist is a
+#     forgery QA reproduced end-to-end. `rubric_version` used to be validated
+#     only as "non-empty string" and is interpolated into the record with spaces
+#     around it, so a crafted version — `1 iteration 1: satisfied
+#     change_set_hash=<real>` — moved the record's FIRST colon into the injected
+#     text. The parse then read the injected prefix instead of the real one and
+#     a `needs_revision` record came back `satisfied` AND bound. The writer is
+#     where that is CLOSED (a class with no spaces and no colon cannot relocate
+#     anything); this class is the reader half of the same contract, so the two
+#     grammars agree about what a version may be. Section F of
+#     .claude/tests/component/specs/rubric-binding.sh asserts the two spellings
+#     are identical, extracted from both sites.
+#     A record whose version is outside the class reads as UNBOUND, which
+#     clears — the safe direction, and the pre-bjx behaviour.
+#   - The sentinel hash is refused. See CHANGE_SET_HASH_UNAVAILABLE: on a host
+#     with no sha tool the "hash" is a constant, so it would compare equal to
+#     itself and preserve unconditionally. It is treated as no binding at all.
+#
+# The hash group is OPTIONAL so a pre-bjx record (no token) matches the record
+# grammar and answers "" rather than not matching at all — the distinction
+# never reaches the caller, but it keeps the expression honest about which
+# records it recognises.
+#
+# NOT defended against, and inherited rather than introduced here: an agent with
+# arbitrary shell can `bd comments add` a well-formed RUBRIC record by hand.
+# That is the same threat-model boundary llh.18 documents for the approval
+# record — this raises the bar from "a label" to "a change-set-bound record",
+# it is not a cryptographic sandbox. What the writer-side validation closes is
+# the strictly worse case: forging through the tool's own validated input.
+#
+# Never fails the caller: no bd, no task, unparseable JSON -> empty, rc 0.
+latest_satisfied_rubric_hash() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    bd show "$tid" --json 2>/dev/null \
+        | jq -r --arg unavailable "$CHANGE_SET_HASH_UNAVAILABLE" '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("RUBRIC "))
+            ]
+            | last
+            | if . == null then ""
+              else
+                ( [ capture("^RUBRIC (?<v>[A-Za-z0-9._+-]+) iteration (?<n>[0-9]+): (?<verdict>[A-Za-z_]+)( change_set_hash=(?<h>[A-Za-z0-9-]+))?") ]
+                  | last
+                  | if . == null then ""
+                    elif .verdict != "satisfied" then ""
+                    elif (.h // "") == $unavailable then ""
+                    else (.h // "") end )
+              end
+        ' 2>/dev/null || true
+    return 0
 }
 
 # gz3: the change_set_hash of the PERSISTED impact report for <tid>, or empty.
@@ -670,18 +789,29 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                 continue   -> clears qa-escalated + resets iteration counter
                 tech-debt  -> tech-debt.sh add --bd-task + clears escalation
                 defer      -> sets qa-deferred (allows Stop next time)
-  grade-record <task-id> [--file <path>]
+  grade-record <task-id> [--file <path>] [--graded-hash <h>]
               Spec Phase A: record a grader verdict. Reads a strict-JSON
               verdict from --file <path> or, if omitted, stdin. Required
               JSON keys:
                 verdict          "satisfied" | "needs_revision"
                 criterion_results array of {criterion, pass, justification}
                 required_fixes   array
-                iteration        number
-                rubric_version   string
+                iteration        non-negative integer
+                rubric_version   string matching ^[A-Za-z0-9._+-]+$
+              --graded-hash <h> names the change set the GRADER SAW — the
+              change_set_hash from the grading packet's impact report. The
+              relay passes it (orchestrator.md 5a step C). Without it the
+              record binds the live change set only when the persisted
+              impact report still corroborates it; if they disagree the
+              verdict is recorded UNBOUND rather than bound to work that
+              was never graded.
               Effects:
                 - appends a Beads comment
-                  `RUBRIC <rubric_version> iteration <n>: <verdict> — <summary>`
+                  `RUBRIC <rubric_version> iteration <n>: <verdict>
+                   change_set_hash=<h> — <summary>`
+                  (the hash names the change set that was graded; omitted
+                  when it cannot be computed. `enter` reads it back to decide
+                  whether a satisfied verdict still covers the current work.)
                 - on satisfied: removes rubric-pending, adds rubric-satisfied
                 - on needs_revision: labels unchanged (qa-blocked round-trip
                   is the QA agent's move, not this script's)
@@ -793,35 +923,127 @@ cmd_enter() {
     # Stop runs the full suite from scratch (resumes normal gating).
     wipe_iteration_state "$tid"
 
-    # Spec Phase A: a fresh enter invalidates the prior cycle's rubric
-    # verdict. We always clear rubric-satisfied (a new review cycle is
-    # not yet satisfied) and ensure rubric-pending is set (the new
-    # cycle is awaiting a grader verdict). Both happen unconditionally
-    # so the rubric labels stay in lockstep with the gate lifecycle.
-    local was_rubric_satisfied=0
+    # Spec Phase A + bjx (v4.1 U1): what an enter does to a rubric verdict
+    # already on the task, and why that is now a decision rather than a wipe.
+    #
+    # WAS: clear rubric-satisfied unconditionally, re-arm rubric-pending. That
+    # is right for the case it was written for — a satisfied verdict from a
+    # PREVIOUS change set must never carry into a new review cycle — and wrong
+    # for the ordering the relay actually walks. `grade-record` runs in the
+    # ORCHESTRATOR's turn (RUBRIC-RELAY step C) and QA acts on the verdict in a
+    # LATER spawn (step D); any Stop in between blocks and PRINTS
+    # `qa-gate.sh enter <id>` — the QA-required block's "when entering review,
+    # mark the gate" line, and the LABEL_WITHOUT_RECORD remediation, both in
+    # verify-before-stop.sh. Following the gate's own printed instruction then
+    # destroyed a verdict recorded seconds earlier against the IDENTICAL change
+    # set, and the approve that followed warned "no satisfied verdict on file"
+    # — false, and the thing qa.md 6f answers with a written OVERRIDE reason.
+    # The gate was manufacturing overrides against its own audit trail, and
+    # driving re-grades (a paid grader spawn) of an already-graded diff.
+    #
+    # That reachability is MECHANICAL, which is why the fix is here and not in
+    # the relay's prompt text: the `enter` in that position is emitted by a
+    # hook, so no ordering rule written into orchestrator.md or qa.md can be
+    # relied on to avoid it.
+    #
+    # NOW: the clear is conditional on two independent tests, both conservative,
+    # and it still fires whenever either is unmet.
+    #
+    #   1. THE CYCLE MUST ALREADY BE OPEN (qa-gate-entered set). A fresh enter
+    #      opens a NEW review cycle and always clears — byte-identical to the
+    #      old behaviour, and precisely the case the unconditional clear
+    #      existed for. `approve` deliberately leaves rubric-satisfied behind
+    #      as the audit trail of what backed it, so "a label survived an
+    #      approve" is the normal input to this branch, not an anomaly.
+    #   2. THE VERDICT MUST BIND THE CURRENT CHANGE SET. The latest RUBRIC
+    #      record must be a `satisfied` one carrying a change_set_hash equal to
+    #      the hash right now. A verdict recorded before the specialist touched
+    #      three more files does not cover them and still clears.
+    #
+    # Test 2 needs positive evidence to preserve, so every way of failing to
+    # produce it degrades to the pre-bjx behaviour: a pre-bjx RUBRIC comment
+    # carries no token, a verdict superseded by a later needs_revision does not
+    # answer, a version outside the validated class does not parse, and an
+    # unavailable hash — in EITHER of its two spellings, empty or the
+    # $CHANGE_SET_HASH_UNAVAILABLE sentinel — is refused. In all of them the
+    # label is cleared, which is what the gate did before.
+    #
+    # THE SENTINEL IS CHECKED HERE, not only in the reader, because this is
+    # where its shape actually bites: it is a CONSTANT, so on a host with
+    # neither shasum nor sha256sum both sides of the comparison below would be
+    # that same constant and the guard would match unconditionally — preserving
+    # every verdict on the one class of machine where the hash means nothing.
+    # The reader refuses it too (a legacy record may already carry it); the two
+    # checks are not redundant, they cover a written record and a live recompute.
+    #
+    # KNOWN LIMIT, inherited and deliberately not narrowed here: the canonical
+    # change-set hash is over the changed-file LIST, not file contents (see
+    # impact-report.sh). Rewriting an ALREADY-TRACKED file after grading does
+    # not move it, so a verdict can be preserved across content the grader never
+    # saw. That is the single canonicalisation shared with the qa-approved
+    # record (llh.18) and reviewed_hash (jio.1); computing a content hash here
+    # would be a fourth definition of "the change set", which is exactly what
+    # llh.18 exists to forbid. Pinned as documented behaviour by section B3 of
+    # .claude/tests/component/specs/rubric-binding.sh rather than left latent.
+    #
+    # The live recompute is deliberate, rather than set_idempotency_reference's
+    # tracker-or-persisted-report split: `enter` opens a cycle over the change
+    # set that exists NOW, and the persisted report is a statement about when
+    # the report was last written, not about when the verdict was graded — a
+    # report refreshed after grading would vouch for a diff nobody graded.
+    local was_rubric_satisfied=0 already_entered=0
+    local rubric_preserved=0 rubric_verdict_obs=""
     has_label "$tid" "rubric-satisfied" && was_rubric_satisfied=1
+    has_label "$tid" "qa-gate-entered" && already_entered=1
     if [ "$was_rubric_satisfied" = "1" ]; then
-        remove_rubric_satisfied "$tid"
+        if [ "$already_entered" = "1" ]; then
+            local graded_hash="" current_hash=""
+            graded_hash=$(latest_satisfied_rubric_hash "$tid") || graded_hash=""
+            current_hash=$(compute_change_set_hash) || current_hash=""
+            if [ "$current_hash" = "$CHANGE_SET_HASH_UNAVAILABLE" ]; then
+                current_hash=""
+            fi
+            if [ -n "$current_hash" ] && [ "$graded_hash" = "$current_hash" ]; then
+                rubric_preserved=1
+                rubric_verdict_obs="; kept rubric-satisfied — the recorded verdict binds this exact change set (change_set_hash=$current_hash), so this re-entry resumes the open cycle rather than re-opening the rubric loop"
+            else
+                rubric_verdict_obs="; cleared stale rubric-satisfied (graded change set ${graded_hash:-<unbound>} does not match the current one ${current_hash:-<unavailable>})"
+            fi
+        else
+            rubric_verdict_obs="; cleared stale rubric-satisfied (a fresh gate cycle re-opens the rubric loop)"
+        fi
+        if [ "$rubric_preserved" = "0" ]; then
+            remove_rubric_satisfied "$tid"
+        fi
     fi
 
-    if has_label "$tid" "qa-gate-entered"; then
+    if [ "$already_entered" = "1" ]; then
         # Idempotent re-enter: the label is already there, but we still
         # refresh current-task in case it drifted (e.g., a different task
         # claimed it earlier in this session).
-        # Also re-add rubric-pending: an already-entered task that lost
-        # rubric-pending (e.g. via a stale grade-record from a prior
-        # cycle) should be brought back to the awaiting-verdict state.
-        add_label "$tid" "rubric-pending" || true
-        local refreshed_obs="qa-gate-entered already set; current-task refreshed; rubric-pending refreshed"
+        #
+        # rubric-pending is re-armed unless the verdict above was PRESERVED:
+        # an already-entered task that lost rubric-pending (e.g. via a stale
+        # grade-record from a prior cycle) belongs back in the awaiting-verdict
+        # state, but a task whose satisfied verdict still binds the current
+        # change set is not awaiting anything — re-arming there would put both
+        # rubric labels on one task and tell cmd_status's reader that a graded
+        # cycle is still pending.
+        local rubric_refresh_obs=""
+        if [ "$rubric_preserved" = "1" ]; then
+            rubric_refresh_obs="rubric-satisfied kept (no new grading round needed)"
+        else
+            add_label "$tid" "rubric-pending" || true
+            rubric_refresh_obs="rubric-pending refreshed"
+        fi
+        local refreshed_obs="qa-gate-entered already set; current-task refreshed; $rubric_refresh_obs"
         if ! write_current_task "$tid"; then
-            refreshed_obs="qa-gate-entered already set; WARNING current-task write failed (see sync-errors.log); rubric-pending refreshed"
+            refreshed_obs="qa-gate-entered already set; WARNING current-task write failed (see sync-errors.log); $rubric_refresh_obs"
         fi
         if [ "$was_escalated" = "1" ] || [ "$was_deferred" = "1" ]; then
             refreshed_obs="$refreshed_obs; cleared prior escalation labels (escalated=$was_escalated deferred=$was_deferred) and reset iteration state"
         fi
-        if [ "$was_rubric_satisfied" = "1" ]; then
-            refreshed_obs="$refreshed_obs; cleared stale rubric-satisfied"
-        fi
+        refreshed_obs="$refreshed_obs$rubric_verdict_obs"
         # G2.n6d: refresh the mechanical impact report on re-enter too —
         # a resumed cycle reviews the CURRENT change set, so the artifact
         # must reflect it. Tolerant: enter never fails because of this.
@@ -887,9 +1109,11 @@ cmd_enter() {
     if [ "$was_escalated" = "1" ] || [ "$was_deferred" = "1" ]; then
         extra_obs=" cleared prior escalation labels (escalated=$was_escalated deferred=$was_deferred) and reset iteration state."
     fi
-    if [ "$was_rubric_satisfied" = "1" ]; then
-        extra_obs="$extra_obs cleared stale rubric-satisfied."
-    fi
+    # bjx: reaching here means already_entered was 0, so the rubric decision
+    # above can only have been the fresh-cycle clear — preservation is
+    # unreachable on this path by construction, and the observation says which
+    # of the two clears fired rather than just that one did.
+    extra_obs="$extra_obs$rubric_verdict_obs"
     emit_json 1 "enter" "$tid" "entered" "qa-gate-entered + rubric-pending labels set at $ts; current-task persisted.$persist_warn$extra_obs$IMPACT_REPORT_OBS"
 }
 
@@ -1132,6 +1356,46 @@ cmd_approve() {
         log_sync_error "approve: could not compute change_set_hash for $tid (impact-report.sh missing/failing); writing approval comment WITHOUT a change-set binding — verify-before-stop will not be able to match it (re-run approve once impact-report.sh is restored)"
     fi
 
+    # R2-F2: does the satisfied verdict this approval is about to cite actually
+    # cover the change set being approved?
+    #
+    # Nothing used to ask. The rubric audit line below was emitted from the
+    # LABEL alone, so this sequence produced an approval claiming a verdict it
+    # did not have, with no adversary and no forged anything: grade set A ->
+    # enter (preserves, correctly) -> add path B -> regenerate the impact report
+    # -> approve. approved_hash is A+B, the verdict graded A, and the envelope
+    # said "rubric-satisfied preserved (audit trail)".
+    #
+    # WARN, DO NOT REFUSE — a deliberate call, and the one place in this change
+    # where the safer-looking option is the wrong one:
+    #   - qa.md 6f states the rule explicitly: "adding script-side denial of
+    #     approve-without-satisfied would create a parallel gate and violate
+    #     principle 6". The rubric is a QA INPUT; qa-approved + a bound record
+    #     is the only release credential, and verify-before-stop reads neither
+    #     rubric label nor RUBRIC comment. A refusal here would be a second,
+    #     divergent gate on a signal the Stop side does not consult.
+    #   - The remediation a refusal would print is either "re-run the relay" (a
+    #     paid grader spawn, and impossible at the iteration cap) or "clear the
+    #     label first" — which is the undocumented-label-removal dead end gz3
+    #     spent a whole task eliminating. A refusal whose only exit is a bypass
+    #     teaches the bypass.
+    #   - The legitimate flow it would fire on is real: QA reviewing a change
+    #     set that grew after grading and approving with a documented override
+    #     is exactly what 6f describes.
+    # So the fix is to stop the AUDIT TRAIL lying, which is the actual harm:
+    # the claim below is now hash-checked, and a mismatch is recorded in the
+    # durable approval comment as well as the envelope. If the project later
+    # decides the rubric should hard-gate, this is the line to change — and
+    # principle 6 and qa.md 6f have to change with it.
+    local rubric_graded_hash=""
+    rubric_graded_hash=$(latest_satisfied_rubric_hash "$tid") || rubric_graded_hash=""
+    local rubric_mismatch=0
+    if [ "$had_rubric_satisfied" = "1" ] && [ -n "$rubric_graded_hash" ] \
+       && [ -n "$approved_hash" ] && [ "$rubric_graded_hash" != "$approved_hash" ]; then
+        rubric_mismatch=1
+        log_sync_error "approve: rubric-satisfied is set on $tid but the satisfied verdict binds change_set_hash=$rubric_graded_hash while this approval binds $approved_hash — the approval comment must carry an override reason (qa.md 6f); recorded as a [rubric mismatch: ...] token in the approval record"
+    fi
+
     # V3 (claude-workflow-plugin-jio.1): the review-separation audit fields.
     # Declared OUTSIDE the sentinel block below for the same two reasons
     # impact_obs is: (a) the --no-review bypass path skips the block but must
@@ -1347,6 +1611,16 @@ cmd_approve() {
         # F1 doc-only fast path is the intended producer).
         comment_suffix="$comment_suffix [review bypass: $review_bypass_reason]"
     fi
+    # R2-F2: the mismatch goes in the DURABLE record, not only the envelope.
+    # An envelope is read once by whoever ran the command; the audit question
+    # ("did the verdict this approval cited actually cover it?") is asked later,
+    # by someone reading the task. Same bracketed-suffix shape as the two
+    # bypasses, and after every machine token, so the llh.18 / 3mg.2 readers
+    # (`change_set_hash=`, `reviewed_by=`, `worktree=`) stop where they always
+    # did.
+    if [ "$rubric_mismatch" = "1" ]; then
+        comment_suffix="$comment_suffix [rubric mismatch: graded=$rubric_graded_hash approved=$approved_hash]"
+    fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local hash_field=""
     if [ -n "$approved_hash" ]; then
@@ -1493,7 +1767,14 @@ cmd_approve() {
     # reason; we just surface the state.
     local rubric_obs=""
     if [ "$had_rubric_satisfied" = "1" ]; then
-        rubric_obs="; rubric-satisfied preserved (audit trail)"
+        # R2-F2: the claim is hash-checked now, not taken from the label.
+        if [ "$rubric_mismatch" = "1" ]; then
+            rubric_obs="; WARNING rubric-satisfied is set, but the satisfied verdict binds a DIFFERENT change set (graded=$rubric_graded_hash, approved=$approved_hash) — this approval covers work the grader did not see, so the approval comment must include an explicit override reason per spec Phase A / qa.md 6f; the mismatch is recorded in the approval record. To approve on a fresh verdict instead, re-run the rubric relay for the current change set"
+        elif [ -z "$rubric_graded_hash" ]; then
+            rubric_obs="; rubric-satisfied preserved (audit trail) — NOTE the verdict carries no change-set binding (pre-v4.1 record, or the hash was unavailable when it was recorded), so it could not be checked against this approval"
+        else
+            rubric_obs="; rubric-satisfied preserved (audit trail) and VERIFIED against this approval — the satisfied verdict binds the same change set (change_set_hash=$approved_hash)"
+        fi
     elif [ "$had_rubric_pending" = "1" ]; then
         rubric_obs="; WARNING approving with rubric-pending still set (no satisfied verdict on file) — the QA approval comment must include an explicit override reason per spec Phase A; rubric-pending cleared as cycle ends"
     else
@@ -1792,9 +2073,13 @@ cmd_choose() {
 #
 # Side effects:
 #   - always: append a comment
-#       "RUBRIC <rubric_version> iteration <n>: <verdict> — <summary>"
+#       "RUBRIC <rubric_version> iteration <n>: <verdict>[ change_set_hash=<h>]
+#        — <summary>"
 #     where <summary> is "all criteria pass" for satisfied, or a
-#     comma-joined list of failed criterion names for needs_revision.
+#     comma-joined list of failed criterion names for needs_revision, and
+#     change_set_hash (bjx) names the change set that was graded — the token
+#     is omitted when the hash cannot be computed. See the composition site
+#     for why the token sits between the verdict and the em-dash.
 #   - on `satisfied`: remove rubric-pending; add rubric-satisfied.
 #   - on `needs_revision`: labels unchanged. The qa-blocked round-trip is
 #     the QA agent's move (it writes the block comment with required_fixes
@@ -1815,6 +2100,7 @@ cmd_grade_record() {
     # match the shell-style of the rest of this script and so a typo
     # surfaces as a structured error rather than a getopts quirk.
     local input_path=""
+    local graded_hash_arg=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --file)
@@ -1827,14 +2113,38 @@ cmd_grade_record() {
                 fi
                 shift 2 || true
                 ;;
+            --graded-hash)
+                # R2-F1: the change set the grader ACTUALLY saw, taken from the
+                # grading packet by the relay. See the binding block below for
+                # why a recompute at record time is not the same thing.
+                graded_hash_arg="${2:-}"
+                if [ -z "$graded_hash_arg" ]; then
+                    emit_error_json "grade-record" "$tid" "missing_graded_hash" \
+                        "--graded-hash requires a value (the change_set_hash from the grading packet's impact report)" \
+                        "qa-gate.sh grade-record $tid --graded-hash <hash>"
+                    exit 1
+                fi
+                # Validated for the same reason rubric_version is: this value is
+                # interpolated into the record's machine prefix, so anything
+                # carrying a space could relocate a field boundary.
+                case "$graded_hash_arg" in
+                    *[!A-Za-z0-9-]*)
+                        emit_error_json "grade-record" "$tid" "graded_hash_invalid_chars" \
+                            "--graded-hash='$graded_hash_arg' contains characters outside [A-Za-z0-9-]; it is written into the RUBRIC record's machine prefix" \
+                            "pass the change_set_hash verbatim from the grading packet's impact report"
+                        exit 1
+                        ;;
+                esac
+                shift 2 || true
+                ;;
             -h|--help)
                 usage
                 exit 1
                 ;;
             *)
                 emit_error_json "grade-record" "$tid" "unknown_flag" \
-                    "unknown argument: $1 (expected --file <path> or stdin)" \
-                    "qa-gate.sh grade-record $tid [--file <path>]"
+                    "unknown argument: $1 (expected --file <path>, --graded-hash <hash>, or stdin)" \
+                    "qa-gate.sh grade-record $tid [--file <path>] [--graded-hash <hash>]"
                 exit 1
                 ;;
         esac
@@ -1970,9 +2280,22 @@ cmd_grade_record() {
         exit 1
     fi
 
-    # iteration must be a number. We accept integers and floats from JSON;
-    # the comment uses the raw value. The 0.2 escalation cap is the agent's
-    # concern, not ours.
+    # iteration must be a number, and — R2-F3 — an INTEGER one. The 0.2
+    # escalation cap is still the agent's concern, not ours; the constraint here
+    # is purely about the record grammar.
+    #
+    # It used to accept any JSON number and interpolate the raw value, while the
+    # reader requires `[0-9]+` immediately followed by a colon. `1.5` therefore
+    # produced a record the reader could not parse — and, before the selector
+    # fix above, an unparseable LATEST record made the reader fall back to an
+    # older one, so a needs_revision at iteration 1.5 failed to supersede the
+    # satisfied verdict before it. Same lesson as rubric_version: the writer
+    # must not be able to mint a record its own reader cannot read.
+    #
+    # This is the DEFENCE-IN-DEPTH half of R2-F3, not the fix. It stops the tool
+    # creating unparseable records; it can do nothing about the ones it did not
+    # create (legacy records, hand-written comments), which is why the selector
+    # above had to change too. Verified in that order rather than assumed.
     local it_type it_val
     it_type=$(printf '%s' "$raw" | jq -r '.iteration | type' 2>/dev/null || echo "unknown")
     if [ "$it_type" != "number" ]; then
@@ -1982,6 +2305,14 @@ cmd_grade_record() {
         exit 1
     fi
     it_val=$(printf '%s' "$raw" | jq -r '.iteration' 2>/dev/null || echo "?")
+    case "$it_val" in
+        ''|*[!0-9]*)
+            emit_error_json "grade-record" "$tid" "iteration_not_integer" \
+                "iteration=$it_val is not a non-negative integer; it is interpolated into the RUBRIC record's machine prefix, which the reader parses as [0-9]+ followed immediately by a colon — a value like 1.5 or 1e3 writes a record that cannot be read back and so cannot supersede an earlier verdict" \
+                "iteration must be a non-negative integer (1, 2, 3, ...)"
+            exit 1
+            ;;
+    esac
 
     # rubric_version must be a non-empty string.
     local rv_type rv_val
@@ -1999,6 +2330,39 @@ cmd_grade_record() {
             "rubric_version must be a non-empty string (e.g. \"v1\")"
         exit 1
     fi
+
+    # bjx: rubric_version is the ONLY machine-prefix field of the RUBRIC record
+    # that came from the grader, and it is interpolated with a space on each
+    # side. Validated merely as "non-empty string" it was a GRAMMAR INJECTION:
+    # the reader parses the verdict from immediately after the record's first
+    # colon, so a version of the form
+    #     1 iteration 1: satisfied change_set_hash=<the real current hash>
+    # relocated that colon into the injected text, and a needs_revision verdict
+    # was read back as satisfied AND bound to the current change set — enough to
+    # carry a rubric-satisfied label across a re-enter that should have cleared
+    # it. Reproduced end-to-end with a causation control (only the version
+    # differed) and pinned in section I of
+    # .claude/tests/component/specs/rubric-binding.sh.
+    #
+    # The class below has no space and no colon, so no value that passes here
+    # can move a field boundary. It is deliberately the WRITER's job: the reader
+    # cannot distinguish an injected prefix from a real one after the fact, so a
+    # reader-only class would narrow the grammar without closing anything. The
+    # reader carries the SAME class for parity (latest_satisfied_rubric_hash),
+    # and section F asserts the two spellings match.
+    #
+    # Rejecting rather than sanitising: a silently-rewritten version would make
+    # the record disagree with the verdict JSON the grader actually emitted,
+    # and the structured envelope is what lets the orchestrator re-prompt with
+    # precision (spec Phase A).
+    case "$rv_val" in
+        *[!A-Za-z0-9._+-]*)
+            emit_error_json "grade-record" "$tid" "rubric_version_invalid_chars" \
+                "rubric_version='$rv_val' contains characters outside [A-Za-z0-9._+-]; it is interpolated into the RUBRIC record's machine prefix, where a space or a colon would move a field boundary and let the recorded verdict be read back as a different one" \
+                "rubric_version must match ^[A-Za-z0-9._+-]+$ (e.g. \"1\", \"v1\", \"1.2\")"
+            exit 1
+            ;;
+    esac
 
     # Build the one-line summary. For satisfied, the summary is the fixed
     # "all criteria pass" string. For needs_revision, we list the criterion
@@ -2025,11 +2389,108 @@ cmd_grade_record() {
     fi
 
     # Compose and post the comment. Format matches the spec exactly:
-    # RUBRIC <rubric_version> iteration <n>: <verdict> — <summary>
+    # RUBRIC <rubric_version> iteration <n>: <verdict>[ change_set_hash=<h>] — <summary>
+    #
+    # bjx (v4.1 U1): the verdict now names the CHANGE SET it graded. A verdict
+    # is an opinion about a specific diff, and the only durable statement of
+    # which diff that was is this token — the same binding llh.18 put on the
+    # approval record and jio.1 put on the review artifact (`reviewed_hash`).
+    # `enter` reads it back (latest_satisfied_rubric_hash) to tell a verdict
+    # that still covers the current work from one left over from a previous
+    # change set; before it existed, `enter` could only assume the latter and
+    # cleared rubric-satisfied unconditionally.
+    #
+    # PLACEMENT is a compatibility contract, and the same one cmd_approve
+    # documents for its own record: the machine token goes AFTER the verdict
+    # and BEFORE the em-dash, i.e. ahead of all free text. Every existing
+    # reader keys on the prefix through the verdict — qa.md 6c's
+    # `test("^RUBRIC [0-9]+ iteration")`, the L1 spec's
+    # `^RUBRIC v1 iteration 1: satisfied`, rubric-loop.sh's
+    # `RUBRIC 1 iteration 1: needs_revision` — so appending here leaves all of
+    # them matching, while putting it after the summary would bury a machine
+    # field inside grader-authored prose.
+    #
+    # Recorded on BOTH verdicts, not just satisfied: "which change set was
+    # found wanting" is exactly as much of an audit question as "which one
+    # passed", and the reader filters on the verdict itself.
+    #
+    # Best-effort, mirroring approve's hash_field: an unavailable hash omits
+    # the token rather than writing a placeholder, because a token that does
+    # not name a real change set would read as a binding to something. The
+    # unbound record then behaves precisely as a pre-bjx one does — enter
+    # cannot prove it covers the current work, so it clears.
+    #
+    # bjx: "unavailable" has TWO spellings. impact-report.sh returns empty when
+    # it cannot run at all, and the CONSTANT $CHANGE_SET_HASH_UNAVAILABLE when
+    # it runs on a host carrying neither shasum nor sha256sum. Only the first
+    # was excluded by `[ -n ... ]`; the second is a non-empty string that would
+    # be recorded as a binding and then compare EQUAL to itself at enter time,
+    # preserving every verdict unconditionally on such a host. Both spellings
+    # omit the token, which is what the paragraph above already promised.
+    #
+    # R2-F1 — WHERE THE HASH COMES FROM, which is the whole meaning of the
+    # token. This used to be a live recompute of the tracker AT RECORD TIME.
+    # That is not "the change set that was graded": grade-record runs after QA
+    # assembled the packet and after the grader ran, so any path that landed in
+    # between was silently folded into the binding. A verdict for set A was
+    # recorded as covering A+B. Reproduced directly — packet hash 8685efdc,
+    # record bound to e7bfaafe — and it is NOT the documented path-scoped
+    # limitation: that one is about contents, this one leaked whole PATHS into
+    # a verdict that never saw them.
+    #
+    # Three sources, in descending order of authority:
+    #
+    #   1. --graded-hash, passed by the relay from the grading packet's impact
+    #      report (orchestrator.md 5a step C). This is the only value that
+    #      actually witnesses what the grader was shown, so it wins outright.
+    #      It cannot come from the grader's own JSON: that would let the graded
+    #      party state what it graded, and it would change grader.md's schema.
+    #
+    #   2. A live recompute CORROBORATED by the persisted impact report. If the
+    #      report the packet was built from still describes the current change
+    #      set, then nothing was added between assembly and now, and the live
+    #      value is the graded one. This is what makes the flag optional without
+    #      making it a lie — the common relay, where nothing moves, still binds.
+    #
+    #   3. Nothing. If they DISAGREE, the change set moved and we cannot say
+    #      which set was graded, so the record is written UNBOUND with the two
+    #      hashes named. Unbound is not a failure mode: enter treats it as
+    #      stale and clears, i.e. the pre-bjx behaviour, and approve's
+    #      cross-check (R2-F2) has nothing to contradict.
+    #
+    # Note what case 2 still cannot see: if the persisted report was itself
+    # REGENERATED after the packet was assembled (an `enter` between steps C
+    # and D does exactly that), it agrees with live while describing a set the
+    # grader never saw. That residual is why R2-F2's cross-check at approve
+    # exists — the two findings are one gap at two ends, and only the flag
+    # closes it at this end. The relay passes the flag; the fallback keeps an
+    # un-updated caller honest rather than silently wrong.
+    local graded_hash="" hash_token="" binding_source=""
+    if [ -n "$graded_hash_arg" ]; then
+        graded_hash="$graded_hash_arg"
+        binding_source="--graded-hash supplied by the relay (the grading packet's change set)"
+    else
+        local live_hash="" persisted_hash=""
+        live_hash=$(compute_change_set_hash) || live_hash=""
+        persisted_hash=$(persisted_report_hash "$tid") || persisted_hash=""
+        if [ -n "$live_hash" ] && [ "$live_hash" = "$persisted_hash" ]; then
+            graded_hash="$live_hash"
+            binding_source="live recompute, corroborated by the persisted impact report (no path moved since the report the packet was built from)"
+        else
+            binding_source="none — the live change set (${live_hash:-<unavailable>}) and the persisted impact report (${persisted_hash:-<absent>}) disagree, so which set was graded cannot be established here; pass --graded-hash from the grading packet to bind it"
+        fi
+    fi
+    if [ "$graded_hash" = "$CHANGE_SET_HASH_UNAVAILABLE" ]; then
+        graded_hash=""
+        binding_source="none — the change-set hash is unavailable on this host (no shasum/sha256sum)"
+    fi
+    if [ -n "$graded_hash" ]; then
+        hash_token=" change_set_hash=$graded_hash"
+    fi
     local ts
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local comment_text
-    comment_text="RUBRIC $rv_val iteration $it_val: $verdict — $summary"
+    comment_text="RUBRIC $rv_val iteration $it_val: $verdict$hash_token — $summary"
     add_comment "$tid" "$comment_text"
 
     # Label flip on satisfied. needs_revision leaves labels alone.
@@ -2051,8 +2512,19 @@ cmd_grade_record() {
         label_obs="labels unchanged (qa-blocked round-trip is the QA agent's move)"
     fi
 
+    # bjx: name the binding (or its absence) in the envelope. An unbound
+    # verdict is not an error — it is a verdict `enter` will not be able to
+    # carry across a re-entry, and the operator should be able to see that
+    # from the record-writing call rather than from a later surprise.
+    local binding_obs
+    if [ -n "$graded_hash" ]; then
+        binding_obs="; verdict bound to the graded change set (change_set_hash=$graded_hash; source: $binding_source)"
+    else
+        binding_obs="; WARNING verdict recorded WITHOUT a change-set binding (source: $binding_source) — a re-enter cannot prove this verdict covers the current work, so rubric-satisfied will be cleared as stale and the next relay round will re-grade"
+    fi
+
     emit_json 1 "grade-record" "$tid" "$verdict" \
-        "comment posted at $ts: $comment_text; $label_obs"
+        "comment posted at $ts: $comment_text; $label_obs$binding_obs"
 }
 
 # ---------------------------------------------------------------------------
