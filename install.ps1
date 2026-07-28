@@ -229,6 +229,13 @@ try {
     # listed because both gate ends fail CLOSED without them (v4 V3 / G2.n6d):
     # a partial install missing either leaves approve refusing and the Stop
     # hook blocking with no in-loop way to diagnose it.
+    #
+    # workflow-doctor.sh (v4.1 / C0a) is the only functional verification
+    # surface; without it a target cannot answer "does this orchestrate?".
+    # Both .claude/mcp/*/package-lock.json files are required because the
+    # target's dependency install is `npm ci`, which REFUSES without a
+    # lockfile — a truncated clone would otherwise yield a target whose MCP
+    # servers can never be installed. Kept in sync with install.sh's list.
     $Required = @(
         ".claude/agents/orchestrator.md",
         ".claude/agents/qa.md",
@@ -245,6 +252,9 @@ try {
         ".claude/scripts/impact-report.sh",
         ".claude/scripts/current-task.sh",
         ".claude/scripts/prevent-orchestrator-edits.sh",
+        ".claude/scripts/workflow-doctor.sh",
+        ".claude/mcp/bd-mcp/package-lock.json",
+        ".claude/mcp/code-graph-mcp/package-lock.json",
         ".claude/hooks/hooks.json",
         ".claude/skills/workflow-engine/SKILL.md",
         ".claude/settings.json",

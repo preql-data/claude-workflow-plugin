@@ -69,4 +69,16 @@ See `docs/` (which has its own index in `docs/plans/README.md`):
 
 - `tests/` -> symlink to `.claude/scripts/tests/`.
 - Run: `make test` (or `bash tests/run-tests.sh` directly).
-- Smoke install: `make install-test`.
+- Health check an install: `make doctor` (or `make doctor TARGET=<dir>`) — eleven
+  functional checks that EXECUTE the SessionStart hook, both MCP servers and both
+  gate hooks. Safe mid-session; see `.claude/scripts/workflow-doctor.sh --help`.
+- Smoke install: `make install-test`. **Expected to FAIL until
+  `claude-workflow-plugin-z9m` (C0b) lands** — it now installs into a tempdir and
+  runs the doctor against the result, and a freshly rendered target has no
+  `.claude/mcp/*/node_modules` (the installer excludes it and the `curl | bash`
+  shallow clone never had one), so `mcp_bd` and `mcp_code_graph` fail. That red is
+  the v4.1 P0 reproducing on demand, not a broken checkout. It is deliberately not
+  wired into CI (`make test-ci` is `test test-component test-e2e-unit
+  manifest-validate`) and deliberately not `--skip`ped, because skipping would
+  make the command answer "yes, this install orchestrates" while the defect is
+  live in every rendered target.

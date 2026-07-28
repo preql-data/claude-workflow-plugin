@@ -95,11 +95,24 @@ if (!SAMPLE_SCRIPT) {
 }
 
 describe("fixture-script-sync: canonical hook-script set", () => {
-  it("listCanonicalHookScripts is non-empty and excludes the harness-only resolver", () => {
+  it("listCanonicalHookScripts is non-empty and excludes every non-hook script", () => {
     expect(CANONICAL_NAMES.length).toBeGreaterThan(0);
     // resolve-fixture-spec.sh is the Makefile fixture->spec resolver and
     // must never be synced into a fixture (no fixture hook invokes it).
     expect(CANONICAL_NAMES).not.toContain("resolve-fixture-spec.sh");
+    // workflow-doctor.sh (v4.1 / claude-workflow-plugin-0fc) is an OPERATOR
+    // CLI, not a hook: no hooks.json event maps to it, no hook shells out to
+    // it, and it builds its own probe sandbox rather than running against a
+    // live tree. Asserted explicitly rather than relying on the drift guard's
+    // "no EXTRA script" assertion to catch it transitively — its sibling
+    // exclusion above has its own assertion, and an exclusion without one is
+    // enforced only for as long as no fixture happens to ship the file.
+    expect(CANONICAL_NAMES).not.toContain("workflow-doctor.sh");
+    // ...but it must really exist on disk, or the exclusion above is
+    // vacuously green (it would also pass for a script that was deleted).
+    expect(
+      existsSync(path.join(PLUGIN_ROOT, ".claude", "scripts", "workflow-doctor.sh")),
+    ).toBe(true);
     // Sanity: the run-4 culprit and its transitive deps ARE in the set.
     for (const required of [
       "verify-before-stop.sh",

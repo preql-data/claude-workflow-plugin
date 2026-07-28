@@ -256,11 +256,25 @@ const HARNESS_METADATA_FILES = ["fixture.yaml"] as const;
  *  minus this exclude list. That mirrors exactly what install.sh lands
  *  in a consumer project (install.sh copies the whole glob).
  *
+ *  `workflow-doctor.sh` (v4.1 / claude-workflow-plugin-0fc) is the second
+ *  entry: it is an OPERATOR CLI, not a hook. No `hooks.json` event maps to
+ *  it, no hook shells out to it, and it deliberately builds its own probe
+ *  sandbox rather than running against a live tree — so a fixture has no
+ *  path that could ever invoke it. Syncing it in would trip the drift
+ *  guard's "no EXTRA .sh script" assertion for every fixture.
+ *
  *  Keep this list TIGHT: only add a name here if it is provably never
  *  invoked through a fixture hook (directly or transitively). Over-
  *  excluding reintroduces the run-4 staleness class for the excluded
- *  script. */
-const FIXTURE_SYNC_EXCLUDES = new Set<string>(["resolve-fixture-spec.sh"]);
+ *  script.
+ *
+ *  THIS LIST IS HAND-MIRRORED IN THE Makefile's `sync-fixtures` target.
+ *  Both must change together; the drift guard reads this one and the bulk
+ *  copy reads that one. */
+const FIXTURE_SYNC_EXCLUDES = new Set<string>([
+  "resolve-fixture-spec.sh",
+  "workflow-doctor.sh",
+]);
 
 /** Relative path (from a fixture root) to the synced scripts dir. */
 const FIXTURE_SCRIPTS_RELDIR = path.join(".claude", "scripts");

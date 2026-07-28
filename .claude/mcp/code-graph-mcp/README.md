@@ -28,6 +28,13 @@ v3.3.0 plan.
 | `dependency_path` | Shortest call chain from one symbol to another | `{from, to, cwd?}` | None |
 | `code_index_health` | Status / drift / coverage / index size | `{cwd?}` | None |
 
+7 tools total. This sentence is machine-read: `.claude/scripts/tests/mcp-deps.test.sh`
+extracts the leading number from the `^<N> tools total\.` line in each server's
+README and cross-checks it against `DOCTOR_TOOL_COUNTS` in
+`.claude/scripts/workflow-doctor.sh` and the Tools column of
+[`docs/MCP_SERVERS.md`](../../../docs/MCP_SERVERS.md). Changing the surface
+means changing all four in the same commit, or the cross-check fails.
+
 Every tool returns `ok()` with `data` plus a free-form `llm_observations`
 string (per v3 principle #9). All tools set `readOnlyHint: true`,
 `destructiveHint: false`, `idempotentHint: true`. Every tool except

@@ -336,6 +336,19 @@ fi
 # one leaves `qa-gate.sh approve` refusing and the Stop hook blocking, with no
 # way to tell from inside the loop that the cause is a missing file. Failing
 # loudly here turns a permanent gate deadlock into an install-time error.
+#
+# workflow-doctor.sh (v4.1 / C0a) is required because it is the ONLY functional
+# verification surface: an install that lands without it cannot answer "does
+# this target orchestrate?" at all, which is how "both MCP servers dead" and
+# "no workflow context" each shipped for three releases.
+#
+# Both .claude/mcp/*/package-lock.json files are required because the target's
+# dependency install is `npm ci`, and `npm ci` REFUSES without a lockfile. A
+# truncated clone (or a source tree whose lockfiles were gitignored) would
+# otherwise produce a target that looks complete and whose MCP servers can
+# never be installed — the same class of silent failure, one layer down.
+# Cross-checked by .claude/scripts/tests/mcp-deps.test.sh, which asserts both
+# files are git-tracked at lockfileVersion 3 with zero install scripts.
 for required in \
     ".claude/agents/orchestrator.md" \
     ".claude/agents/qa.md" \
@@ -352,6 +365,9 @@ for required in \
     ".claude/scripts/impact-report.sh" \
     ".claude/scripts/current-task.sh" \
     ".claude/scripts/prevent-orchestrator-edits.sh" \
+    ".claude/scripts/workflow-doctor.sh" \
+    ".claude/mcp/bd-mcp/package-lock.json" \
+    ".claude/mcp/code-graph-mcp/package-lock.json" \
     ".claude/hooks/hooks.json" \
     ".claude/skills/workflow-engine/SKILL.md" \
     ".claude/settings.json" \

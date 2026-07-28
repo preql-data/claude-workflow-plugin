@@ -21,6 +21,8 @@ Native MCP tools for the Beads (`bd`) issue tracker. A typed shim — Beads stay
 
 21 tools total. Every tool exposes the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) and includes a free-form `llm_observations` field on success per the v3 plan's principle #9.
 
+The count sentence above is machine-read: `.claude/scripts/tests/mcp-deps.test.sh` extracts the leading number from the `^<N> tools total\.` line in each server's README and cross-checks it against `DOCTOR_TOOL_COUNTS` in `.claude/scripts/workflow-doctor.sh` and the Tools column of [`docs/MCP_SERVERS.md`](../../../docs/MCP_SERVERS.md). Changing the surface means changing all four in the same commit, or the cross-check fails.
+
 ## Configuration
 
 | Variable / file | Purpose |

@@ -790,6 +790,86 @@ assert_eq "installer-v3-upgrade 8c: git archive HEAD extracts a source tree for 
     "0" "$META_ARCHIVE_RC"
 cp "$PLUGIN_ROOT/install.sh" "$META_SRC/install.sh"
 
+# WORKING-TREE OVERLAY (v4.1 / claude-workflow-plugin-0fc).
+#
+# `git archive HEAD` is HEAD-only, but the install.sh copied in just above comes
+# from the WORKING TREE. Those two disagree the moment a change adds a file to
+# install.sh's required-source list without committing it: the working-tree
+# installer demands `.claude/scripts/<new>.sh`, HEAD's tree does not have it,
+# and EVERY install in sections 8c-8e aborts with "Plugin source missing" —
+# 39 assertions failing for a reason that has nothing to do with what they test.
+# Observed exactly once, when workflow-doctor.sh joined the required list.
+#
+# The fix keeps the archive (a consistent, .gitignore-respecting snapshot) and
+# overlays the working tree's SHIPPED SURFACE on top, so META_SRC always matches
+# the installer under test. The surface is enumerated by the repo's own
+# workflow-manifest.sh rather than a hand-written path list — a second list here
+# would be one more thing to forget, which is the failure mode this overlay
+# exists to remove. Self-consistent by construction: seed_v4_install generates
+# the target's install-manifest FROM META_SRC, so the hashes downstream
+# assertions classify against are the overlaid bytes.
+#
+# Best-effort: a failure to enumerate leaves the pure-HEAD tree in place (the
+# pre-overlay behaviour), and the install assertions below still report it.
+META_OVERLAY_TOOL="$PLUGIN_ROOT/.claude/scripts/workflow-manifest.sh"
+META_OVERLAY_COUNT=0
+if [ -f "$META_OVERLAY_TOOL" ]; then
+    while IFS="$(printf '\t')" read -r rel _class _hash; do
+        [ -n "$rel" ] || continue
+        [ -f "$PLUGIN_ROOT/$rel" ] || continue
+        mkdir -p "$META_SRC/$(dirname "$rel")" 2>/dev/null || continue
+        cp "$PLUGIN_ROOT/$rel" "$META_SRC/$rel" 2>/dev/null \
+            && META_OVERLAY_COUNT=$((META_OVERLAY_COUNT + 1))
+    done <<EOF
+$(bash "$META_OVERLAY_TOOL" generate "$PLUGIN_ROOT" 2>/dev/null || true)
+EOF
+fi
+# Non-vacuity: an overlay that copied nothing would silently restore the exact
+# HEAD-only fragility this block removes.
+if [ "$META_OVERLAY_COUNT" -gt 20 ]; then
+    PASS=$((PASS + 1))
+    printf '  PASS: installer-v3-upgrade 8c: working-tree surface overlaid onto the archived source (%s file(s))\n' \
+        "$META_OVERLAY_COUNT"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("installer-v3-upgrade 8c: the working-tree overlay copied only $META_OVERLAY_COUNT file(s); META_SRC may not match the installer under test")
+    printf '  FAIL: installer-v3-upgrade 8c: working-tree overlay copied only %s file(s) (expected the whole shipped surface)\n' \
+        "$META_OVERLAY_COUNT"
+fi
+# Pin the specific class that broke: every path install.sh REQUIRES must now be
+# present in META_SRC, whether or not it is committed yet.
+#
+# The extraction is anchored on install.sh's own `for required in \` block and
+# its `    ; do` terminator. Those anchors are TEXT, so a reformat of install.sh
+# would make the awk range match nothing, the loop below would run zero times,
+# and the "" comparison would be green forever while asserting nothing. The
+# floor below closes that — same non-vacuity discipline as META_OVERLAY_COUNT
+# directly above, applied to the reader instead of the writer. 20 is a
+# deliberate under-estimate of the real list (25 entries as of v4.1) so a
+# legitimate shrink does not trip it.
+META_REQ_MISSING=""
+META_REQ_COUNT=0
+while IFS= read -r req; do
+    [ -n "$req" ] || continue
+    META_REQ_COUNT=$((META_REQ_COUNT + 1))
+    [ -e "$META_SRC/$req" ] || META_REQ_MISSING="$META_REQ_MISSING $req"
+done <<EOF
+$(awk '/^for required in \\$/, /^    ; do$/' "$META_SRC/install.sh" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p')
+EOF
+if [ "$META_REQ_COUNT" -gt 20 ]; then
+    PASS=$((PASS + 1))
+    printf '  PASS: installer-v3-upgrade 8c: the required-source extraction found %s path(s) to assert about\n' \
+        "$META_REQ_COUNT"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("installer-v3-upgrade 8c: the required-source extraction yielded only $META_REQ_COUNT path(s) — the awk anchors ('for required in \\' / '    ; do') have probably drifted, making the assertion below vacuous")
+    printf '  FAIL: installer-v3-upgrade 8c: required-source extraction yielded only %s path(s); the awk anchors have drifted and the next assertion is vacuous\n' \
+        "$META_REQ_COUNT"
+fi
+assert_eq "installer-v3-upgrade 8c: every path install.sh requires exists in the overlaid source" \
+    "" "$META_REQ_MISSING"
+
 # clone_meta_fixture <name> — a byte-for-byte copy of the base fixture at
 # $WORK/<name>, printed on stdout. `cp -R src/. dst/` and not `src/*`: the
 # whole tree under test is dotfiles (.claude/, .claude-plugin/, .git/), which

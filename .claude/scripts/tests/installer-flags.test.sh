@@ -321,14 +321,25 @@ assert_eq "META: the mutated copy no longer carries the refusal message" "no" \
 SYNTH="$WORK/synthetic-source"
 mkdir -p "$SYNTH/.claude/agents" "$SYNTH/.claude/scripts" "$SYNTH/.claude/hooks" \
     "$SYNTH/.claude/commands" "$SYNTH/.claude/skills/workflow-engine" \
+    "$SYNTH/.claude/mcp/bd-mcp" "$SYNTH/.claude/mcp/code-graph-mcp" \
     "$SYNTH/.claude-plugin" "$SYNTH/docs" "$SYNTH/bin"
 for agent in orchestrator qa backend frontend devops; do
     printf -- '---\nmodel: test\n---\nsynthetic %s agent\n' "$agent" \
         > "$SYNTH/.claude/agents/$agent.md"
 done
+# Every helper on install.sh's required-source list. workflow-doctor joined it
+# in v4.1 / C0a; a missing entry aborts the mutant run with "Plugin source
+# missing" before the exit-code flip this section measures can happen.
 for helper in session-start intent-router post-edit verify-before-stop session-end \
-    qa-gate review-check impact-report current-task prevent-orchestrator-edits; do
+    qa-gate review-check impact-report current-task prevent-orchestrator-edits \
+    workflow-doctor; do
     printf '#!/bin/bash\nexit 0\n' > "$SYNTH/.claude/scripts/$helper.sh"
+done
+# Both MCP lockfiles joined the required-source list in the same change (the
+# target's dependency install is `npm ci`, which refuses without one).
+for mcp_server in bd-mcp code-graph-mcp; do
+    printf '{"lockfileVersion":3,"packages":{}}\n' \
+        > "$SYNTH/.claude/mcp/$mcp_server/package-lock.json"
 done
 cp "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" "$SYNTH/.claude/scripts/" 2>/dev/null || \
     printf '#!/bin/bash\nexit 1\n' > "$SYNTH/.claude/scripts/workflow-manifest.sh"

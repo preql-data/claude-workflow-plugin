@@ -28,7 +28,8 @@
   ],
   "commands": [
     "./.claude/commands/workflow-model.md",
-    "./.claude/commands/mutation-sweep.md"
+    "./.claude/commands/mutation-sweep.md",
+    "./.claude/commands/workflow-doctor.md"
   ],
   "skills": [
     "./.claude/skills/workflow-engine"
