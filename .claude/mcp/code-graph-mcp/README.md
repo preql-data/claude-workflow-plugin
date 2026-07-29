@@ -51,7 +51,7 @@ retry without a human round-trip — the bd-mcp convention.
 | `CODE_GRAPH_CWD` | Override the cwd resolution from the test harness |
 | `grammars/*.wasm` | Vendored tree-sitter grammars; provenance in `grammars/MANIFEST.md` |
 | `.claude/.code-graph/index.db` | Per-project SQLite index file; created lazily on first tool call |
-| `npm install` | Pulls `web-tree-sitter` (wasm), `sql.js` (wasm), `@modelcontextprotocol/sdk`, `zod`. The plugin installer runs this automatically |
+| `npm ci --omit=dev` | Pulls `web-tree-sitter` (wasm), `sql.js` (wasm), `@modelcontextprotocol/sdk`, `zod` from the committed `package-lock.json`. The plugin installer runs this in the target automatically (v4.1 / C0b); through v4.0 this row claimed it did while nothing ran it, which is why every curl-installed target had this server dead. Add `--ignore-scripts` on an air-gapped host — the lockfile has zero install scripts, so nothing is suppressed |
 | `npm test` | Runs the node:test suite (indexer, tools, protocol-level validation) |
 
 ### Dependency picks

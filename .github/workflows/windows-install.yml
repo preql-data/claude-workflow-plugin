@@ -14,7 +14,7 @@
 #   hosted runners; this job runs only when an operator explicitly
 #   dispatches it (GitHub UI or `gh workflow run windows-install.yml`).
 #   It makes no Anthropic API calls — pure install + filesystem assertions
-#   + a local stdio MCP boot-check — so it never touches the paid cap.
+#   + a local workflow-doctor.sh run — so it never touches the paid cap.
 #
 # WHAT IT ASSERTS
 #   The PowerShell assertions below are a port of the INTENT of
@@ -22,9 +22,16 @@
 #   spec that runs install.sh on ubuntu). Each bash assert_eq /
 #   assert_contains becomes a PowerShell Test-Path / content check, with a
 #   per-assertion PASS/FAIL line and a non-zero exit if ANY assertion
-#   fails. A final boot-check confirms the code-graph-mcp server answers a
-#   JSON-RPC `initialize` over stdio on Windows (the same handshake
-#   Claude Code performs when it spawns the server).
+#   fails.
+#
+#   The final step then runs the target's own workflow-doctor.sh and requires
+#   `failed == 0` (v4.1 / C0b). It replaced a step that npm-installed ONE
+#   server by hand and drove a single `initialize` frame through a
+#   base64-embedded Node harness — an out-of-installer dependency install that
+#   masked the exact defect this epic exists to kill, under a comment claiming
+#   "No package-lock is vendored" that was factually wrong (both lockfiles are
+#   git-tracked at lockfileVersion 3). The doctor boots BOTH servers, from the
+#   dependencies INSTALL.PS1 ITSELF INSTALLED, and adds the two gate hooks.
 #
 # NODE VERSION
 #   Pinned to 20 — matches the repo's other CI jobs (test.yml) and clears
@@ -127,7 +134,7 @@ jobs:
             Pop-Location
           }
           Write-Host "Install target: $target"
-          # Persist the target for the assertion + boot-check steps.
+          # Persist the target for the assertion + verification steps.
           "INSTALL_TARGET=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding ascii -Append
           # Run the installer. $LASTEXITCODE is the installer's exit code.
           & "$env:GITHUB_WORKSPACE/install.ps1" -Path $target -Mode 1
@@ -171,7 +178,16 @@ jobs:
           $mcp = Join-Path $target ".mcp.json"
 
           # --- 1. installer exit 0 -----------------------------------------
-          Add-Result "install.ps1 exit 0" ($installRc -eq 0) "rc=$installRc"
+          # 0 or 3, not just 0 (v4.1 / C0b). The installer now runs
+          # workflow-doctor.sh itself and exits 3 for "every file was written
+          # and at least one functional check does not pass" — distinct from 1,
+          # "aborted, nothing (or a partial tree) written". On THIS runner a 3
+          # is expected rather than alarming: `bd` is a shim that no-ops
+          # `bd init`, so the target never gets a .beads/ and the installer's
+          # own `beads` and `session_start` checks cannot pass. The scoped
+          # doctor step further down is the hard gate; this row only asserts
+          # the installer did not ABORT.
+          Add-Result "install.ps1 did not abort (exit 0 = self-verified, 3 = see doctor step)" (($installRc -eq 0) -or ($installRc -eq 3)) "rc=$installRc"
 
           # --- 2. rendered .mcp.json present -------------------------------
           $mcpPresent = Test-Path -LiteralPath $mcp
@@ -341,54 +357,111 @@ jobs:
           }
           Write-Host "All parity assertions passed."
 
-      # Boot-check: the rendered code-graph-mcp server must answer a
-      # JSON-RPC `initialize` over stdio on Windows — the same handshake
-      # Claude Code performs when it spawns the server. We install the
-      # server's npm deps first (the installer intentionally does NOT vendor
-      # node_modules), then pipe a single NDJSON initialize request to the
-      # launcher and assert the response carries result.serverInfo.
-      - name: Boot-check — code-graph-mcp answers JSON-RPC initialize over stdio
+      # Functional verification (v4.1 / C0b) — replaces the old single-server
+      # boot-check.
+      #
+      # WHAT THIS REPLACED, AND WHY. The previous step npm-installed
+      # code-graph-mcp by hand and then drove one JSON-RPC `initialize` through
+      # a base64-embedded Node harness. Two things were wrong with it. Its
+      # comment claimed "No package-lock is vendored", which is FALSE — both
+      # .claude/mcp/*/package-lock.json are git-tracked at lockfileVersion 3
+      # (asserted by .claude/scripts/tests/mcp-deps.test.sh) — so it ran
+      # `npm install` where `npm ci` was available and reproducible. And its
+      # out-of-installer dependency install is now redundant: install.ps1 runs
+      # `npm ci` in the target itself, which is the whole point of C0b. A CI
+      # step that installs the deps the installer is supposed to install cannot
+      # detect the installer failing to install them — it was masking exactly
+      # the defect this epic exists to kill.
+      #
+      # workflow-doctor.sh boots BOTH servers over stdio (the old harness
+      # covered one) and adds the two gate hooks, from a rendered target,
+      # through the same launcher Claude Code spawns.
+      #
+      # THE SKIP LIST IS A FIXTURE LIMITATION, NAMED RATHER THAN HIDDEN:
+      #   deps           the runner has no real bd. The shim staged above is a
+      #                  `bd.cmd`, and Git Bash's `command -v` does not resolve
+      #                  .cmd files, so the doctor would report bd missing.
+      #   beads          the shim no-ops `bd init`, so the target never gets a
+      #                  .beads/ directory to check.
+      #   session_start  session-start.sh hard-exits without .beads/, by
+      #                  design — so this would fail on the fixture, not on the
+      #                  installer.
+      # Everything the C0b fix is actually about (mcp_bd, mcp_code_graph) plus
+      # the config, surface and gate checks stays in scope. If a gate check
+      # turns out to need a real bd on this runner, the first dispatch will say
+      # so with the doctor's own `fix:` line, and the skip list is where that
+      # gets recorded — this workflow is manual-dispatch, so a red here blocks
+      # nothing while it is being tuned.
+      - name: Verify the rendered install with workflow-doctor.sh
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $target = $env:INSTALL_TARGET
-          $serverDir = Join-Path $target ".claude/mcp/code-graph-mcp"
-          $launcher = Join-Path $serverDir "bin/code-graph-mcp.js"
-          if (-not (Test-Path -LiteralPath $launcher)) {
-            Write-Error "launcher missing at $launcher"; exit 1
-          }
-          Write-Host "Installing code-graph-mcp deps for the boot-check..."
-          Push-Location $serverDir
-          try {
-            # No package-lock is vendored; npm install resolves from the
-            # declared deps. --no-audit/--no-fund keep it quiet+fast.
-            npm install --no-audit --no-fund
-            if ($LASTEXITCODE -ne 0) { Write-Error "npm install failed (rc=$LASTEXITCODE)"; exit 1 }
-          } finally {
-            Pop-Location
+          $doctor = Join-Path $target ".claude/scripts/workflow-doctor.sh"
+          if (-not (Test-Path -LiteralPath $doctor)) {
+            Write-Error "workflow-doctor.sh missing at $doctor - the install did not land it"; exit 1
           }
 
-          # Drive the handshake from a small Node harness: spawn the
-          # launcher, write one NDJSON initialize line to its stdin, read
-          # the first stdout line, assert result.serverInfo is present.
-          # This is the same envelope validated locally against src/server.js
-          # (StdioServerTransport). Done in Node (not raw pwsh pipes) so the
-          # NDJSON framing + timeout are robust on Windows.
-          #
-          # The harness source is embedded base64-encoded and decoded to a
-          # .mjs at runtime. Rationale: a here-string would need its content
-          # and closing terminator at column 0, which collides with YAML
-          # block-scalar indentation; base64 is a single indented token with
-          # nothing for YAML or PowerShell to misparse. Decoded source:
-          #   import { spawn } from "node:child_process";
-          #   ... spawn(launcher) -> write initialize NDJSON to stdin ->
-          #       read first stdout line -> require result.serverInfo ...
-          # Round-trip verified byte-identical against the committed source
-          # and run green locally before encoding.
-          $harness = Join-Path $env:RUNNER_TEMP "mcp-bootcheck.mjs"
-          $harnessB64 = 'aW1wb3J0IHsgc3Bhd24gfSBmcm9tICJub2RlOmNoaWxkX3Byb2Nlc3MiOwoKY29uc3QgbGF1bmNoZXIgPSBwcm9jZXNzLmFyZ3ZbMl07CmNvbnN0IGluaXQgPSBKU09OLnN0cmluZ2lmeSh7CiAganNvbnJwYzogIjIuMCIsIGlkOiAxLCBtZXRob2Q6ICJpbml0aWFsaXplIiwKICBwYXJhbXM6IHsgcHJvdG9jb2xWZXJzaW9uOiAiMjAyNC0xMS0wNSIsIGNhcGFiaWxpdGllczoge30sIGNsaWVudEluZm86IHsgbmFtZTogImJvb3QtY2hlY2siLCB2ZXJzaW9uOiAiMS4wLjAiIH0gfQp9KTsKCmNvbnN0IGNoaWxkID0gc3Bhd24ocHJvY2Vzcy5leGVjUGF0aCwgW2xhdW5jaGVyXSwgeyBzdGRpbzogWyJwaXBlIiwgInBpcGUiLCAicGlwZSJdIH0pOwpsZXQgb3V0ID0gIiIsIGVyciA9ICIiLCBkb25lID0gZmFsc2U7Cgpjb25zdCB0aW1lciA9IHNldFRpbWVvdXQoKCkgPT4gewogIGlmIChkb25lKSByZXR1cm47CiAgZG9uZSA9IHRydWU7CiAgY29uc29sZS5lcnJvcigiQk9PVC1DSEVDSyBGQUlMOiB0aW1lZCBvdXQgd2FpdGluZyBmb3IgaW5pdGlhbGl6ZSByZXNwb25zZSIpOwogIGlmIChlcnIpIGNvbnNvbGUuZXJyb3IoInN0ZGVycjpcbiIgKyBlcnIpOwogIHRyeSB7IGNoaWxkLmtpbGwoKTsgfSBjYXRjaCB7fQogIHByb2Nlc3MuZXhpdCgxKTsKfSwgMzAwMDApOwoKY2hpbGQuc3RkZXJyLm9uKCJkYXRhIiwgZCA9PiB7IGVyciArPSBkLnRvU3RyaW5nKCk7IH0pOwpjaGlsZC5zdGRvdXQub24oImRhdGEiLCBkID0+IHsKICBvdXQgKz0gZC50b1N0cmluZygpOwogIGNvbnN0IG5sID0gb3V0LmluZGV4T2YoIlxuIik7CiAgaWYgKG5sID09PSAtMSB8fCBkb25lKSByZXR1cm47CiAgZG9uZSA9IHRydWU7CiAgY2xlYXJUaW1lb3V0KHRpbWVyKTsKICBjb25zdCBsaW5lID0gb3V0LnNsaWNlKDAsIG5sKS50cmltKCk7CiAgdHJ5IHsgY2hpbGQua2lsbCgpOyB9IGNhdGNoIHt9CiAgdHJ5IHsKICAgIGNvbnN0IG8gPSBKU09OLnBhcnNlKGxpbmUpOwogICAgY29uc3Qgb2sgPSBvLmpzb25ycGMgPT09ICIyLjAiICYmIG8ucmVzdWx0ICYmIChvLnJlc3VsdC5zZXJ2ZXJJbmZvIHx8IG8ucmVzdWx0LnByb3RvY29sVmVyc2lvbik7CiAgICBpZiAob2spIHsKICAgICAgY29uc3QgaW5mbyA9IG8ucmVzdWx0LnNlcnZlckluZm8gPyBKU09OLnN0cmluZ2lmeShvLnJlc3VsdC5zZXJ2ZXJJbmZvKSA6IG8ucmVzdWx0LnByb3RvY29sVmVyc2lvbjsKICAgICAgY29uc29sZS5sb2coIkJPT1QtQ0hFQ0sgUEFTUzogaW5pdGlhbGl6ZSBhbnN3ZXJlZCAtPiAiICsgaW5mbyk7CiAgICAgIHByb2Nlc3MuZXhpdCgwKTsKICAgIH0KICAgIGNvbnNvbGUuZXJyb3IoIkJPT1QtQ0hFQ0sgRkFJTDogcmVzcG9uc2UgaGFkIG5vIHJlc3VsdC5zZXJ2ZXJJbmZvOiAiICsgbGluZSk7CiAgICBwcm9jZXNzLmV4aXQoMSk7CiAgfSBjYXRjaCAoZSkgewogICAgY29uc29sZS5lcnJvcigiQk9PVC1DSEVDSyBGQUlMOiBmaXJzdCBzdGRvdXQgbGluZSB3YXMgbm90IEpTT046ICIgKyBsaW5lKTsKICAgIGNvbnNvbGUuZXJyb3IoInBhcnNlIGVycm9yOiAiICsgZS5tZXNzYWdlKTsKICAgIHByb2Nlc3MuZXhpdCgxKTsKICB9Cn0pOwpjaGlsZC5vbigiZXJyb3IiLCBlID0+IHsKICBpZiAoZG9uZSkgcmV0dXJuOyBkb25lID0gdHJ1ZTsgY2xlYXJUaW1lb3V0KHRpbWVyKTsKICBjb25zb2xlLmVycm9yKCJCT09ULUNIRUNLIEZBSUw6IGZhaWxlZCB0byBzcGF3biBsYXVuY2hlcjogIiArIGUubWVzc2FnZSk7CiAgcHJvY2Vzcy5leGl0KDEpOwp9KTsKY2hpbGQuc3RkaW4ud3JpdGUoaW5pdCArICJcbiIpOwo='
-          [System.IO.File]::WriteAllText($harness, [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($harnessB64)))
+          # Both servers must have had their dependencies installed BY THE
+          # INSTALLER. Asserted before the doctor runs so a missing node_modules
+          # is reported as "install.ps1 did not run npm ci" rather than as an
+          # opaque server-boot failure.
+          foreach ($server in @("bd-mcp", "code-graph-mcp")) {
+            $nm = Join-Path $target ".claude/mcp/$server/node_modules"
+            if (-not (Test-Path -LiteralPath $nm)) {
+              Write-Error "install.ps1 did not install dependencies for $server (no $nm). This is the v4.1 P0 reproducing on Windows."
+              exit 1
+            }
+            Write-Host "OK $server has node_modules (installed by install.ps1)"
+          }
 
-          node $harness $launcher
-          if ($LASTEXITCODE -ne 0) { Write-Error "MCP boot-check failed (rc=$LASTEXITCODE)"; exit 1 }
-          "## MCP boot-check`n`ncode-graph-mcp answered a JSON-RPC ``initialize`` over stdio on windows-latest." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          $reportPath = Join-Path $env:RUNNER_TEMP "workflow-doctor.json"
+          # Scoped 'Continue': Windows PowerShell turns a redirected native
+          # command's stderr into ErrorRecords, and under 'Stop' those become a
+          # terminating NativeCommandError - which would crash this step instead
+          # of reporting a FAILing check. Same reasoning as install.ps1's
+          # Invoke-BashScript.
+          $ErrorActionPreference = "Continue"
+          & bash $doctor --target $target --json-out $reportPath --skip deps,beads,session_start
+          $doctorRc = $LASTEXITCODE
+          $ErrorActionPreference = "Stop"
+          Write-Host "workflow-doctor.sh exit code: $doctorRc"
+
+          if (-not (Test-Path -LiteralPath $reportPath)) {
+            Write-Error "workflow-doctor.sh wrote no JSON report (rc=$doctorRc)"; exit 1
+          }
+          $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
+
+          # Vacuity guard. `failed == 0` over an empty or truncated check list is
+          # green by construction, and a report with only skips would sail
+          # through. The registry ships 11 checks and 3 are skipped above, so 8
+          # is the floor this step is entitled to assert anything with.
+          $checkCount = @($report.checks).Count
+          if ($checkCount -lt 8) {
+            Write-Error "workflow-doctor.sh reported only $checkCount check(s); refusing to treat that as a pass"
+            exit 1
+          }
+
+          $sb = New-Object System.Text.StringBuilder
+          [void]$sb.AppendLine("## workflow-doctor.sh on the rendered Windows install")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("**$($report.passed) passed, $($report.failed) failed, $($report.skipped) skipped** (``--skip deps,beads,session_start`` - the runner's ``bd`` is a shim).")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("| Result | Check | Detail |")
+          [void]$sb.AppendLine("| --- | --- | --- |")
+          foreach ($check in @($report.checks)) {
+            $tag = if ($check.status -eq "PASS") { "PASS" } elseif ($check.status -eq "SKIP") { "skip" } else { "**FAIL**" }
+            $detail = (("" + $check.detail) -split "`n")[0] -replace '\|', '\|'
+            [void]$sb.AppendLine("| $tag | $($check.name) | $detail |")
+          }
+          $sb.ToString() | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          if ([int]$report.failed -ne 0) {
+            foreach ($check in @($report.checks | Where-Object { $_.status -eq "FAIL" })) {
+              Write-Host "FAIL $($check.name): $($check.detail)"
+              if ($check.fix) { Write-Host "  fix: $($check.fix)" }
+            }
+            Write-Error "workflow-doctor.sh reported $($report.failed) failing check(s) on the rendered Windows install."
+            exit 1
+          }
+          Write-Host "All $checkCount doctor check(s) passed or were skipped by request."

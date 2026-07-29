@@ -27,12 +27,20 @@
 #
 # SECTIONS
 #   0. Preflight: the script exists and parses.
-#   1. --help: exit 0, both flags documented, exclusivity documented.
+#   1. --help: exit 0, both flags documented, exclusivity documented, and
+#      (v4.1 / C0b) the three new flags plus the exit-3 contract documented.
 #   2. --mode validation: the enum is enforced, and a VALID mode is let past
 #      (so section 2 cannot pass by rejecting everything).
 #   3. Exclusivity: both flag orders and the `--mode <n>` spelling, with and
 #      without bd on PATH, plus the ordering proof.
+#   3b. --verify (v4.1 / C0b): it runs the TARGET's doctor and propagates its
+#      status, refuses to combine with --upgrade / --mode, exits 1 naming the
+#      missing doctor on an un-installed dir, and NEVER reaches the prerequisite
+#      block — which is what makes it usable on the node-less machine whose
+#      missing runtime it is supposed to help diagnose.
 #   4. META-TEST: a copy with the exclusivity block deleted stops exiting 1.
+#   5. META-TEST (v4.1 / C0b): a copy with the --verify exclusivity blocks
+#      deleted stops refusing `--verify --mode=2` and runs the doctor instead.
 #
 # Exit codes:
 #   0  all assertions pass
@@ -75,6 +83,15 @@ assert_eq() {
 # can be pasted verbatim without escaping.
 contains() {
     if printf '%s' "$1" | grep -qF -- "$2"; then printf 'yes'; else printf 'no'; fi
+}
+
+# file_contains <file> <needle> -> yes/no. Same predicate, reading the file
+# directly. Used wherever the haystack is a whole SCRIPT: `contains "$(cat f)"`
+# pushes ~2,700 lines through a pipe that `grep -q` closes on the first match,
+# and bash reports the resulting SIGPIPE as `printf: write error: Broken pipe`
+# on stderr — noise in a test log that reads like a failure and is not one.
+file_contains() {
+    if grep -qF -- "$2" "$1" 2>/dev/null; then printf 'yes'; else printf 'no'; fi
 }
 
 # --- run helpers -------------------------------------------------------------
@@ -182,6 +199,39 @@ esac
 # Printing usage must not be a side-effecting run.
 assert_eq "--help never reaches the prerequisite checks" "no" \
     "$(contains "$RUN_OUT" "Checking prerequisites")"
+
+# --- v4.1 / C0b: the three new flags and the exit-3 contract ----------------
+# An operator whose install exits 3 has to be able to find out what 3 MEANS
+# without reading the source. `--help` is the only surface that answers that,
+# and an undocumented exit code is indistinguishable from a crash — which is
+# precisely how a caller ends up treating "installed but not working" as
+# "nothing happened" and retrying an install that does not need retrying.
+run_installer "$INSTALL_SH" --help
+assert_eq "--help documents --skip-mcp-deps" "yes" \
+    "$(contains "$RUN_OUT" "--skip-mcp-deps")"
+assert_eq "--help documents --skip-verify" "yes" \
+    "$(contains "$RUN_OUT" "--skip-verify")"
+assert_eq "--help documents --verify" "yes" \
+    "$(contains "$RUN_OUT" "--verify")"
+# The environment forms are the ONLY way to pass these under `curl | bash`,
+# so an operator who cannot find them in --help cannot use them at all.
+assert_eq "--help names the CWP_SKIP_MCP_DEPS environment form" "yes" \
+    "$(contains "$RUN_OUT" "CWP_SKIP_MCP_DEPS")"
+assert_eq "--help names the CWP_SKIP_VERIFY environment form" "yes" \
+    "$(contains "$RUN_OUT" "CWP_SKIP_VERIFY")"
+assert_eq "--help documents the exit codes at all" "yes" \
+    "$(contains "$RUN_OUT" "Exit codes:")"
+assert_eq "--help documents exit 3 as installed-but-unverified" "yes" \
+    "$(contains "$RUN_OUT" "3  INSTALLED, VERIFICATION FAILED")"
+# The 1/3 DISTINCTION is the contract, not just the existence of a 3: 1 has to
+# keep meaning "nothing landed" or the split buys nothing.
+assert_eq "--help distinguishes exit 1 as aborted" "yes" \
+    "$(contains "$RUN_OUT" "1  ABORTED")"
+# Anchored on the phrase unique to the --verify entry: a bare "Cannot be
+# combined with" is already satisfied by the --upgrade and --mode entries, so it
+# would pass on a usage text that never mentions --verify's exclusivity at all.
+assert_eq "--help states --verify cannot be combined with --upgrade or --mode" "yes" \
+    "$(contains "$RUN_OUT" "--upgrade or --mode")"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -291,6 +341,103 @@ assert_eq "no refused invocation created anything in the target" "0" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 3b: --verify (v4.1 / C0b) ==="
+
+# A target that carries a STUB workflow-doctor.sh. The stub records the argv it
+# was handed and exits with a code the test chooses, which is what makes
+# "install.sh execs the TARGET's doctor and returns its status" measurable
+# without running an install or a real 11-check doctor.
+VERIFY_TARGET="$WORK/verify-target"
+mkdir -p "$VERIFY_TARGET/.claude/scripts"
+STUB_ARGV="$WORK/stub-argv.txt"
+write_stub_doctor() {
+    local rc="$1"
+    cat > "$VERIFY_TARGET/.claude/scripts/workflow-doctor.sh" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" > "$STUB_ARGV"
+printf 'stub-doctor ran\n'
+exit $rc
+STUB
+    chmod +x "$VERIFY_TARGET/.claude/scripts/workflow-doctor.sh"
+}
+
+write_stub_doctor 0
+run_installer "$INSTALL_SH" --verify "$VERIFY_TARGET"
+assert_eq "--verify exits 0 when the target's doctor exits 0" "0" "$RUN_RC"
+assert_eq "--verify actually ran the TARGET's doctor" "yes" \
+    "$(contains "$RUN_OUT" "stub-doctor ran")"
+assert_eq "--verify passed --target to the doctor" "yes" \
+    "$(contains "$(cat "$STUB_ARGV" 2>/dev/null)" "--target $VERIFY_TARGET")"
+# The status has to be the DOCTOR's, not a normalised 0/1. A caller that wants
+# to tell "a check failed" (1) from "you typo'd a --skip name" (2) can only do
+# that if install.sh stops flattening it.
+write_stub_doctor 7
+run_installer "$INSTALL_SH" --verify "$VERIFY_TARGET"
+assert_eq "--verify propagates the doctor's exit status verbatim (7)" "7" "$RUN_RC"
+write_stub_doctor 2
+run_installer "$INSTALL_SH" --verify "$VERIFY_TARGET"
+assert_eq "--verify propagates a doctor usage error (2) rather than flattening it" "2" "$RUN_RC"
+write_stub_doctor 0
+
+# An un-installed directory: exit 1, and SAY WHICH FILE is missing. "verify
+# failed" without the path sends an operator looking for a broken install where
+# there is no install at all.
+VERIFY_EMPTY="$WORK/verify-empty"
+mkdir -p "$VERIFY_EMPTY"
+run_installer "$INSTALL_SH" --verify "$VERIFY_EMPTY"
+assert_eq "--verify on an un-installed dir exits 1" "1" "$RUN_RC"
+assert_eq "--verify names the missing doctor by path" "yes" \
+    "$(contains "$RUN_OUT" "$VERIFY_EMPTY/.claude/scripts/workflow-doctor.sh")"
+assert_eq "--verify says the plugin is not installed there" "yes" \
+    "$(contains "$RUN_OUT" "does not appear to be installed")"
+assert_eq "--verify installed nothing into the un-installed dir" "0" \
+    "$(find "$VERIFY_EMPTY" -mindepth 1 2>/dev/null | grep -c . | tr -d ' \n')"
+
+# Exclusivity, both partners, both spellings of --mode.
+run_installer "$INSTALL_SH" --verify --mode=2 "$VERIFY_TARGET"
+assert_eq "--verify --mode=2 exits 1" "1" "$RUN_RC"
+assert_eq "--verify --mode=2 explains the refusal" "yes" \
+    "$(contains "$RUN_OUT" "$EXCLUSIVITY_MSG")"
+assert_eq "--verify --mode=2 names the mode the operator passed" "yes" \
+    "$(contains "$RUN_OUT" "--verify and --mode=2 cannot be combined")"
+# The refusal must PREEMPT the doctor: a run that refused and still ran the
+# doctor would have done half of what it declined to do.
+assert_eq "--verify --mode=2 did not run the doctor anyway" "no" \
+    "$(contains "$RUN_OUT" "stub-doctor ran")"
+
+run_installer "$INSTALL_SH" --mode=2 --verify "$VERIFY_TARGET"
+assert_eq "--mode=2 --verify exits 1 (reverse order)" "1" "$RUN_RC"
+run_installer "$INSTALL_SH" --verify --mode 3 "$VERIFY_TARGET"
+assert_eq "--verify --mode 3 (space form) exits 1" "1" "$RUN_RC"
+
+run_installer "$INSTALL_SH" --verify --upgrade "$VERIFY_TARGET"
+assert_eq "--verify --upgrade exits 1" "1" "$RUN_RC"
+assert_eq "--verify --upgrade explains the refusal" "yes" \
+    "$(contains "$RUN_OUT" "$EXCLUSIVITY_MSG")"
+run_installer "$INSTALL_SH" --upgrade --verify "$VERIFY_TARGET"
+assert_eq "--upgrade --verify exits 1 (reverse order)" "1" "$RUN_RC"
+
+# --- ordering: --verify must PRECEDE the prerequisite block ------------------
+# THE POINT OF THE FLAG. `--verify` is what an operator reaches for when the
+# install is broken, and "node is missing" is one of the things it is supposed
+# to tell them — through the doctor's own `deps` check, alongside the other ten.
+# If the prerequisite block ran first, a node-less machine would get
+# "node and npm are REQUIRED" and learn nothing about the other ten checks.
+if [ "$BD_HIDDEN" != "yes" ]; then
+    echo "  SKIPPED: bd resolves under $MINIMAL_PATH; cannot stage a prereq-hostile run here"
+else
+    run_installer_minimal_path "$INSTALL_SH" --verify "$VERIFY_TARGET"
+    assert_eq "--verify still runs the doctor on a prereq-hostile PATH" "yes" \
+        "$(contains "$RUN_OUT" "stub-doctor ran")"
+    assert_eq "--verify never reaches the prerequisite checks" "no" \
+        "$(contains "$RUN_OUT" "Checking prerequisites")"
+    assert_eq "--verify does not blame a missing tool" "no" \
+        "$(contains "$RUN_OUT" "REQUIRED")"
+    assert_eq "--verify still exits with the doctor's status on that PATH" "0" "$RUN_RC"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Section 4: META-TEST (the exclusivity check can actually fail) ==="
 
 # Delete the exclusivity block from a COPY, anchored on the block's own `if`
@@ -308,8 +455,18 @@ assert_eq "META: the mutated copy is shorter (the block was removed)" "1" \
     "$([ "$(wc -l < "$MUTANT")" -lt "$(wc -l < "$INSTALL_SH")" ] && echo 1 || echo 0)"
 assert_eq "META: the mutated copy is still syntactically valid bash" "0" \
     "$(bash -n "$MUTANT" 2>/dev/null && echo 0 || echo 1)"
-assert_eq "META: the mutated copy no longer carries the refusal message" "no" \
-    "$(contains "$(cat "$MUTANT")" "$EXCLUSIVITY_MSG")"
+# Anchored on the sentence THIS block owns, not on the shared "cannot be
+# combined" phrase. v4.1 / C0b added two more exclusivity blocks (--verify with
+# --upgrade, --verify with --mode) that use the same wording on purpose, so the
+# shared phrase stopped discriminating: it survives this mutation because the
+# OTHER blocks still carry it, and the assertion would fail while the mutation
+# it measures had landed perfectly.
+assert_eq "META: the mutated copy no longer carries the --upgrade/--mode refusal" "no" \
+    "$(file_contains "$MUTANT" "--upgrade and --mode=")"
+# ...and the --verify refusals it was NOT asked to touch are still there, so the
+# sed is proven surgical rather than merely destructive.
+assert_eq "META: the mutated copy still carries the untouched --verify refusals" "yes" \
+    "$(file_contains "$MUTANT" "--verify and --mode=")"
 
 # The mutant has to run to completion to show the exit code FLIP, and a
 # completed run needs a plugin source: install.sh treats its own directory as
@@ -417,6 +574,65 @@ else
     assert_eq "META control: ...and installs nothing" "0" \
         "$(find "$CONTROL_TARGET" -mindepth 1 2>/dev/null | grep -c . | tr -d ' \n')"
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 5: META-TEST (the --verify exclusivity check can actually fail) ==="
+
+# Same construction as section 4, aimed at the two blocks C0b added. Anchored on
+# the blocks' own `if` lines and their column-0 `fi`, never on a line number: if
+# either condition is reworded the sed matches nothing, the "copy differs"
+# assertion below fails, and the META is repaired rather than silently rotting
+# into a no-op.
+#
+# WHY THE FLIP IS MEASURED ON A DOCTOR-BEARING TARGET. Without the exclusivity
+# blocks, `--verify --mode=2` falls through to the --verify handler — which on
+# an EMPTY dir also exits 1 ("no workflow-doctor.sh"), so an exit-code-only
+# assertion would pass for the wrong reason and this META would prove nothing.
+# Pointed at a target carrying the stub doctor, the mutant exits 0 (the stub's
+# status) while the real installer exits 1 with the refusal: a flip in BOTH the
+# code and the message.
+VERIFY_MUTANT="$WORK/install-no-verify-exclusivity.sh"
+# shellcheck disable=SC2016  # sed script: the $VAR text is the installer's own source, not an expansion
+sed -e '/^if \[ "\$VERIFY_ONLY" = true \] && \[ "\$FORCE_UPGRADE" = true \]; then$/,/^fi$/d' \
+    -e '/^if \[ "\$VERIFY_ONLY" = true \] && \[ -n "\$INSTALL_MODE_OVERRIDE" \]; then$/,/^fi$/d' \
+    "$INSTALL_SH" > "$VERIFY_MUTANT"
+assert_eq "META-TEST: the --verify-mutated copy really differs from install.sh" "1" \
+    "$(cmp -s "$VERIFY_MUTANT" "$INSTALL_SH" && echo 0 || echo 1)"
+assert_eq "META-TEST: the --verify-mutated copy is shorter (both blocks were removed)" "1" \
+    "$([ "$(wc -l < "$VERIFY_MUTANT")" -lt "$(wc -l < "$INSTALL_SH")" ] && echo 1 || echo 0)"
+assert_eq "META-TEST: the --verify-mutated copy is still syntactically valid bash" "0" \
+    "$(bash -n "$VERIFY_MUTANT" 2>/dev/null && echo 0 || echo 1)"
+# Both refusal sentences are gone, and they are checked separately: a sed that
+# deleted only one block would otherwise look like a full mutation.
+assert_eq "META-TEST: the mutant no longer carries the --verify/--mode refusal" "no" \
+    "$(file_contains "$VERIFY_MUTANT" "--verify and --mode=")"
+assert_eq "META-TEST: the mutant no longer carries the --verify/--upgrade refusal" "no" \
+    "$(file_contains "$VERIFY_MUTANT" "--verify and --upgrade cannot be combined")"
+# ...and the --upgrade/--mode refusal it was NOT asked to touch is still there,
+# so the sed is proven surgical rather than merely destructive.
+assert_eq "META-TEST: the mutant still carries the untouched --upgrade/--mode refusal" "yes" \
+    "$(file_contains "$VERIFY_MUTANT" "--upgrade and --mode=")"
+
+write_stub_doctor 0
+RUN_OUT=$(bash "$VERIFY_MUTANT" --verify --mode=2 "$VERIFY_TARGET" </dev/null 2>&1)
+VERIFY_MUTANT_RC=$?
+assert_eq "META-TEST: without the blocks, --verify --mode=2 no longer exits 1" "no" \
+    "$([ "$VERIFY_MUTANT_RC" -eq 1 ] && echo yes || echo no)"
+assert_eq "META-TEST: the mutant accepts the conflicting flags and runs the doctor" "yes" \
+    "$(contains "$RUN_OUT" "stub-doctor ran")"
+assert_eq "META-TEST: the mutant prints no refusal" "no" \
+    "$(contains "$RUN_OUT" "$EXCLUSIVITY_MSG")"
+assert_eq "META-TEST: the mutant exits with the doctor's status instead" "0" "$VERIFY_MUTANT_RC"
+
+# Control: the REAL installer, same arguments, same target — still refuses, and
+# still does NOT run the doctor.
+run_installer "$INSTALL_SH" --verify --mode=2 "$VERIFY_TARGET"
+assert_eq "META-TEST control: the unmutated installer still exits 1 on the same run" "1" "$RUN_RC"
+assert_eq "META-TEST control: ...refusing for the documented reason" "yes" \
+    "$(contains "$RUN_OUT" "$EXCLUSIVITY_MSG")"
+assert_eq "META-TEST control: ...and never reaches the doctor" "no" \
+    "$(contains "$RUN_OUT" "stub-doctor ran")"
 
 # --- Summary ---------------------------------------------------------------
 

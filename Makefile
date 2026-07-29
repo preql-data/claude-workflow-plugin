@@ -24,7 +24,7 @@ help:
 	@echo "  shellcheck        — run shellcheck on every hook script"
 	@echo "  check             — run AgentLint against this repo"
 	@echo "  doctor            — functional health check of an install (TARGET=<dir>, DOCTOR_ARGS=\"...\"); safe mid-session (only 'beads' touches the target)"
-	@echo "  install-test      — install into a tempdir, then run the doctor against it; EXPECTED RED until C0b (rendered targets have no MCP node_modules)"
+	@echo "  install-test      — install into a tempdir, then run the doctor against it (expected GREEN; needs the npm registry)"
 	@echo "  clean             — remove transient .qa-tracking state"
 
 # Launch a working session at the effort level the A/B interference test
@@ -240,21 +240,27 @@ check:
 # one-line message when the copy itself did not happen, which is a clearer
 # signal than eleven downstream check failures.
 #
-# mcp_bd / mcp_code_graph are NOT skipped here, and this target is EXPECTED TO
-# EXIT 1 until claude-workflow-plugin-z9m (C0b) lands. A rendered target has no
-# node_modules (install.sh excludes it and the curl path's shallow clone never
-# had one), so both server checks fail — that is the v4.1 P0 reproducing on
-# demand rather than in a user's project. Adding `--skip mcp_bd,mcp_code_graph`
-# would make this command answer "yes, this install orchestrates" while the
-# defect is live in every rendered target, i.e. exactly the false green the epic
-# exists to kill; it would also depend on someone remembering to remove the skip
-# in C0b. Not CI-wired (test-ci is test + test-component + test-e2e-unit +
-# manifest-validate), so the red blocks nothing.
+# mcp_bd / mcp_code_graph are NOT skipped here, and as of
+# claude-workflow-plugin-z9m (C0b) THIS TARGET IS EXPECTED TO PASS. It used to
+# be expected-red, and the red was the v4.1 P0 reproducing on demand: a rendered
+# target had no .claude/mcp/*/node_modules, so both server checks failed. C0b
+# made install.sh run `npm ci` per server IN THE TARGET, and that is what turns
+# this green. Adding `--skip mcp_bd,mcp_code_graph` would make this command
+# answer "yes, this install orchestrates" while the defect was live in every
+# rendered target — the exact false green the epic exists to kill — so the skip
+# stays absent now that it is no longer needed either.
 #
-# The red is made SELF-DESCRIBING instead: on failure the recipe prints why,
-# so an operator following the documented smoke command does not read it as a
-# broken checkout. Same one-liner is on INDEX.md's Tests section.
-# Run `make doctor` against a real (dependency-installed) tree for all-green.
+# THIS TARGET NEEDS THE NETWORK. `npm ci` fetches from the npm registry, so an
+# offline run fails at the dependency step. That is also why it is not CI-wired
+# (test-ci is test + test-component + test-e2e-unit + manifest-validate) and why
+# the L2 installer specs set CWP_SKIP_MCP_DEPS=1 / CWP_SKIP_VERIFY=1: this
+# target is the ONE surface that exercises dependency provisioning for real.
+#
+# EXIT CODES ARE NOW MEANINGFUL, and the recipe reports which it got: install.sh
+# exits 3 for "every file was written and a functional check does not pass",
+# distinct from 1 for "aborted". A 3 here means the installer's OWN verification
+# caught something; the recipe re-runs nothing and just points at the target.
+# Run `make doctor` against this checkout for the same checks without installing.
 install-test:
 	@d=/tmp/cwp-install-test-$$$$ ; \
 	rc=0 ; \
@@ -266,13 +272,15 @@ install-test:
 	if [ "$$rc" -ne 0 ]; then \
 		echo "" ; \
 		echo "install-test: FAILED (exit $$rc)." ; \
-		echo "  EXPECTED until claude-workflow-plugin-z9m (C0b) lands IF the only failing" ; \
-		echo "  checks are mcp_bd and mcp_code_graph: a freshly rendered target has no" ; \
-		echo "  .claude/mcp/*/node_modules, because install.sh excludes it and the" ; \
-		echo "  'curl | bash' shallow clone never had one. That is the v4.1 P0" ; \
-		echo "  reproducing on demand, not a broken checkout." ; \
-		echo "  ANY OTHER failing check is a real regression — read its indented fix: line." ; \
+		echo "  This target is EXPECTED TO PASS since claude-workflow-plugin-z9m (C0b)." ; \
+		echo "  A failure here is a real regression — read each failing check's indented" ; \
+		echo "  fix: line above." ; \
+		echo "  exit 3 = the files all landed and install.sh's own verification failed." ; \
+		echo "  exit 1 = the install aborted, or the doctor found a failing check on re-run." ; \
+		echo "  Offline? 'npm ci' needs the npm registry; there is no cached fallback." ; \
 		echo "  Target left in place for inspection: $$d" ; \
+	else \
+		rm -rf "$$d" ; \
 	fi ; \
 	exit $$rc
 

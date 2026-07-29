@@ -40,6 +40,21 @@
 # run gets the SAME per-file treatment as an upgrade — operator edits preserved
 # with a .new alongside instead of overwritten — and skips its backup entirely
 # when the tree is already at this release with nothing to write.
+#
+# EXIT CODES (v4.1 / C0b — 3 is new and deliberately distinct):
+#   0  installed, and the post-install verification passed (or was skipped).
+#      ALSO covers a run whose `npm ci` failed while the server's existing
+#      dependencies were preserved: the target works — its servers answer
+#      tools/list — so it is not a 3. The tail names the affected servers.
+#   1  ABORTED. Bad arguments, a missing prerequisite, or a source that failed
+#      its sanity check. Nothing — or at most a partial tree — was written.
+#   3  INSTALLED, VERIFICATION FAILED. Every file was written and the target is
+#      complete; workflow-doctor.sh then found at least one functional check
+#      that does not pass. The failing checks and their fixes are printed.
+# The 1/3 split is the whole point: through v4.0 an install whose MCP servers
+# could not boot exited 0 and printed "Installation complete.", which is how
+# "both MCP servers dead" shipped three times. A caller that treats any non-zero
+# as "nothing happened" is now wrong in a way it can detect.
 
 set -e
 
@@ -53,6 +68,13 @@ NC='\033[0m'
 
 # Tunables --------------------------------------------------------------------
 MIN_BD_VERSION="0.47"
+# Both shipped MCP servers declare "engines": {"node": ">=18.17"} in their
+# package.json, and both launchers are dynamic-import shims that fail opaquely
+# on an older runtime. Kept in the same dotted-numeric shape MIN_BD_VERSION uses
+# so the two floors share one `sort -V` idiom.
+# BEGIN MIN_NODE_VERSION (packaging-parity.test.sh extracts this block; keep the sentinels)
+MIN_NODE_VERSION="18.17.0"
+# END MIN_NODE_VERSION
 REPO_URL="${CLAUDE_WORKFLOW_REPO:-https://github.com/preql-data/claude-workflow-plugin.git}"
 REPO_BRANCH="${CLAUDE_WORKFLOW_BRANCH:-main}"
 
@@ -112,13 +134,37 @@ fi
 
 # Argument parsing ------------------------------------------------------------
 # Supports:
-#   --upgrade   force the v2->v3 upgrade flow even if auto-detection is fuzzy
-#   --help/-h   print usage and exit 0
+#   --upgrade         force the v2->v3 upgrade flow even if auto-detection is fuzzy
+#   --skip-mcp-deps   do not run `npm ci` for the MCP servers in the target
+#   --skip-verify     do not run workflow-doctor.sh after the install
+#   --verify          run ONLY the target's workflow-doctor.sh, then exit
+#   --help/-h         print usage and exit 0
 # Anything else is treated as the target project path (back-compat with v2
 # install.sh's positional [project-path] form).
+#
+# THE ENVIRONMENT FORMS ARE NOT A CONVENIENCE. `curl -fsSL <url> | bash` has no
+# clean way to pass a flag (it needs the `bash -s --` incantation, which is
+# exactly the form operators paste wrong), and the curl path is the one that
+# produced the v4.1 P0. `CWP_SKIP_MCP_DEPS=1` / `CWP_SKIP_VERIFY=1` prefix the
+# pipeline and work identically:
+#   CWP_SKIP_MCP_DEPS=1 curl -fsSL <url>/install.sh | bash
+# Any non-empty value enables the skip; the flags win by being checked with the
+# same variable.
 FORCE_UPGRADE=false
 TARGET=""
 INSTALL_MODE_OVERRIDE=""
+VERIFY_ONLY=false
+SKIP_MCP_DEPS=false
+SKIP_VERIFY=false
+# Written as `if` blocks rather than `[ -n ... ] && VAR=true`: the AND-list form
+# is exempt from `set -e` at top level but NOT inside a function, so the short
+# spelling is a trap waiting for someone to move these three lines.
+if [ -n "${CWP_SKIP_MCP_DEPS:-}" ]; then
+    SKIP_MCP_DEPS=true
+fi
+if [ -n "${CWP_SKIP_VERIFY:-}" ]; then
+    SKIP_VERIFY=true
+fi
 
 print_usage() {
     printf '%s installer\n' "$BRAND_LABEL"
@@ -127,6 +173,7 @@ print_usage() {
 Usage:
   bash install.sh [project-path]                Install (auto-detects upgrades)
   bash install.sh --upgrade [project-path]      Force the migration flow
+  bash install.sh --verify [project-path]       Verify an EXISTING install only
   bash install.sh --help                        Print this message
 
 Flags:
@@ -146,12 +193,44 @@ Flags:
                    Useful when running under `curl ... | bash` where the
                    interactive prompt has no usable stdin.
                    Cannot be combined with --upgrade.
+  --skip-mcp-deps  Do NOT run `npm ci` for the two MCP servers in the target.
+                   The servers will not boot until you install their
+                   dependencies by hand; the installer prints the exact
+                   command. Also disables the node/npm prerequisite check, so
+                   this is the flag for an air-gapped or node-less host.
+                   Environment form: CWP_SKIP_MCP_DEPS=1
+  --skip-verify    Do NOT run workflow-doctor.sh after installing. The install
+                   then always exits 0 on success and nothing checks that the
+                   target actually orchestrates.
+                   Environment form: CWP_SKIP_VERIFY=1
+  --verify         Verify an EXISTING install and exit — install nothing. Runs
+                   the TARGET's own .claude/scripts/workflow-doctor.sh and
+                   exits with its status (0 healthy, 1 a check failed, 2 a
+                   usage error). Exits 1 if the target has no doctor, i.e. the
+                   plugin is not installed there. Cannot be combined with
+                   --upgrade or --mode.
   -h, --help       Print this message and exit 0.
+
+Exit codes:
+  0  Installed, and the post-install verification passed (or was skipped).
+     NOTE: 0 also covers a run whose `npm ci` FAILED while the server's existing
+     dependencies were preserved — the target works, so it is not a 3. That case
+     is never silent: the headline says the dependency update did not finish and
+     the last block of output names the affected servers and the command that
+     completes it. Scripted callers that need to distinguish it should grep for
+     "DEPENDENCY UPDATE DID NOT FINISH" or re-run with --verify.
+  1  ABORTED: bad arguments, a missing prerequisite, or an unusable source.
+     Nothing, or at most a partial tree, was written.
+  3  INSTALLED, VERIFICATION FAILED. Every file was written; workflow-doctor.sh
+     then found at least one functional check that does not pass. Each failing
+     check is printed with the command that fixes it. Re-verify at any time
+     with `bash install.sh --verify <project-path>`.
 
 Curl-pipe forms:
   curl -fsSL <url>/install.sh | bash
   curl -fsSL <url>/install.sh | bash -s -- /path/to/project
   curl -fsSL <url>/install.sh | bash -s -- --upgrade
+  CWP_SKIP_MCP_DEPS=1 curl -fsSL <url>/install.sh | bash
 
 The default (no flag) auto-detects both upgrades: v2 layouts (no model:
 frontmatter, no .claude-plugin/plugin.json, no .claude/mcp/) migrate to v3,
@@ -175,6 +254,18 @@ while [ $# -gt 0 ]; do
         --mode)
             INSTALL_MODE_OVERRIDE="${2:-}"
             shift 2
+            ;;
+        --skip-mcp-deps)
+            SKIP_MCP_DEPS=true
+            shift
+            ;;
+        --skip-verify)
+            SKIP_VERIFY=true
+            shift
+            ;;
+        --verify)
+            VERIFY_ONLY=true
+            shift
             ;;
         -h|--help)
             print_usage
@@ -225,6 +316,65 @@ if [ "$FORCE_UPGRADE" = true ] && [ -n "$INSTALL_MODE_OVERRIDE" ]; then
     echo "  --mode picks one flat behaviour for an existing .claude/." >&2
     echo "Pass exactly one of them." >&2
     exit 1
+fi
+
+# --verify joins the same exclusion (v4.1 / C0b) ------------------------------
+# --verify INSTALLS NOTHING; --upgrade and --mode both describe how to write to
+# an existing tree. Combining them is not "verify, then upgrade" — it is two
+# incompatible intents, and picking one silently would mean an operator who
+# typed `--verify --mode=1` could get a backup-and-replace they did not ask
+# for. Same refusal shape and the same "cannot be combined" wording as the pair
+# above, so one L1 assertion covers all three orderings.
+if [ "$VERIFY_ONLY" = true ] && [ "$FORCE_UPGRADE" = true ]; then
+    echo -e "${RED}--verify and --upgrade cannot be combined.${NC}" >&2
+    echo "  --verify only runs the target's workflow-doctor.sh; it installs nothing." >&2
+    echo "  --upgrade runs a migration flow that rewrites the tree." >&2
+    echo "Pass exactly one of them." >&2
+    exit 1
+fi
+if [ "$VERIFY_ONLY" = true ] && [ -n "$INSTALL_MODE_OVERRIDE" ]; then
+    echo -e "${RED}--verify and --mode=$INSTALL_MODE_OVERRIDE cannot be combined.${NC}" >&2
+    echo "  --verify only runs the target's workflow-doctor.sh; it installs nothing." >&2
+    echo "  --mode picks one flat behaviour for an existing .claude/." >&2
+    echo "Pass exactly one of them." >&2
+    exit 1
+fi
+
+# --verify: run the TARGET's doctor and exit with its status ------------------
+#
+# PLACED BEFORE THE PREREQUISITE BLOCK ON PURPOSE. `--verify` on a node-less
+# machine has to WORK — the doctor's own `deps` check is what should report the
+# missing runtime, in the doctor's own vocabulary, alongside the ten other
+# checks. Aborting here with "node not found - REQUIRED" would answer a
+# diagnostic request with an installer error and tell the operator nothing about
+# the other ten checks.
+#
+# It runs the TARGET's copy, not this checkout's: the question `--verify`
+# answers is "is the install over there healthy", and a doctor read from the
+# source tree would verify a script the target may not even have. `exec` hands
+# over the process, so the doctor's exit status IS ours with nothing in between
+# to rewrite it (the cleanup trap is not installed until further down, and
+# there is nothing to clean up yet).
+if [ "$VERIFY_ONLY" = true ]; then
+    VERIFY_TARGET="${TARGET:-.}"
+    if [ ! -d "$VERIFY_TARGET" ]; then
+        echo -e "${RED}--verify: not a directory: $VERIFY_TARGET${NC}" >&2
+        exit 1
+    fi
+    VERIFY_TARGET=$(cd "$VERIFY_TARGET" && pwd)
+    VERIFY_DOCTOR="$VERIFY_TARGET/.claude/scripts/workflow-doctor.sh"
+    if [ ! -f "$VERIFY_DOCTOR" ]; then
+        echo -e "${RED}--verify: no workflow-doctor.sh in $VERIFY_TARGET${NC}" >&2
+        echo "  Expected: $VERIFY_DOCTOR" >&2
+        echo "  The plugin does not appear to be installed there. Install it first:" >&2
+        echo "    bash install.sh \"$VERIFY_TARGET\"" >&2
+        exit 1
+    fi
+    echo ""
+    echo -e "${BLUE}${BRAND_LABEL}${NC}"
+    echo -e "Verifying: ${GREEN}$VERIFY_TARGET${NC}"
+    echo ""
+    exec bash "$VERIFY_DOCTOR" --target "$VERIFY_TARGET"
 fi
 
 # Resolve target ---------------------------------------------------------------
@@ -287,6 +437,75 @@ if [ -n "$BD_VERSION_NUM" ]; then
     fi
 fi
 
+# node + npm are HARD prerequisites (v4.1 / C0b) ------------------------------
+#
+# They were not checked at all through v4.0, and that omission is the whole of
+# the v4.1 P0: both shipped MCP servers declare "engines": {"node": ">=18.17"},
+# both launchers are dynamic-import shims, and both die with
+# ERR_MODULE_NOT_FOUND the moment Claude Code spawns them without their
+# dependencies. The installer now INSTALLS those dependencies (`npm ci`, below),
+# so node and npm are no longer optional runtime niceties — they are build
+# inputs for the install itself.
+#
+# PLACED BEFORE THE CLONE. Under `curl | bash` the next block fetches ~10 MB
+# from GitHub; a node-less machine should be told so before paying for that.
+#
+# SKIPPED UNDER --skip-mcp-deps, and that is the whole reason the flag exists in
+# this form: with no dependency install to run, a node-less host is a legitimate
+# (if degraded) target — an air-gapped machine that will have node_modules
+# copied in later, or an operator who only wants the agents and hooks. Refusing
+# to install at all would be the installer having an opinion it has not earned.
+if [ "$SKIP_MCP_DEPS" = true ]; then
+    echo -e "${YELLOW}note${NC} --skip-mcp-deps: not checking node/npm, and not installing MCP dependencies."
+else
+    if ! command -v node &> /dev/null || ! command -v npm &> /dev/null; then
+        echo ""
+        echo -e "${RED}node and npm are REQUIRED (node >= $MIN_NODE_VERSION)${NC}"
+        echo ""
+        echo "The two MCP servers this plugin ships (bd-mcp, code-graph-mcp) are Node"
+        echo "programs. Without them the workflow still runs, but every bd_* and code_*"
+        echo "tool is missing from every agent."
+        echo ""
+        echo "Install Node (any one of these):"
+        echo "  # nvm (per-user, no sudo, easiest to keep current)"
+        echo "  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash"
+        echo "  nvm install --lts"
+        echo ""
+        echo "  # Homebrew (macOS / Linuxbrew)"
+        echo "  brew install node"
+        echo ""
+        echo "  # Debian / Ubuntu"
+        echo "  sudo apt install nodejs npm"
+        echo ""
+        echo "  # or a prebuilt installer from https://nodejs.org/"
+        echo ""
+        echo "Then run this installer again. To install WITHOUT the MCP servers'"
+        echo "dependencies (air-gapped or node-less host), re-run with:"
+        echo "  bash install.sh --skip-mcp-deps"
+        exit 1
+    fi
+
+    NODE_VERSION_RAW=$(node --version 2>/dev/null | head -1 || echo "unknown")
+    NODE_VERSION_NUM=$(echo "$NODE_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    echo -e "${GREEN}OK${NC} node installed ($NODE_VERSION_RAW), npm $(npm --version 2>/dev/null | head -1)"
+
+    # Same `sort -V` idiom as the bd floor above: sort the pair and check the
+    # LOWER one is not ours. The trailing inequality is what keeps an exact
+    # match from reading as "older than".
+    if [ -n "$NODE_VERSION_NUM" ]; then
+        SORTED=$(printf '%s\n%s\n' "$NODE_VERSION_NUM" "$MIN_NODE_VERSION" | sort -V | head -1)
+        if [ "$SORTED" = "$NODE_VERSION_NUM" ] && [ "$NODE_VERSION_NUM" != "$MIN_NODE_VERSION" ]; then
+            echo ""
+            echo -e "${RED}node version $NODE_VERSION_NUM is older than the required minimum $MIN_NODE_VERSION.${NC}"
+            echo "Both MCP servers declare \"engines\": {\"node\": \">=18.17\"} and their"
+            echo "dynamic-import launchers fail opaquely on older runtimes."
+            echo "Upgrade node (nvm install --lts / brew upgrade node / apt), then rerun."
+            echo "Or install without them: bash install.sh --skip-mcp-deps"
+            exit 1
+        fi
+    fi
+fi
+
 echo ""
 
 # Locate source-of-truth files -------------------------------------------------
@@ -298,6 +517,13 @@ TMP_CLONE=""
 # Scratch space for the generated surface manifest, the upgrade plan, and the
 # upgrade report (v4.1 / U0.3). Created on demand by ensure_work_dir.
 INSTALL_WORK_DIR=""
+# Invoked only through the EXIT trap two lines down. shellcheck stops being able
+# to see that indirection once the script ends in an explicit `exit` (which it
+# does since v4.1 / C0b, to carry the exit-3 verification status), and reports
+# the function as dead: SC2329 on shellcheck >= 0.10, SC2317 on the older builds
+# CI may still carry. Same directive, same reason, as workflow-doctor.sh's
+# doctor_cleanup.
+# shellcheck disable=SC2329,SC2317
 cleanup_install_tmp() {
     if [ -n "$TMP_CLONE" ] && [ -d "$TMP_CLONE" ]; then
         rm -rf "$TMP_CLONE"
@@ -1443,8 +1669,30 @@ chmod +x "$TARGET/.claude/scripts/"*.sh 2>/dev/null || true
 
 # MCP servers -----------------------------------------------------------------
 # Copy each MCP server directory wholesale (source files + package.json +
-# package-lock.json + tests/). node_modules will be installed by the operator
-# if they want to run the servers locally; ship-time we just copy the source.
+# package-lock.json + tests/), EXCLUDING node_modules, then install the
+# dependencies IN THE TARGET with `npm ci` in the block immediately below.
+#
+# THE EXCLUSION IS LOAD-BEARING; THE OLD COMMENT HERE WAS THE LOAD-BEARING LIE.
+# It read "node_modules will be installed by the operator if they want to run
+# the servers locally", which described an intent nothing implemented and no
+# operator was ever told about: the servers are not optional, Claude Code spawns
+# both of them at session start, and both die with ERR_MODULE_NOT_FOUND without
+# their dependencies. That sentence is why "both MCP servers dead in every
+# curl-installed target" survived three releases — it made a defect read like a
+# decision (v4.1 / claude-workflow-plugin-2br).
+#
+# Two independent reasons the exclusion STAYS, now that the deps are installed
+# properly:
+#   1. Under `curl | bash` the source is a `git clone --depth 1` and .gitignore
+#      carries `node_modules/`, so THERE IS NOTHING TO COPY. An installer that
+#      relied on copying would work from a developer's checkout and silently do
+#      nothing for every real user — which is exactly what happened.
+#   2. From a developer's checkout there IS something to copy, and copying it
+#      would be worse than useless: ~7,900 entries built for THAT machine's
+#      platform and node ABI, none of which workflow-manifest.sh enumerates (it
+#      prunes node_modules from the surface scan). uninstall.sh works from the
+#      manifest, so those files would be manifest-less residue in the operator's
+#      tree. `npm ci` from the committed lockfile is both correct and portable.
 #
 # v3 upgrade flow (v4.1 / U0.3): this tree stays a DIRECTORY UNIT. The manifest
 # enumerates its files (so the parity assertions cover them) and classify emits
@@ -1464,15 +1712,583 @@ if [ -d "$SOURCE_DIR/.claude/mcp" ]; then
             rsync -a --exclude=node_modules --exclude=.tmp --exclude='*.log' \
                 "$mcp_dir" "$TARGET/.claude/mcp/$mcp_name/"
         else
-            # Fallback: cp -R then prune dev artifacts.
+            # Fallback for a host with no rsync: copy PER ENTRY, skipping
+            # node_modules and .tmp at copy time.
+            #
+            # THIS USED TO BE `cp -R <src>/.` FOLLOWED BY
+            # `rm -rf <target>/node_modules`, AND THAT IS A DATA-LOSS BUG NOW
+            # THAT THE DEPENDENCIES LIVE IN THE TARGET. The rm deleted the
+            # TARGET's tree — the operator's working, already-installed
+            # node_modules — before `npm ci` ran. On a re-install that then hit
+            # an offline registry, a failing `npm ci`, or a network blip, the
+            # operator ended up with LESS than they started with: working
+            # servers before, broken servers after, and nothing in the backup
+            # (node_modules is not a manifest row, so no backup leg holds it).
+            # Same class as the U0.8 backup defect QA caught. Excluding at copy
+            # time cannot destroy anything.
+            #
+            # THIS COMMENT USED TO END "the worst case is a stale node_modules
+            # that the `npm ci` below then reconciles", WHICH WAS FALSE and is
+            # corrected here rather than deleted, because the false version is
+            # the more instructive artifact. `npm ci` REMOVES node_modules
+            # before it installs, so a `npm ci` that then fails leaves the tree
+            # DESTROYED, not stale — measured: 3,909 entries / 98 package.json
+            # went to 94 empty directories / 0 package.json against an
+            # unreachable registry. Excluding here is still right; it is the
+            # npm ci step below that had to grow the preserve-and-restore, and
+            # a comment asserting the harm was impossible is exactly what stops
+            # the next reader from checking (v4.1 / C0b R2-F1).
+            #
+            # dotglob is required to match the source's dotfiles, which
+            # `cp -R <dir>/.` picked up implicitly; bash's dotglob never matches
+            # `.` or `..`, so there is no self-copy. Both options are restored
+            # immediately after the loop, matching this file's existing
+            # shopt-pair convention.
             mkdir -p "$TARGET/.claude/mcp/$mcp_name"
-            cp -R "$mcp_dir." "$TARGET/.claude/mcp/$mcp_name/"
-            rm -rf "$TARGET/.claude/mcp/$mcp_name/node_modules" 2>/dev/null || true
-            rm -rf "$TARGET/.claude/mcp/$mcp_name/.tmp" 2>/dev/null || true
-            find "$TARGET/.claude/mcp/$mcp_name" -maxdepth 2 -name '*.log' -type f -delete 2>/dev/null || true
+            shopt -s dotglob nullglob
+            for mcp_entry in "$mcp_dir"*; do
+                case "$(basename "$mcp_entry")" in
+                    node_modules|.tmp) continue ;;
+                esac
+                cp -R "$mcp_entry" "$TARGET/.claude/mcp/$mcp_name/"
+            done
+            shopt -u dotglob nullglob
+            # -not -path keeps this off the target's node_modules for the same
+            # reason: it is not ours to prune.
+            find "$TARGET/.claude/mcp/$mcp_name" -maxdepth 2 -name '*.log' -type f \
+                -not -path '*/node_modules/*' -delete 2>/dev/null || true
         fi
         echo -e "${GREEN}OK${NC}   mcp/$mcp_name"
     done
+fi
+
+# MCP server dependencies (v4.1 / C0b) ----------------------------------------
+#
+# THE FIX FOR THE v4.1 P0. `npm ci` runs IN THE TARGET, once per shipped server,
+# straight after the copy loop above. Every argument is deliberate:
+#
+#   ci               not `install`. Reproducible from the committed lockfile,
+#                    and it REFUSES when the lockfile is missing — which is why
+#                    both package-lock.json files are on the required-source
+#                    list above. `npm install` would silently resolve a
+#                    different tree.
+#   --omit=dev       both lockfiles carry ZERO dev packages, so this removes
+#                    nothing today; it is the guard that keeps a future dev
+#                    dependency out of an operator's install.
+#   --ignore-scripts free supply-chain hardening: both lockfiles have ZERO
+#                    entries with hasInstallScript, so nothing is being
+#                    suppressed. mcp-deps.test.sh asserts that invariant, so a
+#                    future dependency that NEEDS a postinstall fails loudly in
+#                    the test rather than silently in a user's target.
+#   --no-audit
+#   --no-fund        two network round-trips and ~15 lines of output that say
+#                    nothing about whether the install worked.
+#   --loglevel=error the success case is one line; the failure case is the part
+#                    an operator needs.
+#
+# `< /dev/null` IS NOT COSMETIC. Under `curl -fsSL <url> | bash` the script's
+# own stdin IS the pipe carrying the rest of the script text. Any npm prompt
+# would read from it — consuming installer source as its answer and truncating
+# the run. Every one of these facts is why the redirect is on the command and
+# not on the loop.
+#
+# The subshell (`( cd ... && npm ... )`) keeps the installer's cwd intact for
+# the copy loops that follow, and means a `cd` failure cannot leave the rest of
+# the install writing into the wrong directory. A bare `cd` inside a loop body
+# under `set -e` is the footgun this avoids.
+#
+# ============================================================================
+# `npm ci` IS ITSELF A DESTRUCTIVE COMMAND. THIS IS THE R2-F1 FIX.
+# ============================================================================
+# `npm ci` REMOVES an existing node_modules before it installs — that is
+# documented, intended npm behaviour and the reason it is reproducible. The
+# consequence for an installer is that a FAILED `npm ci` does not leave a stale
+# tree, it leaves a DESTROYED one. Measured on a populated bd-mcp against an
+# unreachable registry: 3,909 entries / 98 package.json -> 94 EMPTY directories
+# / 0 package.json, rc 1. Through the installer that is a working target going
+# to two dead MCP servers on any registry outage, proxy block or VPN drop.
+#
+# THE FIRST CUT OF C0b SHIPPED THIS, and the reason is worth recording: the
+# `rm -rf` that C0b removed was verified gone under `--skip-mcp-deps` — the one
+# flag that disables `npm ci` entirely. That proved the OLD trigger was closed
+# while the NEW one, on the default path, was never exercised. Delegating a
+# destructive step to a third-party tool does not remove the destructive step.
+#
+# Two layers, in order:
+#
+#   1. SKIP WHEN CURRENT. After a successful install we stamp
+#      node_modules/.cwp-lockfile-sha256 with the sha256 of the lockfile that
+#      produced it. If the tree is present and the stamp still matches, there
+#      is nothing to do: the common re-install becomes fast AND cannot be
+#      harmed, because npm never runs. The stamp lives INSIDE node_modules so
+#      it cannot outlive the tree it describes.
+#
+#   2. PRESERVE AND RESTORE. When npm must run, the existing tree is RENAMED
+#      aside first (same parent directory, so it is an instant rename, not a
+#      copy) and restored verbatim if npm fails. On success the reserve is
+#      removed. The operator therefore never ends a run with less than they
+#      started with.
+#
+# INTERRUPTION IS HANDLED ON THE NEXT RUN, which is the strongest guarantee
+# available without a transactional filesystem: if a run is killed between the
+# rename and npm's completion, the tree is sitting at the named reserve path,
+# and the next run's reclaim step moves it back (or discards it if a good
+# node_modules now exists). The reserve name is FIXED and documented
+# (.node_modules.cwp-reserve, beside node_modules in the server directory), so
+# recovery needs no record of which run created it. The path is printed only in
+# the one case automatic recovery cannot cover — a restore that itself failed.
+#
+# THAT LAST SENTENCE USED TO READ "The reserve path is printed when it is
+# created", WHICH WAS FALSE: nothing printed it on creation. It is corrected
+# rather than deleted for the same reason as the other two false comments this
+# change fixed — a comment asserting behaviour the code does not have is what
+# stops the next reader from checking. Printing on creation was considered and
+# rejected: it would add a line to every dependency install for a case the next
+# run repairs by itself.
+# Single-quoted deliberately: nothing here needs expansion, and it lets
+# packaging-parity.test.sh reuse the one strip_quoted_literal extractor for both
+# dialects (install.ps1's twin is a single-quoted PowerShell string).
+# BEGIN MCP_DEPS_CMD (packaging-parity.test.sh extracts this block; keep the sentinels)
+MCP_DEPS_NPM_ARGS='ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error'
+# END MCP_DEPS_CMD
+
+# One of: ok | failed | skipped | none. Consumed by the final readout, which
+# refuses to advertise servers it has no reason to believe can boot.
+MCP_DEPS_STATUS="none"
+MCP_DEPS_FAILED=""
+
+# The two names the preserve-and-restore machinery owns. Both are relative to a
+# server directory. RESERVE_DIR is deliberately a sibling of node_modules so the
+# set-aside is a rename within one filesystem rather than a 7,900-file copy.
+# BEGIN MCP_DEPS_STAMP (packaging-parity.test.sh extracts this block; keep the sentinels)
+MCP_DEPS_STAMP_NAME='node_modules/.cwp-lockfile-sha256'
+MCP_DEPS_RESERVE_NAME='.node_modules.cwp-reserve'
+# END MCP_DEPS_STAMP
+
+# Portable sha256, same fallback chain and same normalisation as uninstall.sh's
+# hash_of and workflow-manifest.sh (sha256sum -> shasum -a 256 -> openssl dgst).
+# Prints NOTHING when it cannot compute one, and every caller treats an empty
+# answer as "cannot prove it is current" — i.e. it degrades to running npm ci
+# WITH the preserve-and-restore, never to skipping a needed install.
+mcp_sha256_of() {
+    local f="$1" raw="" out=""
+    [ -f "$f" ] || return 0
+    if command -v sha256sum >/dev/null 2>&1; then
+        raw=$(sha256sum "$f" 2>/dev/null) || raw=""
+        out="${raw%% *}"
+    elif command -v shasum >/dev/null 2>&1; then
+        raw=$(shasum -a 256 "$f" 2>/dev/null) || raw=""
+        out="${raw%% *}"
+    elif command -v openssl >/dev/null 2>&1; then
+        # openssl 1.x prints "SHA256(f)= <hex>", 3.x "SHA2-256(f)= <hex>";
+        # the hash is the last field either way.
+        raw=$(openssl dgst -sha256 "$f" 2>/dev/null) || raw=""
+        out="${raw##* }"
+    fi
+    [ "${#out}" -eq 64 ] || return 0
+    case "$out" in
+        *[!0-9a-f]*) return 0 ;;
+    esac
+    printf '%s' "$out"
+}
+
+# mcp_deps_reclaim <server-dir> — heal a reserve left behind by an INTERRUPTED
+# previous run, before anything else touches the directory.
+#
+# Two states, two answers:
+#   reserve exists, node_modules does NOT  -> the run died mid-install; move it
+#                                             back. This is the whole reason
+#                                             interruption is survivable.
+#   reserve exists, node_modules DOES      -> a later run already produced a
+#                                             good tree; the reserve is stale
+#                                             and is discarded.
+mcp_deps_reclaim() {
+    local d="$1" reserve="$1/$MCP_DEPS_RESERVE_NAME"
+    [ -d "$reserve" ] || return 0
+    if [ -d "$d/node_modules" ]; then
+        rm -rf "$reserve" 2>/dev/null || true
+        return 0
+    fi
+    if mv "$reserve" "$d/node_modules" 2>/dev/null; then
+        echo -e "${CYAN}note${NC} restored a dependency tree left behind by an interrupted run"
+    fi
+    return 0
+}
+
+# mcp_deps_current <server-dir> — 0 when node_modules is present AND was
+# installed from the lockfile that is there now.
+#
+# The stamp is written by us, after a SUCCESSFUL npm ci, and lives inside
+# node_modules so it dies with the tree it describes. An operator-installed
+# node_modules carries no stamp, so it is never mistaken for current: the answer
+# is "cannot prove it", and the caller runs npm ci with the tree preserved.
+mcp_deps_current() {
+    local d="$1" want have
+    [ -d "$d/node_modules" ] || return 1
+    [ -f "$d/$MCP_DEPS_STAMP_NAME" ] || return 1
+    want=$(mcp_sha256_of "$d/package-lock.json")
+    [ -n "$want" ] || return 1
+    have=$(cat "$d/$MCP_DEPS_STAMP_NAME" 2>/dev/null | tr -d '[:space:]')
+    [ "$want" = "$have" ]
+}
+
+# mcp_deps_install <server-dir> — npm ci with the existing tree preserved.
+# Sets MCP_DEPS_RESULT to one of: current | ok | failed.
+#
+# THE RESULT IS A GLOBAL, NOT STDOUT, and that is a correctness requirement
+# rather than a style choice. The first cut of this returned the verdict by
+# echoing it and the caller read it with `$( )` — which captures the WHOLE of
+# stdout, so npm's own progress and errors and this function's operator notes
+# ("your existing node_modules was restored unchanged") were swallowed into the
+# verdict string instead of reaching the terminal. The operator lost exactly the
+# reassurance this function exists to give them, and the verdict comparison
+# survived only because the garbled value fell through to the failure arm.
+#
+# The rename is the whole mechanism: node_modules is moved to the reserve BEFORE
+# npm runs, so npm's own removal step has nothing to destroy, and the reserve is
+# moved back verbatim if npm exits non-zero.
+MCP_DEPS_RESULT=""
+mcp_deps_install() {
+    local d="$1" reserve="$1/$MCP_DEPS_RESERVE_NAME" npm_rc=0 stashed=0
+    MCP_DEPS_RESULT="failed"
+
+    mcp_deps_reclaim "$d"
+
+    if mcp_deps_current "$d"; then
+        MCP_DEPS_RESULT="current"
+        return 0
+    fi
+
+    if [ -d "$d/node_modules" ]; then
+        rm -rf "$reserve" 2>/dev/null || true
+        if mv "$d/node_modules" "$reserve" 2>/dev/null; then
+            stashed=1
+        else
+            # Could not set the tree aside (permissions, a cross-device mount).
+            # Say so and DO NOT run npm: an unprotected npm ci here is precisely
+            # the destructive path this function exists to prevent.
+            echo -e "${YELLOW}note${NC} could not set the existing node_modules aside in $d;"
+            echo "  skipping npm ci rather than risking the working tree."
+            MCP_DEPS_RESULT="failed"
+            return 0
+        fi
+    fi
+
+    # shellcheck disable=SC2086  # $MCP_DEPS_NPM_ARGS must word-split into npm's argv
+    ( cd "$d" && npm $MCP_DEPS_NPM_ARGS < /dev/null ) || npm_rc=$?
+
+    if [ "$npm_rc" -eq 0 ]; then
+        if [ "$stashed" -eq 1 ]; then
+            rm -rf "$reserve" 2>/dev/null || true
+        fi
+        # Stamp AFTER success only. A stamp written on a failed run would make
+        # the next run skip a broken tree.
+        mcp_sha256_of "$d/package-lock.json" > "$d/$MCP_DEPS_STAMP_NAME" 2>/dev/null || true
+        MCP_DEPS_RESULT="ok"
+        return 0
+    fi
+
+    if [ "$stashed" -eq 1 ]; then
+        # npm has already deleted whatever it created; put the operator's tree
+        # back exactly as it was.
+        rm -rf "$d/node_modules" 2>/dev/null || true
+        if mv "$reserve" "$d/node_modules" 2>/dev/null; then
+            echo -e "${CYAN}note${NC} npm ci failed; your existing node_modules was RESTORED unchanged."
+        else
+            echo -e "${RED}note${NC} npm ci failed AND the previous node_modules could not be restored."
+            echo "  It is still on disk at: $reserve"
+        fi
+    fi
+    MCP_DEPS_RESULT="failed"
+    return 0
+}
+
+# mcp_deps_manual_hint <server-dir> — the exact command an operator can paste,
+# plus the offline route. Printed at the point of failure and again in the
+# closing readout, because the failure scrolls away and the readout does not.
+mcp_deps_manual_hint() {
+    echo "  Install them by hand:"
+    echo "    cd \"$1\" && npm $MCP_DEPS_NPM_ARGS"
+    echo "  No network at all? Copy node_modules/ into that directory from a"
+    echo "  machine that has run the command above (the servers have no native"
+    echo "  dependencies, so the tree is portable), then re-verify with:"
+    echo "    bash install.sh --verify \"$TARGET\""
+}
+
+# mcp_servers_runnable — 0 only when every shipped server in the TARGET has its
+# dependencies on disk and no `npm ci` reported failure.
+#
+# This exists so the closing readout stops advertising a capability the install
+# does not have. Through v4.0 the success screen said "Two MCP servers: bd-mcp
+# (typed Beads tools), code-graph-mcp (impact_of, dead_code)" on every install,
+# including the ones where both servers died on their first spawn — an operator
+# then reads a missing bd_* tool as their own misconfiguration and goes looking
+# in the wrong place. Presence of node_modules is a weaker claim than "it
+# boots", which is exactly why the doctor above runs too; this predicate is the
+# cheap one that gates a marketing line.
+# PRESENCE ONLY — the MCP_DEPS_STATUS short-circuit was REMOVED in the R2-F1
+# round, and its removal is a correctness fix rather than a relaxation. Once a
+# failing npm ci restores the operator's previous tree, "npm ci failed" and "the
+# servers cannot boot" are no longer the same statement: a re-install whose
+# registry was unreachable leaves a target whose servers still answer
+# tools/list (measured — the doctor reports 11/11 after exactly that run).
+# Keeping the old guard would have made the readout say NOT RUNNABLE about two
+# servers that run, which is the same class of false claim, pointed the other
+# way.
+# mcp_server_has_deps <server-dir> — 0 only when node_modules holds a REAL
+# dependency tree.
+#
+# `[ -d node_modules ]` IS NOT THAT TEST, and the difference is measured rather
+# than theoretical: a FAILED `npm ci` leaves the directory in place holding 94
+# EMPTY subdirectories — 0 regular files, 0 package.json. Every consumer of the
+# weaker test therefore reported a fresh install whose npm ci failed as having
+# runnable servers, which is precisely the overclaim F1 is about, one level
+# down. Presence of at least one package.json is what distinguishes a tree from
+# the husk; depth 3 covers both `pkg/package.json` and `@scope/pkg/package.json`.
+mcp_server_has_deps() {
+    [ -d "$1/node_modules" ] || return 1
+    [ -n "$(find "$1/node_modules" -maxdepth 3 -name package.json -type f 2>/dev/null | head -1)" ]
+}
+
+mcp_servers_runnable() {
+    local d found=0
+    [ -d "$TARGET/.claude/mcp" ] || return 1
+    for d in "$TARGET/.claude/mcp"/*/; do
+        [ -d "$d" ] || continue
+        [ -f "$d/package.json" ] || continue
+        found=1
+        mcp_server_has_deps "${d%/}" || return 1
+    done
+    [ "$found" -eq 1 ]
+}
+
+# mcp_stale_suffix — the qualifier printed under the "Two MCP servers" advert
+# when the servers RUN but this run could not refresh their dependencies.
+#
+# Without it the readout advertises a capability the run did not deliver. That
+# is not a hypothetical: the preserved-failure path ends with exit 0 (correctly
+# — the target works), so this line and the tail block below are the ONLY places
+# the operator learns their dependencies are the previous ones.
+mcp_stale_suffix() {
+    [ -n "$MCP_DEPS_FAILED" ] || return 0
+    echo "    (running on their PREVIOUS dependencies — this run could not update"
+    echo "     them; see the dependency note at the end of this output)"
+}
+
+# mcp_deps_unfinished_readout — the tail block for a dependency install that did
+# not finish. Reads MCP_DEPS_FAILED, which through the first R2 round was
+# ASSIGNED AND NEVER READ.
+#
+# WHY THIS IS AT THE TAIL AND NOT ONLY AT THE POINT OF FAILURE. The per-server
+# `FAILED npm ci` lines print roughly 50 lines before the end of a run, and the
+# closing readout then said "Installation complete." in green and advertised
+# both MCP servers without qualification. Measured on a hostile re-install: the
+# failures land at log lines 70 and 83, the green headline at 135, and the last
+# 22 lines — the part an operator actually reads — mentioned neither. This file
+# says of itself, a few hundred lines down, that an unqualified "Installation
+# complete." over an install that did not deliver what it claimed "is the single
+# sentence that let the P0 ship three times". The preserved path walked around
+# the exit-3 contract written to stop exactly that.
+#
+# EXIT 0 IS DELIBERATE AND STAYS. Exit 3 is documented as "installed, does not
+# work", and after a preserved failure the target demonstrably works — its
+# servers answer tools/list. Reusing 3 would make the code mean two different
+# things. The contract is instead: the tail always names unfinished work, and
+# the exit code answers only "does this target work".
+#
+# The per-server wording is derived from ON-DISK STATE at readout time rather
+# than from a second status variable, so it cannot drift from reality: a server
+# whose tree was preserved reads differently from one that never had a tree.
+mcp_deps_unfinished_readout() {
+    local name dir preserved=0 dead=0
+    [ -n "$MCP_DEPS_FAILED" ] || return 0
+    echo -e "${YELLOW}DEPENDENCY UPDATE DID NOT FINISH${NC}"
+    # shellcheck disable=SC2086  # MCP_DEPS_FAILED is a space-separated name list
+    for name in $MCP_DEPS_FAILED; do
+        dir="$TARGET/.claude/mcp/$name"
+        if mcp_server_has_deps "$dir"; then
+            preserved=$((preserved + 1))
+            echo "  mcp/$name — kept the dependencies it already had; they were NOT"
+            echo "      updated to the version this release ships."
+        else
+            dead=$((dead + 1))
+            echo "  mcp/$name — has no dependencies installed; this server cannot boot."
+        fi
+    done
+    echo ""
+    if [ "$preserved" -gt 0 ]; then
+        echo "  Nothing was lost. An existing dependency tree is always set aside before"
+        echo "  npm ci runs and restored if it fails, so a target that worked before this"
+        echo "  run still works."
+    fi
+    if [ "$dead" -gt 0 ]; then
+        echo "  The server(s) with no dependencies will not start until they are installed."
+    fi
+    echo "  Finish the update once the registry is reachable:"
+    echo "    bash install.sh \"$TARGET\""
+    echo "  Then confirm:"
+    echo "    bash install.sh --verify \"$TARGET\""
+    echo ""
+}
+
+# Heal orphaned reserves FIRST, on EVERY path (v4.1 / C0b R2).
+#
+# mcp_deps_install does its own reclaim, but it only ever runs for servers that
+# have a package-lock.json and only when --skip-mcp-deps is absent. A run
+# interrupted mid-install and then re-run with --skip-mcp-deps would therefore
+# leave the operator's dependency tree sitting in a reserve directory with
+# nothing to move it back — the servers dead, and the tree that would fix them
+# present but invisible. Recovery is not installation, so it must not be gated
+# on the flag that skips installation.
+if [ -d "$TARGET/.claude/mcp" ]; then
+    for mcp_dir in "$TARGET/.claude/mcp"/*/; do
+        [ -d "$mcp_dir" ] || continue
+        mcp_deps_reclaim "${mcp_dir%/}"
+    done
+fi
+
+if [ "$SKIP_MCP_DEPS" = true ]; then
+    if [ -d "$TARGET/.claude/mcp" ]; then
+        MCP_DEPS_STATUS="skipped"
+        echo -e "${YELLOW}note${NC} --skip-mcp-deps: MCP server dependencies were NOT installed."
+        echo "  Until they are, bd-mcp and code-graph-mcp cannot boot and every"
+        echo "  bd_* / code_* tool is missing from every agent."
+        for mcp_dir in "$TARGET/.claude/mcp"/*/; do
+            [ -d "$mcp_dir" ] || continue
+            [ -f "$mcp_dir/package-lock.json" ] || continue
+            mcp_deps_manual_hint "${mcp_dir%/}"
+        done
+    fi
+elif [ -d "$TARGET/.claude/mcp" ]; then
+    echo ""
+    echo -e "${YELLOW}Installing MCP server dependencies...${NC}"
+    for mcp_dir in "$TARGET/.claude/mcp"/*/; do
+        [ -d "$mcp_dir" ] || continue
+        mcp_name=$(basename "${mcp_dir%/}")
+        if [ ! -f "$mcp_dir/package-lock.json" ]; then
+            echo -e "${YELLOW}skip${NC} mcp/$mcp_name (no package-lock.json; npm ci needs one)"
+            continue
+        fi
+        # NOT `$( )` — see mcp_deps_install's header. Capturing its stdout would
+        # swallow npm's output and the restore notes into the verdict string.
+        mcp_deps_install "${mcp_dir%/}"
+        if [ "$MCP_DEPS_RESULT" = "current" ]; then
+            [ "$MCP_DEPS_STATUS" = "failed" ] || MCP_DEPS_STATUS="ok"
+            echo -e "${GREEN}OK${NC}   mcp/$mcp_name dependencies already match the lockfile (skipped)"
+        elif [ "$MCP_DEPS_RESULT" = "ok" ]; then
+            [ "$MCP_DEPS_STATUS" = "failed" ] || MCP_DEPS_STATUS="ok"
+            echo -e "${GREEN}OK${NC}   mcp/$mcp_name dependencies installed"
+        else
+            MCP_DEPS_STATUS="failed"
+            MCP_DEPS_FAILED="$MCP_DEPS_FAILED $mcp_name"
+            # THE INSTALL DOES NOT ABORT HERE, and that is a decision rather
+            # than an oversight. Everything written so far is a partial tree:
+            # agents and scripts are on disk but settings.json is not yet
+            # merged, no hook is wired, and .claude/install-manifest has not
+            # been written — so uninstall.sh could not clean it up and a re-run
+            # could not classify it. A complete tree with two servers the
+            # operator can fix in one command is strictly better than an
+            # unrecoverable half-install. The doctor below turns this into a
+            # non-zero exit so it cannot pass for success.
+            #
+            # NOTE THE NARROWED CLAIM (R2-F1): a failure here no longer means
+            # the server is broken — mcp_deps_install restored any pre-existing
+            # node_modules, so a target that WORKED before this run still works.
+            # It means the dependencies could not be brought to the shipped
+            # lockfile. The doctor decides which of those two it actually is.
+            echo -e "${RED}FAILED${NC} npm ci for mcp/$mcp_name"
+            echo "  Its dependencies were not updated to the shipped lockfile."
+            mcp_deps_manual_hint "${mcp_dir%/}"
+        fi
+    done
+fi
+
+# .gitignore heal for the installed dependencies (v4.1 / C0b) -----------------
+#
+# `npm ci` writes ~7,900 entries under .claude/mcp/*/node_modules. In a project
+# whose .gitignore does not already cover them, that is ~7,900 untracked files
+# in `git status` the morning after an install — noise big enough to hide a real
+# change, and the kind of thing an operator blames on the tool that did it.
+#
+# The generated .gitignore further up already carries `node_modules/`, but that
+# heredoc runs ONLY in the git-init branch and ONLY when the project has no
+# .gitignore at all. A Go, Python, Rust or Java project — the majority of
+# targets, and the ones least likely to have a Node ignore rule — takes neither
+# path. This heal runs on EVERY path instead, and is deliberately timid:
+#
+#   * it NEVER CREATES a .gitignore. A project without one has made a choice;
+#     the installer is not entitled to overrule it.
+#   * it appends only when `git check-ignore` says the path is genuinely NOT
+#     already ignored, so a repo whose rules already cover node_modules
+#     (by any spelling, including a global or nested .gitignore, since
+#     check-ignore consults all of them) is left untouched.
+#   * it is idempotent via its own marker line, so re-installs and Updates do
+#     not stack duplicate blocks even if a later negation rule re-exposes
+#     the path.
+#   * it prints a `note` line. An installer that silently edits a tracked file
+#     in the operator's repo would be a worse bug than the one it fixes.
+#
+# GENERATED_GITIGNORE above is deliberately NOT touched: its `node_modules/`
+# entry already covers this, and packaging-parity.test.sh compares that block
+# line-for-line against install.ps1's copy.
+MCP_GITIGNORE_MARKER="claude-workflow-plugin: MCP server dependencies"
+# THE PROBE IS A FILE PATH, NOT THE DIRECTORY (v4.1 / C0b R2-F2). A gitignore
+# pattern ending in `/` matches only a path git can see IS a directory, so
+# `check-ignore .claude/mcp/bd-mcp/node_modules` answers "not ignored" whenever
+# that directory does not exist yet — even in a repo whose .gitignore already
+# says `node_modules/`. On the normal path npm ci creates it first and the probe
+# is right by luck; under --skip-mcp-deps it is absent and the heal appended its
+# block into repos that already ignored it, contradicting this block's own
+# stated rule. A path with a further component is matched via its PARENT
+# directory component, so it answers correctly whether or not anything exists.
+# `.package-lock.json` is npm's own hidden lockfile, i.e. a real file that is
+# there after a successful install rather than an invented name.
+MCP_GITIGNORE_PROBE=".claude/mcp/bd-mcp/node_modules/.package-lock.json"
+
+# The appended lines, sentinel-wrapped so packaging-parity.test.sh can EXECUTE
+# this block and compare what it prints against install.ps1's list. Body kept
+# free of backticks and apostrophes: the first would command-substitute if this
+# text were ever moved into a double-quoted echo, and the second has to be
+# doubled in PowerShell single-quoted strings, which is how the two copies drift.
+mcp_gitignore_lines() {
+    # BEGIN MCP_GITIGNORE_LINES (packaging-parity.test.sh extracts this block; keep the sentinels)
+    cat <<'MCP_GITIGNORE_EOF'
+
+# claude-workflow-plugin: MCP server dependencies, installed by install.sh with
+# "npm ci". They are vendored third-party files, not project source. Appended
+# because this repo had no rule covering them. uninstall.sh removes the files
+# but LEAVES THESE LINES, since this is your file: delete them yourself once the
+# plugin is gone, or now if you would rather commit the dependencies.
+# The second entry is the installer's set-aside copy, which exists only while
+# dependencies are being reinstalled and after an interrupted run.
+.claude/mcp/*/node_modules/
+.claude/mcp/*/.node_modules.cwp-reserve/
+MCP_GITIGNORE_EOF
+    # END MCP_GITIGNORE_LINES
+}
+
+if [ "$MCP_DEPS_STATUS" != "none" ] && [ -f "$TARGET/.gitignore" ]; then
+    # check-ignore's THREE exit codes are all distinct answers and are read as
+    # such: 0 "already ignored", 1 "not ignored", anything else (128) "git could
+    # not answer — not a repo, or a broken one". Only 1 is a reason to write.
+    # Treating 128 as 1 would have the installer append to a .gitignore in a
+    # directory git does not manage.
+    GITIGNORE_PROBE_RC=0
+    git -C "$TARGET" check-ignore -q "$MCP_GITIGNORE_PROBE" >/dev/null 2>&1 \
+        || GITIGNORE_PROBE_RC=$?
+    if grep -qF "$MCP_GITIGNORE_MARKER" "$TARGET/.gitignore" 2>/dev/null; then
+        : # already healed by a previous run
+    elif [ "$GITIGNORE_PROBE_RC" -ne 1 ]; then
+        : # 0 = a rule already covers it; anything else = git could not answer
+    else
+        if mcp_gitignore_lines >> "$TARGET/.gitignore" 2>/dev/null; then
+            echo -e "${CYAN}note${NC} appended an ignore rule for .claude/mcp/*/node_modules to your .gitignore"
+            echo "  (npm ci writes thousands of files there; nothing else in the file was changed)"
+        else
+            echo -e "${YELLOW}note${NC} could not append to $TARGET/.gitignore; add this line yourself:"
+            echo "    .claude/mcp/*/node_modules/"
+        fi
+    fi
 fi
 
 # Shared merge-input validity gate (v4.1 / R1-F1) ------------------------------
@@ -1921,6 +2737,131 @@ else
     echo -e "${GREEN}OK${NC} Beads health check passed"
 fi
 
+# Functional verification (v4.1 / C0b) ----------------------------------------
+#
+# THE POINT OF THE WHOLE EPIC. Every installer assertion this repo had was
+# presence-or-sha256; not one asked whether the thing it had just written could
+# RUN. That is how "both MCP servers dead" and "no workflow context at all"
+# each shipped three times behind a green "Installation complete."
+#
+# workflow-doctor.sh (C0a) executes the SessionStart hook, boots both MCP
+# servers over stdio and drives both gate hooks against the rendered target. The
+# installer now runs it and REPORTS THE ANSWER IN ITS EXIT CODE:
+#
+#   exit 0  every check passed (or verification was skipped)
+#   exit 3  the tree is complete, and at least one check does not pass
+#
+# 3 rather than 1 because the two states need different reactions: 1 means
+# nothing landed and you should re-run; 3 means everything landed and there is
+# a specific, named, usually one-command repair. Collapsing them would tell a
+# scripted caller to retry an install that does not need retrying.
+#
+# Run LAST, after settings.json, the manifest and the Beads init, because a
+# doctor run before those would fail on files the installer had not written yet.
+INSTALL_EXIT_STATUS=0
+VERIFY_STATUS="skipped"
+VERIFY_FAILED_COUNT=0
+TARGET_DOCTOR="$TARGET/.claude/scripts/workflow-doctor.sh"
+
+if [ "$SKIP_VERIFY" = true ]; then
+    echo ""
+    echo -e "${YELLOW}note${NC} --skip-verify: the install was NOT verified."
+    echo "  Nothing has checked that this target actually orchestrates. Run:"
+    echo "    bash install.sh --verify \"$TARGET\""
+elif [ ! -f "$TARGET_DOCTOR" ]; then
+    # Cannot happen through a normal run — workflow-doctor.sh is on the
+    # required-source list and the scripts glob copies it — so say so loudly
+    # rather than treating "no doctor" as "verified".
+    echo ""
+    echo -e "${YELLOW}note${NC} no workflow-doctor.sh in the target; skipping verification."
+    echo "  Expected: $TARGET_DOCTOR"
+else
+    echo ""
+    echo -e "${YELLOW}Verifying the install (workflow-doctor.sh)...${NC}"
+    ensure_work_dir
+    VERIFY_JSON="$INSTALL_WORK_DIR/doctor.json"
+    VERIFY_LOG="$INSTALL_WORK_DIR/doctor.log"
+    VERIFY_RC=0
+    # --quiet keeps the PASS lines out of an already-long install log; the JSON
+    # below is what this block renders from, so the doctor's own stdout is
+    # captured rather than shown. It IS shown when the JSON turns out to be
+    # unreadable — a verification step whose own failure is silent would be the
+    # same bug one level up.
+    bash "$TARGET_DOCTOR" --target "$TARGET" --json-out "$VERIFY_JSON" --quiet \
+        >"$VERIFY_LOG" 2>&1 || VERIFY_RC=$?
+
+    # `jq -e .` IS NOT A USABILITY ORACLE FOR THIS REPORT (v4.1 / C0b R2-F3).
+    # It exits 0 for `{}`, and an empty object then yields .passed//0 = 0 and
+    # .failed//0 = 0 — "OK verified: 0 check(s) passed", exit 0. That is the same
+    # silent-green shape this whole block exists to kill: a report describing no
+    # checks is not evidence that any check ran. The floor makes "usable" mean
+    # "carries at least one check", and an empty-but-valid report falls through
+    # to the exit-code branch below, which is the honest reading of it.
+    VERIFY_CHECK_COUNT=0
+    if [ -s "$VERIFY_JSON" ]; then
+        VERIFY_CHECK_COUNT=$(jq -r '(.checks // []) | length' "$VERIFY_JSON" 2>/dev/null || echo 0)
+    fi
+    case "$VERIFY_CHECK_COUNT" in
+        ''|*[!0-9]*) VERIFY_CHECK_COUNT=0 ;;
+    esac
+
+    if [ ! -s "$VERIFY_JSON" ] || ! jq -e . "$VERIFY_JSON" >/dev/null 2>&1 \
+       || [ "$VERIFY_CHECK_COUNT" -lt 1 ]; then
+        # NO USABLE REPORT: fall back to the doctor's EXIT CODE, which is its
+        # primary contract (0 = every non-skipped check passed). The JSON is a
+        # rendering convenience, and treating its absence as a failure would
+        # invent one — the real doctor already exits 2 when it cannot write the
+        # report, so "rc 0 and no report" means a doctor that does not
+        # implement --json-out, not a broken install.
+        #
+        # The note is NOT optional. An unreported verification that prints
+        # nothing is the same silent-green shape this whole block exists to
+        # kill; saying so leaves the operator able to tell "checked, fine" from
+        # "could not show you what was checked".
+        if [ "$VERIFY_RC" -eq 0 ]; then
+            VERIFY_STATUS="passed-no-report"
+            echo -e "${GREEN}OK${NC} verified (workflow-doctor.sh exited 0)"
+            echo -e "${YELLOW}note${NC} it wrote no machine-readable report, so the per-check list is not shown."
+        else
+            VERIFY_STATUS="unreadable"
+            INSTALL_EXIT_STATUS=3
+            echo -e "${RED}Verification FAILED${NC} (workflow-doctor.sh exited $VERIFY_RC and wrote no usable report)."
+            echo "  Its output was:"
+            sed 's/^/    /' "$VERIFY_LOG" 2>/dev/null | head -40
+            echo "  Re-run it directly for the full picture:"
+            echo "    bash \"$TARGET_DOCTOR\" --target \"$TARGET\""
+        fi
+    else
+        VERIFY_PASSED=$(jq -r '.passed // 0' "$VERIFY_JSON" 2>/dev/null || echo 0)
+        VERIFY_FAILED_COUNT=$(jq -r '.failed // 0' "$VERIFY_JSON" 2>/dev/null || echo 0)
+        VERIFY_SKIPPED=$(jq -r '.skipped // 0' "$VERIFY_JSON" 2>/dev/null || echo 0)
+        if [ "$VERIFY_FAILED_COUNT" -eq 0 ]; then
+            VERIFY_STATUS="passed"
+            echo -e "${GREEN}OK${NC} verified: $VERIFY_PASSED check(s) passed, $VERIFY_SKIPPED skipped"
+        else
+            VERIFY_STATUS="failed"
+            INSTALL_EXIT_STATUS=3
+            echo -e "${RED}Verification FAILED: $VERIFY_FAILED_COUNT of $((VERIFY_PASSED + VERIFY_FAILED_COUNT + VERIFY_SKIPPED)) check(s) did not pass.${NC}"
+            echo "The files are all installed. These checks say the install does not yet work:"
+            echo ""
+            # Rendered from the JSON rather than scraped from the human output:
+            # the report is a stable contract (name/status/detail/fix per check)
+            # and the terminal rendering is not. `fix` is the field that turns a
+            # failure into an action, so it is never dropped.
+            jq -r '.checks[] | select(.status == "FAIL")
+                   | "  FAIL " + .name + "\n    " + ((.detail // "") | split("\n")[0])
+                     + (if (.fix // "") == "" then "" else "\n    fix: " + ((.fix // "") | gsub("\n"; "\n         ")) end)' \
+                "$VERIFY_JSON" 2>/dev/null || true
+            echo ""
+            echo "After fixing, re-verify without reinstalling:"
+            echo "  bash install.sh --verify \"$TARGET\""
+            echo "Offline host? bd doctor reaches GitHub, so the beads check can time out"
+            echo "on a healthy install; re-verify with:"
+            echo "  bash \"$TARGET_DOCTOR\" --target \"$TARGET\" --skip beads"
+        fi
+    fi
+fi
+
 # v3 upgrade readout (v4.1 / U0.3) --------------------------------------------
 # Plain text on purpose: the same bytes go to the terminal AND to
 # $V3_BACKUP_DIR/upgrade-report.txt, and ANSI escapes in a saved report are
@@ -2048,7 +2989,27 @@ if [ "$V3_UPGRADE" = true ]; then
 else
     # Fresh installs and the three flat modes keep the readout they have had
     # since v3.0 (the v4 rebrand of this block is U0.8).
-    echo -e "${GREEN}Installation complete.${NC}"
+    #
+    # THE HEADLINE IS NO LONGER UNCONDITIONAL (v4.1 / C0b). "Installation
+    # complete." printed over an install whose MCP servers cannot boot is the
+    # single sentence that let the P0 ship three times: it is the last thing an
+    # operator reads, they believe it, and nothing later contradicts it. It now
+    # states which of the two outcomes actually happened.
+    #
+    # THREE ARMS, not two (v4.1 / C0b R2 / F1). The middle one is a run that
+    # WORKS but did not finish: npm ci failed and the previous dependency tree
+    # was preserved, so the target orchestrates and the exit code is 0. Printing
+    # the unqualified green headline there is how "Installation complete." over
+    # an incomplete install gets to be true-ish and misleading at the same time.
+    if [ "$INSTALL_EXIT_STATUS" -ne 0 ]; then
+        echo -e "${RED}Installation complete, but VERIFICATION FAILED.${NC}"
+        echo -e "${YELLOW}Every file was written. This target does not yet work — see the failing checks above.${NC}"
+    elif [ -n "$MCP_DEPS_FAILED" ]; then
+        echo -e "${YELLOW}Installation complete, but the dependency update did not finish.${NC}"
+        echo -e "${YELLOW}The target works; see the dependency note at the end of this output.${NC}"
+    else
+        echo -e "${GREEN}Installation complete.${NC}"
+    fi
     echo ""
     echo -e "Installed to: ${BLUE}$TARGET/.claude/${NC}"
     echo -e "Manifest:     ${BLUE}$TARGET/.claude-plugin/plugin.json${NC}"
@@ -2097,7 +3058,13 @@ else
         echo -e "${CYAN}What changed in the v2 -> v3 upgrade:${NC}"
         echo "  - .claude-plugin/plugin.json: first-class Claude Code plugin manifest"
         echo "  - Agent files now pin 'model:' (run /workflow-model to bump)"
-        echo "  - Two MCP servers: bd-mcp (21 typed Beads tools), code-graph-mcp (7 graph tools incl. impact_of / dead_code)"
+        if mcp_servers_runnable; then
+            echo "  - Two MCP servers: bd-mcp (21 typed Beads tools), code-graph-mcp (7 graph tools incl. impact_of / dead_code)"
+            mcp_stale_suffix
+        else
+            echo "  - Two MCP servers: bd-mcp, code-graph-mcp - NOT RUNNABLE YET, their"
+            echo "    dependencies are not installed (see the npm ci note above)"
+        fi
         echo "  - QA gate is now Beads-label-driven (qa-approved), no longer marker-file"
         echo "  - Hook output uses hookSpecificOutput envelope; PreToolUse blocks orchestrator edits"
         echo "  - SessionStart warns on stale model / old bd; SessionEnd writes a structured summary"
@@ -2133,7 +3100,13 @@ else
         echo "  - Approvals are bound to a change-set hash, so a stale one cannot release work"
         echo "  - Role-aware model selection (.claude/model-roles) + /workflow-model"
         echo "  - Rubric-graded QA loop and a mutation tier (/mutation-sweep) with an LLM judge"
-        echo "  - Two MCP servers: bd-mcp (typed Beads tools), code-graph-mcp (impact_of, dead_code)"
+        if mcp_servers_runnable; then
+            echo "  - Two MCP servers: bd-mcp (typed Beads tools), code-graph-mcp (impact_of, dead_code)"
+            mcp_stale_suffix
+        else
+            echo "  - Two MCP servers: bd-mcp, code-graph-mcp - NOT RUNNABLE YET, their"
+            echo "    dependencies are not installed (see the npm ci note above)"
+        fi
         echo "  - Hash-based re-runs and upgrades: .claude/install-manifest records what was"
         echo "    installed, so your edits are preserved with the shipped copy alongside as *.new"
         echo "  - uninstall.sh removes exactly what the installer wrote, into a recoverable trash"
@@ -2158,3 +3131,32 @@ echo "  bd doctor         # Health check"
 echo ""
 echo "Remember: all code changes require @qa approval."
 echo ""
+
+# Exit status (v4.1 / C0b) ----------------------------------------------------
+#
+# Repeated here because the failing checks scrolled past ~40 lines ago and the
+# tail is what an operator actually reads. The v3 upgrade branch prints its own
+# report and never reached the conditional headline above, so this block is the
+# only place that path says anything about verification at all.
+#
+# `exit "$INSTALL_EXIT_STATUS"` is the last statement in the file on purpose:
+# the EXIT trap (cleanup_install_tmp) ends in an explicit `return 0`, and bash
+# does not let a trap that does not itself call `exit` rewrite the status — so 3
+# survives the cleanup. Verified rather than assumed.
+# Unfinished dependency work, named at the tail regardless of the exit code.
+# Printed BEFORE the verification block so the two read in severity order when
+# both fire (deps stale, then does-not-work).
+mcp_deps_unfinished_readout
+
+if [ "$INSTALL_EXIT_STATUS" -ne 0 ]; then
+    echo -e "${RED}VERIFICATION FAILED — this install does not work yet (exit $INSTALL_EXIT_STATUS).${NC}"
+    if [ "$VERIFY_STATUS" = "failed" ]; then
+        echo "  Every file was written; $VERIFY_FAILED_COUNT functional check(s) did not pass."
+    else
+        echo "  Every file was written; workflow-doctor.sh could not produce a report."
+    fi
+    echo "  Scroll up for each failing check and its fix, or re-run:"
+    echo "    bash install.sh --verify \"$TARGET\""
+    echo ""
+fi
+exit "$INSTALL_EXIT_STATUS"

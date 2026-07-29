@@ -17,7 +17,30 @@
 #   .\install.ps1                                       # uses current dir
 #   .\install.ps1 -Path "C:\Projects\myproject"
 #   .\install.ps1 -Upgrade                              # force the migration flow
+#   .\install.ps1 -Verify -Path "C:\Projects\myproject" # verify only, install nothing
+#   .\install.ps1 -SkipMcpDeps                          # no npm ci (air-gapped/node-less)
+#   .\install.ps1 -SkipVerify                           # skip post-install verification
 #   irm https://.../install.ps1 | iex                   # auto-clones repo
+#
+# `irm | iex` cannot bind parameters, so the two skips also read environment
+# variables — that is the only form available to a Windows operator pasting the
+# one-liner:
+#   $env:CWP_SKIP_MCP_DEPS = "1"; irm https://.../install.ps1 | iex
+#   $env:CWP_SKIP_VERIFY   = "1"; irm https://.../install.ps1 | iex
+#
+# EXIT CODES (v4.1 / C0b — 3 is new and deliberately distinct):
+#   0  installed, and the post-install verification passed (or was skipped).
+#      ALSO covers a run whose `npm ci` failed while the server's existing
+#      dependencies were preserved: the target works, so it is not a 3. That
+#      case is never silent — the headline says the dependency update did not
+#      finish and the last block of output names the affected servers.
+#   1  ABORTED. Bad arguments, a missing prerequisite, or an unusable source.
+#   3  INSTALLED, VERIFICATION FAILED. Every file was written; workflow-doctor.sh
+#      then found at least one functional check that does not pass. NOTE: the
+#      doctor is a bash script, so this path needs Git Bash — which this file
+#      already lists as a requirement and which `git` (a hard prerequisite)
+#      ships with. If bash cannot be found the install still exits 3, because
+#      "could not verify" is not "verified".
 #
 # Upgrades (v4.1 / U0.7 — the PowerShell mirror of install.sh's machinery):
 #   v2 -> v3   detected and REDIRECTED to install.sh. That migration is not
@@ -56,7 +79,15 @@ param(
     # Force the migration flow even when auto-detection is fuzzy. WHICH
     # migration is still a detection question — see the ladder below. Mirrors
     # install.sh's --upgrade, and like it cannot be combined with -Mode.
-    [switch]$Upgrade
+    [switch]$Upgrade,
+    # v4.1 / C0b — the PowerShell twins of --skip-mcp-deps / --skip-verify /
+    # --verify. The environment forms are read below rather than defaulted here,
+    # because `irm ... | iex` cannot bind parameters at all: a Windows operator
+    # pasting the one-liner has ONLY the environment form
+    # ($env:CWP_SKIP_MCP_DEPS = "1") available to them.
+    [switch]$SkipMcpDeps,
+    [switch]$SkipVerify,
+    [switch]$Verify
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,7 +95,27 @@ $ErrorActionPreference = "Stop"
 if (-not $RepoUrl)    { $RepoUrl = "https://github.com/preql-data/claude-workflow-plugin.git" }
 if (-not $RepoBranch) { $RepoBranch = "main" }
 
+# Environment forms, applied on top of the switches (either enables the skip).
+if ($env:CWP_SKIP_MCP_DEPS) { $SkipMcpDeps = $true }
+if ($env:CWP_SKIP_VERIFY)   { $SkipVerify  = $true }
+
 $MinBdVersion = [Version]"0.47"
+# Both shipped MCP servers declare "engines": {"node": ">=18.17"}, and both
+# launchers are dynamic-import shims that fail opaquely on an older runtime.
+# [Version] comparison is what this file already uses for the bd floor, so the
+# two prerequisites share one idiom the way install.sh's share `sort -V`.
+# BEGIN MIN_NODE_VERSION (packaging-parity.test.sh extracts this block; keep the sentinels)
+$MinNodeVersion = [Version]"18.17.0"
+# END MIN_NODE_VERSION
+
+# Verification state (v4.1 / C0b). Initialised HERE rather than at the
+# verification block, because the closing readout and the final `exit` read
+# these on EVERY path — and PowerShell compares `$null -ne 0` as TRUE, so an
+# unset $script:InstallExitStatus would print "VERIFICATION FAILED" and exit
+# non-zero on an install that simply took a branch skipping the block.
+$script:InstallExitStatus = 0
+$script:VerifyStatus = "skipped"
+$script:VerifyFailedCount = 0
 
 function Write-Color {
     param([string]$Message, [string]$Color = "White")
@@ -117,6 +168,145 @@ if ($Upgrade -and $Mode) {
     Write-Host "  -Mode picks one flat behaviour for an existing .claude/."
     Write-Host "Pass exactly one of them."
     exit 1
+}
+
+# -Verify joins the same exclusion (v4.1 / C0b) -------------------------------
+# -Verify INSTALLS NOTHING; -Upgrade and -Mode both describe how to write to an
+# existing tree. Combining them is two incompatible intents, and picking one
+# silently would mean an operator who typed `-Verify -Mode 1` could get a
+# backup-and-replace they never asked for. Same refusal wording as the pair
+# above so one assertion covers all three combinations.
+if ($Verify -and $Upgrade) {
+    Write-Color "-Verify and -Upgrade cannot be combined." Red
+    Write-Host "  -Verify only runs the target's workflow-doctor.sh; it installs nothing."
+    Write-Host "  -Upgrade runs a migration flow that rewrites the tree."
+    Write-Host "Pass exactly one of them."
+    exit 1
+}
+if ($Verify -and $Mode) {
+    Write-Color "-Verify and -Mode $Mode cannot be combined." Red
+    Write-Host "  -Verify only runs the target's workflow-doctor.sh; it installs nothing."
+    Write-Host "  -Mode picks one flat behaviour for an existing .claude/."
+    Write-Host "Pass exactly one of them."
+    exit 1
+}
+
+# Find-Bash — the path to a bash interpreter, or $null.
+#
+# workflow-doctor.sh is bash, and that is not going to change: it drives the
+# same hook scripts the workflow runs, which are bash on every platform. This
+# file already lists Git Bash under "Requirements", and `git` is a hard
+# prerequisite a few lines below, so on a machine that satisfies the documented
+# requirements bash IS present — the two Program Files probes exist for the case
+# where Git for Windows installed it somewhere PATH does not reach.
+#
+# Returning $null is a real outcome, not an error: the caller reports it and
+# STILL FAILS THE VERIFICATION, because "could not check" and "checked, fine"
+# must never produce the same exit code.
+function Find-Bash {
+    $cmd = Get-Command bash -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($candidate in @(
+        "$env:ProgramFiles\Git\bin\bash.exe",
+        "${env:ProgramFiles(x86)}\Git\bin\bash.exe"
+    )) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    return $null
+}
+
+# Invoke-BashScript — run a bash script and return its exit code.
+#
+# THE SCOPED 'Continue' IS THE claude-workflow-plugin-3t1 FACET-3 FIX, not a
+# style choice, and it is why this is a function rather than an inline call.
+# Windows PowerShell 5.1 turns a native command's stderr into ErrorRecords when
+# that stream is REDIRECTED, and under the file-wide
+# $ErrorActionPreference = 'Stop' those become a TERMINATING NativeCommandError.
+# workflow-doctor.sh writes to stderr on a usage error, and the jq calls inside
+# it write to stderr for malformed input — so without this, a doctor run that
+# should have reported "FAIL mcp_bd" would instead crash the installer, turning
+# the verification step into a new failure mode of its own. The assignment is
+# FUNCTION-SCOPED: PowerShell makes a local copy of the preference variable, so
+# 'Stop' is back in force the moment this returns.
+#
+# -Quiet discards the output (the caller is reading the JSON report instead);
+# without it the output goes to the console, which is what -Verify wants.
+#
+# `| Out-Host` IS LOAD-BEARING, not formatting. A native command's stdout is
+# PowerShell's SUCCESS STREAM, so a bare `& $BashExe @BashArgs` inside a function
+# makes every line the doctor printed part of THIS FUNCTION'S RETURN VALUE — the
+# caller would then get a string[] of ~15 report lines with the exit code
+# appended, and `exit (Invoke-BashScript ...)` would fail to convert it to an
+# int. Out-Host writes straight to the host and emits nothing to the pipeline,
+# so the operator still sees the report and the function still returns one
+# integer. $LASTEXITCODE is set by the native command and is unaffected by the
+# pipeline it was routed through.
+function Invoke-BashScript {
+    param([string]$BashExe, [string[]]$BashArgs, [switch]$Quiet)
+    $ErrorActionPreference = 'Continue'
+    if ($Quiet) {
+        & $BashExe @BashArgs 2>&1 | Out-Null
+    } else {
+        & $BashExe @BashArgs | Out-Host
+    }
+    return $LASTEXITCODE
+}
+
+# Invoke-GitCheckIgnore — git check-ignore's exit code, run from <Root>.
+#
+# THREE distinct answers, all preserved: 0 "already ignored", 1 "not ignored",
+# anything else (128) "git could not answer". Same scoped-'Continue' reasoning
+# as Invoke-BashScript — the -q form is redirected here, and a non-repo target
+# makes git write to stderr.
+function Invoke-GitCheckIgnore {
+    param([string]$Root, [string]$RelPath)
+    $ErrorActionPreference = 'Continue'
+    Push-Location $Root
+    try {
+        & git check-ignore -q $RelPath 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } catch {
+        return 128
+    } finally {
+        Pop-Location
+    }
+}
+
+# -Verify: run the TARGET's doctor and exit with its status -------------------
+#
+# PLACED BEFORE THE PREREQUISITE BLOCK, exactly as install.sh places it: -Verify
+# on a node-less machine has to WORK, and the doctor's own `deps` check is what
+# should report the missing runtime — in the doctor's vocabulary, alongside the
+# other ten checks. Aborting here with "node not found - REQUIRED" would answer
+# a diagnostic request with an installer error.
+if ($Verify) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Color "-Verify: not a directory: $Path" Red
+        exit 1
+    }
+    $VerifyTarget = (Resolve-Path $Path).Path
+    $VerifyDoctor = Join-Path $VerifyTarget ".claude\scripts\workflow-doctor.sh"
+    if (-not (Test-Path -LiteralPath $VerifyDoctor)) {
+        Write-Color "-Verify: no workflow-doctor.sh in $VerifyTarget" Red
+        Write-Host "  Expected: $VerifyDoctor"
+        Write-Host "  The plugin does not appear to be installed there. Install it first:"
+        Write-Host "    .\install.ps1 -Path `"$VerifyTarget`""
+        exit 1
+    }
+    $VerifyBash = Find-Bash
+    if (-not $VerifyBash) {
+        Write-Color "-Verify: no bash interpreter found; cannot run workflow-doctor.sh." Red
+        Write-Host "  workflow-doctor.sh is a bash script. Install Git for Windows (which"
+        Write-Host "  ships Git Bash) and re-run, or run it from a Git Bash prompt:"
+        Write-Host "    bash `"$VerifyDoctor`" --target `"$VerifyTarget`""
+        exit 1
+    }
+    Write-Host ""
+    Write-Color $BrandLabel Cyan
+    Write-Host "Verifying: " -NoNewline
+    Write-Color $VerifyTarget Green
+    Write-Host ""
+    exit (Invoke-BashScript -BashExe $VerifyBash -BashArgs @($VerifyDoctor, "--target", $VerifyTarget))
 }
 
 # Resolve target path ---------------------------------------------------------
@@ -180,6 +370,69 @@ if ($BdVersionNum -and $BdVersionNum -lt $MinBdVersion) {
     Write-Host "Upgrade Beads, then rerun this installer:"
     Write-Host "  irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
     exit 1
+}
+
+# node + npm are HARD prerequisites (v4.1 / C0b) ------------------------------
+#
+# The bash twin of this block, and the same reasoning: they were not checked at
+# all through v4.0, which is the whole of the v4.1 P0. Both shipped MCP servers
+# declare "engines": {"node": ">=18.17"}, both launchers are dynamic-import
+# shims, and both die with ERR_MODULE_NOT_FOUND when Claude Code spawns them
+# without their dependencies. The installer now runs `npm ci` in the target, so
+# node and npm are build inputs for the install itself.
+#
+# PLACED BEFORE THE CLONE so a node-less machine is told before paying for it,
+# and SKIPPED UNDER -SkipMcpDeps because with no dependency install to run a
+# node-less host is a legitimate (if degraded) target.
+if ($SkipMcpDeps) {
+    Write-Color "note -SkipMcpDeps: not checking node/npm, and not installing MCP dependencies." Yellow
+} else {
+    if ((-not (Get-Command node -ErrorAction SilentlyContinue)) -or
+        (-not (Get-Command npm -ErrorAction SilentlyContinue))) {
+        Write-Host ""
+        Write-Color "node and npm are REQUIRED (node >= $MinNodeVersion)" Red
+        Write-Host ""
+        Write-Host "The two MCP servers this plugin ships (bd-mcp, code-graph-mcp) are Node"
+        Write-Host "programs. Without them the workflow still runs, but every bd_* and code_*"
+        Write-Host "tool is missing from every agent."
+        Write-Host ""
+        Write-Host "Install Node (any one of these):"
+        Write-Host "  # winget"
+        Write-Host "  winget install OpenJS.NodeJS.LTS"
+        Write-Host ""
+        Write-Host "  # nvm-windows"
+        Write-Host "  winget install CoreyButler.NVMforWindows; nvm install lts; nvm use lts"
+        Write-Host ""
+        Write-Host "  # or a prebuilt installer from https://nodejs.org/"
+        Write-Host ""
+        Write-Host "Then run this installer again. To install WITHOUT the MCP servers'"
+        Write-Host "dependencies (air-gapped or node-less host), re-run with:"
+        Write-Host "  .\install.ps1 -SkipMcpDeps"
+        exit 1
+    }
+
+    $NodeVersionRaw = (node --version 2>$null | Select-Object -First 1)
+    $NodeVersionMatch = [regex]::Match("$NodeVersionRaw", '(\d+)\.(\d+)(?:\.(\d+))?')
+    $NodeVersionNum = $null
+    if ($NodeVersionMatch.Success) {
+        $nMajor = $NodeVersionMatch.Groups[1].Value
+        $nMinor = $NodeVersionMatch.Groups[2].Value
+        $nPatch = if ($NodeVersionMatch.Groups[3].Success) { $NodeVersionMatch.Groups[3].Value } else { "0" }
+        $NodeVersionNum = [Version]"$nMajor.$nMinor.$nPatch"
+    }
+    $NpmVersionRaw = (npm --version 2>$null | Select-Object -First 1)
+    Write-Color "OK node installed ($NodeVersionRaw), npm $NpmVersionRaw" Green
+
+    # [Version] comparison, the same idiom this file uses for the bd floor.
+    if ($NodeVersionNum -and $NodeVersionNum -lt $MinNodeVersion) {
+        Write-Host ""
+        Write-Color "node version $NodeVersionNum is older than the required minimum $MinNodeVersion." Red
+        Write-Host "Both MCP servers declare engines.node >= 18.17 and their dynamic-import"
+        Write-Host "launchers fail opaquely on older runtimes."
+        Write-Host "Upgrade node (winget upgrade OpenJS.NodeJS.LTS), then rerun."
+        Write-Host "Or install without them: .\install.ps1 -SkipMcpDeps"
+        exit 1
+    }
 }
 
 Write-Host ""
@@ -1504,27 +1757,526 @@ try {
     }
 
     # MCP servers -----------------------------------------------------------
-    # Copy each MCP server directory wholesale, excluding node_modules / .tmp
-    # / *.log. node_modules will be installed by the operator if they want to
-    # run the servers locally.
+    # Copy each MCP server directory wholesale EXCLUDING node_modules, then
+    # install the dependencies IN THE TARGET with `npm ci` in the block below.
+    #
+    # THE EXCLUSION IS LOAD-BEARING; THE OLD COMMENT HERE WAS THE LOAD-BEARING
+    # LIE. It read "node_modules will be installed by the operator if they want
+    # to run the servers locally" — an intent nothing implemented and no
+    # operator was ever told about. The servers are not optional: Claude Code
+    # spawns both at session start and both die with ERR_MODULE_NOT_FOUND
+    # without their dependencies. That sentence made a defect read like a
+    # decision for three releases (v4.1 / claude-workflow-plugin-2br).
+    #
+    # It stays for two independent reasons: under `irm | iex` the source is a
+    # shallow clone whose .gitignore carries node_modules/, so there is nothing
+    # to copy at all; and from a developer checkout there IS something to copy
+    # that would be worse than useless — ~7,900 entries built for another
+    # machine, none of them enumerated by the surface manifest that
+    # uninstall.ps1 works from.
     $SourceMcpDir = Join-Path $SourceDir ".claude/mcp"
     if (Test-Path $SourceMcpDir) {
         $TargetMcpDir = Join-Path $ClaudeDir "mcp"
         New-Item -ItemType Directory -Force -Path $TargetMcpDir | Out-Null
         Get-ChildItem -Path $SourceMcpDir -Directory | ForEach-Object {
             $serverName = $_.Name
+            $srcServer = $_.FullName
             $dstServer = Join-Path $TargetMcpDir $serverName
             New-Item -ItemType Directory -Force -Path $dstServer | Out-Null
             # robocopy: /E = include subdirs (empty too), /XD = exclude dirs,
             # /XF = exclude files, /NFL/NDL/NJH/NJS/NP = quiet output.
             # Exit codes 0-7 are success in robocopy world.
-            $rc = & robocopy $_.FullName $dstServer /E /XD node_modules .tmp /XF *.log /NFL /NDL /NJH /NJS /NP
+            #
+            # NO /PURGE AND NO /MIR, deliberately: either one would delete
+            # anything in the destination that is not in the source, and
+            # node_modules is now exactly that — the target's installed
+            # dependency tree. Adding a mirror flag here would silently turn a
+            # re-install into a wipe.
+            $rc = & robocopy $srcServer $dstServer /E /XD node_modules .tmp /XF *.log /NFL /NDL /NJH /NJS /NP
             if ($LASTEXITCODE -gt 7) {
-                # Fall back to Copy-Item if robocopy isn't behaving.
-                Copy-Item -Path (Join-Path $_.FullName '*') -Destination $dstServer -Recurse -Force -Exclude @('node_modules','.tmp','*.log') -ErrorAction SilentlyContinue
+                # Fallback for a host where robocopy misbehaves: copy PER ENTRY,
+                # skipping node_modules and .tmp by name.
+                #
+                # THE OLD FALLBACK WAS `Copy-Item -Recurse -Exclude`, AND -Exclude
+                # DOES NOT RELIABLY EXCLUDE DIRECTORIES: with -Recurse it is
+                # applied to leaf items during the walk, so a directory named
+                # node_modules is descended into and its CONTENTS are copied
+                # (documented PowerShell behaviour, unchanged across 5.1 and 7.x).
+                # A per-entry loop with an explicit name test is the only form
+                # that actually holds, and it is the same shape install.sh's
+                # no-rsync fallback uses.
+                #
+                # -Force alone never deletes the destination's node_modules, so
+                # THIS COPY cannot leave the operator with less than they
+                # started with. install.sh's twin of this branch used to
+                # `rm -rf` it, which was half of the C0b data-loss bug.
+                #
+                # THIS COMMENT USED TO CONTINUE "...so a failed `npm ci`
+                # afterwards cannot leave the operator with less than they
+                # started with", WHICH WAS FALSE. It is corrected rather than
+                # deleted because the false version is the more instructive
+                # artifact: `npm ci` REMOVES node_modules before installing, so
+                # a failing npm ci destroys the tree regardless of how carefully
+                # this copy preserved it. Measured on the bash twin: 3,909
+                # entries / 98 package.json -> 94 empty directories / 0
+                # package.json against an unreachable registry. The other half
+                # of the fix is the preserve-and-restore in the npm ci block
+                # below; a comment asserting the harm was impossible is exactly
+                # what stops the next reader from checking (v4.1 / C0b R2-F1).
+                Get-ChildItem -LiteralPath $srcServer -Force | ForEach-Object {
+                    if ($_.Name -eq 'node_modules' -or $_.Name -eq '.tmp') { return }
+                    if ($_.PSIsContainer) {
+                        Copy-Item -LiteralPath $_.FullName -Destination $dstServer -Recurse -Force -ErrorAction SilentlyContinue
+                    } elseif ($_.Name -notlike '*.log') {
+                        Copy-Item -LiteralPath $_.FullName -Destination $dstServer -Force -ErrorAction SilentlyContinue
+                    }
+                }
             }
             $global:LASTEXITCODE = 0
             Write-Color ("OK   mcp/{0}" -f $serverName) Green
+        }
+    }
+
+    # MCP server dependencies (v4.1 / C0b) ----------------------------------
+    #
+    # THE FIX FOR THE v4.1 P0, mirroring install.sh's block argument for
+    # argument. `npm ci` runs IN THE TARGET, once per shipped server:
+    #
+    #   ci               not `install`. Reproducible from the committed
+    #                    lockfile, and it REFUSES without one — which is why
+    #                    both package-lock.json files are on the
+    #                    required-source list.
+    #   --omit=dev       both lockfiles carry ZERO dev packages today; this is
+    #                    the guard that keeps a future one out of an install.
+    #   --ignore-scripts free supply-chain hardening: both lockfiles have ZERO
+    #                    entries with hasInstallScript, and mcp-deps.test.sh
+    #                    asserts that, so a future dependency needing a
+    #                    postinstall fails in the test rather than in a user's
+    #                    target.
+    #   --no-audit
+    #   --no-fund        two network round-trips that say nothing about whether
+    #                    the install worked.
+    #   --loglevel=error the success case is one line.
+    #
+    # Kept token-identical to install.sh's MCP_DEPS_CMD; packaging-parity.test.sh
+    # extracts both blocks and compares them. Push-Location/Pop-Location in a
+    # try/finally is the PowerShell equivalent of the bash subshell: the
+    # installer's own location survives a failure inside the loop.
+    #
+    # Failure does NOT abort. Everything written so far is a partial tree —
+    # settings.json is not merged, no hook is wired, no install-manifest exists
+    # — so aborting would leave something uninstall.ps1 could not clean and a
+    # re-run could not classify. A complete tree with two fixable servers is
+    # strictly better; the verification step below is what stops it passing for
+    # success.
+    #
+    # ========================================================================
+    # `npm ci` IS ITSELF A DESTRUCTIVE COMMAND. THIS IS THE R2-F1 FIX.
+    # ========================================================================
+    # `npm ci` REMOVES an existing node_modules before it installs — documented,
+    # intended npm behaviour and the reason it is reproducible. The consequence
+    # for an installer is that a FAILED npm ci does not leave a stale tree, it
+    # leaves a DESTROYED one: measured on the bash twin, 3,909 entries / 98
+    # package.json became 94 EMPTY directories / 0 package.json against an
+    # unreachable registry. Through the installer that is a working target going
+    # to two dead MCP servers on any registry outage, proxy block or VPN drop.
+    #
+    # Two layers, identical to install.sh's:
+    #   1. SKIP WHEN CURRENT. A successful install stamps
+    #      node_modules\.cwp-lockfile-sha256 with the SHA256 of the lockfile that
+    #      produced it. If the tree is present and the stamp still matches, npm
+    #      never runs, so the common re-install is both fast and immune.
+    #   2. PRESERVE AND RESTORE. Otherwise the existing tree is RENAMED aside
+    #      (same parent, so a rename and not a copy) and restored verbatim if npm
+    #      fails. The operator never ends a run with less than they started with.
+    # An interrupted run is healed on the NEXT run by Restore-McpDepsReserve.
+    # BEGIN MCP_DEPS_CMD (packaging-parity.test.sh extracts this block; keep the sentinels)
+    $McpDepsNpmArgs = 'ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error'
+    # END MCP_DEPS_CMD
+
+    # The two names the preserve-and-restore machinery owns, both relative to a
+    # server directory. The reserve is a SIBLING of node_modules so setting the
+    # tree aside is a rename within one filesystem, not a 7,900-file copy.
+    # BEGIN MCP_DEPS_STAMP (packaging-parity.test.sh extracts this block; keep the sentinels)
+    $McpDepsStampName = 'node_modules/.cwp-lockfile-sha256'
+    $McpDepsReserveName = '.node_modules.cwp-reserve'
+    # END MCP_DEPS_STAMP
+
+    # One of: ok | failed | skipped | none. Consumed by the final readout, which
+    # refuses to advertise servers it has no reason to believe can boot.
+    $script:McpDepsStatus = "none"
+
+    # The names of servers whose dependency install did not finish. READ by the
+    # closing readout — install.sh's equivalent was assigned and never read for
+    # a whole review round, which is how a preserved failure ended in an
+    # unqualified green tail (v4.1 / C0b R2 / F1). This file had no equivalent
+    # variable at all.
+    $script:McpDepsFailed = @()
+
+    # Get-McpFileSha256 <path> — bare lowercase 64-hex SHA256, or "" when it
+    # cannot be computed. Get-FileHash is the same provider Get-WorkflowSurfaceRows
+    # uses, so the two hashing surfaces in this file agree. An empty answer means
+    # "cannot prove it is current", which degrades to running npm ci WITH the
+    # preserve-and-restore — never to skipping a needed install.
+    function Get-McpFileSha256 {
+        param([string]$FilePath)
+        if (-not (Test-Path -LiteralPath $FilePath)) { return "" }
+        try {
+            return (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        } catch {
+            return ""
+        }
+    }
+
+    # Restore-McpDepsReserve <server-dir> — heal a reserve left by an INTERRUPTED
+    # previous run, before anything else touches the directory.
+    #   reserve exists, node_modules does NOT -> the run died mid-install; move
+    #                                            it back. This is what makes an
+    #                                            interruption survivable.
+    #   reserve exists, node_modules DOES     -> a later run already produced a
+    #                                            good tree; discard the reserve.
+    function Restore-McpDepsReserve {
+        param([string]$ServerDir)
+        $reserve = Join-Path $ServerDir $McpDepsReserveName
+        if (-not (Test-Path -LiteralPath $reserve)) { return }
+        $live = Join-Path $ServerDir "node_modules"
+        if (Test-Path -LiteralPath $live) {
+            Remove-Item -LiteralPath $reserve -Recurse -Force -ErrorAction SilentlyContinue
+            return
+        }
+        try {
+            Move-Item -LiteralPath $reserve -Destination $live -Force -ErrorAction Stop
+            Write-Color "note restored a dependency tree left behind by an interrupted run" Cyan
+        } catch { }
+    }
+
+    # Test-McpDepsCurrent <server-dir> — $true when node_modules is present AND
+    # was installed from the lockfile that is there now. An operator-installed
+    # tree carries no stamp, so it is never mistaken for current: the answer is
+    # "cannot prove it", and the caller runs npm ci with the tree preserved.
+    function Test-McpDepsCurrent {
+        param([string]$ServerDir)
+        if (-not (Test-Path -LiteralPath (Join-Path $ServerDir "node_modules"))) { return $false }
+        $stamp = Join-Path $ServerDir $McpDepsStampName
+        if (-not (Test-Path -LiteralPath $stamp)) { return $false }
+        $want = Get-McpFileSha256 (Join-Path $ServerDir "package-lock.json")
+        if (-not $want) { return $false }
+        $have = ""
+        try { $have = ((Get-Content -Raw -LiteralPath $stamp) -replace '\s', '').ToLowerInvariant() } catch { $have = "" }
+        return ($want -eq $have)
+    }
+
+    # Install-McpDeps <server-dir> — npm ci with the existing tree preserved.
+    # Returns one of: current | ok | failed.
+    #
+    # The RETURN VALUE is the function's only pipeline output, which is why npm
+    # is invoked through Out-Host: a native command's stdout is PowerShell's
+    # success stream, so an uncontained `& npm ...` would make every line npm
+    # printed part of this function's return value. Same trap, and same fix, as
+    # Invoke-BashScript.
+    function Install-McpDeps {
+        param([string]$ServerDir)
+        Restore-McpDepsReserve -ServerDir $ServerDir
+
+        if (Test-McpDepsCurrent -ServerDir $ServerDir) { return "current" }
+
+        $live = Join-Path $ServerDir "node_modules"
+        $reserve = Join-Path $ServerDir $McpDepsReserveName
+        $stashed = $false
+        if (Test-Path -LiteralPath $live) {
+            Remove-Item -LiteralPath $reserve -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                Move-Item -LiteralPath $live -Destination $reserve -Force -ErrorAction Stop
+                $stashed = $true
+            } catch {
+                # Could not set the tree aside. Say so and DO NOT run npm: an
+                # unprotected npm ci here is precisely the destructive path this
+                # function exists to prevent.
+                Write-Color "note could not set the existing node_modules aside in $ServerDir;" Yellow
+                Write-Host "  skipping npm ci rather than risking the working tree."
+                return "failed"
+            }
+        }
+
+        $npmRc = 0
+        Push-Location $ServerDir
+        try {
+            $ErrorActionPreference = 'Continue'
+            & npm ($McpDepsNpmArgs -split ' ') 2>&1 | Out-Host
+            $npmRc = $LASTEXITCODE
+        } catch {
+            $npmRc = 1
+        } finally {
+            Pop-Location
+        }
+
+        if ($npmRc -eq 0) {
+            if ($stashed) {
+                Remove-Item -LiteralPath $reserve -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            # Stamp AFTER success only. A stamp written on a failed run would
+            # make the next run skip a broken tree.
+            $hash = Get-McpFileSha256 (Join-Path $ServerDir "package-lock.json")
+            if ($hash) {
+                try {
+                    [System.IO.File]::WriteAllText((Join-Path $ServerDir $McpDepsStampName), ($hash + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+                } catch { }
+            }
+            return "ok"
+        }
+
+        if ($stashed) {
+            # npm has already deleted whatever it created; put the operator's
+            # tree back exactly as it was.
+            Remove-Item -LiteralPath $live -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                Move-Item -LiteralPath $reserve -Destination $live -Force -ErrorAction Stop
+                Write-Color "note npm ci failed; your existing node_modules was RESTORED unchanged." Cyan
+            } catch {
+                Write-Color "note npm ci failed AND the previous node_modules could not be restored." Red
+                Write-Host "  It is still on disk at: $reserve"
+            }
+        }
+        return "failed"
+    }
+
+    # Test-McpServersRunnable — $true only when every shipped server in the
+    # TARGET has its dependencies on disk and no `npm ci` reported failure.
+    # Gates the closing readout so it stops advertising a capability the install
+    # does not have. Presence of node_modules is a weaker claim than "it boots",
+    # which is exactly why the doctor runs too; this is the cheap predicate.
+    #
+    # PRESENCE ONLY — the $script:McpDepsStatus short-circuit was REMOVED in the
+    # R2-F1 round, and its removal is a correctness fix rather than a
+    # relaxation. Once a failing npm ci restores the operator's previous tree,
+    # "npm ci failed" and "the servers cannot boot" are no longer the same
+    # statement: a re-install whose registry was unreachable leaves a target
+    # whose servers still answer tools/list. Keeping the old guard would have
+    # made the readout say NOT RUNNABLE about two servers that run.
+    # Test-McpServerHasDeps <server-dir> — $true only when node_modules holds a
+    # REAL dependency tree.
+    #
+    # Test-Path on node_modules IS NOT THAT TEST, and the difference is measured
+    # rather than theoretical: a FAILED `npm ci` leaves the directory in place
+    # holding 94 EMPTY subdirectories — 0 regular files, 0 package.json. The
+    # weaker test therefore reported a fresh install whose npm ci failed as
+    # having runnable servers. Depth 3 covers both `pkg/package.json` and
+    # `@scope/pkg/package.json`.
+    function Test-McpServerHasDeps {
+        param([string]$ServerDir)
+        $nm = Join-Path $ServerDir "node_modules"
+        if (-not (Test-Path -LiteralPath $nm)) { return $false }
+        $hit = Get-ChildItem -LiteralPath $nm -Filter "package.json" -File -Recurse -Depth 2 `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+        return [bool]$hit
+    }
+
+    function Test-McpServersRunnable {
+        $root = Join-Path $Target ".claude\mcp"
+        if (-not (Test-Path -LiteralPath $root)) { return $false }
+        $found = $false
+        foreach ($d in @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $d.FullName "package.json"))) { continue }
+            $found = $true
+            if (-not (Test-McpServerHasDeps -ServerDir $d.FullName)) { return $false }
+        }
+        return $found
+    }
+
+    # Write-McpStaleSuffix — the qualifier printed under the "Two MCP servers"
+    # advert when the servers RUN but this run could not refresh their
+    # dependencies. Without it the readout advertises a capability the run did
+    # not deliver, and since the preserved-failure path ends at exit 0 this line
+    # and the tail block are the ONLY places the operator learns their
+    # dependencies are the previous ones.
+    function Write-McpStaleSuffix {
+        if (@($script:McpDepsFailed).Count -eq 0) { return }
+        Write-Host "    (running on their PREVIOUS dependencies - this run could not update"
+        Write-Host "     them; see the dependency note at the end of this output)"
+    }
+
+    # Write-McpDepsUnfinishedReadout — the tail block for a dependency install
+    # that did not finish.
+    #
+    # WHY AT THE TAIL AND NOT ONLY AT THE POINT OF FAILURE: measured on the bash
+    # twin, the per-server failures land ~50 lines before the end of a run and
+    # the last 22 lines mentioned neither them nor their consequence. EXIT 0 IS
+    # DELIBERATE for the preserved case — 3 means "installed, does not work" and
+    # the target demonstrably works — so the tail is what carries the news.
+    #
+    # Per-server wording is derived from ON-DISK STATE rather than a second
+    # status variable, so it cannot drift from reality.
+    function Write-McpDepsUnfinishedReadout {
+        if (@($script:McpDepsFailed).Count -eq 0) { return }
+        $preserved = 0
+        $dead = 0
+        Write-Color "DEPENDENCY UPDATE DID NOT FINISH" Yellow
+        foreach ($name in $script:McpDepsFailed) {
+            $dir = Join-Path (Join-Path $Target ".claude\mcp") $name
+            if (Test-McpServerHasDeps -ServerDir $dir) {
+                $preserved++
+                Write-Host "  mcp/$name - kept the dependencies it already had; they were NOT"
+                Write-Host "      updated to the version this release ships."
+            } else {
+                $dead++
+                Write-Host "  mcp/$name - has no dependencies installed; this server cannot boot."
+            }
+        }
+        Write-Host ""
+        if ($preserved -gt 0) {
+            Write-Host "  Nothing was lost. An existing dependency tree is always set aside before"
+            Write-Host "  npm ci runs and restored if it fails, so a target that worked before this"
+            Write-Host "  run still works."
+        }
+        if ($dead -gt 0) {
+            Write-Host "  The server(s) with no dependencies will not start until they are installed."
+        }
+        Write-Host "  Finish the update once the registry is reachable:"
+        Write-Host "    .\install.ps1 -Path `"$Target`""
+        Write-Host "  Then confirm:"
+        Write-Host "    .\install.ps1 -Verify -Path `"$Target`""
+        Write-Host ""
+    }
+
+    function Write-McpDepsManualHint {
+        param([string]$ServerDir)
+        Write-Host "  Install them by hand:"
+        Write-Host "    cd `"$ServerDir`"; npm $McpDepsNpmArgs"
+        Write-Host "  No network at all? Copy node_modules\ into that directory from a"
+        Write-Host "  machine that has run the command above (the servers have no native"
+        Write-Host "  dependencies, so the tree is portable), then re-verify with:"
+        Write-Host "    .\install.ps1 -Verify -Path `"$Target`""
+    }
+
+    $TargetMcpRoot = Join-Path $ClaudeDir "mcp"
+
+    # Heal orphaned reserves FIRST, on EVERY path (v4.1 / C0b R2).
+    #
+    # Install-McpDeps does its own reclaim, but it only ever runs for servers
+    # with a package-lock.json and only when -SkipMcpDeps is absent. A run
+    # interrupted mid-install and then re-run with -SkipMcpDeps would leave the
+    # operator's dependency tree in a reserve directory with nothing to move it
+    # back. Recovery is not installation, so it must not be gated on the flag
+    # that skips installation.
+    if (Test-Path $TargetMcpRoot) {
+        Get-ChildItem -Path $TargetMcpRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            Restore-McpDepsReserve -ServerDir $_.FullName
+        }
+    }
+
+    if ($SkipMcpDeps) {
+        if (Test-Path $TargetMcpRoot) {
+            $script:McpDepsStatus = "skipped"
+            Write-Color "note -SkipMcpDeps: MCP server dependencies were NOT installed." Yellow
+            Write-Host "  Until they are, bd-mcp and code-graph-mcp cannot boot and every"
+            Write-Host "  bd_* / code_* tool is missing from every agent."
+            Get-ChildItem -Path $TargetMcpRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                if (Test-Path (Join-Path $_.FullName "package-lock.json")) {
+                    Write-McpDepsManualHint -ServerDir $_.FullName
+                }
+            }
+        }
+    } elseif (Test-Path $TargetMcpRoot) {
+        Write-Host ""
+        Write-Color "Installing MCP server dependencies..." Yellow
+        Get-ChildItem -Path $TargetMcpRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $serverName = $_.Name
+            $serverDir = $_.FullName
+            if (-not (Test-Path (Join-Path $serverDir "package-lock.json"))) {
+                Write-Color ("skip mcp/{0} (no package-lock.json; npm ci needs one)" -f $serverName) Yellow
+                return
+            }
+            # The args are split the same way install.sh word-splits
+            # $MCP_DEPS_NPM_ARGS, so the two argv vectors are identical.
+            $depsResult = Install-McpDeps -ServerDir $serverDir
+            if ($depsResult -eq "current") {
+                if ($script:McpDepsStatus -ne "failed") { $script:McpDepsStatus = "ok" }
+                Write-Color ("OK   mcp/{0} dependencies already match the lockfile (skipped)" -f $serverName) Green
+            } elseif ($depsResult -eq "ok") {
+                if ($script:McpDepsStatus -ne "failed") { $script:McpDepsStatus = "ok" }
+                Write-Color ("OK   mcp/{0} dependencies installed" -f $serverName) Green
+            } else {
+                $script:McpDepsStatus = "failed"
+                # RECORDED SO THE TAIL CAN NAME IT (F1). The point-of-failure
+                # message is ~50 lines from the end of the run; the closing
+                # readout is what an operator reads.
+                $script:McpDepsFailed += $serverName
+                # NOTE THE NARROWED CLAIM (R2-F1): a failure here no longer means
+                # the server is broken — Install-McpDeps restored any
+                # pre-existing node_modules, so a target that WORKED before this
+                # run still works. It means the dependencies could not be brought
+                # to the shipped lockfile. The doctor decides which it actually is.
+                Write-Color ("FAILED npm ci for mcp/{0}" -f $serverName) Red
+                Write-Host "  Its dependencies were not updated to the shipped lockfile."
+                Write-McpDepsManualHint -ServerDir $serverDir
+            }
+            $global:LASTEXITCODE = 0
+        }
+    }
+
+    # .gitignore heal for the installed dependencies (v4.1 / C0b) -----------
+    #
+    # `npm ci` writes ~7,900 entries under .claude\mcp\*\node_modules. In a
+    # project whose .gitignore does not already cover them that is ~7,900
+    # untracked files in `git status` the morning after an install. The
+    # generated .gitignore further up already carries node_modules/, but it runs
+    # ONLY in the git-init branch and ONLY when the project has no .gitignore at
+    # all — a Go, Python, Rust or Java project takes neither path.
+    #
+    # Deliberately timid, same three rules as install.sh: never CREATE a
+    # .gitignore, append only when `git check-ignore` says the path is genuinely
+    # not already ignored, and print a note (an installer that silently edits a
+    # tracked file in the operator's repo would be a worse bug than the one it
+    # fixes). GENERATED_GITIGNORE is not touched.
+    $McpGitignoreMarker = "claude-workflow-plugin: MCP server dependencies"
+    # THE PROBE IS A FILE PATH, NOT THE DIRECTORY (v4.1 / C0b R2-F2). A gitignore
+    # pattern ending in `/` matches only a path git can see IS a directory, so
+    # probing the directory answers "not ignored" whenever it does not exist yet
+    # — even in a repo whose .gitignore already says `node_modules/`. On the
+    # normal path npm ci creates it first and the probe is right by luck; under
+    # -SkipMcpDeps it is absent and the heal appended into repos that already
+    # ignored it. A path with a further component matches via its PARENT
+    # component, so it answers correctly whether or not anything exists.
+    $McpGitignoreProbe = ".claude/mcp/bd-mcp/node_modules/.package-lock.json"
+    # BEGIN MCP_GITIGNORE_LINES (packaging-parity.test.sh extracts this block; keep the sentinels)
+    $McpGitignoreLines = @(
+        ''
+        '# claude-workflow-plugin: MCP server dependencies, installed by install.sh with'
+        '# "npm ci". They are vendored third-party files, not project source. Appended'
+        '# because this repo had no rule covering them. uninstall.sh removes the files'
+        '# but LEAVES THESE LINES, since this is your file: delete them yourself once the'
+        '# plugin is gone, or now if you would rather commit the dependencies.'
+        '# The second entry is the installer''s set-aside copy, which exists only while'
+        '# dependencies are being reinstalled and after an interrupted run.'
+        '.claude/mcp/*/node_modules/'
+        '.claude/mcp/*/.node_modules.cwp-reserve/'
+    )
+    # END MCP_GITIGNORE_LINES
+
+    $GitignorePath = Join-Path $Target ".gitignore"
+    if ($script:McpDepsStatus -ne "none" -and (Test-Path -LiteralPath $GitignorePath)) {
+        $alreadyMarked = (Select-String -LiteralPath $GitignorePath -SimpleMatch -Pattern $McpGitignoreMarker -Quiet) -eq $true
+        # check-ignore's THREE exit codes are all distinct answers: 0 already
+        # ignored, 1 not ignored, anything else (128) git could not answer.
+        # Only 1 is a reason to write — treating 128 as 1 would have the
+        # installer append to a .gitignore in a directory git does not manage.
+        $probeRc = Invoke-GitCheckIgnore -Root $Target -RelPath $McpGitignoreProbe
+        $global:LASTEXITCODE = 0
+        if (-not $alreadyMarked -and $probeRc -eq 1) {
+            try {
+                # Append via the same LF writer the generated .gitignore uses:
+                # a CRLF or BOM here would make the file's diff noise, and
+                # Add-Content under Windows PowerShell 5.1 writes both.
+                $existing = [System.IO.File]::ReadAllText($GitignorePath)
+                if ($existing.Length -gt 0 -and -not $existing.EndsWith("`n")) { $existing += "`n" }
+                $appended = $existing + (($McpGitignoreLines -join "`n") + "`n")
+                [System.IO.File]::WriteAllText($GitignorePath, $appended, (New-Object System.Text.UTF8Encoding($false)))
+                Write-Color "note appended an ignore rule for .claude/mcp/*/node_modules to your .gitignore" Cyan
+                Write-Host "  (npm ci writes thousands of files there; nothing else in the file was changed)"
+            } catch {
+                Write-Color "note could not append to $GitignorePath; add this line yourself:" Yellow
+                Write-Host "    .claude/mcp/*/node_modules/"
+            }
         }
     }
 
@@ -1957,6 +2709,133 @@ try {
         Pop-Location
     }
 
+    # Functional verification (v4.1 / C0b) ----------------------------------
+    #
+    # THE POINT OF THE WHOLE EPIC. Every installer assertion in this repo was
+    # presence-or-sha256; not one asked whether the thing it had just written
+    # could RUN. That is how "both MCP servers dead" and "no workflow context at
+    # all" each shipped three times behind a green "Installation complete."
+    #
+    # workflow-doctor.sh executes the SessionStart hook, boots both MCP servers
+    # over stdio and drives both gate hooks against the rendered target. The
+    # installer now runs it and reports the answer in its exit code: 0 healthy,
+    # 3 installed-but-not-working. 3 rather than 1 because the two need
+    # different reactions — 1 means nothing landed and you should re-run, 3
+    # means everything landed and there is a specific named repair.
+    #
+    # THE DOCTOR IS BASH. That is a stated cost, not a hidden one: Git Bash is
+    # already listed under "Requirements" at the end of this file and `git` is a
+    # hard prerequisite above, so on a machine meeting the documented
+    # requirements it is present. When it is NOT, this block says so loudly and
+    # STILL SETS EXIT 3 — "could not verify" must never produce the same exit
+    # code as "verified".
+    # The three status variables are initialised at TOP LEVEL (next to
+    # $MinNodeVersion), not here, so no early-return path can reach the closing
+    # readout with $script:InstallExitStatus unset: PowerShell compares
+    # `$null -ne 0` as TRUE, which would print "VERIFICATION FAILED" and exit
+    # non-zero on a perfectly good install that took a branch skipping this
+    # block.
+    $TargetDoctor = Join-Path $Target ".claude\scripts\workflow-doctor.sh"
+
+    if ($SkipVerify) {
+        Write-Host ""
+        Write-Color "note -SkipVerify: the install was NOT verified." Yellow
+        Write-Host "  Nothing has checked that this target actually orchestrates. Run:"
+        Write-Host "    .\install.ps1 -Verify -Path `"$Target`""
+    } elseif (-not (Test-Path -LiteralPath $TargetDoctor)) {
+        Write-Host ""
+        Write-Color "note no workflow-doctor.sh in the target; skipping verification." Yellow
+        Write-Host "  Expected: $TargetDoctor"
+    } else {
+        $VerifyBash = Find-Bash
+        if (-not $VerifyBash) {
+            $script:VerifyStatus = "no-bash"
+            $script:InstallExitStatus = 3
+            Write-Host ""
+            Write-Color "Verification could not run: no bash interpreter found." Red
+            Write-Host "  workflow-doctor.sh is a bash script and this install has NOT been"
+            Write-Host "  verified. Install Git for Windows (which ships Git Bash), then run:"
+            Write-Host "    bash `"$TargetDoctor`" --target `"$Target`""
+        } else {
+            Write-Host ""
+            Write-Color "Verifying the install (workflow-doctor.sh)..." Yellow
+            $VerifyJson = Join-Path ([System.IO.Path]::GetTempPath()) ("cwp-doctor-$(Get-Random).json")
+            $VerifyRc = 0
+            try {
+                # --quiet keeps the PASS lines out of an already-long install
+                # log; the JSON below is what this block renders from.
+                $VerifyRc = Invoke-BashScript -BashExe $VerifyBash -Quiet -BashArgs @(
+                    $TargetDoctor, "--target", $Target, "--json-out", $VerifyJson, "--quiet")
+            } catch {
+                $VerifyRc = 1
+            }
+            $global:LASTEXITCODE = 0
+
+            $report = $null
+            if (Test-Path -LiteralPath $VerifyJson) {
+                try { $report = Get-Content -Raw -LiteralPath $VerifyJson | ConvertFrom-Json } catch { $report = $null }
+            }
+            # A PARSEABLE REPORT IS NOT A USABLE ONE (v4.1 / C0b R2-F3). `{}`
+            # parses fine and then yields passed=0, failed=0 — "verified: 0
+            # check(s) passed", exit 0. A report describing no checks is not
+            # evidence that any check ran, and that is the same silent-green
+            # shape this block exists to kill. Require at least one check.
+            $reportCheckCount = 0
+            if ($report) { $reportCheckCount = @($report.checks).Count }
+            if (-not $report -or $reportCheckCount -lt 1) {
+                # NO USABLE REPORT: fall back to the doctor's EXIT CODE, which is
+                # its primary contract (0 = every non-skipped check passed).
+                # Matches install.sh's branch exactly — a Windows operator whose
+                # doctor does not implement --json-out must not get exit 3 where
+                # a macOS operator gets 0.
+                if ($VerifyRc -eq 0) {
+                    $script:VerifyStatus = "passed-no-report"
+                    Write-Color "OK verified (workflow-doctor.sh exited 0)" Green
+                    Write-Color "note it wrote no machine-readable report, so the per-check list is not shown." Yellow
+                } else {
+                    $script:VerifyStatus = "unreadable"
+                    $script:InstallExitStatus = 3
+                    Write-Color "Verification FAILED (workflow-doctor.sh exited $VerifyRc and wrote no usable report)." Red
+                    Write-Host "  Re-run it directly for the full picture:"
+                    Write-Host "    bash `"$TargetDoctor`" --target `"$Target`""
+                }
+            } else {
+                $script:VerifyFailedCount = [int]$report.failed
+                $verifyPassed = [int]$report.passed
+                $verifySkipped = [int]$report.skipped
+                if ($script:VerifyFailedCount -eq 0) {
+                    $script:VerifyStatus = "passed"
+                    Write-Color ("OK verified: {0} check(s) passed, {1} skipped" -f $verifyPassed, $verifySkipped) Green
+                } else {
+                    $script:VerifyStatus = "failed"
+                    $script:InstallExitStatus = 3
+                    $verifyTotal = $verifyPassed + $script:VerifyFailedCount + $verifySkipped
+                    Write-Color ("Verification FAILED: {0} of {1} check(s) did not pass." -f $script:VerifyFailedCount, $verifyTotal) Red
+                    Write-Host "The files are all installed. These checks say the install does not yet work:"
+                    Write-Host ""
+                    # Rendered from the JSON rather than scraped from the human
+                    # output: the report is a stable contract
+                    # (name/status/detail/fix per check) and the terminal
+                    # rendering is not. `fix` turns a failure into an action, so
+                    # it is never dropped.
+                    foreach ($check in @($report.checks | Where-Object { $_.status -eq "FAIL" })) {
+                        Write-Host ("  FAIL {0}" -f $check.name)
+                        $firstDetail = (("" + $check.detail) -split "`n")[0]
+                        Write-Host ("    {0}" -f $firstDetail)
+                        if ($check.fix) {
+                            $fixText = ("" + $check.fix) -replace "`n", "`n         "
+                            Write-Host ("    fix: {0}" -f $fixText)
+                        }
+                    }
+                    Write-Host ""
+                    Write-Host "After fixing, re-verify without reinstalling:"
+                    Write-Host "  .\install.ps1 -Verify -Path `"$Target`""
+                }
+            }
+            Remove-Item -LiteralPath $VerifyJson -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     # v3 upgrade readout (v4.1 / U0.7) --------------------------------------
     # Plain text on purpose: the same bytes go to the console AND to
     # $V3BackupDir\upgrade-report.txt, and colour escapes in a saved report are
@@ -2090,7 +2969,26 @@ try {
             Write-Color "note could not save the report into $V3BackupDir" Yellow
         }
     } else {
-        Write-Color "Installation complete." Green
+        # THE HEADLINE IS NO LONGER UNCONDITIONAL (v4.1 / C0b). "Installation
+        # complete." printed over an install whose MCP servers cannot boot is
+        # the single sentence that let the P0 ship three times: it is the last
+        # thing an operator reads, they believe it, and nothing later
+        # contradicts it. It now states which outcome actually happened.
+        #
+        # THREE ARMS, not two (v4.1 / C0b R2 / F1). The middle one is a run that
+        # WORKS but did not finish: npm ci failed and the previous dependency
+        # tree was preserved, so the target orchestrates and the exit code is 0.
+        # An unqualified green headline there is how "Installation complete."
+        # over an incomplete install gets to be true-ish and misleading at once.
+        if ($script:InstallExitStatus -ne 0) {
+            Write-Color "Installation complete, but VERIFICATION FAILED." Red
+            Write-Color "Every file was written. This target does not yet work - see the failing checks above." Yellow
+        } elseif (@($script:McpDepsFailed).Count -gt 0) {
+            Write-Color "Installation complete, but the dependency update did not finish." Yellow
+            Write-Color "The target works; see the dependency note at the end of this output." Yellow
+        } else {
+            Write-Color "Installation complete." Green
+        }
         Write-Host ""
         Write-Host "Installed to: " -NoNewline
         Write-Color "$Target\.claude\" Cyan
@@ -2160,7 +3058,19 @@ try {
         Write-Host "  - Approvals are bound to a change-set hash, so a stale one cannot release work"
         Write-Host "  - Role-aware model selection (.claude/model-roles) + /workflow-model"
         Write-Host "  - Rubric-graded QA loop and a mutation tier (/mutation-sweep) with an LLM judge"
-        Write-Host "  - Two MCP servers: bd-mcp (typed Beads tools), code-graph-mcp (impact_of, dead_code)"
+        # Conditional for the same reason the headline is (v4.1 / C0b): through
+        # v4.0 this line advertised two servers on every install, including the
+        # ones where both died on their first spawn. An operator then reads a
+        # missing bd_* tool as their own misconfiguration and looks in the wrong
+        # place. Test-McpServersRunnable is the cheap on-disk precondition; the
+        # doctor above is the expensive real one.
+        if (Test-McpServersRunnable) {
+            Write-Host "  - Two MCP servers: bd-mcp (typed Beads tools), code-graph-mcp (impact_of, dead_code)"
+            Write-McpStaleSuffix
+        } else {
+            Write-Host "  - Two MCP servers: bd-mcp, code-graph-mcp - NOT RUNNABLE YET, their"
+            Write-Host "    dependencies are not installed (see the npm ci note above)"
+        }
         Write-Host "  - Hash-based re-runs and upgrades: .claude/install-manifest records what was"
         Write-Host "    installed, so your edits are preserved with the shipped copy alongside as *.new"
         Write-Host "  - uninstall.ps1 removes exactly what the installer wrote, into a recoverable trash"
@@ -2182,6 +3092,37 @@ try {
     Write-Host ""
     Write-Color "Remember: all code changes require @qa approval." Red
     Write-Host ""
+
+    # Exit status (v4.1 / C0b) ----------------------------------------------
+    #
+    # Repeated here because the failing checks scrolled past ~40 lines ago and
+    # the tail is what an operator actually reads. The v3 upgrade branch prints
+    # its own report and never reaches the conditional headline above, so this
+    # block is the only place that path says anything about verification.
+    #
+    # `exit` inside this try runs the finally (Cleanup-Clone) first and then
+    # exits with the given code, so the temp clone is still removed. Both this
+    # and install.sh's tail exist because a caller has to be able to tell
+    # "nothing landed" (1) from "everything landed and does not work" (3).
+    # Unfinished dependency work, named at the tail regardless of the exit code.
+    # Printed BEFORE the verification block so the two read in severity order
+    # when both fire (deps stale, then does-not-work).
+    Write-McpDepsUnfinishedReadout
+
+    if ($script:InstallExitStatus -ne 0) {
+        Write-Color ("VERIFICATION FAILED - this install does not work yet (exit {0})." -f $script:InstallExitStatus) Red
+        if ($script:VerifyStatus -eq "failed") {
+            Write-Host "  Every file was written; $($script:VerifyFailedCount) functional check(s) did not pass."
+        } elseif ($script:VerifyStatus -eq "no-bash") {
+            Write-Host "  Every file was written; no bash interpreter was available to verify it."
+        } else {
+            Write-Host "  Every file was written; workflow-doctor.sh could not produce a report."
+        }
+        Write-Host "  Scroll up for each failing check and its fix, or re-run:"
+        Write-Host "    .\install.ps1 -Verify -Path `"$Target`""
+        Write-Host ""
+    }
+    exit $script:InstallExitStatus
 } finally {
     Cleanup-Clone
 }

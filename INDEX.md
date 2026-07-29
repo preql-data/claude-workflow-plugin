@@ -72,13 +72,24 @@ See `docs/` (which has its own index in `docs/plans/README.md`):
 - Health check an install: `make doctor` (or `make doctor TARGET=<dir>`) — eleven
   functional checks that EXECUTE the SessionStart hook, both MCP servers and both
   gate hooks. Safe mid-session; see `.claude/scripts/workflow-doctor.sh --help`.
-- Smoke install: `make install-test`. **Expected to FAIL until
-  `claude-workflow-plugin-z9m` (C0b) lands** — it now installs into a tempdir and
-  runs the doctor against the result, and a freshly rendered target has no
-  `.claude/mcp/*/node_modules` (the installer excludes it and the `curl | bash`
-  shallow clone never had one), so `mcp_bd` and `mcp_code_graph` fail. That red is
-  the v4.1 P0 reproducing on demand, not a broken checkout. It is deliberately not
-  wired into CI (`make test-ci` is `test test-component test-e2e-unit
-  manifest-validate`) and deliberately not `--skip`ped, because skipping would
-  make the command answer "yes, this install orchestrates" while the defect is
-  live in every rendered target.
+- Smoke install: `make install-test` — installs into a tempdir and runs the
+  doctor against the result. **Expected to PASS.** It was expected-red through
+  `claude-workflow-plugin-0fc` (C0a): a rendered target had no
+  `.claude/mcp/*/node_modules`, so `mcp_bd` and `mcp_code_graph` failed. C0b
+  (`claude-workflow-plugin-z9m`) made the installer run `npm ci` per server in
+  the target, which is what turns it green — so a failure here is now a real
+  regression. It **needs the npm registry** (there is no cached fallback), which
+  is why it is deliberately not wired into CI (`make test-ci` is `test
+  test-component test-e2e-unit manifest-validate`) and why the L2 installer
+  specs run with `CWP_SKIP_MCP_DEPS=1` / `CWP_SKIP_VERIFY=1`. It is also
+  deliberately not `--skip`ped: skipping the two server checks would make the
+  command answer "yes, this install orchestrates" without ever booting a server.
+- Installer exit codes (v4.1 / C0b): `0` installed and verified, `1` aborted
+  (nothing, or a partial tree, written), `3` installed but verification FAILED.
+  Re-verify any target without reinstalling: `bash install.sh --verify <dir>`.
+  **`0` also covers a run whose `npm ci` failed while the server's existing
+  dependencies were preserved** — the target works, so it is not a `3`. The
+  installer never hides it: the headline reads "the dependency update did not
+  finish" and the last block of output names the affected servers and the
+  command that completes it. A scripted caller that needs to distinguish this
+  from a clean run should grep for `DEPENDENCY UPDATE DID NOT FINISH`.

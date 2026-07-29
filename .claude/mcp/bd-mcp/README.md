@@ -29,7 +29,7 @@ The count sentence above is machine-read: `.claude/scripts/tests/mcp-deps.test.s
 |---|---|
 | `BD_CWD` | Override the cwd `bd` runs in (used when the MCP launches outside the project root) |
 | `CLAUDE_PROJECT_DIR` | Fallback for `BD_CWD`; usually set by Claude Code |
-| `npm install` | Pulls `@modelcontextprotocol/sdk` and `zod`. The plugin installer runs this automatically |
+| `npm ci --omit=dev` | Pulls `@modelcontextprotocol/sdk` and `zod` from the committed `package-lock.json`. The plugin installer runs this in the target automatically (v4.1 / C0b); through v4.0 this row claimed it did while nothing ran it, which is why every curl-installed target had this server dead. Add `--ignore-scripts` on an air-gapped host — the lockfile has zero install scripts, so nothing is suppressed |
 | `npm test` | Runs the integration suite; needs `bd` on PATH |
 
 The QA tools (`bd_qa_*`) call `qa-gate.sh` from the plugin (`.claude/scripts/qa-gate.sh`) for the side-effect bundle (label transitions, current-task helper writes, iteration-counter wipe, memory writes). If the script is absent, they fall back to direct `bd label` calls and skip side effects.

@@ -1207,9 +1207,25 @@ assert_eq "6b: install.ps1 declares the -Upgrade switch parameter" "1" \
 # shellcheck disable=SC2016 # the searched-for text is a literal PowerShell condition
 assert_eq "6b: install.ps1 tests -Upgrade against -Mode exactly once" "1" \
     "$(code_line_count "$INSTALL_PS1" 'if ($Upgrade -and $Mode)')"
-assert_eq "6b: install.ps1 refuses the combination (the message line)" "1" \
+# Anchored on the sentence THIS refusal owns, not on the shared "cannot be
+# combined." phrase. v4.1 / C0b added two more exclusivity refusals (--verify
+# with --upgrade, --verify with --mode) that reuse the wording deliberately, so
+# a bare count of the shared phrase stopped identifying any one block: it would
+# now read 3 in both installers and say nothing about which refusals exist.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6b: install.ps1 refuses the -Upgrade/-Mode combination (the message line)" "1" \
+    "$(code_line_count "$INSTALL_PS1" '-Upgrade and -Mode $Mode cannot be combined.')"
+# shellcheck disable=SC2016 # the searched-for text is literal shell source
+assert_eq "6b: install.sh refuses the --upgrade/--mode combination too" "1" \
+    "$(code_line_count "$INSTALL_SH" '--upgrade and --mode=$INSTALL_MODE_OVERRIDE cannot be combined.')"
+# The refusal SET is pinned file-to-file, which is what the shared-phrase count
+# was really protecting: three mutually-exclusive pairs, the same three in both
+# installers. An installer that gains a fourth refusal, or loses one, fails here
+# rather than drifting silently against the other.
+assert_eq "6b: both installers carry the SAME NUMBER of exclusivity refusals" \
+    "$(code_line_count "$INSTALL_SH" 'cannot be combined.')" \
     "$(code_line_count "$INSTALL_PS1" 'cannot be combined.')"
-assert_eq "6b: install.sh refuses the combination too" "1" \
+assert_eq "6b: and that number is 3 (upgrade/mode, verify/upgrade, verify/mode)" "3" \
     "$(code_line_count "$INSTALL_SH" 'cannot be combined.')"
 # The remediation sentence is byte-identical in both installers, so it is pinned
 # file-to-file rather than against a literal typed here.
@@ -1412,8 +1428,21 @@ assert_eq "6i: install.ps1 defines exactly one LF writer" "1" \
 assert_eq "6i: ...which writes with WriteAllText (not a cmdlet that appends a newline policy)" "1" \
     "$(code_line_count "$INSTALL_PS1" '[System.IO.File]::WriteAllText($FilePath')"
 # shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
-assert_eq "6i: ...with a BOM-LESS UTF8 encoder" "1" \
+# EVERY UTF8Encoding construction must be the BOM-less form, which is a
+# STRICTLY STRONGER contract than the "exactly one" this replaced. The old count
+# was a proxy for "no BOM anywhere" that held only while Write-LfFile was the
+# sole byte-sensitive writer; v4.1 / C0b added a second (the .gitignore heal),
+# and a proxy that breaks when a COMPLIANT writer is added is measuring the
+# wrong thing. Comparing the two counts forbids a BOM-ful `UTF8Encoding($true)`
+# or a bare `UTF8Encoding()` at any count, including zero writers.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6i: ...and EVERY UTF8 encoder in the file is the BOM-LESS form" \
+    "$(code_line_count "$INSTALL_PS1" 'New-Object System.Text.UTF8Encoding(')" \
     "$(code_line_count "$INSTALL_PS1" 'New-Object System.Text.UTF8Encoding($false)')"
+# Non-vacuity: two matching zeros would satisfy the equality above.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6i: ...and there is at least one of them" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'New-Object System.Text.UTF8Encoding($false)')" != "0" ] && echo yes || echo no)"
 # shellcheck disable=SC2016 # the searched-for text is literal PowerShell/shell source, never an expansion
 assert_eq "6i: ...joining lines with LF" "yes" \
     "$(grep -v '^[[:space:]]*#' "$INSTALL_PS1" | grep -F -- '$Lines -join' | grep -qF '`n' && echo yes || echo no)"
@@ -1565,8 +1594,19 @@ assert_eq "6m: install.sh's banner prints the interpolated brand label" "yes" \
 assert_eq "6m: install.sh's usage header prints it too" "1" \
     "$(code_line_count "$INSTALL_SH" 'printf '"'"'%s installer\n'"'"' "$BRAND_LABEL"')"
 # shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
-assert_eq "6m: install.ps1's banner prints the interpolated brand label" "1" \
-    "$(code_line_count "$INSTALL_PS1" 'Write-Color $BrandLabel Cyan')"
+# `-ge 1`, matching install.sh's sibling assertion four lines up. v4.1 / C0b
+# added a SECOND interpolated banner (the --verify early exit prints the same
+# label before running the doctor), and an exact-1 count would fail on a file
+# that got MORE correct. The top-level install banner is pinned separately just
+# below, anchored at column 0, so "there is still a main banner" is not lost.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6m: install.ps1's banner prints the interpolated brand label" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'Write-Color $BrandLabel Cyan')" != "0" ] && echo yes || echo no)"
+# The MAIN install banner, at column 0 — the one that carried the stale "v3" for
+# a whole release and the one META 19 mutates.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6m: install.ps1's top-level install banner is present exactly once" "1" \
+    "$(grep -c '^Write-Color \$BrandLabel Cyan$' "$INSTALL_PS1" | tr -d ' \n')"
 # ...and the label really comes from plugin.json in both.
 # shellcheck disable=SC2016 # the searched-for text is literal shell source, never an expansion
 assert_eq "6m: install.sh reads the branding version from .claude-plugin/plugin.json" "yes" \
@@ -2242,16 +2282,25 @@ assert_eq "META 19: the mutation actually changed the ps1 copy" "1" \
     "$(cmp -s "$PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
 assert_eq "META 19: -> the no-hardcode check FAILS (count 1, not 0)" "1" \
     "$(text_line_count "$PS_COPY" 'Claude Workflow Plugin v3')"
+# Counted with the SAME column-0 anchor the sed above uses. A plain fixed-string
+# count would also see the INDENTED --verify banner C0b added, which the sed
+# deliberately does not touch — so the mutant would read 1 instead of 0 and this
+# META would fail while the mutation it measures had landed perfectly.
 # shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
-assert_eq "META 19: -> and the interpolated-banner check FAILS (count 0, not 1)" "0" \
-    "$(code_line_count "$PS_COPY" 'Write-Color $BrandLabel Cyan')"
+assert_eq "META 19: -> and the top-level-banner check FAILS (count 0, not 1)" "0" \
+    "$(grep -c '^Write-Color \$BrandLabel Cyan$' "$PS_COPY" | tr -d ' \n')"
+# The mutation really is surgical: the other interpolated banner survives, so
+# the flip is about the top-level one and not about a sed that ate the file.
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "META 19: the mutation is surgical — the --verify banner survives" "yes" \
+    "$([ "$(code_line_count "$PS_COPY" 'Write-Color $BrandLabel Cyan')" != "0" ] && echo yes || echo no)"
 # The unmutated file still passes both, so META 19 is about the mutation and not
 # about a checker that flags everything.
 # shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
 assert_eq "META 19 companion: the real install.ps1 still passes both halves" "0 1" \
     "$(printf '%s %s' \
         "$(text_line_count "$INSTALL_PS1" 'Claude Workflow Plugin v3')" \
-        "$(code_line_count "$INSTALL_PS1" 'Write-Color $BrandLabel Cyan')")"
+        "$(grep -c '^Write-Color \$BrandLabel Cyan$' "$INSTALL_PS1" | tr -d ' \n')")"
 
 # --- META 20 (6n): the gitignore block is EXECUTED, not scraped ----------
 # gitignore_from_sh runs the real heredoc. If it ever degraded to "print the
@@ -2347,6 +2396,556 @@ assert_eq "META 22: a differently-indented manifest yields EMPTY, never a wrong 
     "$(sed -n "$PJV_SED" "$PJV_SCRATCH/four-space.json" | head -1)"
 assert_eq "META 22: ...and 6m's executed --help check is what catches that" "yes" \
     "$(printf '%s' "$BRAND_HELP_OUT" | grep -qF "Claude Workflow Plugin v$BRAND_EXPECTED_VERSION installer" && echo yes || echo no)"
+
+# ===========================================================================
+echo ""
+echo "=== Section 6s: MCP dependency install, node floor, .gitignore heal (C0b) ==="
+#
+# THREE NEW DUPLICATED CONTRACTS, and the reason each one is here rather than
+# trusted to a comment.
+#
+#   MCP_DEPS_CMD         the `npm ci` argument vector. Every flag in it is a
+#                        DECISION with a stated reason (`ci` not `install` so
+#                        the lockfile binds; `--omit=dev` so a future dev
+#                        dependency cannot reach an operator; `--ignore-scripts`
+#                        as supply-chain hardening that is free today because
+#                        both lockfiles have zero install scripts). A silent
+#                        drift between the two installers would mean Windows and
+#                        macOS operators get materially different dependency
+#                        trees from the same release.
+#   MIN_NODE_VERSION     the runtime floor. Both MCP servers declare
+#                        "engines": {"node": ">=18.17"}; an installer floor
+#                        BELOW that admits a runtime the servers reject, and the
+#                        failure surfaces as an opaque dynamic-import error.
+#   MCP_GITIGNORE_LINES  the text appended to an operator's OWN .gitignore. Two
+#                        installers writing different bytes into a tracked file
+#                        in the operator's repo is the worst kind of drift: it
+#                        shows up as a diff nobody can attribute.
+#
+# Plus the DATA-LOSS regression witnesses. install.sh's no-rsync fallback used
+# to `rm -rf` the TARGET's node_modules before copying, and install.ps1's
+# robocopy fallback used `Copy-Item -Recurse -Exclude`, which does not reliably
+# exclude DIRECTORIES. Once the dependencies live in the target, both destroy a
+# working tree on a re-install. Measured before the fix: a mode-2 re-run through
+# the cp fallback took bd-mcp/node_modules from 3,371 files to 0.
+
+MCP_SERVERS="bd-mcp code-graph-mcp"
+
+# --- 6s.1 sentinels present exactly once, in BOTH installers ---------------
+for _blk in MCP_DEPS_CMD MIN_NODE_VERSION MCP_GITIGNORE_LINES; do
+    assert_eq "6s: install.sh '# BEGIN $_blk' present exactly once" "1" \
+        "$(sentinel_line_count "$INSTALL_SH" "# BEGIN $_blk")"
+    assert_eq "6s: install.sh '# END $_blk' present exactly once" "1" \
+        "$(sentinel_line_count "$INSTALL_SH" "# END $_blk")"
+    assert_eq "6s: install.ps1 '# BEGIN $_blk' present exactly once" "1" \
+        "$(sentinel_line_count "$INSTALL_PS1" "# BEGIN $_blk")"
+    assert_eq "6s: install.ps1 '# END $_blk' present exactly once" "1" \
+        "$(sentinel_line_count "$INSTALL_PS1" "# END $_blk")"
+done
+
+# --- 6s.2 MCP_DEPS_CMD: extractable, identical, and still the decided flags -
+SH_DEPS_CMD=$(extract_expr "$INSTALL_SH" "MCP_DEPS_CMD" | normalize_expr)
+PS_DEPS_CMD=$(extract_expr "$INSTALL_PS1" "MCP_DEPS_CMD" | normalize_expr)
+assert_eq "6s: install.sh MCP_DEPS_CMD extraction is non-empty" "non-empty" \
+    "$([ -n "$SH_DEPS_CMD" ] && echo non-empty || echo EMPTY)"
+assert_eq "6s: install.ps1 MCP_DEPS_CMD extraction is non-empty" "non-empty" \
+    "$([ -n "$PS_DEPS_CMD" ] && echo non-empty || echo EMPTY)"
+assert_eq "6s: the npm argument vector is token-identical in both installers" \
+    "$SH_DEPS_CMD" "$PS_DEPS_CMD"
+# Per-flag, because "identical" is satisfied by two installers that dropped the
+# same flag. Each of these is a decision the epic recorded a reason for.
+# grep rather than `case`: bash 3.2 (the macOS system bash this suite runs on)
+# CANNOT PARSE a `case ... esac` inside a `$( )` command substitution — it dies
+# with "syntax error near unexpected token `newline'" at RUN time, which no
+# amount of shellcheck or `bash -n` will show you.
+assert_eq "6s: the command is 'npm ci', not 'npm install' (the lockfile must bind)" "yes" \
+    "$(printf '%s' "$SH_DEPS_CMD" | grep -qE '^ci( |$)' && echo yes || echo no)"
+for _flag in --omit=dev --ignore-scripts --no-audit --no-fund; do
+    assert_eq "6s: the npm argument vector still carries $_flag" "yes" \
+        "$(printf '%s' "$SH_DEPS_CMD" | grep -qF -- "$_flag" && echo yes || echo no)"
+done
+
+# --- 6s.3 MIN_NODE_VERSION: identical, and >= what the servers demand -------
+# The version STRING is compared rather than the whole line: bash writes
+# MIN_NODE_VERSION="18.17.0" and PowerShell $MinNodeVersion = [Version]"18.17.0",
+# so a token comparison of the assignments would fail on dialect alone.
+node_floor_of() {
+    extract_block "$1" MIN_NODE_VERSION | sed -n 's/.*"\([0-9][0-9.]*\)".*/\1/p' | head -1
+}
+SH_NODE_FLOOR=$(node_floor_of "$INSTALL_SH")
+PS_NODE_FLOOR=$(node_floor_of "$INSTALL_PS1")
+assert_eq "6s: install.sh declares a parseable node floor" "yes" \
+    "$([ -n "$SH_NODE_FLOOR" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1 declares a parseable node floor" "yes" \
+    "$([ -n "$PS_NODE_FLOOR" ] && echo yes || echo no)"
+assert_eq "6s: both installers declare the SAME node floor" "$SH_NODE_FLOOR" "$PS_NODE_FLOOR"
+# Cross-checked against the servers' own package.json rather than against a
+# number typed here: this is the assertion that catches a dependency bump moving
+# engines.node while the installers stay put.
+for _srv in $MCP_SERVERS; do
+    _eng=$(jq -r '.engines.node // ""' "$PROJECT_DIR/.claude/mcp/$_srv/package.json" 2>/dev/null \
+        | tr -d '>=^~ ')
+    assert_eq "6s: $_srv declares an engines.node floor" "yes" \
+        "$([ -n "$_eng" ] && echo yes || echo no)"
+    # sort -V puts the lower version first; the installer floor must not be it
+    # (equal is fine, which is why the inequality is tested too).
+    _lowest=$(printf '%s\n%s\n' "$SH_NODE_FLOOR" "$_eng" | sort -V | head -1)
+    assert_eq "6s: the installer node floor ($SH_NODE_FLOOR) is >= $_srv engines.node ($_eng)" "yes" \
+        "$([ "$_lowest" = "$_eng" ] && echo yes || echo no)"
+done
+
+# --- 6s.4 MCP_GITIGNORE_LINES: the sh block is EXECUTED, ps1 rendered -------
+# Executed, not scraped, for the same reason section 6n executes
+# GENERATED_GITIGNORE: running it is the only way to prove the bytes that reach
+# an operator's file. The extracted block is a standalone `cat <<'EOF'`.
+gitignore_heal_from_sh() {
+    local dir="$WORK/mcp-gitignore-exec-$$"
+    mkdir -p "$dir" || return 1
+    extract_block "$1" "MCP_GITIGNORE_LINES" > "$dir/block.sh" || return 1
+    bash "$dir/block.sh" 2>/dev/null
+}
+gitignore_heal_from_ps() {
+    extract_block "$1" "MCP_GITIGNORE_LINES" 2>/dev/null \
+        | sed -n "s/^[[:space:]]*'\(.*\)'[[:space:]]*$/\1/p" \
+        | sed "s/''/'/g"
+}
+SH_HEAL=$(gitignore_heal_from_sh "$INSTALL_SH")
+PS_HEAL=$(gitignore_heal_from_ps "$INSTALL_PS1")
+assert_eq "6s: install.sh's heal block executes and produces text" "yes" \
+    "$([ -n "$(printf '%s' "$SH_HEAL" | tr -d '[:space:]')" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1's heal block renders text" "yes" \
+    "$([ -n "$(printf '%s' "$PS_HEAL" | tr -d '[:space:]')" ] && echo yes || echo no)"
+assert_eq "6s: the appended .gitignore lines are byte-identical in both installers" \
+    "$SH_HEAL" "$PS_HEAL"
+# Non-vacuity: identical empty strings would satisfy the check above.
+assert_eq "6s: the heal block actually ignores the MCP node_modules path" "yes" \
+    "$(printf '%s' "$SH_HEAL" | grep -qF '.claude/mcp/*/node_modules/' && echo yes || echo no)"
+assert_eq "6s: the heal block carries the idempotency marker it greps for" "yes" \
+    "$(printf '%s' "$SH_HEAL" | grep -qF 'claude-workflow-plugin: MCP server dependencies' && echo yes || echo no)"
+# The marker string the installers TEST against has to be the one the block
+# WRITES, or the heal appends a fresh copy on every run.
+for _f in "$INSTALL_SH" "$INSTALL_PS1"; do
+    assert_eq "6s: $(basename "$_f") defines the marker it greps for" "yes" \
+        "$([ "$(code_line_count "$_f" 'claude-workflow-plugin: MCP server dependencies')" != "0" ] && echo yes || echo no)"
+done
+
+# --- 6s.5 WIRING (the §1b contract): each block is actually INVOKED ---------
+# A sentinel block that is defined and never called is the vacuity this file
+# exists to catch: every assertion above would still pass while the installer
+# ran something else entirely.
+# shellcheck disable=SC2016  # the searched-for text IS a literal shell invocation
+assert_eq "6s wiring: install.sh invokes npm with \$MCP_DEPS_NPM_ARGS" "1" \
+    "$(code_line_count "$INSTALL_SH" 'npm $MCP_DEPS_NPM_ARGS < /dev/null')"
+# `< /dev/null` is part of the wiring contract, not decoration: under
+# `curl | bash` the script's own stdin IS the pipe carrying the rest of the
+# source, and any npm prompt would eat it.
+# shellcheck disable=SC2016
+assert_eq "6s wiring: install.sh redirects npm's stdin from /dev/null" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '< /dev/null )')" != "0" ] && echo yes || echo no)"
+# shellcheck disable=SC2016  # the searched-for text is a literal PowerShell invocation
+assert_eq "6s wiring: install.ps1 invokes npm with \$McpDepsNpmArgs" "1" \
+    "$(code_line_count "$INSTALL_PS1" '& npm ($McpDepsNpmArgs -split')"
+# shellcheck disable=SC2016
+assert_eq "6s wiring: install.sh compares against \$MIN_NODE_VERSION" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '"$MIN_NODE_VERSION"')" != "0" ] && echo yes || echo no)"
+# shellcheck disable=SC2016
+assert_eq "6s wiring: install.ps1 compares against \$MinNodeVersion" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '-lt $MinNodeVersion')" != "0" ] && echo yes || echo no)"
+# shellcheck disable=SC2016
+assert_eq "6s wiring: install.sh appends the heal block to the target .gitignore" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_gitignore_lines >> "$TARGET/.gitignore"')"
+# shellcheck disable=SC2016
+assert_eq "6s wiring: install.ps1 joins the heal lines into the appended text" "1" \
+    "$(code_line_count "$INSTALL_PS1" '($McpGitignoreLines -join')"
+
+# --- 6s.6 the node/npm prerequisite exists, and precedes the CLONE ----------
+# Ordering matters for one concrete reason: under `curl | bash` the source is a
+# ~10 MB `git clone --depth 1`, and a node-less machine should be told before
+# paying for it. Both endpoints are located by TEXT; only their relative
+# positions are compared, so a reindent or an inserted block cannot break this.
+sh_line_of() { grep -n -F -- "$2" "$1" 2>/dev/null | head -1 | cut -d: -f1; }
+SH_NODE_CHECK_LINE=$(sh_line_of "$INSTALL_SH" 'node and npm are REQUIRED')
+SH_CLONE_LINE=$(sh_line_of "$INSTALL_SH" 'git clone --depth 1 --branch')
+assert_eq "6s: install.sh has a node/npm prerequisite block" "yes" \
+    "$([ -n "$SH_NODE_CHECK_LINE" ] && echo yes || echo no)"
+assert_eq "6s: install.sh's clone was located (guards the ordering check)" "yes" \
+    "$([ -n "$SH_CLONE_LINE" ] && echo yes || echo no)"
+assert_eq "6s: install.sh checks node BEFORE cloning the source" "yes" \
+    "$([ -n "$SH_NODE_CHECK_LINE" ] && [ -n "$SH_CLONE_LINE" ] && \
+       [ "$SH_NODE_CHECK_LINE" -lt "$SH_CLONE_LINE" ] && echo yes || echo no)"
+PS_NODE_CHECK_LINE=$(sh_line_of "$INSTALL_PS1" 'node and npm are REQUIRED')
+PS_CLONE_LINE=$(sh_line_of "$INSTALL_PS1" 'git clone --depth 1 --branch')
+assert_eq "6s: install.ps1 has a node/npm prerequisite block" "yes" \
+    "$([ -n "$PS_NODE_CHECK_LINE" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1 checks node BEFORE cloning the source" "yes" \
+    "$([ -n "$PS_NODE_CHECK_LINE" ] && [ -n "$PS_CLONE_LINE" ] && \
+       [ "$PS_NODE_CHECK_LINE" -lt "$PS_CLONE_LINE" ] && echo yes || echo no)"
+# A hard prerequisite with no way out is a wall. Both remediations must end at
+# the escape hatch, or a node-less air-gapped host simply cannot install.
+assert_eq "6s: install.sh's node remediation names the --skip-mcp-deps escape" "yes" \
+    "$([ "$(text_line_count "$INSTALL_SH" 'bash install.sh --skip-mcp-deps')" != "0" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1's node remediation names the -SkipMcpDeps escape" "yes" \
+    "$([ "$(text_line_count "$INSTALL_PS1" 'install.ps1 -SkipMcpDeps')" != "0" ] && echo yes || echo no)"
+# Platform-appropriate install routes, per installer.
+for _route in nvm 'brew install node' 'apt install nodejs' 'https://nodejs.org/'; do
+    assert_eq "6s: install.sh's node remediation names '$_route'" "yes" \
+        "$([ "$(text_line_count "$INSTALL_SH" "$_route")" != "0" ] && echo yes || echo no)"
+done
+assert_eq "6s: install.ps1's node remediation names winget OpenJS.NodeJS.LTS" "yes" \
+    "$([ "$(text_line_count "$INSTALL_PS1" 'winget install OpenJS.NodeJS.LTS')" != "0" ] && echo yes || echo no)"
+
+# --- 6s.7 DATA-LOSS regression witnesses -----------------------------------
+# shellcheck disable=SC2016  # the searched-for text is the FORBIDDEN shell line
+assert_eq "6s: install.sh no longer rm -rf's the TARGET's node_modules" "0" \
+    "$(code_line_count "$INSTALL_SH" 'rm -rf "$TARGET/.claude/mcp/$mcp_name/node_modules"')"
+# The replacement must exist, or the assertion above is satisfied by an
+# installer that simply stopped excluding anything.
+assert_eq "6s: install.sh's no-rsync fallback skips node_modules at COPY time" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'node_modules|.tmp) continue ;;')" != "0" ] && echo yes || echo no)"
+# install.ps1: -Exclude does not reliably exclude DIRECTORIES under -Recurse.
+assert_eq "6s: install.ps1 no longer relies on Copy-Item -Exclude for directories" "0" \
+    "$(code_line_count "$INSTALL_PS1" "-Recurse -Force -Exclude @('node_modules'")"
+assert_eq "6s: install.ps1's robocopy fallback tests the entry name explicitly" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" "\$_.Name -eq 'node_modules'")" != "0" ] && echo yes || echo no)"
+# robocopy must never gain a mirroring flag: either one deletes destination
+# content that is not in the source, and node_modules is now exactly that.
+for _bad in /PURGE /MIR; do
+    assert_eq "6s: install.ps1's robocopy carries no $_bad flag" "0" \
+        "$(code_line_count "$INSTALL_PS1" "robocopy \$srcServer \$dstServer /E /XD node_modules .tmp /XF *.log /NFL /NDL /NJH /NJS /NP $_bad")"
+done
+assert_eq "6s: install.sh's rsync still excludes node_modules" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'rsync -a --exclude=node_modules')" != "0" ] && echo yes || echo no)"
+assert_eq "6s: install.sh's rsync carries no --delete (it would wipe node_modules)" "0" \
+    "$(code_line_count "$INSTALL_SH" 'rsync -a --delete')"
+
+# --- 6s.8 the exit-3 contract, in both installers --------------------------
+# shellcheck disable=SC2016
+assert_eq "6s: install.sh ends by exiting with its recorded status" "1" \
+    "$(code_line_count "$INSTALL_SH" 'exit "$INSTALL_EXIT_STATUS"')"
+assert_eq "6s: install.sh sets that status to 3 on a failed verification" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'INSTALL_EXIT_STATUS=3')" != "0" ] && echo yes || echo no)"
+# shellcheck disable=SC2016
+assert_eq "6s: install.ps1 ends by exiting with its recorded status" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'exit $script:InstallExitStatus')"
+# shellcheck disable=SC2016  # the searched-for text is a literal PowerShell assignment
+assert_eq "6s: install.ps1 sets that status to 3 on a failed verification" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '$script:InstallExitStatus = 3')" != "0" ] && echo yes || echo no)"
+# The honest headline: neither installer may print an unconditional
+# "Installation complete." any more.
+assert_eq "6s: install.sh's success headline is conditional" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'Installation complete, but VERIFICATION FAILED')" != "0" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1's success headline is conditional" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'Installation complete, but VERIFICATION FAILED')" != "0" ] && echo yes || echo no)"
+# ...and the "Two MCP servers" advertisement is gated on the servers being
+# runnable, in both.
+assert_eq "6s: install.sh gates the two-servers advertisement" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'if mcp_servers_runnable; then')" != "0" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1 gates the two-servers advertisement" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'if (Test-McpServersRunnable) {')" != "0" ] && echo yes || echo no)"
+assert_eq "6s: install.sh carries the NOT RUNNABLE alternative wording" "yes" \
+    "$([ "$(text_line_count "$INSTALL_SH" 'NOT RUNNABLE YET')" != "0" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1 carries the NOT RUNNABLE alternative wording" "yes" \
+    "$([ "$(text_line_count "$INSTALL_PS1" 'NOT RUNNABLE YET')" != "0" ] && echo yes || echo no)"
+
+# --- 6s.9 the three new flags exist, and mean the same thing, in both -------
+# The FLAG SET is the operator-facing contract. A flag that exists on one
+# platform only is worse than a flag that exists on neither: the documentation
+# is shared, so a macOS operator's instructions silently do not work for their
+# Windows colleague.
+# shellcheck disable=SC2016 # the searched-for texts are literal installer source
+assert_eq "6s: install.sh parses --skip-mcp-deps" "1" \
+    "$(code_line_count "$INSTALL_SH" '        --skip-mcp-deps)')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.sh parses --skip-verify" "1" \
+    "$(code_line_count "$INSTALL_SH" '        --skip-verify)')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.sh parses --verify" "1" \
+    "$(code_line_count "$INSTALL_SH" '        --verify)')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.ps1 declares the -SkipMcpDeps switch" "1" \
+    "$(code_line_count "$INSTALL_PS1" '[switch]$SkipMcpDeps')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.ps1 declares the -SkipVerify switch" "1" \
+    "$(code_line_count "$INSTALL_PS1" '[switch]$SkipVerify')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.ps1 declares the -Verify switch" "1" \
+    "$(code_line_count "$INSTALL_PS1" '[switch]$Verify')"
+# The ENVIRONMENT forms are the only ones a piped install can use, on either
+# platform, so they are pinned as strictly as the flags.
+for _env in CWP_SKIP_MCP_DEPS CWP_SKIP_VERIFY; do
+    assert_eq "6s: install.sh honours \$$_env" "yes" \
+        "$([ "$(code_line_count "$INSTALL_SH" "\${$_env:-}")" != "0" ] && echo yes || echo no)"
+    assert_eq "6s: install.ps1 honours \$env:$_env" "yes" \
+        "$([ "$(code_line_count "$INSTALL_PS1" "\$env:$_env")" != "0" ] && echo yes || echo no)"
+done
+# --verify's own exclusivity refusals, both partners, both installers.
+# shellcheck disable=SC2016
+assert_eq "6s: install.sh refuses --verify with --upgrade" "1" \
+    "$(code_line_count "$INSTALL_SH" '--verify and --upgrade cannot be combined.')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.sh refuses --verify with --mode" "1" \
+    "$(code_line_count "$INSTALL_SH" '--verify and --mode=$INSTALL_MODE_OVERRIDE cannot be combined.')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.ps1 refuses -Verify with -Upgrade" "1" \
+    "$(code_line_count "$INSTALL_PS1" '-Verify and -Upgrade cannot be combined.')"
+# shellcheck disable=SC2016
+assert_eq "6s: install.ps1 refuses -Verify with -Mode" "1" \
+    "$(code_line_count "$INSTALL_PS1" '-Verify and -Mode $Mode cannot be combined.')"
+# install.ps1 must probe for bash rather than assume it, and must NOT silently
+# report success when it cannot find one — "could not verify" and "verified"
+# have to reach different exit codes or the Windows path is verification
+# theatre.
+assert_eq "6s: install.ps1 probes for a bash interpreter" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Find-Bash {')"
+assert_eq "6s: install.ps1 probes both Program Files locations" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'Git\bin\bash.exe')" = "2" ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is a literal PowerShell assignment
+assert_eq "6s: a bash-less Windows host is reported as UNVERIFIED, not verified" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '$script:VerifyStatus = "no-bash"')" != "0" ] && echo yes || echo no)"
+
+# --- 6s.11 a PRESERVED npm ci failure reaches the TAIL (R2 / F1) ------------
+#
+# The preserved path ends at exit 0 — correctly, because the target works — so
+# the closing readout is the ONLY channel left. Through one review round the
+# failure list was ASSIGNED AND NEVER READ in install.sh and did not exist at
+# all in install.ps1, so a hostile re-install printed "FAILED npm ci" at log
+# lines 70 and 83 and then a green "Installation complete." at line 135 with an
+# unqualified two-servers advert. install.sh's own comment calls that headline
+# "the single sentence that let the P0 ship three times".
+# shellcheck disable=SC2016 # the searched-for text is literal shell source
+assert_eq "6s: install.sh records the servers whose deps failed" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'MCP_DEPS_FAILED="$MCP_DEPS_FAILED $mcp_name"')" != "0" ] && echo yes || echo no)"
+# READS, plural: the headline arm, the advert qualifier and the tail block. A
+# single read would be satisfied by a variable that only gates one of them.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source
+assert_eq "6s: install.sh READS the failure list in at least 3 places" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '$MCP_DEPS_FAILED')" -ge 4 ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6s: install.ps1 records the servers whose deps failed" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '$script:McpDepsFailed += $serverName')" != "0" ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6s: install.ps1 READS the failure list in at least 3 places" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '$script:McpDepsFailed')" -ge 4 ] && echo yes || echo no)"
+# The tail block itself, defined AND invoked, in both (the §1b wiring rule: a
+# block that is defined and never called is the vacuity this file exists for).
+assert_eq "6s: install.sh defines the unfinished-dependency tail block" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_deps_unfinished_readout() {')"
+assert_eq "6s: install.ps1 defines the unfinished-dependency tail block" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Write-McpDepsUnfinishedReadout {')"
+assert_eq "6s wiring: install.sh invokes the tail block" "2" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_deps_unfinished_readout')"
+assert_eq "6s wiring: install.ps1 invokes the tail block" "2" \
+    "$(code_line_count "$INSTALL_PS1" 'Write-McpDepsUnfinishedReadout')"
+# The headline grew a THIRD arm in both; the operator-facing sentence is
+# compared file-to-file rather than against a literal typed here.
+# shellcheck disable=SC2016 # sed script: the ${YELLOW}/${NC} text is the installer's own source
+SH_STALE_HEADLINE=$(grep -F -- 'Installation complete, but the dependency update did not finish.' "$INSTALL_SH" \
+    | sed -e 's/^[[:space:]]*//' -e 's/^echo -e "${YELLOW}//' -e 's/${NC}"$//')
+PS_STALE_HEADLINE=$(grep -F -- 'Installation complete, but the dependency update did not finish.' "$INSTALL_PS1" \
+    | sed -e 's/^[[:space:]]*//' -e 's/^Write-Color "//' -e 's/" Yellow$//')
+assert_eq "6s: the did-not-finish headline is byte-identical in both installers" \
+    "$SH_STALE_HEADLINE" "$PS_STALE_HEADLINE"
+assert_eq "6s: ...and it is non-empty (guards the comparison above)" "yes" \
+    "$([ -n "$SH_STALE_HEADLINE" ] && echo yes || echo no)"
+# The tail heading is the string INDEX.md tells scripted callers to grep for, so
+# it is pinned in both installers AND in the doc that promises it.
+for _f in "$INSTALL_SH" "$INSTALL_PS1" "$PROJECT_DIR/INDEX.md"; do
+    assert_eq "6s: $(basename "$_f") carries the DEPENDENCY UPDATE DID NOT FINISH marker" "yes" \
+        "$([ "$(text_line_count "$_f" 'DEPENDENCY UPDATE DID NOT FINISH')" != "0" ] && echo yes || echo no)"
+done
+# The advert qualifier, defined and invoked in both.
+assert_eq "6s: install.sh defines the stale-dependency advert qualifier" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_stale_suffix() {')"
+assert_eq "6s: install.ps1 defines the stale-dependency advert qualifier" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Write-McpStaleSuffix {')"
+# install.sh has TWO advert sites (the v2 branch and the fresh branch); ps1 has
+# one (it redirects v2 to install.sh). Both must qualify every site they own.
+assert_eq "6s wiring: install.sh calls the qualifier at BOTH advert sites" "2" \
+    "$(code_line_count "$INSTALL_SH" '            mcp_stale_suffix')"
+assert_eq "6s wiring: install.ps1 calls the qualifier at its advert site" "1" \
+    "$(code_line_count "$INSTALL_PS1" '            Write-McpStaleSuffix')"
+# The husk predicate. `[ -d node_modules ]` is NOT a test for "has
+# dependencies": a FAILED npm ci leaves the directory holding 94 EMPTY
+# subdirectories with 0 package.json — measured — so the weaker test reported a
+# fresh failed install as having runnable servers.
+assert_eq "6s: install.sh distinguishes a real tree from the empty husk" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_server_has_deps() {')"
+assert_eq "6s: install.ps1 distinguishes a real tree from the empty husk" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Test-McpServerHasDeps {')"
+assert_eq "6s: install.sh's husk test looks for a package.json, not a directory" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '-name package.json -type f')" != "0" ] && echo yes || echo no)"
+assert_eq "6s: install.ps1's husk test looks for a package.json, not a directory" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '-Filter "package.json"')" != "0" ] && echo yes || echo no)"
+# Orphan reclaim must run on EVERY path, not only inside the install function: a
+# run interrupted mid-install and re-run with --skip-mcp-deps would otherwise
+# leave the operator's tree in a reserve with nothing to move it back.
+# shellcheck disable=SC2016 # the searched-for text is literal shell source
+assert_eq "6s: install.sh reclaims orphaned reserves outside the install loop" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" 'mcp_deps_reclaim "${mcp_dir%/}"')" != "0" ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # the searched-for text is literal PowerShell source
+assert_eq "6s: install.ps1 reclaims orphaned reserves outside the install loop" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'Restore-McpDepsReserve -ServerDir $_.FullName')" != "0" ] && echo yes || echo no)"
+
+# --- 6s.10 the npm ci preserve-and-restore (R2-F1), in BOTH installers ------
+#
+# `npm ci` REMOVES an existing node_modules before installing, so a FAILED
+# npm ci destroys the tree rather than leaving it stale. Measured: 3,909
+# entries / 98 package.json -> 94 EMPTY directories / 0 package.json against an
+# unreachable registry. C0b's first cut shipped without this guard because
+# deliverable 2 was verified under --skip-mcp-deps — the one flag that disables
+# npm ci — so the trigger it closed was the old one and the new one on the
+# default path was never exercised.
+#
+# The BEHAVIOUR is pinned by .claude/scripts/tests/mcp-deps-preserve.test.sh,
+# which executes the shipped bash functions (including one section against real
+# npm). What is pinned HERE is the thing that spec cannot see: that install.ps1
+# grew the same two layers, with the same on-disk names.
+assert_eq "6s: install.sh '# BEGIN MCP_DEPS_STAMP' present exactly once" "1" \
+    "$(sentinel_line_count "$INSTALL_SH" "# BEGIN MCP_DEPS_STAMP")"
+assert_eq "6s: install.sh '# END MCP_DEPS_STAMP' present exactly once" "1" \
+    "$(sentinel_line_count "$INSTALL_SH" "# END MCP_DEPS_STAMP")"
+assert_eq "6s: install.ps1 '# BEGIN MCP_DEPS_STAMP' present exactly once" "1" \
+    "$(sentinel_line_count "$INSTALL_PS1" "# BEGIN MCP_DEPS_STAMP")"
+assert_eq "6s: install.ps1 '# END MCP_DEPS_STAMP' present exactly once" "1" \
+    "$(sentinel_line_count "$INSTALL_PS1" "# END MCP_DEPS_STAMP")"
+# The two ON-DISK names must match exactly: a Windows target written by one
+# installer has to be readable by the other's skip-when-current check, and an
+# operator following a doc that names one path must find it on either platform.
+stamp_name_of() {
+    extract_block "$1" MCP_DEPS_STAMP | sed -n "s/.*Stamp[Nn]ame *= *'\([^']*\)'.*/\1/p;s/.*STAMP_NAME='\([^']*\)'.*/\1/p" | head -1
+}
+reserve_name_of() {
+    extract_block "$1" MCP_DEPS_STAMP | sed -n "s/.*Reserve[Nn]ame *= *'\([^']*\)'.*/\1/p;s/.*RESERVE_NAME='\([^']*\)'.*/\1/p" | head -1
+}
+SH_STAMP=$(stamp_name_of "$INSTALL_SH")
+PS_STAMP=$(stamp_name_of "$INSTALL_PS1")
+SH_RESERVE=$(reserve_name_of "$INSTALL_SH")
+PS_RESERVE=$(reserve_name_of "$INSTALL_PS1")
+assert_eq "6s: install.sh names a lockfile stamp" "yes" \
+    "$([ -n "$SH_STAMP" ] && echo yes || echo no)"
+assert_eq "6s: install.sh names a reserve directory" "yes" \
+    "$([ -n "$SH_RESERVE" ] && echo yes || echo no)"
+assert_eq "6s: both installers use the SAME stamp path" "$SH_STAMP" "$PS_STAMP"
+assert_eq "6s: both installers use the SAME reserve directory name" "$SH_RESERVE" "$PS_RESERVE"
+# The stamp lives INSIDE node_modules so it cannot outlive the tree it
+# describes — a stamp beside node_modules would survive a manual `rm -rf` of the
+# tree and make the next run skip an install that is genuinely needed.
+assert_eq "6s: the stamp lives inside node_modules (dies with the tree)" "yes" \
+    "$(printf '%s' "$SH_STAMP" | grep -q '^node_modules/' && echo yes || echo no)"
+# Both layers present, per installer.
+assert_eq "6s: install.sh defines the preserve-and-restore installer" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_deps_install() {')"
+assert_eq "6s: install.sh defines the interrupted-run reclaim" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_deps_reclaim() {')"
+assert_eq "6s: install.sh defines the skip-when-current check" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_deps_current() {')"
+assert_eq "6s: install.ps1 defines the preserve-and-restore installer" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Install-McpDeps {')"
+assert_eq "6s: install.ps1 defines the interrupted-run reclaim" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Restore-McpDepsReserve {')"
+assert_eq "6s: install.ps1 defines the skip-when-current check" "1" \
+    "$(code_line_count "$INSTALL_PS1" 'function Test-McpDepsCurrent {')"
+# The set-aside itself: a rename, in both. A COPY here would be a 7,900-file
+# duplication on every re-install, and a delete would be the original bug.
+# shellcheck disable=SC2016  # the searched-for text is literal shell source
+assert_eq "6s: install.sh sets the tree aside with mv (a rename, not a copy)" "1" \
+    "$(code_line_count "$INSTALL_SH" 'if mv "$d/node_modules" "$reserve"')"
+# shellcheck disable=SC2016  # the searched-for text is literal PowerShell source
+assert_eq "6s: install.ps1 sets the tree aside with Move-Item" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" 'Move-Item -LiteralPath $live -Destination $reserve')" != "0" ] && echo yes || echo no)"
+
+# ORDERING IS THE R2-F1 CONTRACT, not the absence of `rm -rf`. There IS a
+# legitimate `rm -rf "$d/node_modules"` in mcp_deps_install: the RESTORE arm
+# clears whatever npm managed to create before moving the operator's reserve
+# back. What must never happen is that rm running BEFORE npm — that is the
+# destructive shape. So the function is extracted and the two line positions
+# compared, both located by TEXT.
+SH_DEPS_FN=$(awk '/^mcp_deps_install\(\) \{/,/^\}$/' "$INSTALL_SH")
+assert_eq "6s: mcp_deps_install was extracted for the ordering check" "yes" \
+    "$([ "$(printf '%s\n' "$SH_DEPS_FN" | grep -c .)" -gt 20 ] && echo yes || echo no)"
+# shellcheck disable=SC2016  # searching the installer's own source text
+SH_NPM_POS=$(printf '%s\n' "$SH_DEPS_FN" | grep -n 'npm \$MCP_DEPS_NPM_ARGS' | head -1 | cut -d: -f1)
+# shellcheck disable=SC2016  # searching the installer's own source text
+SH_RM_POS=$(printf '%s\n' "$SH_DEPS_FN" | grep -n 'rm -rf "\$d/node_modules"' | head -1 | cut -d: -f1)
+assert_eq "6s: both the npm call and the restore-arm rm were located" "yes" \
+    "$([ -n "$SH_NPM_POS" ] && [ -n "$SH_RM_POS" ] && echo yes || echo no)"
+assert_eq "6s: the only rm of the live tree happens AFTER npm (restore arm)" "yes" \
+    "$([ -n "$SH_NPM_POS" ] && [ -n "$SH_RM_POS" ] && [ "$SH_RM_POS" -gt "$SH_NPM_POS" ] \
+       && echo yes || echo no)"
+# The stamp is written ONLY after success, in both: a stamp written on a failed
+# run would make the NEXT run skip a broken tree.
+# shellcheck disable=SC2016  # the searched-for text is literal installer source
+assert_eq "6s: install.sh stamps exactly once (the success arm)" "1" \
+    "$(code_line_count "$INSTALL_SH" 'mcp_sha256_of "$d/package-lock.json" > "$d/$MCP_DEPS_STAMP_NAME"')"
+# shellcheck disable=SC2016  # the searched-for text is literal installer source
+assert_eq "6s: install.ps1 stamps exactly once (the success arm)" "1" \
+    "$(code_line_count "$INSTALL_PS1" '[System.IO.File]::WriteAllText((Join-Path $ServerDir $McpDepsStampName)')"
+# The .gitignore heal must cover the reserve too, or an interrupted run leaves
+# an untracked 7,900-entry directory in the operator's status.
+assert_eq "6s: the heal block ignores the reserve directory as well" "yes" \
+    "$(printf '%s' "$SH_HEAL" | grep -qF '.node_modules.cwp-reserve' && echo yes || echo no)"
+# R2-F2: the probe is a FILE path. A trailing-slash pattern only matches a path
+# git can see IS a directory, so probing the directory answers "not ignored"
+# whenever it does not exist yet — and the heal then appended into repos that
+# already ignored node_modules.
+for _f in "$INSTALL_SH" "$INSTALL_PS1"; do
+    assert_eq "6s: $(basename "$_f") probes a FILE under node_modules, not the directory" "yes" \
+        "$([ "$(code_line_count "$_f" 'node_modules/.package-lock.json')" != "0" ] && echo yes || echo no)"
+done
+# R2-F3: an empty-but-valid report must not read as verified. `jq -e .` and
+# ConvertFrom-Json both accept `{}`.
+# shellcheck disable=SC2016  # the searched-for text is literal shell source
+assert_eq "6s: install.sh requires the report to carry at least one check" "yes" \
+    "$([ "$(code_line_count "$INSTALL_SH" '[ "$VERIFY_CHECK_COUNT" -lt 1 ]')" != "0" ] && echo yes || echo no)"
+# shellcheck disable=SC2016  # the searched-for text is literal PowerShell source
+assert_eq "6s: install.ps1 requires the report to carry at least one check" "yes" \
+    "$([ "$(code_line_count "$INSTALL_PS1" '$reportCheckCount -lt 1')" != "0" ] && echo yes || echo no)"
+
+# ===========================================================================
+echo ""
+echo "=== Section 7c: META-TESTs for the C0b parity checks ==="
+
+C0B_PS_COPY="$WORK/install-c0b-mutant.ps1"
+C0B_SH_COPY="$WORK/install-c0b-mutant.sh"
+
+# --- META 23 (6s.2): the npm-argument identity check can actually fail ------
+# Drop --ignore-scripts from a COPY of install.ps1's block. Anchored on the flag
+# text inside the sentinel-delimited assignment, never on a line number.
+sed "s/^\(    \$McpDepsNpmArgs = 'ci --omit=dev\) --ignore-scripts/\1/" \
+    "$INSTALL_PS1" > "$C0B_PS_COPY"
+assert_eq "META 23: the mutation actually changed the ps1 copy" "1" \
+    "$(cmp -s "$C0B_PS_COPY" "$INSTALL_PS1" && echo 0 || echo 1)"
+META23_PS=$(extract_expr "$C0B_PS_COPY" "MCP_DEPS_CMD" | normalize_expr)
+assert_eq "META 23: the mutant's vector really lost --ignore-scripts" "no" \
+    "$(printf '%s' "$META23_PS" | grep -qF -- '--ignore-scripts' && echo yes || echo no)"
+assert_eq "META 23: ...but is otherwise still a usable vector (not emptied)" "yes" \
+    "$(printf '%s' "$META23_PS" | grep -qF -- '--omit=dev' && echo yes || echo no)"
+assert_eq "META 23: -> 6s.2's identity check FAILS on the mutant" "no" \
+    "$([ "$SH_DEPS_CMD" = "$META23_PS" ] && echo yes || echo no)"
+assert_eq "META 23 control: it PASSES on the real install.ps1" "yes" \
+    "$([ "$SH_DEPS_CMD" = "$PS_DEPS_CMD" ] && echo yes || echo no)"
+
+# --- META 24 (6s.5): the WIRING check can actually fail ---------------------
+# The vacuity this section exists to catch: hoist the variable, keep the
+# sentinels, and stop calling it. Every extraction assertion above still passes;
+# only the wiring count moves.
+# shellcheck disable=SC2016  # sed script: the $VAR text is the installer's own source
+sed '/npm \$MCP_DEPS_NPM_ARGS < \/dev\/null/d' "$INSTALL_SH" > "$C0B_SH_COPY"
+assert_eq "META 24: the mutation actually changed the sh copy" "1" \
+    "$(cmp -s "$C0B_SH_COPY" "$INSTALL_SH" && echo 0 || echo 1)"
+assert_eq "META 24: the mutant is exactly one line shorter" "1" \
+    "$(( $(wc -l < "$INSTALL_SH") - $(wc -l < "$C0B_SH_COPY") ))"
+# The DEFINITION survives — that is the whole point of the vacuity this catches.
+assert_eq "META 24: the mutant still DEFINES the argument vector" "non-empty" \
+    "$([ -n "$(extract_expr "$C0B_SH_COPY" "MCP_DEPS_CMD" | normalize_expr)" ] && echo non-empty || echo EMPTY)"
+assert_eq "META 24: the mutant still carries both sentinels" "1" \
+    "$(sentinel_line_count "$C0B_SH_COPY" "# BEGIN MCP_DEPS_CMD")"
+# shellcheck disable=SC2016
+assert_eq "META 24: -> 6s.5's wiring count drops to 0" "0" \
+    "$(code_line_count "$C0B_SH_COPY" 'npm $MCP_DEPS_NPM_ARGS < /dev/null')"
+# shellcheck disable=SC2016
+assert_eq "META 24 control: the real install.sh still invokes it exactly once" "1" \
+    "$(code_line_count "$INSTALL_SH" 'npm $MCP_DEPS_NPM_ARGS < /dev/null')"
 
 # --- Summary ---------------------------------------------------------------
 
