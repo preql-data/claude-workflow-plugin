@@ -121,20 +121,21 @@ The shipped `hooks` block wires all six event types (the file also carries
 ### What It Does
 
 ```bash
-# 1. Verify Beads is available
-if ! command -v bd &> /dev/null; then
-    echo '{"error": "Beads (bd) not found"}'
-    exit 1
-fi
+# 1. Probe the dependencies. THIS HOOK HAS NO EXIT PATH THAT LOSES THE
+#    CONTEXT (v4.1 / C0c). It never bails; a missing dependency becomes a
+#    <workflow_degraded> block INSIDE the envelope. See "Degraded mode".
+BD_ON_PATH=0;   command -v bd >/dev/null 2>&1 && BD_ON_PATH=1
+BD_WORKSPACE=0; [ -d "$PROJECT_DIR/.beads" ] && BD_WORKSPACE=1
+BD_AVAILABLE=0                       # needs BOTH: the binary and a workspace
+[ "$BD_ON_PATH" = 1 ] && [ "$BD_WORKSPACE" = 1 ] && BD_AVAILABLE=1
+JQ_ON_PATH=0;   command -v jq >/dev/null 2>&1 && JQ_ON_PATH=1
 
-# 2. Verify Beads is initialized
-if [ ! -d "$PROJECT_DIR/.beads" ]; then
-    echo '{"error": "Beads not initialized. Run: bd init"}'
-    exit 1
-fi
+# 2. Build the degraded block (empty when nothing is missing). Seeded into
+#    CONTEXT first so it lands at the TOP of additionalContext.
+DEGRADED_BLOCK="<workflow_degraded severity=\"high\">...</workflow_degraded>"
 
-# 3. Run bd doctor silently
-bd doctor --quiet
+# 3. Run bd doctor silently — gated, like every other bd call below
+[ "$BD_AVAILABLE" = 1 ] && bd doctor --quiet
 
 # 4. Create session marker
 touch "$PROJECT_DIR/.claude/.session-start"
@@ -152,24 +153,76 @@ if [ -z "$(current-task.sh get)" ]; then
     qa-gate.sh baseline-capture --by session-start
 fi
 
-# 6. Get bd prime output (Beads' agent context)
-BD_PRIME=$(bd prime)
+# 6. Get bd prime output (Beads' agent context) — gated on BD_AVAILABLE,
+#    as are bd blocked / bd list / bd --version below
+[ "$BD_AVAILABLE" = 1 ] && BD_PRIME=$(bd prime)
 
 # 7. Load CLAUDE.md (project memory)
 # 8. Get blocked issues (bd blocked)
 # 9. Get qa-pending issues
 # 10. Inject workflow instructions
 
-# 11. Output JSON for additionalContext
-cat << EOF
-{
-  "hookSpecificOutput": {
-    "hookEventName": "SessionStart",
-    "additionalContext": "..."
-  }
-}
-EOF
+# 11. Encode and emit. Three tiers, each still VALID JSON:
+#     jq -Rs .  ->  built-in awk encoder  ->  a fixed minimal literal.
+CONTEXT_JSON=""
+[ "$JQ_ON_PATH" = 1 ] && CONTEXT_JSON=$(printf '%s' "$CONTEXT" | jq -Rs .)
+[ -z "$CONTEXT_JSON" ] && CONTEXT_JSON=$(printf '%s' "$CONTEXT" | ss_json_string)
+printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": %s\n  }\n}\n' "$CONTEXT_JSON"
 ```
+
+### Degraded mode
+
+**This hook never bails and never exits non-zero.** Until v4.1 it had two
+hard `exit 1` paths that printed a bare `{"error": "..."}` — not a
+`hookSpecificOutput` envelope. Claude Code discards non-envelope hook
+output with no diagnostic, so those paths produced a session with the
+plugin fully installed, **no `workflow_engine` block, no delegation
+contract and no gate instructions**, and nothing anywhere saying so. That
+was symptom 1 of the v4.1 P0 (epic `claude-workflow-plugin-2br`) and it is
+the worst failure direction the plugin has: a gate that silently ceases to
+exist is indistinguishable from a session that never needed one.
+
+Everything after the probe is fail-open and the `<workflow_engine>` block
+is unconditional, so those two bails were the only paths that could lose
+the context wholesale. They are now replaced by loud degradation.
+
+| Missing | Detected as | Result |
+|---------|-------------|--------|
+| `bd` not on PATH | `command -v bd` fails **in the hook's shell** | `<workflow_degraded>` naming **PATH divergence first**, with the `bash -lc` vs `bash -c` discriminator |
+| `.beads/` absent | directory test | `<workflow_degraded>` naming `bd init` — reported separately, because the PATH advice would be wrong here |
+| `jq` not on PATH | `command -v jq` fails | `<workflow_degraded>` naming jq; the envelope is encoded by the built-in awk fallback |
+
+The block is placed at the **top** of `additionalContext`, before
+`beads_context` and the issue lists. An LLM that reads 13 KB of workflow
+rules before the warning has already decided how to behave by the time the
+warning arrives.
+
+It always says three things: **what is missing** (with `fix:` lines that
+`workflow-doctor.sh` echoes verbatim in its `session_start` report), **that
+the delegation contract is unchanged and still binding**, and **that
+enforcement is now advisory** because the Beads-backed state that proves
+compliance is what went missing. A session told "degraded" without the
+second point will reasonably conclude the contract was lifted.
+
+Two things deliberately keep running in degraded mode:
+
+- **The gate baseline.** `qa-gate.sh baseline-capture` is git-only (it does
+  not require bd) and the Stop hook is the only enforcement surface left
+  standing, so removing its baseline would make every pre-existing dirty
+  path read as this session's unreviewed work.
+- **The envelope.** With `jq` absent the old writer emitted
+  `"additionalContext": ` followed by nothing — invalid JSON, discarded by
+  the runtime, indistinguishable from having no hook at all. The awk
+  fallback encoder keeps the full context; a fixed minimal literal carrying
+  its own degraded warning is the last resort.
+
+Verify the whole install — including whether this hook's envelope actually
+carries the contract — with `bash .claude/scripts/workflow-doctor.sh`.
+Regression coverage lives in
+`.claude/tests/component/specs/installer-target-functional.sh` section 6,
+which runs a rendered target's hook with `PATH=/usr/bin:/bin`. That is the
+*only* place the symptom is caught: the doctor's own `session_start` check
+runs on a host where bd is present, so it passes against the pre-C0c hook.
 
 ### Context Injected
 
@@ -1086,6 +1139,7 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 | `bd-github-link.sh` | I3 Beads ↔ GitHub auto-link. PostToolUse hook on Bash invocations. When a Beads task closes, posts a `gh issue comment` linking back; when `gh pr create` runs, parses `Closes #N` and writes `gh-link:` into the task notes. |
 | `detect-stack.sh` | F8/J17 polyglot test runner detection. Emits JSON `{runner, test_cmd, lint_cmd, type_cmd, manifest, overrides}`. Supports npm, pytest, go, cargo, maven, gradle, phpunit, rake, swift, dotnet, make, plus `.claude/test-cmd` overrides. |
 | `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`. Drains stdin (Claude Code passes a session envelope it doesn't need). |
+| `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Eleven named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, and drives both gate hooks. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
 
 Each helper is independently testable via the L1 bash unit tier
 (`.claude/scripts/tests/*.sh`) — see `.claude/tests/README.md` for the

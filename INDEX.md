@@ -35,12 +35,19 @@ listing the directory.
 
 - `.claude/tests/` — five-tier test pyramid root with `component/`, `e2e/`,
   and per-tier README.
-- `.claude/tests/component/` — L2 component specs (15 specs, 243
-  assertions; includes `qa-gate-baseline` codifying the 0wk.2 fix).
+- `.claude/tests/component/` — L2 component specs (40 specs, 1,881
+  assertions, 113 of them META-TESTs; counts measured at
+  `claude-workflow-plugin-20e`, not estimated). Two carry the v4.1 P0:
+  `installer-target-functional.sh` asserts a RENDERED TARGET orchestrates
+  (fresh install -> full doctor 11/11, the air-gap `node_modules` recipe
+  executed, the degraded SessionStart paths, six doctor METAs and a JSONC
+  settings.json installer META); `installer-v3-upgrade.sh` covers the in-place
+  upgrade. `qa-gate-baseline` codifies the 0wk.2 fix.
 - `.claude/tests/e2e/` — L3 live e2e fixtures + golden cassettes
   (`node-react-auth`, `python-django-bug`, `go-cli-refactor`,
   `monorepo-frontend-only`, `multi-domain-signup`, `qa-block-recovery`).
-- `.claude/scripts/tests/` — L1 bash unit tests (49 assertions).
+- `.claude/scripts/tests/` — L1 bash unit tests (29 specs, 1,648 assertions;
+  measured at `claude-workflow-plugin-20e`).
 - `.github/workflows/test.yml` — GitHub Actions CI: lint + 6 test jobs
   + L4 daily drift cron.
 

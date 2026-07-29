@@ -152,7 +152,56 @@ Now just describe what you want to build:
 
 ## Step 5: Verify It's Working
 
+### Run the doctor — the primary check
+
+```bash
+bash .claude/scripts/workflow-doctor.sh
+```
+
+This is the one verification that asks whether the install **runs**, not
+whether its files exist. Eleven checks: it executes the SessionStart hook and
+asserts the emitted envelope actually carries the delegation contract, boots
+both MCP servers over stdio and asserts they register exactly 21 and 7 tools,
+and drives both gate hooks against a synthetic change set. Every failure
+prints its own indented `fix:` line.
+
+```
+workflow-doctor: 11 check(s) — 11 passed, 0 failed, 0 skipped
+```
+
+Exit `0` = green, `1` = a check failed, `2` = usage error. The installer runs
+it for you at the end of an install and exits `3` when a check does not pass
+("everything landed, it does not work yet" — distinct from `1`, "aborted,
+nothing written"). To re-verify later without reinstalling:
+
+```bash
+bash install.sh --verify /path/to/your/project
+```
+
+Safe to run mid-session: every dynamic check runs in a throwaway sandbox copy,
+so your QA approval, change tracker and agent model pins are untouched. The
+one exception is the `beads` check, which runs `bd doctor` against the real
+database on purpose (a sandboxed copy would be checking a database nothing
+uses) and therefore rewrites `.beads/beads.db{,-shm,-wal}`. Pass
+`--skip beads` when you need a run that provably touches nothing.
+
+Two environment-specific variants:
+
+```bash
+# No node on this host — skip the two MCP server checks explicitly.
+bash .claude/scripts/workflow-doctor.sh --skip mcp_bd,mcp_code_graph
+
+# No outbound network — `bd doctor` reaches GitHub for a release check and
+# can otherwise blow its 30s bound on a perfectly healthy install.
+bash .claude/scripts/workflow-doctor.sh --skip beads,mcp_bd,mcp_code_graph
+```
+
 ### Check Beads Health
+
+The doctor's `beads` check is deliberately tolerant — it asks only whether
+`.beads/` exists and `bd doctor` is reachable, because bd's section wording
+varies by version and a health checker that cries wolf gets turned off. For
+the bd-specific drill-down, run it directly:
 
 ```bash
 bd doctor

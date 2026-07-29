@@ -51,7 +51,7 @@ retry without a human round-trip — the bd-mcp convention.
 | `CODE_GRAPH_CWD` | Override the cwd resolution from the test harness |
 | `grammars/*.wasm` | Vendored tree-sitter grammars; provenance in `grammars/MANIFEST.md` |
 | `.claude/.code-graph/index.db` | Per-project SQLite index file; created lazily on first tool call |
-| `npm ci --omit=dev` | Pulls `web-tree-sitter` (wasm), `sql.js` (wasm), `@modelcontextprotocol/sdk`, `zod` from the committed `package-lock.json`. The plugin installer runs this in the target automatically (v4.1 / C0b); through v4.0 this row claimed it did while nothing ran it, which is why every curl-installed target had this server dead. Add `--ignore-scripts` on an air-gapped host — the lockfile has zero install scripts, so nothing is suppressed |
+| `npm ci --omit=dev --ignore-scripts` | Pulls `web-tree-sitter` (wasm), `sql.js` (wasm), `@modelcontextprotocol/sdk`, `zod` from the committed `package-lock.json`. **This exact command** is what `install.sh` / `install.ps1` run inside `<target>/.claude/mcp/code-graph-mcp/` after the file copy (v4.1 / C0b) — named rather than described, so the claim is checkable: `grep -n 'npm ci' install.sh`. Through v4.0 this row said the installer ran it while nothing did, which is why every curl-installed target had this server dead. Skipped only under `--skip-mcp-deps` / `CWP_SKIP_MCP_DEPS=1`, and the installer says so and fails verification in that case. Run it by hand for an air-gapped or repaired install; the lockfile has zero install scripts, so `--ignore-scripts` suppresses nothing |
 | `npm test` | Runs the node:test suite (indexer, tools, protocol-level validation) |
 
 ### Dependency picks
