@@ -150,6 +150,7 @@ Before writing any test, ask:
 - [ ] Failure modes handled (network, timeout, invalid input).
 - [ ] Edge cases covered (empty, boundary, concurrent).
 - [ ] Tests are deterministic (no flakiness).
+- [ ] Each new test was observed failing before the fix landed. If you didn't watch the test fail, you don't know if it tests the right thing — and neither did the specialist. You cannot replay their session, so check it structurally instead: does the assertion actually depend on the changed code? Would reverting the fix turn it red? A test that would stay green against the unfixed state is coverage theatre, and that is a `must_fix`, not a nitpick.
 - [ ] All tests pass.
 - [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape). Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field.
 
@@ -234,6 +235,85 @@ Use this whenever `verify-before-stop.sh` or any QA pass surfaces a failure, bef
 6. **Verify and prevent.** Re-run the failing test (now passes) and the full suite (no regressions). Add the regression test to the permanent suite so the same failure cannot return silently. If the same antipattern is plausible elsewhere — same call site shape, same library misuse — sweep the codebase (e.g., `grep`/`rg` for the pattern) and either fix or file follow-ups. Write the prevention step into the Beads task notes so the team learns from it.
 
 **Bounce-twice rule.** If a shipped fix bounces — the issue persists after merge — twice, return to evidence mode is mandatory. The next attempt restarts from step 1 (do not iterate on the previous patch) and the QA block comment names the prior attempts so the next reviewer can see the chain. Two bounces is the signal that the root-cause statement is wrong, not that the fix needs more polish.
+
+<!-- EBF-CORE-START -->
+<!-- EBF-CORE is byte-identical across qa.md, backend.md, frontend.md and
+     devops.md. qa.md is the reference copy: edit it there, then propagate
+     verbatim. The four copies are extracted and compared byte-for-byte by
+     .claude/scripts/tests/evidence-before-fix.test.sh, which also refuses an
+     empty region — two empty regions compare equal, so identity alone would
+     be one sed away from meaningless. HTML comments delimit it because they
+     render invisibly and are awk-extractable, matching the repo's
+     shell-sentinel convention. -->
+
+**This is the single authoritative debugging protocol.** Where any other
+document prescribes a different threshold or a different sequence for
+diagnosing a failure — a vendored reference under `.claude/vendor/`, an
+external methodology, a habit carried in from another codebase — THIS TEXT
+WINS. Never run two protocols side by side and take whichever clears first;
+that is how a symptom-patching chain acquires a procedure.
+
+The numbered steps are the protocol. The clauses below are the parts that get
+skipped under pressure, so they are spelled out:
+
+- **Read the error completely.** The whole message, the whole stack trace,
+  every line number, file path and error code in it. Errors frequently contain
+  the answer outright, and skimming to the first familiar word is what turns a
+  five-minute fix into a three-patch chain.
+- **Check recent changes before theorising.** What moved? Read `git diff` and
+  the recent commits; look for a new dependency, a config change, a
+  runner-image bump, or an environment difference between the machine that
+  works and the one that does not. A regression has a cause with a timestamp.
+- **Instrument every boundary in a multi-component failure.** When the failing
+  path crosses components — request to service to store, hook to script to
+  gate, CI to build to sign — log what ENTERS and what EXITS each boundary,
+  plus the config and environment each component actually sees, then run it
+  ONCE to collect evidence. Read that evidence to find WHICH component fails
+  before investigating why it fails. Guessing the layer and then investigating
+  only that layer is the most expensive mistake available here.
+- **Pattern analysis before hypothesis.** Find something that WORKS and is
+  shaped like the broken thing — a sibling call site, an earlier passing run,
+  the reference implementation. Read it COMPLETELY; skimming a reference is how
+  you import its shape without its preconditions. Then enumerate EVERY
+  difference between working and broken, however irrelevant each looks. "That
+  can't matter" is itself a hypothesis, and it is the one that is wrong most
+  often.
+- **One hypothesis, one variable at a time.** State it in writing — "I think X
+  is the root cause because Y" — then make the smallest change that can
+  distinguish true from false. Changing two things at once forfeits the result
+  whichever way it lands: the outcome is unattributable, so the attempt bought
+  nothing. When a hypothesis is wrong, form a NEW one; never stack a second fix
+  on top of the first.
+- **Bounce twice and the design assumption is the suspect.** A shipped fix that
+  bounces once is a wrong hypothesis. Twice is a wrong MODEL: on the second
+  bounce, stop patching and question the design assumption every attempt has
+  shared — the invariant everyone believes holds, the boundary everyone
+  believes is clean, the ownership everyone believes is exclusive. This
+  threshold is deliberately STRICTER than the three-failed-attempts rule the
+  external methodology merged into this text used. Two bounces is already
+  enough evidence, and a third attempt costs a full review cycle to re-learn
+  what the second one said.
+- **Say what you do not know.** "I don't understand X" is a legitimate and
+  useful output; a confident wrong root cause is not. When the evidence runs
+  out, use `AskUserQuestion` to request the log, the recording, the env dump or
+  the access you are missing. Asking costs one turn. A wrong fix costs a review
+  cycle and leaves a plausible-looking patch in the tree for the next person to
+  trust.
+- **Red flags — any of these means STOP and restart from the protocol's first
+  step:** "quick fix now, investigate later"; "just change X and see what
+  happens"; bundling several changes and running the suite once; skipping the
+  test because you will verify by hand; "it's probably X"; "I don't fully
+  understand this but it might work"; adapting a reference you only skimmed;
+  proposing fixes before tracing the data flow; and, loudest of all, reaching
+  for one more attempt when the last two failed.
+- **The environmental exit is real but narrow.** If investigation genuinely
+  lands on an external, timing-dependent or environmental cause, you have
+  COMPLETED this protocol rather than escaped it: write down what you
+  investigated and ruled out, implement the appropriate handling (a bounded
+  retry, a timeout, an honest error message), and add the logging that makes
+  the next occurrence diagnosable. Reaching this exit without written evidence
+  for the steps above is not a conclusion; it is a guess wearing one.
+<!-- EBF-CORE-END -->
 
 Only after step 6 do you decide between `qa-gate.sh approve` and `qa-gate.sh block`.
 
@@ -379,6 +459,8 @@ On this spawn you do NOT run `codex-review.sh` yourself (it drives an MCP server
 - It **informs** your verdict. Findings you agree with at or above `risk_threshold` go into `must_fix` and route through your normal `qa-gate.sh block` round-trip. When the specialist fixes one, the resolution is recorded with evidence: `bash .claude/scripts/qa-gate.sh resolve-finding <tid> <finding-id> --fix '<commit or path:line>' --test '<test that proves it>' '<summary>'` — both refs are mandatory, which is the evidence-before-fix protocol expressed as a record.
 - It **does not** bind you. A finding you judge wrong is not silently dropped: surface the disagreement in `llm_observations` for the orchestrator, which arbitrates and records the decision (`qa-gate.sh arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'` — see `orchestrator.md` section 5d). Arbitration is the ORCHESTRATOR's call, not yours and not the implementer's: it is the only party to the dispute that is neither reviewer nor author. Since V3 the count is binding — `overrule` clears the finding, `sustain` leaves it open and blocking.
 - It **never** approves, labels, or releases *by itself*. Your `qa-approved` record is still the only release credential and principle 6's "one approval source of truth" is unchanged. What V3 added is a NECESSARY condition, not a second approval path: `verify-before-stop.sh` re-runs the same `review-check.sh gate` predicate before releasing, so a finding recorded AFTER your approval re-arms the gate. Future editors: the review artifact is wired into both gate ends deliberately (claude-workflow-plugin-jio.1) — do not add a THIRD place that reads these records.
+
+**Verify each finding before you route it.** A finding is a technical claim, and promoting one into `must_fix` without checking it costs the specialist a full round-trip on work that may be correct. Open the cited `path:line` and confirm the described condition exists; confirm it reproduces; ask whether the current implementation exists for a reason the reviewer could not see from the diff; and grep before endorsing an "implement it properly" finding that asks for generality nothing calls. Never respond performatively to a reviewer — "You're absolutely right!" and its relatives are agreement-shaped noise that carries no information and is actively misleading before you have checked. A finding you have verified goes into `must_fix` with its evidence; a finding you judge wrong goes into `llm_observations` with your technical reasoning and the orchestrator arbitrates it; a finding you cannot verify either way is recorded as exactly that, naming what you would need. All three are legitimate outputs. Silent acceptance is not one of them.
 
 ## 6. Rubric grading via the grader subagent (Phase A, root-orchestrated relay)
 

@@ -14,6 +14,12 @@ listing the directory.
   overrides vs. AgentLint.
 - `SECURITY.md` — vulnerability reporting.
 - `AGENTS.md` — companion to CLAUDE.md for non-Claude agent runtimes.
+- `LICENSE` — MIT, backing the `"license": "MIT"` declaration in
+  `.claude-plugin/plugin.json`.
+- `THIRD_PARTY.md` — index of vendored third-party material (tree-sitter
+  grammars, the `brainstorming` reference doc) and the manifest of record for
+  each. Repo-only: neither this nor `LICENSE` is copied into an install target,
+  which has its own licensing.
 
 ## Plugin assets
 
@@ -25,7 +31,13 @@ listing the directory.
   verify-before-stop, etc.) and tests under `.claude/scripts/tests/`.
 - `.claude/hooks/hooks.json` — hook bindings.
 - `.claude/skills/workflow-engine/` — auto-loaded skill describing the
-  always-on workflow.
+  always-on workflow. This is the **only** registered skill; `plugin.json`'s
+  `skills[]` is length 1 and a test asserts it.
+- `.claude/vendor/` — vendored third-party reference docs, read on demand by an
+  explicit `Read` instruction in an agent prompt and deliberately NOT registered
+  as skills. Currently one tree: `superpowers/` (the `brainstorming` skill at a
+  pinned commit, MIT, with ten local modifications). Its `MANIFEST.md` is the
+  record of record; `.claude/scripts/tests/vendored-skills.test.sh` guards it.
 - `.claude/mcp/` — bundled MCP servers (`bd-mcp`, `code-graph-mcp`).
 - `.claude/settings.json` — runtime settings (model, thinking budget,
   permissions, additionalDirectories).

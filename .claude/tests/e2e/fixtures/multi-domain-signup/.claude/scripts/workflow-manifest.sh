@@ -307,7 +307,16 @@ generate_rows() {
     scan_flat workflow ".claude/scripts"  '*.sh'
     scan_flat workflow ".claude/commands" '*.md'
     emit_row  workflow ".claude/hooks/hooks.json"
-    emit_row  workflow ".claude/skills/workflow-engine/SKILL.md"
+    # Skills and vendored reference docs are TREE scans, not named files
+    # (v4.1 / U4). Both mirror install.sh's copy_shipped_tree walks exactly —
+    # every file, dropping only *.log — so a second skill, a supporting file
+    # beside an existing one, or a second vendored document is classified with
+    # no edit here. `scan_tree` returns 0 on a missing directory, which is what
+    # keeps a pre-U4 tag's frozen table byte-identical: `git ls-tree v3.5.0`
+    # carries exactly one file under .claude/skills/ and no .claude/vendor/ at
+    # all, so this pair emits the same single row the named emit_row did.
+    scan_tree workflow ".claude/skills"
+    scan_tree workflow ".claude/vendor"
     scan_tree workflow ".claude/mcp" "node_modules" ".tmp"
     scan_tree workflow ".claude/tests/mutation" "runs"
     emit_row  workflow ".worktreeinclude"

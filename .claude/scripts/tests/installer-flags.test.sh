@@ -478,6 +478,7 @@ assert_eq "META: the mutated copy still carries the untouched --verify refusals"
 SYNTH="$WORK/synthetic-source"
 mkdir -p "$SYNTH/.claude/agents" "$SYNTH/.claude/scripts" "$SYNTH/.claude/hooks" \
     "$SYNTH/.claude/commands" "$SYNTH/.claude/skills/workflow-engine" \
+    "$SYNTH/.claude/vendor/superpowers/brainstorming" \
     "$SYNTH/.claude/mcp/bd-mcp" "$SYNTH/.claude/mcp/code-graph-mcp" \
     "$SYNTH/.claude-plugin" "$SYNTH/docs" "$SYNTH/bin"
 for agent in orchestrator qa backend frontend devops; do
@@ -502,6 +503,15 @@ cp "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" "$SYNTH/.claude/scripts/"
     printf '#!/bin/bash\nexit 1\n' > "$SYNTH/.claude/scripts/workflow-manifest.sh"
 printf '{"hooks":{}}\n'            > "$SYNTH/.claude/hooks/hooks.json"
 printf 'synthetic skill\n'         > "$SYNTH/.claude/skills/workflow-engine/SKILL.md"
+# The vendored reference tree (v4.1 / U4) joined the required-source list. Same
+# rule as every row above it: a missing entry aborts the mutant run with
+# "Plugin source missing" at the source check, BEFORE the flag-exclusivity flip
+# this section measures — so the META would fail for a reason that is not its
+# own. (LESSONS.md: when a change adds a gate to a release path, every META
+# isolating an earlier gate has to be re-seeded to satisfy the new one.)
+printf 'synthetic vendor manifest\n' > "$SYNTH/.claude/vendor/superpowers/MANIFEST.md"
+printf 'synthetic upstream licence\n' > "$SYNTH/.claude/vendor/superpowers/LICENSE.upstream"
+printf 'synthetic vendored skill\n' > "$SYNTH/.claude/vendor/superpowers/brainstorming/SKILL.md"
 printf 'synthetic command\n'       > "$SYNTH/.claude/commands/workflow-model.md"
 printf '{"env":{}}\n'              > "$SYNTH/.claude/settings.json"
 printf '{"name":"synthetic","version":"9.9.9-test"}\n' > "$SYNTH/.claude-plugin/plugin.json"

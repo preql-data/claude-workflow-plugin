@@ -510,6 +510,9 @@ try {
         ".claude/mcp/code-graph-mcp/package-lock.json",
         ".claude/hooks/hooks.json",
         ".claude/skills/workflow-engine/SKILL.md",
+        ".claude/vendor/superpowers/MANIFEST.md",
+        ".claude/vendor/superpowers/LICENSE.upstream",
+        ".claude/vendor/superpowers/brainstorming/SKILL.md",
         ".claude/settings.json",
         ".claude-plugin/plugin.json",
         ".claude/commands/workflow-model.md",
@@ -647,7 +650,14 @@ try {
             Get-SurfaceFlatRows -Root $Root -Class "workflow" -Dir ".claude/scripts"  -Glob "*.sh"
             Get-SurfaceFlatRows -Root $Root -Class "workflow" -Dir ".claude/commands" -Glob "*.md"
             Get-SurfaceFileRow  -Root $Root -Class "workflow" -Rel ".claude/hooks/hooks.json"
-            Get-SurfaceFileRow  -Root $Root -Class "workflow" -Rel ".claude/skills/workflow-engine/SKILL.md"
+            # Skills and vendored reference docs are TREE scans, not named files
+            # (v4.1 / U4), mirroring workflow-manifest.sh's scan_tree pair and
+            # install.ps1's own Copy-ShippedTree walks. Get-SurfaceTreeRows
+            # returns nothing for a missing directory, which is what keeps a
+            # pre-U4 tag's frozen table byte-identical: one file under
+            # .claude/skills/ and no .claude/vendor/ at all.
+            Get-SurfaceTreeRows -Root $Root -Class "workflow" -Dir ".claude/skills"
+            Get-SurfaceTreeRows -Root $Root -Class "workflow" -Dir ".claude/vendor"
             Get-SurfaceTreeRows -Root $Root -Class "workflow" -Dir ".claude/mcp" -Prune @("node_modules", ".tmp")
             Get-SurfaceTreeRows -Root $Root -Class "workflow" -Dir ".claude/tests/mutation" -Prune @("runs")
             Get-SurfaceFileRow  -Root $Root -Class "workflow" -Rel ".worktreeinclude"
@@ -1707,6 +1717,12 @@ try {
     foreach ($d in @(
         "$ClaudeDir\agents",
         "$ClaudeDir\skills\workflow-engine",
+        # Vendored third-party reference docs (v4.1 / U4). NOT under
+        # .claude\skills\ - these are read on demand by an explicit instruction
+        # in an agent prompt, not registered as skills. See
+        # .claude/vendor/superpowers/MANIFEST.md. The tree walk creates deeper
+        # directories, so only the root is seeded here.
+        "$ClaudeDir\vendor",
         "$ClaudeDir\hooks",
         "$ClaudeDir\scripts",
         "$ClaudeDir\commands",
@@ -2433,9 +2449,36 @@ try {
         -Src (Join-Path $SourceDir ".claude/hooks/hooks.json") `
         -Dst "$ClaudeDir\hooks\hooks.json"
 
-    Copy-WorkflowFile `
-        -Src (Join-Path $SourceDir ".claude/skills/workflow-engine/SKILL.md") `
-        -Dst "$ClaudeDir\skills\workflow-engine\SKILL.md"
+    # Skills + vendored reference docs - TREE WALKS, not name-by-name copies.
+    # Through v4.0 the skill was copied by its literal path, mirroring
+    # install.sh's last name-by-name copy. A second skill, or a supporting file
+    # beside an existing one, would have been silently dropped from every
+    # install. Recursive rather than a SKILL.md-only match, because
+    # Get-WorkflowSurfaceRows classifies BOTH trees with Get-SurfaceTreeRows,
+    # which walks every file: a narrower copy would put a file in the manifest
+    # and never on disk. Per-file Copy-WorkflowFile keeps place-by-verdict
+    # semantics on an upgrade. Mirrors install.sh's copy_shipped_tree; keep the
+    # two in sync in the same commit.
+    function Copy-ShippedTree {
+        param([string]$SrcRoot, [string]$DstRoot)
+        if (-not (Test-Path -LiteralPath $SrcRoot -PathType Container)) { return }
+        $srcFull = (Resolve-Path -LiteralPath $SrcRoot).Path
+        Get-ChildItem -LiteralPath $srcFull -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*.log' } |
+            Sort-Object FullName |
+            ForEach-Object {
+                $rel = $_.FullName.Substring($srcFull.Length).TrimStart('\', '/')
+                $dst = Join-Path $DstRoot $rel
+                $dstDir = Split-Path -Parent $dst
+                if ($dstDir -and -not (Test-Path -LiteralPath $dstDir)) {
+                    New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
+                }
+                Copy-WorkflowFile -Src $_.FullName -Dst $dst
+            }
+    }
+
+    Copy-ShippedTree -SrcRoot (Join-Path $SourceDir ".claude/skills") -DstRoot "$ClaudeDir\skills"
+    Copy-ShippedTree -SrcRoot (Join-Path $SourceDir ".claude/vendor") -DstRoot "$ClaudeDir\vendor"
 
     Get-ChildItem (Join-Path $SourceDir ".claude/commands/*.md") -ErrorAction SilentlyContinue | ForEach-Object {
         Copy-WorkflowFile -Src $_.FullName -Dst "$ClaudeDir\commands\$($_.Name)"

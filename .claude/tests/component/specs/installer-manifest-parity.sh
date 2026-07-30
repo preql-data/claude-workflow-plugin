@@ -264,28 +264,42 @@ parity_violations() {
     done < "$manifest"
 }
 
+# THE SCOPE LIST — declared ONCE (v4.1 / U4).
+#
+# Entries are "<dir>:<maxdepth>". .claude/scripts is depth 1 on purpose: that is
+# what keeps the repo-only .claude/scripts/tests/ tier out of the scan, exactly
+# as the generator's `find -maxdepth 1` does. Every scope here is one the
+# installer owns END TO END — it writes every file in it and the operator is
+# expected to write none — which is what makes "not in the manifest" a defect
+# rather than a customization.
+#
+# HOISTED because it was previously hand-copied into extra_files AND
+# files_in_scopes. Those two are a checker and its own vacuity guard, so two
+# copies could disagree: adding a scope to the checker and not to the counter
+# leaves the guard under-counting, which is precisely the direction that
+# silently WEAKENS the guard rather than failing it. One array, one truth.
+#
+# .claude/skills is scoped to the tree (not to `workflow-engine`) and
+# .claude/vendor is new, matching workflow-manifest.sh's `scan_tree` pair and
+# install.sh's `copy_shipped_tree` walks. All three must move together.
+PARITY_SCOPES=(
+    ".claude/agents:1"
+    ".claude/scripts:1"
+    ".claude/hooks:1"
+    ".claude/commands:1"
+    ".claude/rubrics:1"
+    ".claude/skills:9"
+    ".claude/vendor:9"
+)
+
 # CHECKER (shared with the 3b META): every file the target carries in a
 # wholly-plugin-owned directory must appear in <manifest>. Prints one line per
 # file that does not.
-#
-# The scope list is "<dir>:<maxdepth>". .claude/scripts is depth 1 on purpose:
-# that is what keeps the repo-only .claude/scripts/tests/ tier out of the scan,
-# exactly as the generator's `find -maxdepth 1` does. Every scope here is one
-# the installer owns END TO END — it writes every file in it and the operator is
-# expected to write none — which is what makes "not in the manifest" a defect
-# rather than a customization.
 extra_files() {
     local manifest="$1"
     local target="$2"
     local scope dir depth rel
-    for scope in \
-        ".claude/agents:1" \
-        ".claude/scripts:1" \
-        ".claude/hooks:1" \
-        ".claude/commands:1" \
-        ".claude/rubrics:1" \
-        ".claude/skills/workflow-engine:9"
-    do
+    for scope in "${PARITY_SCOPES[@]}"; do
         dir="${scope%:*}"
         depth="${scope##*:}"
         [ -d "$target/$dir" ] || continue
@@ -298,19 +312,13 @@ extra_files() {
     done
 }
 
-# files_in_scopes <target> — how many files the six scopes hold in total. A
-# vacuity guard for extra_files: an empty scan trivially reports no extras.
+# files_in_scopes <target> — how many files the scopes hold in total. A vacuity
+# guard for extra_files: an empty scan trivially reports no extras. Reads the
+# SAME array the checker reads, so the guard cannot drift out from under it.
 files_in_scopes() {
     local target="$1"
     local scope dir depth total=0 n
-    for scope in \
-        ".claude/agents:1" \
-        ".claude/scripts:1" \
-        ".claude/hooks:1" \
-        ".claude/commands:1" \
-        ".claude/rubrics:1" \
-        ".claude/skills/workflow-engine:9"
-    do
+    for scope in "${PARITY_SCOPES[@]}"; do
         dir="${scope%:*}"
         depth="${scope##*:}"
         [ -d "$target/$dir" ] || continue

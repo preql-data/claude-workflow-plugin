@@ -596,6 +596,9 @@ for required in \
     ".claude/mcp/code-graph-mcp/package-lock.json" \
     ".claude/hooks/hooks.json" \
     ".claude/skills/workflow-engine/SKILL.md" \
+    ".claude/vendor/superpowers/MANIFEST.md" \
+    ".claude/vendor/superpowers/LICENSE.upstream" \
+    ".claude/vendor/superpowers/brainstorming/SKILL.md" \
     ".claude/settings.json" \
     ".claude-plugin/plugin.json" \
     ".claude/commands/workflow-model.md" \
@@ -1517,6 +1520,12 @@ echo -e "${YELLOW}Creating plugin structure...${NC}"
 
 mkdir -p "$TARGET/.claude/agents"
 mkdir -p "$TARGET/.claude/skills/workflow-engine"
+# Vendored third-party reference docs (v4.1 / U4). NOT under .claude/skills/ —
+# these are read on demand by an explicit instruction in an agent prompt, not
+# registered as skills. See .claude/vendor/superpowers/MANIFEST.md, "Why a
+# reference doc and not a registered skill". The tree walk below creates any
+# deeper directories, so only the root is seeded here.
+mkdir -p "$TARGET/.claude/vendor"
 mkdir -p "$TARGET/.claude/hooks"
 mkdir -p "$TARGET/.claude/scripts"
 mkdir -p "$TARGET/.claude/commands"
@@ -2392,9 +2401,41 @@ fi
 # Hooks ------------------------------------------------------------------------
 copy_file "$SOURCE_DIR/.claude/hooks/hooks.json" "$TARGET/.claude/hooks/hooks.json"
 
-# Skill ------------------------------------------------------------------------
-copy_file "$SOURCE_DIR/.claude/skills/workflow-engine/SKILL.md" \
-    "$TARGET/.claude/skills/workflow-engine/SKILL.md"
+# Skills + vendored reference docs ---------------------------------------------
+# TREE WALKS, not name-by-name copies. Through v4.0 the skill was copied by its
+# literal path (.claude/skills/workflow-engine/SKILL.md) — the LAST name-by-name
+# copy left in this installer, since agents, scripts, commands and rubrics were
+# already globs. A second skill, or a supporting file placed beside an existing
+# one, would have been silently dropped from every install: exactly the failure
+# mode that hid grader.md from two releases (LESSONS.md).
+#
+# `find` rather than a `*/SKILL.md` nullglob loop, for one specific reason:
+# workflow-manifest.sh classifies BOTH trees with `scan_tree`, which walks every
+# file under them (dropping only *.log). A glob matching just SKILL.md would put
+# a supporting file in the manifest and never on disk, and
+# installer-manifest-parity.sh would then report it absent. The copy walk here
+# and the scan there have to agree file for file; keep them in sync in the same
+# commit.
+#
+# Per-file `copy_file` rather than rsync: a handful of small files, and
+# copy_file is what routes each one through place_by_verdict, so an upgrade
+# still honours replace-custom / preserve-custom for anything the operator
+# edited. rsync would bypass that decision point entirely.
+copy_shipped_tree() {
+    local src_root="$1"
+    local dst_root="$2"
+    local rel
+    [ -d "$src_root" ] || return 0
+    while IFS= read -r -d '' rel; do
+        rel="${rel#./}"
+        [ -n "$rel" ] || continue
+        mkdir -p "$dst_root/$(dirname "$rel")"
+        copy_file "$src_root/$rel" "$dst_root/$rel"
+    done < <(cd "$src_root" && find . -type f ! -name '*.log' -print0 2>/dev/null)
+}
+
+copy_shipped_tree "$SOURCE_DIR/.claude/skills" "$TARGET/.claude/skills"
+copy_shipped_tree "$SOURCE_DIR/.claude/vendor" "$TARGET/.claude/vendor"
 
 # Commands ---------------------------------------------------------------------
 for cmd in "$SOURCE_DIR/.claude/commands/"*.md; do

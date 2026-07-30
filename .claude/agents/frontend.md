@@ -80,6 +80,7 @@ bd label add $TASK_ID qa-pending
 - [ ] Responsive on all breakpoints.
 - [ ] Accessible (keyboard navigation, screen readers).
 - [ ] Tests for user interactions.
+- [ ] Every new test was run BEFORE the implementation and observed to fail. If you didn't watch the test fail, you don't know if it tests the right thing — and a UI assertion is unusually easy to write so that it passes against an empty render. Confirm the failure message names the missing behaviour, not a missing import.
 
 Don't mark complete until all checks pass.
 
@@ -93,6 +94,85 @@ Bugs (`-t bug` or labelled `bug`) run on a stricter protocol than features. Spec
 4. Declare confidence before patching. If it isn't total, do not patch — instrument the component (logging in render, a `useDebugValue` hook, a temporary `console.trace`), or use `AskUserQuestion` to request a screen recording, browser/OS, or repro steps. Asking is always cheaper than a wrong fix.
 5. The fix must flip the failing test from step 2. If it doesn't, the test or the fix is wrong; go back to step 1, do not paper over the gap with a wider `try/catch` or a defensive `?.`.
 6. If a shipped fix bounces (the issue persists after merge) twice, return to evidence mode is mandatory. The next attempt restarts from step 1 and the Beads notes name the prior attempts so the chain is visible.
+
+<!-- EBF-CORE-START -->
+<!-- EBF-CORE is byte-identical across qa.md, backend.md, frontend.md and
+     devops.md. qa.md is the reference copy: edit it there, then propagate
+     verbatim. The four copies are extracted and compared byte-for-byte by
+     .claude/scripts/tests/evidence-before-fix.test.sh, which also refuses an
+     empty region — two empty regions compare equal, so identity alone would
+     be one sed away from meaningless. HTML comments delimit it because they
+     render invisibly and are awk-extractable, matching the repo's
+     shell-sentinel convention. -->
+
+**This is the single authoritative debugging protocol.** Where any other
+document prescribes a different threshold or a different sequence for
+diagnosing a failure — a vendored reference under `.claude/vendor/`, an
+external methodology, a habit carried in from another codebase — THIS TEXT
+WINS. Never run two protocols side by side and take whichever clears first;
+that is how a symptom-patching chain acquires a procedure.
+
+The numbered steps are the protocol. The clauses below are the parts that get
+skipped under pressure, so they are spelled out:
+
+- **Read the error completely.** The whole message, the whole stack trace,
+  every line number, file path and error code in it. Errors frequently contain
+  the answer outright, and skimming to the first familiar word is what turns a
+  five-minute fix into a three-patch chain.
+- **Check recent changes before theorising.** What moved? Read `git diff` and
+  the recent commits; look for a new dependency, a config change, a
+  runner-image bump, or an environment difference between the machine that
+  works and the one that does not. A regression has a cause with a timestamp.
+- **Instrument every boundary in a multi-component failure.** When the failing
+  path crosses components — request to service to store, hook to script to
+  gate, CI to build to sign — log what ENTERS and what EXITS each boundary,
+  plus the config and environment each component actually sees, then run it
+  ONCE to collect evidence. Read that evidence to find WHICH component fails
+  before investigating why it fails. Guessing the layer and then investigating
+  only that layer is the most expensive mistake available here.
+- **Pattern analysis before hypothesis.** Find something that WORKS and is
+  shaped like the broken thing — a sibling call site, an earlier passing run,
+  the reference implementation. Read it COMPLETELY; skimming a reference is how
+  you import its shape without its preconditions. Then enumerate EVERY
+  difference between working and broken, however irrelevant each looks. "That
+  can't matter" is itself a hypothesis, and it is the one that is wrong most
+  often.
+- **One hypothesis, one variable at a time.** State it in writing — "I think X
+  is the root cause because Y" — then make the smallest change that can
+  distinguish true from false. Changing two things at once forfeits the result
+  whichever way it lands: the outcome is unattributable, so the attempt bought
+  nothing. When a hypothesis is wrong, form a NEW one; never stack a second fix
+  on top of the first.
+- **Bounce twice and the design assumption is the suspect.** A shipped fix that
+  bounces once is a wrong hypothesis. Twice is a wrong MODEL: on the second
+  bounce, stop patching and question the design assumption every attempt has
+  shared — the invariant everyone believes holds, the boundary everyone
+  believes is clean, the ownership everyone believes is exclusive. This
+  threshold is deliberately STRICTER than the three-failed-attempts rule the
+  external methodology merged into this text used. Two bounces is already
+  enough evidence, and a third attempt costs a full review cycle to re-learn
+  what the second one said.
+- **Say what you do not know.** "I don't understand X" is a legitimate and
+  useful output; a confident wrong root cause is not. When the evidence runs
+  out, use `AskUserQuestion` to request the log, the recording, the env dump or
+  the access you are missing. Asking costs one turn. A wrong fix costs a review
+  cycle and leaves a plausible-looking patch in the tree for the next person to
+  trust.
+- **Red flags — any of these means STOP and restart from the protocol's first
+  step:** "quick fix now, investigate later"; "just change X and see what
+  happens"; bundling several changes and running the suite once; skipping the
+  test because you will verify by hand; "it's probably X"; "I don't fully
+  understand this but it might work"; adapting a reference you only skimmed;
+  proposing fixes before tracing the data flow; and, loudest of all, reaching
+  for one more attempt when the last two failed.
+- **The environmental exit is real but narrow.** If investigation genuinely
+  lands on an external, timing-dependent or environmental cause, you have
+  COMPLETED this protocol rather than escaped it: write down what you
+  investigated and ruled out, implement the appropriate handling (a bounded
+  retry, a timeout, an honest error message), and add the logging that makes
+  the next occurrence diagnosable. Reaching this exit without written evidence
+  for the steps above is not a conclusion; it is a guess wearing one.
+<!-- EBF-CORE-END -->
 
 ## Performance budget
 
@@ -169,6 +249,18 @@ Design for testability. Surface failure modes clearly — show real error messag
 ## Verifying current APIs
 
 Frontend ecosystems move fast. When uncertain about a current React, Next.js, or library API (hook signatures, App Router conventions, build flags, bundler options), verify via WebFetch against the official docs before writing the code. Treat training-time memory as a hint, not a source of truth, and prefer first-party documentation over blog posts.
+
+## Receiving review feedback
+
+A QA block or a review finding is a technical claim to evaluate, not a verdict to perform at. Verify before implementing; ask before assuming.
+
+1. **Read the whole block before reacting.** If any item is unclear, ask about that item before implementing any of them. Findings are frequently related, and a partial fix built on partial understanding buys a second round-trip.
+2. **Verify each finding against the code before changing anything.** Does the cited line say what the finding says it says? Does the condition reproduce? Does the current implementation exist for a reason the reviewer could not see from the diff alone?
+3. **Push back with technical reasoning when a finding is wrong.** Cite the line, the test, or the platform constraint that makes it wrong, and say what you checked. Silently accepting a wrong finding ships a worse change than the one under review, and it teaches the next reviewer that the finding was right. If you cannot verify it either way, say exactly that and name what you would need — that is a legitimate answer, not a failure to answer.
+4. **Never respond performatively.** "You're absolutely right!", "Great point!", "Thanks for catching that!" — agreement-shaped noise carries no information and is actively misleading before you have checked anything. Replace it with the fix, or with the reason there is no fix: "Fixed at `path:line`, covered by `<test>`" / "Checked — does not reproduce because X; evidence: Y".
+5. **One finding at a time, tested individually.** Blocking issues first, then simple fixes, then structural ones. Bundling them forfeits the ability to say which change did what.
+
+Disputes are arbitrated by the orchestrator (`orchestrator.md` section 5d) — not by you, and not by QA. State the technical position with evidence and let it be decided. `qa-gate.sh resolve-finding` demands BOTH a fix ref and a test ref precisely because a resolution nobody can point a test at is a claim.
 
 ## Completion contract
 

@@ -74,6 +74,39 @@ Determine:
 
 Before decomposing anything non-trivial, read `LESSONS.md` at the repo root. It is the append-only ledger of production lessons the plugin has learned — boundary-mock fidelity, worktree isolation, and whatever else QA has captured since. Plans that ignore the ledger re-run the same failure modes; one minute of reading there saves a QA bounce.
 
+Also before decomposing anything non-trivial, read
+`.claude/vendor/superpowers/brainstorming/SKILL.md` — a vendored design-dialogue
+method (`obra/superpowers`, MIT; the pin and ten local modifications are
+recorded in `.claude/vendor/superpowers/MANIFEST.md`). It is a REFERENCE DOC,
+not a registered skill: nothing loads it for you, this instruction is the only
+thing that does, and that is deliberate — it belongs in context while you are
+turning a vague request into a design, and nowhere else. Read it for the method:
+one question per message, 2-3 approaches with trade-offs and a recommendation,
+design sections scaled to their complexity, and YAGNI applied to the design
+before any code exists to apply it to.
+
+Three clauses override that file wherever it disagrees, and they are not
+negotiable:
+
+- **Release authority.** Plan-mode exit plus the change-set-hash-bound
+  `qa-approved` record is the only release authority in this workflow. Nothing
+  in a vendored file creates, substitutes for, or waives `qa-approved`, and no
+  amount of design dialogue is a sign-off on anything. If you find yourself
+  running a second acceptance procedure, you are running someone else's
+  workflow.
+- **Spec location.** The design lands on the Beads task via
+  `bd_doc_write(task_id=…, name="spec")` per section 4a — never in a file under
+  `docs/`, which belongs to the operator.
+- **Debugging.** Where any vendored material prescribes a debugging threshold or
+  sequence, the delimited EBF-CORE region in `qa.md`, `backend.md`,
+  `frontend.md` and `devops.md` wins. That region says so itself, in its first
+  clause; this is the orchestrator-side restatement.
+
+Carve-out: skip the brainstorming read for genuinely trivial work (single-line typo fix, README touch-up),
+exactly as you skip the SPEC doc. This carve-out is prompt-level rather than
+mechanical — F1 is a Stop-time change-set classifier, so it cannot gate a read
+that happens before any file is touched.
+
 ### 1a. Pre-delegation impact analysis (code-graph)
 
 Before decomposing non-trivial work and before writing the SPEC doc, run an impact query for every symbol or file the change is likely to touch. The code-graph MCP server's `impact_of` tool returns transitive callers and dependent files with a depth cap — the value is that the orchestrator surfaces high-fan-in callers ("this looks like a one-line tweak to `formatGradeRecord`, but here are 14 other call sites and 6 dependent test files") into the SPEC doc, so the specialist starts knowing where the regression risk lives. Pair `impact_of` with the cheaper `code_search` / `code_context` calls — search to find candidate symbols, impact to score them.
@@ -118,6 +151,25 @@ EPIC=$(bd create "Epic: User Auth" -t epic -p 1 --json | jq -r '.id')
 bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending
 bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending
 ```
+
+**Task right-sizing.** A task is the smallest unit that carries its own test
+cycle and is worth a fresh reviewer's gate. That definition decides both
+directions of the split:
+
+- **Fold IN** the setup, configuration, scaffolding, registration and
+  documentation steps that the deliverable needs. They are not separate tasks;
+  they are part of the one task that is incomplete without them. A "register the
+  new agent in `plugin.json`" task is a step, not a unit — and splitting it out
+  is exactly how `grader.md` shipped unregistered for two releases (`LESSONS.md`).
+- **Split** only where a reviewer could meaningfully approve one side and reject
+  the other. If rejecting task B would force task A to be reopened anyway, they
+  were one task wearing two ids, and you have bought two gate cycles for one
+  unit of review.
+
+Each task ends with an independently testable deliverable. Every gate cycle
+costs a QA spawn, an impact report, a review artifact and a rubric round, so an
+over-split epic is not "more granular tracking" — it is a multiplier on the
+most expensive part of the workflow.
 
 #### 2a. Mirror to TaskCreate / TaskUpdate (E13 — dual-tracking)
 
@@ -234,6 +286,29 @@ Implement POST /auth/login that issues short-lived access tokens.
 """)
 
 Task("@backend", "Read bd_doc_read(task_id='proj-42', name='spec') first, then implement per its acceptance criteria. Report via the structured completion contract.")
+```
+
+**Global Constraints (epics).** When you decompose into an epic, write a
+`## Global Constraints` block into the epic's own `spec` doc and state in every
+child spec that it inherits: the project-wide requirements each child
+implicitly carries — version floors, platform requirements (bash 3.2,
+shellcheck-clean, ASCII-only PowerShell source), dependency limits, naming and
+copy rules, the tool baselines a test may assume. One line each, with **exact
+values copied verbatim**, not paraphrased.
+
+The failure this prevents is specific and expensive: a child specialist sees
+only its own spec, so a constraint stated once in the epic description and
+nowhere else is a constraint that half the children will violate — and each
+violation is discovered by QA one gate cycle later, per child.
+
+```
+bd_doc_write(task_id="<epic-id>", name="spec", content="""
+## Global Constraints
+- bash 3.2 (macOS system bash): no associative arrays, no `mapfile`.
+- shellcheck clean: `make lint` must pass on every touched `.sh`.
+- Every new test file carries at least one META-TEST containing `META-TEST`.
+- Assertion counts are measured, never estimated.
+""")
 ```
 
 For genuinely trivial work (single-line typo fix, README touch-up), the
@@ -558,6 +633,33 @@ bd update "$TASK_ID" --notes "REVIEW-RELAY: codex lane degraded (codex-review.sh
 A review finding at or above the artifact's `risk_threshold` shuts the gate: `qa-gate.sh approve` refuses with `error_key=unresolved_findings` and the Stop hook blocks, until that finding is either RESOLVED with evidence or ARBITRATED. When the implementing specialist DISPUTES the finding — its F7 `decisions` / `blockers` contests the reviewer's reading, or QA and the specialist simply disagree — somebody has to decide. That somebody is YOU.
 
 **Why you.** The reviewer (QA, or the Sol lane relayed through you) is one party; the specialist that wrote the code is the other. Neither can adjudicate its own dispute without recreating exactly the self-sign-off V3 exists to prevent. You are the only participant who is neither, so arbitration is an ORCHESTRATOR responsibility — not QA's, not the implementer's. You still do not write code to settle it; you read both positions and record a decision.
+
+**Deciding whether the finding is true — the procedure.** Before choosing a
+resolution, run the finding through these checks in order. They are what turns
+"I read both positions" into a decision someone else can audit, and they are the
+step this section previously left to instinct:
+
+1. **Restate the finding in your own words.** If you cannot, you do not yet
+   understand it — ask the reviewer (another review round, section 5c) rather
+   than arbitrating a claim you are paraphrasing.
+2. **Verify it against the codebase, not against the argument.** Open the cited
+   `path:line`. Does the described condition actually exist there? A finding
+   that cites a line that does not say what the finding says it says is
+   resolvable on the spot.
+3. **Ask why the current code is the way it is.** A reviewer working from the
+   diff alone cannot see a platform constraint, a compatibility floor, or a
+   prior decision recorded in another task. If the specialist's rebuttal names
+   one, confirm it exists — then it is evidence, not assertion.
+4. **Ask whether the suggested change breaks something.** Callers, tests, an
+   older runtime, a supported platform. A finding that is locally correct and
+   globally breaking is still a finding, but the resolution is a different fix
+   than the one proposed.
+5. **Apply YAGNI to "implement it properly" findings.** If the reviewer asks for
+   generality nothing calls, the question is whether to build it or delete the
+   surface — grep for the actual usage before deciding which.
+6. **If you cannot verify either way, say so and do not decide.** "I can't
+   verify this without X" is a legitimate output; the moves it leads to are
+   another review round or `AskUserQuestion`, never a coin-flip `overrule`.
 
 **Two legitimate resolutions.** Either one clears the finding from the gate count. Choose by asking whether the finding is TRUE.
 
