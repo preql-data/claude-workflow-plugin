@@ -54,9 +54,12 @@
 #                            assertions can fail. Sections 8d and 8e (v4.1 /
 #                            U0.5) add the two riders U0.4 left open: the probe
 #                            counting a re-created merged-class file as a write,
-#                            and a v4 -> v4 --upgrade classifying against the
-#                            target's own install-manifest instead of the frozen
-#                            v3.5 table.
+#                            and WHICH old table an --upgrade classifies
+#                            against — the target's own install-manifest when it
+#                            has a usable one, else the frozen table for the
+#                            release the target DECLARES, which is
+#                            v4.1.0.sha256 for a 4.1 tree now that this release
+#                            freezes one, not v3.5.0.sha256 unconditionally.
 #   9. Fresh vs upgraded    — the upgraded tree and a FRESH install of the same
 #                            source differ in EXACTLY the expected places
 #                            (preserved operator files + the two merged files)
@@ -1124,21 +1127,60 @@ assert_eq "installer-v3-upgrade 8d META-TEST: the file is re-created either way 
     "yes" "$(yesno test -f "$PROBE_MUTANT/.mcp.json")"
 
 # ===========================================================================
-# Section 8e: a v4 -> v4 --upgrade classifies against the target's OWN manifest
+# Section 8e: WHICH old table an --upgrade classifies against
 # ===========================================================================
 # `--upgrade` on a 4.x target takes the v3 flow deliberately (backup + verdict
-# walk), but through U0.4 it could only pick its old table from
-# manifests/v<release>.sha256 — in practice the frozen v3.5 table. Every file
-# that changed between v3.5 and the release the target actually runs then differs
-# from BOTH the shipped copy and the old table, so STOCK files are classified as
-# customized: operator-class ones collect a spurious .new and are LEFT STALE
-# (the operator's "version" is the shipped v4 file they never edited), and
-# workflow-class ones are reported as "replaced; yours is in the backup".
+# walk). Which table it hashes the installed tree against is the subject here,
+# and install.sh has exactly two sources, tried in that order:
 #
-# U0.5 prefers $TARGET/.claude/install-manifest whenever the target is not 3.x
-# and the manifest parses. Same fixture shape, two runs, one variable (whether
-# the manifest is there), which is the only way to show that the noise was real
-# and is gone.
+#   1. $TARGET/.claude/install-manifest — the per-file hashes THIS tree was
+#      really installed with. Preferred for any non-3.x target (U0.5).
+#   2. manifests/v<declared>.sha256 — the frozen table for the release the
+#      target declares, WHEN THE SOURCE SHIPS ONE; manifests/v3.5.0.sha256
+#      otherwise.
+#
+# Source 2's "when the source ships one" is the whole story of this section.
+# Through v4.0 manifests/ held v3.5.0.sha256 alone, so every 4.x target without
+# an install-manifest fell back to a table that predates it: each file that
+# changed between v3.5 and the installed release differs from BOTH the shipped
+# copy and that old table, so STOCK files are classified customized —
+# operator-class ones collect a spurious .new and are LEFT STALE (the
+# operator's "version" is the shipped v4 file they never edited), workflow-class
+# ones are reported as "replaced; yours is in the backup". That is the noise
+# U0.5 added source 1 to remove.
+#
+# v4.1 then FROZE manifests/v4.1.0.sha256, which changes what a 4.1.0 fixture
+# can prove. Both sources now describe the same release, so they agree
+# file-for-file: the manifest-present / manifest-absent pair no longer differs
+# in OUTCOME, only in which table the readout NAMES. Asserting the old noisy
+# outcome for the manifest-less arm — which this section did until the table
+# was frozen — asserts a defect that has been fixed.
+#
+# So the outcome-level proof moves to a fixture whose release has NO frozen
+# table. That is not a contrived shape: v4.0.0 has none, and EVERY release has
+# none between the version bump and the freeze. It is built by removing the
+# table from a COPY OF THE SOURCE rather than by doctoring the target, so every
+# target here stays a byte-exact clone of the same install; manifests/ is not
+# part of the shipped surface (workflow-manifest.sh generate emits no row for
+# it) and is never copied into a target, so removing it perturbs no hash and no
+# verdict.
+#
+# Four legs on the 4.1 fixture, one variable each, plus a fifth on a genuine
+# v3.5 target:
+#
+#   A  manifest present, source HAS the 4.1 table -> names install-manifest
+#   B  manifest ABSENT,  source HAS the 4.1 table -> names v4.1.0.sha256, and
+#                                                    classifies CORRECTLY
+#   C  manifest ABSENT,  source has NO 4.1 table  -> names v3.5.0.sha256, and
+#                                                    reproduces the old noise
+#   D  manifest present, source has NO 4.1 table  -> names install-manifest,
+#                                                    noise gone (C's variable)
+#   E  genuine v3.5 target (section 5's run)      -> names v3.5.0.sha256
+#
+# C and D are the one-variable pair that proves U0.5 still earns its keep; that
+# proof used to live in A/B and no longer can. B and E are the pair that proves
+# the selector tracks the version the target DECLARES rather than a hardcoded
+# name: same code path, two fixtures, two different right answers.
 #
 # The two source-side edits are made to files that are ABSENT from the frozen
 # v3.5 table by construction (both arrived in v4). That is asserted below, not
@@ -1173,7 +1215,8 @@ assert_eq "installer-v3-upgrade 8e: the fixture's install-manifest names a versi
 printf '\n# source-side change, 8e\n' >> "$META_SRC/$FROZEN_ABSENT_OPERATOR"
 printf '\n# source-side change, 8e\n' >> "$META_SRC/$FROZEN_ABSENT_WORKFLOW"
 
-# SUBJECT: the manifest is present, so it is preferred.
+# LEG A — manifest present, source HAS the frozen 4.1 table: the manifest is
+# preferred over it.
 UPG44_SUBJECT=$(clone_tree "$UPG44_BASE" "v4-upgrade-manifest")
 UPG44_SUBJECT_RC=0
 run_forced_upgrade_with "$META_SRC/install.sh" "$UPG44_SUBJECT" "$WORK/v4-upgrade-manifest.log" \
@@ -1215,29 +1258,148 @@ assert_contains "installer-v3-upgrade 8e: the genuine operator rule survived" \
 assert_eq "installer-v3-upgrade 8e: with the shipped rubric alongside as .new" \
     "yes" "$(yesno preserved_new_exists "$UPG44_SUBJECT" ".claude/rubrics/default.md")"
 
-# CONTROL: the identical tree with the manifest DELETED falls back to the frozen
-# table — the pre-U0.5 behaviour, and the proof that the noise above was real.
+# LEG B — manifest DELETED, source still HAS the frozen table for the release
+# this fixture declares. It falls back to source 2 and picks the table NAMED FOR
+# THAT VERSION, and because that table describes the same release the tree was
+# installed from, the verdicts match leg A's exactly: no spurious .new, no stale
+# stock file.
+#
+# The expected table name is read from the SOURCE TREE instead of being
+# hardcoded. Both branches of the selector are asserted, and the reason is
+# concrete rather than defensive: this section previously hardcoded
+# v3.5.0.sha256, and freezing manifests/v4.1.0.sha256 turned four assertions red
+# on a release commit for behaviour that had IMPROVED. A future release that
+# bumps plugin.json before freezing its own table is the same event again, and
+# it must not fail here — leg C constructs the no-table branch outright and leg
+# E the has-table branch, so neither branch depends on which one this leg lands
+# in.
+if [ -f "$META_SRC/manifests/v$UPG44_MF_VERSION.sha256" ]; then
+    UPG44_EXPECT_TABLE="v$UPG44_MF_VERSION.sha256"
+else
+    UPG44_EXPECT_TABLE=$(basename "$FROZEN_TABLE")
+fi
 UPG44_CONTROL=$(clone_tree "$UPG44_BASE" "v4-upgrade-frozen")
 rm -f "$UPG44_CONTROL/.claude/install-manifest"
 UPG44_CONTROL_RC=0
 run_forced_upgrade_with "$META_SRC/install.sh" "$UPG44_CONTROL" "$WORK/v4-upgrade-frozen.log" \
     || UPG44_CONTROL_RC=$?
 UPG44_CONTROL_LOG=$(cat "$WORK/v4-upgrade-frozen.log" 2>/dev/null || echo "")
-assert_eq "installer-v3-upgrade 8e CONTROL: the manifest-less clone still upgrades cleanly" \
+assert_eq "installer-v3-upgrade 8e B: the manifest-less clone still upgrades cleanly" \
     "0" "$UPG44_CONTROL_RC"
-assert_contains "installer-v3-upgrade 8e CONTROL: with no manifest it falls back to the frozen table" \
-    "Classifying the installed tree against $(basename "$FROZEN_TABLE")" "$UPG44_CONTROL_LOG"
-assert_contains "installer-v3-upgrade 8e CONTROL: which misreports the stock operator file as preserved (2, not 1)" \
-    "preserved (yours)      2" "$UPG44_CONTROL_LOG"
-assert_eq "installer-v3-upgrade 8e CONTROL: and litters the spurious $FROZEN_ABSENT_OPERATOR.new" \
-    "yes" "$(yesno preserved_new_exists "$UPG44_CONTROL" "$FROZEN_ABSENT_OPERATOR")"
+assert_contains "installer-v3-upgrade 8e B: with no manifest it falls back to the frozen table for the DECLARED version ($UPG44_EXPECT_TABLE)" \
+    "Classifying the installed tree against $UPG44_EXPECT_TABLE" "$UPG44_CONTROL_LOG"
+assert_contains "installer-v3-upgrade 8e B: and the report names that same table" \
+    "hashed against $UPG44_EXPECT_TABLE" "$UPG44_CONTROL_LOG"
+# Same verdicts as leg A. Asserting exact counts here looks like it couples this
+# leg to manifests/v4.1.0.sha256 staying in sync with the working tree, and it
+# does not: classify compares target-hash == source-hash FIRST and emits
+# skip-current (workflow-manifest.sh, the arm above the old-table comparison),
+# so a shipped file edited in the working tree is identical in the target and in
+# the source and lands in no write bucket, whatever the frozen table says about
+# it. Only the two edits this section makes ITSELF can move these numbers. That
+# is a property of the code above, re-readable there; it was also checked once
+# by hand while writing this, by drifting two unrelated shipped files and
+# watching the three counts stay put. Nothing here re-checks it per run.
+assert_contains "installer-v3-upgrade 8e B: both stock-but-changed files are classified replaced (stock)" \
+    "replaced (stock)       2" "$UPG44_CONTROL_LOG"
+assert_contains "installer-v3-upgrade 8e B: nothing is misreported as replaced (customized)" \
+    "replaced (customized)  0" "$UPG44_CONTROL_LOG"
+assert_contains "installer-v3-upgrade 8e B: exactly the one real customization is preserved" \
+    "preserved (yours)      1" "$UPG44_CONTROL_LOG"
+assert_eq "installer-v3-upgrade 8e B: no spurious $FROZEN_ABSENT_OPERATOR.new was written" \
+    "no" "$(yesno preserved_new_exists "$UPG44_CONTROL" "$FROZEN_ABSENT_OPERATOR")"
+UPG44_B_ROLES_CMP_RC=0
+cmp -s "$UPG44_CONTROL/$FROZEN_ABSENT_OPERATOR" "$META_SRC/$FROZEN_ABSENT_OPERATOR" \
+    || UPG44_B_ROLES_CMP_RC=$?
+assert_eq "installer-v3-upgrade 8e B: the stock operator file got the new shipped bytes (NOT left stale)" \
+    "0" "$UPG44_B_ROLES_CMP_RC"
+assert_eq "installer-v3-upgrade 8e B: the genuine customization is still preserved as .new" \
+    "yes" "$(yesno preserved_new_exists "$UPG44_CONTROL" ".claude/rubrics/default.md")"
+
+# LEGS C and D — the source has NO frozen table for the declared release. This
+# is the shape in which source 1 and source 2 still disagree, so it is where the
+# U0.5 rider is proved to earn its keep. The source is a COPY with the table
+# removed; META_SRC itself is left intact.
+UPG44_NOFROZEN_SRC="$WORK/meta-src-nofrozen"
+rm -rf "$UPG44_NOFROZEN_SRC"
+cp -R "$META_SRC" "$UPG44_NOFROZEN_SRC" 2>/dev/null || true
+rm -f "$UPG44_NOFROZEN_SRC/manifests/v$UPG44_MF_VERSION.sha256"
+# Non-vacuity, both ways: the copy must really be missing the declared release's
+# table AND must still carry the v3.5 fallback, or legs C and D would be
+# testing a source that simply has no tables at all — which install.sh rejects
+# outright with "the upgrade flow needs both".
+assert_eq "installer-v3-upgrade 8e C/D: the no-frozen-table source really lacks v$UPG44_MF_VERSION.sha256" \
+    "no" "$(yesno test -f "$UPG44_NOFROZEN_SRC/manifests/v$UPG44_MF_VERSION.sha256")"
+assert_eq "installer-v3-upgrade 8e C/D: ...and still carries the v3.5 fallback table" \
+    "yes" "$(yesno test -f "$UPG44_NOFROZEN_SRC/manifests/$(basename "$FROZEN_TABLE")")"
+assert_eq "installer-v3-upgrade 8e C/D: ...and the source-side edits survived the copy" \
+    "yes" "$(yesno cmp -s "$UPG44_NOFROZEN_SRC/$FROZEN_ABSENT_OPERATOR" "$META_SRC/$FROZEN_ABSENT_OPERATOR")"
+
+# LEG C — no table, no manifest: the pre-U0.5 fallback, noise and all.
+UPG44_C=$(clone_tree "$UPG44_BASE" "v4-upgrade-nofrozen-nomanifest")
+rm -f "$UPG44_C/.claude/install-manifest"
+UPG44_C_RC=0
+run_forced_upgrade_with "$UPG44_NOFROZEN_SRC/install.sh" "$UPG44_C" \
+    "$WORK/v4-upgrade-nofrozen-nomanifest.log" || UPG44_C_RC=$?
+UPG44_C_LOG=$(cat "$WORK/v4-upgrade-nofrozen-nomanifest.log" 2>/dev/null || echo "")
+assert_eq "installer-v3-upgrade 8e C: no frozen table + no manifest still upgrades cleanly" \
+    "0" "$UPG44_C_RC"
+assert_contains "installer-v3-upgrade 8e C: with neither source available it falls back to $(basename "$FROZEN_TABLE")" \
+    "Classifying the installed tree against $(basename "$FROZEN_TABLE")" "$UPG44_C_LOG"
+# The noise, reproduced: the stock operator file is misread as the operator's.
+assert_contains "installer-v3-upgrade 8e C: which misreports the stock operator file as preserved (2, not 1)" \
+    "preserved (yours)      2" "$UPG44_C_LOG"
+assert_eq "installer-v3-upgrade 8e C: and litters the spurious $FROZEN_ABSENT_OPERATOR.new" \
+    "yes" "$(yesno preserved_new_exists "$UPG44_C" "$FROZEN_ABSENT_OPERATOR")"
 # The real cost of the noise: the stock file is left STALE, so the operator has
 # to merge a file they never edited.
 UPG44_STALE_CMP_RC=0
-cmp -s "$UPG44_CONTROL/$FROZEN_ABSENT_OPERATOR" "$META_SRC/$FROZEN_ABSENT_OPERATOR" \
+cmp -s "$UPG44_C/$FROZEN_ABSENT_OPERATOR" "$UPG44_NOFROZEN_SRC/$FROZEN_ABSENT_OPERATOR" \
     || UPG44_STALE_CMP_RC=$?
-assert_eq "installer-v3-upgrade 8e CONTROL: leaving the stock operator file stale (differs from shipped)" \
+assert_eq "installer-v3-upgrade 8e C: leaving the stock operator file stale (differs from shipped)" \
     "yes" "$(yesno test "$UPG44_STALE_CMP_RC" -ne 0)"
+
+# LEG D — same source, same tree, manifest RESTORED. One variable against leg C,
+# and the outcome flips: this is the assertion that the U0.5 rider is still
+# load-bearing now that a 4.1 target's frozen table happens to agree with it.
+UPG44_D=$(clone_tree "$UPG44_BASE" "v4-upgrade-nofrozen-manifest")
+UPG44_D_RC=0
+run_forced_upgrade_with "$UPG44_NOFROZEN_SRC/install.sh" "$UPG44_D" \
+    "$WORK/v4-upgrade-nofrozen-manifest.log" || UPG44_D_RC=$?
+UPG44_D_LOG=$(cat "$WORK/v4-upgrade-nofrozen-manifest.log" 2>/dev/null || echo "")
+assert_eq "installer-v3-upgrade 8e D: no frozen table + a manifest upgrades cleanly" \
+    "0" "$UPG44_D_RC"
+assert_contains "installer-v3-upgrade 8e D: the manifest is preferred even with no frozen table to fall back to" \
+    "Classifying the installed tree against .claude/install-manifest (v$UPG44_MF_VERSION)" \
+    "$UPG44_D_LOG"
+assert_contains "installer-v3-upgrade 8e D: -> leg C's misreport is GONE (1, not 2)" \
+    "preserved (yours)      1" "$UPG44_D_LOG"
+assert_eq "installer-v3-upgrade 8e D: -> and leg C's spurious $FROZEN_ABSENT_OPERATOR.new is not written" \
+    "no" "$(yesno preserved_new_exists "$UPG44_D" "$FROZEN_ABSENT_OPERATOR")"
+UPG44_D_FRESH_CMP_RC=0
+cmp -s "$UPG44_D/$FROZEN_ABSENT_OPERATOR" "$UPG44_NOFROZEN_SRC/$FROZEN_ABSENT_OPERATOR" \
+    || UPG44_D_FRESH_CMP_RC=$?
+assert_eq "installer-v3-upgrade 8e D: -> and leg C's stale stock file got the shipped bytes instead" \
+    "0" "$UPG44_D_FRESH_CMP_RC"
+
+# LEG E — a genuine v3.5-era target. No install-manifest existed before v4.1, so
+# this tree can only take source 2, and the table it must land on is the one
+# frozen for the release it declares: v3.5.0.sha256. Nothing asserted that until
+# now — sections 1-7 check the VERDICTS of that upgrade but never which table
+# produced them. A selector that started preferring the newest manifests/ entry
+# would not have gone unnoticed (that mutation was run: sections 7a, 8a and 9
+# all go red), but every one of those is a SYMPTOM — a missing .new here, an
+# unexpected equivalence diff there — and none of them names the table as the
+# cause. This leg is the one line that does. Asserted against section 5's
+# already-executed no-flags upgrade ($UPGRADE_LOG), so it costs no extra run.
+#
+# This is the other half of leg B: same selector, a fixture declaring a
+# different version, a different right answer. A hardcoded table name cannot
+# satisfy both.
+assert_contains "installer-v3-upgrade 8e E: a genuine v3.5 target still classifies against $(basename "$FROZEN_TABLE")" \
+    "Classifying the installed tree against $(basename "$FROZEN_TABLE")" "$UPGRADE_LOG"
+assert_contains "installer-v3-upgrade 8e E: and its report names that table too" \
+    "hashed against $(basename "$FROZEN_TABLE")" "$UPGRADE_LOG"
 
 # ===========================================================================
 # Section 9: fresh vs upgraded equivalence
