@@ -16,9 +16,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
-## [4.1.0] - 2026-07-29
+## [4.1.0] - 2026-07-30
 
-> **UPGRADE NOTE — one-time hash migration. The change set was never bounded
+**The verifiable install.** Through 4.0.0 the plugin had no answer to "what
+does this ship, and does it work where it landed?" — the shipped surface
+existed only as a sequence of `cp` calls, there was no upgrade path off 3.x,
+and post-install verification was two `test` calls. This release turns the
+surface into a data artifact (`workflow-manifest.sh` plus a frozen per-release
+hash table), builds a real v3.5 → v4 upgrade flow on top of it that preserves
+operator customizations instead of clobbering them, and replaces
+presence-checking with `workflow-doctor.sh` — eleven named checks that assert
+FUNCTION rather than existence, two of which spawn the MCP servers over stdio
+and assert exact tool counts. That last one earned its keep immediately: it
+found a P0 absent from the plan, in which
+every `curl | bash` install ran **no workflow at all** — both MCP servers dead
+because `--depth 1` never cloned `node_modules`, and SessionStart emitting a
+bare `{"error": …}` with no workflow context, no delegation contract and
+nothing saying so. Around that, the v4.0.0 follow-up queue was burned down:
+the `LABEL_WITHOUT_RECORD` remediation that printed a loop with no exit, three
+transient-block race windows, and rubric verdicts that were not bound to the
+change set they graded.
+
+**Why this is a minor.** New capabilities, no broken contracts — the
+`## Versioning` criteria above, applied literally. The release adds a new
+slash command (`/workflow-doctor`, one of that block's own examples of a
+minor), three new scripts, a new installer mode (`--upgrade`), a vendored
+reference document, and a seventh field on the F7 completion contract. It
+does **not** change the install layout, the hook output schema, or the QA
+gate's release predicate, and existing installs upgrade in UPDATE mode —
+never the fresh-mode re-install the major criterion names. That last point is
+the one a reader of 4.0.0's note will want checked, so it is stated
+explicitly: **neither `gz3` nor `bjx` adds a condition to the release
+predicate.** 4.0.0 was a major precisely because the predicate gained two new
+NECESSARY conditions (an independent review artifact, zero unresolved
+at-threshold findings). `gz3` makes `approve`'s idempotency hash-aware — it
+constrains when approve may *no-op*, and its Stop-side `VANISHED-CHANGE-SET`
+arm *releases* a state that previously hung, so both directions are
+weakly-or-not-at-all restrictive. `bjx` adds `change_set_hash` to the RUBRIC
+record grammar and makes `enter` preserve a satisfied rubric label only on
+positive evidence; its approve-side rubric cross-check is deliberately a
+WARNING plus a durable `[rubric mismatch: …]` token rather than a refusal,
+because `qa.md` 6f forbids a script-side rubric denial as a parallel gate and
+`verify-before-stop.sh` reads no rubric state at all. Two honest
+counterweights, both in the upgrade note below rather than buried here: the
+change-set denylist grew three patterns, so an in-flight review cycle pays a
+one-time re-approve; and `node` ≥ 18.17 became a hard, *checked* prerequisite,
+so an installer run on a node-less host now aborts where it previously
+proceeded — the requirement is not new (both MCP servers have always been
+node), only the check is.
+
+> **UPGRADE NOTE — two things to act on, in this order.**
+>
+> **1. Node is now a checked prerequisite and dependencies install in the
+> target.** Every `curl | bash` install of 4.0.0 shipped both MCP servers
+> DEAD: the source is a `git clone --depth 1`, `.gitignore` excludes
+> `node_modules`, so the clone never had dependencies to copy and both
+> launchers died at `ERR_MODULE_NOT_FOUND`. The installer now requires
+> `node` ≥ 18.17 and `npm` (checked BEFORE the clone, so it aborts before
+> writing anything) and runs `npm ci --omit=dev --ignore-scripts` per server
+> in the TARGET after the copy. A run that installs the tree but cannot
+> verify it exits **3** — distinct from `1`, which means "aborted, nothing
+> written". **Existing 4.0.0 installs do not self-heal.** Re-run the
+> installer in update mode, or do it by hand in the installed project:
+>
+> ```bash
+> ( cd .claude/mcp/bd-mcp         && npm ci --omit=dev --ignore-scripts )
+> ( cd .claude/mcp/code-graph-mcp && npm ci --omit=dev --ignore-scripts )
+> ```
+>
+> Then confirm with `bash .claude/scripts/workflow-doctor.sh` (or
+> `bash install.sh --verify`, or `/workflow-doctor`), which spawns both
+> servers over stdio and asserts `tools/list` returns EXACTLY 21 and EXACTLY
+> 7. "The config parses" is precisely what passed while this was broken, so
+> the doctor does not check that.
+>
+> **2. One-time hash migration. The change set was never bounded
 > by the repo.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so any
 > absolute path an agent wrote entered `changed-files.txt`, the change-set
 > hash, and the Stop gate — including files outside the repository entirely.
@@ -74,6 +146,307 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > migration for the patterns that actually shipped (it pins the PRE-landing lib
 > and then restores the real one, so the restore *is* the landing), while
 > **section C** keeps the invented canary that proves the mechanism itself.
+
+### Added
+
+#### The v3.5 → v4 upgrade path (Phase U0, epic `0jk`)
+
+- **`.claude/scripts/workflow-manifest.sh`** — the one machine-readable
+  enumeration of the shipped surface. `generate <root>` emits a sorted,
+  header-free, timestamp-free TSV of `<path><TAB><class><TAB><sha256>`
+  mirroring `install.sh`'s copy loops one-for-one; `classify` produces a
+  six-verdict upgrade decision table from an old hash table, a target and a
+  source. Three classes: `workflow` (plugin-owned, replaced wholesale),
+  `operator` (seeded once, never clobbered), `merged` (jq key-wise, never a
+  copy). Hash chain `sha256sum` → `shasum` → `openssl`. Determinism is
+  load-bearing — downstream specs regenerate the output and compare it
+  byte-for-byte.
+- **`manifests/v3.5.0.sha256`** — the frozen table for the last v3 release,
+  generated from the real `v3.5.0` tag (117 rows, byte-reproducible), and
+  **`manifests/v4.1.0.sha256`** for this one. `install.sh` picks
+  `manifests/v<detected>.sha256` automatically, so a stock target of a
+  released version classifies against its OWN hashes rather than falling back
+  to v3.5's and reporting every unchanged file as customized.
+- **`install.sh --upgrade` / `--mode <fresh|update>`**, mutually exclusive and
+  validated before prerequisites. `detect_v3_install` reads `plugin.json` 3.x
+  as the primary signal with a marker-absent fallback; a dotfile-inclusive
+  `.claude-v3-backup-<timestamp>/` is taken; copies are verdict-driven
+  (preserve-custom writes a `.new` sidecar alongside, replace-custom warns and
+  backs up, merges go through the shared jq expressions); an
+  `.claude/install-manifest` is written on every path; the run ends with a
+  verdict-count readout and an `upgrade-report.txt`.
+- **Idempotent re-runs.** Mode-2 UPDATE consumes the target's own
+  `install-manifest` as `classify`'s old-table, so operator customizations
+  survive a re-run (the re-clobber gap was reproduced before it was fixed;
+  a legacy plain-copy fallback covers targets with no manifest). A
+  sentinel-guarded no-change probe skips backup creation on genuine no-ops.
+- **Manifest-driven uninstall.** `uninstall.sh` consumes the
+  `install-manifest` — unmodified plugin-owned root files are trashed,
+  customized ones are left with a note, and v2/v3 backups are listed. Both
+  uninstallers enforce physical parent containment (`cd && pwd -P`, never a
+  string prefix).
+- **`install.ps1` carries the whole upgrade machinery**: `-Upgrade`, the
+  detection ladder, exclusivity, PowerShell-native generate/classify/hash
+  producing byte-compatible TSV, an LF-only `install-manifest`, the verdict
+  walk, probe and report with rendered-sentence parity against bash, and the
+  same manifest-driven uninstall.
+- **Two shipped docs join the installed surface** (`docs/CODEX_SETUP.md`,
+  `docs/HOOKS.md`), named file by file rather than by a `docs/` scan — an
+  install target's `docs/` belongs to the operator.
+
+#### Installed targets that actually orchestrate (Phase C0, epic `2br` — unplanned P0)
+
+- **`.claude/scripts/workflow-doctor.sh`** — eleven named checks, each
+  `PASS`/`FAIL`/`SKIP` with a `fix:` line, plus `--json-out` and exit `0/1/2`.
+  Three front doors: `install.sh --verify`, the new `/workflow-doctor` slash
+  command, and direct invocation. Two checks carry the phase: `session_start`
+  pipes a synthetic payload through the REAL hook and asserts the emitted
+  envelope CONTAINS the workflow context; `mcp_bd` / `mcp_code_graph` spawn
+  each server over stdio and assert `tools/list` returns EXACTLY 21 / EXACTLY
+  7 (probed with a stub at 0/20/21/22 tools → FAIL/FAIL/PASS/FAIL — exact
+  equality is what catches "boots but registers nothing"). Every dynamic check
+  runs in a throwaway sandbox; the `beads` check is the one documented
+  exception, disclosed in all three operator-facing surfaces, because
+  `bd doctor` must open the real database to mean anything.
+- **MCP dependencies are installed in the target** — `npm ci --omit=dev
+  --ignore-scripts` per server, with `< /dev/null` (under `curl | bash` stdin
+  is the script text, and an npm prompt would eat it). `node` ≥ 18.17 and
+  `npm` are hard prerequisites checked before the clone. Preserve-and-restore
+  around the install, because `npm ci` removes `node_modules` first and a
+  failing re-install would otherwise destroy the operator's tree. New flags
+  `--verify`, `--skip-mcp-deps`, `--skip-verify` with env forms for
+  `curl | bash`.
+- **SessionStart degrades loudly instead of vanishing.** The full envelope is
+  emitted always, with a `<workflow_degraded severity="high">` block SEEDED at
+  the TOP of the context rather than appended. bd-off-PATH and missing-`.beads`
+  are separate reasons. An EXIT trap enforces the guarantee at the exit rather
+  than at each call site, so the next unanticipated death is also covered, and
+  the jq-absent path gets a real awk JSON encoder rather than a truncated
+  literal.
+
+#### Gate follow-up burn-down (Phase U1, epic `waz`)
+
+- **Hash-aware approve idempotency.** `approve` no-ops ONLY when an existing
+  record binds the hash this approve would bind; otherwise it re-verifies every
+  precondition and writes a fresh bound record. This closes a printed
+  remediation that could not work (`enter` never removed `qa-approved` and
+  `approve` short-circuited on its mere presence, so following the printed
+  commands was a no-op loop). Three transient-block race windows close with it:
+  record-before-label, clear-after-truncate, and a Stop-side
+  `VANISHED-CHANGE-SET` release for the two-read straddle no approve-side
+  ordering can fix.
+- **Rubric verdicts are bound to the change set they graded.** RUBRIC records
+  carry `change_set_hash`; `enter` preserves a `rubric-satisfied` label only on
+  positive evidence (gate open, latest record satisfied, hash equal to now) and
+  degrades to the old clear otherwise. The hash comes from three sources in
+  descending authority — `--graded-hash` from the packet, else a live recompute
+  corroborated by the persisted report, else explicitly unbound naming both —
+  and deliberately never from the grader's own JSON, which would let the graded
+  party state what it graded.
+- **`docs/CODEX_SETUP.md` gains the hand-edit model-pin procedure**, a revert
+  path, a moved-CLI-surface introspection ladder, and exit-5/exit-6 lane
+  troubleshooting. The profiles section was CORRECTED rather than written: on
+  codex-cli 0.145.0 a profile cannot reach the `mcp-server` lane at all, so the
+  doc defends the single top-level model key instead of qualifying it.
+
+#### Worktree sweeper and out-of-repo scratch (Phase U2, epic `0yg`)
+
+- **`.claude/scripts/worktree-sweep.sh`** — a report-only sweeper for
+  platform-created worktrees under `.claude/worktrees/` that carry changes and
+  therefore survive subagent teardown. Dry-run is the default and `--apply` is
+  the only thing that removes; removal requires ALL of physical containment,
+  same-repo identity via `--git-common-dir`, a clean `status --porcelain`,
+  locally-decidable pushed-or-merged, age past `--age-days` (default 7), and a
+  task id resolved FROM EVIDENCE that `bd` reports closed. Each rejected
+  candidate prints its FIRST failing reason. SessionEnd runs it
+  `--report-only` under a bound, never `--apply`, and writes its own log which
+  SessionStart surfaces as a fourth warning.
+- **Three patterns join the shared denylist** — see the upgrade note above.
+
+#### The seventh contract field (Phase U3, REDUCED, epic `gio`)
+
+- **`context_coverage`** is appended SEVENTH and last to the F7 completion
+  contract in all four specialist carriers plus `docs/AGENTS.md` — never
+  inserted mid-list, because `qa.md` section 10 promises the base fields keep
+  canonical names AND ordering. Convention: what you read to ground the change
+  / what you deliberately did NOT read and why / the largest remaining unknown
+  you are shipping on.
+- **Rubric criterion C8** with an empty/boilerplate/detached taxonomy mirroring
+  `grader.md`; `.claude/rubrics/default.md` goes to version 2.
+- **The contract's claimed enforcement now exists.** `docs/AGENTS.md` asserted
+  the contract was enforced because "the QA agent's review checklist asks 'did
+  the specialist return all six fields?'" — and `qa.md` section 3's checklist
+  had six items, none of them that. It is now written, and AGENTS.md names
+  `qa.md` section 3 so the citation is checkable.
+
+#### A vendored design method, and one debugging protocol (Phase U4, REDUCED, epic `q37`)
+
+- **`.claude/vendor/superpowers/brainstorming/SKILL.md`** — vendored from
+  `obra/superpowers` at pin `3dcbd5c4` (MIT) as a REFERENCE DOC, not a
+  registered skill. It loads exactly where wired (an explicit `Read` in
+  `orchestrator.md` section 1) rather than session-wide, and it preserves
+  "everything under `.claude/skills/` is registered in `plugin.json`" as an
+  exact, exception-free invariant. Ten surgical local modifications, each with
+  a measured upstream count, are annotated in the sibling `MANIFEST.md` —
+  including the deletion of a `<HARD-GATE>` demanding user approval for every
+  project (a second, prose-only release authority) and of a sentence
+  suppressing `frontend-design`, which is a LIVE registered skill here.
+- **EBF-CORE** — upstream `systematic-debugging` is MERGED into the existing
+  evidence-before-fix protocol rather than shipped beside it as a competing
+  voice. A delimited region is byte-identical across `qa.md`, `backend.md`,
+  `frontend.md` and `devops.md`, carrying a precedence clause and a
+  bounce-twice supremacy rule stated in-text as deliberately stricter than
+  upstream's "3+ fixes".
+- **Root `LICENSE` and `THIRD_PARTY.md`** — `plugin.json` declared MIT with no
+  backing file.
+
+#### Tests
+
+Every count below was re-executed on **2026-07-30** for this release audit on
+`gauntlet/v4.0.0`; see `docs/RELEASE_AUDIT.md` rows `UW1`-`UW12` for the
+per-claim evidence pointers.
+
+- **Nine new L1 specs** (the full delta against the `v4.0.0` tag, derived by
+  `git ls-tree` rather than recalled): `packaging-parity.test.sh` (**623** — it
+  extracts the merge expressions FROM source between literal sentinels and
+  compares bash↔ps1 token identity; closes `bzy`),
+  `workflow-manifest.test.sh` (131), `installer-flags.test.sh` (94),
+  `workflow-doctor.test.sh` (94), `vendored-skills.test.sh` (94),
+  `mcp-deps.test.sh` (55), `mcp-deps-preserve.test.sh` (49),
+  `completion-contract-parity.test.sh` (45), `worktree-sweep.test.sh` (34).
+  Of the existing specs, `denylist-source.test.sh` went 20 → **32**.
+- **Eight new L2 specs**, likewise the full delta:
+  `installer-v3-upgrade.sh` (**235** — the flagship, built on a genuine v3.5
+  fixture rendered by **v3.5.0's own installer**),
+  `rubric-binding.sh` (149), `installer-manifest-parity.sh` (139),
+  `installer-target-functional.sh` (138 assertions across 968 lines and 41
+  METAs — its section 6, `PATH=/usr/bin:/bin`, is the ONLY thing in the repo
+  that can catch the SessionStart P0, because the doctor's own `session_start`
+  check passes on a host that has `bd`), `approve-idempotency.sh` (93),
+  `upgrade-gate-compat.sh` (89), `worktree-sweep.sh` (55), and `bd-mcp.sh`
+  (28) — **there was no bd-mcp spec at all before this release, which is half
+  of why the dead-server symptom shipped.** Of the existing specs,
+  `denylist-shared.sh` gained section D, 36 → **79**.
+- Suite totals moved L1 **23 → 32 files / 1,540 assertions**, L2 **33 → 41
+  specs / 1,011 → 1,983 assertions**, L3 unit **430 → 444 passed / 5 skipped**.
+  (The L1 file count includes the pre-existing `phase5-synthetic-tests.sh`,
+  which the runner discovers because it globs `*.sh`, not `*.test.sh`; all
+  nine additions are `.test.sh` files.)
+- **Load-bearing METAs were verified by removal, not assertion.** The EBF-CORE
+  identity check has a 40-non-blank-line floor plus both sentinels required
+  inside the region, because two EMPTY regions compare equal — identity alone
+  would be one `sed` away from meaningless. The reviewer reproduced this on the
+  live files: identity-alone PASSED all three emptied comparisons while the
+  region checker REJECTED all four.
+
+### Changed
+
+- **`make install-test` verifies function, not presence.** It was literally two
+  `test` calls. It now runs `workflow-doctor.sh` against a rendered target and
+  went from 9 passed / 2 failed to **11 / 0** — the P0 verified fixed by the
+  check that was catching it.
+- **`.gitignore` is healed rather than only seeded.** `npm ci` writes ~13,700
+  files and the installer previously wrote a `.gitignore` only when the target
+  had none, so a Go or Python operator saw every one of them untracked. The
+  heredoc also closes the CHANGELOG-3.4.0 divergence and the backup/sidecar
+  noise, with line-for-line ps1 parity via `Write-LfFile`.
+- **Installer branding is version-dynamic**, read from `plugin.json` by a
+  deliberately jq-free `sed` anchored on exactly two spaces — the top-level
+  depth of the 2-space-indented manifest. A looser `[[:space:]]*` anchor took
+  the FIRST own-line `version` key at ANY depth and would brand every run with
+  a nested one.
+- **`.claude/settings.json` and `.claude/hooks/hooks.json` parity is checked
+  across the full event set**, not just SubagentStart. Generalising that
+  checker immediately found a real divergence: `hooks.json` wires
+  `^Bash$ → bd-github-link.sh` and `settings.json` does not, so the
+  Beads↔GitHub auto-link has never fired in this repo's own sessions.
+  Behaviour is unchanged and the allowance is pinned exactly; the decision is
+  filed as `claude-workflow-plugin-eo8`.
+- **`run_bounded` kills the process group** (`set -m` plus
+  `kill -TERM -$pid`). The previous watchdog orphaned grandchildren — measured
+  at 3 per timeout — and the bounded calls wrap node MCP servers and the Stop
+  hook, so every timeout left the wedged process alive.
+- **`docs/TROUBLESHOOTING.md` gains 191 lines** and had ZERO occurrences of
+  "MCP" before this release; QUICKSTART makes the doctor the primary
+  verification step; `docs/MCP_SERVERS.md` gains a Dependencies section.
+
+### Fixed
+
+- **A failing `npm ci` destroyed the operator's working tree (data loss).**
+  `npm ci` removes `node_modules` before installing, so a failed re-install
+  took a measured 3,909 files / 98 `package.json` down to 94 empty directories
+  / 0. Fixed with skip-when-current plus preserve-and-restore, verified by
+  construction: the shipped installer restores byte-for-byte while a
+  set-aside-removed mutant takes both trees to 0/0. Found only because the
+  first verification run used `--skip-mcp-deps` — the one flag that disables
+  the code path capable of causing the harm.
+- **A failed dependency install printed a green tail.** The failure printed
+  `FAILED npm ci`, then "Installation complete." in green, then advertised
+  "Two MCP servers", and exited 0. Now a three-arm headline, a qualified
+  advert, and a `DEPENDENCY UPDATE DID NOT FINISH` block naming each server
+  and its fix command. Related: a failed `npm ci` leaves `node_modules` as an
+  empty husk (94 directories, 0 files), so `[ -d node_modules ]` answered TRUE
+  for a tree that cannot boot — replaced by `mcp_server_has_deps`.
+- **An upgrade could destroy operator bytes while reporting them safe.** The
+  shipped-docs surface was extended without backup legs across three arms plus
+  an uncited v2 leg, so the report said "yours is in the backup" over files
+  that had none. Fixed structurally with a derived `$SHIPPED_DOCS` and one
+  shared backup helper across seven legs, with a META proving the report string
+  was never an oracle for recoverability.
+- **`install.ps1` was already WinPS-5.1 parse-broken at 4.0.0.** The
+  `windows-install.yml` evidence is pwsh-7-only, so the breakage was invisible.
+  Repaired across seven sites with an ASCII guard and METAs to prevent
+  regression. This is a source-level repair; see the residual below.
+- **A CI-red and a ~8 % flake at one line.** `workflow-doctor.test.sh`'s
+  non-mutation assertion compared file AGE, which is a function of wall-clock
+  time and changed with zero mutation whenever a run crossed a minute boundary;
+  and `stat -f %m` is the BSD spelling, where GNU's `-f` is
+  `--file-system` and writes 248 bytes of unrelated output to stdout that a
+  `$(A || B)` capture then concatenates onto the fallback's answer. Both close
+  by snapshotting raw mtime, GNU-first. Discrimination is retained: touching
+  the marker still FAILS on both platforms.
+- **`.claude/worktrees/` is gitignored at the project root.** It had been
+  denylisted since v4 but never ignored (`:71` covered only the e2e-fixture
+  nesting), so a leftover worktree was invisible to the gate AND visible in
+  `git status`.
+
+### Not shipped, and why
+
+No claim in this release covers any of the following. They are recorded here
+because a plan that is silently under-executed is indistinguishable from one
+that failed.
+
+- **U5, staging e2e QA with injected auth (epic `f2t`) — CANCELLED, not
+  deferred.** There is no date at which it becomes correct. Four reasons in
+  order of weight: it has the most external dependencies of any phase in this
+  release; the largest security surface, since injected auth means credentials
+  in a harness the plugin drives unattended; it is the only phase requiring
+  live paid runs to verify, so its evidence would be the weakest in a release
+  whose standing rule is that no adjective ships without an artifact; and the
+  provider abstraction it implies stays speculative until a SECOND project
+  validates the shape. Revisit when that project exists.
+- **U3's ledger and frontier harness (epic `gio`) — DEFERRED on
+  `claude-workflow-plugin-gio.1`**, behind an evidence bar of three closed
+  tasks exhibiting the same blind spot. What shipped is the `context_coverage`
+  field and rubric C8, above. The motivating problem — a 14-PR speculative-fix
+  chain — is already solved by evidence-before-fix, which is shipped and
+  mechanically guarded, so building the harness now would be machinery ahead of
+  evidence. There is no `.claude/context-config`, no `context-ledger.sh` and no
+  orchestrator wiring.
+- **U6, the nested-spawn depth-3 migration (`7be`) — CLOSED as
+  need-triggered.** `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` stays pinned.
+  Depth-1 is not a limitation awaiting removal; it is itself an enforcement
+  mechanism, because a subagent that cannot spawn subagents structurally cannot
+  procure its own review — which is exactly the separation the gate's
+  independence predicate exists to guarantee. Migrating would mean building a
+  parent-role guard to restore in software a property the platform default
+  gives for free. **The 2026-08-23 next-check date recorded on that task is
+  RETIRED and is not a live date**; the standing task
+  `claude-workflow-plugin-1bn` states the trigger as a condition — raise the
+  pin WHEN a concrete workflow needs nested spawn — never as an elapsed month.
+- **`wearclair-module`**, named in the original U4 request, remains
+  unidentified after two independent checks (not among the 14 `SKILL.md` files
+  at the pin, no web presence). Recorded as a skip.
 
 ## [4.0.0] - 2026-07-26
 

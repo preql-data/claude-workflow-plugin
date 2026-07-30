@@ -275,6 +275,167 @@ release notes — each has a concrete flip-to-PROVEN path in its
   deriver to map the worktree task-creation command shape, then the
   label-milestone invariant passes on the seed cassette.
 
+## Verify conditions for "v4.1.0 (the verifiable install) shipped"
+
+Every number below was measured on **2026-07-30** by
+`claude-workflow-plugin-uvk` on branch `gauntlet/v4.0.0` — the branch name is
+historical (it carries the v4.0.0 release and 31 commits of v4.1 work on top);
+the release is 4.1.0. Each suite figure comes from a run performed in that
+session, one tier at a time, with the tier's own completeness line recorded
+rather than the absence of failures. Deltas below are against the v4.0.0
+baselines in the section immediately following this one, which is where those
+numbers are attributed. A new session can confirm readiness by re-running
+every command here.
+
+- assert: `.claude-plugin/plugin.json` `version` equals `4.1.0`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `4.1.0`.
+- assert: the manifest's TOP-LEVEL 2-space indentation is intact, because
+  `install.sh`'s `plugin_json_version()` (`:96-101`) is a deliberately jq-free
+  `sed` anchored on **exactly two spaces** and a reformat silently degrades
+  every banner to the unnumbered product name. Run
+  `grep -c '^  "version": "4\.1\.0",$' .claude-plugin/plugin.json` and confirm
+  `1`. Cross-check with the installer's own expression, run verbatim:
+  `sed -n 's/^  "version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .claude-plugin/plugin.json | head -1`
+  and confirm `4.1.0`. This condition was load-bearing in v4.0.0 and stated
+  nowhere; it is stated here now.
+- assert: the banner is produced by EXECUTING the installer, not by reading
+  it. Run `bash install.sh --help | head -3` and confirm the first line is
+  `Claude Workflow Plugin v4.1.0 installer`.
+- assert: there is exactly ONE version-carrying manifest, so "both manifests"
+  in the plan means something else. Run
+  `grep -c '"version"' .mcp.json` and confirm `0`; run
+  `node -e 'const p=require("./.claude/tests/e2e/package.json");console.log(p.private,p.version)'`
+  and confirm `true 0.0.0` (its only `4.0.0` is the `zod` range `^4.0.0`). The
+  "both manifests" idiom is inherited from `docs/plans/verification-suite.md:47`
+  and means `.mcp.json` and `.claude-plugin/plugin.json` must AGREE on their
+  MCP server definitions — mechanically asserted by L1
+  `platform-audit.test.sh` section (d), and not a versioning claim.
+- assert: the installers carry NO hardcoded version literal, so a release is a
+  one-line bump and never a refactor. Run
+  `grep -nE '4\.[0-9]+\.0' install.sh install.ps1 | grep -cvE ':[0-9]+:[[:space:]]*#'`
+  and confirm `0` — i.e. every one of the 7 hits (5 in `install.sh`, 2 in
+  `install.ps1`) is a COMMENT line, each a provenance note naming the release
+  a feature arrived in. Cross-check the denominator with
+  `grep -hcE '4\.[0-9]+\.0' install.sh install.ps1` → `5` and `2`, so the zero
+  above is a zero out of seven rather than a zero out of nothing.
+- assert: `bash .claude/scripts/tests/run-tests.sh` exits 0. v4.1.0 L1 baseline
+  is **32 test files / 0 failures / 1,540 assertions** (**+9 files** over
+  v4.0.0's 23 — the delta derived from `git ls-tree v4.0.0`, not recalled:
+  `packaging-parity`, `workflow-manifest`, `installer-flags`,
+  `workflow-doctor`, `vendored-skills`, `mcp-deps`, `mcp-deps-preserve`,
+  `completion-contract-parity`, `worktree-sweep`). Confirm
+  the completeness line `Total: 32  Passed: 32  Failed: 0`, not merely the
+  absence of `FAIL`. Note the runner globs `*.sh`, not `*.test.sh`, so the
+  count includes the pre-existing `phase5-synthetic-tests.sh`; reproduce it
+  with
+  `find .claude/scripts/tests -maxdepth 1 -type f -name '*.sh' ! -name 'run-tests.sh' | wc -l`
+  → `32`.
+- assert: `bash .claude/tests/component/run.sh` exits 0. v4.1.0 L2 baseline is
+  **41 specs / 1,983 assertions / 0 fail** (**+8 specs and +972 assertions**
+  over v4.0.0's 33 / 1,011 — again derived from `git ls-tree v4.0.0`:
+  `installer-v3-upgrade`, `rubric-binding`, `installer-manifest-parity`,
+  `installer-target-functional`, `approve-idempotency`, `upgrade-gate-compat`,
+  `worktree-sweep`, `bd-mcp`). Confirm both completeness lines:
+  `Specs: Total: 41  Passed: 41  Failed: 0` and
+  `Assertions: Passed: 1983  Failed: 0`.
+- assert: `cd .claude/tests/e2e && npm run test:unit` reports **444 passed /
+  5 skipped** across 15 files (**+14 passed** over v4.0.0's 430; skips
+  unchanged at 5). The five skips are the same honest invariant-engine and
+  trace-anchor artifact-missing skips — `completion-contract` (Invariant 3) is
+  among them and is documented as always-skipped, not green-washed.
+- assert: `make lint` is clean AND actually ran. The recipe
+  skips-with-a-warning and **exits 0** when `shellcheck` is absent, so exit 0
+  alone proves nothing. Run `make lint > /tmp/lint.out 2>&1; echo $?` and
+  confirm `0` **with `wc -c < /tmp/lint.out` equal to `0`** — the skip branch
+  prints a sentence, so zero bytes is what distinguishes clean from skipped.
+  Confirm `command -v shellcheck` resolves (0.11.0 on the authoring host).
+- assert: `docs/RELEASE_AUDIT.md` now holds THREE ledgers, so its greps are
+  section-scoped per ledger. Run:
+  - frozen v3.5.0 ledger →
+    `awk '/^# Release Audit/,/^## v4\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    and the three sibling statuses → confirm `51 / 47 / 0 / 23`; row-id count
+    via `grep -cE '^\| [A-Z]+[0-9]+[a-z]? \|'` over the same range → `121`
+    (the optional trailing letter is required: rows `P6a` and `P6b` exist, and
+    without it the count reads `119`).
+  - v4.0.0 ledger →
+    `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    → confirm `14 / 0 / 0 / 0`, row-ids `14`.
+  - v4.1.0 ledger →
+    `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    and siblings → confirm `13 / 3 / 0 / 0`, and
+    `grep -cE '^\| UW[0-9]+ \|'` over the same range → `16`.
+  - assert the trap is still closed: the v4.0.0 range must NOT end at `,0`.
+    Run `grep -cF 'v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md` and
+    confirm `0`; run
+    `grep -cF 'v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md`
+    and confirm `5` (all five ranges bounded). **Positive control, so the
+    zero above is not vacuous:**
+    `grep -cF 'v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md` → `5` — the
+    grep CAN find this shape, and those five are v4.1.0's own ranges, which
+    end at `,0` legitimately because v4.1.0 is currently the last section.
+    With the open-ended form the v4.0.0 range returns `27 / 3` instead of
+    `14 / 0`, which is measured, not hypothetical.
+- assert: a stock 4.1.0 target classifies against its OWN hashes. Run
+  `ls manifests/` and confirm both `v3.5.0.sha256` and `v4.1.0.sha256` are
+  present. `install.sh:1315-1322` falls back to `manifests/v3.5.0.sha256`
+  when a target has no `install-manifest` and no table matches its detected
+  version, so without this file every unchanged 4.1 file would be classified
+  against v3.5's hashes and reported as customized.
+- assert: the v4.1.0 manifest is byte-reproducible. Run
+  `bash .claude/scripts/workflow-manifest.sh generate . > /tmp/m1 && cmp /tmp/m1 manifests/v4.1.0.sha256`
+  and confirm `cmp` is silent with exit `0`, and
+  `wc -l < manifests/v4.1.0.sha256` → `132` (119 `workflow` + 11 `operator` +
+  2 `merged`; the frozen `v3.5.0.sha256` is `117`). Determinism is load-bearing: the
+  generator may embed no timestamp, hostname, locale-dependent sort or
+  unordered glob, and this comparison is what enforces that.
+- assert: there are exactly TWO `SKILL.md` files in the plugin's own surface —
+  one registered skill and one vendored reference. Run
+  `find .claude -name SKILL.md -not -path '*/node_modules/*' -not -path '*/tests/e2e/*' | wc -l`
+  and confirm `2`. **Both exclusions are required and neither is cosmetic:**
+  the bare `find .claude -name SKILL.md | wc -l` returns **15**, because the
+  e2e fixtures each carry a copy of the workflow-engine skill (and two nested
+  harness worktrees carry more) and `node_modules` ships four unrelated
+  vendor skills. Cross-check the registration half with
+  `jq '.skills | length' .claude-plugin/plugin.json` → `1`.
+- assert: the vendored reference is NOT registered as a skill. Run
+  `jq -r '.skills[]' .claude-plugin/plugin.json` and confirm the sole entry is
+  `./.claude/skills/workflow-engine` — nothing under `.claude/vendor/`. Run
+  `grep -c '3dcbd5c4' .claude/vendor/superpowers/MANIFEST.md` → `5` and
+  `grep -c '3dcbd5c4' THIRD_PARTY.md` → `1`, confirming both files carry the
+  pin (`vendored-skills.test.sh` asserts a single distinct pin across them,
+  so agreement is mechanical, not eyeballed).
+- assert: install verification is functional rather than presence-based. Run
+  `make install-test` and confirm exit `0` with the doctor reporting
+  **11 passed / 0 failed / 0 skipped**. It was 9 passed / 2 failed before
+  C0b — that pair WAS the P0, reproducing in CI instead of in a teammate's
+  project.
+- assert: the MCP tool counts the doctor enforces match the servers. Run
+  `grep -rhA1 'registerTool(' .claude/mcp/bd-mcp/src/tools/*.js | grep -oE "'bd_[a-z_]+'" | sort -u | wc -l`
+  → `21`, and `ls .claude/mcp/code-graph-mcp/src/tools/*.js | wc -l` → `7`.
+  These are the exact equalities `workflow-doctor.sh` asserts over stdio; a
+  server that boots but registers nothing is what "the config parses" missed.
+- assert: `README.md`'s on-disk table matches the tree. Run
+  `ls .claude/agents/*.md | wc -l` → `7`, `ls .claude/scripts/*.sh | wc -l` →
+  `26`, `ls .claude/commands/*.md | wc -l` → `3`,
+  `ls .claude/rubrics/*.md | wc -l` → `5`. The commands row read `2` before
+  this release; `/workflow-doctor` is the third.
+- assert: the spawn-depth pin is unchanged and its retirement date is retired.
+  Run `grep -c 'CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH.*1' .claude/settings.json`
+  and confirm `≥ 1`. U6 (`claude-workflow-plugin-7be`) is CLOSED as
+  need-triggered, not calendar-deferred: **the 2026-08-23 next-check date on
+  that task is retired and is not a live date**, and the standing task
+  `claude-workflow-plugin-1bn` states the trigger as a condition.
+- assert: no living doc names 4.0.0 as the CURRENT version (dated per-release
+  records below deliberately still do). Run
+  `grep -rn 'v4\.0\.0' README.md docs/QUICKSTART.md | grep -viE 'changelog|since|release|prior|previous|4\.1'`
+  and confirm nothing describes 4.0.0 as current.
+
+**Remaining before the tag:** the commit, the tag and the push are the
+operator's steps — this closeout task performs none of them. The PR #4 body is
+prepared at `/tmp/pr-body-v4.1.0.md` and was deliberately NOT applied with
+`gh pr edit`.
+
 ## Verify conditions for "v4.0.0 (tri-model workflow) shipped"
 
 Every number below was measured on 2026-07-26 by `claude-workflow-plugin-d2j.1`
@@ -310,9 +471,15 @@ on `gauntlet/v4.0.0`. A new session can confirm readiness by re-running them.
     and the three sibling statuses → confirm `51 / 47 / 0 / 23`, row-id count
     `121`.
   - v4.0.0 ledger →
-    `awk '/^## v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
     → confirm `14 / 0 / 0 / 0`, and
     `grep -cE '^\| TM[0-9]+ \|'` over the same range → `14`.
+    **RE-SCOPED 2026-07-30 (`claude-workflow-plugin-uvk`), counts unchanged.**
+    This range ended at `,0` — end-of-file — which was right only while
+    v4.0.0 was the last section. A third ledger now sits below it, so the
+    open-ended form returns `27 / 3` and would have made the v4.0.0 verdict
+    line a false statement about rows it never audited. Same correction, same
+    reason, as the v3.5.0 → v4.0.0 one directly above.
 - assert: sign-off separation is mechanical at BOTH gate ends. Run
   `grep -c 'REVIEW-SEPARATION' .claude/scripts/qa-gate.sh` (≥ 1) and
   `grep -c 'REVIEW-DISCIPLINE' .claude/scripts/verify-before-stop.sh` (≥ 1);

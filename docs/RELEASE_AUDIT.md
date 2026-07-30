@@ -30,6 +30,51 @@ commit/approval; the orchestrator commits + tags v3.5.0.
 > `awk '/^# Release Audit/,/^## v4\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
 > (and the three sibling statuses) — they still return 51 / 47 / 0 / 23.
 > The v4 section documents its own scoped greps.
+>
+> **ADDENDUM 2 (v4.1.0, 2026-07-30 — `claude-workflow-plugin-uvk`).** The
+> file now carries **three** ledgers: frozen v3.5.0 (121 rows), v4.0.0
+> (`TM1`-`TM14`), and v4.1.0 (`UW1`-`UW16`, "the verifiable install"), each
+> with its own tally and its own scoped greps. The v3.5.0 range above is
+> unchanged and still returns 51 / 47 / 0 / 23. **The v4.0.0 tally's five
+> ranges were re-scoped in this release** — they ended at `,0`, end-of-file,
+> which was correct only while v4.0.0 was the last section; left alone they
+> would have absorbed the 16 `UW` rows into v4's counts. Measured both ways,
+> so the damage is stated exactly rather than gestured at: the **PROVEN** cell
+> would have read **27 instead of 14** and **PROVEN-WITH-CAVEAT 3 instead of
+> 0**, while **NOT-PROVEN and REMOVED are 0 under both forms** — the v4.1
+> section contributes none of either, so the verdict line's "0 NOT-PROVEN"
+> clause survives numerically and is *not* what breaks. What breaks is the two
+> status counts above, plus that verdict's other half, "every row citing an
+> artifact executed green on 2026-07-26", which would then be covering 16 rows
+> dated 2026-07-30.
+>
+> Worth knowing for anyone auditing a future append: **the corruption would
+> have been partly self-announcing.** The `Total` row greps `^\| TM[0-9]+ \|`
+> rather than a status, so it is immune to the range and stays `14` — the
+> broken table would have shown 27 + 3 + 0 + 0 = 30 rows' worth of statuses
+> against a Total of 14. An internally inconsistent table is a much better
+> failure than a uniformly wrong one, and that asymmetry is worth preserving
+> the next time these greps are written.
+>
+> Whoever appends a fourth ledger must do the same to v4.1.0's five ranges.
+> This is now a recurring obligation of appending, not a one-off fix, and it is
+> the second time it has been paid.
+>
+> **A frozen row can be wrong, not merely old — the two are different and
+> only one is protected.** Freezing exists so dated evidence is not
+> retro-edited when the world later moves; it is not a warrant that the
+> observation held on the day it was recorded. Row **A10** is the worked
+> example: it states "All specialist prompts carry the same six-field schema
+> (read 2026-06-13)", and that was **false when written** — `.claude/agents/
+> devops.md` had no completion-contract section at all, not a drifted one,
+> until `claude-workflow-plugin-i17` wrote it in this release. A10 is left
+> byte-untouched, because editing a dated row is the thing freezing forbids;
+> it is **superseded by `UW14` below** — the F7-completion-contract row, which
+> restates the six-field claim as seven and carries the census assertion that
+> would have caught the gap — and supersession is the mechanism this file
+> already uses. So: a date on a row records when someone looked, never that
+> what they saw was true. Rows carrying an executed artifact are the ones
+> that carry proof.
 
 ## Status vocabulary
 
@@ -427,15 +472,24 @@ and there are no bare NOT-PROVEN rows in this section.
 
 Counts over the 14 rows in this section only. Machine-counted with the
 section-scoped greps below (the v3.5.0 ledger above is excluded by the
-`awk` range), re-run at authoring on 2026-07-26:
+`awk` range), re-run at authoring on 2026-07-26.
+
+**RE-SCOPED 2026-07-30 (`claude-workflow-plugin-uvk`), counts unchanged.**
+These five ranges ended at `,0` — end-of-file — which was correct while
+v4.0.0 was the LAST section. The v4.1.0 ledger now sits below it, so an
+open-ended range would have swallowed the `UW` rows into v4 s counts and
+silently falsified the bold verdict line beneath this table. Each range now
+terminates at the v4.1.0 heading. This is the same correction v4.0.0 applied
+to v3.5.0's file-wide greps, for the same reason, one section later; the next
+ledger must do it again to this one.
 
 | Status | Count | Scoped grep |
 | ------ | ----- | ----------- |
-| PROVEN | 14 | `awk '/^## v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
-| PROVEN-WITH-CAVEAT | 0 | `awk '/^## v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
-| NOT-PROVEN | 0 | `awk '/^## v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
-| REMOVED | 0 | `awk '/^## v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
-| **Total** | **14** | `awk '/^## v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '^\| TM[0-9]+ \|'` |
+| PROVEN | 14 | `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
+| PROVEN-WITH-CAVEAT | 0 | `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
+| NOT-PROVEN | 0 | `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
+| REMOVED | 0 | `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
+| **Total** | **14** | `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '^\| TM[0-9]+ \|'` |
 
 **The v4 release rule (zero NOT-PROVEN rows among the new claims) is MET:
 0 NOT-PROVEN, 0 bare rows, every row citing an artifact executed green on
@@ -487,3 +541,181 @@ now-completed live validation did *and did not* cover.
 
 No row in this section asserts an adjective without an artifact pointer,
 and every cited artifact was executed green in the authoring session.
+
+---
+
+## v4.1.0 claims ledger — the verifiable install
+
+Artifact of **Phase C5** (`docs/plans/v4.1-upgrade-wave.md`), written at the
+v4.1.0 closeout task `claude-workflow-plugin-uvk` on **2026-07-30**. The
+v3.5.0 and v4.0.0 ledgers above are FROZEN and untouched apart from the
+v4.0.0 tally's five grep ranges, which were re-scoped so this section does
+not corrupt them; the counts they return are unchanged. This section adds one
+row per NEW v4.1 behaviour under the same operating rule both earlier ledgers
+ran on: **no adjective without an artifact.**
+
+Evidence discipline for this section, stated so a reader can check it. Every
+artifact cited below was located in the tree by `grep`/`find` (never recalled)
+and **executed green in the authoring session on 2026-07-30**. Every assertion
+count in a `UW` row was read out of that session's own run log rather than
+copied from the commit that introduced it; all sixteen agreed with their
+source commits, so the re-measurement changed no published figure. It did
+catch two errors in this ledger's own drafting, recorded here because a
+process claim with no failure in it is usually an unrun process: the v4.1.0
+manifest's row count had been carried as `121` and measures **132**, and
+`packaging-parity.test.sh` had been described as an existing spec that grew
+when — against the `v4.0.0` tag, which is the baseline a release note uses —
+it is NEW. Both were fixed by running `wc -l` and `git ls-tree` instead of
+trusting a recollection. The four tier runs the per-row numbers come from:
+
+| Tier | Command | Result (2026-07-30) |
+| ---- | ------- | ------------------- |
+| L1 | `bash .claude/scripts/tests/run-tests.sh` | `Total: 32  Passed: 32  Failed: 0`, exit 0 — **1,540 assertions** summed across the per-file `PASSED:` lines |
+| L2 | `bash .claude/tests/component/run.sh` | `Specs: Total: 41  Passed: 41  Failed: 0` / `Assertions: Passed: 1983  Failed: 0`, exit 0 |
+| L3 unit | `cd .claude/tests/e2e && npm run test:unit` | 15 files / **444 passed / 5 skipped** (449), exit 0 |
+| lint | `make lint` | exit 0 **and ZERO bytes of output** — see the note below |
+
+The lint row is stated that way deliberately. `make lint`'s recipe
+skips-with-a-printed-warning and **exits 0** when `shellcheck` is absent, so
+exit 0 alone cannot distinguish "clean" from "never ran". Three things were
+therefore recorded rather than one: the run emitted zero bytes (the skip
+branch prints a sentence), `shellcheck` resolves to
+`/opt/homebrew/bin/shellcheck` version 0.11.0, and the binary was proven
+discriminating in the same session — exit 1 on a planted-defect script, exit
+0 on a real repo script.
+
+Thirteen rows are PROVEN. **Three are PROVEN-WITH-CAVEAT, each with the
+caveat inside the row rather than in a footnote**, and each caveat is a
+present limit of the evidence, not a promise about the future: `install.ps1`
+has never been executed on any host; the brainstorming carve-out is
+prompt-level and no mechanism can gate it; and `context_coverage` has zero
+mechanical runtime enforcement. There are no bare NOT-PROVEN rows.
+
+### v4.1.0 claims (UW1-UW16)
+
+| # | Claim (verbatim or tight paraphrase + source) | Verification method | Evidence pointer | Status |
+| --- | --- | --- | --- | --- |
+| UW1 | The shipped surface is a DATA ARTIFACT: "`workflow-manifest.sh generate` emits a sorted, header-free, timestamp-free TSV mirroring `install.sh`'s copy loops one-for-one, byte-reproducible on demand, and `manifests/v<release>.sha256` freezes it per release" (CHANGELOG [4.1.0] Added, "The v3.5 → v4 upgrade path"; `.claude/scripts/workflow-manifest.sh` header) | L1 generator unit incl. determinism, the six-verdict classify table and the frozen-table byte comparison, each with a META proving the check can fail; plus a live regenerate-and-`cmp` of both frozen tables in this session | Ran 2026-07-30: L1 `.claude/scripts/tests/workflow-manifest.test.sh` — **131 / 0 fail**: sorted deterministic output: the three-class enum: classify's six verdicts: the frozen `v3.5.0.sha256` comparison: META "the corrupted copy really differs from the frozen table": META "format check FAILS on a table with a truncated hash": META "…on an out-of-enum class token": META "…on a table with zero rows" (so a silently-truncated manifest cannot pass): META "adding an in-surface file CHANGES the generate output" (so the assertion is not vacuous). Live in this session, both measured rather than carried forward: `manifests/v3.5.0.sha256` regenerated from `git archive v3.5.0` into a temp tree with the CURRENT generator → **117 rows, `cmp` exit 0** (so the U0 refreeze still holds after this release's surface changes); `manifests/v4.1.0.sha256` generated, then regenerated into a second file and `cmp`-ed byte-for-byte → **identical, exit 0, 132 rows** (119 `workflow` + 11 `operator` + 2 `merged`), with the recorded `plugin.json` sha256 `c6427a05…` verified equal to `shasum -a 256` of the bumped file on disk. **Determinism was attacked along the two axes that could plausibly break it, and both are closed empirically rather than by reading the header's promise:** regenerating under `LC_ALL=C`, `LC_ALL=en_US.UTF-8` and `LC_ALL=de_DE.UTF-8` yields three byte-identical 132-row tables (`cmp` exit 0 each; both non-C locales are genuinely present in `locale -a` on this host, so the legs are not vacuous), which is what `generate_manifest`'s pinned `LC_ALL=C sort` at `workflow-manifest.sh:359` exists to guarantee; and the hash chain agrees across tools — `shasum -a 256` and `openssl dgst -sha256` return the same digest for the same file. **The one residual, scoped precisely rather than as a vague platform doubt: a Windows checkout with `core.autocrlf=true`.** That rewrites LF to CRLF in the working tree, which changes the bytes of every text file and therefore every `sha256` in this table, so a table generated on such a checkout would match nothing and `classify` would report the entire surface as customized. It is untested here and is subsumed by `UW6`, which caveats Windows wholesale; `install.ps1` mitigates on its own side by comparing with `[StringComparer]::Ordinal` and writing LF-only (12 write sites), but that is inspection, not execution. | PROVEN |
+| UW2 | The v3.5 → v4 upgrade path preserves operator customizations: "`--upgrade` detects a 3.x install, takes a dotfile-inclusive `.claude-v3-backup-<timestamp>/`, and copies by VERDICT — preserve-custom writes a `.new` sidecar alongside, replace-custom warns and backs up, merges go through the shared jq expressions — writing an `install-manifest` on every path" (CHANGELOG [4.1.0] Added; `install.sh:1290-1322`) | L2 flagship spec built on a GENUINE v3.5 fixture rendered by v3.5.0's OWN installer (not a hand-built approximation), plus an L1 flag-surface unit asserting exclusivity is evaluated BEFORE prerequisites | Ran 2026-07-30: L2 `.claude/tests/component/specs/installer-v3-upgrade.sh` — **235 / 0 fail** on a fixture produced by the real `v3.5.0` tag's installer: detection via `plugin.json` 3.x with the marker-absent fallback: the dotfile-inclusive backup: preserve-custom → `.new` alongside: replace-custom → warn + backup: `install-manifest` written on every path: the verdict-count readout and `upgrade-report.txt`: `7a META-TEST: no default.md.new when the rubric was never customized`: `7a META-TEST: an uncustomized rubric matches the shipped bytes after upgrade` (so the sidecar assertion is not vacuous — a spec that always emitted `.new` would pass the positive leg alone): `7b META-TEST: the backup checker reports ABSENT when .qa-tracking was removed`. L1 `.claude/scripts/tests/installer-flags.test.sh` — **94 / 0 fail**: `--upgrade`/`--mode` hard exclusivity: `--mode` value validation: `--verify` exclusivity: META "the mutated copy no longer carries the --upgrade/--mode refusal": META "the mutated copy still carries the untouched --verify refusals" (the mutation is surgical, so the failure it produces is attributable). | PROVEN |
+| UW3 | Re-runs are idempotent: "mode-2 UPDATE consumes the target's own `install-manifest` as `classify`'s old-table, so operator customizations survive a re-run, and a sentinel-guarded no-change probe skips backup creation on genuine no-ops" (CHANGELOG [4.1.0] Added) | L2 §8 of the flagship spec, driving a real second run against a customized target — the re-clobber gap was reproduced BEFORE the fix — with probe METAs | Ran 2026-07-30: L2 `.claude/tests/component/specs/installer-v3-upgrade.sh` — **235 / 0 fail**, §8 covering idempotency, the re-customize regression, and the probe METAs; `8c: the fresh v4 META fixture installs cleanly`: `8c: the META fixture carries the operator rule before any run` (the fixture's precondition is asserted, so a fixture that never had the customization cannot pass by accident). The legacy plain-copy fallback for targets with no manifest is exercised in the same spec. | PROVEN |
+| UW4 | Fresh and upgraded targets are equivalent, and uninstall is manifest-driven: "fresh-install parity against the generated manifest with NO class exempt; no extras in plugin-owned directories; `uninstall.sh` trashes unmodified plugin-owned root files, leaves customized ones with a note, and both uninstallers enforce PHYSICAL parent containment (`cd && pwd -P`, never a string prefix)" (CHANGELOG [4.1.0] Added; `LESSONS.md:50`) | L2 parity spec asserting an exact-set equivalence between a fresh render and the manifest, the uninstall legs, a path-traversal guard, and restore-backup source discrimination | Ran 2026-07-30: L2 `.claude/tests/component/specs/installer-manifest-parity.sh` — **139 / 0 fail**: fresh-install parity with no class exempt: no-extras in plugin-owned dirs: unmodified root files trashed: customized files left with a note: legacy byte-faithful restore: path-traversal guard: restore-backup source discrimination: `2b META-TEST: the truncated copy really differs from the manifest`: `2b META-TEST: the truncated copy has the SAME row count (truncated, not deleted)`: `2b META-TEST: the checker flags the truncated row`: `2b META-TEST: and flags exactly one row more than the untouched manifest did` (the delta is exactly one, so the checker is not flagging indiscriminately). | PROVEN |
+| UW5 | The upgrade does not break an in-flight gate: "closed tasks carrying pre-v4 approval records are never re-blocked (tolerance proven to be SCOPING, not leniency); bare-label forgery still blocks; new approvals carry `reviewed_by=`/`worktree=`; and the v1 approved-baseline fallback is re-pinned from the upgrade topology" (CHANGELOG [4.1.0] Tests; `599e850`) | L2 real-`bd` spec on a genuinely upgraded v3.5 → current fixture, including a mutilation META that strips only the hash token from an otherwise-complete record | Ran 2026-07-30: L2 `.claude/tests/component/specs/upgrade-gate-compat.sh` — **89 / 0 fail**: pre-v4 approvals on CLOSED tasks tolerated: bare-label forgery still blocks: `reviewed_by=`/`worktree=` on new approvals: the v1 approved-baseline fallback re-pinned (deleting the legacy arm breaks this spec — live-falsified): enter → records → approve → release end-to-end POST-upgrade: `7 META: precondition - the META fixture row was created`: `7 META: precondition - the independent-review predicate is CLEAN here too` (so the block cannot come from an unrelated gate arm): `7 META: the mutilated record is on file`: `7 META: ...with the change_set_hash token stripped`: `7 META: ...while every other 4b ingredient is present - the label still reads approved` (the tolerance is scoping, not leniency — exactly one ingredient differs). Zero production changes in this task. | PROVEN |
+| UW6 | `install.ps1` carries the same upgrade machinery: "`-Upgrade` plus the detection ladder and exclusivity, PowerShell-native generate/classify/hash producing byte-compatible TSV, an LF-only `install-manifest`, the verdict walk/probe/report with rendered-sentence parity, and the manifest-driven uninstall with physical containment" (CHANGELOG [4.1.0] Added; `install.ps1`) | L1 packaging-parity extracting the merge expressions FROM both sources between literal sentinels and comparing bash↔ps1 token identity, with strip-the-line METAs. **Text and expression parity only — no execution** | Ran 2026-07-30: L1 `.claude/scripts/tests/packaging-parity.test.sh` — **623 / 0 fail**: sentinel-extracted `SETTINGS_MERGE_JQ` / `MCP_MERGE_JQ` / `JSON_SINGLE_OBJECT_JQ` compared bash↔ps1: fixture batteries: stamp and orphan-reserve NAMES compared file-to-file (they are on-disk artifacts, so drift makes one installer's target unreadable to the other's skip check): `META 1: the mutation actually changed the expression`: `META 1: the mutated expression is still valid jq (exit 0)`: `META 1: without del(), the retired-key check FAILS (returns 1)`: `META 1: and the retired key is demonstrably still there` (so the parity assertion is not vacuous). Deleting the `npm ci` invocation fails 7 parity assertions. **CAVEAT, and it is total: `install.ps1` has NEVER been executed, on any host, in any release.** No PowerShell is available on this machine, and `gh run list --workflow windows-install.yml` returns **zero runs** (verified 2026-07-30, empty JSON array — the workflow is `workflow_dispatch`-only and the gh token scopes lack `workflow`). Worse than "unverified": U0.7 found `install.ps1` was ALREADY WinPS-5.1 **parse-broken at the 4.0.0 tag**, invisible because the CI evidence is pwsh-7-only; it was repaired across seven sites with an ASCII guard, and that repair is itself unexecuted. Everything above is verified by expression identity and inspection. **This row implies NO Windows coverage whatsoever.** | PROVEN-WITH-CAVEAT |
+| UW7 | Install verification is FUNCTIONAL, not presence-based: "`workflow-doctor.sh` runs eleven named checks, each PASS/FAIL/SKIP with a `fix:` line; `session_start` pipes a synthetic payload through the REAL hook and asserts the emitted envelope CONTAINS the workflow context; `mcp_bd`/`mcp_code_graph` spawn each server over stdio and assert `tools/list` returns EXACTLY 21 / EXACTLY 7; every dynamic check runs in a throwaway sandbox" (CHANGELOG [4.1.0] Added; README; `install.sh --verify`, `/workflow-doctor`) | L1 doctor unit incl. a non-mutation assertion over the LIVE repo and mutant-copy METAs; L2 MCP boot specs over real stdio; plus a live tool-name enumeration in this session | Ran 2026-07-30: L1 `.claude/scripts/tests/workflow-doctor.test.sh` — **94 / 0 fail**: the eleven named checks: `--json-out` and the 0/1/2 exit contract: non-mutation of the live repo: `META-TEST 3: both seeded fixtures start from identical state`: `META-TEST 3: session-start.sh destroys the seeded gate state when run directly`: `META-TEST 3: the destroyed state specifically includes the approval` (so the sandbox is load-bearing, not decorative — an unsandboxed doctor would clear the operator's own QA approval). L2 `.claude/tests/component/specs/bd-mcp.sh` — **28 / 0 fail** (there was NO bd-mcp spec at all before this release, which is half of why the P0 shipped) and `code-graph-mcp.sh` — **29 / 0 fail**, both over real JSON-RPC stdio. Exact equality is the load-bearing choice and was probed with a stub at 0/20/21/22 tools → FAIL/FAIL/PASS/FAIL. Independently re-counted in this session from the server sources rather than from the doctor: **21** distinct `bd_*` names across `.claude/mcp/bd-mcp/src/tools/*.js` and **7** tool modules in `.claude/mcp/code-graph-mcp/src/tools/`, matching README:49-54's list name-for-name. | PROVEN |
+| UW8 | MCP dependencies install in the TARGET, and a failure is loud rather than green: "`npm ci --omit=dev --ignore-scripts` per server after the copy, `node` ≥ 18.17 and `npm` checked BEFORE the clone, preserve-and-restore so a failing re-install cannot destroy the operator's tree, and a three-arm headline plus a `DEPENDENCY UPDATE DID NOT FINISH` block instead of 'Installation complete.' in green" (CHANGELOG [4.1.0] Added/Fixed; UPGRADE NOTE part 1) | L1 spec that EXTRACTS AND EXECUTES the shipped installer functions rather than reimplementing them, driven against five mutants of `install.sh`; plus the lockfile-invariant and tool-count cross-check unit | Ran 2026-07-30: L1 `.claude/scripts/tests/mcp-deps-preserve.test.sh` — **49 / 0 fail**: a populated tree survives a FAILING `npm ci`: skip-when-current never invokes npm: stamp discipline: an interrupted run is healed on the next one: the success path stamps and cleans up: REAL npm against an unreachable registry: `META-TEST: the mutated copy really differs from install.sh`: `META-TEST: the set-aside really is gone from the copy`: `META-TEST: the mutation is surgical — the restore path survives` (so the failure is attributable to the removed set-aside and nothing else). L1 `.claude/scripts/tests/mcp-deps.test.sh` — **55 / 0 fail**: lockfile invariants that make `--omit=dev` safe: a four-way tool-count cross-check: `META-TEST 1 control: the real table and the real README already AGREE on bd-mcp`: `META-TEST 1: the mutant's table really reads 22` (so the cross-check would catch a drifted count). The original harm was measured, not theorised: a failing re-install took 3,909 files / 98 `package.json` down to 94 empty directories / 0. | PROVEN |
+| UW9 | SessionStart can no longer emit a context-free session: "the full `hookSpecificOutput` envelope is emitted ALWAYS, with a `<workflow_degraded severity=\"high\">` block SEEDED at the top of the context rather than appended; bd-off-PATH and missing-`.beads` are separate reasons; an EXIT trap enforces the guarantee at the exit rather than at each call site" (CHANGELOG [4.1.0] Added; `docs/HOOKS.md`) | L2 spec asserting a RENDERED target is functional rather than merely complete, with a `PATH=/usr/bin:/bin` section that is the only thing in the repo able to catch this symptom, plus a fault-injection META | Ran 2026-07-30: L2 `.claude/tests/component/specs/installer-target-functional.sh` — **138 / 0 fail** across 8 sections and 41 METAs, deliberately carrying no `bd_required_or_skip` so it runs in CI: `6g: META-TEST precondition — the fault really got injected`: `6g: META-TEST precondition — the injected copy is still valid bash`: `6g: META-TEST — a mid-script hard failure still exits 0`: `6g: META-TEST — and still emits valid JSON`: `6g: META-TEST — with the right hookEventName` (the emergency envelope is proven at the EXIT, not at one call site). Section 6 runs under `PATH=/usr/bin:/bin` and is the regression coverage for this symptom specifically: **the doctor's own `session_start` check PASSES against the pre-fix hook**, because the doctor runs on a host that has `bd` — so `workflow-doctor.sh` could never have caught this, and the row does not claim it could. The healthy path was proven unchanged by BYTE-DIFFING `additionalContext` old vs new under identical inputs: identical except one trailing newline. | PROVEN |
+| UW10 | Approve idempotency is hash-aware and three transient-block windows are closed: "`approve` no-ops ONLY when an existing record binds the hash this approve would bind; otherwise it re-verifies every precondition and writes a fresh bound record — and the printed `LABEL_WITHOUT_RECORD` remediation now works instead of looping" (CHANGELOG [4.1.0] Added; `docs/HOOKS.md` "Approve idempotency is hash-aware"; `f58e49c`) | L2 spec driving the real gate scripts through the deadlock and all three race windows, RED-verified on a pristine pre-fix worktree before any fix, with a strip-the-block META on the Stop side | Ran 2026-07-30: L2 `.claude/tests/component/specs/approve-idempotency.sh` — **93 / 0 fail** across sections A-H: the hash-aware guard: record-before-label (W1): clear-after-truncate (W2): the Stop-side `VANISHED-CHANGE-SET` release for the two-read straddle (W3) that no approve-side ordering can close: `approve-idem-F3 META: VANISHED-CHANGE-SET sentinels present in verify-before-stop.sh`: `approve-idem-F3 META: the stripped copy still parses`: `approve-idem-F3 META: the stripped copy still sources the shared denylist` (it fails for its own reason, not a missing lib): `approve-idem-F3 META: WITHOUT the block the raced Stop BLOCKS again (F1 WOULD fail)` — the strong form, naming the assertion that would go red. The deadlock and all three windows were reproduced **28/28 on a pristine pre-fix worktree at `ee75125`** before the fix existed. | PROVEN |
+| UW11 | Rubric verdicts are bound to the change set they graded: "RUBRIC records carry `change_set_hash`; `enter` preserves a satisfied rubric label only on positive evidence — gate already open, latest record satisfied, hash equal to now — and everything else degrades to the old clear; the approve-side cross-check is a WARNING plus a durable token, never a refusal" (CHANGELOG [4.1.0] Added; `dd403c4`) | L2 spec grown across three review rounds against six further defects found in this change's own machinery, incl. a writer-side mutation META | Ran 2026-07-30: L2 `.claude/tests/component/specs/rubric-binding.sh` — **149 / 0 fail** across sections A-L: the crafted-`rubric_version` parse relocation closed AT THE WRITER (reader-side tightening was proven unable to close it — the injected prefix is itself in-class): the three hash sources in descending authority: the latest-vs-last-PARSEABLE record bug in four shapes: the sha256-unavailable sentinel rejected as a hash: `rubric-bind-G META: the writer's token line was located and mutated`: `rubric-bind-G META: the mutant's record carries no binding`: `rubric-bind-G META: ...so the SHIPPED enter clears it (section A WOULD fail)`: `rubric-bind-G META: ...reporting the verdict as unbound`. RED **86 of 149** on a pristine pre-fix worktree, GREEN 149/149 after. The prompt-level fix was DISPROVED before the mechanical one was built: the damaging `enter` is printed by `verify-before-stop.sh`'s own block reason, so no ordering rule in `orchestrator.md` could ever have held. | PROVEN |
+| UW12 | Out-of-repo agent scratch leaves the change set, in ONE landing: "three patterns join the shared denylist — `(^\|/)\.claude/plans/`, `^(/private)?/tmp/claude-[^/]+/`, `(^\|/)\.claude/\.mutation-(runs\|worktrees)/` — so an in-flight cycle pays the hash migration exactly once, and `/tmp` as a CLASS is deliberately not covered" (CHANGELOG [4.1.0] UPGRADE NOTE part 2; `f73c46c`) | L1 structural test over the three consumers plus L2 section D, which pins a PRE-landing lib and then restores the real one so the RESTORE is the landing, with two independent discriminating controls | Ran 2026-07-30: L1 `.claude/scripts/tests/denylist-source.test.sh` — **32 / 0 fail** (20 before this release): all three consumers source the lib `BASH_SOURCE`-relative: none carries a literal regex copy: `META: checker flags a consumer that re-declares a literal regex`: `META: that same copy still passes the source check (checks are independent)`: `META: checker flags a PROJECT_DIR-anchored source (not BASH_SOURCE-relative)`. L2 `.claude/tests/component/specs/denylist-shared.sh` — **79 / 0 fail** (36 before): `denylist-D1 control: the shipped regex really carries the plans/ alternative (strip is not a no-op)` — without this, three simulated renames collapse to pre==shipped and every D assertion goes green while proving nothing: `denylist-D2` proves the pinned lib is a WORKING denylist on a control path both regexes drop, because everything D2 asserts is absence-shaped and a lib that fails to parse produces the identical observable: `denylist-D3 landing: the same task-less plan-file Stop now RELEASES (the dead end is gone)`: `denylist-D4: agent-chosen /tmp scratch stays reviewable (the limit is deliberate)`: `denylist-D4: this spec's own mktemp -d fixture path stays reviewable (why /tmp is rejected)` — the exclusion is pinned by the very fixture a broader pattern would have emptied: `denylist-D5: after the landing the pre-landing approval no longer releases (fail closed)`: `denylist-D5: ...so the printed recovery RELEASES the migrated cycle (one landing, one migration)`: `denylist-C4`/`denylist-C5` retained for the invented canary and the explicit-label-removal variant. | PROVEN |
+| UW13 | The worktree sweeper is report-only and containment-scoped: "dry-run is the default and `--apply` is the only thing that removes; removal requires ALL of physical containment, same-repo identity, a clean working tree, locally-decidable pushed-or-merged, age past `--age-days`, and a task id resolved FROM EVIDENCE that `bd` reports closed; SessionEnd runs it `--report-only` under a bound, never `--apply`" (CHANGELOG [4.1.0] Added; `b10c1f3`) | L1 unit with a strip-the-containment-guard META over a real `git worktree add`, plus an L2 spec run with real `bd` STRIPPED from PATH so the METAs execute on the machine that guards the branch | Ran 2026-07-30: L1 `.claude/scripts/tests/worktree-sweep.test.sh` — **34 / 0 fail**: `B1` a worktree plainly outside the root is not-contained: `B2` the sibling `<root>-extra` is not-contained (boundary char, not prefix): `B3` a symlink UNDER the root resolving outside is not-contained: `B4` control — the in-scope worktree passes containment: `B5`/`B5b`/`B5c` the default run is a DRY RUN and the worktree is still on disk and still listed by git: `META-1a: the strip actually changed the file (non-vacuous mutation)`: `META-1c: with the guard stripped, the OUTSIDE worktree passes every gate`: `META-1d: ...and is reported REMOVABLE — the outcome containment prevents`: `META-1e`/`META-1f` restore controls. L2 `.claude/tests/component/specs/worktree-sweep.sh` — **55 / 0 fail**, run under `BD_SHIM_ONLY=1` with `command -v bd` asserted ABSENT first: `8.4 the sweep did NOT remove anything from a hook`: `8.10 a FAILING sweeper still leaves session-end emitting {}`: `8.11 an ABSENT sweeper (pre-C1b install) likewise`: `8.12 SAFETY — the plugin's real worktree-sweep.sh is STILL untouched`. The containment fixture is not vacuous: `git worktree add` RESOLVES symlinks, so the obvious `ln -s` fixture would test nothing; `B3` repoints `.git/worktrees/<n>/gitdir` instead, which is what actually happens when a worktree is moved. | PROVEN |
+| UW14 | The F7 completion contract carries SEVEN fields in every carrier: "`context_coverage` is appended seventh and last across `qa.md`, `backend.md`, `frontend.md`, `devops.md` and `docs/AGENTS.md`, never inserted mid-list, and the QA review checklist now actually asks for it" (CHANGELOG [4.1.0] Added; `docs/AGENTS.md` "Specialist Completion Contract (F7)"). **This row SUPERSEDES frozen row `A10`**, which recorded on 2026-06-13 that "all specialist prompts carry the same six-field schema" — a statement that was FALSE WHEN WRITTEN, since `devops.md` had no completion-contract section at all until `claude-workflow-plugin-i17`. A10 is left byte-untouched per the freezing rule; this row is the correction | L1 parity spec using `jq` as an INDEPENDENT ORACLE over the fences the prompts actually ship, asserting key equality in DOCUMENT order, with a fence CENSUS rather than "every fence found is valid" | Ran 2026-07-30: L1 `.claude/scripts/tests/completion-contract-parity.test.sh` — **45 / 0 fail**: `Section 1: F7 fence census (a COUNT, so a zero-fence file fails)` — this is the assertion shape that would have caught the A10 gap, and it is a count precisely because "every fence found is valid" is vacuously true for a file with zero fences, which is exactly how the `devops.md` gap survived: `Section 2: every fence parses and opens with the canonical seven` (`jq keys_unsorted`, so order-equality implies set-equality in one assertion): `Section 3: qa.md's three blocks are a SUPERSET, not a variant` — there are THREE contract fences in `qa.md`, not one, so a field added only to the canonical section leaves two drifted copies agents actually paste: `Section 4: context_coverage reached every PROSE carrier`: `Section 5: forbidden phrases occur ZERO times in the carrier set`: `META-A: the key-order checker flags the stripped fence`: `META-A: the fence-stripping mutation landed (copy is shorter than the original)` — META-A reconstructs the historical gap by stripping every fence from a copy of `devops.md`, so "this would have caught it" is demonstrated rather than narrated. **CAVEAT, stated as the implementing task stated it: this adds ZERO mechanical runtime enforcement.** The parity test guards DOCUMENTS; nothing rejects a malformed payload at runtime. The trace-side check, `completion-contract` (Invariant 3, `.claude/tests/e2e/lib/invariants.ts:432`), is implemented as **always skipped** — `:439` records why: the current `Trace` schema does not capture specialist final messages — and it is the single documented exemption in the META-COVERAGE rule. It is one of the 5 skips in the L3 figure above, not a green. Runtime compliance remains convention plus grader criteria C3 and the new C8. | PROVEN-WITH-CAVEAT |
+| UW15 | A design method is vendored at a pin without importing a second workflow: "`brainstorming` from `obra/superpowers` at `3dcbd5c4` (MIT) lands under `.claude/vendor/`, NOT `.claude/skills/`, so `plugin.json`'s `skills[]` stays length 1; ten surgical modifications are annotated with measured upstream counts; and upstream `systematic-debugging` is MERGED into evidence-before-fix as ONE authoritative protocol rather than shipped beside it" (CHANGELOG [4.1.0] Added; `.claude/vendor/superpowers/MANIFEST.md`; `THIRD_PARTY.md`) | L1 vendoring spec with per-ban sensitivity METAs and pin assertions; L1 EBF-CORE region checker whose vacuity guard was attacked on the LIVE files by an independent reviewer | Ran 2026-07-30: L1 `.claude/scripts/tests/vendored-skills.test.sh` — **94 / 0 fail**: a single distinct pin, equal to `EXPECTED_PIN`, agreeing with `THIRD_PARTY.md`: `skills[]` length 1: the two line-level invariants (every line with `approv` also carries `qa-approved`; every line with `commit` also carries `recent commits`, case-insensitive): `META-1a: the planted banned phrase actually landed in the fixture`: `META-1b: banned_hits FLAGS the planted phrase`: `META-1c: control — the shipped file is still clean`: `META-2a: the pin-stripping mutation actually landed`: `META-2b: manifest_pins reports ZERO pins for the mutant`. L1 `.claude/scripts/tests/evidence-before-fix.test.sh` — **29 / 0 fail**: `META-A1: identity ALONE passes on two emptied regions (the hole is real)`: `META-A2: region checker REJECTS an emptied region (the hole is closed)`: `META-B0: the one-byte mutation actually landed`: `META-B1: both drift stubs are individually well-formed (not vacuously unequal)`: `META-B2: identity check flags a ONE-BYTE region difference` — two EMPTY regions compare equal, so identity alone is one `sed` away from meaningless; the 40-non-blank-line floor plus both sentinels is what closes it, and an independent reviewer reproduced the attack on the four LIVE carriers (identity-alone PASSED all three emptied comparisons; the region checker REJECTED all four). **CAVEAT: the carve-out that lets an orchestrator SKIP the brainstorming read for trivial work is prompt-level and cannot be made mechanical.** `orchestrator.md:105-108` says so in its own text: F1 is a **Stop-time change-set classifier**, so it runs after files are written and structurally cannot gate a read that happens before any file is touched. There is no artifact that can prove the ceremony was performed or correctly skipped; what IS asserted is that the instruction, the three overriding clauses and the carve-out are present in the shipped prompt. A second, weaker limit is recorded rather than hidden: the four wiring sentinels are asserted against `orchestrator.md` only, never against the vendored file, so the spec catches CORRUPTION of the vendored text but not its DELETION (`claude-workflow-plugin-e2j`; proven by mutation — a 379-byte stub leaves the spec at 94/94). | PROVEN-WITH-CAVEAT |
+| UW16 | "Version 4.1.0 across both manifests" — the release's own definition of done, CORRECTED: there is exactly ONE version-carrying manifest, `.claude-plugin/plugin.json`, and both installers derive their banner from it dynamically with zero hardcoded version literals (`docs/plans/v4.1-upgrade-wave.md` status block, "Definition of done"; `install.sh:96-101`) | L1 packaging-parity section 6m, which EXECUTES the installer's `--help` and drives the shipped extractor against a hostile fixture, plus direct execution of the same code paths in this session and a repo-wide search for a second version-bearing manifest | Ran 2026-07-30: L1 `.claude/scripts/tests/packaging-parity.test.sh` — **623 / 0 fail**, section 6m: `6m: install.sh reads the branding version from .claude-plugin/plugin.json`: `6m: the plugin manifest declares a version (guards the executed check)` — a precondition, so the next assertion cannot pass vacuously: `6m: install.sh --help renders the manifest's version in the header` (EXECUTED, not grepped): `6m: install.ps1's banner prints the interpolated brand label`: `META 22: the SHIPPED extractor returns the top-level version on the hostile fixture`: `META 22: the retired loose anchor returned the NESTED version instead`. Re-executed independently in this session rather than read: `node -e 'JSON.parse(…).version'` → **`4.1.0`**; `grep -c '^  "version": "4\.1\.0",$'` → **1**, confirming the TWO-SPACE top-level indent `install.sh:96-101` is anchored on is intact; `install.sh`'s own `sed` run verbatim → `4.1.0`; the EXECUTED banner `bash install.sh --help \| head -3` → `Claude Workflow Plugin v4.1.0 installer`. **The anchor's load-bearing-ness was re-derived by running the control, not by citing the comment that claims it:** on the fixture `{mcpServers:{a:{version:"0.0.1"}}, version:"9.9.9"}` the loose `[[:space:]]*` form returns **`0.0.1`** (the NESTED value) where the shipped two-space form returns **`9.9.9`**; and against the real manifest reformatted to 4-space indent the shipped form returns **the empty string**, i.e. the banner degrades to the unnumbered product name. The "both manifests" idiom is inherited from `docs/plans/verification-suite.md:47`, where it means `.mcp.json` and `plugin.json` must AGREE on their MCP server definitions — not a versioning claim; `.mcp.json` has no `version` key at all, and `.claude/tests/e2e/package.json` is `private`, versioned `0.0.0`, with its only `4.0.0` being the `zod` range `^4.0.0`. Searched and confirmed 2026-07-30: the only version literals in either installer are 7 provenance COMMENTS naming the release a feature arrived in (`install.sh` 5, `install.ps1` 2) — no runtime literal, so the release bump is genuinely one line. | PROVEN |
+
+### v4.1.0 tally
+
+Counts over the 16 rows in this section only. Machine-counted with the
+section-scoped greps below, re-run at authoring on 2026-07-30:
+
+| Status | Count | Scoped grep |
+| ------ | ----- | ----------- |
+| PROVEN | 13 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
+| PROVEN-WITH-CAVEAT | 3 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
+| NOT-PROVEN | 0 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
+| REMOVED | 0 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
+| **Total** | **16** | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '^\| UW[0-9]+ \|'` |
+
+> **TO WHOEVER APPENDS THE NEXT LEDGER: these five ranges end at `,0` and are
+> correct ONLY while v4.1.0 is the last section.** Before you write a single
+> new row, change every `,0` above to `,/^## v<next>\.0 claims ledger/` and
+> re-run the five commands to confirm the counts are still 13 / 3 / 0 / 0 / 16.
+> This is the third ledger and the second time this correction has been owed;
+> v4.0.0 left no such instruction, which is precisely why it was missed until
+> the row it would have corrupted was already being drafted.
+
+**The v4.1 release rule (zero NOT-PROVEN rows among the new claims) is MET:
+0 NOT-PROVEN, 0 bare rows, every row citing an artifact executed green on
+2026-07-30, and every one of the three caveated rows carrying its caveat
+inside the row.**
+
+### v4.1.0 residuals carried into the release notes
+
+None of these is an evidence gap left unstated — each is named inline in the
+row it belongs to. They are collected here so the release notes and
+`HANDOFF.md` carry the same list.
+
+- **`install.ps1` has never been executed, on any host (UW6; standing since
+  v3.5.0 as S6/R25/R26/I5/Q7, tracker `llh.7`).** This release makes the
+  residual materially worse before better: the PowerShell installer now
+  carries the entire upgrade machinery — generate, classify, the verdict walk,
+  the manifest-driven uninstall — and every line of it is unexecuted. U0.7
+  also established that `install.ps1` was ALREADY WinPS-5.1 parse-broken at
+  the `v4.0.0` tag, invisible because `windows-install.yml` is pwsh-7-only;
+  the seven-site repair is likewise unexecuted. Verified 2026-07-30:
+  `gh run list --workflow windows-install.yml` returns **zero runs**. *Flip
+  that remainder:* obtain a `workflow`-scoped gh token, dispatch
+  `windows-install.yml` on `windows-latest`, and additionally add a
+  Windows-PowerShell-5.1 leg — a pwsh-7 green would not have caught the parse
+  break this release found by inspection.
+- **The brainstorming carve-out is prompt-level and no mechanism can gate it
+  (UW15).** `orchestrator.md:105-108` states this in its own text: F1 is a
+  Stop-time change-set classifier, so it fires after files are written and
+  cannot reach a read that happens before any file exists. This is a
+  structural ceiling, not a deferred fix. *Flip that remainder:* only a
+  pre-delegation hook that can observe an agent's reads — no such event exists
+  in the current platform surface — would make it mechanical; short of that,
+  the honest improvement is a trace-side check that the read occurred, which
+  requires the same specialist-message capture the `completion-contract`
+  invariant is already blocked on.
+- **`context_coverage` has zero mechanical runtime enforcement (UW14).** The
+  parity spec guards DOCUMENTS — it proves every shipped fence declares the
+  seventh key in the canonical order — while nothing rejects a payload that
+  omits or boilerplates it at runtime, and the trace-side `completion-contract`
+  invariant stays skipped on its documented trace gap. *Flip that remainder:*
+  extend the e2e recorder to capture specialist final messages, which
+  un-skips Invariant 3 and lets the same predicate be evaluated over a live
+  trace; grader criterion C8 is the interim, judgment-based cover.
+- **The practice-harvest ledger for U4 exists in no tracked file (tracker
+  `claude-workflow-plugin-l2g`).** `C3`'s commit body says "48-row table in
+  the PR body" and `THIRD_PARTY.md:35` says the ledger "is recorded on Beads
+  task `claude-workflow-plugin-kfe`" — **both pointers were checked on
+  2026-07-30 and neither resolves**: `05b13ba`'s body contains the sentence
+  but not the table, `kfe` carries eleven comments and none of them is it, and
+  PR #4's body is empty. The load-bearing half is the SKIPS: the rows
+  recording why upstream's approval model, trust hierarchy and nested-spawn
+  execution model were REJECTED are what stop a future contributor
+  re-importing them as improvements. No `UW` row claims the table exists, and
+  the figure "48" is unverified — it could not be counted against any
+  artifact. **Partly closed in this release:** `THIRD_PARTY.md`'s false
+  pointer was corrected on 2026-07-30 — it no longer claims the ledger is on
+  `kfe`, it states plainly that the ledger is in no tracked file, and it names
+  `l2g` and the intended home. That removes the false CHECKABILITY claim (the
+  `igp` defect class) without pretending the ledger exists. The commit body of
+  `05b13ba` is immutable and keeps its stale sentence. *Flip the remainder:*
+  land the 19-row reconstruction — built from tracked evidence, with every
+  landing site `grep`-verified, currently in the v4.1.0 PR description — into
+  `.claude/vendor/superpowers/MANIFEST.md` beside the ten per-modification rows
+  it already carries. Deliberately NOT done here: `MANIFEST.md` is in the
+  shipped surface (it is a row in `manifests/v4.1.0.sha256`), so that edit
+  requires regenerating the manifest and re-running L1 and L2, which would
+  expand a change set already under review. The risk that first looked like the
+  blocker turned out not to be one and is recorded so `l2g` does not re-derive
+  it: `vendored-skills.test.sh`'s alternate-authority scan runs over
+  `RUNTIME_SCOPE`, which is six files (the vendored `SKILL.md` plus the five
+  agent prompts) and is pinned at six by assertion 7.2 — `MANIFEST.md` is not
+  among them, so the table's necessarily approval-heavy prose cannot trip it.
+- **Frozen row `A10` was false when written, and freezing does not
+  distinguish that from staleness (UW14; ADDENDUM 2).** The row is left
+  byte-untouched and superseded rather than edited, which is the mechanism
+  this file already uses — but a reader who takes a dated row as verified
+  will still be wrong about that one. *Flip that remainder:* there is no way
+  to flip it without breaking the freezing rule; the durable mitigation is
+  the ADDENDUM 2 sentence distinguishing "frozen because dated" from "frozen
+  despite being wrong", plus this row, and a future ledger should sweep for
+  other rows whose method column is "inspection" rather than an executed
+  artifact.
+
+No row in this section asserts an adjective without an artifact pointer,
+every cited artifact was executed green in the authoring session, and every
+assertion count was read out of that session's run log rather than copied
+from the commit that introduced it.

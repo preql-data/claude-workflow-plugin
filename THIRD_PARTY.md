@@ -32,9 +32,27 @@ Four further upstream skills (`writing-plans`, `test-driven-development`,
 `receiving-code-review`, `systematic-debugging`) were read at the same pin and
 HARVESTED as practices into surfaces that already exist, rather than vendored as
 files. Nothing from them is committed here as text; the ideas were rewritten in
-this repo's own words, into this repo's own agent prompts. The harvest ledger —
-every practice, its source, whether it was adopted, merged or skipped, and where
-it landed — is recorded on Beads task `claude-workflow-plugin-kfe`.
+this repo's own words, into this repo's own agent prompts.
+
+The harvest ledger — every practice, its source, whether it was adopted, merged
+or skipped, and where it landed — **is not currently in any tracked file.** This
+line previously said it "is recorded on Beads task `claude-workflow-plugin-kfe`";
+that was checked on 2026-07-30 and is false — `kfe` carries eleven comments and
+none of them is the ledger. The other two pointers that were offered for it fail
+the same way: `05b13ba`'s commit body refers to a table "in the PR body" without
+containing one, and the PR body was empty. Landing it is tracked as
+`claude-workflow-plugin-l2g`, whose intended home is
+`.claude/vendor/superpowers/MANIFEST.md`, beside the ten per-modification rows
+already there. A 19-row reconstruction from tracked evidence exists in the
+v4.1.0 PR description and is the starting point.
+
+The skips are the load-bearing half of that ledger, which is why its absence is
+worth a paragraph rather than a shrug: the reasons upstream's approval model,
+its human-partner trust hierarchy, its specialist-spawns-specialist relays and
+its `docs/<vendor>/` plan-file convention were REJECTED are what stop a future
+contributor re-importing them as improvements. Until the ledger lands, those
+reasons live only in `docs/RELEASE_AUDIT.md` (row `UW15` and the residual
+beneath it) and in this file's own "Do NOT install upstream" note below.
 
 The upstream repository ships 14 skills in total. Do NOT install it from the
 marketplace alongside this plugin: registration surfaces all 14 session-wide,
