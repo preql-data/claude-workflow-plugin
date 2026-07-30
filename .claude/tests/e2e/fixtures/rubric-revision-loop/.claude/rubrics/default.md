@@ -1,9 +1,9 @@
 ---
-version: 1
+version: 2
 name: default
 ---
 
-# Default rubric (v1)
+# Default rubric (v2)
 
 Applies to every task graded under the rubric-grader QA loop (spec Phase A). Each criterion below is a pass/fail assertion the grader evaluates from the grading packet: `bd show` for the task, the SPEC doc, the diff of the files listed in `.qa-tracking/changed-files.txt`, the F7 completion contract returned by the specialist, and `LESSONS.md`. One-line justification per criterion. No numeric score theater — pass or fail.
 
@@ -23,11 +23,11 @@ Where the diff introduces new behavior, the diff also introduces tests that asse
 
 Evidence that satisfies it: at least one test in the diff that would still pass if the implementation were rewritten while keeping the user contract identical. A test that asserts only against private symbols, internal call counts, or framework boilerplate fails this criterion.
 
-### C3. The F7 completion contract carries all six fields with substantive `llm_observations`.
+### C3. The F7 completion contract carries all seven fields with substantive `llm_observations`.
 
-The specialist's structured completion payload includes `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, and `llm_observations`. `llm_observations` is non-trivial narrative — what surprised the specialist, what was unclear, what they noticed and did not act on. A boilerplate one-liner like "no observations" fails this criterion (principle 9: `llm_observations` is mandatory and substantive).
+The specialist's structured completion payload includes `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, and `context_coverage`. `llm_observations` is non-trivial narrative — what surprised the specialist, what was unclear, what they noticed and did not act on. A boilerplate one-liner like "no observations" fails this criterion (principle 9: `llm_observations` is mandatory and substantive).
 
-Evidence that satisfies it: each of the six fields is present and the `llm_observations` paragraph is the kind of thing a human engineer would say at a stand-up.
+Evidence that satisfies it: each of the seven fields is present and the `llm_observations` paragraph is the kind of thing a human engineer would say at a stand-up. C3 scores presence-of-seven plus the quality of `llm_observations`; the quality of `context_coverage` is C8's job, so a payload can pass C3 on presence and still fail C8 on substance.
 
 ### C4. No unrelated scope in the diff.
 
@@ -54,3 +54,11 @@ When the diff introduces or modifies mocks of boundaries the project does not co
 **Automatic needs_revision:** circular pass-through assertions are an immediate fail. A mock that feeds `body.error` so a test can assert `body.error` proves nothing — it tests the test's own setup, not the production behavior. Cite `LESSONS.md` lesson 2 in the justification.
 
 Evidence that satisfies it: every new boundary mock points at a fixture file (`.fixtures/`, `__fixtures__/`, `testdata/`) carrying a snapshot of the producer's payload, and the fixture has a comment naming the source (URL, commit, SDK version). Tests assert against the producer's contract, not against the mock's own input.
+
+### C8. `context_coverage` names what was read, what was skipped, and the largest unknown.
+
+The F7 payload's seventh field records three things, in order: the sources the specialist actually read to ground the change; the sources they deliberately did NOT read, and why; and the largest remaining unknown the work ships on. It fails on the same three-way taxonomy C3 applies to `llm_observations` — **empty**, **boilerplate** ("read the relevant files", "full context gathered"), or **detached from the work**: sources named that the diff plainly does not depend on, or the file carrying the diff's central change missing from the list. A coverage note with no deliberate omission in it is boilerplate by construction, because there is always one.
+
+This is not a new principle. It is the evidence-before-fix discipline (`docs/AGENTS.md`) applied *before* the change rather than after — that protocol arms only on bug-typed tasks, and the ordinary feature work that produced the motivating 14-PR speculative-fix chain never gets typed as a bug at all.
+
+Evidence that satisfies it: named files or artefacts (paths, doc names, task ids, log lines) in the "read" part; at least one explicit omission carrying its reason; and an unknown concrete enough that a reviewer could act on it. Grade it against the diff, not against its own confidence — the sources named should be the ones the change actually depends on.

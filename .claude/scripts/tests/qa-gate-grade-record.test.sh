@@ -28,7 +28,10 @@
 #      - rubric-pending is cleared (cycle ends), rubric-satisfied (if any)
 #        is preserved as audit trail.
 #   5. status output exposes rubric state.
-#   6. Every rubric file under .claude/rubrics/ has version frontmatter.
+#   6. Every rubric file under .claude/rubrics/ declares the version the
+#      per-file expectation table names (default=2 since v4.1's C8; the four
+#      overlays stay at 1), plus a META-TEST that a stale-version fixture is
+#      flagged by the same extractor.
 #   7. META-TEST: a stubbed qa-gate.sh with the satisfied-branch label
 #      calls removed asserts the rubric-satisfied test FAILS — proving
 #      the assertion is sensitive to the script's label-flip behaviour,
@@ -585,6 +588,43 @@ echo "=== Section 8: structural sanity of .claude/rubrics/ files ==="
 
 RUBRICS_DIR="$PLUGIN_DIR/.claude/rubrics"
 EXPECTED_RUBRICS=(default backend frontend devops bugfix)
+
+# Per-file EXPECTED version. Through v4.0 this loop grepped one hardcoded
+# literal for all five files, which quietly asserted "every rubric is on the
+# same version" — a property nobody wanted and which went red the first time
+# a single rubric was revised on its own (v4.1 / C2 added criterion C8 for
+# `context_coverage` to default.md and bumped it to 2; the four overlays were
+# untouched and stay at 1). A table makes each rubric's version a deliberate,
+# independently-editable fact, and a NEW rubric file that nobody adds here
+# fails rather than inheriting someone else's number.
+RUBRIC_VERSIONS="default=2 backend=1 frontend=1 devops=1 bugfix=1"
+
+# expected_rubric_version <name> — the table's value; exit 1 (empty output)
+# when the rubric is absent from the table.
+# Deliberately no `case` here: `$(case … esac)` parses under `bash -n` and
+# passes shellcheck but dies at runtime, and this function is only ever
+# called inside a command substitution.
+expected_rubric_version() {
+    _erv_want="$1"
+    for _erv_pair in $RUBRIC_VERSIONS; do
+        if [ "${_erv_pair%%=*}" = "$_erv_want" ]; then
+            printf '%s' "${_erv_pair#*=}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# rubric_version_of <file> — the frontmatter version as a bare number, or
+# empty when absent/malformed. Takes a FILE so the META-TEST below runs the
+# identical extraction against a deliberately-wrong fixture.
+rubric_version_of() {
+    [ -f "$1" ] || return 1
+    head -10 "$1" \
+        | sed -n 's/^version:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' \
+        | head -1
+}
+
 for r in "${EXPECTED_RUBRICS[@]}"; do
     f="$RUBRICS_DIR/$r.md"
     if [ ! -f "$f" ]; then
@@ -593,18 +633,39 @@ for r in "${EXPECTED_RUBRICS[@]}"; do
         printf '  FAIL: rubric file missing: %s\n' "$f"
         continue
     fi
-    # Frontmatter must be present and contain `version: 1`.
+    # Frontmatter must be present and declare the version the table expects.
     head1=$(head -1 "$f")
     assert_eq "rubric $r.md: frontmatter opens with ---" "---" "$head1"
-    if head -10 "$f" | grep -qE '^version:[[:space:]]*1[[:space:]]*$'; then
-        PASS=$((PASS + 1))
-        printf '  PASS: rubric %s.md: version: 1 present\n' "$r"
-    else
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("rubric $r.md: missing version: 1 frontmatter")
-        printf '  FAIL: rubric %s.md: missing "version: 1" in frontmatter\n' "$r"
-    fi
+    want=$(expected_rubric_version "$r") || want=""
+    got=$(rubric_version_of "$f") || got=""
+    assert_eq "rubric $r.md: frontmatter declares version $want" "$want" "$got"
 done
+
+# META-TEST: the version check is only worth having if a WRONG version fails
+# it. Feed the identical extractor a fixture rubric that declares version 1
+# where the table says default is 2, and confirm the comparison disagrees.
+# Anchored on the frontmatter text, never on a line number.
+META_RUBRIC=$(mktemp -t rubric-version-meta.XXXXXX)
+cat > "$META_RUBRIC" <<'FIXTURE'
+---
+version: 1
+name: default
+---
+
+# Default rubric (v1) — deliberately stale fixture, not a shipped file.
+FIXTURE
+meta_got=$(rubric_version_of "$META_RUBRIC") || meta_got=""
+meta_want=$(expected_rubric_version default) || meta_want=""
+# 1. the mutation landed: the fixture really does say 1.
+assert_eq "META: stale fixture rubric really declares version 1" "1" "$meta_got"
+# 2. and the table really expects something else, so the check fires.
+assert_eq "META: the table expects 2 for default, so the stale fixture is flagged" \
+    "no" "$([ "$meta_got" = "$meta_want" ] && echo yes || echo no)"
+# 3. control: the SHIPPED default.md agrees with the table (the check is not
+#    simply always-disagreeing).
+assert_eq "META: control — shipped default.md matches the table" \
+    "yes" "$([ "$(rubric_version_of "$RUBRICS_DIR/default.md")" = "$meta_want" ] && echo yes || echo no)"
+rm -f "$META_RUBRIC"
 
 # Domain rubrics declare extends: default in frontmatter.
 for r in backend frontend devops; do

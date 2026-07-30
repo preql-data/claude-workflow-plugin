@@ -883,7 +883,8 @@ how the orchestrator chains delegations without re-deriving context.
     "..."
   ],
   "blockers": [],
-  "llm_observations": "<free-form medium-length text>"
+  "llm_observations": "<free-form medium-length text>",
+  "context_coverage": "<free-form medium-length text>"
 }
 ```
 
@@ -915,11 +916,35 @@ how the orchestrator chains delegations without re-deriving context.
   the brief; future readers of the Beads task use it to reconstruct
   the rationale. **A completion payload without `llm_observations`
   is malformed.**
+- **`context_coverage`** — **required, mandatory**. Free-form string,
+  appended AFTER `llm_observations` so the original six keep the canonical
+  names and ordering every specialist prompt promises. Three things, in
+  this order: what you read to ground this change; what you deliberately
+  did NOT read, and why; the largest remaining unknown you are shipping
+  on. The bar is the question a sceptical reviewer asks when they suspect
+  the author was guessing — "did you look at X?" — answered before they
+  have to ask it. Name files; "read everything relevant" is a non-answer,
+  and so is a list with no deliberate omission in it, because there is
+  always one. This is NOT a new principle: it is the evidence-before-fix
+  protocol applied BEFORE the work instead of after. That protocol arms
+  only on bug-typed tasks, and the incident behind it was a 14-PR
+  speculative-fix chain — fourteen plausible patches nobody could rank,
+  because no one had recorded which sources were actually consulted.
+  Ordinary feature work never gets bug-typed, so it never arms; this
+  field is the cheap version that applies everywhere. The orchestrator
+  reads it when deciding whether the next delegation needs a wider brief;
+  QA reads it to judge whether the specialist's confidence was earned;
+  the rubric grader scores it under default criterion C8. **A completion
+  payload without `context_coverage` is malformed.**
 
 The contract is enforced by convention, not schema validation —
 the QA gate doesn't reject missing fields, but the QA agent's review
-checklist asks "did the specialist return all six fields?" and that
-question being honest is part of QA approving.
+checklist asks "did the specialist return all seven fields?"
+(`.claude/agents/qa.md` section 3) and that question being honest is
+part of QA approving. That pointer is load-bearing: through v4.0 this
+paragraph named an enforcement that did not exist — no item in qa.md's
+checklist asked the question — so the contract's only claimed backstop
+was a citation of nothing.
 
 ---
 

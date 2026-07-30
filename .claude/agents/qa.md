@@ -151,6 +151,9 @@ Before writing any test, ask:
 - [ ] Edge cases covered (empty, boundary, concurrent).
 - [ ] Tests are deterministic (no flakiness).
 - [ ] All tests pass.
+- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape). Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field.
+
+That last item is the F7 contract's **only** claimed enforcement (`docs/AGENTS.md`, "Specialist Completion Contract (F7)"): the gate does not reject a payload with a field missing, so if you do not ask, nothing does. Through v4.0 the doc cited this checklist and the checklist did not carry the item — do not let it drift back out.
 
 ### 3a. Regression impact scan (extends J19, code-graph)
 
@@ -352,6 +355,7 @@ bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID" --fil
   "decisions": ["Assembled and validated review-request (review iteration N); reviewer_lane=codex, so the Sol review turn is deferred to the root orchestrator's relay."],
   "blockers": [],
   "llm_observations": "freeform — REVIEW-RELAY: status=needs-review. The validated review request is at .claude/.qa-tracking/review-request-<task-id>.json (risk_threshold=<sev>, stop_condition=<...>). The root orchestrator runs codex-review.sh at the root, records the artifact via qa-gate.sh review-record, and re-engages QA; the artifact is ADVISORY packet item 8.",
+  "context_coverage": "freeform — what you read to reach this handoff (the diff, the SPEC, the impact report, which review modules you ran), what you deliberately skipped and why, and the largest unknown the reviewer should chase.",
 
   "approved": false,
   "qa_status": "needs-review",
@@ -420,7 +424,7 @@ The packet is eight items — seven mandatory, plus the advisory review artifact
    # the appropriate refspec (e.g. main...HEAD).
    ```
 
-4. **The specialist's F7 completion contract** — the structured JSON return payload the specialist surfaced when handing the task to QA. Read it from the Beads task notes or from the orchestrator's hand-off. All six base fields (`task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`) must be present; missing fields are a finding the grader will record.
+4. **The specialist's F7 completion contract** — the structured JSON return payload the specialist surfaced when handing the task to QA. Read it from the Beads task notes or from the orchestrator's hand-off. All seven base fields (`task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage`) must be present; missing fields are a finding the grader will record.
 
 5. **`LESSONS.md` contents**:
 
@@ -525,6 +529,7 @@ Then return the structured `needs-grading` status in your completion contract �
   "decisions": ["Assembled grading-packet doc (iteration N) and returned needs-grading; rubric grader spawn deferred to root orchestrator."],
   "blockers": [],
   "llm_observations": "freeform — RUBRIC-RELAY: status=needs-grading. The grading packet is persisted as bd_doc grading-packet on the task; the root orchestrator picks it up, spawns the grader, records the verdict via qa-gate.sh grade-record, and re-engages QA on the next spawn.",
+  "context_coverage": "freeform — which of the eight packet items you actually read end-to-end versus pasted through, anything you could not obtain (and why), and the largest unknown the grader is being asked to decide without.",
 
   "approved": false,
   "qa_status": "needs-grading",
@@ -686,7 +691,7 @@ The helper dedup-merges by normalized text, so re-proposing a lesson the ledger 
 
 ## 10. Completion contract
 
-When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical six base fields shared with `backend.md` and `frontend.md`, plus a documented QA-specific superset on top. The base six must keep their canonical names and ordering; QA-specific fields are additive, not replacements.
+When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus a documented QA-specific superset on top. The base seven must keep their canonical names and ordering; QA-specific fields are additive, not replacements. `context_coverage` is the seventh and newest, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises.
 
 ```json
 {
@@ -696,6 +701,7 @@ When you finish a review — whether you approved or blocked — return a struct
   "decisions": ["short description of each call QA made during review"],
   "blockers": ["issues that prevented QA from completing the review"],
   "llm_observations": "freeform — mandatory",
+  "context_coverage": "freeform — mandatory: what you read, what you deliberately skipped and why, the largest remaining unknown",
 
   "approved": true,
   "files_verified": ["path/to/file.ts", "path/to/other.py"],
@@ -714,8 +720,9 @@ Base-field semantics for the QA role:
 - `decisions`: calls QA made during the review — for example "approved despite suggested follow-up X because Y", "scoped review to files A and B because change is isolated", "used reproduction R to confirm regression".
 - `blockers`: issues that blocked QA from completing the review itself (missing fixtures, environment failures, unreviewable diffs, upstream task incomplete). This is review-process-blocking and is different from `must_fix`, which is implementation-blocking and feeds into `qa-gate.sh block`.
 - `llm_observations`: freeform, mandatory. Use it for anything the schema does not capture — surprising behaviour, hunches about brittle areas, notes for the QA-of-QA reviewer, or context the next agent in the chain will need. Never leave it empty; an empty string defeats the purpose of the contract.
+- `context_coverage`: freeform, mandatory. Three things, in order — what you read to reach this verdict (which packet items, which files in the diff, which prior comments on the task), what you deliberately did NOT read and why (a file you judged out of blast radius, a subsystem you scoped out), and the largest remaining unknown your verdict rests on. For QA specifically this is where a bounded review declares its own bounds: an approval that scoped itself to two files is honest, an approval that silently did so is not. Name files; "reviewed the change set" is a non-answer.
 
-QA-specific superset (additive, on top of the base six):
+QA-specific superset (additive, on top of the base seven):
 
 - `approved`: the gate decision; matches whichever `qa-gate.sh` verb you invoked.
 - `files_verified`: files QA inspected during review (read, traced, reasoned about). Typically much larger than `files_changed`.

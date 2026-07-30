@@ -193,7 +193,8 @@ When you finish a task and hand it back to the orchestrator (and onward to QA), 
   "blockers": [
     "Need devops to provision the new Redis instance before the rate-limiter can ship."
   ],
-  "llm_observations": "<freeform notes>"
+  "llm_observations": "<freeform notes>",
+  "context_coverage": "<freeform notes>"
 }
 ```
 
@@ -205,5 +206,6 @@ Field semantics:
 - `decisions` — the calls you made that a future maintainer would want to know about: trade-offs taken, alternatives rejected, non-obvious constraints. One line each.
 - `blockers` — anything preventing this task from being closed: missing infra, ambiguous spec, dependency on another in-progress task. Empty array if none.
 - `llm_observations` — **mandatory free-form text**. Anything that didn't fit the schema and is worth surfacing: gotchas you spotted, surprises in the codebase, smells you didn't fix because they were out of scope, hypotheses you'd want QA or the orchestrator to verify, areas where you were uncertain and chose a default. This field exists precisely because the structured fields above can't anticipate everything; do not leave it empty.
+- `context_coverage` — **mandatory free-form text**. Three things, in order: what you read to ground this change (the migration history, the caller set from `impact_of`, the vendor's OpenAPI, the incident thread); what you deliberately did NOT read and why (the whole ORM layer, because the change is confined to one repository class); and the largest remaining unknown you are shipping on (whether the downstream consumer tolerates the new nullable column). Name files and artefacts — "read the relevant code" is a non-answer, and a coverage note with no deliberate omission in it is boilerplate, because there is always one. This is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. QA and the rubric grader both read it (default rubric C8).
 
 Emit the JSON object verbatim in your final message to the orchestrator (alongside any prose summary). The orchestrator parses it; QA reads it before starting the gate.
