@@ -22,6 +22,14 @@
 # never checked in. The harness's source files ARE tracked.
 .claude/.mutation-worktrees/
 .claude/.mutation-runs/
+# Phase U2 (claude-workflow-plugin-wg6): parallel-agent scratch checkouts at
+# the PROJECT ROOT. The shared denylist has always dropped them, so the gate
+# never reviews them — but nothing gitignored them here until now (the
+# fixtures/*/.claude/worktrees/ rule at the bottom of this file covers only
+# the e2e-fixture nesting), so a leftover worktree was invisible to the gate
+# AND visible in `git status`. Zero hash migration: the denylist already
+# filters the path, so no change set is re-hashed by this line.
+.claude/worktrees/
 
 # OS / editor noise
 .DS_Store

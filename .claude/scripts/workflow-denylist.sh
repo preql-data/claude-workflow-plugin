@@ -49,6 +49,27 @@
 #               is_beads_or_gate_path (a change set consisting solely of
 #               them is fast-path eligible). Denylisting them would erase
 #               them from the hash too, which is not the intent.
+#   /tmp/... and /var/folders/... AS A CLASS
+#               NOT denylisted, and the reason is mechanical rather than
+#               taste. Two component specs seed changed-files.txt with
+#               ABSOLUTE paths rooted at `mktemp -d`'s parent:
+#               specs/impact-report-paths.sh (the project / sibling-worktree
+#               / foreign-repo / non-git-scratch mix that exists to prove
+#               path relativisation) and specs/worktree-approval-resolution.sh
+#               (the worktree-absolute spellings that exist to prove the
+#               cross-worktree approval bridge). That parent is /tmp on a
+#               Linux CI job and /var/folders/... on a macOS dev box, so
+#               EITHER pattern would silently empty both change sets — the
+#               two specs would keep passing while proving nothing. The
+#               narrow `/tmp/claude-<session>/` form in group 7 below is safe
+#               precisely because those fixtures are created as
+#               `mktemp -d -t component-fixture.XXXXXX`, which never yields a
+#               `claude-` prefix. Agent-chosen scratch outside that prefix
+#               (/tmp/qa-p5n-probe/, a bare /tmp/enc-diff.sh) is addressed by
+#               PROMPT guidance instead — qa.md and the three specialist
+#               prompts send throwaway probes to the session scratchpad or
+#               .claude/.qa-tracking/ — never by widening this regex.
+#               (claude-workflow-plugin-wg6 / prm; six recorded instances.)
 # The *.md doc-only fast path (F1) already handles the three .md files above
 # when they change alone.
 #
@@ -85,7 +106,44 @@
 #                               `empty` (nothing to review) rather than
 #                               `doc-only` (auto-approved WITH a gate record).
 #   5. lock / map / minified / compiled artifacts
-WORKFLOW_DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/|(^|/)MEMORY\.md$|(^|/)\.claude/memory/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$'
+#   6. .claude/plans/           plan-mode plan files, wherever they live. The
+#                               branch anchors on (^|/) — start-of-string OR a
+#                               path separator — not on ^, so it matches the
+#                               real shape (~/.claude/plans/<slug>.md, OUTSIDE
+#                               the repo) as well as a repo-relative
+#                               .claude/plans/<slug>.md. A plan is the INPUT
+#                               to the work, not the work — and because it is
+#                               .md it classified doc-only, whose fast path
+#                               auto-approves only WITH an active task, so a
+#                               plan-mode session (which cannot create one)
+#                               had no exit at all. Five recorded occurrences
+#                               of THIS shape alone; one blocked a session
+#                               across three Stop iterations up to J21
+#                               escalation.
+#                               ANTI-OVERREACH: docs/plans/ is a tracked
+#                               deliverable and does NOT match.
+#   7. session scratchpad       ^(/private)?/tmp/claude-<session>/ — the
+#                               harness's own per-session scratch (grader
+#                               verdict files, relay artifacts) that mutated
+#                               the change-set hash mid-relay. ABSOLUTE and
+#                               ^-anchored deliberately: an unanchored branch
+#                               would also drop somebody's src/tmp/claude-1/,
+#                               and ERE alternation keeps the ^ scoped to
+#                               this branch alone. ANTI-OVERREACH: limited to
+#                               the claude- prefix the harness itself creates;
+#                               see "WHAT IS DELIBERATELY *NOT* DENYLISTED"
+#                               above for why /tmp at large is a mechanical
+#                               error, not a stylistic choice.
+#   8. mutation harness state   .claude/.mutation-runs/ (per-run reports) and
+#                               .claude/.mutation-worktrees/ (throwaway
+#                               checkouts) from .claude/tests/mutation/
+#                               mutation-sweep.sh. Gitignored, but reachable
+#                               by Edit because --keep-worktrees exists so a
+#                               human can debug a surviving mutant in situ.
+#                               ANTI-OVERREACH: the harness's own SOURCE
+#                               under .claude/tests/mutation/ is a
+#                               deliverable and does NOT match.
+WORKFLOW_DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next|\.nuxt|target|__pycache__)/|(^|/)\.claude/worktrees/|(^|/)\.claude/tests/e2e/fixtures/[^/]+/(\.claude/(scripts|beads)|\.beads)/|(^|/)MEMORY\.md$|(^|/)\.claude/memory/|\.(lock|lockb|map|pyc)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb|Cargo\.lock|poetry\.lock|go\.sum)$|(^|/)\.claude/plans/|^(/private)?/tmp/claude-[^/]+/|(^|/)\.claude/\.mutation-(runs|worktrees)/'
 
 # workflow_denylisted <path> — 0 = drop it, 1 = keep it.
 workflow_denylisted() {

@@ -189,6 +189,8 @@ Mandatory follow-up after the FIRST ACTION returns: for each high-fan-in caller 
 
 This step pairs with the orchestrator's pre-delegation impact pass (`.claude/agents/orchestrator.md` section 1a). The orchestrator scores impact against the *intended* change before delegating; QA scores impact against the *landed* diff before approving. Both are cheap (the index is warm after the orchestrator's first call) and both feed the same gate.
 
+**Keep your own scratch out of the change set.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad or under `.claude/.qa-tracking/`; both are already denylisted. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
+
 ## 4. Security review pass
 
 Read the change as a human would: what does this code mean? When your reading of the diff suggests a particular concern is in play, run the matching module below. Selection is intent-driven, not regex over filenames or commit text — if a refactor of a "utility" file actually rewires session handling, that is an AUTH change regardless of where it lives.

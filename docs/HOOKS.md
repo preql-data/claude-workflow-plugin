@@ -404,9 +404,18 @@ The denylist approach means almost everything is tracked. Tracked files
 include source code (`.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.rs`,
 `.java`, `.rb`, `.php`, `.vue`, `.svelte`), stylesheets (`.css`, `.scss`),
 markup (`.html`, `.md`, `.yaml`, `.toml`), infra (`Dockerfile`, `.tf`,
-`.proto`), and config (`.json`, `.env.example`). What's denied: anything
-inside `node_modules/`, `dist/`, `build/`, `coverage/`, `.git/`, `.next/`,
-plus `*.lock`, `*.pyc`, `*.map`, `*.min.{js,css}`, and the major lockfiles.
+`.proto`), and config (`.json`, `.env.example`).
+
+There is exactly one authoritative list of what is *denied*, and it is not
+this document: `.claude/scripts/workflow-denylist.sh` carries the regex with a
+numbered comment block explaining each intent group. Broadly it covers build
+and dependency output, lockfiles and compiled/minified artifacts, and
+workflow-internal churn (worktrees, e2e fixture sync, agent memory, plan-mode
+plan files, the harness session scratchpad, mutation-sweep run state). Read
+the lib for the current set — a second enumeration here would drift, which is
+the same failure mode that motivated consolidating the regex in the first
+place. Note that a denied path is not merely untracked: it never enters
+`change_set_hash` either, which is why editing that lib is a migration.
 
 ### The shared denylist (`workflow-denylist.sh`)
 
@@ -444,10 +453,44 @@ Beyond build artifacts and lockfiles the regex also drops:
   They leave the reviewable set BEFORE the F1 doc-only classification, so a
   memory-only change set is `empty` (release, no gate record) rather than
   `doc-only` (auto-approved WITH a `[review bypass: ...]` record about nothing).
+- `.claude/plans/` — plan-mode plan files, matched wherever they live. The
+  real shape is `~/.claude/plans/<slug>.md`, **outside the repo**: `post-edit.sh`
+  records `tool_input.file_path` verbatim, so the change set was never bounded
+  by the project root. A plan is the INPUT to the work, not the work. This one
+  was a hard dead end rather than noise — see the v4.1 note under "Denylist
+  changes are a hash migration" below. `docs/plans/` is a tracked deliverable
+  and does not match.
+- `/tmp/claude-<session>/` (and `/private/tmp/...` on macOS) — the harness's own
+  per-session scratchpad, where grader verdicts and relay artifacts are written.
+  They used to mutate the change-set hash mid-relay. The branch is `^`-anchored
+  and absolute so a repo-relative `src/tmp/claude-1/` is untouched.
+- `.claude/.mutation-runs/` and `.claude/.mutation-worktrees/` — per-run reports
+  and throwaway checkouts from `.claude/tests/mutation/mutation-sweep.sh`.
+  Gitignored, but still reachable by `Edit`, because `--keep-worktrees` exists
+  so a human can debug a surviving mutant in situ. The harness's own source
+  under `.claude/tests/mutation/` is a deliverable and does not match.
 
 Deliberately **not** denylisted: `CLAUDE.md` (behaviour-bearing — SessionStart
 injects it), `LESSONS.md` and `HANDOFF.md` (audit deliverables). The `*.md`
 doc-only fast path already handles those when they change alone.
+
+Also deliberately not denylisted: **`/tmp` and `/var/folders/` as a class**, and
+the reason is mechanical rather than stylistic. Two component specs seed
+`changed-files.txt` with ABSOLUTE paths rooted at `mktemp -d`'s parent —
+`specs/impact-report-paths.sh` (the project / sibling-worktree / foreign-repo /
+non-git-scratch mix that exists to prove path relativisation) and
+`specs/worktree-approval-resolution.sh` (the worktree-absolute spellings that
+exist to prove the cross-worktree approval bridge). That parent is `/tmp/...` on
+a Linux CI job and `/var/folders/...` on a macOS dev box, so either pattern
+would silently empty both change sets and both specs would keep passing while
+proving nothing. The narrow `/tmp/claude-<session>/` branch above is safe
+precisely because those fixtures are created as
+`mktemp -d -t component-fixture.XXXXXX`, which never yields a `claude-` prefix.
+Agent-chosen scratch outside that prefix (`/tmp/qa-p5n-probe/`, a bare
+`/tmp/enc-diff.sh`) is addressed by **prompt guidance** — `qa.md` and the three
+specialist prompts direct throwaway probes to the session scratchpad or
+`.claude/.qa-tracking/` — never by widening the regex. Prompts suggest and
+mechanics guarantee; here the mechanic would break the guarantees.
 
 If the lib is missing, each consumer fails closed in its own idiom:
 `impact-report.sh` exits 3 and emits no hash (upstream treats an empty hash as
@@ -488,6 +531,21 @@ Re-review the change set before re-approving: the guard removes a dead end, it
 does not waive a check. (Pinned by
 `.claude/tests/component/specs/denylist-shared.sh` C4/C5, which drive the
 commands extracted from the block text.)
+
+**Landings so far.** v4.0.0 (2026-07-26) consolidated three drifted copies into
+one lib and added `.claude/worktrees/`, the e2e fixture churn, `MEMORY.md` and
+`.claude/memory/`. v4.1.0 (2026-07-29) added three more **together, in one
+commit**, because the change set turned out never to have been bounded by the
+repo: `(^|/)\.claude/plans/`, `^(/private)?/tmp/claude-[^/]+/`, and
+`(^|/)\.claude/\.mutation-(runs|worktrees)/`. Sections C and D of
+`denylist-shared.sh` split the proof between them: **C** drives an invented
+canary and shows that editing the lib moves all three consumers and re-blocks a
+stale approval; **D** pins the *pre-landing* lib — the shipped regex with those
+three alternatives stripped by literal substring — records an honest approval
+under it, and then restores the real lib, so the restore *is* the v4.1 landing.
+D's first assertions are a discriminating control: they fail loudly if a future
+rename makes the strip a silent no-op, because a "pre-landing" lib identical to
+the shipped one would let every other D assertion pass while proving nothing.
 
 ### Tracking File Location
 

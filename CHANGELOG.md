@@ -16,6 +16,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
+## [4.1.0] - 2026-07-29
+
+> **UPGRADE NOTE — one-time hash migration. The change set was never bounded
+> by the repo.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so any
+> absolute path an agent wrote entered `changed-files.txt`, the change-set
+> hash, and the Stop gate — including files outside the repository entirely.
+> Three patterns join the shared denylist in this release:
+>
+> - `(^|/)\.claude/plans/` — plan-mode plan files wherever they live;
+>   `~/.claude/plans/<slug>.md`, outside the repo, is the real shape.
+> - `^(/private)?/tmp/claude-[^/]+/` — the harness's own per-session
+>   scratchpad (grader verdict files, relay artifacts).
+> - `(^|/)\.claude/\.mutation-(runs|worktrees)/` — `mutation-sweep.sh` per-run
+>   reports and the throwaway checkouts `--keep-worktrees` leaves behind.
+>
+> `change_set_hash` is a sha256 over the DENYLIST-FILTERED changed-files list,
+> so an approval recorded before this landing no longer matches the hash the
+> Stop hook recomputes after it: the gate emits `LABEL_WITHOUT_RECORD` and
+> re-blocks. That is the correct fail-closed direction — a stale approval must
+> not release. All three patterns ship in ONE landing, so an in-flight cycle
+> pays the migration exactly once. Recovery for a cycle caught mid-flight:
+>
+> ```bash
+> bash .claude/scripts/qa-gate.sh enter <task-id>
+> bash .claude/scripts/impact-report.sh <task-id>
+> bash .claude/scripts/qa-gate.sh approve <task-id> '<summary>'
+> ```
+>
+> That is the whole recipe — the same three commands the block reason prints,
+> and no `bd label remove` step (`approve`'s idempotency has been hash-aware
+> since 4.0.0's `gz3` fix).
+>
+> **What this fixes.** Six recorded instances in a single release. The worst
+> was a hard dead end rather than friction: a plan-mode plan file blocked a
+> TASK-LESS session across three Stop iterations up to J21 escalation. The file
+> is `.md`, so F1 classified the change set doc-only — but F1's doc-only fast
+> path auto-approves only WITH an active task, and plan mode forbids creating
+> one. There was no exit. The other five were harness scratchpad verdicts
+> mutating the hash mid-relay, two agent-chosen `/tmp` probes (one of which
+> entered an approval's bound change set), and the two `mutation-sweep`
+> directories — gitignored, but reachable by `Edit`.
+>
+> **What it deliberately does NOT cover, and why.** `/tmp` and `/var/folders/`
+> as a class. The reason is mechanical, not stylistic: two component specs seed
+> `changed-files.txt` with ABSOLUTE paths rooted at `mktemp -d`'s parent —
+> `/tmp/...` on a Linux CI job, `/var/folders/...` on a macOS dev box — so
+> either pattern would silently empty the change set of the spec that exists to
+> prove path relativisation AND the spec that exists to prove the cross-worktree
+> approval bridge. Both would keep passing while proving nothing. The narrow
+> `/tmp/claude-<session>/` form is safe because those fixtures are created as
+> `mktemp -d -t component-fixture.XXXXXX`. Agent-chosen scratch outside that
+> prefix is addressed by PROMPT guidance instead — `qa.md` and the three
+> specialist prompts send throwaway probes to the session scratchpad or
+> `.claude/.qa-tracking/`. Pinned by
+> `.claude/tests/component/specs/denylist-shared.sh`: **section D** drives the
+> migration for the patterns that actually shipped (it pins the PRE-landing lib
+> and then restores the real one, so the restore *is* the landing), while
+> **section C** keeps the invented canary that proves the mechanism itself.
+
 ## [4.0.0] - 2026-07-26
 
 **The tri-model workflow.** The orchestrator plans on the newest, most

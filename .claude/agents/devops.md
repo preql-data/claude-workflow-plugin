@@ -52,6 +52,10 @@ bd update $TASK_ID --status in_progress
 bd update $TASK_ID --notes "IN PROGRESS: Starting infrastructure work"
 ```
 
+### 3. Keep your own scratch out of the change set
+
+`post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad or under `.claude/.qa-tracking/`; both are already denylisted. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
+
 ## Self-check questions (always ask)
 
 1. **Ease**: How do we make deployment/setup as easy as possible?
