@@ -21,13 +21,15 @@ Native MCP tools for the Beads (`bd`) issue tracker. A typed shim — Beads stay
 
 21 tools total. Every tool exposes the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) and includes a free-form `llm_observations` field on success per the v3 plan's principle #9.
 
+The count sentence above is machine-read: `.claude/scripts/tests/mcp-deps.test.sh` extracts the leading number from the `^<N> tools total\.` line in each server's README and cross-checks it against `DOCTOR_TOOL_COUNTS` in `.claude/scripts/workflow-doctor.sh` and the Tools column of [`docs/MCP_SERVERS.md`](../../../docs/MCP_SERVERS.md). Changing the surface means changing all four in the same commit, or the cross-check fails.
+
 ## Configuration
 
 | Variable / file | Purpose |
 |---|---|
 | `BD_CWD` | Override the cwd `bd` runs in (used when the MCP launches outside the project root) |
 | `CLAUDE_PROJECT_DIR` | Fallback for `BD_CWD`; usually set by Claude Code |
-| `npm install` | Pulls `@modelcontextprotocol/sdk` and `zod`. The plugin installer runs this automatically |
+| `npm ci --omit=dev --ignore-scripts` | Pulls `@modelcontextprotocol/sdk` and `zod` from the committed `package-lock.json`. **This exact command** is what `install.sh` / `install.ps1` run inside `<target>/.claude/mcp/bd-mcp/` after the file copy (v4.1 / C0b) — named rather than described, so the claim is checkable: `grep -n 'npm ci' install.sh`. Through v4.0 this row said the installer ran it while nothing did, which is why every curl-installed target had this server dead. Skipped only under `--skip-mcp-deps` / `CWP_SKIP_MCP_DEPS=1`, and the installer says so and fails verification in that case. Run it by hand for an air-gapped or repaired install; the lockfile has zero install scripts, so `--ignore-scripts` suppresses nothing |
 | `npm test` | Runs the integration suite; needs `bd` on PATH |
 
 The QA tools (`bd_qa_*`) call `qa-gate.sh` from the plugin (`.claude/scripts/qa-gate.sh`) for the side-effect bundle (label transitions, current-task helper writes, iteration-counter wipe, memory writes). If the script is absent, they fall back to direct `bd label` calls and skip side effects.
@@ -37,7 +39,7 @@ The QA tools (`bd_qa_*`) call `qa-gate.sh` from the plugin (`.claude/scripts/qa-
 The plugin uses these tools as follows:
 
 - **Orchestrator**: `bd_create_epic` to plan multi-task work in one call; `bd_doc_write({task_id, name: "spec", ...})` to attach the SPEC the spawned specialist reads first.
-- **Specialists** (backend / frontend / devops): `bd_doc_read({task_id, name: "spec"})` to pick up the brief; `bd_update_task({task_id, status: "in_progress"})` to claim; `bd_qa_enter` then `bd_add_label("qa-pending")` on completion. The completion contract from F7 (`{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations}`) maps cleanly onto these calls.
+- **Specialists** (backend / frontend / devops): `bd_doc_read({task_id, name: "spec"})` to pick up the brief; `bd_update_task({task_id, status: "in_progress"})` to claim; `bd_qa_enter` then `bd_add_label("qa-pending")` on completion. The completion contract from F7 (`{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations, context_coverage}`) maps cleanly onto these calls.
 - **QA agent**: `bd_list_tasks({labels_all: ["qa-pending"]})` to find the queue; `bd_qa_approve` (atomic — sets `qa-approved`, drops `qa-pending`/`qa-gate-entered`, comments) or `bd_qa_block(reason)` to gate.
 - **Hooks** (post-edit, verify-before-stop, etc.) still shell out to `bd` directly — migration is a Phase 7+ task. The MCP tools and the bash hooks coexist on the same Beads database.
 

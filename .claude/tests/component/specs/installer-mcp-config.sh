@@ -23,6 +23,25 @@
 
 set -u
 
+# INSTALLER FLAGS FOR THE L2 TIER (v4.1 / C0b) -------------------------------
+# install.sh now does two things after the copy loops that this spec has no
+# business paying for:
+#   1. `npm ci` per MCP server IN THE TARGET. That needs the npm registry, so
+#      leaving it on would make assertions about FILE COPYING fail on an
+#      offline machine — a network dependency in the component tier.
+#   2. workflow-doctor.sh, exiting 3 ("installed, verification FAILED") when a
+#      functional check does not pass. This spec's fixtures are not built to
+#      satisfy eleven functional checks, and every `install.sh exits 0`
+#      assertion here would start reporting a fixture gap as an installer bug.
+# Both are covered for real by `make install-test`, which installs into a
+# tempdir and requires a fully green doctor — that is the surface that proves
+# dependency provisioning works, and it is now expected to be GREEN.
+# Exported once so every installer invocation in this file inherits them
+# without a per-call-site flag; the v3.5-era installer some of these specs also
+# run ignores unknown environment variables.
+export CWP_SKIP_MCP_DEPS=1
+export CWP_SKIP_VERIFY=1
+
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
 

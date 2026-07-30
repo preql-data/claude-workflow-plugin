@@ -35,18 +35,29 @@
 #   C. HASH MIGRATION. Changing the denylist re-hashes recomputed change sets,
 #      so an approval recorded before the change no longer matches and the
 #      gate re-blocks (LABEL_WITHOUT_RECORD). That is the correct fail-closed
-#      direction; this section pins BOTH the block and the recovery path that
-#      actually works. See the C4 note — the remediation the block reason
-#      prints is incomplete, and this spec pins that gap rather than papering
-#      over it.
+#      direction; this section pins BOTH the block and the recovery. C4 drives
+#      the remediation the block reason PRINTS (extracted from the reason text,
+#      not paraphrased) and C5 keeps the explicit-label-removal path pinned
+#      alongside it. Until gz3, C4 was a KNOWN-GAP pin: the printed recipe could
+#      not recover, because approve short-circuited on the stale qa-approved
+#      label. It recovers now; the guard's own contract lives in
+#      specs/approve-idempotency.sh.
+#   D. THE v4.1 LANDING (claude-workflow-plugin-wg6, absorbing prm). A and C
+#      use an INVENTED canary, which proves the mechanism but not that the
+#      patterns which shipped are the ones driving it. D pins the PRE-LANDING
+#      lib — the shipped regex with the three v4.1 alternatives stripped by
+#      literal substring — behaves like a v4.0 install under it, then restores
+#      the real lib: THAT RESTORE IS THE LANDING. D1 is the discriminating
+#      control that stops the strip from silently no-opping.
 #
 # THE SYMLINK HAZARD (read before editing this file)
 # --------------------------------------------------
 # mk_fixture SYMLINKS the plugin's real scripts into the fixture. An in-place
 # `sed -i` against `$FIXTURE/.claude/scripts/workflow-denylist.sh` can rewrite
 # THE REAL PLUGIN FILE through the link. Every mutation here goes through
-# mutate_denylist_lib, which `rm`s the symlink and `cp`s a private copy FIRST,
-# and A5 asserts afterwards that the real plugin lib is still canary-free.
+# mutate_denylist_lib (sections A/C) or pin_denylist_regex (section D), each
+# of which `rm`s the symlink and `cp`s a private copy FIRST; A5, C2, D2 and D5
+# then assert that the real plugin lib is still intact.
 
 set -u
 
@@ -77,6 +88,75 @@ restore_denylist_lib() {
     local lib="$root/.claude/scripts/workflow-denylist.sh"
     rm -f "$lib"
     ln -sf "$real" "$lib"
+}
+
+# pin_denylist_regex <fixture> <regex>   (section D)
+#   Replace the fixture's workflow-denylist.sh SYMLINK with a private copy
+#   whose WORKFLOW_DENYLIST_REGEX line is REWRITTEN to <regex> verbatim.
+#   Prints the real (plugin) path it copied from, so the caller can restore
+#   the symlink — and in section D that restore IS the landing under test.
+#
+#   Same cp-before-write symlink discipline as mutate_denylist_lib (see THE
+#   SYMLINK HAZARD above): an in-place edit would travel down the link into
+#   the real plugin file.
+#
+#   Deliberately NOT sed, unlike mutate_denylist_lib. mutate_denylist_lib
+#   injects a short canary it controls; this one writes a whole ERE full of
+#   `&`, `\`, `|`, `/` and `[`, every one of which sed re-interprets on the
+#   replacement side. A read-loop plus `case` rewrites exactly one line with
+#   no escaping surface at all. The printf format is a %s with the regex as
+#   an ARGUMENT, never as the format string.
+pin_denylist_regex() {
+    local root="$1" regex="$2"
+    local lib="$root/.claude/scripts/workflow-denylist.sh"
+    local real tmp line
+    real=$(readlink "$lib" 2>/dev/null || printf '%s' "$lib")
+    rm -f "$lib"                 # break the link BEFORE writing anything
+    cp "$real" "$lib"
+    tmp="$lib.pin"
+    : > "$tmp"
+    # `|| [ -n "$line" ]` so a final line without a trailing newline is kept.
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            WORKFLOW_DENYLIST_REGEX=*)
+                printf "WORKFLOW_DENYLIST_REGEX='%s'\n" "$regex" >> "$tmp" ;;
+            *)
+                printf '%s\n' "$line" >> "$tmp" ;;
+        esac
+    done < "$lib"
+    mv "$tmp" "$lib"
+    chmod +x "$lib"
+    printf '%s' "$real"
+}
+
+# strip_alt <regex> <literal-alternative>   (section D)
+#   Print <regex> with the FIRST occurrence of "|<literal-alternative>"
+#   removed. LITERAL, not glob: every expansion is quoted, so the `[`, `^`,
+#   `]` and `+` inside an ERE alternative stay ordinary characters rather
+#   than becoming a bracket expression. When the alternative is ABSENT the
+#   input is printed unchanged and the rc is 1.
+#
+#   That absent case is the whole reason section D opens with D1: a silent
+#   no-op here would make the "pre-landing" lib byte-identical to the shipped
+#   one, and every later D assertion would go green while proving nothing.
+strip_alt() {
+    local re="$1" needle="|$2" pre post
+    case "$re" in
+        *"$needle"*) ;;
+        *) printf '%s' "$re"; return 1 ;;
+    esac
+    pre=${re%%"$needle"*}
+    post=${re#*"$needle"}
+    printf '%s%s' "$pre" "$post"
+}
+
+# shipped_regex_of <lib-path> — the ERE the lib actually assigns, unquoted.
+# Parameter expansion rather than sed for the same escaping reason as above.
+shipped_regex_of() {
+    local line
+    line=$(grep -m1 "^WORKFLOW_DENYLIST_REGEX='" "$1" 2>/dev/null) || return 1
+    line=${line#*=\'}
+    printf '%s' "${line%\'}"
 }
 
 # hash_of <fixture> <line>...  — the canonical change-set hash impact-report.sh
@@ -347,29 +427,54 @@ assert_eq "denylist-C3: the pre-migration approval no longer releases (fail clos
 assert_contains "denylist-C3: the block names the change-set binding, not a generic QA-required" \
     "no change-set-bound approval record matches" "$C3_REASON"
 
-# C4. KNOWN GAP, pinned deliberately (claude-workflow-plugin-3mg.1 finding).
+# C4. THE PRINTED REMEDIATION RECOVERS (claude-workflow-plugin-gz3).
 #
-# The block reason above prints this remediation:
+# This was pinned as a KNOWN GAP by 3mg.1: the block reason above printed
 #     qa-gate.sh enter <id> ; impact-report.sh <id> ; qa-gate.sh approve <id>
-# It does not work. `enter` does not clear `qa-approved`, and `approve`
-# short-circuits as an "idempotent no-op" whenever that label is already
-# present — so no new change-set-bound record is written and the gate stays
-# blocked. This predates 3mg.1 (it is the llh.18 approve-idempotency guard
-# meeting the llh.18 hash binding), but a denylist landing is the first event
-# that puts EVERY in-flight cycle on this path at once, which is why it is
-# pinned here. Asserting the wished-for behaviour would just hide it.
-bash "$QG_C" enter "$TID_MIG" >/dev/null 2>&1
-CLAUDE_PROJECT_DIR="$FC" bash "$FC/.claude/scripts/impact-report.sh" "$TID_MIG" >/dev/null 2>&1
-C4_APPROVE=$(bash "$QG_C" approve "$TID_MIG" "re-approved after the migration" 2>&1 | tail -1)
-assert_contains "denylist-C4: bare enter+approve is an idempotent no-op (KNOWN GAP)" \
+# and that sequence could not recover, because `enter` does not clear
+# `qa-approved` and `approve` short-circuited as an "idempotent no-op" whenever
+# that label was present — so no new change-set-bound record was written and the
+# gate stayed blocked on a correct-looking recipe. A denylist landing is the
+# event that puts EVERY in-flight cycle on that path at once, which is why the
+# gap was pinned here rather than papered over.
+#
+# gz3 made approve's idempotency HASH-AWARE (it no-ops only when a record
+# already binds the current change set), so the printed recipe is now a real
+# recovery. The commands below are EXTRACTED FROM THE BLOCK REASON captured in
+# C3 and executed verbatim — the assertion is about the recipe the operator is
+# actually handed, not a paraphrase of it. The explicit-label-removal path stays
+# pinned in C5; the guard's own contract (matching-hash re-approve is still a
+# no-op) and the approve/Stop race live in
+# .claude/tests/component/specs/approve-idempotency.sh.
+C4_REMEDY="$FC/.claude/.qa-tracking/c4-printed-remediation.txt"
+printf '%s\n' "$C3_REASON" | grep -E '^[[:space:]]*bash \.claude/scripts/' \
+    | sed 's/^[[:space:]]*//' > "$C4_REMEDY"
+assert_eq "denylist-C4: the migration block prints a 3-command remediation" \
+    "3" "$(grep -c . "$C4_REMEDY" | tr -d '[:space:]')"
+assert_eq "denylist-C4: ...and it needs no 'bd label remove' step" \
+    "0" "$(grep -c 'bd label remove' "$C4_REMEDY" | tr -d '[:space:]')"
+C4_APPROVE=""
+while IFS= read -r c4_cmd; do
+    [ -z "$c4_cmd" ] && continue
+    c4_cmd=${c4_cmd//\'<approval summary>\'/\'re-reviewed against the post-migration change set\'}
+    C4_LINE=$(cd "$FC" && CLAUDE_PROJECT_DIR="$FC" eval "$c4_cmd" 2>&1 | tail -1)
+    case "$c4_cmd" in *"qa-gate.sh approve"*) C4_APPROVE="$C4_LINE" ;; esac
+done < "$C4_REMEDY"
+assert_contains "denylist-C4: the printed approve writes a freshly-bound record (was: idempotent no-op)" \
+    "change-set-bound approval record written" "$C4_APPROVE"
+assert_not_contains "denylist-C4: ...and is NOT reported as an idempotent no-op" \
     "idempotent no-op" "$C4_APPROVE"
 seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
 bash "$CT_C" set "$TID_MIG"
-assert_eq "denylist-C4: ...so the gate is STILL blocked after it (KNOWN GAP)" \
-    "block" "$(stop_decision "$FC")"
+assert_eq "denylist-C4: ...so following the printed remediation RELEASES the migrated cycle" \
+    "ALLOW" "$(stop_decision "$FC")"
 
-# C5. The recovery that does work: retire the stale label, re-enter, re-review,
-# re-approve. The new record is bound to the POST-migration hash.
+# C5. The OTHER recovery, still supported: retire the stale label explicitly,
+# then re-enter, re-review, re-approve. Since gz3 this is no longer the ONLY way
+# out (C4 covers the printed recipe), but it stays pinned — an operator who has
+# already dropped the label, or a cycle that genuinely wants to start from a
+# not-approved state, must still land on a release. The new record is bound to
+# the POST-migration hash either way.
 (cd "$FC" && bd label remove "$TID_MIG" qa-approved >/dev/null 2>&1)
 bash "$QG_C" enter "$TID_MIG" >/dev/null 2>&1
 bash "$CT_C" set "$TID_MIG"
@@ -388,5 +493,337 @@ assert_eq "denylist-C6: the recovered approval keeps releasing (one landing, one
     "ALLOW" "$(stop_decision "$FC")"
 
 restore_denylist_lib "$FC" "$DL_REAL_C"
+
+# ===========================================================================
+# SECTION D — the v4.1 landing, for the patterns that ACTUALLY SHIPPED
+# (claude-workflow-plugin-wg6, absorbing prm).
+#
+# Section C proves the migration MECHANISM with an invented canary: a pattern
+# is ADDED to the lib and the gate is watched. That is a fine proof of "editing
+# the lib moves the gate" and it stays untouched. It cannot prove that the
+# alternatives which actually shipped are the ones that move it.
+#
+# Section D therefore runs the other way round, in the direction the operator
+# experiences: it PINS THE PRE-LANDING LIB — a private copy whose regex is the
+# shipped one with the three v4.1 alternatives REMOVED by literal substring —
+# behaves like a v4.0 install under it, and then restores the real lib.
+# THAT RESTORE IS THE LANDING.
+#
+# WHY THIS BUG (what post-edit.sh does, and what it costs)
+# --------------------------------------------------------
+# post-edit.sh records `tool_input.file_path` VERBATIM. The change set was
+# therefore never bounded by the repo: any absolute path an agent wrote
+# entered changed-files.txt, the change-set hash, and the Stop gate. Six live
+# instances in one release. The worst is the one D2/D3 drive end to end: a
+# plan-mode plan file at ~/.claude/plans/<slug>.md hard-blocked a TASK-LESS
+# session across three Stop iterations to J21 escalation, because the file is
+# .md (so F1 classifies the set doc-only) and F1's doc-only fast path
+# auto-approves only WITH an active task — which plan mode forbids creating.
+# There was no exit.
+#
+# WHAT SHIPPED, in one landing:
+#   (^|/)\.claude/plans/                      plan-mode plan files, anywhere.
+#   ^(/private)?/tmp/claude-[^/]+/            the harness session scratchpad.
+#   (^|/)\.claude/\.mutation-(runs|worktrees)/   mutation-sweep per-run state.
+#
+# D1 the discriminating control   D2 pre-landing   D3 the landing
+# D4 anti-overreach               D5 the in-flight approval migration
+# ===========================================================================
+
+# --- the three alternatives, as LITERAL strings ---------------------------
+# Single-quoted, so what is written here is exactly what must appear in the
+# shipped regex. D1 proves that claim rather than assuming it.
+D_ALT_PLANS='(^|/)\.claude/plans/'
+D_ALT_SCRATCH='^(/private)?/tmp/claude-[^/]+/'
+D_ALT_MUTATION='(^|/)\.claude/\.mutation-(runs|worktrees)/'
+
+# --- the shapes under test -------------------------------------------------
+# The plan file is spelled ABSOLUTE and OUTSIDE any repo on purpose: that is
+# the shape post-edit.sh actually recorded, and the shape no repo-relative
+# pattern could ever have caught.
+#
+# Built from $HOME rather than a literal, for two reasons. A hardcoded absolute
+# home prefix is exactly what CLAUDE.md and AgentLint S7 forbid in source. And
+# $HOME is the REAL prefix — a macOS dev box and a Linux CI runner spell it
+# differently — so this exercises the actual out-of-repo spelling on whichever
+# machine runs the suite. The assertion does not depend on the value: the
+# alternative anchors on (^|/), so any prefix matches, and D1 pins that
+# alternative's presence independently.
+D_PLAN_ABS="${HOME:-/nonexistent-home}/.claude/plans/v4-1-0-upgrade-gleaming-karp.md"
+D_PLAN_REL='.claude/plans/v4-1-0-upgrade-gleaming-karp.md'
+D_SCRATCH='/private/tmp/claude-501/sess-a/scratchpad/grader-verdict.json'
+D_SCRATCH_LINUX='/tmp/claude-501/sess-a/scratchpad/grader-verdict.json'
+D_MUT_RUN='.claude/.mutation-runs/2026-07-29T12-00-00/report.json'
+D_MUT_WT='.claude/.mutation-worktrees/mut-014/src/a.ts'
+
+mk_fixture
+FD="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+fast_stack_stub "$FD"
+bash "$FD/.claude/scripts/current-task.sh" clear
+
+# ---------------------------------------------------------------------------
+# D1 — THE DISCRIMINATING CONTROL. Read this before trusting anything below.
+#
+# The pre-landing regex is built by stripping three literal substrings. If a
+# future landing renames or rewords any of them, the strip SILENTLY NO-OPS:
+# the "pre-landing" lib becomes byte-identical to the shipped one, D2's
+# "tracked" and D3's "skipped" both keep measuring the same lib, and the whole
+# section goes green having proved nothing. So D1 asserts, per alternative,
+# that the strip actually removed something — LESSONS.md's rule that a test
+# whose acceptance is an ABSENCE needs a control that discriminates the cause.
+#
+# The fixture is DELIBERATELY NOT A GIT REPO, and D3 is why. D3 seeds a
+# tracker whose ONLY line is denylisted; reviewable_changes() then finds
+# nothing in the tracker (found=0) and FALLS THROUGH to the git-status
+# fallback. In a git fixture we would be measuring that fallback, not the
+# denylist. With no git repo has_git_repo returns non-zero, the fallback is
+# skipped, and the change set is genuinely `empty`. (Non-git projects are a
+# supported configuration — has_git_repo exists to answer exactly this.)
+assert_eq "denylist-D1: the drop/keep fixture is intentionally NOT a git repo (isolates the denylist)" \
+    "no" "$(git -C "$FD" rev-parse --git-dir >/dev/null 2>&1 && echo yes || echo no)"
+
+D_LIB_LINK="$FD/.claude/scripts/workflow-denylist.sh"
+D_LIB_REAL=$(readlink "$D_LIB_LINK" 2>/dev/null || printf '%s' "$D_LIB_LINK")
+D_SHIPPED=$(shipped_regex_of "$D_LIB_REAL")
+assert_eq "denylist-D1: the shipped WORKFLOW_DENYLIST_REGEX was extracted" \
+    "yes" "$([ -n "$D_SHIPPED" ] && echo yes || echo no)"
+
+# Per alternative: removing it must CHANGE the regex. This is the leg that
+# fails loudly if a pattern is renamed out from under this spec.
+assert_eq "denylist-D1 control: the shipped regex really carries the plans/ alternative (strip is not a no-op)" \
+    "differs" "$([ "$(strip_alt "$D_SHIPPED" "$D_ALT_PLANS")" != "$D_SHIPPED" ] && echo differs || echo same)"
+assert_eq "denylist-D1 control: ...and the session-scratchpad alternative" \
+    "differs" "$([ "$(strip_alt "$D_SHIPPED" "$D_ALT_SCRATCH")" != "$D_SHIPPED" ] && echo differs || echo same)"
+assert_eq "denylist-D1 control: ...and the mutation-harness alternative" \
+    "differs" "$([ "$(strip_alt "$D_SHIPPED" "$D_ALT_MUTATION")" != "$D_SHIPPED" ] && echo differs || echo same)"
+
+# Build the pre-landing regex: all three removed.
+D_PRE="$D_SHIPPED"
+D_PRE=$(strip_alt "$D_PRE" "$D_ALT_PLANS")
+D_PRE=$(strip_alt "$D_PRE" "$D_ALT_SCRATCH")
+D_PRE=$(strip_alt "$D_PRE" "$D_ALT_MUTATION")
+
+# ...and it must really be pre-landing: none of the three may survive.
+assert_eq "denylist-D1: the pre-landing regex no longer carries plans/" "0" \
+    "$(printf '%s' "$D_PRE" | grep -cF -- "$D_ALT_PLANS" | tr -d '[:space:]')"
+assert_eq "denylist-D1: ...nor the session scratchpad" "0" \
+    "$(printf '%s' "$D_PRE" | grep -cF -- "$D_ALT_SCRATCH" | tr -d '[:space:]')"
+assert_eq "denylist-D1: ...nor the mutation-harness dirs" "0" \
+    "$(printf '%s' "$D_PRE" | grep -cF -- "$D_ALT_MUTATION" | tr -d '[:space:]')"
+
+# ---------------------------------------------------------------------------
+# D2 — PRE-LANDING. Pin the reduced regex; the fixture is now a v4.0 install.
+D_REAL=$(pin_denylist_regex "$FD" "$D_PRE")
+
+# SAFETY, immediately after the write (mirrors A5/C2): the pin must NOT have
+# travelled down the symlink into the plugin's own lib. A spec that edits the
+# script under test poisons every later run on the machine.
+assert_eq "denylist-D2 safety: the REAL plugin lib still carries all three v4.1 alternatives" "3" \
+    "$(( $(grep -cF -- "$D_ALT_PLANS" "$D_LIB_REAL" | tr -d '[:space:]') \
+       + $(grep -cF -- "$D_ALT_SCRATCH" "$D_LIB_REAL" | tr -d '[:space:]') \
+       + $(grep -cF -- "$D_ALT_MUTATION" "$D_LIB_REAL" | tr -d '[:space:]') ))"
+assert_eq "denylist-D2 safety: the fixture copy is no longer a symlink" "no" \
+    "$([ -L "$D_LIB_LINK" ] && echo yes || echo no)"
+
+# THE SECOND DISCRIMINATING CONTROL, and it is not optional. Everything D2
+# asserts next is an ABSENCE of filtering ("tracked"), and a pinned lib that
+# does not parse, does not source, or carries a MALFORMED ERE produces exactly
+# that same observable: workflow_denylisted would fail for every path and every
+# "tracked" would pass while proving nothing about the pre-landing regex. So
+# prove the pinned lib is still a WORKING denylist first, on a control path
+# both regexes drop. A "drop" here means it parsed, sourced silently enough to
+# define the function, and matched — all four properties in one assertion.
+assert_eq "denylist-D2 control: the pinned pre-landing lib is still a WORKING denylist (the strip did not corrupt the ERE)" \
+    "drop" "$(bash -c '. "$1"; workflow_denylisted "$2" && echo drop || echo keep' \
+        _pinned "$D_LIB_LINK" 'node_modules/x.js' 2>/dev/null)"
+
+# post-edit TRACKED all of it — the defect, reproduced.
+assert_eq "denylist-D2 pre-landing: post-edit TRACKS the out-of-repo plan file" \
+    "tracked" "$(track_path "$FD" "$D_PLAN_ABS")"
+assert_eq "denylist-D2 pre-landing: post-edit TRACKS the session scratchpad verdict" \
+    "tracked" "$(track_path "$FD" "$D_SCRATCH")"
+assert_eq "denylist-D2 pre-landing: post-edit TRACKS a mutation-sweep run report" \
+    "tracked" "$(track_path "$FD" "$D_MUT_RUN")"
+
+# THE DEAD END, end to end. Plan file alone, NO active task (plan mode cannot
+# create one). The set is doc-only, so F1 is reached — and F1 auto-approves
+# only WITH a task, so it falls straight through to the hard QA-required block.
+seed_tracker "$FD" "$D_PLAN_ABS"
+D2_DECISION=$(stop_decision "$FD")
+seed_tracker "$FD" "$D_PLAN_ABS"
+D2_REASON=$(stop_reason "$FD")
+assert_eq "denylist-D2 pre-landing: a plan-file-only, task-less Stop BLOCKS (the recorded J21 dead end)" \
+    "block" "$D2_DECISION"
+assert_contains "denylist-D2 pre-landing: ...and the block names the out-of-repo plan file" \
+    "$D_PLAN_ABS" "$D2_REASON"
+assert_contains "denylist-D2 pre-landing: ...and demands a Beads task the plan-mode session cannot create" \
+    "No active Beads task detected" "$D2_REASON"
+
+# ---------------------------------------------------------------------------
+# D3 — THE LANDING. Restoring the real lib IS the v4.1 landing.
+restore_denylist_lib "$FD" "$D_REAL"
+
+assert_eq "denylist-D3 landing: post-edit no longer tracks the out-of-repo plan file" \
+    "skipped" "$(track_path "$FD" "$D_PLAN_ABS")"
+assert_eq "denylist-D3 landing: ...nor a repo-relative .claude/plans/ file" \
+    "skipped" "$(track_path "$FD" "$D_PLAN_REL")"
+assert_eq "denylist-D3 landing: ...nor the macOS session scratchpad (/private/tmp/claude-<sess>/)" \
+    "skipped" "$(track_path "$FD" "$D_SCRATCH")"
+# CI is Linux, where there is no /private prefix — the (/private)? optionality
+# is only half-proven without this leg.
+assert_eq "denylist-D3 landing: ...nor the Linux session scratchpad (/tmp/claude-<sess>/)" \
+    "skipped" "$(track_path "$FD" "$D_SCRATCH_LINUX")"
+assert_eq "denylist-D3 landing: ...nor a mutation-sweep run report" \
+    "skipped" "$(track_path "$FD" "$D_MUT_RUN")"
+assert_eq "denylist-D3 landing: ...nor a --keep-worktrees mutation worktree" \
+    "skipped" "$(track_path "$FD" "$D_MUT_WT")"
+
+# The same task-less Stop that had no exit now releases: the set is `empty`
+# after the denylist, not `doc-only`, so F1's no-task branch allows.
+seed_tracker "$FD" "$D_PLAN_ABS"
+assert_eq "denylist-D3 landing: the same task-less plan-file Stop now RELEASES (the dead end is gone)" \
+    "ALLOW" "$(stop_decision "$FD")"
+
+# ...and consumer 2/3 agrees: none of the six shapes enters the hash.
+D3_H_ALL=$(hash_of "$FD" "src/a.ts" "$D_PLAN_ABS" "$D_PLAN_REL" "$D_SCRATCH" \
+    "$D_SCRATCH_LINUX" "$D_MUT_RUN" "$D_MUT_WT")
+D3_H_SRC=$(hash_of "$FD" "src/a.ts")
+assert_eq "denylist-D3 landing: the change-set hash excludes all six shapes" "same" \
+    "$([ -n "$D3_H_ALL" ] && [ "$D3_H_ALL" = "$D3_H_SRC" ] && echo same || echo differs)"
+
+# ---------------------------------------------------------------------------
+# D4 — ANTI-OVERREACH, under the SHIPPED lib. Each of these must stay
+# reviewable, and each would be taken out by a DIFFERENT over-broad rewrite of
+# one of the three alternatives.
+
+# The project's own planning deliverables. `docs/plans/` is not `.claude/plans/`.
+assert_eq "denylist-D4: docs/plans/ stays reviewable (a deliverable, not a plan-mode file)" \
+    "tracked" "$(track_path "$FD" "docs/plans/v4.1-upgrade-wave.md")"
+# Only the harness's per-run OUTPUT is dropped; its source is shipped code.
+assert_eq "denylist-D4: the mutation harness SOURCE stays reviewable" \
+    "tracked" "$(track_path "$FD" ".claude/tests/mutation/mutation-sweep.sh")"
+
+# POSITIVE PINS OF THE DELIBERATE LIMIT (workflow-denylist.sh, "WHAT IS
+# DELIBERATELY *NOT* DENYLISTED"). Two of the six recorded instances were
+# agent-chosen /tmp paths — /tmp/qa-p5n-probe/ and a bare /tmp/enc-diff.sh
+# that entered an APPROVAL's bound change set. Neither is fixed here, ON
+# PURPOSE: the fix for that class is PROMPT guidance (probes go to the session
+# scratchpad or .claude/.qa-tracking/), because a general /tmp pattern would
+# also filter this suite's own fixture paths — see the next two assertions.
+assert_eq "denylist-D4: agent-chosen /tmp scratch stays reviewable (the limit is deliberate)" \
+    "tracked" "$(track_path "$FD" "/tmp/qa-p5n-probe/notes.md")"
+assert_eq "denylist-D4: ...including a BARE file at /tmp root (no directory to anchor on)" \
+    "tracked" "$(track_path "$FD" "/tmp/enc-diff.sh")"
+
+# THE MECHANICAL REASON, pinned with the realest possible witness: this
+# fixture's own path. mk_fixture is `mktemp -d -t component-fixture.XXXXXX`,
+# so $FD is /tmp/... on Linux CI and /var/folders/... on a macOS dev box —
+# exactly the roots impact-report-paths.sh and worktree-approval-resolution.sh
+# seed into changed-files.txt as ABSOLUTE paths. A /tmp or /var/folders
+# pattern would empty those change sets and both specs would pass vacuously.
+assert_eq "denylist-D4: this spec's own mktemp -d fixture path stays reviewable (why /tmp is rejected)" \
+    "tracked" "$(track_path "$FD" "$FD/src/a.ts")"
+# The ^ anchor is scoped to its own ERE branch, so a repo-relative source path
+# that merely CONTAINS tmp/claude- is not the session scratchpad.
+assert_eq "denylist-D4: a repo-relative src/tmp/claude-*/ path stays reviewable (^ anchor holds)" \
+    "tracked" "$(track_path "$FD" "src/tmp/claude-501/x/y.ts")"
+
+# ...and the gate agrees, not just the tracker: a mixed set still blocks and
+# the reason names ONLY the reviewable path. Reviewers act on that list.
+seed_tracker "$FD" "$D_PLAN_ABS" "$D_MUT_RUN" "src/a.ts"
+D4_DECISION=$(stop_decision "$FD")
+seed_tracker "$FD" "$D_PLAN_ABS" "$D_MUT_RUN" "src/a.ts"
+D4_REASON=$(stop_reason "$FD")
+assert_eq "denylist-D4: a mixed scratch + source change set still BLOCKS" "block" "$D4_DECISION"
+assert_contains "denylist-D4: ...and the reason lists the reviewable source path" \
+    "src/a.ts" "$D4_REASON"
+assert_not_contains "denylist-D4: ...and does NOT list the plan file" \
+    "$D_PLAN_ABS" "$D4_REASON"
+
+# ===========================================================================
+# D5 — THE IN-FLIGHT APPROVAL MIGRATION, for the real patterns.
+#
+# C3-C6 prove the migration for a canary. D5 proves it for the landing that
+# actually shipped, and in the operator's direction: an honest approval is
+# recorded under the PRE-LANDING lib, the real lib is restored (the landing),
+# and the cycle must fail closed and then recover on the printed recipe.
+#
+# This one NEEDS a git repo with a committed baseline (bd + a full gate cycle),
+# mirroring section C's fixture. The tracker always carries a reviewable path
+# here, so reviewable_changes() never reaches the git fallback — the git repo
+# is scaffolding for the gate cycle, not part of what is measured.
+# ===========================================================================
+mk_fixture
+FD5="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+fast_stack_stub "$FD5"
+(cd "$FD5" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+QG_D="$FD5/.claude/scripts/qa-gate.sh"
+CT_D="$FD5/.claude/scripts/current-task.sh"
+
+TID_D5=$(cd "$FD5" && bd create "in-flight approval across the v4.1 denylist landing" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+
+D5_REAL=$(pin_denylist_regex "$FD5" "$D_PRE")
+assert_eq "denylist-D5 safety: the REAL plugin lib is untouched by the pin" "3" \
+    "$(( $(grep -cF -- "$D_ALT_PLANS" "$D5_REAL" | tr -d '[:space:]') \
+       + $(grep -cF -- "$D_ALT_SCRATCH" "$D5_REAL" | tr -d '[:space:]') \
+       + $(grep -cF -- "$D_ALT_MUTATION" "$D5_REAL" | tr -d '[:space:]') ))"
+
+# An honest v4.0 approval: the change set is the real deliverable PLUS the plan
+# file the agent wrote while planning it. That is what v4.0 tracked, so that is
+# what the approval binds. (approve truncates the tracker and clears
+# current-task; the session still holds the same change set, so both are
+# restored afterwards — the same way section C models a live cycle.)
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+bash "$QG_D" enter "$TID_D5" >/dev/null 2>&1
+bash "$CT_D" set "$TID_D5"
+seed_review_records "$TID_D5" "qa-claude" "backend" "$FD5"
+bash "$QG_D" approve "$TID_D5" "reviewed under the pre-landing denylist" >/dev/null 2>&1
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+bash "$CT_D" set "$TID_D5"
+assert_eq "denylist-D5: the pre-landing approval RELEASES (control)" \
+    "ALLOW" "$(stop_decision "$FD5")"
+
+# --- THE LANDING -----------------------------------------------------------
+restore_denylist_lib "$FD5" "$D5_REAL"
+
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+bash "$CT_D" set "$TID_D5"
+D5_DECISION=$(stop_decision "$FD5")
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+bash "$CT_D" set "$TID_D5"
+D5_REASON=$(stop_reason "$FD5")
+assert_eq "denylist-D5: after the landing the pre-landing approval no longer releases (fail closed)" \
+    "block" "$D5_DECISION"
+assert_contains "denylist-D5: the block names the change-set binding, not a generic QA-required" \
+    "no change-set-bound approval record matches" "$D5_REASON"
+assert_not_contains "denylist-D5: ...and the plan file has already left the reviewable set" \
+    "$D_PLAN_ABS" "$D5_REASON"
+
+# The printed recovery, extracted from the block reason and run VERBATIM — the
+# assertion is about the recipe the operator is handed, not a paraphrase.
+D5_REMEDY="$FD5/.claude/.qa-tracking/d5-printed-remediation.txt"
+printf '%s\n' "$D5_REASON" | grep -E '^[[:space:]]*bash \.claude/scripts/' \
+    | sed 's/^[[:space:]]*//' > "$D5_REMEDY"
+assert_eq "denylist-D5: the migration block prints a 3-command remediation" \
+    "3" "$(grep -c . "$D5_REMEDY" | tr -d '[:space:]')"
+assert_eq "denylist-D5: ...and it needs no 'bd label remove' step" \
+    "0" "$(grep -c 'bd label remove' "$D5_REMEDY" | tr -d '[:space:]')"
+D5_APPROVE=""
+while IFS= read -r d5_cmd; do
+    [ -z "$d5_cmd" ] && continue
+    d5_cmd=${d5_cmd//\'<approval summary>\'/\'re-reviewed against the post-landing change set\'}
+    D5_LINE=$(cd "$FD5" && CLAUDE_PROJECT_DIR="$FD5" eval "$d5_cmd" 2>&1 | tail -1)
+    case "$d5_cmd" in *"qa-gate.sh approve"*) D5_APPROVE="$D5_LINE" ;; esac
+done < "$D5_REMEDY"
+assert_contains "denylist-D5: the printed approve writes a freshly-bound record" \
+    "change-set-bound approval record written" "$D5_APPROVE"
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+bash "$CT_D" set "$TID_D5"
+assert_eq "denylist-D5: ...so the printed recovery RELEASES the migrated cycle (one landing, one migration)" \
+    "ALLOW" "$(stop_decision "$FD5")"
 
 [ "$FAIL" -eq 0 ]

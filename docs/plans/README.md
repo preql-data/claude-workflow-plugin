@@ -7,6 +7,35 @@ session that produced them ends.
 
 ## Index
 
+- `v4.1-upgrade-wave.md` — v4.1.0 minor release: U0 installer v3.5→v4
+  upgrade path (priority), U1 follow-up burn-down (gz3/gl6/bjx), U2
+  worktree sweeper + scratchpad denylist (prm), U3 context-gathering
+  ledger, U4 vendored superpowers skills, U5 staging e2e QA, U6 gated
+  depth-3 migration.
+  **Status**: All seven phases resolved (2026-07-26 → 2026-07-30);
+  release closeout `claude-workflow-plugin-uvk` still open. The plan was
+  **not executed as written** — a dated status block at the top of the
+  plan file carries the correction layer, and the plan text below it is
+  preserved verbatim. **Shipped in full**: U0 installer upgrade path
+  (-0jk, eight sub-tasks), U1 follow-up burn-down (-waz), U2 sweeper +
+  denylist (-0yg). **Reduced**: U3 (-gio) shipped as the
+  `context_coverage` contract field plus rubric C8 rather than the
+  ledger/frontier harness, which is deferred on -gio.1 behind a
+  three-instance evidence bar; U4 (-q37) shipped as one vendored
+  reference doc plus a practice harvest rather than five registered
+  skills. **Cancelled**: U5 staging e2e QA (-f2t) — most external
+  dependencies, largest security surface, only phase needing live paid
+  runs, and a provider abstraction that stays speculative until a second
+  project validates it. **Closed as need-triggered, not
+  calendar-deferred**: U6 depth-3 migration (-7be) — depth-1 is itself
+  the mechanism that stops an implementer procuring its own review, so
+  the `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` pin stays and the
+  standing task -1bn carries a condition rather than a date; the
+  2026-08-23 next-check date is **retired**. **Unplanned**: a P0 (-2br)
+  that left every installed target running no workflow at all displaced
+  the planned sequence and shipped first. Session plan mirror at
+  `~/.claude/plans/v4-1-0-upgrade-gleaming-karp.md`.
+
 - `v4-trimodel.md` — the v4.0.0 tri-model workflow: Fable-class orchestrator,
   Opus-class implementers, optional GPT-5.6-Sol reviewer lane via Codex MCP;
   mechanical sign-off separation ("nobody signs off on their own work"),
@@ -22,7 +51,8 @@ session that produced them ends.
   two different reviewers. Scope of that validation, per
   `docs/RELEASE_AUDIT.md` rows TM7/TM14: a small synthetic subject driven
   through the gate scripts directly, so no live e2e trace was captured.
-  Awaiting only the release tag.
+  Tagged and released as `v4.0.0` on 2026-07-26 (commit `7b57a13`); the
+  epic-closing bd sync is `86d238c`.
 
 - `verification-suite.md` — Phases 0/A/B/C shipping v3.1.0 through v3.4.0:
   MCP path hotfix, binding QA-gate escalation, best-model auto-selection,

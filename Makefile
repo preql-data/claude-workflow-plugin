@@ -2,7 +2,7 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help session test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check install-test clean
+.PHONY: help session test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test clean
 
 help:
 	@echo "Targets:"
@@ -23,7 +23,8 @@ help:
 	@echo "  lint              — alias for shellcheck"
 	@echo "  shellcheck        — run shellcheck on every hook script"
 	@echo "  check             — run AgentLint against this repo"
-	@echo "  install-test      — install into a tempdir and verify"
+	@echo "  doctor            — functional health check of an install (TARGET=<dir>, DOCTOR_ARGS=\"...\"); safe mid-session (only 'beads' touches the target)"
+	@echo "  install-test      — install into a tempdir, then run the doctor against it (expected GREEN; needs the npm registry)"
 	@echo "  clean             — remove transient .qa-tracking state"
 
 # Launch a working session at the effort level the A/B interference test
@@ -225,10 +226,77 @@ check:
 		agentlint check --format md --output-dir docs/; \
 	fi
 
+# install-test — install into a tempdir, then VERIFY IT ORCHESTRATES.
+#
+# The old body was the entire post-install verification in this repo and it was
+# two `test` calls (`test -d .claude`, `test -f plugin.json`). Presence is what
+# let both MCP servers ship dead and a SessionStart bail ship silent across
+# three releases (v4.1 / claude-workflow-plugin-2br). The doctor executes the
+# SessionStart hook, both MCP servers and both gate hooks against the rendered
+# target, so a green `install-test` now means "this install runs", not "these
+# files exist".
+#
+# The presence checks are kept AHEAD of the doctor on purpose: they fail with a
+# one-line message when the copy itself did not happen, which is a clearer
+# signal than eleven downstream check failures.
+#
+# mcp_bd / mcp_code_graph are NOT skipped here, and as of
+# claude-workflow-plugin-z9m (C0b) THIS TARGET IS EXPECTED TO PASS. It used to
+# be expected-red, and the red was the v4.1 P0 reproducing on demand: a rendered
+# target had no .claude/mcp/*/node_modules, so both server checks failed. C0b
+# made install.sh run `npm ci` per server IN THE TARGET, and that is what turns
+# this green. Adding `--skip mcp_bd,mcp_code_graph` would make this command
+# answer "yes, this install orchestrates" while the defect was live in every
+# rendered target — the exact false green the epic exists to kill — so the skip
+# stays absent now that it is no longer needed either.
+#
+# THIS TARGET NEEDS THE NETWORK. `npm ci` fetches from the npm registry, so an
+# offline run fails at the dependency step. That is also why it is not CI-wired
+# (test-ci is test + test-component + test-e2e-unit + manifest-validate) and why
+# the L2 installer specs set CWP_SKIP_MCP_DEPS=1 / CWP_SKIP_VERIFY=1: this
+# target is the ONE surface that exercises dependency provisioning for real.
+#
+# EXIT CODES ARE NOW MEANINGFUL, and the recipe reports which it got: install.sh
+# exits 3 for "every file was written and a functional check does not pass",
+# distinct from 1 for "aborted". A 3 here means the installer's OWN verification
+# caught something; the recipe re-runs nothing and just points at the target.
+# Run `make doctor` against this checkout for the same checks without installing.
 install-test:
-	bash install.sh /tmp/cwp-install-test-$$$$ && \
-		test -d /tmp/cwp-install-test-$$$$/.claude && \
-		test -f /tmp/cwp-install-test-$$$$/.claude-plugin/plugin.json
+	@d=/tmp/cwp-install-test-$$$$ ; \
+	rc=0 ; \
+	{ bash install.sh "$$d" && \
+	  test -d "$$d/.claude" && \
+	  test -f "$$d/.claude-plugin/plugin.json" && \
+	  test -f "$$d/.claude/scripts/workflow-doctor.sh" && \
+	  bash "$$d/.claude/scripts/workflow-doctor.sh" --target "$$d" ; } || rc=$$? ; \
+	if [ "$$rc" -ne 0 ]; then \
+		echo "" ; \
+		echo "install-test: FAILED (exit $$rc)." ; \
+		echo "  This target is EXPECTED TO PASS since claude-workflow-plugin-z9m (C0b)." ; \
+		echo "  A failure here is a real regression — read each failing check's indented" ; \
+		echo "  fix: line above." ; \
+		echo "  exit 3 = the files all landed and install.sh's own verification failed." ; \
+		echo "  exit 1 = the install aborted, or the doctor found a failing check on re-run." ; \
+		echo "  Offline? 'npm ci' needs the npm registry; there is no cached fallback." ; \
+		echo "  Target left in place for inspection: $$d" ; \
+	else \
+		rm -rf "$$d" ; \
+	fi ; \
+	exit $$rc
+
+# doctor — run the functional health checks against THIS checkout (or any
+# target: `make doctor TARGET=/path/to/project`). Safe mid-session: every
+# dynamic check EXCEPT `beads` runs in a throwaway sandbox copy, so the live
+# .qa-tracking state and agent model pins are untouched. `beads` runs
+# `bd doctor` against the real target on purpose (a copied database would be
+# meaningless); it changes no issue data but can checkpoint the SQLite WAL.
+# Use DOCTOR_ARGS="--skip beads" for a run that provably touches nothing.
+#   make doctor
+#   make doctor TARGET=/path/to/project
+#   make doctor DOCTOR_ARGS="--skip mcp_bd,mcp_code_graph --json-out /tmp/d.json"
+doctor:
+	@t="$${TARGET:-$$(pwd)}" ; \
+	bash .claude/scripts/workflow-doctor.sh --target "$$t" $(DOCTOR_ARGS)
 
 clean:
 	rm -rf .claude/.qa-tracking
@@ -243,11 +311,14 @@ clean:
 # run (so it never mutates the committed copies).
 #
 # The synced set MUST equal listCanonicalHookScripts(): every
-# `.claude/scripts/*.sh` EXCEPT the harness-only resolve-fixture-spec.sh
-# (the Makefile fixture->spec resolver, never invoked by a fixture hook).
-# Copying it in would trip the guard's "no EXTRA .sh script" assertion, so
-# the exclusion below is load-bearing and mirrors FIXTURE_SYNC_EXCLUDES in
-# lib/runFixture.ts. Idempotent: re-running after a clean sync is a no-op.
+# `.claude/scripts/*.sh` EXCEPT the harness-only / operator-only scripts —
+# resolve-fixture-spec.sh (the Makefile fixture->spec resolver) and
+# workflow-doctor.sh (an operator CLI; no hooks.json event maps to it and no
+# hook shells out to it). Neither is ever invoked by a fixture hook. Copying
+# either in would trip the guard's "no EXTRA .sh script" assertion, so the
+# exclusion below is load-bearing and HAND-MIRRORS FIXTURE_SYNC_EXCLUDES in
+# lib/runFixture.ts — both lists must change together.
+# Idempotent: re-running after a clean sync is a no-op.
 sync-fixtures:
 	@canon=".claude/scripts" ; \
 	fixroot=".claude/tests/e2e/fixtures" ; \
@@ -259,6 +330,7 @@ sync-fixtures:
 		for src in "$$canon"/*.sh; do \
 			base=$$(basename "$$src") ; \
 			if [ "$$base" = "resolve-fixture-spec.sh" ]; then continue ; fi ; \
+			if [ "$$base" = "workflow-doctor.sh" ]; then continue ; fi ; \
 			cp "$$src" "$$dir/$$base" ; \
 			chmod 0755 "$$dir/$$base" ; \
 		done ; \

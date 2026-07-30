@@ -28,6 +28,13 @@ v3.3.0 plan.
 | `dependency_path` | Shortest call chain from one symbol to another | `{from, to, cwd?}` | None |
 | `code_index_health` | Status / drift / coverage / index size | `{cwd?}` | None |
 
+7 tools total. This sentence is machine-read: `.claude/scripts/tests/mcp-deps.test.sh`
+extracts the leading number from the `^<N> tools total\.` line in each server's
+README and cross-checks it against `DOCTOR_TOOL_COUNTS` in
+`.claude/scripts/workflow-doctor.sh` and the Tools column of
+[`docs/MCP_SERVERS.md`](../../../docs/MCP_SERVERS.md). Changing the surface
+means changing all four in the same commit, or the cross-check fails.
+
 Every tool returns `ok()` with `data` plus a free-form `llm_observations`
 string (per v3 principle #9). All tools set `readOnlyHint: true`,
 `destructiveHint: false`, `idempotentHint: true`. Every tool except
@@ -44,7 +51,7 @@ retry without a human round-trip — the bd-mcp convention.
 | `CODE_GRAPH_CWD` | Override the cwd resolution from the test harness |
 | `grammars/*.wasm` | Vendored tree-sitter grammars; provenance in `grammars/MANIFEST.md` |
 | `.claude/.code-graph/index.db` | Per-project SQLite index file; created lazily on first tool call |
-| `npm install` | Pulls `web-tree-sitter` (wasm), `sql.js` (wasm), `@modelcontextprotocol/sdk`, `zod`. The plugin installer runs this automatically |
+| `npm ci --omit=dev --ignore-scripts` | Pulls `web-tree-sitter` (wasm), `sql.js` (wasm), `@modelcontextprotocol/sdk`, `zod` from the committed `package-lock.json`. **This exact command** is what `install.sh` / `install.ps1` run inside `<target>/.claude/mcp/code-graph-mcp/` after the file copy (v4.1 / C0b) — named rather than described, so the claim is checkable: `grep -n 'npm ci' install.sh`. Through v4.0 this row said the installer ran it while nothing did, which is why every curl-installed target had this server dead. Skipped only under `--skip-mcp-deps` / `CWP_SKIP_MCP_DEPS=1`, and the installer says so and fails verification in that case. Run it by hand for an air-gapped or repaired install; the lockfile has zero install scripts, so `--ignore-scripts` suppresses nothing |
 | `npm test` | Runs the node:test suite (indexer, tools, protocol-level validation) |
 
 ### Dependency picks

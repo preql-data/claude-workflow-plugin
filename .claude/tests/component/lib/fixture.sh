@@ -140,6 +140,61 @@ bd_required_or_skip() {
     exit 1
 }
 
+# net_available — 0 when the npm registry is reachable, 1 when it is not.
+#
+# v4.1 / claude-workflow-plugin-20e (C0c). The PREDICATE half of the pair below.
+# Some specs need the network for ONE section and can run every other section
+# offline; those call this and log their own skip, exactly as
+# installer-target-functional.sh does for its `npm ci` legs. Specs that are
+# network-dependent end-to-end call net_required_or_skip instead.
+#
+# The probe asks the question the caller actually has: "can `npm ci` fetch?" —
+# not "is a DNS server up". A HEAD against the registry with a hard 8s bound is
+# the cheapest honest answer; `npm ping` is the fallback when curl is absent.
+#
+# CWP_NET=1 / CWP_NET=0 overrides the probe. That exists for two real cases:
+# a CI runner behind a proxy where the probe lies, and reproducing an offline
+# failure on a machine that does have network. An override is honoured verbatim
+# and never re-probed.
+net_available() {
+    case "${CWP_NET:-}" in
+        1|yes|true)  return 0 ;;
+        0|no|false)  return 1 ;;
+    esac
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 8 -o /dev/null "https://registry.npmjs.org/" >/dev/null 2>&1 \
+            && return 0
+        return 1
+    fi
+    if command -v npm >/dev/null 2>&1; then
+        npm ping --registry "https://registry.npmjs.org/" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+# net_required_or_skip — the POLICY half, mirroring bd_required_or_skip.
+#
+# Prints one "SKIPPED:" line naming the spec and exits 0 (the runner records a
+# spec that exits 0 as passing, with zero assertions — we do not fake them).
+# Use it at the top of a spec that cannot do anything useful offline.
+#
+# Deliberately NOT gated on a CI env var the way bd_required_or_skip is gated on
+# BD_SHIM_ONLY: bd's absence in CI is a fixed, known property of the runner
+# image, whereas network reachability is a per-run condition that can change
+# under the same spec. So this one always skips-with-log rather than hard-failing
+# anywhere, and the log line is what makes the loss of coverage visible.
+net_required_or_skip() {
+    if net_available; then
+        return 0
+    fi
+    local spec_name="${BASH_SOURCE[1]##*/}"
+    if [ -z "$spec_name" ]; then
+        spec_name="<unknown spec>"
+    fi
+    printf 'SKIPPED: %s (npm registry unreachable; set CWP_NET=1 to force)\n' "$spec_name"
+    exit 0
+}
+
 # seed_review_records <task-id> [reviewer-identity] [implementer-role] [root]
 #
 # V3 (claude-workflow-plugin-jio.1): make a task APPROVABLE under the

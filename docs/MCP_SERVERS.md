@@ -9,6 +9,80 @@ The plugin ships two project-scoped MCP servers under `.claude/mcp/`. Both are w
 
 Both servers use stdio transport. Both are stateless across invocations (the Beads tools mutate the local `.beads/` database; the code-graph tools read source files and maintain a per-project SQLite index at `.claude/.code-graph/index.db`, gitignored).
 
+## Dependencies
+
+**Both servers have real npm dependencies and neither can boot without them.**
+`bin/bd-mcp.js` and `bin/code-graph-mcp.js` are dynamic-import launchers; with
+`node_modules/` absent they die on spawn with
+`ERR_MODULE_NOT_FOUND: Cannot find package '@modelcontextprotocol/sdk'` and the
+session simply has no MCP tools.
+
+This is not a hypothetical. Before v4.1 it was the **default** outcome of a
+`curl | bash` install: that path clones the source with `git clone --depth 1`,
+`.gitignore` excludes `node_modules/`, so the clone never had dependencies to
+copy. Both servers were dead in every such target for three releases, and every
+test stayed green because every test asserted file presence.
+
+### What the installer does now
+
+`install.sh` (and `install.ps1`) runs, per server, **in the target**, after the
+file copy:
+
+```bash
+npm ci --omit=dev --ignore-scripts
+```
+
+`node` and `npm` are hard prerequisites, checked before anything is written,
+with a floor of **node >= 18.17** — the `"engines"` value both servers declare.
+Neither server has native dependencies (pure JS + WASM: `sql.js` and
+`web-tree-sitter`, zero `hasInstallScript` packages, both `package-lock.json`
+files git-tracked at lockfileVersion 3), so this needs no compiler and no
+toolchain, and `--ignore-scripts` is safe rather than merely cautious.
+
+Two escape hatches:
+
+```bash
+bash install.sh --skip-mcp-deps /path/to/project   # do not run npm ci
+CWP_SKIP_MCP_DEPS=1 curl -fsSL <url>/install.sh | bash   # env form
+```
+
+Under `--skip-mcp-deps` the installer says so explicitly and the two server
+checks fail verification, so the target is never advertised as working.
+
+### Verifying
+
+`workflow-doctor.sh` **boots each server over stdio** and asserts `tools/list`
+returns **exactly** 21 and 7 tools:
+
+```bash
+bash .claude/scripts/workflow-doctor.sh
+# PASS mcp_bd          serverInfo.name=bd-mcp, tools/list returned exactly 21 tool(s)
+# PASS mcp_code_graph  serverInfo.name=code-graph-mcp, tools/list returned exactly 7 tool(s)
+```
+
+The equality is exact, not `>=`, because "boots and registers nothing" is a
+real failure that a does-it-start check cannot see. `[ -d node_modules ]` is
+likewise not a usable test: a failed `npm ci` leaves an empty husk of
+directories that passes it.
+
+### Air-gapped installs
+
+There is no cached fallback for `npm ci`. Copy each server's `node_modules/`
+from a machine that has run it, then verify:
+
+```bash
+cd <target>/.claude/mcp/bd-mcp         && npm ci --omit=dev --ignore-scripts
+cd <target>/.claude/mcp/code-graph-mcp && npm ci --omit=dev --ignore-scripts
+# ...or copy both node_modules/ trees across, then:
+bash .claude/scripts/workflow-doctor.sh --target <target> --skip beads
+```
+
+`--skip beads` matters offline for an unrelated reason: `bd doctor` performs a
+GitHub release check and can otherwise run past the check's 30s bound and
+report a false failure on a healthy install. This exact recipe is executed (not
+merely documented) by section 5 of
+`.claude/tests/component/specs/installer-target-functional.sh`.
+
 There is also one **optional, per-operator** server the plugin does not ship and never registers for you: `codex`, the OpenAI Codex CLI running in MCP-server mode, which backs the advisory external reviewer lane (Sol). Unlike the two above it is registered at **user scope** (`~/.claude.json`) on the individual machine, never in the project `.mcp.json` — a project-scoped entry would show as a permanently failed server for every teammate without the Codex CLI. With it absent the workflow is unchanged: `codex-detect.sh` is fail-open and the fresh-context Claude review lane fills the reviewer role. Setup, auth, billing, and troubleshooting are in [`CODEX_SETUP.md`](CODEX_SETUP.md).
 
 ## How they work in concert
@@ -17,7 +91,7 @@ The two servers slot into the orchestrator -> specialist -> QA flow at three key
 
 1. **Orchestrator decomposition (pre-delegation).** When the orchestrator plans an epic or any non-trivial change, before spawning a specialist it calls `code_search` / `code_context` for the symbols the change is likely to touch *and* `impact_of({symbol})` (or `impact_of({file})`) to surface transitive callers and dependent files. The result lands in the SPEC doc via `bd_doc_write({task_id, name: "spec", ...})` so the specialist starts from full context — no re-discovery, and no surprise from a high-fan-in caller the orchestrator forgot to mention. The `impact_of` query is conditional on the server being available so a target project that has not yet installed code-graph degrades gracefully to the search-only flow.
 
-2. **Specialist claim + completion.** A specialist calls `bd_doc_read({task_id, name: "spec"})` to fetch the SPEC, `bd_update_task({task_id, status: "in_progress"})` to claim, and on completion `bd_qa_enter` then `bd_add_label("qa-pending")`. During the work, specialists query `code_context({symbol})` and `symbol_callers({symbol})` to identify the exact call sites a change touches. The completion contract from F7 — `{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations}` — flows back through `bd_update_task --notes` (or via a new versioned doc).
+2. **Specialist claim + completion.** A specialist calls `bd_doc_read({task_id, name: "spec"})` to fetch the SPEC, `bd_update_task({task_id, status: "in_progress"})` to claim, and on completion `bd_qa_enter` then `bd_add_label("qa-pending")`. During the work, specialists query `code_context({symbol})` and `symbol_callers({symbol})` to identify the exact call sites a change touches. The completion contract from F7 — `{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations, context_coverage}` — flows back through `bd_update_task --notes` (or via a new versioned doc).
 
 3. **QA regression assessment (extends J19).** The QA agent pulls the diff via `git diff -- $(cat .claude/.qa-tracking/changed-files.txt)` and, for every changed symbol, calls `impact_of({symbol})`. High-fan-in hits are mandatory regression candidates — QA inspects (or runs) their tests as part of the gate, not just the tests that ship in the diff. The full test suite still runs (J19's anti-scope-creep rule), but the impact graph is what tells QA *which* of the existing tests are the highest-value ones to read before approving. Pairs with `verify-before-stop.sh`'s J19 framing (the gate runs the FULL test suite each iteration, not just tests for files in the diff). On approval, `bd_qa_approve` is one atomic call (label add + label removes + comment + memory write) — no manual sequencing. The grader (Phase A) never calls an MCP tool itself, but it does read code-graph output at one remove: packet item 7 is the mechanical impact report that `impact-report.sh` produced by driving this server. See [`AGENTS.md`](AGENTS.md) for the full eight-item packet.
 

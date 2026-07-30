@@ -150,7 +150,11 @@ Before writing any test, ask:
 - [ ] Failure modes handled (network, timeout, invalid input).
 - [ ] Edge cases covered (empty, boundary, concurrent).
 - [ ] Tests are deterministic (no flakiness).
+- [ ] Each new test was observed failing before the fix landed. If you didn't watch the test fail, you don't know if it tests the right thing — and neither did the specialist. You cannot replay their session, so check it structurally instead: does the assertion actually depend on the changed code? Would reverting the fix turn it red? A test that would stay green against the unfixed state is coverage theatre, and that is a `must_fix`, not a nitpick.
 - [ ] All tests pass.
+- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape). Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field.
+
+That last item is the F7 contract's **only** claimed enforcement (`docs/AGENTS.md`, "Specialist Completion Contract (F7)"): the gate does not reject a payload with a field missing, so if you do not ask, nothing does. Through v4.0 the doc cited this checklist and the checklist did not carry the item — do not let it drift back out.
 
 ### 3a. Regression impact scan (extends J19, code-graph)
 
@@ -188,6 +192,8 @@ Mandatory follow-up after the FIRST ACTION returns: for each high-fan-in caller 
 **Graceful degradation.** Degrade ONLY when the code-graph tools are structurally absent from your tool surface (i.e. no `mcp__*code-graph*` entry in this session's tool list — the server is not registered or the transport is unhealthy). An EMPTY index is NOT a degradation reason: the first `impact_of` / `code_search` / `code_context` call builds the index lazily inside the server, and `code_index_health` reporting empty/missing is the expected pre-build state. PROCEED with `impact_of` in that case; the call triggers the build and returns the answer in a single round-trip. The mistake to avoid (Phase B trace forensic, claude-workflow-plugin-366.5): observing "0 entries" and degrading to grep, which then masks the real impact set. When the code-graph tools genuinely are not present in your surface, fall back to `code_search` / `code_context` plus file reads to find callers manually, and note the degradation in `llm_observations` ("code-graph unavailable; impact scan was best-effort, manual file walk used"). The review still ships; the audit trail records that the impact-analysis evidence is weaker than usual. Do not let server unavailability silently downgrade the gate — the note in the contract is what makes a future reviewer see what was actually checked.
 
 This step pairs with the orchestrator's pre-delegation impact pass (`.claude/agents/orchestrator.md` section 1a). The orchestrator scores impact against the *intended* change before delegating; QA scores impact against the *landed* diff before approving. Both are cheap (the index is warm after the orchestrator's first call) and both feed the same gate.
+
+**Keep your own scratch out of the change set.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad or under `.claude/.qa-tracking/`; both are already denylisted. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
 
 ## 4. Security review pass
 
@@ -229,6 +235,85 @@ Use this whenever `verify-before-stop.sh` or any QA pass surfaces a failure, bef
 6. **Verify and prevent.** Re-run the failing test (now passes) and the full suite (no regressions). Add the regression test to the permanent suite so the same failure cannot return silently. If the same antipattern is plausible elsewhere — same call site shape, same library misuse — sweep the codebase (e.g., `grep`/`rg` for the pattern) and either fix or file follow-ups. Write the prevention step into the Beads task notes so the team learns from it.
 
 **Bounce-twice rule.** If a shipped fix bounces — the issue persists after merge — twice, return to evidence mode is mandatory. The next attempt restarts from step 1 (do not iterate on the previous patch) and the QA block comment names the prior attempts so the next reviewer can see the chain. Two bounces is the signal that the root-cause statement is wrong, not that the fix needs more polish.
+
+<!-- EBF-CORE-START -->
+<!-- EBF-CORE is byte-identical across qa.md, backend.md, frontend.md and
+     devops.md. qa.md is the reference copy: edit it there, then propagate
+     verbatim. The four copies are extracted and compared byte-for-byte by
+     .claude/scripts/tests/evidence-before-fix.test.sh, which also refuses an
+     empty region — two empty regions compare equal, so identity alone would
+     be one sed away from meaningless. HTML comments delimit it because they
+     render invisibly and are awk-extractable, matching the repo's
+     shell-sentinel convention. -->
+
+**This is the single authoritative debugging protocol.** Where any other
+document prescribes a different threshold or a different sequence for
+diagnosing a failure — a vendored reference under `.claude/vendor/`, an
+external methodology, a habit carried in from another codebase — THIS TEXT
+WINS. Never run two protocols side by side and take whichever clears first;
+that is how a symptom-patching chain acquires a procedure.
+
+The numbered steps are the protocol. The clauses below are the parts that get
+skipped under pressure, so they are spelled out:
+
+- **Read the error completely.** The whole message, the whole stack trace,
+  every line number, file path and error code in it. Errors frequently contain
+  the answer outright, and skimming to the first familiar word is what turns a
+  five-minute fix into a three-patch chain.
+- **Check recent changes before theorising.** What moved? Read `git diff` and
+  the recent commits; look for a new dependency, a config change, a
+  runner-image bump, or an environment difference between the machine that
+  works and the one that does not. A regression has a cause with a timestamp.
+- **Instrument every boundary in a multi-component failure.** When the failing
+  path crosses components — request to service to store, hook to script to
+  gate, CI to build to sign — log what ENTERS and what EXITS each boundary,
+  plus the config and environment each component actually sees, then run it
+  ONCE to collect evidence. Read that evidence to find WHICH component fails
+  before investigating why it fails. Guessing the layer and then investigating
+  only that layer is the most expensive mistake available here.
+- **Pattern analysis before hypothesis.** Find something that WORKS and is
+  shaped like the broken thing — a sibling call site, an earlier passing run,
+  the reference implementation. Read it COMPLETELY; skimming a reference is how
+  you import its shape without its preconditions. Then enumerate EVERY
+  difference between working and broken, however irrelevant each looks. "That
+  can't matter" is itself a hypothesis, and it is the one that is wrong most
+  often.
+- **One hypothesis, one variable at a time.** State it in writing — "I think X
+  is the root cause because Y" — then make the smallest change that can
+  distinguish true from false. Changing two things at once forfeits the result
+  whichever way it lands: the outcome is unattributable, so the attempt bought
+  nothing. When a hypothesis is wrong, form a NEW one; never stack a second fix
+  on top of the first.
+- **Bounce twice and the design assumption is the suspect.** A shipped fix that
+  bounces once is a wrong hypothesis. Twice is a wrong MODEL: on the second
+  bounce, stop patching and question the design assumption every attempt has
+  shared — the invariant everyone believes holds, the boundary everyone
+  believes is clean, the ownership everyone believes is exclusive. This
+  threshold is deliberately STRICTER than the three-failed-attempts rule the
+  external methodology merged into this text used. Two bounces is already
+  enough evidence, and a third attempt costs a full review cycle to re-learn
+  what the second one said.
+- **Say what you do not know.** "I don't understand X" is a legitimate and
+  useful output; a confident wrong root cause is not. When the evidence runs
+  out, use `AskUserQuestion` to request the log, the recording, the env dump or
+  the access you are missing. Asking costs one turn. A wrong fix costs a review
+  cycle and leaves a plausible-looking patch in the tree for the next person to
+  trust.
+- **Red flags — any of these means STOP and restart from the protocol's first
+  step:** "quick fix now, investigate later"; "just change X and see what
+  happens"; bundling several changes and running the suite once; skipping the
+  test because you will verify by hand; "it's probably X"; "I don't fully
+  understand this but it might work"; adapting a reference you only skimmed;
+  proposing fixes before tracing the data flow; and, loudest of all, reaching
+  for one more attempt when the last two failed.
+- **The environmental exit is real but narrow.** If investigation genuinely
+  lands on an external, timing-dependent or environmental cause, you have
+  COMPLETED this protocol rather than escaped it: write down what you
+  investigated and ruled out, implement the appropriate handling (a bounded
+  retry, a timeout, an honest error message), and add the logging that makes
+  the next occurrence diagnosable. Reaching this exit without written evidence
+  for the steps above is not a conclusion; it is a guess wearing one.
+<!-- EBF-CORE-END -->
 
 Only after step 6 do you decide between `qa-gate.sh approve` and `qa-gate.sh block`.
 
@@ -350,6 +435,7 @@ bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID" --fil
   "decisions": ["Assembled and validated review-request (review iteration N); reviewer_lane=codex, so the Sol review turn is deferred to the root orchestrator's relay."],
   "blockers": [],
   "llm_observations": "freeform — REVIEW-RELAY: status=needs-review. The validated review request is at .claude/.qa-tracking/review-request-<task-id>.json (risk_threshold=<sev>, stop_condition=<...>). The root orchestrator runs codex-review.sh at the root, records the artifact via qa-gate.sh review-record, and re-engages QA; the artifact is ADVISORY packet item 8.",
+  "context_coverage": "freeform — what you read to reach this handoff (the diff, the SPEC, the impact report, which review modules you ran), what you deliberately skipped and why, and the largest unknown the reviewer should chase.",
 
   "approved": false,
   "qa_status": "needs-review",
@@ -373,6 +459,8 @@ On this spawn you do NOT run `codex-review.sh` yourself (it drives an MCP server
 - It **informs** your verdict. Findings you agree with at or above `risk_threshold` go into `must_fix` and route through your normal `qa-gate.sh block` round-trip. When the specialist fixes one, the resolution is recorded with evidence: `bash .claude/scripts/qa-gate.sh resolve-finding <tid> <finding-id> --fix '<commit or path:line>' --test '<test that proves it>' '<summary>'` — both refs are mandatory, which is the evidence-before-fix protocol expressed as a record.
 - It **does not** bind you. A finding you judge wrong is not silently dropped: surface the disagreement in `llm_observations` for the orchestrator, which arbitrates and records the decision (`qa-gate.sh arbitrate <tid> <finding-id> <overrule|sustain> '<rationale>'` — see `orchestrator.md` section 5d). Arbitration is the ORCHESTRATOR's call, not yours and not the implementer's: it is the only party to the dispute that is neither reviewer nor author. Since V3 the count is binding — `overrule` clears the finding, `sustain` leaves it open and blocking.
 - It **never** approves, labels, or releases *by itself*. Your `qa-approved` record is still the only release credential and principle 6's "one approval source of truth" is unchanged. What V3 added is a NECESSARY condition, not a second approval path: `verify-before-stop.sh` re-runs the same `review-check.sh gate` predicate before releasing, so a finding recorded AFTER your approval re-arms the gate. Future editors: the review artifact is wired into both gate ends deliberately (claude-workflow-plugin-jio.1) — do not add a THIRD place that reads these records.
+
+**Verify each finding before you route it.** A finding is a technical claim, and promoting one into `must_fix` without checking it costs the specialist a full round-trip on work that may be correct. Open the cited `path:line` and confirm the described condition exists; confirm it reproduces; ask whether the current implementation exists for a reason the reviewer could not see from the diff; and grep before endorsing an "implement it properly" finding that asks for generality nothing calls. Never respond performatively to a reviewer — "You're absolutely right!" and its relatives are agreement-shaped noise that carries no information and is actively misleading before you have checked. A finding you have verified goes into `must_fix` with its evidence; a finding you judge wrong goes into `llm_observations` with your technical reasoning and the orchestrator arbitrates it; a finding you cannot verify either way is recorded as exactly that, naming what you would need. All three are legitimate outputs. Silent acceptance is not one of them.
 
 ## 6. Rubric grading via the grader subagent (Phase A, root-orchestrated relay)
 
@@ -418,7 +506,7 @@ The packet is eight items — seven mandatory, plus the advisory review artifact
    # the appropriate refspec (e.g. main...HEAD).
    ```
 
-4. **The specialist's F7 completion contract** — the structured JSON return payload the specialist surfaced when handing the task to QA. Read it from the Beads task notes or from the orchestrator's hand-off. All six base fields (`task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`) must be present; missing fields are a finding the grader will record.
+4. **The specialist's F7 completion contract** — the structured JSON return payload the specialist surfaced when handing the task to QA. Read it from the Beads task notes or from the orchestrator's hand-off. All seven base fields (`task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage`) must be present; missing fields are a finding the grader will record.
 
 5. **`LESSONS.md` contents**:
 
@@ -479,6 +567,7 @@ bd_doc_write(task_id="$TASK_ID", name="grading-packet", content="""
 Task type: $TASK_TYPE
 Task labels: $LABELS
 Applicable rubrics: default, $DOMAIN_OVERLAY[, bugfix]
+Graded change set: $IMPACT_REPORT_CHANGE_SET_HASH
 
 ### 1. bd show output
 $BD_SHOW_OUTPUT
@@ -510,6 +599,8 @@ $REVIEW_ARTIFACT_JSON
 
 The template emits all eight sections. A packet that stops at section 6 is incomplete — the grader scores regression-coverage claims against item 7's caller data and reads item 8 as advisory context, and it will record a `needs_revision` finding naming whichever item is missing.
 
+`Graded change set:` is the `change_set_hash` from the impact report you paste as item 7 — copy it verbatim into the header so it is readable without parsing the embedded JSON. It is the value the orchestrator passes to `grade-record --graded-hash`, and it is what makes the recorded verdict bind **what the grader was shown** rather than whatever happens to be in the tracker when the verdict is written. Omit it and the verdict is still recorded, but it binds only if nothing moved in the meantime; if work landed while the grader ran, the record is written unbound and the next relay round re-grades.
+
 Then return the structured `needs-grading` status in your completion contract — add a top-level `qa_status` field (additive on top of the QA superset) alongside the standard `approved: false`. The full QA contract you return on this spawn looks like:
 
 ```json
@@ -520,6 +611,7 @@ Then return the structured `needs-grading` status in your completion contract �
   "decisions": ["Assembled grading-packet doc (iteration N) and returned needs-grading; rubric grader spawn deferred to root orchestrator."],
   "blockers": [],
   "llm_observations": "freeform — RUBRIC-RELAY: status=needs-grading. The grading packet is persisted as bd_doc grading-packet on the task; the root orchestrator picks it up, spawns the grader, records the verdict via qa-gate.sh grade-record, and re-engages QA on the next spawn.",
+  "context_coverage": "freeform — which of the eight packet items you actually read end-to-end versus pasted through, anything you could not obtain (and why), and the largest unknown the grader is being asked to decide without.",
 
   "approved": false,
   "qa_status": "needs-grading",
@@ -549,12 +641,16 @@ LATEST_RUBRIC=$(bd show "$TASK_ID" --json \
              | last.text // ""')
 ```
 
-Branch on the verdict carried in that comment (the `grade-record` shape is `RUBRIC <version> iteration <n>: <verdict> — <summary>`, with the structured JSON pasted below the summary by the helper):
+Branch on the verdict carried in that comment (the `grade-record` shape is `RUBRIC <version> iteration <n>: <verdict> change_set_hash=<h> — <summary>`, with the structured JSON pasted below the summary by the helper):
 
 - **`satisfied`** — the label `rubric-satisfied` is already set by `grade-record`. Proceed to subsection 6f's approval-cites-verdict block. Your completion contract on this spawn carries `qa_status: "approved"` (or simply omit `qa_status` and rely on `approved: true`).
 - **`needs_revision`** — extract `required_fixes` from the RUBRIC comment's JSON block and route through the existing `qa-gate.sh block` round-trip (subsection 6d). After the specialist fixes the task and the gate re-enters, the orchestrator will run another relay (assemble a fresh packet via this prompt on the next QA spawn, persist it, return `needs-grading` again).
 
 If the RUBRIC comment is absent on a spawn that is not the very first QA pass for this task, treat that as a malformed relay state and surface it via `llm_observations` for the orchestrator to triage — do NOT silently proceed to approval or block.
+
+**Re-entering the gate does not throw the verdict away** (bjx). The `change_set_hash` in the record names the change set that was graded; `qa-gate.sh enter` keeps `rubric-satisfied` when that hash still matches the current change set, and clears it when the change set has moved since grading. So an `enter` between the verdict and your approval — including the one the Stop hook prints while you are mid-relay — is safe, and if you DO find `rubric-pending` back on a task you know was graded satisfied, read `enter`'s `observations`: it says which of the two happened. A cleared label after a genuine change means the change set grew since it was graded; ask the orchestrator for another relay rather than overriding.
+
+Know the limit before you lean on it: that hash covers the changed-file **list**, not file contents (the same path-scoped canonicalisation your `reviewed_hash` uses). If the specialist rewrote a file that was already in the change set after the verdict was recorded, the label is preserved and the grader never saw that content — a preserved `rubric-satisfied` is evidence about *which files* were graded, not a guarantee that every byte under review was. Your own review still has to read the diff.
 
 ### 6d. needs_revision: block the specialist and iterate
 
@@ -677,7 +773,7 @@ The helper dedup-merges by normalized text, so re-proposing a lesson the ledger 
 
 ## 10. Completion contract
 
-When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical six base fields shared with `backend.md` and `frontend.md`, plus a documented QA-specific superset on top. The base six must keep their canonical names and ordering; QA-specific fields are additive, not replacements.
+When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus a documented QA-specific superset on top. The base seven must keep their canonical names and ordering; QA-specific fields are additive, not replacements. `context_coverage` is the seventh and newest, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises.
 
 ```json
 {
@@ -687,6 +783,7 @@ When you finish a review — whether you approved or blocked — return a struct
   "decisions": ["short description of each call QA made during review"],
   "blockers": ["issues that prevented QA from completing the review"],
   "llm_observations": "freeform — mandatory",
+  "context_coverage": "freeform — mandatory: what you read, what you deliberately skipped and why, the largest remaining unknown",
 
   "approved": true,
   "files_verified": ["path/to/file.ts", "path/to/other.py"],
@@ -705,8 +802,9 @@ Base-field semantics for the QA role:
 - `decisions`: calls QA made during the review — for example "approved despite suggested follow-up X because Y", "scoped review to files A and B because change is isolated", "used reproduction R to confirm regression".
 - `blockers`: issues that blocked QA from completing the review itself (missing fixtures, environment failures, unreviewable diffs, upstream task incomplete). This is review-process-blocking and is different from `must_fix`, which is implementation-blocking and feeds into `qa-gate.sh block`.
 - `llm_observations`: freeform, mandatory. Use it for anything the schema does not capture — surprising behaviour, hunches about brittle areas, notes for the QA-of-QA reviewer, or context the next agent in the chain will need. Never leave it empty; an empty string defeats the purpose of the contract.
+- `context_coverage`: freeform, mandatory. Three things, in order — what you read to reach this verdict (which packet items, which files in the diff, which prior comments on the task), what you deliberately did NOT read and why (a file you judged out of blast radius, a subsystem you scoped out), and the largest remaining unknown your verdict rests on. For QA specifically this is where a bounded review declares its own bounds: an approval that scoped itself to two files is honest, an approval that silently did so is not. Name files; "reviewed the change set" is a non-answer.
 
-QA-specific superset (additive, on top of the base six):
+QA-specific superset (additive, on top of the base seven):
 
 - `approved`: the gate decision; matches whichever `qa-gate.sh` verb you invoked.
 - `files_verified`: files QA inspected during review (read, traced, reasoned about). Typically much larger than `files_changed`.

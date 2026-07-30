@@ -432,17 +432,20 @@ function invOrchestratorNoEdits(trace: Trace): InvariantResult {
 // Invariant 3: completion-contract
 // ============================================================================
 /**
- * Every specialist completion payload carries all six F7 fields
+ * Every specialist completion payload carries all seven F7 fields
  * (task_id, files_changed, tests_added, decisions, blockers,
- * llm_observations).
+ * llm_observations, context_coverage).
  *
  * SKIPPED: the current `Trace` schema does not capture specialist
  * completion payloads as structured data. The closest signals are the
  * final assistant text of each subagent and free-form `notes` in
- * `bd_update_task` calls — neither is parseable for a six-field
+ * `bd_update_task` calls — neither is parseable for a seven-field
  * presence check without false positives (regex over assistant prose
  * is not evidence). Faking this invariant would make the gate
  * worthless.
+ *
+ * v4.1 (context_coverage, C2) widened the field list this invariant
+ * WOULD check. It did not narrow the trace gap, so the skip stands.
  *
  * TRACE GAP: capturing the completion payload as structured trace
  * fields is a Phase A follow-up (it ties into the rubric grader's

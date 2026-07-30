@@ -1,6 +1,6 @@
 {
   "name": "claude-workflow",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Mandatory orchestrator -> specialists -> QA workflow with Beads task tracking",
   "author": {
     "name": "preql-data",
@@ -28,7 +28,8 @@
   ],
   "commands": [
     "./.claude/commands/workflow-model.md",
-    "./.claude/commands/mutation-sweep.md"
+    "./.claude/commands/mutation-sweep.md",
+    "./.claude/commands/workflow-doctor.md"
   ],
   "skills": [
     "./.claude/skills/workflow-engine"

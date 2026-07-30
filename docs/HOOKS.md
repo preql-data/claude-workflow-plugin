@@ -105,10 +105,19 @@ The shipped `hooks` block wires all six event types (the file also carries
 }
 ```
 
-> The plugin-manifest `.claude/hooks/hooks.json` mirrors this block and
-> additionally wires `SubagentStart` (`subagent-start.sh`) and a second
-> `PostToolUse` matcher (`^Bash$` → `bd-github-link.sh`) for
-> plugin-scoped installs.
+> The plugin-manifest `.claude/hooks/hooks.json` mirrors this block. Both files
+> now wire `SubagentStart` (`subagent-start.sh`); the ONE remaining difference
+> is a second `PostToolUse` matcher (`^Bash$` → `bd-github-link.sh`) that only
+> `hooks.json` carries, for plugin-scoped installs.
+>
+> That difference is the *only* one permitted. `platform-audit.test.sh` checker
+> (f) compares the two files' whole hook surface — event set plus per-event deep
+> equality — and pins the PostToolUse allowance as exactly "settings' list plus
+> that one entry", so drift in any other event, a *different* drift in
+> PostToolUse, or an event deleted from **both** files all fail. (Before v4.1
+> C1b the checker compared `SubagentStart` alone, and this sentence still
+> claimed `SubagentStart` was one of the differences after it had stopped being
+> one.)
 
 ---
 
@@ -121,20 +130,21 @@ The shipped `hooks` block wires all six event types (the file also carries
 ### What It Does
 
 ```bash
-# 1. Verify Beads is available
-if ! command -v bd &> /dev/null; then
-    echo '{"error": "Beads (bd) not found"}'
-    exit 1
-fi
+# 1. Probe the dependencies. THIS HOOK HAS NO EXIT PATH THAT LOSES THE
+#    CONTEXT (v4.1 / C0c). It never bails; a missing dependency becomes a
+#    <workflow_degraded> block INSIDE the envelope. See "Degraded mode".
+BD_ON_PATH=0;   command -v bd >/dev/null 2>&1 && BD_ON_PATH=1
+BD_WORKSPACE=0; [ -d "$PROJECT_DIR/.beads" ] && BD_WORKSPACE=1
+BD_AVAILABLE=0                       # needs BOTH: the binary and a workspace
+[ "$BD_ON_PATH" = 1 ] && [ "$BD_WORKSPACE" = 1 ] && BD_AVAILABLE=1
+JQ_ON_PATH=0;   command -v jq >/dev/null 2>&1 && JQ_ON_PATH=1
 
-# 2. Verify Beads is initialized
-if [ ! -d "$PROJECT_DIR/.beads" ]; then
-    echo '{"error": "Beads not initialized. Run: bd init"}'
-    exit 1
-fi
+# 2. Build the degraded block (empty when nothing is missing). Seeded into
+#    CONTEXT first so it lands at the TOP of additionalContext.
+DEGRADED_BLOCK="<workflow_degraded severity=\"high\">...</workflow_degraded>"
 
-# 3. Run bd doctor silently
-bd doctor --quiet
+# 3. Run bd doctor silently — gated, like every other bd call below
+[ "$BD_AVAILABLE" = 1 ] && bd doctor --quiet
 
 # 4. Create session marker
 touch "$PROJECT_DIR/.claude/.session-start"
@@ -152,24 +162,76 @@ if [ -z "$(current-task.sh get)" ]; then
     qa-gate.sh baseline-capture --by session-start
 fi
 
-# 6. Get bd prime output (Beads' agent context)
-BD_PRIME=$(bd prime)
+# 6. Get bd prime output (Beads' agent context) — gated on BD_AVAILABLE,
+#    as are bd blocked / bd list / bd --version below
+[ "$BD_AVAILABLE" = 1 ] && BD_PRIME=$(bd prime)
 
 # 7. Load CLAUDE.md (project memory)
 # 8. Get blocked issues (bd blocked)
 # 9. Get qa-pending issues
 # 10. Inject workflow instructions
 
-# 11. Output JSON for additionalContext
-cat << EOF
-{
-  "hookSpecificOutput": {
-    "hookEventName": "SessionStart",
-    "additionalContext": "..."
-  }
-}
-EOF
+# 11. Encode and emit. Three tiers, each still VALID JSON:
+#     jq -Rs .  ->  built-in awk encoder  ->  a fixed minimal literal.
+CONTEXT_JSON=""
+[ "$JQ_ON_PATH" = 1 ] && CONTEXT_JSON=$(printf '%s' "$CONTEXT" | jq -Rs .)
+[ -z "$CONTEXT_JSON" ] && CONTEXT_JSON=$(printf '%s' "$CONTEXT" | ss_json_string)
+printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": %s\n  }\n}\n' "$CONTEXT_JSON"
 ```
+
+### Degraded mode
+
+**This hook never bails and never exits non-zero.** Until v4.1 it had two
+hard `exit 1` paths that printed a bare `{"error": "..."}` — not a
+`hookSpecificOutput` envelope. Claude Code discards non-envelope hook
+output with no diagnostic, so those paths produced a session with the
+plugin fully installed, **no `workflow_engine` block, no delegation
+contract and no gate instructions**, and nothing anywhere saying so. That
+was symptom 1 of the v4.1 P0 (epic `claude-workflow-plugin-2br`) and it is
+the worst failure direction the plugin has: a gate that silently ceases to
+exist is indistinguishable from a session that never needed one.
+
+Everything after the probe is fail-open and the `<workflow_engine>` block
+is unconditional, so those two bails were the only paths that could lose
+the context wholesale. They are now replaced by loud degradation.
+
+| Missing | Detected as | Result |
+|---------|-------------|--------|
+| `bd` not on PATH | `command -v bd` fails **in the hook's shell** | `<workflow_degraded>` naming **PATH divergence first**, with the `bash -lc` vs `bash -c` discriminator |
+| `.beads/` absent | directory test | `<workflow_degraded>` naming `bd init` — reported separately, because the PATH advice would be wrong here |
+| `jq` not on PATH | `command -v jq` fails | `<workflow_degraded>` naming jq; the envelope is encoded by the built-in awk fallback |
+
+The block is placed at the **top** of `additionalContext`, before
+`beads_context` and the issue lists. An LLM that reads 13 KB of workflow
+rules before the warning has already decided how to behave by the time the
+warning arrives.
+
+It always says three things: **what is missing** (with `fix:` lines that
+`workflow-doctor.sh` echoes verbatim in its `session_start` report), **that
+the delegation contract is unchanged and still binding**, and **that
+enforcement is now advisory** because the Beads-backed state that proves
+compliance is what went missing. A session told "degraded" without the
+second point will reasonably conclude the contract was lifted.
+
+Two things deliberately keep running in degraded mode:
+
+- **The gate baseline.** `qa-gate.sh baseline-capture` is git-only (it does
+  not require bd) and the Stop hook is the only enforcement surface left
+  standing, so removing its baseline would make every pre-existing dirty
+  path read as this session's unreviewed work.
+- **The envelope.** With `jq` absent the old writer emitted
+  `"additionalContext": ` followed by nothing — invalid JSON, discarded by
+  the runtime, indistinguishable from having no hook at all. The awk
+  fallback encoder keeps the full context; a fixed minimal literal carrying
+  its own degraded warning is the last resort.
+
+Verify the whole install — including whether this hook's envelope actually
+carries the contract — with `bash .claude/scripts/workflow-doctor.sh`.
+Regression coverage lives in
+`.claude/tests/component/specs/installer-target-functional.sh` section 6,
+which runs a rendered target's hook with `PATH=/usr/bin:/bin`. That is the
+*only* place the symptom is caught: the doctor's own `session_start` check
+runs on a host where bd is present, so it passes against the pre-C0c hook.
 
 ### Context Injected
 
@@ -351,9 +413,18 @@ The denylist approach means almost everything is tracked. Tracked files
 include source code (`.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.rs`,
 `.java`, `.rb`, `.php`, `.vue`, `.svelte`), stylesheets (`.css`, `.scss`),
 markup (`.html`, `.md`, `.yaml`, `.toml`), infra (`Dockerfile`, `.tf`,
-`.proto`), and config (`.json`, `.env.example`). What's denied: anything
-inside `node_modules/`, `dist/`, `build/`, `coverage/`, `.git/`, `.next/`,
-plus `*.lock`, `*.pyc`, `*.map`, `*.min.{js,css}`, and the major lockfiles.
+`.proto`), and config (`.json`, `.env.example`).
+
+There is exactly one authoritative list of what is *denied*, and it is not
+this document: `.claude/scripts/workflow-denylist.sh` carries the regex with a
+numbered comment block explaining each intent group. Broadly it covers build
+and dependency output, lockfiles and compiled/minified artifacts, and
+workflow-internal churn (worktrees, e2e fixture sync, agent memory, plan-mode
+plan files, the harness session scratchpad, mutation-sweep run state). Read
+the lib for the current set — a second enumeration here would drift, which is
+the same failure mode that motivated consolidating the regex in the first
+place. Note that a denied path is not merely untracked: it never enters
+`change_set_hash` either, which is why editing that lib is a migration.
 
 ### The shared denylist (`workflow-denylist.sh`)
 
@@ -391,10 +462,44 @@ Beyond build artifacts and lockfiles the regex also drops:
   They leave the reviewable set BEFORE the F1 doc-only classification, so a
   memory-only change set is `empty` (release, no gate record) rather than
   `doc-only` (auto-approved WITH a `[review bypass: ...]` record about nothing).
+- `.claude/plans/` — plan-mode plan files, matched wherever they live. The
+  real shape is `~/.claude/plans/<slug>.md`, **outside the repo**: `post-edit.sh`
+  records `tool_input.file_path` verbatim, so the change set was never bounded
+  by the project root. A plan is the INPUT to the work, not the work. This one
+  was a hard dead end rather than noise — see the v4.1 note under "Denylist
+  changes are a hash migration" below. `docs/plans/` is a tracked deliverable
+  and does not match.
+- `/tmp/claude-<session>/` (and `/private/tmp/...` on macOS) — the harness's own
+  per-session scratchpad, where grader verdicts and relay artifacts are written.
+  They used to mutate the change-set hash mid-relay. The branch is `^`-anchored
+  and absolute so a repo-relative `src/tmp/claude-1/` is untouched.
+- `.claude/.mutation-runs/` and `.claude/.mutation-worktrees/` — per-run reports
+  and throwaway checkouts from `.claude/tests/mutation/mutation-sweep.sh`.
+  Gitignored, but still reachable by `Edit`, because `--keep-worktrees` exists
+  so a human can debug a surviving mutant in situ. The harness's own source
+  under `.claude/tests/mutation/` is a deliverable and does not match.
 
 Deliberately **not** denylisted: `CLAUDE.md` (behaviour-bearing — SessionStart
 injects it), `LESSONS.md` and `HANDOFF.md` (audit deliverables). The `*.md`
 doc-only fast path already handles those when they change alone.
+
+Also deliberately not denylisted: **`/tmp` and `/var/folders/` as a class**, and
+the reason is mechanical rather than stylistic. Two component specs seed
+`changed-files.txt` with ABSOLUTE paths rooted at `mktemp -d`'s parent —
+`specs/impact-report-paths.sh` (the project / sibling-worktree / foreign-repo /
+non-git-scratch mix that exists to prove path relativisation) and
+`specs/worktree-approval-resolution.sh` (the worktree-absolute spellings that
+exist to prove the cross-worktree approval bridge). That parent is `/tmp/...` on
+a Linux CI job and `/var/folders/...` on a macOS dev box, so either pattern
+would silently empty both change sets and both specs would keep passing while
+proving nothing. The narrow `/tmp/claude-<session>/` branch above is safe
+precisely because those fixtures are created as
+`mktemp -d -t component-fixture.XXXXXX`, which never yields a `claude-` prefix.
+Agent-chosen scratch outside that prefix (`/tmp/qa-p5n-probe/`, a bare
+`/tmp/enc-diff.sh`) is addressed by **prompt guidance** — `qa.md` and the three
+specialist prompts direct throwaway probes to the session scratchpad or
+`.claude/.qa-tracking/` — never by widening the regex. Prompts suggest and
+mechanics guarantee; here the mechanic would break the guarantees.
 
 If the lib is missing, each consumer fails closed in its own idiom:
 `impact-report.sh` exits 3 and emits no hash (upstream treats an empty hash as
@@ -415,21 +520,41 @@ That is the correct direction — a stale approval must not release — but it i
 user-visible friction, so **ship every denylist addition in ONE landing**: one
 landing costs in-flight cycles exactly one migration.
 
-Recovery for a cycle caught mid-flight:
+Recovery for a cycle caught mid-flight is exactly what the block reason prints —
+no extra step:
 
 ```bash
-bd label remove <task-id> qa-approved     # retire the stale approval FIRST
 bash .claude/scripts/qa-gate.sh enter <task-id>
 bash .claude/scripts/impact-report.sh <task-id>
 bash .claude/scripts/qa-gate.sh approve <task-id> '<approval summary>'
 ```
 
-The `bd label remove` step is **required** and is not yet printed in the
-gate's own block reason: `enter` does not clear `qa-approved`, and `approve`
-short-circuits as an "idempotent no-op" while that label is present, so
-`enter` + `approve` alone writes no new record and the gate stays blocked.
-(Behaviour pinned by `.claude/tests/component/specs/denylist-shared.sh`
-section C.)
+Do **not** remove the `qa-approved` label first. Until v4.1 that removal was
+mandatory and undocumented in the block reason (`enter` does not clear
+`qa-approved`, and `approve` short-circuited as an "idempotent no-op" while it
+was present, so the printed recipe wrote no new record and the gate stayed
+blocked — claude-workflow-plugin-gz3). `approve`'s idempotency is now hash-aware,
+so a stale label no longer stops it; see
+[Approve idempotency is hash-aware](#approve-idempotency-is-hash-aware).
+Re-review the change set before re-approving: the guard removes a dead end, it
+does not waive a check. (Pinned by
+`.claude/tests/component/specs/denylist-shared.sh` C4/C5, which drive the
+commands extracted from the block text.)
+
+**Landings so far.** v4.0.0 (2026-07-26) consolidated three drifted copies into
+one lib and added `.claude/worktrees/`, the e2e fixture churn, `MEMORY.md` and
+`.claude/memory/`. v4.1.0 (2026-07-29) added three more **together, in one
+commit**, because the change set turned out never to have been bounded by the
+repo: `(^|/)\.claude/plans/`, `^(/private)?/tmp/claude-[^/]+/`, and
+`(^|/)\.claude/\.mutation-(runs|worktrees)/`. Sections C and D of
+`denylist-shared.sh` split the proof between them: **C** drives an invented
+canary and shows that editing the lib moves all three consumers and re-blocks a
+stale approval; **D** pins the *pre-landing* lib — the shipped regex with those
+three alternatives stripped by literal substring — records an honest approval
+under it, and then restores the real lib, so the restore *is* the v4.1 landing.
+D's first assertions are a discriminating control: they fail loudly if a future
+rename makes the strip a silent no-op, because a "pre-landing" lib identical to
+the shipped one would let every other D assertion pass while proving nothing.
 
 ### Tracking File Location
 
@@ -445,6 +570,9 @@ section C.)
 │                            # also the approved-file-set record another checkout reads
 │                            # (see "Cross-worktree approval resolution")
 ├── sync-errors.log          # Best-effort bd-call failures surfaced by SessionStart
+├── worktree-sweep.log       # SessionEnd's REPORT-ONLY worktree-sweep count, surfaced
+│                            # (and truncated) by SessionStart. Its own file, NOT
+│                            # sync-errors.log — see "SessionEnd Hook" below
 └── .changed-files.lock      # flock target (only on systems with flock)
 ```
 
@@ -519,18 +647,17 @@ fi
 #     ahead of that guard re-enters the Stop hook forever).
 if [ -z "$WORKFLOW_DENYLIST_REGEX" ]; then emit_block "..."; fi
 
-# 2. Check for tracked changes (denylist-filtered)
-if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
-    CODE_CHANGES_DETECTED=true
-fi
+# 2. Check for tracked changes. `reviewable_changes` is the ONE definition of
+#    "what counts as a change right now": the denylist-filtered tracker, or —
+#    only when that yields nothing — 2b's git fallback. Step 6a re-reads it.
+while IFS= read -r f; do CODE_CHANGES_DETECTED=true; done < <(reviewable_changes)
 
-# 2b. Fallback: git status MINUS the gate baseline, so only entries NEW
-#     since the baseline count. Requires `git rev-parse --git-dir`, not
-#     `-d .git` (linked worktrees). See "The gate baseline".
-if [ "$CODE_CHANGES_DETECTED" = false ] && has_git_repo; then
-    comm -23 <(git status --porcelain | LC_ALL=C sort) \
-             <(gate_baseline_entries | LC_ALL=C sort)
-fi
+# 2b. Fallback (inside reviewable_changes): git status MINUS the gate baseline,
+#     so only entries NEW since the baseline count. Requires
+#     `git rev-parse --git-dir`, not `-d .git` (linked worktrees). See "The gate
+#     baseline".
+#     comm -23 <(git status --porcelain | LC_ALL=C sort) \
+#              <(gate_baseline_entries | LC_ALL=C sort)
 
 # 3. If no changes, allow
 if [ "$CODE_CHANGES_DETECTED" = false ]; then
@@ -559,9 +686,13 @@ fi
 # (verify-before-stop.sh:20-22); a comment that merely says "QA APPROVED"
 # does NOT release the gate, and `.qa-tracking/approved` is never read.
 
-# 6b. Label present but no record matches this checkout's hash? Before
-#     blocking, try to bind the approval to another WORKTREE of the same repo
-#     (read-only, bounded, fail-closed). See "Cross-worktree approval
+# 6a. Label present but no record matches? Re-read reviewable_changes from
+#     FRESH state first: if there is nothing left to review, an `approve` landed
+#     while this hook was running and the block would be transient noise.
+#     See "The vanished-change-set release" below.
+
+# 6b. Still blocking? Try to bind the approval to another WORKTREE of the same
+#     repo (read-only, bounded, fail-closed). See "Cross-worktree approval
 #     resolution" below.
 
 # 7. If not approved, BLOCK
@@ -664,6 +795,219 @@ recorded *after* an approval — a second review round, a re-opened issue — an
 the approval record, written once, cannot know about them. Both sides fail
 CLOSED: a missing or unrunnable `review-check.sh` refuses/blocks rather than
 waving the change through.
+
+### Approve idempotency is hash-aware
+
+`qa-gate.sh approve` used to no-op whenever the `qa-approved` label was already
+present. That made the LABEL mean "already approved" on the writer side while the
+Stop hook had moved to a RECORD bound to the current change-set hash — and the
+disagreement deadlocked recovery. A `LABEL_WITHOUT_RECORD` block prints
+`enter -> impact-report -> approve`; `enter` does not clear `qa-approved`; so
+`approve` short-circuited, wrote no fresh record, and the same block fired again
+forever. The only escape was an undocumented `bd label remove <tid> qa-approved`
+(claude-workflow-plugin-gz3).
+
+Since v4.1 the guard compares hashes:
+
+| State | Behaviour |
+| --- | --- |
+| label set **and** a `QA-GATE APPROVED` record binds the change set this approve would bind | success **no-op** (`observations` say `idempotent no-op`), no second record |
+| label set, no record binds it (post-approval edit, denylist hash migration, forged/stale label) | **proceeds**: re-runs the impact-freshness refusal, the independent-review refusal and the rubric snapshot, then writes a FRESH bound record (`observations` say `stale-label re-bind`) |
+| label set, change set moved, impact report NOT regenerated | still **refused** (exit 2, `impact_report_stale`) — the guard removes a dead end, it does not skip a check |
+
+"The change set this approve would bind" is the live `--hash-only` recompute,
+except when `changed-files.txt` is empty — the state a previous `approve` leaves
+behind, since it truncates the tracker. There the persisted
+`impact-report-<tid>.json` is the only surviving witness of the approved change
+set, so that is what the comparison reads. This is why a plain double `approve`
+is still a no-op rather than a staleness refusal, and it is the same
+read-the-persisted-record rule the cross-worktree resolution follows. Both
+envelopes name which of the two references they compared against, so the
+comparison is never invisible.
+
+**Known residual of the empty-tracker arm** (reproduced and pinned as section H
+of the spec below): if the tracker is empty *and* real un-baselined dirt exists —
+work written by a helper rather than the Edit tool, which never reaches
+`changed-files.txt` — the Stop hook blocks on the git half of its predicate while
+the persisted report still witnesses the *previous* approval, so a bare `approve`
+no-ops and the block stands. Run the remediation the block prints, all three
+lines of it: step 2 (`impact-report.sh`) re-persists the report, after which no
+record binds it and `approve` proceeds. Closing this inside `approve` would mean a
+second copy of the Stop hook's baseline-relative git walk, and that walk lives in
+exactly one place (`reviewable_changes`) on purpose.
+
+The contract change is reflected in the `bd_qa_approve` MCP tool description and
+pinned by `.claude/tests/component/specs/approve-idempotency.sh` (sections A-C
+and H, plus a META that reverts the guard and shows the deadlock return).
+
+### Rubric verdicts are bound to the change set they graded
+
+`qa-gate.sh enter` used to clear `rubric-satisfied` unconditionally, on the
+principle that a satisfied verdict from a previous change set must never carry
+into a new review cycle. The principle is right; the implementation could not
+tell "previous" from "this one, thirty seconds ago".
+
+That mattered because of *where* `enter` gets called. `grade-record` runs in the
+orchestrator's turn (RUBRIC-RELAY step C) and QA acts on the verdict in a later
+spawn (step D). Any Stop in between blocks and **prints** `qa-gate.sh enter <id>`
+— both the QA-required block ("when entering review, mark the gate") and the
+`LABEL_WITHOUT_RECORD` remediation do. Following the gate's own printed
+instruction destroyed the verdict recorded seconds earlier against the identical
+diff, and the `approve` that followed warned *"no satisfied verdict on file"* —
+false, and the thing `qa.md` 6f answers with a written OVERRIDE reason. The gate
+was manufacturing overrides against its own audit trail and driving paid
+re-grades of an already-graded change set (claude-workflow-plugin-bjx).
+
+Since v4.1 `grade-record` writes the change set into the record, exactly as
+`approve` binds `change_set_hash` and `review-record` binds `reviewed_hash`:
+
+```
+RUBRIC <version> iteration <n>: <verdict> change_set_hash=<h> — <summary>
+```
+
+The token sits between the verdict and the em-dash — ahead of all grader-authored
+free text, so every existing reader that keys on the prefix through the verdict
+still matches, and the machine field is never buried inside prose. It is recorded
+on both verdicts: "which change set was found wanting" is as much an audit
+question as "which one passed". It is omitted, not faked, when the hash cannot be
+computed.
+
+`enter` then decides rather than wipes. It keeps `rubric-satisfied` only when
+**both** hold:
+
+| Test | Why |
+| --- | --- |
+| the gate is already open (`qa-gate-entered` set) | a fresh `enter` opens a NEW cycle and always clears — unchanged behaviour, and the case the original clear existed for. `approve` deliberately leaves `rubric-satisfied` behind as audit trail, so a surviving label is the normal input here |
+| the latest RUBRIC record is a `satisfied` one whose `change_set_hash` equals the hash right now | a verdict recorded before the specialist touched three more files does not cover them |
+
+Preservation needs positive evidence, so every way of failing to produce it
+degrades to the old behaviour: a pre-v4.1 record carries no token, a `satisfied`
+superseded by a later `needs_revision` does not answer, a version outside the
+validated class does not parse, and an unavailable hash — in either spelling,
+see below — is refused. All of them clear. When the label is kept,
+`rubric-pending` is deliberately *not* re-armed — a graded cycle is not awaiting
+anything, and both labels at once would tell `qa-gate.sh status` the wrong thing.
+
+Both outcomes are named in `enter`'s `observations` (`kept rubric-satisfied — the
+recorded verdict binds this exact change set` / `cleared stale rubric-satisfied
+(...)`), so the decision is never invisible.
+
+**`rubric_version` is validated, and that is a security boundary, not tidiness.**
+It is the only machine-prefix field that comes from the grader, and it is
+interpolated into the record with a space on each side. Validated merely as
+"non-empty string" it was a **grammar injection**: the reader parses the verdict
+from immediately after the record's first colon, so a version of the form
+`1 iteration 1: satisfied change_set_hash=<real>` relocated that colon into the
+injected text and a `needs_revision` verdict was read back as `satisfied` **and**
+bound to the current change set. `grade-record` now refuses any version outside
+`^[A-Za-z0-9._+-]+$` with `error_key: rubric_version_invalid_chars`; the class
+has no space and no colon, so nothing that passes can move a field boundary. The
+reader carries the same class for parity. (A hand-written `bd comments add` can
+still fabricate a record — that is the llh.18 threat-model boundary, unchanged.
+What is closed is forging through the tool's own validated input.)
+
+**Two spellings of "no hash", both refused.** `impact-report.sh` returns empty
+when it cannot run, and the literal `sha256-unavailable` on a host carrying
+neither `shasum` nor `sha256sum`. The second is a non-empty *constant*, so it
+would be recorded as a binding and then compare equal to itself at `enter` time
+— preserving every verdict on the one class of machine where the hash means
+nothing. The writer omits the token for both, and `enter` refuses both.
+
+**Known limit, inherited and deliberately not narrowed here.** The hash is over
+the changed-file **list**, not file contents. Rewriting an already-tracked file
+after grading does not move it, so a verdict can be preserved over content the
+grader never saw. That is the single canonicalisation shared with the
+`qa-approved` record (llh.18) and `reviewed_hash` (jio.1); computing a content
+hash inside `cmd_enter` would be a fourth definition of "the change set", which
+is what llh.18 exists to forbid. It is pinned as documented behaviour (section
+B3) rather than left latent.
+
+**Where the graded hash comes from.** `grade-record` runs *after* QA assembled
+the packet and *after* the grader ran, so a live recompute at record time is not
+"the change set that was graded" — a path landing in between was silently folded
+in, and a verdict for set A was recorded as covering A+B (R2-F1; a **path** leak,
+distinct from the content-only limit below). Three sources, in descending
+authority:
+
+1. `--graded-hash`, passed by the relay from the packet's `Graded change set:`
+   header (`orchestrator.md` 5a step C). The only value that witnesses what the
+   grader was shown. Deliberately not read from the grader's own JSON — that
+   would let the graded party state what it graded.
+2. A live recompute **corroborated** by the persisted impact report. If the
+   report the packet was built from still describes the current change set,
+   nothing was added in between. This keeps the ordinary relay binding without
+   the flag.
+3. Nothing. If they disagree, the record is written **unbound**, with both
+   hashes named. `enter` then treats it as stale and clears — the pre-bjx
+   behaviour, and the next relay round re-grades.
+
+**`approve` cross-checks the verdict it cites.** The rubric audit line used to be
+emitted from the *label*, so this purely sequential flow produced an approval
+claiming a verdict it did not have: grade set A → `enter` (preserves, correctly)
+→ add path B → regenerate the report → `approve` binds A+B and reports
+"rubric-satisfied preserved (audit trail)" (R2-F2). `cmd_approve` now compares
+`approved_hash` against the satisfied verdict's binding and reports one of three
+states — verified, unbound-so-uncheckable, or **mismatch**. A mismatch warns and
+is recorded in the durable approval comment as
+`[rubric mismatch: graded=<h> approved=<h>]`; it does **not** refuse. That is
+deliberate: `qa.md` 6f states that script-side rubric denial "would create a
+parallel gate and violate principle 6", `verify-before-stop.sh` reads neither
+rubric label nor RUBRIC comment, and the only remediations a refusal could print
+are a paid re-grade or the label-removal dead end 3.5.0/gz3 eliminated. The harm
+was the audit trail lying; that is what is fixed.
+
+**Superseded verdicts.** The reader selects the **latest** RUBRIC record and then
+parses it. It used to `capture` across every comment and take the last *result*,
+so an unparseable latest record fell out and the reader answered with an older
+one — a `satisfied` followed by a `needs_revision` at iteration `1.5` kept the
+stale hash (R2-F3). `iteration` is now validated as a non-negative integer at the
+writer too, but that half is defence-in-depth: it cannot reach a record the
+writer never created (a legacy one, a hand-written comment), and that case
+reproduced on the shipped script. The selector is the load-bearing half.
+
+Pinned by `.claude/tests/component/specs/rubric-binding.sh` (sections A-L, plus
+METAs that revert each half of the preservation fix, the version validation, and
+the sentinel refusals, and a reader differential that attributes R2-F3 to the
+selector rather than to the writer check).
+
+### The vanished-change-set release (`VANISHED-CHANGE-SET`)
+
+The Stop hook reads the change set **twice**: once at its detection stage, and
+again — after the test/lint pass — when it recomputes the hash to match against
+the approval record. `qa-gate.sh approve` runs in a different process (the QA
+subagent) and finishes by truncating `changed-files.txt` and refreshing the gate
+baseline. A Stop whose two reads straddle that finalization recomputes the
+**empty-list** hash, matches no record, and prints the forged-label block for an
+approval that landed seconds earlier. Observed live during the v4.1 upgrade wave
+(recorded on `claude-workflow-plugin-gz3`) and since reproduced deterministically
+at a drive point; the empty-set hash `e3b0c44298fc…` appearing as the *current*
+hash in a block reason is the fingerprint.
+
+So before emitting that block the hook re-derives `reviewable_changes` from fresh
+state and releases when it is empty — the same decision the detection stage makes
+on the next fire. It grants nothing new: "nothing to review -> allow" is already
+the detection stage's rule, reached before any label is consulted. In particular
+it does **not** release when the tracker is empty but real un-baselined dirt
+exists (work written by a helper rather than the Edit tool never reaches the
+tracker), because the git half of `reviewable_changes` still reports it.
+
+Three ordering rules in `qa-gate.sh approve` support this (see its
+`APPROVE-COMMIT ORDER` note; all three are pinned by
+`specs/approve-idempotency.sh` section E — the two reorderings functionally at
+their drive points, the source order structurally):
+
+- the **record** is written before the `qa-approved` **label** (changed in v4.1),
+  so a concurrent Stop never sees the label without a record;
+- the gate **baseline** is refreshed before the **tracker** is truncated
+  (unchanged since 0wk.2, but now load-bearing), so an empty tracker always pairs
+  with a fresh baseline — flipping those two lines re-opens the race;
+- and `current-task` is cleared **after** the truncation (changed in v4.1), so a
+  mid-approve Stop cannot block with "No active Beads task detected".
+
+The tracking-state finalization deliberately stays **after** every step that can
+roll back: a rollback that had already truncated the tracker would leave the
+session's work invisible to the gate, i.e. fail OPEN on the next "no changes"
+fast path.
 
 ### Cross-worktree approval resolution (`WORKTREE-RESOLUTION`)
 
@@ -835,6 +1179,39 @@ clarity, even though stdout is not consumed. Any cleanup that needs to
 happen MUST happen before this hook runs (verify-before-stop is the
 canonical gate point); SessionEnd is best-effort persistence only.
 
+### Worktree sweep (report-only)
+
+**SessionEnd cannot enforce anything.** Its output and its exit code are
+ignored and it cannot block termination, so nothing it decides can be relied
+on. That is the whole reason the worktree sweep runs here in
+**`--report-only`** mode and `--apply` is **never** passed from a hook:
+removing an operator's checkout is a decision, and a hook whose verdict nobody
+reads is the worst place to make one.
+
+What it does: runs `worktree-sweep.sh --report-only --json` under `timeout 8s`
+(where a `timeout`/`gtimeout` binary exists; the script is bounded internally by
+`SWEEP_MAX_CANDIDATES=16` either way), does **no network I/O**, and — only when
+the count is non-zero — appends one `<ts>\t<message>` line to
+`.claude/.qa-tracking/worktree-sweep.log`. SessionStart snapshots and truncates
+that file and renders warning 6, so the notice fires once per event.
+
+**Its own log file, deliberately.** `session-start.sh` renders
+`sync-errors.log`'s head line verbatim as *"Last session's bd sync failed at
+…"* regardless of how the line is tagged, so a sweep line landing there first
+would be reported to the operator as a Beads failure.
+
+`session-end.sh` runs under `set -e`, so every leg of the sweep block is
+`|| true`-guarded: an unguarded failure would kill the hook before its
+`echo "{}"`. The component spec pins that a *failing* sweeper and an *absent*
+one both still leave `{}` on stdout.
+
+Acting on the report is manual:
+
+```bash
+bash .claude/scripts/worktree-sweep.sh            # dry run — the default
+bash .claude/scripts/worktree-sweep.sh --apply    # actually remove
+```
+
 ### sync-errors.log Surfacing
 
 When `bd sync` fails (typically because the bd daemon is unreachable —
@@ -865,6 +1242,8 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 | `bd-github-link.sh` | I3 Beads ↔ GitHub auto-link. PostToolUse hook on Bash invocations. When a Beads task closes, posts a `gh issue comment` linking back; when `gh pr create` runs, parses `Closes #N` and writes `gh-link:` into the task notes. |
 | `detect-stack.sh` | F8/J17 polyglot test runner detection. Emits JSON `{runner, test_cmd, lint_cmd, type_cmd, manifest, overrides}`. Supports npm, pytest, go, cargo, maven, gradle, phpunit, rake, swift, dotnet, make, plus `.claude/test-cmd` overrides. |
 | `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`. Drains stdin (Claude Code passes a session envelope it doesn't need). |
+| `worktree-sweep.sh` | v4.1 (C1b) sweeper for the subagent worktrees at `.claude/worktrees/<name>`. Ones with NO changes are auto-removed when the subagent finishes; ones WITH changes survive, and until this script nothing removed them. **Dry run is the default; `--apply` is the only thing that removes**, and removal is `git worktree remove` + `git worktree prune` — there is no `rm -rf` in the file and `worktree remove` is never `--force`d (both asserted structurally by `worktree-sweep.test.sh`). A worktree is removable only if ALL of: (1) its `cd … && pwd -P`-**resolved** path is physically inside the resolved `.claude/worktrees/` — a string-prefix test is not a containment guard, and this is what excludes an operator's sibling checkout whose name merely *extends* the root's; (2) same repo by `--git-common-dir` identity; (3) `git status --porcelain` empty; (4) `@{upstream}..HEAD` == 0 commits, else `merge-base --is-ancestor <branch> <default>` — **decided locally, never a fetch**; (5) directory mtime older than `--age-days` (default 7); (6) a Beads task resolved from EVIDENCE (the worktree's own `.qa-tracking/current-task`, else a task-shaped branch token bd actually knows) that bd reports `closed`. Any error, unreadable path or ambiguity is NOT a candidate, and each keeper prints its FIRST failing gate. Worktree NAMING is deliberately off the safety path. Flags: `--apply`, `--age-days N`, `--report-only` (wins over `--apply`), `--json`, `--max-candidates N` (default 16, the same bound as the Stop hook's `WTRES_MAX_CANDIDATES`), `--help`. Exit 0 / 1 (a removal failed) / 2 (bad invocation). Invoked report-only by `session-end.sh`; see "Worktree sweep (report-only)". |
+| `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Eleven named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, and drives both gate hooks. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
 
 Each helper is independently testable via the L1 bash unit tier
 (`.claude/scripts/tests/*.sh`) — see `.claude/tests/README.md` for the

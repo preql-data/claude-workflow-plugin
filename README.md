@@ -234,13 +234,18 @@ bash .claude/tests/component/run.sh --filter bd-compat
 
 ## 📦 What you get on disk
 
+Counts re-derived from the tree on 2026-07-30 for the v4.1.0 release audit,
+not carried forward from the previous release.
+
 | Component | Count | Where |
 |-----------|-------|-------|
 | Agents | 7 | `.claude/agents/{orchestrator,qa,backend,frontend,devops,grader,judge}.md` |
-| Hook scripts | 9+ | `.claude/scripts/` (hook events + statusline + lessons + model-select) |
-| MCP servers | 2 | `.claude/mcp/{bd-mcp,code-graph-mcp}/` |
+| Shell scripts | 26 | `.claude/scripts/*.sh` — of which **7** are hook entry points, wired across **7** hook events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, `SessionEnd`); the rest are helpers the agents and hooks call (`qa-gate`, `impact-report`, `review-check`, `workflow-doctor`, `workflow-manifest`, `worktree-sweep`, `model-select`, `lessons`, `statusline`, …) |
+| MCP servers | 2 | `.claude/mcp/{bd-mcp,code-graph-mcp}/` — 21 and 7 tools respectively; `bash .claude/scripts/workflow-doctor.sh` spawns both and asserts those exact counts |
 | Rubrics | 5 | `.claude/rubrics/{default,backend,frontend,devops}.md` + `bugfix.md` overlay |
-| Slash commands | 2 | `.claude/commands/{workflow-model,mutation-sweep}.md` |
+| Slash commands | 3 | `.claude/commands/{workflow-model,mutation-sweep,workflow-doctor}.md` |
+| Skills | 1 | `.claude/skills/workflow-engine/SKILL.md` — the only registered skill, and `plugin.json`'s `skills[]` array is asserted to be length 1 by `vendored-skills.test.sh` |
+| Vendored reference | 1 | `.claude/vendor/superpowers/` — `brainstorming/SKILL.md` from `obra/superpowers` at pin `3dcbd5c4` (MIT), plus `MANIFEST.md` and `LICENSE.upstream`. Deliberately **not** under `.claude/skills/` and **not** registered: an explicit `Read` in `orchestrator.md` loads it exactly where it is wired instead of session-wide. Provenance and the ten local modifications are in `MANIFEST.md`; see also `THIRD_PARTY.md` |
 | Test tiers | L1 + L2 + L3 unit + L3 live + L3.5 mutation | `.claude/scripts/tests/` + `.claude/tests/{component,e2e,mutation}/` |
 | Lessons ledger | 1 | `LESSONS.md` (append-only via `lessons.sh add`) |
 | CI | GitHub Actions | `.github/workflows/test.yml` (lint + offline tiers; live tier `workflow_dispatch`-only; zero API spend per PR) |

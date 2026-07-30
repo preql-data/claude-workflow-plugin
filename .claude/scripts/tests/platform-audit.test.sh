@@ -17,11 +17,27 @@
 #   (d) .mcp.json + .claude-plugin/plugin.json parse; both bd + code-graph
 #       entries are "type":"stdio"; .mcp.json uses the literal ${CLAUDE_PROJECT_DIR:-.}.
 #   (e) every agent frontmatter `effort:` == max (the durable ceiling).
-#   (f) settings.json and hooks.json agree on the SubagentStart entry.
+#   (f) settings.json and hooks.json agree on the WHOLE hook surface: the same
+#       EVENT SET, and deep equality per event.
+#
+# WHY (f) IS NO LONGER SubagentStart-ONLY (v4.1 C1b, claude-workflow-plugin-8xv)
+# ----------------------------------------------------------------------------
+# The two files are hand-mirrored: settings.json is what a session actually
+# loads, hooks.json is what the PLUGIN manifest ships. Until this release the
+# check compared exactly one event, so a hook entry added to, removed from, or
+# retimed in ONE file and not the other was invisible — the plugin and the
+# installed project would silently run different hook sets, which is the same
+# class of drift the shared denylist was consolidated to kill. The gap surfaced
+# while wiring the worktree sweep into SessionEnd (an event the old checker did
+# not cover); closing it is independent of the sweeper.
 #
 # META:
 #   - (a) a tempdir settings.json WITH the effort env key must trip checker (a).
 #   - (b) a tempdir agent file WITH `hooks:` frontmatter must trip checker (b).
+#   - (f) a tempdir hooks.json with an EXTRA event must trip EVENT_SET_MISMATCH;
+#         one with a changed SessionEnd command must trip EVENT_DIFF:SessionEnd;
+#         an unparseable file must trip READ_ERROR (never read as clean); and a
+#         faithful copy must return no violations at all.
 
 set -u
 
@@ -100,6 +116,47 @@ frontmatter_effort() {
     line=$(printf '%s\n' "$fm" | grep -E '^effort:' | head -1)
     if [ -z "$line" ]; then printf '<missing>'; return 0; fi
     printf '%s' "$line" | sed -e 's/^effort:[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+# Echo space-separated violation codes for the settings.json <-> hooks.json
+# hook-surface comparison; empty output == clean. READ_ERROR if either file
+# fails to parse, NO_EVENTS if neither declares any hook (which would make
+# every per-event comparison below vacuously true).
+#
+# The event union is built from TWO independent single-file jq calls rather than
+# one `jq -s` over both: `-s` binds by POSITION, so a file that is secretly a
+# multi-document stream shifts .[0]/.[1] and the comparison silently reads the
+# wrong pair of documents (LESSONS.md). There is no position to get wrong here.
+#
+# `jq -S` sorts object keys recursively so formatting and key order cannot
+# register as drift — but ARRAY order is preserved, because hook execution order
+# is semantic and a reordered array IS a real difference.
+audit_hooks_parity() {
+    local a="$1" b="$2" out="" ka kb ev va vb n=0
+    if ! jq -e . "$a" >/dev/null 2>&1 || ! jq -e . "$b" >/dev/null 2>&1; then
+        printf 'READ_ERROR'; return 0
+    fi
+    ka=$(jq -S -c '(.hooks // {}) | keys' "$a" 2>/dev/null)
+    kb=$(jq -S -c '(.hooks // {}) | keys' "$b" 2>/dev/null)
+    [ "$ka" = "$kb" ] || out="$out EVENT_SET_MISMATCH"
+    while IFS= read -r ev; do
+        [ -n "$ev" ] || continue
+        n=$((n + 1))
+        va=$(jq -S -c --arg e "$ev" '.hooks[$e] // null' "$a" 2>/dev/null)
+        vb=$(jq -S -c --arg e "$ev" '.hooks[$e] // null' "$b" 2>/dev/null)
+        [ "$va" = "$vb" ] || out="$out EVENT_DIFF:$ev"
+    done < <( { jq -r '(.hooks // {}) | keys[]' "$a" 2>/dev/null
+                jq -r '(.hooks // {}) | keys[]' "$b" 2>/dev/null; } | LC_ALL=C sort -u )
+    [ "$n" -gt 0 ] || out="$out NO_EVENTS"
+    printf '%s' "${out# }"
+}
+
+# Echo the count of distinct hook events declared across both files. Reported
+# as a completeness number rather than inferred from "no violations": a checker
+# that compared zero events would also report no violations.
+hooks_event_count() {
+    { jq -r '(.hooks // {}) | keys[]' "$1" 2>/dev/null
+      jq -r '(.hooks // {}) | keys[]' "$2" 2>/dev/null; } | LC_ALL=C sort -u | grep -c . || true
 }
 
 # Echo "file:line" for every deprecated Task-call `mode` param across the
@@ -188,15 +245,40 @@ done
 assert_eq "(e) every agent frontmatter effort: == max ($E_COUNT agents)" "" "${E_BAD# }"
 
 # ---------------------------------------------------------------------------
-# (f) settings.json and hooks.json agree on the SubagentStart entry.
+# (f) settings.json and hooks.json agree on the WHOLE hook surface.
 # ---------------------------------------------------------------------------
 
-echo "--- (f) SubagentStart parity ---"
+echo "--- (f) hook-surface parity (event set + per-event deep equality) ---"
+F_OUT=$(audit_hooks_parity "$SETTINGS" "$HOOKS_JSON")
+# ONE difference is deliberate and documented (docs/HOOKS.md, under the
+# settings.json example): hooks.json wires a SECOND PostToolUse matcher,
+# `^Bash$` -> bd-github-link.sh, for plugin-scoped installs. It is pinned
+# EXACTLY rather than waved through, in two steps: the violation set must be
+# that one code and nothing else, AND the PostToolUse difference must be
+# precisely "settings' list plus that entry". A drift in any other event, or a
+# DIFFERENT drift in PostToolUse, still fails.
+assert_eq "(f) the ONLY hook-surface difference is the documented PostToolUse one" \
+    "EVENT_DIFF:PostToolUse" "$F_OUT"
+# The single quotes are load-bearing: $CLAUDE_PROJECT_DIR is a LITERAL in the
+# manifest and must not expand here.
+# shellcheck disable=SC2016
+F_BASH_ENTRY='{"matcher":"^Bash$","hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/bd-github-link.sh\"","timeout":15000}]}'
+assert_eq "(f) hooks.json PostToolUse == settings.json's PLUS exactly the ^Bash^ entry" \
+    "$(jq -S -c --argjson x "$F_BASH_ENTRY" '(.hooks.PostToolUse // []) + [$x]' "$SETTINGS" 2>/dev/null)" \
+    "$(jq -S -c '.hooks.PostToolUse // []' "$HOOKS_JSON" 2>/dev/null)"
+# Completeness, not absence: N events were actually compared.
+F_COUNT=$(hooks_event_count "$SETTINGS" "$HOOKS_JSON")
+assert_eq "(f) Total: 7 hook events compared" "7" "$F_COUNT"
+# The exact shipped set, so a hook DELETED FROM BOTH files (which the parity
+# check alone would call clean) still fails here.
+assert_eq "(f) the shipped event set is exactly the seven v4 hooks" \
+    '["PostToolUse","PreToolUse","SessionEnd","SessionStart","Stop","SubagentStart","UserPromptSubmit"]' \
+    "$(jq -S -c '(.hooks // {}) | keys' "$SETTINGS" 2>/dev/null)"
 SS_SETTINGS=$(jq -S -c '.hooks.SubagentStart // null' "$SETTINGS" 2>/dev/null)
-SS_HOOKS=$(jq -S -c '.hooks.SubagentStart // null' "$HOOKS_JSON" 2>/dev/null)
 assert_eq "(f) settings.json defines a SubagentStart entry" \
     "no" "$([ "$SS_SETTINGS" = "null" ] && echo yes || echo no)"
-assert_eq "(f) settings.json and hooks.json agree on SubagentStart" "$SS_HOOKS" "$SS_SETTINGS"
+assert_eq "(f) hooks.json defines a SessionEnd entry" "no" \
+    "$([ "$(jq -S -c '.hooks.SessionEnd // null' "$HOOKS_JSON" 2>/dev/null)" = "null" ] && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
 # META (a): a settings.json WITH the effort env key must trip checker (a).
@@ -266,6 +348,51 @@ body
 MD
 assert_eq "META (b): checker passes an agent without hooks: frontmatter" "no" \
     "$(frontmatter_has_hooks "$META_DIR/good-agent.md")"
+
+# ---------------------------------------------------------------------------
+# META (f): the generalised hook-parity checker must fire on each drift shape.
+# Every fixture is derived from the REAL hooks.json so a change to the shipped
+# file cannot leave these fixtures pinning a shape that no longer exists.
+# ---------------------------------------------------------------------------
+
+echo "--- META (f) ---"
+
+# The baseline pair is hooks.json against a COPY OF ITSELF, not against
+# settings.json: the real pair carries the documented PostToolUse allowance
+# above, and a control that is already non-empty cannot show that the mutations
+# below are what produced their codes.
+cp "$HOOKS_JSON" "$META_DIR/hooks-clean.json"
+assert_eq "META (f): checker passes a faithful pair with no violations at all" "" \
+    "$(audit_hooks_parity "$HOOKS_JSON" "$META_DIR/hooks-clean.json")"
+
+# 1. An event present in one file only.
+jq '.hooks.PreCompact = [{"hooks":[{"type":"command","command":"echo drift"}]}]' \
+    "$HOOKS_JSON" > "$META_DIR/hooks-extra-event.json" 2>/dev/null
+assert_eq "META (f): the extra-event fixture really differs from the shipped file" "1" \
+    "$(cmp -s "$HOOKS_JSON" "$META_DIR/hooks-extra-event.json" && echo 0 || echo 1)"
+assert_contains "META (f): an event in ONE file only trips EVENT_SET_MISMATCH" \
+    "EVENT_SET_MISMATCH" "$(audit_hooks_parity "$HOOKS_JSON" "$META_DIR/hooks-extra-event.json")"
+
+# 2. Same event set, different content — the case the old SubagentStart-only
+#    check could not see for any event but SubagentStart. SessionEnd is chosen
+#    deliberately: it is the event v4.1 C1b added work to.
+jq '.hooks.SessionEnd[0].hooks[0].timeout = 999999' \
+    "$HOOKS_JSON" > "$META_DIR/hooks-diff-value.json" 2>/dev/null
+assert_eq "META (f): the value-drift fixture really differs from the shipped file" "1" \
+    "$(cmp -s "$HOOKS_JSON" "$META_DIR/hooks-diff-value.json" && echo 0 || echo 1)"
+META_F_DIFF=$(audit_hooks_parity "$HOOKS_JSON" "$META_DIR/hooks-diff-value.json")
+assert_eq "META (f): a per-event value change trips EXACTLY EVENT_DIFF:SessionEnd" \
+    "EVENT_DIFF:SessionEnd" "$META_F_DIFF"
+
+# 3. A corrupt manifest must never read as clean.
+printf 'this is not json\n' > "$META_DIR/hooks-broken.json"
+assert_eq "META (f): an unparseable manifest reports READ_ERROR, not clean" "READ_ERROR" \
+    "$(audit_hooks_parity "$HOOKS_JSON" "$META_DIR/hooks-broken.json")"
+
+# 4. A pair that declares no hooks at all must not pass by vacuity.
+printf '{"env":{}}\n' > "$META_DIR/hooks-empty.json"
+assert_contains "META (f): a hookless pair reports NO_EVENTS rather than clean" \
+    "NO_EVENTS" "$(audit_hooks_parity "$META_DIR/hooks-empty.json" "$META_DIR/hooks-empty.json")"
 
 # ---------------------------------------------------------------------------
 # Summary

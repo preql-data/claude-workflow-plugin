@@ -490,7 +490,7 @@ Live runs are audited by the `approval-cites-independent-review` invariant (`.cl
 
 ### QA rubric-grading step (Phase A, spec v3.2.0 — root-orchestrated relay)
 
-Before approval, the rubric grader scores the work in a separate context. **The grader is spawned by the root orchestrator, not by QA** — Claude Code subagents cannot spawn other subagents (`code.claude.com/docs/en/sub-agents`: `Agent(agent_type)` has no effect inside a subagent definition), so the QA-to-grader handoff is implemented as a relay that the orchestrator drives. The institutional memory is `LESSONS.md` lesson 4; the regression that motivated the relay is `claude-workflow-plugin-l1r.6`. The rubric is composed from `.claude/rubrics/default.md` plus a domain overlay (`backend.md`, `frontend.md`, or `devops.md`) plus the `bugfix.md` overlay when the task type is `bug`. Every grader verdict — `satisfied` or `needs_revision` — is recorded via `qa-gate.sh grade-record`, which appends a Beads comment of the shape `RUBRIC <version> iteration <n>: <verdict> — <summary>` and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`.
+Before approval, the rubric grader scores the work in a separate context. **The grader is spawned by the root orchestrator, not by QA** — Claude Code subagents cannot spawn other subagents (`code.claude.com/docs/en/sub-agents`: `Agent(agent_type)` has no effect inside a subagent definition), so the QA-to-grader handoff is implemented as a relay that the orchestrator drives. The institutional memory is `LESSONS.md` lesson 4; the regression that motivated the relay is `claude-workflow-plugin-l1r.6`. The rubric is composed from `.claude/rubrics/default.md` plus a domain overlay (`backend.md`, `frontend.md`, or `devops.md`) plus the `bugfix.md` overlay when the task type is `bug`. Every grader verdict — `satisfied` or `needs_revision` — is recorded via `qa-gate.sh grade-record`, which appends a Beads comment of the shape `RUBRIC <version> iteration <n>: <verdict> change_set_hash=<h> — <summary>` and, on `satisfied`, flips `rubric-pending` to `rubric-satisfied`. The `change_set_hash` names the **changed-file list** that was graded — the same path-scoped canonicalisation the approval record and `reviewed_hash` use, not a hash of file contents — so `qa-gate.sh enter` can tell a verdict that still covers the current work from one left over from a previous change set instead of clearing every verdict it finds (see `docs/HOOKS.md`, "Rubric verdicts are bound to the change set they graded").
 
 The grading packet is eight items: `bd show` output, the SPEC doc, the diff scoped to `.qa-tracking/changed-files.txt`, the specialist's F7 completion contract, `LESSONS.md`, the rubric file(s) being applied, the mechanical impact report (v3.3.0 / G2.n6d), and the independent review artifact (v4 Phase V2 — ADVISORY). Items 1-7 are mandatory; item 8 is advisory input the grader weighs but never scores as a criterion. QA assembles the packet and persists it as a `grading-packet` bd_doc on the task; the orchestrator reads that doc and pastes it into the grader's prompt. The grader's read-only tools (`Read`, `Grep`, `Glob`, `LS`) exist to verify packet claims against the files the diff references — never to browse the repo or propose fixes beyond `required_fixes`.
 
@@ -883,7 +883,8 @@ how the orchestrator chains delegations without re-deriving context.
     "..."
   ],
   "blockers": [],
-  "llm_observations": "<free-form medium-length text>"
+  "llm_observations": "<free-form medium-length text>",
+  "context_coverage": "<free-form medium-length text>"
 }
 ```
 
@@ -915,11 +916,35 @@ how the orchestrator chains delegations without re-deriving context.
   the brief; future readers of the Beads task use it to reconstruct
   the rationale. **A completion payload without `llm_observations`
   is malformed.**
+- **`context_coverage`** — **required, mandatory**. Free-form string,
+  appended AFTER `llm_observations` so the original six keep the canonical
+  names and ordering every specialist prompt promises. Three things, in
+  this order: what you read to ground this change; what you deliberately
+  did NOT read, and why; the largest remaining unknown you are shipping
+  on. The bar is the question a sceptical reviewer asks when they suspect
+  the author was guessing — "did you look at X?" — answered before they
+  have to ask it. Name files; "read everything relevant" is a non-answer,
+  and so is a list with no deliberate omission in it, because there is
+  always one. This is NOT a new principle: it is the evidence-before-fix
+  protocol applied BEFORE the work instead of after. That protocol arms
+  only on bug-typed tasks, and the incident behind it was a 14-PR
+  speculative-fix chain — fourteen plausible patches nobody could rank,
+  because no one had recorded which sources were actually consulted.
+  Ordinary feature work never gets bug-typed, so it never arms; this
+  field is the cheap version that applies everywhere. The orchestrator
+  reads it when deciding whether the next delegation needs a wider brief;
+  QA reads it to judge whether the specialist's confidence was earned;
+  the rubric grader scores it under default criterion C8. **A completion
+  payload without `context_coverage` is malformed.**
 
 The contract is enforced by convention, not schema validation —
 the QA gate doesn't reject missing fields, but the QA agent's review
-checklist asks "did the specialist return all six fields?" and that
-question being honest is part of QA approving.
+checklist asks "did the specialist return all seven fields?"
+(`.claude/agents/qa.md` section 3) and that question being honest is
+part of QA approving. That pointer is load-bearing: through v4.0 this
+paragraph named an enforcement that did not exist — no item in qa.md's
+checklist asked the question — so the contract's only claimed backstop
+was a citation of nothing.
 
 ---
 
@@ -943,6 +968,15 @@ syntax, only matching gitignored files are copied (tracked files are
 never duplicated), and the rule applies to subagent worktrees
 automatically. Worktrees with no changes are auto-removed when the
 subagent finishes.
+
+Worktrees **with** changes survive, and the platform does not come back
+for them — they accumulate under `.claude/worktrees/` until something
+removes them. `.claude/scripts/worktree-sweep.sh` is that something:
+`session-end.sh` runs it `--report-only` and SessionStart surfaces the
+count, but nothing is deleted without a manual `--apply`, and then only
+for a worktree that is contained, clean, pushed-or-merged, old enough,
+and attached to a closed Beads task. See "Worktree sweep (report-only)"
+in `docs/HOOKS.md`.
 
 Why this matters: same-tree parallel agents contaminate each other's
 branches. It is the first entry in `LESSONS.md` because it is the

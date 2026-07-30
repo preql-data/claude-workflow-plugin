@@ -4,6 +4,150 @@ Common issues and solutions for the Ultimate Workflow Plugin.
 
 ---
 
+## Start here: run the doctor
+
+Before working through any section below, run the functional health check.
+It executes the SessionStart hook, boots both MCP servers over stdio and
+drives both gate hooks against your actual install, then prints a `fix:`
+line for every failure:
+
+```bash
+bash .claude/scripts/workflow-doctor.sh
+# or, from the plugin source checkout:
+bash install.sh --verify /path/to/your/project
+# or, in a session:
+/workflow-doctor
+```
+
+Exit `0` = every check passed, `1` = something failed (each FAIL names
+itself and its fix), `2` = usage error.
+
+This exists because for three releases every check in this repo was
+"is the file there" and none was "does it run" — which is exactly how a
+target could be byte-perfect and still not orchestrate. If the doctor is
+green and something is still wrong, that is a gap worth reporting.
+
+Two useful variants:
+
+```bash
+# No node on this host? Skip the two MCP server checks explicitly.
+bash .claude/scripts/workflow-doctor.sh --skip mcp_bd,mcp_code_graph
+
+# No outbound network? `bd doctor` reaches GitHub for a release check and
+# can blow the 30s bound on a perfectly healthy install.
+bash .claude/scripts/workflow-doctor.sh --skip beads,mcp_bd,mcp_code_graph
+```
+
+---
+
+## MCP Server Issues
+
+The plugin ships two MCP servers, `bd-mcp` (21 tools) and `code-graph-mcp`
+(7 tools), under `.claude/mcp/`. Both are dynamic-import launchers with real
+npm dependencies.
+
+### Both MCP servers unavailable / `ERR_MODULE_NOT_FOUND`
+
+**Symptom**: `mcp__bd__*` and `mcp__code_graph__*` tools are missing from a
+session. Running a server by hand produces:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@modelcontextprotocol/sdk'
+imported from .../.claude/mcp/bd-mcp/src/server.js
+```
+
+**Cause**: the servers' `node_modules/` was never installed in your project.
+Before v4.1 this was the default outcome of a `curl | bash` install: that path
+clones the source with `git clone --depth 1`, `.gitignore` excludes
+`node_modules/`, **so the clone never had dependencies to copy**. Both servers
+then died on spawn and the session simply had no MCP tools. Nothing reported it.
+
+**Diagnose**:
+
+```bash
+# The dependency the launchers import. `[ -d node_modules ]` is NOT enough —
+# a failed `npm ci` leaves an empty husk of directories that passes that test.
+ls .claude/mcp/bd-mcp/node_modules/@modelcontextprotocol/sdk
+ls .claude/mcp/code-graph-mcp/node_modules/@modelcontextprotocol/sdk
+
+# Or just ask the doctor, which BOOTS each server and counts its tools:
+bash .claude/scripts/workflow-doctor.sh --skip beads
+```
+
+**Solution** — install the dependencies from the committed lockfiles:
+
+```bash
+cd .claude/mcp/bd-mcp         && npm ci --omit=dev --ignore-scripts && cd -
+cd .claude/mcp/code-graph-mcp && npm ci --omit=dev --ignore-scripts && cd -
+bash .claude/scripts/workflow-doctor.sh   # confirm: 21 and 7 tools
+```
+
+Neither server has native dependencies (pure JS + WASM, zero install scripts),
+so this needs no compiler and no toolchain. Re-running the plugin installer
+does the same thing automatically as of v4.1.
+
+### Air-gapped or offline install
+
+`npm ci` needs the registry and there is no cached fallback. On a host with no
+outbound network, copy the dependency trees from a machine that has run the
+commands above:
+
+```bash
+# On the connected machine, from the plugin source:
+tar czf mcp-deps.tgz \
+  .claude/mcp/bd-mcp/node_modules \
+  .claude/mcp/code-graph-mcp/node_modules
+
+# On the air-gapped host, from the project root:
+tar xzf mcp-deps.tgz
+bash .claude/scripts/workflow-doctor.sh --skip beads
+```
+
+Then install (or re-install) the plugin with dependency provisioning off, so
+the installer does not try to reach the registry:
+
+```bash
+bash install.sh --skip-mcp-deps /path/to/project
+# environment form, for `curl | bash`:
+CWP_SKIP_MCP_DEPS=1 curl -fsSL <url>/install.sh | bash
+```
+
+`--skip beads` matters offline for an unrelated reason: `bd doctor` performs a
+GitHub release check, so with no network it can run past the check's 30s bound
+and report a false failure on a healthy install.
+
+### `node` or `npm` missing
+
+Both servers declare `"engines": {"node": ">=18.17"}` and their launchers fail
+opaquely on older runtimes. node and npm are hard prerequisites of the
+installer as of v4.1. If you cannot install node at all, the rest of the
+workflow still works — skip the two server checks explicitly so the remaining
+report stays trustworthy:
+
+```bash
+bash .claude/scripts/workflow-doctor.sh --skip mcp_bd,mcp_code_graph
+```
+
+Both agent prompts degrade gracefully when the code-graph tools are absent
+(`orchestrator.md`, `qa.md`), and the Beads lifecycle runs through the `bd`
+CLI over Bash rather than through MCP — so a dead MCP server costs you
+pre-loaded call sites and impact analysis, not the workflow itself.
+
+### The server boots but registers no tools
+
+The doctor asserts **exact** tool counts (21 and 7), not "at least one",
+because "boots and registers nothing" is a real failure that a
+`does-it-start` check cannot see. If the counts are wrong rather than the
+server dead, the dependency tree is likely partial — remove it and re-run
+`npm ci` rather than layering an install on top:
+
+```bash
+rm -rf .claude/mcp/bd-mcp/node_modules
+cd .claude/mcp/bd-mcp && npm ci --omit=dev --ignore-scripts
+```
+
+---
+
 ## Installation Issues
 
 ### "Beads (bd) not found"
@@ -295,6 +439,53 @@ bd list --label qa-pending
 ---
 
 ## Context Issues
+
+### The session has no workflow at all — no delegation, no gate
+
+**Symptom**: the plugin is installed, but the main session does everything
+itself. No specialist is spawned, no QA gate fires, the Stop hook never
+blocks. The same install orchestrates correctly on another machine.
+
+**Cause** (pre-v4.1): `session-start.sh` had two hard `exit 1` paths that
+printed a bare `{"error": "..."}` instead of a `hookSpecificOutput` envelope,
+when `bd` was off PATH or `.beads/` was missing. Claude Code discards
+non-envelope hook output silently, so the session received **no
+`workflow_engine` block, no delegation contract and no gate instructions** —
+and nothing said so.
+
+**As of v4.1 this cannot happen quietly.** The hook never bails: a missing
+dependency becomes a `<workflow_degraded severity="high">` block at the top
+of the injected context, naming the cause and its fix. If you see that block
+in a session, the workflow is running in **advisory** mode — the delegation
+contract still applies, but nothing can prove it was followed.
+
+**Diagnose** — the likeliest cause is PATH divergence, not a missing install.
+Hooks run in a non-interactive, non-login shell that does not read `~/.zshrc`
+or `~/.bashrc`:
+
+```bash
+bash -lc 'command -v bd'    # your login shell
+bash -c  'command -v bd'    # what the hook sees — this is the one that matters
+```
+
+- **Only the first prints a path** → PATH divergence. Export bd's directory
+  from a file non-interactive shells *do* read (`~/.zshenv` for zsh,
+  `~/.bash_env` for bash), or set `env.PATH` in `.claude/settings.json`.
+  Start a new session afterwards.
+- **Neither prints a path** → bd genuinely is not installed.
+- **`.beads/` is missing** → run `bd init` in the project root.
+
+**Verify the hook end to end**, which is what the doctor's `session_start`
+check does:
+
+```bash
+echo '{}' | bash .claude/scripts/session-start.sh \
+  | jq -r '.hookSpecificOutput.additionalContext' | head -40
+```
+
+You should see the `<workflow_engine source="skills/workflow-engine/SKILL.md">`
+block and roughly 13 KB of contract. A `<workflow_degraded>` block at the top
+names anything missing.
 
 ### "bd prime" output missing
 

@@ -14,6 +14,12 @@ listing the directory.
   overrides vs. AgentLint.
 - `SECURITY.md` — vulnerability reporting.
 - `AGENTS.md` — companion to CLAUDE.md for non-Claude agent runtimes.
+- `LICENSE` — MIT, backing the `"license": "MIT"` declaration in
+  `.claude-plugin/plugin.json`.
+- `THIRD_PARTY.md` — index of vendored third-party material (tree-sitter
+  grammars, the `brainstorming` reference doc) and the manifest of record for
+  each. Repo-only: neither this nor `LICENSE` is copied into an install target,
+  which has its own licensing.
 
 ## Plugin assets
 
@@ -25,7 +31,13 @@ listing the directory.
   verify-before-stop, etc.) and tests under `.claude/scripts/tests/`.
 - `.claude/hooks/hooks.json` — hook bindings.
 - `.claude/skills/workflow-engine/` — auto-loaded skill describing the
-  always-on workflow.
+  always-on workflow. This is the **only** registered skill; `plugin.json`'s
+  `skills[]` is length 1 and a test asserts it.
+- `.claude/vendor/` — vendored third-party reference docs, read on demand by an
+  explicit `Read` instruction in an agent prompt and deliberately NOT registered
+  as skills. Currently one tree: `superpowers/` (the `brainstorming` skill at a
+  pinned commit, MIT, with ten local modifications). Its `MANIFEST.md` is the
+  record of record; `.claude/scripts/tests/vendored-skills.test.sh` guards it.
 - `.claude/mcp/` — bundled MCP servers (`bd-mcp`, `code-graph-mcp`).
 - `.claude/settings.json` — runtime settings (model, thinking budget,
   permissions, additionalDirectories).
@@ -35,12 +47,19 @@ listing the directory.
 
 - `.claude/tests/` — five-tier test pyramid root with `component/`, `e2e/`,
   and per-tier README.
-- `.claude/tests/component/` — L2 component specs (15 specs, 243
-  assertions; includes `qa-gate-baseline` codifying the 0wk.2 fix).
+- `.claude/tests/component/` — L2 component specs (40 specs, 1,881
+  assertions, 113 of them META-TESTs; counts measured at
+  `claude-workflow-plugin-20e`, not estimated). Two carry the v4.1 P0:
+  `installer-target-functional.sh` asserts a RENDERED TARGET orchestrates
+  (fresh install -> full doctor 11/11, the air-gap `node_modules` recipe
+  executed, the degraded SessionStart paths, six doctor METAs and a JSONC
+  settings.json installer META); `installer-v3-upgrade.sh` covers the in-place
+  upgrade. `qa-gate-baseline` codifies the 0wk.2 fix.
 - `.claude/tests/e2e/` — L3 live e2e fixtures + golden cassettes
   (`node-react-auth`, `python-django-bug`, `go-cli-refactor`,
   `monorepo-frontend-only`, `multi-domain-signup`, `qa-block-recovery`).
-- `.claude/scripts/tests/` — L1 bash unit tests (49 assertions).
+- `.claude/scripts/tests/` — L1 bash unit tests (29 specs, 1,648 assertions;
+  measured at `claude-workflow-plugin-20e`).
 - `.github/workflows/test.yml` — GitHub Actions CI: lint + 6 test jobs
   + L4 daily drift cron.
 
@@ -69,4 +88,27 @@ See `docs/` (which has its own index in `docs/plans/README.md`):
 
 - `tests/` -> symlink to `.claude/scripts/tests/`.
 - Run: `make test` (or `bash tests/run-tests.sh` directly).
-- Smoke install: `make install-test`.
+- Health check an install: `make doctor` (or `make doctor TARGET=<dir>`) — eleven
+  functional checks that EXECUTE the SessionStart hook, both MCP servers and both
+  gate hooks. Safe mid-session; see `.claude/scripts/workflow-doctor.sh --help`.
+- Smoke install: `make install-test` — installs into a tempdir and runs the
+  doctor against the result. **Expected to PASS.** It was expected-red through
+  `claude-workflow-plugin-0fc` (C0a): a rendered target had no
+  `.claude/mcp/*/node_modules`, so `mcp_bd` and `mcp_code_graph` failed. C0b
+  (`claude-workflow-plugin-z9m`) made the installer run `npm ci` per server in
+  the target, which is what turns it green — so a failure here is now a real
+  regression. It **needs the npm registry** (there is no cached fallback), which
+  is why it is deliberately not wired into CI (`make test-ci` is `test
+  test-component test-e2e-unit manifest-validate`) and why the L2 installer
+  specs run with `CWP_SKIP_MCP_DEPS=1` / `CWP_SKIP_VERIFY=1`. It is also
+  deliberately not `--skip`ped: skipping the two server checks would make the
+  command answer "yes, this install orchestrates" without ever booting a server.
+- Installer exit codes (v4.1 / C0b): `0` installed and verified, `1` aborted
+  (nothing, or a partial tree, written), `3` installed but verification FAILED.
+  Re-verify any target without reinstalling: `bash install.sh --verify <dir>`.
+  **`0` also covers a run whose `npm ci` failed while the server's existing
+  dependencies were preserved** — the target works, so it is not a `3`. The
+  installer never hides it: the headline reads "the dependency update did not
+  finish" and the last block of output names the affected servers and the
+  command that completes it. A scripted caller that needs to distinguish this
+  from a clean run should grep for `DEPENDENCY UPDATE DID NOT FINISH`.

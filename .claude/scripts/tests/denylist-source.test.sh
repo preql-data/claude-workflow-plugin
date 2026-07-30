@@ -132,15 +132,89 @@ if [ -f "$LIB" ]; then
         "" "$LIB_NOISE"
 
     # And it actually answers: 0 = drop, 1 = keep.
-    DL_DROP=$(bash -c ". '$LIB'; workflow_denylisted 'node_modules/x.js' && echo drop || echo keep")
-    assert_eq "denylist-lib: workflow_denylisted drops a build path" "drop" "$DL_DROP"
-    DL_KEEP=$(bash -c ". '$LIB'; workflow_denylisted 'src/a.ts' && echo drop || echo keep")
-    assert_eq "denylist-lib: workflow_denylisted keeps a source path" "keep" "$DL_KEEP"
+    #
+    # dl_verdict <path> — the shipped lib's own answer, as a word. Every
+    # behavioural assertion below goes through it, so they all measure the
+    # same function the three consumers call rather than a re-implementation.
+    #
+    # The lib path and the probe path are passed as ARGUMENTS to `bash -c`,
+    # never interpolated into its script text: a path containing a quote would
+    # otherwise rewrite the command rather than be tested by it.
+    dl_verdict() {
+        bash -c '. "$1"; workflow_denylisted "$2" && echo drop || echo keep' \
+            _dl_verdict "$LIB" "$1"
+    }
+
+    assert_eq "denylist-lib: workflow_denylisted drops a build path" \
+        "drop" "$(dl_verdict 'node_modules/x.js')"
+    assert_eq "denylist-lib: workflow_denylisted keeps a source path" \
+        "keep" "$(dl_verdict 'src/a.ts')"
     # Deliberately NOT denylisted — behaviour-bearing / audit deliverables.
     for keeper in CLAUDE.md LESSONS.md HANDOFF.md; do
-        KRC=$(bash -c ". '$LIB'; workflow_denylisted '$keeper' && echo drop || echo keep")
-        assert_eq "denylist-lib: $keeper stays reviewable" "keep" "$KRC"
+        assert_eq "denylist-lib: $keeper stays reviewable" "keep" "$(dl_verdict "$keeper")"
     done
+
+    # -----------------------------------------------------------------------
+    # v4.1 landing (claude-workflow-plugin-wg6, absorbing prm): out-of-repo
+    # and workflow-internal scratch.
+    #
+    # post-edit.sh records `tool_input.file_path` VERBATIM, so the change set
+    # was never bounded by the repo — any absolute path an agent wrote entered
+    # the change-set hash and the Stop gate. Six live instances in one
+    # release; the worst hard-blocked a TASK-LESS plan-mode session across
+    # three Stop iterations to J21 escalation, because the plan file is .md
+    # (so F1 classifies it doc-only) and F1's fast path auto-approves only
+    # WITH an active task, which plan mode forbids creating. No exit.
+    #
+    # These are BEHAVIOURAL pins on the shipped regex. The structural checks
+    # above are pattern-agnostic by design and needed no change.
+    # $HOME, not a literal: a hardcoded absolute home prefix is what CLAUDE.md
+    # and AgentLint S7 forbid in source, and $HOME is the REAL prefix anyway
+    # (a macOS dev box and a Linux CI runner spell it differently). The
+    # alternative anchors on (^|/), so the verdict does not depend on it.
+    assert_eq "denylist-lib: drops an OUT-OF-REPO plan-mode plan file (the J21 dead end)" \
+        "drop" "$(dl_verdict "${HOME:-/nonexistent-home}/.claude/plans/v4-1-0-upgrade-gleaming-karp.md")"
+    assert_eq "denylist-lib: drops a repo-relative .claude/plans/ file too" \
+        "drop" "$(dl_verdict '.claude/plans/x.md')"
+    assert_eq "denylist-lib: drops the macOS session scratchpad (/private/tmp/claude-<sess>/)" \
+        "drop" "$(dl_verdict '/private/tmp/claude-501/sess/scratchpad/verdict.json')"
+    # Linux CI has no /private prefix, so the `(/private)?` optionality is
+    # only half-proven without this one — and CI is where the suite runs.
+    assert_eq "denylist-lib: drops the Linux session scratchpad (/tmp/claude-<sess>/)" \
+        "drop" "$(dl_verdict '/tmp/claude-501/sess/scratchpad/verdict.json')"
+    assert_eq "denylist-lib: drops mutation-sweep per-run reports" \
+        "drop" "$(dl_verdict '.claude/.mutation-runs/2026-07-29T12-00-00/report.json')"
+    assert_eq "denylist-lib: drops mutation-sweep throwaway worktrees (--keep-worktrees)" \
+        "drop" "$(dl_verdict '.claude/.mutation-worktrees/mut-014/src/a.ts')"
+
+    # ANTI-OVERREACH. Each of these must stay REVIEWABLE, and each fails for
+    # its own reason — a single over-broad alternative would take several out
+    # at once.
+    # The project's own planning deliverables live here and reviewers read them.
+    assert_eq "denylist-lib: docs/plans/ stays reviewable (a deliverable, not a plan-mode file)" \
+        "keep" "$(dl_verdict 'docs/plans/v4.1-upgrade-wave.md')"
+    # Only the harness's per-run OUTPUT is dropped; its source is shipped code.
+    assert_eq "denylist-lib: the mutation harness SOURCE stays reviewable" \
+        "keep" "$(dl_verdict '.claude/tests/mutation/mutation-sweep.sh')"
+    # POSITIVE PIN of the deliberate limit (see workflow-denylist.sh, "WHAT IS
+    # DELIBERATELY *NOT* DENYLISTED"). Agent-chosen /tmp scratch is addressed
+    # by PROMPT guidance, not by a /tmp pattern. If a future landing broadens
+    # /tmp, this fails loudly and forces that block to be revisited first.
+    assert_eq "denylist-lib: agent-chosen /tmp scratch stays reviewable (limit is deliberate)" \
+        "keep" "$(dl_verdict '/tmp/qa-p5n-probe/notes.md')"
+    # The ^ anchor is scoped to its own ERE branch: a repo-relative source
+    # path that merely CONTAINS tmp/claude- is not the session scratchpad.
+    assert_eq "denylist-lib: a repo-relative src/tmp/claude-*/ path stays reviewable (^ anchor holds)" \
+        "keep" "$(dl_verdict 'src/tmp/claude-501/x/y')"
+    # These two are why a general /tmp or /var/folders pattern is REJECTED:
+    # impact-report-paths.sh and worktree-approval-resolution.sh seed
+    # changed-files.txt with ABSOLUTE paths rooted at `mktemp -d`'s parent.
+    # Either pattern would silently empty those change sets and both specs
+    # would pass while proving nothing.
+    assert_eq "denylist-lib: a macOS mktemp -d fixture path stays reviewable (/var/folders/)" \
+        "keep" "$(dl_verdict '/var/folders/qr/T/component-fixture.aB3xYz/src/a.ts')"
+    assert_eq "denylist-lib: a Linux mktemp -d fixture path stays reviewable (/tmp/)" \
+        "keep" "$(dl_verdict '/tmp/component-fixture.aB3xYz/src/a.ts')"
 fi
 
 # ---------------------------------------------------------------------------

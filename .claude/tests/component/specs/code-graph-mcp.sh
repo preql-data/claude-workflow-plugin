@@ -48,19 +48,59 @@ PLUGIN_ROOT=$(plugin_root)
 MCP_DIR="$PLUGIN_ROOT/.claude/mcp/code-graph-mcp"
 MCP_BIN="$MCP_DIR/bin/code-graph-mcp.js"
 
-# The server module imports from node_modules under MCP_DIR. The
-# install.sh path copies node_modules along with the rest of the tree
-# when shipping; in the source repo it must be installed manually.
-# Skip-with-log if node_modules/ is absent (CI may run install
-# separately).
-if [ ! -d "$MCP_DIR/node_modules" ]; then
-    printf 'SKIPPED: %s (node_modules not installed under %s — run `cd %s && npm install` first)\n' \
-        "${BASH_SOURCE[0]##*/}" "$MCP_DIR" "$MCP_DIR"
-    exit 0
-fi
+# The server module imports from node_modules under MCP_DIR.
+#
+# CORRECTED (v4.1 / claude-workflow-plugin-0fc). The comment that stood here
+# for three releases said "The install.sh path copies node_modules along with
+# the rest of the tree when shipping" — the exact INVERSE of the truth, and
+# the sentence that made the bare `exit 0` below look benign while the
+# shipped-target case it claimed to cover was broken. The truth:
+#
+#   - install.sh EXCLUDES node_modules from the MCP copy (rsync
+#     --exclude=node_modules, and an `rm -rf` in the cp fallback), and under
+#     `curl | bash` the source is a shallow clone where .gitignore's
+#     `node_modules/` means there was never anything to copy in the first
+#     place. A rendered target therefore has ZERO server dependencies.
+#   - As of v4.1 the installer runs `npm ci --omit=dev` IN THE TARGET instead
+#     (claude-workflow-plugin-z9m), which is what actually makes a shipped
+#     install bootable.
+#   - In THIS repo the dev tree is what we boot from, so a missing
+#     node_modules here means "nobody ran npm install in the checkout", not
+#     "the ship path is fine".
+#
+# And a self-skip is not evidence: an unconditional `exit 0` on absent
+# node_modules made this spec report PASS on precisely the machines where the
+# servers could not boot. So: ATTEMPT the install once, and only skip-with-log
+# if that attempt fails (offline CI runner with no registry access). The flags
+# mirror the air-gapped recipe in workflow-doctor.sh --help: --omit=dev and
+# --ignore-scripts are safe because both lockfiles carry zero dev packages and
+# zero install scripts (pinned by .claude/scripts/tests/mcp-deps.test.sh).
 if ! command -v node >/dev/null 2>&1; then
     printf 'SKIPPED: %s (node not on PATH)\n' "${BASH_SOURCE[0]##*/}"
     exit 0
+fi
+if [ ! -d "$MCP_DIR/node_modules" ]; then
+    if ! command -v npm >/dev/null 2>&1; then
+        printf 'SKIPPED: %s (node_modules absent under %s and npm not on PATH)\n' \
+            "${BASH_SOURCE[0]##*/}" "$MCP_DIR"
+        exit 0
+    fi
+    # shellcheck disable=SC2016  # the backticked npm command is literal text, not a substitution
+    printf '  note: %s — node_modules absent; attempting `npm ci --omit=dev` once in %s\n' \
+        "${BASH_SOURCE[0]##*/}" "$MCP_DIR"
+    NPM_CI_LOG="$FIXTURE/npm-ci-code-graph.log"
+    if ! ( cd "$MCP_DIR" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+            --loglevel=error ) >"$NPM_CI_LOG" 2>&1; then
+        printf 'SKIPPED: %s (npm ci failed in %s; see %s — last lines:)\n' \
+            "${BASH_SOURCE[0]##*/}" "$MCP_DIR" "$NPM_CI_LOG"
+        tail -5 "$NPM_CI_LOG" 2>/dev/null | sed 's/^/    /'
+        exit 0
+    fi
+    if [ ! -d "$MCP_DIR/node_modules" ]; then
+        printf 'SKIPPED: %s (npm ci exited 0 but %s/node_modules still absent)\n' \
+            "${BASH_SOURCE[0]##*/}" "$MCP_DIR"
+        exit 0
+    fi
 fi
 
 # Build a temp project root the MCP can index. A small sub-fixture is

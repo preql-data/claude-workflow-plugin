@@ -75,6 +75,19 @@ mk_bd_shim() {
 
     local real_bd
     real_bd=$(command -v bd 2>/dev/null || true)
+    # gz3: refuse to wrap OURSELVES. mk_fixture prepends $fixture/bin to PATH,
+    # so a SECOND call for the same fixture resolves `command -v bd` to the shim
+    # this call is about to overwrite — and the generated `exec <that path>`
+    # would re-exec itself forever. That failure mode is a hang with no output
+    # (the runner captures each spec's stdout in a command substitution, so a
+    # spinning spec prints nothing at all), which is expensive to diagnose. A
+    # spec that needs to restore the wrapper after temporarily replacing it must
+    # write it from the real bd path it saved, not call this again.
+    if [ -n "$real_bd" ] && [ "$real_bd" = "$script" ]; then
+        printf 'mk_bd_shim: refusing to wrap the shim at %s with itself (PATH already prefers it; save the real bd path before replacing the wrapper)\n' \
+            "$script" >&2
+        return 1
+    fi
     if [ -z "$real_bd" ]; then
         # In BD_SHIM_ONLY mode (CI runner without bd installed), stay
         # silent here — the spec's own `bd_required_or_skip` call will
