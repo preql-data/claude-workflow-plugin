@@ -282,6 +282,19 @@ if [ -s "$SYNC_ERROR_LOG" ]; then
     : > "$SYNC_ERROR_LOG"
 fi
 
+# v4.1 C1b (claude-workflow-plugin-8xv): the same snapshot-then-truncate
+# contract for session-end.sh's worktree-sweep report, so warning 6 below fires
+# once per event. It has its OWN file rather than sharing sync-errors.log
+# because warning 3 renders that log's head line verbatim as "Last session's bd
+# sync failed at ..." — a sweep line landing there would be reported as a bd
+# failure no matter how it was tagged.
+SWEEP_REPORT_LOG="$QA_TRACKING_DIR/worktree-sweep.log"
+SWEEP_REPORT_LINE=""
+if [ -s "$SWEEP_REPORT_LOG" ]; then
+    SWEEP_REPORT_LINE=$(head -1 "$SWEEP_REPORT_LOG" 2>/dev/null || echo "")
+    : > "$SWEEP_REPORT_LOG"
+fi
+
 # gate-baseline v2 (3mg.1): capture "what was already dirty when this session
 # started" so the Stop gate evaluates THIS session's delta.
 #
@@ -520,6 +533,19 @@ fi
 if [ -n "${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-}" ] && [ "${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-}" != "1" ]; then
     WARNINGS+="
 - PLATFORM GUARD: CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH='$CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH' (expected '1'). v2.1.219 defaults nested subagent spawning to depth 3; the workflow's relay invariants (grader/judge spawned only from root) assume depth 1. Restore the pin in .claude/settings.json env."
+fi
+
+# Warning 6: last session's worktree sweep found removable worktrees (v4.1
+# C1b). Reads the file snapshotted-and-truncated above, so it fires once per
+# event exactly like warning 3. The sweep that produced it ran from SessionEnd,
+# which CANNOT ENFORCE ANYTHING — it was --report-only and removed nothing, so
+# the wording points at the manual command rather than implying that cleanup
+# already happened.
+if [ -n "$SWEEP_REPORT_LINE" ]; then
+    SWEEP_TS=$(printf '%s' "$SWEEP_REPORT_LINE" | awk -F'\t' '{print $1}')
+    SWEEP_MSG=$(printf '%s' "$SWEEP_REPORT_LINE" | awk -F'\t' '{print $2}')
+    WARNINGS+="
+- worktree-sweep at ${SWEEP_TS:-an unknown time}: ${SWEEP_MSG:-removable worktrees were found under .claude/worktrees/}"
 fi
 
 # 1. Get bd prime output (Beads' built-in agent context).

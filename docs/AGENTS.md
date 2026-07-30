@@ -944,6 +944,15 @@ never duplicated), and the rule applies to subagent worktrees
 automatically. Worktrees with no changes are auto-removed when the
 subagent finishes.
 
+Worktrees **with** changes survive, and the platform does not come back
+for them — they accumulate under `.claude/worktrees/` until something
+removes them. `.claude/scripts/worktree-sweep.sh` is that something:
+`session-end.sh` runs it `--report-only` and SessionStart surfaces the
+count, but nothing is deleted without a manual `--apply`, and then only
+for a worktree that is contained, clean, pushed-or-merged, old enough,
+and attached to a closed Beads task. See "Worktree sweep (report-only)"
+in `docs/HOOKS.md`.
+
 Why this matters: same-tree parallel agents contaminate each other's
 branches. It is the first entry in `LESSONS.md` because it is the
 most common multi-agent failure mode the plugin has seen. The

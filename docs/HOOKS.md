@@ -105,10 +105,19 @@ The shipped `hooks` block wires all six event types (the file also carries
 }
 ```
 
-> The plugin-manifest `.claude/hooks/hooks.json` mirrors this block and
-> additionally wires `SubagentStart` (`subagent-start.sh`) and a second
-> `PostToolUse` matcher (`^Bash$` → `bd-github-link.sh`) for
-> plugin-scoped installs.
+> The plugin-manifest `.claude/hooks/hooks.json` mirrors this block. Both files
+> now wire `SubagentStart` (`subagent-start.sh`); the ONE remaining difference
+> is a second `PostToolUse` matcher (`^Bash$` → `bd-github-link.sh`) that only
+> `hooks.json` carries, for plugin-scoped installs.
+>
+> That difference is the *only* one permitted. `platform-audit.test.sh` checker
+> (f) compares the two files' whole hook surface — event set plus per-event deep
+> equality — and pins the PostToolUse allowance as exactly "settings' list plus
+> that one entry", so drift in any other event, a *different* drift in
+> PostToolUse, or an event deleted from **both** files all fail. (Before v4.1
+> C1b the checker compared `SubagentStart` alone, and this sentence still
+> claimed `SubagentStart` was one of the differences after it had stopped being
+> one.)
 
 ---
 
@@ -561,6 +570,9 @@ the shipped one would let every other D assertion pass while proving nothing.
 │                            # also the approved-file-set record another checkout reads
 │                            # (see "Cross-worktree approval resolution")
 ├── sync-errors.log          # Best-effort bd-call failures surfaced by SessionStart
+├── worktree-sweep.log       # SessionEnd's REPORT-ONLY worktree-sweep count, surfaced
+│                            # (and truncated) by SessionStart. Its own file, NOT
+│                            # sync-errors.log — see "SessionEnd Hook" below
 └── .changed-files.lock      # flock target (only on systems with flock)
 ```
 
@@ -1167,6 +1179,39 @@ clarity, even though stdout is not consumed. Any cleanup that needs to
 happen MUST happen before this hook runs (verify-before-stop is the
 canonical gate point); SessionEnd is best-effort persistence only.
 
+### Worktree sweep (report-only)
+
+**SessionEnd cannot enforce anything.** Its output and its exit code are
+ignored and it cannot block termination, so nothing it decides can be relied
+on. That is the whole reason the worktree sweep runs here in
+**`--report-only`** mode and `--apply` is **never** passed from a hook:
+removing an operator's checkout is a decision, and a hook whose verdict nobody
+reads is the worst place to make one.
+
+What it does: runs `worktree-sweep.sh --report-only --json` under `timeout 8s`
+(where a `timeout`/`gtimeout` binary exists; the script is bounded internally by
+`SWEEP_MAX_CANDIDATES=16` either way), does **no network I/O**, and — only when
+the count is non-zero — appends one `<ts>\t<message>` line to
+`.claude/.qa-tracking/worktree-sweep.log`. SessionStart snapshots and truncates
+that file and renders warning 6, so the notice fires once per event.
+
+**Its own log file, deliberately.** `session-start.sh` renders
+`sync-errors.log`'s head line verbatim as *"Last session's bd sync failed at
+…"* regardless of how the line is tagged, so a sweep line landing there first
+would be reported to the operator as a Beads failure.
+
+`session-end.sh` runs under `set -e`, so every leg of the sweep block is
+`|| true`-guarded: an unguarded failure would kill the hook before its
+`echo "{}"`. The component spec pins that a *failing* sweeper and an *absent*
+one both still leave `{}` on stdout.
+
+Acting on the report is manual:
+
+```bash
+bash .claude/scripts/worktree-sweep.sh            # dry run — the default
+bash .claude/scripts/worktree-sweep.sh --apply    # actually remove
+```
+
 ### sync-errors.log Surfacing
 
 When `bd sync` fails (typically because the bd daemon is unreachable —
@@ -1197,6 +1242,7 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 | `bd-github-link.sh` | I3 Beads ↔ GitHub auto-link. PostToolUse hook on Bash invocations. When a Beads task closes, posts a `gh issue comment` linking back; when `gh pr create` runs, parses `Closes #N` and writes `gh-link:` into the task notes. |
 | `detect-stack.sh` | F8/J17 polyglot test runner detection. Emits JSON `{runner, test_cmd, lint_cmd, type_cmd, manifest, overrides}`. Supports npm, pytest, go, cargo, maven, gradle, phpunit, rake, swift, dotnet, make, plus `.claude/test-cmd` overrides. |
 | `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`. Drains stdin (Claude Code passes a session envelope it doesn't need). |
+| `worktree-sweep.sh` | v4.1 (C1b) sweeper for the subagent worktrees at `.claude/worktrees/<name>`. Ones with NO changes are auto-removed when the subagent finishes; ones WITH changes survive, and until this script nothing removed them. **Dry run is the default; `--apply` is the only thing that removes**, and removal is `git worktree remove` + `git worktree prune` — there is no `rm -rf` in the file and `worktree remove` is never `--force`d (both asserted structurally by `worktree-sweep.test.sh`). A worktree is removable only if ALL of: (1) its `cd … && pwd -P`-**resolved** path is physically inside the resolved `.claude/worktrees/` — a string-prefix test is not a containment guard, and this is what excludes an operator's sibling checkout whose name merely *extends* the root's; (2) same repo by `--git-common-dir` identity; (3) `git status --porcelain` empty; (4) `@{upstream}..HEAD` == 0 commits, else `merge-base --is-ancestor <branch> <default>` — **decided locally, never a fetch**; (5) directory mtime older than `--age-days` (default 7); (6) a Beads task resolved from EVIDENCE (the worktree's own `.qa-tracking/current-task`, else a task-shaped branch token bd actually knows) that bd reports `closed`. Any error, unreadable path or ambiguity is NOT a candidate, and each keeper prints its FIRST failing gate. Worktree NAMING is deliberately off the safety path. Flags: `--apply`, `--age-days N`, `--report-only` (wins over `--apply`), `--json`, `--max-candidates N` (default 16, the same bound as the Stop hook's `WTRES_MAX_CANDIDATES`), `--help`. Exit 0 / 1 (a removal failed) / 2 (bad invocation). Invoked report-only by `session-end.sh`; see "Worktree sweep (report-only)". |
 | `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Eleven named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, and drives both gate hooks. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
 
 Each helper is independently testable via the L1 bash unit tier
