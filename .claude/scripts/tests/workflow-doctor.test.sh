@@ -494,20 +494,30 @@ snapshot_live() {
                 printf 'qa-tracking/%s\tABSENT\t-\n' "$f"
             fi
         done
-        # The session marker: session-start.sh touches it.
+        # The session marker: session-start.sh touches it. Record the RAW MTIME,
+        # never the age: mtime changes if and only if the file is touched, which
+        # is precisely the property under test, whereas age is a function of
+        # wall-clock time and so drifts between the two snapshots on its own.
+        #
+        # GNU `stat -c %Y` MUST be tried first. BSD's `stat -f %m` is not a clean
+        # no-op on GNU: there `-f` is --file-system and takes no format argument,
+        # so `%m` and the path are parsed as two OPERANDS — `%m` errors (nonzero
+        # exit) but the path SUCCEEDS and prints filesystem info beginning
+        # `File: "..."` on stdout. The `||` fallback then appends the real mtime
+        # to that garbage, and the bare word `File` reaching an arithmetic
+        # context under `set -u` is the "File: unbound variable" crash this spec
+        # hit on CI. GNU `-c` on BSD fails cleanly by contrast: usage to stderr,
+        # nothing on stdout, so this ordering is safe in both directions.
         if [ -f "$PROJECT_DIR/.claude/.session-start" ]; then
             printf 'session-start-marker\t%s\n' \
-                "$(( $(date +%s) - $(stat -f %m "$PROJECT_DIR/.claude/.session-start" 2>/dev/null \
-                    || stat -c %Y "$PROJECT_DIR/.claude/.session-start" 2>/dev/null || echo 0) ))000"
+                "$(stat -c %Y "$PROJECT_DIR/.claude/.session-start" 2>/dev/null \
+                    || stat -f %m "$PROJECT_DIR/.claude/.session-start" 2>/dev/null \
+                    || echo 0)"
         else
             printf 'session-start-marker\tABSENT\n'
         fi
     } > "$1"
 }
-# The marker snapshot records AGE, not mtime, so it changes if (and only if)
-# the file is touched — the age arithmetic would otherwise drift by seconds
-# between the two snapshots. Round to a coarse bucket to absorb that drift
-# while still catching a `touch` (which resets the age to ~0).
 snapshot_live "$LIVE_BEFORE"
 doctor_run "$DOCTOR" "$PROJECT_DIR" "" --quiet \
     --skip "$(all_but session_start gate_stop gate_pretooluse)"
@@ -518,19 +528,14 @@ MODEL_PINS_AFTER=$(grep -v '^session-start-marker' "$LIVE_AFTER")
 assert_eq "non-mutation: the live repo's agent model pins + gate state are byte-identical after a doctor run" \
     "$MODEL_PINS_BEFORE" "$MODEL_PINS_AFTER"
 
-MARKER_AGE_BEFORE=$(grep '^session-start-marker' "$LIVE_BEFORE" | awk -F'\t' '{print $2}')
-MARKER_AGE_AFTER=$(grep '^session-start-marker' "$LIVE_AFTER" | awk -F'\t' '{print $2}')
-# A `touch` resets the age to ~0; anything else keeps it within a few seconds
-# of the original. Compare bucketed-to-minutes so the assertion is about
-# "was it touched", not about clock drift.
-if [ "$MARKER_AGE_BEFORE" = "ABSENT" ] && [ "$MARKER_AGE_AFTER" = "ABSENT" ]; then
+MARKER_MTIME_BEFORE=$(grep '^session-start-marker' "$LIVE_BEFORE" | awk -F'\t' '{print $2}')
+MARKER_MTIME_AFTER=$(grep '^session-start-marker' "$LIVE_AFTER" | awk -F'\t' '{print $2}')
+if [ "$MARKER_MTIME_BEFORE" = "ABSENT" ] && [ "$MARKER_MTIME_AFTER" = "ABSENT" ]; then
     PASS=$((PASS + 1))
     printf '  PASS: non-mutation: .claude/.session-start was absent before and after (not created)\n'
 else
-    BEFORE_MIN=$(( ${MARKER_AGE_BEFORE:-0} / 60000 ))
-    AFTER_MIN=$(( ${MARKER_AGE_AFTER:-0} / 60000 ))
-    assert_eq "non-mutation: .claude/.session-start was not touched by the doctor (age bucket unchanged)" \
-        "$BEFORE_MIN" "$AFTER_MIN"
+    assert_eq "non-mutation: .claude/.session-start was not touched by the doctor (mtime unchanged)" \
+        "$MARKER_MTIME_BEFORE" "$MARKER_MTIME_AFTER"
 fi
 
 # 5b: a SEEDED copy, so the assertion is not vacuously green just because the
