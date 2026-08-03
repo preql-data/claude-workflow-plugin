@@ -41,7 +41,7 @@
 #
 # Conventions mirror qa-gate-choose.test.sh / qa-gate-grade-record.test.sh:
 # plain bash, `set -u`, local assert helpers, trailing summary, tempdir fixture
-# with a bd --no-daemon shim, skip-with-log when bd is absent in CI.
+# with a pass-through bd shim, skip-with-log when bd is absent in CI.
 #
 # Exit codes:
 #   0  every assertion passed
@@ -144,15 +144,27 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 1
 fi
 
+# bd wrapper: a pass-through so the fixture has one PATH-controlled bd. It
+# injected --no-daemon until bd 1.1.2 removed the flag (and the daemon: 1.1.x
+# runs an in-process embedded Dolt engine, so there is no tempdir race left).
 REAL_BD=$(command -v bd)
 cat > "$FIXTURE/bin/bd" <<EOF
 #!/bin/bash
-exec ${REAL_BD} --no-daemon "\$@"
+exec ${REAL_BD} "\$@"
 EOF
 chmod +x "$FIXTURE/bin/bd"
 export PATH="$FIXTURE/bin:$PATH"
 
 cd "$FIXTURE" && bd init >/dev/null 2>&1
+# Section 4.1 asserts the approval record spells `worktree=none` off a git
+# checkout, so this fixture MUST NOT be one. bd 1.1.2's `bd init` runs
+# `git init` (0.47.x did not), which silently satisfied `git rev-parse` and
+# made the record carry a real path instead — the precondition was gone, not
+# the behaviour. Drop the repo bd created rather than relaxing the assertion.
+# `--skip-agents --skip-hooks` suppresses the CLAUDE.md/.claude scaffolding but
+# NOT the git init, so removing it here is the only way back to a bare tempdir.
+# bd itself is unaffected: the store is .beads/embeddeddolt, not git.
+rm -rf "$FIXTURE/.git"
 export CLAUDE_PROJECT_DIR="$FIXTURE"
 
 QG="$FIXTURE/.claude/scripts/qa-gate.sh"
@@ -165,8 +177,17 @@ labels_for() {
         2>/dev/null || echo ""
 }
 
+# Same version-tolerant reader the production scripts use: bd 1.1.2 returns
+# only a comment_count on a plain `show --json` and needs --include-comments;
+# bd 0.47.x rejects that flag but inlines .comments. Pin the chain, not the leg.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 comments_of() {
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r '(if type == "array" then .[0].comments else .comments end) // [] | .[].text' \
         2>/dev/null || echo ""
 }
@@ -395,7 +416,9 @@ assert_contains "4.1 non-git checkout records worktree=none (never an omitted to
 
 # 4.2 THE compatibility assertion: the llh.18 capture the Stop hook uses is
 # UNCHANGED by the inserted tokens. Run the hook's exact jq, not a paraphrase.
-REC_CAPTURED=$(bd show "$TID_REC" --json 2>/dev/null \
+# (The jq below is byte-identical to the hook's; only the transport in front of
+# it gained --include-comments, in both places, for bd 1.1.2.)
+REC_CAPTURED=$(bd_show_with_comments "$TID_REC" \
     | jq -r '(if type == "array" then .[0].comments else .comments end) // []
              | .[].text
              | select(test("QA-GATE APPROVED .*change_set_hash="))

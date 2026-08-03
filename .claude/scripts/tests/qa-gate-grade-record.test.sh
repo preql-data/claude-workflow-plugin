@@ -39,7 +39,8 @@
 #
 # Conventions mirror .claude/scripts/tests/qa-gate-choose.test.sh —
 # plain bash, `set -u`, assert helpers, trailing summary, tempdir
-# fixture with a bd --no-daemon shim.
+# fixture with a pass-through bd shim (it carried --no-daemon until bd 1.1.2
+# removed the flag along with the daemon).
 #
 # Exit codes:
 #   0  every assertion passed
@@ -148,11 +149,13 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 1
 fi
 
-# bd --no-daemon wrapper so the tempdir DB doesn't race the daemon.
+# bd wrapper: a pass-through so the fixture has one PATH-controlled bd. It
+# injected --no-daemon until bd 1.1.2 removed the flag (and the daemon: 1.1.x
+# runs an in-process embedded Dolt engine, so there is no tempdir race left).
 REAL_BD=$(command -v bd)
 cat > "$FIXTURE/bin/bd" <<EOF
 #!/bin/bash
-exec ${REAL_BD} --no-daemon "\$@"
+exec ${REAL_BD} "\$@"
 EOF
 chmod +x "$FIXTURE/bin/bd"
 export PATH="$FIXTURE/bin:$PATH"
@@ -199,9 +202,18 @@ labels_for() {
 }
 
 # Helper: count comments matching a regex on a task.
+# Same version-tolerant reader the production scripts use: bd 1.1.2 returns
+# only a comment_count on a plain `show --json` and needs --include-comments;
+# bd 0.47.x rejects that flag but inlines .comments. Pin the chain, not the leg.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 comment_count_matching() {
     local tid="$1" pat="$2"
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r --arg pat "$pat" \
             'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test($pat))) | length' \
         2>/dev/null || echo "0"
@@ -210,7 +222,7 @@ comment_count_matching() {
 # Helper: pull the first comment matching a regex (or empty).
 comment_first_matching() {
     local tid="$1" pat="$2"
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r --arg pat "$pat" \
             'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test($pat))) | .[0].text // ""' \
         2>/dev/null || echo ""
@@ -784,7 +796,7 @@ fi
 mkdir -p "$STUB_DIR/bin"
 cat > "$STUB_DIR/bin/bd" <<EOF
 #!/bin/bash
-exec ${REAL_BD} --no-daemon "\$@"
+exec ${REAL_BD} "\$@"
 EOF
 chmod +x "$STUB_DIR/bin/bd"
 

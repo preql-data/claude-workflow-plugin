@@ -20,7 +20,7 @@ CT="$FIXTURE/.claude/scripts/current-task.sh"
 
 # Seed an active Beads task.
 TID=$(cd "$FIXTURE" && bd create "Test subagent task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
-assert_match "subagent-start: seed task id created" '^[a-z0-9-]+\.' "$TID"
+assert_match "subagent-start: seed task id created" "$BD_ID_RE" "$TID"
 bash "$CT" set "$TID"
 
 # 1. agent_type=backend + active task -> additionalContext injected.
@@ -98,7 +98,7 @@ assert_empty_envelope "subagent-start: empty JSON no-op" "$OUT"
 
 implementer_lines() {
     # All IMPLEMENTER record first-lines on a task (one per line).
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r '(if type == "array" then .[0].comments else .comments end) // []
                  | .[].text | split("\n")[0]' 2>/dev/null \
         | grep -E '^IMPLEMENTER: ' || true

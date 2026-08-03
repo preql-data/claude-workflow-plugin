@@ -21,7 +21,7 @@ TRACK="$FIXTURE/.claude/.qa-tracking"
 
 # Seed a task to operate on.
 TID=$(cd "$FIXTURE" && bd create "QA gate test" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
-assert_match "qa-gate: seed task created" '^[a-z0-9-]+\.' "$TID"
+assert_match "qa-gate: seed task created" "$BD_ID_RE" "$TID"
 
 # 1. status on a fresh task -> not-entered.
 OUT=$(bash "$QG" status "$TID")
@@ -249,7 +249,7 @@ assert_contains "impact-report: bypass note in gate JSON observations" \
     "impact-bypass" "$IR3_OUT"
 assert_contains "impact-report: bypass reason in gate JSON observations" \
     "emergency: server bin quarantined by ops" "$IR3_OUT"
-IR3_CMT=$(cd "$FIXTURE" && bd show "$TID_IR3" --json 2>/dev/null \
+IR3_CMT=$(bd_show_with_comments "$TID_IR3" "$FIXTURE" \
     | jq -r 'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test("impact-report bypass"))) | length' 2>/dev/null || echo "0")
 assert_eq "impact-report: bypass reason recorded in approval comment" "1" "$IR3_CMT"
 
@@ -485,12 +485,17 @@ TRACK_RB="$FIXTURE_RB/.claude/.qa-tracking"
 # which exits 1. Overwrites the fixture's bd shim (same bin/ dir, on PATH).
 REAL_BD_RB=$(command -v bd)
 # command -v bd here resolves the fixture shim; read the real bd it wraps.
-REAL_BD_RB=$(sed -n 's/^exec \(.*\) --no-daemon.*/\1/p' "$FIXTURE_RB/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+# Anchored on the trailing `"$@"`, NOT on a bd flag: the wrapper ended
+# `--no-daemon "$@"` until bd 1.1.2 removed that flag, and a pattern keyed to it
+# returns empty on the new wrapper — which sends the fallback below to
+# `command -v bd`, i.e. THIS shim, producing a wrapper that execs itself
+# forever (a silent hang, not a failure). See lib/shim.sh's gz3 guard.
+REAL_BD_RB=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$FIXTURE_RB/bin/bd" 2>/dev/null | tr -d '"' | head -1)
 [ -z "$REAL_BD_RB" ] && REAL_BD_RB=$(command -v bd)
 cat > "$FIXTURE_RB/bin/bd" <<EOF
 #!/bin/bash
 if [ "\$1" = "label" ] && [ "\$2" = "remove" ] && [ "\$4" = "qa-pending" ]; then exit 1; fi
-exec $REAL_BD_RB --no-daemon "\$@"
+exec $REAL_BD_RB "\$@"
 EOF
 chmod +x "$FIXTURE_RB/bin/bd"
 TID_RB=$(cd "$FIXTURE_RB" && bd create "approve rollback" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
@@ -527,7 +532,7 @@ QG_BIND="$FIXTURE_BIND/.claude/scripts/qa-gate.sh"
 IR_BIND="$FIXTURE_BIND/.claude/scripts/impact-report.sh"
 TRACK_BIND="$FIXTURE_BIND/.claude/.qa-tracking"
 bind_hash_of_record() {
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
                  | select(test("QA-GATE APPROVED .*change_set_hash="))
                  | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | head -1

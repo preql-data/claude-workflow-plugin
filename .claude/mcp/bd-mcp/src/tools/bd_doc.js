@@ -42,6 +42,7 @@ import { z } from 'zod';
 import {
     runBd,
     runBdJson,
+    runBdShowJson,
     BdError,
     validateTaskId,
     HINT_LIST_TO_FIND_IDS,
@@ -161,7 +162,13 @@ export function registerDocTools(server) {
 
             // Named doc: figure out the next version, then append a comment
             // with the sentinel header.
-            const showRaw = await runBdJson(['show', tid, '--json'], {
+            //
+            // includeComments is load-bearing: named docs ARE comments, so on
+            // bd 1.1.2 a plain show returns none and every write would compute
+            // nextVersion=1 — silently forking the version chain instead of
+            // extending it.
+            const showRaw = await runBdShowJson(tid, {
+                includeComments: true,
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });
@@ -248,7 +255,12 @@ export function registerDocTools(server) {
         safe(async (input) => {
             const tid = validateTaskId(input.task_id);
 
-            const raw = await runBdJson(['show', tid, '--json'], {
+            // includeComments is load-bearing: named docs are stored AS
+            // comments, so without it bd_doc_read reports every named doc as
+            // missing on bd 1.1.2 (the 'main' doc, which lives in .notes,
+            // would still resolve — making the failure look selective).
+            const raw = await runBdShowJson(tid, {
+                includeComments: true,
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });

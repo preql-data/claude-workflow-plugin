@@ -72,7 +72,7 @@ NPM_LOG="$FIXTURE/bin/npm.log"
 
 # Seed a task and enter the QA gate.
 TID=$(cd "$FIXTURE" && bd create "Escalation cap test" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
-assert_match "esc: seeded task id" '^[a-z0-9-]+\.' "$TID"
+assert_match "esc: seeded task id" "$BD_ID_RE" "$TID"
 bash "$QG" enter "$TID" >/dev/null
 bd label add "$TID" qa-pending >/dev/null 2>&1
 
@@ -97,7 +97,7 @@ labels_for() {
 
 # Helper: count comments matching a pattern.
 comment_count_matching() {
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r --arg pat "$2" \
             'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test($pat))) | length' \
         2>/dev/null || echo "0"

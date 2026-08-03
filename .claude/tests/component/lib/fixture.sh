@@ -3,7 +3,7 @@
 #
 # Phase B (claude-workflow-plugin-0wk.11). Encapsulates the per-spec setup
 # pattern: mktemp -d, scaffold .claude/.qa-tracking + .beads + scripts,
-# install a bd wrapper (avoids daemon races on tempdir DBs), set
+# install a bd wrapper (one PATH-controlled bd entry point), set
 # CLAUDE_PROJECT_DIR, register cleanup. Specs call mk_fixture once, get
 # back a path, and write/read against $FIXTURE/.claude/.qa-tracking/...
 #
@@ -14,7 +14,7 @@
 #         - .claude/scripts/             (symlinks to plugin's real scripts)
 #         - .claude/settings.json        (minimal manifest, hooks-aware)
 #         - .beads/                      (initialised via `bd init`)
-#         - bin/bd                       (--no-daemon wrapper of real bd)
+#         - bin/bd                       (pass-through wrapper of real bd)
 #       Exports CLAUDE_PROJECT_DIR + COMPONENT_FIXTURE_PATH and prepends
 #       the fixture's bin/ to PATH.
 #
@@ -40,6 +40,12 @@
 #       V3 (jio.1): seed the IMPLEMENTER + REVIEW-ARTIFACT records a task
 #       needs before `qa-gate.sh approve` will succeed. See the function's
 #       own header for the contract.
+#
+#   bd_show_with_comments <task-id>
+#       `bd show --json` that always carries comment BODIES, across the
+#       supported bd range. Specs that assert on records (IMPLEMENTER,
+#       REVIEW-ARTIFACT, QA-GATE APPROVED, RUBRIC, ...) must read through
+#       this, not through a bare `bd show --json`. See its own header.
 
 if [ -n "${__COMPONENT_FIXTURE_SH_SOURCED:-}" ]; then
     return 0 2>/dev/null || true
@@ -222,6 +228,63 @@ net_required_or_skip() {
 #
 # Returns non-zero (and prints to stderr) if the artifact could not be
 # recorded, so a spec that silently lost its seed fails loudly.
+# BD_ID_RE — ERE matching a well-formed bd issue id. Use it for the
+# "seed task created" sanity assertions.
+#
+# These assertions used to spell the pattern '^[a-z0-9-]+\.' inline. That only
+# ever matched by accident: mk_fixture's tempdir is `component-fixture.XXXXXX.
+# <rand>`, `bd init` derives the issue prefix from the directory name, and on
+# bd 0.47.x the dots came through verbatim — so every id began
+# "component-fixture." and the leading-dot pattern matched. bd 1.1.2 sanitizes
+# the derived prefix (`.` -> `_`), producing
+# `component-fixture_XXXXXX_<rand>-<suffix>`, and the old pattern matches
+# nothing — while the property those assertions are NAMED for ("bd create
+# returned a task id") still holds exactly as before.
+#
+# So this pins the id SHAPE rather than the fixture's directory name: a prefix,
+# a hyphen, and an alphanumeric suffix, with a trailing `.<n>` permitted for
+# dotted child ids. It still rejects the empty string (the real regression these
+# guard against — `jq '.id // empty'` yielding nothing) and any bd error text,
+# which contains spaces and colons.
+BD_ID_RE='^[A-Za-z0-9._-]+-[A-Za-z0-9.]+$'
+
+# bd_show_with_comments <task-id> — `bd show --json` that always carries
+# comment BODIES, across the supported bd range (>=0.47).
+#
+# bd 1.1.2 stopped inlining comments in `bd show --json`: it returns a
+# `comment_count` integer, and the bodies need the new --include-comments flag.
+# bd 0.47.x has no such flag and exits 1 ("unknown flag: --include-comments"),
+# but inlines .comments already. So try the new form and fall back to the plain
+# one — pin the CHAIN, not the leg, the same shape seed_review_records uses for
+# `bd comments add || bd comment add`. This mirrors, byte for byte, the helper
+# the production scripts (qa-gate.sh, verify-before-stop.sh, review-check.sh,
+# subagent-start.sh, bd-github-link.sh) now read through.
+#
+# Specs asserting on RECORDS must use this. A bare `bd show --json` under 1.1.2
+# yields zero comments, so an assertion like "the approval record was written"
+# would go green->red for a reason that has nothing to do with the code under
+# test — or, worse, a "no record present" assertion would pass vacuously.
+#
+# Never fails the caller; callers keep the usual
+# `(if type=="array" then .[0].comments else .comments end) // []` accessor.
+#
+# The optional <root> runs the read inside that directory, so specs with a
+# `bdq()`/`bdt()`-style `( cd "$root" && bd ... )` wrapper use this ONE helper
+# too instead of growing a second, subtly-different variant.
+bd_show_with_comments() {
+    local tid="$1" root="${2:-}"
+    if [ -n "$root" ]; then
+        ( cd "$root" 2>/dev/null || exit 0
+          bd show "$tid" --json --include-comments 2>/dev/null \
+            || bd show "$tid" --json 2>/dev/null \
+            || true )
+        return 0
+    fi
+    bd show "$tid" --json --include-comments 2>/dev/null \
+        || bd show "$tid" --json 2>/dev/null \
+        || true
+}
+
 seed_review_records() {
     local tid="$1"
     local reviewer="${2:-qa-claude}"
@@ -335,10 +398,31 @@ JSON
     # purely additive host-isolation.
     export CODEX_USER_CONFIG="$root/.claude/.no-codex-config.json"
 
-    # Initialise Beads inside the fixture. Use the wrapper so --no-daemon
-    # is injected. Cd into the project for the init; cd back so we don't
-    # surprise the caller. `bd init` is silent on success.
+    # Initialise Beads inside the fixture, through the PATH wrapper. Cd into
+    # the project for the init; cd back so we don't surprise the caller.
+    # `bd init` is silent on success.
     (cd "$root" && bd init >/dev/null 2>&1) || true
+
+    # Undo the repo `bd init` now creates. bd 1.1.2's init runs `git init` and
+    # scaffolds CLAUDE.md / AGENTS.md / .claude/settings.json / .codex/; 0.47.x
+    # created neither. A component fixture is a BARE TEMPDIR by contract, and
+    # several specs depend on that directly:
+    #   - denylist-shared.sh asserts "intentionally NOT a git repo"
+    #   - verify-before-stop.sh's ALLOW paths rely on the Stop hook's
+    #     `git status` fallback finding nothing, which a fresh repo full of
+    #     untracked fixture files does not
+    # Leaving the repo in place turns those into failures that have nothing to
+    # do with the code under test. Specs that WANT a git checkout run their own
+    # `git init` after mk_fixture, so removing it here cannot take one away.
+    # bd is unaffected: its store is .beads/embeddeddolt, not git.
+    #
+    # `--skip-agents --skip-hooks` suppresses the CLAUDE.md/.claude scaffolding
+    # but NOT the git init, so this removal is the only way back to the
+    # documented fixture shape. Guarded on the path so a bug in $root can never
+    # turn this into an `rm -rf` somewhere else.
+    if [ -n "$root" ] && [ -d "$root/.git" ]; then
+        rm -rf "$root/.git"
+    fi
 
     # IMPORTANT: cd INTO the fixture in the caller's shell. The plugin's
     # hook scripts (qa-gate.sh, etc.) invoke `bd label add` etc. without

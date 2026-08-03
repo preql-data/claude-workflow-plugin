@@ -1,9 +1,15 @@
-# SQLite databases
+# SQLite databases (bd <= 0.47.x primary store)
 *.db
 *.db?*
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Embedded Dolt store (bd >= 1.1.x primary store) and its rolling backups.
+# Both are machine-local, exactly like the SQLite files above: issues.jsonl
+# is the portable ground truth and `bd bootstrap` rebuilds these from it.
+embeddeddolt/
+backup/
 
 # Daemon runtime files
 daemon.lock
@@ -36,6 +42,11 @@ beads.right.meta.json
 # These files are machine-specific and should not be shared across clones
 .sync.lock
 sync_base.jsonl
+
+# Export state (bd >= 1.1.x). `bd export` writes a Dolt commit hash plus a
+# timestamp here — the 1.1.x analogue of sync-state.json above, and just as
+# machine-local. Tracking it would churn on every ledger refresh.
+export-state.json
 
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing

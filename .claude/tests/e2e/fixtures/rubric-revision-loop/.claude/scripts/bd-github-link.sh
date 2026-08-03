@@ -124,12 +124,33 @@ normalize_ref() {
     return 1
 }
 
+# bd_show_with_comments <task-id> — `bd show --json` that always carries
+# comment BODIES, across the supported bd range.
+#
+# bd 1.1.2 stopped inlining comments in `bd show --json`: it returns a
+# `comment_count` integer, and the bodies need the new --include-comments flag.
+# bd 0.47.x has no such flag and exits 1 ("unknown flag: --include-comments"),
+# but inlines .comments already. So try the new form, fall back to the plain
+# one — pin the CHAIN, not the leg, the same shape the repo's
+# `bd comments add || bd comment add` calls use. Callers keep the usual
+# `.comments` accessor, which reads both shapes correctly. Never fails the
+# caller.
+#
+# Only readers of .comments need this. The notes-only read in ensure_gh_link_note
+# must NOT use it: the flag's own help warns it "may be slow on issues with many
+# comments", and .notes is unaffected by the change.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 # Find an explicit gh-link reference attached to a Beads task. We look in
 # notes (most recent) and most-recent comments, in that order.
 find_gh_link() {
     local tid="$1"
     local payload
-    payload=$(bd show "$tid" --json 2>/dev/null | jq -r '
+    payload=$(bd_show_with_comments "$tid" | jq -r '
         if type == "array" then .[0] else . end
         | (.notes // ""), (.comments // [] | map(.text) | reverse | .[])
     ' 2>/dev/null || echo "")

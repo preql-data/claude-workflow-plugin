@@ -3,10 +3,10 @@
 # (v4.1 / claude-workflow-plugin-0fc, epic 2br).
 #
 # The doctor is the repo's ONLY functional post-install verification surface,
-# so its own contract has to be pinned hard. Three properties matter most:
+# so its own contract has to be pinned hard. Four properties matter most:
 #
 #   1. THE CHECK REGISTRY IS THE TEST CONTRACT. Other specs and the
-#      /workflow-doctor command assert on the eleven names by name, so the
+#      /workflow-doctor command assert on the twelve check names by name, so the
 #      DOCTOR_CHECK_NAMES sentinel block, the runner's case arms, --help and a
 #      real --json-out run must all agree exactly. A name that exists in one
 #      place and not another is a check that silently never runs.
@@ -26,6 +26,15 @@
 #      showing the SAME seeded state IS destroyed when session-start.sh is
 #      invoked directly.
 #
+#   4. THE REGISTRY SIZE IS A CONTRACT TOO, not just the names (section 7).
+#      Docs, component specs, the two installers, the SessionStart degraded
+#      block and the Windows CI job's vacuity floor all state how many checks
+#      there are. When `beads_ledger` took the count from eleven to twelve, the
+#      stale "eleven" survived three review rounds of hand sweeps and left the
+#      CI floor asserting a bound the truncation it guards against would clear.
+#      Section 7 derives the expected count from the sentinel and scans every
+#      tracked surface, so the next registry change goes red instead of quiet.
+#
 # META-TESTs (all anchored to unique TEXT patterns, never line numbers, per
 # LESSONS.md; all operate on separate mutant/fixture COPIES so the repo tree
 # and each other's fixtures are never poisoned):
@@ -43,6 +52,12 @@
 #   META-TEST 5  a target whose SKILL.md is the fallback-stub shape FAILS the
 #                session_start check, while the same target with the real
 #                SKILL.md PASSES it.
+#   META-TEST 6  (section 7) the registry-size-vs-prose scan bites in BOTH
+#                directions: bumping the sentinel without touching the prose
+#                flags every tracked surface; staling ONE surface with the
+#                sentinel unchanged flags exactly that one; and restoring the
+#                Windows CI job's hardcoded vacuity floor trips the assertion
+#                that says it must stay derived.
 #
 # Exit codes: 0 all assertions pass, 1 otherwise, 2 invocation error.
 
@@ -224,6 +239,116 @@ all_but() {
     printf '%s' "${out#,}"
 }
 
+# --- Section 7 helpers: registry-size claims in prose -----------------------
+#
+# The vocabulary a REGISTRY-SIZE claim is written in: a count, one or more
+# spaces or a hyphen, optional qualifier words, then "check". Deliberately
+# narrow at the low end — the spelled alternation starts at "seven" and numerals
+# below DOCTOR_CLAIM_FLOOR are dropped — because "at least one check", "the two
+# checks below" and "five named checks" are claims about a SUBSET of the
+# registry, not about its size, and no plausible subset claim in the tracked
+# files reaches seven.
+#
+# THE TWO BOUNDARIES ARE NOT DECORATION. Each was added after a whole-tree run
+# produced a false positive, and each is named here so nobody removes it as
+# noise:
+#   leading  [^0-9A-Za-z.-]  stops "sections 1-7 check the VERDICTS" reading as
+#                            a claim of seven, and "U0.8 checkers" as one of
+#                            eight — a hyphenated range and a dotted section
+#                            label are not counts.
+#   trailing ([^[:alpha:]]|$) stops "the principle 11 checklist" and
+#                            "the U0.8 checkers" matching on a mere prefix of
+#                            "check".
+#
+# THERE IS NO EXEMPTION LIST, on purpose. If a legitimate non-registry claim of
+# seven-or-more checks ever appears in a tracked file, reword it ("every other
+# check in the registry", "a single check") rather than teaching this scanner to
+# look away — a guard with an exemption list is a guard someone can turn off one
+# line at a time.
+DOCTOR_CLAIM_RE='(^|[^0-9A-Za-z.-])(seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|[0-9]+)[ -]+((functional|named|doctor|health|registry|workflow)[ -]+)*check(s|\(s\))?([^[:alpha:]]|$)'
+DOCTOR_CLAIM_FLOOR=7
+
+# spelled_count <token> — the numeric value of a count token, spelled or not.
+# Echoes the token unchanged when it is neither, so the caller's is-it-a-number
+# test rejects it.
+spelled_count() {
+    case "$1" in
+        seven) printf '7'  ;; eight)    printf '8'  ;; nine)     printf '9'  ;;
+        ten)   printf '10' ;; eleven)   printf '11' ;; twelve)   printf '12' ;;
+        thirteen) printf '13' ;; fourteen) printf '14' ;; fifteen)  printf '15' ;;
+        sixteen)  printf '16' ;; seventeen) printf '17' ;; eighteen) printf '18' ;;
+        nineteen) printf '19' ;; twenty)    printf '20' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# count_claims <file> [display-name] — one TSV row per registry-size claim:
+#   <display>:<line> <TAB> <numeric value> <TAB> <matched text>
+# Empty output means the file makes no claim at all, which Section 7 treats
+# differently depending on which tier the file is in.
+count_claims() {
+    local f="$1" rel="${2:-}"
+    [ -n "$rel" ] || rel="${f#"$PROJECT_DIR"/}"
+    [ -f "$f" ] || return 0
+    grep -oniE "$DOCTOR_CLAIM_RE" "$f" 2>/dev/null | while IFS=: read -r ln raw; do
+        local tok n
+        tok=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' \
+                | sed -E 's/^[^0-9a-z]*//; s/[ -].*$//')
+        n=$(spelled_count "$tok")
+        case "$n" in ''|*[!0-9]*) continue ;; esac
+        [ "$n" -ge "$DOCTOR_CLAIM_FLOOR" ] || continue
+        printf '%s:%s\t%s\t%s\n' "$rel" "$ln" "$n" "$raw"
+    done
+}
+
+# claim_offenders <expected> <file>... — "" when every claim in every file says
+# <expected>, otherwise a space-separated list of "path:line=value".
+claim_offenders() {
+    local want="$1"; shift
+    local f loc val out=""
+    for f in "$@"; do
+        while IFS=$'\t' read -r loc val _; do
+            [ -n "$loc" ] || continue
+            [ "$val" = "$want" ] || out="$out $loc=$val"
+        done < <(count_claims "$f")
+    done
+    printf '%s' "${out# }"
+}
+
+# enum_gaps <file>... — "<path>:<name>" for every registry name a file that is
+# supposed to ENUMERATE the check names never mentions. Reads $SENTINEL_LIST,
+# which section 2 derives from the sentinel.
+#
+# File-level rather than row-level on purpose: pinning the exact markup of a
+# markdown table cell would break on a reflow and teach nobody anything. The
+# weakness is named — a name that appears ELSEWHERE in the file satisfies this
+# even if the enumeration omits it — but it is not vacuous for the case that
+# actually shipped: pre-fix docs/HOOKS.md contained the string `beads_ledger`
+# exactly zero times.
+enum_gaps() {
+    local f n rel out=""
+    for f in "$@"; do
+        rel="${f#"$PROJECT_DIR"/}"
+        if [ ! -f "$f" ]; then out="$out $rel:<absent>"; continue; fi
+        for n in $SENTINEL_LIST; do
+            grep -qF -- "$n" "$f" || out="$out $rel:$n"
+        done
+    done
+    printf '%s' "${out# }"
+}
+
+# claim_count <file>... — how many registry-size claims the files make in total.
+# Non-vacuity fuel: a scanner that matches nothing passes every equality test
+# ever written against it.
+claim_count() {
+    local f total=0 n
+    for f in "$@"; do
+        n=$(count_claims "$f" | grep -c . | tr -d ' ')
+        total=$((total + n))
+    done
+    printf '%s' "$total"
+}
+
 # ===========================================================================
 echo "=== Section 1: --help and usage errors ==="
 
@@ -345,7 +470,7 @@ assert_eq "registry: exactly one END DOCTOR_CHECK_NAMES sentinel" "1" "$SENTINEL
 
 SENTINEL_LIST=$(sentinel_names "$DOCTOR")
 SENTINEL_COUNT=$(printf '%s' "$SENTINEL_LIST" | wc -w | tr -d ' ')
-assert_eq "registry: the sentinel declares 11 check names" "11" "$SENTINEL_COUNT"
+assert_eq "registry: the sentinel declares 12 check names" "12" "$SENTINEL_COUNT"
 
 # Sorted comparison so the assertion is about SET equality, not ordering.
 SENTINEL_SORTED=$(printf '%s' "$SENTINEL_LIST" | sort_words)
@@ -440,7 +565,9 @@ assert_eq "skip: the kept check still ran (deps has a non-SKIP status)" "false" 
     "$([ "$(status_of "$SKIP_JSON" deps)" = "SKIP" ] && echo true || echo false)"
 assert_eq "skip: a skipped check's status is SKIP" "SKIP" \
     "$(status_of "$SKIP_JSON" gate_stop)"
-assert_eq "skip: .skipped counts every skipped name" "10" \
+# 12 checks in the registry, one kept (deps) => 11 skipped. Bumped from 10
+# when beads_ledger joined the registry (claude-workflow-plugin-fkm.1.1).
+assert_eq "skip: .skipped counts every skipped name" "11" \
     "$(jq -r '.skipped' "$SKIP_JSON" 2>/dev/null || echo "-1")"
 assert_eq "skip: a skipped check is NOT counted in .passed" "true" \
     "$(jq -r '.passed <= 1' "$SKIP_JSON" 2>/dev/null || echo "false")"
@@ -455,7 +582,7 @@ assert_eq "skip: skipping every check yields passed=0" "0" \
     "$(jq -r '.passed' "$ALL_SKIP_JSON" 2>/dev/null || echo "-1")"
 assert_eq "skip: skipping every check yields failed=0" "0" \
     "$(jq -r '.failed' "$ALL_SKIP_JSON" 2>/dev/null || echo "-1")"
-assert_eq "skip: skipping every check yields skipped=11" "11" \
+assert_eq "skip: skipping every check yields skipped=12" "12" \
     "$(jq -r '.skipped' "$ALL_SKIP_JSON" 2>/dev/null || echo "-1")"
 
 # ===========================================================================
@@ -662,9 +789,11 @@ assert_eq "beads-exception: check_beads does NOT sandbox (it queries the real .b
 assert_eq "beads-exception: CONTROL — check_session_start DOES sandbox (so the probe is discriminating)" "true" \
     "$(printf '%s' "$SS_BODY" | grep -q 'mk_probe_sandbox' && echo true || echo false)"
 
-# The shim inconsistency QA flagged: check_beads used to bypass the
-# `bd --no-daemon` wrapper every other bd call in the doctor goes through.
-assert_eq "beads-exception: check_beads routes bd through the shared --no-daemon shim" "true" \
+# The shim inconsistency QA flagged: check_beads used to bypass the bd wrapper
+# every other bd call in the doctor goes through. (The wrapper injected
+# --no-daemon until bd 1.1.2 removed the flag; what is asserted is that
+# check_beads uses the SHARED shim, not what the shim puts on the command line.)
+assert_eq "beads-exception: check_beads routes bd through the shared bd shim" "true" \
     "$(printf '%s' "$BEADS_BODY" | grep -q 'mk_bd_shim' && echo true || echo false)"
 
 # BEHAVIOURAL: with `--skip beads`, a run leaves .beads/ byte-identical. This is
@@ -853,6 +982,242 @@ else
         "SKILL.md" \
         "$(jq -r '.checks[] | select(.name == "session_start") | .detail' "$STUB_JSON" 2>/dev/null || echo "")"
 fi
+
+# ===========================================================================
+echo ""
+echo "=== Section 7: the registry SIZE is one number in every surface (+ META-TEST 6) ==="
+#
+# WHY THIS SECTION EXISTS (claude-workflow-plugin-fkm.1.1)
+# Adding `beads_ledger` took the registry from eleven names to twelve, and the
+# stale "eleven" survived THREE consecutive remediation rounds — each sweep
+# scoped to the vocabulary of the previous fix, each missing a surface the
+# previous one had not taught anyone to look at. A code-shaped sweep missed
+# prose; a prose-shaped sweep missed the production script's own header and the
+# count vocabulary entirely. The last round found stale claims in five files
+# nobody had touched, plus a CI vacuity floor still derived from eleven — a
+# guard written to catch a truncated report that would have waved through
+# exactly the truncation it was written for.
+#
+# A fourth hand sweep is not a fix. This is: the expected count is DERIVED from
+# the sentinel (never typed here), and every tracked surface is scanned for a
+# claim that disagrees. Change DOCTOR_CHECK_NAMES without touching the prose and
+# this goes red, naming the file and the line.
+#
+# TWO TIERS, because "makes no claim" means different things:
+#   NAMING  the surface's job is to state the count. It must carry AT LEAST ONE
+#           claim, so a claim that disappears (reworded, deleted, or wrapped
+#           across a line break where a line-oriented scan cannot see it — a
+#           real near-miss: INDEX.md's claim was split over two lines) fails
+#           here instead of silently leaving the file uncovered.
+#   SILENT  a count claim is optional (the doctor script and both installers
+#           deliberately say "every other check in the registry" rather than a
+#           number) but must be correct if present.
+COUNT_SURFACES_NAMING=(
+    ".claude/scripts/session-start.sh"              # degraded-session context
+    ".claude/commands/workflow-doctor.md"           # the slash command
+    ".claude/scripts/tests/workflow-doctor.test.sh" # this spec's own header
+    ".claude/scripts/tests/installer-flags.test.sh" # --verify stub rationale
+    ".claude/tests/component/specs/installer-target-functional.sh"
+    ".claude/tests/component/specs/installer-mcp-config.sh"
+    ".claude/tests/component/specs/installer-manifest-parity.sh"
+    ".claude/tests/component/specs/installer-v3-upgrade.sh"
+    ".claude/tests/component/specs/upgrade-gate-compat.sh"
+    "docs/HOOKS.md"                                 # the hook-inventory row
+    "docs/QUICKSTART.md"                            # Step 5 + its sample output
+    "INDEX.md"                                      # the make doctor bullet
+    ".github/workflows/windows-install.yml"         # the vacuity-floor comment
+)
+COUNT_SURFACES_SILENT=(
+    ".claude/scripts/workflow-doctor.sh"            # the WHAT A RUN TOUCHES note
+    "install.sh"
+    "install.ps1"
+)
+# NOT tracked, deliberately: CHANGELOG.md, docs/RELEASE_AUDIT.md,
+# docs/v4.1-closure.md and docs/plans/v4.1-upgrade-wave.md all say "eleven" and
+# all are DATED records of what shipped at v4.1.0, when eleven was true.
+# Rewriting history to satisfy a guard would be the worse failure.
+
+COUNT_MISSING=""
+COUNT_NAMING_PATHS=()
+for _s in "${COUNT_SURFACES_NAMING[@]}"; do
+    if [ -f "$PROJECT_DIR/$_s" ]; then
+        COUNT_NAMING_PATHS+=("$PROJECT_DIR/$_s")
+    else
+        COUNT_MISSING="$COUNT_MISSING $_s"
+    fi
+done
+COUNT_SILENT_PATHS=()
+for _s in "${COUNT_SURFACES_SILENT[@]}"; do
+    if [ -f "$PROJECT_DIR/$_s" ]; then
+        COUNT_SILENT_PATHS+=("$PROJECT_DIR/$_s")
+    else
+        COUNT_MISSING="$COUNT_MISSING $_s"
+    fi
+done
+# The committed fixture copies of session-start.sh carry the same sentence.
+# `make sync-fixtures` keeps them byte-identical and an L3 spec guards that, but
+# scanning them here means an L1-only run still catches a half-done sync.
+for _s in "$PROJECT_DIR"/.claude/tests/e2e/fixtures/*/.claude/scripts/session-start.sh; do
+    [ -f "$_s" ] && COUNT_NAMING_PATHS+=("$_s")
+done
+
+# 7a: every tracked path resolves. A renamed file must drop out LOUDLY — a
+# silently-missing surface is an uncovered surface, which is the whole defect.
+assert_eq "count-parity: every tracked surface exists" "" "$COUNT_MISSING"
+
+# 7b: NON-VACUITY. If the pattern stopped matching, 7c would pass over an empty
+# set. The floor is a count, not a list, so adding a surface does not churn it.
+COUNT_TOTAL=$(claim_count "${COUNT_NAMING_PATHS[@]}" "${COUNT_SILENT_PATHS[@]}")
+assert_eq "count-parity: the scan finds a plausible number of claims (>= 15)" "true" \
+    "$([ "${COUNT_TOTAL:-0}" -ge 15 ] && echo true || echo false)"
+
+# 7c: THE ASSERTION. Every claim, in either tier, states the registry size.
+assert_eq "count-parity: no tracked surface claims a count other than the registry's $SENTINEL_COUNT" \
+    "" "$(claim_offenders "$SENTINEL_COUNT" "${COUNT_NAMING_PATHS[@]}" "${COUNT_SILENT_PATHS[@]}")"
+
+# 7d: each NAMING surface actually makes a claim (see the tier note above).
+COUNT_SILENT_NAMERS=""
+for _p in "${COUNT_NAMING_PATHS[@]}"; do
+    [ "$(claim_count "$_p")" != "0" ] || COUNT_SILENT_NAMERS="$COUNT_SILENT_NAMERS ${_p#"$PROJECT_DIR"/}"
+done
+assert_eq "count-parity: every NAMING surface still states the count" "" "$COUNT_SILENT_NAMERS"
+
+# 7e: the surfaces that spell the names OUT must spell out all of them. The
+# count and the list go stale together — docs/HOOKS.md's inventory row carried
+# the previous count AND omitted `beads_ledger` from its list, so a count-only
+# guard would have caught exactly half of that defect.
+COUNT_SURFACES_ENUMERATING=(
+    "$PROJECT_DIR/.claude/commands/workflow-doctor.md"
+    "$PROJECT_DIR/.claude/scripts/workflow-doctor.sh"
+    "$PROJECT_DIR/.claude/tests/component/specs/installer-target-functional.sh"
+    "$PROJECT_DIR/docs/HOOKS.md"
+)
+assert_eq "count-parity: every surface that enumerates the names lists all $SENTINEL_COUNT" \
+    "" "$(enum_gaps "${COUNT_SURFACES_ENUMERATING[@]}")"
+
+# --- 7f: the Windows CI vacuity floor, which is the one with teeth -----------
+#
+# `failed == 0` over a truncated report is green by construction, so that job
+# refuses to call a run a pass below a floor. The floor used to be a literal 8,
+# written when the registry had eleven names and three were skipped; the
+# registry moved to twelve and the literal did not, so a report truncated to 8
+# entries — the exact shape the guard exists to catch — passed it. The fix was
+# to derive the floor from the sentinel in the doctor the install landed, and
+# these assertions are what keep it derived.
+WIN_WF="$PROJECT_DIR/.github/workflows/windows-install.yml"
+# These patterns are PowerShell source being matched as text, so every `$` in
+# them is a literal. Single quotes are mandatory and the SC2016 waivers say so
+# once here rather than at each use site.
+# shellcheck disable=SC2016
+CI_LITERAL_FLOOR_RE='\$checkCount[[:space:]]+-lt[[:space:]]+[0-9]'
+# shellcheck disable=SC2016
+CI_DERIVED_FLOOR_RE='\$checkCount[[:space:]]+-lt[[:space:]]+\$floor'
+# shellcheck disable=SC2016
+CI_SKIPARG_RE='\-\-skip[[:space:]]+\$skipArg'
+# shellcheck disable=SC2016
+CI_SKIPLIST_SED='s/^[[:space:]]*\$skipChecks[[:space:]]*=[[:space:]]*@(\(.*\))[[:space:]]*$/\1/p'
+assert_eq "ci-floor: the Windows workflow exists" "true" \
+    "$([ -f "$WIN_WF" ] && echo true || echo false)"
+if [ -f "$WIN_WF" ]; then
+    assert_eq "ci-floor: the vacuity floor is read from the DOCTOR_CHECK_NAMES sentinel" "true" \
+        "$(grep -q 'DOCTOR_CHECK_NAMES' "$WIN_WF" && echo true || echo false)"
+    # A literal comparison is precisely the defect: the count must be compared
+    # against the derived floor, never against a typed number.
+    assert_eq "ci-floor: the check count is NOT compared against a hardcoded literal" "0" \
+        "$(grep -cE "$CI_LITERAL_FLOOR_RE" "$WIN_WF" | tr -d ' ')"
+    assert_eq "ci-floor: ...it is compared against the derived floor" "true" \
+        "$(grep -qE "$CI_DERIVED_FLOOR_RE" "$WIN_WF" && echo true || echo false)"
+    # The skip list is declared once and joined into --skip, so the floor's
+    # subtrahend and the invocation can never disagree.
+    assert_eq "ci-floor: --skip is passed the joined variable, not a re-typed list" "true" \
+        "$(grep -qE "$CI_SKIPARG_RE" "$WIN_WF" && echo true || echo false)"
+    CI_SKIPS=$(sed -n "$CI_SKIPLIST_SED" \
+        "$WIN_WF" | head -1 | tr -d '" ' | tr ',' ' ')
+    CI_SKIP_N=$(printf '%s' "$CI_SKIPS" | wc -w | tr -d ' ')
+    assert_eq "ci-floor: the skip list parses to a non-empty set" "true" \
+        "$([ "${CI_SKIP_N:-0}" -ge 1 ] && echo true || echo false)"
+    # A skip name the registry does not have makes the doctor exit 2 — on a
+    # manual-dispatch-only workflow that is a red nobody sees for months.
+    CI_SKIP_UNKNOWN=""
+    for _n in $CI_SKIPS; do
+        [ "$(has_word "$SENTINEL_LIST" "$_n")" = "true" ] || CI_SKIP_UNKNOWN="$CI_SKIP_UNKNOWN $_n"
+    done
+    assert_eq "ci-floor: every skipped name is a real registry name" "" "$CI_SKIP_UNKNOWN"
+    # And the arithmetic the job will do must leave something to assert with.
+    CI_FLOOR=$((SENTINEL_COUNT - CI_SKIP_N))
+    assert_eq "ci-floor: registry ($SENTINEL_COUNT) minus skips ($CI_SKIP_N) leaves a floor above zero" "true" \
+        "$([ "$CI_FLOOR" -ge 1 ] && echo true || echo false)"
+fi
+
+echo ""
+echo "--- META-TEST 6: the count-parity scan bites in BOTH directions ---"
+#
+# Leg A is the regression this section was written for: the registry moves and
+# the prose does not. Leg B is its mirror: the prose moves and the registry does
+# not. Both operate on COPIES; the repo tree is never touched.
+
+# Leg A — one more registry name, prose untouched.
+MUT6="$WORK/doctor-mut6.sh"
+sed 's/^DOCTOR_CHECK_NAMES="deps /DOCTOR_CHECK_NAMES="deps synthetic_extra /' "$DOCTOR" > "$MUT6"
+MUT6_COUNT=$(printf '%s' "$(sentinel_names "$MUT6")" | wc -w | tr -d ' ')
+assert_eq "META-TEST 6A: the mutant registry really declares one more name" \
+    "$((SENTINEL_COUNT + 1))" "$MUT6_COUNT"
+assert_eq "META-TEST 6A: the mutant is still valid bash" "0" \
+    "$(bash -n "$MUT6" 2>/dev/null && echo 0 || echo 1)"
+MUT6A_OFFENDERS=$(claim_offenders "$MUT6_COUNT" "${COUNT_NAMING_PATHS[@]}" "${COUNT_SILENT_PATHS[@]}")
+assert_eq "META-TEST 6A: bumping the registry WITHOUT touching the prose flags every surface" "true" \
+    "$([ -n "$MUT6A_OFFENDERS" ] && echo true || echo false)"
+# Every NAMING surface should be among the flagged, not just one of them —
+# otherwise the scan is only watching a corner of the tracked set.
+MUT6A_N=$(printf '%s' "$MUT6A_OFFENDERS" | wc -w | tr -d ' ')
+assert_eq "META-TEST 6A: ...and flags ALL of them, not a lucky one" "$COUNT_TOTAL" "$MUT6A_N"
+
+# Leg B — the prose moves, the registry does not. The target is
+# docs/QUICKSTART.md's sample doctor output, one of the surfaces the last review
+# round found stale (docs/HOOKS.md's inventory row was the other). Both the
+# search and the replacement are BUILT from $SENTINEL_COUNT rather than typed.
+# Spelling the previous count out here would plant a stale claim in a tracked
+# surface and 7c would flag this spec for describing its own META — which is
+# not hypothetical: the first draft of this very comment did exactly that, and
+# the section caught it on its first run.
+MUT6B_SRC="$PROJECT_DIR/docs/QUICKSTART.md"
+MUT6B="$WORK/quickstart-mut6.md"
+sed "s/$SENTINEL_COUNT check(s)/$((SENTINEL_COUNT - 1)) check(s)/" "$MUT6B_SRC" > "$MUT6B"
+assert_eq "META-TEST 6B: the prose mutant really differs from the original" "1" \
+    "$(cmp -s "$MUT6B" "$MUT6B_SRC" && echo 0 || echo 1)"
+MUT6B_OFF=$(claim_offenders "$SENTINEL_COUNT" "$MUT6B")
+assert_eq "META-TEST 6B: exactly the one mutated claim is flagged" "1" \
+    "$(printf '%s' "$MUT6B_OFF" | wc -w | tr -d ' ')"
+assert_contains "META-TEST 6B: ...and the report names the wrong value it found" \
+    "=$((SENTINEL_COUNT - 1))" "$MUT6B_OFF"
+assert_eq "META-TEST 6B control: the UNMUTATED surface is clean" "" \
+    "$(claim_offenders "$SENTINEL_COUNT" "$MUT6B_SRC")"
+
+# Leg C — the floor guard. A copy of the workflow with the literal restored must
+# fail 7e, so "no hardcoded literal" is a real assertion and not a tautology.
+MUT6C="$WORK/windows-install-mut6.yml"
+# Same literal-`$` reasoning as the CI_*_RE patterns above: this is PowerShell
+# text, and the replacement side has to keep `$checkCount` verbatim.
+# shellcheck disable=SC2016
+sed 's/\$checkCount -lt \$floor/$checkCount -lt 8/' "$WIN_WF" > "$MUT6C"
+assert_eq "META-TEST 6C: the workflow mutant really restored the literal" "1" \
+    "$(grep -cE "$CI_LITERAL_FLOOR_RE" "$MUT6C" | tr -d ' ')"
+assert_eq "META-TEST 6C control: the shipped workflow has no such literal" "0" \
+    "$(grep -cE "$CI_LITERAL_FLOOR_RE" "$WIN_WF" | tr -d ' ')"
+
+# Leg D — the enumeration guard. Delete one name from a copy of the inventory
+# row and 7e must name it. This reproduces the shipped defect exactly: the row
+# carried the previous count and its list had no `beads_ledger` in it.
+MUT6D_SRC="$PROJECT_DIR/docs/HOOKS.md"
+MUT6D="$WORK/hooks-mut6d.md"
+# Backticks are markdown being matched as text, not command substitution.
+# shellcheck disable=SC2016
+sed 's/, `beads_ledger`//' "$MUT6D_SRC" > "$MUT6D"
+assert_eq "META-TEST 6D: the mutant really dropped the name" "0" \
+    "$(grep -cF 'beads_ledger' "$MUT6D" | tr -d ' ')"
+assert_contains "META-TEST 6D: the enumeration guard names the dropped check" \
+    ":beads_ledger" "$(enum_gaps "$MUT6D")"
+assert_eq "META-TEST 6D control: the shipped row has no gaps" "" "$(enum_gaps "$MUT6D_SRC")"
 
 # ---------------------------------------------------------------------------
 echo ""

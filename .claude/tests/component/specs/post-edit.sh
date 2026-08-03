@@ -116,7 +116,7 @@ run_pe2() {
 }
 # Helper: count Progress: comments on a task.
 progress_comment_count() {
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | map(select(.text|test("Progress:")))|length' \
         2>/dev/null || echo "0"
 }
@@ -155,7 +155,7 @@ printf '%s\n' "$TID_PIPE" > "$TRACK2/current-task"
 seed_tracking_lines 3
 printf '9' > "$ECF"            # next edit -> 10
 run_pe2 "src/f1.ts" >/dev/null
-PIPE_TEXT=$(bd show "$TID_PIPE" --json 2>/dev/null \
+PIPE_TEXT=$(bd_show_with_comments "$TID_PIPE" \
     | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | map(select(.text|test("Progress:")))|.[0].text // ""' 2>/dev/null)
 assert_match "post-edit mut30: progress comment count is a bare integer (wc -l pipeline intact)" \
     "Progress: [0-9]+ files edited" "$PIPE_TEXT"

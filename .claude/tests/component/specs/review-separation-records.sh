@@ -28,7 +28,7 @@ TID=$(bd create "review-separation spec" -t task --json 2>/dev/null | jq -r '.id
 # latest_comment_matching <regex> — the last comment text whose FIRST line
 # matches (records are single-line).
 latest_comment_matching() {
-    bd show "$TID" --json 2>/dev/null | jq -r '.[0].comments[].text' 2>/dev/null \
+    bd_show_with_comments "$TID" | jq -r '.[0].comments[].text' 2>/dev/null \
         | grep -E "$1" | tail -1
 }
 

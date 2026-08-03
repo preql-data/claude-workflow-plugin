@@ -25,8 +25,8 @@
 # Conventions: this script mirrors bd-github-link.test.sh /
 # phase5-synthetic-tests.sh — plain bash, `set -u`, assert helpers,
 # trailing summary. No bats. The fixture is a tempdir with bd init'd
-# inside it; we use a --no-daemon wrapper so the test doesn't race the
-# daemon-autostart path on fresh DBs.
+# inside it, reached through a pass-through bd wrapper on PATH (it carried
+# --no-daemon until bd 1.1.2 removed the flag along with the daemon).
 #
 # Exit codes:
 #   0  every assertion passed
@@ -122,11 +122,13 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 1
 fi
 
-# bd --no-daemon wrapper so the tempdir DB doesn't race the daemon.
+# bd wrapper: a pass-through so the fixture has one PATH-controlled bd. It
+# injected --no-daemon until bd 1.1.2 removed the flag (and the daemon: 1.1.x
+# runs an in-process embedded Dolt engine, so there is no tempdir race left).
 REAL_BD=$(command -v bd)
 cat > "$FIXTURE/bin/bd" <<EOF
 #!/bin/bash
-exec ${REAL_BD} --no-daemon "\$@"
+exec ${REAL_BD} "\$@"
 EOF
 chmod +x "$FIXTURE/bin/bd"
 export PATH="$FIXTURE/bin:$PATH"
@@ -173,13 +175,25 @@ labels_for() {
         2>/dev/null || echo ""
 }
 
+# Same version-tolerant reader the production scripts use: bd 1.1.2 returns
+# only a comment_count on a plain `show --json` and needs --include-comments;
+# bd 0.47.x rejects that flag but inlines .comments. Pin the chain, not the leg.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 # Helper: count comments matching a regex on a task. Kept for parity
 # with the L2 spec's helper, even though this file uses inline jq for
 # every comment-check — having both reduces future drift.
+# NOTE: the disable below must stay DIRECTLY above comment_count_matching —
+# a shellcheck directive binds to the next command, so anything inserted
+# between them silently transfers the suppression to the interloper.
 # shellcheck disable=SC2329  # Retained as a documented helper.
 comment_count_matching() {
     local tid="$1" pat="$2"
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r --arg pat "$pat" \
             'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test($pat))) | length' \
         2>/dev/null || echo "0"
@@ -248,7 +262,7 @@ assert_eq "choose continue: escalation-posted marker wiped" "1" \
     "$([ -f "$TRACK/escalation-posted.$SANITIZED_CONT" ] && echo 0 || echo 1)"
 
 # Audit comment recorded.
-CMT_CONT=$(bd show "$TID_CONT" --json | jq -r 'if type == "array" then .[0].comments else .comments end | map(select(.text | test("QA-GATE CHOICE continue"))) | length')
+CMT_CONT=$(bd_show_with_comments "$TID_CONT" | jq -r 'if type == "array" then .[0].comments else .comments end | map(select(.text | test("QA-GATE CHOICE continue"))) | length')
 assert_eq "choose continue: audit comment recorded" "1" "$CMT_CONT"
 
 # ---------------------------------------------------------------------------
@@ -276,7 +290,7 @@ assert_contains "choose defer: qa-pending preserved" \
 # can mention both labels.)
 
 # Audit comment.
-CMT_DEF=$(bd show "$TID_DEF" --json | jq -r 'if type == "array" then .[0].comments else .comments end | map(select(.text | test("QA-GATE CHOICE defer"))) | length')
+CMT_DEF=$(bd_show_with_comments "$TID_DEF" | jq -r 'if type == "array" then .[0].comments else .comments end | map(select(.text | test("QA-GATE CHOICE defer"))) | length')
 assert_eq "choose defer: audit comment recorded" "1" "$CMT_DEF"
 
 # ---------------------------------------------------------------------------

@@ -88,9 +88,10 @@ See `docs/` (which has its own index in `docs/plans/README.md`):
 
 - `tests/` -> symlink to `.claude/scripts/tests/`.
 - Run: `make test` (or `bash tests/run-tests.sh` directly).
-- Health check an install: `make doctor` (or `make doctor TARGET=<dir>`) — eleven
-  functional checks that EXECUTE the SessionStart hook, both MCP servers and both
-  gate hooks. Safe mid-session; see `.claude/scripts/workflow-doctor.sh --help`.
+- Health check an install: `make doctor` (or `make doctor TARGET=<dir>`) —
+  twelve functional checks that EXECUTE the SessionStart hook, both MCP servers,
+  both gate hooks and the Beads ledger. Safe mid-session; see
+  `.claude/scripts/workflow-doctor.sh --help`.
 - Smoke install: `make install-test` — installs into a tempdir and runs the
   doctor against the result. **Expected to PASS.** It was expected-red through
   `claude-workflow-plugin-0fc` (C0a): a rendered target had no

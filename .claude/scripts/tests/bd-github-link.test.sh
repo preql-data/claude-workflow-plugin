@@ -134,9 +134,10 @@ REAL_BD="$(command -v bd 2>/dev/null || true)"
 
 cat > "$FIXTURE/bin/bd" <<EOF
 #!/bin/bash
-# bd shim: forward to real bd with --no-daemon to avoid concurrent
-# daemon-autostart races during the test run.
-exec "$REAL_BD" --no-daemon "\$@"
+# bd shim: forward to the real bd. It used to inject --no-daemon to dodge
+# bd 0.47.x daemon-autostart races on the tempdir DB; bd 1.1.2 removed the
+# flag and the daemon (embedded in-process Dolt), so this is a pass-through.
+exec "$REAL_BD" "\$@"
 EOF
 chmod +x "$FIXTURE/bin/bd"
 

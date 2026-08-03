@@ -171,11 +171,23 @@ context. (`post-edit.sh:53` `emit_empty() { echo '{}'; }`.)
 
 **Trigger**: When session ends
 
-**Purpose**: Ensure Beads state is persisted
+**Purpose**: Detect whether the JSONL ledger — what a fresh clone recovers the
+issue database from — still matches the database. It writes nothing.
 
 **What it does**:
 ```bash
-bd sync
+bash .claude/scripts/beads-ledger.sh check    # READ-ONLY; wraps a bd export to a temp file
+```
+
+`bd sync` was REMOVED in bd 1.1.2, and the automatic ledger write that briefly
+replaced it was removed too (R4-F1): five defects came out of letting an
+unattended hook decide when writing was safe. So SessionEnd RECORDS a
+divergence to `sync-errors.log`, `session-start.sh` surfaces it next session,
+and `workflow-doctor.sh`'s `beads_ledger` check reports it as a FAIL. Repair is
+always an explicit operator action:
+
+```bash
+bash .claude/scripts/beads-ledger.sh reconcile --apply
 ```
 
 ---

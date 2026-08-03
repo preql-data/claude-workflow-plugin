@@ -328,7 +328,7 @@ assert_eq "denylist-B1: memory-only change set RELEASES (empty after the denylis
 MEM_STATUS=$(bash "$QG_B" status "$TID_MEM" 2>/dev/null | jq -r '.status // "error"')
 assert_eq "denylist-B1: and does NOT auto-approve the task (was: F1 doc-only)" \
     "entered" "$MEM_STATUS"
-MEM_COMMENTS=$(cd "$FB" && bd show "$TID_MEM" --json 2>/dev/null \
+MEM_COMMENTS=$(bd_show_with_comments "$TID_MEM" "$FB" \
     | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | map(.text) | join("\n")')
 assert_not_contains "denylist-B1: no F1 doc-only bypass record was written" \
     "[review bypass: F1 doc-only" "$MEM_COMMENTS"

@@ -11,6 +11,7 @@
 import { z } from 'zod';
 import {
     runBdJson,
+    runBdShowJson,
     BdError,
     validateTaskId,
     HINT_LIST_TO_FIND_IDS,
@@ -114,8 +115,9 @@ export function registerListTools(server) {
                     .describe(
                         "Advanced: pass `bd show --refs` which returns a reverse-reference MAP keyed by " +
                         "the requested id (different shape than the default object). Most callers should " +
-                        "leave this false — plain show already includes `dependencies` (blockers) and " +
-                        "`dependents` (reverse refs) in the returned task. Default: false.",
+                        "leave this false — this tool already returns `dependencies` (blockers) and " +
+                        "`dependents` (reverse refs) on the task, hydrating them explicitly where the " +
+                        "installed bd does not inline them. Default: false.",
                     ),
                 cwd: z.string().optional(),
             },
@@ -129,9 +131,17 @@ export function registerListTools(server) {
         },
         safe(async (input) => {
             const tid = validateTaskId(input.task_id);
-            const args = ['show', tid, '--json'];
-            if (input.include_refs) args.push('--refs');
-            const raw = await runBdJson(args, {
+            // This tool's contract is the task's FULL state, so it hydrates
+            // both arrays bd 1.1.2 stopped inlining. Without them the payload
+            // silently loses .comments and .dependents while still reporting
+            // comment_count / dependent_count — the shape would also differ
+            // between bd 0.47.x and 1.1.2, which is worse than either choice.
+            // Measured cost on this repo's heaviest bead: ~30-40ms on a ~350ms
+            // baseline (bd process startup dominates).
+            const raw = await runBdShowJson(tid, {
+                includeComments: true,
+                includeDependents: true,
+                extraArgs: input.include_refs ? ['--refs'] : [],
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });

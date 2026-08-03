@@ -64,7 +64,7 @@ printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint
 chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
 
 comments_of() {
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r '(if type == "array" then .[0].comments else .comments end) // [] | .[].text' \
         2>/dev/null || echo ""
 }

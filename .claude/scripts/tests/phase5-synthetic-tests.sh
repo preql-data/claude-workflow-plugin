@@ -103,6 +103,14 @@ if ! command -v bd >/dev/null 2>&1; then
 fi
 
 cd "$FIXTURE" && bd init >/dev/null 2>&1
+# Section 3.7 drives the Stop hook's ALLOW path by emptying the changed-files
+# tracker. With the tracker empty the hook falls back to `git status`, so the
+# fixture must not be a git checkout — otherwise the fallback reports the
+# fixture's own untracked .claude/ tree as pending work and the hook BLOCKS.
+# bd 1.1.2's `bd init` runs `git init` (0.47.x did not), which silently made
+# this fixture a repo. Drop it: the premise moved, not the hook's behaviour.
+# bd is unaffected — the store is .beads/embeddeddolt, not git.
+rm -rf "$FIXTURE/.git"
 
 export CLAUDE_PROJECT_DIR="$FIXTURE"
 

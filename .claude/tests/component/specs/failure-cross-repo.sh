@@ -69,7 +69,7 @@ TRACK="$FIXTURE/.claude/.qa-tracking"
 # different absolute path as the "task's repo".
 # --------------------------------------------------------------------------
 TID=$(cd "$FIXTURE" && bd create "Cross-repo failure-injection task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
-assert_match "failure-cross-repo: task created" '^[a-z0-9-]+\.' "$TID"
+assert_match "failure-cross-repo: task created" "$BD_ID_RE" "$TID"
 bash "$CT" set "$TID"
 
 # Initialise git inside the fixture so the gate's `git rev-parse

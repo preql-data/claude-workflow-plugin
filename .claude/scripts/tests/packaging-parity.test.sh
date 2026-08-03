@@ -2947,6 +2947,78 @@ assert_eq "META 24: -> 6s.5's wiring count drops to 0" "0" \
 assert_eq "META 24 control: the real install.sh still invokes it exactly once" "1" \
     "$(code_line_count "$INSTALL_SH" 'npm $MCP_DEPS_NPM_ARGS < /dev/null')"
 
+# ---------------------------------------------------------------------------
+# 8. BEADS-UPGRADER parity (claude-workflow-plugin-fkm.1.1 / R2-F3)
+#
+# The bd 1.1.2 migration contract shipped in install.sh only; Windows targets
+# kept the 64KB ledger bug the whole exercise exists to fix. install.ps1 now
+# carries the twin — and because that file "has never been executed by anyone,
+# anywhere" (v4.1 closure), TEXT PARITY is its entire verification. These
+# assertions are what make "parity-verified" a fact rather than a claim: each
+# names a specific mechanism that must exist on BOTH sides, so porting half the
+# contract, or letting one side drift later, fails here.
+echo ""
+echo "=== Section 8: beads-upgrader parity (install.sh <-> install.ps1) ==="
+
+INSTALL_SH="$PROJECT_DIR/install.sh"
+
+assert_eq "parity 8.1: install.sh declares RECOMMENDED_BD_VERSION between sentinels" "1" \
+    "$(grep -c '^# BEGIN RECOMMENDED_BD_VERSION' "$INSTALL_SH" | tr -d ' ')"
+assert_eq "parity 8.2: install.ps1 declares it between the SAME sentinels" "1" \
+    "$(grep -c '^# BEGIN RECOMMENDED_BD_VERSION' "$INSTALL_PS1" | tr -d ' ')"
+# The VALUE must agree: a Windows target upgrading to a different floor than a
+# POSIX one is the drift this whole section exists to prevent.
+# The single-quoted sed programs below keep `$` LITERAL on purpose: they are
+# matching PowerShell variable names ($RecommendedBdVersion, $MinBdVersion),
+# not expanding shell variables.
+# shellcheck disable=SC2016
+PARITY_REC_SH=$(sed -n 's/^RECOMMENDED_BD_VERSION="\(.*\)"$/\1/p' "$INSTALL_SH" | head -1)
+# shellcheck disable=SC2016
+PARITY_REC_PS=$(sed -n 's/^\$RecommendedBdVersion = \[Version\]"\(.*\)"$/\1/p' "$INSTALL_PS1" | head -1)
+assert_eq "parity 8.3: both installers recommend the SAME bd version" "$PARITY_REC_SH" "$PARITY_REC_PS"
+assert_eq "parity 8.4: ...and it is a real dotted version" "yes" \
+    "$(printf '%s' "$PARITY_REC_SH" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' && echo yes || echo no)"
+
+# The hard floor must NOT have moved on either side — an old bd is degraded,
+# not refused, and that decision is shared.
+assert_eq "parity 8.5: install.sh keeps the 0.47 hard floor" "0.47" \
+    "$(sed -n 's/^MIN_BD_VERSION="\(.*\)"$/\1/p' "$INSTALL_SH" | head -1)"
+# shellcheck disable=SC2016
+assert_eq "parity 8.6: install.ps1 keeps the same hard floor" "0.47" \
+    "$(sed -n 's/^\$MinBdVersion = \[Version\]"\(.*\)"$/\1/p' "$INSTALL_PS1" | head -1)"
+
+# Each mechanism, named. These are the steps whose ABSENCE on one platform
+# makes the migration contract false there.
+parity_both() {
+    # parity_both <n> <label> <sh-needle> <ps-needle>
+    assert_eq "parity $1: $2 — install.sh" "yes" \
+        "$(grep -qF -- "$3" "$INSTALL_SH" && echo yes || echo no)"
+    assert_eq "parity $1: $2 — install.ps1" "yes" \
+        "$(grep -qF -- "$4" "$INSTALL_PS1" && echo yes || echo no)"
+}
+parity_both "8.7"  "an opt-out exists" "--skip-beads-upgrade" "SkipBeadsUpgrade"
+parity_both "8.8"  "the upgrade command is a substitutable seam" "BD_UPGRADE_COMMAND" "BdUpgradeCommand"
+parity_both "8.9"  "the safeguard prefers the COMMENT-PRESERVING writer" "bd sync --flush-only" "bd sync --flush-only"
+parity_both "8.10" "...with the export fallback" "bd export -o" "bd export -o"
+parity_both "8.11" "the ledger is backed up before being rewritten" "pre-upgrade.bak" "pre-upgrade.bak"
+parity_both "8.12" "comment loss is DETECTED, not assumed away" "DROPPED comments" "DROPPED comments"
+parity_both "8.13" "...and refuses the upgrade when it happens" "QA audit trail" "QA audit trail"
+parity_both "8.14" "the already-installed path rebuilds via bootstrap" "bd bootstrap" "bd bootstrap"
+parity_both "8.15" "the version swap is confirmed before migrating" "Not migrating the database" "Not migrating the database"
+parity_both "8.16" "a failed upgrade command is survivable" "Upgrade by hand later" "Upgrade by hand later"
+
+# META: the parity check must be able to FAIL. Strip the PowerShell bootstrap
+# call from a copy and prove 7.14's PS leg flips — otherwise every assertion
+# above could be passing because grep always finds something.
+PARITY_MUT="$WORK/install.ps1.no-bootstrap"
+sed 's/bd bootstrap/bd NOTHING/g' "$INSTALL_PS1" > "$PARITY_MUT"
+assert_eq "parity 8.17: META — the mutation really removed the bootstrap call" "0" \
+    "$(grep -c 'bd bootstrap' "$PARITY_MUT" | tr -d ' ')"
+assert_eq "parity 8.18: META — ...so the parity probe would report it absent" "no" \
+    "$(grep -qF -- 'bd bootstrap' "$PARITY_MUT" && echo yes || echo no)"
+assert_eq "parity 8.19: META control — the real install.ps1 still has it" "yes" \
+    "$(grep -qF -- 'bd bootstrap' "$INSTALL_PS1" && echo yes || echo no)"
+
 # --- Summary ---------------------------------------------------------------
 
 if [ "$FAIL" -gt 0 ]; then

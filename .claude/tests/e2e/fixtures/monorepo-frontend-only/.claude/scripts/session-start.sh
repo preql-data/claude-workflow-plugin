@@ -247,8 +247,8 @@ $DEGRADED_LOSSES
 
     bash .claude/scripts/workflow-doctor.sh
 
-Eleven functional checks -- the SessionStart envelope, both MCP servers, both
-gate hooks -- each with its own fix: line.
+Twelve functional checks -- the SessionStart envelope, both MCP servers, both
+gate hooks, the Beads ledger -- each with its own fix: line.
 </workflow_degraded>
 "
 fi
@@ -355,6 +355,52 @@ if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/qa-gate.sh" ]; then
     fi
 fi
 
+# Ledger-divergence DETECTION (bd 1.1.2 / claude-workflow-plugin-fkm.1.1).
+#
+# DETECT AND WARN ONLY. This block used to run `beads-ledger.sh refresh`, which
+# rewrote .beads/issues.jsonl whenever the classifier judged the database the
+# safe side. That single idea produced FIVE defects — direction-blindness,
+# unmodeled differences falling through to the destructive branch, a rule-order
+# short-circuit, and finally comment-COUNT evidence being blind to comment-SET
+# divergence — each found only after the previous fix shipped. Every one was an
+# evidence rule whose claim was weaker than the safety property it authorised.
+#
+# So the automatic write is GONE, not strengthened again. Detection stays and
+# gets louder; repair is an explicit operator action
+# (`beads-ledger.sh reconcile --apply`). The earlier reasoning here — that a
+# warning "loses to a git commit -am" — was true and is now simply outweighed:
+# a warning that is occasionally ignored is recoverable, and a destructive
+# automatic write on a state we mis-classified is not.
+#
+# COST: one `bd export` (~0.5s) for the comparison. See beads-ledger.sh's
+# header for why no cheaper predicate is honest (`bd sql` is unsupported in
+# embedded mode; mtime/count proxies are wrong rather than imprecise).
+#
+# GATED ON BD_AVAILABLE, unlike the gate-baseline block above. That one is
+# deliberately ungated because it is git-only and still does useful work with bd
+# absent; this one INHERENTLY needs bd, so in a degraded session it could only
+# ever report "undetermined" — and writing that to sync-errors.log every single
+# session would turn a known, already-reported degradation into recurring noise.
+# installer-target-functional.sh 6c pins exactly that: a degraded run captures
+# the gate baseline AND logs no sync error.
+#
+# FAIL OPEN, like every other block here: nothing it observes blocks the session.
+SS_LEDGER_STATUS=""
+SS_LEDGER_SH="$SS_SCRIPT_DIR/beads-ledger.sh"
+if [ "$BD_AVAILABLE" = "1" ] && [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_LEDGER_SH" ] && [ -d "$PROJECT_DIR/.beads" ]; then
+    # `check` is READ-ONLY and is the only ledger subcommand any hook may call.
+    SS_LEDGER_JSON=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_LEDGER_SH" check --json 2>/dev/null || true)
+    if [ -n "$SS_LEDGER_JSON" ] && command -v jq >/dev/null 2>&1; then
+        SS_LEDGER_STATUS=$(printf '%s' "$SS_LEDGER_JSON" | jq -r '.status // empty' 2>/dev/null || echo "")
+    fi
+    if [ "$SS_LEDGER_STATUS" = "failed" ] || [ "$SS_LEDGER_STATUS" = "undetermined" ]; then
+        printf '%s\t[session-start]\t%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
+            "Beads ledger check returned '$SS_LEDGER_STATUS'; .beads/issues.jsonl may not match the database" \
+            >> "$SYNC_ERROR_LOG" 2>/dev/null || true
+    fi
+fi
+
 # Helpers ---------------------------------------------------------------------
 
 # Compare two dotted versions (a, b). Echoes "older", "equal", or "newer".
@@ -456,12 +502,37 @@ if [ -n "$MODEL_SELECT_MSG" ]; then
 - $MODEL_SELECT_MSG"
 fi
 
-# Warning 3: surface a prior session's bd sync failure (B11). The log was
+# Warning 3: surface a prior session's Beads write failure (B11). The log was
 # already truncated above so this fires once per failure event.
+#
+# Wording note (fkm.1.1): this said "bd sync failed" until bd 1.1.2 removed
+# `bd sync`. It was never accurate anyway — sync-errors.log is the shared
+# failure log for every bd write in the workflow (qa-gate.sh's log_sync_error
+# appends `bd comments add` failures to it too), so naming one command
+# mislabelled the rest. It now names the LOG, which is what the operator has to
+# open. The file keeps its name: renaming it would churn the installer manifest
+# and every consumer for no gain.
 if [ -n "$SYNC_ERROR_LINE" ]; then
     SYNC_TS=$(printf '%s' "$SYNC_ERROR_LINE" | awk -F'\t' '{print $1}')
     WARNINGS+="
-- Last session's bd sync failed at ${SYNC_TS:-an unknown time}; see .claude/.qa-tracking/sync-errors.log"
+- Last session logged a Beads sync error at ${SYNC_TS:-an unknown time}; see .claude/.qa-tracking/sync-errors.log"
+fi
+
+# Warning 3b: the ledger is BEHIND the database (fkm.1.1 / R4-F1). Nothing was
+# repaired — this hook detects and reports, it does not write. The likeliest
+# cause is a previous session that ended without running SessionEnd.
+if [ "$SS_LEDGER_STATUS" = "stale" ]; then
+    WARNINGS+="
+- .beads/issues.jsonl is BEHIND the local Beads database: the database carries issues the ledger does not, so a fresh clone would recover an out-of-date set. NOTHING WAS CHANGED — repairing the ledger is a deliberate action. Run: bash .claude/scripts/beads-ledger.sh reconcile --apply   (then commit .beads/issues.jsonl)"
+fi
+
+# Warning 3c: the ledger is AHEAD, or the direction cannot be established.
+# Both mean the same thing to the operator: do NOT run a one-way export here,
+# because it deletes whatever only the ledger has. `reconcile --apply` keeps
+# both sides, which is why it is the only command named.
+if [ "$SS_LEDGER_STATUS" = "ledger-ahead" ] || [ "$SS_LEDGER_STATUS" = "indeterminate" ]; then
+    WARNINGS+="
+- .beads/issues.jsonl and the local Beads database DIVERGE, and the ledger holds records the database does not (a fresh clone, or this machine after a git pull). NOTHING WAS CHANGED. Do NOT run 'beads-ledger.sh export' — it is one-way and would delete them. Run: bash .claude/scripts/beads-ledger.sh reconcile --apply   (imports, then re-exports the union)"
 fi
 
 # Warning 4: effort floor + A/B verdict reconciliation (v4.0.0 V0 / cnz.1).

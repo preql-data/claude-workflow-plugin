@@ -346,7 +346,7 @@ echo "=== Section 3b: --verify (v4.1 / C0b) ==="
 # A target that carries a STUB workflow-doctor.sh. The stub records the argv it
 # was handed and exits with a code the test chooses, which is what makes
 # "install.sh execs the TARGET's doctor and returns its status" measurable
-# without running an install or a real 11-check doctor.
+# without running an install or a real 12-check doctor.
 VERIFY_TARGET="$WORK/verify-target"
 mkdir -p "$VERIFY_TARGET/.claude/scripts"
 STUB_ARGV="$WORK/stub-argv.txt"
@@ -420,9 +420,10 @@ assert_eq "--upgrade --verify exits 1 (reverse order)" "1" "$RUN_RC"
 # --- ordering: --verify must PRECEDE the prerequisite block ------------------
 # THE POINT OF THE FLAG. `--verify` is what an operator reaches for when the
 # install is broken, and "node is missing" is one of the things it is supposed
-# to tell them — through the doctor's own `deps` check, alongside the other ten.
-# If the prerequisite block ran first, a node-less machine would get
-# "node and npm are REQUIRED" and learn nothing about the other ten checks.
+# to tell them — through the doctor's own `deps` check, alongside every other
+# check in the registry. If the prerequisite block ran first, a node-less
+# machine would get "node and npm are REQUIRED" and learn nothing about the
+# rest of the install's health.
 if [ "$BD_HIDDEN" != "yes" ]; then
     echo "  SKIPPED: bd resolves under $MINIMAL_PATH; cannot stage a prereq-hostile run here"
 else

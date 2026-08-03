@@ -193,7 +193,7 @@ Mandatory follow-up after the FIRST ACTION returns: for each high-fan-in caller 
 
 This step pairs with the orchestrator's pre-delegation impact pass (`.claude/agents/orchestrator.md` section 1a). The orchestrator scores impact against the *intended* change before delegating; QA scores impact against the *landed* diff before approving. Both are cheap (the index is warm after the orchestrator's first call) and both feed the same gate.
 
-**Keep your own scratch out of the change set.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad or under `.claude/.qa-tracking/`; both are already denylisted. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
+**Keep your own scratch out of the change set.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad, which IS denylisted (`^(/private)?/tmp/claude-[^/]+/`). Do NOT use `.claude/.qa-tracking/` for scratch: despite what this line used to say, it is NOT denylisted — post-edit.sh tracks it and anything you write there enters the change set, which is how a review artifact ended up as a tracked entry of its own change set. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
 
 ## 4. Security review pass
 
@@ -545,8 +545,11 @@ The packet is eight items — seven mandatory, plus the advisory review artifact
 
    ```bash
    cat "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-artifact-$TASK_ID-r$REVIEW_ITERATION.json"
-   # Fallback — the durable record on the task:
-   bd show "$TASK_ID" --json \
+   # Fallback — the durable record on the task. --include-comments is REQUIRED
+   # on bd >= 1.1.2 (a plain show returns only a comment_count, so this comes
+   # back empty); the second leg covers bd 0.47.x, which rejects the flag.
+   { bd show "$TASK_ID" --json --include-comments 2>/dev/null \
+       || bd show "$TASK_ID" --json; } \
        | jq -r '(if type == "array" then .[0].comments else .comments end) // []
                 | map(select(.text | test("^REVIEW-ARTIFACT v1 ")))
                 | last.text // ""'
@@ -635,7 +638,12 @@ When the orchestrator re-engages QA, your first move is to read the latest RUBRI
 ```bash
 # The most recent RUBRIC comment carries the verdict the orchestrator
 # recorded via qa-gate.sh grade-record.
-LATEST_RUBRIC=$(bd show "$TASK_ID" --json \
+# --include-comments is REQUIRED on bd >= 1.1.2: a plain `bd show --json`
+# returns a comment_count integer and NO comment bodies, so this read comes
+# back empty and the relay silently loses the verdict. bd 0.47.x rejects the
+# flag but inlines comments already, hence the fallback leg.
+LATEST_RUBRIC=$( { bd show "$TASK_ID" --json --include-comments 2>/dev/null \
+    || bd show "$TASK_ID" --json; } \
     | jq -r '(if type == "array" then .[0].comments else .comments end) // []
              | map(select(.text | test("^RUBRIC [0-9]+ iteration")))
              | last.text // ""')

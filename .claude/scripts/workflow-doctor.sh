@@ -58,12 +58,15 @@
 # bytes and mtimes do change — so "the doctor writes nothing anywhere" would be
 # a false claim and is not made.
 #
-# MEASURED, not assumed. On an isolated 6,936-file target: a full 11-check run
-# changed exactly those three .beads/* files and nothing else; the same run with
+# MEASURED, not assumed. On an isolated 6,936-file target: a full run changed
+# exactly those three .beads/* files and nothing else; the same run with
 # `--skip beads` left all 6,936 files byte-identical; and `beads` alone
 # reproduced the change. (QA independently measured the same on a 10,358-file
-# target.) So `--skip beads` is the run that provably touches nothing — use it
-# on a read-only mount, mid-`bd` operation, or when you need that guarantee.
+# target.) That measurement predates `beads_ledger`, the only check added since,
+# and that one reads the real target but writes nothing into it — it exports to
+# a temp file OUTSIDE the target — so the result carries over unchanged.
+# So `--skip beads` is the run that provably touches nothing — use it on a
+# read-only mount, mid-`bd` operation, or when you need that guarantee.
 
 set -u
 
@@ -77,7 +80,7 @@ set -u
 # the runtime registry agree exactly, and other specs assert on individual
 # names. Renaming one is a breaking change to that contract.
 # BEGIN DOCTOR_CHECK_NAMES (workflow-doctor.test.sh extracts this block; keep the sentinels)
-DOCTOR_CHECK_NAMES="deps agents skill mcp_config settings_hooks beads session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop"
+DOCTOR_CHECK_NAMES="deps agents skill mcp_config settings_hooks beads beads_ledger session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop"
 # END DOCTOR_CHECK_NAMES
 
 # Expected tools/list cardinality per shipped MCP server, as
@@ -176,8 +179,15 @@ Checks (the names are a stable contract; specs assert on them):
                    that exists in the target
   beads            .beads/ present and `bd doctor` reachable (tolerant: bd's
                    section wording varies by version, so text findings only
-                   downgrade to a NOTE). THE ONE CHECK THAT RUNS AGAINST THE
-                   REAL TARGET — see the note below.
+                   downgrade to a NOTE). RUNS AGAINST THE REAL TARGET, and is
+                   the only check that WRITES there — see the note below.
+  beads_ledger     .beads/issues.jsonl is in step with the database. Also runs
+                   against the real target, but READ-ONLY (it exports to a temp
+                   file outside the target and compares). A divergence is a
+                   FAIL: the JSONL is what a fresh clone recovers from. The two
+                   directions get DIFFERENT remedies — database-ahead means
+                   export, ledger-ahead means import, and prescribing the wrong
+                   one destroys data.
   session_start    EXECUTES the target's session-start.sh and asserts a valid
                    SessionStart envelope carrying a non-empty additionalContext
                    with the workflow_engine block and the delegation contract
@@ -190,8 +200,9 @@ Checks (the names are a stable contract; specs assert on them):
                    with no approval and asserts the Stop is blocked
 
 WHAT A RUN TOUCHES (safe to run mid-session; the exception is named)
-  Every dynamic check EXCEPT `beads` runs in a throwaway sandbox copy of the
-  target. No source file, config file, agent prompt, hook script, skill,
+  Every dynamic check EXCEPT `beads` and `beads_ledger` runs in a throwaway
+  sandbox copy of the target; of those two only `beads` writes anything.
+  No source file, config file, agent prompt, hook script, skill,
   manifest or gate artifact in the target is modified: your QA approval
   (.claude/.qa-tracking/approved), changed-files tracker, gate baseline,
   current-task pointer, settings.json, .mcp.json, SKILL.md, .beads/issues.jsonl
@@ -207,6 +218,14 @@ WHAT A RUN TOUCHES (safe to run mid-session; the exception is named)
   three and nothing else, and the same run with `--skip beads` changed nothing
   at all. So pass `--skip beads` when you need a run that provably touches
   nothing (read-only mount, or a `bd` operation in flight).
+
+  `beads_ledger` also reads the REAL target's database — a sandboxed copy would
+  answer for the wrong ledger — but writes nothing there: it exports to a
+  mktemp file OUTSIDE the target and compares sha256. It deliberately does not
+  repair what it measures, because a checker that fixes a fault cannot then
+  report it. Nothing else repairs it automatically either — since R4-F1 the
+  ledger is written only by an explicit `beads-ledger.sh reconcile --apply`.
+  `--skip beads_ledger` opts out.
 
 AIR-GAPPED / OFFLINE INSTALL RECIPE
   The two MCP servers have no native dependencies (zero install scripts, zero
@@ -347,9 +366,9 @@ doctor_cleanup() {
 }
 trap doctor_cleanup EXIT
 
-# mk_bd_shim <bin-dir> — write a `bd` wrapper into <bin-dir> that injects
-# `--no-daemon`, and echo <bin-dir>. Returns non-zero (and writes nothing) when
-# no real bd is on PATH; the `deps` check is what reports bd's absence.
+# mk_bd_shim <bin-dir> — write a `bd` wrapper into <bin-dir>, and echo
+# <bin-dir>. Returns non-zero (and writes nothing) when no real bd is on PATH;
+# the `deps` check is what reports bd's absence.
 #
 # ONE definition, two callers (mk_probe_sandbox and check_beads). It used to be
 # inline in the sandbox builder only, which meant the `beads` check invoked the
@@ -358,6 +377,15 @@ trap doctor_cleanup EXIT
 # (cmd/bd/daemon_autostart.go:228), which is exactly why every e2e fixture
 # pre-installs this same wrapper. A health checker that can itself be taken down
 # by the bug the shim exists to dodge is not much of a health checker.
+#
+# The wrapper no longer injects `--no-daemon`: bd 1.1.2 removed the flag along
+# with the daemon (`bd dolt status` -> "embedded (in-process, no server)"), so
+# the 0.47.1 autostart crash it dodged cannot occur. Keeping it would have been
+# far worse than inert here — an unknown flag makes cobra swallow the NEXT
+# token as its value, so `bd --no-daemon doctor` became `unknown command`, and a
+# health checker whose every probe fails for a reason unrelated to the thing
+# being probed reports garbage. The wrapper is kept (rather than dropped) so
+# both callers keep a single, PATH-controlled bd entry point.
 mk_bd_shim() {
     local bindir="$1" real_bd
     real_bd=$(command -v bd 2>/dev/null || echo "")
@@ -365,8 +393,8 @@ mk_bd_shim() {
     mkdir -p "$bindir" 2>/dev/null || return 1
     {
         printf '#!/bin/bash\n'
-        printf '# workflow-doctor shim: bd 0.47.1 daemon autostart crashes.\n'
-        printf 'exec %s --no-daemon "$@"\n' "$real_bd"
+        printf '# workflow-doctor shim: single PATH-controlled bd entry point.\n'
+        printf 'exec %s "$@"\n' "$real_bd"
     } > "$bindir/bd" || return 1
     chmod +x "$bindir/bd" 2>/dev/null || true
     printf '%s' "$bindir"
@@ -509,7 +537,7 @@ mk_probe_sandbox() {
 #                            claude without probing the operator's real
 #                            ~/.claude.json.
 #   CODEX_DETECT_TIMEOUT_S=1 keeps the advisory probe off the critical path.
-# PATH carries the sandbox's bd shim first (bd 0.47.1 daemon autostart crash).
+# PATH carries the sandbox's bd shim first (one controlled bd entry point).
 run_in_sandbox() {
     local sb="$1" secs="$2" outf="$3" errf="$4"; shift 4
     run_bounded "$secs" "$outf" "$errf" env \
@@ -1031,10 +1059,10 @@ hook failure per fire and the gate it belonged to is simply absent."
 # commands/workflow-doctor.md all name `beads` as the documented exception
 # instead of claiming the run touches nothing. `--skip beads` opts out.
 #
-# The invocation goes through the SAME `bd --no-daemon` shim mk_probe_sandbox
-# installs (mk_bd_shim): bd 0.47.1's daemon-autostart path crashes, and a health
-# checker that can be taken down by the bug the shim exists to dodge would
-# report a false FAIL on a healthy install.
+# The invocation goes through the SAME bd shim mk_probe_sandbox installs
+# (mk_bd_shim), so every bd call in the doctor has one PATH-controlled entry
+# point. The shim used to inject --no-daemon because bd 0.47.1's
+# daemon-autostart path crashes; bd 1.1.2 has no daemon and no such flag.
 # ===========================================================================
 check_beads() {
     if [ ! -d "$TARGET/.beads" ]; then
@@ -1051,8 +1079,8 @@ not read your login profile): compare \`bash -lc 'command -v bd'\` with
         return
     fi
 
-    # Route through the --no-daemon shim (see the header note). Falls back to
-    # the raw PATH only if the shim could not be written.
+    # Route through the bd shim (see the header note). Falls back to the raw
+    # PATH only if the shim could not be written.
     local shim_path="$PATH"
     if mk_bd_shim "$WORKDIR/bin" >/dev/null 2>&1; then
         shim_path="$WORKDIR/bin:$PATH"
@@ -1065,9 +1093,9 @@ not read your login profile): compare \`bash -lc 'command -v bd'\` with
         record beads FAIL "\`bd doctor\` did not complete within 30s (unreachable)" \
 "Two common causes. (1) NO NETWORK: bd doctor performs a GitHub release check,
 so an air-gapped host can blow this 30s bound on an otherwise healthy install —
-re-run with \`--skip beads\`. (2) A wedged daemon: this check already invokes bd
-through a \`--no-daemon\` shim, so if plain \`bd --no-daemon doctor\` also hangs
-in the target, the database itself needs attention."
+re-run with \`--skip beads\`. (2) A wedged database: if plain \`bd doctor\` also
+hangs in the target, the database itself needs attention — check
+\`bd dolt status\` for the backend state."
         return
     fi
     if [ ! -s "$out" ] && [ "$rc" -ne 0 ]; then
@@ -1096,6 +1124,105 @@ NOTE: bd doctor reported $warns advisory warning(s) (informational only). Run
 \`bd doctor\` in the target to read them."
     fi
     record beads PASS ".beads/ present; \`bd doctor\` reachable (exit $rc)$note"
+}
+
+# ===========================================================================
+# Check: beads_ledger — is .beads/issues.jsonl in step with the database?
+#
+# WHY THIS IS A NAMED CHECK (claude-workflow-plugin-fkm.1.1)
+# .beads/issues.jsonl is the portable ground truth: a fresh clone recovers the
+# whole issue database from it, and .beads/embeddeddolt/ is gitignored
+# machine-local state. Before this check, a ledger that silently stopped being
+# written had NO surface at all — it announced itself at the next clone, as
+# missing issues. That is exactly how this repo lost its ledger: bd 1.1.2
+# removed `bd sync` (session-end.sh's only write path) and bd's own pre-commit
+# hook exits 0 without exporting, so every commit recorded a stale ledger
+# behind a green hook.
+#
+# SECOND TARGET-TOUCHING CHECK, AND WHY IT IS STILL SAFE. `beads` is documented
+# as the ONE check that runs against the real target because `bd doctor`
+# rewrites .beads/beads.db*. This check also runs bd against the real target,
+# but READ-ONLY by construction: beads-ledger.sh's `check` exports to a mktemp
+# file OUTSIDE the target and compares hashes. It never writes the ledger and
+# never writes into .beads/. A health checker that repairs what it measures
+# cannot report on it — and since R4-F1 nothing repairs the ledger
+# automatically at all: the write happens only under an explicit
+# `reconcile --apply`. `--skip beads_ledger` opts out.
+#
+# The predicate costs one full `bd export` (~0.5s here). beads-ledger.sh's
+# header records why nothing cheaper is honest: `bd sql` is unsupported in
+# embedded mode, and mtime/count proxies are wrong rather than merely
+# imprecise — a comment added with no issue edit changes the ledger while
+# leaving the record count identical.
+# ===========================================================================
+check_beads_ledger() {
+    if [ ! -d "$TARGET/.beads" ]; then
+        # The `beads` check above already FAILs on this; do not double-report.
+        record beads_ledger PASS "no .beads/ in the target — nothing to compare (the \`beads\` check owns that failure)"
+        return
+    fi
+    local script="$TARGET/.claude/scripts/beads-ledger.sh"
+    if [ ! -f "$script" ]; then
+        record beads_ledger FAIL "missing: .claude/scripts/beads-ledger.sh (partial install)" \
+"This script is the workflow's ONLY ledger-write path since bd 1.1.2 removed
+\`bd sync\`. Without it session-end.sh cannot write .beads/issues.jsonl, and a
+fresh clone of this repo will recover an out-of-date issue database. Re-run
+install.sh in Update mode."
+        return
+    fi
+
+    local out="$WORKDIR/beads-ledger.out" err="$WORKDIR/beads-ledger.err" rc=0
+    run_bounded 30 "$out" "$err" env "CLAUDE_PROJECT_DIR=$TARGET" \
+        bash "$script" check || rc=$?
+
+    if [ "$rc" = "124" ]; then
+        record beads_ledger FAIL "\`beads-ledger.sh check\` did not complete within 30s" \
+"The check runs one \`bd export\`. If that hangs, the database itself needs
+attention — start with \`bd dolt status\` and \`bd doctor\` in the target."
+        return
+    fi
+
+    local detail
+    detail=$(head -1 "$out" 2>/dev/null || echo "")
+    case "$rc" in
+        0)
+            record beads_ledger PASS ".beads/issues.jsonl matches the database"
+            ;;
+        1)
+            record beads_ledger FAIL "${detail:-the ledger differs from the database (database ahead)}" \
+"The database is ahead of .beads/issues.jsonl, so a fresh clone would recover an
+out-of-date issue set. NOTHING repairs this automatically — no hook writes the
+ledger. Repair it deliberately:
+  bash .claude/scripts/beads-ledger.sh reconcile --apply
+then commit .beads/issues.jsonl. (\`reconcile\` is dry-run without --apply, and
+is preferred over \`export\` because it is safe in BOTH directions.)"
+            ;;
+        3)
+            # THE OPPOSITE DIRECTION (R1-F1). The ledger holds records the
+            # database does not — a fresh clone before its first import, a
+            # second machine after `git pull`, a restored backup. Prescribing
+            # an export here would tell the operator to destroy exactly the
+            # records that are only in the ledger, so the remedy names
+            # `bd import` and the reconcile helper instead. bd 1.1.2 never
+            # auto-imports a newer ledger, so nothing repairs this on its own.
+            record beads_ledger FAIL "${detail:-the ledger is AHEAD of the database}" \
+"The LEDGER holds records the database does not, so this is NOT a stale-export
+problem and \`beads-ledger.sh export\` would DESTROY them. Import first — the
+order matters, and \`reconcile\` is the single command that gets it right:
+  bash .claude/scripts/beads-ledger.sh reconcile --apply
+which runs \`bd import .beads/issues.jsonl\` and then re-exports the union.
+Without --apply it reports what it would do and changes nothing. If this is a
+fresh clone that has never been imported, \`bd bootstrap\` does the same job
+from the git-tracked ledger."
+            ;;
+        *)
+            # Undetermined (no bd, export failed). `deps` already FAILs when bd
+            # is absent, so this stays a NOTE rather than a second red for the
+            # same root cause.
+            record beads_ledger PASS "ledger freshness could not be determined (informational)
+NOTE: ${detail:-beads-ledger.sh check returned $rc}"
+            ;;
+    esac
 }
 
 # ===========================================================================
@@ -1488,6 +1615,7 @@ for _check in $DOCTOR_CHECK_NAMES; do
         mcp_config)      check_mcp_config ;;
         settings_hooks)  check_settings_hooks ;;
         beads)           check_beads ;;
+        beads_ledger)    check_beads_ledger ;;
         session_start)   check_session_start ;;
         mcp_bd)          check_mcp_server "bd-mcp" ;;
         mcp_code_graph)  check_mcp_server "code-graph-mcp" ;;

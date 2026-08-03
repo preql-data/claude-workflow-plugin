@@ -294,7 +294,7 @@ assert_eq "ms-F: qa pin updated in lockstep" "claude-fable-5" "$PIN_F_QA"
 assert_eq "ms-F: meta-task pointer file exists" "0" \
     "$([ -f "$META_PTR" ] && echo 0 || echo 1)"
 META_ID=$(cat "$META_PTR" 2>/dev/null)
-assert_match "ms-F: meta-task id is a valid bd id" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "$META_ID"
+assert_match "ms-F: meta-task id is a valid bd id" "$BD_ID_RE" "$META_ID"
 COMMENT=$(bd show "$META_ID" 2>/dev/null | grep -A3 'MODEL SWITCH' | head -4)
 assert_contains "ms-F: comment records the old->new transition" \
     "claude-opus-4-7 -> claude-fable-5" "$COMMENT"

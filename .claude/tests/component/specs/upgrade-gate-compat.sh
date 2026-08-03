@@ -124,7 +124,7 @@ set -u
 #      offline machine — a network dependency in the component tier.
 #   2. workflow-doctor.sh, exiting 3 ("installed, verification FAILED") when a
 #      functional check does not pass. This spec's fixtures are not built to
-#      satisfy eleven functional checks, and every `install.sh exits 0`
+#      satisfy twelve functional checks, and every `install.sh exits 0`
 #      assertion here would start reporting a fixture gap as an installer bug.
 # Both are covered for real by `make install-test`, which installs into a
 # tempdir and requires a fully green doctor — that is the surface that proves
@@ -374,7 +374,7 @@ stop_reason() { printf '%s' "$STOP_OUT" | jq -r '.reason // empty' 2>/dev/null; 
 # list. jq -cS makes it a byte-comparable string; ids and created_at are fixed
 # at write time, so including them makes the comparison STRICTER, not flakier.
 task_state() {
-    bdt show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" "$T" \
         | jq -cS '(if type == "array" then .[0] else . end)
                   | {labels: (.labels // []), comments: (.comments // [])}' 2>/dev/null \
         || echo ""
@@ -383,7 +383,7 @@ task_state() {
 # approval_records <tid> - every `QA-GATE APPROVED ...` comment on the task, one
 # per line. Same source the Stop hook reads.
 approval_records() {
-    bdt show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" "$T" \
         | jq -r '(if type == "array" then .[0].comments else .comments end) // []
                  | .[].text' 2>/dev/null \
         | grep '^QA-GATE APPROVED ' || true

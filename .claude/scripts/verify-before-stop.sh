@@ -570,6 +570,32 @@ current_change_set_hash() {
     CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || printf ''
 }
 
+# bd_show_with_comments <task-id> — `bd show --json` that always carries
+# comment BODIES, across the supported bd range.
+#
+# bd 1.1.2 stopped inlining comments in `bd show --json`: it returns a
+# `comment_count` integer, and the bodies need the new --include-comments flag.
+# bd 0.47.x has no such flag and exits 1 ("unknown flag: --include-comments"),
+# but inlines .comments already. So try the new form, fall back to the plain
+# one — pin the CHAIN, not the leg, the same shape the `bd comments add ||
+# bd comment add` calls use. Callers keep the usual
+# `(if type=="array" then .[0].comments else .comments end) // []` accessor,
+# which reads both shapes correctly. Never fails the caller.
+#
+# This matters here more than anywhere: every reader below is a RELEASE
+# predicate. Under 1.1.2 without the flag they all see zero comments, so the
+# approval RECORD check silently degrades to "no record" — which fails closed
+# (blocks), but would make a correctly-approved task unreleasable.
+#
+# Only readers of .comments need this. has_label() and the other .labels
+# readers must NOT use it: the flag's own help warns it "may be slow on issues
+# with many comments", and .labels is unaffected by the change.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 # task_has_matching_approval_record <task-id> <expected-hash> — 0 when the
 # task carries a `QA-GATE APPROVED change_set_hash=<h>` comment whose <h>
 # equals <expected-hash>, 1 otherwise (incl. bd unavailable / empty hash).
@@ -587,7 +613,7 @@ task_has_matching_approval_record() {
     # `change_set_hash=` prefix is matched literally so a summary that merely
     # mentions a hex string cannot satisfy the gate.
     local recorded_hashes
-    recorded_hashes=$(bd show "$tid" --json 2>/dev/null \
+    recorded_hashes=$(bd_show_with_comments "$tid" \
         | jq -r '
             (if type == "array" then .[0].comments else .comments end) // []
             | .[].text
@@ -619,7 +645,7 @@ matching_approval_record_text() {
     [ -z "$expected" ] && return 0
     command -v bd >/dev/null 2>&1 || return 0
     [ -d "$PROJECT_DIR/.beads" ] || return 0
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r --arg h "$expected" '
             (if type == "array" then .[0].comments else .comments end) // []
             | .[].text
@@ -1619,7 +1645,7 @@ try_worktree_resolution() {
     # The approval records. `gsub("\n"; " ")` flattens a multi-line summary so
     # the token scans below stay line-oriented.
     local approvals
-    approvals=$(bd show "$CURRENT_TASK" --json 2>/dev/null \
+    approvals=$(bd_show_with_comments "$CURRENT_TASK" \
         | jq -r '
             (if type == "array" then .[0].comments else .comments end) // []
             | .[].text

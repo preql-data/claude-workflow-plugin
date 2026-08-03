@@ -81,10 +81,31 @@ parent_epic_of() {
     printf '%s' "$parent"
 }
 
+# bd_show_with_dependents <id> — `bd show --json` that always carries the
+# REVERSE edges (.dependents), across the supported bd range.
+#
+# Same break as .comments, different field: bd 1.1.2 stopped inlining
+# .dependents in `bd show --json` (it returns a `dependent_count` integer) and
+# needs the new --include-dependents flag for the array. bd 0.47.x has no such
+# flag and exits 1 on it, but inlines .dependents already — so try the new
+# form, fall back to the plain one. Pin the CHAIN, not the leg.
+#
+# Without this, sub_tasks_of() returns EMPTY for every epic under 1.1.2, and an
+# epic with unapproved children reads as an epic with no children — the gate
+# would pass vacuously. Note parent_epic_of() does NOT need this: it reads
+# .dependencies (FORWARD edges), which 1.1.2 still inlines. Its `bd list --type
+# epic` fallback does scan .dependents, but list entries never carried them on
+# either version (bd-compat.sh pin #21), so that leg stays a no-op as designed.
+bd_show_with_dependents() {
+    bd show "$1" --json --include-dependents 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 # List sub-task ids of an epic (parent-child dependents).
 sub_tasks_of() {
     local epic="$1"
-    bd show "$epic" --json 2>/dev/null \
+    bd_show_with_dependents "$epic" \
         | jq -r 'if type == "array" then .[0] else . end
                  | (.dependents // [])
                  | map(select(.dependency_type == "parent-child"))

@@ -1,11 +1,24 @@
 #!/bin/bash
-# SessionEnd Hook: Sync Beads state.
+# SessionEnd Hook: DETECT a Beads ledger divergence. It writes nothing.
 #
 # Phase 1 changes (claude-workflow-plugin-y4a.5):
 #   - B11: cd is guarded so a missing PROJECT_DIR no longer corrupts state.
-#          bd sync exit code is captured; failures are appended to
-#          .claude/.qa-tracking/sync-errors.log so SessionStart can surface
-#          a one-line warning next session.
+#          The check exit code is captured; divergences and failures are
+#          appended to .claude/.qa-tracking/sync-errors.log so SessionStart
+#          can surface a one-line warning next session.
+#
+# THIS HOOK NO LONGER WRITES THE LEDGER (claude-workflow-plugin-fkm.1.1 /
+# R4-F1). It ran `bd sync` until bd 1.1.2 removed that command, then
+# `beads-ledger.sh export`, then the classifier-driven `refresh`. Five separate
+# defects came out of letting an unattended hook decide to write — each an
+# evidence rule whose claim was weaker than the safety property it authorised —
+# so the automatic write was REMOVED rather than guarded a fifth time. What
+# remains is `beads-ledger.sh check`, which is read-only.
+#
+# A divergence is therefore RECORDED here, surfaced by the next SessionStart,
+# and reported by workflow-doctor.sh's `beads_ledger` check. Repair is an
+# explicit operator action: `beads-ledger.sh reconcile --apply`, which the
+# Landing-the-Plane protocol in AGENTS.md runs around `git pull`.
 #
 # Phase 5 / E9: SessionEnd has no decision control per the Claude Code hooks
 # reference (it cannot block session termination). Output and exit code are
@@ -20,12 +33,35 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
 
     mkdir -p "$(dirname "$SYNC_LOG")" 2>/dev/null || true
 
-    # Capture stderr for the log line.
-    SYNC_ERR_FILE="$(mktemp -t bd-sync.XXXXXX 2>/dev/null || echo "${TMPDIR:-/tmp}/bd-sync.$$")"
-    if ! bd sync >/dev/null 2>"$SYNC_ERR_FILE"; then
+    # Capture stderr for the log line. The helper prints its own one-line
+    # diagnosis on stdout, so BOTH streams are captured and stdout is preferred
+    # for the log text — `bd export`'s own stderr is usually empty on the
+    # failure paths that matter (missing bd, unwritable ledger).
+    LEDGER_SH="$PROJECT_DIR/.claude/scripts/beads-ledger.sh"
+    SYNC_ERR_FILE="$(mktemp -t bd-ledger.XXXXXX 2>/dev/null || echo "${TMPDIR:-/tmp}/bd-ledger.$$")"
+    if [ -f "$LEDGER_SH" ]; then
+        # `check` ONLY (R4-F1). SessionEnd used to write the ledger — first via
+        # a direction-blind `export`, then via the classifier-driven `refresh`.
+        # Both are gone: no hook writes the ledger, because five separate
+        # defects came out of letting a classifier verdict authorise a write.
+        # A divergence is RECORDED here and surfaced by the next SessionStart;
+        # repairing it is an explicit `reconcile --apply`.
+        LEDGER_RC=0
+        bash "$LEDGER_SH" check >"$SYNC_ERR_FILE" 2>&1 || LEDGER_RC=$?
         TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         ERR_LINE=$(head -1 "$SYNC_ERR_FILE" 2>/dev/null | tr -d '\n' || echo "")
-        printf '%s\tbd sync failed: %s\n' "$TS" "${ERR_LINE:-unknown error}" >> "$SYNC_LOG"
+        if [ "$LEDGER_RC" = "1" ] || [ "$LEDGER_RC" = "3" ]; then
+            printf '%s\tledger NOT written — it diverges from the database and no hook may repair that automatically. Run: bash .claude/scripts/beads-ledger.sh reconcile --apply\n' \
+                "$TS" >> "$SYNC_LOG"
+        elif [ "$LEDGER_RC" != "0" ]; then
+            printf '%s\tledger check failed: %s\n' "$TS" "${ERR_LINE:-unknown error}" >> "$SYNC_LOG"
+        fi
+    else
+        # A partial install: report it rather than silently skipping the
+        # workflow's only ledger-divergence detector.
+        TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '%s\tledger check skipped: %s is missing (partial install)\n' \
+            "$TS" ".claude/scripts/beads-ledger.sh" >> "$SYNC_LOG"
     fi
     rm -f "$SYNC_ERR_FILE" 2>/dev/null || true
 fi
@@ -40,7 +76,7 @@ fi
 # sweeper itself does no network I/O (its pushed/merged decision is local).
 #
 # ITS OWN LOG FILE, deliberately not sync-errors.log: session-start.sh renders
-# that log's head line verbatim as "Last session's bd sync failed at ..."
+# that log's head line verbatim as "Last session logged a Beads sync error at ..."
 # regardless of any tag, so a sweep line landing there first would be reported
 # as a bd failure. session-start.sh read-and-truncates this file separately.
 #

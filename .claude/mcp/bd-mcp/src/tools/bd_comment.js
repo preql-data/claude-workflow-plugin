@@ -16,6 +16,7 @@ import {
     validateTaskId,
     HINT_LIST_TO_FIND_IDS,
     runBdJson,
+    runBdShowJson,
     normalizeShowResult,
 } from '../lib/exec-bd.js';
 import { ok, fail, safe } from '../lib/format.js';
@@ -131,8 +132,15 @@ export function registerCommentTools(server) {
         safe(async (input) => {
             const tid = validateTaskId(input.task_id);
             // bd show is more reliable than `bd comments <id> --json`, which
-            // doesn't exist as a standalone JSON-list mode in 0.47.x.
-            const raw = await runBdJson(['show', tid, '--json'], {
+            // doesn't exist as a standalone JSON-list mode in 0.47.x. (It DOES
+            // exist in 1.1.2, but a version-conditional transport buys nothing
+            // over the hydration flag, which runBdShowJson handles for both.)
+            //
+            // includeComments is load-bearing: bd 1.1.2 returns only a
+            // comment_count on a plain show, so without it this tool reports
+            // "0 comment(s)" on a task that has them.
+            const raw = await runBdShowJson(tid, {
+                includeComments: true,
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });

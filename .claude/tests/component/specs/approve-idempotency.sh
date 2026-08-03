@@ -134,7 +134,7 @@ json_field() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null || echo ""; }
 # approval_records <root> <tid> — every QA-GATE APPROVED comment, one per line,
 # from the same source the Stop hook reads.
 approval_records() {
-    bdq "$1" show "$2" --json 2>/dev/null \
+    bd_show_with_comments "$2" "$1" \
         | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text' 2>/dev/null \
         | grep '^QA-GATE APPROVED ' || true
 }
@@ -328,12 +328,19 @@ armed_cycle "$FE" "$TID_E" "src/e.ts"
 # which exits 1. Same idiom as qa-gate.sh spec's Step-3 rollback case; the real
 # bd path is read out of the existing wrapper because $FE/bin is already first on
 # PATH (so `command -v bd` resolves to the wrapper itself).
-REAL_BD_E=$(sed -n 's/^exec \(.*\) --no-daemon.*/\1/p' "$FE/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+# The extraction is anchored on the trailing `"$@"`, NOT on any bd flag: the
+# wrapper used to end `--no-daemon "$@"` until bd 1.1.2 removed that flag, and a
+# pattern keyed to it silently returns empty on the new wrapper. That is not a
+# harmless miss — the `command -v bd` fallback below resolves to $FE/bin (first
+# on PATH), i.e. to THIS wrapper, so the regenerated file would exec itself
+# forever. The failure mode is a spec that hangs printing nothing (the runner
+# captures stdout in a command substitution). See lib/shim.sh's gz3 guard.
+REAL_BD_E=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$FE/bin/bd" 2>/dev/null | tr -d '"' | head -1)
 [ -z "$REAL_BD_E" ] && REAL_BD_E=$(command -v bd)
 cat > "$FE/bin/bd" <<EOF
 #!/bin/bash
 if [ "\$1" = "label" ] && [ "\$2" = "add" ] && [ "\$4" = "qa-approved" ]; then exit 1; fi
-exec $REAL_BD_E --no-daemon "\$@"
+exec $REAL_BD_E "\$@"
 EOF
 chmod +x "$FE/bin/bd"
 E_RC=0
@@ -345,7 +352,7 @@ E_OUT=$(printf '%s\n' "$E_RAW" | tail -1)
 # restore still has to be done by hand).
 cat > "$FE/bin/bd" <<EOF
 #!/bin/bash
-exec $REAL_BD_E --no-daemon "\$@"
+exec $REAL_BD_E "\$@"
 EOF
 chmod +x "$FE/bin/bd"
 assert_eq "approve-idem-E1: a failed qa-approved add exits 3 (atomic refusal)" "3" "$E_RC"
@@ -391,9 +398,11 @@ assert_eq "approve-idem-E2: the tracking-state finalization stays AFTER the roll
 # drive_point_bd <root> <argv1> <argv2> <argv4>: wrap bd so the FIRST call
 # matching (argv1, argv2, argv4) runs for real, snapshots what a Stop would see,
 # runs the Stop hook, and stores its envelope. Everything else passes through.
+# Anchored on the trailing `"$@"`, never on a bd flag — see the note at the E1
+# wrapper above for why a missed match here hangs the spec instead of failing it.
 real_bd_of() {
     local p
-    p=$(sed -n 's/^exec \(.*\) --no-daemon.*/\1/p' "$1/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+    p=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$1/bin/bd" 2>/dev/null | tr -d '"' | head -1)
     [ -z "$p" ] && p=$(command -v bd)
     printf '%s' "$p"
 }
@@ -405,8 +414,8 @@ drive_point_bd() {
 #!/bin/bash
 if [ "\$1" = "$a1" ] && [ "\$2" = "$a2" ] && [ "\$4" = "$a4" ] && [ ! -f "$root/.claude/.qa-tracking/.drive-fired" ]; then
     : > "$root/.claude/.qa-tracking/.drive-fired"
-    $real --no-daemon "\$@"; rc=\$?
-    $real --no-daemon show "\$3" --json 2>/dev/null \\
+    $real "\$@"; rc=\$?
+    $real show "\$3" --json --include-comments 2>/dev/null \\
         | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text' 2>/dev/null \\
         | grep -c '^QA-GATE APPROVED ' > "$root/.claude/.qa-tracking/.drive-records" 2>/dev/null
     if [ -f "$root/.claude/.qa-tracking/current-task" ]; then
@@ -424,14 +433,14 @@ if [ "\$1" = "$a1" ] && [ "\$2" = "$a2" ] && [ "\$4" = "$a4" ] && [ ! -f "$root/
         | tail -1 > "$root/.claude/.qa-tracking/.drive-stop.json" )
     exit \$rc
 fi
-exec $real --no-daemon "\$@"
+exec $real "\$@"
 EOF
     chmod +x "$root/bin/bd"
 }
 # Restore the plain wrapper by hand (never via mk_bd_shim — see its guard).
 restore_bd() {
     local root="$1" real; real=$(real_bd_of "$root")
-    printf '#!/bin/bash\nexec %s --no-daemon "$@"\n' "$real" > "$root/bin/bd"
+    printf '#!/bin/bash\nexec %s "$@"\n' "$real" > "$root/bin/bd"
     chmod +x "$root/bin/bd"
 }
 drive_read() { tr -d '[:space:]' < "$1/.claude/.qa-tracking/$2" 2>/dev/null || printf 'missing'; }

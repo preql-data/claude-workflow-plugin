@@ -54,13 +54,74 @@ function buildCreateArgs(input, type) {
     if (input.priority !== undefined) args.push('-p', input.priority);
     if (input.labels && input.labels.length > 0) args.push('-l', input.labels.join(','));
     if (input.parent) args.push('--parent', validateTaskId(input.parent, 'parent'));
-    if (input.deps && input.deps.length > 0) args.push('--deps', input.deps.join(','));
+    // DELIBERATELY NO `--deps` HERE. See applyDeps() below: bd 1.1.2 still
+    // ACCEPTS the flag and records the edge BACKWARDS, so passing it is worse
+    // than useless — it writes a wrong edge and then blocks the right one.
     if (input.notes) args.push('--notes', input.notes);
     if (input.description) args.push('-d', input.description);
     if (input.assignee) args.push('-a', input.assignee);
     if (input.acceptance) args.push('--acceptance', input.acceptance);
     if (input.design) args.push('--design', input.design);
     return args;
+}
+
+/**
+ * Attach `deps` to a freshly-created issue with explicit `bd dep` calls.
+ *
+ * WHY THIS EXISTS (claude-workflow-plugin-fkm.1.1)
+ *   `bd create --deps blocks:<id>` records the edge INVERTED on bd 1.1.2. The
+ *   flag is still documented in `bd create --help` and the command still exits
+ *   0, but the direction is reversed: `create B --deps blocks:A` should mean
+ *   "B is blocked by A" and instead yields "A is blocked by B". Verified
+ *   directly against a `bd dep add` control — B's own `.dependencies` stays
+ *   empty while A acquires a dependency on B. That is silent CORRUPTION, not
+ *   silent loss, and it poisons the correct call afterwards: a subsequent
+ *   `bd dep add B A` is refused with "adding dependency would create a cycle".
+ *
+ *   Doing it explicitly is also VERSION-INDEPENDENT, which is why `--deps` is
+ *   dropped from the create args entirely rather than kept as a first attempt:
+ *   on bd 0.47.x the flag DOES work, so a create-then-add pair would try to
+ *   record every edge twice. One path, both versions.
+ *
+ *   Mapping mirrors bd_dep.js exactly (`related` is bi-directional and uses
+ *   `dep relate`; everything else is `dep add <dependent> <blocker>` with
+ *   `--type` for non-default kinds), so the two tools cannot drift into
+ *   disagreeing about what an edge kind means.
+ *
+ * Never throws: the issue already exists by this point, and failing the whole
+ * call would leave the caller unable to tell that it was created. Returns the
+ * list of human-readable failures for the tool layer to surface.
+ *
+ * @returns {Promise<string[]>} empty when every edge was recorded
+ */
+async function applyDeps(newId, deps, opts) {
+    const failures = [];
+    for (const raw of deps) {
+        const spec = String(raw).trim();
+        if (!spec) continue;
+        // 'type:id' or bare 'id' (bare defaults to blocks, matching the
+        // documented --deps grammar this replaces).
+        const sep = spec.indexOf(':');
+        const kind = sep === -1 ? 'blocks' : spec.slice(0, sep).trim();
+        const other = sep === -1 ? spec : spec.slice(sep + 1).trim();
+        if (!other) {
+            failures.push(`'${spec}' names no issue id`);
+            continue;
+        }
+        try {
+            const blocker = validateTaskId(other, 'deps');
+            if (kind === 'related' || kind === 'relates-to' || kind === 'relates_to') {
+                await runBd(['dep', 'relate', blocker, newId], opts);
+            } else {
+                const depArgs = ['dep', 'add', newId, blocker];
+                if (kind !== 'blocks') depArgs.push('--type', kind);
+                await runBd(depArgs, opts);
+            }
+        } catch (err) {
+            failures.push(`${spec}: ${err && err.message ? err.message : String(err)}`);
+        }
+    }
+    return failures;
 }
 
 /**
@@ -100,12 +161,20 @@ export function registerCreateTools(server) {
                     "duplicate label that conflicts with a unique constraint, or .beads/ not initialized in cwd.",
             });
             const id = created && (created.id || (Array.isArray(created) && created[0]?.id));
+            // Deps are attached AFTER creation, not via --deps. See applyDeps().
+            let depNote = '';
+            if (id && input.deps && input.deps.length > 0) {
+                const failures = await applyDeps(id, input.deps, { cwd: input.cwd });
+                depNote = failures.length
+                    ? ` ${failures.length} of ${input.deps.length} dependency edge(s) could NOT be recorded: ${failures.join('; ')}.`
+                    : ` ${input.deps.length} dependency edge(s) recorded via bd dep.`;
+            }
             return ok(
                 `Created ${type} ${id ?? '(id unknown)'}: ${input.title.slice(0, 80)}`,
                 created,
-                id
+                (id
                     ? `Next typical step: bd_qa_enter for QA gate, or bd_update_task to set status=in_progress when work begins.`
-                    : `Server returned create result without an id field; inspect the JSON below.`,
+                    : `Server returned create result without an id field; inspect the JSON below.`) + depNote,
             );
         }),
     );
@@ -164,6 +233,16 @@ export function registerCreateTools(server) {
                 );
             }
 
+            // Step 1b: attach the EPIC's own deps explicitly (bd 1.1.2 records
+            // `bd create --deps blocks:` BACKWARDS — see applyDeps). Children
+            // carry no deps of their own: the children[] schema has no deps
+            // field, and their parent-child edge comes from --parent, which
+            // still works.
+            const epicDepFailures =
+                input.deps && input.deps.length > 0
+                    ? await applyDeps(epicId, input.deps, { cwd: input.cwd })
+                    : [];
+
             // Step 2: create each child with --parent <epic.id>.
             const created = [];
             const failures = [];
@@ -201,12 +280,15 @@ export function registerCreateTools(server) {
                 );
             }
 
+            const epicDepNote = epicDepFailures.length
+                ? ` ${epicDepFailures.length} dependency edge(s) on the epic could NOT be recorded: ${epicDepFailures.join('; ')}.`
+                : '';
             return ok(
                 `Created epic ${epicId} with ${created.length} child task(s)`,
                 { epic, children: created, failures: [] },
-                created.length > 0
+                (created.length > 0
                     ? `Children inherit the epic's id as parent. Use bd_get_ready or bd_list_tasks(parent=${epicId}) to see them.`
-                    : `Created an empty epic. Add children later with bd_create_task(..., parent=${epicId}).`,
+                    : `Created an empty epic. Add children later with bd_create_task(..., parent=${epicId}).`) + epicDepNote,
             );
         }),
     );

@@ -438,6 +438,27 @@ compute_change_set_hash() {
 # Stop hook, so changing it belongs to that script's contract, not to this one.
 CHANGE_SET_HASH_UNAVAILABLE="sha256-unavailable"
 
+# bd_show_with_comments <task-id> — `bd show --json` that always carries
+# comment BODIES, across the supported bd range.
+#
+# bd 1.1.2 stopped inlining comments in `bd show --json`: it returns a
+# `comment_count` integer, and the bodies need the new --include-comments flag.
+# bd 0.47.x has no such flag and exits 1 ("unknown flag: --include-comments"),
+# but inlines .comments already. So try the new form, fall back to the plain
+# one — pin the CHAIN, not the leg, exactly as add_comment() does for
+# `bd comments add || bd comment add`. Callers keep the usual
+# `(if type=="array" then .[0].comments else .comments end) // []` accessor,
+# which reads both shapes correctly. Never fails the caller.
+#
+# Only readers of .comments need this. get_labels() and the other
+# .labels/.status/.notes readers must NOT use it: the flag's own help warns it
+# "may be slow on issues with many comments", and those fields are unaffected.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 # gz3 (v4.1 U1): the approval records THIS task already carries — one
 # change_set_hash per `QA-GATE APPROVED ... change_set_hash=<h> ...` comment.
 #
@@ -458,7 +479,7 @@ recorded_approval_hashes() {
     local tid="$1"
     [ -n "$tid" ] || return 0
     command -v bd >/dev/null 2>&1 || return 0
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r '
             (if type == "array" then .[0].comments else .comments end) // []
             | .[].text
@@ -558,7 +579,7 @@ latest_satisfied_rubric_hash() {
     local tid="$1"
     [ -n "$tid" ] || return 0
     command -v bd >/dev/null 2>&1 || return 0
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r --arg unavailable "$CHANGE_SET_HASH_UNAVAILABLE" '
             [ (if type == "array" then .[0].comments else .comments end) // []
               | .[].text
@@ -2539,7 +2560,7 @@ cmd_grade_record() {
 finding_id_in_latest_artifact() {
     local tid="$1" fid="$2"
     local comments art token
-    comments=$(bd show "$tid" --json 2>/dev/null \
+    comments=$(bd_show_with_comments "$tid" \
         | jq -r 'if type=="array" then .[0].comments else .comments end | (.[]?.text // empty)' 2>/dev/null || echo "")
     art=$(printf '%s\n' "$comments" | grep -E '^REVIEW-ARTIFACT v1 ' | tail -1 || true)
     [ -z "$art" ] && return 1

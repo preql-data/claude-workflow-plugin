@@ -139,6 +139,36 @@ Plugin-scope manifests substitute `${CLAUDE_PLUGIN_ROOT}` (and `${CLAUDE_PROJECT
 
 The two manifests should always agree on server set and tool surface; if you change one, change the other in the same commit. The L2 spec `.claude/tests/component/specs/installer-mcp-config.sh` enforces this for the rendered install (no bare `${VAR}` references, both servers wired, the retired `code-context` entry absent).
 
+## Restart Claude Code after changing MCP server code
+
+**The running server is the one that was spawned at session start.** Claude Code
+launches each MCP server as a child process when the session begins and keeps
+that process for the session's lifetime. Editing anything under
+`.claude/mcp/*/src/` therefore has NO effect on the tools you are calling right
+now — the old code stays resident until the session restarts.
+
+This is worth stating explicitly because the failure is silent and asymmetric.
+It bit this project during the bd 1.1.2 migration: `bd_show_task` and
+`bd_list_comments` had just been fixed to pass `--include-comments`, but the
+session's resident server predated the fix, so every comment READ returned zero
+for the whole session while every WRITE succeeded. Nothing errored. The natural
+reading of "writes work, reads are empty" is a data-loss bug in the database,
+which is a long way from the truth.
+
+Symptoms that should make you suspect a stale server rather than your change:
+
+- a tool returns empty or default data for records you can see with the `bd` CLI;
+- a fix you just made to `src/` has no effect, and re-running it changes nothing;
+- `workflow-doctor.sh`'s `mcp_bd` / `mcp_code_graph` checks pass (they spawn a
+  FRESH server over stdio, so they exercise the NEW code and disagree with the
+  session).
+
+That last point is the reliable discriminator: if the doctor sees correct
+behaviour and your session does not, the session is running stale code.
+
+**Fix:** restart Claude Code. There is no reload command, and `/mcp` reconnects
+the transport rather than re-reading the source.
+
 ## Troubleshooting: bd (or code-graph) shows failed / not spawned
 
 If `/mcp` lists a server as failed, or the `bd_*` / `code_*` tools are missing in an installed project, check these two things first — in this order.

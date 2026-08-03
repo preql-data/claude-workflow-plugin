@@ -67,7 +67,7 @@ stop_reason() {
 }
 
 comments_of() {
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r '(if type == "array" then .[0].comments else .comments end) // [] | .[].text' \
         2>/dev/null || echo ""
 }
@@ -116,7 +116,7 @@ restage "$TID" "src/handler.ts"
 record_artifact "$TID" 2 "qa-claude" \
     '[{"id":"R2-F1","severity":"critical","location":"src/handler.ts:42","evidence":"the retry loop swallows the auth error","description":"silent auth failure"}]'
 # Precondition: the record still matches (so any block is about REVIEW state).
-D2_RECORD_OK=$(bd show "$TID" --json 2>/dev/null \
+D2_RECORD_OK=$(bd_show_with_comments "$TID" \
     | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
              | select(test("QA-GATE APPROVED .*change_set_hash="))' 2>/dev/null | wc -l | tr -d ' ')
 assert_eq "D2: precondition — the change-set-bound approval record is still on file" \

@@ -14,6 +14,7 @@
 import { z } from 'zod';
 import {
     runBdJson,
+    runBdShowJson,
     runBd,
     BdError,
     validateTaskId,
@@ -121,11 +122,17 @@ export function registerDepTools(server) {
         safe(async (input) => {
             const tid = validateTaskId(input.task_id);
             // bd's `--refs --json` returns a different shape (a reverse-ref
-            // map keyed by id), but plain `bd show --json` already includes
-            // both `dependencies[]` (blockers) AND `dependents[]` (reverse
-            // refs) in its output. So we use plain show — simpler and
-            // consistent with how every other tool reads task state.
-            const raw = await runBdJson(['show', tid, '--json'], {
+            // map keyed by id), so we use plain show — simpler and consistent
+            // with how every other tool reads task state.
+            //
+            // `dependencies[]` (blockers, FORWARD edges) is still inlined on
+            // every supported bd. `dependents[]` (reverse refs) is NOT: bd
+            // 1.1.2 returns a dependent_count integer and needs
+            // --include-dependents, so without it this tool reports
+            // "0 dependent(s)" for every hub bead. runBdShowJson falls back for
+            // 0.47.x, which inlines them and rejects the flag.
+            const raw = await runBdShowJson(tid, {
+                includeDependents: true,
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });

@@ -198,7 +198,7 @@ short summary:
 | PreToolUse          | `prevent-orchestrator-edits.sh`     | Blocks orchestrator from writing code.                         |
 | PostToolUse         | `post-edit.sh` + `github-link.sh`   | Tracks changed files (Edit*); auto-links Beads <-> GitHub PRs (Bash gh*) (I3). |
 | Stop                | `verify-before-stop.sh`             | Polyglot test/lint/type, QA gate, epic gate (multi-repo aware: I8). |
-| SessionEnd          | `session-end.sh`                    | `bd sync` with error logging.                                  |
+| SessionEnd          | `session-end.sh`                    | Checks the Beads JSONL ledger (read-only) and logs divergence. |
 
 ## Plugin scripts (Claude-invoked)
 

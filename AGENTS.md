@@ -9,7 +9,11 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --status in_progress  # Claim work
 bd close <id>         # Complete work
-bd sync               # Sync with git
+bash .claude/scripts/beads-ledger.sh reconcile --apply   # Sync database <-> ledger, both ways
+                                                        # (dry-run without --apply)
+bd export -o .beads/issues.jsonl                # One-way: database -> ledger. Overwrites the
+                                                # ledger, so it DISCARDS anything only the
+                                                # ledger has (e.g. just-pulled issues).
 ```
 
 ## Landing the Plane (Session Completion)
@@ -23,11 +27,24 @@ bd sync               # Sync with git
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
+   # 1. Fold local database work into the ledger BEFORE pulling. --apply is
+   #    required: reconcile is dry-run by default.
+   bash .claude/scripts/beads-ledger.sh reconcile --apply
    git pull --rebase
-   bd sync
+   # 2. Fold in whatever the pull brought. This step is why `export` is NOT
+   #    used here: the pull may have added issues that exist ONLY in the
+   #    ledger, and a plain export would overwrite them from the local
+   #    database and then push the deletion. `reconcile` imports first, so
+   #    the database ends up holding the union and nothing is discarded.
+   bash .claude/scripts/beads-ledger.sh reconcile --apply
+   git add .beads/issues.jsonl                   # the ledger is the portable ground truth
    git push
    git status  # MUST show "up to date with origin"
    ```
+
+   > `bd sync` used to sit between the pull and the push. It was REMOVED in bd
+   > 1.1.2, and it was BIDIRECTIONAL — replacing it with a one-way export is
+   > what makes the ordering above load-bearing rather than cosmetic.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session

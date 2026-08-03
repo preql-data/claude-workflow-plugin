@@ -39,7 +39,7 @@
 #      PASS BY NAME out of --json-out.
 #   3. Fresh install, DEFAULT flags — @modelcontextprotocol/sdk present in both
 #      server trees. Network-gated (net_available).
-#   4. Full doctor, no skips — exit 0, all 11 checks PASS. THIS IS THE ASSERTION
+#   4. Full doctor, no skips — exit 0, all 12 checks PASS. THIS IS THE ASSERTION
 #      THAT WOULD HAVE CAUGHT THE ORIGINAL P0.
 #   5. Offline boot leg — a --skip-mcp-deps target plus a copied node_modules
 #      boots both servers: mcp_bd 21 tools, mcp_code_graph 7. Runs with no
@@ -62,7 +62,8 @@
 # RUNTIME. Measured on an M-series laptop: an install is ~7s, a doctor run with
 # the two server checks skipped is ~5s, a full one ~9s. Section 3's `npm ci` is
 # the only network step and the only slow one. The METAs use skip_all_but() so a
-# mutation aimed at one check does not pay for the other ten.
+# mutation aimed at one check does not pay for every other check in the
+# registry.
 #
 # EVERY TARGET IS AN mktemp -d (claude-workflow-plugin-1nz). Nothing here writes
 # to the live repo: workflow-doctor.test.sh carries a live-repo non-mutation
@@ -257,9 +258,9 @@ skip_all_but() {
     printf '%s' "${out#,}"
 }
 
-assert_eq "installer-target-functional 0: the doctor's check registry extracted (11 names)" \
-    "11" "$DOCTOR_CHECK_COUNT"
-for _n in deps agents skill mcp_config settings_hooks beads session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop; do
+assert_eq "installer-target-functional 0: the doctor's check registry extracted (12 names)" \
+    "12" "$DOCTOR_CHECK_COUNT"
+for _n in deps agents skill mcp_config settings_hooks beads beads_ledger session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop; do
     case " $DOCTOR_CHECKS " in
         *" $_n "*) ;;
         *)
@@ -389,8 +390,9 @@ else
             "$D4" 2>/dev/null || true
     fi
     assert_eq "installer-target-functional 4: full doctor (no skips) exits 0" "0" "$D4_RC"
-    assert_eq "installer-target-functional 4: 11 checks passed, 0 failed, 0 skipped" \
-        "11 0 0" \
+    # 12 since beads_ledger joined the registry (fkm.1.1).
+    assert_eq "installer-target-functional 4: 12 checks passed, 0 failed, 0 skipped" \
+        "12 0 0" \
         "$(jq -r '"\(.passed) \(.failed) \(.skipped)"' "$D4" 2>/dev/null || echo "?")"
     for _c in $DOCTOR_CHECKS; do
         assert_eq "installer-target-functional 4: $_c PASS" "PASS" "$(status_of "$D4" "$_c")"
@@ -892,8 +894,9 @@ if [ "$HAVE_NODE" = "yes" ]; then
     assert_eq "installer-target-functional 7g: after all METAs, the full check set is green again" \
         "0" "$M7G_RC"
 fi
-assert_eq "installer-target-functional 7g: 9 passed, 0 failed after the METAs" \
-    "9 0" "$(jq -r '"\(.passed) \(.failed)"' "$M7G" 2>/dev/null || echo "?")"
+# 10 since beads_ledger joined the registry (fkm.1.1).
+assert_eq "installer-target-functional 7g: 10 passed, 0 failed after the METAs" \
+    "10 0" "$(jq -r '"\(.passed) \(.failed)"' "$M7G" 2>/dev/null || echo "?")"
 
 # ===========================================================================
 # Section 8: installer-level META — a JSONC settings.json is now LOUD

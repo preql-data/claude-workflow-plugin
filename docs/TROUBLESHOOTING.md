@@ -148,6 +148,23 @@ cd .claude/mcp/bd-mcp && npm ci --omit=dev --ignore-scripts
 
 ---
 
+### MCP tools return empty data after you edited the server code
+
+**Symptom**: a bd-mcp tool reports zero comments / no docs / missing fields for a
+task the `bd` CLI shows correctly — and writes through the same server still work.
+
+**Cause**: Claude Code spawns each MCP server once, at session start, and keeps
+that process. Edits under `.claude/mcp/*/src/` do not reach the running server.
+The session is executing the code as it was when the session began.
+
+**Discriminator**: run `bash .claude/scripts/workflow-doctor.sh`. Its `mcp_bd`
+check spawns a FRESH server over stdio, so it exercises the new code. If the
+doctor is happy and your session is not, the session is stale.
+
+**Fix**: restart Claude Code. `/mcp` reconnects the transport but does not
+re-read the source. See `docs/MCP_SERVERS.md`, "Restart Claude Code after
+changing MCP server code".
+
 ## Installation Issues
 
 ### "Beads (bd) not found"
@@ -258,8 +275,9 @@ bd doctor --fix
 
 # Common fixes:
 # - Schema mismatch: bd migrate
-# - Daemon issues: bd daemon restart
-# - Sync issues: bd sync
+# - Backend/engine state: bd dolt status
+# - Diverged JSONL ledger: bash .claude/scripts/beads-ledger.sh check
+#   (then `reconcile --apply` to repair; nothing repairs it automatically)
 ```
 
 ### Tasks not persisting
@@ -271,14 +289,18 @@ bd doctor --fix
 **Solution**:
 
 ```bash
-# Install git hooks
+# Install git hooks. NOTE: on bd 1.1.2 the bd pre-commit hook exits 0 WITHOUT
+# exporting, so it does NOT keep issues.jsonl current. Use the ledger helper.
 bd hooks install
 
-# Force sync
-bd sync
+# Repair the ledger. `reconcile --apply` imports first and then re-exports the
+# union, so it is safe whichever side is ahead; `export --apply` is one-way and
+# discards anything only the ledger has. BOTH are dry runs without --apply.
+bash .claude/scripts/beads-ledger.sh reconcile --apply
 
-# Verify issues.jsonl exists
+# Verify issues.jsonl exists AND matches the database
 ls .beads/issues.jsonl
+bash .claude/scripts/beads-ledger.sh check   # exit 0 = fresh, 1 = stale
 ```
 
 ### "bd ready" shows nothing
@@ -348,10 +370,13 @@ If missing, re-run installer or manually add hooks to settings.json.
 }
 ```
 
-2. Check Beads daemon:
+2. Check the Beads backend. `bd daemon` was REMOVED in bd 1.1.2 (there is no
+   daemon — the engine is in-process embedded Dolt), so the equivalent checks
+   are:
 ```bash
 bd doctor
-bd daemon restart
+bd dolt status     # backend/engine state
+bd context         # which .beads/ and which backend this project resolves to
 ```
 
 ### "Invalid JSON" errors
@@ -414,7 +439,10 @@ bd show $TASK_ID --json | jq '.labels'
 
 2. Check comment contains "QA APPROVED":
 ```bash
-bd show $TASK_ID --json | jq '.comments'
+# --include-comments is required on bd >= 1.1.2; without it .comments is absent
+# and this prints null no matter how many comments the task has.
+{ bd show "$TASK_ID" --json --include-comments 2>/dev/null || bd show "$TASK_ID" --json; } \
+    | jq '(if type == "array" then .[0].comments else .comments end) // []'
 ```
 
 3. Manually add file marker (emergency):
@@ -587,10 +615,12 @@ rm .claude/.qa-tracking/approved
 
 **Solutions**:
 
-1. Check Beads daemon:
+1. Check the Beads backend. `bd daemon status` / `bd daemon restart` were
+   REMOVED in bd 1.1.2 (verified: "unknown command \"daemon\" for \"bd\"") —
+   1.1.x runs an in-process embedded Dolt engine with no daemon to restart:
 ```bash
-bd daemon status
-bd daemon restart
+bd dolt status
+bd doctor
 ```
 
 2. Reduce project memory size (CLAUDE.md)

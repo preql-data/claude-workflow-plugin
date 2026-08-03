@@ -162,7 +162,9 @@ export async function runBd(args, opts = {}) {
                 stdout: err.stdout || '',
                 code: 'TIMEOUT',
                 hint: opts.hintOnError ||
-                    "If the daemon is stuck, try `bd --no-daemon ${args[0]}` or check `.beads/daemon.log` for hangs.",
+                    "Check `.beads/daemon.log` for hangs, and `bd dolt status` for the backend state. " +
+                    "(`--no-daemon` was REMOVED in bd 1.1.x, which runs an in-process embedded Dolt " +
+                    "engine — there is no daemon to disable.)",
             });
         }
         throw new BdError(
@@ -202,6 +204,54 @@ export async function runBdJson(args, opts = {}) {
             stdout: trimmed.slice(0, 2000),
             hint: "This usually means the bd version is older than expected. Check with `bd --version` (need >=0.47).",
         });
+    }
+}
+
+/**
+ * `bd show <id> --json` with optional hydration flags, tolerant of the bd
+ * versions this plugin supports (>=0.47).
+ *
+ * WHY: bd 1.1.2 stopped INLINING two arrays that 0.47.x returned by default.
+ * Plain `bd show --json` now returns `comment_count` / `dependent_count`
+ * integers, and the arrays themselves require the new `--include-comments` /
+ * `--include-dependents` flags. Reading `.comments` off a plain 1.1.2 response
+ * silently yields [] — which for the QA gate means "no approval record", and
+ * for bd_doc_read means "no docs".
+ *
+ * bd 0.47.x does not have those flags and exits 1 with
+ * "unknown flag: --include-comments" — but it inlines both arrays already. So
+ * we try the hydrated form and fall back to the plain one ONLY on an
+ * unknown-flag error. Pin the chain, not the leg. Any other failure (missing
+ * task, timeout) propagates untouched, so we never mask a real error behind a
+ * second call.
+ *
+ * Pass the flags ONLY where the field is actually read: hydration is not free
+ * (bd's own help warns it "may be slow on issues with many comments"), though
+ * measured against this repo's heaviest bead it costs ~40ms on a ~350ms
+ * baseline, i.e. process startup dominates.
+ *
+ * @param {string} tid           issue id
+ * @param {object} opts          cwd / hintOnError, plus:
+ *   includeComments  {boolean}  hydrate .comments[]
+ *   includeDependents{boolean}  hydrate .dependents[]
+ *   extraArgs        {string[]} additional bd args (e.g. ['--refs'])
+ */
+export async function runBdShowJson(tid, opts = {}) {
+    const extraArgs = opts.extraArgs || [];
+    const plain = ['show', tid, '--json', ...extraArgs];
+    const hydrate = [];
+    if (opts.includeComments) hydrate.push('--include-comments');
+    if (opts.includeDependents) hydrate.push('--include-dependents');
+    if (hydrate.length === 0) return runBdJson(plain, opts);
+
+    try {
+        return await runBdJson(['show', tid, '--json', ...hydrate, ...extraArgs], opts);
+    } catch (err) {
+        if (err instanceof BdError && /unknown flag/i.test(err.stderr || '')) {
+            // bd 0.47.x — the arrays are inlined in the plain response.
+            return runBdJson(plain, opts);
+        }
+        throw err;
     }
 }
 

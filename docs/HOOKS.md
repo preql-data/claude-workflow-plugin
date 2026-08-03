@@ -1149,7 +1149,7 @@ on task B does NOT pick up where task A left off.
 
 **File**: `.claude/scripts/session-end.sh`
 
-**Purpose**: Sync Beads state before session ends.
+**Purpose**: Detect a Beads JSONL ledger divergence before the session ends. It writes nothing.
 
 ### What It Does
 
@@ -1157,13 +1157,24 @@ on task B does NOT pick up where task A left off.
 # Guard cwd: a missing PROJECT_DIR no longer corrupts state.
 cd "$PROJECT_DIR" || { echo '{}'; exit 0; }
 
-# Run bd sync and capture stderr for sync-errors.log so SessionStart can
-# surface a one-line warning next session.
-SYNC_ERR_FILE="$(mktemp -t bd-sync.XXXXXX)"
-if ! bd sync >/dev/null 2>"$SYNC_ERR_FILE"; then
-    TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    ERR_LINE=$(head -1 "$SYNC_ERR_FILE" | tr -d '\n')
-    printf '%s\tbd sync failed: %s\n' "$TS" "${ERR_LINE:-unknown error}" \
+# CHECK the JSONL ledger and capture output for sync-errors.log so
+# SessionStart can surface a one-line warning next session.
+#
+# This hook no longer WRITES the ledger (R4-F1). It ran `bd sync` until bd
+# 1.1.2 removed that command, then `beads-ledger.sh export`, then the
+# classifier-driven `refresh`; five defects came out of an unattended hook
+# deciding to write, so the automatic write was removed. `check` is read-only,
+# and repair is an explicit `beads-ledger.sh reconcile --apply`.
+LEDGER_SH="$PROJECT_DIR/.claude/scripts/beads-ledger.sh"
+SYNC_ERR_FILE="$(mktemp -t bd-ledger.XXXXXX)"
+LEDGER_RC=0
+bash "$LEDGER_SH" check >"$SYNC_ERR_FILE" 2>&1 || LEDGER_RC=$?
+TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [ "$LEDGER_RC" = "1" ] || [ "$LEDGER_RC" = "3" ]; then
+    printf '%s\tledger NOT written — it diverges from the database and no hook may repair that automatically. Run: bash .claude/scripts/beads-ledger.sh reconcile --apply\n' \
+        "$TS" >> "$SYNC_LOG"
+elif [ "$LEDGER_RC" != "0" ]; then
+    printf '%s\tledger check failed: %s\n' "$TS" "$(head -1 "$SYNC_ERR_FILE" | tr -d '\n')" \
         >> "$SYNC_LOG"
 fi
 rm -f "$SYNC_ERR_FILE"
@@ -1196,9 +1207,9 @@ the count is non-zero — appends one `<ts>\t<message>` line to
 that file and renders warning 6, so the notice fires once per event.
 
 **Its own log file, deliberately.** `session-start.sh` renders
-`sync-errors.log`'s head line verbatim as *"Last session's bd sync failed at
-…"* regardless of how the line is tagged, so a sweep line landing there first
-would be reported to the operator as a Beads failure.
+`sync-errors.log`'s head line verbatim as *"Last session logged a Beads sync
+error at …"* regardless of how the line is tagged, so a sweep line landing
+there first would be reported to the operator as a Beads failure.
 
 `session-end.sh` runs under `set -e`, so every leg of the sweep block is
 `|| true`-guarded: an unguarded failure would kill the hook before its
@@ -1214,8 +1225,7 @@ bash .claude/scripts/worktree-sweep.sh --apply    # actually remove
 
 ### sync-errors.log Surfacing
 
-When `bd sync` fails (typically because the bd daemon is unreachable —
-see bug 0wk.5), the failure is appended to
+When the ledger export fails, the failure is appended to
 `.claude/.qa-tracking/sync-errors.log` rather than swallowed silently.
 SessionStart reads recent entries from this file on the next session and
 surfaces a one-line `<sync_warnings>` block in `additionalContext` so
@@ -1238,12 +1248,12 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 | `prevent-orchestrator-edits.sh` | PreToolUse hook (matcher `^(Write\|Edit\|MultiEdit\|Bash)$`) blocking code edits by the `orchestrator`. Denies the Write/Edit/MultiEdit tools AND *write-shaped* Bash (redirection into source, `tee`, `sed -i`, `dd of=`, `cp`/`mv` into the tree) so the orchestrator cannot launder a write through Bash (llh.19). Legitimate orchestrator Bash (git/bd/reads/test-runs, redirects into `/tmp`/`/dev/null`) is allowed (anti-overreach). For a WRITE with no probeable agent identity it fails CLOSED (deny) — an unattributed write is treated as a possible mis-attributed orchestrator edit. Emits `hookSpecificOutput.permissionDecision: deny`. Defense in depth (the Bash detector is a raise-the-bar heuristic, not airtight); the primary guard is the orchestrator's omitted Write/Edit tools. |
 | `epic-gate.sh` | Epic-level QA gate (B2). Subcommands: `check`, `siblings`, `shared-files`. Returns `pass`/`defer`/`block` based on sibling status and file-intersection across in-progress tasks under the same epic. |
 | `subagent-start.sh` | J3 cross-session auto-assign. SubagentStart hook: when the spawned subagent is a specialist AND `current-task` is non-empty, injects `additionalContext` with the task id + brief summary so the orchestrator doesn't need to repeat the brief. |
-| `tech-debt.sh` | TECHNICAL_DEBT.md append (J22). Subcommands: `add <severity> <file:line> <effort> <description>`, `list`. Optional `--bd-task` creates a paired Beads task with `--deps blocks:<active-task>`. |
+| `tech-debt.sh` | TECHNICAL_DEBT.md append (J22). Subcommands: `add <severity> <file:line> <effort> <description>`, `list`. Optional `--bd-task` creates a paired Beads task and links it to the active task with an explicit `bd dep add` (it used `--deps blocks:` until bd 1.1.2, which records that edge backwards). |
 | `bd-github-link.sh` | I3 Beads ↔ GitHub auto-link. PostToolUse hook on Bash invocations. When a Beads task closes, posts a `gh issue comment` linking back; when `gh pr create` runs, parses `Closes #N` and writes `gh-link:` into the task notes. |
 | `detect-stack.sh` | F8/J17 polyglot test runner detection. Emits JSON `{runner, test_cmd, lint_cmd, type_cmd, manifest, overrides}`. Supports npm, pytest, go, cargo, maven, gradle, phpunit, rake, swift, dotnet, make, plus `.claude/test-cmd` overrides. |
 | `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`. Drains stdin (Claude Code passes a session envelope it doesn't need). |
 | `worktree-sweep.sh` | v4.1 (C1b) sweeper for the subagent worktrees at `.claude/worktrees/<name>`. Ones with NO changes are auto-removed when the subagent finishes; ones WITH changes survive, and until this script nothing removed them. **Dry run is the default; `--apply` is the only thing that removes**, and removal is `git worktree remove` + `git worktree prune` — there is no `rm -rf` in the file and `worktree remove` is never `--force`d (both asserted structurally by `worktree-sweep.test.sh`). A worktree is removable only if ALL of: (1) its `cd … && pwd -P`-**resolved** path is physically inside the resolved `.claude/worktrees/` — a string-prefix test is not a containment guard, and this is what excludes an operator's sibling checkout whose name merely *extends* the root's; (2) same repo by `--git-common-dir` identity; (3) `git status --porcelain` empty; (4) `@{upstream}..HEAD` == 0 commits, else `merge-base --is-ancestor <branch> <default>` — **decided locally, never a fetch**; (5) directory mtime older than `--age-days` (default 7); (6) a Beads task resolved from EVIDENCE (the worktree's own `.qa-tracking/current-task`, else a task-shaped branch token bd actually knows) that bd reports `closed`. Any error, unreadable path or ambiguity is NOT a candidate, and each keeper prints its FIRST failing gate. Worktree NAMING is deliberately off the safety path. Flags: `--apply`, `--age-days N`, `--report-only` (wins over `--apply`), `--json`, `--max-candidates N` (default 16, the same bound as the Stop hook's `WTRES_MAX_CANDIDATES`), `--help`. Exit 0 / 1 (a removal failed) / 2 (bad invocation). Invoked report-only by `session-end.sh`; see "Worktree sweep (report-only)". |
-| `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Eleven named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, and drives both gate hooks. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
+| `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Twelve named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `beads_ledger`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, and drives both gate hooks. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
 
 Each helper is independently testable via the L1 bash unit tier
 (`.claude/scripts/tests/*.sh`) — see `.claude/tests/README.md` for the

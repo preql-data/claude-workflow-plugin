@@ -279,6 +279,27 @@ emit_gate() {
     exit "$code"
 }
 
+# bd_show_with_comments <task-id> — `bd show --json` that always carries
+# comment BODIES, across the supported bd range.
+#
+# bd 1.1.2 stopped inlining comments in `bd show --json`: it returns a
+# `comment_count` integer, and the bodies need the new --include-comments flag.
+# bd 0.47.x has no such flag and exits 1 ("unknown flag: --include-comments"),
+# but inlines .comments already. So try the new form, fall back to the plain
+# one — pin the CHAIN, not the leg, exactly as add_comment() does for
+# `bd comments add || bd comment add`. Callers keep the usual
+# `(if type=="array" then .[0].comments else .comments end) // []` accessor,
+# which reads both shapes correctly. Never fails the caller.
+#
+# Only readers of .comments need this. Calls that read .labels/.status/.notes/
+# .dependencies must NOT use it: the flag's own help warns it "may be slow on
+# issues with many comments", and those fields are unaffected by the change.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 # normalize_comments — stdin: bd-show JSON | {comments:[...]} | [texts] ;
 # stdout: a JSON array of comment TEXT strings.
 normalize_comments() {
@@ -337,7 +358,7 @@ cmd_gate() {
             exit 2
         fi
         local show
-        show=$(bd show "$tid" --json 2>/dev/null || echo "")
+        show=$(bd_show_with_comments "$tid" || echo "")
         if [ -z "$show" ]; then
             emit_validate "gate" "false" "bd_unavailable" "bd show $tid returned nothing"
             exit 2

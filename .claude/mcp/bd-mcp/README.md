@@ -58,7 +58,7 @@ The integration suite (`tests/integration.test.js`) spins up a temp `.beads`-ini
 ## Limits / non-goals
 
 - **No Beads logic re-implementation.** Every tool shells out to `bd`. If a feature isn't exposed by the CLI yet, the tool either returns `not-supported` or shells through `bd config` for the closest equivalent.
-- **No remote Beads sync.** The MCP server runs against the local `.beads/` only. `bd sync` is invoked by the plugin's `session-end.sh` hook, not from a tool.
+- **No remote Beads sync, and no automatic ledger write.** The MCP server runs against the local `.beads/` only. `bd sync` was removed in bd 1.1.2, and no hook writes `.beads/issues.jsonl`: `session-end.sh` and `session-start.sh` only DETECT a divergence (`.claude/scripts/beads-ledger.sh check`, read-only) and report it. Writing is an explicit operator action — `beads-ledger.sh reconcile --apply` — never a tool call and never a hook side effect.
 - **Hooks not yet migrated.** `verify-before-stop.sh`, `post-edit.sh`, etc. still call `bd ...` via bash. Migration is Phase 7+.
 - **GitHub auto-linking** is handled separately by `.claude/scripts/bd-github-link.sh` (I3), not via a bd-mcp tool.
 - **Multi-repo (I8)** is gate-side, not bd-mcp-side. Cross-repo detection lives in `verify-before-stop.sh`; bd-mcp tools accept an optional `cwd` parameter for federated layouts.

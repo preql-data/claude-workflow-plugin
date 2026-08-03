@@ -159,14 +159,15 @@ bash .claude/scripts/workflow-doctor.sh
 ```
 
 This is the one verification that asks whether the install **runs**, not
-whether its files exist. Eleven checks: it executes the SessionStart hook and
+whether its files exist. Twelve checks: it executes the SessionStart hook and
 asserts the emitted envelope actually carries the delegation contract, boots
 both MCP servers over stdio and asserts they register exactly 21 and 7 tools,
-and drives both gate hooks against a synthetic change set. Every failure
-prints its own indented `fix:` line.
+drives both gate hooks against a synthetic change set, and compares
+`.beads/issues.jsonl` against the Beads database. Every failure prints its own
+indented `fix:` line.
 
 ```
-workflow-doctor: 11 check(s) — 11 passed, 0 failed, 0 skipped
+workflow-doctor: 12 check(s) — 12 passed, 0 failed, 0 skipped
 ```
 
 Exit `0` = green, `1` = a check failed, `2` = usage error. The installer runs

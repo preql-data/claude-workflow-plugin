@@ -5,7 +5,7 @@ argument-hint: [--skip <check,check>] [--json-out <file>]
 
 # /workflow-doctor
 
-Run the eleven functional health checks over this project's install. Every
+Run the twelve functional health checks over this project's install. Every
 check either EXECUTES the thing or reads a contract a broken install cannot
 satisfy — the presence-only assertions live in the installer specs, and
 presence is exactly what let "both MCP servers dead" and "no workflow context
@@ -25,13 +25,13 @@ by indented `fix:` lines that are meant to be run as-is. Exit 0 = all
 non-skipped checks passed, 1 = at least one failed, 2 = usage error.
 
 The check names are a stable contract (`deps`, `agents`, `skill`,
-`mcp_config`, `settings_hooks`, `beads`, `session_start`, `mcp_bd`,
+`mcp_config`, `settings_hooks`, `beads`, `beads_ledger`, `session_start`, `mcp_bd`,
 `mcp_code_graph`, `gate_pretooluse`, `gate_stop`). `--skip` rejects an unknown
 name rather than ignoring it.
 
 ## Notes for Claude
 
-- Safe to run mid-session. Every dynamic check EXCEPT `beads` runs against a
+- Safe to run mid-session. Every dynamic check EXCEPT `beads` and `beads_ledger` runs against a
   throwaway copy of the project, so the operator's QA approval, changed-files
   tracker, gate baseline and agent `model:` pins are never touched. Do NOT
   "optimise" this by invoking `session-start.sh` or `verify-before-stop.sh`

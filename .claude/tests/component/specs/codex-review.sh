@@ -95,7 +95,7 @@ if command -v bd >/dev/null 2>&1; then
     if [ -n "$TID" ]; then
         RR_REC=$(bash "$QAGATE" review-record "$TID" --file "$RR_OUT" 2>/dev/null)
         assert_json_field "C1 review-record: ok=true" "$RR_REC" ".ok|tostring" "true"
-        POSTED=$(bd show "$TID" --json 2>/dev/null | jq -r '.[0].comments[].text' 2>/dev/null | grep -c '^REVIEW-ARTIFACT v1 ' || echo 0)
+        POSTED=$(bd_show_with_comments "$TID" | jq -r '.[0].comments[].text' 2>/dev/null | grep -c '^REVIEW-ARTIFACT v1 ' || echo 0)
         assert_eq "C1 review-record: REVIEW-ARTIFACT comment posted" "1" "$POSTED"
     fi
 else

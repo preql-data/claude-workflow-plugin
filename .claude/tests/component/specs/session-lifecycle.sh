@@ -47,11 +47,11 @@ assert_eq "session-start: .session-start marker created" "0" \
 # 4. Surfaced bd warnings: plant a stale sync-errors.log, confirm next
 # SessionStart surfaces a warning AND truncates the log.
 SYNC_LOG="$TRACK/sync-errors.log"
-printf '2026-01-01T00:00:00Z\t[verify-before-stop]\tbd sync failed: test scenario\n' > "$SYNC_LOG"
+printf '2026-01-01T00:00:00Z\t[verify-before-stop]\tledger export failed: test scenario\n' > "$SYNC_LOG"
 OUT=$(printf '%s' '{}' | bash "$SS" 2>/dev/null)
 CTX=$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
 assert_match "session-start: surfaces prior bd-sync error" \
-    "bd sync failed" "$CTX"
+    "Beads sync error" "$CTX"
 # Log truncated (size 0).
 LOG_SIZE=$(wc -c < "$SYNC_LOG" | tr -d ' ')
 assert_eq "session-start: sync log truncated after surfacing" "0" "$LOG_SIZE"
