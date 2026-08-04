@@ -1029,6 +1029,20 @@ fi
 # eligible — is_fastpath_only_change returns 1 the moment a non-beads source
 # path appears, so the qa-approved-only release rule stays intact for every
 # real code path. Doc-only precedence is preserved (it was here first).
+# qzv: the verdict of the change-set/task binding predicate, and the operator-
+# facing reason when it refuses.
+#
+# BOTH ARE DECLARED HERE, OUTSIDE the F1-CHANGE-SET-BINDING regions below, with
+# the PRE-FIX (auto-approving) defaults — the same discipline
+# REVIEW_DISCIPLINE_BLOCKED / APPROVAL_RECORD_DETAIL use further down. With those
+# regions stripped nothing ever reassigns them, the guard is gone, the note stays
+# empty, and the mid-implementation auto-approval returns: byte-for-byte the
+# behaviour that shipped before qzv. That is what makes the L2 META measure the
+# guard instead of dying on an unset variable.
+F1_BINDING_VERDICT=safe
+F1_BINDING_DETAIL=""
+F1_BINDING_NOTE=""
+
 FASTPATH_CLASS=""
 if [ "$DOC_ONLY" = true ] && [ ${#ALL_CHANGED_FILES[@]} -gt 0 ]; then
     FASTPATH_CLASS="doc-only"
@@ -1052,8 +1066,241 @@ if [ -n "$FASTPATH_CLASS" ]; then
         # approved/blocked). This idempotency is enforced inside qa-gate.sh
         # too, but we check here to keep observations clear.
         GATE_STATUS=$("$QA_GATE" status "$CURRENT_TASK" 2>/dev/null | jq -r '.status // "error"' 2>/dev/null || echo "error")
+
+        # The hash of the change set THIS Stop classified, captured BEFORE the
+        # `enter` below. Declared outside the binding regions for the same
+        # stripped-copy-stays-coherent reason as the verdict variables: with the
+        # regions gone this is computed and simply never passed on, which is the
+        # pre-qzv call shape.
+        #
+        # BEFORE `enter` is the whole point. `enter` reconciles the tracker and
+        # regenerates the impact report, so a path that appeared between the
+        # detection stage and here lands in the set `approve` will bind — and
+        # F1's doc-only verdict was reached over the EARLIER set. Capturing here
+        # is what makes `--expect-hash` an assertion about the classified set
+        # rather than a tautology about the bound one.
+        F1_CLASSIFIED_HASH=$(current_change_set_hash) || true
+        # An array rather than `${var:+--expect-hash "$var"}`: the latter relies
+        # on word splitting of an unquoted expansion to become two arguments,
+        # which is correct only for as long as the value can never contain a
+        # space. The array says what it means and degrades to zero arguments when
+        # the hash is unavailable (that case is already handled by approve's own
+        # unbound-record warning).
+        F1_EXPECT_ARGS=()
+        if [ -n "$F1_CLASSIFIED_HASH" ]; then
+            F1_EXPECT_ARGS=(--expect-hash "$F1_CLASSIFIED_HASH")
+        fi
+
+        # F1-CHANGE-SET-BINDING BEGIN (qzv)
+        #
+        # F1 MAY NOT SPEAK FOR A TASK AN IMPLEMENTER IS STILL WORKING ON.
+        #
+        # THE DEFECT (reproduced live four times, most seriously on the v4.1.0
+        # release task itself). F1's verdict is a statement about a CHANGE SET —
+        # "no reviewable source changed". Its `qa-approved` label is a statement
+        # about a TASK — "this task's work is approved". Any doc-only Stop that
+        # lands while a task is open converts the first into the second. On
+        # claude-workflow-plugin-0fc: gate entered 15:44:00Z, `IMPLEMENTER:
+        # role=devops` posted 15:44:59Z, and at 15:46:39Z F1 recorded
+        # `QA-GATE APPROVED change_set_hash=b1169536… reviewed_by=none` for work
+        # that did not exist when the cycle opened.
+        #
+        # THE PREDICATE. Auto-approve only when no `IMPLEMENTER: role=… task=…
+        # at <ts>` record on the active task is at-or-newer than the most recent
+        # `QA-GATE: entered at <ts>`. Both grammars are single-line
+        # ISO-8601-UTC, so the comparison is lexicographic.
+        #
+        # THE INPUTS ARE THE RECORDS THEMSELVES, via review-check.sh's existing
+        # envelope. That is deliberate and it is the lesson of this release's own
+        # R6-F1: a guard whose evidence is WEAKER than the property it protects
+        # is not a guard. The rejected alternative was a sibling-file or
+        # label-shaped probe — cheap to write, and false exactly when it matters.
+        # There is no second parser here: review-check.sh already reads both
+        # record classes to count implementers.
+        #
+        # NO IMPLEMENTER RECORD IS *SAFE*, NOT UNKNOWN. Doc-only work is
+        # orchestrator-authored and never produces one, so requiring a record
+        # would deadlock every documentation commit. Its absence is a fact, and
+        # the fact says nothing is in flight.
+        #
+        # AND WHEN THE PREDICATE CANNOT BE ESTABLISHED, REFUSE — never
+        # auto-approve, never allow. Three ways that happens, each landing in the
+        # `unestablished` verdict with its own reason: review-check.sh is absent;
+        # it answers without the two fields (a pre-qzv or partially-synced
+        # install); or a record exists whose timestamp does not parse. "Cannot
+        # establish" is mechanically distinct from "established as safe" — the
+        # first has no usable pair of timestamps, the second has two and compared
+        # them — and the block reason says which.
+        #
+        # THE EXIT CODE IS NOT THE DISCRIMINATOR, and this is the subtle part:
+        # F1 fires on change sets with nothing to review, so `review-check.sh
+        # gate` exits 4 (`review_artifact_missing`) on the NORMAL path here.
+        # Keying on rc would refuse every doc-only Stop. The discriminator is
+        # whether the two FIELDS came back.
+        #
+        # ONE CROSS-CHECK, for the failure this repo has already lived through:
+        # bd 1.1.2 stopped inlining `.comments`, so every record reader can come
+        # back empty while the LABELS still read fine. Empty records are
+        # indistinguishable from "a task with no records" unless something
+        # compares the two sources — so when the label says a cycle is open
+        # (GATE_STATUS `entered`) and no `QA-GATE: entered` record came back, the
+        # two disagree and that is `unestablished`, not `safe`.
+        #
+        # WHAT THIS DOES NOT ESTABLISH, stated because the temptation to
+        # overclaim is the defect one layer up: binding F1's verdict to the
+        # change set it classified does NOT establish that the change set is
+        # COMPLETE. The freshness machinery behind it compares two reads of the
+        # same source, so it detects drift and is structurally blind to loss
+        # (claude-workflow-plugin-fkm.1.20). An independent witness for
+        # completeness is a later phase's job; nothing here proves it.
+        #
+        # KNOWN FALSE NEGATIVE, found while building this and filed rather than
+        # left for a reader to discover (claude-workflow-plugin-qzv.1).
+        # `subagent-start.sh record_implementer` is idempotent per (role, task):
+        # a re-spawn of the SAME role on the SAME task posts nothing. So
+        # `latest_implementer_ts` is the timestamp of that role's FIRST spawn, not
+        # its most recent one. Sequence that defeats the predicate: cycle 1 opens,
+        # devops spawns (record at T2), approve clears `qa-gate-entered`; cycle 2
+        # opens (fresh `enter`, record at T3 > T2), devops is re-spawned and posts
+        # NOTHING — so this compare sees T2 < T3, reads "previous cycle", and
+        # auto-approves mid-implementation. The `qa` role is a second route: it is
+        # deliberately excluded from `is_implementer_role`, so a QA agent writing
+        # files during review never produces a record at all. The predicate is
+        # still strictly stronger than the nothing it replaces, and the fix is a
+        # change to record_implementer's idempotency key (per role, task AND
+        # cycle) rather than to anything here — it would reuse these same two
+        # facts, so it adds no state.
+        #
+        # The sentinel comments are load-bearing: an L2 META-TEST strips every
+        # F1-CHANGE-SET-BINDING region and asserts the in-flight implementer's
+        # task is auto-approved again. Do not rename them.
+        f1_binding_verdict() {
+            local rc_out="" has_fields="" ekey="" cycle="" impl="" oldest=""
+            if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+                F1_BINDING_VERDICT="unestablished"
+                F1_BINDING_DETAIL="the review predicate is missing ($REVIEW_CHECK_SCRIPT), so whether an implementer is in flight could not be established"
+                return 0
+            fi
+            # rc is deliberately ignored (see the note above); the fields are the
+            # discriminator. Command substitution keeps a non-zero rc from
+            # aborting the hook under `set -e` — an aborted hook emits nothing,
+            # which the hooks contract reads as NON-blocking, i.e. it would fail
+            # OPEN.
+            rc_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$CURRENT_TASK" 2>/dev/null) || true
+            has_fields=$(printf '%s' "$rc_out" | jq -r 'if (type == "object" and has("cycle_opened_ts") and has("latest_implementer_ts")) then "yes" else "no" end' 2>/dev/null) || has_fields="no"
+            [ -n "$has_fields" ] || has_fields="no"
+            if [ "$has_fields" != "yes" ]; then
+                # Two very different causes reach here, and reporting the wrong
+                # one sends the operator to the wrong fix. The predicate's own
+                # dependency failures (`bd` or `jq` off PATH, no Beads workspace)
+                # come back with an error_key on the terse envelope; anything else
+                # answered in a shape that has no such fields at all, which means
+                # the copy on disk predates qzv or was partially synced.
+                ekey=$(printf '%s' "$rc_out" | jq -r '.error_key // ""' 2>/dev/null) || ekey=""
+                case "$ekey" in
+                    bd_unavailable|jq_missing)
+                        F1_BINDING_VERDICT="unestablished"
+                        F1_BINDING_DETAIL="the review predicate could not read $CURRENT_TASK's records (review-check.sh reported error_key=$ekey — bd or jq is not on this hook's PATH, or there is no Beads workspace here), so whether an implementer is in flight could not be established"
+                        ;;
+                    *)
+                        F1_BINDING_VERDICT="unestablished"
+                        F1_BINDING_DETAIL="review-check.sh answered without cycle_opened_ts / latest_implementer_ts (a pre-qzv or partially-synced copy of the script${ekey:+; error_key=$ekey}), so whether an implementer is in flight could not be established"
+                        ;;
+                esac
+                return 0
+            fi
+            cycle=$(printf '%s' "$rc_out" | jq -r '.cycle_opened_ts // ""' 2>/dev/null) || cycle=""
+            impl=$(printf '%s' "$rc_out" | jq -r '.latest_implementer_ts // ""' 2>/dev/null) || impl=""
+            if [ "$cycle" = "unparseable" ] || [ "$impl" = "unparseable" ]; then
+                F1_BINDING_VERDICT="unestablished"
+                F1_BINDING_DETAIL="a QA-GATE-entered or IMPLEMENTER record on $CURRENT_TASK carries a timestamp that is not single-line ISO-8601-UTC (cycle_opened_ts=${cycle:-<none>} latest_implementer_ts=${impl:-<none>}), so the comparison could not be established"
+                return 0
+            fi
+            if [ "$GATE_STATUS" = "entered" ] && [ -z "$cycle" ]; then
+                F1_BINDING_VERDICT="unestablished"
+                F1_BINDING_DETAIL="the qa-gate-entered LABEL says a review cycle is open on $CURRENT_TASK but no 'QA-GATE: entered' record came back from bd — the label and the record stream disagree (the bd-1.1.2 comment-inlining change produces exactly this), so the comparison could not be established"
+                return 0
+            fi
+            if [ -z "$impl" ]; then
+                F1_BINDING_VERDICT="safe"
+                F1_BINDING_DETAIL="no IMPLEMENTER record on $CURRENT_TASK, so no implementation is in flight for this fast path to speak over"
+                return 0
+            fi
+            if [ -z "$cycle" ]; then
+                F1_BINDING_VERDICT="implementer-newer"
+                F1_BINDING_DETAIL="an IMPLEMENTER record on $CURRENT_TASK (at $impl) exists and NO review cycle was ever opened on it, so there is nothing for that record to be older than"
+                return 0
+            fi
+            if [ "$impl" = "$cycle" ]; then
+                # A tie is REFUSED, and that is a deliberate strengthening of
+                # "newer than". Both grammars stamp whole seconds, so an
+                # `enter` and a spawn in the same second are genuinely
+                # unorderable — and the two directions are not symmetric: a
+                # false refusal costs one ordinary QA round, a false approval
+                # is the defect.
+                F1_BINDING_VERDICT="implementer-newer"
+                F1_BINDING_DETAIL="an IMPLEMENTER record on $CURRENT_TASK carries the SAME second as the cycle open ($impl), which whole-second stamps cannot order — refused rather than guessed"
+                return 0
+            fi
+            oldest=$(printf '%s\n%s\n' "$cycle" "$impl" | LC_ALL=C sort | head -1)
+            if [ "$oldest" = "$impl" ]; then
+                F1_BINDING_VERDICT="safe"
+                F1_BINDING_DETAIL="the newest IMPLEMENTER record on $CURRENT_TASK (at $impl) predates the current cycle open (at $cycle), so it belongs to a previous cycle"
+                return 0
+            fi
+            F1_BINDING_VERDICT="implementer-newer"
+            F1_BINDING_DETAIL="an IMPLEMENTER record on $CURRENT_TASK (at $impl) is NEWER than the cycle this gate opened (QA-GATE: entered at $cycle), so implementation work is in flight that a doc-only verdict cannot speak for"
+        }
+        f1_binding_verdict
+        #
+        # THE NOTE IS COMPOSED HERE, not inside the `case` arm below, and that
+        # placement is the fix for a real gap rather than a tidy-up. When bd is off
+        # PATH `qa-gate.sh status` cannot answer either, so GATE_STATUS is `error`,
+        # the arm never runs, and a note written inside it would never be set — the
+        # Stop would block (correctly) while saying nothing about the refusal
+        # (incorrectly). Composing it out here covers every status on which F1 was
+        # eligible OR unreadable, which is exactly the set where "the fast path was
+        # considered and declined" is information the operator needs.
+        #
+        # `blocked` and `approved` are excluded deliberately: F1 was never going to
+        # fire on those, so the note would be noise about a path that was not taken
+        # for an unrelated reason.
+        if [ "$F1_BINDING_VERDICT" != "safe" ]; then
+            case "$GATE_STATUS" in
+                not-entered|entered|pending|error|"")
+                    F1_BINDING_NOTE="The $FASTPATH_CLASS fast path (F1) did NOT auto-approve this Stop (claude-workflow-plugin-qzv).
+
+Why: $F1_BINDING_DETAIL.
+
+F1's verdict is a statement about a CHANGE SET (\"no reviewable source
+changed\"); the qa-approved label it writes is a statement about a TASK. When an
+implementer is in flight — or when whether one is in flight cannot be
+established — those are not the same proposition, so the fast path declines and
+the ordinary review path below applies. This is not a failure state: run the QA
+round, or, if the implementation really is finished, let its completion contract
+and review land first.
+
+Diagnose the two records this compared:
+  bash .claude/scripts/review-check.sh gate $CURRENT_TASK
+(read cycle_opened_ts and latest_implementer_ts in the envelope)"
+                    log_sync_error "Stop: F1 $FASTPATH_CLASS fast path declined to auto-approve $CURRENT_TASK (verdict=$F1_BINDING_VERDICT, gate_status=${GATE_STATUS:-<unreadable>}): $F1_BINDING_DETAIL (qzv)"
+                    ;;
+            esac
+        fi
+        # F1-CHANGE-SET-BINDING END (qzv)
+
         case "$GATE_STATUS" in
             not-entered|entered|pending)
+                # F1-CHANGE-SET-BINDING BEGIN (qzv)
+                # The guard. Its closing `fi` is in the region at the end of this
+                # arm, so stripping both regions restores the pre-qzv arm exactly —
+                # which is what the META measures. There is no `else`: the note and
+                # the log line are composed above, where they are reachable on the
+                # statuses this arm does not match. The arm's body keeps its
+                # original indentation deliberately; re-indenting it would bury a
+                # behavioural change in a whitespace diff.
+                if [ "$F1_BINDING_VERDICT" = "safe" ]; then
+                # F1-CHANGE-SET-BINDING END (qzv)
                 # Ensure the gate is entered first (so approve is well-formed).
                 "$QA_GATE" enter "$CURRENT_TASK" >/dev/null 2>&1 || log_sync_error "qa-gate enter failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
                 # V3 (jio.1): --no-review is REQUIRED on this path. A doc-only
@@ -1064,25 +1311,37 @@ if [ -n "$FASTPATH_CLASS" ]; then
                 # (`[review bypass: ...]`), which is also the marker the Stop
                 # hook's review-discipline check skips on — so the audited
                 # decision is made once, here, and honoured downstream.
+                #
+                # qzv: --expect-hash names the change set THIS Stop classified
+                # (captured above, before `enter` could move it). approve refuses
+                # if what it is about to bind is a different set, so a path that
+                # arrived in the meantime can no longer be approved under a
+                # doc-only verdict that never saw it. On the stripped-META copy
+                # the variable is still computed and simply not passed, which is
+                # the pre-qzv call.
                 "$QA_GATE" approve "$CURRENT_TASK" \
                     --no-review "F1 $FASTPATH_CLASS fast path: no reviewable source changed" \
+                    ${F1_EXPECT_ARGS[@]+"${F1_EXPECT_ARGS[@]}"} \
                     "$FASTPATH_REASON" >/dev/null 2>&1 \
-                    || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK"
-                # Mark task as closed if bd is available. Beads 0.47.x uses
-                # status=closed (not "completed"); using the wrong value used
-                # to silently fail under `|| true`, so we log to sync-errors.log.
+                    || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK (change set classified as $FASTPATH_CLASS, hash=${F1_CLASSIFIED_HASH:-<unavailable>}); no approval was recorded"
                 #
-                # llh.20: redirect STDOUT to /dev/null too (not just stderr).
-                # `bd update` prints a `✓ Updated issue: <id>` banner to STDOUT
-                # on success; with only `2>/dev/null` that banner reaches the
-                # hook's stdout and prefixes the `{}` verdict, so `jq` over the
-                # whole stdout fails — the documented "raw text -> Claude ignores
-                # output" antipattern. `>/dev/null 2>&1` silences both streams;
-                # the `|| log_sync_error` on non-zero exit is preserved as-is.
-                if command -v bd >/dev/null 2>&1; then
-                    bd update "$CURRENT_TASK" --status closed >/dev/null 2>&1 \
-                        || log_sync_error "bd update --status closed failed for $CURRENT_TASK during F1 $FASTPATH_CLASS fast path"
-                fi
+                # THE TASK IS NOT CLOSED HERE (qzv). This used to run
+                # `bd update <tid> --status closed`, and it was the second of the
+                # live defect's four effects. A doc-only Stop is not evidence a
+                # task is finished: the verdict above is about a CHANGE SET, and
+                # closing is a claim about the TASK's work. Nothing in a change
+                # set can tell you whether a task's acceptance criteria are met,
+                # so the close was structurally a guess — one that also silently
+                # overrode whatever the orchestrator intended for the task (the
+                # v4.1.0 release task was closed this way, 22 seconds into its
+                # implementer's spawn).
+                #
+                # No close HINT is emitted on this path either, deliberately, and
+                # for the same reason: an F1 verdict is not evidence about the
+                # task at all, so suggesting a close would re-commit the category
+                # error in prose. The approved path further down does emit one,
+                # because there a real review of a real change set happened.
+                #
                 # Clean up tracking artifacts. Includes per-task iteration
                 # counter (legacy unscoped path is also cleared so users
                 # upgrading don't keep stale state).
@@ -1091,6 +1350,12 @@ if [ -n "$FASTPATH_CLASS" ]; then
                 rm -f "$(iteration_file_for "$CURRENT_TASK")" 2>/dev/null || true
                 rm -f "$ITERATION_FILE_LEGACY" 2>/dev/null || true
                 echo "{}"; exit 0
+                # F1-CHANGE-SET-BINDING BEGIN (qzv)
+                # Refused: fall THROUGH to the QA-required block — never
+                # auto-approve, and never allow. The reason it declined is already
+                # in F1_BINDING_NOTE, composed above.
+                fi
+                # F1-CHANGE-SET-BINDING END (qzv)
                 ;;
         esac
     elif [ "$FASTPATH_CLASS" = "beads-state" ] || [ "$FASTPATH_CLASS" = "empty" ]; then
@@ -2102,6 +2367,16 @@ $CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
 
 $CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
     fi
+    # qzv: when the F1 fast path was ELIGIBLE but declined, say so here. The
+    # append is deliberately OUTSIDE the F1-CHANGE-SET-BINDING regions: with those
+    # stripped, F1_BINDING_NOTE is never assigned, stays empty, and this is a
+    # no-op — so the stripped copy keeps emitting the pre-qzv reason verbatim.
+    if [ -n "$F1_BINDING_NOTE" ]; then
+        REASON="$REASON
+
+$F1_BINDING_NOTE"
+    fi
+
     REASON="$REASON
 
 Files changed:
@@ -2215,19 +2490,58 @@ for the file list."
     fi
 fi
 
-# Mark the task closed (idempotent if already closed). Beads 0.47.x rejects
-# "completed" — valid status is "closed".
+# THE TASK IS NOT CLOSED HERE EITHER (qzv). This used to run
+# `bd update <tid> --status closed`, and removing it is a judgement call, so the
+# reasoning is recorded rather than implied.
 #
-# llh.20: STDOUT -> /dev/null as well as stderr. `bd update` prints a
-# `✓ Updated issue: <id>` banner to STDOUT on success; with only `2>/dev/null`
-# that banner reaches the hook's stdout and prefixes the final `{}` /
-# hookSpecificOutput envelope, so `jq` over the whole stdout fails (the
-# "raw text -> Claude ignores the verdict" antipattern). `>/dev/null 2>&1`
-# keeps the stdout clean for the envelope while preserving the
-# `|| log_sync_error` fallback on a genuine non-zero exit.
+# THE ARGUMENT FOR KEEPING IT was real: reaching this line means a genuine
+# approval, a clean independent review, and a record bound to the current change
+# set — the strongest evidence this workflow produces. The argument that wins is
+# that none of that evidence is about the TASK. An approval binds a CHANGE SET;
+# a task can legitimately carry more work after one reviewed change set, and this
+# repo's own history is the demonstration — `claude-workflow-plugin-94d` was
+# closed BY HAND after its approval precisely because the approval covered one
+# landing and the task covered two. Nothing in a change set can tell you whether
+# a task's acceptance criteria are met, so the close was structurally a guess,
+# and it silently overrode whatever the caller intended (the v4.1.0 release
+# implementer discovered the F1 twin of this only because `bd_update_task` echoed
+# back `status=closed` when it had passed no such thing).
+#
+# WHAT DEPENDED ON IT, checked rather than assumed:
+#   - No L1, L2 or L3 assertion required the task to reach `closed`. The one
+#     nearby L2 assertion — the llh.20 "stdout is a single valid JSON envelope"
+#     case — existed BECAUSE this call printed a `✓ Updated issue` banner onto
+#     stdout, so removing the call removes that pollution source; the assertion
+#     is kept and retargeted at the note below, which is now what that path
+#     emits.
+#   - `bd-github-link.sh` recognises `bd update <tid> --status closed`, but it is
+#     a PostToolUse hook keyed on `tool_name == "Bash"`. This call was never a
+#     Bash TOOL invocation (it ran inside the hook process), so it never reached
+#     that pipeline and no GitHub linking is lost.
+#   - `epic-gate.sh check` reads sub-task STATUS and defers an epic while any
+#     sibling is `in_progress`. Its verdict is computed ABOVE this line, so on
+#     the last child's own Stop the child already counted as in_progress and the
+#     epic already deferred; the "epic can close" readout only ever appeared on a
+#     LATER Stop. That is now reached when something closes the child, which is
+#     the documented protocol in docs/AGENTS.md and docs/WORKFLOW.md ("closed:
+#     set by the agent after QA approval").
+#
+# THE AFFORDANCE IS NOT SILENTLY DROPPED. Removing a side effect and saying
+# nothing would trade one silent wrong claim for a silently un-closed task —
+# which is the same class of failure, and it feeds the stale-`in_progress` pile
+# Phase P is separately trying to drain. So the release path now NAMES the close
+# as the caller's decision, in band, with the command. A decision the caller
+# makes explicitly is auditable; one the hook made for it was not.
+CLOSE_HINT_NOTE=""
 if [ -n "$CURRENT_TASK" ] && command -v bd >/dev/null 2>&1; then
-    bd update "$CURRENT_TASK" --status closed >/dev/null 2>&1 \
-        || log_sync_error "bd update --status closed failed for $CURRENT_TASK at end of QA-approved flow"
+    CLOSE_HINT_NOTE="
+
+The gate is clear for $CURRENT_TASK, and the hook did NOT close it (qzv). This
+approval binds a CHANGE SET, which is not evidence that the task's work is
+finished — only you know whether more remains. If it is done:
+  bd close $CURRENT_TASK --reason '<what shipped>'
+If more work remains, leave it open and re-enter the gate for the next change
+set."
 fi
 
 # Clean up tracking. Note: the legacy .qa-tracking/approved marker is no
@@ -2248,9 +2562,12 @@ if [ -n "$CURRENT_TASK" ]; then
 fi
 
 # B2: if the epic gate had something to surface, emit it as a non-blocking
-# note via additionalContext. Otherwise emit a clean {}.
-if [ -n "$EPIC_DEFER_NOTE" ]; then
-    NOTE_TEXT="QA gate cleared for $CURRENT_TASK.$EPIC_DEFER_NOTE"
+# note via additionalContext. qzv: the close hint rides the SAME envelope rather
+# than a second mechanism — one note path, so nothing has to decide which of two
+# non-blocking envelopes wins. `{}` is still emitted whenever there is nothing to
+# say (no task, or no bd), which is what keeps a no-Beads user's release silent.
+if [ -n "$EPIC_DEFER_NOTE" ] || [ -n "$CLOSE_HINT_NOTE" ]; then
+    NOTE_TEXT="QA gate cleared for $CURRENT_TASK.$EPIC_DEFER_NOTE$CLOSE_HINT_NOTE"
     cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":$(printf '%s' "$NOTE_TEXT" | jq -Rs .)}}
 EOF

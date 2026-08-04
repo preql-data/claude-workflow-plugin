@@ -1315,11 +1315,71 @@ fallback and no marker-file fallback — both were deleted
   clear stale files left by pre-v3 installs.
 
 The gate also auto-approves without QA when there is nothing reviewable to
-review — the **F1 fast path** (`verify-before-stop.sh:616-691`), which fires
-when every changed path is doc-only, is Beads/gate bookkeeping
-(`.beads/*.jsonl`, `beads.db`, `.qa-tracking/*`), or the change-set is empty
-after the build-artifact denylist. A mixed diff (bookkeeping **plus** one
-real source file) is not fast-path eligible and still requires the label.
+review — the **F1 fast path** (`verify-before-stop.sh`, the block guarded by
+`FASTPATH_CLASS`), which fires when every changed path is doc-only, is
+Beads/gate bookkeeping (`.beads/*.jsonl`, `beads.db`, `.qa-tracking/*`), or the
+change-set is empty after the build-artifact denylist. A mixed diff
+(bookkeeping **plus** one real source file) is not fast-path eligible and still
+requires the label.
+
+**The fast path is bound to the change set it judged, and it no longer speaks
+for a task an implementer is working on** (`claude-workflow-plugin-qzv`, the
+`F1-CHANGE-SET-BINDING` and `EXPECTED-HASH-REFUSAL` regions). The defect: F1's
+verdict is a statement about a CHANGE SET ("no reviewable source changed") while
+its `qa-approved` label is a statement about a TASK, so any doc-only Stop that
+landed while a task was open converted the first into the second. It fired four
+times live, the last on the `v4.1.0` release task 22 seconds into its
+implementer's spawn, binding a *previous* task's doc-only change set. Three
+things changed:
+
+- **A binding predicate.** F1 may auto-approve only when no `IMPLEMENTER:
+  role=… task=… at <ts>` record on the active task is at-or-newer than the most
+  recent `QA-GATE: entered at <ts>`. Both timestamps come from
+  `review-check.sh gate`'s envelope — `cycle_opened_ts` and
+  `latest_implementer_ts`, resolved before that subcommand's artifact gate so
+  they are present on the `review_artifact_missing` envelope F1 always gets —
+  so there is no second parser for either grammar. **No implementer record is
+  SAFE, not unknown:** doc-only work is orchestrator-authored and never produces
+  one, and requiring one would deadlock every documentation commit. A tie on the
+  same whole second is refused, because whole-second stamps cannot order it.
+- **A refusal at `approve`, not a trust at `enter`.** F1 passes `--expect-hash
+  <h>` naming the set it classified, captured *before* the `enter` that
+  reconciles the tracker and regenerates the impact report. `approve` compares it
+  against the hash it is about to bind and refuses (exit 2,
+  `expected_hash_mismatch`) on a mismatch, naming **both** hashes. This is why
+  the check lives at `approve` rather than `enter` — `enter` is documented
+  tolerant, and F1 calls it on exactly the classes with no completion payload.
+- **Unestablishable is a refusal, not a pass.** `review-check.sh` missing, an
+  envelope without the two fields (a pre-qzv or partially-synced copy), a record
+  whose timestamp is not single-line ISO-8601-UTC, `bd`/`jq` off the hook's PATH,
+  or the label saying a cycle is open while no `QA-GATE: entered` record comes
+  back (the bd-1.1.2 comment-inlining failure) all fall through to the
+  QA-required block with the cause named in the reason. The exit code is
+  deliberately **not** the discriminator: F1 fires on change sets with nothing to
+  review, so `review-check.sh gate` exits 4 on the normal path here, and keying
+  on rc would refuse every doc-only Stop.
+
+**What that does NOT establish.** Binding a verdict to the change set it judged
+proves *bound == classified*. It does **not** prove the set is COMPLETE: both
+sides come from one canonicalisation of one tracker, so the comparison detects
+drift and is structurally blind to loss (`claude-workflow-plugin-fkm.1.20`). An
+independent witness for completeness — cross-checking against the F7 contract's
+`files_changed` — is separate work and is not in this mechanism.
+
+**The Stop hook no longer sets `status=closed`.** Both call sites are gone (the
+F1 fast path's and the end-of-QA-approved-flow's), and the reasoning is recorded
+at each. An approval binds a CHANGE SET; closing is a claim about the TASK's
+work, and nothing in a change set can tell you whether a task's acceptance
+criteria are met — so the close was structurally a guess, and it silently
+overrode whatever the caller intended. `docs/WORKFLOW.md`'s status table has
+always said `closed` is set by the agent after QA approval; that is now the only
+writer. The release path emits the close command as a non-blocking
+`additionalContext` note (`CLOSE_HINT_NOTE`) rather than dropping the affordance
+silently. Nothing was lost mechanically: `bd-github-link.sh` recognises
+`bd update <tid> --status closed` but is keyed on `tool_name == "Bash"`, and this
+call ran inside the hook process, never as a Bash tool call; and
+`epic-gate.sh check`'s verdict is computed *above* the removed line, so the
+active task already counted as `in_progress` on its own Stop.
 
 One more precondition on the label itself: `qa-gate.sh approve` refuses
 (exit 2) unless a hash-current per-file impact report exists at

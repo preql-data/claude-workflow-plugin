@@ -227,3 +227,23 @@ Field semantics:
 - `context_coverage` — **mandatory free-form text**. Three things, in order: what you read to ground this change (the failing CI run's log, `docs/HOOKS.md`, the installer's prior behaviour on an upgrade, the manifest's classification for the files you touched); what you deliberately did NOT read and why (the whole e2e harness, because the change is confined to one hook's envelope); and the largest remaining unknown you are shipping on (whether the Linux runner spells the temp path the way the macOS box does). Name files and artefacts — "read the relevant scripts" is a non-answer, and a coverage note with no deliberate omission in it is boilerplate, because there is always one. This is not a new rule: it is the evidence-before-fix protocol above applied *before* the change rather than after. That protocol only arms on bug-typed tasks, and infra work is where the un-typed version of the same failure lives — the timeout bumped on a hunch, the retry added because a retry usually helps. QA and the rubric grader both read this field (default rubric C8).
 
 Emit the JSON object verbatim in your final message to the orchestrator (alongside any prose summary). The orchestrator parses it; QA reads it before starting the gate, and its section-3 review checklist carries an item asking whether all seven fields came back.
+
+### Reconcile task state before you report
+
+Re-read the task's own state at completion and reconcile it against what you actually passed. One `bd show <id>` (or the response body of the last
+`bd update` you issued — it echoes the post-write state) against the fields you
+set. If the status, the labels, or the notes carry something you did not write,
+say so in `llm_observations` and do not report the task as cleanly finished.
+
+This costs one call and it is the cheapest guard the workflow has against a
+hook writing a claim about your task that nothing you did justifies. It exists
+because it happened: a Stop-time fast path stamped `qa-approved` and
+`status=closed` on four tasks — including a release task, 22 seconds into an
+implementer's spawn, over a *previous* task's change set. It was caught exactly
+once, and only because `bd_update_task` echoed back `status=closed,
+labels=[devops,qa-approved]` to an implementer that had passed neither while
+setting notes. Three earlier instances went unnoticed. The mechanism is fixed
+(`claude-workflow-plugin-qzv`), and this remains the containment: a label or a
+status you cannot account for is a finding, not a formality. Infra tasks are the ones this
+landed on hardest: a doc-only change set is the shape that triggers it, and
+infra work produces doc-only change sets constantly

@@ -160,6 +160,54 @@ printf '%s' '{}' | bash "$SS" >/dev/null 2>&1
 assert_eq "session-start 8.5: clearing the cycle restores the reset (8.2 is caused by the cycle)" "gone" \
     "$([ -s "$TRACKER" ] && echo kept || echo gone)"
 
+# 8.6 THE READ ITSELF MUST NOT BE THE WEAK LINK (claude-workflow-plugin-94d.1.1,
+# QA finding R6-F1). The guard above decides on `current-task`, but it used to
+# LEARN that fact only through `[ -f .claude/scripts/current-task.sh ]` — a probe
+# for the sibling HELPER, not for the state file the helper writes. Reproduced by
+# QA: state file says a cycle is in flight, helper moved aside, SS_ACTIVE_TASK
+# empty, tracker destroyed, silently, with a valid envelope.
+#
+# It is a real degraded install rather than a hypothetical: `qa-gate.sh`'s
+# write_current_task explicitly supports the helper-absent case with a direct
+# write, and reconcile_tracker reads the same file directly — so two other
+# consumers already treat the state file as the source of truth and tolerate the
+# helper's absence. Only this read did not.
+#
+# Both consumers of the hoisted read are covered by one fix, which is why the
+# fallback is to the FACT and not to a "preserve when the probe fails" flag: a
+# flag honoured by the tracker guard but not by the baseline capture would
+# re-open the very asymmetry the hoisting closed.
+CT_REAL=$(readlink "$CT" 2>/dev/null || printf '%s' "$CT")
+bash "$CT" set "session-lifecycle-94d11-task" >/dev/null 2>&1
+printf '/degraded/one.ts\n/degraded/two.ts\n' > "$TRACKER"
+TRACKER_BEFORE_DEGRADED=$(cat "$TRACKER")
+rm -f "$CT"
+assert_eq "session-start 8.6: precondition — the helper really is absent" "absent" \
+    "$([ -e "$CT" ] && echo present || echo absent)"
+assert_eq "session-start 8.6: precondition — and the state file still names a cycle" "yes" \
+    "$([ -s "$TRACK/current-task" ] && echo yes || echo no)"
+OUT86=$(printf '%s' '{"source":"compact"}' | bash "$SS" 2>/dev/null)
+assert_eq "session-start 8.6: helper absent + cycle in flight -> the tracker SURVIVES (was: destroyed)" \
+    "kept" "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+assert_eq "session-start 8.6: ...BYTE-IDENTICAL, so it was preserved and not rebuilt" \
+    "$TRACKER_BEFORE_DEGRADED" "$(cat "$TRACKER" 2>/dev/null || echo '')"
+assert_valid_envelope "session-start 8.6: ...on a still-valid envelope (the hook never blocks)" "$OUT86"
+CTX86=$(printf '%s' "$OUT86" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "session-start 8.6: ...and the carry-over is still REPORTED in a degraded install" \
+    "change-set tracker CARRIED OVER" "$CTX86"
+assert_contains "session-start 8.6: ...naming the cycle it read from the state file" \
+    "session-lifecycle-94d11-task" "$CTX86"
+# 8.6b DISCRIMINATOR: helper still absent, but the state file no longer names a
+# cycle. The reset must come back — so 8.6 is caused by the file's CONTENT and not
+# by the helper's absence having become a blanket "always preserve".
+: > "$TRACK/current-task"
+printf '/degraded/one.ts\n' > "$TRACKER"
+printf '%s' '{}' | bash "$SS" >/dev/null 2>&1
+assert_eq "session-start 8.6b: helper absent + NO cycle -> the reset still happens (not a blanket preserve)" \
+    "gone" "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+ln -sf "$CT_REAL" "$CT"
+bash "$CT" clear >/dev/null 2>&1
+
 # ---------------------------------------------------------------------------
 # 8M META (spec-mandated): strip the TRACKER-PRESERVE region from a fixture copy
 # of session-start.sh and the tracker must be DESTROYED mid-cycle again.

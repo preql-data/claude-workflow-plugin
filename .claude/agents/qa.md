@@ -823,3 +823,22 @@ QA-specific superset (additive, on top of the base seven):
 - `qa_status` (relay spawns only): `"needs-grading"` (section 6b) or `"needs-review"` (section 6p.2) when you are handing off mid-cycle rather than deciding. Carries `rubric_iteration` / `review_iteration` alongside it. Omit the field entirely on a spawn where you approve or block; `approved` is the decision.
 
 When `approved` is `false`, `must_fix` must be non-empty and must match the reasons recorded via `qa-gate.sh block`. When `approved` is `true`, `must_fix` should be empty and any residual concerns belong in `suggested_followups` (and, where appropriate, in newly-filed Beads tasks per section 7).
+
+### Reconcile task state before you report
+
+Re-read the task's own state at completion and reconcile it against what you actually passed. One `bd show <id>` (or the response body of the last
+`bd update` you issued — it echoes the post-write state) against the fields you
+set. If the status, the labels, or the notes carry something you did not write,
+say so in `llm_observations` and do not report the task as cleanly finished.
+
+This costs one call and it is the cheapest guard the workflow has against a
+hook writing a claim about your task that nothing you did justifies. It exists
+because it happened: a Stop-time fast path stamped `qa-approved` and
+`status=closed` on four tasks — including a release task, 22 seconds into an
+implementer's spawn, over a *previous* task's change set. It was caught exactly
+once, and only because `bd_update_task` echoed back `status=closed,
+labels=[devops,qa-approved]` to an implementer that had passed neither while
+setting notes. Three earlier instances went unnoticed. The mechanism is fixed
+(`claude-workflow-plugin-qzv`), and this remains the containment: a label or a
+status you cannot account for is a finding, not a formality. You are the gate, so an
+unaccounted label on a task you are about to approve is a block, not a note

@@ -281,10 +281,45 @@ rm -f "$QA_TRACKING_DIR/approved" 2>/dev/null || true
 # inside one run, and the disagreement that matters is "tracker preserved, and
 # then the work it names baselined as pre-existing" — the exact pairing 94d.1 is
 # about. One resolution, one answer, both blocks read this variable.
+#
+# AND THE READ FALLS BACK TO THE STATE FILE (claude-workflow-plugin-94d.1.1).
+#
+# The probe used to be `[ -f "$SS_SCRIPT_DIR/current-task.sh" ]` alone — a test
+# for the sibling HELPER SCRIPT, not for the fact. QA reproduced the cost: state
+# file says a cycle is in flight, helper moved aside, `SS_ACTIVE_TASK` empty,
+# tracker DESTROYED, silently, with a valid envelope — and the gate-baseline
+# capture below wrong in the same direction on the same read.
+#
+# THE IRONY IS THE POINT, and it is worth keeping written down: the paragraph
+# above rejects a bd LABEL predicate precisely because it would make a decision
+# about a LOCAL FILE depend on an external dependency. The shipped probe then
+# kept a dependency of the same class — on a sibling script — for a fact this
+# hook can read directly. QA's framing was "your own preserve-when-the-read-fails
+# rule, applied to the read that shipped."
+#
+# WHY THE FALLBACK IS TO THE STATE FILE rather than a "preserve when the probe is
+# impossible" flag. There is ONE hoisted answer here serving TWO consumers, and
+# that is deliberate (see above). A preserve-flag would have to be honoured by
+# both, or it re-opens the exact asymmetry this hoisting closed — tracker
+# preserved, and then the work it names baselined as pre-existing. Reading the
+# fact makes the ONE variable correct and both consumers correct with it, and it
+# is not a new predicate: `qa-gate.sh reconcile_tracker` reads this same file
+# directly, `write_current_task` writes it directly when the helper is absent, and
+# `verify-before-stop.sh get_current_task` already has this exact helper-then-file
+# shape. Copying a shipped read beats inventing a fourth one.
+#
+# THE FALLBACK IS ON EMPTINESS, not on the helper's absence, so it also covers a
+# helper that is present but broken (bad shebang, non-zero exit, truncated by a
+# partial sync). Those fail the same way — no id — and reading the file is
+# strictly more evidence than not reading it. When the helper DOES answer, its
+# answer wins, so a future schema change in `current-task.sh get` still governs.
 SS_SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || SS_SCRIPT_DIR=""
 SS_ACTIVE_TASK=""
 if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
     SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
+fi
+if [ -z "$SS_ACTIVE_TASK" ] && [ -s "$QA_TRACKING_DIR/current-task" ]; then
+    SS_ACTIVE_TASK=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' || echo "")
 fi
 
 # TRACKER-PRESERVE BEGIN (94d.1)

@@ -280,4 +280,24 @@ When a task is finished, return a structured report alongside the Beads update. 
 
 The `llm_observations` field is mandatory: it is the channel for everything the typed schema doesn't capture, and the QA agent and orchestrator both read it. **Never leave it empty — unconditionally.** Through v4.0 this sentence made the rule conditional on having something notable to report, which is the hedge that lets an empty field look compliant; `docs/AGENTS.md` has always been unambiguous that a payload without `llm_observations` is malformed. "Nothing notable" is itself an observation worth a sentence: what you checked and found clean is evidence a reviewer can use. (An L1 spec now denies the old conditional phrasing by fixed string — if you want to cite it as an antipattern, paraphrase rather than reproduce it.)
 
+### Reconcile task state before you report
+
+Re-read the task's own state at completion and reconcile it against what you actually passed. One `bd show <id>` (or the response body of the last
+`bd update` you issued — it echoes the post-write state) against the fields you
+set. If the status, the labels, or the notes carry something you did not write,
+say so in `llm_observations` and do not report the task as cleanly finished.
+
+This costs one call and it is the cheapest guard the workflow has against a
+hook writing a claim about your task that nothing you did justifies. It exists
+because it happened: a Stop-time fast path stamped `qa-approved` and
+`status=closed` on four tasks — including a release task, 22 seconds into an
+implementer's spawn, over a *previous* task's change set. It was caught exactly
+once, and only because `bd_update_task` echoed back `status=closed,
+labels=[devops,qa-approved]` to an implementer that had passed neither while
+setting notes. Three earlier instances went unnoticed. The mechanism is fixed
+(`claude-workflow-plugin-qzv`), and this remains the containment: a label or a
+status you cannot account for is a finding, not a formality. Front-end tasks reach this
+through the same door as any other: a docs-or-styles-only change set is enough
+to trigger the fast path that produced it
+
 `context_coverage` is mandatory on the same terms. Three things, in order: what you read to ground this change (the design system tokens, the API's response shape, the existing route's focus handling, the component's prior test file); what you deliberately did NOT read and why (the whole state-management layer, because the change is presentational); and the largest remaining unknown (whether the empty state can actually occur for a returning user). Name files — "read the relevant components" is a non-answer, and a coverage note with no deliberate omission is boilerplate, because there is always one. It is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. The rubric grader scores it under default criterion C8.

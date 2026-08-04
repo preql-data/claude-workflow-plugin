@@ -11,8 +11,14 @@
 #                                           report via impact-report.sh (G2.n6d;
 #                                           tolerant — enter never fails on it).
 #   status  <task-id>                       Print one of: not-entered, entered, approved, blocked.
-#   approve <task-id> [--no-impact-report '<reason>'] [--no-review '<reason>']
-#           <approval-summary>
+#   approve <task-id> [--expect-hash <hash>] [--no-impact-report '<reason>']
+#           [--no-review '<reason>'] <approval-summary>
+#                                           --expect-hash <h> names the change set
+#                                           the CALLER classified; approve REFUSES
+#                                           (exit 2, expected_hash_mismatch) if that
+#                                           is not the set it would bind, naming both
+#                                           hashes (qzv). It proves bound == classified,
+#                                           NOT that the set is complete.
 #                                           Atomic: -qa-gate-entered, -qa-pending, +qa-approved, comment.
 #                                           REFUSES (exit 2) when the impact report
 #                                           (.qa-tracking/impact-report-<task-id>.json)
@@ -1381,9 +1387,19 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               change_set_hash covers the whole git-visible delta. Both steps
               are tolerant: enter never fails because of either.
   status  <task-id>
-  approve <task-id> [--accept-reconstructed '<reason>']
+  approve <task-id> [--expect-hash <hash>] [--accept-reconstructed '<reason>']
           [--no-impact-report '<reason>'] [--no-review '<reason>']
           <approval-summary>
+              --expect-hash <hash> is the change set the CALLER classified.
+              REFUSES (exit 2, error_key expected_hash_mismatch) when that is
+              not the set this approval would bind, naming BOTH hashes so the
+              operator can see which one is stale and how big the delta is
+              (qzv). The F1 doc-only fast path passes the hash of the set it
+              classified, so a source file arriving mid-Stop can no longer be
+              approved under a doc-only verdict that never saw it. It proves
+              bound == classified; it does NOT prove the set is COMPLETE (both
+              sides read one canonicalisation of one tracker, so it detects
+              drift and is blind to loss — fkm.1.20).
               REFUSES (exit 2, error_key change_set_reconstructed) when all
               three hold: changed-files.txt was absent-or-empty when the
               reconcile ran (so the set was REBUILT from `git status`), the
@@ -1889,8 +1905,44 @@ cmd_approve() {
     local bypass_reconstructed=0
     local reconstructed_bypass_reason=""
     # CHANGE-SET-RECONSTRUCTED END (94d.1)
+    # EXPECTED-HASH-REFUSAL BEGIN (qzv)
+    local expect_hash_arg=""
+    # EXPECTED-HASH-REFUSAL END (qzv)
     while [ $# -gt 0 ]; do
         case "$1" in
+            # EXPECTED-HASH-REFUSAL BEGIN (qzv)
+            --expect-hash)
+                # qzv: the change set the CALLER classified, so approve can refuse
+                # to bind a different one. Mirrors grade-record's --graded-hash
+                # argument handling exactly; see the refusal block below for what
+                # it does and why it sits where it does.
+                expect_hash_arg="${2:-}"
+                if [ -z "$expect_hash_arg" ]; then
+                    emit_error_json "approve" "$tid" "missing_expected_hash" \
+                        "--expect-hash requires a value (the change_set_hash of the set the caller classified; impact-report.sh --hash-only prints it)" \
+                        "qa-gate.sh approve $tid --expect-hash <hash> '<summary>'"
+                    exit 1
+                fi
+                # Validated for a DIFFERENT reason than --graded-hash's identical
+                # check, and the difference is worth stating: this value is only
+                # ever COMPARED, never written into a record's machine prefix, so
+                # a stray character cannot relocate a field boundary. The check is
+                # here so a caller who passed a shell-mangled or multi-word value
+                # gets a usage error NAMING THE FLAG rather than an
+                # `expected_hash_mismatch` that reads like a real drift detection
+                # — a wrong answer that looks like the right one is the more
+                # expensive failure.
+                case "$expect_hash_arg" in
+                    *[!A-Za-z0-9-]*)
+                        emit_error_json "approve" "$tid" "expected_hash_invalid_chars" \
+                            "--expect-hash='$expect_hash_arg' contains characters outside [A-Za-z0-9-], so it cannot be a canonical change-set hash; this is a usage error, NOT a change-set mismatch" \
+                            "pass the value impact-report.sh --hash-only printed for the set you classified"
+                        exit 1
+                        ;;
+                esac
+                shift 2 || true
+                ;;
+            # EXPECTED-HASH-REFUSAL END (qzv)
             # CHANGE-SET-RECONSTRUCTED BEGIN (94d.1)
             --accept-reconstructed)
                 # 94d.1: the audited bypass for the change_set_reconstructed
@@ -2226,6 +2278,74 @@ cmd_approve() {
     if [ -z "$approved_hash" ]; then
         log_sync_error "approve: could not compute change_set_hash for $tid (impact-report.sh missing/failing); writing approval comment WITHOUT a change-set binding — verify-before-stop will not be able to match it (re-run approve once impact-report.sh is restored)"
     fi
+
+    # EXPECTED-HASH-REFUSAL BEGIN (claude-workflow-plugin-qzv)
+    #
+    # DID THE CALLER'S VERDICT COVER THE CHANGE SET THIS APPROVAL WILL BIND?
+    #
+    # THE DEFECT THIS CLOSES. `verify-before-stop.sh`'s F1 fast path classifies a
+    # change set as doc-only / beads-state / empty, and THEN calls approve. Those
+    # are two reads at two instants, in a process that runs `enter` (which
+    # reconciles the tracker and regenerates the impact report) in between. A path
+    # that arrives in that window is inside what approve binds and outside what F1
+    # judged — so a "no reviewable source changed" verdict could be recorded over
+    # a set containing reviewable source. On the v4.1.0 release task the recorded
+    # approval bound `9942b2bd` while the work that actually shipped hashed to
+    # `914ceeff`. `--expect-hash` makes the caller state the set it judged and
+    # refuses when that is not the set being bound.
+    #
+    # WHERE IT SITS, AND WHY — cmd_approve now carries four refusals, and the
+    # order is a claim about what each one can PROVE:
+    #   1. tracker_unreconcilable / 2. change_set_reconstructed — what the change
+    #      set IS. Nothing can be reasoned about a set nobody has established, so
+    #      these come first (their own headers say so).
+    #   3. THIS ONE. It compares the caller's expectation against `approved_hash`,
+    #      the value this function will actually bind — which does not exist until
+    #      the line above. Placing it earlier would compare against a different
+    #      quantity than the one bound, which is exactly the "guard probes a
+    #      weaker fact than the property it protects" shape that produced this
+    #      release's R6-F1. It also has to precede every WRITE below, since a
+    #      refusal must leave the task untouched.
+    #   4. REVIEW-SEPARATION — the most expensive to remediate (a human/agent
+    #      review round-trip) and, on the F1 path, bypassed outright. Same
+    #      cheapest-first argument that block's own header makes about the
+    #      impact-report refusal: a pure string compare over two values already in
+    #      hand should not queue behind a review round, and a caller whose
+    #      classification is stale has nothing to review yet anyway.
+    #
+    # ONE BOUNDARY, NAMED RATHER THAN LEFT LATENT. The hash-aware idempotency
+    # no-op higher up in this function returns BEFORE this refusal. On that path
+    # nothing new is bound, so there is nothing for this check to protect — but a
+    # caller passing --expect-hash to an already-approved task whose existing
+    # record binds a different set than it expected gets a success envelope (which
+    # names the hash it matched) rather than a refusal. F1 cannot reach it: its
+    # `case` arm excludes the `approved` status, so this is a manual-caller
+    # boundary only.
+    #
+    # WHAT THIS DOES NOT ESTABLISH. It proves the bound set is the CLASSIFIED set.
+    # It does NOT prove that set is COMPLETE — both sides come from the same
+    # canonicalisation over the same tracker, so this detects drift and is
+    # structurally blind to loss (claude-workflow-plugin-fkm.1.20). An independent
+    # witness for completeness is a separate piece of work; nothing here supplies
+    # one.
+    #
+    # BOTH HASHES ARE NAMED in the refusal, because "they differ" is unactionable:
+    # which one is stale, and whether the delta is one doc or a source file, is the
+    # whole decision the operator has to make.
+    #
+    # The sentinel comments are load-bearing: an L2 META-TEST strips this region
+    # and asserts a mismatched --expect-hash then approves. Do not rename them.
+    if [ -n "$expect_hash_arg" ] && [ "$expect_hash_arg" != "$approved_hash" ]; then
+        emit_error_json "approve" "$tid" "expected_hash_mismatch" \
+            "approve refused: the caller expected to approve change set $expect_hash_arg but this approval would bind $approved_hash. The two reads straddle something that moved the change set — most often a path that arrived after the caller classified it (the F1 doc-only fast path passes the hash of the set it classified, so a source file landing mid-Stop lands here rather than being approved under a doc-only verdict). NOTE: this proves the bound set is the CLASSIFIED set; it does NOT prove that set is complete (claude-workflow-plugin-fkm.1.20). Re-derive the current set and decide: bash .claude/scripts/impact-report.sh --hash-only — then either re-review at the new hash and approve without --expect-hash, or pass the hash you actually reviewed." \
+            "qa-gate.sh approve <task-id> [--expect-hash <hash>] [--accept-reconstructed '<reason>'] [--no-impact-report '<reason>'] [--no-review '<reason>'] <summary>"
+        exit 2
+    fi
+    local expect_hash_obs=""
+    if [ -n "$expect_hash_arg" ]; then
+        expect_hash_obs="; expected-hash verified (the caller classified change_set_hash=$expect_hash_arg and that is what this approval binds; NOT a completeness claim — see fkm.1.20)"
+    fi
+    # EXPECTED-HASH-REFUSAL END (claude-workflow-plugin-qzv)
 
     # R2-F2: does the satisfied verdict this approval is about to cite actually
     # cover the change set being approved?
@@ -2675,7 +2795,7 @@ cmd_approve() {
     # ${reconcile_obs:-} and ${reconstructed_obs:-} expand to empty when their
     # sentinel regions (TRACKER-RECONCILE / CHANGE-SET-RECONSTRUCTED) are stripped
     # by a META-TEST, keeping the stripped copy's envelope coherent.
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs$binding_obs$stale_label_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs$binding_obs${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The

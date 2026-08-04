@@ -301,3 +301,23 @@ Field semantics:
 - `context_coverage` — **mandatory free-form text**. Three things, in order: what you read to ground this change (the migration history, the caller set from `impact_of`, the vendor's OpenAPI, the incident thread); what you deliberately did NOT read and why (the whole ORM layer, because the change is confined to one repository class); and the largest remaining unknown you are shipping on (whether the downstream consumer tolerates the new nullable column). Name files and artefacts — "read the relevant code" is a non-answer, and a coverage note with no deliberate omission in it is boilerplate, because there is always one. This is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. QA and the rubric grader both read it (default rubric C8).
 
 Emit the JSON object verbatim in your final message to the orchestrator (alongside any prose summary). The orchestrator parses it; QA reads it before starting the gate.
+
+### Reconcile task state before you report
+
+Re-read the task's own state at completion and reconcile it against what you actually passed. One `bd show <id>` (or the response body of the last
+`bd update` you issued — it echoes the post-write state) against the fields you
+set. If the status, the labels, or the notes carry something you did not write,
+say so in `llm_observations` and do not report the task as cleanly finished.
+
+This costs one call and it is the cheapest guard the workflow has against a
+hook writing a claim about your task that nothing you did justifies. It exists
+because it happened: a Stop-time fast path stamped `qa-approved` and
+`status=closed` on four tasks — including a release task, 22 seconds into an
+implementer's spawn, over a *previous* task's change set. It was caught exactly
+once, and only because `bd_update_task` echoed back `status=closed,
+labels=[devops,qa-approved]` to an implementer that had passed neither while
+setting notes. Three earlier instances went unnoticed. The mechanism is fixed
+(`claude-workflow-plugin-qzv`), and this remains the containment: a label or a
+status you cannot account for is a finding, not a formality, and reporting it is not
+an eighth contract field — it belongs in the two free-form fields the schema
+already has

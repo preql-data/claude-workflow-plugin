@@ -814,4 +814,173 @@ ct "$FR" set "$TID_R" >/dev/null 2>&1
 assert_eq "approve-idem-H3: ...and the gate releases (residual is recoverable, not a deadlock)" \
     "ALLOW" "$(stop_decision "$FR")"
 
+# ===========================================================================
+# SECTION I — `--expect-hash`: did the CALLER'S verdict cover the set being
+# bound? (claude-workflow-plugin-qzv)
+#
+# THE DEFECT. `verify-before-stop.sh`'s F1 fast path classifies a change set
+# ("doc-only — nothing reviewable here") and THEN calls approve. Two reads, two
+# instants, with `enter` — which reconciles the tracker and regenerates the impact
+# report — in between. A path arriving in that window is inside what approve binds
+# and outside what F1 judged. On the v4.1.0 release task the recorded approval
+# bound `9942b2bd` while the work that shipped hashed to `914ceeff`.
+#
+# `--expect-hash <h>` makes the caller STATE the set it judged, and approve
+# refuses when that is not the set it would bind. Mirrors `grade-record
+# --graded-hash` in argument handling; the refusal names BOTH hashes, because
+# "they differ" does not tell an operator which one is stale.
+#
+# WHAT SECTION I DOES NOT CLAIM. The check proves bound == classified. It does NOT
+# prove the set is COMPLETE: both sides come from one canonicalisation of one
+# tracker, so it detects drift and is structurally blind to loss
+# (claude-workflow-plugin-fkm.1.20). No assertion below implies otherwise.
+# ===========================================================================
+gate_fixture
+FI="$COMPONENT_FIXTURE_PATH"
+
+TID_I=$(new_task "$FI" "qzv: --expect-hash binds the classified set")
+armed_cycle "$FI" "$TID_I" "src/i.ts"
+I_HASH=$(ir "$FI" --hash-only 2>/dev/null || echo "")
+assert_eq "approve-idem-I0: precondition — the armed change set has a computable hash" \
+    "yes" "$([ -n "$I_HASH" ] && echo yes || echo no)"
+
+# I1. The MATCHING expectation approves, and says so in the audit trail.
+I1_OUT=$(qg "$FI" approve "$TID_I" --expect-hash "$I_HASH" "reviewed i.ts" 2>&1 | tail -1)
+assert_json_field "approve-idem-I1: a matching --expect-hash approves" "$I1_OUT" '.status' "approved"
+assert_contains "approve-idem-I1: ...naming the verified expectation in the envelope" \
+    "expected-hash verified" "$I1_OUT"
+assert_contains "approve-idem-I1: ...and NOT claiming completeness (it binds, it does not witness)" \
+    "NOT a completeness claim" "$I1_OUT"
+assert_eq "approve-idem-I1: ...writing exactly one bound record" "1" "$(record_count "$FI" "$TID_I")"
+assert_eq "approve-idem-I1: ...bound to the expected hash" "$I_HASH" "$(record_hash "$FI" "$TID_I")"
+
+# I2. THE HEADLINE: a MISMATCHED expectation is REFUSED, nothing is written, and
+# both hashes are named. Driven exactly as the live defect arrives — the caller
+# classified set A, a path landed, and the set approve would bind is A+B.
+TID_I2=$(new_task "$FI" "qzv: --expect-hash refuses a moved change set")
+armed_cycle "$FI" "$TID_I2" "src/i2.ts"
+I2_CLASSIFIED=$(ir "$FI" --hash-only 2>/dev/null || echo "")
+# The path that arrives after the caller classified the set.
+seed_tracker "$FI" "src/i2.ts" "src/i2-arrived-late.ts"
+ir "$FI" "$TID_I2" >/dev/null 2>&1          # a FRESH report, so staleness is not the refusal
+I2_BOUND=$(ir "$FI" --hash-only 2>/dev/null || echo "")
+assert_eq "approve-idem-I2: precondition — the classified and bindable sets really differ" \
+    "differ" "$([ -n "$I2_CLASSIFIED" ] && [ "$I2_CLASSIFIED" != "$I2_BOUND" ] && echo differ || echo same)"
+I2_RC=0
+# NB: capture the rc WITHOUT a pipe — `cmd | tail` yields tail's status, which is
+# always 0 and would pass this assertion whatever approve did.
+I2_RAW=$(qg "$FI" approve "$TID_I2" --expect-hash "$I2_CLASSIFIED" "doc-only verdict over a moved set" 2>&1) || I2_RC=$?
+I2_OUT=$(printf '%s\n' "$I2_RAW" | tail -1)
+assert_eq "approve-idem-I2: a mismatched --expect-hash is REFUSED (exit 2)" "2" "$I2_RC"
+assert_json_field "approve-idem-I2: ...with error_key=expected_hash_mismatch" \
+    "$I2_OUT" '.error_key' "expected_hash_mismatch"
+assert_contains "approve-idem-I2: ...naming the hash the caller CLASSIFIED" "$I2_CLASSIFIED" "$I2_OUT"
+assert_contains "approve-idem-I2: ...and the hash it would have BOUND" "$I2_BOUND" "$I2_OUT"
+assert_contains "approve-idem-I2: ...and steering to the recompute that resolves it" \
+    "impact-report.sh --hash-only" "$I2_OUT"
+assert_contains "approve-idem-I2: ...while refusing to imply the binding proves completeness" \
+    "does NOT prove that set is complete" "$I2_OUT"
+assert_eq "approve-idem-I2: ...writing NO approval record" "0" "$(record_count "$FI" "$TID_I2")"
+assert_not_contains "approve-idem-I2: ...and adding NO qa-approved label" \
+    "qa-approved" "$(labels_of "$FI" "$TID_I2")"
+# The refusal is not the impact-report staleness check wearing a different name:
+# the report was regenerated above, so that check passes and this one is what
+# fires. Asserted so a future reordering cannot make I2 pass for the wrong reason.
+assert_not_contains "approve-idem-I2: ...and it is NOT the staleness refusal in disguise" \
+    "impact_report_stale" "$I2_OUT"
+
+# I3/I4. Argument handling, mirroring --graded-hash. Both are USAGE errors (exit
+# 1) and must be distinguishable from a real mismatch — a shell-mangled value
+# reported as `expected_hash_mismatch` would look like a genuine drift detection.
+I3_RC=0
+I3_RAW=$(qg "$FI" approve "$TID_I2" --expect-hash 2>&1) || I3_RC=$?
+assert_eq "approve-idem-I3: --expect-hash with no value is a usage error (exit 1)" "1" "$I3_RC"
+assert_json_field "approve-idem-I3: ...with error_key=missing_expected_hash" \
+    "$(printf '%s\n' "$I3_RAW" | tail -1)" '.error_key' "missing_expected_hash"
+I4_RC=0
+I4_RAW=$(qg "$FI" approve "$TID_I2" --expect-hash "not a hash" "summary" 2>&1) || I4_RC=$?
+assert_eq "approve-idem-I4: a non-hash --expect-hash value is a usage error (exit 1)" "1" "$I4_RC"
+assert_json_field "approve-idem-I4: ...with error_key=expected_hash_invalid_chars" \
+    "$(printf '%s\n' "$I4_RAW" | tail -1)" '.error_key' "expected_hash_invalid_chars"
+assert_contains "approve-idem-I4: ...explicitly NOT reported as a change-set mismatch" \
+    "NOT a change-set mismatch" "$(printf '%s\n' "$I4_RAW" | tail -1)"
+
+# I5. ABSENT flag -> unchanged behaviour. The refusal must not become a new
+# mandatory precondition: every existing caller passes no --expect-hash.
+I5_OUT=$(qg "$FI" approve "$TID_I2" "no expectation stated" 2>&1 | tail -1)
+assert_json_field "approve-idem-I5: with no --expect-hash, approve still approves" \
+    "$I5_OUT" '.status' "approved"
+assert_not_contains "approve-idem-I5: ...and says nothing about an expectation it was not given" \
+    "expected-hash verified" "$I5_OUT"
+assert_eq "approve-idem-I5: ...binding the current set" "$I2_BOUND" "$(record_hash "$FI" "$TID_I2")"
+
+# ---------------------------------------------------------------------------
+# SECTION IM — META: strip the EXPECTED-HASH-REFUSAL region and I2 goes green
+# for the wrong reason, i.e. the mismatched expectation APPROVES.
+#
+# The region is arranged so stripping it yields the PRE-QZV function rather than a
+# syntax error: the flag's parse arm, the refusal and the audit-observation
+# assignment are all inside sentinels, and the envelope reads
+# `${expect_hash_obs:-}` so the stripped copy still composes.
+# ---------------------------------------------------------------------------
+gate_fixture
+FIM="$COMPONENT_FIXTURE_PATH"
+QG_REAL_IM=$(readlink "$FIM/.claude/scripts/qa-gate.sh" 2>/dev/null || printf '%s' "$FIM/.claude/scripts/qa-gate.sh")
+QG_IM_MUT="$FIM/.claude/scripts/qa-gate-noexpect.sh"
+awk '
+    /^ *# EXPECTED-HASH-REFUSAL BEGIN/ { skip = 1; next }
+    /^ *# EXPECTED-HASH-REFUSAL END/   { skip = 0; next }
+    !skip { print }
+' "$QG_REAL_IM" > "$QG_IM_MUT"
+chmod +x "$QG_IM_MUT"
+if assert_mutant_applied "approve-idem-IM META" "$QG_REAL_IM" "$QG_IM_MUT"; then
+    # Counted on the CODE line, not on the identifier — the same trap the 8M META
+    # records. `expected_hash_mismatch` is also named in the `usage` text and in
+    # the parse arm's explanatory comment, both DELIBERATELY outside the sentinels
+    # (the usage block documents the flag for a human; excising it would make the
+    # stripped copy advertise a flag it no longer has). A bare identifier grep
+    # therefore answers 3 and this leg would fail for a reason that has nothing to
+    # do with the mutation. Measured, not predicted: it did.
+    assert_eq "approve-idem-IM META: the refusal's emit site is gone (the strip landed where it was aimed)" \
+        "0" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_IM_MUT" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: ...and the shipped script still has exactly one such emit site" \
+        "1" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_REAL_IM" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: ...and the --expect-hash parse arm is gone with it" \
+        "0" "$(grep -c -- '--expect-hash)' "$QG_IM_MUT" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: the stripped copy still parses" "0" \
+        "$(bash -n "$QG_IM_MUT" 2>/dev/null && echo 0 || echo 1)"
+    TID_IM=$(new_task "$FIM" "qzv META: stripped refusal approves a moved set")
+    armed_cycle "$FIM" "$TID_IM" "src/im.ts"
+    IM_CLASSIFIED=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
+    seed_tracker "$FIM" "src/im.ts" "src/im-arrived-late.ts"
+    ir "$FIM" "$TID_IM" >/dev/null 2>&1
+    IM_BOUND=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
+    assert_eq "approve-idem-IM META: precondition — classified and bindable sets differ" \
+        "differ" "$([ -n "$IM_CLASSIFIED" ] && [ "$IM_CLASSIFIED" != "$IM_BOUND" ] && echo differ || echo same)"
+    # Under the stripped copy `--expect-hash <h>` is not a known flag, so the
+    # pre-qzv parser folds it into the SUMMARY — which is precisely the pre-qzv
+    # world: the caller's expectation is inert and the approval binds whatever the
+    # set happens to be now.
+    IM_RC=0
+    IM_RAW=$( cd "$FIM" && CLAUDE_PROJECT_DIR="$FIM" bash "$QG_IM_MUT" approve "$TID_IM" \
+        --expect-hash "$IM_CLASSIFIED" "doc-only verdict over a moved set" 2>&1 ) || IM_RC=$?
+    IM_OUT=$(printf '%s\n' "$IM_RAW" | tail -1)
+    assert_eq "approve-idem-IM META: with the refusal stripped the mismatched expectation APPROVES (I2 WOULD fail)" \
+        "0" "$IM_RC"
+    assert_json_field "approve-idem-IM META: ...with status=approved" "$IM_OUT" '.status' "approved"
+    assert_eq "approve-idem-IM META: ...binding the set the caller never classified" \
+        "$IM_BOUND" "$(record_hash "$FIM" "$TID_IM")"
+    # Restore control: the SHIPPED script refuses the identical state.
+    TID_IMC=$(new_task "$FIM" "qzv META: shipped refusal refuses the same state")
+    armed_cycle "$FIM" "$TID_IMC" "src/imc.ts"
+    IMC_CLASSIFIED=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
+    seed_tracker "$FIM" "src/imc.ts" "src/imc-arrived-late.ts"
+    ir "$FIM" "$TID_IMC" >/dev/null 2>&1
+    IMC_RC=0
+    ( cd "$FIM" && CLAUDE_PROJECT_DIR="$FIM" bash "$FIM/.claude/scripts/qa-gate.sh" approve "$TID_IMC" \
+        --expect-hash "$IMC_CLASSIFIED" "doc-only verdict over a moved set" >/dev/null 2>&1 ) || IMC_RC=$?
+    assert_eq "approve-idem-IM META: restore control — the shipped script refuses it (exit 2)" "2" "$IMC_RC"
+    assert_eq "approve-idem-IM META: ...and wrote no record" "0" "$(record_count "$FIM" "$TID_IMC")"
+fi
+
 [ "$FAIL" -eq 0 ]

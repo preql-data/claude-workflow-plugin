@@ -251,7 +251,8 @@ cmd_validate_artifact() {
 
 # emit_gate <exit-code> <ok> <error_key> <observations>  (reads the parsed
 # globals: ART_*, REVIEWER, THRESHOLD, IMPL_JSON, OPEN_JSON, OPEN_COUNT,
-# INDEPENDENT). Prints the rich envelope, then exits with <exit-code>.
+# INDEPENDENT, CYCLE_OPENED_TS, LATEST_IMPLEMENTER_TS). Prints the rich
+# envelope, then exits with <exit-code>.
 emit_gate() {
     local code="$1" ok="$2" ekey="$3" obs="$4"
     local artifact_json
@@ -266,17 +267,71 @@ emit_gate() {
         --arg findings "${ART_FINDINGS:-}" \
         '{iteration:$it, reviewer:$rev, model:$model, reviewed_hash:$hash, risk_threshold:$thr, verdict:$verdict, stopped_by:$stopped, findings_token:$findings}')
     # shellcheck disable=SC2016
-    printf '{"ok":%s,"subcommand":"gate","artifact":%s,"reviewer_identity":%s,"implementers":%s,"independent":%s,"open_findings":%s,"open_finding_ids":%s,"error_key":%s,"observations":%s}\n' \
+    printf '{"ok":%s,"subcommand":"gate","artifact":%s,"reviewer_identity":%s,"implementers":%s,"cycle_opened_ts":%s,"latest_implementer_ts":%s,"independent":%s,"open_findings":%s,"open_finding_ids":%s,"error_key":%s,"observations":%s}\n' \
         "$ok" \
         "$artifact_json" \
         "$(printf '%s' "${REVIEWER:-}" | jq -Rs .)" \
         "${IMPL_JSON:-[]}" \
+        "$(printf '%s' "${CYCLE_OPENED_TS:-}" | jq -Rs .)" \
+        "$(printf '%s' "${LATEST_IMPLEMENTER_TS:-}" | jq -Rs .)" \
         "${INDEPENDENT:-true}" \
         "${OPEN_COUNT:-0}" \
         "${OPEN_JSON:-[]}" \
         "$(printf '%s' "$ekey" | jq -Rs .)" \
         "$(printf '%s' "$obs" | jq -Rs .)"
     exit "$code"
+}
+
+# CYCLE / IMPLEMENTER TIMESTAMPS (claude-workflow-plugin-qzv)
+#
+# WHY THEY LIVE HERE. The Stop hook's F1 fast path needs to know whether an
+# implementer is in flight before it may auto-approve a doc-only change set, and
+# the two facts that answer it are records THIS function already reads: the
+# `IMPLEMENTER: role=… task=… at <ts>` lines it derives the implementer set from,
+# and the `QA-GATE: entered at <ts>` line that opens a review cycle. Parsing them
+# in verify-before-stop.sh instead would be a SECOND parser for one grammar —
+# the thing this script exists to prevent (see the header, and the way
+# compute_change_set_hash defers to impact-report.sh --hash-only).
+#
+# THE TIMESTAMP IS THE LEXICOGRAPHIC MAX, not the last line in comment order. bd
+# returns comments chronologically today, so the two coincide; keying on the
+# record's OWN timestamp means the answer does not silently change if that
+# ordering ever does.
+#
+# THREE DISTINCT ANSWERS, and the third one is the point. A caller must be able
+# to tell "there is no such record" from "there is one and I could not read it",
+# because those demand opposite decisions: the first is ordinary (doc-only work
+# is orchestrator-authored and never gets an IMPLEMENTER record), the second
+# means the predicate is unestablished and the caller must fail closed. So a
+# record that exists but carries no well-formed timestamp prints the literal
+# `unparseable` — a value no valid ISO-8601-UTC stamp can collide with — rather
+# than the empty string.
+QZV_ISO_UTC_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+
+# max_record_ts <firstlines-file> <record-prefix-ERE>
+max_record_ts() {
+    local file="$1" prefix="$2" lines ts
+    lines=$(grep -E "$prefix" "$file" 2>/dev/null) || lines=""
+    if [ -z "$lines" ]; then
+        printf ''
+        return 0
+    fi
+    # Anchored at END OF LINE on purpose: both grammars put the timestamp last,
+    # so a hex-or-date-looking token inside a free-text summary cannot be
+    # mistaken for one. LC_ALL=C because the compare must be byte order; the
+    # operands are fixed-shape, so the first differing character is always a
+    # digit, and pinning the collation makes that independent of the host locale
+    # rather than merely true on it.
+    ts=$(printf '%s\n' "$lines" \
+        | grep -oE " at $QZV_ISO_UTC_RE\$" 2>/dev/null \
+        | sed -E 's/^ at //' \
+        | LC_ALL=C sort \
+        | tail -1)
+    if [ -z "$ts" ]; then
+        printf 'unparseable'
+        return 0
+    fi
+    printf '%s' "$ts"
 }
 
 # bd_show_with_comments <task-id> — `bd show --json` that always carries
@@ -379,6 +434,19 @@ cmd_gate() {
     REVIEWER=""; THRESHOLD=""; ART_ITER=""; ART_MODEL=""; ART_HASH=""
     ART_VERDICT=""; ART_STOPPED=""; ART_FINDINGS=""; IMPL_JSON="[]"
     OPEN_JSON="[]"; OPEN_COUNT="0"; INDEPENDENT="true"
+    CYCLE_OPENED_TS=""; LATEST_IMPLEMENTER_TS=""
+
+    # qzv: resolved BEFORE the artifact gate below, deliberately. The F1 fast
+    # path's only caller state is a task with NO review artifact — F1 fires on
+    # doc-only change sets, which have nothing to review — so these two fields
+    # have to be on the `review_artifact_missing` envelope or they would never
+    # reach the caller that needs them. That is why they are not computed
+    # alongside `implementers`, which still resolves after the gate and therefore
+    # still reports `[]` on that envelope; the asymmetry is named rather than
+    # tidied because widening the artifact-missing envelope further is a change
+    # to a release predicate's inputs, not a cleanup.
+    CYCLE_OPENED_TS=$(max_record_ts "$firstlines" '^QA-GATE: entered at ')
+    LATEST_IMPLEMENTER_TS=$(max_record_ts "$firstlines" '^IMPLEMENTER: role=[a-z]+ ')
 
     # art = LAST comment matching /^REVIEW-ARTIFACT v1 /.
     local art
