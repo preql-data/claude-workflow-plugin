@@ -133,6 +133,14 @@ PVBS="$PRIM/.claude/scripts/verify-before-stop.sh"
 # the same reason the real plugin repo ignores them: they are per-session
 # ephemera, and leaving them tracked would make the gate's own writes dirty the
 # tree mid-spec (a baseline would go stale the instant it was taken).
+#
+# 94d NOTE: `.claude/scripts/` must NOT be added here, however tempting. This
+# spec depends on the hook surface being COMMITTED so that `git worktree add`
+# materialises it inside the linked worktree (assertion wtres-0.4, "the
+# worktree's hook surface resolves (committed symlinks)"). Gitignoring it leaves
+# the worktree with no hooks at all and takes the spec from 15 failures to 37 —
+# measured. The instrumentation churn is handled by baselining it instead; see
+# the baseline_incidental_dirt calls below.
 printf '.claude/.qa-tracking/\n.claude/.session-start\n.beads/\nbin/\n' > "$PRIM/.gitignore"
 mkdir -p "$PRIM/src"
 printf 'export const a = 0;\n' > "$PRIM/src/a.ts"
@@ -190,6 +198,20 @@ fi
 # with cwd = the primary, i.e. ONE database.
 mkdir -p "$W/.claude/.qa-tracking" "$W/.beads"
 WTRACK="$W/.claude/.qa-tracking"
+
+# 94d: the primary checkout is fully constructed now (hook surface committed, the
+# detect-stack stub written on top, the worktree added), so this is its ARRIVAL
+# state — baseline it, exactly as session-start.sh does on a real session. The
+# stub is a git-visible typechange over a committed symlink, and every later
+# section writes another mutant next to it; without a baseline
+# `reconcile-tracker` correctly reads all of that as this session's work, the
+# primary's delta stops being a subset of what the worktree approved, and every
+# bridge assertion collapses to "no change-set-bound approval record matches".
+# `--exclude-tracked` protects whatever the tracker already names, so the SUBJECT
+# (src/a.ts and friends) is never baselined and stays gated. Gitignoring
+# `.claude/scripts/` instead is NOT an option here — see the note on .gitignore
+# above.
+baseline_incidental_dirt "$PRIM"
 WQG="$W/.claude/scripts/qa-gate.sh"
 
 # The spelling git itself reports for the worktree — and therefore the spelling
@@ -224,6 +246,34 @@ restage() {
     local f
     for f in "$@"; do printf '%s\n' "$f" >> "$PTRACK/changed-files.txt"; done
     rm -f "$PTRACK/iteration-count" "$PTRACK/iteration-count.$SAN" 2>/dev/null || true
+    # 94d: re-account for the PRIMARY's incidental dirt on every restage, not just
+    # once at construction. Later sections keep writing instrumentation into the
+    # primary's `.claude/scripts/` — section 8's stripped hook, section 9's
+    # `qa-gate-notoken.sh`, section 9c's removal and restoration of
+    # `impact-report.sh` — and each of those is a real, git-visible, un-baselined
+    # change that `reconcile-tracker` correctly folds into the primary's change
+    # set. Once it does, that delta is no longer a subset of the file set the
+    # worktree's approval covered, `wtres_delta_is_subset` returns 1, and every
+    # bridge RELEASE assertion collapses to "no change-set-bound approval record
+    # matches" — including the META controls in 8.2 and 9c.
+    #
+    # Placed AFTER the tracker is seeded so `--exclude-tracked` protects this
+    # case's SUBJECT: the paths just written above are never baselined and stay
+    # gated, which is what each assertion measures. Only the harness's own churn
+    # is absorbed.
+    #
+    # This touches the PRIMARY only. The worktree's own baseline is untouched, so
+    # sections 5.1/5.4 — "new dirt in the worktree AFTER approve BLOCKS" and "a
+    # worktree with NO gate-baseline cannot prove absence of drift" — still
+    # measure exactly what they did before.
+    #
+    # RULED OUT before reaching for this, both by measurement: (1) reconcile_tracker
+    # resolves the prefix CORRECTLY inside a linked worktree — canon($PROJECT_DIR)
+    # equals canon(--show-toplevel) there, so it emits the worktree's own root and
+    # the paths exist on disk; (2) a deliberately-absent `impact-report.sh` does
+    # NOT make `reconcile-tracker` fail (rc 0), so the Stop hook's fail-closed
+    # reconcile block cannot pre-empt section 9c's causation probe.
+    baseline_incidental_dirt "$PRIM"
 }
 
 # approve_in <worktree> <tid> <qa-gate-path> <summary> — the full review cycle

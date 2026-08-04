@@ -124,27 +124,65 @@ ledger row.)
 
 ### 3. PostToolUse
 
-**Trigger**: After Write, Edit, or MultiEdit tools
+**Trigger**: After the Write, Edit, MultiEdit or NotebookEdit tools — the four
+whose `tool_input` carries a path (`file_path` for the first three,
+`notebook_path` for NotebookEdit; that spelling is sourced from the runtime's own
+tool schema, see HOOKS.md "Matcher"). Bash is NOT matched and cannot be
+(`tool_input.command` has no path field); files written by a shell redirect are
+folded in from `git status` by `qa-gate.sh reconcile-tracker` instead (94d) —
+partially: that reconcile subtracts the gate baseline over raw porcelain lines,
+so it catches a shell-written path that was clean at baseline capture and misses
+a second write to a path the baseline already lists (HOOKS.md, "The tracker
+reconcile", the line-granularity limit under "Known limits";
+`claude-workflow-plugin-dpe`). What it misses is now **counted and named** in
+every observation (`subtracted=N`, plus the paths and
+`.claude/.qa-tracking/reconcile-subtracted.txt`) rather than silently dropped —
+the miss is unchanged, its invisibility is not (94d.1). The reconcile is also
+**not a recovery path** for a lost tracker: two of the sixteen paths lost in the
+occurrence that filed 94d.1 were invisible to `git status` altogether, so
+prevention lives at the deleter.
 
 **Purpose**: Track file changes for QA review
 
 **What it does**:
 ```bash
-# 1. Extract file path from tool input (.tool_input.file_path // .path)
+# 1. Extract file path from tool input
+#    (.tool_input.file_path // .path // .notebook_path)
 # 2. Apply a build-artifact DENYLIST (node_modules/, dist/, build/,
 #    *.lock, *.min.js, lockfiles, ...) — everything NOT matched is
 #    tracked, including .md/.json/.yaml/.toml/.tf/.proto. (Not an
 #    extension allowlist: a narrow allowlist was the B6 antipattern this
 #    hook was rewritten to avoid — see CLAUDE.md and HOOKS.md.)
-# 3. Add to tracking file (deduplicated, flock-guarded when available)
-# 4. Trim only when the file exceeds 1000 entries, keeping the last 500
-#    (race-tolerant: 2x headroom so concurrent appenders don't lose data)
-# 5. Update Beads with progress (batched every 10 edits)
+# 3. Apply the SELF-WRITTEN rule from the same lib (94d):
+#    workflow_self_written drops .claude/.qa-tracking/** and
+#    .beads/interactions.jsonl — paths the gate itself rewrites on every
+#    invocation. NOT .beads/issues.jsonl, which is the committed ledger.
+#    This is the WRITER side of the rule; qa-gate.sh's reconcile applies
+#    the same one, so the tracker (and therefore change_set_hash) can
+#    never become a function of the gate's own progress. See HOOKS.md,
+#    "The second rule: workflow_self_written".
+# 4. Apply RECORD-TIME CONTAINMENT (fkm.1.15): a path outside
+#    $CLAUDE_PROJECT_DIR is dropped AND logged to sync-errors.log. This one
+#    is NOT in the shared lib — it compares against a runtime root rather
+#    than matching a pattern, and it has exactly one applier, because the
+#    only other tracker writer takes its paths from git status inside the
+#    repo. Relative paths are kept (resolved against the root); both the
+#    logical and physical spellings of the root are accepted. It closes the
+#    OVER-coverage half of 94d's acceptance list: before it, a scratch file
+#    an agent wrote to /tmp entered change_set_hash and staled the impact
+#    report. See HOOKS.md, "The third rule: record-time containment".
+# 5. Add to tracking file (deduplicated, flock-guarded when available)
+# 6. Trim only when the file exceeds 1000 entries, keeping the last 500
+#    (2x headroom so concurrent appenders don't lose data) — and ONLY under
+#    flock (94d). The trim is a read-modify-write; without a lock it can
+#    discard a path appended mid-trim, and a discarded path is a file the
+#    Stop gate never sees and no approval covers. No flock: skip and log.
+# 7. Update Beads with progress (batched every 10 edits)
 ```
 
 **Output**: `{}` — a valid empty `hookSpecificOutput` no-op. This hook only
 records state; the Stop hook surfaces the "changes require QA review"
-context. (`post-edit.sh:53` `emit_empty() { echo '{}'; }`.)
+context. (`post-edit.sh:75` `emit_empty() { echo '{}'; }`.)
 
 ### 4. Stop
 
@@ -347,7 +385,7 @@ fi
 The tracking file is trimmed only when it grows past **1000** entries, and
 is then reduced to the last 500 (deduplicated). The 2x headroom is
 deliberate: it keeps the trim race-tolerant so concurrent appenders don't
-lose data (`post-edit.sh:98-105`):
+lose data (`post-edit.sh:366-378`):
 ```bash
 if [ "${LINE_COUNT:-0}" -gt 1000 ]; then
     # (flock-guarded when available)
@@ -417,12 +455,19 @@ the operator's own environment, not from `permissions.deny`.
 QA tracking data is session-local:
 ```
 .claude/.qa-tracking/
-├── changed-files.txt    # Cleared each session
+├── changed-files.txt    # Cleared each session — EXCEPT while a gate cycle is in
+│                        # flight (`current-task` set), when SessionStart preserves
+│                        # it. It is the change set the review is reading, and a
+│                        # rebuild from `git status` can only ever be a subset
+│                        # (94d.1; HOOKS.md "The tracker survives a session
+│                        # boundary")
 ├── approved             # Marker file
 └── edit-count           # Counter for batching
 ```
 
-This data is gitignored and not persisted.
+This data is gitignored and not persisted. The full inventory — the gate
+baseline, impact reports, the subtracted-path sidecar, the logs — is in HOOKS.md
+under "Tracking File Location"; this is the short list, not the whole directory.
 
 ---
 

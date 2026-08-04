@@ -269,6 +269,15 @@ export function registerQaTools(server) {
                 "approve leaves behind). If a Stop still blocks after a no-op, re-run " +
                 "`impact-report.sh <id>` and approve again; that re-persists the report so the " +
                 "comparison sees the current change set.\n\n" +
+                "REFUSES with error_key change_set_reconstructed (94d.1) when changed-files.txt was " +
+                "absent-or-empty at reconcile time, the rebuild from `git status` produced a " +
+                "NON-EMPTY set, and it also dropped git-visible path(s) as already-baselined — real " +
+                "work being certified over a proven subset of the working tree. The dropped paths " +
+                "are named in the error and in .claude/.qa-tracking/reconcile-subtracted.txt. THIS " +
+                "TOOL HAS NO BYPASS PARAMETER: read those paths, and if they are genuinely " +
+                "pre-existing dirt rather than lost work, proceed through the shell with a recorded " +
+                "reason — `qa-gate.sh approve <id> --accept-reconstructed '<reason>' '<summary>'`. " +
+                "Same for the older --no-impact-report / --no-review bypasses.\n\n" +
                 "Replaces shell: `bash .claude/scripts/qa-gate.sh approve <id> '<summary>'`",
             inputSchema: {
                 task_id: z.string().min(1).max(256),

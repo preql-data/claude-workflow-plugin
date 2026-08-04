@@ -258,7 +258,12 @@ assert_eq "impact-report: bypass reason recorded in approval comment" "1" "$IR3_
 # (approve succeeds without the artifact). Proves the refusal block is
 # load-bearing, not theatre. Mirrors qa-gate-baseline.sh Spec H.
 REAL_QG=$(readlink "$QG" || printf '%s' "$QG")
-QG_STRIPPED="$FIXTURE/qa-gate-stripped.sh"
+# The copy lives in the fixture's `.claude/scripts/` — NOT the fixture root.
+# Since 94d qa-gate.sh loads `workflow-denylist.sh` from its OWN directory
+# (BASH_SOURCE-relative), so a copy parked anywhere else has no denylist,
+# reconcile_tracker refuses, and approve exits 2 for a reason unrelated to the
+# region under test. Same constraint the post-edit.sh spec's META documents.
+QG_STRIPPED="$FIXTURE/.claude/scripts/qa-gate-stripped.sh"
 STRIP_RC=0
 awk '
     /# IMPACT-REPORT-REFUSAL BEGIN/ { skipping=1; found=1; next }
@@ -573,5 +578,160 @@ assert_json_field "qa-gate llh18: bypass approve succeeds" "$BP_OUT" '.status' "
 BP_REC_HASH=$(bind_hash_of_record "$TID_BIND_BP")
 assert_eq "qa-gate llh18: bypass path still writes a matching change_set_hash record" \
     "$BP_EXP_HASH" "$BP_REC_HASH"
+
+# ===========================================================================
+# THE TRACKER-RECONCILE REFUSAL — error_key=tracker_unreconcilable
+# (claude-workflow-plugin-94d; closes QA finding R2-F3).
+#
+# 94d added a hard refusal with NO bypass flag and shipped it with ZERO
+# assertions at any of the three test layers, while its happy path
+# (`reconcile-tracker` succeeding) appears in six specs. That asymmetry is the
+# dangerous kind: a regression turning `return 1` into `return 0` would be
+# SILENT — every happy-path spec stays green and the gate approves against a
+# tracker it could not reconcile, which is exactly the P1 this task exists to
+# close. So the refusal is asserted here, on both emitters, plus the two
+# properties that make it worth having:
+#
+#   NO BYPASS.   `--no-impact-report` waives an ANALYSIS whose degradation is
+#                documented. There is no comparable degraded mode for "we do not
+#                know which files changed", so the flag must NOT reach this.
+#   ORDERING.    reconcile runs BEFORE the impact-report refusal, deliberately:
+#                the freshness check compares the report's hash against the
+#                CURRENT one, and the reconcile is what makes "current" mean the
+#                git-visible change set. With BOTH degraded, the error_key must
+#                still be tracker_unreconcilable — if it were
+#                impact_report_stale, the ordering had silently inverted.
+#
+# ONE VARIABLE. The cycle below is fully legitimate and READY to approve — a
+# tracked change, a fresh impact report from `enter`, real review records — and
+# then exactly one thing is removed: the shared denylist lib the reconcile needs
+# to know which paths belong in the tracker. qa-gate.sh resolves it
+# BASH_SOURCE-relative, so deleting the fixture's copy is a clean seam. The
+# restore leg at the end puts it back and re-approves, which is what proves the
+# refusal is caused by the missing lib rather than by anything else in the setup.
+# ===========================================================================
+mk_fixture
+FIXTURE_TU="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+QG_TU="$FIXTURE_TU/.claude/scripts/qa-gate.sh"
+TRACK_TU="$FIXTURE_TU/.claude/.qa-tracking"
+LIB_TU="$FIXTURE_TU/.claude/scripts/workflow-denylist.sh"
+tu_labels() {
+    (cd "$FIXTURE_TU" && bd show "$1" --json 2>/dev/null \
+        | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null) || echo ""
+}
+tu_report_for() {
+    printf '%s/impact-report-%s.json' "$TRACK_TU" \
+        "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+assert_eq "tracker-unreconcilable: the fixture lib is a symlink to the real plugin lib" "yes" \
+    "$([ -L "$LIB_TU" ] && echo yes || echo no)"
+
+TID_TU=$(cd "$FIXTURE_TU" && bd create "tracker reconcile refusal" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/tu-change.ts\n' > "$TRACK_TU/changed-files.txt"
+bash "$QG_TU" enter "$TID_TU" >/dev/null 2>&1
+seed_review_records "$TID_TU" "qa-claude" "backend" "$FIXTURE_TU"
+assert_eq "tracker-unreconcilable: precondition — a fresh impact report exists" "0" \
+    "$([ -f "$(tu_report_for "$TID_TU")" ] && echo 0 || echo 1)"
+
+# --- THE ONE CHANGE -------------------------------------------------------
+LIB_TU_REAL=$(readlink "$LIB_TU" 2>/dev/null || printf '%s' "$LIB_TU")
+rm -f "$LIB_TU"
+assert_eq "tracker-unreconcilable: the shared denylist lib is now absent" "gone" \
+    "$([ -e "$LIB_TU" ] && echo present || echo gone)"
+
+# 1. The subcommand form refuses (exit 2). This is the entry point
+#    verify-before-stop.sh calls, so its rc IS the Stop hook's block trigger.
+TU_SUB_RC=0
+TU_SUB_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_TU" bash "$QG_TU" reconcile-tracker 2>/dev/null) || TU_SUB_RC=$?
+assert_eq "tracker-unreconcilable: reconcile-tracker refuses with exit 2" "2" "$TU_SUB_RC"
+# NB: assert_json_field cannot assert a literal `false` (its `// empty` jq
+# fallback swallows it) — same workaround test 14 above documents.
+assert_contains "tracker-unreconcilable: reconcile-tracker ok=false" '"ok":false' "$TU_SUB_OUT"
+assert_json_field "tracker-unreconcilable: reconcile-tracker error_key" \
+    "$TU_SUB_OUT" '.error_key' "tracker_unreconcilable"
+assert_contains "tracker-unreconcilable: ...and the reason names the missing filter" \
+    "workflow-denylist.sh" "$TU_SUB_OUT"
+assert_contains "tracker-unreconcilable: ...and says callers must refuse to proceed" \
+    "refuse to proceed" "$TU_SUB_OUT"
+
+# 2. approve refuses with the SAME key — and writes NOTHING.
+TU_AP_RC=0
+TU_AP_OUT=$(bash "$QG_TU" approve "$TID_TU" "must not approve an unprovable change set" 2>/dev/null) || TU_AP_RC=$?
+assert_eq "tracker-unreconcilable: approve refuses with exit 2" "2" "$TU_AP_RC"
+assert_json_field "tracker-unreconcilable: approve error_key=tracker_unreconcilable" \
+    "$TU_AP_OUT" '.error_key' "tracker_unreconcilable"
+assert_contains "tracker-unreconcilable: approve's reason says the change set is unprovable" \
+    "unprovable" "$TU_AP_OUT"
+assert_contains "tracker-unreconcilable: ...and states there is no bypass flag" \
+    "no bypass flag" "$TU_AP_OUT"
+# THE PROPERTY THAT MATTERS: fail-closed. No label, no record.
+assert_not_contains "tracker-unreconcilable: qa-approved was NOT added" \
+    "qa-approved" "$(tu_labels "$TID_TU")"
+TU_RECORDS=$(bd_show_with_comments "$TID_TU" "$FIXTURE_TU" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | map(.text) | join("\n")' 2>/dev/null)
+assert_not_contains "tracker-unreconcilable: no QA-GATE APPROVED record was written" \
+    "QA-GATE APPROVED" "$TU_RECORDS"
+
+# 3. NO BYPASS: --no-impact-report does not waive it. If this ever returns
+#    approved, the flag has grown a second meaning it was never given.
+TU_BP_RC=0
+TU_BP_OUT=$(bash "$QG_TU" approve "$TID_TU" --no-impact-report "ops emergency" "bypass must not cover this" 2>/dev/null) || TU_BP_RC=$?
+assert_eq "tracker-unreconcilable: --no-impact-report still refuses (exit 2, NO bypass)" "2" "$TU_BP_RC"
+assert_json_field "tracker-unreconcilable: ...with the same error_key" \
+    "$TU_BP_OUT" '.error_key' "tracker_unreconcilable"
+assert_not_contains "tracker-unreconcilable: ...and did NOT report approved" \
+    "\"status\":\"approved\"" "$TU_BP_OUT"
+
+# 4. ORDERING: with the impact report ALSO gone, the reconcile refusal still
+#    wins. A tracker_unreconcilable answer here means reconcile ran first.
+rm -f "$(tu_report_for "$TID_TU")"
+TU_ORD_RC=0
+TU_ORD_OUT=$(bash "$QG_TU" approve "$TID_TU" "both degraded at once" 2>/dev/null) || TU_ORD_RC=$?
+assert_eq "tracker-unreconcilable: both degraded -> still exit 2" "2" "$TU_ORD_RC"
+assert_json_field "tracker-unreconcilable: both degraded -> reconcile refusal WINS (ordering)" \
+    "$TU_ORD_OUT" '.error_key' "tracker_unreconcilable"
+assert_not_contains "tracker-unreconcilable: ...NOT impact_report_stale (would mean the order inverted)" \
+    "impact_report_stale" "$TU_ORD_OUT"
+
+# 5. ANTI-OVERREACH: a usage error is still a usage error, not a refusal. If
+#    every non-zero path reported tracker_unreconcilable the assertions above
+#    would pass for the wrong reason.
+TU_FLAG_RC=0
+TU_FLAG_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_TU" bash "$QG_TU" reconcile-tracker --nonsense 2>/dev/null) || TU_FLAG_RC=$?
+assert_eq "tracker-unreconcilable: an unknown flag is exit 1, not the refusal" "1" "$TU_FLAG_RC"
+assert_json_field "tracker-unreconcilable: ...with error_key=unknown_flag" \
+    "$TU_FLAG_OUT" '.error_key' "unknown_flag"
+
+# --- RESTORE + CONTROL: the missing lib was the cause ----------------------
+# Nothing else about the cycle changes. `enter` regenerates the report deleted
+# in leg 4; the review records are re-seeded because `enter` resets iteration
+# state. If this leg did not go green, every refusal above could be an artefact
+# of the setup rather than of the removal.
+ln -sf "$LIB_TU_REAL" "$LIB_TU"
+assert_eq "tracker-unreconcilable CONTROL: the lib is back" "present" \
+    "$([ -e "$LIB_TU" ] && echo present || echo gone)"
+printf 'src/tu-change.ts\n' > "$TRACK_TU/changed-files.txt"
+bash "$QG_TU" enter "$TID_TU" >/dev/null 2>&1
+seed_review_records "$TID_TU" "qa-claude" "backend" "$FIXTURE_TU"
+TU_OK_RC=0
+TU_OK_OUT=$(bash "$QG_TU" approve "$TID_TU" "reviewed; the reconcile can run again" 2>/dev/null) || TU_OK_RC=$?
+assert_eq "tracker-unreconcilable CONTROL: the SAME approve now succeeds (rc=0)" "0" "$TU_OK_RC"
+assert_json_field "tracker-unreconcilable CONTROL: status=approved" "$TU_OK_OUT" '.status' "approved"
+assert_contains "tracker-unreconcilable CONTROL: and the observations report a reconcile ran" \
+    "tracker reconcile" "$TU_OK_OUT"
+
+# 6. THE DOCUMENTED NO-OP, so the refusal is not over-broad: on a NON-git tree
+#    there is no delta to reconcile against and reconcile-tracker succeeds.
+#    (The component fixture is not a git repo unless a spec makes it one.)
+assert_eq "tracker-unreconcilable: the fixture is NOT a git repo (isolates the no-op arm)" \
+    "no" "$(git -C "$FIXTURE_TU" rev-parse --git-dir >/dev/null 2>&1 && echo yes || echo no)"
+TU_NG_RC=0
+TU_NG_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_TU" bash "$QG_TU" reconcile-tracker 2>/dev/null) || TU_NG_RC=$?
+assert_eq "tracker-unreconcilable: non-git tree is a NO-OP, rc=0 (not a refusal)" "0" "$TU_NG_RC"
+assert_json_field "tracker-unreconcilable: ...and reports ok=true" "$TU_NG_OUT" '.ok' "true"
+assert_contains "tracker-unreconcilable: ...naming why (no git-visible delta)" \
+    "not a git checkout" "$TU_NG_OUT"
 
 [ "$FAIL" -eq 0 ]

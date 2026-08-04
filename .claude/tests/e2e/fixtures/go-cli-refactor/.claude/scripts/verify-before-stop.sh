@@ -355,12 +355,32 @@ gate_baseline_entries() {
 # exactly the incoherence gz3 fixed — a second copy of this walk would be a
 # second thing to drift (same reason the denylist regex lives in one lib).
 #
-# ORDER MATTERS: the tracker (post-edit.sh's record of actual tool edits) is
-# authoritative; `git status --porcelain` minus the gate baseline is the FALLBACK
-# consulted only when the tracker yields nothing. That is the pre-existing
-# behaviour, preserved verbatim — the baseline is subtracted only on the git
-# side, because pre-existing dirt cannot enter the tracker and an edit to an
-# already-dirty file must still gate.
+# BOTH HALVES, ALWAYS — a UNION, not a fallback (94d). It used to short-circuit
+# on `found=1`: the tracker was authoritative and the baseline-relative
+# `git status` walk was consulted ONLY when the tracker yielded nothing. That made
+# the detector a strict subset of git whenever post-edit.sh had recorded even one
+# path, so a single Edit was enough to hide every file written by a Bash redirect,
+# `cp` or a generator script. Measured live four times; the tracker once held 37
+# of 71 changed files while this function reported exactly those 37.
+#
+# The primary repair for that is reconcile_tracker in qa-gate.sh, which folds the
+# git-visible delta INTO the tracker so `change_set_hash` covers it too (a
+# read-time union alone would fix this detector and leave the hash short — a gate
+# that reports 14 paths and releases on an approval binding 9). Dropping the
+# short-circuit is the belt to that braces: after a reconcile the git half finds
+# nothing new, and if the reconcile was skipped or failed the detector STILL
+# cannot under-report relative to git MINUS THE BASELINE — which is the delta
+# both halves are defined against, and the qualifier is load-bearing. Neither
+# half sees a RE-WRITE of a path the baseline already lists: the subtraction is
+# over raw porcelain LINES, so a second write leaves " M path" byte-identical and
+# `comm -23` drops it on both sides. See qa-gate.sh's reconcile_tracker header,
+# KNOWN LIMITS, and claude-workflow-plugin-dpe.
+#
+# The git half skips paths the tracker already yielded, in either spelling: the
+# tracker holds ABSOLUTE paths and porcelain is repo-relative, so an unfiltered
+# union would emit both spellings of every file and double the reported count.
+# The baseline is still subtracted only on the git side, because pre-existing dirt
+# cannot enter the tracker and an edit to an already-dirty file must still gate.
 #
 # `comm -23 a b` prints lines in a but not in b and needs both inputs in the
 # SAME collation, hence LC_ALL=C on both sides, matching write_gate_baseline.
@@ -368,20 +388,20 @@ gate_baseline_entries() {
 # entries.) Bash 3.2 supports the process substitution used here (verified on
 # macOS bash 3.2.57).
 reviewable_changes() {
-    local line path found=0
+    local line path emitted="" skip
     if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
         while IFS= read -r line; do
             [ -z "$line" ] && continue
             if is_tracked_change "$line"; then
                 printf '%s\n' "$line"
-                found=1
+                emitted="$emitted$line
+"
             fi
         done < <(sort -u "$TRACKING_FILE" 2>/dev/null)
     fi
-    [ "$found" = "1" ] && return 0
     has_git_repo || return 0
 
-    local baseline current new_entries
+    local baseline current new_entries abs_root
     baseline=$(gate_baseline_entries | LC_ALL=C sort)
     current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort)
     if [ -z "$baseline" ]; then
@@ -392,9 +412,52 @@ reviewable_changes() {
         new_entries=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
     fi
     [ -n "$new_entries" ] || return 0
+    # The working-tree root, for comparing a repo-relative porcelain path against
+    # an absolute tracker entry. Empty is tolerated: we then compare only the
+    # relative spelling, which over-reports rather than under-reports.
+    abs_root=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || abs_root=""
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         path="${line#???}"
+        case "$path" in *" -> "*) path="${path##* -> }" ;; esac
+        [ -n "$path" ] || continue
+        # Explicit `if` rather than `grep ... && continue`: an AND-OR list whose
+        # left side fails is exactly the shape that makes `set -e` behaviour
+        # version-dependent, and this function runs inside a hook where an
+        # aborted process emits nothing — which the hooks contract reads as
+        # NON-blocking, i.e. it would fail OPEN.
+        skip=0
+        if [ -n "$emitted" ]; then
+            if printf '%s' "$emitted" | grep -qxF -- "$path"; then
+                skip=1
+            elif printf '%s' "$emitted" | grep -qxF -- "$PROJECT_DIR/$path"; then
+                skip=1
+            elif [ -n "$abs_root" ] && printf '%s' "$emitted" | grep -qxF -- "$abs_root/$path"; then
+                skip=1
+            fi
+        fi
+        if [ "$skip" = "1" ]; then
+            continue
+        fi
+        # PATHS THE WORKFLOW ITSELF REWRITES must be skipped here too, or this
+        # half contradicts the hash (94d). reconcile_tracker refuses to APPEND
+        # them, so without this the tracker excluded `.beads/interactions.jsonl`
+        # while THIS walk included it — and since bd rewrites that file on every
+        # single call, including the gate's own add_comment and `label add`,
+        # DOC_ONLY went false on every doc-only change set as soon as any bd call
+        # had run. The F1 fast path was dead in production: every documentation
+        # Stop demanded a full QA round. Measured at
+        # specs/verify-review-discipline.sh D4, where the tracker held exactly
+        # `docs/notes.md` and the gate still blocked.
+        #
+        # This is NOT the denylist (see workflow_self_written's header for why the
+        # two rules are separate): a change set consisting solely of beads/gate
+        # state still reaches the `beads-state` fast path and still gets a gate
+        # record. It only stops the gate's own bookkeeping from making somebody
+        # else's change set look mixed.
+        if [ -n "${WORKFLOW_SELF_WRITTEN_REGEX:-}" ] && workflow_self_written "$path"; then
+            continue
+        fi
         if is_tracked_change "$path"; then
             printf '%s\n' "$path"
         fi
@@ -782,20 +845,102 @@ Fix (one of):
      canonical hook scripts into it (make sync-fixtures)."
 fi
 
-# Detect tracked changes. The rule — tracker first, then the baseline-relative
-# git-status fallback — lives in reviewable_changes() (ONE definition, two
+# TRACKER-RECONCILE BEGIN (94d)
+#
+# FIRST, MAKE THE TRACKER COMPLETE. changed-files.txt is written by exactly one
+# hook — post-edit.sh, on Write/Edit/MultiEdit/NotebookEdit — so a file produced
+# by a Bash redirect, `cp`, `sed -i` or a generator script never entered it.
+# Everything downstream of here reads that file, and not only as a detector:
+#   - CHANGE_COUNT and the block reason's "Files changed:" list enumerate it;
+#   - compute_intent_payload's changed_files[] enumerates it;
+#   - change_set_hash() — the value this gate matches an approval record
+#     against — is a sha256 of it.
+# So an under-covering tracker did not merely hide files from the readout; it let
+# the gate release on an approval bound to fewer paths than actually shipped.
+# Reconciling here, before anything reads the file, is what makes every one of
+# those four consumers describe the same change set.
+#
+# FAIL CLOSED. `qa-gate.sh reconcile-tracker` exits non-zero only when it cannot
+# determine the git-visible delta at all (git unreadable, or the shared denylist
+# missing so "which paths belong in the tracker" is unknowable). In that state we
+# cannot say what the change set IS, so we refuse to release rather than evaluate
+# a set we know may be short — the same call the denylist-missing block above
+# makes. Placed AFTER the stop_hook_active circuit breaker, never before it: a
+# block emitted ahead of that guard loops the Stop hook forever (AgentLint H3).
+#
+# A missing qa-gate.sh is ALSO a block: it is the script that owns this repair,
+# and a gate whose own state machine is absent cannot vouch for a change set.
+#
+# Sentinels are load-bearing (an L2 META-TEST strips every TRACKER-RECONCILE
+# region and asserts the Bash-written file stops reaching the tracker and the
+# block reason). Do not rename them.
+if [ ! -f "$QA_GATE" ]; then
+    log_sync_error "Stop blocked: qa-gate.sh missing at $QA_GATE; the change-set tracker cannot be reconciled against git, so the change set is unprovable"
+    emit_block "QA gate cannot run: qa-gate.sh is missing.
+
+verify-before-stop.sh could not find its sibling gate script at:
+  $QA_GATE
+
+That script owns the change-set tracker reconcile (94d) — the step that folds
+files written by Bash redirects, \`cp\` or generator scripts into
+.claude/.qa-tracking/changed-files.txt. Without it the gate cannot prove the
+change set it would release is the change set that actually changed, so it
+refuses rather than guess.
+
+Fix (one of):
+  1. Restore the file: it ships with the plugin at .claude/scripts/qa-gate.sh
+     (re-run the plugin installer, or 'git checkout -- .claude/scripts/qa-gate.sh').
+  2. If you are running a partially-synced fixture or worktree, re-sync the
+     canonical hook scripts into it (make sync-fixtures)."
+fi
+RECONCILE_OUT=""
+RECONCILE_RC=0
+RECONCILE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$QA_GATE" reconcile-tracker 2>&1) || RECONCILE_RC=$?
+if [ "$RECONCILE_RC" -ne 0 ]; then
+    log_sync_error "Stop blocked: qa-gate.sh reconcile-tracker exited $RECONCILE_RC; the git-visible change set is undeterminable so changed-files.txt cannot be proven complete (94d)"
+    emit_block "QA gate cannot run: the change-set tracker could not be reconciled against git.
+
+\`qa-gate.sh reconcile-tracker\` exited $RECONCILE_RC in:
+  $PROJECT_DIR
+
+It reported:
+$RECONCILE_OUT
+
+That step folds every git-visible change into
+.claude/.qa-tracking/changed-files.txt, which is what the change-set hash is
+computed over and what this gate matches an approval record against. When it
+cannot run, the gate cannot tell whether the tracker covers the whole diff — so
+it refuses to release rather than certify a change set that may be short (94d).
+
+Fix (usual causes, in order):
+  1. Is \`git status\` working in this checkout? Run it by hand; an interrupted
+     rebase, a stale index.lock, or a permissions problem all surface here.
+  2. Is .claude/scripts/workflow-denylist.sh present? Without it there is no
+     definition of which paths are reviewable.
+  3. Re-run after fixing:
+       bash .claude/scripts/qa-gate.sh reconcile-tracker"
+fi
+# TRACKER-RECONCILE END (94d)
+
+# Detect tracked changes. The rule — the tracker UNION the baseline-relative
+# git-status walk — lives in reviewable_changes() (ONE definition, two
 # readers; see its header). This loop only derives the three things the rest of
 # the flow needs from that set.
 #
-# 0wk.2 / 3mg.1 context for the fallback half, kept here because it is where a
+# 0wk.2 / 3mg.1 context for the git half, kept here because it is where a
 # reader looks for it: the gate baseline (written by session-start, qa-gate
 # enter and qa-gate approve) captures the git state already accounted for, so
 # the gate evaluates the session DELTA. Without it every Stop fired
 # "N file(s) changed - all require QA review" against the same pre-existing
-# uncommitted state. There is deliberately NO hash-side subtraction: the
-# baseline is subtracted only in the git fallback, because changed-files.txt is
-# fed exclusively by post-edit.sh from actual tool edits (pre-existing dirt
-# cannot enter it) and an edit to an already-dirty file must still gate.
+# uncommitted state.
+#
+# There is STILL deliberately no hash-side subtraction, and 94d did not change
+# that — it moved WHERE the subtraction happens rather than adding one. The
+# tracker has two writers now: post-edit.sh (actual tool edits, unfiltered by the
+# baseline, so an edit to an already-dirty file must still gate) and
+# reconcile_tracker (the git-visible remainder, which subtracts the baseline
+# before appending). Pre-existing dirt therefore still cannot enter the tracker
+# from either writer, which is the property the no-subtraction rule rests on.
 CODE_CHANGES_DETECTED=false
 ALL_CHANGED_FILES=()
 DOC_ONLY=true   # F1: stays true only if every changed file is doc-only.

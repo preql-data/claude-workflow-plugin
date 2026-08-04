@@ -33,6 +33,17 @@
 #                                           `git status --porcelain` snapshot the Stop gate
 #                                           subtracts so it evaluates the session DELTA, not a
 #                                           tree that was dirty on arrival. No task, no bd.
+#   reconcile-tracker                       Fold every git-visible changed path the
+#                                           Write/Edit/MultiEdit hook never saw (Bash
+#                                           redirects, cp, generator scripts) into
+#                                           .qa-tracking/changed-files.txt, so the
+#                                           change-set hash covers the whole diff rather
+#                                           than the subset post-edit.sh recorded (94d).
+#                                           No task, no bd, no labels. Exit 2 when the
+#                                           reconcile cannot be completed — callers must
+#                                           treat that as refuse-to-proceed. `enter` and
+#                                           `approve` call it themselves; the Stop hook
+#                                           calls it at its detection stage.
 #   choose  <approve|continue|tech-debt|defer> <task-id> <note> [extra args for tech-debt]
 #                                           Spec 0.2: record a J21 decision while qa-escalated.
 #                                           Each choice records a comment + acts on labels/state.
@@ -59,7 +70,8 @@
 #   0   success
 #   1   missing args / usage error
 #   2   bd unavailable, task lookup failed, or approve REFUSED for a
-#       missing/invalid/stale impact report (error_key names which)
+#       missing/invalid/stale impact report, or for a change-set tracker that
+#       could not be reconciled against git (error_key names which)
 #   3   atomic operation rolled back
 #   4   approve REFUSED by the V3 review-separation gate: no independent
 #       review artifact, the reviewer is also an implementer, findings at or
@@ -74,6 +86,30 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 CURRENT_TASK_HELPER="$PROJECT_DIR/.claude/scripts/current-task.sh"
 SYNC_ERRORS_LOG="$QA_TRACKING_DIR/sync-errors.log"
+
+# TRACKER-RECONCILE BEGIN (94d)
+# The shared path denylist. This script became a FOURTH consumer of the lib when
+# reconcile_tracker landed: it WRITES into changed-files.txt, so it must apply
+# exactly the filter post-edit.sh applies to the same file — otherwise the
+# reconciler tracks build output the other writer is careful to drop, and the two
+# writers of one file disagree about what belongs in it. Everything else in this
+# script still defers to impact-report.sh --hash-only for canonicalisation
+# (llh.18); this is a filter, not a second hash.
+#
+# Resolved relative to THIS script (BASH_SOURCE), never to $PROJECT_DIR — the
+# gate may run with CLAUDE_PROJECT_DIR pointing at a different checkout than the
+# install it lives in. Same convention as the other three consumers.
+#
+# Missing lib -> reconcile_tracker REFUSES (see its header). That matches the two
+# gate-side consumers (impact-report.sh exits 3, verify-before-stop.sh blocks)
+# rather than post-edit.sh's track-anyway, because an unfiltered reconcile would
+# append build output to an append-only file and there is no way back.
+_WFDL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || _WFDL_DIR=""
+if [ -n "$_WFDL_DIR" ] && [ -f "$_WFDL_DIR/workflow-denylist.sh" ]; then
+    # shellcheck source=.claude/scripts/workflow-denylist.sh
+    . "$_WFDL_DIR/workflow-denylist.sh"
+fi
+# TRACKER-RECONCILE END (94d)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -234,7 +270,20 @@ write_gate_baseline() {
         printf 'captured_at=%s\n' "$ts"
         printf 'captured_by=%s\n' "$captured_by"
         printf -- '--\n'
-        [ -n "$status_out" ] && printf '%s\n' "$status_out"
+        # `if`, NOT `[ -n ... ] && printf` (94d). The body of a brace group takes
+        # the exit status of its LAST command, so on an EMPTY snapshot the false
+        # test made the whole group "fail": the handler below deleted the tmp file
+        # it had just written correctly, logged "could not write", and returned 1.
+        # An empty snapshot is the normal state of a CLEAN tree, and of an
+        # --exclude-tracked capture where every dirty path is already tracked, so
+        # the effect was that exactly those cases silently got NO baseline —
+        # `baseline-capture` reported ok:false and exit 2 on a clean checkout, and
+        # `enter --if-missing` could never find one to skip. Reproduced with one
+        # variable isolated (clean tree fails, one dirty file succeeds) and pinned
+        # by section 8 of specs/gate-baseline-v2.sh.
+        if [ -n "$status_out" ]; then
+            printf '%s\n' "$status_out"
+        fi
     } > "$tmp" 2>/dev/null || {
         rm -f "$tmp" 2>/dev/null || true
         log_sync_error "write_gate_baseline: could not write $tmp (captured_by=$captured_by)"
@@ -296,6 +345,581 @@ gate_baseline_exclude_tracked() {
     # Trim the single trailing newline the accumulator adds.
     printf '%s' "${kept%$'\n'}"
 }
+
+# gate_baseline_entries — the porcelain lines of the current gate baseline, or
+# empty when there is none.
+#
+# The v2 file carries a provenance header terminated by a lone `--`; everything
+# after it is the snapshot. The v1 file (`approved-baseline`, 0wk.2) was a bare
+# line list and is read as a fallback for ONE release — any v2 write deletes it,
+# so that arm only ever serves an install that upgraded mid-cycle.
+#
+# The IDENTICAL reader lives in verify-before-stop.sh (which cannot source this
+# file: qa-gate.sh is a dispatching script, not a lib). Keep them in sync, the
+# same standing pairing has_git_repo carries. Within THIS file there is exactly
+# one copy of the header-skip awk — cmd_baseline_capture counts through here
+# rather than repeating it.
+gate_baseline_entries() {
+    if [ -f "$GATE_BASELINE_FILE" ]; then
+        awk 'body { print; next } /^--$/ { body = 1 }' "$GATE_BASELINE_FILE" 2>/dev/null || true
+        return 0
+    fi
+    if [ -f "$LEGACY_APPROVED_BASELINE" ]; then
+        cat "$LEGACY_APPROVED_BASELINE" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# TRACKER-RECONCILE BEGIN (94d)
+#
+# reconcile_tracker — make changed-files.txt describe the WHOLE session delta,
+# not just the subset a Write/Edit/MultiEdit tool call happened to produce.
+#
+# THE DEFECT THIS CLOSES. changed-files.txt is fed by exactly one writer:
+# post-edit.sh, on the PostToolUse events that carry a path field. Anything
+# written by a Bash redirect, `cp`, `mv`, `sed -i`, a generator script, or a
+# subagent's shell therefore never enters it — measured live four times over two
+# days, at one point with the tracker holding 37 of 71 changed files. That is not
+# merely an under-reporting detector: `change_set_hash()` hashes THIS FILE's path
+# list (impact-report.sh canonical_changed_files), so the gate could name N paths
+# and release on an approval binding M < N, and the whole change-set binding —
+# the approval record, the rubric verdict, the reviewed hash — certified less than
+# the actual diff.
+#
+# WHY RECONCILE INTO THE TRACKER RATHER THAN UNION AT READ TIME. A read-time
+# union in verify-before-stop.sh's reviewable_changes() fixes the DETECTOR and
+# leaves the hash tracker-only, which produces a gate that reports 14 paths and
+# releases on an approval binding 9 — the same hole, now with a confident
+# readout. The tracker is the hash's input, so the repair has to land there.
+#
+# WHAT IT DOES. `git status --porcelain`, minus the gate baseline, minus the
+# denylist, minus what the tracker already holds; the remainder is appended as
+# ABSOLUTE paths. Modelled on gate_baseline_exclude_tracked above, whose
+# absolute/relative matching and `R old -> new` rename handling this reuses.
+#
+# CONTRACT, and why each clause is the way it is:
+#
+#   NOT A GIT CHECKOUT -> NO-OP, rc 0. There is no delta to reconcile against;
+#   the tracker is all the gate has and that is the pre-existing behaviour.
+#
+#   `git status` FAILS -> rc 1. That is the DIVERGENCE SIGNAL, not a pass: we
+#   cannot prove the tracker is complete, so every caller treats it as
+#   refuse-to-proceed (approve refuses with tracker_unreconcilable; the Stop
+#   hook blocks). Same shape as impact-report.sh exiting 3 on a missing
+#   denylist rather than hashing with an unknown filter.
+#
+#   ABSOLUTE PATHS. post-edit.sh records `tool_input.file_path` VERBATIM and the
+#   runtime passes absolute paths, so the tracker is absolute in practice (the
+#   live file was 129 lines / 87 unique, all absolute). Dedup happens at
+#   canonical_changed_files() via `sort -u`, which collapses duplicates but NOT
+#   two spellings of one file — so emitting a repo-relative path here would
+#   double-count it into the hash. The prefix is $PROJECT_DIR when it IS the repo
+#   toplevel (primary checkout or worktree root: the common case, and the
+#   spelling post-edit would have used) and git's `--show-toplevel` otherwise
+#   (a $PROJECT_DIR nested BELOW the toplevel, where porcelain paths are
+#   root-relative and `$PROJECT_DIR/$p` would be wrong). The two are compared
+#   through `pwd -P` because git returns symlink-RESOLVED paths while
+#   CLAUDE_PROJECT_DIR may be the unresolved spelling — /var/folders/... vs
+#   /private/var/folders/... on macOS, which is exactly how a mixed-spelling
+#   double count would arrive.
+#
+#   `??` UNTRACKED AND `D` DELETIONS ARE BOTH INCLUDED. A new file nobody
+#   reviewed and a deleted file nobody reviewed are both changes. Git COLLAPSES
+#   an untracked directory into one `?? dir/` entry, so a surviving entry ending
+#   in `/` is expanded with `status --porcelain -uall -- <dir>`; without that a
+#   file added later INSIDE an already-listed directory would not move the hash.
+#   The expansion runs only on survivors (rare) so the main call keeps the same
+#   invocation as the baseline writer — `comm -23` needs both sides produced
+#   identically, and a global `-uall` would make every baselined untracked
+#   directory's contents read as new.
+#
+#   WHAT THE WORKFLOW ITSELF REWRITES IS EXCLUDED — two paths, one rule.
+#   Membership test: rewritten by the gate's own machinery on essentially every
+#   invocation, and never authored by the work under review.
+#
+#     .claude/.qa-tracking/**     per-session gate bookkeeping.
+#                                verify-before-stop.sh's own is_beads_or_gate_path
+#                                calls it "workflow machinery, never reviewable
+#                                source", and it is NOT gitignored in every
+#                                install: install.sh writes that rule only when
+#                                the target has no .gitignore at all, so a project
+#                                that already had one has the gate's state
+#                                git-visible.
+#     .beads/interactions.jsonl  bd's interaction log, rewritten by EVERY bd call
+#                                including the gate's own add_comment and
+#                                `label add`. Measured, not assumed: it was the
+#                                one path that churned in every L2 gate fixture,
+#                                and it is what put `.beads/interactions.jsonl`
+#                                into an approval's bound file set.
+#
+#   Why the rule is not optional: reconciling either makes the change-set hash a
+#   function of the gate's own progress, and DEADLOCKS a cycle by construction.
+#   `enter` reconciles and then writes impact-report-<tid>.json; `approve`
+#   reconciles, sees that json as new, appends it, and the report it just
+#   enforced freshness on is now stale against a hash the enforcement itself
+#   moved. The same shape applies to a bd write landing between the two.
+#
+#   `.beads/issues.jsonl` is deliberately NOT excluded: it is the committed
+#   ledger, a real deliverable, and bd 1.1.2 rewrites it only on an explicit
+#   export — so it is stable across a cycle and belongs in the change set, which
+#   is what the denylist header means by "beads state stays in the change set".
+#
+#   FILTERED ON THE ABSOLUTE SPELLING, because that is the string that would
+#   enter the tracker and the hash, and it is what post-edit.sh filters. The
+#   Stop hook's git half filters the repo-relative spelling, so the two can
+#   disagree only for the `^`-anchored absolute branches of the denylist (a repo
+#   living inside /tmp/claude-<session>/). There the detector over-reports
+#   relative to the hash, which is the fail-closed direction.
+#
+#   APPEND-ONLY, under the SAME lock post-edit.sh uses, so the two writers
+#   serialise where flock exists. Nothing is ever removed: this function can
+#   only grow the reviewed set.
+#
+# KNOWN LIMITS, named rather than left latent:
+#   - THE BASELINE IS SUBTRACTED AT LINE GRANULARITY, so a RE-WRITE of an
+#     already-baselined path is invisible. `comm -23` compares raw porcelain
+#     lines, which are not content-addressed: a path that was dirty when the
+#     baseline was captured stays subtracted however much it changes afterwards.
+#     It reaches neither the tracker nor change_set_hash nor the block reason,
+#     and this function still returns 0. Since 94d.1 it does NOT return silently:
+#     `subtracted=N` is in every observation next to `denylisted=N`, and each
+#     dropped path is named (inline up to the cap, in full in
+#     .claude/.qa-tracking/reconcile-subtracted.txt). The hole is unchanged; only
+#     its invisibility is closed.
+#     NO COMMIT IS REQUIRED; a second write in the same session is enough, which
+#     makes this strictly wider than the committed-work limit below (and wider
+#     than claude-workflow-plugin-dpe, which frames the hole as needing an
+#     intervening commit). Inherited from the gate baseline's FORMAT, not
+#     introduced here — the Stop hook's git half shares the blind spot because
+#     it subtracts the same file the same way — but it BOUNDS what this function
+#     can promise: for the write classes named at the top (Bash redirect, cp,
+#     mv, sed -i, generator scripts) it folds in the ones whose path was CLEAN
+#     at baseline capture, or whose status CODE has since changed, and only
+#     those. A collapsed `?? dir/` entry that was baselined is the same
+#     mechanism: a file created inside it does not surface.
+#
+#     THE MAGNITUDE AND THE TRIGGER, measured rather than estimated — and both
+#     are larger than the "re-write of one path" shape this limit was first
+#     written for (94d.1). The trigger that matters is not an incremental second
+#     write; it is a SESSION BOUNDARY. SessionStart deleted changed-files.txt
+#     unconditionally (including on `compact`), and the very next reconcile then
+#     re-derived the WHOLE change set through this subtraction, wholesale. On
+#     94d's own review that cost 16 of 26 paths at once — 62%, or 54% counted
+#     over QA's independent measurement of the same tree (60 git-visible, 29
+#     baseline-identical, 21 denylisted, 10 recovered). It scales with BASELINE
+#     AGE, because every path that has been dirty since the last capture is a
+#     line the subtraction will match: the baseline in that occurrence was ~35h
+#     old, written by an earlier cycle's approve. The deletion half is fixed at
+#     the deleter (session-start.sh's TRACKER-PRESERVE region); this limit is
+#     what remains once the tracker survives, and it is bounded by baseline age
+#     rather than by write count.
+#
+#     Pinned in both directions by specs/gate-baseline-v2.sh 7.6 / 7.7, with 7R
+#     forcing the subtraction branch alone to prove 7.6's cause, and 7S pinning
+#     that the drop is now reported. Tracked as `dpe`; NOT fixed here because
+#     content-addressing the baseline is its own change-set-hash migration, and
+#     the cheaper candidate (invalidate entries against the recorded head) would
+#     close only the committed variant.
+#   - A path git QUOTES (`"src/na\303\257ve.ts"`, control chars) is appended in
+#     its quoted spelling, because the baseline is written with the same
+#     quoting and `comm -23` must see identical bytes. The result over-reports
+#     a path that does not literally exist — fail-closed, and logged.
+#   - Work already COMMITTED is invisible to `git status`, so a tracker
+#     destroyed after a commit cannot be recovered from here.
+#
+# THIS IS NOT A RECOVERY PATH, and the distinction is structural rather than a
+# matter of degree (claude-workflow-plugin-94d.1). If changed-files.txt is LOST
+# — SessionStart used to delete it unconditionally, including on `compact` — what
+# this function rebuilds is necessarily a SUBSET of what was lost, and no
+# refinement of the baseline, the `comm`, or the filters can change that. Measured
+# on the loss that produced 94d.1: 16 of 26 paths went, through TWO mechanisms,
+# and only the first is even addressable here.
+#   CHANNEL A — 14 paths whose porcelain line was byte-identical to a gate-baseline
+#   entry, so `comm -23` subtracted them. Visible to git; reportable; that is what
+#   the accounting below exists to say out loud.
+#   CHANNEL B — 2 paths GIT CANNOT SEE AT ALL: `.claude/review-config`, whose
+#   content had been reverted so it was not dirty, and a
+#   `.claude/.qa-tracking/review-artifact-*.json`, which the shared self-written
+#   rule keeps out of the change set by design. Those two existed ONLY in the
+#   tracker. `git status` is this function's only source, so they are unrecoverable
+#   here in principle, not by omission.
+# Channel B is why prevention has to live at the deleter (session-start.sh's
+# TRACKER-PRESERVE region) and why this function's job is to ANNOUNCE that it
+# reconstructed, never to imply that it restored.
+#
+# Sets RECONCILE_ADDED (count added), RECONCILE_SUBTRACTED (count dropped as
+# already-baselined and NOT covered by the tracker), RECONCILE_SUBTRACTED_PATHS
+# (that list), RECONCILE_REBUILT_FROM_EMPTY (1 when the tracker was absent-or-
+# empty and a rebuild happened) and RECONCILE_OBS (human-readable).
+#
+# WHY THE SUBTRACTION IS REPORTED BUT DOES NOT CHANGE THE RETURN CODE. rc!=0 is
+# the "cannot determine the change set" signal, and every caller treats it as
+# refuse-to-proceed (approve refuses, the Stop hook blocks). Baseline subtraction
+# is the baseline's PURPOSE: in a repo that was merely dirty on arrival it drops
+# dozens of genuinely pre-existing paths on every call, so returning non-zero for
+# it would deadlock every cycle in every dirty checkout. The refusal that DOES
+# fire on it is narrower and lives in cmd_approve (error_key
+# change_set_reconstructed): reconstruction from an empty tracker AND a non-empty
+# subtraction, which together mean the set being bound is provably a subset.
+#
+# Sentinels are load-bearing: an L2 META-TEST strips every TRACKER-RECONCILE
+# region and asserts the Bash-written file stops entering the tracker and the
+# block reason. Do not rename them.
+RECONCILE_ADDED=0
+RECONCILE_OBS=""
+RECONCILE_SUBTRACTED=0
+RECONCILE_SUBTRACTED_PATHS=""
+RECONCILE_REBUILT_FROM_EMPTY=0
+RECONCILE_SUBTRACTED_FILE="$QA_TRACKING_DIR/reconcile-subtracted.txt"
+# How many subtracted paths are enumerated INLINE in RECONCILE_OBS. The rest are
+# counted and pointed at the sidecar. A cap is not tidiness: this string lands in
+# `enter`/`approve` JSON observations, and a repo dirty on arrival can subtract
+# 150 paths on every call — an unbounded list there would bury the count, which
+# is the part a reader acts on.
+RECONCILE_SUBTRACTED_INLINE_CAP=12
+reconcile_tracker() {
+    RECONCILE_ADDED=0
+    RECONCILE_OBS=""
+    RECONCILE_SUBTRACTED=0
+    RECONCILE_SUBTRACTED_PATHS=""
+    RECONCILE_REBUILT_FROM_EMPTY=0
+
+    # The full subtracted list, durable, because RECONCILE_OBS only carries the
+    # first $RECONCILE_SUBTRACTED_INLINE_CAP and two of the three callers discard
+    # the string entirely on the success path (the Stop hook reads RECONCILE_OUT
+    # only when rc!=0). TRUNCATED HERE, before any early return: a stale file from
+    # the previous call would otherwise read as this call's answer, which is the
+    # same defect class as everything else on this task. Lives under
+    # .claude/.qa-tracking/, so the self-written rule keeps it out of the change
+    # set and it cannot move change_set_hash.
+    RECONCILE_SUBTRACTED_FILE="$QA_TRACKING_DIR/reconcile-subtracted.txt"
+    : > "$RECONCILE_SUBTRACTED_FILE" 2>/dev/null || true
+
+    if [ -z "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
+        log_sync_error "reconcile_tracker: workflow-denylist.sh not loaded (looked in ${_WFDL_DIR:-<unresolvable script dir>}) — refusing to append to changed-files.txt with an unknown filter, which would put build output into an append-only file"
+        RECONCILE_OBS="tracker reconcile FAILED: the shared path denylist (workflow-denylist.sh) is not loaded, so which paths belong in the tracker is unknowable"
+        return 1
+    fi
+
+    if ! has_git_repo; then
+        RECONCILE_OBS="tracker reconcile skipped: $PROJECT_DIR is not a git checkout we can query, so there is no git-visible delta to reconcile against"
+        return 0
+    fi
+
+    local status_out
+    status_out=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null) || {
+        log_sync_error "reconcile_tracker: 'git status --porcelain' failed in $PROJECT_DIR — the git-visible change set is unknown, so changed-files.txt cannot be proven complete and the change-set hash may certify less than the actual diff"
+        RECONCILE_OBS="tracker reconcile FAILED: 'git status --porcelain' could not be read in $PROJECT_DIR, so the tracker cannot be proven complete"
+        return 1
+    }
+
+    # The absolute-path prefix for repo-root-relative porcelain paths.
+    local prefix="" top canon_pd canon_top
+    top=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || top=""
+    if [ -n "$top" ]; then
+        canon_pd=$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P) || canon_pd=""
+        canon_top=$(cd "$top" 2>/dev/null && pwd -P) || canon_top=""
+        if [ -n "$canon_pd" ] && [ "$canon_pd" = "$canon_top" ]; then
+            prefix="${PROJECT_DIR%/}"
+        else
+            prefix="${top%/}"
+        fi
+    fi
+    if [ -z "$prefix" ]; then
+        # A bare repo, or a toplevel we cannot resolve. `git status` would
+        # normally have failed already; refuse rather than guess a prefix.
+        log_sync_error "reconcile_tracker: could not resolve a working-tree root for $PROJECT_DIR (rev-parse --show-toplevel empty) — cannot spell porcelain paths absolutely, so the tracker cannot be reconciled"
+        RECONCILE_OBS="tracker reconcile FAILED: no resolvable working-tree root for $PROJECT_DIR"
+        return 1
+    fi
+
+    # Already-tracked set, in BOTH spellings — post-edit records absolute paths
+    # but a caller (or a fixture) may have seeded relative ones, and appending
+    # the other spelling of a file already present is the double count this
+    # function exists to avoid.
+    # Built by a plain loop rather than `$( ... | sort -u )`: bash 3.2's parser
+    # mis-reads `${t#"$prefix"/}` nested inside a command substitution (macOS
+    # ships 3.2, and the plugin supports it), and the set is only ever probed
+    # with `grep -qxF`, which does not need it sorted.
+    #
+    # BUILT HERE, ahead of the baseline subtraction, rather than after it as it
+    # was before 94d.1: the subtraction accounting below has to know which
+    # subtracted paths the tracker ALREADY covers (those are harmless) to isolate
+    # the ones it does not (those are the risk class), and it runs before the
+    # survivors are walked.
+    local tracking="$QA_TRACKING_DIR/changed-files.txt"
+    local tracked_set="" t rel
+    local tracker_was_empty=1
+    if [ -s "$tracking" ]; then
+        tracker_was_empty=0
+        while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            tracked_set="$tracked_set$t
+"
+            case "$t" in
+                "$prefix"/*)
+                    rel="${t#"$prefix"/}"
+                    tracked_set="$tracked_set$rel
+"
+                    ;;
+            esac
+        done < "$tracking"
+    fi
+
+    # Subtract the baseline. LC_ALL=C on BOTH sides: comm -23 needs one
+    # collation, and the writer pins C too (see write_gate_baseline).
+    local baseline current survivors subtracted=""
+    baseline=$(gate_baseline_entries | LC_ALL=C sort)
+    current=$(printf '%s\n' "$status_out" | LC_ALL=C sort | grep -v '^$' || true)
+    if [ -z "$current" ]; then
+        RECONCILE_OBS="tracker reconcile: working tree clean relative to HEAD; nothing to add (subtracted=0)"
+        return 0
+    fi
+    if [ -z "$baseline" ]; then
+        survivors="$current"
+    else
+        survivors=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
+        # SUBTRACTION-ACCOUNTING BEGIN (94d.1)
+        # The COMPLEMENT of the line above, and the whole point of 94d.1's
+        # visibility half: `comm -12` is the set `comm -23` threw away. Before
+        # this it was computed, discarded, and never mentioned — so a call that
+        # dropped 16 git-visible paths and a call that dropped none produced
+        # indistinguishable output.
+        subtracted=$(comm -12 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
+        # SUBTRACTION-ACCOUNTING END (94d.1)
+    fi
+
+    # The accounting clause, appended to every RECONCILE_OBS from here down.
+    # DECLARED OUTSIDE the SUBTRACTION-ACCOUNTING region below so the 7SM META's
+    # stripped copy stays coherent: with the region excised this stays the empty
+    # string and every observation reverts EXACTLY to its pre-94d.1 text, which is
+    # what makes that META measure the accounting rather than a syntax error.
+    # Same discipline as post-edit.sh's _PE_RESOLVED and approve's impact_obs.
+    local account_obs=""
+
+    # SUBTRACTION-ACCOUNTING BEGIN (94d.1)
+    # ---- ACCOUNT FOR WHAT THE BASELINE SUBTRACTED (94d.1) -------------------
+    #
+    # WHICH subtracted entries are reported, and why not all of them. A subtracted
+    # path that the tracker ALREADY holds is covered by the change set either way,
+    # so naming it would only dilute the count. What is reported is the residue:
+    # git-visible, reviewable, dropped as pre-existing, and absent from the
+    # tracker — i.e. every path that is in the working tree and outside
+    # change_set_hash. That is exactly the set a lost tracker's contents fall
+    # into, and also exactly the set genuine arrival dirt falls into. Reconcile
+    # cannot tell those apart (that is the honest limit, stated in the readout
+    # rather than resolved), so it reports the residue and says it cannot tell.
+    #
+    # NO `?? dir/` EXPANSION on this side, deliberately, unlike the survivors
+    # walk below. A collapsed untracked directory that was baselined hides its
+    # contents by the same mechanism; expanding it here would list files that were
+    # never individually baselined and inflate the count with paths whose status
+    # this function did not actually decide. The DIRECTORY is named instead, which
+    # is the honest granularity of what was dropped.
+    #
+    # COST, named because this runs on every Stop: two `grep -qxF` per subtracted
+    # entry, and the subtracted set can be much larger than the survivor set (in a
+    # repo dirty on arrival it is most of the baseline). It is the SAME per-path
+    # shape the append loop below already uses — deliberately, so the two
+    # membership tests cannot drift apart — and it is skipped entirely when the
+    # tracker is empty, which is the case this accounting exists for. A single
+    # `grep -vxF -f` pass would be cheaper but would have to normalise every
+    # tracked entry to one spelling first, which changes what the APPEND side
+    # sees; that is not a change this task should make blind.
+    local sub_line sub_p sub_abs
+    local sub_paths="" sub_count=0
+    if [ -n "$subtracted" ]; then
+        while IFS= read -r sub_line; do
+            [ -z "$sub_line" ] && continue
+            sub_p="${sub_line#???}"
+            case "$sub_p" in *" -> "*) sub_p="${sub_p##* -> }" ;; esac
+            [ -n "$sub_p" ] || continue
+            sub_abs="$prefix/$sub_p"
+            # Same two filters the append side applies, for the same reason: a
+            # denylisted or self-written path is not reviewable work, so its
+            # absence from the change set is correct and reporting it is noise.
+            if workflow_self_written "$sub_abs"; then
+                continue
+            fi
+            if [[ "$sub_abs" =~ $WORKFLOW_DENYLIST_REGEX ]]; then
+                continue
+            fi
+            # Already covered by the tracker in either spelling -> harmless.
+            if [ -n "$tracked_set" ] && printf '%s\n' "$tracked_set" | grep -qxF -- "$sub_abs"; then
+                continue
+            fi
+            if [ -n "$tracked_set" ] && printf '%s\n' "$tracked_set" | grep -qxF -- "$sub_p"; then
+                continue
+            fi
+            sub_paths="$sub_paths$sub_abs
+"
+            sub_count=$((sub_count + 1))
+        done <<< "$subtracted"
+    fi
+    RECONCILE_SUBTRACTED="$sub_count"
+    RECONCILE_SUBTRACTED_PATHS="$sub_paths"
+    if [ -n "$sub_paths" ]; then
+        printf '%s' "$sub_paths" > "$RECONCILE_SUBTRACTED_FILE" 2>/dev/null || true
+    fi
+
+    # A rebuild from an absent-or-empty tracker. `current` is non-empty by the
+    # early return above, so reaching here with an empty tracker means every path
+    # the tracker ends up holding came from `git status` rather than from a
+    # recorded edit.
+    if [ "$tracker_was_empty" = "1" ]; then
+        RECONCILE_REBUILT_FROM_EMPTY=1
+    fi
+
+    # `subtracted=N` is set unconditionally, next to `denylisted=N`, so a reader
+    # can never wonder whether a zero means "none" or "not measured" — and
+    # `added=0` can never again stand alone as the whole story.
+    account_obs="; subtracted=$RECONCILE_SUBTRACTED"
+    if [ "$RECONCILE_SUBTRACTED" -gt 0 ]; then
+        local sub_shown sub_extra=0
+        sub_shown=$(printf '%s' "$sub_paths" | head -n "$RECONCILE_SUBTRACTED_INLINE_CAP" | tr '\n' ' ')
+        if [ "$RECONCILE_SUBTRACTED" -gt "$RECONCILE_SUBTRACTED_INLINE_CAP" ]; then
+            sub_extra=$((RECONCILE_SUBTRACTED - RECONCILE_SUBTRACTED_INLINE_CAP))
+        fi
+        account_obs="; SUBTRACTED $RECONCILE_SUBTRACTED git-visible path(s) as already-baselined and NOT covered by changed-files.txt — they are outside the change set and outside change_set_hash. reconcile CANNOT distinguish pre-existing arrival dirt from session work whose tracker entry was lost (94d.1): $sub_shown"
+        if [ "$sub_extra" -gt 0 ]; then
+            account_obs="$account_obs(+$sub_extra not shown; full list in $RECONCILE_SUBTRACTED_FILE)"
+        fi
+    fi
+    if [ "$RECONCILE_REBUILT_FROM_EMPTY" = "1" ]; then
+        account_obs="$account_obs; REBUILT FROM AN EMPTY TRACKER: changed-files.txt was absent-or-empty when this reconcile ran, so every path it now holds came from 'git status', not from a recorded edit. ASSUMPTION MADE: that no tool edit had happened yet. reconcile cannot tell that from 'the tracker was destroyed', and it is NOT a recovery path — a file whose content was reverted and the gate's own artifacts are invisible to git, so a rebuild is only ever a SUBSET (94d.1)"
+        # The narrow alarm, and the only sync-errors.log line this function writes
+        # for the accounting. Gated on a cycle being in flight because an empty
+        # tracker with no cycle open is unremarkable (a fresh session, nothing
+        # recorded yet) and the Stop hook reconciles on EVERY stop — logging it
+        # unconditionally would flood the log that warning 3 of session-start.sh
+        # renders. With a cycle open the tracker is append-only by contract, so
+        # empty means either "nothing recorded in this cycle" or "destroyed", and
+        # both are worth a durable line.
+        if [ -s "$QA_TRACKING_DIR/current-task" ]; then
+            log_sync_error "reconcile_tracker: changed-files.txt was absent-or-empty while a gate cycle was in flight ($(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '[:space:]')), so the change set was REBUILT from git status alone; $RECONCILE_SUBTRACTED further git-visible path(s) were dropped as already-baselined (see $RECONCILE_SUBTRACTED_FILE). A rebuild can only be a subset — a reverted-content file and the gate's own artifacts are invisible to git (94d.1)"
+        fi
+    fi
+    # SUBTRACTION-ACCOUNTING END (94d.1)
+
+    if [ -z "$survivors" ]; then
+        RECONCILE_OBS="tracker reconcile: every git-visible entry is already in the gate baseline (pre-existing dirt); nothing to add$account_obs"
+        return 0
+    fi
+
+    local line code p abs quoted=0 denied=0
+    local candidates="" expanded _exp_raw
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        code="${line:0:2}"
+        p="${line#???}"
+        # Rename/copy entries are "R  old -> new"; the destination is the path
+        # a tracker entry would name.
+        case "$p" in *" -> "*) p="${p##* -> }" ;; esac
+        [ -n "$p" ] || continue
+        case "$p" in '"'*) quoted=$((quoted + 1)) ;; esac
+        # A collapsed untracked DIRECTORY: expand to the files inside it.
+        case "$code" in
+            '??')
+                case "$p" in
+                    */)
+                        expanded=""
+                        # Run from $prefix (the working-tree ROOT), not from
+                        # $PROJECT_DIR: porcelain paths are root-relative, and a
+                        # pathspec is CWD-relative — from a nested $PROJECT_DIR
+                        # the pathspec would match nothing and every collapsed
+                        # directory would silently stay collapsed.
+                        if _exp_raw=$(git -C "$prefix" status --porcelain -uall -- "$p" 2>/dev/null); then
+                            expanded=$(printf '%s\n' "$_exp_raw" | sed 's/^...//' | grep -v '^$' || true)
+                        fi
+                        if [ -n "$expanded" ]; then
+                            candidates="$candidates$expanded
+"
+                            continue
+                        fi
+                        # Expansion unavailable: keep the directory entry rather
+                        # than drop it (fail closed on something over nothing).
+                        ;;
+                esac
+                ;;
+        esac
+        candidates="$candidates$p
+"
+    done <<< "$survivors"
+
+    local to_add=""
+    while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        abs="$prefix/$p"
+        # PATHS THE WORKFLOW ITSELF REWRITES — the ONE rule, in the lib, because
+        # verify-before-stop.sh's git walk must apply the IDENTICAL rule or the
+        # tracker and the detector disagree about the change set (they did: the
+        # tracker excluded .beads/interactions.jsonl while the detector included
+        # it, which killed the F1 doc-only fast path for every change set once any
+        # bd call had run). See workflow_self_written's header for the membership
+        # test and for why it is not part of WORKFLOW_DENYLIST_REGEX.
+        if workflow_self_written "$abs"; then
+            continue
+        fi
+        if [[ "$abs" =~ $WORKFLOW_DENYLIST_REGEX ]]; then
+            denied=$((denied + 1))
+            continue
+        fi
+        # Already present in either spelling?
+        if [ -n "$tracked_set" ] && printf '%s\n' "$tracked_set" | grep -qxF -- "$abs"; then
+            continue
+        fi
+        if [ -n "$tracked_set" ] && printf '%s\n' "$tracked_set" | grep -qxF -- "$p"; then
+            continue
+        fi
+        # Exact line match, not a substring test: one candidate path can be a
+        # suffix of another and a `case` glob would silently drop it.
+        if [ -n "$to_add" ] && printf '%s' "$to_add" | grep -qxF -- "$abs"; then
+            continue
+        fi
+        to_add="$to_add$abs
+"
+    done <<< "$candidates"
+
+    if [ -z "$to_add" ]; then
+        RECONCILE_OBS="tracker reconcile: changed-files.txt already covers every reviewable git-visible path (denylisted=$denied)$account_obs"
+        return 0
+    fi
+
+    mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
+    # A tracker whose last line lacks its newline (hand-edited; post-edit.sh
+    # always writes one) would otherwise get our first path concatenated onto it.
+    if [ -s "$tracking" ] && [ "$(tail -c 1 "$tracking" 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; then
+        to_add="
+$to_add"
+    fi
+    local lock="$QA_TRACKING_DIR/.changed-files.lock"
+    local append_rc=0
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -x 9
+            printf '%s' "$to_add" >> "$tracking"
+        ) 9>"$lock" || append_rc=$?
+    else
+        # One write() for the whole block: short appends to an O_APPEND fd do
+        # not interleave, which is the same safety class post-edit.sh's
+        # no-flock append relies on.
+        printf '%s' "$to_add" >> "$tracking" || append_rc=$?
+    fi
+    if [ "$append_rc" -ne 0 ]; then
+        log_sync_error "reconcile_tracker: could not append $(printf '%s' "$to_add" | grep -c . | tr -d ' ') reconciled path(s) to $tracking (rc=$append_rc) — the tracker still under-covers the git-visible change set"
+        RECONCILE_OBS="tracker reconcile FAILED: append to $tracking returned rc=$append_rc$account_obs"
+        return 1
+    fi
+
+    RECONCILE_ADDED=$(printf '%s' "$to_add" | grep -c . | tr -d ' ')
+    RECONCILE_OBS="tracker reconciled: +$RECONCILE_ADDED git-visible path(s) that no Write/Edit hook recorded (denylisted=$denied)$account_obs"
+    if [ "$quoted" -gt 0 ]; then
+        log_sync_error "reconcile_tracker: $quoted porcelain entr(y|ies) carried a git-QUOTED path; they are reconciled in their quoted spelling, which over-reports a literal path that does not exist (fail-closed, see the function header)"
+        RECONCILE_OBS="$RECONCILE_OBS; WARNING $quoted git-quoted path(s) reconciled in quoted spelling"
+    fi
+    return 0
+}
+# TRACKER-RECONCILE END (94d)
 
 # 0wk.2 fix: paired with write_approved_baseline. The legacy approve path
 # left changed-files.txt populated; the next post-edit.sh would append
@@ -750,12 +1374,32 @@ usage() {
     cat >&2 <<'USAGE'
 Usage: qa-gate.sh <subcommand> <task-id> [args]
   enter   <task-id>
-              Also generates the mechanical impact report
+              Reconciles changed-files.txt against `git status` (94d), then
+              generates the mechanical impact report
               (.claude/.qa-tracking/impact-report-<task-id>.json) via
-              impact-report.sh — tolerant, enter never fails because of it.
+              impact-report.sh — in that order, so the report's
+              change_set_hash covers the whole git-visible delta. Both steps
+              are tolerant: enter never fails because of either.
   status  <task-id>
-  approve <task-id> [--no-impact-report '<reason>'] [--no-review '<reason>']
+  approve <task-id> [--accept-reconstructed '<reason>']
+          [--no-impact-report '<reason>'] [--no-review '<reason>']
           <approval-summary>
+              REFUSES (exit 2, error_key change_set_reconstructed) when all
+              three hold: changed-files.txt was absent-or-empty when the
+              reconcile ran (so the set was REBUILT from `git status`), the
+              rebuild produced a NON-EMPTY set, and it ALSO dropped
+              git-visible path(s) as already-baselined — i.e. real work is
+              being certified over a proven SUBSET of the working tree
+              (94d.1). The dropped paths are named in the refusal and in
+              .claude/.qa-tracking/reconcile-subtracted.txt. An EMPTY rebuilt
+              set is NOT refused: that is the normal shape of a no-op approve
+              in a dirty checkout and is indistinguishable from it.
+              --accept-reconstructed '<reason>' bypasses it (the observation is
+              inferential: a destroyed tracker and an all-Bash session in a
+              repo that was dirty on arrival look identical to the reconcile,
+              and a human reading the paths can tell them apart). The reason is
+              recorded in the approval comment and the gate JSON.
+
               REFUSES (exit 2, structured error) when the impact report is
               missing or stale (change_set_hash != current changed-files
               list). Regenerate with:
@@ -788,6 +1432,7 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                 QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id>
                 worktree=<tok> at <ts>: <summary>
                 [ [impact-report bypass: ...]][ [review bypass: ...]]
+                [ [reconstructed change set accepted: ...]]
   block   <task-id> <reason>
   baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
               Write .claude/.qa-tracking/gate-baseline — the snapshot of
@@ -797,6 +1442,18 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               bd, no labels. session-start.sh calls this (--by session-start)
               when no review cycle is active; `enter` and `approve` write it
               themselves.
+  reconcile-tracker
+              Append every git-visible changed path that changed-files.txt is
+              missing (94d). post-edit.sh only sees Write/Edit/MultiEdit/
+              NotebookEdit, so a file written by a Bash redirect, `cp`, `sed
+              -i` or a generator script never entered the tracker — and the
+              tracker is what change_set_hash() hashes, so the gate could name
+              N paths and release on an approval binding fewer. Non-git tree:
+              no-op. Emits absolute paths; subtracts the gate baseline and the
+              shared denylist; never removes anything. Exit 2 when the
+              reconcile cannot be completed (git unreadable), which every
+              caller treats as refuse-to-proceed. No task id, no bd, no
+              labels.
   choose  <approve|continue|tech-debt|defer> <task-id> <note> [tech-debt: severity file:line effort]
               Record a J21 decision while qa-escalated. The note is the
               human-readable rationale; for `tech-debt` the note becomes
@@ -1065,6 +1722,17 @@ cmd_enter() {
             refreshed_obs="$refreshed_obs; cleared prior escalation labels (escalated=$was_escalated deferred=$was_deferred) and reset iteration state"
         fi
         refreshed_obs="$refreshed_obs$rubric_verdict_obs"
+        # TRACKER-RECONCILE BEGIN (94d)
+        # Before the report is generated, not after: the report records the
+        # change_set_hash of the tracker AS IT IS when it runs, and approve
+        # refuses on any later drift. Reconciling first is what makes the
+        # artifact cover the whole git-visible delta rather than the subset the
+        # Write/Edit hook saw. Tolerant here for the same reason the report
+        # itself is (enter is documented tolerant, qa-gate.sh:1102-1106 class);
+        # approve is where an unreconcilable tracker REFUSES.
+        reconcile_tracker || true
+        refreshed_obs="$refreshed_obs; $RECONCILE_OBS"
+        # TRACKER-RECONCILE END (94d)
         # G2.n6d: refresh the mechanical impact report on re-enter too —
         # a resumed cycle reviews the CURRENT change set, so the artifact
         # must reflect it. Tolerant: enter never fails because of this.
@@ -1120,6 +1788,34 @@ cmd_enter() {
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     add_comment "$tid" "QA-GATE: entered at $ts"
 
+    # TRACKER-RECONCILE BEGIN (94d)
+    # Fold every git-visible path the Write/Edit hook never saw into the tracker
+    # BEFORE the impact report binds a change_set_hash to it.
+    #
+    # AFTER write_gate_baseline above, and the order is not arbitrary. The
+    # reconciler subtracts the baseline, so with one in place a cycle opening in
+    # a dirty tree reconciles only this session's delta. Reversing the two would
+    # be worse, not better: with no baseline yet, the reconciler would append the
+    # ENTIRE dirty tree — someone else's half-finished refactor included — into
+    # this task's change set and its approval binding, which is the 0wk.2 symptom
+    # the baseline exists to prevent.
+    #
+    # RESIDUAL, inherited and unresolvable here: when NO baseline exists at this
+    # point, write_gate_baseline --exclude-tracked can only exclude what the
+    # TRACKER knows, so a Bash-written file gets baselined as "pre-existing" and
+    # the reconcile below then finds nothing new. Reaching that state needs a
+    # session with no session-start baseline AND no prior enter (session-start
+    # skips the capture while a cycle is active, and enter/approve both write
+    # one), so it is rare — but it is real, and it cannot be fixed by reordering:
+    # without a baseline there is no signal that separates "dirty because this
+    # session wrote it" from "dirty on arrival". The fix would be a session-start
+    # capture that runs even mid-cycle, which is claude-workflow-plugin-fkm.1.2's
+    # half (a), not this one's.
+    #
+    # Tolerant (enter is documented tolerant); approve is where this refuses.
+    reconcile_tracker || true
+    # TRACKER-RECONCILE END (94d)
+
     # G2.n6d: generate the mechanical impact report as part of packet
     # assembly. Tolerant by contract — a failed generation degrades to a
     # WARNING in the observations + sync-errors.log; enter still succeeds.
@@ -1135,6 +1831,9 @@ cmd_enter() {
     # unreachable on this path by construction, and the observation says which
     # of the two clears fired rather than just that one did.
     extra_obs="$extra_obs$rubric_verdict_obs"
+    # TRACKER-RECONCILE BEGIN (94d)
+    extra_obs="$extra_obs; $RECONCILE_OBS"
+    # TRACKER-RECONCILE END (94d)
     emit_json 1 "enter" "$tid" "entered" "qa-gate-entered + rubric-pending labels set at $ts; current-task persisted.$persist_warn$extra_obs$IMPACT_REPORT_OBS"
 }
 
@@ -1186,8 +1885,40 @@ cmd_approve() {
     local bypass_review=0
     local review_bypass_reason=""
     local summary=""
+    # CHANGE-SET-RECONSTRUCTED BEGIN (94d.1)
+    local bypass_reconstructed=0
+    local reconstructed_bypass_reason=""
+    # CHANGE-SET-RECONSTRUCTED END (94d.1)
     while [ $# -gt 0 ]; do
         case "$1" in
+            # CHANGE-SET-RECONSTRUCTED BEGIN (94d.1)
+            --accept-reconstructed)
+                # 94d.1: the audited bypass for the change_set_reconstructed
+                # refusal below. Mirrors --no-impact-report / --no-review,
+                # including the empty-reason refusal.
+                #
+                # This one HAS a bypass where tracker_unreconcilable deliberately
+                # does not, and the difference is what the two predicates can
+                # PROVE. "git status failed" is mechanical: the change set is
+                # genuinely unknowable and no operator judgement can supply it.
+                # "the tracker was empty and N paths were subtracted as
+                # already-baselined" is INFERENTIAL: the same observation is
+                # produced by a destroyed tracker and by a session whose work was
+                # entirely Bash-mediated in a repo that was dirty on arrival.
+                # reconcile cannot tell those apart (see its header) — a human
+                # looking at the named paths can. Refusing with no exit would
+                # deadlock the second case with nothing to fix.
+                bypass_reconstructed=1
+                reconstructed_bypass_reason="${2:-}"
+                if [ -z "$reconstructed_bypass_reason" ]; then
+                    emit_error_json "approve" "$tid" "bypass_reason_required" \
+                        "--accept-reconstructed requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the change-set completeness check is indistinguishable from approving a change set nobody established" \
+                        "qa-gate.sh approve $tid --accept-reconstructed '<reason>' '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            # CHANGE-SET-RECONSTRUCTED END (94d.1)
             --no-impact-report)
                 bypass_impact=1
                 bypass_reason="${2:-}"
@@ -1298,6 +2029,125 @@ cmd_approve() {
         # would make every such grep a silent false positive.
         stale_label_obs="; NOTE qa-approved was already set but no approval record bound this change set (reference hash=${idem_ref:-<unavailable>} via ${IDEM_REF_SOURCE:-<unavailable>}) — preconditions re-verified and a FRESH record written (stale-label re-bind, gz3)"
     fi
+
+    # TRACKER-RECONCILE BEGIN (94d)
+    # RECONCILE BEFORE THE IMPACT-REPORT REFUSAL, and refuse when it cannot be
+    # done. Ordering is the whole point: the refusal below compares the report's
+    # recorded change_set_hash against the CURRENT one, and this is what makes
+    # "current" mean the git-visible change set rather than the subset a
+    # Write/Edit hook recorded. Reconciling AFTER would bind an approval to a
+    # hash computed over an under-covering list — the defect itself.
+    #
+    # This is a REFUSAL, not a warning, and unlike the impact-report refusal it
+    # has NO bypass flag. An unreconcilable tracker means we cannot say what the
+    # change set IS; every downstream credential this approve writes (the bound
+    # approval record, the reviewed hash, the rubric binding) would be a claim
+    # about an unknown quantity. --no-impact-report waives an ANALYSIS whose
+    # degradation is documented; there is no comparable degraded mode for "we do
+    # not know which files changed".
+    #
+    # Declared before the sentinel-wrapped block below so the META-TEST's
+    # stripped copy stays coherent.
+    if ! reconcile_tracker; then
+        emit_error_json "approve" "$tid" "tracker_unreconcilable" \
+            "approve refused: the change-set tracker could not be reconciled against git, so the change set this approval would bind is unprovable. $RECONCILE_OBS. Fix the underlying git error and re-run approve; there is deliberately no bypass flag — an approval bound to an unknown change set is worse than no approval (94d)." \
+            "qa-gate.sh approve <task-id> [--no-impact-report '<reason>'] [--no-review '<reason>'] <summary>"
+        exit 2
+    fi
+    local reconcile_obs="; $RECONCILE_OBS"
+    # TRACKER-RECONCILE END (94d)
+
+    # CHANGE-SET-RECONSTRUCTED BEGIN (94d.1)
+    # THE MATERIALLY-SHORT REFUSAL — fkm.1.2 half (b), generalised because its
+    # original form is now unreachable.
+    #
+    # fkm.1.2 (b) asked approve to refuse "when the change set is EMPTY while git
+    # shows un-baselined dirt". That guard cannot fire any more, and P1 is why:
+    # the tracker reconcile folds un-baselined dirt INTO the tracker before
+    # anything reads it, so "empty tracker + un-baselined dirt" is not a state
+    # approve can observe. (Spelled in prose rather than with the function's own
+    # identifier deliberately: this comment sits OUTSIDE the TRACKER-RECONCILE
+    # sentinels, and 7M asserts that stripping those regions leaves zero mentions
+    # of that name — a prose mention here fails that leg, which is exactly how it
+    # was caught.) The failure it was written for did not go away — it changed
+    # shape.
+    # On 94d's own review the same trigger (SessionStart deleting the tracker at a
+    # compaction) produced a NON-EMPTY, plausible, 10-of-26-path set and a
+    # confident `+10 git-visible path(s)`. There is no zero left to trip on, so
+    # the predicate has to be "materially short" rather than "empty".
+    #
+    # WHAT "MATERIALLY SHORT" MEANS HERE, and why it is not a ratio. THREE facts
+    # from the reconcile that just ran, none of them inferred from the tracker's
+    # own contents:
+    #   (1) RECONCILE_REBUILT_FROM_EMPTY — changed-files.txt was absent-or-empty
+    #       when the reconcile ran, so every path in the set being bound came from
+    #       `git status`, not from a recorded edit. The tracker is APPEND-ONLY
+    #       during a cycle (post-edit appends, reconcile appends, nothing removes;
+    #       only approve and the Stop's release paths truncate), so empty during
+    #       an open cycle means either "nothing was ever recorded" or "it was
+    #       destroyed".
+    #   (2) RECONCILE_ADDED > 0 — the rebuild produced a NON-EMPTY change set, so
+    #       this approve is about to certify actual work.
+    #   (3) RECONCILE_SUBTRACTED > 0 — and it ALSO dropped N git-visible,
+    #       reviewable paths as already-baselined. So the set being certified is a
+    #       PROVEN SUBSET of the working tree's reviewable dirt.
+    # Together they are the state where binding an approval is strictly worse than
+    # not binding one: it converts an under-covered review into a signed
+    # attestation of completeness. The live 94d.1 occurrence sits exactly here
+    # (added=10, subtracted=16).
+    #
+    # WHY CLAUSE (2) IS THERE, MEASURED rather than assumed. Without it the
+    # refusal also fires on `added=0, subtracted>0` — an EMPTY change set with
+    # baselined dirt around it — and that is a common, legitimate state, not a
+    # loss: a task closed with no code change, a doc-only fast path, or simply a
+    # session that did nothing while the repo happened to be dirty on arrival.
+    # It is the state of the L1 `qa-gate-choose` and `qa-gate-grade-record`
+    # fixtures, whose approve calls this refusal broke before clause (2) was
+    # added (their one "subtracted" entry is the fixture's own untracked
+    # `.claude/scripts/` directory). The gate already treats an empty change set
+    # as "nothing to review" everywhere else; refusing it here would be a wide
+    # false positive for a narrow gain.
+    #
+    # WHAT CLAUSE (2) THEREFORE DOES NOT COVER, named rather than left latent: a
+    # session whose work was ENTIRELY Bash-written to paths that were ALL already
+    # dirty at baseline capture reads as `added=0` and is not refused, even though
+    # its change set is hollow. That is fkm.1.2's ORIGINAL empty-binding concern,
+    # and this predicate cannot separate it from the legitimate empty cases above
+    # — the observations are identical. It is REPORTED either way (`subtracted=N`
+    # plus the paths, and the rebuild announcement), which is the honest limit of
+    # what this evidence supports: escalating to a refusal there would block every
+    # no-op approve in a dirty checkout.
+    #
+    # WHY NOT A COMPARISON OF TWO COUNTS. Because both counts a truncated tracker
+    # can offer are derived from the truncated tracker. That is precisely how the
+    # impact-report freshness check missed this: `recorded_hash == current_hash`
+    # holds when BOTH describe the shrunken set, so it detects DRIFT and is blind
+    # to LOSS. Neither input above is read from the tracker's contents — (1) is the
+    # emptiness of the file at a known instant, (2) is a count taken from `git
+    # status` and the baseline.
+    #
+    # PLACED BEFORE THE IMPACT-REPORT REFUSAL, for the reason that block's own
+    # header gives about the reconcile: what the change set IS has to be settled
+    # before anything reasons about it. A report validated against a set nobody
+    # established is a fresh answer to the wrong question.
+    #
+    # INERT WHEN THE TRACKER-RECONCILE REGION IS STRIPPED (`:-0` defaults), so the
+    # 7M META's stripped copy keeps testing what it is aimed at rather than dying
+    # on an unset variable.
+    if [ "$bypass_reconstructed" != "1" ] \
+        && [ "${RECONCILE_REBUILT_FROM_EMPTY:-0}" = "1" ] \
+        && [ "${RECONCILE_ADDED:-0}" -gt 0 ] \
+        && [ "${RECONCILE_SUBTRACTED:-0}" -gt 0 ]; then
+        emit_error_json "approve" "$tid" "change_set_reconstructed" \
+            "approve refused: the change set this approval would bind was RECONSTRUCTED, and is provably short. changed-files.txt was absent-or-empty when the reconcile ran, so all ${RECONCILE_ADDED:-0} path(s) in it came from 'git status' rather than from a recorded edit — and that rebuild dropped ${RECONCILE_SUBTRACTED:-0} further git-visible path(s) as already-baselined. Dropped (first ${RECONCILE_SUBTRACTED_INLINE_CAP:-12} shown; FULL list in $QA_TRACKING_DIR/reconcile-subtracted.txt): $(printf '%s' "${RECONCILE_SUBTRACTED_PATHS:-}" | head -n "${RECONCILE_SUBTRACTED_INLINE_CAP:-12}" | tr '\n' ' '). A rebuild can only ever be a SUBSET — a file whose content was reverted, and the gate's own artifacts, are invisible to git — so binding an approval here would certify less than shipped (94d.1). Decide which it is: if those paths ARE this session's work, the tracker was destroyed and the review has to cover them; if they are genuinely pre-existing dirt, say so and proceed: bash .claude/scripts/qa-gate.sh approve $tid --accept-reconstructed '<reason>' '<summary>'" \
+            "qa-gate.sh approve <task-id> [--accept-reconstructed '<reason>'] [--no-impact-report '<reason>'] [--no-review '<reason>'] <summary>"
+        exit 2
+    fi
+    local reconstructed_obs=""
+    if [ "$bypass_reconstructed" = "1" ]; then
+        reconstructed_obs="; reconstructed-change-set bypass: $reconstructed_bypass_reason (change_set_reconstructed refusal waived via --accept-reconstructed; rebuilt_from_empty=${RECONCILE_REBUILT_FROM_EMPTY:-0} added=${RECONCILE_ADDED:-0} subtracted=${RECONCILE_SUBTRACTED:-0}; reason recorded per 94d.1)"
+    fi
+    # CHANGE-SET-RECONSTRUCTED END (94d.1)
 
     # G2.n6d: impact-report audit note. Declared OUTSIDE the sentinel
     # block below so (a) the bypass audit trail survives even if the
@@ -1642,6 +2492,18 @@ cmd_approve() {
     if [ "$rubric_mismatch" = "1" ]; then
         comment_suffix="$comment_suffix [rubric mismatch: graded=$rubric_graded_hash approved=$approved_hash]"
     fi
+    # CHANGE-SET-RECONSTRUCTED BEGIN (94d.1)
+    # Same reasoning as R2-F2 above, and it applies harder here: this bypass says
+    # "the change set I am binding was rebuilt from git and is provably short, and
+    # I judged the missing paths pre-existing". That judgement is exactly what a
+    # later audit needs to see, and an envelope read once by whoever typed the
+    # command is not where it survives. Bracketed suffix, after every machine
+    # token, so the `change_set_hash=` / `reviewed_by=` / `worktree=` captures
+    # stop where they always did.
+    if [ "$bypass_reconstructed" = "1" ]; then
+        comment_suffix="$comment_suffix [reconstructed change set accepted: $reconstructed_bypass_reason (subtracted=${RECONCILE_SUBTRACTED:-0})]"
+    fi
+    # CHANGE-SET-RECONSTRUCTED END (94d.1)
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local hash_field=""
     if [ -n "$approved_hash" ]; then
@@ -1810,7 +2672,10 @@ cmd_approve() {
         binding_obs="; WARNING approval comment written WITHOUT a change-set binding (hash unavailable) — verify-before-stop cannot match it; re-run approve once impact-report.sh is restored"
     fi
 
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs$impact_obs$review_obs$binding_obs$stale_label_obs"
+    # ${reconcile_obs:-} and ${reconstructed_obs:-} expand to empty when their
+    # sentinel regions (TRACKER-RECONCILE / CHANGE-SET-RECONSTRUCTED) are stripped
+    # by a META-TEST, keeping the stripped copy's envelope coherent.
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs$binding_obs$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -2794,10 +3659,11 @@ cmd_baseline_capture() {
     done
 
     if write_gate_baseline "$by" ${passthru[@]+"${passthru[@]}"}; then
+        # Counted through the ONE header-skip reader in this file
+        # (gate_baseline_entries), not a second copy of its awk.
         local n="0"
-        if [ -f "$GATE_BASELINE_FILE" ]; then
-            n=$(awk 'body { c++ } /^--$/ { body = 1 } END { print c + 0 }' "$GATE_BASELINE_FILE" 2>/dev/null || echo "0")
-        fi
+        n=$(gate_baseline_entries | grep -c . | tr -d ' ')
+        n="${n:-0}"
         emit_json 1 "baseline-capture" "" "captured" \
             "gate-baseline captured_by=$by entries=$n at $GATE_BASELINE_FILE"
         return 0
@@ -2806,6 +3672,36 @@ cmd_baseline_capture() {
         "gate-baseline capture failed (captured_by=$by); see sync-errors.log"
     exit 2
 }
+
+# TRACKER-RECONCILE BEGIN (94d)
+# cmd_reconcile_tracker — the subcommand form of reconcile_tracker, so
+# verify-before-stop.sh has ONE implementation to call instead of a second copy
+# of the walk (the same reason cmd_baseline_capture exists for session-start.sh,
+# and the same reason compute_change_set_hash defers to impact-report.sh
+# --hash-only). Deliberately does NOT require bd: no task is involved, no label
+# is touched, and the Stop hook must be able to run it on a repo with no Beads
+# workspace at all.
+#
+# Exit codes: 0 reconciled (or legitimately nothing to do), 2 the reconcile
+# could not be completed — the caller must treat that as refuse-to-proceed.
+cmd_reconcile_tracker() {
+    if [ "$#" -gt 0 ]; then
+        emit_error_json "reconcile-tracker" "" "unknown_flag" \
+            "unknown argument '$1'; reconcile-tracker takes none" \
+            "qa-gate.sh reconcile-tracker"
+        exit 1
+    fi
+    if reconcile_tracker; then
+        emit_json 1 "reconcile-tracker" "" "reconciled" \
+            "${RECONCILE_OBS:-nothing to reconcile} (added=$RECONCILE_ADDED)"
+        return 0
+    fi
+    emit_error_json "reconcile-tracker" "" "tracker_unreconcilable" \
+        "${RECONCILE_OBS:-tracker reconcile failed}; the change-set hash would certify less than the actual diff, so callers must refuse to proceed rather than bind an unproven change set" \
+        "qa-gate.sh reconcile-tracker"
+    exit 2
+}
+# TRACKER-RECONCILE END (94d)
 
 # ---------------------------------------------------------------------------
 # Dispatch
@@ -2816,6 +3712,9 @@ shift || true
 case "$SUB" in
     enter)        cmd_enter "$@" ;;
     baseline-capture) cmd_baseline_capture "$@" ;;
+# TRACKER-RECONCILE BEGIN (94d)
+    reconcile-tracker) cmd_reconcile_tracker "$@" ;;
+# TRACKER-RECONCILE END (94d)
     status)       cmd_status "$@" ;;
     approve)      cmd_approve "$@" ;;
     block)        cmd_block "$@" ;;

@@ -197,6 +197,14 @@ bash "$QG" enter "$TID_DOC" >/dev/null
 # After enter, current-task is set. Now provide ONLY doc-paths in the
 # changed list.
 printf 'README.md\ndocs/architecture.md\n' > "$TRACK/changed-files.txt"
+# 94d: account for this fixture's INCIDENTAL dirt so the change set really is
+# only the two doc paths above. The `git init` at case 7 left every file in the
+# fixture untracked, and `bd init` scaffolded `.gitignore`, `CLAUDE.md` and
+# `AGENTS.md` on top — so without a baseline the reconciler correctly reads
+# `.gitignore` as this session's work, DOC_ONLY goes false, and F1 never gets its
+# chance. See baseline_incidental_dirt in lib/fixture.sh for why the fixture (not
+# the reconciler) is what is wrong there.
+baseline_incidental_dirt "$FIXTURE"
 # Capture stdout+stderr (bd update output bleeds into stdout); the JSON
 # envelope is on the last line.
 RAW=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" 2>&1)

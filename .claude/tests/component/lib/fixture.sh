@@ -46,6 +46,10 @@
 #       supported bd range. Specs that assert on records (IMPLEMENTER,
 #       REVIEW-ARTIFACT, QA-GATE APPROVED, RUBRIC, ...) must read through
 #       this, not through a bare `bd show --json`. See its own header.
+#
+#   assert_mutant_applied <label> <source> <mutant>
+#       The MUTANT DID NOT APPLY guard. Every mutation-META in this tier must
+#       call it immediately after building its mutant copy. See its header.
 
 if [ -n "${__COMPONENT_FIXTURE_SH_SOURCED:-}" ]; then
     return 0 2>/dev/null || true
@@ -283,6 +287,99 @@ bd_show_with_comments() {
     bd show "$tid" --json --include-comments 2>/dev/null \
         || bd show "$tid" --json 2>/dev/null \
         || true
+}
+
+# assert_mutant_applied <label> <source> <mutant> — the MUTANT DID NOT APPLY
+# guard. Call it immediately after building a mutant copy, before any assertion
+# that only means something against a real mutant.
+#
+# WHY IT EXISTS (claude-workflow-plugin-94d, QA finding R4-F4). A mutation META
+# earns its keep by changing ONE thing and watching exactly one leg flip. If the
+# mutation never applied, the "mutant" IS the shipped script: every leg then
+# measures shipped behaviour while reporting on a mutant, and the spec goes
+# GREEN. That is measured, not hypothesised — two mutants in the `dmi` round were
+# built with `\|` alternation, a GNU sed extension BSD sed does not support (this
+# tier runs on macOS). The copies came out byte-identical to the original, the
+# spec reported 97 pass / 0 fail, and that reads exactly like a healthy run. It
+# was caught by eye, which is not a mechanism. This is the mechanism.
+#
+# A byte-identical mutant is never a legitimate state: a mutation that changes
+# nothing tests nothing. So `cmp -s` and fail loudly.
+#
+# Returns 0 when the mutant differs from its source, 1 when it does not (or when
+# it is missing/empty), so call sites can gate their dependent legs:
+#
+#     if assert_mutant_applied "gbv2-9M" "$SRC" "$MUT"; then
+#         ... legs that are only meaningful against a real mutant ...
+#     fi
+#
+# Skipping those legs is the right answer: they cannot pass honestly. The guard
+# counts exactly one PASS or FAIL through assert_eq, so the runner still goes red
+# and names the guard rather than silently losing assertions.
+#
+# NOT a replacement for the per-mutant textual sanity checks ("the +2 form is
+# present", "the original +1 form is gone", "the strip removed lines"). Those pin
+# WHICH mutation landed; this pins THAT one did, which is the half that hides.
+assert_mutant_applied() {
+    local label="$1" src="$2" mut="$3"
+    if ! type assert_eq >/dev/null 2>&1; then
+        # No counter to bump: say so on stderr rather than return a silent 0,
+        # which is the exact class of failure this guard exists to prevent.
+        printf 'assert_mutant_applied: assert.sh is not sourced, so the guard for %s could not be COUNTED\n' \
+            "$label" >&2
+        return 1
+    fi
+    local state="applied"
+    if [ ! -f "$mut" ]; then
+        state="MISSING: the mutant file was never written"
+    elif [ ! -s "$mut" ]; then
+        state="EMPTY: the mutant file was written with no content"
+    elif [ ! -f "$src" ]; then
+        state="NO SOURCE: $src is not a readable file to compare against"
+    elif cmp -s "$src" "$mut"; then
+        state="MUTANT DID NOT APPLY: byte-identical to its source, so the edit matched nothing (a GNU-only sed/awk construct on BSD sed is the recorded cause)"
+    fi
+    assert_eq "$label: mutant applied (differs from its source)" "applied" "$state"
+    [ "$state" = "applied" ]
+}
+
+# baseline_incidental_dirt <root> — account for a fixture's INCIDENTAL git dirt
+# so the change set under test is the one the spec seeded.
+#
+# WHY THIS EXISTS (claude-workflow-plugin-94d). `qa-gate.sh reconcile-tracker`
+# folds every git-visible path that is NOT in the gate baseline into
+# changed-files.txt, because that file is what `change_set_hash` is computed over
+# and a path missing from it is a path no approval covers. A component fixture
+# that `git init`s but never captures a baseline therefore has ALL of its dirt —
+# the harness's own `bin/bd` wrapper and `detect-stack.sh` stub, whatever `bd
+# init` scaffolded (`.gitignore`, `CLAUDE.md`, `AGENTS.md`, `.codex/`), the
+# fixture's untracked directories — read as this session's work. Assertions then
+# fail for reasons that have nothing to do with the code under test: a change set
+# stops being doc-only because `.gitignore` is in it, a hash moves between `enter`
+# and `approve`, or a worktree delta stops being a subset of the approved set.
+#
+# THAT STATE IS NOT REALISTIC, which is why the fix belongs in the fixture. In
+# production `session-start.sh` captures a baseline on arrival for exactly this
+# purpose (see "The gate baseline" in docs/HOOKS.md, and gate-baseline-v2.sh
+# section 1.1 which pins that writer). A git repo with dirt and no baseline is a
+# state the runtime does not produce.
+#
+# `--exclude-tracked` is load-bearing: it drops paths already in
+# changed-files.txt, so the SUBJECT of the spec — whatever the spec seeded, or
+# post-edit recorded — is never baselined and stays gated. Only incidental dirt
+# is absorbed. Call it AFTER the tracker is seeded and BEFORE the Stop/approve
+# under test.
+#
+# Silent and best-effort by design: a spec that calls this on a non-git fixture
+# gets a no-op, which is the same thing the reconciler does there.
+baseline_incidental_dirt() {
+    local root="$1"
+    [ -n "$root" ] || return 0
+    [ -x "$root/.claude/scripts/qa-gate.sh" ] || [ -f "$root/.claude/scripts/qa-gate.sh" ] || return 0
+    ( cd "$root" 2>/dev/null || exit 0
+      CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
+          baseline-capture --by session-start --exclude-tracked >/dev/null 2>&1 ) || true
+    return 0
 }
 
 seed_review_records() {

@@ -20,8 +20,9 @@
 #   1  usage error
 #   4  the review request failed schema validation (via review-check.sh)
 #   5  Sol could not produce a valid artifact within budget (timeout, server
-#      gone, or still-invalid after the malformed-retry corrective turns) —
-#      NO artifact is written; the caller degrades to the Claude path
+#      gone, an unmarshalable tool-call frame, or still-invalid after the
+#      malformed-retry corrective turns) — NO artifact is written; the caller
+#      degrades to the Claude path
 #   6  iteration exceeds the max_review_iterations cap
 #
 # Transport / stub seams (mirror impact-report.sh's CODE_GRAPH_MCP_BIN):
@@ -294,8 +295,74 @@ validate_candidate() {
 }
 
 # The initial codex tool call (read-only sandbox).
-CALL=$(jq -nc --arg p "$ENVELOPE" --arg cwd "$PROJECT_DIR" \
+#
+# The envelope reaches jq BY FILE, never through argv (claude-workflow-plugin-
+# fkm.1.12). `--arg p "$ENVELOPE"` puts the ENTIRE review request on the jq
+# command line, so any change set whose assembled envelope exceeds the platform's
+# argv limit kills the exec with E2BIG. Measured on macOS 26.3 (Darwin 25.3),
+# `getconf ARG_MAX`=1048576: a 1568552-byte review request — 1.5x the limit before
+# the instruction header is even prepended — left $CALL EMPTY with the
+# assignment's status at 126. Linux is stricter still: it caps a SINGLE argument
+# at MAX_ARG_STRLEN (32 pages, typically 131072 bytes) far below its larger
+# ARG_MAX. `--rawfile` reads the same bytes off disk and is byte-identical to
+# `--arg` for the same string (verified on payloads containing quotes,
+# backslashes and tabs), so the lane no longer has a size ceiling on either
+# platform. Do NOT "fix" this by refusing oversize envelopes up front — that
+# would reinstate the ceiling this removes. $WORK is a mode-0700 mktemp dir
+# removed by the EXIT trap, so the envelope (which embeds the full change-set
+# diff) neither leaks to other users nor outlives the run.
+#
+# CONSEQUENCE FOR ERROR MESSAGES, and it is a rule rather than a preference
+# (QA finding R2-F4): NO operator-facing message may cite $ENVELOPE_FILE or any
+# other path under $WORK. fail_no_artifact exits, `trap cleanup EXIT` fires on
+# that same exit, and `rm -rf "$WORK"` runs before the operator has finished
+# reading the line — so a message naming the path sends them to look at something
+# that is guaranteed not to exist. Put the diagnostic VALUE in the message
+# (byte counts, exit codes, which precondition failed) and leave the path out.
+# Inlining a file's CONTENT is fine and is the sanctioned form — see the
+# initialize failure, which reads `tail -2 "$ERR"` into its own message.
+#
+# ONE PRE-EXISTING INSTANCE REMAINS, named so this rule is not read as already
+# satisfied everywhere: `log "mkfifo failed in $WORK"` above. It is not touched
+# here because it belongs to the larger trap-destroys-its-own-diagnostics gap
+# (validate_candidate's candidate.json and error_key, and $ERR on the final
+# failure) tracked at claude-workflow-plugin-fkm.1.14, which needs its own
+# round. Do not add a fourth instance while waiting for that one.
+ENVELOPE_FILE="$WORK/envelope.txt"
+if ! printf '%s' "$ENVELOPE" > "$ENVELOPE_FILE" 2>/dev/null || [ ! -s "$ENVELOPE_FILE" ]; then
+    fail_no_artifact "could not stage the review envelope for jq --rawfile: this run's temp dir is not writable, or the assembled envelope was empty; nothing was sent, no artifact"
+fi
+ENVELOPE_BYTES=$(wc -c < "$ENVELOPE_FILE" 2>/dev/null | tr -d '[:space:]')
+[ -n "$ENVELOPE_BYTES" ] || ENVELOPE_BYTES="unknown"
+
+CALL=$(jq -nc --rawfile p "$ENVELOPE_FILE" --arg cwd "$PROJECT_DIR" \
     '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"codex",arguments:{prompt:$p,sandbox:"read-only",cwd:$cwd}}}')
+CALL_RC=$?
+
+# FRAME-GUARD BEGIN (claude-workflow-plugin-fkm.1.12)
+# An unbuildable frame must fail LOUD and NOW.
+#
+# send_frame CANNOT detect this on its own: `printf '%s\n' "" >&3` returns 0, so
+# the `|| fail_no_artifact` below never fires on an empty $CALL. The server then
+# skips the blank line (a JSON-RPC reader has nothing to parse), no id=2 reply
+# ever arrives, and `wait_id 2` burns the ENTIRE timeout_seconds budget waiting
+# for a request that was never sent — measured at 45 minutes of dead wait
+# presenting as a paid review in progress, with an idle server holding stdin.
+# Asserting non-empty AND parseable turns that into an immediate named error.
+# Exit 5 (via fail_no_artifact) is the right contract slot: the request itself is
+# schema-valid (it already cleared review-check.sh, which has no size cap), the
+# invocation is well-formed (not 1), the iteration is in-cap (not 6), and no
+# artifact is written — so the caller's move is exactly the documented exit-5
+# move in orchestrator.md 5c Step D, degrade to the Claude lane. Retrying the
+# paid call would fail identically and deterministically.
+#
+# The sentinels are load-bearing: the META leg of the codex-review component spec
+# excises exactly this block to prove the guard is what converts the hang into a
+# fast named failure. Keep them if you move the block.
+if [ "$CALL_RC" -ne 0 ] || [ -z "$CALL" ] || ! printf '%s' "$CALL" | jq -e . >/dev/null 2>&1; then
+    fail_no_artifact "could not marshal the codex tool call — frame is empty or not valid JSON (jq rc=$CALL_RC, envelope $ENVELOPE_BYTES bytes); nothing was sent, no artifact"
+fi
+# FRAME-GUARD END (claude-workflow-plugin-fkm.1.12)
 send_frame "$CALL" || fail_no_artifact "could not write codex tool call (server gone)"
 wait_id 2; rc=$?
 [ "$rc" -eq 0 ] || fail_no_artifact "codex tool call exceeded ${TIMEOUT_S}s wall-clock budget (or server exited); no artifact"

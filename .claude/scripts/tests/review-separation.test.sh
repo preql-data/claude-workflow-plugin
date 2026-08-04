@@ -438,7 +438,13 @@ assert_eq "4.2 the V3 reviewed_by capture stops before worktree=" \
 # shapes proves the captures are invariant to the token region — which is the
 # whole back-compat claim. Without this, "the old regex still works" would rest
 # on inspection of one record rather than on a differential test.
-QG_NOTOKEN="$FIXTURE/qa-gate-noworktreetoken.sh"
+# The copy lives in the fixture's `.claude/scripts/` — NOT the fixture root.
+# Since 94d qa-gate.sh loads `workflow-denylist.sh` from its OWN directory
+# (BASH_SOURCE-relative), so a copy parked anywhere else has no denylist,
+# reconcile_tracker refuses, and approve exits 2 for a reason that has nothing
+# to do with the region under test. Same constraint the post-edit.sh component
+# spec's META already documents for its mutant.
+QG_NOTOKEN="$FIXTURE/.claude/scripts/qa-gate-noworktreetoken.sh"
 TOKSTRIP_RC=0
 awk '
     /# WORKTREE-TOKEN BEGIN/ { skipping=1; found=1; next }
@@ -524,7 +530,9 @@ echo "=== Section 6: META — the REVIEW-SEPARATION block is load-bearing ==="
 # Strip everything between the sentinels from a COPY. If the refusal really is
 # what enforces the contract, the stripped copy approves a task with NO review
 # artifact — i.e. every section-1 assertion would FAIL against it.
-QG_STRIPPED="$FIXTURE/qa-gate-noreviewsep.sh"
+# In `.claude/scripts/`, not the fixture root — see the note on QG_NOTOKEN above
+# (94d made qa-gate.sh resolve workflow-denylist.sh from its own directory).
+QG_STRIPPED="$FIXTURE/.claude/scripts/qa-gate-noreviewsep.sh"
 STRIP_RC=0
 awk '
     /# REVIEW-SEPARATION BEGIN/ { skipping=1; found=1; next }

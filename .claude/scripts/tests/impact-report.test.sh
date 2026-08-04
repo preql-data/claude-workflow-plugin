@@ -332,6 +332,71 @@ assert_eq "empty: hash of empty canonical list" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 6: the EMPTY-SET hash is a pinned constant (94d) ==="
+
+# WHY A LITERAL AND NOT A RECOMPUTATION.
+#
+# Section 5 above compares the artifact's hash against a locally recomputed one,
+# which proves the two agree — and would keep passing if BOTH moved together.
+# The empty-set hash is not just any value: it is load-bearing text in three
+# other places, all of which reason about the specific string.
+#
+#   - verify-before-stop.sh's VANISHED-CHANGE-SET note names
+#     `e3b0c44298fc…` as the hash a Stop recomputed mid-approve, and its whole
+#     argument is that this value "no honest approval of real work can carry".
+#   - .claude/tests/component/specs/approve-idempotency.sh names it for the
+#     same reason.
+#   - The 94d change set exists because a tracker that under-covers hashes as
+#     if the missing files were not there; an EMPTY tracker hashes to exactly
+#     this, which is how a review cycle came to bind a hollow approval over 0
+#     files (claude-workflow-plugin-fkm.1.2) while looking perfectly valid.
+#
+# So the constant is a contract, not an implementation detail. Pinning it means
+# any change to the canonicalisation that silently moves it — a trailing
+# newline, a header line, a `sort` that emits something for empty input — fails
+# HERE, next to the reason, instead of turning three prose citations into
+# quiet fiction.
+#
+# This is the sha256 of the EMPTY BYTE STRING, which is what an empty canonical
+# list feeds to sha256_stdin:
+#     printf '' | shasum -a 256
+EMPTY_SET_HASH_CONST="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+if [ "$EMPTY_HASH" = "sha256-unavailable" ]; then
+    printf 'SKIPPED: section 6 (neither shasum nor sha256sum on PATH; the degraded sentinel is not a sha256)\n'
+else
+    assert_eq "empty-const: the empty canonical list hashes to the pinned e3b0c442… constant" \
+        "$EMPTY_SET_HASH_CONST" "$(printf '%s' "$J5" | jq -r '.change_set_hash')"
+    assert_eq "empty-const: --hash-only on a project with NO tracker prints the same constant" \
+        "$EMPTY_SET_HASH_CONST" "$(CLAUDE_PROJECT_DIR="$F5" bash "$IR" --hash-only 2>/dev/null)"
+
+    # A tracker that exists but is EMPTY must hash identically to one that does
+    # not exist. `approve` treats an empty report as fresh against an empty
+    # tracker, so these two states have to be indistinguishable — if they ever
+    # diverged, the freshness check would refuse a legitimately empty cycle.
+    F6=$(mk_proj)
+    : > "$F6/.claude/.qa-tracking/changed-files.txt"
+    assert_eq "empty-const: an EXISTING but empty tracker hashes to the same constant" \
+        "$EMPTY_SET_HASH_CONST" "$(CLAUDE_PROJECT_DIR="$F6" bash "$IR" --hash-only 2>/dev/null)"
+
+    # And a tracker holding ONLY denylisted paths is empty after filtering, so
+    # it lands on the same constant — the "empty post-denylist" class the Stop
+    # hook's fast path treats as nothing-to-review.
+    printf 'node_modules/a.js\npnpm-lock.yaml\n' > "$F6/.claude/.qa-tracking/changed-files.txt"
+    assert_eq "empty-const: a tracker of ONLY denylisted paths hashes to the same constant" \
+        "$EMPTY_SET_HASH_CONST" "$(CLAUDE_PROJECT_DIR="$F6" bash "$IR" --hash-only 2>/dev/null)"
+
+    # Discriminator: one real path must NOT hash to it. Without this the three
+    # assertions above would all pass against a --hash-only that always printed
+    # the constant.
+    printf 'src/real.ts\n' > "$F6/.claude/.qa-tracking/changed-files.txt"
+    NONEMPTY6=$(CLAUDE_PROJECT_DIR="$F6" bash "$IR" --hash-only 2>/dev/null)
+    assert_eq "empty-const: DISCRIMINATOR — one real path does not hash to the empty-set constant" \
+        "differs" "$([ "$NONEMPTY6" != "$EMPTY_SET_HASH_CONST" ] && echo differs || echo same)"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"
     for t in "${FAILED_TESTS[@]}"; do

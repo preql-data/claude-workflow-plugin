@@ -270,7 +270,116 @@ QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 SYNC_ERROR_LOG="$QA_TRACKING_DIR/sync-errors.log"
 mkdir -p "$QA_TRACKING_DIR"
 rm -f "$QA_TRACKING_DIR/approved" 2>/dev/null || true
-rm -f "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null || true
+
+# THE ACTIVE-CYCLE READ, hoisted so ONE answer serves BOTH decisions.
+#
+# Two blocks in this hook turn on the same question — "is a review cycle in
+# flight?": the tracker-preserve guard immediately below, and the gate-baseline
+# capture further down (search `baseline-capture --by session-start`; its own
+# comment has said "ONLY WHEN NO REVIEW CYCLE IS ACTIVE" since 3mg.1). They used
+# to be answered independently, and they MUST NOT be: two reads can disagree
+# inside one run, and the disagreement that matters is "tracker preserved, and
+# then the work it names baselined as pre-existing" — the exact pairing 94d.1 is
+# about. One resolution, one answer, both blocks read this variable.
+SS_SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || SS_SCRIPT_DIR=""
+SS_ACTIVE_TASK=""
+if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
+    SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
+fi
+
+# TRACKER-PRESERVE BEGIN (94d.1)
+# DO NOT DESTROY THE CHANGE SET OF A GATE CYCLE THAT IS STILL IN FLIGHT.
+#
+# WHAT THIS HOOK USED TO DO, AND WHAT IT COST (reproduced live 2026-08-04 on
+# this repo's own 94d review, and again in an isolated repo before this guard was
+# written). The `rm -f` below was UNCONDITIONAL. SessionStart fires on `startup`,
+# `resume`, `clear` AND `compact` — so a conversation that compacted mid-review
+# deleted changed-files.txt out from under the review that was reading it: 26
+# paths -> 0, after which `qa-gate.sh enter`'s reconcile_tracker rebuilt 10 of
+# them from `git status` minus a 159-entry gate baseline. Every step reported
+# ok:true. change_set_hash moved 01296db9... -> 0b5a546e... and nothing anywhere
+# said 16 paths had gone. QA reached the same state independently from the other
+# side of the same review: 60 git-visible, 29 byte-identical to the baseline, 21
+# denylisted, 10 recovered.
+#
+# WHY THE RECONCILER IS NOT THE ANSWER, and why prevention has to live here.
+# reconcile_tracker can only ever produce a SUBSET of a lost tracker, for a
+# reason no refinement of it can fix: it derives its paths from `git status`, and
+# two of the 16 lost paths were invisible to git at all — one whose content had
+# been reverted (dirty in the tracker's history, clean on disk) and one gate
+# artifact under .claude/.qa-tracking/, which the shared self-written rule keeps
+# out of the change set by design. No baseline fix, no `comm` refinement and no
+# subtraction accounting can recover those two. A rebuild is a guess with a
+# plausible shape; not deleting the file is the only thing that keeps the
+# evidence.
+#
+# THE PREDICATE IS THE ONE THE GATE-BASELINE BLOCK ALREADY USES: `current-task`
+# names a task. Deliberately IDENTICAL, not merely similar — this hook's
+# `baseline-capture --by session-start` call has skipped on exactly that
+# condition since 3mg.1, with the fail-closed reasoning already written out
+# there, and the `rm` was the one outlier that ignored it. Two consequences of
+# copying it rather than inventing a second predicate:
+#   - The asymmetry cannot be "restored" by a later editor who sees two
+#     different tests for one question and normalises the wrong way.
+#   - No conjunction with a bd LABEL read. An earlier draft of this guard
+#     required qa-gate-entered/qa-pending as well, and that draft was WORSE in
+#     two measurable ways. It made SessionStart depend on bd + jq + a `bd show`
+#     round-trip for a decision about a local file (this hook's whole v4.1 C0c
+#     contract is that a degraded install still works), and — the real defect —
+#     it re-introduced the asymmetry from the other end: current-task set with
+#     no gate label would have SKIPPED the baseline capture (loose predicate)
+#     while DELETING the tracker (strict predicate), which is the 94d.1 state
+#     reached by a different route.
+#
+# THE STICKINESS COST, named rather than discovered later. `approve` clears
+# current-task; `block` deliberately does not (a block/fix loop is one cycle).
+# So a session that dies mid-cycle leaves the id set, and this guard then
+# preserves the tracker across every later session until something clears it —
+# feeding a dead cycle's paths into the change-set hash of unrelated work. That
+# is OVER-reporting: it blocks a Stop until someone looks, which is recoverable
+# (`current-task.sh clear`, or the next approve). Under-reporting certifies a
+# subset of what shipped, which is not. It is also not a NEW exposure: the
+# gate-baseline block has carried the identical stickiness since 3mg.1. Warning
+# 7 below is what makes it visible instead of silent.
+#
+# NEVER BLOCKS AND NEVER FAILS. The read above is `|| `-guarded and this block
+# only compares strings; the hook still emits its envelope and exits 0 whatever
+# happens. Nothing here writes sync-errors.log, deliberately: that log is
+# snapshotted-and-truncated a few lines BELOW this point, so a line written here
+# would be consumed in the same run and re-reported as "Last session logged a
+# Beads sync error" (the fkm.1.1 mislabelling). Warning 7 is in-band, so it
+# reaches the model in the session that has to act on it.
+SS_TRACKER_KEEP=0
+SS_TRACKER_STATE="no-cycle"
+SS_TRACKER_PATHS=0
+if [ -s "$QA_TRACKING_DIR/changed-files.txt" ]; then
+    SS_TRACKER_PATHS=$(grep -c . "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null | tr -d '[:space:]') || SS_TRACKER_PATHS=0
+    [ -n "$SS_TRACKER_PATHS" ] || SS_TRACKER_PATHS=0
+fi
+if [ -n "$SS_ACTIVE_TASK" ]; then
+    SS_TRACKER_KEEP=1
+    SS_TRACKER_STATE="preserved-cycle-in-flight"
+fi
+# TRACKER-PRESERVE END (94d.1)
+
+# The delete itself lives OUTSIDE the sentinels, and its guard reads
+# `${SS_TRACKER_KEEP:-0}` rather than a bare `$SS_TRACKER_KEEP`, for one
+# deliberate reason: with the region above excised the variable is UNSET, the
+# default is 0, and this becomes the unconditional `rm -f` that shipped before
+# 94d.1 — byte-for-byte the pre-fix behaviour. That is what makes the
+# strip-META in session-lifecycle.sh section 8 measure the guard rather than a
+# syntax error, and it is the same construction post-edit.sh uses for
+# _PE_RESOLVED at its SECOND-CHANCE region. Consequence, named rather than
+# left implicit: a future edit that loses the region defaults to DELETING, not
+# preserving. That is the pre-94d.1 status quo rather than a new hazard, and the
+# META is what notices.
+if [ "${SS_TRACKER_KEEP:-0}" != "1" ]; then
+    rm -f "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null || true
+fi
+# edit-count is NOT preserved with it, and that is not an oversight: its only
+# consumer is post-edit.sh's every-10-edits "Progress: N files edited" comment.
+# It carries no evidence about WHICH paths changed, so nothing downstream can
+# certify less because it reset.
 rm -f "$QA_TRACKING_DIR/edit-count" 2>/dev/null || true
 
 # B11 surface: capture (and clear) any sync errors from the prior session
@@ -308,10 +417,21 @@ fi
 # cycle is in flight and its work is (by construction) dirty right now;
 # baselining it would mark that work pre-existing and release it unreviewed.
 # In that case we write nothing and the cycle stays gated — the fail-closed
-# direction. (This hook also clears changed-files.txt above, so an in-flight
-# cycle resumed in a new session runs on the git fallback with whatever
-# baseline the cycle already had: every path dirtied since then reads as new.
-# Correct, if noisy.)
+# direction.
+#
+# The parenthesis that used to close this paragraph described the OTHER half of
+# a state this hook no longer produces, and it is corrected here rather than
+# deleted because it named the hazard accurately (94d.1). It read: "This hook
+# also clears changed-files.txt above, so an in-flight cycle resumed in a new
+# session runs on the git fallback with whatever baseline the cycle already had:
+# every path dirtied since then reads as new. Correct, if noisy." Two things
+# were wrong with it. The clearing is no longer unconditional — the
+# TRACKER-PRESERVE region above keeps the tracker for exactly the case this
+# block skips, on the SAME `current-task` predicate, which is why the two now
+# read one hoisted variable instead of two independent probes. And "correct, if
+# noisy" was the opposite of what happened: once reconcile_tracker existed, the
+# resumed cycle did not read as noisy-but-complete, it read as a smaller,
+# well-formed change set (26 paths -> 10) with every step reporting ok:true.
 #
 # Runs AFTER the B11 truncate above on purpose: a failure logged here belongs
 # to THIS session and should surface at the NEXT SessionStart, not be consumed
@@ -339,12 +459,12 @@ fi
 # enforcement surface still standing, so weakening it is the wrong direction.
 # .claude/tests/component/specs/installer-target-functional.sh section 6c pins
 # this: a degraded run must still leave .claude/.qa-tracking/gate-baseline.
-SS_SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || SS_SCRIPT_DIR=""
+# SS_SCRIPT_DIR and SS_ACTIVE_TASK are resolved ONCE, up at the QA-tracking
+# reset (see "THE ACTIVE-CYCLE READ, hoisted"), because the tracker-preserve
+# guard there turns on the same `current-task` question this block does. Reading
+# it a second time here would let one run answer it twice — and the disagreement
+# that matters is "tracker preserved, work then baselined as pre-existing".
 if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/qa-gate.sh" ]; then
-    SS_ACTIVE_TASK=""
-    if [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
-        SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
-    fi
     if [ -z "$SS_ACTIVE_TASK" ]; then
         CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/qa-gate.sh" \
             baseline-capture --by session-start >/dev/null 2>&1 \
@@ -617,6 +737,23 @@ if [ -n "$SWEEP_REPORT_LINE" ]; then
     SWEEP_MSG=$(printf '%s' "$SWEEP_REPORT_LINE" | awk -F'\t' '{print $2}')
     WARNINGS+="
 - worktree-sweep at ${SWEEP_TS:-an unknown time}: ${SWEEP_MSG:-removable worktrees were found under .claude/worktrees/}"
+fi
+
+# Warning 7: the change-set tracker was CARRIED OVER rather than reset (94d.1).
+#
+# This is the correct outcome, not a fault — but it is the outcome nobody could
+# see before, and invisibility is what made 94d.1 expensive. The pre-94d.1 hook
+# destroyed the tracker at every session boundary; whoever resumed a review then
+# read a smaller, well-formed change set with nothing anywhere saying it had
+# shrunk. So the PRESERVE says so, out loud, with the count, in the session that
+# has to act on it.
+#
+# It also carries the recovery for the stickiness the guard's header names: an
+# id that never got cleared pins the tracker open, and this line is where an
+# operator finds out that is what is happening.
+if [ "$SS_TRACKER_STATE" = "preserved-cycle-in-flight" ]; then
+    WARNINGS+="
+- change-set tracker CARRIED OVER (94d.1): a review cycle is in flight on '$SS_ACTIVE_TASK', so .claude/.qa-tracking/changed-files.txt was NOT reset and still holds $SS_TRACKER_PATHS path(s) from before this session boundary. That is deliberate — the tracker is what change_set_hash is computed over, and rebuilding it from 'git status' can only ever recover a SUBSET (a reverted-content file and the gate's own artifacts are invisible to git). If that cycle is actually finished, clear it: bash .claude/scripts/current-task.sh clear"
 fi
 
 # 1. Get bd prime output (Beads' built-in agent context).

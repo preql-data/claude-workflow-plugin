@@ -72,4 +72,167 @@ assert_eq "session-end: idempotent rc=0" "0" "$RC"
 OUT=$(PATH=/usr/bin:/bin bash -c "echo '{\"reason\":\"clear\"}' | bash '$SE'" 2>/dev/null)
 assert_empty_envelope "session-end: bd-unavailable graceful" "$OUT"
 
+# ===========================================================================
+# SECTION 8 — THE TRACKER SURVIVES A SESSION BOUNDARY WHILE A CYCLE IS IN
+# FLIGHT (claude-workflow-plugin-94d.1).
+#
+# THE DEFECT. Section 2 above pins that SessionStart resets changed-files.txt,
+# and that is right for a NEW session. It used to be unconditional — and
+# SessionStart fires on `startup`, `resume`, `clear` AND `compact`, so a
+# conversation that compacted in the middle of a QA review deleted the change
+# set out from under the review reading it. Reproduced live on this repo's own
+# 94d review: 26 tracked paths -> 0, then `qa-gate.sh enter`'s reconcile rebuilt
+# 10 of them from `git status` minus a 35-hour-old gate baseline. Every step
+# reported ok:true and change_set_hash moved 01296db9... -> 0b5a546e...
+#
+# WHY PREVENTION HAS TO BE HERE AND NOT IN THE RECONCILER. A rebuild from `git
+# status` can only ever be a SUBSET of what was lost. Of the 16 paths that went,
+# TWO were invisible to git at all: one whose content had been reverted (so it
+# was not dirty) and one `.claude/.qa-tracking/` artifact, which the shared
+# self-written rule keeps out of the change set by design. No baseline fix and no
+# accounting can recover those, so the file must not be deleted in the first
+# place.
+#
+# THE PREDICATE IS `current-task`, IDENTICAL to the one the gate-baseline capture
+# in the same hook has used since 3mg.1. Section 8.3 pins that it needs NOTHING
+# from bd — no task record, no label read — which is what keeps this decision
+# working in a degraded install (the C0c contract) and what stops the two
+# decisions in this hook from ever disagreeing about whether a cycle is open.
+# ===========================================================================
+CT="$FIXTURE/.claude/scripts/current-task.sh"
+TRACKER="$TRACK/changed-files.txt"
+
+# 8.1 CONTROL, local to this section so the flip below is unambiguous: with no
+# cycle in flight the reset still happens (this is section 2's behaviour, and it
+# must not have been traded away for the preserve).
+bash "$CT" clear >/dev/null 2>&1
+printf '/work/one.ts\n/work/two.ts\n' > "$TRACKER"
+printf '%s' '{}' | bash "$SS" >/dev/null 2>&1
+assert_eq "session-start 8.1: CONTROL — no cycle in flight, the tracker is still reset" "gone" \
+    "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+
+# 8.2 THE GUARD. Same input, one variable changed: a cycle is in flight.
+printf '/work/one.ts\n/work/two.ts\n' > "$TRACKER"
+TRACKER_BEFORE=$(cat "$TRACKER")
+bash "$CT" set "session-lifecycle-94d1-task" >/dev/null 2>&1
+printf '%s' '{"source":"compact"}' | bash "$SS" >/dev/null 2>&1
+assert_eq "session-start 8.2: with a cycle in flight the tracker SURVIVES (was: deleted)" "kept" \
+    "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+assert_eq "session-start 8.2: ...BYTE-IDENTICAL — preserved, not partially rebuilt" \
+    "$TRACKER_BEFORE" "$(cat "$TRACKER" 2>/dev/null || echo '')"
+assert_eq "session-start 8.2: ...and it survives a SECOND boundary too (idempotent, not one-shot)" "kept" \
+    "$(printf '%s' '{"source":"resume"}' | bash "$SS" >/dev/null 2>&1; [ -s "$TRACKER" ] && echo kept || echo gone)"
+
+# 8.3 THE GUARD NEEDS NOTHING FROM bd. The id set above names no real Beads
+# issue, and 8.2 preserved anyway. That is the property that makes this decision
+# survive a degraded install — and the reason the predicate is not conjoined with
+# a qa-gate-entered/qa-pending label read: a label read would make a decision
+# about a local file depend on bd + jq + a `bd show` round-trip, and would ALSO
+# re-open the asymmetry from the other end (current-task set, no label => the
+# baseline capture skips on the loose predicate while the delete fires on the
+# strict one, which is the same lost-change-set state by another route).
+assert_eq "session-start 8.3: precondition — the preserved cycle's id is NOT a real Beads issue" "absent" \
+    "$(bd show "session-lifecycle-94d1-task" --json >/dev/null 2>&1 && echo present || echo absent)"
+assert_eq "session-start 8.3: ...so the preserve cannot have come from a label read" "kept" \
+    "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+
+# 8.4 IT SAYS SO. Invisibility is what made 94d.1 expensive: whoever resumed the
+# review read a smaller, well-formed change set with nothing anywhere reporting
+# the shrink. A silent preserve would fix the data and leave the operator with no
+# way to tell a carried-over tracker from a fresh one.
+OUT8=$(printf '%s' '{"source":"compact"}' | bash "$SS" 2>/dev/null)
+assert_valid_envelope "session-start 8.4: the envelope is still valid with the preserve active" "$OUT8"
+CTX8=$(printf '%s' "$OUT8" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "session-start 8.4: the context REPORTS the carry-over" \
+    "change-set tracker CARRIED OVER" "$CTX8"
+assert_contains "session-start 8.4: ...naming the cycle it is held for" \
+    "session-lifecycle-94d1-task" "$CTX8"
+assert_contains "session-start 8.4: ...and the count, so a reader can compare it against the review" \
+    "2 path(s)" "$CTX8"
+assert_contains "session-start 8.4: ...and the recovery for a cycle that is actually finished" \
+    "current-task.sh clear" "$CTX8"
+
+# 8.5 THE DISCRIMINATOR. Clear the cycle, change nothing else, and the reset
+# comes back — so 8.2 is caused by the in-flight cycle and not by the guard
+# having simply stopped deleting.
+bash "$CT" clear >/dev/null 2>&1
+printf '%s' '{}' | bash "$SS" >/dev/null 2>&1
+assert_eq "session-start 8.5: clearing the cycle restores the reset (8.2 is caused by the cycle)" "gone" \
+    "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+
+# ---------------------------------------------------------------------------
+# 8M META (spec-mandated): strip the TRACKER-PRESERVE region from a fixture copy
+# of session-start.sh and the tracker must be DESTROYED mid-cycle again.
+#
+# The region is arranged so that stripping it yields the PRE-FIX code rather than
+# a no-op: the `rm -f` lives OUTSIDE the sentinels behind
+# `if [ "${SS_TRACKER_KEEP:-0}" != "1" ]`, so with the region gone the variable is
+# unset, the default is 0, and the delete is unconditional — byte-for-byte what
+# shipped before 94d.1. Same construction as post-edit.sh's `_PE_RESOLVED=""`
+# ahead of its SECOND-CHANCE region. A strip that merely removed the `rm` would
+# make the tracker survive for the WRONG reason and this META would pass against
+# a broken hook.
+#
+# The copy replaces the fixture's symlink in `.claude/scripts/` so it keeps
+# resolving its siblings (current-task.sh, qa-gate.sh) BASH_SOURCE-relative, the
+# same constraint gate-baseline-v2.sh's 7M and post-edit.sh's METAs work under.
+# Anchored patterns (`^ *#`) for the R4-F5 reason: unanchored, a prose line
+# naming the sentinel mid-sentence would start the excision early.
+strip_tracker_preserve() {
+    awk '
+        /^ *# TRACKER-PRESERVE BEGIN/ { skip = 1; next }
+        /^ *# TRACKER-PRESERVE END/   { skip = 0; next }
+        !skip { print }
+    ' "$1" > "$2"
+}
+SS_REAL=$(readlink "$SS" || printf '%s' "$SS")
+META8_DIR="$TRACK/meta8"
+mkdir -p "$META8_DIR"
+strip_tracker_preserve "$SS_REAL" "$META8_DIR/session-start.stripped.sh"
+
+# THE GUARD FIRST (R4-F4): a strip that matched nothing leaves a byte-identical
+# copy, and then every leg below measures the SHIPPED hook while reporting on a
+# mutant — a green run that proves nothing.
+if assert_mutant_applied "session-start 8M META" "$SS_REAL" "$META8_DIR/session-start.stripped.sh"; then
+    assert_eq "session-start 8M META: the strip removed lines (non-vacuous)" "smaller" \
+        "$([ "$(grep -c . "$META8_DIR/session-start.stripped.sh")" -lt "$(grep -c . "$SS_REAL")" ] && echo smaller || echo same)"
+    assert_eq "session-start 8M META: no SS_TRACKER_KEEP assignment survives (the mutation landed where it was aimed)" \
+        "0" "$(grep -c 'SS_TRACKER_KEEP=' "$META8_DIR/session-start.stripped.sh" | tr -d '[:space:]')"
+    # Counted on the CODE line, not on the identifier: the paragraph above the
+    # guard quotes `${SS_TRACKER_KEEP:-0}` in prose to explain why the default is
+    # there, so a bare identifier grep answers 2 and this leg would fail for a
+    # reason that has nothing to do with the mutation.
+    assert_eq "session-start 8M META: ...while the rm's guard SURVIVES, defaulting to DELETE (only the decision was removed)" \
+        "1" "$(grep -c -x -F 'if [ "${SS_TRACKER_KEEP:-0}" != "1" ]; then' "$META8_DIR/session-start.stripped.sh" | tr -d '[:space:]')"
+    assert_eq "session-start 8M META: ...and the rm itself survives inside it" "1" \
+        "$(grep -c 'rm -f "\$QA_TRACKING_DIR/changed-files.txt"' "$META8_DIR/session-start.stripped.sh" | tr -d '[:space:]')"
+    assert_eq "session-start 8M META: the stripped copy still parses" "0" \
+        "$(bash -n "$META8_DIR/session-start.stripped.sh" 2>/dev/null && echo 0 || echo 1)"
+
+    # --- strip leg: the 94d.1 failure, reproduced ---
+    rm -f "$SS"
+    cp "$META8_DIR/session-start.stripped.sh" "$SS"
+    chmod +x "$SS"
+    printf '/work/one.ts\n/work/two.ts\n' > "$TRACKER"
+    bash "$CT" set "session-lifecycle-94d1-task" >/dev/null 2>&1
+    OUT8M=$(printf '%s' '{"source":"compact"}' | bash "$SS" 2>/dev/null)
+    assert_eq "session-start 8M META: with the guard stripped the tracker is DESTROYED mid-cycle (8.2 WOULD fail)" \
+        "gone" "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+    assert_valid_envelope "session-start 8M META: ...and the hook still emitted a valid envelope, so the loss is silent" \
+        "$OUT8M"
+    CTX8M=$(printf '%s' "$OUT8M" | jq -r '.hookSpecificOutput.additionalContext // empty')
+    assert_not_contains "session-start 8M META: ...with nothing anywhere reporting it (8.4 WOULD fail)" \
+        "change-set tracker CARRIED OVER" "$CTX8M"
+
+    # --- restore control: same state, shipped hook, the tracker survives again ---
+    rm -f "$SS"
+    ln -sf "$SS_REAL" "$SS"
+    printf '/work/one.ts\n/work/two.ts\n' > "$TRACKER"
+    bash "$CT" set "session-lifecycle-94d1-task" >/dev/null 2>&1
+    printf '%s' '{"source":"compact"}' | bash "$SS" >/dev/null 2>&1
+    assert_eq "session-start 8M META: restore control — the shipped hook preserves it again" "kept" \
+        "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+fi
+bash "$CT" clear >/dev/null 2>&1
+
 [ "$FAIL" -eq 0 ]

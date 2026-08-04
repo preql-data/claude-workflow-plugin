@@ -99,9 +99,31 @@ quiet_stack() {
 # gate_fixture — a fresh git fixture with the no-op detect-stack stub every gate
 # spec uses (empty test/lint/type commands, so the assertions measure the GATE
 # decision rather than a toolchain run). Result in $COMPONENT_FIXTURE_PATH.
+#
+# THE .gitignore IS LOAD-BEARING (94d). This spec's drive points REWRITE the
+# harness's own instrumentation mid-cycle: `drive_point_bd` and the E1 selective
+# shim overwrite `bin/bd`, and `racing_stack`/`quiet_stack` overwrite
+# `.claude/scripts/detect-stack.sh`. Those writes are real, git-visible,
+# un-baselined changes, so once `qa-gate.sh reconcile-tracker` existed they were
+# correctly folded into the change set — which moved the change-set hash between
+# `enter` and `approve` and made four sections fail for a reason that has nothing
+# to do with the gate: E1 refused with impact_report_stale before it ever reached
+# the label step it was written to probe, and section A's approval bound a file
+# set containing the harness's own scaffolding.
+#
+# The instrumentation is not the subject matter, so it must not be in the
+# fixture's git view. This is the same call the shared denylist already makes for
+# the e2e tier — `.claude/tests/e2e/fixtures/<f>/.claude/{scripts,beads}/` is
+# denylisted precisely as "churn the harness rewrites mechanically" — applied to
+# the L2 tier, whose fixtures are `mktemp -d` roots that no denylist branch can
+# name. `.claude/.qa-tracking/` is listed for the same reason the real plugin
+# repo gitignores it (per-session ephemera). The spec's SUBJECT — src/*.ts,
+# smuggled.ts, helper-written.ts — stays fully tracked and fully reviewable.
 gate_fixture() {
     mk_fixture
     bd_required_or_skip
+    printf 'bin/\n.claude/scripts/\n.claude/.qa-tracking/\n' \
+        > "$COMPONENT_FIXTURE_PATH/.gitignore"
     (cd "$COMPONENT_FIXTURE_PATH" && git init -q 2>/dev/null \
         && git config user.email t@t.t && git config user.name t \
         && git add -A && git commit -qm baseline 2>/dev/null) || true
@@ -628,9 +650,28 @@ assert_eq "approve-idem-F2: a forged label + EMPTY tracker + real dirt STILL BLO
 assert_contains "approve-idem-F2: ...on the LABEL_WITHOUT_RECORD branch (the release did not swallow it)" \
     "no change-set-bound approval record matches" "$(json_field "$F2_JSON" '.reason')"
 # Causation: remove the cause, the release returns.
+#
+# 94d CHANGED WHAT "THE CAUSE" IS, and the probe has to follow. The Stop above
+# ran `qa-gate.sh reconcile-tracker`, which folded smuggled.ts INTO
+# changed-files.txt — so deleting the file no longer restores the release on its
+# own: the tracker remembers it. That stickiness is deliberate and is exactly the
+# semantics post-edit.sh has always had (Write a file, delete it with Bash, and
+# the path still gates until an approve truncates the tracker); reconciled paths
+# now behave the same way, and pruning the tracker to "fix" it would reintroduce
+# the lose-a-tracked-path failure mode that cost post-edit.sh its unlocked trim.
+# So the causation probe removes BOTH halves of the cause — the file and the
+# tracker entry the reconcile derived from it — which is the state a fresh cycle
+# reaches anyway, and asserts the release returns. The stickiness itself is
+# asserted first so it is recorded behaviour rather than an incidental detail.
 rm -f "$FG2/smuggled.ts"
 ct "$FG2" set "$TID_F2" >/dev/null 2>&1
-assert_eq "approve-idem-F2: removing the un-baselined dirt restores the release (block was attributable)" \
+assert_eq "approve-idem-F2: 94d — a reconciled path is STICKY: deleting the file alone still blocks" \
+    "block" "$(stop_decision "$FG2")"
+assert_eq "approve-idem-F2: ...because the reconcile recorded it in the tracker" "1" \
+    "$(grep -c 'smuggled\.ts' "$FG2/.claude/.qa-tracking/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+: > "$FG2/.claude/.qa-tracking/changed-files.txt"
+ct "$FG2" set "$TID_F2" >/dev/null 2>&1
+assert_eq "approve-idem-F2: removing the dirt AND its tracker entry restores the release (block was attributable)" \
     "ALLOW" "$(stop_decision "$FG2")"
 
 # ===========================================================================
@@ -689,25 +730,36 @@ assert_eq "approve-idem-G META: the SHIPPED guard recovers the identical state" 
     "ALLOW" "$(stop_decision "$FH")"
 
 # ===========================================================================
-# SECTION H — the RESIDUAL of the empty-tracker reference, pinned as reality.
+# SECTION H — the empty-tracker reference: its residual, and how 94d closed it.
 #
 # The empty-tracker arm of set_idempotency_reference reads the PERSISTED impact
 # report, because after an approve the tracker no longer witnesses what was
-# approved (section B2 depends on that). The cost is a bounded residual, found by
-# probing this arm rather than by waiting for it in the field:
+# approved (section B2 depends on that). Before 94d that carried a bounded
+# residual, found by probing this arm rather than by waiting for it in the field:
 #
 #   tracker empty + real UN-BASELINED dirt (work written by a helper, never seen
 #   by post-edit.sh — LESSONS.md/bi3.2) => the Stop hook blocks on the git half
 #   of its predicate, while the persisted report still witnesses the PREVIOUS
-#   approval. A bare `approve` therefore no-ops and the block stands.
+#   approval. A bare `approve` therefore no-op'd and the block stood.
 #
-# This is pinned, not papered over, and it is NOT the gz3 deadlock: the printed
-# remediation still recovers, because its step 2 (impact-report.sh) re-persists
-# the report — after which no record binds it and approve proceeds. H3 proves
-# exactly that. Fixing the no-op inside approve would require a second copy of
-# the Stop hook's baseline-relative git walk (reviewable_changes), which is the
-# drift the one-definition rule exists to prevent; the chosen mitigation is that
-# the no-op NAMES the reference it matched, asserted in H2.
+# 94d CLOSED IT, and from an unexpected direction. The no-op depended on the
+# tracker still being EMPTY at approve time; the Stop hook now runs
+# `qa-gate.sh reconcile-tracker` before it reads anything, so the helper-written
+# file is in the tracker by the time approve runs. set_idempotency_reference
+# therefore takes its LIVE-RECOMPUTE arm, no record binds that hash, and approve
+# PROCEEDS into its preconditions — where the persisted report is correctly
+# refused as STALE. The operator gets a precise refusal naming both hashes and
+# the regenerate step, instead of a "success" that leaves the gate blocked.
+#
+# H2 below asserts that new behaviour; H3 (unchanged) still proves the printed
+# remediation recovers the state. Note that the OLD justification for leaving the
+# residual open — "fixing the no-op inside approve would require a second copy of
+# the Stop hook's baseline-relative git walk" — no longer holds either:
+# reconcile_tracker IS that walk, in a single callable definition. Moving
+# approve's own reconcile above the idempotency check would close the remaining
+# sliver (approve invoked with an empty tracker and no Stop in between); that is
+# a deliberate decision for the approve-idempotency work, not a side effect of
+# the tracker fix, so this spec pins the behaviour as shipped.
 # ===========================================================================
 gate_fixture
 FR="$COMPONENT_FIXTURE_PATH"
@@ -722,17 +774,24 @@ ct "$FR" set "$TID_R" >/dev/null 2>&1
 H_JSON=$(stop_json "$FR")
 assert_eq "approve-idem-H1: un-baselined dirt after an approval BLOCKS (the git half still sees it)" \
     "block" "$(json_field "$H_JSON" '.decision')"
-H2_OUT=$(qg "$FR" approve "$TID_R" "bare approve, no regenerated report" 2>&1 | tail -1)
-assert_json_field "approve-idem-H2: THE RESIDUAL — a bare approve reports success..." \
-    "$H2_OUT" '.status' "approved"
-assert_contains "approve-idem-H2: ...as an idempotent no-op against the previous approval" \
+# The Stop above reconciled the helper-written file into the tracker (94d), which
+# is what takes the no-op off the table. Asserted first, because every H2 claim
+# below follows from it.
+assert_eq "approve-idem-H2: 94d — the Stop reconciled the helper-written file into the tracker" \
+    "1" "$(grep -c 'helper-written\.ts' "$FR/.claude/.qa-tracking/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+H2_RC=0
+H2_RAW=$(qg "$FR" approve "$TID_R" "bare approve, no regenerated report" 2>&1) || H2_RC=$?
+H2_OUT=$(printf '%s\n' "$H2_RAW" | tail -1)
+assert_eq "approve-idem-H2: a bare approve now REFUSES (exit 2) instead of no-op'ing" "2" "$H2_RC"
+assert_json_field "approve-idem-H2: ...with status=error" "$H2_OUT" '.status' "error"
+assert_json_field "approve-idem-H2: ...on the impact-report staleness check, not the idempotency guard" \
+    "$H2_OUT" '.error_key' "impact_report_stale"
+assert_not_contains "approve-idem-H2: ...and is NOT reported as an idempotent no-op (the pre-94d residual)" \
     "idempotent no-op" "$H2_OUT"
-assert_contains "approve-idem-H2: ...NAMING the persisted report as the reference it matched" \
-    "persisted impact report" "$H2_OUT"
-assert_contains "approve-idem-H2: ...and steering to the step that resolves it" \
-    "re-run impact-report.sh" "$H2_OUT"
+assert_contains "approve-idem-H2: ...steering to the step that resolves it" \
+    "impact-report.sh" "$H2_OUT"
 ct "$FR" set "$TID_R" >/dev/null 2>&1
-assert_eq "approve-idem-H2: ...so the gate still blocks (the residual, stated as reality)" \
+assert_eq "approve-idem-H2: ...and the gate still blocks (nothing was released on a stale binding)" \
     "block" "$(stop_decision "$FR")"
 # H3. The printed remediation — all three lines — still recovers this state.
 H3_REMEDY="$FR/.claude/.qa-tracking/printed-remediation.txt"

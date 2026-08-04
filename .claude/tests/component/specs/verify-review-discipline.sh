@@ -40,6 +40,16 @@ CT="$FIXTURE/.claude/scripts/current-task.sh"
 RCHECK="$FIXTURE/.claude/scripts/review-check.sh"
 TRACK="$FIXTURE/.claude/.qa-tracking"
 
+# 94d: keep this spec's own INSTRUMENTATION out of the fixture's git view. D5
+# DELETES `.claude/scripts/review-check.sh` and D6 WRITES a stripped hook copy
+# into `.claude/scripts/` — both are real, git-visible changes (deletions
+# included), so once `reconcile-tracker` existed they moved the change-set hash
+# mid-cycle and LABEL_WITHOUT_RECORD fired before the review-discipline check the
+# assertions are about. Same call the shared denylist already makes for the e2e
+# tier ("churn the harness rewrites mechanically"), applied to an L2 mktemp root
+# no denylist branch can name. The SUBJECT (src/handler.ts and friends) stays
+# tracked and fully reviewable.
+printf 'bin/\n.claude/scripts/\n.claude/.qa-tracking/\n' > "$FIXTURE/.gitignore"
 (cd "$FIXTURE" && git init -q 2>/dev/null \
     && git config user.email t@t.t && git config user.name t \
     && git add -A && git commit -qm baseline 2>/dev/null) || true
@@ -52,6 +62,18 @@ rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
 printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint_cmd\":\"\",\"type_cmd\":\"\"}'" \
     > "$FIXTURE/.claude/scripts/detect-stack.sh"
 chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+
+# 94d: the fixture is fully constructed now, so this is its ARRIVAL state —
+# baseline it, exactly as session-start.sh does on a real session. Without this,
+# `qa-gate.sh reconcile-tracker` correctly reads the harness's own detect-stack
+# stub and whatever `bd init` scaffolded (.gitignore, CLAUDE.md, AGENTS.md) as
+# this session's work: D4's change set stops being doc-only so F1 never fires,
+# and D5/D6 get a change-set hash no recorded approval binds. The tracker is
+# empty here, so `--exclude-tracked` has nothing to protect yet and every path
+# each case seeds below is new relative to this snapshot — which is precisely the
+# change set each case means to measure. See baseline_incidental_dirt in
+# lib/fixture.sh.
+baseline_incidental_dirt "$FIXTURE"
 
 # stop_decision [hook-path] — run the Stop hook and print `block` or `ALLOW`.
 stop_decision() {
