@@ -963,12 +963,17 @@ fi
 CURRENT_TASK=$(get_current_task)
 
 # I8 (Phase 6b): cross-repo detection. If the active task was claimed in a
-# different repo than the cwd's, we treat that as a hard "do not auto-mark
-# complete" signal: a Stop fired in repo Y must NOT silently close a task
-# tracked in repo X's Beads database (or against repo X's HEAD). We:
+# different repo than the cwd's, we treat that as a hard "do not auto-approve"
+# signal: a Stop fired in repo Y must NOT silently sign off a task tracked in
+# repo X's Beads database (or against repo X's HEAD). We:
 #   - skip the F1 doc-only auto-approve fast path (kept for same-repo only)
-#   - skip the post-approval `bd update --status closed` short-circuit
 #   - surface a clearly-formatted block reason explaining the mismatch
+# A third bullet here used to read "skip the post-approval `bd update --status
+# closed` short-circuit". That short-circuit no longer exists anywhere in this
+# hook — qzv removed both call sites (see THE TASK IS NOT CLOSED HERE below and
+# the note at the end of the approved-path flow) — so there is nothing left for
+# I8 to skip, and leaving the bullet in place would have credited this check with
+# suppressing a write that cannot happen. The APPROVAL is what it suppresses.
 # Single-repo users see no behaviour change because get_recorded_repo
 # returns empty for them (the helper file simply doesn't carry repo data).
 CROSS_REPO_PEER=""
@@ -982,8 +987,10 @@ if [ "$cross_rc" -ne 0 ] && [ -n "$cross_check" ]; then
 fi
 
 if [ -n "$CROSS_REPO_PEER" ]; then
-    # The CWD is in a different repo than the recorded task. Surface a
-    # block reason; do not auto-approve, do not auto-close.
+    # The CWD is in a different repo than the recorded task. Surface a block
+    # reason and do not auto-approve. ("...and do not auto-close" used to be the
+    # other half of this sentence; qzv removed every close from this hook, so the
+    # only write left to withhold is the approval.)
     CURRENT_REPO_ROOT=$(get_current_repo_root)
     REASON="Cross-repo Stop detected (I8).
 
@@ -993,7 +1000,7 @@ The active Beads task ($CURRENT_TASK) was claimed in repo:
 But this Stop hook fires from the cwd-rooted repo:
   ${CURRENT_REPO_ROOT:-(no git repo detected in cwd)}
 
-The QA gate will not auto-mark the task complete from a foreign repo. Pick one:
+The QA gate will not auto-approve a task from a foreign repo. Pick one:
 
   1. cd into $CROSS_REPO_PEER and re-run the Stop flow there. Tests/lint
      for the task's actual repo run against the right HEAD.
@@ -1124,13 +1131,23 @@ if [ -n "$FASTPATH_CLASS" ]; then
         # the fact says nothing is in flight.
         #
         # AND WHEN THE PREDICATE CANNOT BE ESTABLISHED, REFUSE — never
-        # auto-approve, never allow. Three ways that happens, each landing in the
-        # `unestablished` verdict with its own reason: review-check.sh is absent;
-        # it answers without the two fields (a pre-qzv or partially-synced
-        # install); or a record exists whose timestamp does not parse. "Cannot
-        # establish" is mechanically distinct from "established as safe" — the
-        # first has no usable pair of timestamps, the second has two and compared
-        # them — and the block reason says which.
+        # auto-approve, never allow. FIVE branches land in the `unestablished`
+        # verdict, each with its own reason (docs/HOOKS.md enumerates the same
+        # five; keep the two in step):
+        #   1. review-check.sh is absent.
+        #   2. it answers with no `cycle_opened_ts` / `latest_implementer_ts` at
+        #      all — a pre-qzv or partially-synced install.
+        #   3. it reports its own dependency failure instead
+        #      (error_key=bd_unavailable|jq_missing: bd or jq off this hook's
+        #      PATH, or no Beads workspace here). Split from 2 because the two
+        #      send an operator to completely different fixes.
+        #   4. a record exists whose timestamp is not single-line ISO-8601-UTC.
+        #   5. the qa-gate-entered LABEL says a cycle is open while no
+        #      `QA-GATE: entered` record comes back — the bd-1.1.2 cross-check
+        #      below.
+        # "Cannot establish" is mechanically distinct from "established as safe" —
+        # the first has no usable pair of timestamps, the second has two and
+        # compared them — and the block reason says which.
         #
         # THE EXIT CODE IS NOT THE DISCRIMINATOR, and this is the subtle part:
         # F1 fires on change sets with nothing to review, so `review-check.sh
@@ -1154,22 +1171,82 @@ if [ -n "$FASTPATH_CLASS" ]; then
         # (claude-workflow-plugin-fkm.1.20). An independent witness for
         # completeness is a later phase's job; nothing here proves it.
         #
-        # KNOWN FALSE NEGATIVE, found while building this and filed rather than
-        # left for a reader to discover (claude-workflow-plugin-qzv.1).
-        # `subagent-start.sh record_implementer` is idempotent per (role, task):
-        # a re-spawn of the SAME role on the SAME task posts nothing. So
-        # `latest_implementer_ts` is the timestamp of that role's FIRST spawn, not
-        # its most recent one. Sequence that defeats the predicate: cycle 1 opens,
-        # devops spawns (record at T2), approve clears `qa-gate-entered`; cycle 2
-        # opens (fresh `enter`, record at T3 > T2), devops is re-spawned and posts
-        # NOTHING — so this compare sees T2 < T3, reads "previous cycle", and
-        # auto-approves mid-implementation. The `qa` role is a second route: it is
-        # deliberately excluded from `is_implementer_role`, so a QA agent writing
-        # files during review never produces a record at all. The predicate is
-        # still strictly stronger than the nothing it replaces, and the fix is a
-        # change to record_implementer's idempotency key (per role, task AND
-        # cycle) rather than to anything here — it would reuse these same two
-        # facts, so it adds no state.
+        # THE RECORD THIS READS IS RE-WRITTEN PER CYCLE, and it has to be
+        # (claude-workflow-plugin-qzv.1). `subagent-start.sh record_implementer`
+        # used to be idempotent per (role, task) — a re-spawn of the SAME role on
+        # the SAME task posted nothing, ever — so `latest_implementer_ts` was that
+        # role's FIRST spawn permanently and this compare read "previous cycle"
+        # from the second cycle onward. QA reproduced the whole sequence live:
+        # cycle 1 entered 18:31:36Z / spawned 18:31:38Z blocked correctly; a fresh
+        # enter at 18:32:06Z plus a re-spawn that posted nothing left impl < cycle,
+        # and F1 stamped `qa-approved` + `reviewed_by=none` mid-implementation.
+        # That defect is CLOSED at the writer, not here: the idempotency key is now
+        # (role, task, CYCLE), keyed on this same `QA-GATE: entered` record, so it
+        # adds no state and no third parser. Nothing in this function changed for
+        # it. See subagent-start.sh's IMPLEMENTER-CYCLE-KEY region.
+        #
+        # THE `qa` ROLE IS OUT OF SCOPE FOR THIS PREDICATE, deliberately, and a
+        # reader of this header is entitled to know it rather than infer it.
+        # `is_implementer_role` is backend|frontend|devops only, so a QA agent —
+        # which holds Write/Edit/MultiEdit — produces no IMPLEMENTER record and
+        # this compare has nothing of QA's to see. Recording `qa` was considered
+        # and is WORSE in two measurable ways: the record would outlive the cycle
+        # it was written in for every task QA has ever reviewed, so F1 would refuse
+        # on any task with QA history — deadlocking exactly the documentation
+        # commits this fast path exists for, the same anti-overreach argument that
+        # makes a MISSING record `safe` — and it would put `qa` into the implementer
+        # SET that `approve`'s review-separation reads, where it can only ever
+        # refuse an approval that should stand.
+        #
+        # WHAT THAT EXEMPTION ACTUALLY LEAVES OPEN. F1 requires DOC_ONLY, i.e.
+        # EVERY path in the change set matches `is_doc_only_path` — and that
+        # classifier's last arm is `*/docs/*|docs/*`, which matches ANY path under
+        # ANY `docs/` directory REGARDLESS OF FILE TYPE. Probed against the shipped
+        # function: `docs/deploy.sh`, `docs/scripts/migrate.py`, `docs/Dockerfile`,
+        # `docs/settings.json`, `docs/.github/workflows/ci.yml` and
+        # `src/docs/handler.ts` all classify as documentation. So a QA-authored
+        # script, fixture or CI workflow DOES reach this predicate whenever it sits
+        # under a `docs/` directory. Only one placed elsewhere — a test at `tests/`,
+        # a hook at `.claude/scripts/` — makes DOC_ONLY false and takes F1 out of
+        # play.
+        #
+        # THE RESIDUAL, therefore: `reviewed_by=none` over a change set its own
+        # author wrote, WHICH MAY CONTAIN EXECUTABLE CONTENT under `docs/`. Not a
+        # hypothetical — QA reproduced the end of it against these hooks: a change
+        # set of exactly one executable `docs/deploy.sh`, zero IMPLEMENTER records,
+        # auto-approved with `reviewed_by=none`.
+        #
+        # WHAT STILL HOLDS, because the bound is narrower than "unbounded" and
+        # overcorrecting would be the same error in the other direction: the set F1
+        # classifies IS the set the approval binds, by hash. So this is an
+        # unreviewed approval over its author's OWN work, never one that silently
+        # covers a DIFFERENT change set. The binding is not the weak part here; the
+        # classifier is.
+        #
+        # AND THE HASH IS A HASH OF THE PATH LIST — stated because "bound by hash"
+        # invites a stronger reading than the code supports, and this passage has
+        # already shipped one of those. impact-report.sh's change_set_hash is
+        # `canonical_changed_files | sha256_stdin`, and canonical_changed_files
+        # prints the sorted, deduped, denylist-filtered PATHS; it never reads a byte
+        # of their content. Measured: appending a line to a file already in the
+        # tracker leaves the hash IDENTICAL. So the binding pins WHICH files a
+        # verdict covers, not what was in them — which is precisely what
+        # --expect-hash was built for (a path arriving between classification and
+        # approval) and is all it can do.
+        #
+        # THE CLASSIFIER IS FILED AND OPEN, NOT FIXED: claude-workflow-plugin-bbh.
+        # It is a bypass by file PLACEMENT that needs no privilege and is not
+        # specific to `qa` — every role reaches it. Read the two paragraphs above
+        # as describing the behaviour that ships TODAY, not a state pending a fix.
+        #
+        # HOW THE PREVIOUS VERSION OF THIS PASSAGE GOT IT WRONG, kept because the
+        # failure mode is the instructive part: it asserted that a script or a
+        # fixture makes DOC_ONLY false, called itself "measured", and had never
+        # probed the classifier — the `docs/` arm was read in the same session and
+        # dismissed as an edge case. A disclosure that overstates the safety it
+        # discloses is worse than no disclosure, because it is what a future
+        # maintainer reads INSTEAD of checking. That is the whole reason this
+        # paragraph exists, so it was the worst possible place for it.
         #
         # The sentinel comments are load-bearing: an L2 META-TEST strips every
         # F1-CHANGE-SET-BINDING region and asserts the in-flight implementer's

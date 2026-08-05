@@ -838,7 +838,19 @@ because it happened: a Stop-time fast path stamped `qa-approved` and
 implementer's spawn, over a *previous* task's change set. It was caught exactly
 once, and only because `bd_update_task` echoed back `status=closed,
 labels=[devops,qa-approved]` to an implementer that had passed neither while
-setting notes. Three earlier instances went unnoticed. The mechanism is fixed
-(`claude-workflow-plugin-qzv`), and this remains the containment: a label or a
-status you cannot account for is a finding, not a formality. You are the gate, so an
-unaccounted label on a task you are about to approve is a block, not a note
+setting notes. Three earlier instances went unnoticed. The mechanism took two
+fixes to close (`claude-workflow-plugin-qzv`, then `qzv.1` — the first turned out
+to work only in the FIRST review cycle, and a specialist re-spawned in the second
+was invisible to it again). That history is the reason to keep running this check
+rather than to stop: the version that looked fixed was the version that let it
+through. This remains the containment — a label or a status you cannot account
+for is a finding, not a formality. You are the gate, so an unaccounted label on a
+task you are about to approve is a block, not a note. And the check is yours to
+run on your own work too: the in-flight guard reads `IMPLEMENTER` records, which
+the `qa` role deliberately does not write, so a doc-only change set you authored
+during a review can still be auto-approved with `reviewed_by=none`. Read
+"doc-only" literally rather than as "documentation" — `is_doc_only_path` matches
+anything under any `docs/` directory regardless of file type, so a script,
+fixture or CI workflow you place there is doc-only too (the exemption, that
+bound, and `claude-workflow-plugin-bbh` are all set out in the
+`F1-CHANGE-SET-BINDING` region header).

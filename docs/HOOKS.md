@@ -1342,6 +1342,58 @@ things changed:
   SAFE, not unknown:** doc-only work is orchestrator-authored and never produces
   one, and requiring one would deadlock every documentation commit. A tie on the
   same whole second is refused, because whole-second stamps cannot order it.
+- **The record the predicate reads is re-written per review CYCLE**
+  (`claude-workflow-plugin-qzv.1`, the `IMPLEMENTER-CYCLE-KEY` region in
+  `subagent-start.sh`). `record_implementer` was idempotent per `(role, task)` —
+  its guard matched any comment on the task ever — so `latest_implementer_ts` was
+  that role's **first** spawn permanently, and from the second cycle onward the
+  predicate compared a stale record against a fresh cycle open, read "previous
+  cycle", and auto-approved mid-implementation: the same defect, one cycle later.
+  QA reproduced it end to end (cycle 1 entered 18:31:36Z / spawned 18:31:38Z
+  blocked; a fresh enter at 18:32:06Z plus a re-spawn that posted nothing
+  released, stamping `qa-approved reviewed_by=none`). The key is now
+  `(role, task, cycle)`: a record is skipped only when that role already has one
+  at-or-newer than the newest `QA-GATE: entered` — which reuses the two facts the
+  predicate already compares, so it adds no state and no third parser. The
+  **grammar is unchanged**, so every reader (`max_record_ts`'s end-of-line
+  anchor, the `^IMPLEMENTER: role=([a-z]+) ` set capture, `is_implementer_role`)
+  is untouched; only how often a record is written changed. The anti-spam intent
+  survives — re-spawns inside one cycle still post nothing — and a task that has
+  never opened a cycle keeps the old per-`(role, task)` behaviour, because in
+  that state the predicate already refuses on the record's mere existence.
+- **The `qa` role is out of scope for the predicate, deliberately.**
+  `is_implementer_role` is `backend|frontend|devops` only, so a QA agent — which
+  holds `Write`/`Edit`/`MultiEdit` — writes no `IMPLEMENTER` record and the
+  in-flight check has nothing of QA's to see. Recording it was considered and is
+  worse twice over: the record would outlive its cycle for every task QA has ever
+  reviewed, so F1 would refuse on any task with QA history (deadlocking the
+  documentation commits it exists for), and `qa` would enter the implementer
+  **set** `approve`'s review-separation reads, where it can only refuse an
+  approval that should stand. **What the exemption leaves open is wider than
+  "documentation", because `DOC_ONLY` is wider than that.** `is_doc_only_path`'s
+  last arm is `*/docs/*|docs/*`, which matches any path under any `docs/`
+  directory **regardless of file type** — probed against the shipped function,
+  `docs/deploy.sh`, `docs/scripts/migrate.py`, `docs/Dockerfile`,
+  `docs/settings.json`, `docs/.github/workflows/ci.yml` and `src/docs/handler.ts`
+  all classify as documentation. So a QA-authored script, fixture or CI workflow
+  **does** reach the predicate whenever it sits under a `docs/` directory; only
+  one placed elsewhere (a test at `tests/`, a hook at `.claude/scripts/`) makes
+  the change set non-doc-only and takes F1 out of play. The residual is therefore
+  `reviewed_by=none` over a change set its own author wrote, **which may contain
+  executable content** under `docs/` — reproduced end-to-end against these hooks
+  with a change set of one executable `docs/deploy.sh` and zero `IMPLEMENTER`
+  records. What still holds, and it is what bounds the blast radius rather than
+  removing it: the set F1 classifies **is** the set the approval binds, by hash,
+  so this is an unreviewed approval over its author's own work and never one that
+  silently covers a *different* change set. Read "by hash" precisely, though —
+  `change_set_hash` is `canonical_changed_files | sha256_stdin`, a hash of the
+  sorted, deduped, denylist-filtered **path list**, which never reads file
+  content (measured: appending a line to an already-tracked file leaves the hash
+  identical). The binding pins *which* files a verdict covers, not what was in
+  them. The classifier itself is filed as
+  `claude-workflow-plugin-bbh` and is **open, not fixed** — it is a bypass by file
+  **placement**, needs no privilege, and is not specific to `qa`: every role
+  reaches it. Read this paragraph as the behaviour that ships today.
 - **A refusal at `approve`, not a trust at `enter`.** F1 passes `--expect-hash
   <h>` naming the set it classified, captured *before* the `enter` that
   reconciles the tracker and regenerates the impact report. `approve` compares it

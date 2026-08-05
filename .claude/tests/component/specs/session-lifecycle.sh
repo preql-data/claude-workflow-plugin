@@ -283,4 +283,68 @@ if assert_mutant_applied "session-start 8M META" "$SS_REAL" "$META8_DIR/session-
 fi
 bash "$CT" clear >/dev/null 2>&1
 
+# ---------------------------------------------------------------------------
+# 8.6M META (QA finding R7-F3): strip the STATE-FILE-FALLBACK region and leg 8.6
+# must go blind again — the tracker destroyed mid-cycle because the sibling helper
+# was unreadable.
+#
+# WHY THIS EXISTS SEPARATELY FROM 8M. 8M strips the DECISION (TRACKER-PRESERVE);
+# this strips the READ the decision is made on. They fail in the same visible way
+# — tracker gone, valid envelope, nothing reported — from opposite causes, and
+# only this one proves leg 8.6 is SENSITIVE to the fallback rather than passing
+# because something else in the fixture happened to preserve the file. 94d.1.1
+# shipped without it, with 8.6/8.6b as its only guard.
+#
+# The region is arranged so the strip yields the PRE-94d.1.1 read: the helper
+# probe and the `SS_ACTIVE_TASK=""` default live OUTSIDE the sentinels, so the
+# stripped copy still parses and simply has no second source of the fact.
+strip_state_file_fallback() {
+    awk '
+        /^ *# STATE-FILE-FALLBACK BEGIN/ { skip = 1; next }
+        /^ *# STATE-FILE-FALLBACK END/   { skip = 0; next }
+        !skip { print }
+    ' "$1" > "$2"
+}
+META86_DIR="$TRACK/meta86"
+mkdir -p "$META86_DIR"
+strip_state_file_fallback "$SS_REAL" "$META86_DIR/session-start.stripped.sh"
+if assert_mutant_applied "session-start 8.6M META" "$SS_REAL" "$META86_DIR/session-start.stripped.sh"; then
+    assert_eq "session-start 8.6M META: no state-file read survives (the strip landed where it was aimed)" \
+        "0" "$(grep -c 'QA_TRACKING_DIR/current-task"' "$META86_DIR/session-start.stripped.sh" | tr -d '[:space:]')"
+    # On the CODE line, not the identifier: the surviving prose names the variable
+    # repeatedly, so a bare identifier grep would answer >1 and this leg would fail
+    # for a reason unrelated to the mutation.
+    assert_eq "session-start 8.6M META: ...while the empty DEFAULT survives outside it (so the copy is coherent)" \
+        "1" "$(grep -c -x -F 'SS_ACTIVE_TASK=""' "$META86_DIR/session-start.stripped.sh" | tr -d '[:space:]')"
+    assert_eq "session-start 8.6M META: ...and the TRACKER-PRESERVE decision is untouched by this strip" \
+        "1" "$(grep -c -x -F 'if [ "${SS_TRACKER_KEEP:-0}" != "1" ]; then' "$META86_DIR/session-start.stripped.sh" | tr -d '[:space:]')"
+    assert_eq "session-start 8.6M META: the stripped copy still parses" "0" \
+        "$(bash -n "$META86_DIR/session-start.stripped.sh" 2>/dev/null && echo 0 || echo 1)"
+
+    # --- strip leg: leg 8.6's exact state, with the fallback removed ---
+    CT_REAL_86=$(readlink "$CT" 2>/dev/null || printf '%s' "$CT")
+    bash "$CT" set "session-lifecycle-86m-task" >/dev/null 2>&1
+    printf '/degraded/one.ts\n/degraded/two.ts\n' > "$TRACKER"
+    rm -f "$SS"
+    cp "$META86_DIR/session-start.stripped.sh" "$SS"
+    chmod +x "$SS"
+    rm -f "$CT"
+    assert_eq "session-start 8.6M META: precondition — helper absent, state file still names a cycle" \
+        "yes" "$([ ! -e "$CT" ] && [ -s "$TRACK/current-task" ] && echo yes || echo no)"
+    OUT86M=$(printf '%s' '{"source":"compact"}' | bash "$SS" 2>/dev/null)
+    assert_eq "session-start 8.6M META: with the fallback stripped the tracker is DESTROYED (8.6 WOULD fail)" \
+        "gone" "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+    assert_valid_envelope "session-start 8.6M META: ...on a valid envelope, so the loss is silent" "$OUT86M"
+
+    # --- restore control: the shipped hook, identical degraded state, survives ---
+    rm -f "$SS"
+    ln -sf "$SS_REAL" "$SS"
+    printf '/degraded/one.ts\n/degraded/two.ts\n' > "$TRACKER"
+    printf '%s' '{"source":"compact"}' | bash "$SS" >/dev/null 2>&1
+    assert_eq "session-start 8.6M META: restore control — the shipped hook reads the state file and preserves it" \
+        "kept" "$([ -s "$TRACKER" ] && echo kept || echo gone)"
+    ln -sf "$CT_REAL_86" "$CT"
+    bash "$CT" clear >/dev/null 2>&1
+fi
+
 [ "$FAIL" -eq 0 ]

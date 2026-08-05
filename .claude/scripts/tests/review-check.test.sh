@@ -230,6 +230,72 @@ assert_eq "META: STRIPPED checker reports ok=true" "true" "$(printf '%s' "$STRIP
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 4: the ISO-8601 timestamp extraction has TWO carriers (qzv.1) ==="
+# This script owns the record grammars and defines the ONE timestamp extraction
+# (`max_record_ts`). `subagent-start.sh` — the sole WRITER of the IMPLEMENTER
+# grammar — carries a second copy, and it has to: its cycle-keyed idempotency
+# decision is PER-ROLE, and nothing in `gate`'s envelope is per-role
+# (`latest_implementer_ts` is the max across every role, so reusing it would
+# suppress one role's record because another had already posted this cycle, and
+# the implementer SET is what makes `approve` refuse a self-review).
+#
+# The COUPLING that matters is that both carriers agree on what a timestamp is:
+# if the writer's notion of "current cycle" diverges from the predicate's, the
+# writer under-posts and claude-workflow-plugin-qzv.1 comes straight back. The
+# behavioural pin is the two-cycle leg in the verify-before-stop component spec;
+# this is the structural one, and it fails EARLY and by name instead of late and
+# diffusely. Anchored on the literals, never on line numbers.
+SUBAGENT_START="$PROJECT_DIR/.claude/scripts/subagent-start.sh"
+assert_eq "qzv.1 coupling: subagent-start.sh exists to compare against" "1" \
+    "$([ -f "$SUBAGENT_START" ] && echo 1 || echo 0)"
+ISO_RE_LINE="QZV_ISO_UTC_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'"
+assert_eq "qzv.1 coupling: review-check.sh defines the ISO-8601-UTC literal exactly once" "1" \
+    "$(grep -c -x -F "$ISO_RE_LINE" "$RCHECK" | tr -d '[:space:]')"
+assert_eq "qzv.1 coupling: subagent-start.sh defines the SAME literal, byte for byte" "1" \
+    "$(grep -c -x -F "$ISO_RE_LINE" "$SUBAGENT_START" | tr -d '[:space:]')"
+# The extraction itself: end-of-line anchored, so a date-shaped token inside a
+# free-text summary cannot be read as the record's stamp. Both carriers must
+# anchor the same way — an unanchored copy would read a DIFFERENT timestamp off
+# the same line and the two would disagree without either looking wrong.
+#
+# The needle deliberately STOPS before the line-continuation backslash. Including
+# it would make this leg fail when someone reflows the pipeline, which has nothing
+# to do with the property being pinned. Single-quoted on purpose: `$QZV_ISO_UTC_RE`
+# must stay LITERAL, because that is how it appears in both files.
+# shellcheck disable=SC2016
+EXTRACT_LINE='| grep -oE " at $QZV_ISO_UTC_RE\$" 2>/dev/null'
+assert_eq "qzv.1 coupling: review-check.sh anchors the extraction at end-of-line" "1" \
+    "$(grep -c -F "$EXTRACT_LINE" "$RCHECK" | tr -d '[:space:]')"
+assert_eq "qzv.1 coupling: subagent-start.sh anchors it identically" "1" \
+    "$(grep -c -F "$EXTRACT_LINE" "$SUBAGENT_START" | tr -d '[:space:]')"
+# Both carriers must also keep the THREE-answer contract, because collapsing
+# 'unparseable' into '' is the one drift that flips a refusal into an approval:
+# "no record" is safe, "a record I cannot read" is not.
+assert_eq "qzv.1 coupling: review-check.sh still distinguishes unparseable from absent" "1" \
+    "$(grep -c "printf 'unparseable'" "$RCHECK" | tr -d '[:space:]')"
+assert_eq "qzv.1 coupling: subagent-start.sh still distinguishes unparseable from absent" "1" \
+    "$(grep -c "printf 'unparseable'" "$SUBAGENT_START" | tr -d '[:space:]')"
+
+# META for section 4. A substring assertion that has never been seen to MISS is
+# indistinguishable from one whose needle matches something broader than intended,
+# so drive the needle against a line carrying the ONE difference that matters —
+# the `\$` end-of-line anchor removed — and require it not to match. A whole
+# stripped copy of the script is not needed for that, and building one by `sed`ing
+# a regex out of a regex was fragile in a way this is not.
+# DERIVED from the needle rather than written out a second time: a hand-copied
+# counterexample can drift into being a counterexample to something else, and then
+# this META passes while proving nothing. Removing `\$` from before the closing
+# quote is exactly the loss of the anchor and nothing else.
+LOOSENED_LINE=${EXTRACT_LINE/'\$"'/'"'}
+LOOSENED="$WORK/loosened-anchor.txt"
+printf '%s\n' "$LOOSENED_LINE" > "$LOOSENED"
+assert_eq "qzv.1 coupling META: de-anchoring the needle actually changed it" "changed" \
+    "$([ "$LOOSENED_LINE" != "$EXTRACT_LINE" ] && echo changed || echo same)"
+assert_eq "qzv.1 coupling META: ...and the anchored needle does NOT match the de-anchored line (the legs above can MISS)" "0" \
+    "$(grep -c -F "$EXTRACT_LINE" "$LOOSENED" | tr -d '[:space:]')"
+
+# ---------------------------------------------------------------------------
+echo ""
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"
     for t in "${FAILED_TESTS[@]}"; do printf '  - %s\n' "$t"; done

@@ -166,11 +166,143 @@ NOBD_JSON_OK=$(printf '%s' "$NOBD_OUT" | jq -e . >/dev/null 2>&1 && echo yes || 
 assert_eq "implementer: bd absent -> hook still emits valid JSON (never blocks a spawn)" \
     "yes" "$NOBD_JSON_OK"
 
+# ===========================================================================
+# THE IDEMPOTENCY KEY INCLUDES THE REVIEW CYCLE (claude-workflow-plugin-qzv.1).
+#
+# I2 above pins "a re-spawn does not duplicate", and it passed for a year while
+# the guard was WRONG: `grep -qE "^IMPLEMENTER: role=${role} "` matched ANY
+# comment on the task ever, so the record was idempotent per (role, task) with no
+# expiry. The Stop hook's F1 predicate compares that record's TIMESTAMP against
+# the most recent `QA-GATE: entered at <ts>` to refuse auto-approving a doc-only
+# change set while an implementer is in flight — and against a permanently-first
+# timestamp it read "previous cycle" from the second cycle onward and auto-
+# approved mid-implementation (QA reproduced it end to end; see qzv.1).
+#
+# Every leg below is deterministic BY CONSTRUCTION rather than by timing: the
+# cycle records are planted at fixed stamps, so no assertion depends on whether
+# `enter` and a spawn landed in the same whole second. The counterpart — a real
+# `qa-gate.sh enter` writing the cycle record, and the Stop-hook consequence —
+# is leg 8 of the verify-before-stop spec, which drives this same hook.
+#
+# A note on the planted stamps: the PAST-cycle legs use 2000-01-01 and the
+# FUTURE-cycle legs 2099-01-01 so the comparison against the record this hook
+# writes (always `date -u` NOW) has the same answer on any plausible clock. In a
+# future-dated cycle every spawn posts, which is the fail-safe direction and only
+# reachable through clock skew or a forged comment.
+# ===========================================================================
+
+plant_comment() {
+    # plant_comment <tid> <text> — append a record to the task, newest last.
+    (cd "$FIXTURE" && bd comments add "$1" "$2" >/dev/null 2>&1 \
+        || bd comment add "$1" "$2" >/dev/null 2>&1)
+}
+spawn_as() {
+    # spawn_as <agent_type> [hook] — drive the real SubagentStart entry point.
+    printf '%s' "{\"agent_type\":\"$1\"}" | bash "${2:-$HOOK}" >/dev/null 2>&1 || true
+}
+new_cycle_task() {
+    # new_cycle_task <title> -> id, claimed as the active task.
+    local tid
+    tid=$(cd "$FIXTURE" && bd create "$1" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$CT" set "$tid"
+    printf '%s' "$tid"
+}
+
+# I9a. Inside ONE open cycle, a re-spawn still posts nothing. This is the
+# anti-spam property the guard exists for — preserved, not traded away.
+TID_C1=$(new_cycle_task "cycle key: one cycle")
+plant_comment "$TID_C1" "QA-GATE: entered at 2000-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9a: the first spawn in an open cycle records once" "1" \
+    "$(count_role "$TID_C1" devops)"
+spawn_as devops
+spawn_as @devops
+assert_eq "cycle key I9a: ...and re-spawns INSIDE the same cycle add nothing" "1" \
+    "$(count_role "$TID_C1" devops)"
+
+# I9b. THE DEFECT. A cycle opened AFTER this role's record -> a fresh record.
+# Pre-fix this posted nothing and the count stayed 1, which is the whole bug.
+TID_C2=$(new_cycle_task "cycle key: later cycle")
+plant_comment "$TID_C2" "IMPLEMENTER: role=devops task=$TID_C2 at 2000-01-01T00:00:00Z"
+plant_comment "$TID_C2" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9b: a re-spawn in a LATER cycle posts a FRESH record (was: nothing)" \
+    "2" "$(count_role "$TID_C2" devops)"
+assert_match "cycle key I9b: ...in the unchanged grammar every reader parses" \
+    "^IMPLEMENTER: role=devops task=${TID_C2} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" \
+    "$(implementer_lines "$TID_C2" | tail -1)"
+
+# I9c/d/e. THE BOUNDARY, one second either side and the exact tie. The tie counts
+# as "current" deliberately: F1 refuses same-second pairs (whole-second stamps
+# cannot order an enter and a spawn), so the record already there blocks and a
+# duplicate would add a line for nothing.
+TID_C3=$(new_cycle_task "cycle key: one second before")
+plant_comment "$TID_C3" "IMPLEMENTER: role=devops task=$TID_C3 at 2098-12-31T23:59:59Z"
+plant_comment "$TID_C3" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9c: a record ONE SECOND before the cycle open -> posts" "2" \
+    "$(count_role "$TID_C3" devops)"
+
+TID_C4=$(new_cycle_task "cycle key: same second")
+plant_comment "$TID_C4" "IMPLEMENTER: role=devops task=$TID_C4 at 2099-01-01T00:00:00Z"
+plant_comment "$TID_C4" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9d: a record in the SAME SECOND as the cycle open -> no post" "1" \
+    "$(count_role "$TID_C4" devops)"
+
+TID_C5=$(new_cycle_task "cycle key: one second after")
+plant_comment "$TID_C5" "IMPLEMENTER: role=devops task=$TID_C5 at 2099-01-01T00:00:01Z"
+plant_comment "$TID_C5" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9e: a record ONE SECOND after the cycle open -> no post" "1" \
+    "$(count_role "$TID_C5" devops)"
+
+# I9f. THE LEXICOGRAPHIC MAX, not the last line in comment order. The newer cycle
+# record is planted FIRST, so a reader keying on comment order would see the OLDER
+# open, conclude the role's record is newer than it, and skip.
+TID_C6=$(new_cycle_task "cycle key: max not last line")
+plant_comment "$TID_C6" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+plant_comment "$TID_C6" "QA-GATE: entered at 2000-01-01T00:00:00Z"
+plant_comment "$TID_C6" "IMPLEMENTER: role=devops task=$TID_C6 at 2050-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9f: the MAX cycle open wins over the last-listed one -> posts" "2" \
+    "$(count_role "$TID_C6" devops)"
+
+# I9g. PER-ROLE, which is why `review-check.sh gate`'s cross-role
+# `latest_implementer_ts` could not be reused for this decision: reusing it would
+# suppress devops's record because backend already posted one this cycle, and the
+# implementer SET is what makes `approve` refuse a self-review (jio.1).
+TID_C7=$(new_cycle_task "cycle key: per role")
+plant_comment "$TID_C7" "QA-GATE: entered at 2000-01-01T00:00:00Z"
+spawn_as backend
+assert_eq "cycle key I9g: precondition — backend recorded in this cycle" "1" \
+    "$(count_role "$TID_C7" backend)"
+spawn_as devops
+assert_eq "cycle key I9g: ...and devops still gets its OWN record (never suppressed)" "1" \
+    "$(count_role "$TID_C7" devops)"
+
+# I9h. An UNPARSEABLE stamp posts rather than skips. `date` failing makes this
+# hook write a literal `at ?`, so it is a stamp the writer can really produce; the
+# two records cannot be ordered, and a fresh well-formed one is the only answer
+# that makes the predicate readable again.
+TID_C8=$(new_cycle_task "cycle key: unparseable stamp")
+plant_comment "$TID_C8" "IMPLEMENTER: role=devops task=$TID_C8 at ?"
+plant_comment "$TID_C8" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9h: an unparseable existing stamp -> posts (fail-safe)" "2" \
+    "$(count_role "$TID_C8" devops)"
+
 # I8. META: break the idempotency guard in a COPY (invert the grep so the
 # "already recorded" branch never fires) -> a re-spawn DUPLICATES the record,
 # i.e. assertion I2 would fail. Proves I2 is sensitive to the guard rather
 # than to some incidental de-duplication elsewhere. TEXT-anchored on the guard
 # (LESSONS llh.20), not on a line number.
+#
+# qzv.1 kept this anchor line byte-identical on purpose: the pre-fix
+# per-(role, task) grep still lives outside the IMPLEMENTER-CYCLE-KEY region and
+# still decides the first half of the guard, so rewriting it to a constant-false
+# condition still makes every spawn post. What changed is that it now sets a
+# `skip` variable the region refines, instead of returning directly.
 REAL_HOOK=$(readlink "$HOOK" 2>/dev/null || printf '%s' "$HOOK")
 HOOK_MUT="$FIXTURE/subagent-start-dupmut.sh"
 awk '
@@ -192,6 +324,54 @@ if [ "$MUT_RC" -eq 0 ]; then
     printf '%s' '{"agent_type":"backend"}' | bash "$HOOK_MUT" >/dev/null
     assert_eq "implementer META: with the guard broken a re-spawn DUPLICATES (I2 WOULD fail)" \
         "2" "$(count_role "$TID_MUT" backend)"
+fi
+
+# I10. META (spec-mandated for qzv.1): strip the IMPLEMENTER-CYCLE-KEY region and
+# a re-spawn in a LATER cycle posts NOTHING again — I9b's exact state, pre-fix.
+# This is the writer-side half; the gate-side half (the same strip making a
+# doc-only Stop auto-approve mid-implementation) is the qzv.1 META in the
+# verify-before-stop spec.
+#
+# The strip yields the PRE-FIX guard rather than a syntax error because the
+# per-(role, task) grep and the `skip` variable it sets live OUTSIDE the
+# sentinels; only the refinement and its two helpers live inside. Anchored
+# patterns (`^ *#`) so a prose line naming the sentinel cannot start the excision
+# early.
+CK_MUT="$FIXTURE/subagent-start-cyclekey-stripped.sh"
+awk '
+    /^ *# IMPLEMENTER-CYCLE-KEY BEGIN/ { skip = 1; next }
+    /^ *# IMPLEMENTER-CYCLE-KEY END/   { skip = 0; next }
+    !skip { print }
+' "$REAL_HOOK" > "$CK_MUT"
+chmod +x "$CK_MUT"
+if assert_mutant_applied "implementer I10 META" "$REAL_HOOK" "$CK_MUT"; then
+    assert_eq "implementer I10 META: no cycle refinement survives (the strip landed where aimed)" \
+        "0" "$(grep -c 'recorded_in_current_cycle' "$CK_MUT" | tr -d '[:space:]')"
+    assert_eq "implementer I10 META: ...while the pre-fix per-(role, task) grep SURVIVES outside it" \
+        "1" "$(grep -c -F 'if printf '"'"'%s\n'"'"' "$existing" | grep -qE "^IMPLEMENTER: role=${role} "; then' "$CK_MUT" | tr -d '[:space:]')"
+    assert_eq "implementer I10 META: the stripped copy still parses" "0" \
+        "$(bash -n "$CK_MUT" 2>/dev/null && echo 0 || echo 1)"
+    TID_CKM=$(new_cycle_task "cycle key META: stripped writer goes blind")
+    plant_comment "$TID_CKM" "IMPLEMENTER: role=devops task=$TID_CKM at 2000-01-01T00:00:00Z"
+    plant_comment "$TID_CKM" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+    spawn_as devops "$CK_MUT"
+    assert_eq "implementer I10 META: with the cycle key stripped the later cycle posts NOTHING (I9b WOULD fail)" \
+        "1" "$(count_role "$TID_CKM" devops)"
+    # Restore control: the SHIPPED hook, identical state, posts the fresh record.
+    TID_CKC=$(new_cycle_task "cycle key META: shipped writer records")
+    plant_comment "$TID_CKC" "IMPLEMENTER: role=devops task=$TID_CKC at 2000-01-01T00:00:00Z"
+    plant_comment "$TID_CKC" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+    spawn_as devops
+    assert_eq "implementer I10 META: restore control — the shipped hook posts it" "2" \
+        "$(count_role "$TID_CKC" devops)"
+    # ...and the stripped copy is NOT broken in some blanket way that would make
+    # the leg above pass for the wrong reason: with no cycle record at all, both
+    # copies agree (this is the state I2 covers, where the keys are equivalent).
+    TID_CKN=$(new_cycle_task "cycle key META: no cycle, both agree")
+    spawn_as devops "$CK_MUT"
+    spawn_as devops "$CK_MUT"
+    assert_eq "implementer I10 META: ...and with NO cycle record the stripped copy still de-dupes" \
+        "1" "$(count_role "$TID_CKN" devops)"
 fi
 
 [ "$FAIL" -eq 0 ]

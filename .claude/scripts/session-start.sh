@@ -318,9 +318,19 @@ SS_ACTIVE_TASK=""
 if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
     SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
 fi
+# STATE-FILE-FALLBACK BEGIN (94d.1.1)
+# The fallback itself, in a sentinel region so a mutation META can measure it
+# (QA finding R7-F3: it shipped with legs 8.6/8.6b as its only guard — strong
+# legs, but nothing proved they were SENSITIVE to this read, and a behavioural
+# leg whose sensitivity is unproven is the shape the harness exists to reject).
+# Stripping this region yields the PRE-94d.1.1 read exactly: the helper probe and
+# the `SS_ACTIVE_TASK=""` default both live OUTSIDE it, so the stripped copy is
+# coherent and simply goes blind whenever the sibling helper is unreadable —
+# byte-for-byte the state QA reproduced. Do not rename the sentinels.
 if [ -z "$SS_ACTIVE_TASK" ] && [ -s "$QA_TRACKING_DIR/current-task" ]; then
     SS_ACTIVE_TASK=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' || echo "")
 fi
+# STATE-FILE-FALLBACK END (94d.1.1)
 
 # TRACKER-PRESERVE BEGIN (94d.1)
 # DO NOT DESTROY THE CHANGE SET OF A GATE CYCLE THAT IS STILL IN FLIGHT.

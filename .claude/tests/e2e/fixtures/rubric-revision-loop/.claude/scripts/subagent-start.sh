@@ -23,9 +23,13 @@
 # V3 (claude-workflow-plugin-jio.1) adds one side effect between 2 and 3: for
 # the three IMPLEMENTING roles (backend/frontend/devops — never qa) the hook
 # appends an `IMPLEMENTER: role=<r> task=<t> at <ts>` Beads comment, once per
-# (role, task). That record is the implementer set `review-check.sh gate`
-# reads, which `qa-gate.sh approve` and the Stop hook use to refuse a
-# self-review. It is best-effort: a failure logs and never blocks the spawn.
+# (role, task, REVIEW CYCLE). That record is the implementer set
+# `review-check.sh gate` reads, which `qa-gate.sh approve` and the Stop hook use
+# to refuse a self-review — and whose TIMESTAMP the Stop hook's F1 fast path
+# compares against the cycle open to refuse speaking for a task an implementer
+# is still working on. The cycle in that key is claude-workflow-plugin-qzv.1;
+# see the IMPLEMENTER-CYCLE-KEY region below for why (role, task) alone was not
+# enough. It is best-effort: a failure logs and never blocks the spawn.
 #
 # Autonomy: this hook is silent on every error (per principle #3 — full
 # autonomy, no user prompts). Failures fall through to the empty-output
@@ -112,10 +116,12 @@ is_implementer_role() {
 #   IMPLEMENTER: role=<backend|frontend|devops> task=<tid> at <ISO8601-UTC>
 #
 # Contract:
-#   - IDEMPOTENT per (role, task): a re-spawn of the same specialist on the
-#     same task posts nothing. A multi-domain task spawning backend AND
-#     frontend gets ONE record per distinct role (the gate de-dupes anyway,
-#     but a clean audit trail beats a noisy one).
+#   - IDEMPOTENT per (role, task, REVIEW CYCLE): a re-spawn of the same
+#     specialist inside the SAME review cycle posts nothing; a re-spawn in a
+#     LATER cycle posts a fresh record. A multi-domain task spawning backend AND
+#     frontend gets ONE record per distinct role per cycle (the gate de-dupes
+#     anyway, but a clean audit trail beats a noisy one). The cycle half of that
+#     key is claude-workflow-plugin-qzv.1 — see the IMPLEMENTER-CYCLE-KEY region.
 #   - BEST-EFFORT: every failure path logs to sync-errors.log and returns
 #     non-zero; the caller ignores the result. A SubagentStart hook must never
 #     block or slow a spawn, and the additionalContext envelope below is
@@ -141,6 +147,149 @@ bd_show_with_comments() {
         || true
 }
 
+# IMPLEMENTER-CYCLE-KEY BEGIN (qzv.1)
+#
+# THE IDEMPOTENCY KEY HAS TO INCLUDE THE REVIEW CYCLE, or the record cannot
+# express the thing the Stop hook asks of it.
+#
+# THE DEFECT, REPRODUCED END TO END (claude-workflow-plugin-qzv.1; QA's
+# two-cycle run against the real scripts, 2026-08-04). The guard below used to
+# be `grep -qE "^IMPLEMENTER: role=${role} "` alone — idempotent per
+# (role, task), matching ANY comment on the task ever. So
+# `review-check.sh gate`'s `latest_implementer_ts` was that role's FIRST spawn,
+# permanently, and the Stop hook's F1 predicate (which refuses to auto-approve a
+# doc-only change set while an IMPLEMENTER record is at-or-newer than the most
+# recent `QA-GATE: entered at <ts>`) read "previous cycle" from the second cycle
+# onward:
+#
+#   CYCLE 1  QA-GATE: entered  18:31:36Z
+#            IMPLEMENTER role=devops 18:31:38Z
+#            -> impl > cycle  -> Stop BLOCKS                       (correct)
+#   CYCLE 2  qa-gate-entered removed, FRESH enter -> entered 18:32:06Z
+#            devops RE-SPAWNS -> posted NOTHING (record count stayed 1)
+#            -> impl 18:31:38Z < cycle 18:32:06Z -> Stop ALLOWS
+#            -> qa-approved + `reviewed_by=none` mid-implementation
+#
+# That last line is claude-workflow-plugin-qzv's titular defect verbatim, and
+# multi-cycle is this project's normal mode (94d took six). Re-keying on the
+# cycle makes the timestamp mean what the predicate already assumed it meant.
+#
+# WHY RE-KEY RATHER THAN DROP IDEMPOTENCY. Dropping it — one record per spawn —
+# also fixes the predicate, and it is smaller. It was rejected because a role is
+# re-spawned SEVERAL times inside one cycle as a matter of routine (a stream
+# watchdog kill, a mid-task course correction), so per-spawn records put a dozen
+# lines of noise into a comment stream that humans and agents read by hand with
+# plain `bd show` (claude-workflow-plugin-fkm.1.18) — and it would delete a
+# tested property rather than correct it (spec leg I2, and its I8 META).
+#
+# WHY THE PARSE LIVES HERE and is not read back off `review-check.sh gate`'s
+# envelope, which is where every OTHER consumer of these two facts gets them:
+#   - The decision is PER-ROLE. `latest_implementer_ts` is the max across ALL
+#     roles, so using it would suppress devops's record because backend already
+#     posted one this cycle — and the implementer SET is the reason these records
+#     exist (jio.1), so losing a role from it would silently re-legalise the
+#     self-review `approve` refuses. Nothing in that envelope is per-role.
+#   - This script is the grammar's sole WRITER, and it already read its own
+#     records back to make this very decision. A writer checking what it wrote
+#     is not a second reader of someone else's format.
+#   - `review-check.sh` cannot be sourced (its dispatcher runs and exits on an
+#     empty subcommand), and a SubagentStart hook must never block or slow a
+#     spawn, so adding a subprocess + a new subcommand + a fallback for when that
+#     subcommand is missing buys strictly more failure surface than it removes.
+# WHAT THE COUPLING COSTS, and how it is pinned rather than hoped for: the
+# writer's notion of "current cycle" must agree with the predicate's. Pinned
+# BEHAVIOURALLY by the two-cycle legs in the verify-before-stop component spec
+# (they drive the real writer and the real predicate over one record stream, so a
+# divergence in the dangerous direction goes red), and STRUCTURALLY by
+# review-check.test.sh, which asserts this file and review-check.sh carry a
+# byte-identical `QZV_ISO_UTC_RE` and a byte-identical extraction pipeline.
+#
+# THE GRAMMAR IS UNCHANGED. `IMPLEMENTER: role=<r> task=<t> at <ISO8601-UTC>`,
+# byte for byte. Every reader keeps working untouched: `max_record_ts`'s
+# end-of-line ` at <ts>$` anchor, the `^IMPLEMENTER: role=([a-z]+) ` set
+# capture, `is_implementer_role`, and F1's predicate. Only how OFTEN a record is
+# written changed.
+QZV_ISO_UTC_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+
+# max_record_ts_in <firstlines> <record-prefix-ERE> — the same three answers, the
+# same pipeline and the same anchor as `review-check.sh`'s max_record_ts, over a
+# STRING of comment first-lines instead of a file (this hook already has them in
+# a variable and writing a temp file inside a spawn hook buys nothing):
+#   ''            no record of that class exists
+#   'unparseable' records exist, none carries a well-formed trailing timestamp
+#   <ts>          the LEXICOGRAPHIC MAX, never the last line in comment order
+# The third answer is why the empty string is not overloaded: "no record" and "a
+# record I cannot read" demand opposite decisions below.
+max_record_ts_in() {
+    local lines ts
+    lines=$(printf '%s\n' "$1" | grep -E "$2" 2>/dev/null) || lines=""
+    if [ -z "$lines" ]; then
+        printf ''
+        return 0
+    fi
+    ts=$(printf '%s\n' "$lines" \
+        | grep -oE " at $QZV_ISO_UTC_RE\$" 2>/dev/null \
+        | sed -E 's/^ at //' \
+        | LC_ALL=C sort \
+        | tail -1) || ts=""
+    if [ -z "$ts" ]; then
+        printf 'unparseable'
+        return 0
+    fi
+    printf '%s' "$ts"
+}
+
+# recorded_in_current_cycle <role> <firstlines> -> 'yes' | 'no'
+#
+# 'yes' means "this role already has a record the F1 predicate will read as
+# in-flight", i.e. posting another adds nothing. Four cases, IN THIS ORDER, and
+# the direction of each is chosen so that being WRONG costs comment noise rather
+# than a mis-approval:
+#
+#   THIS ROLE HAS NO RECORD -> 'no' (post). Checked FIRST and not merely for
+#     tidiness: with it ordered after the no-cycle case below, a task carrying no
+#     records at all answered 'yes' — "already recorded" for a role that had
+#     never spawned. The guard never reaches the helper in that state, so it was
+#     invisible from the call site and only a direct truth-table probe found it;
+#     an unconditional caller added later would have skipped every first spawn.
+#   NO CYCLE RECORD AT ALL -> 'yes' (keep the old per-(role, task) key). Nothing
+#     for the record to be older than, and F1 already refuses on the record's
+#     mere existence in that state ("...and NO review cycle was ever opened on
+#     it"). So a second record cannot change any verdict, and posting one on
+#     every spawn of a task that has never reached the gate would be pure spam.
+#   EITHER SIDE UNPARSEABLE -> 'no' (post). The two cannot be ordered, so the
+#     cycle this role last recorded in is unknown; a fresh, well-formed record is
+#     the only answer that makes the predicate readable again. F1 refuses on an
+#     unparseable stamp anyway, so this cannot buy an approval.
+#   OTHERWISE -> compare. 'yes' only when the role's newest record is at-or-newer
+#     than the newest cycle open. A SAME-SECOND TIE counts as 'yes' — F1 refuses
+#     ties (whole-second stamps cannot order an enter and a spawn), so the
+#     existing record already blocks and a duplicate would add a line for nothing.
+recorded_in_current_cycle() {
+    local role="$1" firstlines="$2" role_ts cycle_ts newest
+    role_ts=$(max_record_ts_in "$firstlines" "^IMPLEMENTER: role=${role} ")
+    cycle_ts=$(max_record_ts_in "$firstlines" '^QA-GATE: entered at ')
+    if [ -z "$role_ts" ]; then
+        printf 'no'
+        return 0
+    fi
+    if [ -z "$cycle_ts" ]; then
+        printf 'yes'
+        return 0
+    fi
+    if [ "$role_ts" = "unparseable" ] || [ "$cycle_ts" = "unparseable" ]; then
+        printf 'no'
+        return 0
+    fi
+    newest=$(printf '%s\n%s\n' "$role_ts" "$cycle_ts" | LC_ALL=C sort | tail -1)
+    if [ "$newest" = "$role_ts" ]; then
+        printf 'yes'
+    else
+        printf 'no'
+    fi
+}
+# IMPLEMENTER-CYCLE-KEY END (qzv.1)
+
 record_implementer() {
     local role="$1" tid="$2"
     [ -n "$role" ] && [ -n "$tid" ] || return 1
@@ -154,10 +303,43 @@ record_implementer() {
         | jq -r '(if type=="array" then .[0].comments else .comments end) // []
                  | .[].text | split("\n")[0]' 2>/dev/null || echo "")
 
-    # IMPLEMENTER-IDEMPOTENCY-GUARD (load-bearing; the L2 META mutates this
-    # grep so duplicates post, which must break the "posted exactly once"
-    # assertion). The pattern mirrors the gate's own capture.
+    # IMPLEMENTER-IDEMPOTENCY-GUARD, in two halves.
+    #
+    # HALF ONE, HERE, OUTSIDE the cycle-key region: "does this role have a record
+    # at all". This is the PRE-qzv.1 answer in full, and it stays outside the
+    # sentinels on purpose — with the region stripped it is the only answer, so the
+    # stripped copy is BEHAVIOURALLY IDENTICAL to pre-qzv.1 (with the
+    # test-anchored `grep` line below byte-identical to it), and the L2 META
+    # therefore measures the cycle key instead of dying on an unset variable. Same
+    # discipline as verify-before-stop.sh's F1_BINDING_VERDICT default.
+    #
+    # "Behaviourally identical" rather than "byte-for-byte": the surrounding code
+    # DID move — the old form returned directly, this one sets `skip` — so only
+    # that one line is byte-identical. The equivalence is the measured kind: QA
+    # compared pre-fix / stripped / shipped across 7 task states (no records,
+    # previous cycle, this cycle, never-entered, same-second tie, unparseable
+    # stamp, other-role-only); pre-fix and stripped agree on all 7, and shipped
+    # differs in exactly two, both RELAXATIONS. No state exists where pre-fix
+    # posted and shipped did not.
+    #
+    # THE `grep` LINE BELOW IS TEST-ANCHORED: the spec's I8 META locates it by its
+    # exact text and rewrites it to a constant-false condition, which must make a
+    # re-spawn duplicate. Change its wording and that META stops finding it —
+    # `assert_mutant_applied`-style, it fails loudly rather than silently, but fix
+    # the anchor in the same edit. The pattern mirrors the gate's own capture.
+    local skip="no"
     if printf '%s\n' "$existing" | grep -qE "^IMPLEMENTER: role=${role} "; then
+        skip="yes"
+    fi
+    # IMPLEMENTER-CYCLE-KEY BEGIN (qzv.1)
+    # HALF TWO: a record from a PREVIOUS cycle does not count. This only ever
+    # RELAXES the skip (yes -> no), never tightens it, so it cannot suppress a
+    # record the pre-fix guard would have written.
+    if [ "$skip" = "yes" ]; then
+        skip=$(recorded_in_current_cycle "$role" "$existing")
+    fi
+    # IMPLEMENTER-CYCLE-KEY END (qzv.1)
+    if [ "$skip" = "yes" ]; then
         return 0
     fi
 

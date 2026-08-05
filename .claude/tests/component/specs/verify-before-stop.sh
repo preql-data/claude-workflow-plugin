@@ -1260,6 +1260,16 @@ qzv_approval_records() {
         | grep '^QA-GATE APPROVED ' || true
 }
 qzv_record_count() { qzv_approval_records "$1" | grep -c . | tr -d '[:space:]'; }
+# qzv_implementer_count <tid> <role> — how many IMPLEMENTER records that role has.
+# The count, not merely the presence: the qzv.1 defect was a record that failed to
+# be WRITTEN a second time, so "is there one?" is exactly the question that cannot
+# see it.
+qzv_implementer_count() {
+    (cd "$FIXTURE_QZV" && bd show "$1" --json --include-comments 2>/dev/null \
+        || cd "$FIXTURE_QZV" && bd show "$1" --json 2>/dev/null) \
+        | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text | split("\n")[0]' 2>/dev/null \
+        | grep -cE "^IMPLEMENTER: role=$2 " | tr -d '[:space:]'
+}
 qzv_comment() { (cd "$FIXTURE_QZV" && bd comments add "$1" "$2" >/dev/null 2>&1 || bd comment add "$1" "$2" >/dev/null 2>&1); }
 # qzv_seed_docs — a doc-only tracked change set, plus a baseline that absorbs any
 # incidental dirt the .gitignore above does not already hide. Called AFTER the
@@ -1502,6 +1512,185 @@ assert_contains "vbs-qzv-7: ...and the envelope names the close as the caller's 
     "bd close $TID_Q7" "$Q7_CTX"
 assert_eq "vbs-qzv-7: ...on a still-valid, non-blocking envelope" "false" \
     "$(printf '%s' "$Q7_JSON" | jq -r 'has("decision")' 2>/dev/null)"
+
+# --- Leg 8: TWO CYCLES, the same role RE-SPAWNED -> the second Stop BLOCKS ----
+#
+# THE SHAPE NOTHING HAD (claude-workflow-plugin-qzv.1). Legs 1-3 above each drive
+# ONE cycle with a hand-planted record, and every one of them passed while the
+# predicate was blind from the second cycle onward. `record_implementer` was
+# idempotent per (role, task), matching ANY comment on the task ever, so a role
+# re-spawned in a LATER cycle posted NOTHING, `latest_implementer_ts` stayed at
+# that role's FIRST spawn, and F1 read "previous cycle" forever. QA reproduced it
+# end to end: cycle 1 blocked (18:31:36Z enter / 18:31:38Z spawn), then a fresh
+# enter at 18:32:06Z + a re-spawn that posted nothing left impl < cycle, and F1
+# stamped `qa-approved` + `reviewed_by=none` mid-implementation — qzv's titular
+# defect verbatim, one cycle later.
+#
+# So this leg drives the RE-SPAWN through the real SubagentStart entry point
+# (stdin JSON -> the shipped hook) rather than planting a record, because the
+# WRITER is where the defect lived. The cycle-1 record is planted, deliberately:
+# planting it at a fixed 2000-01-01 makes the leg answer the question with no
+# dependence on wall-clock granularity, where two real spawns seconds apart would
+# make "did the second cycle post?" depend on whether `enter` and the spawn
+# landed in the same whole second. The adjacent-timestamp boundary (one second
+# either side of the cycle open, and the exact tie) is pinned separately and
+# deterministically in the subagent-start spec's I9, against the same writer.
+SS_QZV="$FIXTURE_QZV/.claude/scripts/subagent-start.sh"
+# CONTROL first, on its own task: a previous cycle's record does NOT block, so the
+# block on the probe below is attributable to the re-spawn and not to the fixture.
+# (Its own task because ALLOW here means F1 approves, which clears the gate label,
+# truncates the tracker and unsets current-task — state the probe still needs.)
+TID_Q8=$(cd "$FIXTURE_QZV" && bd create "qzv: two cycles, control" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q8" --status in_progress >/dev/null 2>&1) || true
+qzv_comment "$TID_Q8" "IMPLEMENTER: role=devops task=$TID_Q8 at 2000-01-01T00:00:00Z"
+qzv_arm "$TID_Q8"
+assert_eq "vbs-qzv-8: CONTROL — cycle 2 open, NO re-spawn: the old record still approves" \
+    "ALLOW" "$(qzv_decision)"
+
+TID_Q8B=$(cd "$FIXTURE_QZV" && bd create "qzv: two cycles, re-spawn" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q8B" --status in_progress >/dev/null 2>&1) || true
+# Cycle 1's record, as the real hook would have left it.
+qzv_comment "$TID_Q8B" "IMPLEMENTER: role=devops task=$TID_Q8B at 2000-01-01T00:00:00Z"
+# Cycle 2 opens: a FRESH enter writes a new `QA-GATE: entered at <now>` record.
+# (A re-enter on an already-entered task returns early and writes NO record, which
+# is exactly why only a fresh cycle moves this timestamp.)
+qzv_arm "$TID_Q8B"
+assert_eq "vbs-qzv-8: precondition — the task carries exactly ONE devops record from cycle 1" \
+    "1" "$(qzv_implementer_count "$TID_Q8B" devops)"
+# THE RE-SPAWN, through the shipped SubagentStart hook. cwd matters: the hook's
+# `bd comments add` locates the workspace from it, like every other bd call here.
+(cd "$FIXTURE_QZV" && printf '%s' '{"agent_type":"devops"}' \
+    | CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$SS_QZV" >/dev/null 2>&1) || true
+assert_eq "vbs-qzv-8: a re-spawn in a LATER cycle posts a FRESH record (was: nothing)" \
+    "2" "$(qzv_implementer_count "$TID_Q8B" devops)"
+Q8_JSON=$(qzv_json)
+assert_eq "vbs-qzv-8: ...so the second cycle's doc-only Stop BLOCKS (was: auto-approved)" \
+    "block" "$(printf '%s' "$Q8_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+Q8_REASON=$(printf '%s' "$Q8_JSON" | jq -r '.reason // empty')
+assert_contains "vbs-qzv-8: ...naming the refused fast path" "did NOT auto-approve" "$Q8_REASON"
+assert_contains "vbs-qzv-8: ...naming the in-flight implementer as the cause" "IMPLEMENTER" "$Q8_REASON"
+Q8_LABELS=$(qzv_labels "$TID_Q8B")
+assert_eq "vbs-qzv-8: ...no qa-approved label was written" "0" \
+    "$(printf ',%s,' "$Q8_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+assert_eq "vbs-qzv-8: ...no QA-GATE APPROVED record was written" "0" "$(qzv_record_count "$TID_Q8B")"
+assert_eq "vbs-qzv-8: ...and the task is STILL in_progress" \
+    "in_progress" "$(qzv_status "$TID_Q8B")"
+
+# ---------------------------------------------------------------------------
+# qzv.1 META (spec-mandated): strip the IMPLEMENTER-CYCLE-KEY region from a copy
+# of subagent-start.sh and leg 8 must AUTO-APPROVE again — QA's reproduction,
+# reproduced. This is the gate-side half; the subagent-start spec's own META
+# measures the same strip at the WRITER (no fresh record posted).
+#
+# The region is arranged so stripping it yields the PRE-qzv.1 guard rather than a
+# syntax error: the per-(role, task) grep and the `skip` variable it sets live
+# OUTSIDE the sentinels, and only the cycle-aware refinement (plus the two
+# helpers it calls) live inside. Same discipline as F1_BINDING_VERDICT below.
+QZV1_REAL_SS=$(readlink "$SS_QZV" 2>/dev/null || printf '%s' "$SS_QZV")
+SS_QZV_MUT="$FIXTURE_QZV/.claude/scripts/ss-cyclekey-stripped.sh"
+awk '
+    /^ *# IMPLEMENTER-CYCLE-KEY BEGIN/ { skip = 1; next }
+    /^ *# IMPLEMENTER-CYCLE-KEY END/   { skip = 0; next }
+    !skip { print }
+' "$QZV1_REAL_SS" > "$SS_QZV_MUT"
+chmod +x "$SS_QZV_MUT"
+if assert_mutant_applied "vbs-qzv.1 META" "$QZV1_REAL_SS" "$SS_QZV_MUT"; then
+    assert_eq "vbs-qzv.1 META: no cycle refinement survives (the strip landed where it was aimed)" \
+        "0" "$(grep -c 'recorded_in_current_cycle' "$SS_QZV_MUT" | tr -d '[:space:]')"
+    # Counted on the CODE line, not the bare identifier: the surviving prose above
+    # the guard names `skip` in a sentence, so an identifier grep would answer >1
+    # and this leg would fail for a reason unrelated to the mutation.
+    assert_eq "vbs-qzv.1 META: ...while the pre-fix per-(role, task) grep SURVIVES outside it" \
+        "1" "$(grep -c -F 'if printf '"'"'%s\n'"'"' "$existing" | grep -qE "^IMPLEMENTER: role=${role} "; then' "$SS_QZV_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv.1 META: the stripped copy still parses" "0" \
+        "$(bash -n "$SS_QZV_MUT" 2>/dev/null && echo 0 || echo 1)"
+    # Leg 8's exact state, with the stripped writer.
+    TID_QK=$(cd "$FIXTURE_QZV" && bd create "qzv.1 META: stripped cycle key re-approves" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QK" --status in_progress >/dev/null 2>&1) || true
+    qzv_comment "$TID_QK" "IMPLEMENTER: role=devops task=$TID_QK at 2000-01-01T00:00:00Z"
+    qzv_arm "$TID_QK"
+    (cd "$FIXTURE_QZV" && printf '%s' '{"agent_type":"devops"}' \
+        | CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$SS_QZV_MUT" >/dev/null 2>&1) || true
+    assert_eq "vbs-qzv.1 META: with the cycle key stripped the re-spawn posts NOTHING" \
+        "1" "$(qzv_implementer_count "$TID_QK" devops)"
+    assert_eq "vbs-qzv.1 META: ...so the second cycle AUTO-APPROVES mid-implementation (leg 8 WOULD fail)" \
+        "ALLOW" "$(qzv_decision)"
+    assert_eq "vbs-qzv.1 META: ...stamping an approval record on work in flight" \
+        "1" "$(qzv_record_count "$TID_QK")"
+    QK_LABELS=$(qzv_labels "$TID_QK")
+    assert_eq "vbs-qzv.1 META: ...and the qa-approved label with it" "1" \
+        "$(printf ',%s,' "$QK_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+    # Restore control INSIDE the META rather than leaning on leg 8 above: run the
+    # identical sequence with the SHIPPED writer, so the ALLOW is attributable to
+    # the strip and not to anything this block does differently from leg 8.
+    TID_QKC=$(cd "$FIXTURE_QZV" && bd create "qzv.1 META: shipped cycle key refuses" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QKC" --status in_progress >/dev/null 2>&1) || true
+    qzv_comment "$TID_QKC" "IMPLEMENTER: role=devops task=$TID_QKC at 2000-01-01T00:00:00Z"
+    qzv_arm "$TID_QKC"
+    (cd "$FIXTURE_QZV" && printf '%s' '{"agent_type":"devops"}' \
+        | CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$SS_QZV" >/dev/null 2>&1) || true
+    assert_eq "vbs-qzv.1 META: restore control — the shipped writer posts the fresh record" \
+        "2" "$(qzv_implementer_count "$TID_QKC" devops)"
+    assert_eq "vbs-qzv.1 META: ...and the identical Stop BLOCKS" "block" "$(qzv_decision)"
+fi
+
+# --- Leg 9: DOC_ONLY IS WIDER THAN "DOCUMENTATION" ---------------------------
+#
+# WHY THIS LEG EXISTS AND WHAT IT IS FOR. The F1-CHANGE-SET-BINDING region header
+# documents what the `qa`-role exemption can let through, and its first version
+# claimed a QA-authored script or fixture makes DOC_ONLY false on its own — while
+# calling itself "measured". It is not true: `is_doc_only_path`'s last arm is
+# `*/docs/*|docs/*`, so ANY path under ANY `docs/` directory is documentation to
+# this gate REGARDLESS OF FILE TYPE. QA blocked the prose (R1-F1) and reproduced
+# the end of it. This leg is the corrected claim's test: the prose now says an
+# executable under `docs/` reaches the fast path, and this is what makes that
+# statement checkable instead of asserted.
+#
+# THIS LEG IS COUPLED TO claude-workflow-plugin-bbh BY DESIGN. bbh proposes
+# requiring the documentation EXTENSION set inside the `docs/` arm, which would
+# make `docs/deploy.sh` reviewable and turn the assertion below RED. That is the
+# intended coupling, not a maintenance hazard: when bbh lands it must also correct
+# the region header and docs/HOOKS.md, and a red leg here is how the next editor
+# is told. Flip the expectation and the prose in the SAME change set.
+TID_Q9=$(cd "$FIXTURE_QZV" && bd create "doc-only breadth: executable under docs/" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q9" --status in_progress >/dev/null 2>&1) || true
+# A change set of EXACTLY ONE file: an executable script, under docs/, whose body
+# is the shape nobody would call documentation.
+printf '#!/bin/sh\ncurl -fsSL https://example.invalid/install.sh | sh\n' > "$FIXTURE_QZV/docs/deploy.sh"
+chmod +x "$FIXTURE_QZV/docs/deploy.sh"
+printf '%s/docs/deploy.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q9" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q9"
+printf '%s/docs/deploy.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-9: precondition — the change set is exactly one path" "1" \
+    "$(grep -c . "$TRACK_QZV/changed-files.txt" | tr -d '[:space:]')"
+assert_eq "vbs-qzv-9: precondition — and it is an EXECUTABLE file, not documentation" "yes" \
+    "$([ -x "$FIXTURE_QZV/docs/deploy.sh" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-9: an executable under docs/ IS fast-pathed (DOC_ONLY is placement-based)" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-9: ...and auto-approved, so the region header's residual is real" \
+    "1" "$(qzv_record_count "$TID_Q9")"
+assert_contains "vbs-qzv-9: ...with nobody named as the reviewer" \
+    "reviewed_by=none" "$(qzv_approval_records "$TID_Q9")"
+
+# CONTROL: the SAME file shape OUTSIDE a docs/ directory is NOT fast-pathed, which
+# is what makes the assertion above a statement about PLACEMENT rather than about
+# this fixture being permissive.
+TID_Q9B=$(cd "$FIXTURE_QZV" && bd create "doc-only breadth: same script outside docs/" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q9B" --status in_progress >/dev/null 2>&1) || true
+printf '#!/bin/sh\ncurl -fsSL https://example.invalid/install.sh | sh\n' > "$FIXTURE_QZV/deploy.sh"
+chmod +x "$FIXTURE_QZV/deploy.sh"
+printf '%s/deploy.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q9B" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q9B"
+# Re-seeded AFTER `enter`, which reconciles the tracker: same order as qzv_arm's
+# callers, so the Stop under test faces the set this leg means to gate.
+printf '%s/deploy.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-9: CONTROL — the identical script at the repo root is NOT fast-pathed" \
+    "block" "$(qzv_decision)"
+assert_eq "vbs-qzv-9: ...and nothing was approved for it" "0" "$(qzv_record_count "$TID_Q9B")"
 
 # ---------------------------------------------------------------------------
 # qzv META (spec-mandated): strip the F1-CHANGE-SET-BINDING regions from a copy

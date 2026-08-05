@@ -294,10 +294,14 @@ because it happened: a Stop-time fast path stamped `qa-approved` and
 implementer's spawn, over a *previous* task's change set. It was caught exactly
 once, and only because `bd_update_task` echoed back `status=closed,
 labels=[devops,qa-approved]` to an implementer that had passed neither while
-setting notes. Three earlier instances went unnoticed. The mechanism is fixed
-(`claude-workflow-plugin-qzv`), and this remains the containment: a label or a
-status you cannot account for is a finding, not a formality. Front-end tasks reach this
-through the same door as any other: a docs-or-styles-only change set is enough
-to trigger the fast path that produced it
+setting notes. Three earlier instances went unnoticed. The mechanism took two
+fixes to close (`claude-workflow-plugin-qzv`, then `qzv.1` — the first turned out
+to work only in the FIRST review cycle, and a specialist re-spawned in the second
+was invisible to it again). That history is the reason to keep running this check
+rather than to stop: the version that looked fixed was the version that let it
+through. This remains the containment — a label or a status you cannot account
+for is a finding, not a formality. Front-end tasks reach this through the same
+door as any other: a docs-or-styles-only change set is enough to trigger the fast
+path that produced it.
 
 `context_coverage` is mandatory on the same terms. Three things, in order: what you read to ground this change (the design system tokens, the API's response shape, the existing route's focus handling, the component's prior test file); what you deliberately did NOT read and why (the whole state-management layer, because the change is presentational); and the largest remaining unknown (whether the empty state can actually occur for a returning user). Name files — "read the relevant components" is a non-answer, and a coverage note with no deliberate omission is boilerplate, because there is always one. It is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. The rubric grader scores it under default criterion C8.
