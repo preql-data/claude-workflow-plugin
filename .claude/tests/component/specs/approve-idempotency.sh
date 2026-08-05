@@ -216,17 +216,29 @@ assert_contains "approve-idem-A2: ...and says so explicitly (do NOT remove the l
     "do NOT remove the qa-approved label first" "$A_REASON"
 
 A_APPROVE_OUT=""
+A_ENTER_OUT=""
 while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
     cmd=${cmd//\'<approval summary>\'/\'re-reviewed after the post-approval edit\'}
     OUT_LINE=$( cd "$FA" && CLAUDE_PROJECT_DIR="$FA" eval "$cmd" 2>&1 | tail -1 )
-    case "$cmd" in *"qa-gate.sh approve"*) A_APPROVE_OUT="$OUT_LINE" ;; esac
+    case "$cmd" in
+        *"qa-gate.sh approve"*) A_APPROVE_OUT="$OUT_LINE" ;;
+        *"qa-gate.sh enter"*)   A_ENTER_OUT="$OUT_LINE" ;;
+    esac
 done < "$REMEDY_FILE"
 
 assert_json_field "approve-idem-A3: the printed approve SUCCEEDS" "$A_APPROVE_OUT" '.status' "approved"
 assert_not_contains "approve-idem-A3: ...and is NOT reported as an idempotent no-op" \
     "idempotent no-op" "$A_APPROVE_OUT"
-assert_contains "approve-idem-A3: ...it names the stale-label re-bind in the audit trail" \
+# 8zi/jue: WHICH of the two closures does the work on THIS path, asserted rather
+# than assumed. The printed remediation runs `enter` first, and `enter` now clears
+# a prior cycle's qa-approved (jue) — so by the time approve runs there is no
+# stale label left to re-bind, and the envelope must NOT claim one. The
+# `stale-label re-bind` diagnostic belongs to the plain re-run path with no
+# intervening enter, and is asserted there, in section G's shipped-guard leg.
+assert_contains "approve-idem-A3: the remediation's ENTER step clears the prior cycle's qa-approved (jue)" \
+    "cleared a prior cycle's qa-approved" "$A_ENTER_OUT"
+assert_not_contains "approve-idem-A3: ...so the approve that follows is a clean re-bind, NOT a stale-label one" \
     "stale-label re-bind" "$A_APPROVE_OUT"
 assert_contains "approve-idem-A3: ...and re-verified the impact report rather than skipping it" \
     "impact-report verified" "$A_APPROVE_OUT"
@@ -391,7 +403,15 @@ assert_contains "approve-idem-E1: ...and the envelope says the record is inert w
 QG_REAL="$PLUGIN_D/.claude/scripts/qa-gate.sh"
 line_of() { grep -n -- "$2" "$1" | head -1 | cut -d: -f1; }
 L_RECORD=$(line_of "$QG_REAL" '    add_comment "$tid" "QA-GATE APPROVED ')
-L_LABEL=$(line_of "$QG_REAL" '    if ! add_label "$tid" "qa-approved"; then')
+# 8zi re-pointed this anchor. The INVARIANT is untouched — the record is still
+# written before the qa-approved label, and the tracking-state finalization still
+# comes after the rollback-capable label steps — but the statement that writes the
+# label is no longer a bare `add_label`: approve now performs the whole terminal
+# transition (add qa-approved, clear every other cycle label, restore exactly on
+# failure) through one call. Anchored WITHOUT the trailing `"${sweep_clear[@]}"`
+# because line_of greps a BRE and the `[...]` would be read as a bracket
+# expression rather than a literal.
+L_LABEL=$(line_of "$QG_REAL" '    if ! set_terminal_label "$tid" "qa-approved"')
 L_BASELINE=$(line_of "$QG_REAL" '    if ! write_gate_baseline "qa-gate-approve"; then')
 L_TRUNCATE=$(grep -n '^    truncate_changed_files_tracker$' "$QG_REAL" | head -1 | cut -d: -f1)
 L_CLEARTASK=$(grep -n '^    clear_current_task$' "$QG_REAL" | head -1 | cut -d: -f1)
@@ -681,6 +701,30 @@ assert_eq "approve-idem-F2: removing the dirt AND its tracker entry restores the
 # changed. A copy whose guard short-circuits unconditionally must reproduce the
 # original deadlock: approve reports an idempotent no-op and the gate stays
 # blocked.
+#
+# 8zi/jue UPDATE — WHY THIS FLOW NO LONGER RUNS `enter`, and what that costs.
+#
+# The deadlock this META reproduces now has TWO independent closures in the tree,
+# and they overlap on exactly one path:
+#   gz3  approve refuses to no-op when no record binds the current change set;
+#   jue  `enter` clears a prior cycle's qa-approved, in both of its arms.
+# The printed remediation is `enter` -> `impact-report.sh` -> `approve`, so after
+# the jue fix the label is already GONE by the time approve runs on that path:
+# had_approved is 0, the idempotency guard is not reached at all, and a mutant of
+# that guard cannot express anything. Driving the mutant through `enter` would
+# therefore assert nothing about the guard — a green leg measuring an unreachable
+# branch, which is the failure mode this whole spec exists to prevent.
+#
+# So this flow drops the `enter` step and keeps the other two. That is not a
+# weaker scenario: it is the plain re-run — edit, regenerate the report, approve
+# again — where qa-approved is still set, the change set has moved, and the
+# hash-aware guard is the ONLY thing standing between the operator and the
+# original deadlock. One variable, and it is the guard.
+#
+# WHAT IS NO LONGER COVERED HERE, named rather than left implicit: the
+# enter-mediated recovery under a label-only guard. It is covered instead by the
+# jue legs in specs/qa-gate.sh (jue-4a/4b and jue-META), which pin the enter-side
+# clear and show a mutant of it leaving the label behind.
 # ===========================================================================
 gate_fixture
 FH="$COMPONENT_FIXTURE_PATH"
@@ -707,12 +751,16 @@ armed_cycle "$FH" "$TID_G" "src/g.ts"
 ( cd "$FH" && CLAUDE_PROJECT_DIR="$FH" bash "$QG_MUT" approve "$TID_G" "first approval" >/dev/null 2>&1 )
 assert_eq "approve-idem-G META: precondition — the mutant's first approve wrote a record" \
     "1" "$(record_count "$FH" "$TID_G")"
-# The post-approval edit, then the printed remediation, driven against the mutant.
+# The post-approval edit, then the plain re-run (regenerate the report, approve
+# again) driven against the mutant. NO `enter` — see the section header: with the
+# jue fix an intervening enter clears qa-approved, so had_approved is 0 and the
+# mutated guard is never reached.
 seed_tracker "$FH" "src/g.ts" "src/g2.ts"
 ct "$FH" set "$TID_G" >/dev/null 2>&1
 assert_eq "approve-idem-G META: precondition — the mutant's post-edit state BLOCKS" \
     "block" "$(stop_decision "$FH")"
-( cd "$FH" && CLAUDE_PROJECT_DIR="$FH" bash "$QG_MUT" enter "$TID_G" >/dev/null 2>&1 )
+assert_contains "approve-idem-G META: precondition — qa-approved is still SET (so the guard is reachable)" \
+    "qa-approved" "$(labels_of "$FH" "$TID_G")"
 ir "$FH" "$TID_G" >/dev/null 2>&1
 G_APPROVE=$( cd "$FH" && CLAUDE_PROJECT_DIR="$FH" bash "$QG_MUT" approve "$TID_G" "re-approved after the edit" 2>&1 | tail -1 )
 assert_contains "approve-idem-G META: under the label-only guard approve is an idempotent no-op (A3 WOULD fail)" \
@@ -723,7 +771,16 @@ ct "$FH" set "$TID_G" >/dev/null 2>&1
 assert_eq "approve-idem-G META: ...and the gate is STILL blocked (A4 WOULD fail — the original deadlock)" \
     "block" "$(stop_decision "$FH")"
 # The shipped script recovers the identical state, so the difference is the guard.
-qg "$FH" approve "$TID_G" "shipped guard recovers" >/dev/null 2>&1
+G_SHIPPED=$( qg "$FH" approve "$TID_G" "shipped guard recovers" 2>&1 | tail -1 )
+# 8zi/jue moved this assertion here from A3/H3. On THIS path — a plain re-run with
+# no intervening enter — qa-approved is still set and no record binds the current
+# change set, so the hash-aware guard falls through loudly and NAMES it. That is
+# the only remaining place the literal is reachable, which is exactly why the
+# assertion has to live here now rather than be dropped.
+assert_contains "approve-idem-G META: the SHIPPED guard names the stale-label re-bind in the audit trail" \
+    "stale-label re-bind" "$G_SHIPPED"
+assert_not_contains "approve-idem-G META: ...and does NOT report an idempotent no-op" \
+    "idempotent no-op" "$G_SHIPPED"
 seed_tracker "$FH" "src/g.ts" "src/g2.ts"
 ct "$FH" set "$TID_G" >/dev/null 2>&1
 assert_eq "approve-idem-G META: the SHIPPED guard recovers the identical state" \
@@ -800,15 +857,24 @@ printf '%s\n' "$(json_field "$(stop_json "$FR")" '.reason')" \
 assert_eq "approve-idem-H3: the still-blocking Stop prints the same 3-command remediation" \
     "3" "$(grep -c . "$H3_REMEDY" | tr -d '[:space:]')"
 H3_APPROVE=""
+H3_ENTER=""
 while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
     cmd=${cmd//\'<approval summary>\'/\'re-reviewed including the helper-written file\'}
     LINE=$( cd "$FR" && CLAUDE_PROJECT_DIR="$FR" eval "$cmd" 2>&1 | tail -1 )
-    case "$cmd" in *"qa-gate.sh approve"*) H3_APPROVE="$LINE" ;; esac
+    case "$cmd" in
+        *"qa-gate.sh approve"*) H3_APPROVE="$LINE" ;;
+        *"qa-gate.sh enter"*)   H3_ENTER="$LINE" ;;
+    esac
 done < "$H3_REMEDY"
 assert_not_contains "approve-idem-H3: with step 2 run, approve is NOT a no-op" \
     "idempotent no-op" "$H3_APPROVE"
-assert_contains "approve-idem-H3: ...it re-binds against the regenerated report" \
+# 8zi/jue, same reasoning as A3: the remediation's own `enter` step removes the
+# stale label, so the approve after it re-binds against the regenerated report
+# WITHOUT a stale-label note. The step that made that true is asserted directly.
+assert_contains "approve-idem-H3: the remediation's ENTER step clears the prior cycle's qa-approved (jue)" \
+    "cleared a prior cycle's qa-approved" "$H3_ENTER"
+assert_not_contains "approve-idem-H3: ...so the approve re-binds cleanly, with no stale-label note" \
     "stale-label re-bind" "$H3_APPROVE"
 ct "$FR" set "$TID_R" >/dev/null 2>&1
 assert_eq "approve-idem-H3: ...and the gate releases (residual is recoverable, not a deadlock)" \

@@ -734,4 +734,542 @@ assert_json_field "tracker-unreconcilable: ...and reports ok=true" "$TU_NG_OUT" 
 assert_contains "tracker-unreconcilable: ...naming why (no git-visible delta)" \
     "not a git checkout" "$TU_NG_OUT"
 
+# ===========================================================================
+# THE TERMINAL-LABEL TRANSITION — 8zi, l1r.3, jue.
+#
+# THREE FILED DEFECTS, ONE STATE MODEL. They are tested together because the
+# first two cannot be tested apart:
+#
+#   8zi   approve did not clear a prior cycle's qa-blocked, so a
+#         block -> fix -> approve round trip ended with BOTH terminal labels set.
+#         Observed live four times (uvk, q7n, 94d, and qzv.1 — where the gate's
+#         own reviewer removed the label BY HAND mid-approval and said so).
+#   l1r.3 remove_label was a bare `bd label remove ... >/dev/null 2>&1`. MEASURED
+#         on bd 1.1.2, that command exits 0 for a label the task never had AND
+#         for a task id that does not exist. So every rollback in qa-gate.sh that
+#         branched on it was decorative, INCLUDING the ones 8zi's fix adds. This
+#         is why the removal verifies first and why it is asserted directly.
+#   jue   enter did not clear a prior cycle's qa-approved, so a label-polling
+#         reader read a previous cycle's verdict as a verdict on new commits.
+#
+# WHAT EACH LEG BUYS, and the discipline behind the shape of these assertions:
+# the reason 8zi survived four live sightings is that the existing coverage
+# asserted the PRESENCE of qa-approved after an approve. Presence is satisfiable
+# by a task carrying every label in the lifecycle at once. So every leg below
+# asserts the COMPLETE final label set, byte-for-byte, never a substring.
+#
+# bd's own ordering makes that a set comparison: MEASURED on bd 1.1.2, labels come
+# back sorted, and a remove-then-re-add reproduces the identical joined string.
+# ===========================================================================
+# depoison_bd <fixture-root> — point this fixture's bd wrapper at the REAL bd.
+#
+# A MEASURED HARNESS HAZARD, not a precaution. mk_fixture prepends <root>/bin to
+# PATH, and mk_bd_shim builds each wrapper from `command -v bd` — which, once any
+# earlier fixture in the same spec shell has REPLACED its own bin/bd, resolves to
+# that replacement. The new fixture is then generated as
+# `exec <other-fixture>/bin/bd "$@"` and INHERITS the other section's selective
+# failure. Directly observed while diagnosing this section: with fixture A's
+# wrapper replaced by a shim that fails `label remove <tid> qa-pending`, a fixture
+# B created afterwards returns rc=1 from that same removal and the label survives.
+#
+# THE POISONER IN THIS SPEC is the pre-existing approve Step-3 rollback section
+# above, whose shim fails exactly `label remove ... qa-pending`. It stayed latent
+# for two later sections because neither removed qa-pending — and this section's
+# whole subject is a sweep that does. The resulting symptom is indistinguishable
+# from a real defect: approve exits 3 because the removal genuinely did not happen
+# and remove_label's read-back correctly refuses to claim it did.
+#
+# Which is the reason this helper exists rather than a loosened check: the
+# verification was right and the FIXTURE was lying. Follow the `exec <path> "$@"`
+# chain to the binary at the end of it and write a one-hop wrapper, so the shims
+# installed further down sit directly on top of a real bd.
+#
+# Filed as a harness defect in its own right; fixing mk_bd_shim to resolve the
+# chain would remove the trap for every future spec, but that is a shared-harness
+# change needing a full-tier run, not a change this spec can validate.
+depoison_bd() {
+    # One `local` per line, deliberately: this tier runs under `bash -u`, and bash
+    # expands every word of a `local` command BEFORE binding any of them, so
+    # `local root="$1" p="$root/bin/bd"` reads an unbound $root and aborts the spec.
+    local root="$1"
+    local p="$root/bin/bd"
+    local next=""
+    local guard=0
+    while [ -f "$p" ] && [ "$guard" -lt 16 ]; do
+        next=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$p" 2>/dev/null | tr -d "\"'" | head -1)
+        [ -n "$next" ] || break
+        p="$next"
+        guard=$((guard + 1))
+    done
+    [ -n "$p" ] && [ -x "$p" ] || return 1
+    printf '#!/bin/bash\nexec %q "$@"\n' "$p" > "$root/bin/bd"
+    chmod +x "$root/bin/bd"
+}
+# bd_wrapper_state <root> — "clean" when the wrapper execs something outside any
+# component fixture, "poisoned" when it chains into another fixture's shim.
+bd_wrapper_state() {
+    grep '^exec' "$1/bin/bd" 2>/dev/null | grep -q 'component-fixture' \
+        && echo poisoned || echo clean
+}
+
+mk_fixture
+FIXTURE_TL="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+assert_eq "8zi-0: the inherited bd wrapper IS poisoned by an earlier section (the hazard is real, not hypothetical)" \
+    "poisoned" "$(bd_wrapper_state "$FIXTURE_TL")"
+depoison_bd "$FIXTURE_TL"
+assert_eq "8zi-0: ...and this section's wrapper now execs a real bd" \
+    "clean" "$(bd_wrapper_state "$FIXTURE_TL")"
+QG_TL="$FIXTURE_TL/.claude/scripts/qa-gate.sh"
+QG_TL_REAL=$(readlink "$QG_TL" 2>/dev/null || printf '%s' "$QG_TL")
+TRACK_TL="$FIXTURE_TL/.claude/.qa-tracking"
+
+# labels_in <root> <tid> — the comma-joined set, in bd's own (sorted) order.
+labels_in() {
+    (cd "$1" && bd show "$2" --json 2>/dev/null \
+        | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null) \
+        || echo ""
+}
+tl_labels() { labels_in "$FIXTURE_TL" "$1"; }
+# tl_new <title> -> a fresh task id in FIXTURE_TL.
+tl_new() {
+    (cd "$FIXTURE_TL" && bd create "$1" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+}
+# tl_add <tid> <label>...
+tl_add() {
+    local t="$1"; shift
+    local l
+    for l in "$@"; do (cd "$FIXTURE_TL" && bd label add "$t" "$l" >/dev/null 2>&1) || true; done
+}
+tl_del() {
+    local t="$1"; shift
+    local l
+    for l in "$@"; do (cd "$FIXTURE_TL" && bd label remove "$t" "$l" >/dev/null 2>&1) || true; done
+}
+# tl_arm <tid> <changed-file> — the state approve REQUIRES: a tracked change, a
+# fresh impact report (written by enter), and real review records. Without all
+# three approve refuses at an unrelated gate and the leg measures nothing.
+tl_arm() {
+    printf '%s\n' "$2" > "$TRACK_TL/changed-files.txt"
+    bash "$QG_TL" enter "$1" >/dev/null 2>&1 || true
+    seed_review_records "$1" "qa-claude" "backend" "$FIXTURE_TL"
+}
+
+# --- 8zi-1: the live y4a.13 five-label shape -------------------------------
+# Not a hypothetical seed. `bd show claude-workflow-plugin-y4a.13` carries
+# exactly this set today: devops, qa-approved, qa-blocked, qa-gate-entered,
+# qa-pending — both terminal labels and both in-flight labels on one task.
+TID_TL1=$(tl_new "8zi: the y4a.13 five-label shape")
+tl_arm "$TID_TL1" "src/8zi-a.ts"
+# enter arms rubric-pending; y4a.13 predates Phase A, so drop it to seed the
+# recorded shape EXACTLY rather than approximately.
+tl_del "$TID_TL1" rubric-pending
+tl_add "$TID_TL1" devops qa-pending qa-blocked qa-approved
+assert_eq "8zi-1: seeded the live y4a.13 five-label shape" \
+    "devops,qa-approved,qa-blocked,qa-gate-entered,qa-pending" "$(tl_labels "$TID_TL1")"
+TL1_RC=0
+TL1_OUT=$(bash "$QG_TL" approve "$TID_TL1" "8zi: one approve must end the whole cycle" 2>/dev/null) || TL1_RC=$?
+assert_eq "8zi-1: approve succeeds (rc=0)" "0" "$TL1_RC"
+assert_json_field "8zi-1: status=approved" "$TL1_OUT" '.status' "approved"
+# THE ASSERTION 8zi survived four sightings for want of: the FULL final set.
+assert_eq "8zi-1: final label set is EXACTLY {devops,qa-approved} — qa-blocked is GONE" \
+    "devops,qa-approved" "$(tl_labels "$TID_TL1")"
+TL1_OBS=$(printf '%s' "$TL1_OUT" | jq -r '.observations // ""')
+assert_contains "8zi-1: the envelope names the labels the sweep cleared" \
+    "cycle labels cleared:" "$TL1_OBS"
+assert_contains "8zi-1: ...and qa-blocked is among them" "qa-blocked" "$TL1_OBS"
+# THE ENVELOPE TOKENS. Pinned here because the 8zi sweep rewrote the code that
+# emits them, and because a full-tree search for either literal found NO consumer
+# anywhere — not a spec, not a doc, not an agent prompt, not a hook; only this
+# emitter and its synced fixture copies. The plan's claim that "specs and
+# operators grep them" is false for specs, so until this assertion existed
+# nothing would have caught their removal. Operator-facing output stability is
+# the real reason to keep them; this is the mechanism that keeps them.
+assert_contains "8zi-1: the approve envelope still carries the literal 'removed qa-gate-entered=' token" \
+    "removed qa-gate-entered=1" "$TL1_OUT"
+assert_contains "8zi-1: ...and the literal 'qa-pending=' token, with the same counter semantics" \
+    "qa-pending=1" "$TL1_OUT"
+# status precedence resolved the old contradiction to `approved`, so it was never
+# the symptom — the label set was. It must still read approved.
+assert_json_field "8zi-1: status still reads approved" \
+    "$(bash "$QG_TL" status "$TID_TL1")" '.status' "approved"
+
+# --- 8zi-2: rubric-satisfied is NOT swept ---------------------------------
+# The complement of 8zi-1, and the half that would make this fix a regression if
+# it were wrong: rubric-satisfied is the audit trail of the grader verdict that
+# backed the approval. It is deliberately absent from QA_CYCLE_LABELS, so the
+# sweep cannot reach it even if a future call site asked.
+TID_TL2=$(tl_new "8zi: rubric-satisfied survives the sweep")
+tl_arm "$TID_TL2" "src/8zi-b.ts"
+tl_add "$TID_TL2" devops qa-blocked rubric-satisfied
+assert_eq "8zi-2: seeded a blocked task with BOTH rubric labels" \
+    "devops,qa-blocked,qa-gate-entered,rubric-pending,rubric-satisfied" \
+    "$(tl_labels "$TID_TL2")"
+TL2_OUT=$(bash "$QG_TL" approve "$TID_TL2" "8zi: keep the verdict, clear the cycle" 2>/dev/null)
+assert_json_field "8zi-2: approve succeeds" "$TL2_OUT" '.status' "approved"
+assert_eq "8zi-2: rubric-PENDING swept, rubric-SATISFIED kept, qa-blocked gone" \
+    "devops,qa-approved,rubric-satisfied" "$(tl_labels "$TID_TL2")"
+assert_contains "8zi-2: ...and the envelope still calls it the audit trail" \
+    "rubric-satisfied preserved (audit trail)" "$TL2_OUT"
+
+# --- 8zi-3: the block leg, and the fail-OPEN twin -------------------------
+# 8zi's own direction (a surviving qa-blocked) is fail-closed noise: every label
+# reader in the tree tests qa-approved FIRST — cmd_status, epic-gate.sh's
+# qa_state_of, and statusline.sh's two readers — so the contradiction resolves to
+# `approved` and nothing releases wrongly. The REVERSE direction is not cosmetic:
+# a block that leaves a prior qa-approved standing makes all four readers report
+# a BLOCKED task as APPROVED. That is why block gets the sweep too.
+#
+# Both halves in one leg, per the prose rule: what block clears AND what it
+# preserves. Clearing more than qa-approved would break the documented "Keeps
+# qa-gate-entered" contract and silently end the rubric loop mid-cycle.
+TID_TL3=$(tl_new "8zi: block clears qa-approved and nothing else")
+bash "$QG_TL" enter "$TID_TL3" >/dev/null 2>&1
+tl_add "$TID_TL3" devops qa-pending qa-approved
+assert_eq "8zi-3: seeded a stale qa-approved on top of an OPEN cycle" \
+    "devops,qa-approved,qa-gate-entered,qa-pending,rubric-pending" "$(tl_labels "$TID_TL3")"
+assert_json_field "8zi-3: precondition — status reads APPROVED on a task about to be blocked" \
+    "$(bash "$QG_TL" status "$TID_TL3")" '.status' "approved"
+TL3_OUT=$(bash "$QG_TL" block "$TID_TL3" "8zi: a block must not leave an approval standing" 2>/dev/null)
+assert_json_field "8zi-3: block status=blocked" "$TL3_OUT" '.status' "blocked"
+assert_eq "8zi-3: block clears qa-approved — and every in-flight label SURVIVES" \
+    "devops,qa-blocked,qa-gate-entered,qa-pending,rubric-pending" "$(tl_labels "$TID_TL3")"
+assert_contains "8zi-3: the block envelope reports the cleared prior approval" \
+    "cleared a prior cycle's [qa-approved]" "$TL3_OUT"
+assert_contains "8zi-3: ...and still records that qa-gate-entered is preserved" \
+    "qa-gate-entered preserved if present" "$TL3_OUT"
+# THE FAIL-OPEN, closed: the same status read now reports blocked.
+assert_json_field "8zi-3: status now reads BLOCKED (it read approved one line above)" \
+    "$(bash "$QG_TL" status "$TID_TL3")" '.status' "blocked"
+
+# --- jue-4a: enter clears a prior approval — the FRESH arm ----------------
+TID_TL4=$(tl_new "jue: enter clears a prior cycle's approval (fresh arm)")
+tl_arm "$TID_TL4" "src/jue-a.ts"
+tl_add "$TID_TL4" devops
+tl_del "$TID_TL4" rubric-pending
+bash "$QG_TL" approve "$TID_TL4" "jue: first cycle's approval" >/dev/null 2>&1
+assert_eq "jue-4a: precondition — approve left qa-approved and cleared qa-gate-entered" \
+    "devops,qa-approved" "$(tl_labels "$TID_TL4")"
+TL4_OUT=$(bash "$QG_TL" enter "$TID_TL4" 2>/dev/null)
+assert_json_field "jue-4a: the re-enter succeeds" "$TL4_OUT" '.status' "entered"
+assert_eq "jue-4a: the FRESH arm clears the prior cycle's qa-approved" \
+    "devops,qa-gate-entered,rubric-pending" "$(tl_labels "$TID_TL4")"
+assert_contains "jue-4a: ...and the envelope gives the fresh arm's reason" \
+    "a fresh gate cycle supersedes the previous cycle's approval" "$TL4_OUT"
+
+# --- jue-4b: enter clears a prior approval — the EARLY-RETURN arm ---------
+# The arm the brief flags as the trap: it returns before the fresh-cycle code and
+# writes NO cycle record. Combined with rmz (bd 1.1.2 `create --parent` inherits
+# every gate label, transitively) a task can be BORN carrying qa-gate-entered and
+# never be entered at all — qzv.2 is in that state today. So this seed is the real
+# provenance, not a contrivance: labels applied without any enter having run.
+TID_TL4B=$(tl_new "jue: enter clears a prior approval (early-return arm)")
+tl_add "$TID_TL4B" devops qa-gate-entered qa-approved
+assert_eq "jue-4b: seeded the rmz inheritance shape — entered-looking, never entered" \
+    "devops,qa-approved,qa-gate-entered" "$(tl_labels "$TID_TL4B")"
+TL4B_OUT=$(bash "$QG_TL" enter "$TID_TL4B" 2>/dev/null)
+assert_json_field "jue-4b: the enter succeeds" "$TL4B_OUT" '.status' "entered"
+assert_contains "jue-4b: ...and takes the early-return arm" \
+    "qa-gate-entered already set" "$TL4B_OUT"
+assert_eq "jue-4b: the EARLY-RETURN arm clears qa-approved too" \
+    "devops,qa-gate-entered,rubric-pending" "$(tl_labels "$TID_TL4B")"
+# The two arms give DIFFERENT reasons, and the difference is the finding: this
+# pair is unreachable through the gate's own transitions, so it did not come from
+# an approve of the open cycle.
+assert_contains "jue-4b: ...for the early-return arm's OWN reason, not the fresh arm's" \
+    "unreachable through the gate's own transitions" "$TL4B_OUT"
+
+# ---------------------------------------------------------------------------
+# 8zi-META: strip the TERMINAL-LABEL-SWEEP regions -> qa-blocked survives.
+#
+# The sentinel regions contain ONLY the delta — one `sweep_clear+=(qa-blocked)` in
+# approve and one `block_clear+=(qa-approved)` in block. The unified function and
+# its snapshot/restore sit OUTSIDE them deliberately, on the same discipline as
+# worktree_field's empty default: a strip must leave a copy that still performs a
+# coherent PRE-8zi approve. Had the function been inside, the stripped copy could
+# not approve at all and "qa-blocked survived" would pass for the wrong reason.
+#
+# So this META asserts three things, and the middle one is what makes the other
+# two mean anything: the stripped copy still approves, it STILL removes
+# qa-gate-entered and qa-pending, and qa-blocked SURVIVES.
+# ---------------------------------------------------------------------------
+QG_TL_NOSWEEP="$FIXTURE_TL/.claude/scripts/qa-gate-nosweep.sh"
+NOSWEEP_RC=0
+# Anchored `^ *#` for the reason QA finding R4-F5 gives: unanchored, the pattern
+# matches the sentinel name anywhere on a line, so a prose line quoting it
+# mid-sentence starts the excision early and deletes real code above the region.
+# This spec's own header quotes the region name, and so does qa-gate.sh's.
+awk '
+    /^ *# TERMINAL-LABEL-SWEEP BEGIN/ { skip = 1; found = 1; next }
+    /^ *# TERMINAL-LABEL-SWEEP END/   { skip = 0; next }
+    !skip { print }
+    END { if (!found) exit 7 }
+' "$QG_TL_REAL" > "$QG_TL_NOSWEEP" || NOSWEEP_RC=$?
+chmod +x "$QG_TL_NOSWEEP" 2>/dev/null || true
+assert_eq "8zi-META: the TERMINAL-LABEL-SWEEP sentinels are present in qa-gate.sh" "0" "$NOSWEEP_RC"
+if assert_mutant_applied "8zi-META" "$QG_TL_REAL" "$QG_TL_NOSWEEP"; then
+    NOSWEEP_PARSE=0
+    bash -n "$QG_TL_NOSWEEP" 2>/dev/null || NOSWEEP_PARSE=$?
+    assert_eq "8zi-META: the stripped copy still parses (it must fail for the reason under test)" \
+        "0" "$NOSWEEP_PARSE"
+    TID_MS=$(tl_new "8zi META: stripped copy leaves qa-blocked")
+    printf 'src/8zi-meta.ts\n' > "$TRACK_TL/changed-files.txt"
+    bash "$QG_TL" enter "$TID_MS" >/dev/null 2>&1
+    seed_review_records "$TID_MS" "qa-claude" "backend" "$FIXTURE_TL"
+    tl_del "$TID_MS" rubric-pending
+    tl_add "$TID_MS" devops qa-pending qa-blocked
+    assert_eq "8zi-META: seeded the same shape 8zi-1 approves cleanly" \
+        "devops,qa-blocked,qa-gate-entered,qa-pending" "$(tl_labels "$TID_MS")"
+    MS_RC=0
+    MS_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_TL" bash "$QG_TL_NOSWEEP" approve "$TID_MS" \
+        "stripped copy must still approve" 2>/dev/null) || MS_RC=$?
+    # NON-VACUITY: the stripped copy is a working pre-8zi approve, not a broken one.
+    assert_eq "8zi-META: the stripped copy STILL approves (rc=0) — the strip removed the sweep, not approve" \
+        "0" "$MS_RC"
+    assert_json_field "8zi-META: ...reporting status=approved" "$MS_OUT" '.status' "approved"
+    # ISOLATION: everything the pre-8zi approve cleared, it still clears.
+    assert_contains "8zi-META: ...and still removes qa-gate-entered and qa-pending" \
+        "removed qa-gate-entered=1 qa-pending=1" "$MS_OUT"
+    # THE DEFECT, reproduced: 8zi-1's exact-set assertion WOULD fail here.
+    assert_eq "8zi-META: qa-blocked SURVIVES the stripped approve (8zi-1 WOULD fail)" \
+        "devops,qa-approved,qa-blocked" "$(tl_labels "$TID_MS")"
+    # The block half of the same delta: the stripped copy leaves the approval
+    # standing, so the fail-open 8zi-3 closes comes back.
+    TID_MSB=$(tl_new "8zi META: stripped block leaves qa-approved")
+    tl_add "$TID_MSB" devops qa-approved
+    CLAUDE_PROJECT_DIR="$FIXTURE_TL" bash "$QG_TL_NOSWEEP" block "$TID_MSB" \
+        "stripped copy must not clear the approval" >/dev/null 2>&1 || true
+    assert_eq "8zi-META: the stripped block leaves qa-approved set alongside qa-blocked" \
+        "devops,qa-approved,qa-blocked" "$(tl_labels "$TID_MSB")"
+    assert_json_field "8zi-META: ...so status reports APPROVED on a blocked task (8zi-3 WOULD fail)" \
+        "$(CLAUDE_PROJECT_DIR="$FIXTURE_TL" bash "$QG_TL_NOSWEEP" status "$TID_MSB")" \
+        '.status' "approved"
+fi
+
+# ---------------------------------------------------------------------------
+# jue-META: revert cmd_enter's qa-approved clear -> the label survives an enter.
+# ---------------------------------------------------------------------------
+QG_TL_NOJUE="$FIXTURE_TL/.claude/scripts/qa-gate-nojue.sh"
+NOJUE_RC=0
+awk '
+    /^        if remove_label "\$tid" "qa-approved"; then$/ {
+        print "        if false; then"; found = 1; next
+    }
+    { print }
+    END { if (!found) exit 7 }
+' "$QG_TL_REAL" > "$QG_TL_NOJUE" || NOJUE_RC=$?
+chmod +x "$QG_TL_NOJUE" 2>/dev/null || true
+assert_eq "jue-META: the enter-side clear was located and mutated" "0" "$NOJUE_RC"
+if assert_mutant_applied "jue-META" "$QG_TL_REAL" "$QG_TL_NOJUE"; then
+    NOJUE_PARSE=0
+    bash -n "$QG_TL_NOJUE" 2>/dev/null || NOJUE_PARSE=$?
+    assert_eq "jue-META: the mutated copy still parses" "0" "$NOJUE_PARSE"
+    TID_MJ=$(tl_new "jue META: mutant leaves qa-approved")
+    tl_add "$TID_MJ" devops qa-gate-entered qa-approved
+    CLAUDE_PROJECT_DIR="$FIXTURE_TL" bash "$QG_TL_NOJUE" enter "$TID_MJ" >/dev/null 2>&1 || true
+    assert_eq "jue-META: under the mutant a prior qa-approved SURVIVES the enter (4a/4b WOULD fail)" \
+        "devops,qa-approved,qa-gate-entered,rubric-pending" "$(tl_labels "$TID_MJ")"
+fi
+
+# ===========================================================================
+# l1r.3 — the removal that verifies.
+#
+# A SEPARATE FIXTURE because the seam is a bd shim, and it is the one that must
+# not leak into any other leg: `bd label remove` exits 0 and does nothing. That is
+# not a contrived failure, it is the SHAPE l1r.3 records (a removal that reports
+# success and did not happen) reproduced deterministically. The bd-level cause in
+# l1r.3's own reproduction is a stale-JSONL auto-import; this shim reproduces the
+# observable, which is what a test can assert on.
+# ===========================================================================
+mk_fixture
+FIXTURE_L13="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+depoison_bd "$FIXTURE_L13"
+assert_eq "l1r.3-6: this fixture's bd wrapper execs a real bd (so the shim below is the ONLY seam)" \
+    "clean" "$(bd_wrapper_state "$FIXTURE_L13")"
+QG_L13="$FIXTURE_L13/.claude/scripts/qa-gate.sh"
+QG_L13_REAL=$(readlink "$QG_L13" 2>/dev/null || printf '%s' "$QG_L13")
+TRACK_L13="$FIXTURE_L13/.claude/.qa-tracking"
+
+# A dispatch-stripped copy, so remove_label can be called DIRECTLY. It lives in
+# .claude/scripts/ because qa-gate.sh resolves workflow-denylist.sh relative to
+# its own BASH_SOURCE; a copy parked elsewhere takes a degraded path.
+QG_L13_LIB="$FIXTURE_L13/.claude/scripts/qa-gate-lib.sh"
+L13_LIB_RC=0
+awk '/^SUB="\$\{1:-\}"$/ { found = 1; exit } { print } END { if (!found) exit 7 }' \
+    "$QG_L13_REAL" > "$QG_L13_LIB" || L13_LIB_RC=$?
+assert_eq "l1r.3-6: the dispatch anchor was found (sourceable copy built)" "0" "$L13_LIB_RC"
+L13_LIB_PARSE=0
+bash -n "$QG_L13_LIB" 2>/dev/null || L13_LIB_PARSE=$?
+assert_eq "l1r.3-6: the sourceable copy parses" "0" "$L13_LIB_PARSE"
+
+TID_L13=$(cd "$FIXTURE_L13" && bd create "l1r.3: remove_label verifies" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_L13" && bd label add "$TID_L13" qa-blocked >/dev/null 2>&1) || true
+
+# CONTROL first — the other half of the claim. With a WORKING bd, remove_label
+# must return ZERO and the label must be gone. Without this leg "returns
+# non-zero" is satisfiable by a function that always fails.
+L13_OK_RC=0
+( CLAUDE_PROJECT_DIR="$FIXTURE_L13"; . "$QG_L13_LIB" >/dev/null 2>&1
+  remove_label "$TID_L13" "qa-blocked" ) >/dev/null 2>&1 || L13_OK_RC=$?
+assert_eq "l1r.3-6b CONTROL: remove_label returns 0 when the removal really happens" "0" "$L13_OK_RC"
+assert_eq "l1r.3-6b CONTROL: ...and the label is actually gone" "" "$(labels_in "$FIXTURE_L13" "$TID_L13")"
+
+# --- THE ONE CHANGE: bd's removals now exit 0 and do nothing ---------------
+REAL_BD_L13=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$FIXTURE_L13/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+[ -z "$REAL_BD_L13" ] && REAL_BD_L13=$(command -v bd)
+cat > "$FIXTURE_L13/bin/bd" <<EOF
+#!/bin/bash
+# l1r.3 shim: report success for every label removal, perform none of them.
+if [ "\$1" = "label" ] && [ "\$2" = "remove" ]; then exit 0; fi
+exec $REAL_BD_L13 "\$@"
+EOF
+chmod +x "$FIXTURE_L13/bin/bd"
+(cd "$FIXTURE_L13" && bd label add "$TID_L13" qa-blocked >/dev/null 2>&1) || true
+assert_eq "l1r.3-6a: precondition — the label is back and the shim is installed" \
+    "qa-blocked" "$(labels_in "$FIXTURE_L13" "$TID_L13")"
+L13_BAD_RC=0
+( CLAUDE_PROJECT_DIR="$FIXTURE_L13"; . "$QG_L13_LIB" >/dev/null 2>&1
+  remove_label "$TID_L13" "qa-blocked" ) >/dev/null 2>&1 || L13_BAD_RC=$?
+assert_eq "l1r.3-6a: remove_label returns NON-ZERO when bd's removal silently no-ops" \
+    "nonzero" "$([ "$L13_BAD_RC" -ne 0 ] && echo nonzero || echo zero)"
+assert_eq "l1r.3-6a: ...because the label is still there" \
+    "qa-blocked" "$(labels_in "$FIXTURE_L13" "$TID_L13")"
+
+# --- l1r.3-6c: and therefore approve REFUSES instead of lying -------------
+# The end-to-end consequence, and the reason this defect had to be fixed before
+# 8zi's sweep: with an unverified removal, approve reported
+# `removed qa-gate-entered=1` for a removal that never happened.
+TID_L13B=$(cd "$FIXTURE_L13" && bd create "l1r.3: approve refuses on an unprovable removal" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/l1r3.ts\n' > "$TRACK_L13/changed-files.txt"
+CLAUDE_PROJECT_DIR="$FIXTURE_L13" bash "$QG_L13" enter "$TID_L13B" >/dev/null 2>&1 || true
+seed_review_records "$TID_L13B" "qa-claude" "backend" "$FIXTURE_L13"
+L13C_RC=0
+L13C_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_L13" bash "$QG_L13" approve "$TID_L13B" \
+    "l1r.3: the sweep cannot be proven" 2>/dev/null) || L13C_RC=$?
+assert_eq "l1r.3-6c: approve exits 3 when a sweep removal cannot be proven" "3" "$L13C_RC"
+# assert_CONTAINS, not assert_json_field, and the reason is a harness constraint
+# worth stating so nobody "fixes" the envelope: assert_json_field extracts with
+# `jq -r '<path> // empty'`, and jq's `//` treats FALSE exactly like absent — so
+# `.ok // empty` on {"ok":false,...} prints nothing and the comparison can never
+# see `false`. Verified directly. Every existing assert_json_field '.ok' leg in
+# this file asserts "true" for that reason, and the refusal legs above already use
+# this same '"ok":false' substring form.
+assert_contains "l1r.3-6c: ...reporting ok=false" '"ok":false' "$L13C_OUT"
+assert_contains "l1r.3-6c: ...and naming the label it could not remove" \
+    "failed to remove qa-gate-entered" "$L13C_OUT"
+# HONEST RESIDUAL, asserted rather than left implicit: with removals broken the
+# rollback cannot undo its own add either, so it SAYS SO instead of claiming a
+# clean restore. (The approval record is append-only and already written, which is
+# why this is exit 3 plus a loud envelope rather than a silent recovery.)
+assert_contains "l1r.3-6c: ...and admits the rollback itself could not complete" \
+    "the restore itself did not complete" "$L13C_OUT"
+# The false claim must be ABSENT: no success envelope, no removal counters.
+L13C_FALSE=$(printf '%s' "$L13C_OUT" | grep -c 'removed qa-gate-entered=1' || true)
+assert_eq "l1r.3-6c: ...and never reports 'removed qa-gate-entered=1' for a removal that did not happen" \
+    "0" "$(printf '%s' "$L13C_FALSE" | tr -d '[:space:]')"
+
+# --- l1r.3-META: revert the verification -> approve lies again ------------
+QG_L13_MUT="$FIXTURE_L13/.claude/scripts/qa-gate-noverify.sh"
+L13M_RC=0
+awk '
+    /^    ! has_label "\$1" "\$2"$/ { print "    return 0"; found = 1; next }
+    { print }
+    END { if (!found) exit 7 }
+' "$QG_L13_REAL" > "$QG_L13_MUT" || L13M_RC=$?
+chmod +x "$QG_L13_MUT" 2>/dev/null || true
+assert_eq "l1r.3-META: the read-back was located and reverted to the bare form" "0" "$L13M_RC"
+if assert_mutant_applied "l1r.3-META" "$QG_L13_REAL" "$QG_L13_MUT"; then
+    L13M_PARSE=0
+    bash -n "$QG_L13_MUT" 2>/dev/null || L13M_PARSE=$?
+    assert_eq "l1r.3-META: the mutated copy still parses" "0" "$L13M_PARSE"
+    TID_L13M=$(cd "$FIXTURE_L13" && bd create "l1r.3 META: unverified removal" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    printf 'src/l1r3m.ts\n' > "$TRACK_L13/changed-files.txt"
+    CLAUDE_PROJECT_DIR="$FIXTURE_L13" bash "$QG_L13" enter "$TID_L13M" >/dev/null 2>&1 || true
+    seed_review_records "$TID_L13M" "qa-claude" "backend" "$FIXTURE_L13"
+    L13M_APRC=0
+    L13M_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_L13" bash "$QG_L13_MUT" approve "$TID_L13M" \
+        "unverified removals report success" 2>/dev/null) || L13M_APRC=$?
+    assert_eq "l1r.3-META: under the bare removal approve SUCCEEDS (6c WOULD fail)" "0" "$L13M_APRC"
+    assert_contains "l1r.3-META: ...and falsely reports 'removed qa-gate-entered=1'" \
+        "removed qa-gate-entered=1" "$L13M_OUT"
+    assert_eq "l1r.3-META: ...while qa-gate-entered is demonstrably still on the task" \
+        "present" \
+        "$(printf '%s' ",$(labels_in "$FIXTURE_L13" "$TID_L13M")," | grep -q ',qa-gate-entered,' && echo present || echo absent)"
+fi
+
+# ===========================================================================
+# 8zi-5 — the rollback: byte-identical restoration, exit 3.
+#
+# A THIRD fixture, with a NARROWER shim: only `label remove <tid> qa-pending`
+# fails. In approve's sweep order (qa-gate-entered, qa-pending, qa-escalated,
+# qa-deferred, rubric-pending, qa-blocked) that is the SECOND removal, so the
+# transition is genuinely PART-APPLIED when it fails — qa-approved added,
+# qa-gate-entered removed — and the restore has to undo both directions.
+# ===========================================================================
+mk_fixture
+FIXTURE_RL="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+depoison_bd "$FIXTURE_RL"
+assert_eq "8zi-5: this fixture's bd wrapper execs a real bd (so qa-pending is the ONLY failing removal)" \
+    "clean" "$(bd_wrapper_state "$FIXTURE_RL")"
+QG_RL="$FIXTURE_RL/.claude/scripts/qa-gate.sh"
+TRACK_RL="$FIXTURE_RL/.claude/.qa-tracking"
+# Anchored on the trailing `"$@"`, NOT on a bd flag: the wrapper ended
+# `--no-daemon "$@"` until bd 1.1.2 removed that flag, and a pattern keyed to it
+# returns empty on the new wrapper — which sends the fallback to `command -v bd`,
+# i.e. THIS shim, producing a wrapper that execs itself forever (a silent hang).
+REAL_BD_RL=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$FIXTURE_RL/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+[ -z "$REAL_BD_RL" ] && REAL_BD_RL=$(command -v bd)
+cat > "$FIXTURE_RL/bin/bd" <<EOF
+#!/bin/bash
+if [ "\$1" = "label" ] && [ "\$2" = "remove" ] && [ "\$4" = "qa-pending" ]; then exit 1; fi
+exec $REAL_BD_RL "\$@"
+EOF
+chmod +x "$FIXTURE_RL/bin/bd"
+
+TID_RL=$(cd "$FIXTURE_RL" && bd create "8zi: mid-sweep failure restores exactly" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/8zi-rb.ts\n' > "$TRACK_RL/changed-files.txt"
+CLAUDE_PROJECT_DIR="$FIXTURE_RL" bash "$QG_RL" enter "$TID_RL" >/dev/null 2>&1 || true
+seed_review_records "$TID_RL" "qa-claude" "backend" "$FIXTURE_RL"
+for l in devops qa-pending qa-blocked; do
+    (cd "$FIXTURE_RL" && bd label add "$TID_RL" "$l" >/dev/null 2>&1) || true
+done
+# THE SNAPSHOT, captured from bd rather than hardcoded — this is the exact string
+# the restore has to reproduce.
+RL_SNAP=$(labels_in "$FIXTURE_RL" "$TID_RL")
+assert_contains "8zi-5: the pre-call set contains qa-gate-entered (the sweep will remove it first)" \
+    "qa-gate-entered" "$RL_SNAP"
+assert_eq "8zi-5: ...and does NOT contain qa-approved (the restore must undo the add too)" "0" \
+    "$(printf '%s' ",$RL_SNAP," | grep -c ',qa-approved,' | tr -d '[:space:]')"
+RL_RC=0
+RL_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_RL" bash "$QG_RL" approve "$TID_RL" \
+    "8zi: force a mid-sweep failure" 2>/dev/null) || RL_RC=$?
+assert_eq "8zi-5: a mid-sweep removal failure exits 3" "3" "$RL_RC"
+# See the l1r.3-6c note: jq's `//` cannot distinguish false from absent.
+assert_contains "8zi-5: ...reporting ok=false" '"ok":false' "$RL_OUT"
+assert_contains "8zi-5: ...naming the label it could not remove" \
+    "failed to remove qa-pending" "$RL_OUT"
+assert_contains "8zi-5: ...and claiming an exact restore" \
+    "pre-call label set restored exactly" "$RL_OUT"
+# THE ASSERTION: byte-identical, not set-equivalent-by-eye.
+assert_eq "8zi-5: the pre-call label set is restored BYTE-IDENTICALLY" \
+    "$RL_SNAP" "$(labels_in "$FIXTURE_RL" "$TID_RL")"
+# CONTROL: the shim is the cause. The SAME approve on a task with no qa-pending
+# never reaches the failing removal and succeeds.
+TID_RLC=$(cd "$FIXTURE_RL" && bd create "8zi: rollback control" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+printf 'src/8zi-rb.ts\n' > "$TRACK_RL/changed-files.txt"
+CLAUDE_PROJECT_DIR="$FIXTURE_RL" bash "$QG_RL" enter "$TID_RLC" >/dev/null 2>&1 || true
+seed_review_records "$TID_RLC" "qa-claude" "backend" "$FIXTURE_RL"
+(cd "$FIXTURE_RL" && bd label add "$TID_RLC" devops >/dev/null 2>&1) || true
+(cd "$FIXTURE_RL" && bd label add "$TID_RLC" qa-blocked >/dev/null 2>&1) || true
+RLC_RC=0
+RLC_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_RL" bash "$QG_RL" approve "$TID_RLC" \
+    "8zi: no qa-pending, no failing removal" 2>/dev/null) || RLC_RC=$?
+assert_eq "8zi-5 CONTROL: with no qa-pending to remove, the SAME shim lets approve succeed" \
+    "0" "$RLC_RC"
+assert_json_field "8zi-5 CONTROL: ...status=approved" "$RLC_OUT" '.status' "approved"
+assert_eq "8zi-5 CONTROL: ...and the sweep still cleared qa-blocked" \
+    "devops,qa-approved" "$(labels_in "$FIXTURE_RL" "$TID_RLC")"
+
 [ "$FAIL" -eq 0 ]

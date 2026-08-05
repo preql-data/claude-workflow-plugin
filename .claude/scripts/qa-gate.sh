@@ -10,6 +10,13 @@
 #                                           Also generates the mechanical impact
 #                                           report via impact-report.sh (G2.n6d;
 #                                           tolerant — enter never fails on it).
+#                                           Clears a PRIOR CYCLE's qa-approved in
+#                                           both arms — the fresh one and the
+#                                           already-entered one (jue). Does NOT
+#                                           write a cycle record in the
+#                                           already-entered arm, so a
+#                                           qa-gate-entered label is not evidence
+#                                           that enter ever ran.
 #   status  <task-id>                       Print one of: not-entered, entered, approved, blocked.
 #   approve <task-id> [--expect-hash <hash>] [--no-impact-report '<reason>']
 #           [--no-review '<reason>'] <approval-summary>
@@ -19,7 +26,17 @@
 #                                           is not the set it would bind, naming both
 #                                           hashes (qzv). It proves bound == classified,
 #                                           NOT that the set is complete.
-#                                           Atomic: -qa-gate-entered, -qa-pending, +qa-approved, comment.
+#                                           Atomic (8zi): +qa-approved and -every
+#                                           other QA cycle label (qa-blocked,
+#                                           qa-gate-entered, qa-pending,
+#                                           qa-escalated, qa-deferred,
+#                                           rubric-pending), + comment. On any
+#                                           failure the pre-call label set is
+#                                           restored exactly and it exits 3.
+#                                           rubric-satisfied is NOT in the cycle
+#                                           set and is preserved as the audit
+#                                           trail of the verdict that backed the
+#                                           approval.
 #                                           REFUSES (exit 2) when the impact report
 #                                           (.qa-tracking/impact-report-<task-id>.json)
 #                                           is missing or its change_set_hash no longer
@@ -33,7 +50,16 @@
 #                                           findings, per review-check.sh gate (V3).
 #                                           --no-review '<reason>' is the audited
 #                                           bypass for that check.
-#   block   <task-id> <reason>              Add qa-blocked label + comment. Keeps qa-gate-entered.
+#   block   <task-id> <reason>              Add qa-blocked label + comment. Keeps
+#                                           qa-gate-entered, qa-pending,
+#                                           rubric-pending and the escalation pair
+#                                           — a block happens MID-cycle. Clears
+#                                           qa-approved only (8zi): every label
+#                                           reader in the tree tests qa-approved
+#                                           first, so a surviving one would report
+#                                           a blocked task as approved. Same
+#                                           restore-exactly-then-exit-3 discipline
+#                                           as approve.
 #   baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
 #                                           Write .qa-tracking/gate-baseline (3mg.1): the
 #                                           `git status --porcelain` snapshot the Stop gate
@@ -1021,6 +1047,176 @@ remove_rubric_satisfied() {
     remove_label "$tid" "rubric-satisfied" 2>/dev/null || true
 }
 
+# ---------------------------------------------------------------------------
+# THE ONE TERMINAL-LABEL TRANSITION (8zi, l1r.3, jue).
+#
+# Every label the gate sets and clears inside one review cycle. A terminal label
+# (qa-approved / qa-blocked) is the verdict of a cycle; the rest are its
+# in-flight state. Callers name what they clear, and set_terminal_label refuses a
+# name that is not in this set — see the guard for why silence is the failure mode
+# that has to be designed out here specifically.
+#
+# rubric-satisfied IS DELIBERATELY NOT IN THIS SET, and its absence is the
+# mechanism that protects it rather than a comment asking people to be careful.
+# It is the audit trail of the grader verdict that backed an approval, which is
+# why cmd_approve preserves it (the had_rubric_satisfied capture, the three-way
+# "rubric-satisfied preserved (audit trail)" observation, and the
+# [rubric mismatch: graded=... approved=...] override token that logs a
+# sync_error when the satisfied verdict binds a different change set than the
+# approval). cmd_enter owns the only clears, and bjx made them conditional on the
+# verdict's change_set_hash. Because rubric-satisfied is not a member here, a
+# future call site that tried to sweep it is REFUSED at the guard below instead of
+# quietly destroying that trail.
+QA_CYCLE_LABELS="qa-approved qa-blocked qa-gate-entered qa-pending qa-escalated qa-deferred rubric-pending"
+
+# set_terminal_label's out-params, declared at file scope so a caller can read
+# them without depending on the call having reached any particular branch.
+#   TERMINAL_SWEEP_PHASE   "" | usage | add_terminal | sweep   (which step failed)
+#   TERMINAL_SWEEP_REMOVED space-delimited labels actually removed (present -> gone)
+#   TERMINAL_SWEEP_OBS     human-readable account, for the caller's envelope
+TERMINAL_SWEEP_PHASE=""
+TERMINAL_SWEEP_REMOVED=""
+TERMINAL_SWEEP_OBS=""
+
+# restore_labels <task-id> <snapshot> — put the label set back exactly.
+#
+# <snapshot> is a get_labels string (comma-joined). Both directions are applied:
+# anything the snapshot had and the task no longer does is re-added, anything the
+# task has and the snapshot did not is removed. Then the result is COMPARED back
+# against the snapshot, so the restore has a provable postcondition rather than a
+# best-effort one.
+#
+# The byte comparison is a set comparison here, MEASURED not assumed: bd 1.1.2
+# returns labels sorted, and a remove-then-re-add of one label reproduces the
+# identical joined string. If a future bd returned insertion order instead, this
+# comparison could report a false failure on a correctly restored SET — which only
+# ever degrades the message, never the outcome: the caller is already on its
+# failure path and already exits 3 either way.
+restore_labels() {
+    local tid="$1" snapshot="$2"
+    local current rc=0 l
+    current="$(get_labels "$tid")"
+    local IFS=,
+    for l in $snapshot; do
+        [ -n "$l" ] || continue
+        case ",$current," in
+            *",$l,"*) ;;
+            *) add_label "$tid" "$l" || rc=1 ;;
+        esac
+    done
+    for l in $current; do
+        [ -n "$l" ] || continue
+        case ",$snapshot," in
+            *",$l,"*) ;;
+            *) remove_label "$tid" "$l" || rc=1 ;;
+        esac
+    done
+    [ "$(get_labels "$tid")" = "$snapshot" ] || rc=1
+    return $rc
+}
+
+# set_terminal_label <task-id> <terminal-label> [<clear-label> ...]
+#
+# Sets <terminal-label> and clears each <clear-label> that is present, as one
+# transition: on any failure the label set is restored to what it was before the
+# call and a non-zero status is returned. Callers turn that into exit 3.
+#
+# WHY THIS EXISTS. cmd_approve used to walk the transition step by step, and the
+# steps were not exhaustive across cycles: a block -> fix -> approve round trip
+# ended with the task carrying BOTH qa-approved and qa-blocked, because approve
+# cleared qa-gate-entered, qa-pending, the escalation pair and rubric-pending but
+# never the previous cycle's terminal label. Observed live four times (uvk, q7n,
+# 94d, and qzv.1 where the gate's own reviewer removed the label by hand mid-
+# approval), which is the argument for one function over one more removal: the
+# defect is not a missing line, it is that "what a cycle clears" was expressed as
+# a list of independent steps that a future label can be added without.
+#
+# ORDER: the terminal label goes on FIRST, then the sweep. That is the gz3
+# ordering rule the step-by-step version already followed, kept deliberately: the
+# approval RECORD is written before this call, so from the moment the terminal
+# label lands the {record, label} pair is coherent and a concurrent Stop sees
+# either no approval yet or a complete one. The transient state this produces on
+# approve is {qa-approved, qa-blocked} — the 8zi state — for the width of one bd
+# call. Every reader in the tree resolves that to `approved`, because all four
+# test qa-approved first: cmd_status, epic-gate.sh's qa_state_of, and
+# statusline.sh's two label readers. Sweeping first would instead open a window
+# with NO terminal label, which those same readers resolve to `entered` or `none`.
+set_terminal_label() {
+    local tid="$1" terminal="$2"
+    shift 2 2>/dev/null || true
+    TERMINAL_SWEEP_PHASE=""
+    TERMINAL_SWEEP_REMOVED=""
+    TERMINAL_SWEEP_OBS=""
+
+    if [ -z "$tid" ] || [ -z "$terminal" ]; then
+        TERMINAL_SWEEP_PHASE="usage"
+        TERMINAL_SWEEP_OBS="set_terminal_label: <task-id> and <terminal-label> are both required"
+        return 1
+    fi
+
+    # THE MEMBERSHIP GUARD. Refuse any label outside QA_CYCLE_LABELS rather than
+    # issue the removal, because a typo'd or non-cycle label is the one error here
+    # with NO observable symptom: bd exits 0 removing a label a task never had,
+    # remove_label's read-back then finds it absent and also reports success, and
+    # the sweep records a clean transition it never performed. Refusing converts
+    # that silence into a usage error at the call site.
+    local want
+    for want in "$terminal" "$@"; do
+        case " $QA_CYCLE_LABELS " in
+            *" $want "*) ;;
+            *)
+                TERMINAL_SWEEP_PHASE="usage"
+                TERMINAL_SWEEP_OBS="set_terminal_label: '$want' is not a QA cycle label (the set is: $QA_CYCLE_LABELS), and a removal of a non-member cannot be distinguished from success — refusing instead of reporting a transition that did not happen"
+                return 1
+            ;;
+        esac
+    done
+
+    # SNAPSHOT BEFORE ANY MUTATION. This is what makes the rollback real rather
+    # than a hand-maintained inverse of the steps above it.
+    local snapshot
+    snapshot="$(get_labels "$tid")"
+
+    # Phase 1: the terminal label. Verified with has_label for the same reason
+    # remove_label verifies (l1r.3) — bd's exit status is not evidence.
+    if ! add_label "$tid" "$terminal" || ! has_label "$tid" "$terminal"; then
+        TERMINAL_SWEEP_PHASE="add_terminal"
+        TERMINAL_SWEEP_OBS="failed to set $terminal on $tid; no labels changed (pre-call set: ${snapshot:-<none>})"
+        return 1
+    fi
+
+    # Phase 2: the sweep. has_label first so TERMINAL_SWEEP_REMOVED names only
+    # labels that were PRESENT and are now gone — that is the semantics the
+    # approve envelope's `removed qa-gate-entered=` / `removed qa-pending=`
+    # counters have always reported, and readers grep them.
+    local lbl
+    for lbl in "$@"; do
+        [ -n "$lbl" ] || continue
+        [ "$lbl" = "$terminal" ] && continue
+        has_label "$tid" "$lbl" || continue
+        if remove_label "$tid" "$lbl"; then
+            TERMINAL_SWEEP_REMOVED="$TERMINAL_SWEEP_REMOVED $lbl"
+            continue
+        fi
+        TERMINAL_SWEEP_PHASE="sweep"
+        TERMINAL_SWEEP_REMOVED=""
+        local restore_obs=""
+        if restore_labels "$tid" "$snapshot"; then
+            restore_obs="pre-call label set restored exactly (${snapshot:-<none>})"
+        else
+            restore_obs="WARNING the restore itself did not complete: labels now read '$(get_labels "$tid")' against a pre-call set of '${snapshot:-<none>}' — reconcile by hand before re-running"
+            log_sync_error "set_terminal_label: rollback INCOMPLETE on $tid after failing to remove $lbl; pre-call='${snapshot:-<none>}' now='$(get_labels "$tid")'"
+        fi
+        TERMINAL_SWEEP_OBS="failed to remove $lbl after $terminal was set; rolled back — $restore_obs"
+        return 1
+    done
+
+    TERMINAL_SWEEP_REMOVED="${TERMINAL_SWEEP_REMOVED# }"
+    TERMINAL_SWEEP_OBS="$terminal set; cleared [${TERMINAL_SWEEP_REMOVED:-none}] from the cycle set"
+    return 0
+}
+# ---------------------------------------------------------------------------
+
 # G2.n6d (claude-workflow-plugin-llh.2): mechanical impact-report helpers.
 #
 # The report file is the deterministic impact_of artifact that the QA
@@ -1580,7 +1776,42 @@ add_label() {
 }
 
 remove_label() {
-    bd label remove "$1" "$2" >/dev/null 2>&1
+    # remove_label <task-id> <label> -> 0 only when the label is ABSENT afterwards.
+    #
+    # l1r.3. This was a bare `bd label remove "$1" "$2" >/dev/null 2>&1` whose exit
+    # status was the only evidence any caller had that a label went away, and that
+    # evidence is worth nothing. MEASURED against bd 1.1.2, the version this repo
+    # runs:
+    #   - `bd label remove <tid> <label-the-task-never-had>` prints
+    #     "Removed label ..." and exits 0;
+    #   - `bd label remove <nonexistent-task-id> <label>` prints
+    #     "Error resolving <id>: no issue found matching ..." and ALSO exits 0.
+    # So the status could not distinguish "removed" from "did nothing at all", and
+    # every rollback block in this file that branches on it was decorative.
+    #
+    # NOW: run the removal, then read the task back. The contract is a
+    # POSTCONDITION — "this label is not on this task" — not "a removal was
+    # applied". The difference is load-bearing in both directions:
+    #   - removing an ABSENT label still succeeds, which is exactly what
+    #     remove_escalation_labels and the two remove_rubric_* helpers rely on:
+    #     they fire unconditionally on labels that are usually not there.
+    #   - a task that cannot be READ reports its label set as empty (get_labels
+    #     swallows the error and returns ""), so the postcondition holds vacuously
+    #     and this returns 0. That is the honest limit of the check: it proves the
+    #     label is gone, it cannot tell "gone" from "unreadable", and callers that
+    #     need the task to exist establish that separately (require_bd, plus the
+    #     has_label captures at the top of cmd_approve).
+    #
+    # SCOPE, against l1r.3's own reproduction rather than against its title. That
+    # reproduction is a stale-JSONL auto-import RESURRECTING an already-removed
+    # label, and its item 2 records that `bd show` immediately after the removal
+    # agreed the label was gone — i.e. a read-back at this point would have passed,
+    # and the label returned on a later read. One read-back cannot observe a future
+    # import, so this closes the removal that never landed, not the removal that is
+    # undone afterwards. The second half is a bd-level divergence between
+    # beads.db-wal and issues.jsonl and has no fix inside this function.
+    bd label remove "$1" "$2" >/dev/null 2>&1 || true
+    ! has_label "$1" "$2"
 }
 
 add_comment() {
@@ -1711,6 +1942,56 @@ cmd_enter() {
         fi
     fi
 
+    # jue: an enter does not leave a PRIOR CYCLE's qa-approved behind, in EITHER
+    # arm. Decided here, above the early-return, for the same reason the rubric
+    # decision is: both arms need an answer and only one of them reaches the code
+    # below.
+    #
+    # THE FRESH ARM (no qa-gate-entered yet). Same reasoning as the legacy
+    # approved-baseline removal further down this function — a new gate cycle
+    # invalidates the previous cycle's credentials — and note that bjx's
+    # conditional preservation of rubric-satisfied does NOT apply here: that
+    # condition lives in the already-entered arm, and the fresh arm clears
+    # rubric-satisfied unconditionally too, because a fresh cycle re-opens the
+    # loop. jue was filed for two symptoms: approve short-circuiting as a no-op so
+    # no fresh bound record was ever written (since narrowed by gz3's hash-aware
+    # idempotency, which no longer no-ops when the change set has moved), and a
+    # watcher polling the LABEL reading a prior-cycle approval as a verdict on new
+    # commits. The second symptom is untouched by gz3 and is what this closes: the
+    # label goes away when the cycle it belonged to ends.
+    #
+    # THE EARLY-RETURN ARM (qa-gate-entered already set). It clears too, and the
+    # argument is different: {qa-gate-entered, qa-approved} is not reachable
+    # through this script's own transitions, because approve removes
+    # qa-gate-entered as part of the same sweep that adds qa-approved. So a task in
+    # this arm holding qa-approved did not get it from a clean approve of the open
+    # cycle. The two ways it arrives are label inheritance (bd 1.1.2's
+    # `create --parent` copies gate labels from the parent, transitively — see rmz)
+    # and a partially applied transition. Both are states where the label is not a
+    # verdict on anything, and leaving it would hand a release credential to a task
+    # whose review cycle is open.
+    #
+    # THIS ARM ALSO WRITES NO CYCLE RECORD, which is a separate open defect and NOT
+    # fixed here: a task born with qa-gate-entered can be entered, take this arm,
+    # and still have zero `QA-GATE: entered` records. Do not read a qa-gate-entered
+    # label as evidence that this function ever ran on the task.
+    local had_prior_approval=0 approval_clear_obs=""
+    has_label "$tid" "qa-approved" && had_prior_approval=1
+    if [ "$had_prior_approval" = "1" ]; then
+        local approval_clear_why=""
+        if [ "$already_entered" = "1" ]; then
+            approval_clear_why="the label cannot be a verdict on an OPEN cycle — approve clears qa-gate-entered when it sets qa-approved, so this pair is unreachable through the gate's own transitions (inherited from a parent, or a partially applied transition)"
+        else
+            approval_clear_why="a fresh gate cycle supersedes the previous cycle's approval, the same way it invalidates that approval's legacy baseline"
+        fi
+        if remove_label "$tid" "qa-approved"; then
+            approval_clear_obs="; cleared a prior cycle's qa-approved ($approval_clear_why) — re-approve to record a verdict on this cycle"
+        else
+            approval_clear_obs="; WARNING a prior cycle's qa-approved is set and could NOT be cleared ($approval_clear_why); a label-polling reader will still see it as an approval of the current change set"
+            log_sync_error "enter: failed to clear a prior cycle's qa-approved on $tid; the label survives an enter and any label-polling reader will treat it as a verdict on the new cycle"
+        fi
+    fi
+
     if [ "$already_entered" = "1" ]; then
         # Idempotent re-enter: the label is already there, but we still
         # refresh current-task in case it drifted (e.g., a different task
@@ -1737,7 +2018,7 @@ cmd_enter() {
         if [ "$was_escalated" = "1" ] || [ "$was_deferred" = "1" ]; then
             refreshed_obs="$refreshed_obs; cleared prior escalation labels (escalated=$was_escalated deferred=$was_deferred) and reset iteration state"
         fi
-        refreshed_obs="$refreshed_obs$rubric_verdict_obs"
+        refreshed_obs="$refreshed_obs$rubric_verdict_obs$approval_clear_obs"
         # TRACKER-RECONCILE BEGIN (94d)
         # Before the report is generated, not after: the report records the
         # change_set_hash of the tracker AS IT IS when it runs, and approve
@@ -1846,7 +2127,7 @@ cmd_enter() {
     # above can only have been the fresh-cycle clear — preservation is
     # unreachable on this path by construction, and the observation says which
     # of the two clears fired rather than just that one did.
-    extra_obs="$extra_obs$rubric_verdict_obs"
+    extra_obs="$extra_obs$rubric_verdict_obs$approval_clear_obs"
     # TRACKER-RECONCILE BEGIN (94d)
     extra_obs="$extra_obs; $RECONCILE_OBS"
     # TRACKER-RECONCILE END (94d)
@@ -2015,9 +2296,14 @@ cmd_approve() {
     require_bd "approve" "$tid"
 
     # Capture rollback state up front.
-    local had_entered=0 had_pending=0 had_approved=0
-    has_label "$tid" "qa-gate-entered" && had_entered=1
-    has_label "$tid" "qa-pending" && had_pending=1
+    #
+    # 8zi: qa-gate-entered and qa-pending are no longer captured here. They were
+    # read only to decide whether to attempt a removal and to set the two envelope
+    # counters, and set_terminal_label now does both from the state at sweep time —
+    # which is after the reconcile, both refusals and the record write. Keeping a
+    # copy taken earlier would be a second source of truth for the same question,
+    # and the later one is the one that describes what the sweep did.
+    local had_approved=0
     has_label "$tid" "qa-approved" && had_approved=1
 
     # Spec Phase A: snapshot rubric state for the warning + audit message.
@@ -2649,64 +2935,58 @@ cmd_approve() {
     # WORKTREE-TOKEN END (v4 V4 / claude-workflow-plugin-3mg.2)
     add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}at $ts: $summary$comment_suffix"
 
-    # Step 2 (gz3: after the record): add qa-approved — the release-enabling
-    # label. From here the {label, record} pair is coherent, so a concurrent
-    # Stop either sees no approval yet or sees a complete one.
-    if ! add_label "$tid" "qa-approved"; then
-        # The record is already on the task and comments are append-only, so we
-        # say so rather than claiming "nothing changed": without the label the
-        # record cannot release anything (the Stop needs both), and re-running
-        # approve writes a fresh record.
-        log_sync_error "approve: qa-approved label add FAILED for $tid after the approval record was written; the record cannot release without the label — re-run approve (gz3 ordering)"
-        emit_json 0 "approve" "$tid" "error" "failed to add qa-approved; no labels changed (the approval record was already written and cannot be unwritten — it is inert without the label; re-run approve)"
+    # Step 2 (gz3: after the record): THE terminal-label transition. One call
+    # replaces what were four separate steps — add qa-approved, remove
+    # qa-gate-entered with a rollback, remove qa-pending with a hand-written
+    # inverse of that rollback, then two best-effort helper calls for the
+    # escalation pair and rubric-pending. See set_terminal_label for the ordering
+    # rationale (terminal first, then sweep) and for why the transition is one
+    # function rather than one more step.
+    #
+    # WHAT THIS CLEARS: the cycle set below, minus qa-approved itself. What it does
+    # NOT clear is rubric-satisfied, which is not a member of QA_CYCLE_LABELS at
+    # all — the audit trail of the verdict that backed this approval, handled by
+    # the had_rubric_satisfied / rubric_mismatch logic above and reported in
+    # $rubric_obs below.
+    #
+    # The list is declared OUTSIDE the sentinel region that follows, with
+    # qa-blocked appended INSIDE it. Same discipline as worktree_field's empty
+    # default above: stripping the region must leave a copy that still performs a
+    # coherent pre-8zi approve, otherwise the META asserting "qa-blocked survives
+    # the stripped copy's approve" would be measuring a script that cannot approve
+    # at all, and would pass for the wrong reason.
+    local -a sweep_clear=(qa-gate-entered qa-pending qa-escalated qa-deferred rubric-pending)
+    # TERMINAL-LABEL-SWEEP BEGIN (8zi)
+    # THE 8zi DELTA, in one line: a previous cycle's qa-blocked is part of what an
+    # approval ends. Without it the block -> fix -> approve round trip terminates
+    # with both terminal labels set and no way for a reader to tell which is
+    # current — reproduced live on uvk, q7n, 94d and qzv.1.
+    sweep_clear+=(qa-blocked)
+    # TERMINAL-LABEL-SWEEP END (8zi)
+    if ! set_terminal_label "$tid" "qa-approved" "${sweep_clear[@]}"; then
+        if [ "$TERMINAL_SWEEP_PHASE" = "add_terminal" ]; then
+            # The record is already on the task and comments are append-only, so we
+            # say so rather than claiming "nothing changed": without the label the
+            # record cannot release anything (the Stop needs both), and re-running
+            # approve writes a fresh record.
+            log_sync_error "approve: qa-approved label add FAILED for $tid after the approval record was written; the record cannot release without the label — re-run approve (gz3 ordering)"
+            emit_json 0 "approve" "$tid" "error" "failed to add qa-approved; no labels changed (the approval record was already written and cannot be unwritten — it is inert without the label; re-run approve). $TERMINAL_SWEEP_OBS"
+            exit 3
+        fi
+        log_sync_error "approve: the terminal-label transition FAILED for $tid after the approval record was written; $TERMINAL_SWEEP_OBS"
+        emit_json 0 "approve" "$tid" "error" "approve rolled back: $TERMINAL_SWEEP_OBS (the approval record was already written and cannot be unwritten — it is inert without the label; re-run approve once bd is healthy)"
         exit 3
     fi
 
-    # Step 3: remove qa-gate-entered (best-effort but tracked for rollback).
-    local removed_entered=0
-    if [ "$had_entered" = "1" ]; then
-        if remove_label "$tid" "qa-gate-entered"; then
-            removed_entered=1
-        else
-            # Roll back qa-approved.
-            remove_label "$tid" "qa-approved" || true
-            emit_json 0 "approve" "$tid" "error" "failed to remove qa-gate-entered; rolled back qa-approved"
-            exit 3
-        fi
-    fi
-
-    # Step 4: remove qa-pending.
-    local removed_pending=0
-    if [ "$had_pending" = "1" ]; then
-        if remove_label "$tid" "qa-pending"; then
-            removed_pending=1
-        else
-            # Roll back: re-add qa-gate-entered if we removed it, drop qa-approved.
-            # NB: the older `[ X ] && Y || true` shorthand here trips shellcheck
-            # SC2015 because `Y` is allowed to exit non-zero (add_label returns
-            # the bd exit code), in which case the `|| true` would mask it AND
-            # the meaning isn't quite if/then/else. The explicit `if` is what
-            # the SC2015 advice recommends.
-            if [ "$removed_entered" = "1" ]; then
-                add_label "$tid" "qa-gate-entered" || true
-            fi
-            remove_label "$tid" "qa-approved" || true
-            emit_json 0 "approve" "$tid" "error" "failed to remove qa-pending; rolled back"
-            exit 3
-        fi
-    fi
-
-    # Spec 0.2: also clear any qa-escalated / qa-deferred labels so a
-    # subsequent re-enter on this task (or a future bug regression) starts
-    # from a clean lifecycle.
-    remove_escalation_labels "$tid"
-
-    # Spec Phase A: the rubric cycle is over once approve runs. Drop
-    # rubric-pending (the cycle was either resolved by a satisfied
-    # verdict or overridden by the QA agent with a documented reason).
-    # rubric-satisfied is preserved if present — it is the audit
-    # trail showing the final verdict that backed this approval.
-    remove_rubric_pending "$tid"
+    # The two counters the approve envelope has always reported. Derived from what
+    # the sweep actually removed rather than from a has_label captured at the top
+    # of this function, which is a slightly sharper claim: it reports the state
+    # transition this call performed, not a presence check taken several refusals
+    # and one record write earlier.
+    local removed_entered=0 removed_pending=0
+    case " $TERMINAL_SWEEP_REMOVED " in *" qa-gate-entered "*) removed_entered=1 ;; esac
+    case " $TERMINAL_SWEEP_REMOVED " in *" qa-pending "*) removed_pending=1 ;; esac
+    local sweep_obs="; cycle labels cleared: [${TERMINAL_SWEEP_REMOVED:-none}]"
 
     # ---- TRACKING-STATE FINALIZATION (gz3 ordering rules 2 and 4) ---------
     # Runs AFTER every step that can roll back (rule 4), and in the order
@@ -2795,7 +3075,19 @@ cmd_approve() {
     # ${reconcile_obs:-} and ${reconstructed_obs:-} expand to empty when their
     # sentinel regions (TRACKER-RECONCILE / CHANGE-SET-RECONSTRUCTED) are stripped
     # by a META-TEST, keeping the stripped copy's envelope coherent.
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs$binding_obs${expect_hash_obs:-}$stale_label_obs"
+    #
+    # `removed qa-gate-entered=` and `removed qa-pending=` are PRESERVED VERBATIM
+    # across the 8zi rewrite. Worth recording what that preservation is and is not
+    # based on: a full-tree search for either literal (and for the shorter
+    # `qa-gate-entered=` / `qa-pending=` forms) finds NO consumer anywhere —
+    # not a spec, not a doc, not an agent prompt, not a hook. The only hits are
+    # this line, the mirrored fixture copies of this script under
+    # .claude/tests/e2e/fixtures/, and historical artifacts (grading-packet diffs,
+    # mutation-run mutant dumps, one captured e2e transcript). They are kept
+    # because keeping them is free and an operator may well be greping them from
+    # memory; they are NOT kept because a test pins them. $sweep_obs is the token
+    # that reports the FULL cleared set, which is what the counters cannot.
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs$binding_obs${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -2936,9 +3228,36 @@ cmd_block() {
     fi
     require_bd "block" "$tid"
 
-    if ! add_label "$tid" "qa-blocked"; then
-        emit_json 0 "block" "$tid" "error" "failed to add qa-blocked label"
+    # The same one transition approve uses, with a deliberately NARROW clear set.
+    #
+    # WHAT BLOCK CLEARS: qa-approved, and nothing else. WHAT IT PRESERVES, and why
+    # each is a decision rather than an omission:
+    #   - qa-gate-entered — documented contract ("Keeps qa-gate-entered") so the
+    #     cycle stays open until an approve or an unblock-and-approve ends it.
+    #   - qa-pending — the task IS still pending review; a block sends it back to
+    #     the specialist and it returns for re-review.
+    #   - rubric-pending, qa-escalated, qa-deferred — a block happens mid-cycle, so
+    #     the rubric loop and any J21 escalation are still live. No filed defect
+    #     says otherwise, and clearing them here would be an unrequested lifecycle
+    #     change.
+    # Only qa-approved is contradictory with a block, and that one is not cosmetic
+    # the way 8zi's own direction is: every label reader in the tree tests
+    # qa-approved FIRST (cmd_status, epic-gate.sh's qa_state_of, statusline.sh's
+    # two readers), so a block that leaves a prior qa-approved in place reports the
+    # task as APPROVED. That is the fail-open twin of the fail-closed noise 8zi
+    # describes, and it is why block gets the sweep too rather than just approve.
+    local -a block_clear=()
+    # TERMINAL-LABEL-SWEEP BEGIN (8zi)
+    block_clear+=(qa-approved)
+    # TERMINAL-LABEL-SWEEP END (8zi)
+    if ! set_terminal_label "$tid" "qa-blocked" "${block_clear[@]}"; then
+        log_sync_error "block: the terminal-label transition FAILED for $tid; $TERMINAL_SWEEP_OBS"
+        emit_json 0 "block" "$tid" "error" "failed to set qa-blocked: $TERMINAL_SWEEP_OBS"
         exit 3
+    fi
+    local block_sweep_obs=""
+    if [ -n "$TERMINAL_SWEEP_REMOVED" ]; then
+        block_sweep_obs="; cleared a prior cycle's [$TERMINAL_SWEEP_REMOVED] — a block and an approval cannot both be current"
     fi
 
     local ts
@@ -2952,7 +3271,7 @@ cmd_block() {
         memory_obs="qa-block memory write failed (see sync-errors.log)"
     fi
 
-    emit_json 1 "block" "$tid" "blocked" "qa-blocked label set at $ts (qa-gate-entered preserved if present); ${memory_obs}"
+    emit_json 1 "block" "$tid" "blocked" "qa-blocked label set at $ts (qa-gate-entered preserved if present); ${memory_obs}${block_sweep_obs}"
 }
 
 # Spec 0.2: record a J21 decision while qa-escalated. Signature is
