@@ -108,6 +108,13 @@ new_task() {
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" enter "$tid" >/dev/null 2>&1
     (cd "$FIXTURE" && bd comments add "$tid" \
         "IMPLEMENTER: role=$role task=$tid at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1)
+    # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve also refuses without a
+    # validated COMPLETION v1 record. A4 and B2 assert approve SUCCEEDS after an
+    # overrule / a resolve-finding, and neither is observable if a LATER refusal
+    # fires first. Satisfied legitimately rather than with --no-completion,
+    # because this spec's whole subject is that the arbitration path reaches a
+    # REAL approve — one stacked bypass would make that claim untestable.
+    seed_completion_record "$tid" "$role" "$FIXTURE"
     printf '%s' "$tid"
 }
 

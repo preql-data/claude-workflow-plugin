@@ -1272,4 +1272,388 @@ assert_json_field "8zi-5 CONTROL: ...status=approved" "$RLC_OUT" '.status' "appr
 assert_eq "8zi-5 CONTROL: ...and the sweep still cleared qa-blocked" \
     "devops,qa-approved" "$(labels_in "$FIXTURE_RL" "$TID_RLC")"
 
+# ===========================================================================
+# P7 — the completion contract at approve (claude-workflow-plugin-qbhw).
+#
+# Three pieces, one gate: `review-check.sh validate-completion` is the ONE
+# validator, `qa-gate.sh completion-record` is the record writer that calls it
+# as a subprocess, and cmd_approve REFUSES without the record it writes.
+#
+# A SEPARATE FIXTURE, because every other section in this file now gets a
+# completion record for free (lib/fixture.sh's seed_review_records seeds one),
+# and the legs below need tasks that deliberately DO NOT have one. The seeding
+# here therefore composes the REAL writers directly — the same thing
+# arbitration-acceptance.sh and review-separation.test.sh do when they need
+# per-record control. Using the real writers rather than hand-built comments is
+# what makes a grammar change break these legs loudly.
+# ===========================================================================
+mk_fixture
+FIXTURE_P7="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+QG_P7="$FIXTURE_P7/.claude/scripts/qa-gate.sh"
+RC_P7="$FIXTURE_P7/.claude/scripts/review-check.sh"
+IR_P7="$FIXTURE_P7/.claude/scripts/impact-report.sh"
+TRACK_P7="$FIXTURE_P7/.claude/.qa-tracking"
+
+p7_new() {   # p7_new <title> <changed-file> -> tid, staged + entered
+    local tid
+    tid=$(cd "$FIXTURE_P7" && bd create "$1" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    printf '%s\n' "$2" > "$TRACK_P7/changed-files.txt"
+    CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" enter "$tid" >/dev/null 2>&1
+    printf '%s' "$tid"
+}
+p7_seed_review() {   # implementer + independent clean artifact, NO completion record
+    local tid="$1" h art
+    h=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$IR_P7" --hash-only 2>/dev/null || echo "")
+    [ -z "$h" ] && h="unverified"
+    (cd "$FIXTURE_P7" && bd comments add "$tid" \
+        "IMPLEMENTER: role=backend task=$tid at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1)
+    art="$TRACK_P7/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"m","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+        "$tid" "$h" > "$art"
+    CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" review-record "$tid" --file "$art" >/dev/null 2>&1
+}
+p7_settle() {   # absorb incidental fixture dirt, then refresh the report for the CURRENT set
+    baseline_incidental_dirt "$FIXTURE_P7"
+    CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$IR_P7" "$1" >/dev/null 2>&1 || true
+}
+p7_payload() {  # p7_payload <tid> <files-json> -> path
+    local tid="$1" files="$2" p
+    p="$TRACK_P7/p7-payload-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
+    printf '{"task_id":"%s","role":"backend","files_changed":%s,"tests_added":["t.sh::a"],"decisions":["d"],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+        "$tid" "$files" > "$p"
+    printf '%s' "$p"
+}
+
+# --- P7-1: a valid payload RECORDS, and the task then APPROVES -------------
+TID_P7A=$(p7_new "P7: valid payload" "src/p7a.ts")
+p7_seed_review "$TID_P7A"
+P7A_PAY=$(p7_payload "$TID_P7A" '["src/p7a.ts"]')
+P7A_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7A" --file "$P7A_PAY" 2>/dev/null)
+assert_json_field "P7-1: completion-record ok=true" "$P7A_OUT" '.ok' "true"
+assert_json_field "P7-1: completion-record status=recorded" "$P7A_OUT" '.status' "recorded"
+# The record grammar, byte-exact through the machine prefix.
+P7A_REC=$(bd_show_with_comments "$TID_P7A" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep '^COMPLETION v1 ' | tail -1)
+assert_match "P7-1: the record matches the COMPLETION v1 grammar" \
+    '^COMPLETION v1 task=[A-Za-z0-9._-]+ role=backend fields=[A-Za-z0-9._,+-]+ payload_sha=[A-Za-z0-9._+-]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: 1 file\(s\), 1 test\(s\)$' \
+    "$P7A_REC"
+# payload_sha binds the PERSISTED artifact: recompute it independently.
+# The artifact is keyed on task AND role (QA R1-F4): task-keyed storage let a
+# second contract on the same task overwrite the first, and the file list the
+# completeness cross-check reads is what got overwritten. Asserting the
+# role-suffixed name here is not incidental — it is that fix, pinned.
+P7A_PERSISTED="$TRACK_P7/completion-$(printf '%s' "$TID_P7A" | tr -c 'A-Za-z0-9._-' '_')-backend.json"
+assert_eq "P7-1: the validated payload was persisted under its role-keyed name" "0" \
+    "$([ -f "$P7A_PERSISTED" ] && echo 0 || echo 1)"
+P7A_RECSHA=$(printf '%s' "$P7A_REC" | grep -oE 'payload_sha=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2-)
+P7A_DISKSHA=$(shasum -a 256 "$P7A_PERSISTED" 2>/dev/null | awk '{print $1}')
+assert_eq "P7-1: payload_sha is the digest of the persisted artifact (recomputed independently)" \
+    "$P7A_DISKSHA" "$P7A_RECSHA"
+p7_settle "$TID_P7A"
+P7A_ARC=0
+P7A_AOUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7A" "contract recorded" 2>/dev/null) || P7A_ARC=$?
+assert_eq "P7-1: approve SUCCEEDS once the contract is recorded (rc=0)" "0" "$P7A_ARC"
+assert_json_field "P7-1: ...status=approved" "$P7A_AOUT" '.status' "approved"
+assert_contains "P7-1: ...and the envelope names the verified contract" \
+    "completion contract verified (role=backend" "$P7A_AOUT"
+assert_contains "P7-1: ...and the completeness cross-check PASSED" \
+    "completeness cross-check PASSED" "$P7A_AOUT"
+
+# --- P7-2: the ONE validator rejects a payload missing a canonical field ---
+TID_P7B=$(p7_new "P7: missing context_coverage" "src/p7b.ts")
+P7B_PAY="$TRACK_P7/p7b.json"
+printf '{"task_id":"%s","role":"backend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o"}\n' \
+    "$TID_P7B" > "$P7B_PAY"
+P7B_RC=0
+P7B_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7B" --file "$P7B_PAY" 2>/dev/null) || P7B_RC=$?
+assert_eq "P7-2: completion-record refuses a payload missing context_coverage (rc=1)" "1" "$P7B_RC"
+assert_json_field "P7-2: error_key=missing_key:context_coverage" \
+    "$P7B_OUT" '.error_key' "missing_key:context_coverage"
+assert_contains "P7-2: the refusal names the ONE validator it came from" \
+    "review-check.sh" "$P7B_OUT"
+# Same verdict from the validator called DIRECTLY — the writer carries no
+# second schema, so both entry points must agree.
+P7B_DRC=0
+P7B_DOUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$RC_P7" validate-completion "$P7B_PAY" 2>/dev/null) || P7B_DRC=$?
+assert_eq "P7-2: review-check.sh validate-completion agrees (rc=4)" "4" "$P7B_DRC"
+assert_json_field "P7-2: ...with the same error_key" \
+    "$P7B_DOUT" '.error_key' "missing_key:context_coverage"
+# No record was written for a rejected payload.
+P7B_RECS=$(bd_show_with_comments "$TID_P7B" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
+assert_eq "P7-2: a rejected payload writes NO record" "0" "$P7B_RECS"
+
+# --- P7-3: a control character in a grammar-bearing scalar (layer 1) -------
+# The vg8 class: role is embedded verbatim in a ONE-LINE record, so a newline
+# splits it and every later token lands on a line no reader parses.
+TID_P7C=$(p7_new "P7: newline in role" "src/p7c.ts")
+P7C_PAY="$TRACK_P7/p7c.json"
+printf '{"task_id":"%s","role":"back\\nend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7C" > "$P7C_PAY"
+P7C_RC=0
+P7C_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7C" --file "$P7C_PAY" 2>/dev/null) || P7C_RC=$?
+assert_eq "P7-3: a newline in role is refused (rc=1)" "1" "$P7C_RC"
+assert_json_field "P7-3: error_key=scalar_contains_control_char:role" \
+    "$P7C_OUT" '.error_key' "scalar_contains_control_char:role"
+
+# --- P7-4: THE INJECTION. A crafted role of the form
+#     `backend fields=x payload_sha=deadbeef at 1999-01-01T00:00:00Z: 99 file(s), 99 test(s)`
+#     would relocate the record's own `: ` boundary, so a reader parsing the
+#     machine prefix would take the ATTACKER's counts and digest instead of the
+#     real ones — the claude-workflow-plugin-bjx class, reproduced.
+#     It carries NO control character, so layer 1 passes it; the writer's
+#     character class is what closes it. -----------------------------------
+TID_P7D=$(p7_new "P7: role injection" "src/p7d.ts")
+P7D_PAY="$TRACK_P7/p7d.json"
+P7D_EVIL='backend fields=x payload_sha=deadbeef at 1999-01-01T00:00:00Z: 99 file(s), 99 test(s)'
+printf '{"task_id":"%s","role":"%s","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7D" "$P7D_EVIL" > "$P7D_PAY"
+# It really is control-char-free, i.e. layer 1 cannot be what stops it.
+P7D_VRC=0
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$RC_P7" validate-completion "$P7D_PAY" >/dev/null 2>&1 || P7D_VRC=$?
+assert_eq "P7-4: the crafted role passes the SCHEMA (so the char class is what closes it)" \
+    "0" "$P7D_VRC"
+P7D_RC=0
+P7D_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7D" --file "$P7D_PAY" 2>/dev/null) || P7D_RC=$?
+assert_eq "P7-4: role='backend fields=x payload_sha=deadbeef at 1999-01-01T00:00:00Z: 99 file(s), 99 test(s)' is REJECTED by the char class (rc=1)" \
+    "1" "$P7D_RC"
+assert_json_field "P7-4: ...error_key=role_invalid_chars" "$P7D_OUT" '.error_key' "role_invalid_chars"
+assert_contains "P7-4: ...rejected, NOT sanitised" "Rejected, not sanitised" "$P7D_OUT"
+P7D_RECS=$(bd_show_with_comments "$TID_P7D" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
+assert_eq "P7-4: ...and no forged record reached the task" "0" "$P7D_RECS"
+# The same class over a payload KEY NAME, which is equally caller-controlled
+# and is comma-joined into `fields=`.
+TID_P7D2=$(p7_new "P7: key-name injection" "src/p7d2.ts")
+P7D2_PAY="$TRACK_P7/p7d2.json"
+printf '{"task_id":"%s","role":"backend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","evil at 1999: 0 file(s)":"x"}\n' \
+    "$TID_P7D2" > "$P7D2_PAY"
+P7D2_RC=0
+P7D2_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7D2" --file "$P7D2_PAY" 2>/dev/null) || P7D2_RC=$?
+assert_eq "P7-4b: a payload KEY NAME carrying the same shape is rejected too (rc=1)" "1" "$P7D2_RC"
+assert_json_field "P7-4b: ...error_key=field_name_invalid_chars" \
+    "$P7D2_OUT" '.error_key' "field_name_invalid_chars"
+
+# --- P7-4c/4d: QA R1-F1 — the guard must inspect the bytes that are WRITTEN.
+# P7-4b passed against the BROKEN implementation because its shape carried
+# neither a comma nor a glob metacharacter. These two legs are the shapes that
+# did not. Both were reproduced against the pre-fix script before the fix
+# landed. ------------------------------------------------------------------
+#
+# 4c — COMMA, deterministic, no adversary required. The csv was built with jq's
+# join(",") and then "validated" by re-splitting it on IFS=','; a key literally
+# named `a,b` split into two legal words, so the guard never saw the comma, and
+# the record was written from the untouched original: `fields=...,a,b`, one key
+# rendered as two members.
+TID_P7C2=$(p7_new "P7: comma in a key name" "src/p7c2.ts")
+P7C2_PAY="$TRACK_P7/p7c2.json"
+printf '{"task_id":"%s","role":"backend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","a,b":"x"}\n' \
+    "$TID_P7C2" > "$P7C2_PAY"
+P7C2_RC=0
+P7C2_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7C2" --file "$P7C2_PAY" 2>/dev/null) || P7C2_RC=$?
+assert_eq "P7-4c: a key name containing a COMMA is rejected (pre-fix: ok=true, and the record read fields=...,a,b)" \
+    "1" "$P7C2_RC"
+assert_json_field "P7-4c: ...error_key=field_name_invalid_chars" \
+    "$P7C2_OUT" '.error_key' "field_name_invalid_chars"
+P7C2_RECS=$(bd_show_with_comments "$TID_P7C2" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
+assert_eq "P7-4c: ...and no record with a split csv reached the task" "0" "$P7C2_RECS"
+
+# 4d — GLOB, and the assertion is CWD-INDEPENDENCE rather than mere rejection.
+# The unquoted expansion also performed pathname expansion, so `[c]lean1`
+# expanded to `clean1` (legal, brackets still written to the record) when a file
+# of that name sat in the process's working directory, and was rejected when it
+# did not. Same payload, opposite verdicts, decided by unrelated files. So this
+# runs the SAME payload from two directories and asserts the two verdicts AGREE
+# — a leg that merely asserted "rejected" would have passed pre-fix whenever it
+# happened to run somewhere without the decoy.
+TID_P7D3=$(p7_new "P7: glob metachar in a key name" "src/p7d3.ts")
+P7D3_PAY="$TRACK_P7/p7d3.json"
+printf '{"task_id":"%s","role":"backend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","[c]lean1":"x"}\n' \
+    "$TID_P7D3" > "$P7D3_PAY"
+mkdir -p "$FIXTURE_P7/globdir-with" "$FIXTURE_P7/globdir-without"
+: > "$FIXTURE_P7/globdir-with/clean1"          # the decoy the glob would expand to
+P7D3_WITH_RC=0
+P7D3_WITH=$( (cd "$FIXTURE_P7/globdir-with" && CLAUDE_PROJECT_DIR="$FIXTURE_P7" \
+    bash "$QG_P7" completion-record "$TID_P7D3" --file "$P7D3_PAY" 2>/dev/null) ) || P7D3_WITH_RC=$?
+P7D3_WITHOUT_RC=0
+P7D3_WITHOUT=$( (cd "$FIXTURE_P7/globdir-without" && CLAUDE_PROJECT_DIR="$FIXTURE_P7" \
+    bash "$QG_P7" completion-record "$TID_P7D3" --file "$P7D3_PAY" 2>/dev/null) ) || P7D3_WITHOUT_RC=$?
+assert_eq "P7-4d: the verdict is the SAME from a CWD holding the glob's target and from one that does not (pre-fix: 0 vs 1)" \
+    "$P7D3_WITHOUT_RC" "$P7D3_WITH_RC"
+assert_eq "P7-4d: ...and that shared verdict is REJECT (rc=1)" "1" "$P7D3_WITH_RC"
+assert_json_field "P7-4d: ...error_key=field_name_invalid_chars, decoy present" \
+    "$P7D3_WITH" '.error_key' "field_name_invalid_chars"
+assert_json_field "P7-4d: ...error_key=field_name_invalid_chars, decoy absent" \
+    "$P7D3_WITHOUT" '.error_key' "field_name_invalid_chars"
+
+# --- P7-5: no record -> approve REFUSES ------------------------------------
+TID_P7E=$(p7_new "P7: approve without a contract" "src/p7e.ts")
+p7_seed_review "$TID_P7E"
+p7_settle "$TID_P7E"
+P7E_RC=0
+P7E_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7E" "ship it" 2>/dev/null) || P7E_RC=$?
+assert_eq "P7-5: approve refuses with no COMPLETION record (rc=2)" "2" "$P7E_RC"
+assert_contains "P7-5: ...ok=false" '"ok":false' "$P7E_OUT"
+assert_json_field "P7-5: ...error_key=completion_record_missing" \
+    "$P7E_OUT" '.error_key' "completion_record_missing"
+assert_contains "P7-5: ...the remediation names completion-record" \
+    "qa-gate.sh completion-record" "$P7E_OUT"
+assert_contains "P7-5: ...and names the audited bypass" "--no-completion" "$P7E_OUT"
+# A refused approve is a no-op on labels (same discipline as every other refusal).
+P7E_LBL=$(cd "$FIXTURE_P7" && bd show "$TID_P7E" --json 2>/dev/null \
+    | jq -r 'if type=="array" then .[0].labels else .labels end // [] | join(",")')
+assert_eq "P7-5: the refusal leaves qa-approved unset" "0" \
+    "$(printf '%s' ",$P7E_LBL," | grep -c ',qa-approved,' | tr -d '[:space:]')"
+
+# --- P7-6: --no-completion '' exits 1; with a reason it approves -----------
+P7F_RC=0
+P7F_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7E" --no-completion "" "s" 2>/dev/null) || P7F_RC=$?
+assert_eq "P7-6: --no-completion with an empty reason exits 1" "1" "$P7F_RC"
+assert_json_field "P7-6: ...error_key=bypass_reason_required" \
+    "$P7F_OUT" '.error_key' "bypass_reason_required"
+P7G_RC=0
+P7G_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7E" \
+    --no-completion "F1 doc-only fast path: no specialist, no completion payload" \
+    "bypassed approval" 2>/dev/null) || P7G_RC=$?
+assert_eq "P7-6: ...with a reason, the SAME task approves (rc=0)" "0" "$P7G_RC"
+assert_contains "P7-6: ...the reason lands in the envelope" \
+    "completion-bypass: F1 doc-only fast path" "$P7G_OUT"
+P7G_CMT=$(bd_show_with_comments "$TID_P7E" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '\[completion bypass:' | tr -d '[:space:]')
+assert_eq "P7-6: ...and in the durable approval record" "1" "$P7G_CMT"
+
+# --- P7-7: fkm.1.20 — the completeness cross-check REPORTS the 94d.1 shape -
+# 94d.1 measured: eight files declared by the implementer's own F7 contract, a
+# tracker rebuilt to a subset, and approve's freshness check passing VACUOUSLY
+# because both of its numbers described the shrunken set. Here the declaration
+# is the independent witness, and the delta is reported rather than hidden.
+TID_P7H=$(p7_new "P7: short change set" "src/p7h-one.ts")
+printf 'src/p7h-one.ts\nsrc/p7h-two.ts\n' > "$TRACK_P7/changed-files.txt"
+p7_seed_review "$TID_P7H"
+P7H_PAY=$(p7_payload "$TID_P7H" '["src/p7h-one.ts","src/p7h-two.ts","src/p7h-three.ts","src/p7h-four.ts","src/p7h-five.ts","src/p7h-six.ts","src/p7h-seven.ts","src/p7h-eight.ts"]')
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7H" --file "$P7H_PAY" >/dev/null 2>&1
+p7_settle "$TID_P7H"
+P7H_RC=0
+P7H_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7H" "approve over a short set" 2>/dev/null) || P7H_RC=$?
+# REPORTS, does not refuse — see completion_files_crosscheck's header for the
+# four reasons. The value is the visibility, which is what 94d.1 lacked.
+assert_eq "P7-7: a provably short change set still APPROVES (the check reports)" "0" "$P7H_RC"
+assert_contains "P7-7: ...and the envelope reports the 94d.1 arithmetic" \
+    "declared=8 bound=2 matched=2 missing=6" "$P7H_OUT"
+assert_contains "P7-7: ...names the missing paths" "src/p7h-eight.ts" "$P7H_OUT"
+P7H_CMT=$(bd_show_with_comments "$TID_P7H" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '\[completion cross-check: 6 of 8 declared file(s) absent' | tr -d '[:space:]')
+assert_eq "P7-7: ...and the DURABLE approval record carries the finding" "1" "$P7H_CMT"
+
+# --- P7-7b: QA R1-F4 — a QA contract recorded on the SAME task must not
+# disarm the check. THE REGRESSION LEG. P7-7 above passes on the broken
+# implementation too, because no QA record follows it in that fixture; this one
+# is the shape the release's own qa.md flow produces, and pre-fix it turned the
+# 6-of-8 WARNING into an affirmative "PASSED — every one of the 0 declared
+# file(s)" with NO token in the durable record at all. ---------------------
+TID_P7I=$(p7_new "P7: QA contract must not disarm the cross-check" "src/p7i-one.ts")
+printf 'src/p7i-one.ts\nsrc/p7i-two.ts\n' > "$TRACK_P7/changed-files.txt"
+p7_seed_review "$TID_P7I"
+P7I_IMPL=$(p7_payload "$TID_P7I" '["src/p7i-one.ts","src/p7i-two.ts","src/p7i-three.ts","src/p7i-four.ts","src/p7i-five.ts","src/p7i-six.ts","src/p7i-seven.ts","src/p7i-eight.ts"]')
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7I" --file "$P7I_IMPL" >/dev/null 2>&1
+# QA's own contract, recorded AFTER — files_changed [] because QA verifies
+# rather than authors, which is exactly why reading it as the witness is wrong.
+P7I_QA="$TRACK_P7/p7i-qa.json"
+printf '{"task_id":"%s","role":"qa","files_changed":[],"tests_added":[],"decisions":["reviewed"],"blockers":[],"llm_observations":"o","context_coverage":"c","approved":true,"files_verified":["src/p7i-one.ts"]}\n' \
+    "$TID_P7I" > "$P7I_QA"
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7I" --file "$P7I_QA" >/dev/null 2>&1
+# The artifacts must COEXIST — task-keyed storage let the second write clobber
+# the first, which is half the defect.
+assert_eq "P7-7b: the implementer's payload artifact survives QA recording its own" "0" \
+    "$([ -f "$TRACK_P7/completion-$(printf '%s' "$TID_P7I" | tr -c 'A-Za-z0-9._-' '_')-backend.json" ] && echo 0 || echo 1)"
+assert_eq "P7-7b: ...and QA's is a SEPARATE artifact, not an overwrite" "0" \
+    "$([ -f "$TRACK_P7/completion-$(printf '%s' "$TID_P7I" | tr -c 'A-Za-z0-9._-' '_')-qa.json" ] && echo 0 || echo 1)"
+p7_settle "$TID_P7I"
+P7I_RC=0
+P7I_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7I" "QA recorded after the implementer" 2>/dev/null) || P7I_RC=$?
+assert_eq "P7-7b: approve still succeeds" "0" "$P7I_RC"
+# THE ASSERTION: the arithmetic is the IMPLEMENTER's, not QA's empty list.
+assert_contains "P7-7b: the cross-check reads the IMPLEMENTER's declaration (pre-fix: 'every one of the 0 declared file(s)')" \
+    "declared=8" "$P7I_OUT"
+assert_contains "P7-7b: ...reporting the real 6-of-8 shortfall" \
+    "missing=6" "$P7I_OUT"
+P7I_FALSEPASS=$(printf '%s' "$P7I_OUT" | grep -c 'cross-check PASSED' || true)
+assert_eq "P7-7b: ...and NEVER reports an affirmative PASS over a short set" \
+    "0" "$(printf '%s' "$P7I_FALSEPASS" | tr -d '[:space:]')"
+P7I_CMT=$(bd_show_with_comments "$TID_P7I" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '\[completion cross-check: 6 of 8 declared file(s) absent' | tr -d '[:space:]')
+assert_eq "P7-7b: ...and the durable record carries the token (pre-fix: none at all)" "1" "$P7I_CMT"
+
+# --- P7-7c: a task with ONLY a reviewer contract reports UNESTABLISHED, never
+# a PASS. The fail-safe direction of the implementer-role allowlist: an
+# unrecognised role must degrade to "I could not check", because degrading to
+# "PASSED" is the defect above wearing a different hat. -------------------
+TID_P7J=$(p7_new "P7: only a reviewer contract" "src/p7j.ts")
+p7_seed_review "$TID_P7J"
+P7J_QA="$TRACK_P7/p7j-qa.json"
+printf '{"task_id":"%s","role":"qa","files_changed":[],"tests_added":[],"decisions":["reviewed"],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7J" > "$P7J_QA"
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7J" --file "$P7J_QA" >/dev/null 2>&1
+p7_settle "$TID_P7J"
+P7J_RC=0
+P7J_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7J" "reviewer contract only" 2>/dev/null) || P7J_RC=$?
+assert_eq "P7-7c: the reviewer's contract still satisfies the REFUSAL (approve proceeds)" "0" "$P7J_RC"
+assert_contains "P7-7c: ...but the cross-check reports UNESTABLISHED, not PASSED" \
+    "completeness cross-check UNESTABLISHED" "$P7J_OUT"
+assert_contains "P7-7c: ...and names the roles it did find, so the degradation is diagnosable" \
+    "roles seen: qa" "$P7J_OUT"
+
+# --- P7-META: strip the sentinels -> approve succeeds with NO record -------
+# The falsifiable form of "this refusal is what enforces the contract". The copy
+# lives in the fixture's .claude/scripts/ because qa-gate.sh loads
+# workflow-denylist.sh relative to its OWN directory (see the impact-report META
+# above): a copy parked elsewhere has no denylist, reconcile_tracker refuses,
+# and approve exits 2 for a reason unrelated to the region under test.
+QG_P7_REAL=$(readlink "$QG_P7" 2>/dev/null || printf '%s' "$QG_P7")
+QG_P7_STRIPPED="$FIXTURE_P7/.claude/scripts/qa-gate-nocompletion.sh"
+P7M_STRIP_RC=0
+awk '
+    /^ *# COMPLETION-CONTRACT-REFUSAL BEGIN/ { skip = 1; found = 1; next }
+    /^ *# COMPLETION-CONTRACT-REFUSAL END/   { skip = 0; next }
+    skip { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$QG_P7_REAL" > "$QG_P7_STRIPPED" || P7M_STRIP_RC=$?
+chmod +x "$QG_P7_STRIPPED" 2>/dev/null || true
+assert_eq "P7-META: the COMPLETION-CONTRACT-REFUSAL sentinels are present in qa-gate.sh" \
+    "0" "$P7M_STRIP_RC"
+if assert_mutant_applied "P7-META" "$QG_P7_REAL" "$QG_P7_STRIPPED"; then
+    P7M_PARSE=0
+    bash -n "$QG_P7_STRIPPED" 2>/dev/null || P7M_PARSE=$?
+    assert_eq "P7-META: the stripped copy still parses (it must fail for the reason under test)" \
+        "0" "$P7M_PARSE"
+    TID_P7M=$(p7_new "P7 META: stripped copy approves without a contract" "src/p7m.ts")
+    p7_seed_review "$TID_P7M"
+    p7_settle "$TID_P7M"
+    # CONTROL: the SHIPPED script refuses this exact task.
+    P7M_SRC_RC=0
+    CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7M" "control" >/dev/null 2>&1 || P7M_SRC_RC=$?
+    assert_eq "P7-META CONTROL: the shipped copy refuses this task (rc=2)" "2" "$P7M_SRC_RC"
+    # THE MUTANT: without the region, the same task approves.
+    P7M_RC=0
+    P7M_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7_STRIPPED" approve "$TID_P7M" \
+        "stripped copy must NOT refuse" 2>/dev/null) || P7M_RC=$?
+    assert_eq "P7-META: the stripped copy approves with NO completion record (P7-5 WOULD fail)" \
+        "0" "$P7M_RC"
+    assert_json_field "P7-META: ...status=approved" "$P7M_OUT" '.status' "approved"
+    # NON-VACUITY: the stripped copy is a working pre-P7 approve, not a broken
+    # one — it still writes a coherent, change-set-bound approval record.
+    assert_contains "P7-META: ...and still writes a change-set-bound record" \
+        "change-set-bound approval record written" "$P7M_OUT"
+fi
+
 [ "$FAIL" -eq 0 ]

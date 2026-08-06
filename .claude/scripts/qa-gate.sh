@@ -50,6 +50,23 @@
 #                                           findings, per review-check.sh gate (V3).
 #                                           --no-review '<reason>' is the audited
 #                                           bypass for that check.
+#                                           ALSO REFUSES (exit 2,
+#                                           completion_record_missing) when no
+#                                           COMPLETION v1 record exists for the task
+#                                           — the F7 specialist completion contract
+#                                           had zero runtime enforcement before P7.
+#                                           --no-completion '<reason>' is the audited
+#                                           bypass (the Stop hook's doc-only fast
+#                                           path passes it: no specialist, no
+#                                           payload). The approval additionally
+#                                           REPORTS how many of the contract's
+#                                           declared files_changed are absent from
+#                                           the change set being bound — the
+#                                           independent completeness witness the
+#                                           freshness check structurally cannot be
+#                                           (fkm.1.20). That is a report, not a
+#                                           refusal; see
+#                                           completion_files_crosscheck for why.
 #   block   <task-id> <reason>              Add qa-blocked label + comment. Keeps
 #                                           qa-gate-entered, qa-pending,
 #                                           rubric-pending and the escalation pair
@@ -87,6 +104,17 @@
 #   review-record <task-id> [--file <path>] Phase V2: validate a reviewer artifact via
 #                                           review-check.sh then append the REVIEW-ARTIFACT
 #                                           v1 record comment (record writer only).
+#   completion-record <task-id> [--file <path>]
+#                                           P7: validate an F7 specialist completion
+#                                           payload via review-check.sh
+#                                           validate-completion (the ONE validator),
+#                                           persist it to
+#                                           .qa-tracking/completion-<task-id>.json,
+#                                           and append:
+#                                             COMPLETION v1 task=<tid> role=<r>
+#                                             fields=<csv> payload_sha=<sha256>
+#                                             at <ts>: <n> file(s), <m> test(s)
+#                                           approve REFUSES without this record.
 #   resolve-finding <tid> <fid> --fix <ref> --test <ref> <summary>
 #                                           Phase V2: append a RESOLVED <fid> comment
 #                                           (id must be in the latest REVIEW-ARTIFACT).
@@ -111,6 +139,14 @@
 #       itself is unavailable (fail-closed). error_key names which; the
 #       remediation names the resolve-finding / arbitrate / review-record
 #       command that clears it.
+#
+# The P7 completion-contract refusal exits 2, not 5, deliberately: exit 2 is
+# already this file's "refused because a mechanical artifact is missing, stale or
+# unverifiable" code (impact_report_missing, tracker_unreconcilable,
+# change_set_reconstructed), the error_key names which one, and a missing
+# completion record is exactly that shape — one command by the party that did
+# the work clears it. A new code would make every existing caller's `case` on
+# the exit status silently incomplete for no gain.
 
 set -e
 
@@ -1532,6 +1568,384 @@ approval_worktree_token() {
     printf '%s' "$top"
 }
 
+# ---------------------------------------------------------------------------
+# COMPLETION CONTRACT (P7 / claude-workflow-plugin-qbhw): the F7 specialist
+# payload, recorded and read back.
+#
+# WHY THESE LIVE HERE. `completion-record` writes a durable record and persists
+# the validated payload; `approve` reads both back. Same split, and the same
+# reasons, as the approval record (llh.18) and the rubric verdict (bjx): the
+# Beads comment is the tamper-evident, cross-checkout-visible statement that a
+# contract was submitted, and the on-disk artifact is the content that statement
+# is a digest of. Neither is a second copy of the other — the record cannot
+# carry a file list without becoming a multi-line record, and the artifact
+# cannot survive a different checkout.
+#
+# NOT wiped by wipe_review_artifacts and NOT truncated by approve, deliberately:
+# it is the evidence the cross-check below was made against, so it has to
+# outlive the cycle exactly as impact-report-<tid>.json does.
+
+# completion_payload_path_for <tid> <role> — KEYED ON BOTH, and the role half is
+# the fix for QA finding R1-F4.
+#
+# It was keyed on the task alone, so the SECOND contract recorded against a task
+# silently overwrote the first. That is not a corner case, it is the flow this
+# release mandates: the implementer records its contract, then QA records its
+# own on the same task, and QA's `files_changed` is legitimately `[]` because QA
+# verifies files rather than authoring them. The implementer's declaration — the
+# entire independent witness the completeness cross-check exists to read — was
+# gone, replaced by an empty list, and the cross-check then reported an
+# affirmative PASS over zero declared files. Reproduced over the 94d.1 shape
+# before this fix: `declared=8 bound=2 matched=2 missing=6` became
+# `PASSED — every one of the 0 declared file(s)`, with no token in the durable
+# record at all.
+#
+# Two contracts on one task are now two artifacts. The role is sanitised with
+# the same class as the task id even though assert_record_scalar has already
+# constrained it — this function is also reachable from the READ side, where the
+# role comes off a parsed record rather than a validated payload.
+completion_payload_path_for() {
+    local sanitized role_part
+    sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    role_part=$(printf '%s' "${2:-unknown}" | tr -c 'A-Za-z0-9._-' '_')
+    printf '%s/completion-%s-%s.json' "$QA_TRACKING_DIR" "$sanitized" "$role_part"
+}
+
+# THE ROLES WHOSE COMPLETION CONTRACT DESCRIBES THE WORK (R1-F4).
+#
+# An ALLOWLIST, not a denylist of reviewer roles, and the direction is the whole
+# safety argument. Get it wrong one way and an unrecognised IMPLEMENTER role
+# makes the cross-check report `unestablished` — loud, recorded, and honest.
+# Get it wrong the other way and an unrecognised REVIEWER role is read as an
+# implementer, its `files_changed: []` is taken as the declaration, and the
+# check reports an affirmative PASS over nothing. That second outcome is exactly
+# the defect this list exists to close, so the list must fail toward
+# "unestablished" and never toward "PASS".
+#
+# `implementer` is included ahead of its use: v5 Phase D0 collapses
+# backend/frontend/devops into one implementer class, and a list that lags that
+# rename would silently disarm the check at the moment the roles change.
+# WHEN YOU ADD A ROLE: add it here only if that role WRITES CODE. A reviewing
+# role (qa, grader, judge, a design reviewer) must NOT be added — its contract
+# describes a review, and its file list is not a claim about what shipped.
+COMPLETION_IMPLEMENTER_ROLES_JSON='["backend","frontend","devops","implementer"]'
+
+# sha256_file <path> — hex digest of a file, or the host-level "no sha tool"
+# sentinel.
+#
+# This is NOT a second change-set canonicalisation and must never become one:
+# every change-set hash in this file still defers to impact-report.sh
+# --hash-only (llh.18). This digests ONE named blob, which is a different
+# question with no canonicalisation to drift. The sentinel is reused from
+# CHANGE_SET_HASH_UNAVAILABLE rather than spelled again — the CONDITION it names
+# is "this host has neither shasum nor sha256sum", not anything about change
+# sets, and two literals for one condition is the drift this file avoids
+# elsewhere.
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$1" 2>/dev/null | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$1" 2>/dev/null | awk '{print $1}'
+    else
+        printf '%s' "$CHANGE_SET_HASH_UNAVAILABLE"
+    fi
+}
+
+# latest_completion_record <tid> — the text of the LAST `COMPLETION v1 `
+# comment on the task, or empty.
+#
+# `startswith("COMPLETION v1 ")` rather than a regex or a substring search, for
+# the reason latest_satisfied_rubric_hash documents at length and review-count's
+# "prose-only mention" leg pins: agents QUOTE record grammars in comments
+# constantly. A comment that merely mentions the grammar mid-sentence does not
+# START with it, so it is not a record — and here that direction is the safe
+# one, because a prose mention must not be able to SATISFY the refusal below.
+#
+# LATEST-WINS. A specialist re-spawned in a second review round posts a second
+# contract; the newest one is the one that describes the work being approved.
+#
+# Never fails the caller: no bd, no task, unparseable JSON -> empty, rc 0.
+latest_completion_record() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    bd_show_with_comments "$tid" \
+        | jq -r '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("COMPLETION v1 "))
+            ]
+            | last // ""
+        ' 2>/dev/null || true
+    return 0
+}
+
+# latest_implementer_completion_record <tid> — the last COMPLETION record whose
+# role WROTE CODE (see COMPLETION_IMPLEMENTER_ROLES_JSON), or empty.
+#
+# WHY THIS IS A SEPARATE SELECTOR FROM THE ONE ABOVE, which is the substance of
+# the R1-F4 fix. The two questions the gate asks of these records are different:
+#   - THE REFUSAL asks "did anyone hand back a validated contract for this
+#     task?". Any contract answers that, QA's included, so it reads
+#     latest_completion_record and latest-wins is correct there.
+#   - THE COMPLETENESS CROSS-CHECK asks "what did the party that DID THE WORK
+#     say it touched?". Only an implementer's contract answers that. QA's
+#     `files_changed` is the files QA itself edited — normally none — and its
+#     analogue is `files_verified`, which is deliberately NOT read here: a
+#     reviewer's reading list is not a claim about what shipped.
+# Conflating them is what made a QA record silently disarm the check, so they
+# are two functions rather than one with a flag.
+#
+# LATEST-WINS WITHIN THE IMPLEMENTER SET: a specialist re-spawned in a second
+# review round posts a second contract, and the newer one describes the work
+# being approved.
+#
+# The role is parsed with the SAME character class the writer validates it
+# against, anchored from the start of the record, so a role token appearing
+# inside the free-text tail cannot be mistaken for the real one.
+#
+# Never fails the caller: no bd, no task, unparseable JSON -> empty, rc 0.
+latest_implementer_completion_record() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    bd_show_with_comments "$tid" \
+        | jq -r --argjson impl "$COMPLETION_IMPLEMENTER_ROLES_JSON" '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("COMPLETION v1 "))
+              | select(
+                  ( [ capture("^COMPLETION v1 task=[A-Za-z0-9._+-]+ role=(?<r>[A-Za-z0-9._+-]+) ") ]
+                    | first | .r? // "" ) as $r
+                  | ($impl | index($r)) != null )
+            ]
+            | last // ""
+        ' 2>/dev/null || true
+    return 0
+}
+
+# completion_roles_seen <tid> — every distinct role that recorded a contract on
+# the task, comma-joined. Diagnostic only: when the cross-check reports
+# `unestablished` because no IMPLEMENTER contract exists, the operator's next
+# question is "then whose contracts are on this task?", and an answer that names
+# them turns an unexplained degradation into a one-line diagnosis.
+completion_roles_seen() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    bd_show_with_comments "$tid" \
+        | jq -r '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("COMPLETION v1 "))
+              | ( [ capture("^COMPLETION v1 task=[A-Za-z0-9._+-]+ role=(?<r>[A-Za-z0-9._+-]+) ") ]
+                  | first | .r? // "?" )
+            ] | unique | join(",")
+        ' 2>/dev/null || true
+    return 0
+}
+
+# assert_record_scalar <subcommand> <tid> <field> <value> — THE bjx GRAMMAR-
+# INJECTION GUARD. Refuses (exit 1) any value that could move a field boundary
+# in a one-line record, and REJECTS rather than sanitising.
+#
+# THE DEFECT CLASS, twice reproduced in this repo and once LIVE IN SHIPPED CODE:
+#   - bjx: `rubric_version` was validated only as "non-empty string" and is
+#     interpolated with a space on each side, so a version of the form
+#     `1 iteration 1: satisfied change_set_hash=<real>` relocated the record's
+#     first colon into attacker-supplied text and a needs_revision verdict read
+#     back as satisfied AND bound.
+#   - P8 (`lessons.sh`): `--source 'evil --> <!-- recorded: 1999-01-01'` wrote
+#     an attacker-supplied field into the ledger's entry grammar. Its guard
+#     covers tag, prose AND source — three scalars — because guarding one field
+#     of a multi-field grammar just relocates the same defect to the next field.
+#
+# So every scalar this file interpolates into the COMPLETION record passes
+# through here: the task id, the role, and each field name in the `fields=` csv.
+# The class has no space, no colon, no comma and no bracket, so nothing that
+# passes can relocate a token, split the csv, or terminate the machine prefix.
+#
+# REJECT, NEVER SANITISE, for bjx's reason: a silently-rewritten value would
+# make the record disagree with the payload the specialist actually submitted,
+# and the structured envelope is what lets the caller fix it precisely.
+assert_record_scalar() {
+    local sub="$1" tid="$2" field="$3" value="$4"
+    if [ -z "$value" ]; then
+        emit_error_json "$sub" "$tid" "${field}_empty" \
+            "$field is empty; it is interpolated into the COMPLETION record's machine prefix, where an empty value collapses two tokens into one" \
+            "qa-gate.sh $sub <task-id> [--file <path>]"
+        exit 1
+    fi
+    case "$value" in
+        *[!A-Za-z0-9._+-]*)
+            emit_error_json "$sub" "$tid" "${field}_invalid_chars" \
+                "$field='$value' contains characters outside [A-Za-z0-9._+-]; it is interpolated into the COMPLETION record's machine prefix, where a space, a colon, a comma or a bracket would move a field boundary and let the record be read back as something the payload never said (the claude-workflow-plugin-bjx class). Rejected, not sanitised: a rewritten value would make the record disagree with the payload" \
+                "qa-gate.sh $sub <task-id> [--file <path>]"
+            exit 1
+            ;;
+    esac
+    return 0
+}
+
+# completion_files_crosscheck <tid> <recorded-payload-sha> — THE INDEPENDENT
+# COMPLETENESS WITNESS (claude-workflow-plugin-fkm.1.20).
+#
+# THE GAP IT FILLS. approve's impact-report freshness check compares the
+# report's recorded change_set_hash against a recompute. That is sound for DRIFT
+# (the set moved after the report was written) and STRUCTURALLY BLIND TO LOSS
+# (the set shrank before it was written), because both numbers are derived from
+# the same tracker. MEASURED LIVE on 94d.1: after SessionStart destroyed
+# changed-files.txt and the reconcile rebuilt a 10-path subset of a 26-path
+# change set, `enter` generated a report over the shrunken set and approve's
+# freshness enforcement PASSED — vacuously, because recorded and current both
+# faithfully described the shrunken set. Six of the eight files the
+# implementer's own F7 contract declared were absent from what the approval
+# would have bound. The enforcement did not fail; it succeeded about the wrong
+# question.
+#
+# The general rule that instance proves: two numbers derived from the same
+# truncated source cannot detect the truncation. Completeness needs a witness
+# that is INDEPENDENT of the tracker — and the F7 contract's `files_changed` is
+# the cheapest one already on disk, declared by the party that did the work,
+# before and outside any gate bookkeeping.
+#
+# ===========================================================================
+# WHY THIS REPORTS AND DOES NOT REFUSE. A deliberate call, made against the
+# instinct that the safer-looking option is the safer one. Five reasons, in
+# descending weight:
+#
+#   0. A REFUSAL WOULD HAVE DEADLOCKED THE TASK THAT INTRODUCED IT. This is not
+#      a constructed argument; it is the measurement from P7's own approval.
+#      That task declared 40 files and the change set bound 19, missing 21 — and
+#      all 21 were the e2e fixture byte-copies that `make sync-fixtures` writes.
+#      post-edit.sh records the paths of Write/Edit TOOL calls, so files produced
+#      by a Makefile recipe are STRUCTURALLY invisible to it; they reach the
+#      change set only if a later reconcile happens to see them as git dirt. A
+#      refusal here would have blocked the change that added the refusal, on a
+#      21-file delta that was entirely correct. Any task whose work includes a
+#      generator, a codemod, or a build step is in that same class. (Credit where
+#      due: QA found this while reviewing P7, and it is a better argument than
+#      the path-spelling one below because it is self-demonstrating.)
+#   1. THE TWO LISTS ARE SPELLED DIFFERENTLY BY CONSTRUCTION, and a refusal
+#      keyed on a set difference would therefore fire on healthy tasks.
+#      post-edit.sh records `tool_input.file_path` VERBATIM — usually absolute —
+#      and reconcile_tracker "emits absolute paths"; specialists declare
+#      RELATIVE paths (every F7 example in every prompt does). The
+#      normalisation below strips $PROJECT_DIR/ from both sides, which aligns
+#      the common case and CANNOT align a symlinked checkout, a path recorded
+#      through a different mount, or a worktree. A gate whose false-positive
+#      mode is "everything looks missing" must not be a refusal.
+#   2. LEGITIMATE ASYMMETRY IS NORMAL. A file that was already dirty at
+#      gate-baseline capture is correctly declared by the specialist and
+#      correctly ABSENT from the change set (the baseline is subtracted on
+#      purpose). Same for a path created and then deleted, a path outside the
+#      project dir, and anything the shared denylist filters. Each is a
+#      declared-but-not-bound entry that is not loss.
+#   3. IT WOULD MAKE A MECHANICAL GATE DEPEND ON AN AGENT'S SELF-REPORT. A
+#      specialist could deadlock its own approval by mistyping one path, and
+#      the only exit would be a bypass flag — which is the shape the R2-F2
+#      note in cmd_approve rejects in as many words: "a refusal whose only exit
+#      is a bypass teaches the bypass".
+#   4. THE PRECEDENT IS EXPLICIT. R2-F2 faced the same choice about the rubric
+#      binding and chose to stop the AUDIT TRAIL lying rather than to add a
+#      second gate. The harm in 94d.1 was not that approve proceeded; it was
+#      that NOTHING SAID the bound set was short. That is what this fixes.
+#
+# So the result is recorded in the DURABLE approval record as well as the
+# envelope, on the same bracketed-suffix shape as the rubric mismatch and after
+# every machine token. `unestablished` is recorded too: silence would read as
+# "checked and clean", which is exactly the false confidence 94d.1 was approved
+# under.
+#
+# READ THE NUMBERS THIS WAY. `matched=0` with BOTH lists non-empty is the
+# signature of a path-spelling mismatch, not of loss — no real session declares
+# eight files and touches eight entirely different ones. The 94d.1 shape is
+# PARTIAL overlap: matched=2, missing=6. The observation text says so, because a
+# report that can be misread in the alarming direction will be.
+#
+# Returns 0 ALWAYS, by globals (the caller needs five values, and `x=$(f)` runs
+# f in a subshell where the other four die silently — the same reason
+# set_idempotency_reference hands its pair back this way).
+COMPLETION_XCHECK_STATE=""
+COMPLETION_XCHECK_DETAIL=""
+COMPLETION_XCHECK_DECLARED=0
+COMPLETION_XCHECK_BOUND=0
+COMPLETION_XCHECK_MATCHED=0
+COMPLETION_XCHECK_MISSING=0
+COMPLETION_XCHECK_MISSING_PATHS=""
+COMPLETION_XCHECK_INLINE_CAP=12
+completion_files_crosscheck() {
+    local tid="$1" recorded_sha="${2:-}" role="${3:-}"
+    COMPLETION_XCHECK_STATE="unestablished"
+    COMPLETION_XCHECK_DETAIL=""
+    COMPLETION_XCHECK_DECLARED=0
+    COMPLETION_XCHECK_BOUND=0
+    COMPLETION_XCHECK_MATCHED=0
+    COMPLETION_XCHECK_MISSING=0
+    COMPLETION_XCHECK_MISSING_PATHS=""
+
+    # R1-F4: the caller passes the role of the IMPLEMENTER record it selected,
+    # and the artifact is looked up under that role. Without it this read went to
+    # a task-keyed path that whichever contract was recorded LAST had overwritten.
+    if [ -z "$role" ]; then
+        COMPLETION_XCHECK_DETAIL="no implementer role was resolved for this task, so there is no contract to read a declared file list from"
+        return 0
+    fi
+
+    local payload_file report
+    payload_file=$(completion_payload_path_for "$tid" "$role")
+    if [ ! -f "$payload_file" ]; then
+        COMPLETION_XCHECK_DETAIL="the validated payload artifact is absent at $payload_file — the record proves a contract was validated, but the file list it declared is not on this disk (expected when the record was written in another checkout, or the tracking dir was cleaned)"
+        return 0
+    fi
+
+    # The record's digest is what binds the artifact to the record. A mismatch
+    # means the file on disk is not the one that was recorded, so reading a file
+    # list out of it would be reading an unrecorded claim.
+    local disk_sha
+    disk_sha=$(sha256_file "$payload_file")
+    if [ -n "$recorded_sha" ] && [ -n "$disk_sha" ] && [ "$recorded_sha" != "$disk_sha" ]; then
+        COMPLETION_XCHECK_DETAIL="the persisted payload at $payload_file digests to $disk_sha, but the COMPLETION record binds payload_sha=$recorded_sha — the artifact on disk is NOT the one that was recorded, so no file list is read from it"
+        return 0
+    fi
+
+    # The bound change set's FILE LIST. It comes from the persisted impact
+    # report because that artifact is the only thing that carries it:
+    # impact-report.sh --hash-only yields a digest, and re-deriving the list here
+    # would be a second copy of canonical_changed_files (sort + denylist), i.e.
+    # exactly the drift surface llh.18 refuses to open.
+    report=$(impact_report_path_for "$tid")
+    if [ ! -f "$report" ]; then
+        COMPLETION_XCHECK_DETAIL="the impact report is absent at $report, so the file list of the change set being bound is unavailable (only the report carries it; --hash-only yields a digest). Regenerate it to enable the cross-check: bash .claude/scripts/impact-report.sh $tid"
+        return 0
+    fi
+
+    local xj
+    xj=$(jq -n --slurpfile p "$payload_file" --slurpfile r "$report" --arg root "$PROJECT_DIR" '
+        def norm: ltrimstr($root + "/") | ltrimstr("./");
+        ( ($p[0].files_changed // []) | map(select(type == "string")) | map(norm) | unique ) as $declared
+        | ( ($r[0].files // []) | map(.file // "") | map(select(type == "string" and . != "")) | map(norm) | unique ) as $bound
+        | ( $declared - $bound ) as $missing
+        | { declared: ($declared|length),
+            bound: ($bound|length),
+            matched: (($declared|length) - ($missing|length)),
+            missing: ($missing|length),
+            missing_paths: $missing }
+    ' 2>/dev/null) || xj=""
+    if [ -z "$xj" ]; then
+        COMPLETION_XCHECK_DETAIL="could not compare the two lists (the payload at $payload_file or the report at $report is unparseable)"
+        return 0
+    fi
+
+    COMPLETION_XCHECK_DECLARED=$(printf '%s' "$xj" | jq -r '.declared' 2>/dev/null || echo 0)
+    COMPLETION_XCHECK_BOUND=$(printf '%s' "$xj" | jq -r '.bound' 2>/dev/null || echo 0)
+    COMPLETION_XCHECK_MATCHED=$(printf '%s' "$xj" | jq -r '.matched' 2>/dev/null || echo 0)
+    COMPLETION_XCHECK_MISSING=$(printf '%s' "$xj" | jq -r '.missing' 2>/dev/null || echo 0)
+    COMPLETION_XCHECK_MISSING_PATHS=$(printf '%s' "$xj" | jq -r '.missing_paths[]?' 2>/dev/null || echo "")
+    COMPLETION_XCHECK_STATE="checked"
+    return 0
+}
+
 # generate_impact_report <task-id> — best-effort invocation for enter.
 # Sets IMPACT_REPORT_OBS (appended to enter's JSON observations) and
 # returns 0/1. NEVER allowed to fail the enter flow: failures are logged
@@ -1645,6 +2059,31 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               approval comment as `[review bypass: <reason>]` (which the Stop
               hook's review-discipline check honours) and in the gate JSON.
 
+              ALSO REFUSES (exit 2, error_key completion_record_missing) when
+              the task carries no `COMPLETION v1` record — the F7 specialist
+              completion contract, which had NO runtime enforcement before P7
+              (twelve documents described it; nothing rejected a payload).
+              Record one with:
+                bash .claude/scripts/qa-gate.sh completion-record <task-id> \
+                    --file <payload.json>
+              --no-completion '<reason>' is the audited bypass, for the case
+              where there was no specialist and no payload is owed (the Stop
+              hook's doc-only fast path passes it). The reason lands in the
+              approval comment as `[completion bypass: <reason>]` and in the
+              gate JSON.
+              A successful approval additionally REPORTS the completeness
+              cross-check: how many of the contract's declared `files_changed`
+              are absent from the change set being bound. That is the
+              INDEPENDENT witness the impact-report freshness check cannot be —
+              freshness compares two reads of the same tracker, so it detects
+              DRIFT and is blind to LOSS (fkm.1.20; measured live on 94d.1,
+              where 6 of 8 declared files were absent and freshness passed
+              vacuously). It REPORTS rather than refuses, because the two lists
+              are spelled differently by construction and legitimate asymmetry
+              is normal — see completion_files_crosscheck for the full argument.
+              The verdict is recorded in the approval comment as
+              `[completion cross-check: ...]` whenever it is not clean.
+
               The approval comment records the reviewer AND the approving
               checkout (3mg.2 — `worktree=` is the %20-encoded git toplevel,
               or `none`; the Stop hook resolves cross-worktree approvals
@@ -1681,9 +2120,10 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               through to .claude/scripts/tech-debt.sh add.
               Effects:
                 approve    -> delegates to `approve` (same atomic flow, so it
-                              inherits BOTH refusals: a J21 decision does not
-                              exempt the task from a fresh impact report or
-                              from independent review)
+                              inherits EVERY refusal: a J21 decision does not
+                              exempt the task from a fresh impact report, from
+                              independent review, or from a recorded completion
+                              contract)
                 continue   -> clears qa-escalated + resets iteration counter
                 tech-debt  -> tech-debt.sh add --bd-task + clears escalation
                 defer      -> sets qa-deferred (allows Stop next time)
@@ -1724,6 +2164,23 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                 stopped_by=<s> findings=[<id>:<sev>,...] at <ts>: <summary>
               (empty findings render as findings=[]). Record writer only —
               no approve/Stop enforcement.
+  completion-record <task-id> [--file <path>]
+              P7: record the F7 specialist completion contract. Validates the
+              payload JSON via review-check.sh `validate-completion` (the ONE
+              validator — no second schema lives here), persists the validated
+              bytes to .claude/.qa-tracking/completion-<task-id>.json, and
+              appends:
+                COMPLETION v1 task=<tid> role=<r> fields=<csv>
+                payload_sha=<sha256> at <ts>: <n> file(s), <m> test(s)
+              Required payload keys: the canonical seven (task_id,
+              files_changed, tests_added, decisions, blockers,
+              llm_observations, context_coverage) plus `role`. The four
+              free-form fields are NEVER interpolated — only their presence
+              and the digest reach the record, which is the injection
+              boundary. Every interpolated scalar (task, role, each field
+              name, the digest) must match ^[A-Za-z0-9._+-]+$ and is REJECTED,
+              never sanitised (the claude-workflow-plugin-bjx class).
+              `approve` REFUSES without this record.
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -2197,6 +2654,12 @@ cmd_approve() {
     # EXPECTED-HASH-REFUSAL BEGIN (qzv)
     local expect_hash_arg=""
     # EXPECTED-HASH-REFUSAL END (qzv)
+    # COMPLETION-CONTRACT-REFUSAL (P7): declared OUTSIDE the sentinel-wrapped
+    # block below, for the same two reasons impact_obs and review_obs are — the
+    # bypass path skips the block but must still record WHY, and the META-TEST's
+    # stripped copy has to stay syntactically coherent.
+    local bypass_completion=0
+    local completion_bypass_reason=""
     while [ $# -gt 0 ]; do
         case "$1" in
             # EXPECTED-HASH-REFUSAL BEGIN (qzv)
@@ -2282,6 +2745,26 @@ cmd_approve() {
                     emit_error_json "approve" "$tid" "bypass_reason_required" \
                         "--no-review requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the independent-review requirement is indistinguishable from signing off on your own work" \
                         "qa-gate.sh approve $tid --no-review '<reason>' '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --no-completion)
+                # P7: the audited completion-contract bypass. Mirrors
+                # --no-impact-report / --no-review exactly, including the
+                # empty-reason refusal — a bypass with no recorded reason is
+                # indistinguishable from gate evasion.
+                #
+                # THE INTENDED PRODUCER is the Stop hook's F1 fast path, which
+                # approves change sets that had no specialist and therefore owe
+                # no completion payload. It passes
+                #   --no-completion 'F1 <class> fast path: no specialist, no completion payload'
+                bypass_completion=1
+                completion_bypass_reason="${2:-}"
+                if [ -z "$completion_bypass_reason" ]; then
+                    emit_error_json "approve" "$tid" "bypass_reason_required" \
+                        "--no-completion requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the completion-contract requirement is indistinguishable from approving work nobody described" \
+                        "qa-gate.sh approve $tid --no-completion '<reason>' '<summary>'"
                     exit 1
                 fi
                 shift 2 || true
@@ -2791,6 +3274,121 @@ cmd_approve() {
     fi
     # REVIEW-SEPARATION END (v4 V3 / claude-workflow-plugin-jio.1)
 
+    # P7: the completion-contract audit fields. Declared OUTSIDE the sentinel
+    # block below for the same two reasons impact_obs and review_obs are —
+    # the --no-completion path skips the block but must still record WHY, and
+    # the META-TEST's stripped copy must stay coherent and still write a
+    # well-formed approval record.
+    local completion_obs=""
+    local completion_suffix=""
+    if [ "$bypass_completion" = "1" ]; then
+        completion_obs="; completion-bypass: $completion_bypass_reason (completion-contract refusal bypassed via --no-completion; reason recorded per P7)"
+        completion_suffix=" [completion bypass: $completion_bypass_reason]"
+    fi
+
+    # COMPLETION-CONTRACT-REFUSAL BEGIN (P7 / claude-workflow-plugin-qbhw)
+    #
+    # DID THE PARTY THAT DID THE WORK DESCRIBE IT?
+    #
+    # THE DEFECT THIS CLOSES. The F7 completion contract shipped with ZERO
+    # runtime enforcement. Twelve documents describe it, an L1 parity spec keeps
+    # those twelve in step, and nothing anywhere rejected a payload — so
+    # `context_coverage` (v4.1) and every field the v5 design phase is about to
+    # add (`unit_id`, `green_before`, `green_after`, `design_hash`) were, and
+    # would be, documentation. This is the ONE validation point
+    # docs/plans/v5-design-phase.md Phase P asks for, wired where it can refuse:
+    # a task cannot be approved unless a VALIDATED contract was recorded for it.
+    #
+    # WHY AT approve AND NOT AT enter. `enter` is documented TOLERANT — it never
+    # fails on a missing artifact, and the Stop hook's F1 fast path calls it on
+    # exactly the change-set classes that have no specialist and therefore no
+    # completion payload at all. A refusal there would deadlock every doc-only
+    # Stop, which is the majority of them.
+    #
+    # WHERE IT SITS, and why here rather than earlier. cmd_approve's refusals are
+    # ordered by what each can PROVE and how expensive its remediation is (see
+    # the EXPECTED-HASH block's own note). This one goes LAST:
+    #   - it needs `$approved_hash` and the reconciled tracker, so it cannot
+    #     precede those;
+    #   - its remediation is the cheapest of all of them — one
+    #     `completion-record` call by whoever did the work — but it is a claim
+    #     about the WHOLE task rather than about one artifact, so firing it while
+    #     a more basic precondition is still missing would tell the operator to
+    #     fix the wrong thing;
+    #   - and it must precede every WRITE below, because a refusal has to leave
+    #     the task untouched.
+    #
+    # WHAT IT ESTABLISHES, stated narrowly. That a payload passing
+    # review-check.sh `validate-completion` was recorded for THIS task. It does
+    # NOT establish that the payload is TRUE, that the change set is complete
+    # (see completion_files_crosscheck, which reports on that and deliberately
+    # does not refuse), or that the specialist read what it claims to have read
+    # — the last is a quality judgement the rubric grader owns (C8).
+    #
+    # THREAT-MODEL BOUNDARY, inherited rather than introduced: an agent with
+    # arbitrary shell can `bd comments add` a well-formed COMPLETION line by
+    # hand, exactly as llh.18 documents for the approval record and bjx for the
+    # rubric verdict. This raises the bar from "nothing at all" to "a validated
+    # payload plus a digest-bound artifact"; it is not a cryptographic sandbox,
+    # and the full-shell autonomy model precludes one.
+    #
+    # The sentinel comments wrapping this block are load-bearing: an L2
+    # META-TEST strips everything between them and asserts approve then succeeds
+    # with NO completion record at all. Do not rename them.
+    if [ "$bypass_completion" != "1" ]; then
+        local completion_rec="" completion_sha=""
+        completion_rec=$(latest_completion_record "$tid") || completion_rec=""
+        if [ -z "$completion_rec" ]; then
+            emit_error_json "approve" "$tid" "completion_record_missing" \
+                "approve refused: no COMPLETION v1 record exists for $tid, so nothing on this task states what was done, which files it touched, or what the implementer read to ground it. The F7 completion contract is the specialist's structured hand-off (docs/AGENTS.md, 'Specialist Completion Contract (F7)'); until P7 nothing rejected a missing one, which made every field in it documentation. Record it — the specialist writes its F7 payload plus a \"role\" key to a file and runs: bash .claude/scripts/qa-gate.sh completion-record $tid --file <payload.json> — or, when there was no specialist and no payload is owed (the doc-only Stop fast path), bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --no-completion '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--no-completion '<reason>'] <summary>"
+            exit 2
+        fi
+        completion_sha=$(printf '%s' "$completion_rec" | grep -oE 'payload_sha=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+        local completion_role=""
+        completion_role=$(printf '%s' "$completion_rec" | grep -oE 'role=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+        completion_obs="; completion contract verified (role=${completion_role:-<unreadable>}, payload_sha=${completion_sha:-<unreadable>})"
+
+        # fkm.1.20: the completeness cross-check. Reports, never refuses — the
+        # helper's header gives the four reasons.
+        #
+        # R1-F4: it reads the IMPLEMENTER's contract, NOT the latest one. The
+        # refusal above is satisfied by any contract (the question there is "did
+        # anyone hand one back"); this question is "what did the party that DID
+        # THE WORK declare", and only an implementer's contract answers it. When
+        # QA records its own contract — which this release's qa.md tells it to —
+        # the latest record is QA's, whose files_changed is legitimately empty,
+        # and reading THAT produced an affirmative "PASSED, every one of the 0
+        # declared file(s)" on the very change set the check exists to catch.
+        local impl_rec="" impl_sha="" impl_role=""
+        impl_rec=$(latest_implementer_completion_record "$tid") || impl_rec=""
+        if [ -n "$impl_rec" ]; then
+            impl_sha=$(printf '%s' "$impl_rec" | grep -oE 'payload_sha=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+            impl_role=$(printf '%s' "$impl_rec" | grep -oE 'role=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+            completion_files_crosscheck "$tid" "$impl_sha" "$impl_role"
+        else
+            # No implementer contract. Report it and NAME THE ROLES THAT DID
+            # record, because "unestablished" with no cause is the kind of
+            # degradation nobody chases.
+            COMPLETION_XCHECK_STATE="unestablished"
+            COMPLETION_XCHECK_DETAIL="no COMPLETION record on this task carries an implementer role (roles seen: $(completion_roles_seen "$tid" || echo "<unreadable>"); implementer roles are $COMPLETION_IMPLEMENTER_ROLES_JSON). A reviewer's contract declares the files IT edited, which is not a claim about what shipped, so it is deliberately not read here"
+        fi
+        if [ "$COMPLETION_XCHECK_STATE" != "checked" ]; then
+            completion_obs="$completion_obs; completeness cross-check UNESTABLISHED — $COMPLETION_XCHECK_DETAIL (the impact-report freshness check above proves the report is not STALE; it cannot prove the change set is not SHORT, because both of its numbers come from the same tracker — fkm.1.20)"
+            completion_suffix=" [completion cross-check: unestablished]"
+        elif [ "$COMPLETION_XCHECK_MISSING" -gt 0 ]; then
+            local xnote=""
+            if [ "$COMPLETION_XCHECK_MATCHED" = "0" ] && [ "$COMPLETION_XCHECK_BOUND" -gt 0 ]; then
+                xnote=" NOTE matched=0 with both lists non-empty is the signature of a PATH-SPELLING mismatch (absolute vs relative, a symlinked checkout, a linked worktree), not of loss; the loss shape is PARTIAL overlap"
+            fi
+            completion_obs="$completion_obs; WARNING completeness cross-check: $COMPLETION_XCHECK_MISSING of $COMPLETION_XCHECK_DECLARED declared file(s) are NOT in the change set this approval binds (declared=$COMPLETION_XCHECK_DECLARED bound=$COMPLETION_XCHECK_BOUND matched=$COMPLETION_XCHECK_MATCHED missing=$COMPLETION_XCHECK_MISSING). Missing (first $COMPLETION_XCHECK_INLINE_CAP): $(printf '%s' "$COMPLETION_XCHECK_MISSING_PATHS" | head -n "$COMPLETION_XCHECK_INLINE_CAP" | tr '\n' ' '). Decide which it is: if those paths ARE this session's work the tracker under-covers and the review does not reach them (94d.1's shape was 2 of 8 matched); if they are baselined-on-arrival dirt, deleted scratch, or denylisted paths, the delta is expected$xnote"
+            completion_suffix=" [completion cross-check: $COMPLETION_XCHECK_MISSING of $COMPLETION_XCHECK_DECLARED declared file(s) absent from the bound change set]"
+        else
+            completion_obs="$completion_obs; completeness cross-check PASSED — every one of the $COMPLETION_XCHECK_DECLARED declared file(s) is in the bound change set of $COMPLETION_XCHECK_BOUND (an INDEPENDENT witness: the declaration predates the tracker bookkeeping, so it can see a truncation the freshness check cannot — fkm.1.20)"
+        fi
+    fi
+    # COMPLETION-CONTRACT-REFUSAL END (P7 / claude-workflow-plugin-qbhw)
+
     # ---- APPROVE-COMMIT ORDER (gz3 / v4.1 U1) -----------------------------
     #
     # The steps below are ordered so that a Stop hook firing CONCURRENTLY never
@@ -2918,6 +3516,17 @@ cmd_approve() {
         comment_suffix="$comment_suffix [reconstructed change set accepted: $reconstructed_bypass_reason (subtracted=${RECONCILE_SUBTRACTED:-0})]"
     fi
     # CHANGE-SET-RECONSTRUCTED END (94d.1)
+    # P7: the completion-contract token — the audited bypass, or the
+    # completeness cross-check's verdict when it is anything other than clean.
+    # Same reasoning as R2-F2 and 94d.1 above, and it applies with full force
+    # here: "the bound change set omits 6 of the 8 files the implementer
+    # declared" is an audit question asked LATER, by someone reading the task,
+    # and an envelope read once by whoever typed the command is not where it
+    # survives. Bracketed suffix, after every machine token, so the
+    # `change_set_hash=` / `reviewed_by=` / `worktree=` captures stop where they
+    # always did. Expanded with :- so a stripped sentinel region leaves the
+    # record coherent.
+    comment_suffix="$comment_suffix${completion_suffix:-}"
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local hash_field=""
     if [ -n "$approved_hash" ]; then
@@ -3095,7 +3704,7 @@ cmd_approve() {
     # because keeping them is free and an operator may well be greping them from
     # memory; they are NOT kept because a test pins them. $sweep_obs is the token
     # that reports the FULL cleared set, which is what the counters cannot.
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs$binding_obs${expect_hash_obs:-}$stale_label_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}$binding_obs${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -3990,6 +4599,243 @@ cmd_review_record() {
     emit_json 1 "review-record" "$tid" "recorded" "comment posted at $ts: $comment_text"
 }
 
+# ---------------------------------------------------------------------------
+# completion-record <tid> [--file <path>] (P7 / claude-workflow-plugin-qbhw)
+#
+# THE F7 COMPLETION CONTRACT'S ONE RUNTIME RECORDING POINT. Mirrors
+# cmd_review_record exactly, including the SUBPROCESS call to the ONE validator
+# — review-check.sh `validate-completion`. No schema lives here, and none may:
+# the whole reason that script exists is that a second copy of a contract's
+# rules is a second thing to drift (see its header, and the way
+# compute_change_set_hash defers to impact-report.sh --hash-only).
+#
+# RECORD GRAMMAR, one line, machine prefix first:
+#   COMPLETION v1 task=<tid> role=<r> fields=<csv> payload_sha=<sha256> at <ts>: <n> file(s), <m> test(s)
+#
+# WHAT IS AND IS NOT IN IT. The four FREE-FORM fields (`decisions`, `blockers`,
+# `llm_observations`, `context_coverage`) are NEVER interpolated: only their
+# presence — established by the validator — and the payload digest reach the
+# record. That is not a size optimisation, it is the injection boundary. Those
+# fields are unconstrained prose by design; the moment one of them is embedded
+# in a one-line grammar, every apostrophe, colon and newline in a specialist's
+# honest narrative becomes a parser input. `payload_sha` is how the record still
+# BINDS that prose: the persisted artifact carries it, and approve re-digests
+# the artifact and compares.
+#
+# THE COUNTS are `files_changed | length` and `tests_added | length`. They are
+# the cheapest thing an auditor reading the task can compare against the diff,
+# and they cost nothing to record. `file(s)` / `test(s)` is deliberately not
+# pluralised by count: a fixed spelling is one grammar, not two.
+cmd_completion_record() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "completion-record" "" "missing_task_id" \
+            "completion-record requires <task-id> as first positional argument" \
+            "qa-gate.sh completion-record <task-id> [--file <path>]"
+        exit 1
+    fi
+    shift || true
+
+    local input_path=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                input_path="${2:-}"
+                if [ -z "$input_path" ]; then
+                    emit_error_json "completion-record" "$tid" "missing_file_path" \
+                        "--file requires a path argument" \
+                        "qa-gate.sh completion-record $tid --file <path>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                emit_error_json "completion-record" "$tid" "unknown_flag" \
+                    "unknown argument: $1 (expected --file <path> or stdin)" \
+                    "qa-gate.sh completion-record $tid [--file <path>]"
+                exit 1
+                ;;
+        esac
+    done
+
+    require_bd "completion-record" "$tid"
+
+    local raw=""
+    if [ -n "$input_path" ]; then
+        if [ ! -f "$input_path" ]; then
+            emit_error_json "completion-record" "$tid" "file_not_found" \
+                "completion payload file does not exist: $input_path" \
+                "qa-gate.sh completion-record $tid --file <existing-path>"
+            exit 1
+        fi
+        if ! raw=$(cat -- "$input_path" 2>/dev/null); then
+            emit_error_json "completion-record" "$tid" "file_unreadable" \
+                "could not read completion payload file: $input_path" \
+                "qa-gate.sh completion-record $tid --file <readable-path>"
+            exit 1
+        fi
+    else
+        if [ -t 0 ]; then
+            emit_error_json "completion-record" "$tid" "no_input" \
+                "no --file given and stdin is a terminal; pipe the completion JSON or pass --file <path>" \
+                "qa-gate.sh completion-record $tid --file <path>  OR  printf '%s' \"\$JSON\" | qa-gate.sh completion-record $tid"
+            exit 1
+        fi
+        raw=$(cat)
+    fi
+
+    if [ -z "$raw" ]; then
+        emit_error_json "completion-record" "$tid" "empty_input" \
+            "completion payload input is empty" \
+            "qa-gate.sh completion-record $tid --file <path>  OR  stdin pipe"
+        exit 1
+    fi
+
+    # FAIL CLOSED on a missing validator, and say which it is. review-record
+    # runs `bash $REVIEW_CHECK_SCRIPT` unguarded, so a deleted checker there
+    # produces an empty envelope and the generic `invalid_artifact` key — a
+    # SCHEMA error for an INFRASTRUCTURE failure. That is the "wrong answer that
+    # looks like the right one" shape the --expect-hash validation note in
+    # cmd_approve names, and it is cheap to not repeat: an absent validator is
+    # reported as an absent validator.
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        emit_error_json "completion-record" "$tid" "validator_unavailable" \
+            "cannot record a completion contract: the ONE validator is missing at $REVIEW_CHECK_SCRIPT, so the payload cannot be schema-checked. This FAILS CLOSED by design — recording an unvalidated payload would put a record on the task that approve then trusts. Restore the script and re-run" \
+            "qa-gate.sh completion-record $tid --file <path>"
+        exit 2
+    fi
+
+    # Validate via the ONE validator (subprocess). No second schema here.
+    local tmpf vout ok ekey vobs
+    tmpf=$(mktemp -t qa-gate-completion.XXXXXX 2>/dev/null) || tmpf="$QA_TRACKING_DIR/.completion-record-$$.json"
+    printf '%s' "$raw" > "$tmpf"
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-completion "$tmpf" 2>/dev/null || true)
+    rm -f "$tmpf" 2>/dev/null || true
+    ok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
+    if [ "$ok" != "true" ]; then
+        ekey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_completion_payload"' 2>/dev/null || echo "invalid_completion_payload")
+        [ -z "$ekey" ] && ekey="invalid_completion_payload"
+        vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null || echo "")
+        emit_error_json "completion-record" "$tid" "$ekey" \
+            "completion payload failed validation via review-check.sh: $ekey${vobs:+ — $vobs}" \
+            "provide a valid F7 completion payload (see review-check.sh validate-completion)"
+        exit 1
+    fi
+
+    # Grammar fields from the validated payload. `fields_csv` is NOT read here —
+    # it is BUILT below from the keys this function has individually validated.
+    local payload_tid role nfiles ntests
+    payload_tid=$(printf '%s' "$raw" | jq -r '.task_id' 2>/dev/null)
+    role=$(printf '%s' "$raw" | jq -r '.role' 2>/dev/null)
+    nfiles=$(printf '%s' "$raw" | jq -r '.files_changed | length' 2>/dev/null)
+    ntests=$(printf '%s' "$raw" | jq -r '.tests_added | length' 2>/dev/null)
+
+    # THE DECOY-PAYLOAD CHECK. A payload whose own task_id names a different
+    # task is the shape llh.18 documents for approvals (P1: "a decoy-task
+    # approval records the decoy's hash, not the shipping change-set's"), and it
+    # is cheaper to refuse than to reason about later: the record would claim
+    # task A's completion while sitting on task B, and approve's cross-check
+    # would compare task B's change set against task A's declared files.
+    if [ "$payload_tid" != "$tid" ]; then
+        emit_error_json "completion-record" "$tid" "task_id_mismatch" \
+            "the payload's task_id='$payload_tid' is not the task being recorded ('$tid'). A contract recorded on a task it does not describe would make approve cross-check one task's change set against another's declared files" \
+            "qa-gate.sh completion-record $tid --file <path with task_id=\"$tid\">"
+        exit 1
+    fi
+
+    # THE bjx GUARD, over every scalar this function interpolates — see
+    # assert_record_scalar. Payload KEY NAMES are specialist-controlled (the
+    # payload is an arbitrary JSON object that merely has the required keys), so
+    # they are exactly as untrusted as the role.
+    #
+    # VALIDATE-THEN-BUILD, not build-then-validate. This loop is the ONLY
+    # producer of `fields_csv`: each key is checked and then appended, so the
+    # string that reaches the record is composed of members this function proved
+    # legal. That is a structural property, not a careful one.
+    #
+    # THE DEFECT THAT FORCED IT (QA R1-F1, both shapes reproduced before the
+    # fix). The first version built the csv with jq's `join(",")` and then
+    # validated it by re-splitting with `IFS=','` and an UNQUOTED `for fname in
+    # $fields_csv`. Two independent holes, and the guard passed both while the
+    # record was written from the untouched original:
+    #   - COMMA, deterministic and needing no adversary: a key literally named
+    #     `a,b` was split by IFS into two legal words `a` and `b`, so the guard
+    #     never saw the comma it existed to reject. `ok=true`, and the record
+    #     read `fields=...,context_coverage,a,b` — one key rendered as two csv
+    #     members. This file's own header claimed "a comma ... cannot split the
+    #     csv"; it could.
+    #   - GLOB, and this one is worse than a bypass: an unquoted expansion also
+    #     performs PATHNAME EXPANSION. A key `[c]lean1` expanded to `clean1` —
+    #     legal — when a file of that name happened to sit in the process's
+    #     working directory, and stayed `[c]lean1` — rejected — when it did not.
+    #     The same payload got opposite verdicts decided by unrelated files in
+    #     an unrelated directory, and on the passing side the brackets reached
+    #     the record.
+    # The general shape, which is the part worth carrying forward: A GUARD MUST
+    # INSPECT THE BYTES THAT ARE WRITTEN. Validating a transformation of them —
+    # a re-split, a re-join, a normalisation — validates a different string, and
+    # the difference is where the payload hides.
+    #
+    # NUL-DELIMITED, and read through PROCESS SUBSTITUTION rather than a pipe.
+    # NUL because it is the one byte a JSON key cannot contain, so no key can
+    # forge a separator (a newline could, and a newline in a key is exactly the
+    # vg8 control-character shape). Process substitution because the loop body
+    # calls assert_record_scalar, which `exit 1`s on refusal: behind a pipe the
+    # loop runs in a SUBSHELL, that exit would kill only the subshell, and the
+    # function would carry on and write the record it had just refused.
+    assert_record_scalar "completion-record" "$tid" "task" "$tid"
+    assert_record_scalar "completion-record" "$tid" "role" "$role"
+    local fname fields_csv=""
+    while IFS= read -r -d '' fname; do
+        assert_record_scalar "completion-record" "$tid" "field_name" "$fname"
+        fields_csv="${fields_csv:+$fields_csv,}$fname"
+    done < <(printf '%s' "$raw" | jq -j 'keys_unsorted[] | . + "\u0000"' 2>/dev/null)
+    if [ -z "$fields_csv" ]; then
+        emit_error_json "completion-record" "$tid" "fields_unreadable" \
+            "the payload's key names could not be enumerated, so the record's fields= token cannot be built from validated members; refusing rather than writing an unvalidated or empty token" \
+            "qa-gate.sh completion-record $tid --file <path>"
+        exit 1
+    fi
+
+    # Persist the payload, THEN digest the file. In that order deliberately: the
+    # digest then describes bytes that exist on disk, so `shasum -a 256 <path>`
+    # by hand reproduces the token in the record. Digesting the in-memory string
+    # and writing separately would leave two things that are only equal by
+    # construction.
+    # R1-F4: KEYED ON THE ROLE as well as the task, so a QA contract recorded
+    # after an implementer's no longer overwrites the declaration the
+    # completeness cross-check reads. `role` has already passed the character
+    # class above, so it cannot escape the filename.
+    local payload_file payload_sha
+    payload_file=$(completion_payload_path_for "$tid" "$role")
+    if ! mkdir -p "$QA_TRACKING_DIR" 2>/dev/null; then
+        emit_error_json "completion-record" "$tid" "tracking_dir_unwritable" \
+            "cannot create $QA_TRACKING_DIR, so the validated payload cannot be persisted; approve reads that artifact for its completeness cross-check" \
+            "qa-gate.sh completion-record $tid --file <path>"
+        exit 2
+    fi
+    if ! printf '%s' "$raw" > "$payload_file" 2>/dev/null; then
+        emit_error_json "completion-record" "$tid" "payload_unwritable" \
+            "could not persist the validated payload to $payload_file; refusing to write a record whose payload_sha names bytes nothing kept" \
+            "qa-gate.sh completion-record $tid --file <path>"
+        exit 2
+    fi
+    payload_sha=$(sha256_file "$payload_file")
+    [ -z "$payload_sha" ] && payload_sha="$CHANGE_SET_HASH_UNAVAILABLE"
+    # Ours, not the caller's — but checked anyway, because "this value is ours"
+    # is exactly the assumption bjx's rubric_version was shipped on.
+    assert_record_scalar "completion-record" "$tid" "payload_sha" "$payload_sha"
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="COMPLETION v1 task=$tid role=$role fields=$fields_csv payload_sha=$payload_sha at $ts: $nfiles file(s), $ntests test(s)"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "completion-record" "$tid" "recorded" \
+        "comment posted at $ts: $comment_text; validated payload persisted at $payload_file (approve re-digests it and cross-checks files_changed against the change set it binds)"
+}
+
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
     local tid="${1:-}" fid="${2:-}"
@@ -4168,6 +5014,7 @@ case "$SUB" in
     choose)       cmd_choose "$@" ;;
     grade-record) cmd_grade_record "$@" ;;
     review-record)   cmd_review_record "$@" ;;
+    completion-record) cmd_completion_record "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     ""|-h|--help|help)

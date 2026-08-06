@@ -1427,8 +1427,26 @@ Diagnose the two records this compared:
                 # doc-only verdict that never saw it. On the stripped-META copy
                 # the variable is still computed and simply not passed, which is
                 # the pre-qzv call.
+                #
+                # P7: --no-completion is REQUIRED on this path, for the same
+                # reason --no-review is. approve now refuses without a recorded
+                # F7 completion contract, and this path's whole premise is that
+                # there was no specialist to write one — the change set is
+                # documentation, Beads state, or empty. Without the flag every
+                # doc-only Stop would deadlock on a payload nobody owes. The
+                # reason lands in the approval comment as
+                # `[completion bypass: ...]`, so the audited decision is made
+                # once, here, and is visible to whoever reads the task later.
+                #
+                # NOTE this bypass is not "F1 tasks never have a specialist" —
+                # a specialist may well have written the documentation. It is
+                # "this VERDICT is about a change set with nothing reviewable in
+                # it", which is the same scope --no-review has. A task whose
+                # specialist DID post a contract still gets it recorded; the
+                # flag only stops the absence from blocking.
                 "$QA_GATE" approve "$CURRENT_TASK" \
                     --no-review "F1 $FASTPATH_CLASS fast path: no reviewable source changed" \
+                    --no-completion "F1 $FASTPATH_CLASS fast path: no specialist, no completion payload" \
                     ${F1_EXPECT_ARGS[@]+"${F1_EXPECT_ARGS[@]}"} \
                     "$FASTPATH_REASON" >/dev/null 2>&1 \
                     || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK (change set classified as $FASTPATH_CLASS, hash=${F1_CLASSIFIED_HASH:-<unavailable>}); no approval was recorded"

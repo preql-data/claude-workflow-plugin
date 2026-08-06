@@ -17,6 +17,7 @@
 # Subcommands (strict JSON envelope on stdout):
 #   validate-request  <file>                    schema-check a review request
 #   validate-artifact <file>                    schema-check a review artifact
+#   validate-completion <file>                  schema-check an F7 completion payload
 #   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
 #                                               independence + open-finding count
 #                                               + the ROUNDS count (see below)
@@ -268,6 +269,162 @@ cmd_validate_artifact() {
     fi
 
     emit_validate "validate-artifact" "true" "" "artifact valid"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# validate-completion (P7 / claude-workflow-plugin-qbhw)
+# ---------------------------------------------------------------------------
+#
+# THE F7 SPECIALIST COMPLETION CONTRACT, validated at runtime. Until now the
+# contract had ZERO runtime enforcement: an L1 parity spec guarded the
+# DOCUMENTS that describe it, and nothing anywhere rejected a payload. A field
+# nothing validates is documentation, and `context_coverage` shipped in v4.1
+# exactly that way. This is the ONE validation point the v5 plan asks for
+# (docs/plans/v5-design-phase.md, Phase P "Runtime contract validation"), and
+# every field added to the contract later reuses it rather than growing a
+# second checker.
+#
+# It lives HERE, next to validate-request/validate-artifact, for the reason
+# this whole script exists: qa-gate.sh `completion-record` calls it as a
+# SUBPROCESS instead of carrying a second copy of the schema, exactly as
+# `review-record` calls validate-artifact and as compute_change_set_hash defers
+# to impact-report.sh --hash-only. One schema, one place to change it.
+#
+# STRUCTURAL PURITY (see the file header): nothing below names a transport or a
+# lane. It parses a generic payload shape, and the L2 structural-purity test
+# that greps this file stays green.
+#
+# WHAT IT CHECKS, and the deliberate limit on each:
+#
+#   1. The canonical SEVEN are present. A missing key is `missing_key:<k>` —
+#      the same error-key spelling validate-request and validate-artifact use,
+#      so a caller has one thing to parse across all three.
+#   2. `role` is present. It sits OUTSIDE the seven-key loop on purpose: it is
+#      NOT an F7 field (the seven documented in docs/AGENTS.md are unchanged,
+#      and the prompts' contract fences still carry exactly those), it is the
+#      one grammar-bearing scalar the record writer cannot derive — the record
+#      says WHO completed, and nothing else on the payload answers that. Same
+#      shape as validate-request's MANDATORY-NONEMPTY block, which likewise
+#      guards required fields after its own key loop.
+#   3. Control characters in GRAMMAR-BEARING scalars only — `task_id` and
+#      `role`. Identical reasoning, and identical failure class, to the
+#      validate-artifact scan above (claude-workflow-plugin-vg8): the writer
+#      embeds these two verbatim into a ONE-LINE record comment, so an embedded
+#      newline splits the record and pushes every later token onto a second
+#      line where no line-oriented reader will find it. Scope is deliberately
+#      PRECISE: the four free-form fields (`decisions`, `blockers`,
+#      `llm_observations`, `context_coverage`) are never interpolated — only
+#      their PRESENCE and the payload digest reach the record — and they
+#      legitimately span lines. A blanket ban would reject good specialist
+#      output for no safety gain.
+#   4. Per-field types. The four array fields must be arrays (empty is legal —
+#      "no blockers" is a real answer); `files_changed` items must be STRINGS
+#      because approve consumes that list as the independent witness for its
+#      completeness cross-check (claude-workflow-plugin-fkm.1.20).
+#   5. `llm_observations` and `context_coverage` must be non-empty after
+#      whitespace trimming. docs/AGENTS.md says a payload without either "is
+#      malformed"; this is that sentence made mechanical. A whitespace-only
+#      value is the same lie as an empty one, which is why the check trims.
+#
+# WHAT IT DELIBERATELY DOES NOT CHECK: quality. "Read the relevant code" is a
+# non-answer and this validator will accept it. Judging whether a coverage note
+# is substantive is the rubric grader's job (default rubric C8) and QA's; the
+# validator owns SHAPE. Conflating the two would put a taste judgement in a
+# mechanical gate, which is the failure mode the gate exists to avoid.
+cmd_validate_completion() {
+    local file="${1:-}"
+    if [ -z "$file" ]; then
+        emit_validate "validate-completion" "false" "usage" "validate-completion requires <file>"
+        exit 1
+    fi
+    if [ ! -f "$file" ]; then
+        emit_validate "validate-completion" "false" "usage" "file not found: $file"
+        exit 1
+    fi
+    local raw
+    raw=$(cat -- "$file" 2>/dev/null)
+    if ! printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        emit_validate "validate-completion" "false" "invalid_json" "completion payload is not a JSON object"
+        exit 4
+    fi
+
+    local k has
+    for k in task_id files_changed tests_added decisions blockers llm_observations context_coverage; do
+        has=$(printf '%s' "$raw" | jq -r --arg k "$k" 'has($k)' 2>/dev/null || echo "false")
+        if [ "$has" != "true" ]; then
+            emit_validate "validate-completion" "false" "missing_key:$k" \
+                "completion payload missing required key: $k (the canonical seven are task_id, files_changed, tests_added, decisions, blockers, llm_observations, context_coverage)"
+            exit 4
+        fi
+    done
+
+    # See note 2 above: required, but not one of the seven.
+    has=$(printf '%s' "$raw" | jq -r 'has("role")' 2>/dev/null || echo "false")
+    if [ "$has" != "true" ]; then
+        emit_validate "validate-completion" "false" "missing_key:role" \
+            "completion payload missing required key: role — the record names WHO completed the task and nothing else in the payload answers that. It is transport metadata for the record grammar, NOT an eighth F7 field"
+        exit 4
+    fi
+
+    # Note 3: control characters in the two scalars the record grammar embeds.
+    local ctrl_field
+    ctrl_field=$(printf '%s' "$raw" | jq -r '
+        def ctrl: (type == "string") and test("[[:cntrl:]]");
+        . as $p
+        | ((["task_id","role"] | map(select(($p[.]? // "") | ctrl)))
+          )[0] // ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$ctrl_field" ]; then
+        emit_validate "validate-completion" "false" "scalar_contains_control_char:$ctrl_field" \
+            "$ctrl_field contains a control character (newline/CR/tab); it is embedded verbatim in the one-line COMPLETION record, and a control character there splits the record so every later token lands on a line no reader parses"
+        exit 4
+    fi
+
+    # Note 4/5: per-field types, then the two mandatory non-empty strings.
+    # ONE jq pass, first offending field wins, so the error names a field
+    # rather than reporting "something was wrong".
+    local type_err
+    type_err=$(printf '%s' "$raw" | jq -r '
+        def nonempty_string: (type == "string") and ((gsub("[[:space:]]";"")) != "");
+        . as $p
+        | [ (if ($p.task_id | type) != "string" then "field_type_invalid:task_id"
+             elif ($p.task_id | nonempty_string) | not then "field_empty:task_id"
+             else empty end),
+            (if ($p.role | type) != "string" then "field_type_invalid:role"
+             elif ($p.role | nonempty_string) | not then "field_empty:role"
+             else empty end),
+            (["files_changed","tests_added","decisions","blockers"]
+             | map(select(($p[.] | type) != "array") | "field_type_invalid:" + .)
+             | .[]),
+            (if ($p.files_changed | type) == "array"
+                and (($p.files_changed | map(select(type != "string")) | length) > 0)
+             then "field_type_invalid:files_changed[]" else empty end),
+            (["llm_observations","context_coverage"]
+             | map(select(($p[.] | type) != "string") | "field_type_invalid:" + .)
+             | .[]),
+            (["llm_observations","context_coverage"]
+             | map(select((($p[.] | type) == "string") and (($p[.] | nonempty_string) | not))
+                   | "field_empty:" + .)
+             | .[])
+          ]
+        | .[0] // ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$type_err" ]; then
+        local detail="a field failed its type check: $type_err"
+        case "$type_err" in
+            field_empty:llm_observations|field_empty:context_coverage)
+                detail="$type_err — this field is mandatory free-form text; docs/AGENTS.md states a completion payload without it is malformed, and a whitespace-only value is the same claim as an empty one"
+                ;;
+            field_type_invalid:files_changed*)
+                detail="$type_err — files_changed must be an array of strings; approve reads it as the INDEPENDENT witness of what the session touched (claude-workflow-plugin-fkm.1.20), so a non-string item makes that cross-check unanswerable"
+                ;;
+        esac
+        emit_validate "validate-completion" "false" "$type_err" "$detail"
+        exit 4
+    fi
+
+    emit_validate "validate-completion" "true" "" "completion payload valid"
     exit 0
 }
 
@@ -650,12 +807,27 @@ shift || true
 case "$SUB" in
     validate-request)  cmd_validate_request "$@" ;;
     validate-artifact) cmd_validate_artifact "$@" ;;
+    validate-completion) cmd_validate_completion "$@" ;;
     gate)              cmd_gate "$@" ;;
     ""|-h|--help)
         cat >&2 <<'USAGE'
 Usage: review-check.sh <subcommand> [args]
   validate-request  <file>                    schema-check a review request
   validate-artifact <file>                    schema-check a review artifact
+  validate-completion <file>                  schema-check an F7 completion
+                                              payload: the canonical seven keys
+                                              (task_id, files_changed,
+                                              tests_added, decisions, blockers,
+                                              llm_observations,
+                                              context_coverage) plus `role`;
+                                              control chars rejected in the two
+                                              scalars the record grammar embeds
+                                              (task_id, role); the four array
+                                              fields must be arrays and
+                                              files_changed[] strings;
+                                              llm_observations and
+                                              context_coverage must be non-empty
+                                              after trimming
   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
                                               independence + open-finding count,
                                               plus rounds/rounds_hash: how many

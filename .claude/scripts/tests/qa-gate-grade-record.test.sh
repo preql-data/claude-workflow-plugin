@@ -190,7 +190,23 @@ seed_review_records() {
     printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$reviewer" "$hash" > "$art"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
-        review-record "$tid" --file "$art" >/dev/null 2>&1
+        review-record "$tid" --file "$art" >/dev/null 2>&1 || return 1
+    # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
+    # (exit 2, completion_record_missing) without a validated COMPLETION v1
+    # record. Section 6's subject is the RUBRIC warning approve emits, which is
+    # only observable on an approve that SUCCEEDS — so the completion
+    # precondition has to be satisfied here rather than bypassed, or the
+    # observations under test never get written. Seeded through the REAL writer.
+    #
+    # files_changed is [] because this fixture changes no files: the accurate
+    # declaration, and it keeps approve's completeness cross-check (fkm.1.20)
+    # from adding a WARNING to the very observations section 6 asserts on.
+    local pay
+    pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
+    printf '{"task_id":"%s","role":"%s","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the qa-gate-grade-record fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}\n' \
+        "$tid" "$role" > "$pay"
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }
 
 # Helper: read the current labels for a task as a comma-joined string.

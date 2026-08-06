@@ -50,7 +50,17 @@
 #      4, the quality taxonomy, the working procedure), the default rubric's
 #      C3 and C8, qa.md's section 3 review checklist, and both READMEs.
 #   5. Forbidden phrases: the stale count words and the frontend hedge occur
-#      ZERO times across the carrier set.
+#      ZERO times across the carrier set. Since P7 that list also denies the
+#      "enforced by convention, not schema validation" sentence, which was true
+#      until runtime validation landed and is now the exact false claim a
+#      careless revert would reintroduce.
+#   7. Every carrier that hands the contract to an agent NAMES THE INVOCATION
+#      that records it. A contract with a runtime refusal and no prompt telling
+#      anyone how to satisfy it is worse than one with neither: every approve
+#      deadlocks. This is asserted as a COUNT per carrier for the same reason
+#      section 1 is — "every mention we found is well-formed" is vacuously true
+#      of a prompt with no mention at all, which is precisely the shape the
+#      devops gap had.
 #   6. Each .claude/rubrics/*.md is byte-identical to the rubric-revision-loop
 #      e2e fixture's copy. That identity is currently accidental — nothing
 #      syncs them and nothing checked them. This turns it into an assertion,
@@ -82,12 +92,47 @@
 #     would falsify the evidence.
 #   - CHANGELOG.md entries are historical for the same reason.
 #
-# HONEST CEILING. This spec guards the DOCUMENTS. There is no runtime
-# enforcement of the contract anywhere in the plugin: nothing rejects a
-# completion payload that omits a field, and the e2e `completion-contract`
-# invariant remains `skipped` on its documented trace gap. The contract is
-# enforced by convention plus the QA review checklist plus rubric C3/C8 —
-# and this spec only makes sure those three say the same thing.
+# HONEST CEILING (REWRITTEN at P7 / claude-workflow-plugin-qbhw; the previous
+# text is quoted below because it was true when written and its replacement is
+# the whole point of that task).
+#
+# WAS: "This spec guards the DOCUMENTS. There is no runtime enforcement of the
+# contract anywhere in the plugin: nothing rejects a completion payload that
+# omits a field ... The contract is enforced by convention plus the QA review
+# checklist plus rubric C3/C8 — and this spec only makes sure those three say
+# the same thing."
+#
+# NOW: runtime enforcement EXISTS, and this spec's ceiling moved rather than
+# disappeared. Precisely what changed:
+#   - `review-check.sh validate-completion` REJECTS a payload that omits any of
+#     the canonical seven (or `role`), carries a control character in `task_id`
+#     or `role`, types a field wrongly, or leaves `llm_observations` /
+#     `context_coverage` empty after trimming.
+#   - `qa-gate.sh completion-record` records a validated payload and refuses
+#     every grammar-injecting scalar (the bjx class).
+#   - `qa-gate.sh approve` REFUSES (exit 2, completion_record_missing) without
+#     such a record, and REPORTS how many of the contract's declared
+#     `files_changed` are absent from the change set it binds (fkm.1.20).
+# Section 7 below asserts each carrier tells its specialist to make that call;
+# the enforcement itself is pinned in .claude/tests/component/specs/qa-gate.sh
+# (section P7) and .claude/scripts/tests/review-separation.test.sh.
+#
+# WHAT IS STILL NOT ENFORCED, stated as narrowly as the old text was:
+#   - QUALITY. The validator accepts "read the relevant code" as
+#     `context_coverage`. Whether a coverage note is substantive is judged by
+#     the rubric grader (C3/C8) and QA, and this spec still only makes those
+#     documents agree with each other.
+#   - TRUTH. Nothing verifies that a declared file was really read or that a
+#     listed test really exists. The `files_changed` cross-check compares two
+#     lists and reports; it does not adjudicate.
+#   - THE FINAL MESSAGE. The e2e `completion-contract` invariant remains
+#     `skipped` on its documented trace gap — the Trace schema still does not
+#     capture specialist final messages, so nothing checks that the payload the
+#     specialist EMITTED matches the one it RECORDED.
+#   - A DETERMINED ADVERSARY. `bd comments add "COMPLETION v1 ..."` forges the
+#     record, exactly as it forges the approval record (llh.18) and the rubric
+#     verdict (bjx). The bar moved from "nothing at all" to "a validated payload
+#     plus a digest-bound artifact"; it is not a cryptographic sandbox.
 #
 # Exit codes:
 #   0  every assertion passed and both META-TESTs flagged their fixtures
@@ -329,6 +374,15 @@ assert_eq "stale count: 'the six fields' is gone"  "0" "$(phrase_hits 'the six f
 # The frontend hedge (see the header). Denied by exact wording.
 assert_eq "hedge: the conditional mandatoriness phrasing is gone" \
     "0" "$(phrase_hits 'when there is anything notable to say')"
+# P7: the sentence that was TRUE until runtime validation landed, and is now
+# the precise false claim a careless revert reintroduces. Denied by exact
+# wording, like the hedge above, and for the same reason: a paraphrase is a
+# judgement call, an exact string is a fact. (Quoting it as an antipattern
+# anywhere in the carrier set turns this red, by design — paraphrase instead.
+# This spec is not a carrier, which is why its own META-B fixture below can
+# still contain the words.)
+assert_eq "stale enforcement claim: 'enforced by convention, not schema validation' is gone" \
+    "0" "$(phrase_hits 'enforced by convention, not schema validation')"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -351,6 +405,72 @@ done
 # so pin it explicitly rather than relying on cmp alone to explain the break.
 assert_eq "default rubric declares version 2 (C8 landed in v4.1)" \
     "1" "$(phrase_hits 'version: 2' "$PROJECT_DIR/.claude/rubrics/default.md")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 7: every carrier NAMES the invocation that records the contract ==="
+
+# P7. approve now REFUSES without a COMPLETION v1 record. A refusal whose
+# remediation appears in no prompt is not an enforcement, it is a deadlock: the
+# specialist finishes, QA calls approve, approve refuses, and nothing anywhere
+# tells either of them what to run. So the four prompts that hand the contract
+# to an agent, plus the canonical definition, must each name the call.
+#
+# A COUNT PER CARRIER, not "every mention is well-formed" — that phrasing is
+# vacuously true of a prompt with zero mentions, which is exactly the shape the
+# devops gap had (see the header). Asserted as ONE completeness line so a
+# carrier cannot pass by being absent from the loop.
+INVOKE_CENSUS=""
+for pair in "docs/AGENTS.md:AGENTS" \
+            ".claude/agents/backend.md:backend" \
+            ".claude/agents/frontend.md:frontend" \
+            ".claude/agents/devops.md:devops" \
+            ".claude/agents/qa.md:qa"; do
+    file="${pair%%:*}"
+    label="${pair##*:}"
+    # >=1 collapses to a yes/no so a carrier that legitimately names the call
+    # twice (prose plus a code block) is not a failure. The question is whether
+    # the invocation is REACHABLE from that document, not how often it appears.
+    hits=$(phrase_hits 'qa-gate.sh completion-record' "$PROJECT_DIR/$file")
+    INVOKE_CENSUS="$INVOKE_CENSUS $label=$([ "${hits:-0}" -ge 1 ] && echo yes || echo NO)"
+done
+INVOKE_CENSUS="${INVOKE_CENSUS# }"
+assert_eq "invocation census: every carrier names 'qa-gate.sh completion-record'" \
+    "AGENTS=yes backend=yes frontend=yes devops=yes qa=yes" "$INVOKE_CENSUS"
+
+# The `role` key is the one thing a specialist would otherwise get wrong: it is
+# required by the validator and is NOT in the fences above, so a prompt that
+# names the command without naming the key sends its agent into a
+# missing_key:role refusal on the first try.
+ROLE_CENSUS=""
+for pair in ".claude/agents/backend.md:backend" \
+            ".claude/agents/frontend.md:frontend" \
+            ".claude/agents/devops.md:devops" \
+            ".claude/agents/qa.md:qa"; do
+    file="${pair%%:*}"
+    label="${pair##*:}"
+    hits=$(phrase_hits "\"role\": \"$label\"" "$PROJECT_DIR/$file")
+    ROLE_CENSUS="$ROLE_CENSUS $label=$([ "${hits:-0}" -ge 1 ] && echo yes || echo NO)"
+done
+ROLE_CENSUS="${ROLE_CENSUS# }"
+assert_eq "role census: every specialist prompt shows its own role value" \
+    "backend=yes frontend=yes devops=yes qa=yes" "$ROLE_CENSUS"
+
+# The claim the HONEST CEILING now makes about itself. If the validator
+# subcommand stops existing, this spec's header becomes fiction — and a header
+# that describes enforcement which is not there is the exact failure the
+# rewritten ceiling replaced.
+assert_eq "the ONE validator's subcommand is dispatched in review-check.sh" \
+    "1" "$([ "$(phrase_hits 'validate-completion) cmd_validate_completion' "$PROJECT_DIR/.claude/scripts/review-check.sh")" -ge 1 ] && echo 1 || echo 0)"
+# BEGIN and END asserted SEPARATELY rather than counting the bare name: the
+# name also appears in prose (the note on the variables declared outside the
+# region), so a bare count would pin an incidental sentence. What this needs to
+# establish is that the strippable PAIR exists, which is what the L2 META-TEST
+# excises.
+assert_eq "approve carries the completion-contract refusal BEGIN sentinel" \
+    "1" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL BEGIN' "$PROJECT_DIR/.claude/scripts/qa-gate.sh")"
+assert_eq "approve carries the completion-contract refusal END sentinel" \
+    "1" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL END' "$PROJECT_DIR/.claude/scripts/qa-gate.sh")"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -440,6 +560,59 @@ assert_eq "META-B: the scanner flags a doc still carrying the hedge" \
 assert_eq "META-B: ...and the shipped tree does not" \
     "0" "$(phrase_hits 'when there is anything notable to say')"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== META-TEST C: section 7's presence checks must fail when the call is gone ==="
+
+# Section 7 asserts a string is PRESENT. That shape fails in a quieter way than
+# an absence assertion: a needle that matches something incidental passes
+# forever and proves nothing. So mutate a copy until the thing being asserted is
+# genuinely absent, and confirm the SAME checker disagrees.
+#
+# Both mutations are anchored on text, never on line numbers, and both run
+# against a COPY under mktemp — an experiment that edits the tree under review
+# changes the change-set hash out from under whoever is reviewing it.
+META_C_DIR=$(mktemp -d -t ccp-metac.XXXXXX)
+
+# C1. A devops.md with the invocation stripped — the state the file was in
+#     before P7, and the state a careless revert would restore.
+META_NOCALL="$META_C_DIR/devops-nocall.md"
+grep -v 'qa-gate.sh completion-record' "$PROJECT_DIR/.claude/agents/devops.md" > "$META_NOCALL"
+assert_eq "META-C: the strip landed (the mutated copy no longer names the call)" \
+    "0" "$(phrase_hits 'qa-gate.sh completion-record' "$META_NOCALL")"
+assert_eq "META-C: ...so the census checker reports NO for it (section 7 WOULD fail)" \
+    "NO" "$([ "$(phrase_hits 'qa-gate.sh completion-record' "$META_NOCALL")" -ge 1 ] && echo yes || echo NO)"
+assert_eq "META-C: control — the shipped devops.md still reports yes" \
+    "yes" "$([ "$(phrase_hits 'qa-gate.sh completion-record' "$PROJECT_DIR/.claude/agents/devops.md")" -ge 1 ] && echo yes || echo NO)"
+
+# C2. A qa-gate.sh whose refusal sentinels are renamed — the mutation the
+#     region's own header forbids ("Do not rename them"), and the one that would
+#     silently disarm the L2 META-TEST that strips them.
+META_NOSENT="$META_C_DIR/qa-gate-renamed.sh"
+sed -e 's/# COMPLETION-CONTRACT-REFUSAL BEGIN/# SOMETHING-ELSE BEGIN/' \
+    -e 's/# COMPLETION-CONTRACT-REFUSAL END/# SOMETHING-ELSE END/' \
+    "$PROJECT_DIR/.claude/scripts/qa-gate.sh" > "$META_NOSENT"
+assert_eq "META-C: the rename landed (mutant differs from its source)" \
+    "differs" "$(cmp -s "$PROJECT_DIR/.claude/scripts/qa-gate.sh" "$META_NOSENT" && echo identical || echo differs)"
+assert_eq "META-C: the renamed copy has no BEGIN sentinel (section 7 WOULD fail)" \
+    "0" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL BEGIN' "$META_NOSENT")"
+assert_eq "META-C: the renamed copy has no END sentinel either" \
+    "0" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL END' "$META_NOSENT")"
+
+# C3. The forbidden-phrase leg added to section 5 has the same never-seen-red
+#     problem every absence assertion has. Prove the scanner fires on the exact
+#     sentence docs/AGENTS.md carried until P7.
+META_STALE_ENF="$META_C_DIR/stale-enforcement.md"
+cat > "$META_STALE_ENF" <<'FIXTURE'
+The contract is enforced by convention, not schema validation — the QA gate
+doesn't reject missing fields.
+FIXTURE
+assert_eq "META-C: the scanner flags a doc still claiming convention-only enforcement" \
+    "1" "$(phrase_hits 'enforced by convention, not schema validation' "$META_STALE_ENF")"
+assert_eq "META-C: ...and the shipped carrier set does not (the fixture is the only hit)" \
+    "0" "$(phrase_hits 'enforced by convention, not schema validation')"
+
+rm -rf "$META_C_DIR"
 rm -rf "$META_DIR"
 
 # --- Summary -------------------------------------------------------------

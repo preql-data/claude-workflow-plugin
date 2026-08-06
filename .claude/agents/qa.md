@@ -872,3 +872,28 @@ anything under any `docs/` directory regardless of file type, so a script,
 fixture or CI workflow you place there is doc-only too (the exemption, that
 bound, and `claude-workflow-plugin-bbh` are all set out in the
 `F1-CHANGE-SET-BINDING` region header).
+
+### Record the contract — AFTER the gate call, not before
+
+The contract is no longer enforced by convention. `qa-gate.sh approve` REFUSES (exit 2, `error_key=completion_record_missing`) unless the task carries a validated `COMPLETION v1` record.
+
+**That refusal is satisfied by the IMPLEMENTER's contract, not by yours.** So record yours LAST, after the section-7 gate call, exactly as every other prompt does — a contract describes completed work, and your review is not complete until the gate call is made.
+
+An earlier draft of this section told you to record FIRST, and that instruction shipped a defect worth naming here, because the shape recurs. Your `files_changed` is normally `[]` (you verify files, you rarely author them). The completeness cross-check reads a contract's `files_changed` as its independent witness of what shipped. When your record was the most recent one, the check read YOUR empty list and reported an affirmative *"PASSED — every one of the 0 declared file(s)"* over a change set that was provably missing six of the implementer's eight declared files. A guard that reports success because it read the wrong record is worse than no guard. Two things now make the ordering non-load-bearing — the artifact is keyed by role so contracts cannot overwrite each other, and the cross-check selects the implementer's record rather than the latest — but record last anyway: it is the natural order, and it is one fewer thing depending on a fix.
+
+If `approve` refuses with `completion_record_missing`, do NOT satisfy it by recording your own contract first. Read the refusal as the signal it is: either the specialist finished without recording its contract, in which case block and send it back, or there was genuinely no specialist, in which case the audited `--no-completion '<reason>'` bypass is the honest exit and the reason should say which.
+
+```bash
+# The payload is the JSON object above with ONE key added: "role": "qa".
+# A QUOTED heredoc keeps backticks and apostrophes literal — see the bullets.
+bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" <<'PAYLOAD'
+{ "role": "qa", "task_id": "...", ... }
+PAYLOAD
+```
+
+- `role` is the one key beyond the seven. It is transport metadata for the record's `role=` token — the record has to name who completed the task — not an eighth F7 field. The seven and the QA superset are unchanged; your extra keys are recorded in the `fields=` list and are welcome.
+- Use a quoted heredoc, or `--file <path>`. Never assemble the JSON in a double-quoted shell string: a backtick in `llm_observations` runs as command substitution, and a single-quoted one ends at the first apostrophe — `LESSONS.md` records six ledger entries that lost their possessives to exactly that.
+- The payload is VALIDATED before it is recorded, by `review-check.sh validate-completion`. A missing key, a control character in `task_id` or `role`, a non-array `files_changed`, or an empty `llm_observations` / `context_coverage` is rejected with a structured error naming the field. An empty mandatory field is now a failure rather than a habit.
+- On a **block**, record the contract too. The refusal only gates `approve`, but the record is the durable statement of what the review covered, and the next cycle's reviewer reads it.
+- `files_changed` is the INDEPENDENT witness `approve` cross-checks the change set against — for QA that is usually `[]`, since `files_verified` is the larger set and is not what the cross-check reads. The approval envelope reports how many declared paths are absent from the set it binds; read that line, because it is the only signal in the system that a change set is SHORT rather than merely stale (`claude-workflow-plugin-fkm.1.20`).
+- The audited `approve --no-completion '<reason>'` bypass exists for the Stop hook's doc-only fast path. If you reach for it, say in the reason why no specialist owed a payload — "I did not write one" is not that reason.

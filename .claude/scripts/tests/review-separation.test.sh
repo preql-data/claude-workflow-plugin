@@ -196,14 +196,45 @@ current_hash() {
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" --hash-only 2>/dev/null || echo ""
 }
 
+# record_completion <tid> <changed-file> — the F7 completion contract record
+# (P7 / claude-workflow-plugin-qbhw), written through the REAL writer so a
+# grammar or schema change breaks this loudly instead of leaving the spec
+# asserting against a dead shape. Same reasoning as record_artifact below.
+#
+# P7 MIGRATION, and why the seed is here rather than a --no-completion on every
+# approve call. approve now REFUSES (exit 2, completion_record_missing) unless
+# the task carries a validated COMPLETION v1 record, so eleven tasks in this
+# spec acquired a precondition the spec predates. Two ways to satisfy it, and
+# the choice is the same one this spec's own section-3 comment makes about the
+# impact bypass: satisfy the requirement LEGITIMATELY rather than stack a second
+# bypass on the case under test. A `--no-completion` on every call would mean
+# this spec never drives approve's normal path at all — so a completion refusal
+# that regressed to always-firing would leave every leg here green.
+#
+# `files_changed` names the file new_task staged, so approve's completeness
+# cross-check (fkm.1.20) PASSES rather than emitting a WARNING about a delta
+# that is an artifact of the fixture.
+record_completion() {
+    local tid="$1" file="$2" pay
+    pay="$TRACK/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
+    cat > "$pay" <<JSON
+{"task_id":"$tid","role":"backend","files_changed":["$file"],"tests_added":["review-separation.test.sh::seeded"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the review-separation fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+JSON
+    bash "$QG" completion-record "$tid" --file "$pay" >/dev/null 2>&1
+}
+
 # new_task <title> <changed-file> — create a task, stage a change-set for it,
 # and enter the gate (which generates the impact report so the EARLIER
-# impact-freshness refusal never masks the review refusal under test).
+# impact-freshness refusal never masks the review refusal under test). Also
+# records the F7 completion contract, so the LATER completion refusal does not
+# mask it either — this spec's subject is review separation, and every other
+# precondition has to be satisfied for that subject to be observable.
 new_task() {
     local title="$1" file="$2" tid
     tid=$(bd create "$title" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
     printf '%s\n' "$file" > "$TRACK/changed-files.txt"
     bash "$QG" enter "$tid" >/dev/null 2>&1
+    record_completion "$tid" "$file"
     printf '%s' "$tid"
 }
 

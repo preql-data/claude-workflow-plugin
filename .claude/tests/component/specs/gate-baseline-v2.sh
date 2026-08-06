@@ -675,10 +675,75 @@ assert_eq "gbv2-7M META: the strip removed lines from qa-gate.sh (non-vacuous)" 
     "$([ "$(grep -c . "$META7_DIR/qa-gate.stripped.sh")" -lt "$(grep -c . "$QG7_REAL")" ] && echo smaller || echo same)"
 assert_eq "gbv2-7M META: the strip removed lines from verify-before-stop.sh (non-vacuous)" "smaller" \
     "$([ "$(grep -c . "$META7_DIR/verify-before-stop.stripped.sh")" -lt "$(grep -c . "$VBS7_REAL")" ] && echo smaller || echo same)"
+# executable_refs <file> <needle> — lines mentioning <needle> that are NOT
+# comment-only. THE ANCHOR FOR THE TWO LEGS BELOW, re-cut from a bare text count
+# (claude-workflow-plugin-qbhw / P7).
+#
+# WHAT THESE LEGS ACTUALLY CLAIM, which is what their NAMES have always said: no
+# CALL survives the strip. That is the property that matters, because the strip
+# deletes the function's definition — a surviving call would make the stripped
+# copy a BROKEN script rather than a faithful pre-94d one, and every leg below
+# would then be measuring a syntax-or-runtime error instead of the behaviour
+# under test.
+#
+# WHY THE OLD ANCHOR DRIFTED. It was `grep -c 'reconcile_tracker'`, a count of
+# TEXT occurrences, standing in for a claim about CODE. Any comment outside the
+# sentinel regions that named the function tripped it, and such comments are
+# legitimate and expected: code near the reconcile has to explain its
+# relationship to it. P7 added exactly one — a header sentence noting that the
+# reconciler emits absolute paths — and this leg went red on a change that could
+# not affect the property it names. The file was already paying for the
+# imprecision: an existing comment contorts itself into prose ("spelled in prose
+# rather than with the function's own identifier deliberately") solely to avoid
+# this grep.
+#
+# WHY THE NEW ANCHOR CANNOT DRIFT THE SAME WAY. It asks a question about the
+# LINE'S KIND, not about the file's prose: a line that begins with optional
+# whitespace and then `#` cannot contain a call, in any shell, ever. Nothing a
+# future author writes in a comment can change that, so comments are structurally
+# outside the measurement rather than tolerated by an exception list. It stays
+# strict where it counts: a trailing comment on a CODE line (`foo  # ...`) is not
+# comment-only, so it is still counted — over-strict in that one direction, which
+# is the safe one.
+#
+# It is deliberately NOT a `#`-stripping pass. Stripping comments from shell
+# means deciding whether a `#` sits inside a string, a `${var#pat}` expansion, or
+# a `$#` — parsing shell with a regex, in a checker whose whole job is to be more
+# trustworthy than the thing it checks.
+#
+# The two legs immediately after this pair prove the anchor is SENSITIVE to a
+# real call and INSENSITIVE to prose; without them this would be a guard that was
+# loosened and never seen to fire.
+executable_refs() {
+    grep "$2" "$1" 2>/dev/null | grep -vc '^[[:space:]]*#' | tr -d '[:space:]'
+}
+
 assert_eq "gbv2-7M META: no reconcile_tracker call survives in the stripped qa-gate.sh" "0" \
-    "$(grep -c 'reconcile_tracker' "$META7_DIR/qa-gate.stripped.sh" | tr -d '[:space:]')"
+    "$(executable_refs "$META7_DIR/qa-gate.stripped.sh" 'reconcile_tracker')"
 assert_eq "gbv2-7M META: no reconcile-tracker invocation survives in the stripped Stop hook" "0" \
-    "$(grep -c 'reconcile-tracker' "$META7_DIR/verify-before-stop.stripped.sh" | tr -d '[:space:]')"
+    "$(executable_refs "$META7_DIR/verify-before-stop.stripped.sh" 'reconcile-tracker')"
+
+# THE ANCHOR'S OWN SENSITIVITY PROOF. A check that was just relaxed and has never
+# been seen to fire is indistinguishable from a check that no longer works, so
+# both directions are demonstrated against COPIES.
+META7_CALL="$META7_DIR/qa-gate.callsurvives.sh"
+cp "$META7_DIR/qa-gate.stripped.sh" "$META7_CALL"
+printf 'reconcile_tracker || true\n' >> "$META7_CALL"
+assert_eq "gbv2-7M META: the anchor FIRES when a real call survives the strip" "1" \
+    "$(executable_refs "$META7_CALL" 'reconcile_tracker')"
+META7_PROSE="$META7_DIR/qa-gate.prosesurvives.sh"
+cp "$META7_DIR/qa-gate.stripped.sh" "$META7_PROSE"
+printf '    # a comment naming reconcile_tracker, which cannot be a call\n' >> "$META7_PROSE"
+assert_eq "gbv2-7M META: ...and does NOT fire on a comment naming it (the P7 false positive)" "0" \
+    "$(executable_refs "$META7_PROSE" 'reconcile_tracker')"
+# CONTROL: the old bare-text anchor would have failed BOTH of the above the same
+# way, which is the imprecision being removed — stated as an assertion so the
+# claim is measured rather than narrated.
+assert_eq "gbv2-7M META: the OLD text anchor could not tell the two apart (both non-zero)" \
+    "same" \
+    "$([ "$(grep -c 'reconcile_tracker' "$META7_CALL" | tr -d '[:space:]')" -gt 0 ] \
+       && [ "$(grep -c 'reconcile_tracker' "$META7_PROSE" | tr -d '[:space:]')" -gt 0 ] \
+       && echo same || echo differed)"
 assert_eq "gbv2-7M META: the stripped qa-gate.sh still parses" "0" \
     "$(bash -n "$META7_DIR/qa-gate.stripped.sh" 2>/dev/null && echo 0 || echo 1)"
 assert_eq "gbv2-7M META: the stripped Stop hook still parses" "0" \

@@ -422,6 +422,53 @@ JSON
         printf 'seed_review_records: qa-gate.sh review-record failed for %s\n' "$tid" >&2
         return 1
     fi
+    seed_completion_record "$tid" "${role:-backend}" "$root" || return 1
+    return 0
+}
+
+# seed_completion_record <tid> [role] [root] [files-json] — the F7 completion
+# contract record (P7 / claude-workflow-plugin-qbhw).
+#
+# WHY IT IS FOLDED INTO seed_review_records ABOVE. approve now REFUSES (exit 2,
+# error_key=completion_record_missing) unless the task carries a validated
+# COMPLETION v1 record, so every spec that drives approve to SUCCESS acquired a
+# precondition it predates. seed_review_records is already the ONE place a spec
+# says "make this task approvable" — it exists because the V3 review-separation
+# refusal created exactly this migration — so the new precondition belongs
+# there rather than at eighty call sites. Specs testing the completion refusal
+# itself simply do not call it.
+#
+# SEEDED THROUGH THE REAL WRITER, like the review artifact above: a change to
+# the record grammar or the payload schema must break these specs loudly
+# instead of leaving them asserting against a shape nothing produces.
+#
+# files_changed DEFAULTS TO [] and that is deliberate. Most fixtures stage a
+# change set that is the SUBJECT of their own assertions, and a fabricated
+# declaration would put approve's completeness cross-check (fkm.1.20) into the
+# observations those assertions read. An empty declaration is the accurate one
+# for a fixture that authored no files. Specs exercising the cross-check pass
+# their own JSON array as the fourth argument.
+seed_completion_record() {
+    local tid="$1"
+    local role="${2:-backend}"
+    local root="${3:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+    local files_json="${4:-[]}"
+    if [ -z "$tid" ]; then
+        printf 'seed_completion_record: <task-id> is required\n' >&2
+        return 1
+    fi
+    local sanitized pay
+    sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    pay="$root/.claude/.qa-tracking/completion-draft-$sanitized.json"
+    mkdir -p "$root/.claude/.qa-tracking" 2>/dev/null || true
+    cat > "$pay" <<JSON
+{"task_id":"$tid","role":"$role","files_changed":$files_json,"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the component fixture harness","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+JSON
+    if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
+            completion-record "$tid" --file "$pay" >/dev/null 2>&1; then
+        printf 'seed_completion_record: qa-gate.sh completion-record failed for %s\n' "$tid" >&2
+        return 1
+    fi
     return 0
 }
 

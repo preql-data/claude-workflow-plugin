@@ -305,3 +305,21 @@ door as any other: a docs-or-styles-only change set is enough to trigger the fas
 path that produced it.
 
 `context_coverage` is mandatory on the same terms. Three things, in order: what you read to ground this change (the design system tokens, the API's response shape, the existing route's focus handling, the component's prior test file); what you deliberately did NOT read and why (the whole state-management layer, because the change is presentational); and the largest remaining unknown (whether the empty state can actually occur for a returning user). Name files — "read the relevant components" is a non-answer, and a coverage note with no deliberate omission is boilerplate, because there is always one. It is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. The rubric grader scores it under default criterion C8.
+
+### Record the contract — your LAST action
+
+The contract is no longer enforced by prompt alone. `qa-gate.sh approve` REFUSES (exit 2, `error_key=completion_record_missing`) unless the task carries a validated `COMPLETION v1` record, so recording yours is the last thing you do — **after** the reconcile above, so anything that reconcile turns up is already in `llm_observations` when the payload is frozen and digested:
+
+```bash
+# The payload is the JSON object above with ONE key added: "role": "frontend".
+# A QUOTED heredoc keeps backticks and apostrophes literal — see the bullets.
+bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" <<'PAYLOAD'
+{ "role": "frontend", "task_id": "...", ... }
+PAYLOAD
+```
+
+- `role` is the one key beyond the seven. It is transport metadata for the record's `role=` token — the record has to name who completed the task — not an eighth F7 field. The seven are unchanged.
+- Use a quoted heredoc, or `--file <path>`. Never assemble the JSON in a double-quoted shell string: a backtick in `llm_observations` runs as command substitution, and a single-quoted one ends at the first apostrophe — `LESSONS.md` records six ledger entries that lost their possessives to exactly that.
+- The payload is VALIDATED before it is recorded, by `review-check.sh validate-completion`. A missing key, a control character in `task_id` or `role`, a non-array `files_changed`, or an empty `llm_observations` / `context_coverage` is rejected with a structured error naming the field. An empty mandatory field is now a failure rather than a habit.
+- `files_changed` is additionally the INDEPENDENT witness `approve` cross-checks the change set against, so declare every path you touched. It reports how many declared paths are absent from the set it binds — which is how a truncated change set becomes visible at all (`claude-workflow-plugin-fkm.1.20`: a freshness check that compares two reads of one tracker detects drift and is structurally blind to loss).
+- The audited `approve --no-completion '<reason>'` bypass exists for the Stop hook's doc-only fast path, where there was no specialist and no payload is owed. It is not for you.

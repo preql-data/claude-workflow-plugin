@@ -163,7 +163,25 @@ seed_review_records() {
     printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$reviewer" "$hash" > "$art"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
-        review-record "$tid" --file "$art" >/dev/null 2>&1
+        review-record "$tid" --file "$art" >/dev/null 2>&1 || return 1
+    # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
+    # (exit 2, completion_record_missing) unless the task carries a validated
+    # COMPLETION v1 record. `choose approve` delegates straight to cmd_approve,
+    # so it inherits that refusal — deliberately, per the subcommand's own
+    # contract ("a J21 decision does not exempt the task from ... a recorded
+    # completion contract"). Seeded through the REAL writer for the same reason
+    # the artifact above is: a grammar change must break this loudly.
+    #
+    # files_changed is [] because this fixture changes no files. That is the
+    # accurate declaration, and it keeps approve's completeness cross-check
+    # (fkm.1.20) silent — a fabricated path here would emit a WARNING into the
+    # very observations several assertions below read.
+    local pay
+    pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
+    printf '{"task_id":"%s","role":"%s","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the qa-gate-choose fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}\n' \
+        "$tid" "$role" > "$pay"
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }
 TRACK="$FIXTURE/.claude/.qa-tracking"
 

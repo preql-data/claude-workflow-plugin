@@ -122,6 +122,10 @@ printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID" >/dev/null 2>&1
 bd comments add "$TID" "IMPLEMENTER: role=backend task=$TID at 2026-07-26T00:00:00Z" >/dev/null 2>&1
 record_artifact "$TID" 1 "qa-claude" "[]"
+# P7 (claude-workflow-plugin-qbhw) MIGRATION: approve also refuses without a
+# validated COMPLETION v1 record. D1 is the CONTROL for this whole spec — "a
+# clean independent review releases" — so it has to reach a real approve.
+seed_completion_record "$TID" "backend" "$FIXTURE"
 APPROVE_OUT=$(bash "$QG" approve "$TID" "reviewed by qa-claude; ships safely" 2>&1)
 assert_json_field "D1: approve succeeds with an independent clean review" \
     "$APPROVE_OUT" '.status' "approved"
@@ -257,6 +261,9 @@ if [ "$STRIP_RC" -eq 0 ]; then
     bash "$QG" enter "$TID_META" >/dev/null 2>&1
     bd comments add "$TID_META" "IMPLEMENTER: role=backend task=$TID_META at 2026-07-26T00:00:00Z" >/dev/null 2>&1
     record_artifact "$TID_META" 1 "qa-claude" "[]"
+    # P7 MIGRATION (see D1): the META rebuilds D2's approved state, which needs
+    # a real approve to exist at all.
+    seed_completion_record "$TID_META" "backend" "$FIXTURE"
     bash "$QG" approve "$TID_META" "clean at approve time" >/dev/null 2>&1
     record_artifact "$TID_META" 2 "qa-claude" \
         '[{"id":"R2-F1","severity":"critical","location":"src/meta-handler.ts:7","evidence":"synthetic","description":"post-approval finding"}]'

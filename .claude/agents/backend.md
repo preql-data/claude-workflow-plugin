@@ -324,3 +324,21 @@ rather than to stop: the version that looked fixed was the version that let it
 through. This remains the containment — a label or a status you cannot account
 for is a finding, not a formality, and reporting it is not an eighth contract
 field; it belongs in the two free-form fields the schema already has.
+
+### Record the contract — your LAST action
+
+The contract is no longer enforced by convention. `qa-gate.sh approve` REFUSES (exit 2, `error_key=completion_record_missing`) unless the task carries a validated `COMPLETION v1` record, so recording yours is the last thing you do — **after** the reconcile above, so anything that reconcile turns up is already in `llm_observations` when the payload is frozen and digested:
+
+```bash
+# The payload is the JSON object above with ONE key added: "role": "backend".
+# A QUOTED heredoc keeps backticks and apostrophes literal — see the bullets.
+bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" <<'PAYLOAD'
+{ "role": "backend", "task_id": "...", ... }
+PAYLOAD
+```
+
+- `role` is the one key beyond the seven. It is transport metadata for the record's `role=` token — the record has to name who completed the task — not an eighth F7 field. The seven are unchanged.
+- Use a quoted heredoc, or `--file <path>`. Never assemble the JSON in a double-quoted shell string: a backtick in `llm_observations` runs as command substitution, and a single-quoted one ends at the first apostrophe — `LESSONS.md` records six ledger entries that lost their possessives to exactly that.
+- The payload is VALIDATED before it is recorded, by `review-check.sh validate-completion`. A missing key, a control character in `task_id` or `role`, a non-array `files_changed`, or an empty `llm_observations` / `context_coverage` is rejected with a structured error naming the field. An empty mandatory field is now a failure rather than a habit.
+- `files_changed` is additionally the INDEPENDENT witness `approve` cross-checks the change set against, so declare every path you touched. It reports how many declared paths are absent from the set it binds — which is how a truncated change set becomes visible at all (`claude-workflow-plugin-fkm.1.20`: a freshness check that compares two reads of one tracker detects drift and is structurally blind to loss).
+- The audited `approve --no-completion '<reason>'` bypass exists for the Stop hook's doc-only fast path, where there was no specialist and no payload is owed. It is not for you.

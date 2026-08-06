@@ -291,6 +291,37 @@ approve_in() {
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
+    # (exit 2, completion_record_missing) without a validated COMPLETION v1
+    # record. Seeded here rather than bypassed with --no-completion, because
+    # sections 1.5, 1.6 and 3.1 assert approve's SIDE EFFECTS — the tracker
+    # truncation, the baseline refresh, and the cross-worktree release the
+    # resulting record enables. A bypass that short-circuited before those
+    # effects would leave those legs green while testing nothing.
+    #
+    # CLAUDE_PROJECT_DIR="$root" IS LOAD-BEARING, and this is the one spec where
+    # it can be got wrong invisibly. The payload artifact is written under
+    # $CLAUDE_PROJECT_DIR/.claude/.qa-tracking, exactly as the impact report is,
+    # so seeding against the primary while approving in the worktree would put
+    # the artifact in a checkout the approve never reads: the record would
+    # satisfy the refusal (records are bd comments, one shared database) while
+    # the completeness cross-check silently degraded to `unestablished`. Verified
+    # empirically against a real linked worktree before this line was written —
+    # the artifact lands in the worktree and NOT in the primary, and the
+    # worktree's approve finds it.
+    #
+    # Through "$qg", the same writer the leg approves with, so a mutant copy is
+    # exercised end-to-end rather than seeded by a different script.
+    #
+    # files_changed is [] because this fixture authors no files as a specialist
+    # would; it is also what keeps the cross-check silent, so no
+    # `[completion cross-check: ...]` suffix is added to the approval record that
+    # sections 1.1-1.3 assert the grammar of.
+    local pay="$root/.claude/.qa-tracking/completion-draft-$san.json"
+    cat > "$pay" <<JSON
+{"task_id":"$tid","role":"devops","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+JSON
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
     CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" "$summary" 2>&1 | tail -1
 }
 

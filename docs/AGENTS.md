@@ -937,14 +937,66 @@ how the orchestrator chains delegations without re-deriving context.
   the rubric grader scores it under default criterion C8. **A completion
   payload without `context_coverage` is malformed.**
 
-The contract is enforced by convention, not schema validation —
-the QA gate doesn't reject missing fields, but the QA agent's review
-checklist asks "did the specialist return all seven fields?"
-(`.claude/agents/qa.md` section 3) and that question being honest is
-part of QA approving. That pointer is load-bearing: through v4.0 this
-paragraph named an enforcement that did not exist — no item in qa.md's
-checklist asked the question — so the contract's only claimed backstop
-was a citation of nothing.
+### Runtime enforcement (P7)
+
+Through v4.1 this paragraph said the contract was "enforced by
+convention" — the gate rejected nothing, and the QA agent's review
+checklist (`.claude/agents/qa.md` section 3) was the only backstop.
+That is no longer the whole story, and the correction matters because a
+field nothing validates is documentation.
+
+The specialist records the contract as its LAST action:
+
+```bash
+bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" --file <payload.json>
+```
+
+The payload is the seven fields above plus one transport key,
+`"role"`, which supplies the record's `role=` token — the record has to
+name who completed the task. It is NOT an eighth F7 field; the seven
+are unchanged.
+
+Three mechanisms, each in one place:
+
+- **`review-check.sh validate-completion`** is the ONE validator. It
+  rejects a payload missing any of the seven (or `role`), a control
+  character in `task_id` or `role`, a wrongly-typed field, a
+  non-string entry in `files_changed`, or an `llm_observations` /
+  `context_coverage` that is empty after trimming. That last one makes
+  this document's two "a completion payload without it is malformed"
+  sentences mechanical rather than aspirational.
+- **`qa-gate.sh completion-record`** validates through that subprocess
+  — it carries no second schema — then persists the payload to
+  `.claude/.qa-tracking/completion-<task-id>.json` and appends
+  `COMPLETION v1 task=<tid> role=<r> fields=<csv> payload_sha=<sha256>
+  at <ts>: <n> file(s), <m> test(s)`. Every interpolated scalar must
+  match `^[A-Za-z0-9._+-]+$` and is REJECTED, never sanitised. The four
+  free-form fields are never interpolated: only their presence and the
+  digest reach the record, which is the injection boundary.
+- **`qa-gate.sh approve`** REFUSES (exit 2,
+  `error_key=completion_record_missing`) without such a record.
+  `--no-completion '<reason>'` is the audited bypass, for the case
+  where there was no specialist and no payload is owed; the Stop hook's
+  doc-only fast path passes it, and the reason lands in the approval
+  comment.
+
+Approve additionally REPORTS how many of the contract's declared
+`files_changed` are absent from the change set it binds. That is the
+independent completeness witness the impact-report freshness check
+structurally cannot be — freshness compares two reads of the same
+tracker, so it detects DRIFT and is blind to LOSS
+(`claude-workflow-plugin-fkm.1.20`). It reports rather than refuses,
+because the two lists are spelled differently by construction and
+legitimate asymmetry is normal; the reasoning is written out in full at
+`completion_files_crosscheck` in `.claude/scripts/qa-gate.sh`.
+
+What is still NOT enforced: quality (the validator accepts a
+non-answer as `context_coverage`; the rubric grader judges that under
+C3/C8), truth (nothing verifies a declared file was read), the final
+message (the e2e `completion-contract` invariant remains `skipped` on
+its trace gap, so nothing checks that the payload EMITTED matches the
+one RECORDED), and forgery by an agent with arbitrary shell — the same
+threat-model boundary the approval record and the rubric verdict carry.
 
 ---
 
