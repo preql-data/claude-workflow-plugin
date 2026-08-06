@@ -433,13 +433,24 @@ assert_contains "vbs mut1114: QA-required escalated reason includes the J21 opti
 # --- META-TEST: prove the 921 banner assertion is load-bearing ------------
 # Mutate the SUITE_REUSED guard in a copy so the escalated replay uses
 # "Last failure summary"; the banner assertion must then FAIL (banner absent).
-# Anchor the mutation by the guard's UNIQUE text (`SUITE_REUSED" = "true"`,
-# which occurs exactly once — the assignment `SUITE_REUSED=true` has no
-# spaces/quotes), NOT an absolute line number. This guard has already drifted
-# twice (921 -> 974 with the llh.18 change-set-bound helpers, 974 -> 1000 with
-# the llh.20/llh.17 comment additions); pattern-anchoring ends the churn while
-# mutating the SAME guard with identical force. The assertion NAME keeps the
-# historical mut921 tag.
+# Anchored by PATTERN, never by an absolute line number. This guard has already
+# drifted twice (921 -> 974 with the llh.18 change-set-bound helpers, 974 -> 1000
+# with the llh.20/llh.17 comment additions); pattern-anchoring ends the churn
+# while mutating the SAME guard with identical force. The assertion NAME keeps
+# the historical mut921 tag.
+#
+# THIRD RE-ANCHORING (claude-workflow-plugin-2ty). Until now the anchor was the
+# guard's text alone, on the stated grounds that `SUITE_REUSED" = "true"` occurred
+# exactly ONCE in the gate. 2ty added two more readers of the same variable — the
+# QA-required path's suite clause (which used to claim "test suite NOT re-run"
+# even on the cap-hit Stop that had just run it) and the review-discipline
+# reuse condition — so the bare text now matches THREE lines and a text-only awk
+# would mutate all three. A mutation META that changes three things measures
+# nothing in particular, so the anchor is now SEMANTIC: the first SUITE_REUSED
+# guard AFTER the escalated banner it belongs to, which is the banner guard
+# itself. `armed` disarms immediately, so a future reader added anywhere else
+# cannot widen this mutant again — and the count assertion below still proves
+# exactly one site changed.
 #
 # 3mg.1: the copy lives in the fixture's `.claude/scripts/`. verify-before-
 # stop.sh now loads `workflow-denylist.sh` from its OWN directory
@@ -448,8 +459,15 @@ assert_contains "vbs mut1114: QA-required escalated reason includes the J21 opti
 # vanished" assertion below without ever reaching the escalation replay.
 REAL_VBS_W=$(readlink "$VBS_W" || printf '%s' "$VBS_W")
 VBS_W_MUT="$FIXTURE_W/.claude/scripts/vbs-suitereuse-mut.sh"
-awk '/SUITE_REUSED" = "true"/ {print "        if [ \"$SUITE_REUSED\" != \"true\" ]; then"; next} {print}' \
-    "$REAL_VBS_W" > "$VBS_W_MUT"
+awk '
+    /REASON="Verification gate ESCALATED/ { armed = 1 }
+    armed && /SUITE_REUSED" = "true"/ {
+        print "        if [ \"$SUITE_REUSED\" != \"true\" ]; then"
+        armed = 0
+        next
+    }
+    { print }
+' "$REAL_VBS_W" > "$VBS_W_MUT"
 chmod +x "$VBS_W_MUT"
 VBS_W_MUT_LANDED=$(grep -c 'SUITE_REUSED" != "true"' "$VBS_W_MUT" || true)
 VBS_W_MUT_LANDED=$(printf '%s' "$VBS_W_MUT_LANDED" | tr -d '[:space:]')

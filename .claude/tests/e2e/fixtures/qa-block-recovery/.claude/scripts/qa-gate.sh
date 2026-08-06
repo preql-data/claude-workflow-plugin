@@ -974,10 +974,12 @@ truncate_changed_files_tracker() {
 # task_id is passed as $1.
 #
 # Spec 0.2: also wipe escalation artifacts (cached test result, escalation
-# comment marker) so a future cycle starts clean.
+# comment marker) so a future cycle starts clean. 2ty adds the auto-defer
+# counter to that set.
 wipe_iteration_state() {
     local tid="$1"
     rm -f "$QA_TRACKING_DIR/iteration-count" 2>/dev/null || true
+    rm -f "$QA_TRACKING_DIR/escalated-stops" 2>/dev/null || true
     if [ -n "$tid" ]; then
         local sanitized
         sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
@@ -986,6 +988,12 @@ wipe_iteration_state() {
         rm -f "$QA_TRACKING_DIR/last-failed-checks.$sanitized" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/last-runner.$sanitized" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/escalation-posted.$sanitized" 2>/dev/null || true
+        # 2ty: the auto-defer counter (Stops that fired while qa-escalated was
+        # already set). It MUST die with the rest of the per-cycle state: a count
+        # that survived `enter` or `choose continue` would make the FIRST
+        # escalated Stop of the next cycle auto-defer immediately, and
+        # auto-defer's consequence is that the following Stop is ALLOWED.
+        rm -f "$QA_TRACKING_DIR/escalated-stops.$sanitized" 2>/dev/null || true
     fi
     rm -f "$QA_TRACKING_DIR/last-test-output.log" 2>/dev/null || true
     rm -f "$QA_TRACKING_DIR/last-lint-output.log" 2>/dev/null || true

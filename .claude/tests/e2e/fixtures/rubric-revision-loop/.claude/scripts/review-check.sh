@@ -17,13 +17,39 @@
 # Subcommands (strict JSON envelope on stdout):
 #   validate-request  <file>                    schema-check a review request
 #   validate-artifact <file>                    schema-check a review artifact
-#   gate <task-id> [--comments-json <file>]     independence + open-finding count
+#   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
+#                                               independence + open-finding count
+#                                               + the ROUNDS count (see below)
 #
 # Exit codes:
 #   0  ok / clean
 #   4  contract violation (schema invalid, non-independent, open findings)
 #   2  bd unavailable (gate could not read comments and no --comments-json)
 #   1  usage error
+#
+# ROUNDS (claude-workflow-plugin-2ty). `gate` additionally reports how many
+# review ROUNDS have landed against ONE change set: the number of
+# `REVIEW-ARTIFACT v1` FIRSTLINES whose `reviewed_hash=` equals the reference
+# hash. The reference is `--change-set-hash <h>` when given, else the LATEST
+# artifact's own `reviewed_hash` (so the field is self-consistent with the
+# `artifact` block on the same envelope). Two keys carry it: `rounds` (integer)
+# and `rounds_hash` (the reference it counted against, so the number is
+# auditable rather than merely asserted).
+#
+# WHO NEEDS IT: verify-before-stop.sh's J21 escalation cap used to charge
+# STOP-HOOK PASSES against the defect budget, so a thorough review or a run of
+# infrastructure failures could trip a cap that is named for review rounds —
+# measured three times in one session, twice with ZERO reviews on the task and
+# once while the reviewer was still mid-review. Escalating on
+# max(iterations, rounds) makes the counter non-authoritative on its own. Note
+# `rounds` is present on the `review_artifact_missing` envelope too (it is 0
+# there) — that state is exactly the one the caller must be able to see.
+#
+# ABSENT rather than zero on the terse envelopes: a usage error or
+# `bd_unavailable` answers through emit_validate, which carries NO `rounds` key
+# at all. Callers must treat "the key is missing" as UNESTABLISHED and fall back
+# to their own signal, never as "zero rounds" — the same discriminator the F1
+# fast path applies to `cycle_opened_ts`.
 #
 # Severity enum (D8, ordered): critical > high > medium > low > info. The
 # risk_threshold uses the same enum. `gate` counts a finding as open when its
@@ -251,8 +277,8 @@ cmd_validate_artifact() {
 
 # emit_gate <exit-code> <ok> <error_key> <observations>  (reads the parsed
 # globals: ART_*, REVIEWER, THRESHOLD, IMPL_JSON, OPEN_JSON, OPEN_COUNT,
-# INDEPENDENT, CYCLE_OPENED_TS, LATEST_IMPLEMENTER_TS). Prints the rich
-# envelope, then exits with <exit-code>.
+# INDEPENDENT, CYCLE_OPENED_TS, LATEST_IMPLEMENTER_TS, ROUNDS, ROUNDS_HASH).
+# Prints the rich envelope, then exits with <exit-code>.
 emit_gate() {
     local code="$1" ok="$2" ekey="$3" obs="$4"
     local artifact_json
@@ -267,7 +293,7 @@ emit_gate() {
         --arg findings "${ART_FINDINGS:-}" \
         '{iteration:$it, reviewer:$rev, model:$model, reviewed_hash:$hash, risk_threshold:$thr, verdict:$verdict, stopped_by:$stopped, findings_token:$findings}')
     # shellcheck disable=SC2016
-    printf '{"ok":%s,"subcommand":"gate","artifact":%s,"reviewer_identity":%s,"implementers":%s,"cycle_opened_ts":%s,"latest_implementer_ts":%s,"independent":%s,"open_findings":%s,"open_finding_ids":%s,"error_key":%s,"observations":%s}\n' \
+    printf '{"ok":%s,"subcommand":"gate","artifact":%s,"reviewer_identity":%s,"implementers":%s,"cycle_opened_ts":%s,"latest_implementer_ts":%s,"independent":%s,"open_findings":%s,"open_finding_ids":%s,"rounds":%s,"rounds_hash":%s,"error_key":%s,"observations":%s}\n' \
         "$ok" \
         "$artifact_json" \
         "$(printf '%s' "${REVIEWER:-}" | jq -Rs .)" \
@@ -277,6 +303,8 @@ emit_gate() {
         "${INDEPENDENT:-true}" \
         "${OPEN_COUNT:-0}" \
         "${OPEN_JSON:-[]}" \
+        "${ROUNDS:-0}" \
+        "$(printf '%s' "${ROUNDS_HASH:-}" | jq -Rs .)" \
         "$(printf '%s' "$ekey" | jq -Rs .)" \
         "$(printf '%s' "$obs" | jq -Rs .)"
     exit "$code"
@@ -374,12 +402,24 @@ cmd_gate() {
     local tid="${1:-}"
     shift || true
     local comments_file=""
+    local want_hash=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --comments-json)
                 comments_file="${2:-}"
                 if [ -z "$comments_file" ]; then
                     emit_validate "gate" "false" "usage" "--comments-json requires a path"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --change-set-hash)
+                # 2ty: the reference hash the ROUNDS count is taken against.
+                # Optional — omitted, the count falls back to the latest
+                # artifact's own reviewed_hash (see the ROUNDS block below).
+                want_hash="${2:-}"
+                if [ -z "$want_hash" ]; then
+                    emit_validate "gate" "false" "usage" "--change-set-hash requires a hash"
                     exit 1
                 fi
                 shift 2 || true
@@ -435,6 +475,7 @@ cmd_gate() {
     ART_VERDICT=""; ART_STOPPED=""; ART_FINDINGS=""; IMPL_JSON="[]"
     OPEN_JSON="[]"; OPEN_COUNT="0"; INDEPENDENT="true"
     CYCLE_OPENED_TS=""; LATEST_IMPLEMENTER_TS=""
+    ROUNDS="0"; ROUNDS_HASH=""
 
     # qzv: resolved BEFORE the artifact gate below, deliberately. The F1 fast
     # path's only caller state is a task with NO review artifact — F1 fires on
@@ -451,6 +492,63 @@ cmd_gate() {
     # art = LAST comment matching /^REVIEW-ARTIFACT v1 /.
     local art
     art=$(grep -E '^REVIEW-ARTIFACT v1 ' "$firstlines" | tail -1 || true)
+
+    # ROUNDS (claude-workflow-plugin-2ty) --------------------------------------
+    #
+    # COUNTED BEFORE the artifact-missing refusal below, deliberately: zero
+    # artifacts is precisely the state the caller needs a number for ("has any
+    # reviewer spoken about THIS change set yet?"), and an envelope that omits
+    # the field there would force the caller to infer it from an error_key.
+    #
+    # IT ANCHORS ON THE FIRSTLINE GRAMMAR, AND THAT IS THE WHOLE POINT. A bare
+    # substring count is wrong in the most misleading possible direction: on
+    # claude-workflow-plugin-8zi, BEFORE any artifact existed,
+    # `bd show 8zi | grep -c REVIEW-ARTIFACT` returned 1 — and the hit was PROSE
+    # inside a reviewer's own note, the sentence "zero REVIEW-ARTIFACT
+    # firstlines". Agents quote record grammars in comments constantly, so prose
+    # mentions are the NORMAL case on any task with review history, not an edge
+    # case. A count that includes them reports rounds a reviewer never ran, which
+    # would make the escalation cap it feeds fire on discussion of reviews rather
+    # than reviews. The regression leg lives in review-count.test.sh
+    # ("prose-only mention"): a comment set whose ONLY mention is prose must
+    # measure 0.
+    #
+    # THE ANCHOR IS DELIBERATELY ONE NOTCH LOOSER THAN THE `art` SELECTOR ABOVE
+    # (`^[[:space:]]*` vs `^`), which is an asymmetry rather than an oversight.
+    # `art` decides WHICH record the release predicate reads, and widening that
+    # is a change to a release input nothing here asked for. The count only ever
+    # decides whether an escalation may fire, and there the safe direction is to
+    # COUNT an ambiguous record: a leading-whitespace record then reads as "a
+    # reviewer has spoken", which leaves today's escalation behaviour intact,
+    # whereas ignoring it could SUPPRESS an escalation on the strength of a
+    # record that exists. Never fail toward suppression on ambiguity.
+    #
+    # The reference hash: `--change-set-hash` when the caller named one, else the
+    # latest artifact's own reviewed_hash. `match()` takes the FIRST token on the
+    # line, mirroring the `grep -oE ... | head -1` semantics every other token
+    # read here uses, so a summary that mentions a second `reviewed_hash=` cannot
+    # move the comparison. An empty reference counts 0: the awk guard requires a
+    # non-empty token, so "no hash to compare" can never be read as "everything
+    # matches".
+    ROUNDS_HASH="$want_hash"
+    if [ -z "$ROUNDS_HASH" ] && [ -n "$art" ]; then
+        ROUNDS_HASH=$(printf '%s' "$art" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    fi
+    ROUNDS=$(awk -v ref="$ROUNDS_HASH" '
+        BEGIN { n = 0 }
+        ref == "" { next }
+        /^[[:space:]]*REVIEW-ARTIFACT v1 / {
+            if (match($0, /reviewed_hash=[A-Za-z0-9._-]+/)) {
+                if (substr($0, RSTART + 14, RLENGTH - 14) == ref) { n++ }
+            }
+        }
+        END { print n + 0 }
+    ' "$firstlines" 2>/dev/null) || ROUNDS="0"
+    case "$ROUNDS" in
+        ''|*[!0-9]*) ROUNDS="0" ;;
+    esac
+    # ROUNDS end ---------------------------------------------------------------
+
     if [ -z "$art" ]; then
         emit_gate 4 "false" "review_artifact_missing" "no REVIEW-ARTIFACT v1 comment found for $tid"
     fi
@@ -558,7 +656,12 @@ case "$SUB" in
 Usage: review-check.sh <subcommand> [args]
   validate-request  <file>                    schema-check a review request
   validate-artifact <file>                    schema-check a review artifact
-  gate <task-id> [--comments-json <file>]     independence + open-finding count
+  gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
+                                              independence + open-finding count,
+                                              plus rounds/rounds_hash: how many
+                                              REVIEW-ARTIFACT firstlines carry
+                                              reviewed_hash=<h> (default <h> is
+                                              the latest artifact's own hash)
 Exit: 0 ok | 4 violation | 2 bd-unavailable | 1 usage.
 USAGE
         exit 1

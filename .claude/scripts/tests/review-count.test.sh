@@ -75,6 +75,25 @@ run_gate() {
 ekey_of() { printf '%s' "$1" | jq -r '.error_key // ""' 2>/dev/null || echo ""; }
 openct_of() { printf '%s' "$1" | jq -r '.open_findings // 0' 2>/dev/null || echo "0"; }
 
+# 2ty helpers. art_hashed <iteration> <reviewed_hash> -> a clean, findings-free
+# REVIEW-ARTIFACT record for a NAMED change-set hash (art_line above pins
+# reviewed_hash=h, which the rounds legs have to vary).
+art_hashed() {
+    printf 'REVIEW-ARTIFACT v1 iteration=%s reviewer=qa-claude model=m reviewed_hash=%s risk_threshold=high verdict=approve stopped_by=verdict findings=[] at 2026-08-06T00:00:0%sZ: round %s\n' \
+        "$1" "$2" "$1" "$1"
+}
+# run_gate_ref <comments-json> [extra args...] — run_gate with extra flags.
+run_gate_ref() {
+    local comments="$1"
+    shift || true
+    printf '%s' "$comments" > "$WORK/comments.json"
+    GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RCHECK" gate t-1 \
+        --comments-json "$WORK/comments.json" "$@" 2>/dev/null)
+    GATE_EXIT=$?
+}
+rounds_of()     { printf '%s' "$1" | jq -r 'if has("rounds") then (.rounds|tostring) else "<absent>" end' 2>/dev/null || echo "<absent>"; }
+roundshash_of() { printf '%s' "$1" | jq -r '.rounds_hash // ""' 2>/dev/null || echo ""; }
+
 IMPL_BACKEND="IMPLEMENTER: role=backend implemented the feature"
 
 # ---------------------------------------------------------------------------
@@ -251,6 +270,109 @@ assert_eq "META: removing the ARBITRATION flips the gate to exit 4" "4" "$GATE_E
 assert_eq "META: removing the ARBITRATION -> unresolved_findings" "unresolved_findings" "$(ekey_of "$GATE_OUT")"
 assert_eq "META: the once-overruled finding is now open" "R1-F1" \
     "$(printf '%s' "$GATE_OUT" | jq -r '.open_finding_ids[0]')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 6: ROUNDS — review rounds against ONE change set (2ty) ==="
+# The J21 escalation cap used to charge STOP-HOOK PASSES against a budget named
+# for review rounds. `gate` now reports the rounds directly so the cap can
+# escalate on max(iterations, rounds) instead of on how often the orchestrator
+# polled. These legs pin the counting rules.
+
+# 6.1 three rounds against ONE hash, named explicitly.
+THREE_ON_H1=$(mk_comments "$IMPL_BACKEND" \
+    "$(art_hashed 1 h1)" "$(art_hashed 2 h1)" "$(art_hashed 3 h1)")
+run_gate_ref "$THREE_ON_H1" --change-set-hash h1
+assert_eq "6.1 three artifacts on h1: rounds=3" "3" "$(rounds_of "$GATE_OUT")"
+assert_eq "6.1 three artifacts on h1: rounds_hash echoes the reference" "h1" "$(roundshash_of "$GATE_OUT")"
+
+# 6.2 a FOURTH round against a DIFFERENT hash RESETS the count. This is the
+# property that makes rounds the right quantity for the cap: a new change set has
+# needed no rounds yet, however many the previous one took.
+FOUR_MIXED=$(mk_comments "$IMPL_BACKEND" \
+    "$(art_hashed 1 h1)" "$(art_hashed 2 h1)" "$(art_hashed 3 h1)" "$(art_hashed 4 h2)")
+run_gate_ref "$FOUR_MIXED" --change-set-hash h2
+assert_eq "6.2 a fourth round against a NEW hash resets rounds to 1" "1" "$(rounds_of "$GATE_OUT")"
+run_gate_ref "$FOUR_MIXED" --change-set-hash h1
+assert_eq "6.2 ...while the old hash still reports its own 3" "3" "$(rounds_of "$GATE_OUT")"
+
+# 6.3 with no --change-set-hash the reference is the LATEST artifact's own hash,
+# so the count is self-consistent with the `artifact` block on the same envelope.
+run_gate_ref "$FOUR_MIXED"
+assert_eq "6.3 no flag: reference defaults to the latest artifact's hash" "h2" "$(roundshash_of "$GATE_OUT")"
+assert_eq "6.3 no flag: rounds counted against that default" "1" "$(rounds_of "$GATE_OUT")"
+
+# 6.4 THE PROSE-ONLY REGRESSION. Measured on claude-workflow-plugin-8zi: before
+# any artifact existed, `bd show 8zi | grep -c REVIEW-ARTIFACT` returned 1, and
+# the hit was a reviewer's own sentence "zero REVIEW-ARTIFACT firstlines". Agents
+# quote record grammars in comments constantly, so an unanchored count reports
+# rounds nobody ran — and rounds feed an escalation cap whose default outcome is
+# a release. The count MUST measure 0 here.
+PROSE_ONLY=$(mk_comments "$IMPL_BACKEND" \
+    "QA round 1 note: this task has zero REVIEW-ARTIFACT firstlines so far; a REVIEW-ARTIFACT v1 record with reviewed_hash=h1 would be the first." \
+    "Orchestrator: agreed, no REVIEW-ARTIFACT v1 reviewed_hash=h1 record exists yet.")
+run_gate_ref "$PROSE_ONLY" --change-set-hash h1
+assert_eq "6.4 prose-only mentions: rounds=0 (anchored on the firstline grammar)" \
+    "0" "$(rounds_of "$GATE_OUT")"
+assert_eq "6.4 prose-only mentions: still review_artifact_missing" \
+    "review_artifact_missing" "$(ekey_of "$GATE_OUT")"
+# The unanchored count these legs exist to rule out, measured on the same input:
+# 2 matches for a task with zero rounds.
+PROSE_RAW=$(printf '%s' "$PROSE_ONLY" | jq -r '.[]' | grep -c 'REVIEW-ARTIFACT v1 ' || true)
+PROSE_RAW=$(printf '%s' "$PROSE_RAW" | tr -d '[:space:]')
+assert_eq "6.4 CONTROL: an UNANCHORED count over the same comments would report 2" \
+    "2" "$PROSE_RAW"
+
+# 6.5 hash comparison is whole-token, not prefix: ref=h1 must not match h1beef.
+run_gate_ref "$(mk_comments "$IMPL_BACKEND" "$(art_hashed 1 h1beef)")" --change-set-hash h1
+assert_eq "6.5 a longer hash sharing the reference's prefix does NOT count" "0" "$(rounds_of "$GATE_OUT")"
+
+# 6.6 rounds is present (as 0) on the artifact-missing envelope. That state — "a
+# cycle is open and nobody has spoken yet" — is exactly the one the caller needs
+# a number for, so the field cannot be conditional on an artifact existing.
+run_gate_ref "$(mk_comments "$IMPL_BACKEND")" --change-set-hash h1
+assert_eq "6.6 no artifact at all: rounds is present and 0, not absent" "0" "$(rounds_of "$GATE_OUT")"
+
+# 6.7 an artifact with NO reviewed_hash token cannot be counted against any
+# reference (it is unattributable, not a match for everything).
+run_gate_ref "$(mk_comments "$IMPL_BACKEND" \
+    "REVIEW-ARTIFACT v1 iteration=1 reviewer=qa-claude model=m risk_threshold=high verdict=approve stopped_by=verdict findings=[] at 2026-08-06T00:00:00Z: no hash token")" \
+    --change-set-hash h1
+assert_eq "6.7 an artifact with no reviewed_hash token counts 0" "0" "$(rounds_of "$GATE_OUT")"
+
+# 6.8 the UNESTABLISHED signal: a usage error answers on the terse envelope,
+# which carries NO rounds key at all. Callers must read a missing key as
+# "unestablished" and fall back to their own signal — never as zero rounds.
+USAGE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RCHECK" gate t-1 \
+    --comments-json "$WORK/comments.json" --change-set-hash 2>/dev/null)
+USAGE_RC=$?
+assert_eq "6.8 --change-set-hash with no value: usage error rc=1" "1" "$USAGE_RC"
+assert_eq "6.8 usage error: error_key=usage" "usage" "$(ekey_of "$USAGE_OUT")"
+assert_eq "6.8 usage error: the rounds key is ABSENT (unestablished, not zero)" \
+    "<absent>" "$(rounds_of "$USAGE_OUT")"
+
+# 6.9 META (load-bearing): UNANCHOR the rounds matcher in a checker copy and the
+# prose-only leg must start counting the prose. This is the mutation the fix was
+# explicitly told not to inherit, so it gets a mutant rather than a promise.
+UNANCHORED_GATE="$WORK/review-check-unanchored.sh"
+sed 's|/\^\[\[:space:\]\]\*REVIEW-ARTIFACT v1 /|/REVIEW-ARTIFACT v1 /|' "$RCHECK" > "$UNANCHORED_GATE"
+chmod +x "$UNANCHORED_GATE"
+if cmp -s "$RCHECK" "$UNANCHORED_GATE"; then
+    assert_eq "6.9 META: the unanchor mutation APPLIED (mutant differs from source)" "differs" "identical"
+else
+    assert_eq "6.9 META: the unanchor mutation APPLIED (mutant differs from source)" "differs" "differs"
+    assert_eq "6.9 META: mutated checker parses" "0" \
+        "$(bash -n "$UNANCHORED_GATE" 2>/dev/null && echo 0 || echo 1)"
+    printf '%s' "$PROSE_ONLY" > "$WORK/comments.json"
+    META_UA_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$UNANCHORED_GATE" gate t-1 \
+        --comments-json "$WORK/comments.json" --change-set-hash h1 2>/dev/null)
+    assert_eq "6.9 META: WITHOUT the firstline anchor the prose mentions COUNT as rounds (the 8zi defect)" \
+        "2" "$(rounds_of "$META_UA_OUT")"
+    # Discriminator: the mutant still ran the real predicate (same verdict), so
+    # the rounds difference is the anchor and nothing else.
+    assert_eq "6.9 META: the mutant still reported review_artifact_missing (ran the real predicate)" \
+        "review_artifact_missing" "$(ekey_of "$META_UA_OUT")"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

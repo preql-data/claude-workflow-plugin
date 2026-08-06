@@ -1446,7 +1446,11 @@ comments and answers three questions — is there a `REVIEW-ARTIFACT v1` record
 at all, is its `reviewer_identity` different from every `IMPLEMENTER: role=...`
 record on the task, and is every finding at or above the artifact's
 `risk_threshold` either `RESOLVED` (with fix + test evidence) or
-`ARBITRATION ... decision=overrule`. The implementer records are written by
+`ARBITRATION ... decision=overrule`. Since 2ty it also answers a fourth,
+non-gating question for the Stop hook's escalation basis — how many
+`REVIEW-ARTIFACT v1` firstlines carry `reviewed_hash=<h>` (`rounds` /
+`rounds_hash`, optional `--change-set-hash <h>`); see "Escalation State
+Machine". The implementer records are written by
 `subagent-start.sh` at spawn time for the three implementing roles only
 (backend / frontend / devops — `qa` reviews, so recording it would make every
 single-agent review non-independent). The approval comment names the reviewer
@@ -1804,19 +1808,101 @@ captured bd comments skips rather than retro-failing.
 ### Escalation State Machine (spec 0.2)
 
 The Stop hook tracks a per-task iteration counter at
-`.qa-tracking/iteration-count.<task-id>`. The counter bumps on every Stop
-fire that detects tracked changes. When the counter reaches
+`.qa-tracking/iteration-count.<task-id>`. When the escalation BASIS reaches
 `MAX_ITERATIONS` (default 3) the gate transitions into an `escalated`
 state to prevent the runaway loop captured in the bug report (iteration
 7+ still re-running the suite with no behavioral consequence).
+
+**The basis is `max(verification iterations, review rounds)`, not the Stop count**
+(`claude-workflow-plugin-2ty`). Three measured instances in one session had the
+cap firing on tasks where nothing had failed and, twice, where nobody had
+reviewed anything: the counter used to bump once per Stop fire, and an
+orchestrator waiting on a long review — or interrupted by infrastructure — Stops
+repeatedly. That is not a bookkeeping error, because reaching the cap forces a
+J21 decision whose DEFAULT (no choice recorded by the next Stop) is *defer*,
+which sets `qa-deferred` and lets the following Stop release. An over-charging
+counter therefore steers work toward release-without-approval on a timer. Three
+rules make the counter non-authoritative:
+
+1. **The iteration counter charges verification iterations only.** It bumps when
+   this Stop will actually run a verification pass, and reads without writing
+   otherwise: not while `qa-escalated` (the escalation contract does not re-run
+   the suite), not while `qa-deferred` (the Stop is allowed through), and not
+   when no test/lint/type command is configured at all (there is no suite, so a
+   Stop was never an iteration). On a project with no runner the basis is
+   therefore review rounds alone.
+2. **Review rounds count records, not polls.** `review-check.sh gate <id>
+   --change-set-hash <h>` reports `rounds` — the number of `REVIEW-ARTIFACT v1`
+   FIRSTLINES whose `reviewed_hash=` equals `<h>` — plus `rounds_hash`. The count
+   is anchored on the firstline grammar (`^[[:space:]]*REVIEW-ARTIFACT v1 `)
+   because prose mentions are the normal case on any task with review history: on
+   `8zi`, before any artifact existed, an unanchored `grep -c REVIEW-ARTIFACT`
+   returned 1 and the hit was a reviewer's own sentence *"zero REVIEW-ARTIFACT
+   firstlines"*. Rounds reset when the change set moves, which is correct — a new
+   change set has needed no rounds yet.
+3. **Escalation is suppressed while a review is in flight.** When a cycle is open
+   (the `qa-gate-entered` label agrees with a `QA-GATE: entered` record), zero
+   artifacts exist for the current hash, and no technical check is failing, the
+   cap does not fire and the J21 options are not offered: a reviewer has claimed
+   the cycle and not yet spoken, so nobody has disagreed with anything. The
+   scope — *no technical check failing* — is load-bearing. A red suite is its own
+   evidence and must still reach J21; a cycle is open during almost all
+   implementation work, so an unscoped suppression would delete the J21 escape
+   from the failing-test loop entirely.
+
+   **Suppression governs whether an escalation STARTS, not whether a live one
+   continues.** `qa-escalated` is sticky: once set it survives until `approve`,
+   `enter`, or a `choose` records a decision. So a task can be escalated *and*
+   subsequently enter the review-in-flight state — most easily by moving its
+   change set, which drops `rounds` to 0 — and in that state the J21 options are
+   still offered (the escalation is live and has to be answerable) while the
+   suppression paragraph is not printed (an escalated task is not suppressed).
+   The auto-defer chain also still runs from there; that residual is filed as
+   part of `claude-workflow-plugin-2ty`'s QA round and pinned by an L2 leg
+   (`escalation-basis.sh`, `H-RESIDUAL(R1-F3)`) so closing it turns a test red
+   rather than going unnoticed.
+
+If `rounds` cannot be established (no active task, no `review-check.sh`, no
+computable change-set hash, or an envelope with no `rounds` key — a pre-2ty or
+partially-synced copy), the basis falls back to the iteration count alone,
+suppression does not apply, and the machinery behaves as it did before. An
+unavailable new signal must never disable the old one.
+
+**What the block reasons claim, and what they do not.** Every block reason on the
+capped paths names the basis it used and both components, and the `QA-GATE
+ESCALATED` record carries the same triple. The escalation banners state the
+*relationship* to the cap rather than asserting it: `basis N >= 3; cap reached`
+when the cap is currently met, and `escalated on an earlier Stop at basis M; the
+current basis N is BELOW the cap of 3` when it is not. Both forms are computed
+from the live basis plus the triggering basis persisted in
+`.qa-tracking/escalation-posted.<task-id>` at the moment of escalation; when that
+marker
+predates this change it is empty, and the phrasing drops the number rather than
+inventing one. The claim these sentences make is exactly "here is what was
+compared" — they do not claim the count is a complete history of the task, and a
+`rounds` reset after a change-set move is a real drop, not a lost round.
 
 States — each row lists the trigger, label set, and Stop-hook behaviour:
 
 | State | Trigger | Labels on task | Stop hook |
 | ----- | ------- | -------------- | --------- |
 | `pending` | normal review cycle | `qa-pending` (+ `qa-gate-entered`) | Run full suite each loop; block until approved |
-| `escalated` | iteration counter reaches `MAX_ITERATIONS` | `+qa-escalated` | Skip full suite; reuse cached failure; block with "record a J21 choice" wording; post J21 options comment exactly once |
-| `deferred` | `qa-gate.sh choose defer` OR one more Stop while escalated with no recorded choice (auto-defer) | `+qa-deferred` (qa-pending preserved) | Allow Stop immediately — the single audited escape valve permitted by principle 6 |
+| `escalated` | `max(iterations, rounds)` reaches `MAX_ITERATIONS`, and no review is in flight (or a check is failing) | `+qa-escalated` | Skip full suite; reuse cached failure; block with "record a J21 choice" wording; post J21 options comment exactly once |
+| `deferred` | `qa-gate.sh choose defer` OR `AUTO_DEFER_AFTER_ESCALATED_STOPS` (2) Stops fired while escalated with no recorded choice (auto-defer) | `+qa-deferred` (qa-pending preserved) | Allow Stop immediately — the single audited escape valve permitted by principle 6 |
+
+**Auto-defer counts Stops, on its own counter**
+(`.qa-tracking/escalated-stops.<task-id>`), and that separation is deliberate.
+Auto-defer asks "how many chances has the agent had to answer?", which is
+legitimately a Stop count; the iteration counter asks "how many verification
+passes has this taken?". They used to be the same number
+(`ITER > MAX_ITERATIONS + 1`), so once the iteration counter stopped charging
+Stops that run nothing it would have frozen at the cap and auto-defer — a
+documented escape — would have become silently unreachable. Timing is unchanged
+Stop-for-Stop: the cap-hit Stop shows the J21 options, the first escalated Stop
+after it still blocks, the second auto-defers. The counter is wiped by the same
+`wipe_iteration_state` that clears the iteration counter (`enter`, `approve`,
+`choose continue`, `choose tech-debt`), because a count that survived a fresh
+cycle would auto-defer on that cycle's FIRST escalated Stop.
 
 Exit transitions:
 

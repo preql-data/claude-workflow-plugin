@@ -107,7 +107,7 @@ Track QA review state.
 | `qa-gate-entered` | QA has claimed the task; gate is armed | `qa-gate.sh enter` |
 | `qa-approved` | QA has signed off | @qa agent (via `qa-gate.sh approve` / `choose approve`) |
 | `qa-blocked` | QA found issues; specialist must fix | @qa agent (via `qa-gate.sh block`) |
-| `qa-escalated` | Iteration cap reached (spec 0.2); awaiting a J21 decision | `verify-before-stop.sh` (auto, on first cap hit) |
+| `qa-escalated` | Iteration cap reached (spec 0.2) — measured on `max(verification iterations, review rounds against the current change set)`, and never while a review is in flight with nothing failing (`claude-workflow-plugin-2ty`); awaiting a J21 decision | `verify-before-stop.sh` (auto, on first cap hit) |
 | `qa-deferred` | J21 option 4 recorded (spec 0.2); Stop hook now allows | `qa-gate.sh choose defer` OR `verify-before-stop.sh` auto-defer |
 | `rubric-pending` | Rubric-grader cycle armed (spec Phase A); awaiting a grader verdict | `qa-gate.sh enter` (auto, alongside qa-gate-entered) |
 | `rubric-satisfied` | Rubric-grader returned `satisfied`; the verdict-backed audit trail for QA approval. Survives `approve`; survives a re-`enter` while the recorded `change_set_hash` still matches the current change set, and is cleared as stale otherwise (see `docs/HOOKS.md`) | `qa-gate.sh grade-record` (when the verdict JSON is `satisfied`) |

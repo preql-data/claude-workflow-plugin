@@ -69,6 +69,20 @@ TYPE_TIMEOUT_S=600
 # Maximum iterations before escalating via the decision gate.
 MAX_ITERATIONS=3
 
+# 2ty: how many ESCALATED Stops may pass with no recorded J21 choice before the
+# gate auto-selects option 4 (defer). This used to be expressed as
+# `ITER > MAX_ITERATIONS + 1`, i.e. it borrowed the ITERATION counter to count
+# "chances the agent has had to answer". Those are two different quantities, and
+# conflating them is the defect this task exists for: once the iteration counter
+# stopped charging Stops that run nothing, it stopped advancing under escalation
+# at all, and auto-defer — a legitimate STOP-counting rule — would have silently
+# become unreachable. So the two now count separately.
+#
+# 2 preserves the previous timing Stop-for-Stop: cap-hit Stop shows the J21
+# options, the FIRST escalated Stop after it still blocks (one more chance to
+# record a choice), the SECOND auto-defers.
+AUTO_DEFER_AFTER_ESCALATED_STOPS=2
+
 mkdir -p "$QA_TRACKING_DIR"
 
 # sync-errors.log: surface silently-failing best-effort calls (write_current_task,
@@ -515,13 +529,20 @@ bump_iteration() {
 }
 
 # Read the iteration counter at $1 without bumping.
+#
+# 2ty: this became LIVE code (it had no caller until the bump was made
+# conditional), so it now carries bump_iteration's empty-value guard. A counter
+# file holding anything with no digits in it — a truncated write, a stray
+# newline — used to yield the EMPTY STRING here, and every consumer feeds the
+# result to `[ "$ITER" -ge "$MAX_ITERATIONS" ]`, which on an empty operand emits
+# "integer expression expected" on stderr and evaluates false. Printing 0 keeps
+# an unreadable counter equivalent to an absent one.
 read_iteration() {
-    local file="$1"
+    local file="$1" n=""
     if [ -s "$file" ]; then
-        head -1 "$file" | tr -dc '0-9'
-    else
-        printf '0'
+        n=$(head -1 "$file" | tr -dc '0-9' || printf '')
     fi
+    printf '%s' "${n:-0}"
 }
 
 # J21 decision-gate options block (Phase 4 fix pass / MATERIAL 6).
@@ -538,9 +559,9 @@ j21_options_block() {
     local tid="$1"
     cat <<EOF
 
-ESCALATION: Iteration $ITER (>= $MAX_ITERATIONS). Use the J21 decision gate
-options to choose a path forward (record via \`qa-gate.sh choose ...\` so
-the gate exits escalation):
+ESCALATION: Iteration $ITER ($(escalation_basis_claim)).
+Use the J21 decision gate options to choose a path forward (record via
+\`qa-gate.sh choose ...\` so the gate exits escalation):
 
 Options:
   1. approve  — \`bash .claude/scripts/qa-gate.sh choose approve $tid '<summary>'\`
@@ -591,6 +612,16 @@ escalation_posted_file_for() {
     local tid="$1"
     [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/escalation-posted"; return; }
     printf '%s/escalation-posted.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+# 2ty: the auto-defer counter — Stops that fired while qa-escalated was already
+# set, i.e. chances the agent has had to record a J21 choice. Task-keyed like the
+# rest, and wiped by the same qa-gate.sh wipe_iteration_state that clears the
+# iteration counter; a count that survived `enter` or `choose continue` would
+# make the FIRST escalated Stop of a fresh cycle auto-defer immediately.
+escalated_stops_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/escalated-stops"; return; }
+    printf '%s/escalated-stops.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
 }
 
 # task_has_label <task-id> <label> - 0 if present, 1 if absent or bd unavailable.
@@ -1426,6 +1457,9 @@ Diagnose the two records this compared:
                 rm -f "$QA_TRACKING_DIR/edit-count" 2>/dev/null || true
                 rm -f "$(iteration_file_for "$CURRENT_TASK")" 2>/dev/null || true
                 rm -f "$ITERATION_FILE_LEGACY" 2>/dev/null || true
+                # 2ty: the auto-defer counter is per-cycle state like the counter
+                # above it, so an F1 approval clears it for the same reason.
+                rm -f "$(escalated_stops_file_for "$CURRENT_TASK")" 2>/dev/null || true
                 echo "{}"; exit 0
                 # F1-CHANGE-SET-BINDING BEGIN (qzv)
                 # Refused: fall THROUGH to the QA-required block — never
@@ -1451,24 +1485,98 @@ Diagnose the two records this compared:
     # the QA-required messaging with a hint.
 fi
 
-# B3 + MATERIAL 5 fix: increment iteration counter for THIS task's stop fire.
-# The counter is keyed by CURRENT_TASK so abandoning task A at iter=3 and
-# switching to task B does NOT make B start at iter=4. When CURRENT_TASK
-# is empty we still use the legacy path (single-task / no-Beads users).
+# B3 + MATERIAL 5 fix: the iteration counter is keyed by CURRENT_TASK so
+# abandoning task A at iter=3 and switching to task B does NOT make B start at
+# iter=4. When CURRENT_TASK is empty we still use the legacy path (single-task /
+# no-Beads users).
 ITERATION_FILE=$(iteration_file_for "$CURRENT_TASK")
-ITER=$(bump_iteration "$ITERATION_FILE")
 
 # Spec 0.2: escalation state machine. Read once and act before the suite
 # runs so we never repeat the four-loops-past-the-cap behaviour the bug
 # report captured. The label reads are best-effort — if bd is missing or
 # the task id is empty we fall through to the legacy "always run tests"
 # path so single-repo / no-Beads users see no regression.
+#
+# 2ty: these reads now happen BEFORE the counter is touched, because WHAT THE
+# COUNTER MEANS depends on them. See the ITERATION-BUMP region below.
 QA_DEFERRED=false
 QA_ESCALATED=false
 if [ -n "$CURRENT_TASK" ]; then
     if task_has_label "$CURRENT_TASK" "qa-deferred"; then QA_DEFERRED=true; fi
     if task_has_label "$CURRENT_TASK" "qa-escalated"; then QA_ESCALATED=true; fi
 fi
+
+# 2ty: the stack is detected ONCE, here, because the bump decision below has to
+# know whether this Stop has anything to run before it charges an iteration for
+# it. The suite section further down consumes THIS json rather than re-invoking
+# the detector — one probe, one answer, and no way for the two reads to disagree
+# about what this Stop was going to do. detect-stack.sh is a read-only file
+# inspection, so the escalated/deferred paths pay a few milliseconds for a
+# boolean they use and nothing else; RUNNER / TEST_CMD / LINT_CMD / TYPE_CMD are
+# still parsed in the suite block, so the escalated REPLAY still takes its runner
+# name from the cache exactly as before.
+DETECT_JSON="{}"
+if [ -x "$DETECT_STACK" ]; then
+    DETECT_JSON=$("$DETECT_STACK" 2>/dev/null || echo "{}")
+fi
+
+# ITERATION-BUMP BEGIN (claude-workflow-plugin-2ty)
+#
+# THE COUNTER CHARGES VERIFICATION ITERATIONS, NOT STOP-HOOK PASSES.
+#
+# THE DEFECT, measured three times in one session (2026-08-05, recorded on this
+# task with numbers): the counter incremented once per Stop fire, and an
+# orchestrator waiting on a long review — or one interrupted by infrastructure —
+# necessarily Stops repeatedly. So the cost of a THOROUGH review was charged to
+# the same budget as defect rounds:
+#   * qzv.1: counter 3, review verdicts 1, gate entries 6.
+#   * 8zi:   counter 3, review artifacts 0, all three bumps caused by three 529
+#            API errors and one stream-watchdog stall.
+#   * 8zi:   counter 3 AGAIN, while the reviewer was actively mid-review.
+# None of the three involved a finding or a failing test.
+#
+# WHY IT COSTS SOMETHING RATHER THAN BEING BOOKKEEPING: reaching the cap forces
+# a J21 decision, and the DEFAULT when none is recorded by the next Stop is
+# DEFER, which sets qa-deferred and lets the following Stop RELEASE. So an
+# over-charging counter steers work toward release-without-approval on a timer,
+# driven by nothing connected to review quality.
+#
+# THE RULE: bump only when this Stop will actually run a verification pass.
+# Two states are excluded, and each was already charged before:
+#   1. qa-escalated — the escalation contract explicitly does NOT re-run the
+#      suite (see the replay branch below). The Stop that triggered escalation on
+#      8zi said so in its own output while charging for it.
+#   2. qa-deferred — the Stop is allowed through immediately; nothing runs.
+# And one that was charged and should never have been:
+#   3. no test/lint/type command is configured at all. There is no suite, so
+#      "iteration N of 3" was pure poll-counting. On such a project the
+#      escalation basis is now review ROUNDS alone (see ESCALATION-BASIS below),
+#      which is the quantity J21 is named for.
+#
+# The read path uses read_iteration, which does NOT write, so a Stop that runs
+# nothing also leaves the counter untouched for the next one.
+#
+# `jq -e` decides case 3 POSITIVELY: only a detector answer that proves all three
+# commands are empty suppresses the bump. A malformed or unreadable answer keeps
+# today's always-bump behaviour rather than silently freezing the counter — an
+# unestablished input must never quietly disable the machinery it feeds.
+VERIFY_CMD_PRESENT=true
+if printf '%s' "$DETECT_JSON" \
+    | jq -e '((.test_cmd // "") == "") and ((.lint_cmd // "") == "") and ((.type_cmd // "") == "")' \
+        >/dev/null 2>&1; then
+    VERIFY_CMD_PRESENT=false
+fi
+VERIFY_WILL_RUN=false
+if [ "$QA_DEFERRED" != "true" ] && [ "$QA_ESCALATED" != "true" ] \
+    && [ "$VERIFY_CMD_PRESENT" = "true" ]; then
+    VERIFY_WILL_RUN=true
+fi
+if [ "$VERIFY_WILL_RUN" = "true" ]; then
+    ITER=$(bump_iteration "$ITERATION_FILE")
+else
+    ITER=$(read_iteration "$ITERATION_FILE")
+fi
+# ITERATION-BUMP END (claude-workflow-plugin-2ty)
 
 # Spec 0.2 escape valve: if qa-deferred is set on the active task, allow
 # this Stop immediately. The user explicitly recorded "defer" (or the
@@ -1483,27 +1591,171 @@ fi
 
 # Spec 0.2 auto-defer: if qa-escalated has been set for at least one
 # prior Stop AND no recorded J21 choice has arrived in time, auto-pick
-# option 4 (defer). The threshold is one buffer iteration past the cap
-# — cap-hit (ITER=MAX) shows the J21 options, ITER=MAX+1 still blocks
-# under the escalation wording (giving the agent one more chance to
-# record a choice), and ITER>=MAX+2 auto-defers. This matches the L2
-# acceptance ("lands on a recorded J21 decision by iteration 5 at the
-# latest" with MAX=3 and a one-iteration warning buffer).
-if [ "$QA_ESCALATED" = "true" ] && [ -n "$CURRENT_TASK" ] && [ "$ITER" -gt $((MAX_ITERATIONS + 1)) ]; then
+# option 4 (defer).
+#
+# 2ty: the THRESHOLD MOVED OFF THE ITERATION COUNTER onto its own. It used to
+# read `ITER > MAX_ITERATIONS + 1`, i.e. "two Stops past the cap" — which worked
+# only because the iteration counter charged every Stop, including the escalated
+# ones that run nothing. With the counter now charging verification iterations
+# only (see ITERATION-BUMP above), ITER FREEZES at the cap under escalation and
+# that predicate could never fire again: a documented escape would have become
+# silently unreachable, and the L2 acceptance ("lands on a recorded J21 decision
+# by iteration 5 at the latest") would have been quietly false.
+#
+# So the quantity auto-defer actually wants is counted directly: how many Stops
+# have fired while the task was ALREADY escalated, i.e. how many chances the
+# agent has had to record a choice. That is legitimately a STOP count — nothing
+# about it pretends to measure defect rounds — and counting it separately keeps
+# BOTH signals honest. Timing is preserved Stop-for-Stop (see
+# AUTO_DEFER_AFTER_ESCALATED_STOPS).
+#
+# The bump is here rather than beside the iteration counter because the
+# qa-deferred escape above must exit BEFORE it: a deferred Stop is not a chance
+# to answer, the question has already been answered.
+ESCALATED_STOPS=0
+if [ "$QA_ESCALATED" = "true" ]; then
+    ESCALATED_STOPS=$(bump_iteration "$(escalated_stops_file_for "$CURRENT_TASK")")
+fi
+if [ "$QA_ESCALATED" = "true" ] && [ -n "$CURRENT_TASK" ] \
+    && [ "$ESCALATED_STOPS" -ge "$AUTO_DEFER_AFTER_ESCALATED_STOPS" ]; then
     if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
         bd label add "$CURRENT_TASK" qa-deferred >/dev/null 2>&1 \
             || log_sync_error "auto-defer: bd label add qa-deferred failed for $CURRENT_TASK"
         # Use bd comments (qa-gate.sh's add_comment wraps this pair) so
         # the audit trail mirrors a manual `qa-gate.sh choose defer`.
         AUTO_DEFER_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
-        AUTO_DEFER_NOTE="QA-GATE AUTO-DEFER at $AUTO_DEFER_TS: auto-deferred at iteration $ITER after escalation went unanswered; task remains qa-pending"
+        AUTO_DEFER_NOTE="QA-GATE AUTO-DEFER at $AUTO_DEFER_TS: auto-deferred after $ESCALATED_STOPS escalated Stop(s) with no recorded J21 choice (verification iteration $ITER); task remains qa-pending"
         bd comments add "$CURRENT_TASK" "$AUTO_DEFER_NOTE" >/dev/null 2>&1 \
             || bd comment add "$CURRENT_TASK" "$AUTO_DEFER_NOTE" >/dev/null 2>&1 \
             || log_sync_error "auto-defer: comment add failed for $CURRENT_TASK"
     fi
-    log_sync_error "Stop auto-deferred for $CURRENT_TASK at iteration $ITER (qa-escalated unanswered)"
+    log_sync_error "Stop auto-deferred for $CURRENT_TASK after $ESCALATED_STOPS escalated Stop(s) with no J21 choice (verification iteration $ITER)"
     echo "{}"; exit 0
 fi
+
+# ESCALATION-BASIS BEGIN (claude-workflow-plugin-2ty)
+#
+# ESCALATE ON max(VERIFICATION ITERATIONS, REVIEW ROUNDS) — AND NOT AT ALL WHILE
+# A REVIEWER HAS CLAIMED THE CYCLE AND NOT YET SPOKEN.
+#
+# Two independent signals, because the iteration counter alone was authoritative
+# and should not be:
+#
+#   ROUNDS — how many `REVIEW-ARTIFACT v1` records on this task carry
+#   `reviewed_hash=` equal to the CURRENT change-set hash. This is the quantity
+#   J21 is named for ("this change set has needed N rounds"), it is immune to how
+#   often the orchestrator polls, and it RESETS when the change set moves, which
+#   is correct: a new change set has needed no rounds yet. Counted by
+#   review-check.sh — the ONE record parser — not re-implemented here, the same
+#   discipline current_change_set_hash follows for the hash itself.
+#
+#   REVIEW_IN_FLIGHT — a cycle is open (the qa-gate-entered LABEL agrees with a
+#   `QA-GATE: entered` RECORD) and ZERO artifacts exist for the current hash.
+#   That state means a reviewer has claimed this cycle and has not yet reported.
+#   Escalating there is never useful: nobody has disagreed with anything, because
+#   nobody has spoken. This is what makes the third measured instance — the
+#   escalation that fired WHILE the reviewer was mid-review, racing the counter
+#   against the reviewer for whether the verdict would matter — impossible rather
+#   than merely less likely.
+#
+# THE SUPPRESSION IS SCOPED TO "NOTHING IS FAILING", and that scope is
+# load-bearing rather than cautious. When the suite is RED the evidence for
+# escalating is the red suite, not the reviewer's silence — J21 exists precisely
+# to ask "you have tried three times to fix this; approve / continue / debt /
+# defer". A cycle is open during almost all implementation work, so an unscoped
+# suppression would delete the J21 escape from the failing-test loop entirely.
+# The check therefore lives in mark_escalation_if_capped, guarded on an empty
+# FAILED_CHECKS, and every one of the three measured instances was a
+# nothing-failing Stop ("technical checks passed").
+#
+# NEVER FAIL OPEN, in the specific sense that matters here: if ROUNDS cannot be
+# ESTABLISHED — no active task, no review-check.sh, no computable change-set
+# hash, an envelope with no `rounds` key (a pre-2ty or partially-synced copy) —
+# the basis falls back to ITER alone, suppression does not apply, and the
+# escalation machinery behaves exactly as it does today. An unavailable new
+# signal must not be able to disable the old one, and the block reason names
+# which of the two it used (ROUNDS_UNAVAILABLE_REASON, rendered by
+# escalation_basis_note) rather than printing a number whose provenance the
+# reader has to infer.
+#
+# ORDERING: this runs BEFORE the suite. The change-set hash it compares against
+# is therefore a pre-suite read, so a path that arrives during a 20-minute test
+# run leaves ROUNDS counted against the older hash — which can only ever
+# OVER-count (the older hash is the one the existing artifacts were written for),
+# i.e. it degrades toward today's escalation behaviour and never toward
+# suppressing one. The release predicate further down keeps its own post-suite
+# read; see the review-discipline block.
+ROUNDS=""                       # empty string = NOT established (never "0")
+ROUNDS_HASH=""
+REVIEW_IN_FLIGHT=false
+ESCALATION_BASIS="$ITER"
+ROUNDS_UNAVAILABLE_REASON=""   # set by the probe when rounds cannot be established
+# Stored review-gate probe, so the release predicate below can reuse this Stop's
+# read instead of taking a second one when nothing has happened in between.
+REVIEW_GATE_PROBED=false
+REVIEW_GATE_RC=0
+REVIEW_GATE_OUT=""
+
+review_rounds_probe() {
+    local have="" ekey="" cycle=""
+    if [ -z "$CURRENT_TASK" ]; then
+        ROUNDS_UNAVAILABLE_REASON="review rounds unavailable (no active Beads task, so no review record can be attributed to this change set); escalation basis is the verification-iteration count alone"
+        return 0
+    fi
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        ROUNDS_UNAVAILABLE_REASON="review rounds unavailable (the review predicate $REVIEW_CHECK_SCRIPT is missing); escalation basis is the verification-iteration count alone"
+        return 0
+    fi
+    # `|| true` for the same set -e fail-open class the CURRENT_CS_HASH guard
+    # below documents: current_change_set_hash returns 1 when impact-report.sh is
+    # absent, and a bare assignment whose RHS exits non-zero aborts the hook —
+    # which emits nothing, which the hooks contract reads as NON-blocking.
+    ROUNDS_HASH=$(current_change_set_hash) || true
+    if [ -z "$ROUNDS_HASH" ]; then
+        ROUNDS_UNAVAILABLE_REASON="review rounds unavailable (the current change-set hash could not be recomputed, so no artifact can be matched to it); escalation basis is the verification-iteration count alone"
+        return 0
+    fi
+    REVIEW_GATE_RC=0
+    REVIEW_GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" \
+        gate "$CURRENT_TASK" --change-set-hash "$ROUNDS_HASH" 2>&1) || REVIEW_GATE_RC=$?
+    REVIEW_GATE_PROBED=true
+    # A NON-ZERO rc IS NOT THE DISCRIMINATOR — `gate` exits 4 for
+    # review_artifact_missing, which is the normal answer on a task whose review
+    # has not landed yet and exactly the state ROUNDS=0 has to describe. The
+    # presence of the field is the discriminator, as it is for the F1 fast path's
+    # cycle_opened_ts.
+    have=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r 'if (type == "object" and has("rounds")) then "yes" else "no" end' 2>/dev/null) || have="no"
+    [ -n "$have" ] || have="no"
+    if [ "$have" != "yes" ]; then
+        ekey=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '.error_key // ""' 2>/dev/null) || ekey=""
+        ROUNDS_UNAVAILABLE_REASON="review rounds unavailable (review-check.sh answered without a rounds field${ekey:+; error_key=$ekey} — a pre-2ty or partially-synced copy, or its own dependency is missing); escalation basis is the verification-iteration count alone"
+        return 0
+    fi
+    ROUNDS=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '.rounds // 0' 2>/dev/null) || ROUNDS=""
+    case "$ROUNDS" in
+        ''|*[!0-9]*)
+            ROUNDS=""
+            ROUNDS_UNAVAILABLE_REASON="review rounds unavailable (review-check.sh reported a non-numeric rounds value); escalation basis is the verification-iteration count alone"
+            return 0
+            ;;
+    esac
+    # A cycle is OPEN only when the label and the record AGREE. bd 1.1.2 stopped
+    # inlining comment bodies, so a record reader can come back empty while the
+    # labels still read fine (the failure this repo has already lived through) —
+    # requiring both means that degradation reads as "not in flight", i.e. it
+    # falls back to today's escalation behaviour instead of suppressing on an
+    # absence it could not verify.
+    cycle=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '.cycle_opened_ts // ""' 2>/dev/null) || cycle=""
+    if [ "$ROUNDS" = "0" ] && [ -n "$cycle" ] && [ "$cycle" != "unparseable" ] \
+        && task_has_label "$CURRENT_TASK" "qa-gate-entered"; then
+        REVIEW_IN_FLIGHT=true
+    fi
+}
+review_rounds_probe
+if [ -n "$ROUNDS" ] && [ "$ROUNDS" -gt "$ESCALATION_BASIS" ]; then
+    ESCALATION_BASIS="$ROUNDS"
+fi
+# ESCALATION-BASIS END (claude-workflow-plugin-2ty)
 
 # F8/J17 + B3: detect runner and run test/lint/type-check with timeouts.
 # Spec 0.2: while qa-escalated is set we MUST NOT re-run the full suite;
@@ -1539,8 +1791,12 @@ if [ "$QA_ESCALATED" = "true" ]; then
     [ -s "$LRN_FILE" ] && RUNNER=$(head -1 "$LRN_FILE" | tr -d '\r\n')
     SUITE_REUSED=true
 else
+    # 2ty: DETECT_JSON was captured ONCE, above the iteration-bump decision (the
+    # bump has to know whether this Stop has a suite to run before it charges an
+    # iteration for it). The detector is NOT re-invoked here — one probe, one
+    # answer. `[ -x ]` still guards the parse so a missing detector leaves the
+    # pre-existing RUNNER=none / empty-command defaults exactly as before.
     if [ -x "$DETECT_STACK" ]; then
-        DETECT_JSON=$("$DETECT_STACK" 2>/dev/null || echo "{}")
         RUNNER=$(echo "$DETECT_JSON" | jq -r '.runner // "none"' 2>/dev/null || echo "none")
         TEST_CMD=$(echo "$DETECT_JSON" | jq -r '.test_cmd // ""' 2>/dev/null || echo "")
         LINT_CMD=$(echo "$DETECT_JSON" | jq -r '.lint_cmd // ""' 2>/dev/null || echo "")
@@ -1633,15 +1889,127 @@ else
     fi
 fi
 
+# ESCALATION READOUT (claude-workflow-plugin-2ty, QA round 1) -----------------
+#
+# THE ONE SUPPRESSION PREDICATE, AND WHY IT IS A FUNCTION.
+#
+# It shipped as three copies of one idea, and they disagreed. Two consulted
+# FAILED_CHECKS; the third — the operator-facing paragraph — was COMPOSED IN THE
+# ESCALATION-BASIS REGION, which runs BEFORE the suite, so it could not consult
+# FAILED_CHECKS even in principle: the variable is not initialised until forty
+# lines later. QA reproduced all three consequences on the shipped tree:
+#   (a) iteration 1 with a RED suite — the ordinary post-block fix round, the
+#       most common block in this workflow — printed "no technical check is
+#       failing, the J21 escalation is SUPPRESSED";
+#   (b) the cap-hit Stop printed SUPPRESSED one line above its own J21 options;
+#   (c) an ALREADY-ESCALATED task whose change set had moved printed SUPPRESSED,
+#       then the options, and the NEXT Stop auto-deferred into a release.
+# In (c) every antecedent of the sentence holds — a cycle IS open, no artifact
+# exists for this hash, nothing IS failing — so it is not a conditional that
+# happens not to fire. It is FALSE, on the exact path that releases. An agent
+# that believes it does not record the J21 choice that would stop that release,
+# which is instance 3's failure mode arriving from a new direction with the gate
+# asserting it is not happening.
+#
+# So the predicate is computed ONCE, HERE, after the suite has run and
+# FAILED_CHECKS is real, and the label transition, the J21-options predicate and
+# the paragraph all call it. Three callers, one answer, by construction.
+#
+# `${FAILED_CHECKS:-}` and `${REVIEW_IN_FLIGHT:-false}` are defensive under
+# `set -u` rather than decorative: this function is defined above at least one
+# path that could grow an earlier caller, and an unbound-variable abort here
+# emits nothing, which the hooks contract reads as NON-blocking — i.e. release.
+escalation_suppressed() {
+    [ "${REVIEW_IN_FLIGHT:-false}" = "true" ] || return 1
+    [ -z "${FAILED_CHECKS:-}" ] || return 1
+    return 0
+}
+
+# escalation_basis_claim — the parenthetical the escalation banners carry.
+#
+# It exists because "cap reached" and "basis N >= 3" became FALSE-BUT-REACHABLE
+# in this same change, and only in it: ITER used to bump on every Stop, so an
+# escalated task always carried ITER >= MAX and the claim was safe. Now ITER
+# FREEZES under the escalation contract and ROUNDS DROPS when the change set
+# moves, while the banners and j21_options_due clause 1 key on the STICKY LABEL.
+# QA measured the result: `gate ESCALATED (iteration 1 of 3; cap reached)` and
+# `ESCALATION: Iteration 1 (basis 1 >= 3)`.
+#
+# The honest number is the basis that TRIGGERED the escalation, so that basis is
+# persisted at the moment it triggers — into the escalation-posted marker, whose
+# EXISTENCE already means "we escalated" and which `wipe_iteration_state` already
+# clears with the rest of the per-cycle state. A marker written before this
+# change (or by an upgrade mid-cycle) is zero bytes and reads back as 0, so the
+# no-number phrasing is the fallback rather than a wrong number.
+#
+# Only ever rendered when the cap IS met or the label IS set (see the two
+# banners and j21_options_due), so the two branches below are exhaustive.
+escalation_basis_claim() {
+    if [ "$ESCALATION_BASIS" -ge "$MAX_ITERATIONS" ]; then
+        printf 'basis %s >= %s; cap reached' "$ESCALATION_BASIS" "$MAX_ITERATIONS"
+        return 0
+    fi
+    local trig
+    trig=$(read_iteration "$(escalation_posted_file_for "${CURRENT_TASK:-}")")
+    if [ "${trig:-0}" -gt 0 ]; then
+        printf 'escalated on an earlier Stop at basis %s; the current basis %s is BELOW the cap of %s' \
+            "$trig" "$ESCALATION_BASIS" "$MAX_ITERATIONS"
+    else
+        printf 'escalated on an earlier Stop; the current basis %s is BELOW the cap of %s' \
+            "$ESCALATION_BASIS" "$MAX_ITERATIONS"
+    fi
+}
+
+# escalation_basis_note — the basis paragraph, composed AT EMISSION TIME.
+#
+# Called from both block-reason paths after the suite has run. The suppression
+# clause is gated on the shared predicate AND on the escalation not already being
+# live: an escalated task is by definition not suppressed, whatever the current
+# basis says, and that combination is reproduction (c).
+escalation_basis_note() {
+    if [ -z "$ROUNDS" ]; then
+        printf '%s' "${ROUNDS_UNAVAILABLE_REASON:-}"
+        return 0
+    fi
+    printf 'Escalation basis: verification iterations=%s, independent review rounds against this change set=%s (change_set_hash=%s); the cap applies to the larger of the two.' \
+        "$ITER" "$ROUNDS" "$ROUNDS_HASH"
+    # The next line is a MUTATION ANCHOR, not a strippable region (deleting it
+    # would orphan the `fi` below): two L2 METAs rewrite it by substitution, one
+    # dropping each clause, because each clause answers a different reproduction —
+    # the green-suite clause kills "SUPPRESSED at iteration 1 with a red suite",
+    # the live-escalation clause kills "SUPPRESSED on an already-escalated task".
+    # Both are load-bearing. Keep the text on ONE line so the anchor stays exact.
+    if escalation_suppressed && [ "$QA_ESCALATED" != "true" ]; then
+        printf '\n%s' 'A review cycle is OPEN on this task and no REVIEW-ARTIFACT record exists for this
+change set yet, so no reviewer has disagreed with anything. While that holds and
+no technical check is failing, the J21 escalation is SUPPRESSED — it would be
+charging a review for taking time to happen (claude-workflow-plugin-2ty).'
+    fi
+}
+
 # Spec 0.2: at the moment we first reach the cap, record qa-escalated +
 # post the J21 options comment exactly once. The comment marker file
 # prevents re-posting on subsequent escalated loops (idempotent).
 mark_escalation_if_capped() {
     local tid="$1"
     [ -z "$tid" ] && return 0
-    if [ "$ITER" -lt "$MAX_ITERATIONS" ]; then
+    # 2ty: the cap applies to max(verification iterations, review rounds), never
+    # to the iteration counter alone. See the ESCALATION-BASIS region.
+    if [ "$ESCALATION_BASIS" -lt "$MAX_ITERATIONS" ]; then
         return 0
     fi
+    # REVIEW-IN-FLIGHT SUPPRESSION BEGIN (claude-workflow-plugin-2ty)
+    # A reviewer has claimed this cycle and has not yet spoken, and NOTHING is
+    # failing — so there is nothing to escalate about. The scope (see
+    # escalation_suppressed) is deliberate: a red suite is its own evidence and
+    # must still reach J21. The sentinels are load-bearing — an L2 META
+    # neutralizes this block and asserts the poll-during-review leg escalates
+    # again. Do not rename them.
+    if escalation_suppressed; then
+        log_sync_error "Escalation SUPPRESSED for $tid: basis $ESCALATION_BASIS >= $MAX_ITERATIONS but a review cycle is open with zero REVIEW-ARTIFACT records for change_set_hash=$ROUNDS_HASH and no technical check is failing — the reviewer has not spoken yet (2ty)"
+        return 0
+    fi
+    # REVIEW-IN-FLIGHT SUPPRESSION END (claude-workflow-plugin-2ty)
     if [ "$QA_ESCALATED" = "true" ]; then
         return 0  # already escalated; no relabel, no relog
     fi
@@ -1658,12 +2026,45 @@ mark_escalation_if_capped() {
         local ts options_text
         ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
         options_text=$(j21_options_block "$tid")
-        bd comments add "$tid" "QA-GATE ESCALATED at $ts (iteration $ITER >= $MAX_ITERATIONS).$options_text" >/dev/null 2>&1 \
-            || bd comment add "$tid" "QA-GATE ESCALATED at $ts (iteration $ITER >= $MAX_ITERATIONS).$options_text" >/dev/null 2>&1 \
+        # 2ty: the record NAMES ITS BASIS. "iteration 3 >= 3" was the whole
+        # problem when the 3 came from three Stop-hook passes and one review —
+        # the operator reading this comment could not tell an iterated task from
+        # a polled one, and the plan's own option (c) called that out as worth
+        # fixing on its own. basis= is what the cap compared; the two components
+        # follow so the number is auditable from the comment alone.
+        local basis_text
+        basis_text="basis $ESCALATION_BASIS >= $MAX_ITERATIONS; verification iterations=$ITER, review rounds=${ROUNDS:-unavailable}"
+        bd comments add "$tid" "QA-GATE ESCALATED at $ts ($basis_text).$options_text" >/dev/null 2>&1 \
+            || bd comment add "$tid" "QA-GATE ESCALATED at $ts ($basis_text).$options_text" >/dev/null 2>&1 \
             || log_sync_error "mark_escalation: comment add failed for $tid"
-        : > "$marker" 2>/dev/null || true
+        # The marker's CONTENT is the basis that triggered this escalation, and
+        # its EXISTENCE is still the idempotency signal (the `[ ! -f ]` above is
+        # unchanged). A later Stop reads it back so the banners can name the
+        # number that actually caused the escalation instead of asserting a
+        # false inequality about the current one — see escalation_basis_claim.
+        printf '%s\n' "$ESCALATION_BASIS" > "$marker" 2>/dev/null || true
     fi
     QA_ESCALATED=true
+}
+
+# 2ty: whether THIS Stop's block reason should carry the J21 options. Three
+# clauses, in precedence order:
+#   1. already escalated — always show them. The reason text says "record a J21
+#      choice", so withholding the commands would be incoherent, and it is how a
+#      task recovers from an escalation that pre-dates this cycle.
+#   2. suppressed (review in flight, nothing failing) — never show them. Offering
+#      a J21 decision on a basis the gate itself declined to escalate on would
+#      invite exactly the spurious `choose defer` this task exists to prevent,
+#      and defer is the option that RELEASES.
+#   3. otherwise the cap, measured on the basis rather than on ITER.
+# Mirrors mark_escalation_if_capped's predicate on purpose: the label and the
+# printed options must never disagree about whether the cap was reached.
+j21_options_due() {
+    [ "$QA_ESCALATED" = "true" ] && return 0
+    if escalation_suppressed; then
+        return 1
+    fi
+    [ "$ESCALATION_BASIS" -ge "$MAX_ITERATIONS" ]
 }
 
 # J19: iterative loop. If checks fail, surface tail + iteration count +
@@ -1678,7 +2079,11 @@ if [ -n "$FAILED_CHECKS" ]; then
         # Spec 0.2 wording: "escalated — record a J21 choice before
         # iterating further." Lead with the escalation banner; include
         # the cached failure summary so the agent still sees why.
-        REASON="Verification gate ESCALATED (iteration $ITER of $MAX_ITERATIONS; cap reached) — record a J21 choice before iterating further."
+        # 2ty QA R1-F2: the parenthetical is COMPUTED, never asserted. It used to
+        # read "iteration N of 3; cap reached" unconditionally, which this same
+        # change made reachable-and-false (ITER freezes under escalation, ROUNDS
+        # drops when the change set moves, and this banner keys on the label).
+        REASON="Verification gate ESCALATED (iteration $ITER; $(escalation_basis_claim)) — record a J21 choice before iterating further."
         if [ "$SUITE_REUSED" = "true" ]; then
             REASON="$REASON
 
@@ -1732,7 +2137,26 @@ $TYPE_FAIL_TAIL"
 The gate is idempotent: fix the issue, then this Stop hook re-evaluates
 on the next attempt. The iteration counter resets on QA approval."
 
-    if [ "$ITER" -ge "$MAX_ITERATIONS" ]; then
+    # 2ty: name the basis the cap was measured on, so the iteration number is
+    # never the only figure the reader gets.
+    #
+    # COMPOSED HERE, NOT EARLIER (QA R1-F1). The previous version built this
+    # paragraph in the ESCALATION-BASIS region and carried a comment asserting
+    # "on this path the suppression clause never applies (FAILED_CHECKS is
+    # non-empty by construction)". The clause is indeed unreachable HERE — but
+    # the STRING was not, because it had already been rendered forty lines before
+    # FAILED_CHECKS existed. QA reproduced it at iteration 1 with a red suite and
+    # again at the cap-hit. The comment was a claim nothing checked, inside the
+    # fix for claims nothing checked; calling the composer at emission time is
+    # what makes the scoping real rather than asserted.
+    BASIS_NOTE=$(escalation_basis_note)
+    if [ -n "$BASIS_NOTE" ]; then
+        REASON="$REASON
+
+$BASIS_NOTE"
+    fi
+
+    if j21_options_due; then
         REASON="$REASON
 $(j21_options_block "${CURRENT_TASK:-<TASK_ID_NEEDED>}")"
     fi
@@ -1835,8 +2259,35 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
                     REVIEW_DISCIPLINE_DETAIL="the review predicate is missing ($REVIEW_CHECK_SCRIPT), so independent review cannot be verified (error_key=review_check_unavailable)"
                     log_sync_error "Stop blocked: review-check.sh missing; review-discipline fails closed for $CURRENT_TASK"
                 else
-                    REVIEW_GATE_RC=0
-                    REVIEW_GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$CURRENT_TASK" 2>&1) || REVIEW_GATE_RC=$?
+                    # 2ty: STORE ONCE, REUSE — but only where reuse is sound.
+                    #
+                    # The escalation basis above already read this predicate for
+                    # THIS Stop (review_rounds_probe), so re-reading it is a
+                    # second `bd show --include-comments` for the same answer.
+                    # Reuse is taken when BOTH hold:
+                    #   * SUITE_REUSED — the suite did NOT run this loop, so
+                    #     nothing long-running happened between the two points
+                    #     and the stored read is still this Stop's answer. When
+                    #     the suite DID run, minutes may have passed and a
+                    #     finding recorded meanwhile MUST re-arm the gate: this
+                    #     is a RELEASE predicate, and the whole reason it runs at
+                    #     Stop as well as at approve is that findings keep
+                    #     arriving. Staleness here would silently ship one.
+                    #   * a numeric ROUNDS came back — which proves the probe's
+                    #     `--change-set-hash` form was ACCEPTED. A pre-2ty
+                    #     review-check.sh on disk (partially-synced install)
+                    #     rejects that flag with error_key=usage and rc 1;
+                    #     consuming that envelope here would block a legitimate
+                    #     release on an argument-parsing error. Falling through
+                    #     to the classic call shape keeps such an install on
+                    #     exactly today's behaviour.
+                    if [ "$REVIEW_GATE_PROBED" = "true" ] && [ "$SUITE_REUSED" = "true" ] \
+                        && [ -n "$ROUNDS" ]; then
+                        log_sync_error "Stop: review-discipline reused this Stop's stored review-gate read for $CURRENT_TASK (suite was not re-run this loop, so nothing arrived in between) — rc=$REVIEW_GATE_RC (2ty)"
+                    else
+                        REVIEW_GATE_RC=0
+                        REVIEW_GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$CURRENT_TASK" 2>&1) || REVIEW_GATE_RC=$?
+                    fi
                     if [ "$REVIEW_GATE_RC" -ne 0 ]; then
                         REVIEW_GATE_KEY=$(printf '%s' "$REVIEW_GATE_OUT" | jq -r '.error_key // ""' 2>/dev/null || echo "")
                         [ -z "$REVIEW_GATE_KEY" ] && REVIEW_GATE_KEY="review_check_unavailable"
@@ -2435,14 +2886,45 @@ No active Beads task detected. Create one (and write its id via
     # Spec 0.2: when escalated, lead with the escalation wording (the cap
     # is what we're enforcing; the suite-reuse note disambiguates from
     # the FAILED_CHECKS path which DOES surface a failure summary).
+    #
+    # 2ty: THE SUITE CLAUSE IS NOW BRANCHED ON SUITE_REUSED, because the flat
+    # version was FALSE on the cap-hit Stop and the falsehood cost real evidence.
+    # mark_escalation_if_capped runs a few lines above and sets QA_ESCALATED
+    # WITHIN this same Stop, so the very Stop that reaches the cap took this
+    # branch while SUITE_REUSED was false — it had just run the full suite — and
+    # announced "Test suite NOT re-run this loop per the escalation contract".
+    # That sentence was then read back (twice, on two different tasks) as
+    # first-hand evidence that the counter had charged for a Stop that ran
+    # nothing. The defect was real; this particular readout was not evidence of
+    # it. A gate that reports confidently on its own behaviour must be right
+    # about it, so the two cases now say what actually happened. The FAILED_CHECKS
+    # path above has always branched this way; this path simply did not.
     if [ "$QA_ESCALATED" = "true" ]; then
-        REASON="QA approval required — gate ESCALATED (iteration $ITER of $MAX_ITERATIONS; cap reached) — record a J21 choice before iterating further. Test suite NOT re-run this loop per the escalation contract (runner=$RUNNER, technical checks previously passed).
+        if [ "$SUITE_REUSED" = "true" ]; then
+            ESC_SUITE_CLAUSE="Test suite NOT re-run this loop per the escalation contract (runner=$RUNNER, technical checks previously passed)."
+        else
+            ESC_SUITE_CLAUSE="Technical checks RAN and passed this loop (runner=$RUNNER); the escalation contract skips them only on later loops."
+        fi
+        REASON="QA approval required — gate ESCALATED (iteration $ITER; $(escalation_basis_claim)) — record a J21 choice before iterating further. $ESC_SUITE_CLAUSE
 
 $CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
     else
         REASON="QA approval required (iteration $ITER, runner=$RUNNER, technical checks passed).
 
 $CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
+    fi
+
+    # 2ty: the basis readout. This is the path all three measured instances took
+    # ("technical checks passed", waiting on review), so it is the one where the
+    # operator most needs to see WHY the cap did or did not fire — and, when the
+    # escalation is suppressed, why the J21 options are absent. Composed here so
+    # the suppression clause is decided against the suite result and the live
+    # escalation state, both of which are only known at this point (QA R1-F1).
+    BASIS_NOTE=$(escalation_basis_note)
+    if [ -n "$BASIS_NOTE" ]; then
+        REASON="$REASON
+
+$BASIS_NOTE"
     fi
     # qzv: when the F1 fast path was ELIGIBLE but declined, say so here. The
     # append is deliberately OUTSIDE the F1-CHANGE-SET-BINDING regions: with those
@@ -2511,7 +2993,9 @@ Cannot complete without QA approval."
     # QA-required path too, not just the FAILED_CHECKS path. This is the
     # MORE common case (clean tech-checks waiting on QA), so without it
     # users hit iter>=3 with no escalation guidance.
-    if [ "$ITER" -ge "$MAX_ITERATIONS" ]; then
+    # 2ty: gated on the same predicate the label transition uses, so the printed
+    # options and the qa-escalated label can never disagree about the cap.
+    if j21_options_due; then
         REASON="$REASON
 $(j21_options_block "$TASK_ID")"
     fi
@@ -2636,6 +3120,8 @@ if [ -n "$CURRENT_TASK" ]; then
     rm -f "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
     rm -f "$(last_runner_file_for "$CURRENT_TASK")" 2>/dev/null || true
     rm -f "$(escalation_posted_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    # 2ty: the auto-defer counter belongs to the cycle that just closed.
+    rm -f "$(escalated_stops_file_for "$CURRENT_TASK")" 2>/dev/null || true
 fi
 
 # B2: if the epic gate had something to surface, emit it as a non-blocking
