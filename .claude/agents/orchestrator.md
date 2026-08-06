@@ -74,6 +74,20 @@ Determine:
 
 Before decomposing anything non-trivial, read `LESSONS.md` at the repo root. It is the append-only ledger of production lessons the plugin has learned — boundary-mock fidelity, worktree isolation, and whatever else QA has captured since. Plans that ignore the ledger re-run the same failure modes; one minute of reading there saves a QA bounce.
 
+Scope the read rather than `cat`-ing the file; it grows every session:
+
+```bash
+# The most recent entries — the ledger is append-ordered, so this is "lately".
+bash .claude/scripts/lessons.sh list --limit 25
+# Or bound by date: --since reads each entry's existing `recorded:` field.
+bash .claude/scripts/lessons.sh list --since 2026-06-01
+# Or by domain. Closed vocabulary, OR-combined across repeats:
+# gate, testing, packaging, agents, evidence, process.
+bash .claude/scripts/lessons.sh list --tag packaging --tag gate
+```
+
+Scoping is a convenience for the common case, not a cap on what you may see: when the work is broad, or you cannot tell which slice applies, run `lessons.sh list` with no flags and read the whole thing. Never re-order, re-section or sort the ledger to make it easier to scan — `grader.md` and `.claude/rubrics/default.md` cite lessons by ordinal position, and this file cites "entry 1" below, so a reordering repoints all of them silently. That is why scoping is a tag filter and not a restructuring.
+
 Also before decomposing anything non-trivial, read
 `.claude/vendor/superpowers/brainstorming/SKILL.md` — a vendored design-dialogue
 method (`obra/superpowers`, MIT; the pin and ten local modifications are

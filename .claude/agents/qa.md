@@ -508,11 +508,19 @@ The packet is eight items — seven mandatory, plus the advisory review artifact
 
 4. **The specialist's F7 completion contract** — the structured JSON return payload the specialist surfaced when handing the task to QA. Read it from the Beads task notes or from the orchestrator's hand-off. All seven base fields (`task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage`) must be present; missing fields are a finding the grader will record.
 
-5. **`LESSONS.md` contents**:
+5. **`LESSONS.md` contents — the WHOLE ledger, never a filtered slice**:
 
    ```bash
-   cat "$CLAUDE_PROJECT_DIR/LESSONS.md"
+   # `list` with no flags prints the file verbatim, same bytes as `cat`.
+   bash "$CLAUDE_PROJECT_DIR/.claude/scripts/lessons.sh" list
    ```
+
+   The helper also takes `--tag`, `--since` and `--limit`. **Do not pass them
+   here.** Lessons are criteria-by-reference for the grader — every recorded
+   lesson is a pass/fail check it applies to the diff — so a filter narrows
+   the CRITERIA, not the reading time, and it does so silently: the packet
+   still looks complete. The orchestrator's planning read is the one that
+   scopes (`orchestrator.md`).
 
 6. **The rubric file(s) to apply** — default plus the domain overlay matching the task label, plus the bugfix overlay when the task type is `bug`:
 
@@ -771,13 +779,23 @@ A candidate lesson is anything that would have changed how the orchestrator deco
 
 ```bash
 # Propose, don't apply. The user (or the orchestrator on the next turn)
-# decides whether to merge. Emit one bash command per candidate lesson:
-bash .claude/scripts/lessons.sh add \
-    'Mocks of unowned downstream producers must derive their shape from a fixture extracted from the producer spec, not a hand-rolled object.' \
-    --source <task-id>
+# decides whether to merge. Emit one bash command per candidate lesson.
+#
+# Use --stdin with a QUOTED heredoc, never an inline quoted string. Single
+# quotes end at the first apostrophe — that is how several shipped entries
+# lost their possessives ("the gate's own" became "the gate own") — and
+# double quotes run the backticks lessons routinely contain as command
+# substitution. A quoted heredoc is literal on both counts.
+#
+# --tag is REQUIRED and repeatable. The vocabulary is closed: gate, testing,
+# packaging, agents, evidence, process (see the LESSONS.md preamble).
+bash .claude/scripts/lessons.sh add --stdin \
+    --source <task-id> --tag testing <<'LESSON'
+Mocks of unowned downstream producers must derive their shape from a fixture extracted from the producer's spec, not a hand-rolled object.
+LESSON
 ```
 
-The helper dedup-merges by normalized text, so re-proposing a lesson the ledger already has just appends the new source — safe to over-propose.
+The helper dedup-merges by normalized text, so re-proposing a lesson the ledger already has just merges the new source and tags into that entry — safe to over-propose. The same normalization is why a damaged entry cannot be repaired by re-adding a corrected version: different text is a different lesson, so the corrected copy lands as a duplicate. Propose new lessons; leave existing prose alone.
 
 ## 10. Completion contract
 

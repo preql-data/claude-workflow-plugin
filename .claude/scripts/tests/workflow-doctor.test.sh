@@ -21,10 +21,15 @@
 #      gate baseline and calls model-select.sh apply (which REWRITES AGENT
 #      FRONTMATTER PINS). A doctor that ran those against the live tree would
 #      clear the operator's own QA approval as a side effect of a health check.
-#      Section 5 asserts the live repo is byte-identical after a run, and its
+#      Section 5 asserts this in two halves with different owners: 5b seeds the
+#      gate artifacts into a COPIED target and asserts they survive, and its
 #      META proves the preservation comes from the sandbox indirection by
 #      showing the SAME seeded state IS destroyed when session-start.sh is
-#      invoked directly.
+#      invoked directly; 5a asserts the LIVE repo's agent pins and session
+#      marker are unmoved. 5a deliberately carries only that low-volatility
+#      residue, and guards even that with a double-snapshot control
+#      (claude-workflow-plugin-1nz) — see the long note above 5a for why the
+#      gate-state half is 5b's and must not be moved back.
 #
 #   4. THE REGISTRY SIZE IS A CONTRACT TOO, not just the names (section 7).
 #      Docs, component specs, the two installers, the SessionStart degraded
@@ -58,6 +63,13 @@
 #                sentinel unchanged flags exactly that one; and restoring the
 #                Windows CI job's hardcoded vacuity floor trips the assertion
 #                that says it must stay derived.
+#   META-TEST 7  (section 5) the double-snapshot control 5a skips on is itself
+#                controlled, in both directions: an UNDISTURBED fixture must
+#                hold still across two samples (an over-sensitive control would
+#                switch 5a off permanently and silently, since a note is not a
+#                failure), a perturbed .session-start must move it, and the skip
+#                branch that then runs must print a note while moving NEITHER
+#                counter — which is what keeps the run's exit code 0.
 #
 # Exit codes: 0 all assertions pass, 1 otherwise, 2 invocation error.
 
@@ -74,7 +86,14 @@ if [ ! -f "$DOCTOR" ]; then
     printf 'workflow-doctor.test: script under test missing: %s\n' "$DOCTOR" >&2
     exit 2
 fi
-for tool in jq awk sed; do
+# `diff` is required, not optional, and it is listed here rather than guarded at
+# its call site on purpose. Section 5a's control reports "the world moved" on any
+# non-zero diff exit — which is the right direction for a real difference, but an
+# ABSENT diff would report the same thing on every run, and 5a would then skip
+# with a note forever. A note is not a failure and nothing counts it, so that
+# degradation would be permanent and invisible. Exit 2 here instead: loud, and it
+# names the missing tool.
+for tool in jq awk sed diff; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'workflow-doctor.test: %s is required\n' "$tool" >&2
         exit 2
@@ -601,26 +620,65 @@ echo "=== Section 5: NON-MUTATION — the sandbox design is load-bearing ==="
 # behaviour cannot drift apart again in either direction.
 
 # 5a: the LIVE repo. The doctor is expected to be run mid-session by a human
-# asking "is my install healthy?"; if that clears their QA approval or re-pins
-# their agents, the feature is worse than useless.
-LIVE_BEFORE="$WORK/live-before.sha"
-LIVE_AFTER="$WORK/live-after.sha"
+# asking "is my install healthy?"; if that re-pins their agents or touches the
+# session marker, the feature is worse than useless.
+#
+# SCOPE, DELIBERATELY NARROWED (claude-workflow-plugin-1nz). This snapshot used
+# to carry a second half — the five .qa-tracking gate artifacts — and that half
+# is GONE. Do not restore it. Two reasons, in order of importance:
+#
+#   IT BOUGHT NO COVERAGE. 5b BELOW OWNS THAT PROPERTY, and owns it better: it
+#   seeds approved / changed-files.txt / edit-count / current-task into a COPIED
+#   target and asserts all four survive a doctor run, and META-TEST 3 runs
+#   session-start.sh directly against an identically-seeded copy and asserts the
+#   same four are destroyed. Both directions, over input this spec controls. The
+#   live half asserted the same property over input it did NOT control, so it
+#   could only ever agree with 5b or be wrong.
+#
+#   AND IT WAS WRONG OFTEN, in the way that trains people to ignore a red suite.
+#   LESSONS.md: "a non-mutation assertion must compare a quantity that moves only
+#   when the property is violated." Every one of those five moves in normal
+#   operation, by design and often: post-edit.sh appends to changed-files.txt and
+#   increments edit-count on EVERY Write/Edit by ANY agent; qa-gate.sh writes
+#   current-task and approved on enter/block/approve and rewrites gate-baseline
+#   unconditionally on approve. So the assertion failed whenever a review cycle
+#   was in flight — which is precisely when the Stop hook runs it. Five recorded
+#   instances; the last was the Stop hook racing THE GATE'S OWN STATE MACHINE,
+#   and one cost a spurious J21 escalation on a P0 task. A test that fails under
+#   a concurrent writer teaches everyone to re-run rather than believe, which is
+#   how a real regression eventually gets waved through as flake.
+#
+#   THE ONE GENUINE COVERAGE LOSS, named rather than left to be discovered:
+#   gate-baseline, which was in the live half and is now in neither. What it
+#   could catch is a sandbox break in the narrow window where the live repo has
+#   NO active cycle — session-start.sh captures the baseline only inside
+#   `if [ -z "$SS_ACTIVE_TASK" ]`, so with a cycle in flight (the usual state,
+#   and the state during every review) it was already inert. Carrying it into 5b
+#   would be vacuous for the same reason: that fixture deliberately seeds
+#   current-task, so nothing on that path can move it. A non-vacuous assertion
+#   needs a no-active-cycle fixture, which is session-lifecycle.sh's surface and
+#   not this spec's. Traded knowingly: a conditional assertion that only bites
+#   when the repo is idle, against a spec that failed whenever it was not.
+
+# snapshot_live <out-file> [root] — the LOW-VOLATILITY live state a doctor run
+# could plausibly damage: agent frontmatter `model:` pins (model-select.sh apply
+# rewrites them) and the session marker's mtime (session-start.sh touches it).
+# <root> defaults to the live repo; META-TEST 7 passes a throwaway fixture so
+# the control below can be perturbed without ever writing to the checkout.
 snapshot_live() {
+    local out="$1" root="${2:-$PROJECT_DIR}"
     {
         # Agent frontmatter: model-select.sh apply rewrites `model:` pins.
-        for f in "$PROJECT_DIR"/.claude/agents/*.md; do
+        for f in "$root"/.claude/agents/*.md; do
             [ -f "$f" ] && printf '%s\t%s\n' "$(basename "$f")" \
                 "$(sed -n 's/^model:[[:space:]]*//p' "$f" | head -1)"
         done
-        # Transient gate state: session-start.sh removes/truncates these.
-        for f in approved changed-files.txt edit-count gate-baseline current-task; do
-            if [ -f "$PROJECT_DIR/.claude/.qa-tracking/$f" ]; then
-                printf 'qa-tracking/%s\tpresent\t%s\n' "$f" \
-                    "$(wc -c < "$PROJECT_DIR/.claude/.qa-tracking/$f" | tr -d ' ')"
-            else
-                printf 'qa-tracking/%s\tABSENT\t-\n' "$f"
-            fi
-        done
+        # NOTHING FROM .qa-tracking BELONGS HERE. 5b owns the gate artifacts,
+        # over a seeded copy; see the long note above. Adding one back makes
+        # this assertion a function of what every other agent in the session is
+        # doing (1nz), and a note-and-skip control cannot save it — those files
+        # change on every single Write/Edit anywhere in the repo.
+        #
         # The session marker: session-start.sh touches it. Record the RAW MTIME,
         # never the age: mtime changes if and only if the file is touched, which
         # is precisely the property under test, whereas age is a function of
@@ -635,35 +693,189 @@ snapshot_live() {
         # context under `set -u` is the "File: unbound variable" crash this spec
         # hit on CI. GNU `-c` on BSD fails cleanly by contrast: usage to stderr,
         # nothing on stdout, so this ordering is safe in both directions.
-        if [ -f "$PROJECT_DIR/.claude/.session-start" ]; then
+        if [ -f "$root/.claude/.session-start" ]; then
             printf 'session-start-marker\t%s\n' \
-                "$(stat -c %Y "$PROJECT_DIR/.claude/.session-start" 2>/dev/null \
-                    || stat -f %m "$PROJECT_DIR/.claude/.session-start" 2>/dev/null \
+                "$(stat -c %Y "$root/.claude/.session-start" 2>/dev/null \
+                    || stat -f %m "$root/.claude/.session-start" 2>/dev/null \
                     || echo 0)"
         else
             printf 'session-start-marker\tABSENT\n'
         fi
-    } > "$1"
+    } > "$out"
 }
-snapshot_live "$LIVE_BEFORE"
-doctor_run "$DOCTOR" "$PROJECT_DIR" "" --quiet \
-    --skip "$(all_but session_start gate_stop gate_pretooluse)"
-snapshot_live "$LIVE_AFTER"
 
-MODEL_PINS_BEFORE=$(grep -v '^session-start-marker' "$LIVE_BEFORE")
-MODEL_PINS_AFTER=$(grep -v '^session-start-marker' "$LIVE_AFTER")
-assert_eq "non-mutation: the live repo's agent model pins + gate state are byte-identical after a doctor run" \
-    "$MODEL_PINS_BEFORE" "$MODEL_PINS_AFTER"
+# control_held <root> <prefix> [perturb-cmd...] — take TWO snapshots of <root>
+# with no doctor run between them, and report whether the world held still.
+# Writes <prefix>.a, <prefix>.b and <prefix>.diff. Returns 0 when the samples
+# are identical, non-zero when they are not — and also non-zero if diff itself
+# errors, which fails toward SKIPPING rather than toward a misattributed FAIL.
+# The optional trailing command runs BETWEEN the two samples; only META-TEST 7
+# passes one, and that is what makes the moved case reachable on demand.
+control_held() {
+    local root="$1" pfx="$2"; shift 2
+    snapshot_live "$pfx.a" "$root"
+    if [ "$#" -gt 0 ]; then "$@" || true; fi
+    snapshot_live "$pfx.b" "$root"
+    diff "$pfx.a" "$pfx.b" > "$pfx.diff" 2>&1
+}
 
-MARKER_MTIME_BEFORE=$(grep '^session-start-marker' "$LIVE_BEFORE" | awk -F'\t' '{print $2}')
-MARKER_MTIME_AFTER=$(grep '^session-start-marker' "$LIVE_AFTER" | awk -F'\t' '{print $2}')
-if [ "$MARKER_MTIME_BEFORE" = "ABSENT" ] && [ "$MARKER_MTIME_AFTER" = "ABSENT" ]; then
-    PASS=$((PASS + 1))
-    printf '  PASS: non-mutation: .claude/.session-start was absent before and after (not created)\n'
+# note_live_control_moved <diff-file> — the ONE branch taken when the control
+# moved, factored into a function so META-TEST 7 executes the real thing rather
+# than a copy of it. It MOVES NEITHER COUNTER on purpose: run-tests.sh has no
+# SKIP verb — it reads a spec's exit code and nothing else — so the house idiom
+# for "this leg could not be measured" is a bare note that leaves PASS and FAIL
+# alone, the same shape META-TESTs 3, 4 and 5 use below. Consequence, stated
+# because it surprises anyone diffing two runs: this spec's total assertion
+# count is NOT a constant. It drops by three when the control fires.
+note_live_control_moved() {
+    printf '  note: 5a SKIPPED - the live repo moved underneath the CONTROL, before the\n'
+    printf '        doctor ran at all, so a before/after difference here could not be\n'
+    printf '        attributed to the doctor. That is interference, not a regression\n'
+    printf '        (claude-workflow-plugin-1nz). 5b below still proves the same\n'
+    printf '        property over a seeded copy nothing else can write to.\n'
+    printf '        What moved between the two control samples:\n'
+    sed 's/^/          /' "$1" 2>/dev/null | head -20
+}
+
+# THE CONTROL. Agent pins and the session marker are low-volatility, not
+# immovable: an implementer editing .claude/agents/*.md is instance 4 of 1nz and
+# it really happened. So sample twice with NOTHING between the samples; if the
+# world moved with no doctor running, 5a can attribute nothing and skips. Same
+# discriminating-control shape as denylist-shared section D1.
+#
+# WHAT THIS IS NOT: a lock. There is deliberately no advisory lock in
+# run-tests.sh — candidate fix (c) on the filing, ruled out there because a lock
+# cannot stop a non-test writer (an installer experiment, an implementer's Edit)
+# and the Stop hook fires on every turn regardless.
+#
+# WHAT IT DOES NOT COVER, said plainly so nobody mistakes it for one: it samples
+# a window of a few milliseconds, while the measurement window is the whole
+# doctor run. A writer that lands exactly once, inside that run, is still a false
+# FAIL. The NARROWING above is what makes 5a reliable; the control is what
+# catches a writer that is CONTINUOUSLY active, which is what an agent holding a
+# file for minutes looks like.
+LIVE_CTRL="$WORK/live-control"
+if ! control_held "$PROJECT_DIR" "$LIVE_CTRL"; then
+    note_live_control_moved "$LIVE_CTRL.diff"
 else
-    assert_eq "non-mutation: .claude/.session-start was not touched by the doctor (mtime unchanged)" \
-        "$MARKER_MTIME_BEFORE" "$MARKER_MTIME_AFTER"
+    # The control's SECOND sample IS the measurement's BEFORE. Re-snapshotting
+    # would reopen a gap between "the world was quiet" and "the measurement
+    # began"; reusing it leaves none.
+    LIVE_BEFORE="$LIVE_CTRL.b"
+    LIVE_AFTER="$WORK/live-after.sha"
+    doctor_run "$DOCTOR" "$PROJECT_DIR" "" --quiet \
+        --skip "$(all_but session_start gate_stop gate_pretooluse)"
+    snapshot_live "$LIVE_AFTER"
+
+    MODEL_PINS_BEFORE=$(grep -v '^session-start-marker' "$LIVE_BEFORE")
+    MODEL_PINS_AFTER=$(grep -v '^session-start-marker' "$LIVE_AFTER")
+    # NON-VACUITY, and it is new with the narrowing: with the gate-state half
+    # gone, an agents/ glob that matched nothing would leave both sides empty
+    # and the comparison green forever. Deliberately family-agnostic — it asks
+    # whether a pin was READ, never what the pin says, because the model
+    # families are expected to change and a spec that pins them would go red on
+    # a rename rather than on a mutation.
+    assert_eq "non-mutation: the live snapshot really captured agent model pins (non-vacuity)" \
+        "yes" \
+        "$(printf '%s\n' "$MODEL_PINS_BEFORE" | awk -F'\t' 'NF==2 && $2 != "" {n++} END {print (n>0 ? "yes" : "no")}')"
+    assert_eq "non-mutation: the live repo's agent model pins are byte-identical after a doctor run" \
+        "$MODEL_PINS_BEFORE" "$MODEL_PINS_AFTER"
+
+    MARKER_MTIME_BEFORE=$(grep '^session-start-marker' "$LIVE_BEFORE" | awk -F'\t' '{print $2}')
+    MARKER_MTIME_AFTER=$(grep '^session-start-marker' "$LIVE_AFTER" | awk -F'\t' '{print $2}')
+    if [ "$MARKER_MTIME_BEFORE" = "ABSENT" ] && [ "$MARKER_MTIME_AFTER" = "ABSENT" ]; then
+        PASS=$((PASS + 1))
+        printf '  PASS: non-mutation: .claude/.session-start was absent before and after (not created)\n'
+    else
+        assert_eq "non-mutation: .claude/.session-start was not touched by the doctor (mtime unchanged)" \
+            "$MARKER_MTIME_BEFORE" "$MARKER_MTIME_AFTER"
+    fi
 fi
+
+echo ""
+echo "--- META-TEST 7: the control 5a skips on is itself controlled ---"
+#
+# WITHOUT THIS, THE SKIP BRANCH IS CODE THAT HAS NEVER EXECUTED. The live repo
+# is quiet during almost every run, so every ordinary run takes the assert path;
+# the branch that makes interference non-fatal would ship untested, and it is
+# exactly the kind that goes wrong silently — it prints and returns, and nothing
+# counts it.
+#
+# Three legs, and the FIRST is the one that gets left out:
+#   quiet   an UNDISTURBED fixture must hold still across two samples. A control
+#           that fires on nothing would switch 5a off permanently and invisibly,
+#           because a note is not a failure.
+#   moved   a .session-start rewritten between the samples must move it.
+#   branch  the branch that then runs must print a note and move NEITHER
+#           counter. This file's tail exits 1 if and only if FAIL > 0, so
+#           "neither counter moved" IS "the run still exits 0" — and the last
+#           leg checks that premise instead of assuming it.
+#
+# The fixture is a throwaway copy under $WORK. Nothing here writes to the
+# checkout: perturbing the live .claude/.session-start to test a test would be
+# the same class of mistake this section exists to remove.
+CTRL7="$WORK/ctrl7-fixture"
+mkdir -p "$CTRL7/.claude/agents"
+cp "$PROJECT_DIR"/.claude/agents/*.md "$CTRL7/.claude/agents/" 2>/dev/null || true
+: > "$CTRL7/.claude/.session-start"
+
+CTRL7_PROBE="$WORK/ctrl7-probe.sha"
+snapshot_live "$CTRL7_PROBE" "$CTRL7"
+assert_eq "META-TEST 7: the control fixture really carries agent pins (non-vacuity)" "yes" \
+    "$(awk -F'\t' '$1 ~ /\.md$/ && $2 != "" {n++} END {print (n>0 ? "yes" : "no")}' "$CTRL7_PROBE")"
+assert_eq "META-TEST 7: ...and a session marker with a real mtime (non-vacuity)" "yes" \
+    "$(awk -F'\t' '$1 == "session-start-marker" && $2 ~ /^[0-9]+$/ {n++} END {print (n>0 ? "yes" : "no")}' "$CTRL7_PROBE")"
+
+if control_held "$CTRL7" "$WORK/ctrl7-quiet"; then
+    PASS=$((PASS + 1))
+    printf '  PASS: META-TEST 7 quiet: an undisturbed fixture holds still across two samples\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("META-TEST 7 quiet: two samples of an UNDISTURBED fixture already differ, so the control fires on nothing and 5a is silently switched off")
+    printf '  FAIL: META-TEST 7 quiet: two back-to-back samples of an UNDISTURBED fixture\n'
+    printf '        already differ, so the control cannot tell interference from its own\n'
+    printf '        noise - and a control that always fires disables 5a silently.\n'
+    sed 's/^/          /' "$WORK/ctrl7-quiet.diff" 2>/dev/null | head -10
+fi
+
+# `touch -t` with an explicit far-past stamp, never a bare `touch`: two touches
+# inside one filesystem timestamp granularity can land on the SAME mtime (HFS+
+# is 1s), and a perturbation that did not perturb would make this leg vacuous in
+# the direction that looks green.
+if control_held "$CTRL7" "$WORK/ctrl7-moved" \
+        touch -t 202001010000 "$CTRL7/.claude/.session-start"; then
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("META-TEST 7 moved: the control did NOT notice a .session-start rewritten between its two samples")
+    printf '  FAIL: META-TEST 7 moved: .session-start was rewritten between the two control\n'
+    printf '        samples and the control still reported "held" - 5a would go on to blame\n'
+    printf '        a concurrent writer on the doctor, which is claude-workflow-plugin-1nz.\n'
+else
+    PASS=$((PASS + 1))
+    printf '  PASS: META-TEST 7 moved: the control notices a .session-start perturbation between samples\n'
+fi
+
+# ...and now EXECUTE the branch 5a takes, for real - the same function, not a
+# copy of it - reading the counters either side of the call.
+M7_PASS_BEFORE=$PASS
+M7_FAIL_BEFORE=$FAIL
+M7_NOTE="$WORK/ctrl7-note.out"
+note_live_control_moved "$WORK/ctrl7-moved.diff" > "$M7_NOTE" 2>&1
+M7_PASS_AFTER=$PASS
+M7_FAIL_AFTER=$FAIL
+assert_eq "META-TEST 7 branch: the skip branch moves NEITHER counter, so a fired control cannot fail the run" \
+    "PASS=$M7_PASS_BEFORE FAIL=$M7_FAIL_BEFORE" "PASS=$M7_PASS_AFTER FAIL=$M7_FAIL_AFTER"
+assert_contains "META-TEST 7 branch: it announces the skip in the house note: idiom" \
+    "note: 5a SKIPPED" "$(cat "$M7_NOTE")"
+assert_contains "META-TEST 7 branch: ...and names WHAT moved, so the interference is diagnosable" \
+    "session-start-marker" "$(cat "$M7_NOTE")"
+# The premise the counter assertion rests on, CHECKED rather than assumed: this
+# file's tail exits non-zero if and only if FAIL is non-zero, so a branch that
+# moves neither counter cannot change the exit code. Anchored on the tail's own
+# text at column 0 — every grep needle in this spec is indented, so the pattern
+# cannot match itself and read as satisfied by its own presence.
+# shellcheck disable=SC2016
+assert_eq "META-TEST 7 branch: ...and the tail exits on FAIL alone, which is what makes 'the run still exits 0' true" \
+    "1" "$(grep -c '^if \[ "\$FAIL" -gt 0 \]; then$' "${BASH_SOURCE[0]:-$0}" | tr -d ' ')"
 
 # 5b: a SEEDED copy, so the assertion is not vacuously green just because the
 # live repo happened to have no approval on disk at test time.
