@@ -382,13 +382,35 @@ every command here.
   when a target has no `install-manifest` and no table matches its detected
   version, so without this file every unchanged 4.1 file would be classified
   against v3.5's hashes and reported as customized.
-- assert: the v4.1.0 manifest is byte-reproducible. Run
-  `bash .claude/scripts/workflow-manifest.sh generate . > /tmp/m1 && cmp /tmp/m1 manifests/v4.1.0.sha256`
+- assert: the v4.1.0 manifest is byte-reproducible **from the tree of the tag it
+  names**. Run
+  `T=$(mktemp -d) && git archive v4.1.0 | tar -x -C "$T" && bash .claude/scripts/workflow-manifest.sh generate "$T" > /tmp/m1 && cmp /tmp/m1 manifests/v4.1.0.sha256`
   and confirm `cmp` is silent with exit `0`, and
   `wc -l < manifests/v4.1.0.sha256` → `132` (119 `workflow` + 11 `operator` +
   2 `merged`; the frozen `v3.5.0.sha256` is `117`). Determinism is load-bearing: the
   generator may embed no timestamp, hostname, locale-dependent sort or
   unordered glob, and this comparison is what enforces that.
+  **Against the TAG, never against `.`.** This line used to read `generate .`,
+  which compares a LIVE WORKING TREE against a table frozen at the release
+  commit `57fb888` — red by construction, and red on a load-bearing determinism
+  assert with nothing to tell stale-table drift from a broken generator.
+  Measured 2026-08-07 at `1a3d59b`: **73 differing lines**, from 36 rows whose
+  hash moved after the freeze plus `.claude/scripts/beads-ledger.sh`, which did
+  not exist at the tag. That is expected drift. The table is correct for the
+  tree it names, and the tag is not moving
+  (`docs/plans/v5-design-phase.md`, correction-layer decision 2).
+  **Do not "fix" a red here by regenerating the table.** A `v4.1.0.sha256`
+  regenerated at HEAD no longer describes v4.1.0's tree, so an operator
+  upgrading from a real v4.1.0 install matches neither the new source nor the
+  recorded oldhash on any drifted row, lands on `preserve-custom`
+  (`workflow-manifest.sh:490-503`) and collects `.new` sidecars for files they
+  never touched — the defect class `016` closed, reintroduced from the other
+  side. Regenerate at the D7 refreeze, against the tag that release actually
+  ships. Automated as `.claude/scripts/tests/workflow-manifest.test.sh`
+  Section 6, which runs this comparison on every L1 run for whichever release
+  `.claude-plugin/plugin.json` currently names, and prints a `note:` skip rather
+  than a failure when that tag or table is not in the checkout
+  (`claude-workflow-plugin-ce5`).
 - assert: there are exactly TWO `SKILL.md` files in the plugin's own surface —
   one registered skill and one vendored reference. Run
   `find .claude -name SKILL.md -not -path '*/node_modules/*' -not -path '*/tests/e2e/*' | wc -l`

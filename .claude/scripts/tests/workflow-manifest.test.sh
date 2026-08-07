@@ -22,6 +22,15 @@
 #   dependent sort, or an unordered glob would make every comparison a coin
 #   flip. Two consecutive runs must be byte-identical.
 #
+#   TABLE FIDELITY — a frozen table under manifests/ must describe the tree of
+#   the release it is NAMED for. install.sh classifies an installed tree
+#   against it (workflow-manifest.sh:490-503), so a table that has drifted from
+#   its own release makes every verdict wrong in the safest-LOOKING direction:
+#   a file the operator never touched matches neither the new source nor the
+#   recorded oldhash, lands on preserve-custom, and gets a spurious .new
+#   sidecar. Section 6 pins this for the CURRENT release by regenerating from
+#   `git archive <tag>` rather than from the working tree.
+#
 # ASSERTION ANCHORING: every check below is anchored to TEXT (a path, a class
 # token, a verdict token, a row grammar) and never to a line number — the
 # brittleness LESSONS.md (2026-06-13) records after three re-anchorings.
@@ -35,10 +44,14 @@
 #   4. Classify decision table: all six verdicts, one assertion each.
 #   4d. The shipped-docs subset (v4.1 / U0.8): the four verdicts its
 #      asymmetric old-table membership makes reachable.
-#   5. Frozen-table format: manifests/v3.5.0.sha256 row grammar, sort order,
+#   5. Frozen-table FORMAT: manifests/v3.5.0.sha256 row grammar, sort order,
 #      v3.5 sentinels present, v4 markers absent, and the U0.8 refreeze
 #      (docs/HOOKS.md in, docs/CODEX_SETUP.md out) from both sides.
-#   6. META-TESTs: each proves a check above is capable of failing.
+#   6. Frozen-table CONTENT for the current release: the table named by
+#      .claude-plugin/plugin.json reproduces byte-for-byte from the tree of
+#      the tag it names, under the current generator. Notes a skip when the
+#      table or the tag is not in this checkout.
+#   7. META-TESTs: each proves a check above is capable of failing.
 #
 # Exit codes:
 #   0  all assertions pass
@@ -53,6 +66,22 @@ FAILED_TESTS=()
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 SCRIPT="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
 FROZEN="$PROJECT_DIR/manifests/v3.5.0.sha256"
+
+# The CURRENT release, DERIVED rather than hardcoded, so Section 6 follows the
+# version bump instead of needing an edit at every release.
+# .claude-plugin/plugin.json is the one version-carrying manifest in this repo
+# (HANDOFF.md:305-313), and after a release it keeps naming that release for the
+# whole development period that follows — which is exactly what makes it the
+# right pointer at "the frozen table that is currently shipping".
+#
+# Every lookup below is allowed to MISS, and a miss is a note, never a failure.
+# Between a version bump and the release that freezes its table there is a
+# window where plugin.json names a release that has neither a table nor a tag;
+# a check that went red for that whole window would be muted and then deleted.
+RELEASE_VERSION=$(jq -r '.version // empty' \
+    "$PROJECT_DIR/.claude-plugin/plugin.json" 2>/dev/null || echo "")
+RELEASE_TAG="v$RELEASE_VERSION"
+RELEASE_TABLE="$PROJECT_DIR/manifests/$RELEASE_TAG.sha256"
 
 TAB=$(printf '\t')
 # The row grammar the frozen tables and every generate run must satisfy:
@@ -121,6 +150,24 @@ check_table_format() {
     if grep -v "^[[:space:]]*$" "$f" | grep -qvE "$ROW_RE"; then
         return 1
     fi
+    return 0
+}
+
+# tables_match <a> <b> — 0 when the two manifest tables are byte-identical,
+# 1 when they differ, 2 when either file is missing.
+#
+# Section 6's whole claim runs through here, and so does META 4, which drives
+# BYTE-IDENTICAL logic against a deliberately mutated copy — the same reason
+# check_table_format above takes a file rather than reaching for $FROZEN.
+#
+# The missing-input arm is 2 rather than 1 on purpose, and META 4 pins it: a
+# comparator that returned "match" for a file that is not there would let
+# Section 6 pass on a checkout carrying no table at all, which is the one
+# result nobody would look at twice.
+tables_match() {
+    local a="$1" b="$2"
+    { [ -f "$a" ] && [ -f "$b" ]; } || return 2
+    cmp -s "$a" "$b" || return 1
     return 0
 }
 
@@ -641,7 +688,148 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Section 6: META-TESTs (each check above can actually fail) ==="
+echo "=== Section 6: the current release's table reproduces from its own tag ==="
+
+# WHY THIS SECTION EXISTS — claude-workflow-plugin-ce5.
+#
+# HANDOFF.md's release checklist used to assert byte-reproducibility as
+#
+#     workflow-manifest.sh generate . | cmp - manifests/v4.1.0.sha256
+#
+# — a LIVE WORKING TREE against a table frozen at the release commit. That is
+# red BY CONSTRUCTION. It goes red the moment any manifest-covered path changes
+# after the freeze, which is every development day, and it says nothing about
+# the generator when it does. Measured 2026-08-07 at 1a3d59b: 73 differing
+# lines, from 36 rows whose hash moved plus one row that did not exist at the
+# tag (.claude/scripts/beads-ledger.sh). Anyone running that checklist got a red
+# on a load-bearing determinism assert with no way to tell stale-table drift
+# from a broken generator.
+#
+# The property actually worth asserting is TREE-SCOPED: the frozen table
+# reproduces byte-for-byte from the tree of the TAG IT NAMES, under the current
+# generator. It stays green across development because a tag's tree does not
+# move, and it is the claim install.sh's classifier actually depends on.
+#
+# ON claude-workflow-plugin-1nz (live-repo assertions failing under concurrent
+# writers), stated exactly rather than as a blanket "this one is safe": the tag
+# side genuinely cannot move — it is read out of the object database, not the
+# working tree. The other two inputs, the frozen table and plugin.json, ARE
+# working-tree files and a concurrent writer could touch them. The difference
+# from 1nz is that nothing in a normal session writes either one, and a session
+# that DID write one has changed which release ships or what that release
+# contains — so a red here is the signal, not interference.
+#
+# SCOPED TO THE CURRENT RELEASE ONLY, deliberately. The same comparison for
+# v3.5.0 already runs one tier up, at .claude/tests/component/specs/
+# installer-v3-upgrade.sh section 2 ("byte-identical to the regenerated tag
+# manifest"), so a copy here would be a second maintenance point for one claim.
+# Measured 2026-08-07 for the record, since it is worth knowing and is not
+# asserted here: the v3.5.0 tree under the CURRENT generator still reproduces
+# manifests/v3.5.0.sha256 exactly, 117 rows.
+#
+# WHAT IS DELIBERATELY ABSENT: a HEAD-vs-frozen check. plugin.json carries the
+# shipping release's version for the entire development period after that
+# release, so such a check would be red every day between two releases. A check
+# that can never go green gets muted, then deleted, and takes the checks around
+# it with it.
+
+SECTION6_SKIP=""
+SECTION6_HINT=""
+if [ -z "$RELEASE_VERSION" ]; then
+    SECTION6_SKIP="could not read .version from .claude-plugin/plugin.json (jq absent, or the manifest moved)"
+elif [ ! -f "$RELEASE_TABLE" ]; then
+    SECTION6_SKIP="plugin.json declares $RELEASE_VERSION but manifests/$RELEASE_TAG.sha256 has not been frozen yet"
+elif ! git -C "$PROJECT_DIR" rev-parse -q --verify "$RELEASE_TAG^{commit}" >/dev/null 2>&1; then
+    SECTION6_SKIP="the $RELEASE_TAG tag is not reachable here (shallow clone, tagless worktree, not a git checkout at all, or that release is not tagged yet)"
+    # Only this branch is the one CI can regress into, so only this branch says
+    # so. Printing the fetch-depth hint on the table-absent branch too would
+    # send the next reader after a checkout setting that was never the cause.
+    SECTION6_HINT="the CI l1-unit job checks out with fetch-depth: 0 precisely so this tag IS present; a skip in CI means that was reverted"
+fi
+
+if [ -n "$SECTION6_SKIP" ]; then
+    # MOVES NEITHER COUNTER on purpose: run-tests.sh has no SKIP verb, it reads
+    # a spec's exit code and nothing else, so the house idiom for "this leg had
+    # no inputs to measure" is a bare note (workflow-doctor.test.sh 5a, META 3,
+    # META 4, META 5). Consequence, stated because it surprises anyone diffing
+    # two runs: the assertion total for this spec is NOT a constant — it drops
+    # by this whole section when the note fires. That is stated WITHOUT a
+    # literal count on purpose. A hardcoded one was written here first, said
+    # "seven" against a section of eight, and was caught only by running the
+    # skip path; the next assertion added below would have rotted it again.
+    printf '  note: 6 SKIPPED - %s.\n' "$SECTION6_SKIP"
+    printf '        There is nothing to compare, so this is neither a pass nor a\n'
+    printf '        failure. The comparator itself is still proven sensitive by\n'
+    printf '        META 4 below, which needs only the frozen table.\n'
+    if [ -n "$SECTION6_HINT" ]; then
+        printf '        Note also: %s.\n' "$SECTION6_HINT"
+    fi
+else
+    TAGTREE="$WORK/release-tag-tree"
+    mkdir -p "$TAGTREE"
+    # pipefail inside the subshell: without it a failing `git archive` is masked
+    # by tar exiting 0 on an empty stream, and the section would go on to
+    # compare a 132-row table against a 0-row manifest and blame the generator.
+    ARCHIVE_RC=0
+    ( set -o pipefail; git -C "$PROJECT_DIR" archive "$RELEASE_TAG" | tar -x -C "$TAGTREE" ) \
+        || ARCHIVE_RC=$?
+    assert_eq "release $RELEASE_TAG: git archive extracts the tag tree cleanly" \
+        "0" "$ARCHIVE_RC"
+    assert_eq "release $RELEASE_TAG: the extracted tree carries .claude-plugin/plugin.json" \
+        "yes" "$([ -f "$TAGTREE/.claude-plugin/plugin.json" ] && echo yes || echo no)"
+
+    REGEN="$WORK/release-tag-manifest.tsv"
+    GEN_RC=0
+    # stderr to a FILE, not /dev/null: generate dies loudly on an unreadable
+    # file or a missing hash tool, and that message is the whole diagnosis when
+    # this fails. Discarding it would leave a bare "exit 1" to explain.
+    bash "$SCRIPT" generate "$TAGTREE" > "$REGEN" 2>"$WORK/release-tag-generate.err" \
+        || GEN_RC=$?
+    if [ "$GEN_RC" -ne 0 ]; then
+        printf '  diagnostic: generate over the %s tree exited %s; stderr:\n' "$RELEASE_TAG" "$GEN_RC"
+        sed 's/^/    /' "$WORK/release-tag-generate.err" 2>/dev/null | head -10
+    fi
+    assert_eq "release $RELEASE_TAG: generate over the tag tree exits 0" "0" "$GEN_RC"
+
+    # Non-vacuity before the claim: two empty files are byte-identical, so an
+    # empty regeneration compared against an empty table would "pass" and prove
+    # nothing at all.
+    REGEN_ROWS=$(wc -l < "$REGEN" 2>/dev/null | tr -d ' ')
+    TABLE_ROWS=$(wc -l < "$RELEASE_TABLE" 2>/dev/null | tr -d ' ')
+    assert_eq "release $RELEASE_TAG: the regeneration produced rows (not an empty-vs-empty match)" \
+        "yes" "$([ "${REGEN_ROWS:-0}" -gt 0 ] && echo yes || echo no)"
+    assert_eq "release $RELEASE_TAG: regenerated row count equals the frozen table's" \
+        "$TABLE_ROWS" "$REGEN_ROWS"
+
+    # THE CLAIM.
+    REGEN_MATCH=$(tables_match "$REGEN" "$RELEASE_TABLE" && echo 0 || echo $?)
+    if [ "$REGEN_MATCH" != "0" ]; then
+        printf '  diagnostic: first differing rows (regenerated from %s vs frozen):\n' "$RELEASE_TAG"
+        diff "$REGEN" "$RELEASE_TABLE" 2>/dev/null | head -10 | sed 's/^/    /'
+    fi
+    assert_eq "release $RELEASE_TAG: manifests/$RELEASE_TAG.sha256 is byte-identical to the regenerated tag manifest" \
+        "0" "$REGEN_MATCH"
+
+    # WHICH SIDE MOVED. When the claim above fails these two say whether the
+    # table was edited after the tag or the generator changed under it, which is
+    # the first question anyone hitting that red will ask. They are not
+    # redundant: a table re-frozen against an unchanged tag to match a CHANGED
+    # generator satisfies the claim above and fails here — and that shape
+    # matters, because an operator installing from the tag and one installing
+    # from the branch would then classify against two different tables.
+    TAGCOPY="$WORK/release-table-at-tag.sha256"
+    SHOW_RC=0
+    git -C "$PROJECT_DIR" show "$RELEASE_TAG:manifests/$RELEASE_TAG.sha256" \
+        > "$TAGCOPY" 2>/dev/null || SHOW_RC=$?
+    assert_eq "release $RELEASE_TAG: the tag tree carries the table it is named for" \
+        "0" "$SHOW_RC"
+    assert_eq "release $RELEASE_TAG: and the committed copy is unedited since the tag" \
+        "0" "$(tables_match "$TAGCOPY" "$RELEASE_TABLE" && echo 0 || echo $?)"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 7: META-TESTs (each check above can actually fail) ==="
 
 # META 1 — corrupt a hash in a COPY of the frozen table. If the format check
 # cannot see a 40-char hash where 64 belongs, Section 5 is decoration.
@@ -748,6 +936,55 @@ assert_eq "META: it falls through to the workflow default instead" \
 # failure above really is about the operator branch and not collateral damage.
 assert_eq "META: the stripped copy still reports replace-stock correctly" \
     "replace-stock" "$(field_of "$STRIPPED_TSV" ".claude/agents/backend.md" 3)"
+
+# META 4 — Section 6's comparator (claude-workflow-plugin-ce5). Mutate ONE hash
+# in a COPY of the frozen release table and prove tables_match flags it.
+#
+# ONE hash, and one BYTE of it, because that is the real failure: the defect
+# this section was filed for moved exactly one row (LESSONS.md), and a
+# comparator that only noticed wholesale corruption would have called that
+# table clean. The mutant stays valid 64-lowercase-hex, so it still passes
+# check_table_format — which is the point of running both checkers: Section 5
+# CANNOT see this and Section 6 must.
+#
+# Runs whenever the table exists, INDEPENDENT of the tag, so the comparator's
+# sensitivity is proven even on a checkout where Section 6 itself skipped.
+if [ -f "$RELEASE_TABLE" ]; then
+    META_RELEASE="$WORK/release-table-onehash.sha256"
+    awk -F'\t' -v OFS='\t' '
+        NR == 1 {
+            last = substr($3, 64, 1)
+            $3 = substr($3, 1, 63) ((last == "0") ? "1" : "0")
+        }
+        { print }
+    ' "$RELEASE_TABLE" > "$META_RELEASE"
+
+    assert_eq "META: the one-hash mutant really differs from the frozen release table" \
+        "1" "$(cmp -s "$META_RELEASE" "$RELEASE_TABLE" && echo 0 || echo 1)"
+    assert_eq "META: the mutant is STILL format-valid (so only a byte comparison can catch it)" \
+        "0" "$(check_table_format "$META_RELEASE" && echo 0 || echo $?)"
+    assert_eq "META: Section 6's comparator FAILS on a table with one changed hash" \
+        "1" "$(tables_match "$META_RELEASE" "$RELEASE_TABLE" && echo 0 || echo $?)"
+    # Confinement: exactly the mutated row moved. A one-row change is an NcN
+    # hunk, so diff emits both a `<` and a `>` line for it and 2 is the whole
+    # difference — anything more means the awk edited more than it claimed.
+    META_REL_LINES=$(diff "$META_RELEASE" "$RELEASE_TABLE" 2>/dev/null | grep -c '^[<>]' | tr -d ' \n')
+    assert_eq "META: ...and the mutation is the ONLY thing that moved" "2" "$META_REL_LINES"
+
+    # Positive control: the same comparator on an unmutated copy must PASS, or
+    # the red above would be a comparator stuck at fail rather than a detection.
+    META_RELEASE_COPY="$WORK/release-table-copy.sha256"
+    cp "$RELEASE_TABLE" "$META_RELEASE_COPY"
+    assert_eq "META: ...while an UNmutated copy still matches (not stuck at fail)" \
+        "0" "$(tables_match "$META_RELEASE_COPY" "$RELEASE_TABLE" && echo 0 || echo $?)"
+    # Missing input is 2, never 0. A comparator that reported a match for a file
+    # that is not there would make Section 6 pass on a checkout with no table.
+    assert_eq "META: ...and a MISSING table reports 2, never a match" \
+        "2" "$(tables_match "$WORK/definitely-not-a-table.sha256" "$RELEASE_TABLE" && echo 0 || echo $?)"
+else
+    printf '  note: META 4 SKIPPED - manifests/%s.sha256 is not in this checkout,\n' "$RELEASE_TAG"
+    printf '        so there is no frozen table to mutate. Moves neither counter.\n'
+fi
 
 # --- Summary ---------------------------------------------------------------
 

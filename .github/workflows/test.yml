@@ -90,6 +90,16 @@ jobs:
       BD_SHIM_ONLY: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: tests/workflow-manifest.test.sh section 6
+          # regenerates the current release's frozen table from that release's
+          # TAG (git archive) and byte-compares. The default shallow
+          # single-branch checkout has no tags to archive, and that section
+          # degrades to a `note:` skip rather than a failure — so without this
+          # the guard would be silently vacuous on every CI run, which is the
+          # one outcome indistinguishable from green. Same reason l2-component
+          # below sets it (claude-workflow-plugin-ce5).
+          fetch-depth: 0
       - name: Verify dependencies
         run: |
           jq --version
