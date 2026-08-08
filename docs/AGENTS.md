@@ -74,8 +74,10 @@ bd list --status in_progress # Currently active
 
 # Create hierarchical tasks (EPICS)
 bd create "Epic: Feature Name" -t epic -p 1 --description "..."
-bd create "Backend: API" -p 1 --parent $EPIC_ID -l backend,qa-pending
-bd create "Frontend: UI" -p 1 --parent $EPIC_ID -l frontend,qa-pending
+# --no-inherit-labels: bd copies the parent's labels onto a child, so without it
+# a task under an approved parent is born carrying qa-approved (rmz).
+bd create "Backend: API" -p 1 --parent $EPIC_ID -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: UI" -p 1 --parent $EPIC_ID -l frontend,qa-pending --no-inherit-labels
 
 # Claim and track
 bd update $ID --status in_progress

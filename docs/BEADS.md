@@ -69,10 +69,18 @@ BLOCKED_COUNT=$(echo "$BLOCKED" | jq 'length')
 EPIC=$(bd create "Epic: User Auth" -t epic -p 1 \
     --description "Complete authentication system" --json | jq -r '.id')
 
-# Create children
-bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending
-bd create "QA: Auth tests" -p 1 --parent $EPIC -l qa
+# Create children.
+#
+# --no-inherit-labels IS LOAD-BEARING. bd copies the parent's labels onto every
+# child it creates, so a child filed under a parent that carries qa-approved,
+# qa-gate-entered or rubric-satisfied is BORN with them — asserting a review
+# nobody performed, transitively down the whole subtree
+# (claude-workflow-plugin-rmz). The bd-mcp tools (bd_create_task /
+# bd_create_epic) suppress it and verify the result; a bare CLI create does not,
+# so spell the flag here.
+bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending --no-inherit-labels
+bd create "QA: Auth tests" -p 1 --parent $EPIC -l qa --no-inherit-labels
 ```
 
 **Result**:
@@ -241,8 +249,9 @@ bd create "Add dark mode" -t feature -p 2 \
 # Epic
 bd create "Epic: User Auth" -t epic -p 1 --description "..."
 
-# Child of epic
-bd create "Backend: API" -p 1 --parent $EPIC -l backend,qa-pending
+# Child of epic (--no-inherit-labels: see the epic section above — without it the
+# child inherits the parent's gate labels)
+bd create "Backend: API" -p 1 --parent $EPIC -l backend,qa-pending --no-inherit-labels
 
 # Bug discovered during work
 bd create "Bug: edge case" -t bug -p 1 \

@@ -6,7 +6,7 @@ Native MCP tools for the Beads (`bd`) issue tracker. A typed shim — Beads stay
 
 | Name | Summary | Input shape | Side effects |
 |---|---|---|---|
-| `bd_create_task` | Create one task / bug / feature / chore | `{title, type, priority?, labels?, parent?, notes?}` | Inserts a row in `.beads/`; emits `created` event |
+| `bd_create_task` | Create one task / bug / feature / chore | `{title, type, priority?, labels?, parent?, inherit_labels?, notes?}` | Inserts a row in `.beads/`; emits `created` event |
 | `bd_create_epic` | Create an epic with optional sub-tasks (one call) | `{title, children?:[{title, labels?}]}` | Multi-row insert; partial state on per-child failure |
 | `bd_list_tasks` | Filtered list (status, label-AND/OR, parent, type, priority) | `{labels_all?, labels_any?, status?, parent?, type?, priority_min?, priority_max?}` | None (`readOnlyHint`) |
 | `bd_show_task` | Detail view incl. dependencies, comments, notes | `{task_id}` | None |
@@ -20,6 +20,30 @@ Native MCP tools for the Beads (`bd`) issue tracker. A typed shim — Beads stay
 | `bd_qa_enter` / `bd_qa_status` / `bd_qa_approve` / `bd_qa_block` | QA-gate lifecycle, atomic with rollback | `{task_id, summary?}` | Label transitions + comment + memory + iteration counter; wraps `qa-gate.sh` |
 
 21 tools total. Every tool exposes the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) and includes a free-form `llm_observations` field on success per the v3 plan's principle #9.
+
+### Two behaviours these tools guarantee that bare `bd` does not
+
+Both come from the same rule — *a tool must not report a result it did not
+establish* — and both are pinned by
+`.claude/scripts/tests/mcp-unestablished-results.test.sh` (L1), which proves each
+guard by mutating it and asserting the mutant reproduces the original defect.
+
+- **Labels are exactly what you pass** (`claude-workflow-plugin-rmz`). bd 1.1.2
+  `create --parent P` COPIES P's labels onto the child, transitively, so a
+  sub-task filed under an approved parent is born carrying `qa-approved` —
+  asserting a review that never happened. `bd_create_task` / `bd_create_epic`
+  pass `--no-inherit-labels` AND independently audit the labels bd echoes back,
+  stripping anything unrequested. Pass `inherit_labels: true` to opt into the
+  parent's domain labels; workflow-gate labels are never inherited either way.
+  A bare `bd create --parent` is NOT covered — spell the flag yourself.
+- **An empty comment list means empty** (`claude-workflow-plugin-fkm.1.18`). bd
+  1.1.2 stopped inlining `.comments` on a plain `bd show --json`, and reading the
+  absent field as `[]` made `bd_list_comments` answer `ok:true` with zero
+  comments on a task carrying 76. Every reader now cross-checks the returned
+  bodies against bd's own `comment_count` and REFUSES when they disagree, so
+  "this task has no comments" and "I could not read them" are always
+  distinguishable. `bd_show_task` degrades by saying so rather than failing,
+  because comments are one field of its payload rather than its whole contract.
 
 The count sentence above is machine-read: `.claude/scripts/tests/mcp-deps.test.sh` extracts the leading number from the `^<N> tools total\.` line in each server's README and cross-checks it against `DOCTOR_TOOL_COUNTS` in `.claude/scripts/workflow-doctor.sh` and the Tools column of [`docs/MCP_SERVERS.md`](../../../docs/MCP_SERVERS.md). Changing the surface means changing all four in the same commit, or the cross-check fails.
 

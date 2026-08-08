@@ -162,8 +162,13 @@ bd create "Fix: Login timeout" -t bug -p 1 -l backend,qa-pending
 
 # Complex (multiple domains) — use an epic
 EPIC=$(bd create "Epic: User Auth" -t epic -p 1 --json | jq -r '.id')
-bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending
+# --no-inherit-labels is NOT optional: bd COPIES the parent's labels onto every
+# child, so a task filed under a parent carrying qa-approved / qa-gate-entered is
+# born asserting a review that never happened (claude-workflow-plugin-rmz). The
+# bd_create_task / bd_create_epic MCP tools suppress this for you; a bare
+# `bd create --parent` does not.
+bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending --no-inherit-labels
 ```
 
 **Task right-sizing.** A task is the smallest unit that carries its own test

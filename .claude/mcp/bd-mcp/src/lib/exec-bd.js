@@ -267,6 +267,134 @@ export function normalizeShowResult(raw) {
     return raw;
 }
 
+// ---------------------------------------------------------------------------
+// COMMENT AVAILABILITY (claude-workflow-plugin-fkm.1.18)
+//
+// THE RULE THIS ENFORCES: a tool must not report a comment count it did not
+// establish. `[]` has to mean "this task genuinely has none", never "I could
+// not see them".
+//
+// WHY IT IS A SHARED HELPER AND NOT A PATCH AT ONE CALL SITE. Four readers
+// consume `.comments` off a show response — bd_list_comments, bd_doc_read,
+// bd_doc_write (named docs ARE comments, and a blind read computes
+// nextVersion=1 over an existing chain, which FORKS it rather than merely
+// hiding it) and bd_show_task's headline. Every one of them previously spelled
+// `task.comments || []`, which turns an unreadable source into a confident
+// zero. Fixing the transport at one of them is what already happened once:
+// fkm.1.1 added `--include-comments` on 2026-08-03, and on 2026-08-04 the tool
+// still answered `{"ok":true,...,"comments":[]}` on a task carrying 76, because
+// nothing CHECKED that the transport had worked.
+//
+// THE WITNESS, and why this is possible at all: bd reports `comment_count`
+// separately from the bodies, and it reports it on a PLAIN show — the exact
+// response shape that carries no bodies. So every response that can lose the
+// array still carries the number that proves the array is missing.
+//
+// MEASURED against this repo's ledger on bd 1.1.2, all 342 issues, hydrated:
+//   comment_count present on 342/342          (never absent)
+//   comment_count === comments.length 342/342 (never disagrees)
+//   `comments` KEY ABSENT on 117/342          — exactly the 117 with count 0
+//
+// That last row is why key-presence is NOT the discriminator: bd 1.1.2 omits
+// `comments` entirely on a zero-comment task even when hydrating, so
+// "key absent => unavailable" would have failed 34% of this ledger. The count
+// is the witness; the key is not.
+export const COMMENTS_VERIFIED = 'verified';
+export const COMMENTS_UNVERIFIED = 'unverified';
+export const COMMENTS_UNAVAILABLE = 'unavailable';
+
+/**
+ * Decide whether a show response's comment bodies can be trusted.
+ *
+ * @param {object|null} task  normalizeShowResult() output
+ * @returns {{status: string, comments: Array, count: number|null, reason: string|null}}
+ *
+ *   verified     the array is present and agrees with comment_count (this
+ *                INCLUDES the genuine-zero case: count 0 with no array).
+ *   unverified   bodies are present but no comment_count came back to check
+ *                them against (a bd old enough to inline the array without
+ *                publishing the count). Callers may use the bodies; they must
+ *                not claim the count is confirmed.
+ *   unavailable  the count says there are comments and the bodies did not
+ *                arrive, or nothing usable came back at all. NEVER report this
+ *                as an empty result.
+ */
+export function resolveComments(task) {
+    const arrRaw = task && task.comments;
+    const hasArray = Array.isArray(arrRaw);
+    const comments = hasArray ? arrRaw : [];
+
+    // comment_count may legitimately arrive as a JSON number; tolerate a
+    // numeric string so a future serialisation change degrades to `unverified`
+    // rather than to a wrong verdict.
+    const ccRaw = task ? task.comment_count : undefined;
+    let count = null;
+    if (typeof ccRaw === 'number' && Number.isFinite(ccRaw)) {
+        count = ccRaw;
+    } else if (typeof ccRaw === 'string' && /^\d+$/.test(ccRaw.trim())) {
+        count = parseInt(ccRaw.trim(), 10);
+    }
+
+    if (count === null) {
+        if (hasArray) {
+            return {
+                status: COMMENTS_UNVERIFIED,
+                comments,
+                count: null,
+                reason:
+                    `bd returned ${comments.length} comment body/bodies but no comment_count field, ` +
+                    `so the count could not be cross-checked against an independent witness.`,
+            };
+        }
+        return {
+            status: COMMENTS_UNAVAILABLE,
+            comments: [],
+            count: null,
+            reason:
+                "bd returned neither a comments array nor a comment_count field, so " +
+                "'this task has no comments' and 'the comments could not be read' are indistinguishable.",
+        };
+    }
+
+    if (count === comments.length) {
+        return { status: COMMENTS_VERIFIED, comments, count, reason: null };
+    }
+
+    return {
+        status: COMMENTS_UNAVAILABLE,
+        comments,
+        count,
+        reason:
+            `bd reports comment_count=${count} but returned ${hasArray ? comments.length : 'no'} ` +
+            `comment ${hasArray ? 'bodies' : 'body array'}. The bodies are missing or truncated, ` +
+            `not absent.`,
+    };
+}
+
+/**
+ * The one BdError every caller raises when resolveComments() says the bodies
+ * cannot be trusted. Centralised so the four readers cannot drift into
+ * describing the same failure four different ways.
+ *
+ * @param {string} tid        issue id, for the message
+ * @param {object} resolved   resolveComments() output
+ * @param {string} whatFor    what the caller needed the comments FOR
+ */
+export function commentsUnavailableError(tid, resolved, whatFor) {
+    return new BdError(
+        `Comments on '${tid}' could not be read — refusing to report an empty result. ${resolved.reason}`,
+        {
+            hint:
+                `This tool needs the comment bodies ${whatFor}. Reproduce with ` +
+                `\`bd show ${tid} --json --include-comments\` and compare \`.comment_count\` against ` +
+                `\`.comments | length\`. If the installed bd does not stream bodies, read them with ` +
+                `plain \`bd show ${tid}\` (the COMMENTS section) until the transport is fixed. ` +
+                `An empty array from this tool means the task genuinely has none; this error means ` +
+                `it could not be established either way.`,
+        },
+    );
+}
+
 /**
  * Build a stable "actionable error" message for the LLM. We keep this
  * compact to preserve context tokens — full stderr is included only as a

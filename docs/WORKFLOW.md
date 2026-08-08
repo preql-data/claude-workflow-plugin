@@ -197,23 +197,29 @@ EPIC=$(bd create "Epic: User Authentication" -t epic -p 1 \
 ### 3. Create Subtasks
 
 ```bash
+# --no-inherit-labels on every --parent create: bd copies the parent's labels
+# onto the child, so a subtask under a parent carrying qa-approved is born
+# claiming a review that never happened (claude-workflow-plugin-rmz). The
+# bd_create_task / bd_create_epic MCP tools do this for you; the bare CLI does
+# not.
+
 # Backend task
 BACKEND=$(bd create "Backend: Auth API endpoints" -p 1 \
-    --parent $EPIC \
+    --parent $EPIC --no-inherit-labels \
     --description "POST /auth/login, /auth/register, /auth/refresh" \
     -l backend,qa-pending --json | jq -r '.id')
 # Result: bd-abc123.1
 
 # Frontend task
 FRONTEND=$(bd create "Frontend: Login/Register UI" -p 1 \
-    --parent $EPIC \
+    --parent $EPIC --no-inherit-labels \
     --description "Login form, register form, password reset" \
     -l frontend,qa-pending --json | jq -r '.id')
 # Result: bd-abc123.2
 
 # QA task
 QA=$(bd create "QA: Test auth user journeys" -p 1 \
-    --parent $EPIC \
+    --parent $EPIC --no-inherit-labels \
     -l qa --json | jq -r '.id')
 # Result: bd-abc123.3
 ```
@@ -466,8 +472,8 @@ KEY DECISIONS: 30s timeout, 3 retries with exponential backoff"
 ```bash
 # Good - organized
 EPIC=$(bd create "Epic: Payment Integration" -t epic -p 1 --json | jq -r '.id')
-bd create "Backend: Stripe API" --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Checkout UI" --parent $EPIC -l frontend,qa-pending
+bd create "Backend: Stripe API" --parent $EPIC -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: Checkout UI" --parent $EPIC -l frontend,qa-pending --no-inherit-labels
 
 # Bad - flat
 bd create "Stripe API" -l backend,qa-pending
