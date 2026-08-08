@@ -143,24 +143,176 @@ is_tracked_change() {
     return 0
 }
 
+# DOC-CONTENT-VETO BEGIN (claude-workflow-plugin-bbh)
+#
+# IS THIS PATH AFFIRMATIVELY EXECUTABLE CONTENT?
+#
+# Two facts about the FILE, neither of them about its name or its position:
+#   - the executable bit is set on a regular file, i.e. the operating system
+#     will run it;
+#   - its first two bytes are `#!`, i.e. it names its own interpreter.
+#
+# This is the half of claude-workflow-plugin-bbh that does not merely delete a
+# bad inference. The arms that survive in is_doc_only_path still read a content
+# type off a name — `*.md`, or the exact basename `LICENSE` — so a matching name
+# is NECESSARY and must not be SUFFICIENT. A file the OS will execute is not
+# documentation whatever it is called, and that is a question about the file.
+#
+# POSITIVE EVIDENCE ONLY. This is the one deliberate asymmetry and it is load-
+# bearing in the availability direction. A path that does not resolve to a
+# regular file yields no evidence either way, and the name arms then decide
+# exactly as they did before. Three ordinary states reach that branch:
+#   * a DELETION — `git status` reports ` D docs/old-guide.md`, reviewable_
+#     changes strips the status prefix, and the path arrives here with nothing
+#     behind it. Deleting documentation is a legitimate doc-only commit, and a
+#     deleted file ships no content, so "unresolvable => reviewable" would
+#     deadlock it while buying no safety at all.
+#   * the old side of a rename.
+#   * a tracker entry spelled relative to a different cwd, or a change set
+#     belonging to another worktree.
+# So the veto only ever NARROWS the name arms. It cannot widen them, and it
+# cannot turn an absent file into a refusal.
+#
+# THE ONE THING IT TRADES: on a filesystem that reports every file executable
+# (some Windows/Cygwin-style mounts historically did), every doc-named path
+# would be vetoed and F1 would stop firing — a FALSE BLOCK, never a false
+# release. That is the survivable direction of this pair, and the log line the
+# caller writes on each veto is what makes it diagnosable rather than baffling.
+#
+# Relative paths resolve against $PROJECT_DIR, not the process cwd: this hook is
+# invoked from wherever the session happens to be, and post-edit.sh records
+# absolute paths while `git status --porcelain` yields repo-relative ones — both
+# spellings arrive here.
+#
+# `read -r -n 2` rather than `head -c 2`: no fork, and it is bounded to two
+# bytes, so a doc-named file that is really a 200MB single-line blob cannot be
+# slurped into memory. `|| true` guards the EOF return of a file shorter than
+# two bytes — bash has already assigned the partial read by then, so the
+# two-byte file containing exactly `#!` is still caught (verified against
+# /bin/bash 3.2.57, which is what these hooks run under on macOS).
+DOC_VETO_REASON=""
+doc_path_is_executable_content() {
+    local p="$1" abs first
+    DOC_VETO_REASON=""
+    [ -n "$p" ] || return 1
+    case "$p" in
+        /*) abs="$p" ;;
+        *)  abs="$PROJECT_DIR/$p" ;;
+    esac
+    # Not a regular file: absent, deleted, a directory, a device. No evidence.
+    [ -f "$abs" ] || return 1
+    if [ -x "$abs" ]; then
+        DOC_VETO_REASON="the executable bit is set"
+        return 0
+    fi
+    first=""
+    IFS= read -r -n 2 first < "$abs" 2>/dev/null || true
+    if [ "$first" = '#!' ]; then
+        DOC_VETO_REASON="the file begins with a #! shebang"
+        return 0
+    fi
+    return 1
+}
+# DOC-CONTENT-VETO END (claude-workflow-plugin-bbh)
+
 # Doc-only patterns (F1). A change matches doc-only if EVERY modified file
 # matches one of these patterns AND no other tracked code changes are
-# present. We keep this conservative: README, CHANGELOG, LICENSE, and
-# anything under docs/ counts; .json/.yaml/.toml do NOT (they often
+# present. We keep this conservative: README, CHANGELOG, LICENSE and the
+# documentation extensions count; .json/.yaml/.toml do NOT (they often
 # influence behavior).
+#
+# ---------------------------------------------------------------------------
+# NEITHER POSITION NOR A NAME GLOB MAY CONFER DOCUMENTATION STATUS
+# (claude-workflow-plugin-bbh)
+# ---------------------------------------------------------------------------
+# TWO ARMS DID, and each was a live release-authorising bypass needing no
+# privilege beyond where a file sits or what it is called:
+#
+#   */docs/*|docs/*   ANY path under ANY `docs/` directory, at any depth, in any
+#                     tree. Probed against the shipped function (extracted by
+#                     awk, sha256 0bdaee6e644689e5901d8223ce242a992846fca0c938
+#                     d2acb74eac66ac0966f9): `docs/deploy.sh`,
+#                     `docs/scripts/migrate.py`, `docs/Dockerfile`,
+#                     `docs/.github/workflows/ci.yml` and `src/docs/handler.ts`
+#                     all classified as documentation. QA reproduced the end of
+#                     it against these hooks — a change set of exactly one
+#                     EXECUTABLE `docs/deploy.sh`, zero IMPLEMENTER records,
+#                     auto-approved and recorded `QA-GATE APPROVED …
+#                     reviewed_by=none`.
+#   LICENSE.*         ANY extension after the name LICENSE. Root-only, because
+#                     that arm carried no `*/` prefix — so `src/LICENSE.sh` was
+#                     already reviewable while `LICENSE.sh` and `LICENSE.py`
+#                     were documentation. A filename alone sufficed; no `docs/`
+#                     directory was even needed.
+#
+# BOTH ARE REMOVED RATHER THAN NARROWED, and that is a measurement rather than a
+# preference. The filing's candidate — keep the `docs/` arm but require a
+# documentation extension INSIDE it — is an exclusion list, i.e. a new place for
+# the next extension to be missing, and it is also INERT: `docs/guide.md`
+# already matches `*.md` and `docs/LICENSE` already matches `*/LICENSE`, so the
+# arm's whole marginal contribution was the files that match nothing else.
+# MEASURED over a 1120-path cross product (8 directory shapes x 10 basenames x
+# 14 extensions), removing both arms moves 438 paths from doc-only to reviewable
+# and 0 paths the other way. This can only ever narrow.
+#
+# WHAT IT COSTS, because this is a behaviour change on the most-travelled fast
+# path and the cost is the point of the round rather than a footnote: a `docs/`
+# tree carrying non-prose files stops fast-pathing. `docs/img/diagram.png`,
+# `docs/fixtures/payload.json`, an extension-less `docs/Makefile` or
+# `docs/README` now need a QA round when they change alone. That is the correct
+# direction — F1's entire licence is that there is nothing to review — and
+# `docs/README` is now merely consistent with the repo-root `README`, which has
+# never had an arm here.
+#
+# NO "KNOWN-EXECUTABLE EXTENSION" ARM was added to the veto below, and the
+# reason is vacuity, not scope. Every surviving arm is either suffix-anchored on
+# a documentation extension or an EXACT extension-less basename, so "ends in
+# .sh" and "ends in .md" cannot both hold and LICENSE/CHANGELOG/NOTICE/AUTHORS
+# have no extension at all. Such a leg could not change any answer, and a guard
+# whose failure nobody can produce is presumed vacuous. Add one only alongside
+# an arm that is neither suffix-anchored nor an exact name — and with the test
+# that makes it fire.
+#
+# WHAT THIS CLASSIFIER STILL CANNOT SEE, stated because a fast path that
+# auto-approves is allowed to be narrow and is not allowed to be wrong: for
+# everything that is not affirmatively executable it still reads content type
+# off the NAME. A `.txt` that is a golden test assertion, a `.md` that is an
+# agent prompt or a rubric (this repo's own CLAUDE.md, .claude/agents/*.md and
+# .claude/rubrics/*.md are behaviour-bearing markdown), and a bare `LICENSE`
+# that is really a data file all classify as documentation. Those are facts
+# about a project's layout, not about a path or a file's first two bytes, and no
+# shape or content check recovers them. They are the residual this round does
+# NOT close.
 is_doc_only_path() {
     local p="$1"
     [ -z "$p" ] && return 1
     case "$p" in
-        *.md|*.markdown|*.mdx|*.rst|*.txt) return 0 ;;
-        */LICENSE|LICENSE|LICENSE.*) return 0 ;;
-        # .md variants of CHANGELOG are already covered by *.md above; keep
-        # the extension-less forms here so e.g. plain `CHANGELOG` still wins.
-        */CHANGELOG|CHANGELOG) return 0 ;;
-        */NOTICE|NOTICE|*/AUTHORS|AUTHORS) return 0 ;;
-        */docs/*|docs/*) return 0 ;;
+        *.md|*.markdown|*.mdx|*.rst|*.txt) ;;
+        # Extension-LESS documentation filenames only. `LICENSE.<ext>` is
+        # deliberately absent: `LICENSE.md` / `LICENSE.txt` / `LICENSE.rst`
+        # already match the extension arm above, so the glob's only reach was
+        # over extensions nobody enumerated.
+        */LICENSE|LICENSE) ;;
+        */CHANGELOG|CHANGELOG) ;;
+        */NOTICE|NOTICE|*/AUTHORS|AUTHORS) ;;
+        *) return 1 ;;
     esac
-    return 1
+    # DOC-CONTENT-VETO BEGIN (claude-workflow-plugin-bbh)
+    # A documentation NAME is necessary and no longer sufficient. See
+    # doc_path_is_executable_content above for what counts as evidence and why
+    # an unresolvable path is not evidence of anything.
+    #
+    # The sentinel comments are load-bearing: a META strips this region and
+    # asserts an executable `docs/install.txt` classifies doc-only again. The
+    # arms above end in `;;` with no `return 0`, so the stripped copy falls
+    # through to the `return 0` below — the pre-veto, name-only classifier —
+    # rather than to a syntax error. Do not rename them.
+    if doc_path_is_executable_content "$p"; then
+        log_sync_error "F1: $p carries a documentation name but is executable content ($DOC_VETO_REASON), so it is classified REVIEWABLE and the doc-only fast path does not apply to this change set (claude-workflow-plugin-bbh)"
+        return 1
+    fi
+    # DOC-CONTENT-VETO END (claude-workflow-plugin-bbh)
+    return 0
 }
 
 # G2.gate-friction (claude-workflow-plugin-llh.3): beads-state / gate-
@@ -1230,29 +1382,53 @@ if [ -n "$FASTPATH_CLASS" ]; then
         # refuse an approval that should stand.
         #
         # WHAT THAT EXEMPTION ACTUALLY LEAVES OPEN. F1 requires DOC_ONLY, i.e.
-        # EVERY path in the change set matches `is_doc_only_path` — and that
-        # classifier's last arm is `*/docs/*|docs/*`, which matches ANY path under
-        # ANY `docs/` directory REGARDLESS OF FILE TYPE. Probed against the shipped
-        # function: `docs/deploy.sh`, `docs/scripts/migrate.py`, `docs/Dockerfile`,
-        # `docs/settings.json`, `docs/.github/workflows/ci.yml` and
-        # `src/docs/handler.ts` all classify as documentation. So a QA-authored
-        # script, fixture or CI workflow DOES reach this predicate whenever it sits
-        # under a `docs/` directory. Only one placed elsewhere — a test at `tests/`,
-        # a hook at `.claude/scripts/` — makes DOC_ONLY false and takes F1 out of
-        # play.
+        # EVERY path in the change set matches `is_doc_only_path`. THE ONLY
+        # ACCURATE STATEMENT OF WHICH PATHS THOSE ARE IS THE FUNCTION — read it,
+        # it is at the top of this file and it is a short `case`;
+        # `.claude/scripts/tests/doc-only-classifier.test.sh` drives it over 1120
+        # paths if you want the answer generated rather than read.
         #
-        # THE RESIDUAL, therefore: `reviewed_by=none` over a change set its own
-        # author wrote, WHICH MAY CONTAIN EXECUTABLE CONTENT under `docs/`. Not a
-        # hypothetical — QA reproduced the end of it against these hooks: a change
-        # set of exactly one executable `docs/deploy.sh`, zero IMPLEMENTER records,
-        # auto-approved with `reviewed_by=none`.
+        # THAT INSTRUCTION REPLACES A HAND-WRITTEN COMPLEMENT, and the replacement
+        # is the point rather than a tidy-up. The sentence that used to sit here
+        # enumerated what is NOT doc-only in English ("only a file placed
+        # elsewhere — a test at `tests/`, a hook at `.claude/scripts/` — makes
+        # DOC_ONLY false"), and that sentence shipped FALSE in three consecutive
+        # rounds, each written by a round that had just corrected the previous
+        # one. Its last version was falsified by both of its own examples:
+        # `tests/spec.txt` and `.claude/scripts/hook.txt` are doc-only via the
+        # extension arm, at any location. The tell is worth carrying: the POSITIVE
+        # claim beside it had a test and stayed true every time; the complement had
+        # no test and was wrong every time. Do not write a fourth one — point at
+        # the function, or generate the list from it.
+        #
+        # WHAT bbh CHANGED, named because a reader arriving from the git history
+        # needs the old shape: two arms conferred documentation status by SHAPE
+        # rather than by content — `*/docs/*|docs/*` (any file under any `docs/`
+        # directory, any type, any depth) and `LICENSE.*` (any extension after
+        # that one name, at the root). Both are removed, and a file that is
+        # affirmatively executable — the executable bit, or a `#!` first line — is
+        # now never doc-only whatever it is called. The reproduction this passage
+        # used to disclose as LIVE — a change set of exactly one executable
+        # `docs/deploy.sh`, zero IMPLEMENTER records, auto-approved with
+        # `reviewed_by=none` — no longer classifies as doc-only, so it no longer
+        # reaches this predicate at all.
+        #
+        # THE RESIDUAL THAT REMAINS, stated positively because that is the half
+        # that keeps being true: `reviewed_by=none` over DOCUMENTATION its own
+        # author wrote. For anything not affirmatively executable the classifier
+        # still reads content type off the NAME, so a `.txt` that is a golden test
+        # assertion and a `.md` that is an agent prompt or a rubric — this repo's
+        # own CLAUDE.md and .claude/agents/*.md are behaviour-bearing markdown —
+        # classify as documentation and reach this exemption. Those are facts about
+        # a project's layout, not about a path or a file's first two bytes, and no
+        # shape or content check recovers them. bbh narrowed this residual; it did
+        # not remove it.
         #
         # WHAT STILL HOLDS, because the bound is narrower than "unbounded" and
         # overcorrecting would be the same error in the other direction: the set F1
         # classifies IS the set the approval binds, by hash. So this is an
         # unreviewed approval over its author's OWN work, never one that silently
-        # covers a DIFFERENT change set. The binding is not the weak part here; the
-        # classifier is.
+        # covers a DIFFERENT change set.
         #
         # AND THE HASH IS A HASH OF THE PATH LIST — stated because "bound by hash"
         # invites a stronger reading than the code supports, and this passage has
@@ -1265,19 +1441,16 @@ if [ -n "$FASTPATH_CLASS" ]; then
         # --expect-hash was built for (a path arriving between classification and
         # approval) and is all it can do.
         #
-        # THE CLASSIFIER IS FILED AND OPEN, NOT FIXED: claude-workflow-plugin-bbh.
-        # It is a bypass by file PLACEMENT that needs no privilege and is not
-        # specific to `qa` — every role reaches it. Read the two paragraphs above
-        # as describing the behaviour that ships TODAY, not a state pending a fix.
-        #
-        # HOW THE PREVIOUS VERSION OF THIS PASSAGE GOT IT WRONG, kept because the
-        # failure mode is the instructive part: it asserted that a script or a
-        # fixture makes DOC_ONLY false, called itself "measured", and had never
-        # probed the classifier — the `docs/` arm was read in the same session and
-        # dismissed as an edge case. A disclosure that overstates the safety it
-        # discloses is worse than no disclosure, because it is what a future
-        # maintainer reads INSTEAD of checking. That is the whole reason this
-        # paragraph exists, so it was the worst possible place for it.
+        # HOW EARLIER VERSIONS OF THIS PASSAGE GOT IT WRONG, kept because the
+        # failure mode is the instructive part and because it recurred. Round 7
+        # asserted that a script or a fixture makes DOC_ONLY false, called itself
+        # "measured", and had never probed the classifier — the `docs/` arm was
+        # read in the same session and dismissed as an edge case. Round 8's
+        # correction then claimed placement outside `docs/` was sufficient, which
+        # is false for every `.txt` in the tree. A disclosure that overstates the
+        # safety it discloses is worse than no disclosure, because it is what a
+        # future maintainer reads INSTEAD of checking. That is the whole reason
+        # this paragraph exists, so it was the worst possible place for it.
         #
         # The sentinel comments are load-bearing: an L2 META-TEST strips every
         # F1-CHANGE-SET-BINDING region and asserts the in-flight implementer's
@@ -1444,12 +1617,159 @@ Diagnose the two records this compared:
                 # it", which is the same scope --no-review has. A task whose
                 # specialist DID post a contract still gets it recorded; the
                 # flag only stops the absence from blocking.
-                "$QA_GATE" approve "$CURRENT_TASK" \
+                #
+                # qzv.3: approve's OUTPUT is captured rather than discarded, and
+                # its exit status is kept. Both are declared here, OUTSIDE the
+                # F1-APPROVE-REFUSAL region below, carrying the PRE-FIX
+                # (releasing) default — the same discipline F1_BINDING_VERDICT
+                # uses. With that region stripped this call still runs, still
+                # logs the same sync-error line, and still falls through to the
+                # cleanup and `echo "{}"`: byte-for-byte the behaviour that
+                # shipped before qzv.3, which is what makes the META measure the
+                # guard instead of dying on an unset variable.
+                #
+                # `2>&1` into the variable, not `>/dev/null 2>&1`: approve's
+                # refusals are structured JSON on STDOUT carrying error_key +
+                # observations, and a block that cannot name which refusal fired
+                # is a dead end for whoever has to fix it.
+                F1_APPROVE_RC=0
+                F1_APPROVE_OUT=""
+                F1_APPROVE_OUT=$("$QA_GATE" approve "$CURRENT_TASK" \
                     --no-review "F1 $FASTPATH_CLASS fast path: no reviewable source changed" \
                     --no-completion "F1 $FASTPATH_CLASS fast path: no specialist, no completion payload" \
                     ${F1_EXPECT_ARGS[@]+"${F1_EXPECT_ARGS[@]}"} \
-                    "$FASTPATH_REASON" >/dev/null 2>&1 \
-                    || log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK (change set classified as $FASTPATH_CLASS, hash=${F1_CLASSIFIED_HASH:-<unavailable>}); no approval was recorded"
+                    "$FASTPATH_REASON" 2>&1) || F1_APPROVE_RC=$?
+                if [ "$F1_APPROVE_RC" -ne 0 ]; then
+                    log_sync_error "qa-gate approve failed during F1 $FASTPATH_CLASS fast path for $CURRENT_TASK (change set classified as $FASTPATH_CLASS, hash=${F1_CLASSIFIED_HASH:-<unavailable>}, approve exit $F1_APPROVE_RC); no approval was recorded"
+                fi
+                # F1-APPROVE-REFUSAL BEGIN (claude-workflow-plugin-qzv.3)
+                #
+                # A REFUSED APPROVAL MUST NOT RELEASE THE STOP, AND MUST NOT
+                # DESTROY THE CHANGE SET ON THE WAY OUT.
+                #
+                # THE DEFECT, reproduced against these scripts before this was
+                # written (component fixture, shipped hooks, real qa-gate.sh;
+                # remove .claude/scripts/impact-report.sh — a partially-synced
+                # install, the degradation class vbs-qzv-4/-5 already model —
+                # then drive a doc-only Stop on an entered task):
+                #
+                #   Stop decision            : ALLOW  (bare {} — it RELEASED)
+                #   QA-GATE APPROVED records : 0      (nothing was approved)
+                #   labels                   : devops,qa-gate-entered,qa-pending
+                #   changed-files.txt        : WIPED
+                #   current-task             : survives
+                #   sync-errors.log          : "qa-gate approve failed … no
+                #                               approval was recorded"
+                #
+                # The old form was `approve … >/dev/null 2>&1 || log_sync_error`,
+                # then straight on to the `rm -f` cleanup and `echo "{}"; exit 0`.
+                # So ANY non-zero approve was logged and ignored — the gate
+                # released a change set, recorded no approval for it, and
+                # destroyed the tracker that named it. One line in
+                # sync-errors.log was the only trace, and the wipe is what made
+                # the failure self-erasing rather than merely silent.
+                #
+                # WHAT REACHES HERE, so the availability cost is stated rather
+                # than discovered. This turns a path that ALWAYS released into
+                # one that can block, on all three fast-path classes:
+                #   * impact_report_unverifiable / _missing / _invalid — a
+                #     partially-synced or half-installed tree. This is the
+                #     reproduction above, and it is exactly the shape LESSONS
+                #     already records going undetected for a whole run.
+                #   * expected_hash_mismatch — a path that arrived between F1's
+                #     classification and this approval. NOT a degraded install:
+                #     it is qzv's own refusal, and until now it was swallowed
+                #     too, so the guard qzv shipped ended in a silent release.
+                #   * exit 3 — approve rolled back a partial label write.
+                # NOT reachable: change_set_reconstructed and
+                # tracker_unreconcilable. The hook's own unconditional
+                # reconcile-tracker fail-closes above, so the in-arm `enter` is
+                # an idempotent reconcile — QA's round-8 reasoning on that point
+                # was checked and holds.
+                #
+                # THE TRACKER SURVIVES BECAUSE THE CLEANUP IS NOW SCOPED TO A
+                # SUCCESSFUL APPROVAL. emit_block exits before the `rm -f` block
+                # below, and that ordering is the fix: a block whose recovery
+                # needs the change set, delivered over a wiped change set, is
+                # unrecoverable. NOTHING IN qa-gate.sh MOVED FOR THIS — in
+                # particular the gz3 APPROVE-COMMIT ORDER (baseline before
+                # tracker, session state last) is untouched, because approve's
+                # refusals all exit BEFORE that finalization and never reach it.
+                # This states the same rule from the hook's side that
+                # claude-workflow-plugin-qzv.2 has to decide for the SUCCESS
+                # path: the F1 arm may finalize tracking state only for an
+                # approval that actually happened. qzv.2 narrows WHICH cycle's
+                # state a successful approval may finalize; this fixes that a
+                # FAILED one finalizes any.
+                #
+                # The sentinel comments are load-bearing: an L2 META strips this
+                # region and asserts the identical Stop RELEASES with zero
+                # approval records and a WIPED tracker — the live defect. Do not
+                # rename them.
+                if [ "$F1_APPROVE_RC" -ne 0 ]; then
+                    F1_APPROVE_KEY=$(printf '%s' "$F1_APPROVE_OUT" | jq -r '.error_key // empty' 2>/dev/null) || F1_APPROVE_KEY=""
+                    F1_APPROVE_OBS=$(printf '%s' "$F1_APPROVE_OUT" | jq -r '.observations // empty' 2>/dev/null) || F1_APPROVE_OBS=""
+                    if [ -z "$F1_APPROVE_OBS" ]; then
+                        # No parseable envelope. Under the pre-qzv.3 scripts this
+                        # was the NORMAL shape of the failure rather than an edge
+                        # case: `approve` died under `set -e` on an unguarded
+                        # `current_hash=$(compute_change_set_hash)` and emitted
+                        # empty stdout AND empty stderr. That is fixed in
+                        # qa-gate.sh (ERREXIT-HASH-GUARD), so this arm now covers
+                        # a genuinely unparseable answer — an older qa-gate.sh on
+                        # disk, or a crash — and says so instead of printing an
+                        # empty section.
+                        F1_APPROVE_OBS="(approve produced no parseable JSON envelope; raw output follows)
+${F1_APPROVE_OUT:-<empty — approve wrote nothing to stdout or stderr>}"
+                    fi
+                    log_sync_error "Stop BLOCKED: F1 $FASTPATH_CLASS fast path refused for $CURRENT_TASK (approve exit $F1_APPROVE_RC${F1_APPROVE_KEY:+, error_key=$F1_APPROVE_KEY}); the change-set tracker was preserved (qzv.3)"
+                    emit_block "QA gate cannot release: the $FASTPATH_CLASS fast path (F1) tried to
+auto-approve this change set and \`qa-gate.sh approve\` REFUSED.
+
+Nothing was approved. This Stop does NOT release.
+
+  task        : $CURRENT_TASK
+  class       : $FASTPATH_CLASS
+  change set  : ${F1_CLASSIFIED_HASH:-<hash unavailable>}
+  approve exit: $F1_APPROVE_RC${F1_APPROVE_KEY:+
+  error_key   : $F1_APPROVE_KEY}
+
+approve reported:
+$F1_APPROVE_OBS
+
+Why this blocks rather than releasing (claude-workflow-plugin-qzv.3): F1's
+whole claim is \"nothing reviewable changed, so this is approved without a
+review\". When the approval it drives does not happen, that claim was never
+recorded — releasing anyway would ship a change set with no approval and no
+reviewer, which is the outcome the gate exists to prevent.
+
+YOUR CHANGE SET IS INTACT. .claude/.qa-tracking/changed-files.txt is NOT
+truncated on this path, so whatever you fix below, the set is still there to
+re-approve. Confirm with:
+  wc -l .claude/.qa-tracking/changed-files.txt
+  bash .claude/scripts/impact-report.sh --hash-only
+
+Fix, in the order these actually occur:
+  1. A partially-synced install. impact_report_* means
+     .claude/scripts/impact-report.sh is missing or failing — restore it from
+     the plugin and re-run the Stop. Check the whole directory, not just that
+     one file; a tree that lost one script has usually lost more.
+  2. A change set that moved. expected_hash_mismatch means a file arrived
+     between the moment F1 classified this set and the moment approve went to
+     bind it, so the doc-only verdict does not cover what would ship. Re-derive
+     and look at what appeared:
+       bash .claude/scripts/impact-report.sh --hash-only
+       cat .claude/.qa-tracking/changed-files.txt
+     If the newcomer is reviewable source, this needs a real QA round.
+  3. Anything else: run the same approval by hand and read the full envelope —
+       bash .claude/scripts/qa-gate.sh approve $CURRENT_TASK \\
+         --no-review 'F1 $FASTPATH_CLASS fast path: no reviewable source changed' \\
+         --no-completion 'F1 $FASTPATH_CLASS fast path: no specialist, no completion payload' \\
+         'manual re-run of the F1 approval'
+
+The full history is in .claude/.qa-tracking/sync-errors.log."
+                fi
+                # F1-APPROVE-REFUSAL END (claude-workflow-plugin-qzv.3)
                 #
                 # THE TASK IS NOT CLOSED HERE (qzv). This used to run
                 # `bd update <tid> --status closed`, and it was the second of the

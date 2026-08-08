@@ -867,11 +867,17 @@ task you are about to approve is a block, not a note. And the check is yours to
 run on your own work too: the in-flight guard reads `IMPLEMENTER` records, which
 the `qa` role deliberately does not write, so a doc-only change set you authored
 during a review can still be auto-approved with `reviewed_by=none`. Read
-"doc-only" literally rather than as "documentation" — `is_doc_only_path` matches
-anything under any `docs/` directory regardless of file type, so a script,
-fixture or CI workflow you place there is doc-only too (the exemption, that
-bound, and `claude-workflow-plugin-bbh` are all set out in the
-`F1-CHANGE-SET-BINDING` region header).
+"doc-only" as whatever `is_doc_only_path` says and nothing else — do not
+paraphrase it here or anywhere; the paraphrase in this paragraph was wrong for
+three consecutive rounds. Since `claude-workflow-plugin-bbh` it no longer treats
+a file's *position* (anything under `docs/`) or a name glob (`LICENSE.*`) as
+documentation, and it never classifies a file with the executable bit set or a
+`#!` first line as doc-only. What still reaches the exemption is documentation
+by NAME — including a `.txt` that is really a golden test assertion and a `.md`
+that is really an agent prompt or a rubric. If you authored one of those during
+a review, that is the case to watch for. The exemption, its bound and the
+residual are set out in the `F1-CHANGE-SET-BINDING` region header of
+`verify-before-stop.sh`.
 
 ### Record the contract — AFTER the gate call, not before
 

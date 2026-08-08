@@ -407,8 +407,8 @@ The Stop hook enforces QA approval:
 
 ### What Allows Completion
 
-Exactly two paths (`verify-before-stop.sh:982-992` and the F1 fast path at
-`:616-691`):
+Exactly two paths (the `GATE_STATUS=` read in `verify-before-stop.sh`, and the
+F1 fast path — the block guarded by `FASTPATH_CLASS`):
 
 - The task has the **`qa-approved` label** (the single source of truth, set
   by `qa-gate.sh approve`), OR
@@ -418,7 +418,7 @@ Exactly two paths (`verify-before-stop.sh:982-992` and the F1 fast path at
   which auto-approves with an audited comment).
 
 There is **no** "comment containing QA APPROVED" path. The comment-text
-fallback was deleted (`verify-before-stop.sh:20-22`); a comment whose body
+fallback was deleted (the `B13` line in `verify-before-stop.sh`'s header); a comment whose body
 says "QA APPROVED" does not release the gate. Likewise there is no marker
 file: `.qa-tracking/approved` is never read.
 
@@ -426,10 +426,12 @@ file: `.qa-tracking/approved` is never read.
 
 A `Ctrl+C` interrupt does end the turn: when the Stop hook fires with
 `stop_reason=user_interrupt` it emits `{}` and exits 0 immediately, before
-running any check or writing any artifact (`verify-before-stop.sh:543-545`).
+running any check or writing any artifact (the
+`[[ "$STOP_REASON" == "user_interrupt" ]]` arm in `verify-before-stop.sh`).
 This pass-through is deliberate — it is the same anti-loop guard that lets
-the hook bail out on `stop_hook_active` (`:538-540`, AgentLint H3) so the
-gate can never trap the user in a forced continuation. It is **not** tracked
+the hook bail out on `stop_hook_active` (the circuit breaker immediately
+above that arm, AgentLint H3) so the gate can never trap the user in a
+forced continuation. It is **not** tracked
 or recorded anywhere: the interrupt leaves no Beads label, no comment, and
 no `sync-errors.log` entry. The task simply stays at whatever gate state it
 held, so the next non-interrupted Stop re-evaluates it normally.

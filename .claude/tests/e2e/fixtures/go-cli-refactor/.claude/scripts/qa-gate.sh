@@ -3022,7 +3022,44 @@ cmd_approve() {
                 "qa-gate.sh approve <task-id> [--no-impact-report '<reason>'] <summary>"
             exit 2
         fi
-        current_hash=$(compute_change_set_hash)
+        # ERREXIT-HASH-GUARD (claude-workflow-plugin-qzv.3). `|| current_hash=""`
+        # is not defensive noise: without it this refusal is DEAD CODE.
+        #
+        # compute_change_set_hash returns 1 on exactly one condition —
+        # IMPACT_REPORT_SCRIPT missing — and this file runs under `set -e`, so a
+        # BARE assignment from it aborts the whole script three lines above the
+        # refusal that exists for that condition. Measured against the shipped
+        # script before the fix (component fixture, real bd, impact-report.sh
+        # removed after `enter` had written the artifact):
+        #
+        #   ARM A  shipped, `set -e`   -> rc=1, stdout EMPTY, stderr EMPTY
+        #   ARM B  same call, `set +e` -> rc=2, error_key=impact_report_unverifiable
+        #
+        # and `bash -x` on ARM A ends at `+ current_hash=`. The two-arm control
+        # is what makes that a fact about this line rather than a reading of
+        # errexit semantics. rc=1 is `return 1` propagating through errexit.
+        #
+        # WHY IT MATTERED MORE THAN A MUTE REFUSAL: verify-before-stop.sh's F1
+        # fast path called this and discarded both streams, so an empty-output
+        # exit 1 was indistinguishable from any other failure — it logged one
+        # sync-error line, wiped the tracker and RELEASED the Stop with zero
+        # approval records. The pair is one failure path and landed as one change
+        # set; see the F1-APPROVE-REFUSAL region in verify-before-stop.sh.
+        #
+        # The same slip was in the second call site below (`approved_hash`), on
+        # the --no-impact-report bypass path, and is fixed there with the same
+        # note. Those were the only two unguarded assignments in this file: the
+        # three others (IDEM_REF_HASH, cmd_enter's current_hash, live_hash) were
+        # already written `|| var=""`, which is what makes this a slip rather
+        # than a design choice.
+        #
+        # The negative control does NOT strip a sentinel region — deleting the
+        # assignment would leave `current_hash` unset and the refusal firing
+        # spuriously, which is not the pre-fix behaviour. It removes the
+        # ` || current_hash=""` SUFFIX, restoring the pre-fix text exactly, and
+        # asserts approve then exits 1 with empty stdout and empty stderr.
+        # Anchored on that text; do not reflow this line.
+        current_hash=$(compute_change_set_hash) || current_hash=""
         if [ -z "$current_hash" ]; then
             emit_error_json "approve" "$tid" "impact_report_unverifiable" \
                 "approve refused: cannot recompute the current change-set hash ($IMPACT_REPORT_SCRIPT missing or failing), so the report's freshness is unverifiable. Restore the script, or bypass: bash .claude/scripts/qa-gate.sh approve $tid --no-impact-report '<reason>' '<summary>'" \
@@ -3050,8 +3087,26 @@ cmd_approve() {
     # path. compute_change_set_hash prints empty on failure; an empty hash
     # degrades to the legacy unbound comment (logged) rather than aborting
     # the approval (labels remain the lifecycle source of truth).
+    #
+    # ERREXIT-HASH-GUARD (claude-workflow-plugin-qzv.3). The `|| approved_hash=""`
+    # is what makes the sentence directly above TRUE; without it the paragraph
+    # described behaviour this line did not have. This is the SECOND unguarded
+    # assignment the qzv.3 round found, and the one reachable through the
+    # documented `--no-impact-report` bypass — the refusal block above is skipped
+    # there, so this is the first compute_change_set_hash on that path and, under
+    # `set -e`, a missing impact-report.sh aborted the script here. Measured
+    # against the shipped script: `approve <tid> --no-impact-report '<reason>'
+    # --no-review '<reason>' --no-completion '<reason>' '<summary>'` with the
+    # script absent gave rc=1, EMPTY stdout, EMPTY stderr, 0 approval records and
+    # no label written, and `bash -x` ended at `+ approved_hash=`. So the audited
+    # bypass — the exit an operator is TOLD to take when the mechanical artifact
+    # is unavailable — was itself unusable in the one situation that produces it.
+    #
+    # Negative control, as for the first site: remove the ` || approved_hash=""`
+    # SUFFIX and assert the bypassed approve exits 1 with empty output. Anchored
+    # on that text; do not reflow this line.
     local approved_hash
-    approved_hash=$(compute_change_set_hash)
+    approved_hash=$(compute_change_set_hash) || approved_hash=""
     if [ -z "$approved_hash" ]; then
         log_sync_error "approve: could not compute change_set_hash for $tid (impact-report.sh missing/failing); writing approval comment WITHOUT a change-set binding — verify-before-stop will not be able to match it (re-run approve once impact-report.sh is restored)"
     fi
