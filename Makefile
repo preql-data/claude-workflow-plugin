@@ -173,7 +173,63 @@ manifest-validate:
 # manifest-validate as part of test-all (which has older semantics) —
 # it gets its own line here so a manifest-only regression surfaces
 # distinctly.
-test-ci: test test-component test-e2e-unit manifest-validate
+#
+# claude-workflow-plugin-fkm.1.11 — TWO changes, both deliberate:
+#
+# 1. IT RECORDS ITS OWN RESULT. The Stop gate runs the detected runner's
+#    DEFAULT target, which on this repo is `make test` (L1) plus `make lint`.
+#    It does not run this target and has no way to discover it, so it used to
+#    print "technical checks passed" over a tree with four L2 specs red. The
+#    gate now reads .claude/.qa-tracking/verification-ledger and reports what
+#    was last recorded, against the tree it was measured at.
+#
+#    THE RECORDING COMMAND IS THIS RECIPE, NOT AN AGENT. That is the whole
+#    reason it can be trusted at all: nobody types the exit code. It calls the
+#    ONE definition of the tree fingerprint (verify-before-stop.sh
+#    record-verification) rather than recomputing it here, so the writer and
+#    the reader cannot drift — a second copy of that hash is exactly the
+#    duplicate canonicalisation llh.18 exists to forbid.
+#
+# 2. IT NO LONGER FAILS FAST. The tiers were prerequisites, so make aborted at
+#    the first red one — which meant a FAILING run recorded nothing and the
+#    ledger would still be showing the last GREEN result. A staleness signal
+#    that silently keeps a stale green is the defect this task is about, at one
+#    remove. Running all four and returning the worst rc also matches CI, which
+#    runs them as independent jobs.
+#
+# `|| true` on the record call: this is instrumentation. It must never be the
+# reason a test run reports failure.
+#
+# THE DRY-RUN GUARD IS LOAD-BEARING, and it is here because it bit on the first
+# try. `make -n` does NOT skip a recipe line that contains `$(MAKE)` — it runs
+# it, so the whole line above executes under -n, the sub-makes print instead of
+# running, rc stays 0, and the record call wrote `make test-ci exited 0` over a
+# suite that had not run. A dry run minting a green record is the exact defect
+# this feature exists to report on, so it is refused: under -n / -q / -t,
+# MAKEFLAGS' first word carries the single-letter flags (measured: `n` for
+# `make -n`, empty for `make --no-print-directory`), and we skip the write.
+# Matching only the FIRST WORD is what keeps a long option that happens to
+# contain the letter n from silently disabling the record on a real run.
+# Regression: .claude/scripts/tests/gate-claim-honesty.test.sh section 5 drives
+# both a real and a dry run of a Makefile carrying this exact guard — extracted
+# from THIS file, never re-typed, so the probe cannot pass over a guard the repo
+# does not ship. (It read "section 4" until fkm.1.11 QA round 2; section 4 is
+# the tree fingerprint and invokes no make at all. A control attribution naming
+# the wrong control is the same defect class as the claim below it.)
+test-ci:
+	@rc=0 ; \
+	mf_first="$${MAKEFLAGS%% *}" ; dry=0 ; \
+	case "$$mf_first" in *n*|*q*|*t*) dry=1 ;; esac ; \
+	$(MAKE) --no-print-directory test || rc=$$? ; \
+	$(MAKE) --no-print-directory test-component || rc=$$? ; \
+	$(MAKE) --no-print-directory test-e2e-unit || rc=$$? ; \
+	$(MAKE) --no-print-directory manifest-validate || rc=$$? ; \
+	if [ "$$dry" = "1" ]; then \
+		echo "test-ci: dry/question/touch run (MAKEFLAGS='$$MAKEFLAGS') — NOT recording a verification result" ; \
+	else \
+		bash .claude/scripts/verify-before-stop.sh record-verification "make test-ci" "$$rc" || true ; \
+	fi ; \
+	exit $$rc
 
 # Diff the most recent replay against its committed golden. The FIXTURE
 # variable scopes the search; default is whatever has the freshest

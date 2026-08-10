@@ -328,6 +328,22 @@ and naming conventions. The CI summary surfaces META-TEST pass/fail
 counts as a distinct line so regression-injection sensitivity stays
 visible.
 
+**This is a closeout requirement, not a preference.** A new check does not
+ship without its negative control, and the four-part standard a pair must
+meet — non-vacuity, specific misbehaviour, restore control, and **execution
+of the shipped artifact** — is defined once, in `.claude/tests/README.md`
+§ "The pairing requirement". Read it before adding a check. The short
+version of the part people skip: **at least one leg must observe the shipped
+artifact running.** A three-leg triad over markdown byte-equality is a triad
+over markdown, and in the measured population not one document check reached
+that leg while not one executable check failed it. If the thing you are
+checking is prose, either drive the executable whose behaviour it describes
+or declare the check UNPAIRED and say what the control is instead — an
+honest UNPAIRED row beats a byte-comparison dressed as a pair.
+
+At closeout, every check the change added is either paired or listed as
+UNPAIRED with its reason.
+
 ### Smoke tests (still manual)
 
 1. Run `bash install.sh /tmp/test-project-$(date +%s)` against a fresh
@@ -417,6 +433,102 @@ contribution, follow the labels convention from `CLAUDE.md`:
 Use `bd ready` to see what's available, `bd blocked` to see what's stuck,
 and the structured-notes format (`COMPLETED: ... | IN PROGRESS: ... |
 KEY DECISIONS: ...`) for everything you write to a task.
+
+### A finding discovered after a task closes opens a NEW task
+
+**Never a comment on a closed one.** The reason is mechanical, not stylistic:
+a comment on a closed task never surfaces in a ready-work query. `bd ready`
+and `bd list` exclude closed issues by default, so the finding is filed
+somewhere real, is visible to whoever wrote it, and is invisible to everyone
+who goes looking for work. It is the shape of an artifact that exists and
+does not function — which is the same defect class as a check that passes
+without verifying anything.
+
+So:
+
+```bash
+# WRONG — the finding is now unreachable from any work query
+bd comments add <closed-id> 'found afterwards: X is broken'
+
+# RIGHT — a new task, linked back to where it was found
+bd create 'X is broken (found after <closed-id> closed)' -t bug -p 1 -l <domain>
+bd dep add <new-id> <closed-id> --type discovered-from
+```
+
+Link it with `discovered-from` so the provenance survives, then put the
+evidence in the NEW task's description — not in a comment on the closed one,
+where the same invisibility applies to the evidence.
+
+This applies to review findings, post-merge regressions, and anything an
+audit turns up about already-closed work. Reopening the closed task is the
+other legitimate option when the original work was simply not finished; the
+one thing that is never right is leaving the finding as a comment nobody's
+queries will return.
+
+### Every number carries the command that produced it and the commit it was measured at
+
+Any number appearing in a `docs/RELEASE_AUDIT.md` row, a `CHANGELOG.md`
+entry, a `HANDOFF.md` verification block, a task closure or a review artifact
+must carry **(a) the command that produced it** and **(b) the commit it was
+measured at**. A reader must be able to re-run it and compare.
+
+The point is **falsifiability**. A number a reader cannot reproduce is an
+assertion, not a measurement — and the failure mode is not that the number is
+wrong, it is that nothing can tell you whether it is. Every one of the
+recorded errors that produced this rule was a *proxy reported as a
+measurement*:
+
+- A sentinel-guard count quoted as 22, then 24, then re-derived as three more
+  values depending on the grep anchor, with a census reporting a further one.
+  **Five or more counts of "the same" quantity, and not one of them stated its
+  method** — so no two were comparable and none was checkable. Each was
+  probably correct for its own anchor; that is exactly why the anchor has to
+  be written down. (The figures in that filing are reproduced here as an
+  account of the incident, not as measurements: re-deriving them is impossible
+  precisely because no command was recorded.)
+- A tier reported green while citing the log of the RED pre-sync run; the
+  green run was a different file, identified afterwards by mtime.
+- A restore hash passed into a review brief unverified, matching neither the
+  current tree nor HEAD.
+- Two grep outputs labelled "empty above = good" over output that was not
+  empty.
+- A completeness line read off a per-spec summary block rather than the run's
+  final line.
+
+It is also not only a human failure, and the good case is instructive: a
+reviewer re-measured a ledger count and got a different answer from the one
+quoted — correctly, because the ledger had moved between the two
+measurements — and *noticed*, because both sides could be re-run. (Those two
+figures are likewise an account of the incident, not measurements published
+here.) **An absolute count against a live artifact goes stale the moment it
+is written**, so the commit is not decoration; it is what turns a
+disagreement into a reproducible one.
+
+Practical form — the command and the commit, inline:
+
+```markdown
+L1: 34 specs / 34 passed / 0 failed
+  (`make test`, read off the run's FINAL `=== Summary ===` line, at 1233ea5)
+
+Sentinel-wrapped guard regions: 20
+  (`for f in $(git ls-tree -r --name-only 1233ea5 -- .claude/scripts |
+     grep '\.sh$'); do git show "1233ea5:$f"; done | grep -c '^# .* BEGIN'`
+   — line-initial `# <NAME> BEGIN` only, over .claude/scripts RECURSIVELY,
+   which includes .claude/scripts/tests/. At 1233ea5.)
+```
+
+The second example is real, and it is worth reading twice: the flat glob
+`.claude/scripts/*.sh` and the recursive walk above are **different
+populations**, and they return different numbers for a quantity that sounds
+singular. Writing the command down is what makes that visible instead of
+making it an argument.
+
+**What this is not.** It is not a demand that every number be re-measured on
+every read — a stated method plus a commit is enough, because it makes the
+number checkable. And it is **not a licence to bury numbers in prose to avoid
+the requirement**: writing "the suite is comprehensive" instead of a count
+does not satisfy this rule, it evades it, and an adjective was never
+falsifiable in the first place.
 
 ## Multi-repo workflows (I8)
 

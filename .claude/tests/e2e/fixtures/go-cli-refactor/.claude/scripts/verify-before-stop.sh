@@ -143,6 +143,879 @@ is_tracked_change() {
     return 0
 }
 
+# VERIFICATION-LEDGER BEGIN (claude-workflow-plugin-fkm.1.11)
+#
+# WHAT THIS GATE ACTUALLY RUNS, AND WHAT IT CANNOT KNOW.
+#
+# The Stop hook resolves ONE runner via detect-stack.sh and executes that
+# runner's DEFAULT test/lint/type targets. On this repo that is `make test`
+# (Makefile:40 -> run-tests.sh, the L1 tier) plus `make lint`. It is NOT
+# `make test-ci`, which is the target that chains L1 + L2 + L3-unit +
+# manifest-validate. The gate has no way to discover that a project defines a
+# wider tier, and running a ten-minute suite on every Stop is not the fix.
+#
+# So the gate says what it ran, and it reads a LEDGER for anything wider.
+#
+# THE LEDGER IS A SELF-REPORT, AND THE READOUT SAYS ONLY THAT. `make test-ci`
+# does record its own exit status, but that is a fact about that ONE recipe,
+# not about the ledger: `record_verification` takes the label and the exit code
+# as ARGUMENTS and writes them verbatim, the line has five fields and none of
+# them names a writer, and the manual recipe is offered to operators on purpose
+# (four tiers run as four commands have no other way in). NOTHING here
+# distinguishes a record `make` wrote from one a person typed.
+#
+# The readout claimed otherwise until R1-F1 — "the command recorded its own
+# result" — a provenance the mechanism does not establish, shipped inside the
+# fix for claims wider than their mechanism, and false of the only real record
+# this repo's ledger held. Deleted rather than qualified. What is left is true:
+# this gate did not run it, does not vouch for it, and here are the command,
+# the exit code and the tree it was measured at, so a reader can re-run it and
+# compare. Reporting confidently on unverified evidence is the v4.1 closure
+# meta-finding; saying plainly what is NOT verified is what keeps this on the
+# right side of it. A sixth field naming the writer would let the readout state
+# provenance instead of assuming it — not shipped, so the absence is stated.
+#
+# THE FINGERPRINT IS CONTENT-SENSITIVE, DELIBERATELY. It is NOT built from
+# `git status --porcelain`: porcelain reports the same ` M path` line however
+# many times that file is rewritten, so a porcelain-derived staleness signal
+# would carry the exact blind spot this task exists to correct (it is also the
+# reason change_set_hash — a hash over the sorted PATH LIST — cannot answer
+# this question; see the LABEL_WITHOUT_RECORD block reason below). Three
+# inputs:
+#   HEAD                              which commit, or the literal `no-head`
+#                                     when nothing is committed yet
+#   `git diff <base>`                 every tracked modification, by content —
+#                                     run `--no-ext-diff --no-textconv`, which
+#                                     keeps textconv and external-diff drivers
+#                                     out of it; a clean/eol filter is repository
+#                                     configuration those flags do NOT reach, and
+#                                     that residual is a KNOWN LIMITS bullet
+#                                     below. <base> is the resolved HEAD, or
+#                                     the EMPTY TREE when HEAD is unborn
+#   `git hash-object` over untracked  every untracked file GIT COULD READ, by
+#                                     content — the WORKTREE's bytes, hashed
+#                                     `--no-filters`, not what a clean/eol/
+#                                     encoding rule would make of them — plus
+#                                     their sorted names; a path it could NOT
+#                                     read contributes its name and the fact of
+#                                     its unreadability
+#
+# AND — THE PART THAT IS ONE INVARIANT RATHER THAN A LIST OF GUARDS —
+# tree_fingerprint RETURNS A FINGERPRINT ONLY IF every hash it handled came back
+# with a HASH'S SHAPE (64 hex characters for a digest, 16 for the value it
+# returns) and every producer it invoked exited 0 — with EXACTLY TWO NAMED
+# EXCEPTIONS, both of which turn the failure into content rather than swallowing
+# it:
+#
+#   * `rev-parse HEAD` on an unborn HEAD, captured as the `no-head` literal.
+#     Input 2 then diffs the EMPTY TREE, so the configuration is still measured.
+#   * the batch `git hash-object --stdin-paths` over the untracked set, which is
+#     retried ONE PATH AT A TIME, each unreadable path captured as an
+#     `UNREADABLE <path>` line.
+#
+# Both exceptions are stated HERE rather than only in KNOWN LIMITS, because the
+# absolute version of this sentence was false in the round that wrote it: this is
+# the one sentence a maintainer is told to trust, and it had two unnamed
+# exceptions. Nothing else is returned as a fingerprint. There is exactly ONE
+# refusal in the function, every other input converges on it, and it emits the
+# literal `no-hash`, which the readout routes to CANNOT BE DETERMINED.
+# `_vl_is_hash` is the whole rule.
+#
+# AND THE INVARIANT IS NECESSARY WITHOUT BEING SUFFICIENT, which is the design
+# result of the round that added the flags above. Refusing on a FAILED producer
+# or a MALFORMED hash cannot reach an input that degrades to a constant while its
+# producer SUCCEEDS and its hash is WELL-FORMED — a lossy-but-working textconv
+# driver does exactly that, and so does a lossy-but-working clean filter. There
+# is nothing wrong for a guard to detect there, so that class is cured by
+# stopping the degradation wherever a switch exists — the diff flags for
+# textconv and external drivers, `--no-filters` for everything the attributes
+# machinery would otherwise do to input 3 — and STATED where none does: `git
+# diff` has no filter bypass of its own, so input 2's half of the filter family
+# is a KNOWN LIMITS bullet rather than a guard. A fifth guard would not have
+# found any of them.
+#
+# WHY AN INVARIANT, AND NOT THE ENUMERATION THAT STOOD HERE. This block has
+# asserted something FALSE about the very degradations it enumerates in every
+# version of itself so far, and each false assertion was written in the round
+# that was correcting the previous one:
+#
+#   v1 said NO COMMITS degrades to "cannot tell". It did not; it worked.
+#   v2 said the three inputs are "all content-bearing" and glossed input 2 as
+#      "every tracked modification, by content". A `git diff HEAD` that FAILS
+#      writes nothing, `|| true` swallowed the exit status, and input 2 became
+#      the constant sha256 of the empty string — so the fingerprint went blind
+#      to every tracked modification while the readout said the tree was
+#      UNCHANGED across an end-to-end rewrite. Measured on a FULLY NORMAL host:
+#      a `.gitattributes` textconv driver naming a binary that is not installed
+#      (`diff.external` and a file at mode 000 reach the same rc=128). It is
+#      ordering-dependent — a failing path that sorts after a modified one
+#      still streams the earlier hunks — so it is intermittent, not rare.
+#   v2 also said that with nothing committed "EVERY file is untracked, so input
+#      3 hashes the whole tree BY CONTENT". A file that is STAGED but never
+#      committed is in NEITHER set: `ls-files --others` excludes anything in the
+#      index, and `diff HEAD` cannot run. All three inputs were then constants,
+#      and the fingerprint was not merely stable — it was the SAME SIXTEEN
+#      CHARACTERS, 9d9c545c09de3fcf, in every such repository whatever the
+#      staged file contained. Measured across two sandboxes and four different
+#      file contents, with the readout saying UNCHANGED over each rewrite.
+#   v3 introduced the invariant and exempted ONE call from it, this input-3
+#      `|| true`, describing the degradation as "name-sensitive rather than
+#      blind". The mechanism half was true; the CONSEQUENCE was never stated. One
+#      dangling symlink — or one untracked file at mode 000 — froze the whole
+#      fingerprint at 63e4abbe578dae06 across an end-to-end rewrite of a
+#      different untracked file, and the readout said UNCHANGED. The one place
+#      exempted from the invariant is where the next instance lived.
+#   v3 also glossed input 2 as "every tracked modification, by content" while
+#      leaving `git diff` at the mercy of `.gitattributes`. A textconv driver
+#      that is INSTALLED AND WORKING but lossy makes `git status` say ` M` and
+#      `git diff` exit 0 having written nothing — a producer that SUCCEEDS while
+#      carrying no modification at all, which no refusal can detect. Measured:
+#      f801c30b833bb924 before and after an end-to-end rewrite, readout
+#      UNCHANGED.
+#   v4 (the round that added the per-path fallback) corrected an earlier
+#      comment claiming a newline-named file "mis-splits", with a measurement
+#      of the BATCH call — `--stdin-paths` un-quotes the C-quoted form
+#      `ls-files` emits — and generalised it to "hashed BY CONTENT like any
+#      other". The fallback it stood beside consumed the SAME names as ARGV,
+#      which git takes literally. One readable a<newline>b beside one dangling
+#      symlink: the batch call fails on the symlink, the fallback reports the
+#      READABLE file as `UNREADABLE "a\nb"` — a constant — and the fingerprint
+#      froze across its rewrite, readout UNCHANGED. Measured (R7-F1): every
+#      producer rc=0, every digest well-formed 64 hex, the invariant never
+#      consulted.
+#   v5 (the round that added the diff flags) wrote the pair off as "THE ONE
+#      DEGRADATION NO REFUSAL CAN REACH" and its gloss as now "TRUE rather
+#      than merely checkable". A clean filter is neither a textconv driver nor
+#      an external diff, and the flags do not touch it. Lossy-but-working (an
+#      nbstripout analogue: clean strips output cells), it left `git status`
+#      saying ` M`, `update-index --refresh` exiting 1 — git ITSELF calling
+#      the file modified — while the flagged diff exited 0 having written ZERO
+#      bytes: fingerprint frozen at 9a4568ef8e751786 across an end-to-end
+#      rewrite, readout UNCHANGED (R8-F1, measured through the shipped
+#      readout). The same machinery reached input 3 separately: hash-object
+#      honoured the filter by default, so an UNTRACKED file behind it returned
+#      ONE object id across a rewrite, on the batch call and the per-path
+#      fallback alike. And the family is wider than filters: an eol-only
+#      rewrite under the `text` attribute reproduced the tracked half
+#      identically (frozen at 9ca7b0e75b3695ee, measured), and a BOM-preserving
+#      UTF-16 re-encode under working-tree-encoding reproduced the untracked
+#      half (one constant id, measured).
+#
+# Seven false sentences, and NOT quite one shape — which is the reason this
+# region ended up with an invariant AND three stop-the-degradation fixes rather
+# than any alone. Four were "an input silently degrades to a constant and
+# nothing refuses it", and an enumeration cannot fix those because the next
+# instance is by definition the one not enumerated. The fifth, sixth and
+# seventh were an input degrading to a constant with NOTHING WRONG TO REFUSE —
+# producer exit 0, digest well-formed — and the only cure for those is to stop
+# the degradation happening wherever a switch exists: pin what the diff shows
+# (the flags), keep the fallback in the quoting convention its names arrive in
+# (--stdin-paths, never argv), and hash untracked content raw (--no-filters).
+# The seventh is also the first with a residual NO switch reaches — the diff
+# half of the filter family — which is why it ends in a KNOWN LIMITS bullet
+# instead of another absolute sentence here. The invariant above is what is
+# checked; the list below is what has been MEASURED, and it is not
+# load-bearing. Pinned by gate-claim-honesty.test.sh legs 4.11-4.63 and its
+# 4P/4Q/4R/4S/4T METAs, which mutate the single refusal, the per-path fallback,
+# the diff flags, the fallback's calling convention and the untracked hashes'
+# filter bypass in turn and watch the legs that depend on each go red — every
+# one measured against a mechanically un-fixed copy of this file.
+#
+# KNOWN LIMITS, all measured:
+#
+#   * GITIGNORED FILES ARE INVISIBLE. They are not deliverables.
+#   * NO GIT AT ALL is not a degradation of an input but the absence of all
+#     three: tree_fingerprint returns the literal `no-git` before it asks for
+#     any, and the readout gives that its own CANNOT BE DETERMINED sentence.
+#   * NO SHA256 TOOL AT ALL — neither `shasum` nor `sha256sum` — routes to the
+#     invariant: `_vl_sha256` returns the CONSTANT `sha256-unavailable`, which
+#     is not 64 hex characters, so the digest is refused. THE PROJECT HAD
+#     ALREADY MET THIS HAZARD AND THIS COPY TOOK HALF THE CURE: `_vl_sha256`
+#     was taken from impact-report.sh's `sha256_stdin` down to that literal, but
+#     not from its contract, which says of the degraded mode that it "can't
+#     detect staleness — log so the gap is visible"; and the reader half of that
+#     cure lives in qa-gate.sh as CHANGE_SET_HASH_UNAVAILABLE.
+#     .claude/tests/component/specs/rubric-binding.sh section I4 states the rule
+#     this region now obeys: "being CONSTANT it equals itself across two calls
+#     ... Both the writer and the reader refuse it."
+#   * NO COMMITS DOES NOT DEGRADE, and it now does not degrade for a reason
+#     rather than by luck. `rev-parse HEAD` fails, so input 1 is `no-head`; but
+#     input 2 is then diffed against the EMPTY TREE (`git hash-object -t tree
+#     /dev/null`, the repo's own object format) instead of against HEAD, which
+#     exits 0 and carries the content of anything staged. Measured: `git diff
+#     <empty-tree>` names the staged path and emits its content, the fingerprint
+#     moves when that file is rewritten, and the readout says MOVED. Untracked
+#     files are carried by input 3 as always. Nothing here relies on the diff
+#     failing quietly, which is what v2 relied on without saying so.
+#   * AN UNTRACKED PATH GIT CANNOT READ contributes its NAME and its
+#     UNREADABILITY, never its content — which nothing on the host can read
+#     either. THE TWO CASES ARE DIFFERENT AND THE PREVIOUS VERSION OF THIS BULLET
+#     ONLY ASKED ONE OF THEM, which is the reading failure that has cost this
+#     region five rounds:
+#       - a DIRECTORY git cannot open: `git ls-files --others` warns and still
+#         exits 0 (measured, mode-000 directory), so there is no failure to
+#         detect and nothing under it is in the set at all. The old bullet
+#         reasoned about this case, concluded "there is no failure to detect",
+#         and never asked the adjacent one.
+#       - a FILE git cannot open — mode 000, or a dangling symlink: it IS in the
+#         set and `git hash-object` DOES fail on it, rc=128 (measured, both). The
+#         batch call is all-or-nothing and aborts at the first such path, so that
+#         used to discard the content of every untracked file sorting after it.
+#         It is now retried per path, and only the unreadable path itself is
+#         uncarried.
+#     THE RESIDUAL, STATED PLAINLY: a change confined to an unreadable path is
+#     invisible — retarget a dangling symlink to another nonexistent path and
+#     both hash to `UNREADABLE <path>`. Appearing, disappearing, or crossing the
+#     readable/unreadable boundary all move the fingerprint (measured); the
+#     bytes behind a path git cannot open do not. Closing that would mean
+#     reading the path with something other than git, which this region
+#     deliberately does not do. Refusing outright instead — one broken symlink
+#     turning every readout into "cannot tell" — was the other option and is the
+#     worse one; the per-path retry is what makes it a false dichotomy.
+#   * THE ATTRIBUTES FAMILY REACHES INPUT 2 AND NOTHING HERE STOPS IT. Clean/
+#     smudge filters, eol/text normalisation and working-tree-encoding are
+#     three doors into one room: git transforms worktree bytes on the way in,
+#     so what the diff compares stops being what the file's bytes are, with
+#     every producer exiting 0. Input 3 no longer goes through that machinery
+#     (`--no-filters` on both hash-object calls — measured value-preserving
+#     where no attribute is configured, and measured to keep rc=128 on a
+#     dangling symlink and a mode-000 file, so UNREADABLE stays reachable).
+#     `git diff` HAS NO SUCH FLAG, so a TRACKED file keeps the residual: behind
+#     a lossy-but-working clean filter — or across an eol-only rewrite under
+#     `text` — `git status` says ` M` and `update-index --refresh` exits 1,
+#     git itself calling the file modified, while the flagged diff exits 0
+#     having written ZERO bytes; a change confined to what the filter strips
+#     never moves the fingerprint, and the readout says UNCHANGED over it
+#     (both measured, R8-F1). git >= 2.40 could reach it — `--attr-source`
+#     aimed at the empty tree made the same zero-byte diff emit the file's
+#     real 197-byte hunk (measured on 2.50) — and it is deliberately NOT
+#     taken: an unknown global option is fatal (rc=129, measured), so on every
+#     older git input 2 would fail and EVERY readout would degrade to CANNOT
+#     BE DETERMINED, on exactly the hosts that never had the defect; and it
+#     would un-filter every file whose filter is doing its job, changing every
+#     recorded fingerprint on such repos. The tracked half of
+#     working-tree-encoding did NOT reproduce the false match here: a
+#     BOM-carrying re-encode of the same text quiesces (status clean, refresh
+#     rc=0 — git itself calls that tree unchanged, so UNCHANGED agrees with
+#     git), and a BOM-less one fails loudly, the diff carries real bytes, and
+#     the fingerprint MOVES (both measured). Pinned by gate-claim-honesty
+#     leg 4.63, which measures the residual's signature so this bullet cannot
+#     outlive the behaviour it describes.
+#   * A HASH TOOL THAT EXITS 0 AND RETURNS A WELL-FORMED WRONG CONSTANT is NOT
+#     covered, and no shape test can cover it. A tool that fails part-way is:
+#     it either exits non-zero (each input pipeline runs under `set -o pipefail`,
+#     so that reaches the refusal) or returns something that is not 64 hex. What
+#     survives is a backend that reads none of a large input, exits 0, and
+#     prints a plausible digest anyway. Nothing in this region can tell that
+#     from a real one, and it is stated rather than implied.
+#   * A VERY LARGE UNTRACKED SET makes the hash-object pass proportionally
+#     slower (bounded in practice by .gitignore). The fast path is ONE fork for
+#     the whole set; the per-path retry is one fork per path and is entered only
+#     after the batch call has already failed, so a large set costs the extra
+#     forks only on a host that also has an unreadable path in it.
+#
+# FAIL-OPEN THROUGHOUT. Every function here returns 0 and prints something
+# usable when git is missing, the ledger is absent, or a field is malformed. A
+# missing ledger must never block a Stop: it is evidence, not a precondition.
+#
+# AND IT IS FAIL-OPEN UNDER `set -e` SPECIFICALLY, which is not the same claim
+# and was not true until this round. The script sets `-e` at line 25, so an
+# unguarded `x=$(cmd)` whose command is missing does not degrade — it ABORTS the
+# function mid-way. `broader_verification_note` parses the ledger with five
+# `cut` calls and, on a host with no `cut`, the first of them ended the function
+# at rc=127 with NO output: the operator saw no broader-verification section at
+# all, on precisely the host where tree_fingerprint had just correctly refused
+# to guess. It was found by driving these functions under `set -eu`; the harness
+# that missed it drove them under `set -u`, which is why the new legs use a
+# driver matching the shipped shell options rather than a laxer one.
+#
+# THE GUARANTEE IS SCOPED TO THE READ PATH, and the scope is stated because the
+# blanket version of this sentence is false. Every command substitution invoking
+# an EXTERNAL command in tree_fingerprint and broader_verification_note — the
+# two functions the Stop hook calls — carries its own `||` fallback.
+# `record_verification`'s two `tr` calls deliberately do NOT: it is a subcommand
+# `make` and operators invoke directly, so its failure is visible at the call
+# site rather than swallowed into a readout, and those two calls are what keep a
+# tab or a newline out of a field. Degrading them quietly would corrupt the
+# record instead of failing to write one, which is the worse of the two.
+VERIFICATION_LEDGER="$QA_TRACKING_DIR/verification-ledger"
+
+# THE THREE SENTINELS, NAMED ONCE EACH — but they are not the same kind of
+# value, and the difference matters more than the naming does.
+#
+# FP_NO_GIT and FP_NO_HASH are RETURN VALUES with readers: broader_verification_
+# note branches on both, and a sentinel spelled at both ends is a sentinel that
+# can drift — the convention qa-gate.sh:1640 states for exactly this class of
+# value ("two literals for one condition is the drift this file avoids").
+#
+# VL_SHA256_UNAVAILABLE HAS NO READER IN THIS REGION, AND THAT IS THE FIX
+# RATHER THAN AN OVERSIGHT. Until this round tree_fingerprint refused the
+# degraded digest by comparing against this literal — an IDENTITY test, which
+# could only ever refuse the one degradation somebody had already met, and which
+# had to sit before `cut -c1-16` because the cut reshapes the 18-character
+# literal into a 16-character one. `_vl_is_hash` refuses it now for its SHAPE,
+# along with the truncation, the empty string and every degradation nobody has
+# enumerated. The constant remains because `_vl_sha256` still WRITES it: a
+# degraded host emitting a named sentinel is greppable, where one emitting
+# nothing is indistinguishable from a tool that produced nothing.
+#
+# The spelling is deliberately the SAME STRING as qa-gate.sh's
+# CHANGE_SET_HASH_UNAVAILABLE and impact-report.sh's `sha256_stdin` return: it
+# names the same host condition, and one spelling keeps it greppable across all
+# three. It is nonetheless RE-DECLARED here rather than imported, because both
+# of those files are executables whose main body runs on source — there is no
+# library to import it from, and inventing one to share an 18-character constant
+# would be a wider change than this defect warrants. With no cross-file reader
+# there is no functional coupling to share either, only a spelling.
+#
+# `no-hash` NAMES WHAT THE FIELD IS, NOT WHY. It is returned for a missing hash
+# tool, for a `git diff` that exited non-zero, and for a digest of the wrong
+# shape; what is true of all of them is that the value in the ledger's tree
+# column is not a hash. The readout's sentence enumerates the causes it has met
+# and says the sentinel covers any of them.
+VL_SHA256_UNAVAILABLE="sha256-unavailable"
+FP_NO_GIT="no-git"
+FP_NO_HASH="no-hash"
+
+_vl_sha256() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 2>/dev/null | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum 2>/dev/null | awk '{print $1}'
+    else
+        cat >/dev/null
+        printf '%s' "$VL_SHA256_UNAVAILABLE"
+    fi
+}
+
+# _vl_is_hash <value> <hex-digits> — THE SHAPE RULE, and the ONLY definition of
+# "this is a hash" in the region. tree_fingerprint applies it to every hash it
+# handles, so there is one predicate to get right instead of one guard per
+# degradation somebody remembered.
+#
+# A SHAPE TEST, NEVER AN IDENTITY TEST, and that is the difference between this
+# and what it replaces. An identity test can only refuse a value someone has
+# already been surprised by; this refuses `sha256-unavailable`, its cut-
+# truncated form `sha256-unavailab`, the empty string a missing `cut` produces,
+# a digest a hash tool cut short, and whatever the next one turns out to be.
+#
+# Hex is case-insensitive by definition. Both shipped backends emit lowercase;
+# a future backend emitting uppercase should be believed rather than refused
+# over its spelling, since refusing it would print CANNOT BE DETERMINED on a
+# host whose hash tool works perfectly.
+_vl_is_hash() {
+    local v="${1:-}" n="${2:-0}"
+    case "$v" in
+        "" | *[!0-9a-fA-F]*) return 1 ;;
+    esac
+    [ "${#v}" -eq "$n" ]
+}
+
+# _vl_untracked_paths — the untracked set, MINUS the workflow's own state.
+#
+# THIS EXCLUSION IS NOT COSMETIC AND IT WAS MEASURED, not anticipated. The
+# first version hashed the raw untracked list, and `record_verification`'s own
+# write to .claude/.qa-tracking/verification-ledger changed that list — so the
+# very act of recording a run moved the tree past the run it had just recorded,
+# and the note said MOVED immediately after writing UNCHANGED. It did not
+# reproduce in this repo, because .gitignore:12 hides .claude/.qa-tracking/
+# here; it reproduces in any INSTALLED target, because install.sh writes that
+# ignore rule only when the target has no .gitignore at all. A defect visible
+# nowhere except on other people's machines is the reason this is filtered by
+# the SHARED rule rather than by a local pattern.
+#
+# `workflow_self_written` is that shared rule (workflow-denylist.sh), the same
+# one post-edit.sh, reconcile_tracker and reviewable_changes apply. Sourced
+# above; if the lib is missing the set is left unfiltered, which makes the
+# fingerprint over-sensitive and the note say MOVED — false-negative on
+# freshness, never a false claim of currency, which is the survivable direction.
+_vl_untracked_paths() {
+    local p
+    git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if command -v workflow_self_written >/dev/null 2>&1 && workflow_self_written "$p"; then
+            continue
+        fi
+        printf '%s\n' "$p"
+    done
+}
+
+# _vl_hash_each <newline-separated-paths> — THE SLOW PATH, entered only when the
+# one-fork `--stdin-paths` call failed.
+#
+# WHY IT EXISTS AT ALL: `--stdin-paths` is all-or-nothing. It streams in sorted
+# order and aborts at the FIRST path it cannot open, so a single dangling
+# symlink or mode-000 file discarded the content of every untracked file after
+# it — and, when that path sorted first, of every untracked file full stop. The
+# fingerprint then held still across an end-to-end rewrite and the gate said the
+# tree was UNCHANGED. Measured; it is the fifth instance of this defect class and
+# the only one that survived round 5, because it was the one place deliberately
+# exempted from the invariant.
+#
+# ONE GIT INVOCATION PER PATH, AND ONLY HERE. The fast path above still costs
+# one fork for the whole set, which is what a repo with thousands of untracked
+# files needs; this loop is reached only on a host that has already proved it
+# has an unreadable path.
+#
+# EACH NAME GOES BACK THROUGH `--stdin-paths`, NEVER ONTO THE COMMAND LINE,
+# and that is a quoting convention, not a style choice. Names arrive here
+# exactly as `ls-files` emitted them — C-QUOTED onto one line whenever the
+# path carries a control character, a `"`, a `\`, or (under the default
+# core.quotePath) any non-ASCII byte: a file named a<newline>b arrives as the
+# six bytes `"a\nb"`. `--stdin-paths` un-quotes that convention on the way
+# in; a command-line pathname is taken LITERALLY. The first version of this
+# loop passed the quoted form as argv, and git then failed on a file it could
+# read perfectly well — the loop emitted `UNREADABLE "a\nb"`, a CONSTANT, the
+# producer exited 0, every digest stayed well-formed 64 hex, and the
+# fingerprint froze across an end-to-end rewrite of that file, readout
+# UNCHANGED (R7-F1; measured: rc=128 as argv, the real object id via
+# --stdin-paths — same tool, same name, opposite un-quoting). The invariant
+# below cannot reach a degradation with nothing failed and nothing malformed,
+# so the cure is input 2's cure again: keep the consumer in the convention the
+# producer speaks. Where the old argv call was RIGHT — plain names, readable
+# symlinks — the two conventions return identical object ids (measured), so
+# fallback output and any ledger record built on it are unchanged there.
+#
+# AN UNREADABLE PATH CONTRIBUTES ITS NAME AND ITS UNREADABILITY, NOT ITS
+# CONTENT, and that residual is stated rather than implied — see KNOWN LIMITS.
+# `UNREADABLE <path>` cannot collide with a real object name (which is 40 or 64
+# hex characters and nothing else), so a path becoming unreadable, or readable,
+# moves the fingerprint. One name per invocation also cannot re-enter the
+# blank-line trap the batch call skips (a lone blank line exits 128): the loop
+# discards empty lines before feeding anything.
+#
+# AND THE CONTENT GOES IN RAW — `--no-filters`, here and on the batch call,
+# because by default hash-object runs the same attributes machinery the
+# checkin path does (clean filters, eol/text, working-tree-encoding), and a
+# lossy-but-working clean filter then returned ONE object id across an
+# end-to-end rewrite of an untracked file, on this route and the batch route
+# alike (R8-F1; measured, an nbstripout analogue) — input 2's textconv
+# degradation again, one input over. The flag changes nothing else that this
+# loop is load-bearing for: an unreadable path still exits 128 (measured,
+# dangling symlink and mode-000 file both — UNREADABLE stays reachable), the
+# per-path `--stdin-paths` feed still un-quotes a C-quoted name (measured —
+# R7-F1's convention holds), and where no attribute is configured the object
+# ids are byte-identical with and without it (measured).
+_vl_hash_each() {
+    local p
+    printf '%s\n' "$1" | while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        printf '%s\n' "$p" | git -C "$PROJECT_DIR" hash-object --stdin-paths --no-filters 2>/dev/null \
+            || printf 'UNREADABLE %s\n' "$p"
+    done
+    # Explicit, so the caller's `contents=$(...) || ...` cannot be steered by
+    # whichever branch the last path happened to take.
+    return 0
+}
+
+tree_fingerprint() {
+    # ONE INVARIANT: a fingerprint comes back only when every producer exited 0
+    # and every hash has a hash's shape. `unusable` is set by any input that
+    # failed that test and there is exactly ONE refusal, at the bottom — so a
+    # degradation nobody enumerated arrives at the same place as the three that
+    # have been measured, instead of at a `cut` that turns it into a plausible
+    # 16-character string.
+    #
+    # EVERY PRODUCER PIPELINE RUNS UNDER `set -o pipefail`, inside the command
+    # substitution's own subshell so the option cannot leak to the caller. Without
+    # it the rc of `git ... | _vl_sha256` is the HASH TOOL'S, and a git that died
+    # having written nothing is indistinguishable from a git that found nothing
+    # to say — which is precisely the defect this round exists to remove. It also
+    # makes a hash tool that exits non-zero visible, since `_vl_sha256`'s own
+    # internal pipeline is subject to the option it inherits from this one.
+    local head base diffh untrackedh digest fp paths contents
+    local unusable=""
+
+    if ! git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+        printf '%s' "$FP_NO_GIT"
+        return 0
+    fi
+
+    # INPUT 1 — which commit. THE ONE INPUT WHOSE DEGRADATION CANNOT BLIND THE
+    # FINGERPRINT, which is why it has no shape test: `rev-parse HEAD` either
+    # prints an object name or fails, the failure is captured here as the
+    # `no-head` literal, and either way inputs 2 and 3 still carry content in
+    # every configuration they can reach. It is also not a hash of content, and
+    # its width is the repo's object format (40 hex, or 64 under SHA-256), so a
+    # shape test here would have to encode that too, for nothing.
+    head=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null) || head="no-head"
+    [ -n "$head" ] || head="no-head"
+
+    # INPUT 2 — every tracked modification, by content.
+    #
+    # THE BASE IS RESOLVED FIRST, AND THAT IS WHAT MAKES THE REFUSAL BELOW
+    # UNCONDITIONAL. `git diff HEAD` fails in TWO unrelated situations: the diff
+    # machinery broke (a textconv or external driver that is configured but not
+    # installed, a file it cannot read), and HEAD is simply unborn. The old code
+    # ran one command for both and discarded the status, so the two were
+    # indistinguishable; QA's fix sketch separated them by exempting the unborn
+    # case from the refusal, and an exemption is the shape that hid this defect
+    # for four rounds — "the configuration where HEAD resolves was never asked".
+    # So there is no exemption: when HEAD is unborn the base becomes the EMPTY
+    # TREE, the diff then exits 0 and carries the content of anything STAGED
+    # (which `ls-files --others` excludes, so input 3 never saw it — measured, a
+    # live false match), and a non-zero rc means one thing only, always refused.
+    # Diffing the RESOLVED head rather than the name `HEAD` also pins inputs 1
+    # and 2 to the same commit if a ref moves mid-call.
+    #
+    # `--no-ext-diff --no-textconv`, AND THIS PAIR IS NOT DEFENSIVE HABIT — IT
+    # CLOSES A DEGRADATION NO REFUSAL CAN REACH. Every instance fixed before
+    # this one had a producer that FAILED or a hash that came back MALFORMED,
+    # so the invariant below could see it. A textconv driver that is INSTALLED
+    # AND WORKING but LOSSY has neither symptom: `git status` reports
+    # ` M data.bin`, `git diff` exits 0 having written ZERO bytes because the
+    # converted text is unchanged, and the sha256 of the empty string is 64
+    # perfectly good hex characters. Measured, on a host with nothing wrong
+    # with it: the fingerprint sat at f801c30b833bb924 across an end-to-end
+    # rewrite of the file and the readout said UNCHANGED. Any real lossy
+    # converter reaches it — pdftotext over a PDF whose text is unchanged but
+    # whose bytes are not, `strings`, `exiftool`, `unzip -p`.
+    #
+    # So the fix is not a fifth guard, it is to stop letting repository
+    # configuration decide what input 2 shows — WHERE A SWITCH EXISTS TO STOP
+    # IT. This block used to end by calling the pair "THE ONE DEGRADATION NO
+    # REFUSAL CAN REACH" and the gloss above now "TRUE rather than merely
+    # checkable", and those were the region's seventh false sentence (see the
+    # history block): a lossy-but-working CLEAN FILTER is neither a textconv
+    # driver nor an external diff, these flags do not touch it, and it blinds
+    # this diff with the same signature — status ` M`, rc 0, zero bytes,
+    # fingerprint frozen at 9a4568ef8e751786, readout UNCHANGED (R8-F1,
+    # measured; an eol-only rewrite under the `text` attribute reproduces it).
+    # `git diff` has no filter bypass the way hash-object has `--no-filters`,
+    # so that residual is STATED — the attributes-family bullet in KNOWN
+    # LIMITS — rather than re-absorbed into an absolute sentence here. What
+    # remains true, and is what these flags buy: input 2 no longer depends on
+    # any DRIVER being installed, working, or honest, and the three routes the
+    # earlier rounds measured (missing textconv, diff.external, lossy-but-
+    # working textconv) are all closed.
+    #
+    # THREE THINGS WERE MEASURED BEFORE SHIPPING IT, because a flag that changes
+    # the diff changes every fingerprint in the ledger:
+    #   1. VALUE-PRESERVING where no driver is configured — byte-identical output
+    #      on this repo (413421 bytes, same sha256 with and without) and on a
+    #      pristine sandbox, so records written before this change stay
+    #      comparable.
+    #   2. STRICTLY BETTER on two of the three routes the previous round refused:
+    #      a textconv naming a binary that is not installed, and `diff.external`
+    #      (per-attribute or global), both go from rc=128/0 bytes to rc=0 with
+    #      real content. Those hosts are now MEASURED instead of being told
+    #      "cannot tell". The third route — a worktree file git genuinely cannot
+    #      read, and a damaged object store — still fails, and is still refused.
+    #   3. BINARY FILES STAY COVERED. A `-diff` marked file emits `index
+    #      <old>..<new>` with real worktree object ids either way, so rewriting it
+    #      moves the fingerprint. `--binary` is deliberately NOT added: the OIDs
+    #      already carry the content and the payload would not.
+    if [ "$head" = "no-head" ]; then
+        base=$(git -C "$PROJECT_DIR" hash-object -t tree /dev/null 2>/dev/null) || base=""
+    else
+        base="$head"
+    fi
+    diffh=""
+    if [ -z "$base" ]; then
+        unusable=1
+    else
+        diffh=$( set -o pipefail
+                 git -C "$PROJECT_DIR" diff --no-ext-diff --no-textconv "$base" 2>/dev/null \
+                     | _vl_sha256 ) || unusable=1
+    fi
+    _vl_is_hash "$diffh" 64 || unusable=1
+
+    # Untracked files are hashed BY CONTENT (`git hash-object`), not by name: a
+    # name-only list would miss an untracked file rewritten in place, which is
+    # the same blind spot as hashing a path list — precisely what this
+    # fingerprint exists to avoid. And by the WORKTREE'S content — `--no-filters`
+    # on both calls — because the default is to run the checkin conversion
+    # first, and behind a lossy-but-working clean filter that hashed an
+    # untracked file to ONE object id across an end-to-end rewrite, batch and
+    # fallback alike, fingerprint frozen, readout UNCHANGED (R8-F1, measured;
+    # the `text` and working-tree-encoding attributes reach the same constant).
+    # Where no attribute is configured the flag is value-preserving — object
+    # ids and whole-repo fingerprint byte-identical, measured — so records
+    # written before it stay comparable, the same property the diff flags
+    # were checked for.
+    #
+    # BOTH the names and the contents go in, and that is a degradation choice,
+    # not belt-and-braces. `--stdin-paths` is ONE fork for the whole set (the
+    # obvious per-file loop is one fork per untracked file, and a repo with a
+    # thin .gitignore has thousands), but it is all-or-nothing: a broken
+    # symlink or a file deleted mid-walk fails the call and would otherwise
+    # leave the untracked half hashing to the empty string — silently
+    # collapsing to "no untracked files", the one wrong answer that looks
+    # stable. Feeding the sorted NAME LIST in as well means that failure
+    # degrades to a name-sensitive fingerprint rather than to a blind one.
+    #
+    # Sorted with LC_ALL=C so the same set hashes identically under any locale;
+    # the comparison spans a hook and an interactive shell, which need not
+    # agree on collation.
+    #
+    # ONE FILENAME PER LINE, AND IT HOLDS BECAUSE GIT QUOTES — not because
+    # filenames are well behaved. The previous version of this sentence said a
+    # filename containing a newline "mis-splits" and lands on a different hash;
+    # that is measurably false, and it is the same shape of claim this whole
+    # region has spent five rounds correcting, so it is corrected here rather
+    # than left because it happened to reach a safe conclusion. `ls-files
+    # --others` C-quotes any path containing a CONTROL character onto a single
+    # line — "a\nb.txt" — and does so unconditionally: `core.quotePath=false`
+    # suppresses the escaping of NON-ASCII bytes only, and a newline is still
+    # quoted with it set (measured both ways). `hash-object --stdin-paths`
+    # un-quotes on the way in, so such a file is hashed BY CONTENT like any
+    # other and rewriting it moves the fingerprint (measured, quoted and
+    # unquoted, newline-named and accented). THE UN-QUOTING BELONGS TO THE
+    # CALLING CONVENTION, NOT TO THE TOOL: the same quoted name handed to
+    # `hash-object` as a COMMAND-LINE argument is taken literally and fails on
+    # a file git can read (measured, rc=128 as argv, object id via
+    # --stdin-paths). The round that wrote this paragraph measured the batch
+    # half and stood it beside a fallback consuming the SAME names as argv —
+    # true of the code it described, false of the code next to it (R7-F1):
+    # entered for a legitimate reason (one dangling symlink) with a quoted
+    # name in the set, the fallback reported the READABLE file as
+    # `UNREADABLE "a\nb"` and the fingerprint froze. _vl_hash_each now feeds
+    # each name back through --stdin-paths, so the sentence above holds on
+    # both routes. Quoting alone still cannot enter the fallback spuriously —
+    # the batch call handles quoted names, which is what was measured and why
+    # the freeze needed a symlink BESIDE the newline-named file to reach it.
+    #
+    # THE `|| true` THAT USED TO STAY, AND WHY IT COULD NOT. Round 5 kept one
+    # deliberate carve-out from the invariant, here, on the reasoning that the
+    # sorted NAME LIST still reaches the same hash so the loss degrades to a
+    # "name-sensitive rather than blind" fingerprint. The mechanism half of that
+    # was true and re-measured true. THE CONSEQUENCE WAS NEVER STATED, and it is
+    # the same false sentence every other instance produced: one dangling symlink
+    # in the untracked set froze the fingerprint at 63e4abbe578dae06 across an
+    # end-to-end rewrite of a DIFFERENT untracked file, and the readout said "The
+    # working tree is UNCHANGED since that run ... so it does describe these
+    # changes". Measured on a fully normal host, every tool present. It carried
+    # R4-F1's exact signature too — `--stdin-paths` streams and aborts at the
+    # FIRST unreadable path, so the freeze depends on sort order: name the broken
+    # path `zzz-dangling` and the earlier hashes stream, the fingerprint moves,
+    # and nothing looks wrong. Intermittent, not rare. THE CLASS IS WIDER THAN
+    # SYMLINKS: an untracked file at mode 000 reproduces it identically.
+    #
+    # THE TRADE-OFF WAS PRESENTED AS A DICHOTOMY AND IS NOT ONE. Refuse (one
+    # broken symlink turns every readout into "cannot tell") versus accept (a
+    # false green) are not the only options. `--stdin-paths` stays as the FAST
+    # PATH — one fork for the whole set, and a repo with a thin .gitignore has
+    # thousands of untracked files — and its failure now falls back to hashing
+    # each path SEPARATELY, so one unreadable path costs the content of that path
+    # and nothing else. Measured on the same dangling-symlink sandbox: content
+    # sensitivity restored, the readout says MOVED, N forks paid only in the
+    # degraded case.
+    #
+    # `paths` is guarded because a missing `sort` would otherwise abort the whole
+    # hook under `set -e`, which the FAIL-OPEN contract at the top of this region
+    # forbids.
+    #
+    # THE EMPTY SET IS SKIPPED EXPLICITLY, and that is load-bearing rather than an
+    # optimisation. Fed a single blank line, `git hash-object --stdin-paths`
+    # exits 128 (`could not open '' for reading`) — measured. The old `|| true`
+    # swallowed that too, so a repo with NO untracked files was silently taking
+    # the failure path on every call; a fix that refused on non-zero rc would have
+    # refused on every clean repository, and this fallback would otherwise fire
+    # constantly while the comment claimed the fast path was normal.
+    paths=$( set -o pipefail; _vl_untracked_paths | LC_ALL=C sort ) || unusable=1
+    contents=""
+    if [ -n "$paths" ]; then
+        contents=$(printf '%s\n' "$paths" \
+            | git -C "$PROJECT_DIR" hash-object --stdin-paths --no-filters 2>/dev/null) \
+            || contents=$(_vl_hash_each "$paths")
+    fi
+    # BYTE-COMPATIBLE WITH THE STREAM IT REPLACES, checked rather than assumed:
+    # `$(...)` strips the trailing newline `hash-object` writes and the `printf`
+    # puts exactly one back, and the empty set emits nothing here just as an
+    # errored `--stdin-paths` wrote nothing before. So this repo's fingerprint is
+    # UNCHANGED by this round and ledger records written before it stay
+    # comparable — the same property the diff flags above were checked for.
+    untrackedh=$( set -o pipefail
+        {
+            printf '%s\n' "$paths"
+            [ -z "$contents" ] || printf '%s\n' "$contents"
+        } | _vl_sha256 ) || unusable=1
+    _vl_is_hash "$untrackedh" 64 || unusable=1
+
+    # THE DIGEST, and then the VALUE ACTUALLY RETURNED — two shapes, because a
+    # transform between them can destroy a good digest. `cut -c1-16` on a host
+    # with no `cut` produces the EMPTY STRING, which the ledger records as a
+    # blank tree column and the readout compares equal to the next blank one:
+    # measured, "The working tree is UNCHANGED since that run (tree )". Checking
+    # the digest alone would not see it, and checking only the return value would
+    # accept a malformed digest whose first 16 characters happened to be hex.
+    #
+    # THIS IS WHERE THE OLD IDENTITY TEST WAS, AND WHY THE REPLACEMENT IS NOT A
+    # MOVE. That test compared the digest against `sha256-unavailable` and had to
+    # precede the cut, because the cut reshapes an 18-character literal into a
+    # 16-character one — a guard that cannot fire is indistinguishable, in a
+    # green run log, from a guard that never had to. `_vl_is_hash` refuses that
+    # value at BOTH points for its shape, so placement stops being load-bearing
+    # and the truncation stops being an escape.
+    digest=$( set -o pipefail
+              printf '%s\n%s\n%s\n' "$head" "$diffh" "$untrackedh" | _vl_sha256 ) || unusable=1
+    _vl_is_hash "$digest" 64 || unusable=1
+
+    fp=$(printf '%s\n' "$digest" | cut -c1-16) || fp=""
+    _vl_is_hash "$fp" 16 || unusable=1
+
+    # THE ONE REFUSAL. Every input above converges here, including inputs nobody
+    # has enumerated: mutate this branch and the degraded-host legs, the broken-
+    # diff legs and the missing-`cut` legs all go red together, which is what
+    # 4P measures.
+    if [ -n "$unusable" ]; then
+        printf '%s' "$FP_NO_HASH"
+        return 0
+    fi
+    printf '%s' "$fp"
+}
+
+record_verification() {
+    # record_verification <label> <exit-code>
+    # Appends one tab-separated line. Latest line wins on read.
+    local label="${1:-}" rc="${2:-}" ts fp head
+    if [ -z "$label" ] || [ -z "$rc" ]; then
+        printf 'record-verification: usage: record-verification <command-label> <exit-code>\n' >&2
+        return 2
+    fi
+    # Tabs are the field separator and newlines end the record, so neither may
+    # survive inside a field.
+    label=$(printf '%s' "$label" | tr '\t\n' '  ')
+    rc=$(printf '%s' "$rc" | tr -cd '0-9')
+    [ -n "$rc" ] || rc=0
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '?')
+    fp=$(tree_fingerprint)
+    head=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null) || head="?"
+    [ -n "$head" ] || head="?"
+    mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
+    printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$label" "$rc" "$fp" "$head" \
+        >> "$VERIFICATION_LEDGER" 2>/dev/null || {
+            printf 'record-verification: could not write %s\n' "$VERIFICATION_LEDGER" >&2
+            return 1
+        }
+    printf 'recorded: %s exited %s at tree %s (HEAD %s)\n' "$label" "$rc" "$fp" "$head"
+    return 0
+}
+
+broader_verification_note() {
+    local line ts label rc fp head now
+    if [ ! -s "$VERIFICATION_LEDGER" ]; then
+        printf '%s' 'Broader verification: NONE RECORDED. Nothing has told this gate that a wider
+tier (a full CI target, component/integration/e2e suites, manifest or schema
+validation) was run against this tree. Record one — a record is a self-report
+and nothing here verifies it, so record only what you actually ran:
+  make test-ci        (runs every offline tier and records its own exit status)
+  bash .claude/scripts/verify-before-stop.sh record-verification '"'"'<command>'"'"' <exit-code>'
+        return 0
+    fi
+    line=$(tail -1 "$VERIFICATION_LEDGER" 2>/dev/null) || line=""
+    if [ -z "$line" ]; then
+        printf '%s' 'Broader verification: the ledger exists but its last line is unreadable.'
+        return 0
+    fi
+    # EVERY EXTRACTION IS GUARDED, and that is not defensive habit — it was
+    # measured. The enclosing script runs under `set -e`, so on a host with no
+    # `cut` the FIRST of these aborted the function at rc=127 and the gate
+    # printed NO broader-verification section at all. That host is exactly the
+    # one tree_fingerprint now refuses for (R4-F3): the refusal was correct and
+    # the operator could not see it, because the sentence explaining it never
+    # got printed. A guard whose output is swallowed is the same thing as no
+    # guard, one layer down. Found by driving these functions under `set -eu`
+    # rather than `set -u`; the harness that missed it used the latter.
+    ts=$(printf '%s' "$line" | cut -f1) || ts=""
+    label=$(printf '%s' "$line" | cut -f2) || label=""
+    rc=$(printf '%s' "$line" | cut -f3) || rc=""
+    fp=$(printf '%s' "$line" | cut -f4) || fp=""
+    head=$(printf '%s' "$line" | cut -f5) || head=""
+    now=$(tree_fingerprint)
+    printf 'Broader verification, LAST RECORDED (this gate did not run it and does not
+vouch for it — re-run it to check):
+  %s  exited %s  at %s  (HEAD %s, tree %s)\n' "$label" "$rc" "$ts" "$head" "$fp"
+    # TWO WAYS TO HAVE NO COMPARISON, AND EACH SAYS WHICH ONE IT IS. What
+    # neither may do is fall through to the equality test below: both sentinels
+    # are CONSTANTS, so a fingerprint that is one of them matches the next one
+    # unconditionally, and the equality test would then report currency it never
+    # measured. Refused at the writer (tree_fingerprint) and again here, which
+    # is the pairing rubric-binding.sh I4 names for the same hazard in
+    # change_set_hash: "Both the writer and the reader refuse it."
+    if [ "$fp" = "$FP_NO_GIT" ] || [ "$now" = "$FP_NO_GIT" ]; then
+        printf '%s' '  Whether the tree has moved since then CANNOT BE DETERMINED here (no git
+  repository), so treat that record as describing a different tree.'
+    elif [ "$fp" = "$FP_NO_HASH" ] || [ "$now" = "$FP_NO_HASH" ]; then
+        # THE SENTENCE ATTRIBUTES NOTHING TO "THIS HOST", and that is deliberate.
+        # EITHER fingerprint can be the sentinel: a record written on a degraded
+        # host and read on a normal one lands here with a perfectly good `now`,
+        # and "this host has no sha256 tool" would then be false — the exact
+        # defect class this branch exists to remove. "At least one of the two"
+        # is true in all three combinations.
+        #
+        # AND IT NO LONGER NAMES A MISSING HASH TOOL AS THE CAUSE, because that
+        # is now only one of them. `no-hash` is what the invariant in
+        # tree_fingerprint returns whenever an input failed or came back
+        # malformed, and a failing `git diff` reaches it on a host whose sha256
+        # tools are all present and working — measured. A sentence naming the
+        # missing tool would have been false exactly there, which is the same way
+        # this branch's first wording would have been false. So it states the
+        # GENERAL condition first, then the causes it has actually met, and says
+        # so in those terms rather than implying the list is closed.
+        #
+        # THE DIFF'S CAUSE LIST WAS REWRITTEN WHEN THE DIFF CHANGED, and that is
+        # the point rather than housekeeping. Until this round it named "a
+        # configured but missing textconv or external diff driver", which was
+        # true of the mechanism then. tree_fingerprint now runs `git diff` with
+        # `--no-ext-diff --no-textconv`, so BOTH of those hosts exit 0 with real
+        # content and never reach this branch at all — measured, and the whole
+        # subject of this change set is a sentence outliving the mechanism that
+        # made it true. What still reaches it, measured: a worktree file git
+        # cannot read (mode 000), and a damaged object store where the base blob
+        # is gone. `git status` calls the file modified in both, and the diff
+        # cannot be produced.
+        #
+        # "uses when", not "records when" (R4-F4): the sentinel can be the LIVE
+        # fingerprint rather than the recorded one, and that one is computed, not
+        # recorded. One word, true of both.
+        #
+        # Plain quotes around the sentinel, never backticks: this is a
+        # single-quoted printf, and a backtick inside one is SC2016 — `make
+        # lint` runs shellcheck with no severity floor, so an info-level finding
+        # is a red pipeline. Measured, on this very sentence. No apostrophes
+        # either: one would end the string.
+        #
+        # THE WRAP IS LOAD-BEARING, and this cost a red run to learn: leg 4.18
+        # greps the RAW text for "neither shasum nor sha256sum", so the first
+        # rewrite of this sentence broke that needle across a line end and 4.18
+        # went red on correct output. Rewrapping is a code change here, not
+        # formatting.
+        printf '%s' '  Whether the tree has moved since then CANNOT BE DETERMINED here: at least
+  one of the two fingerprints is "no-hash", which this gate uses whenever an
+  input to a fingerprint failed or came back malformed, whatever the cause. The
+  causes it has met so far: no usable sha256 tool where that fingerprint was
+  taken (neither shasum nor sha256sum); a "git diff" that exited non-zero,
+  which a worktree file git cannot read or a damaged object store produces; and
+  a digest or fingerprint that was not hex of the expected length. Treat that
+  record as describing a different tree.'
+    elif [ "$now" = "$fp" ]; then
+        printf '  The working tree is UNCHANGED since that run (tree %s), so it does describe
+  these changes.' "$now"
+    else
+        printf '  The working tree has MOVED since that run (now %s), so that result does NOT
+  describe the current changes. Re-run it.' "$now"
+    fi
+    return 0
+}
+
+# VERIFICATION-LEDGER END (claude-workflow-plugin-fkm.1.11)
+
+# Subcommand dispatch, deliberately ahead of `INPUT=$(cat)`. The Stop hook is
+# wired in settings.json with NO arguments, so `$#` is 0 on every hook
+# invocation and this branch is unreachable from the gate path; it exists so
+# the Makefile has ONE definition of the fingerprint to write against rather
+# than a second copy that would drift from the reader (llh.18).
+#
+# OUTSIDE the sentinel region on purpose: the region must contain function
+# DEFINITIONS only, so a test can `.` it to drive the functions without the
+# sourcing script's own $1 accidentally tripping this branch.
+if [ "${1:-}" = "record-verification" ]; then
+    shift
+    record_verification "$@"
+    exit $?
+fi
+
 # DOC-CONTENT-VETO BEGIN (claude-workflow-plugin-bbh)
 #
 # IS THIS PATH AFFIRMATIVELY EXECUTABLE CONTENT?
@@ -2227,6 +3100,94 @@ else
     fi
 fi
 
+# CHECK-SCOPE BEGIN (claude-workflow-plugin-fkm.1.11)
+#
+# THE DEFECT WAS THE CLAIM, NOT THE SCOPE.
+#
+# The QA-required block reason used to end with the flat literal
+# `technical checks passed`. Measured on this repo, what that sentence covered
+# was `make test` (the L1 tier) plus `make lint`; `make test-ci` — L1 + L2 +
+# L3-unit + manifest-validate — is a different target the gate never invokes,
+# and `type_cmd` resolves EMPTY here so the type stage runs nothing at all.
+# The live consequence was recorded before this fix: with four L2 specs failing
+# and 28 assertion failures outstanding, every Stop in that session printed
+# `technical checks passed`.
+#
+# Running a ten-minute suite on every Stop is not the fix and was explicitly
+# rejected. The fix is that the gate stops making a claim wider than the
+# commands it executed. These two functions are the whole of it:
+#
+#   checks_scope_claim   the short parenthetical in the reason header. Names
+#                        the stages that ran, or says plainly that none did.
+#   checks_scope_note    the paragraph: the literal commands executed, the
+#                        stages that were skipped and why, the standing caveat
+#                        that these are the runner's DEFAULT targets, and the
+#                        broader-verification ledger readout.
+#
+# WHY FUNCTIONS RATHER THAN INLINE STRINGS. Both block-reason paths need the
+# same answer, and the 2ty incident in this same file is what happens when one
+# idea is written three times: the copies disagreed and the operator-facing one
+# was false. One definition, two callers, by construction — and a function is
+# drivable, which is what lets .claude/scripts/tests/gate-claim-honesty.test.sh
+# assert on the emitted text by RUNNING it rather than by reading the file.
+#
+# Deliberately avoids the literal `technical checks passed` in every branch:
+# component specs assert its ABSENCE on the failing path, and re-introducing
+# the phrase anywhere is the regression this region exists to prevent.
+checks_scope_claim() {
+    if [ "${SUITE_REUSED:-false}" = "true" ]; then
+        printf 'checks NOT re-run this loop — cached result replayed under the escalation contract'
+        return 0
+    fi
+    local ran=""
+    [ -n "${TEST_CMD:-}" ] && ran="tests"
+    if [ -n "${LINT_CMD:-}" ]; then
+        [ -n "$ran" ] && ran="$ran + lint" || ran="lint"
+    fi
+    if [ -n "${TYPE_CMD:-}" ]; then
+        [ -n "$ran" ] && ran="$ran + type-check" || ran="type-check"
+    fi
+    if [ -z "$ran" ]; then
+        printf 'NO technical check ran — detect-stack.sh resolved no test, lint or type command'
+        return 0
+    fi
+    printf '%s passed — and nothing else ran' "$ran"
+    return 0
+}
+
+checks_scope_note() {
+    printf 'WHAT THIS GATE RAN, EXACTLY.\n'
+    if [ "${SUITE_REUSED:-false}" = "true" ]; then
+        printf '  The suite was NOT re-run this loop (escalation contract). The result above
+  is the cached one from an earlier Stop at runner=%s; this loop executed no
+  test, lint or type command of its own.\n' "${RUNNER:-none}"
+    else
+        if [ -n "${TEST_CMD:-}" ]; then
+            printf '  RAN      tests       %s\n' "$TEST_CMD"
+        else
+            printf '  NOT RUN  tests       no test command detected for runner=%s\n' "${RUNNER:-none}"
+        fi
+        if [ -n "${LINT_CMD:-}" ]; then
+            printf '  RAN      lint        %s\n' "$LINT_CMD"
+        else
+            printf '  NOT RUN  lint        no lint command detected for runner=%s\n' "${RUNNER:-none}"
+        fi
+        if [ -n "${TYPE_CMD:-}" ]; then
+            printf '  RAN      type-check  %s\n' "$TYPE_CMD"
+        else
+            printf '  NOT RUN  type-check  no type command detected for runner=%s\n' "${RUNNER:-none}"
+        fi
+        printf '
+  Those are the DEFAULT targets detect-stack.sh resolves for runner=%s. Any
+  wider tier this project defines — a full CI target, component/integration/e2e
+  suites, manifest or schema validation — is not part of them, is not run here,
+  and is not covered by the line above.\n' "${RUNNER:-none}"
+    fi
+    printf '\n%s\n' "$(broader_verification_note)"
+    return 0
+}
+# CHECK-SCOPE END (claude-workflow-plugin-fkm.1.11)
+
 # ESCALATION READOUT (claude-workflow-plugin-2ty, QA round 1) -----------------
 #
 # THE ONE SUPPRESSION PREDICATE, AND WHY IT IS A FUNCTION.
@@ -2444,12 +3405,20 @@ $FAILED_CHECKS
 Regression coverage note: this gate runs the FULL test suite + FULL
 type-check on every iteration, not just tests for changed files. Changes
 to module A might break module B's contract; only running A's tests
-would miss B's failure."
+would miss B's failure. That is a statement about SCOPING, not coverage:
+whatever commands ran, ran whole. Which commands those were is below."
     fi
 
+    # fkm.1.11: the failing path names the executed commands too. It never
+    # overclaimed a PASS — it reports failures — but it did leave "the FULL test
+    # suite + FULL type-check" standing next to a bare `Detected runner:` line,
+    # and on this repo the type stage runs nothing at all because detect-stack.sh
+    # resolves type_cmd empty. Same note, same function, both paths.
     REASON="$REASON
 
-Detected runner: $RUNNER"
+Detected runner: $RUNNER
+
+$(checks_scope_note)"
 
     if [ -n "$TEST_FAIL_TAIL" ]; then
         REASON="$REASON
@@ -3083,18 +4052,91 @@ fi
 # EXTRACTED FROM THIS TEXT, and denylist-shared.sh section C4 does the same after
 # a denylist hash migration — so editing the recipe here without editing the
 # behaviour fails a test.
+#
+# ko82: THE THIRD BULLET USED TO BE FALSE, and it read:
+#   "Editing a tracked file AFTER approval shifts the current change-set hash
+#    away from the approved one — the change must be re-reviewed."
+# change_set_hash is a sha256 over the sorted, denylist-filtered PATH LIST
+# (impact-report.sh change_set_hash / canonical_changed_files); contents are
+# never hashed. Measured directly against the shipped `impact-report.sh
+# --hash-only`: a tracked file rewritten from end to end produced a
+# byte-identical hash. The sentence sat third in a list of four whose other
+# three are accurate, so its true neighbours lent it credibility, in the text an
+# operator reads at the moment they are already blocked.
+#
+# What actually produces this block after an approval is MEMBERSHIP DIVERGENCE:
+# approve truncates the tracker, so the current hash covers the paths edited
+# SINCE the approval, and it stops matching as soon as that set differs from the
+# approved one. The corrected bullet says that instead of asserting a content
+# sensitivity the mechanism does not have. The attestation this implies —
+# membership plus review-at-review-time, not content — is stated in the closing
+# note, which is the paragraph that already carries the residuals.
+# APPROVAL-BINDING-TEXT BEGIN (claude-workflow-plugin-ko82)
+#
+# The two paragraphs of this block reason that make CLAIMS ABOUT THE MECHANISM,
+# lifted into functions so a test can assert on them by RUNNING them.
+#
+# That is not a style preference, it is what makes the assertion possible at
+# all. The claim under test — "does this text say the hash is content-
+# sensitive?" — cannot be checked by grepping the FILE, because the comment
+# above quotes the false sentence verbatim in order to explain why it was
+# removed. A grep over the file finds it and concludes the defect is still
+# live; a grep over the FUNCTION'S OUTPUT does not, because a comment is not
+# output. That is the "never verify a removal by grepping for the removed
+# pattern" rule with a concrete escape from it, and
+# .claude/scripts/tests/gate-claim-honesty.test.sh asserts BOTH halves of the
+# distinction so the escape cannot quietly stop working.
+#
+# printf with single-quoted lines throughout: the text contains backticks, and
+# a double-quoted string would run them as command substitution.
+approval_record_causes() {
+    local tid="${1:-<task-id>}"
+    # SC2016: the backticks are LITERAL — they quote a shell command inside prose
+    # the operator reads. Expanding them is exactly what must not happen, which
+    # is why the string is single-quoted in the first place.
+    # shellcheck disable=SC2016
+    printf '  - A bare `bd label add %s qa-approved` sets the label but writes\n' "$tid"
+    printf '%s\n' '    NO change-set-bound record, so it cannot release (red-team P0).'
+    printf '%s\n' '  - Approving a decoy task and redirecting current-task records the DECOY'"'"'s'
+    printf '%s\n' '    change-set hash, which will not match what is actually shipping (P1).'
+    printf '%s\n' '  - Working on a DIFFERENT SET OF FILES after approval. The hash is over the'
+    printf '%s\n' '    sorted, denylist-filtered PATH LIST, and approve truncates the tracker — so'
+    printf '%s\n' '    afterwards the hash covers the paths touched SINCE, and it stops matching'
+    printf '%s\n' '    the approved one as soon as that set differs. What diverged is WHICH FILES'
+    printf '%s\n' '    are in play, never what is in them — but re-touching one covered file is'
+    printf '%s\n' '    still a different SET: only re-touching EXACTLY the approved set reproduces'
+    printf '%s\n' '    the approved hash (see the note at the end).'
+    printf '%s\n' '  - A denylist change re-hashes the whole change set, so an approval recorded'
+    printf '%s'   '    before it no longer matches (one migration per landing; see docs/HOOKS.md).'
+    return 0
+}
+
+approval_binding_attests() {
+    printf '%s\n' 'WHAT A CHANGE-SET-BOUND APPROVAL ATTESTS (ko82, and read this before trusting'
+    printf '%s\n' 'one): MEMBERSHIP PLUS REVIEW-AT-REVIEW-TIME. These paths were the change set,'
+    printf '%s\n' 'and a reviewer looked at them then. It does NOT attest CONTENT — change_set_hash'
+    printf '%s\n' 'is a sha256 over the sorted, denylist-filtered path list, so nothing in the'
+    printf '%s\n' 'record is a function of the bytes in those files.'
+    printf '%s\n' ''
+    printf '%s\n' 'That still defeats a forged or stale label, a decoy-task redirect, a path'
+    printf '%s\n' 'entering or leaving the set, and a denylist re-hash — all four block. Two'
+    printf '%s\n' 'residuals it does not cover:'
+    printf '%s\n' '  - An adversary with arbitrary shell can reproduce the record by hand; this is'
+    printf '%s\n' '    a tamper-EVIDENT record, not a cryptographic sandbox (llh.18).'
+    printf '%s\n' '  - Re-editing EXACTLY the approved set of paths after approval reproduces the'
+    printf '%s\n' '    approved hash, so that content is not re-reviewed. Reachable in one step'
+    printf '%s\n' '    when the approved change set is a single file. Measured, filed; the repair'
+    printf '%s\n' '    belongs at the one canonical definition (impact-report.sh change_set_hash /'
+    printf '%s'   '    canonical_changed_files) or nowhere.'
+    return 0
+}
+# APPROVAL-BINDING-TEXT END (claude-workflow-plugin-ko82)
+
 if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     emit_block "qa-approved label present but no change-set-bound approval record matches the current changes — approve via qa-gate.sh approve, not a bare label add.
 
 Why this blocks ($APPROVAL_RECORD_DETAIL):
-  - A bare \`bd label add $CURRENT_TASK qa-approved\` sets the label but writes
-    NO change-set-bound record, so it cannot release (red-team P0).
-  - Approving a decoy task and redirecting current-task records the DECOY's
-    change-set hash, which will not match what is actually shipping (P1).
-  - Editing a tracked file AFTER approval shifts the current change-set hash
-    away from the approved one — the change must be re-reviewed.
-  - A denylist change re-hashes the whole change set, so an approval recorded
-    before it no longer matches (one migration per landing; see docs/HOOKS.md).
+$(approval_record_causes "$CURRENT_TASK")
 
 The release path requires a tamper-evident record that qa-gate.sh approve
 writes (a \`QA-GATE APPROVED change_set_hash=<h>\` comment) AND a matching
@@ -3112,9 +4154,7 @@ record binding the current change set, it re-verifies every precondition
 bound record rather than reporting an idempotent no-op. Re-review the change set
 before you run it; nothing here waives that.
 
-Note: this binds approval to the reviewed files and defeats a forged or stale
-label, but is not a cryptographic sandbox against an adversary with arbitrary
-shell who reproduces the record by hand (documented residual, llh.18)."
+$(approval_binding_attests)"
 fi
 
 # V3 (jio.1): the review-discipline block. Emitted BEFORE the generic
@@ -3237,19 +4277,30 @@ No active Beads task detected. Create one (and write its id via
     # it. A gate that reports confidently on its own behaviour must be right
     # about it, so the two cases now say what actually happened. The FAILED_CHECKS
     # path above has always branched this way; this path simply did not.
+    #
+    # fkm.1.11: both branches now end in checks_scope_note, and neither claims
+    # more than the commands that ran. The escalated branch keeps its two-way
+    # SUITE_REUSED split (2ty's fix, above) because "previously passed" and "ran
+    # this loop" are genuinely different facts; what changed is that "technical
+    # checks" — a phrase that silently promised a whole verification programme —
+    # is now spelled out as the stages actually executed.
     if [ "$QA_ESCALATED" = "true" ]; then
         if [ "$SUITE_REUSED" = "true" ]; then
-            ESC_SUITE_CLAUSE="Test suite NOT re-run this loop per the escalation contract (runner=$RUNNER, technical checks previously passed)."
+            ESC_SUITE_CLAUSE="Test suite NOT re-run this loop per the escalation contract (runner=$RUNNER; the cached result below is what passed earlier)."
         else
-            ESC_SUITE_CLAUSE="Technical checks RAN and passed this loop (runner=$RUNNER); the escalation contract skips them only on later loops."
+            ESC_SUITE_CLAUSE="The detected runner's checks RAN and passed this loop (runner=$RUNNER); the escalation contract skips them only on later loops."
         fi
         REASON="QA approval required — gate ESCALATED (iteration $ITER; $(escalation_basis_claim)) — record a J21 choice before iterating further. $ESC_SUITE_CLAUSE
 
-$CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
-    else
-        REASON="QA approval required (iteration $ITER, runner=$RUNNER, technical checks passed).
+$CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE
 
-$CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE"
+$(checks_scope_note)"
+    else
+        REASON="QA approval required (iteration $ITER, runner=$RUNNER; $(checks_scope_claim)).
+
+$CHANGE_COUNT file(s) changed - all require QA review.$NO_TASK_NOTE
+
+$(checks_scope_note)"
     fi
 
     # 2ty: the basis readout. This is the path all three measured instances took

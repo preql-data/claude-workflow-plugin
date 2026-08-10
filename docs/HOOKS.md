@@ -1545,6 +1545,52 @@ the approval record, written once, cannot know about them. Both sides fail
 CLOSED: a missing or unrunnable `review-check.sh` refuses/blocks rather than
 waving the change through.
 
+### What a change-set-bound approval attests
+
+**Membership plus review-at-review-time.** These paths were the change set, and
+a reviewer looked at them then. **It does not attest content.**
+
+`change_set_hash` is a sha256 over the sorted, denylist-filtered **path list**
+(`impact-report.sh` `change_set_hash` / `canonical_changed_files`); the bytes in
+those files are never hashed. Measured against the shipped script: a tracked
+file rewritten from end to end produced a byte-identical hash. Three record
+types inherit this today — `QA-GATE APPROVED`, `REVIEW-ARTIFACT reviewed_hash`,
+and `RUBRIC` — because all three bind the same one definition. That is
+deliberate: a second, content-aware canonicalisation invented at one of the
+consumers is the duplicate-definition failure `llh.18` exists to forbid, so any
+repair belongs at that single definition or nowhere.
+
+What the binding still catches, all four blocking:
+
+| Attack / accident | Why it is caught |
+| --- | --- |
+| a bare `bd label add <tid> qa-approved` | no record exists at all |
+| approving a decoy task and redirecting `current-task` | the record binds the decoy's path set |
+| a path entering or leaving the change set after approval | the path list, and so the hash, differs |
+| a denylist edit, or a change to what reaches the tracker | the whole set re-hashes (see "Denylist changes are a hash migration") |
+
+What it does not catch:
+
+- **Hand-forged records.** An agent with arbitrary shell can reproduce the
+  comment. Tamper-*evident*, not a cryptographic sandbox (`llh.18`).
+- **Re-editing exactly the approved set.** `approve` truncates the tracker, so
+  the live hash afterwards covers the paths touched *since*. Touch precisely the
+  approved set again and the hash returns to the approved value, and that new
+  content is not re-reviewed. Reachable in one step whenever the approved change
+  set is a single file. Measured on the shipped `impact-report.sh --hash-only`;
+  filed, and scheduled as a prerequisite of the v5 coherence claim, because
+  coherence is a content assertion and a membership-only binding cannot support
+  one.
+
+The operator-facing statement of the same thing is the closing note of the
+`LABEL_WITHOUT_RECORD` block reason in `verify-before-stop.sh`, and that note is
+what `.claude/scripts/tests/gate-claim-honesty.test.sh` pins: it asserts the
+text the shipped function EMITS against the *measured* behaviour of the shipped
+hash rather than against a fixed string — so if the hash ever becomes
+content-sensitive, the assertion flips with it instead of going quietly stale.
+This section is prose and is **not** pinned: no test asserts anything about its
+wording, so it is kept true by review.
+
 ### Approve idempotency is hash-aware
 
 `qa-gate.sh approve` used to no-op whenever the `qa-approved` label was already

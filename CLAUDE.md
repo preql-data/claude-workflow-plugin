@@ -11,6 +11,9 @@ Use this checklist instead of front-loading every doc. Pick the row matching the
 - if you are debugging a hook or helper script -> read `docs/HOOKS.md` and the relevant script under `.claude/scripts/`
 - if you are editing the QA gate -> read `.claude/scripts/verify-before-stop.sh` and `.claude/scripts/qa-gate.sh`
 - if you are adding or updating tests -> read `.claude/tests/README.md`
+- if you are adding a new CHECK of any kind (assertion, guard, CI job, gate condition) -> read `.claude/tests/README.md` § "The pairing requirement": it does not ship without a negative control, and at least one leg must observe the shipped artifact RUNNING
+- if you found a defect in work that is ALREADY CLOSED -> read `CONTRIBUTING.md` § "A finding discovered after a task closes opens a NEW task" (a comment on a closed task never surfaces in a ready-work query)
+- if you are writing a number into a report, audit row, CHANGELOG entry, task closure or review artifact -> read `CONTRIBUTING.md` § "Every number carries the command that produced it and the commit it was measured at"
 - if you are touching install / packaging -> read `install.sh`, `install.ps1`, `.claude-plugin/plugin.json`
 - if you are touching MCP servers -> read `docs/MCP_SERVERS.md` and `.claude/mcp/<server>/`
 - if you are debugging an MCP issue -> read `docs/MCP_SERVERS.md` and `.claude/mcp/<server>/`

@@ -719,3 +719,97 @@ No row in this section asserts an adjective without an artifact pointer,
 every cited artifact was executed green in the authoring session, and every
 assertion count was read out of that session's run log rather than copied
 from the commit that introduced it.
+
+---
+
+## Standing attestations — what the release credentials actually mean
+
+**This is not a fourth claims ledger and it deliberately contains no status
+cells.** It carries no `PROVEN` / `PROVEN-WITH-CAVEAT` / `NOT-PROVEN` /
+`REMOVED` row and no `| UW<n> |` row, so the five v4.1.0 scoped greps above
+still return 13 / 3 / 0 / 0 / 16 with their `,0` ranges untouched — verified by
+re-running all five after this section was written, at
+`1233ea5` + this change set. The appending obligation recorded in the v4.1.0
+tally is therefore **not yet paid and is still owed** by whoever writes the
+next ledger of rows.
+
+Its purpose is different from a ledger's. A row says *this claim was checked*.
+This section says *what the credential means at all*, so a later reader does
+not infer a stronger guarantee from a green row than the mechanism can carry.
+
+### A change-set-bound approval attests membership plus review-at-review-time
+
+**These paths were the change set, and a reviewer looked at them then. It does
+not attest content.**
+
+`change_set_hash` is a sha256 over the sorted, denylist-filtered **path list**;
+file contents are never hashed. Measured, not inferred:
+
+| What was measured | Command | Result |
+| --- | --- | --- |
+| does rewriting a tracked file move the hash | `CLAUDE_PROJECT_DIR=<sandbox> bash .claude/scripts/impact-report.sh --hash-only`, before and after replacing a listed file's contents entirely | **no** — byte-identical hash both sides |
+| does adding a path move it | same command, after appending one new path to `changed-files.txt` | yes |
+| does re-touching exactly the approved set after approval move it | same command, after `truncate_changed_files_tracker` then re-adding the same paths | **no** — returns to the approved value |
+
+Measured at `1233ea5` on 2026-08-08 by `claude-workflow-plugin-ko82`.
+
+Three record types inherit this today — `QA-GATE APPROVED`,
+`REVIEW-ARTIFACT reviewed_hash` and `RUBRIC` — because all three bind the same
+single definition (`impact-report.sh` `change_set_hash` /
+`canonical_changed_files`). Any repair belongs at that one definition or
+nowhere: a content-aware second canonicalisation invented at a consumer is the
+duplicate-definition failure `llh.18` exists to forbid.
+
+**What this does not weaken.** The binding still blocks a bare `bd label add`,
+a decoy-task redirect, a path entering or leaving the set, and a denylist
+re-hash. Two residuals, both stated rather than discovered later: a hand-forged
+record is possible for an agent with arbitrary shell (tamper-*evident*, not a
+sandbox — `llh.18`), and re-editing **exactly** the approved set of paths
+reproduces the approved hash, so that content is not re-reviewed — reachable in
+one step whenever the approved change set is a single file.
+
+**Consequence for a future coherence claim.** Coherence is a *content*
+assertion: it says design, tests and code describe the same system. A
+membership-only binding cannot support one. So if the content-binding repair
+has not landed by the release that claims coherence, that row is **scoped to
+membership** rather than claimed at content.
+
+Operator-facing statement of the same thing: the closing note of the
+`LABEL_WITHOUT_RECORD` block reason in `.claude/scripts/verify-before-stop.sh`.
+Developer-facing: `docs/HOOKS.md` § "What a change-set-bound approval attests".
+The **block-reason note** is pinned by
+`.claude/scripts/tests/gate-claim-honesty.test.sh`, which asserts the text the
+shipped function EMITS against the *measured* behaviour of the shipped hash
+rather than against a fixed string. The two PROSE copies — this section and the
+`docs/HOOKS.md` one — are **not** pinned: no test asserts anything about their
+wording, and they are kept true by review.
+
+### The Stop gate's technical-check claim is scoped to the runner's default target
+
+The Stop hook resolves one runner via `detect-stack.sh` and runs that runner's
+**default** test/lint/type targets. Measured on this repo at `1233ea5` with
+`CLAUDE_PROJECT_DIR=$PWD bash .claude/scripts/detect-stack.sh`:
+
+| Field | Value |
+| --- | --- |
+| `runner` | `make` |
+| `test_cmd` | `cd "<repo>" && make test` → `Makefile:40` → `run-tests.sh` — the L1 tier only |
+| `lint_cmd` | `cd "<repo>" && make lint` → shellcheck |
+| `type_cmd` | *(empty — the type stage runs nothing on this repo)* |
+
+`make test-ci` — the target chaining L1 + L2 + L3-unit + manifest-validate — is
+**not** what the gate runs and the gate cannot discover it. Until
+`claude-workflow-plugin-fkm.1.11` the block reason nevertheless read `technical
+checks passed`; with four L2 specs red and 28 assertion failures outstanding it
+said exactly that, on every attempt of that session. The gate now names the
+commands it executed and the stages it skipped, and reads
+`.claude/.qa-tracking/verification-ledger` for anything wider — the last
+recorded command, its exit code, the tree it was measured at, and whether the
+tree has moved since. `make test-ci` does record its own result, but
+`record_verification` takes the label and the code as arguments and the ledger
+line has no writer field, so the readout claims **no provenance** for it:
+**the gate did not run it and does not vouch for it**, and the readout says so
+in those words. (It said more than that until `fkm.1.11` QA round 1 — "the
+command recorded its own result" — which was false of the only record this
+repo's ledger held, one an operator had typed by hand after running the four
+tiers separately.)

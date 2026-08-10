@@ -22,8 +22,14 @@ bd export -o .beads/issues.jsonl                # One-way: database -> ledger. O
 
 **MANDATORY WORKFLOW:**
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
+1. **File issues for remaining work** - Create issues for anything that needs follow-up.
+   A finding about work that is ALREADY CLOSED opens a **new** task — never a
+   comment on the closed one, which no ready-work query will ever return. See
+   CONTRIBUTING.md § "A finding discovered after a task closes opens a NEW task".
+2. **Run quality gates** (if code changed) - Tests, linters, builds.
+   Every number you then report carries the command that produced it and the
+   commit it was measured at — CONTRIBUTING.md § "Every number carries the
+   command that produced it and the commit it was measured at".
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash

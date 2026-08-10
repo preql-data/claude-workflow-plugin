@@ -251,6 +251,165 @@ visible. If a META-TEST starts passing through when it should fail, the
 test has gone soft and the gate doesn't actually guard the thing it
 names.
 
+### The pairing requirement — a new check ships with its negative control
+
+**A new check cannot ship without a paired negative control.** This is a
+closeout requirement, not a preference: at closeout, every check added by the
+change is either paired to the standard below or listed as UNPAIRED with a
+reason. It exists because 26 separate instances were recorded of a check that
+claimed more than it verified, and every fix until now was instance-shaped.
+This one targets the generator.
+
+A pair is PAIRED only when all four parts are present:
+
+1. **Non-vacuity.** A mutation of the shipped artifact — or of the state it
+   reads — with an **explicit leg proving the mutation landed where it was
+   aimed**. An `awk` strip that matched nothing, a `sed` that substituted
+   nothing, and a fixture that was never written all produce a mutant identical
+   to the original, and a "control" over an unmutated artifact passes for the
+   wrong reason. Prove the hit: an `END { if (!found) exit 7 }` on the strip, a
+   byte-comparison of mutant against shipped, a `bash -n` on the result.
+2. **Specific misbehaviour.** An assertion that the mutant fails *in the way
+   the guard prevents*, **naming the check that would fail**. "The mutant is
+   different" is not it; "the mutant releases a change set with no bound
+   approval record, so assertion X goes green while the defect is live" is.
+3. **Restore control.** The shipped artifact, same inputs, same call shape,
+   behaving correctly. Without it the mutant's failure could be an artefact of
+   the harness rather than of the mutation.
+4. **Execution.** **At least one leg observes the shipped artifact *running*.**
+
+**Leg 4 is the discriminator, and it is the one that gets skipped.** *A
+three-leg triad over markdown byte-equality is a triad over markdown.* The
+census that produced this requirement measured the tier **bimodal**, and the
+split is predicted almost perfectly by one variable — is the artifact under
+test an EXECUTABLE or a DOCUMENT:
+
+- Every PAIRED row drives a shipped script, a shipped JS module, or a function
+  extracted verbatim from one.
+- Every FALSE-PAIR row compares bytes in markdown, in JSON, or in a script's
+  *comment text*.
+- **Not one document check reached leg 4. Not one executable check failed it.**
+
+That makes the fix targetable rather than diffuse: if the thing you are
+checking is prose, either find the executable whose behaviour that prose
+describes and drive it, or **declare the check UNPAIRED and say what the
+control is instead**. An honest UNPAIRED row is worth more than a
+byte-comparison dressed as a pair, because the byte-comparison is a claim
+nothing checks — which is the defect being censused.
+
+Two failure modes earned their own line, both from live incidents:
+
+- **Do not count text to prove a claim about code.** A grep tally over a
+  document is evidence about the document.
+- **Do not verify a removal by grepping for the removed pattern.** The region
+  header documenting a deleted arm contains the pattern, so it survives as
+  prose in the very file that removed it. Compare hashes, or drive the
+  function.
+
+Worked examples in this repo, both executable:
+
+- `.claude/tests/component/specs/approve-idempotency.sh` F3 — strips a
+  sentinel-wrapped region from a copy of `verify-before-stop.sh`, asserts the
+  strip landed (`exit 7` if the sentinels are absent), asserts the copy still
+  parses, asserts a discriminator that rules out the wrong-reason block, then
+  DRIVES both the mutant and the shipped hook.
+- `.claude/scripts/tests/doc-only-classifier.test.sh` — extracts
+  `is_doc_only_path` from the shipped script by `awk` and runs it over a
+  cross-product of paths, so the thing under test is the shipped definition
+  rather than a re-typed copy free to drift.
+
+**The honest ceiling of the census that produced this, stated so it is not
+over-read:** it was run by the same process it was auditing, so it is subject
+to the gap it measures. Two runs, both partial — the first contaminated by a
+concurrent writer (seven files moved under it mid-run), the second delivered
+2 of 6 chunks, leaving L2's 44 specs and L3's 22 files never censused. **No
+tier-wide coverage percentage is published, deliberately**, because a total
+whose rows were never delivered is exactly the claim this convention forbids.
+The pairing inventory is a standing invariant maintained one tier at a time
+through ordinary reviewed work, not a snapshot; covering the population is a
+side effect of maintaining it.
+
+#### This convention is itself UNPAIRED, and that is the declaration it asks for
+
+The rule above is prose. There is no shipped executable whose behaviour changes
+when this section changes, so **there is no execution leg available and none is
+claimed.** A check that read these paragraphs and asserted their wording would
+be a byte-comparison over markdown — leg 4 absent, and precisely the false pair
+the census named. Writing one would make the convention self-refuting.
+
+So, stated plainly rather than papered over — **what the control actually is:**
+
+1. **The convention binds at review, not at runtime.** Its enforcement point is
+   the closeout checklist and the reviewer reading it, which is a human control
+   with a human control's reliability. That is a weaker guarantee than a test,
+   and saying so is the point.
+2. **Its worked examples carry the execution legs it cannot.** The rule is only
+   as real as the pairs shipped under it, and those are executable and pinned:
+   `.claude/scripts/tests/gate-claim-honesty.test.sh` (ten guards, each with a
+   mutation that lands, a named misbehaviour, a restore control, and a leg that
+   runs the shipped artifact — the count is checkable by counting META blocks,
+   one per guard: `2M`, `3M`, `4M`, `4N`, `4P`, `4Q`, `4R`, `4S`, `4T`, `5M`.
+   Ten guards and five numbered sections, and the two numbers are *not* meant
+   to agree: section 1 is a MEASUREMENT, not a guard, and carries no mutation,
+   while section 4 carries seven — the tree fingerprint's content sensitivity,
+   the readout's provenance claim, the fingerprint's *invariant*, the per-path
+   fallback over the untracked set, the diff flags that keep drivers out of
+   input 2, the fallback's quoting convention, and the untracked hashes'
+   filter bypass. This paragraph's counts have now been stale once (`4S`
+   shipped in round 7 and was not added here until round 8 — recorded as
+   R8-F3), which is this file's own subject applied to itself: a count the
+   text invites the reader to verify mechanically, failing when verified. The
+   fifth guard shipped
+   in QA round 3, after a mutant proved a corrected sentence had no control at
+   all; the sixth in round 4, after review found the fingerprint degrading to a
+   CONSTANT on a host carrying no sha256 tool — so two of them compared equal
+   and the readout stated UNCHANGED over a rewritten tree, a false match from
+   inside the block promising the design never produces one. Round 5 turned that
+   sixth guard from a refusal of *one remembered* degradation into an invariant
+   over all of them, after three more inputs were measured degrading the same
+   way: it asserts four sandboxes against a single refusal, and its `4P`
+   carries two mutations under one banner because the invariant has two halves —
+   an input must carry content wherever its producer can read the repository,
+   and the function must refuse when a producer fails. Round 6 added the seventh
+   and eighth, and they are separate guards rather than further mutations of
+   `4P` for a reason worth stating: the seventh (`4Q`) covers a defect that
+   *survived* the invariant, in the one call round 5 deliberately exempted from
+   it, where one dangling symlink froze the whole fingerprint across an
+   end-to-end rewrite; the eighth (`4R`) covers one that **cannot be refused at
+   all** — a `textconv` driver that is installed, working and lossy leaves the
+   producer exiting 0 and the digest 64 valid hex characters, so no guard has
+   anything to detect and the cure is `--no-ext-diff --no-textconv`, which stops
+   the degradation instead of catching it. Round 7 added the ninth (`4S`), a
+   cross-model review find after six same-family rounds ran 194 assertions
+   green over it: the per-path fallback consumed C-quoted names as argv, so a
+   readable newline-named file read as UNREADABLE — 4R's signature again,
+   nothing failed and nothing malformed, cured by keeping the consumer in the
+   producer's quoting convention rather than by any guard. Round 8 added the
+   tenth (`4T`), the same shape one input over: a lossy-but-working `clean`
+   filter (an nbstripout analogue) made `hash-object` return one constant
+   object id across an end-to-end rewrite of an untracked file, and the cure —
+   `--no-filters` on both hash-object calls — is deliberately ASYMMETRIC,
+   because `git diff` has no such flag: input 3 is cured, input 2's half of
+   the filter family is a measured KNOWN LIMITS bullet in the region and a
+   pinned measurement (leg 4.63), not a guard. That is also why the round-5
+   wording
+   of `4P`'s second half was corrected above: "an input must carry content in
+   every configuration" was itself false while `.gitattributes` could decide what
+   the diff showed),
+   `approve-idempotency.sh` F3, and
+   `doc-only-classifier.test.sh`. Read those to see what a pair looks like; the
+   prose here only describes them.
+3. **One mechanical arm exists and is narrow.** `specs/_invariants.unit.spec.ts`
+   enumerates `listInvariants()` and fails when a registered invariant has no
+   `it("META-TEST: …")`. That is a real, executing coverage check — for
+   invariants only. Nothing equivalent exists for L1 or L2 assertions, and no
+   claim is made that one does.
+
+The honest form of the gap, for anyone who wants to close it: a mechanical arm
+for the other tiers would have to enumerate checks the way `listInvariants()`
+enumerates invariants, which needs a registry that does not exist. Until it
+does, this convention is maintained, not enforced.
+
 ### Invariant META-TEST pattern
 
 The invariant engine carries the META-TEST convention into L3-unit. For
