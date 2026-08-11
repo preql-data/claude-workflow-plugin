@@ -335,8 +335,13 @@ echo "=== Section 7: the fresh-clone state (empty database, populated committed 
 # (measured: it reported the parent's 5 records). A sibling tempdir is the only
 # way to get a genuinely virgin workspace.
 CLONE=$(mktemp -d -t beads-ledger-clone.XXXXXX)
+# Re-arming EXIT replaces the runner wrapper's trap, so the chain ends with
+# __spec_wrapper_exit (a9hh R4-F1): it prints the __SPEC_SUMMARY__ line and
+# runs the fixture cleanup this trap would otherwise silently drop. Dropping
+# the chain is loud, not silent — the runner scores an exit-0 spec with no
+# summary line as FAILED.
 # shellcheck disable=SC2064
-trap "rm -rf '$CLONE' 2>/dev/null || true" EXIT
+trap "rm -rf '$CLONE' 2>/dev/null || true; __spec_wrapper_exit" EXIT
 mkdir -p "$CLONE/.beads"
 printf '%s\n' \
     '{"id":"clone-aaa","title":"first issue from the clone","status":"open","issue_type":"task","priority":2}' \

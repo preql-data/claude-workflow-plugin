@@ -45,13 +45,15 @@
 #
 # THE bd SIMULATOR, and why sections 1-2 do not need a real bd
 # ------------------------------------------------------------
-# CI has no bd (BD_SHIM_ONLY=1), so a spec that needed one would be a skip in
-# the only environment that runs on every push. Sections 1-2 therefore run
-# against a PATH shim that reproduces the two measured bd behaviours this fix
-# turns on — parent-label union on create, and comment_count-without-bodies on
-# show. Section 3 then VALIDATES THE SIMULATOR against the real bd when one is
-# present, so the CI-runnable legs rest on a model that has been checked rather
-# than assumed. Only section 3 skips.
+# When this spec was written, CI had no bd (BD_SHIM_ONLY=1) and a spec that
+# needed one would have been a skip in the only environment that runs on
+# every push — so sections 1-2 run against a PATH shim that reproduces the
+# two measured bd behaviours this fix turns on: parent-label union on create,
+# and comment_count-without-bodies on show. Since a9hh the l1-unit job
+# installs the real bd, so section 3 — which VALIDATES THE SIMULATOR against
+# the real bd — runs in CI too, and a bd-less environment is a counted
+# FAILURE rather than a note. The simulator stays: sections 1-2 remain
+# runnable anywhere node is, and section 3 is what keeps the model honest.
 #
 # MEASURED FACTS THIS SPEC ENCODES (bd 1.1.2, this repo's ledger, 342 issues):
 #   * `bd show --json --include-comments` omits the `comments` KEY entirely on a
@@ -484,16 +486,13 @@ assert_eq "2.17 RESTORE CONTROL: the shipped tree still creates a clean child" \
 printf '\n--- 3. against the REAL bd: simulator fidelity + end to end ---\n'
 # ===========================================================================
 if ! command -v bd >/dev/null 2>&1; then
-    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
-        printf '  note: section 3 SKIPPED (bd not available; CI env BD_SHIM_ONLY=1).\n'
-        printf '  note: NOT measured here — that bd 1.1.2 really unions parent labels on create,\n'
-        printf '        that --no-inherit-labels really suppresses it, and that a real degraded\n'
-        printf '        transport really trips the refusal. Sections 1-2 ran against the simulator.\n'
-    else
-        printf '  FAIL: bd CLI not on PATH and BD_SHIM_ONLY is unset — section 3 cannot run.\n'
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("section 3 could not run: bd missing without BD_SHIM_ONLY")
-    fi
+    # No BD_SHIM_ONLY note-skip arm any more (a9hh): CI installs the real bd,
+    # so the simulator-fidelity half runs in the one environment that runs on
+    # every push. A bd-less run is a counted FAILURE — sections 1-2 rest on a
+    # model this section exists to check.
+    printf '  FAIL: bd CLI not on PATH — section 3 (simulator fidelity) cannot run.\n'
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("section 3 could not run: bd missing")
 else
     REAL_BD=$(command -v bd)
     BW="$FIXTURE/realbd"

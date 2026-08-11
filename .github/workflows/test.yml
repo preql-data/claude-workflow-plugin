@@ -25,18 +25,65 @@
 # Portability:
 #   - All jobs run on ubuntu-latest. shellcheck is pre-installed on the
 #     standard runner image so the lint job just calls `make lint`.
-#   - jq is also pre-installed; bd (Beads CLI) is not — L1/L2 invoke bd
-#     only inside specs that have a `bd` shim or self-skip. We mirror
-#     the local convention of skip-with-log rather than failing.
-#   - Node 20 (LTS) for the L3 jobs.
+#   - jq is also pre-installed.
+#   - bd (Beads CLI): the l1-unit job installs the REAL bd from a pinned,
+#     checksum-verified release tarball (a9hh — see the job's install
+#     step). The historical claim that Beads had "no easy public
+#     installer URL" stopped being true when steveyegge/beads started
+#     publishing per-platform release binaries; pinning version + sha256
+#     is deliberate (a tag can move, a digest cannot).
+#   - Node 20 (LTS) for the L3 jobs; l1-unit also sets up node and runs
+#     `npm ci` for BOTH MCP servers — bd-mcp (which
+#     mcp-unestablished-results.test.sh drives) and code-graph-mcp (which
+#     impact-report.test.sh section 4 drives live). Neither has install
+#     scripts or native builds, so both are pure download+extract.
 #
-# BD_SHIM_ONLY=1 — set on the l1-unit and l2-component jobs. Beads has
-# no easy public installer URL we can curl in CI; rather than vendoring a
-# binary or spinning up a separate setup action, we let bd-dependent
-# specs skip-with-log when the env var is set. Each spec calls
-# `bd_required_or_skip` (or the L1 equivalent) near the top, prints a
-# single "SKIPPED:" line, and exits 0. Dev machines (where bd IS
-# installed) take the normal path and run the full coverage.
+# BD_SHIM_ONLY=1 — now set ONLY on the l2-component job. Under it,
+# bd-dependent specs (via lib/fixture.sh `bd_required_or_skip`) print a
+# "SKIPPED:" line and exit 0. What the runner does with that, MEASURED
+# rather than asserted (a9hh R7-F2 falsified this comment's earlier
+# "never as passes / 7-spec remainder" claim; cmd: bd off PATH +
+# BD_SHIM_ONLY=1, `bash .claude/tests/component/run.sh`, final a9hh
+# R6/R7 bytes at HEAD 535c89a, macOS and ubuntu:24.04/aarch64 both):
+#   Specs: Total: 44  Passed: 12  Failed: 1  Skipped: 31  Partial: 2
+# A whole-file skip is SKIPPED (never a pass) under a COMPLETENESS
+# caveat; a spec that ran assertions BEFORE its bd gate is PASSED with
+# its executed count and counted Partial — the executed set this job
+# really measures is 13 specs (12 passed + the pre-existing
+# installer-v3-upgrade 8e-B failure), of which post-edit.sh (101 of its
+# 115 assertions) and reviewer-lane-degradation.sh (4 of 8) are the two
+# partials. 37 of 44 specs carry the helper, but how much of each
+# executes before gating is a property of the spec's layout, not of the
+# helper census — which is why the numbers above are measured, and why
+# the job pins none of them (the assertion totals are additionally
+# environment-sensitive). Installing bd here too — and putting an L2
+# floor under the tier — is the recorded follow-up on a9hh (u84b); it
+# was deliberately kept out of the L1 round so the l2-component job's
+# semantics moved by one reviewed decision, not as a side effect.
+#
+# The L1 tier has NO skip mode any more: a9hh measured 286 of 2461
+# assertions (11.6% of the tier, review-separation's 60 included)
+# silently unexecuted under a byte-identical green summary. Precisely:
+# five whole-file BD_SHIM_ONLY arms (bd-github-link, qa-gate-choose,
+# qa-gate-grade-record, review-separation, phase5-synthetic-tests) and
+# one section-level BD_SHIM_ONLY note arm (mcp-unestablished-results
+# :489) were deleted. mcp-unestablished-results.test.sh KEEPS its
+# whole-file node/node_modules arm at :115-122 — correctly: it names a
+# prerequisite, and it is now classified SKIPPED and fails the tier, so
+# this job installs the prerequisite instead of arguing with the arm.
+# The runner classifies exit-0-with-zero-assertions as SKIPPED-not-
+# passed, and a completeness floor (EXPECTED_SPECS) fails the run when
+# the discovered set shrinks. See run-tests.sh's floor block — it is the
+# negative control for the completeness line, and the pairing
+# convention's first application.
+#
+# STRICT_SECTIONS=1 (l1-unit only) closes the granularity gap under it:
+# the floor counts SPECS, so a spec that ran 24 of its 39 assertions and
+# printed a `SKIPPED: section ...` marker still counted as "executed".
+# That is how a9hh's own first fix round shipped a green 36/36 over 15
+# unexecuted assertions. Under the flag a section skip is red — HERE,
+# where every prerequisite is provisioned; unset elsewhere, where a dev
+# machine may legitimately lack one.
 
 name: tests
 
@@ -84,10 +131,56 @@ jobs:
   l1-unit:
     name: L1 — bash unit tests
     runs-on: ubuntu-latest
+    # NO BD_SHIM_ONLY here any more (a9hh): this job installs the real bd
+    # below, five whole-file BD_SHIM_ONLY skip arms and one section-level one
+    # are deleted, and the runner's completeness floor fails the run if the
+    # executed set ever shrinks again.
+    #
+    # THIS JOB IS THE STRICT ENVIRONMENT. It provisions every prerequisite the
+    # tier's section arms name — bd, node, AND both MCP servers' node_modules
+    # — so STRICT_SECTIONS=1 below is defensible: here, a skipped section is a
+    # dropped provisioning step or a new arm nobody provisioned, never "this
+    # laptop doesn't have X". A section-granular sweep of all 36 specs at
+    # 535c89a + this change set found exactly one arm that fired in this job
+    # (impact-report.test.sh section 4, 15 assertions, fixed by the
+    # code-graph-mcp step below); the arms that did NOT fire, and why, are:
+    #   installer-flags 258/305/428  bd must not resolve under
+    #                                /usr/bin:/bin:/usr/sbin:/sbin — hence bd
+    #                                is installed to /usr/local/bin below, and
+    #                                moving it into /usr/bin would silently
+    #                                skip three positive-control sections
+    #   installer-flags 195          only when plugin.json is on a 3.x version
+    #   workflow-manifest 6, META 4  need the release tag + frozen table:
+    #                                fetch-depth: 0 above, manifests/ in-tree
+    #   workflow-manifest 532        needs a non-root uid (GitHub runners are
+    #   gate-claim-honesty 1247      the `runner` user, not root)
+    #   impact-report 3/4 (node),
+    #     6 (sha256sum), 4 (tmpdir
+    #     inside a git checkout)     node via setup-node; coreutils; mktemp
+    #                                gives /tmp, which is not a checkout
+    #   mcp-deps-preserve 347        npm, via setup-node
+    #   workflow-doctor 5a, META-TEST
+    #     3/4/5                      fire only when the live repo moves under
+    #                                the run, when bd/node_modules are absent
+    #                                (both provisioned here), or when their own
+    #                                control failed
+    #   mcp-unestablished-results,
+    #     worktree-sweep             WHOLE-FILE arms (node/node_modules; jq+git)
+    #                                — already red as SKIPPED since a9hh, and
+    #                                provisioned here
+    # Two arms are NOT marker-shaped and so are invisible to STRICT_SECTIONS.
+    # Both were checked by hand and neither can fire in this job:
+    #   mutation-harness 652         `if command -v jq` guards one assertion
+    #                                silently — unreachable, because
+    #                                run-tests.sh itself exits 2 without jq
+    #   gate-claim-honesty 542/2086, git/make/jq absences that `exit 2` or
+    #     packaging-parity 398       `exit 1` — a FAILURE, never a skip
+    # And no spec exits 0 part-way through after running assertions: every
+    # mid-file `exit 0` in the tier is inside a fixture heredoc (checked).
+    # That list is a snapshot, which is exactly why STRICT_SECTIONS exists:
+    # the next arm added does not need anyone to redo the sweep.
     env:
-      # See workflow header — bd has no public CI installer; specs
-      # self-skip when this is set.
-      BD_SHIM_ONLY: "1"
+      STRICT_SECTIONS: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,11 +193,73 @@ jobs:
           # one outcome indistinguishable from green. Same reason l2-component
           # below sets it (claude-workflow-plugin-ce5).
           fetch-depth: 0
+      - name: Install bd (Beads CLI) — pinned release, checksum-verified
+        # a9hh: five L1 specs (233 assertions, review-separation's 60-strong
+        # separation guard included) need the real bd and used to skip-with-
+        # log in CI, which the old runner scored as PASSED. Pinned to the
+        # exact version dev machines run (1.1.2) and verified against the
+        # release digest, so a moved tag or a tampered tarball fails loudly
+        # here instead of executing.
+        #
+        # /usr/local/bin IS LOAD-BEARING, not a default. installer-flags.test.sh
+        # probes a deliberately prereq-hostile PATH of
+        # /usr/bin:/bin:/usr/sbin:/sbin and skips three positive-control
+        # sections if bd resolves under it. Installing into /usr/bin would
+        # therefore trade five specs' coverage for three sections' — silently,
+        # before STRICT_SECTIONS existed.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/beads.tar.gz \
+            "https://github.com/steveyegge/beads/releases/download/v1.1.2/beads_1.1.2_linux_amd64.tar.gz"
+          echo "a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2  /tmp/beads.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/beads.tar.gz -C /usr/local/bin bd
+          bd version
+      - uses: actions/setup-node@v4
+        with:
+          # For BOTH MCP servers' deps below (engines: node >=18.17). Same
+          # LTS the L3 jobs pin.
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            .claude/mcp/bd-mcp/package-lock.json
+            .claude/mcp/code-graph-mcp/package-lock.json
+      - name: Install bd-mcp deps (mcp-unestablished-results.test.sh)
+        # Without node_modules the spec whole-file-skips, and since a9hh a
+        # skip fails the tier (SKIP IS NOT A PASS) — so CI provisions what
+        # the spec needs instead of green-lighting its absence.
+        run: npm ci
+        working-directory: .claude/mcp/bd-mcp
+      - name: Install code-graph-mcp deps (impact-report.test.sh section 4)
+        # a9hh R1-F1. The step above provisioned one of two MCP servers, and
+        # the tier went green over the other: impact-report.test.sh executed
+        # 24 of 39 assertions, printing `SKIPPED: section 4 (code-graph-mcp
+        # not installed ...)`, under a `Total: 36  Passed: 36  Failed: 0
+        # Skipped: 0` / floor-HELD summary, rc=0. Section 4 is the LIVE
+        # code-graph path — server=code-graph, exit-0-despite-one-per-file-
+        # error, the non-git relativisation fallback — i.e. the live half of
+        # the artifact `qa-gate.sh approve` refuses to run without.
+        # 94 packages, no install scripts, no native builds (sql.js and
+        # web-tree-sitter are WASM), ~45M.
+        run: npm ci
+        working-directory: .claude/mcp/code-graph-mcp
       - name: Verify dependencies
+        # Fail HERE, naming the missing thing, rather than three minutes later
+        # as a section skip inside a spec. The two node_modules checks are the
+        # cheap guard on the two steps above actually having done something.
         run: |
           jq --version
           bash --version | head -1
+          bd version
+          node --version
+          for d in bd-mcp code-graph-mcp; do
+            if [ ! -d ".claude/mcp/$d/node_modules" ]; then
+              echo "MISSING: .claude/mcp/$d/node_modules — the npm ci step for it did not run or did not land." >&2
+              echo "  Specs keyed on it would skip, and STRICT_SECTIONS=1 would fail the suite in a less obvious place." >&2
+              exit 1
+            fi
+          done
       - name: Run L1 suite
+        # STRICT_SECTIONS=1 comes from the job env above: in THIS environment a
+        # spec that skips a section fails the tier.
         run: bash .claude/scripts/tests/run-tests.sh
 
   # ---------------------------------------------------------------------------

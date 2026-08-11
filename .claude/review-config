@@ -21,17 +21,52 @@
 #                            set to cap:max_findings. Default: 10.
 #   max_review_iterations    hard cap on review iterations for a task; an
 #                            iteration above this exits before any Codex call.
-#                            Default: 3.
+#                            Built-in default when unset: 3. Shipped: 12 —
+#                            see the rationale below.
 #   timeout_seconds          overall wall-clock budget for one Codex turn;
 #                            exceeding it kills the server and writes no
 #                            artifact (the caller degrades to the Claude
-#                            path). Default: 300.
+#                            path). Built-in default when unset: 300.
+#                            Shipped: 2400 — see the rationale below.
 #   malformed_retry          number of corrective codex-reply turns allowed
 #                            when the model's first message fails artifact
 #                            validation. Default: 1.
+#
+# WHY THE SHIPPED VALUES ARE 12 AND 2400 (iu5o, operator decision 2026-08-10;
+# grader conditions from fkm.1.11 rubric v2: rationale in-file, CHANGELOG
+# entry, and an L2 leg asserting THESE shipped values — codex-review.sh spec
+# section C8 brackets max_review_iterations at the rc=6 boundary and pins
+# timeout_seconds, both against this file's bytes, so drift here fails the
+# tier instead of riding invisibly the way the first raise did).
+#
+# The measurement that drove this cuts AGAINST the larger numbers, and it
+# belongs here more than the numbers do. On the first correctly-invoked paid
+# Sol relay (fkm.1.11 arc, 2026-08-09), Sol completed a real 1008-line scoped
+# review payload in 66 SECONDS of the original 300 — the timeout was never
+# the blocker. What actually blocked the turn was max_review_iterations=3
+# returning rc=6 at ZERO seconds ("iteration 7 exceeds
+# max_review_iterations=3"), because the iteration counter DOES NOT
+# DISTINGUISH CODEX TURNS FROM CLAUDE ONES: a change set that has consumed
+# several Claude review rounds becomes permanently ineligible for its first
+# Codex turn — and the task that needed many rounds is exactly the task where
+# a second model family is most valuable. Raising the cap to 12 treats that
+# symptom so the lane is usable at all; the lane-blind counter is the defect,
+# and it is owned by claude-workflow-plugin-nq5f (make the counter per-lane).
+# When nq5f lands, this cap should be revisited DOWN.
+#
+# timeout_seconds=2400 is headroom, not measurement: the only payload that
+# ever exhausted 300s was a 541KB unscoped request (2026-08-06) whose failure
+# is undiagnosable in hindsight (the driver discarded error_key — fkm.1.14),
+# while the measured real review used 66s. 2400 exists so a large legitimate
+# turn cannot die at the budget while nq5f/fkm.1.14 make the curve
+# measurable; it does not raise per-turn spend for well-behaved turns (Sol
+# bills by work, and a fast turn still returns in seconds) — what it does
+# raise is how long a WEDGED turn can hold the machine before the caller
+# degrades to the Claude path: 40 minutes instead of 5. That trade is
+# accepted, stated, and bounded by exactly this line.
 
 risk_threshold_default=high
 max_findings=10
-max_review_iterations=3
-timeout_seconds=300
+max_review_iterations=12
+timeout_seconds=2400
 malformed_retry=1

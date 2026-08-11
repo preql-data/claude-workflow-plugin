@@ -216,11 +216,20 @@ manifest-validate:
 # does not ship. (It read "section 4" until fkm.1.11 QA round 2; section 4 is
 # the tree fingerprint and invokes no make at all. A control attribution naming
 # the wrong control is the same defect class as the claim below it.)
+#
+# STRICT_SECTIONS=1 is exported here and NOT in `make test` (a9hh R1-F1). This
+# target's whole claim is "what CI runs", and .claude/tests/README.md says in
+# so many words that a green test-ci means a green CI. The CI l1-unit job sets
+# STRICT_SECTIONS=1, so without it here that implication is false in exactly
+# the direction that hurts: a section skip is green locally and red in CI. It
+# also means test-ci needs what CI provisions — both MCP servers' node_modules
+# — and says so when they are missing, which is the point. `make test` stays
+# lenient: it is the target you run fifty times a day on a laptop.
 test-ci:
 	@rc=0 ; \
 	mf_first="$${MAKEFLAGS%% *}" ; dry=0 ; \
 	case "$$mf_first" in *n*|*q*|*t*) dry=1 ;; esac ; \
-	$(MAKE) --no-print-directory test || rc=$$? ; \
+	STRICT_SECTIONS=1 $(MAKE) --no-print-directory test || rc=$$? ; \
 	$(MAKE) --no-print-directory test-component || rc=$$? ; \
 	$(MAKE) --no-print-directory test-e2e-unit || rc=$$? ; \
 	$(MAKE) --no-print-directory manifest-validate || rc=$$? ; \

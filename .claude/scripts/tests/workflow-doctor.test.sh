@@ -721,12 +721,22 @@ control_held() {
 
 # note_live_control_moved <diff-file> — the ONE branch taken when the control
 # moved, factored into a function so META-TEST 7 executes the real thing rather
-# than a copy of it. It MOVES NEITHER COUNTER on purpose: run-tests.sh has no
-# SKIP verb — it reads a spec's exit code and nothing else — so the house idiom
-# for "this leg could not be measured" is a bare note that leaves PASS and FAIL
-# alone, the same shape META-TESTs 3, 4 and 5 use below. Consequence, stated
-# because it surprises anyone diffing two runs: this spec's total assertion
-# count is NOT a constant. It drops by three when the control fires.
+# than a copy of it. It MOVES NEITHER PASS NOR FAIL on purpose, so a fired
+# control cannot fail this spec — that is the property META-TEST 7 pins below,
+# and it is unchanged.
+#
+# What DID change (claude-workflow-plugin-a9hh, and this comment used to assert
+# the opposite): run-tests.sh is no longer blind to the note. It has a SKIP
+# verb, it reads the executed-assertion count rather than the exit code alone,
+# and since a9hh R1-F1 it classifies a passing spec that printed a `note: ...
+# SKIPPED` marker as PARTIAL — named under the completeness line, and red under
+# STRICT_SECTIONS=1 (which the CI l1-unit job sets). The idiom is still a bare
+# note that leaves this spec's own counters alone, the same shape META-TESTs 3,
+# 4 and 5 use below; it is simply no longer a note that nothing can see. 5a
+# firing in CI would mean something wrote the checkout mid-run, which is worth
+# a red rather than a shrug. Consequence, stated because it surprises anyone
+# diffing two runs: this spec's total assertion count is NOT a constant. It
+# drops by three when the control fires.
 note_live_control_moved() {
     printf '  note: 5a SKIPPED - the live repo moved underneath the CONTROL, before the\n'
     printf '        doctor ran at all, so a before/after difference here could not be\n'
@@ -904,9 +914,13 @@ assert_eq "META-TEST 3: both seeded fixtures start from identical state" \
     "$SEED_A_BEFORE" "$SEED_B_BEFORE"
 
 if ! command -v bd >/dev/null 2>&1; then
-    printf '  note: META-TEST 3 direct-invocation leg needs the real bd CLI; bd is absent.\n'
+    # The word SKIPPED belongs on THIS line, not the third one: run-tests.sh
+    # matches section-skip markers at line start (a9hh R1-F1), so a note whose
+    # first line does not carry it is a section that vanishes from the tier's
+    # completeness accounting. Enforced by runner-completeness.test.sh section 9.
+    printf '  note: META-TEST 3 SKIPPED - the direct-invocation leg needs the real bd CLI; bd is absent.\n'
     printf '        session-start.sh exits before the wipe without it, so the leg would\n'
-    printf '        prove nothing. Skipping the leg (the state-equality assertions above ran).\n'
+    printf '        prove nothing (the state-equality assertions above ran).\n'
 else
     ( cd "$SEED_B" && printf '{}' | env \
         "CLAUDE_PROJECT_DIR=$SEED_B" "ANTHROPIC_API_KEY=" \
@@ -1108,9 +1122,10 @@ echo ""
 echo "--- META-TEST 4: the MCP tool count is EXACT, not a >= bound ---"
 MCP_BD_DIR="$PROJECT_DIR/.claude/mcp/bd-mcp"
 if ! command -v node >/dev/null 2>&1 || [ ! -d "$MCP_BD_DIR/node_modules" ]; then
-    printf '  note: META-TEST 4 needs node + %s/node_modules to boot the server.\n' "$MCP_BD_DIR"
+    # SKIPPED on the marker line — see the META-TEST 3 note above.
+    printf '  note: META-TEST 4 SKIPPED - it needs node + %s/node_modules to boot the server.\n' "$MCP_BD_DIR"
     # shellcheck disable=SC2016  # the backticked command is literal text
-    printf '        Run `cd %s && npm ci --omit=dev` to enable it. Skipping.\n' "$MCP_BD_DIR"
+    printf '        Run `cd %s && npm ci --omit=dev` to enable it.\n' "$MCP_BD_DIR"
 else
     ONLY_BD=$(all_but mcp_bd)
     # The target here is the REPO, not $FULL_TARGET: mk_target deliberately does
@@ -1157,8 +1172,9 @@ fi
 echo ""
 echo "--- META-TEST 5: session_start is sensitive to a gutted SKILL.md ---"
 if ! command -v bd >/dev/null 2>&1; then
-    printf '  note: META-TEST 5 needs the real bd CLI (session-start.sh exits before\n'
-    printf '        building context without it). Skipping.\n'
+    # SKIPPED on the marker line — see the META-TEST 3 note above.
+    printf '  note: META-TEST 5 SKIPPED - it needs the real bd CLI (session-start.sh\n'
+    printf '        exits before building context without it).\n'
 else
     ONLY_SS=$(all_but session_start)
     # Control FIRST: an intact target must PASS, or the stub target's FAIL is

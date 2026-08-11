@@ -60,10 +60,12 @@
 #
 # WHY THIS TIER. Every assertion here is over a pure function of its inputs —
 # an extracted shell function, or `impact-report.sh --hash-only` against a
-# seeded tracker. No bd, no network, no LLM. It deliberately does NOT need bd:
-# a spec that skips when bd is absent exits 0 having executed nothing, and CI
-# runs L1 with BD_SHIM_ONLY=1 (claude-workflow-plugin-a9hh). Nothing in this
-# file has a skip-to-exit-0 arm.
+# seeded tracker. No bd, no network, no LLM. It deliberately does NOT need bd
+# (claude-workflow-plugin-a9hh: when this was written, CI ran L1 under
+# BD_SHIM_ONLY=1 and a spec that skipped on absent bd exited 0 having
+# executed nothing; a9hh since installed real bd in CI, deleted the L1 skip
+# arms, and made the runner refuse to count a zero-assertion exit-0 as a
+# pass). Nothing in this file has a skip-to-exit-0 arm.
 #
 # THE ASSERTIONS ARE ANCHORED TO MEASURED BEHAVIOUR, NOT TO FIXED STRINGS.
 # Section 1 MEASURES what the shipped hash does; sections 2 onward assert that

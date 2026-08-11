@@ -88,16 +88,12 @@ cp "$PLUGIN_DIR/.claude/skills/workflow-engine/SKILL.md" \
     "$FIXTURE/.claude/skills/workflow-engine/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
+# No BD_SHIM_ONLY skip arm any more (a9hh): CI installs the real bd
+# (pinned release, checksum-verified — see .github/workflows/test.yml), and
+# a bd-less environment is a hard failure everywhere. The statusline +
+# qa-gate + memory-bridge sections all require real bd state — no useful
+# partial coverage is possible, so absence fails loudly instead of skipping.
 if ! command -v bd >/dev/null 2>&1; then
-    # Match the L2 spec convention: in BD_SHIM_ONLY=1 mode (CI runner,
-    # no public bd installer), skip-with-log instead of hard-fail. The
-    # statusline + qa-gate + memory-bridge sections all require real bd
-    # state — no useful partial coverage is possible. Dev-machine path
-    # stays loud so misconfigurations are caught.
-    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
-        echo "SKIPPED: phase5-synthetic-tests.sh (bd not available; CI env BD_SHIM_ONLY=1)"
-        exit 0
-    fi
     echo "bd CLI not on PATH — these synthetic tests require Beads."
     exit 1
 fi

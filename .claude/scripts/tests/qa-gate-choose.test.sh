@@ -113,11 +113,9 @@ mkdir -p "$FIXTURE/.claude/scripts" "$FIXTURE/.claude/.qa-tracking" \
 cp "$PLUGIN_DIR/.claude/scripts/"*.sh "$FIXTURE/.claude/scripts/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
+# No BD_SHIM_ONLY skip arm any more (a9hh): CI installs the real bd, and a
+# bd-less environment is a hard failure everywhere.
 if ! command -v bd >/dev/null 2>&1; then
-    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
-        echo "SKIPPED: qa-gate-choose.test.sh (bd not available; CI env BD_SHIM_ONLY=1)"
-        exit 0
-    fi
     echo "bd CLI not on PATH — qa-gate-choose tests require Beads."
     exit 1
 fi

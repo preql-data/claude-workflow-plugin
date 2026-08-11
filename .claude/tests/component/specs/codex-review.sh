@@ -362,3 +362,103 @@ assert_not_contains "META: and still no frame reached the server" \
     '"method":"tools/call"' "$(cat "$METALOG" 2>/dev/null)"
 write_config
 
+# ---------------------------------------------------------------------------
+# C8 (iu5o): the SHIPPED review-config defaults — asserted against the shipped
+# file's BYTES, driven through the shipped driver.
+#
+# Every other leg of this spec runs against write_config's spec-authored
+# fixture values, which is exactly why the first cap raise (fkm.1.11's sed of
+# the live file) was provably INERT to this tier: a product config change rode
+# to every install (install.sh copies .claude/review-config verbatim) with
+# nothing anywhere asserting the shipped numbers. The grader's condition on
+# iu5o is this section: an L2 leg that fails when the SHIPPED values drift.
+#
+# max_review_iterations=12 is bracketed BEHAVIOURALLY at the rc=6 boundary —
+# iteration 12 admitted (rc=0, artifact written), iteration 13 refused (rc=6,
+# no server call, no artifact) — so the pin is the driver's behaviour over the
+# shipped bytes, not a text count. timeout_seconds=2400 cannot be bracketed
+# without a 2400s wall-clock leg, so it is pinned through read_cap EXTRACTED
+# VERBATIM from the shipped driver (doc-only-classifier.test.sh's pattern: the
+# thing under test is the shipped definition, not a re-typed copy free to
+# drift) run over the shipped file.
+# ---------------------------------------------------------------------------
+SHIPPED_RC="$(plugin_root)/.claude/review-config"
+assert_eq "C8 shipped review-config exists (installers copy it to every target)" "1" \
+    "$([ -f "$SHIPPED_RC" ] && echo 1 || echo 0)"
+
+# The driver under test reads $CLAUDE_PROJECT_DIR/.claude/review-config, so
+# the fixture config becomes a byte-copy of the shipped file for this section.
+cp "$SHIPPED_RC" "$FIXTURE/.claude/review-config"
+assert_eq "C8 the fixture config IS the shipped bytes (copy landed)" "identical" \
+    "$(cmp -s "$SHIPPED_RC" "$FIXTURE/.claude/review-config" && echo identical || echo differs)"
+
+# read_cap, extracted verbatim from the shipped driver.
+READ_CAP_SRC=$(awk '/^read_cap\(\) \{$/{f=1} f{print} f && /^\}$/{exit}' \
+    "$(plugin_root)/.claude/scripts/codex-review.sh")
+assert_eq "C8 read_cap extracted from the shipped driver (non-empty, balanced)" "1" \
+    "$(printf '%s' "$READ_CAP_SRC" | grep -c '^}$' | tr -d '[:space:]')"
+shipped_cap() {
+    # shipped_cap <key> <default> [config-file] — the SHIPPED parser over a
+    # config file (default: the shipped one).
+    ( REVIEW_CONFIG="${3:-$SHIPPED_RC}"
+      eval "$READ_CAP_SRC"
+      read_cap "$1" "$2" )
+}
+assert_eq "C8 SHIPPED max_review_iterations parses as 12 through the shipped read_cap" \
+    "12" "$(shipped_cap max_review_iterations 3)"
+assert_eq "C8 SHIPPED timeout_seconds parses as 2400 through the shipped read_cap" \
+    "2400" "$(shipped_cap timeout_seconds 300)"
+assert_eq "C8 the rationale prose cannot shadow the values (first match is the assignment, not a comment)" \
+    "high" "$(shipped_cap risk_threshold_default MISSING)"
+
+# Behavioural bracket of the iteration cap, both sides of the boundary.
+mk_req_at() {
+    # mk_req_at <n> — a valid request at iteration <n>.
+    jq -nc --argjson n "$1" '{contract_version:"1",task_id:"cr-1",iteration:$n,
+        risk_threshold:"high",stop_condition:"no critical/high remain",
+        change_set_hash:"h123",spec:"s",diff:"d",completion_contract:"c",
+        impact_report:"i"}' > "$FIXTURE/req-iter-$1.json"
+}
+run_review_at() {
+    # run_review_at <iteration> — like run_review, at an arbitrary iteration.
+    mk_req_at "$1"
+    RR_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB -m stub-sol" \
+        STUB_CODEX_FIRST_TEXT="$APPROVE_TEXT" STUB_CODEX_REPLY_TEXT="$APPROVE_TEXT" \
+        STUB_CODEX_SLEEP_MS=0 STUB_LOG="" \
+        bash "$CR" cr-1 --request "$FIXTURE/req-iter-$1.json" --iteration "$1" 2>/dev/null)
+    RR_EXIT=$?
+}
+rm -f "$TRACK"/review-artifact-cr-1-r12.json "$TRACK"/review-artifact-cr-1-r13.json
+run_review_at 12
+assert_eq "C8 iteration 12 is ADMITTED by the shipped cap (rc=0 — the boundary's inside edge)" "0" "$RR_EXIT"
+assert_eq "C8 iteration 12 wrote a real artifact" "1" \
+    "$([ -n "$RR_OUT" ] && [ -f "$RR_OUT" ] && echo 1 || echo 0)"
+assert_json_field "C8 artifact iterations FORCED to 12" "$(cat "$RR_OUT")" ".iterations|tostring" "12"
+run_review_at 13
+assert_eq "C8 iteration 13 is REFUSED by the shipped cap (rc=6 — the boundary's outside edge, so the cap is EXACTLY 12)" \
+    "6" "$RR_EXIT"
+assert_eq "C8 the refused iteration wrote NO artifact" "0" \
+    "$([ -f "$TRACK/review-artifact-cr-1-r13.json" ] && echo 1 || echo 0)"
+
+# NEGATIVE CONTROL (four-part; .claude/tests/README.md "The pairing
+# requirement"). Mutate a COPY of the shipped config back to the old default,
+# prove the mutation landed, and show the C8 legs above are the ones that
+# catch the drift — parser-level and behaviourally.
+MUT_RC="$FIXTURE/review-config.drifted"
+sed -E 's/^max_review_iterations=12$/max_review_iterations=3/' "$SHIPPED_RC" > "$MUT_RC"
+if assert_mutant_applied "C8-M drifted-config" "$SHIPPED_RC" "$MUT_RC"; then
+    assert_eq "C8-M SPECIFIC: the shipped read_cap SEES the drift (the 12-assertion above would FAIL on it)" \
+        "3" "$(shipped_cap max_review_iterations 999 "$MUT_RC")"
+    cp "$MUT_RC" "$FIXTURE/.claude/review-config"
+    run_review_at 12
+    assert_eq "C8-M SPECIFIC: under the drifted config iteration 12 is REFUSED (rc=6) — the pre-iu5o world, where a multi-round task is permanently ineligible for its first Codex turn" \
+        "6" "$RR_EXIT"
+    # RESTORE CONTROL: shipped bytes back, same call shape, admitted again.
+    cp "$SHIPPED_RC" "$FIXTURE/.claude/review-config"
+    rm -f "$TRACK"/review-artifact-cr-1-r12.json
+    run_review_at 12
+    assert_eq "C8-M RESTORE: with the shipped bytes back, iteration 12 is admitted again (rc=0)" \
+        "0" "$RR_EXIT"
+fi
+write_config
+

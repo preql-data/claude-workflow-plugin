@@ -54,6 +54,205 @@ make cassette-diff     # diff the most recent replay vs its committed golden (de
 
 `make test-ci` is the local mirror of what the GitHub Actions
 `tests` workflow runs. If `test-ci` is green locally, CI will be green too.
+Mirroring is why `test-ci` — and only `test-ci`, not `make test` — exports
+`STRICT_SECTIONS=1`: the CI `l1-unit` job sets it, so without it here a
+skipped section would be green locally and red in CI, which is the direction
+that costs a push. The price is that `test-ci` wants what CI provisions —
+`npm ci` in **both** `.claude/mcp/bd-mcp` and `.claude/mcp/code-graph-mcp` —
+and says which one is missing when it is not there.
+
+### Runner outcome semantics (a9hh / mwrb)
+
+Both bash-tier runners classify every spec into one of THREE outcomes —
+three outcomes, three reasons:
+
+- **PASSED** — exited 0 AND executed at least one assertion.
+- **FAILED** — exited non-zero, or was killed at the per-spec wall-clock cap
+  (`SPEC_TIMEOUT_S`; default 900s at L1, 3600s at L2 — no "0 disables it"
+  arm, an unbounded spec is the mwrb defect), or **returned while background
+  work from its own process group was still alive** (a9hh R2-F2 — a late line
+  can be a `FAIL:` or a `SKIPPED:`, so a transcript with live writers cannot
+  be classified; the runner kills the leftovers and says so), or **exited 0
+  while its own record says otherwise** (a9hh R4-F1/R4-F2): a `FAIL:` line
+  in the transcript the exit code never carried — a backgrounded assertion
+  that fails and finishes inside the sweep's grace, or broken exit-code
+  plumbing — is a FAILURE in both runners, and at L2 so is a summary that
+  counted failed assertions under rc=0 (an early `exit 0` bypassing the
+  fail gate) or a missing `__SPEC_SUMMARY__` line altogether (an
+  exec-replacement, or a spec-level EXIT trap that failed to chain
+  `__spec_wrapper_exit`). A timeout is a FAILURE with a distinct reason,
+  never a pass and never a skip, and per-spec elapsed time is printed so a
+  slow tier is diagnosable in seconds rather than hours.
+- **SKIPPED** — exited 0 having executed ZERO assertions (and, at L2, said
+  so in its summary — the wrapper's EXIT trap prints `pass=0 fail=0` even
+  when a skip gate exits early). Never a pass: a measurement that did not
+  happen must not look like one that passed. A spec that runs assertions
+  and THEN hits a skip gate is PASSED with its executed count — a9hh R4-F1:
+  the pre-fix wrapper lost the whole summary to the gate's `exit 0`, so a
+  spec with a failing assertion before its `bd_required_or_skip` call was
+  scored SKIPPED, `Failed: 0`, rc=0, on the CI path.
+
+Both runners launch each spec as its **own process group** (`set -m`; a9hh
+R2-F2/R2-F3). At the cap, one shared escalation (`escalate_kill`) TERMs a
+**ppid-tree snapshot taken before the polite pass** plus the group, waits a
+grace, **re-walks once from every snapshot member still alive** (a9hh
+R6-F1: a TERM handler can spawn a NEW child during the grace — absent from
+the snapshot, outside the group, reachable only through its still-live
+parent), then KILLs the union and the group (a9hh R4-F4: the group KILL
+alone cannot reach a TERM-immune descendant that left the group). The
+escalation **names what refused TERM before KILLing it**, and — because the
+set is two bounded walks, NOT a closed world — **names anything it could
+not kill** as a `survivor:` line instead of claiming a clean tree: a
+process that both leaves the group and outlives its parent chain before a
+walk reaches it (a double-forked daemon; a handler that spawns and dies) is
+out of reach short of the machine-global scan R1-F2 banned, and the
+deliberate design choice is ONE bounded re-walk, never a chase loop. After
+every spec the runner additionally sweeps the group (short grace so
+in-flight output still lands and counts, then TERM/KILL), fails a spec that
+left work running, and names every survivor it kills (pid/ppid/pgid/args
+under the verdict line, control bytes stripped). An interrupt (^C, `make`
+TERM — and SIGHUP, the closed-terminal path, a9hh R7-F3) runs the same
+escalation against the active spec before the runner exits 130; the
+pre-R6-F1 runner also TERMed its own watchdog the moment `wait` returned,
+which cut the KILL pass short whenever the spec's leader died politely —
+reproduced: a TERM-trapping shell AND the child its trap spawned both
+outlived the entire tier.
+Backgrounding is fine — *returning over live work* is the offence: a
+spec that `wait`s for its own children before exiting is a clean PASS. Known,
+stated limit: a double-forking daemon (new session, parent chain gone — bd's
+own daemon, measured) is outside any supervisor's reach and is shared
+infrastructure, not a spec's leak. bd's **telemetry flusher** is the measured
+counter-shape (a9hh R3-F1): `bd send-metrics` detaches to ppid=1 *without*
+`setsid`, so it stays in the spec's group and a slow endpoint carries it past
+the sweep's grace — both runners therefore export `BD_DISABLE_METRICS=1`,
+which prevents the spawn at the source (an argv-based sweep exemption was
+rejected as forgeable). One more consequence of `set -m`, handled at the
+launch site: each spec's stdin is **explicitly** redirected from `/dev/null`
+(a9hh R3-F2 — job control makes a background job *inherit* the runner's
+stdin, and under a terminal a stdin-reading spec SIGTTIN-stops into a
+full-cap TIMEOUT; with the redirect it sees instant EOF).
+
+**Neither runner arms an EXIT trap** (a9hh R5-F1). The scratch dir used to
+be removed by one, and on Linux bash 5.2 (the CI platform family) that trap
+nondeterministically fired **inside forked children** under load, deleting
+the scratch mid-tier: every later spec failed rc=1 with 0 assertions
+(`cat: …/spec-out.N: No such file`) over specs that ran and passed —
+measured on the pre-fix runners at 29-35/40 runs under CPU contention and
+up to 40/40 at L2, and invisible on macOS bash 3.2. In-trap guards do not
+fix it, and the R7-F1 factorial (independent builds by QA and by us,
+byte-identical harness, full table in `run-tests.sh`'s header and the a9hh
+Beads record) replaced the earlier account with the measured one: a
+BASHPID guard evaluated as the trap's FIRST command **misevaluates** and
+fails 25-37/40; an in-trap **write never masks the defect** — it records
+the foreign firings at baseline BAD rate (QA's rm→log control read clean
+because removing the `rm` removes the *deleter*, a correct inference this
+README previously miscalled a probe effect); and the one shape that reads
+clean with the trap still armed — a write placed BEFORE the guard — is an
+order-sensitive interaction nobody has explained, not a fix. Cleanup now
+happens at explicit terminal exits (`finish`), so a child that wrongly
+executes leftover trap machinery has nothing to execute; HUP/INT/TERM are
+trapped and clean, and the residual (a `set -u` abort or SIGKILL) leaks
+one bounded /tmp dir. Consequence for spec authors at L2: the wrapper owns
+the EXIT trap for the summary line — a spec that re-arms EXIT for its own
+teardown must end its trap command with `__spec_wrapper_exit` (see
+`beads-ledger.sh`; dropping the chain is loud — the runner FAILS an exit-0
+spec with no summary line, QA-verified against real evasions, and THAT is
+the guarantee). `runner-completeness.test.sh` 12.42 additionally lints the
+shapes a static scan can see — canonical, multi-signal, numeric-0 and
+trailing-comment forms (12.43a-e pin each) — while a variable-spelled
+signal stays invisible to any static scan and is caught at runtime by the
+missing-summary arm.
+
+…and **one annotation on top of those three**, because the three are
+spec-granular:
+
+- **PARTIAL** — a spec that PASSED but also printed a section-level skip
+  marker, so it measured only part of itself. It is counted (`Partial: N` in
+  the summary), named with its own marker text, and the completeness line
+  carries the qualification. At L1, under `STRICT_SECTIONS=1`, it makes the
+  tier **red**. Since a9hh R7-F2 the L2 runner carries the same annotation
+  with the same `SECTION_SKIP_RE` (measured need: under `BD_SHIM_ONLY=1` CI,
+  `post-edit.sh` was an unqualified `PASSED (101 assertion(s))` out of a
+  115-assertion full run, its `SKIPPED:` marker named nowhere — the a9hh
+  section-skip defect one tier down); L2 has no strict mode, matching its
+  skip policy.
+
+The L1 runner additionally enforces a **completeness floor**
+(`EXPECTED_SPECS` in `run-tests.sh`): an unfiltered run fails when the
+discovered spec set shrinks, and any skip makes the tier red. The floor is
+the **negative control for the completeness line** — the pairing
+convention's first application (see below): `Total: N  Passed: N  Failed: 0`
+is a claim, and the floor is what makes that claim falsifiable. **When you
+add or remove an L1 spec, update `EXPECTED_SPECS` in the same change.** The
+pair for all of this is `runner-completeness.test.sh`, which drives both
+shipped runners — and TWELVE excision mutants of them: L1 un-floored, L1
+without the section refusal, each runner without its survivor sweep, each
+without its telemetry disarm, each with the spec stdin redirect stripped,
+L1 without the transcript-fail arm, L2 without the filter zero-match
+guard, L2 without its accounting (summary trap + failed-accounting
+arms), and L2 without its PARTIAL annotation — against shrunken, skipping,
+section-skipping, deliberately hanging, background-leaking, stdin-loaded,
+telemetry-shaped, early-exiting, transcript-contradicting,
+interrupt-stranding and grace-window-respawning fixtures. Five further
+reddening mutations are hand-run and recorded per round rather than
+committed (they need live process timing): the pre-widening trap-scan
+regex, the RESNAPSHOT excision, the watchdog-wait reversion, HUP
+untrapped, and the silent-kill report strip — each observed to redden
+exactly its legs in the a9hh R6/R7 record.
+
+**`STRICT_SECTIONS` and why the floor is not enough on its own.** The floor
+counts spec FILES. a9hh's own first fix round shipped a green
+`Total: 36  Passed: 36  Failed: 0  Skipped: 0` /
+`Completeness floor: HELD (36/36 specs discovered and executed)`, rc=0, over
+15 assertions that never executed: `impact-report.test.sh` ran 24 of 39 and
+printed `SKIPPED: section 4 (code-graph-mcp not installed …)`, because the
+job installed one MCP server's `node_modules` and not the other's. Nothing
+in the runner could see it. Now:
+
+- the runner recognises the four section-skip marker shapes the tier prints
+  (`SKIPPED: …`, `  SKIPPED: …`, `  SKIP: …`, `  note: … SKIPPED …`) — and,
+  since a9hh R2-F1, **any line-initial `note:` at all**, with or without a
+  skip word on that line and regardless of how it was emitted (printf,
+  heredoc, cat of a file — detection reads the spec's *output*, where every
+  emission mechanism converges). The two-line shape `note: section 4 needs X`
+  / `… Skipping.` used to evade both the runtime match and the source scan at
+  once when it arrived via a heredoc. **If you add a section arm, print one
+  of the four shapes with the skip word on the marker line** — that keeps the
+  marker legible to a human reading a log, and `runner-completeness.test.sh`
+  section 9 still lints the sources for it (now including heredoc bodies) —
+  but the runner no longer depends on the convention being followed;
+- the summary prints `Assertions executed: N`, the number that actually moves
+  when a section is lost (measured at a9hh round 1, tree `535c89a` + change
+  set `5b47c019`: 2501 local vs 2486 in the CI shape — same 36 specs, same
+  green line);
+- `STRICT_SECTIONS=1` — set by the CI `l1-unit` job, which provisions bd,
+  node, and BOTH MCP servers' `node_modules` — makes a skipped section fail
+  the tier. It is unset by default because a dev machine legitimately lacks
+  some prerequisites, and a control that goes red on every laptop is a
+  control people stop reading. An unrecognised value is an invocation error,
+  never a silent "off".
+
+The L2 runner reports skips honestly (they leave the `Passed` column and the
+summary carries a `COMPLETENESS:` caveat naming the executed subset) but
+still exits 0 on skips, and has no section-level detection: in
+`BD_SHIM_ONLY=1` CI, 37 of 44 specs skip, so an L2 floor is inseparable from
+installing bd in that job — the recorded follow-up on a9hh (`u84b`),
+deliberately not a side effect of the L1 round. It **does** share the
+process-group mechanics above (group-wide kill escalation, survivor sweep,
+interrupt reaping): those close leaks, not skip policy, and L2 had the
+identical holes. And its **instrument honesty** is now L1's equal (a9hh
+R4/R5): a `--filter` that matches nothing is rc=2, never a green
+`Total: 0` (both runners filter with BRE `grep`, so an ERE alternation like
+`a|b` matches no basename — loudly now), and the accounting arms above mean
+an early-exit spec can neither hide a failure as a skip nor lose its
+executed assertions.
+
+**Spec stdin is `/dev/null`.** Both runners now launch each spec as a
+background job so a watchdog can poll it, and POSIX gives an async command
+`/dev/null` on stdin unless it is redirected. No spec read stdin before or
+after this change, and `installer-flags.test.sh` already redirected
+`</dev/null` explicitly — but a future spec that expects an interactive
+stdin will see EOF, not a prompt.
 
 ## Live e2e (manual, invariant-based)
 

@@ -99,15 +99,10 @@ cp "$PLUGIN_DIR/.claude/scripts/bd-github-link.sh" "$FIXTURE/.claude/scripts/"
 cp "$PLUGIN_DIR/.claude/scripts/current-task.sh"   "$FIXTURE/.claude/scripts/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
-# Hard preconditions.
+# Hard preconditions. No BD_SHIM_ONLY skip arm any more (a9hh): CI installs
+# the real bd, and a bd-less environment is a hard failure everywhere — the
+# whole fixture is bd-driven, so there's no useful partial coverage.
 if ! command -v bd >/dev/null 2>&1; then
-    # Match the L2 spec convention: in BD_SHIM_ONLY=1 mode (CI runner,
-    # no public bd installer), skip-with-log instead of hard-fail. The
-    # whole fixture is bd-driven — there's no useful partial coverage.
-    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
-        echo "SKIPPED: bd-github-link.test.sh (bd not available; CI env BD_SHIM_ONLY=1)"
-        exit 0
-    fi
     echo "bd CLI not on PATH -- this fixture requires Beads."
     exit 1
 fi

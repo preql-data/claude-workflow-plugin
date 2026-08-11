@@ -748,15 +748,28 @@ elif ! git -C "$PROJECT_DIR" rev-parse -q --verify "$RELEASE_TAG^{commit}" >/dev
 fi
 
 if [ -n "$SECTION6_SKIP" ]; then
-    # MOVES NEITHER COUNTER on purpose: run-tests.sh has no SKIP verb, it reads
-    # a spec's exit code and nothing else, so the house idiom for "this leg had
-    # no inputs to measure" is a bare note (workflow-doctor.test.sh 5a, META 3,
-    # META 4, META 5). Consequence, stated because it surprises anyone diffing
-    # two runs: the assertion total for this spec is NOT a constant — it drops
-    # by this whole section when the note fires. That is stated WITHOUT a
-    # literal count on purpose. A hardcoded one was written here first, said
-    # "seven" against a section of eight, and was caught only by running the
-    # skip path; the next assertion added below would have rotted it again.
+    # MOVES NEITHER PASS NOR FAIL on purpose — but it is NOT invisible, and the
+    # text here used to say it was ("run-tests.sh has no SKIP verb, it reads a
+    # spec's exit code and nothing else"). Both clauses died with
+    # claude-workflow-plugin-a9hh. run-tests.sh now: (1) has a SKIP verb —
+    # exit-0-with-zero-assertions is a third outcome that fails the tier; and
+    # (2) reads the executed-assertion count, not the exit code alone. Since
+    # a9hh R1-F1 it also reads THIS line: a `note: ... SKIPPED` on a spec that
+    # otherwise passed makes the spec PARTIAL, names it under the completeness
+    # line, and — under STRICT_SECTIONS=1, which the CI l1-unit job sets —
+    # fails the tier. That is deliberate here: CI checks out with fetch-depth:
+    # 0 precisely so the tag IS reachable, so this note firing in CI means the
+    # checkout config regressed, which is worth a red.
+    #
+    # The house idiom for "this leg had no inputs to measure" is still a bare
+    # note (workflow-doctor.test.sh 5a, META 3, META 4, META 5) — it is just no
+    # longer a note that nothing can see. Consequence, stated because it
+    # surprises anyone diffing two runs: the assertion total for this spec is
+    # NOT a constant — it drops by this whole section when the note fires. That
+    # is stated WITHOUT a literal count on purpose. A hardcoded one was written
+    # here first, said "seven" against a section of eight, and was caught only
+    # by running the skip path; the next assertion added below would have
+    # rotted it again.
     printf '  note: 6 SKIPPED - %s.\n' "$SECTION6_SKIP"
     printf '        There is nothing to compare, so this is neither a pass nor a\n'
     printf '        failure. The comparator itself is still proven sensitive by\n'

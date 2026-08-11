@@ -16,6 +16,383 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
+## [Unreleased]
+
+### Changed
+
+- **The test runners stop scoring absence as green** (`a9hh`, `mwrb`). Both
+  tier runners (`.claude/scripts/tests/run-tests.sh`,
+  `.claude/tests/component/run.sh`) previously scored specs by exit status
+  alone, so a spec that exited 0 having executed zero assertions was counted
+  PASSED — measured in CI shape as 286 of 2461 L1 assertions (11.6% of the
+  tier, `review-separation.test.sh`'s 60 included) never executing under a
+  summary line byte-identical to a full run. A skip is now a THIRD OUTCOME
+  that is never a pass; the L1 tier enforces a completeness floor
+  (`EXPECTED_SPECS`) that fails the run when the discovered set shrinks —
+  framed in-file as the negative control for the completeness line, the
+  pairing convention's first application; and both runners kill a hung spec
+  at a per-spec wall-clock cap (`SPEC_TIMEOUT_S`; L1 900s, L2 3600s),
+  reporting it FAILED with a distinct TIMEOUT reason — never passed, never
+  skipped — with per-spec elapsed time printed (a hung tier emits no
+  completeness line at all, measured three times as 45+ minute losses). The
+  CI `l1-unit` job now installs the real `bd` (pinned v1.1.2,
+  checksum-verified release tarball, into `/usr/local/bin` — not `/usr/bin`,
+  which `installer-flags.test.sh` probes as a prereq-hostile PATH) plus BOTH
+  MCP servers' deps, and the L1 skip arms are deleted. Precisely: five
+  whole-file `BD_SHIM_ONLY` arms (`bd-github-link`, `qa-gate-choose`,
+  `qa-gate-grade-record`, `review-separation`, `phase5-synthetic-tests`) and
+  one section-level `BD_SHIM_ONLY` note arm
+  (`mcp-unestablished-results.test.sh:489`);
+  `mcp-unestablished-results.test.sh` KEEPS its whole-file
+  node/`node_modules` arm, which is correct — it names a prerequisite, is now
+  classified SKIPPED, and fails the tier, so CI installs the prerequisite
+  instead of arguing with the arm. A bd-less environment is a loud failure
+  everywhere, not a silent green. `l2-component` keeps `BD_SHIM_ONLY=1` for
+  now — its summary now says honestly that 37 of 44 specs skip there;
+  installing bd + a floor in that job is the recorded follow-up.
+- **…and the L1 runner stops scoring a skipped SECTION as coverage**
+  (`a9hh` R1-F1). The floor above counts spec FILES, and the first fix round
+  for `a9hh` shipped its own false green on exactly that gap: the rewired
+  `l1-unit` job printed `Total: 36  Passed: 36  Failed: 0  Skipped: 0` and
+  `Completeness floor: HELD (36/36 specs discovered and executed)`, rc=0,
+  over 15 assertions that never ran — `impact-report.test.sh` executed 24 of
+  39 and printed `SKIPPED: section 4 (code-graph-mcp not installed …)`
+  because the job installed bd-mcp's `node_modules` and not
+  code-graph-mcp's. Section 4 is the LIVE code-graph path (`server=code-graph`,
+  exit-0-despite-one-per-file-error, the non-git relativisation fallback) —
+  the live half of the artifact `qa-gate.sh approve` refuses to run without.
+  Three changes close it: the job runs a second `npm ci` in
+  `.claude/mcp/code-graph-mcp` (94 packages, no install scripts, no native
+  builds) and verifies both `node_modules` before the suite; the runner
+  recognises the four section-skip marker shapes the tier prints, counts them
+  as `Partial: N`, names each with its own marker text, prints
+  `Assertions executed: N` (the number that moves when a section is lost —
+  2501 vs 2486 across the same 36 specs), and qualifies the completeness line
+  itself; and `STRICT_SECTIONS=1`, set on `l1-unit` where every prerequisite
+  is provisioned, makes a skipped section RED. It is unset by default because
+  a dev machine legitimately lacks prerequisites and a control that cries
+  wolf stops being read; an unrecognised value is an invocation error, never
+  a silent "off". Both runners also now launch specs as background jobs (the
+  watchdog needs to poll them) with stdin explicitly redirected from
+  `/dev/null` — the redirect must be explicit because `set -m` inverts the
+  async default (see the R3 entry below); no spec read stdin before or
+  after, but it is a real semantic change.
+  Paired by `runner-completeness.test.sh` (40 → 83 assertions), which
+  drives both shipped runners and TWO mutants of the L1 one — un-floored, and
+  with the section refusal excised — against shrunken, skipping,
+  section-skipping and deliberately hanging fixtures, with the orphan probes
+  scoped per run and a decoy process proving the scoping is real.
+  The sweep this finding demanded turned up a second instance nobody had
+  named: `workflow-doctor.test.sh`'s META-TEST 3, 4 and 5 printed
+  `note: META-TEST N needs <prerequisite>` with the word "Skipping" on a
+  LATER line, so three section-level skips were invisible to any line-anchored
+  detector. They now carry the word on the marker line, and section 9 of
+  `runner-completeness.test.sh` scans every spec's `note:` literals and fails
+  on one that does not — with a control proving the scan can fail, and an
+  end-to-end leg showing the runner really is blind to the old shape.
+- **…and both runners stop trusting a spec's exit as the end of its story**
+  (`a9hh` R2, three HIGH findings from a second model family — Sol,
+  gpt-5.6-sol — each reproduced as a failing invocation before any fix).
+  R2-F1: the section-skip detector demanded a skip word ON the `note:` line
+  and its convention scan read only quoted printf/echo literals, so the
+  known-bad two-line shape emitted through a heredoc evaded both layers at
+  once — `STRICT_SECTIONS=1` reported `Partial: 0`, rc=0, over an omitted
+  section (the class the round existed to close, surviving its three fixed
+  instances). Detection now keys on the spec's OUTPUT, where every emission
+  mechanism converges: ANY line-initial `note:` counts (checked against both
+  tiers: nothing else prints one; a future informational `note:` fails loud
+  as PARTIAL in strict CI, the safe direction), and the source scan reads
+  heredoc bodies too, kept as the human-legibility lint plus dormant-arm
+  audit it always was. R2-F2: the runner waited only on the spec's top-level
+  pid, so a spec could background a subshell and exit 0 — reproduced:
+  `Passed: 36 … Partial: 0`, rc=0, the child alive after the tier returned,
+  its `SKIPPED:` marker written into the already-unlinked output file
+  (outcome and evidence both lost). Specs now run as their own process
+  groups (`set -m`); after `wait`, a survivor sweep polls the group (short
+  grace, so in-flight output lands and COUNTS), kills what remains, and
+  classifies the spec FAILED with a reap-your-own-work reason — a spec that
+  backgrounds and reaps stays a clean PASS, and bd's double-forking daemon
+  (own session, ppid 1, measured) never enters the group. R2-F3: the
+  watchdog's `kill_tree` sent TERM to descendants and its KILL only to the
+  (usually already dead) top-level pid, so a `trap '' TERM` child survived
+  the cap and outlived the whole run — reproduced on both runners, and the
+  paired control could never have caught it because its blocking child was
+  a `sleep`, which honors TERM: a negative control structurally incapable
+  of failing, inside the batch that exists to eliminate exactly that. The
+  escalation is now group-wide (`kill -KILL -- -pgid`), the ppid walk stays
+  as the polite first pass, and an INT/TERM trap forwards interrupts to the
+  active spec group (own-group specs no longer die with the terminal's ^C).
+  `runner-completeness.test.sh` grows 83 → 117 assertions: TERM-immune child
+  AND TERM-immune leader legs against both shipped runners (the blocking
+  child now actually ignores TERM), background-and-exit legs, TWO new
+  sweep-excision mutants (L1 + L2, awk-verified) demonstrating the exact
+  green-over-leak line on demand, a backgrounds-but-reaps restore control,
+  and heredoc-emission controls for the scan — with the pre-R2 literal-only
+  scan kept on display as a leg proving it finds 0 hits on the heredoc
+  fixture. Every new leg names, in-file, the mutation that turns it red;
+  the three mutations were each run by hand and observed to redden their leg
+  (narrowed regex → 9.5; sweep excised → 5.8/5.13; watchdog escalation
+  deleted → runner blocked 20s past a 3s cap → 5.10 via the outer cap).
+- **…and the sweep stops crying wolf on bd's telemetry, and the runners stop
+  claiming stdin semantics `set -m` inverts** (`a9hh` R3, QA re-review; both
+  HIGH findings reproduced against the shipped runners before any edit).
+  R3-F1: `bd send-metrics` — spawned by ANY bd command while metrics are
+  enabled — detaches to ppid=1 WITHOUT `setsid`, so unlike the daemon the
+  R2 header generalised from it stays IN the spec's process group; a fresh
+  fixture HOME re-enables metrics (no `~/.config/bd` defaults to ON,
+  measured on bd 1.1.2, the version CI pins), and a slow endpoint carries
+  the flusher past the sweep's 2.0s grace, SIGKILLing an innocent spec.
+  Reproduced through the shipped runner: 0/25 firings idle, 10/10 with the
+  endpoint blackholed — the CI-latency shape (QA: 4/25 under load; 61/61
+  census flushers in-group, 0/61 setsid, max lifetime 3s). Both runners now
+  export `BD_DISABLE_METRICS=1`, which prevents the SPAWN itself (measured:
+  3/3 in-group flushers without it, 0/3 with). An argv-pattern sweep
+  exemption was rejected as forgeable (`exec -a 'bd send-metrics'` would
+  cloak a real leak), and a ppid==1 exclusion as suicidal (an escaped child
+  reparents to 1 the instant its spec dies — that predicate deletes R2-F2's
+  own detection). The sweep now NAMES every survivor it kills
+  (pid/ppid/pgid/args under the verdict line — QA needed an instrumented
+  copy to identify the flusher; the next person reads it off the failure),
+  and the failure text demands what a spec CAN do ("end its background work
+  before returning" — "reap" is impossible for a ppid=1 non-child). R3-F2:
+  both runners' new STDIN paragraphs promised the POSIX async
+  `/dev/null` default while `set -m` INVERTS it — with job control on, a
+  background job inherits the runner's stdin. Reproduced both ways: a
+  reader spec consumed a sentinel piped into the shipped runner, and under
+  a pty it was SIGTTIN-stopped (state T at 8/8 samples; `kill -0` reads
+  stopped as alive) into a full-cap TIMEOUT — the mwrb wedge, in text that
+  promised instant EOF. Both launch sites now redirect `< /dev/null`
+  explicitly, and the paragraphs state the measured behaviour. Also: the
+  README's mutant census said "two mutants" over a change set that shipped
+  four (R3-F3 — corrected, now the enumerated eight), and the `note:`
+  predicate's zero-false-positive claim lived in a comment rather than a
+  leg (R3-F4) — it is now a dated measurement carrying its command in the
+  header, plus output-layer legs pinning both directions: the tier's real
+  near-miss shapes (`Note also:`, `(note:`, `footnote:`) stay invisible,
+  and a line-initial `Note: switching` arriving through a subprocess is a
+  LOUD, verbatim-quoted PARTIAL, never a silent green.
+  `runner-completeness.test.sh` grows 117 → 149: telemetry-disarm pairs
+  (the env probe driven with the variable `env -u`-stripped at the call
+  site, so it proves the RUNNER establishes it, not the ambient
+  environment), real-bd verification (a fresh HOME reports OFF with the
+  variable and ON without — a bd that renames it goes red HERE, not as a
+  1-in-6 CI flake), stdin sentinel pairs against both runners, and FOUR new
+  excision/strip mutants (awk found-checked, cmp-verified, demonstrated red
+  in-run); the two hand mutations for the new 8.21 legs (de-anchored
+  `note:` predicate, re-narrowed predicate) were each run and observed to
+  redden exactly their leg.
+- **…and the runners stop deleting their own scratch mid-tier on Linux,
+  converting failures into skips, swallowing background failures, blessing
+  empty filters, and stranding descendants on interrupt** (`a9hh` R4/R5 —
+  two independent parallel reviews on the same bytes: Sol, gpt-5.6-sol,
+  4 HIGH by inspection; QA, 1 HIGH + 2 MEDIUM by measurement; every finding
+  reproduced against the shipped runners before any edit). R5-F1, the
+  blocker: both runners' EXIT trap (`cleanup_scratch`) nondeterministically
+  fired **inside forked children** on Linux bash 5.2.21 under load and
+  `rm -rf`'d the live scratch MID-TIER — every later spec failed rc=1 with
+  0 assertions (`cat: …/spec-out.N: No such file`), one spec went SKIPPED
+  over its unlinked output. Reproduced in ubuntu:24.04 against 36 trivial
+  stubs: 32/40 runs bad under CPU contention (`--cpus=1` + 2 spinners),
+  1/12 from a bind mount, 0/30 idle (QA: up to 10/12 bind-mounted, 6/20 at
+  L2 — our L2 pre-fix control measured 40/40 under contention); not
+  reproducible on macOS bash 3.2. The trap-body interactions were then
+  MEASURED AS A FACTORIAL rather than modelled — 40 trials per variant, 36
+  trivial stubs, ubuntu:24.04 bash 5.2.21 aarch64, `docker run --cpus=1 -e
+  LOAD=2` — by THREE independent builds: QA (R5/R7), ours (R4/R5, re-run
+  and extended R6/R7), and a third at R9. R7 falsified this entry's first
+  account and R9 refined the correction. What follows is what those three
+  builds OBSERVED, stated as ranges across builds and NOT as bounds: the
+  spread at n=40 is wide enough that a 5-point gap between builds is noise
+  (28/40 against 33/40 is z≈1.35), so a range is the honest form and a
+  superlative is not. Variants are named by the ORDER of their statements,
+  because "guard + write + rm" cannot distinguish 28/40 from 0/40 — a whole
+  review round was spent reconciling that ambiguous label against an
+  unambiguous table — and run-tests.sh carries each body VERBATIM. A bare
+  `rm` in the trap: 29-35/40 BAD. A BASHPID guard evaluated as the trap's
+  FIRST command (guard→rm, and guard→write→rm): 25-37/40 BAD — the
+  misfiring child gets past the guard and deletes. This entry called that
+  "the WORST shape measured"; the R9 build does not reproduce that ordering
+  (its guard shapes read 28 and 28, against 30 for the bare rm), so the
+  superlative is WITHDRAWN. What IS supported is that guard-first is no
+  better than the bare rm, which is the load-bearing point; which shape is
+  worst is not established. An in-trap WRITE never masks the defect:
+  write→rm with no guard stays at baseline, 27-32/40 BAD, while the write
+  LOGS every foreign firing — the defect is instrumentable. QA's rm→log
+  control read 0/40-0/60 because removing the rm removes the deleter, so
+  their "the deleter IS the rm" inference was CORRECT (this entry
+  previously miscalled it a probe effect, over what were two GUARD fallback
+  shapes, not "two logging variants"). The one armed-trap shape every build
+  reads clean is write→guard→rm — the byte-identical write placed BEFORE
+  the guard: 0/40 + 0/40 + 0/25+0/25, with 109 and 48 foreign firings
+  observed entering the trap and every one stopped by the
+  now-correctly-evaluating guard. The masking is therefore ORDER-dependent,
+  not combination-dependent: the two builds that isolated the order read
+  35/40 and 28/40 BAD with the guard first against 0/40 with the write
+  first, and in the R9 build 146 logged firings recorded `BASHPID != $$` in
+  the instant before running the `rm`. Why first-command evaluation differs
+  inside a misfiring child is still unexplained. strace also masks (0/30). No in-trap shape is
+  trustworthy; the fix is structural, not a guard: NO EXIT trap at all —
+  cleanup moved to explicit terminal exits (`finish`), leaving nothing in
+  trap-space for a misfiring child to execute. Verified on the fixed bytes
+  in the identical amplified container: L1 0/40 + 0/12 mount, L2 0/40;
+  re-verified at R6/R7 — 0/12 on the reviewed bytes, then 0/40 sha-pinned
+  on the final R6/R7 bytes (pre-fix controls in the same harness: 32/40,
+  1/12, 40/40). R4-F1: an L2 spec's
+  failing assertion followed by a skip gate's `exit 0`
+  (`bd_required_or_skip`'s exact mechanism, reachable today via
+  `post-edit.sh` under `BD_SHIM_ONLY=1`) was classified SKIPPED with
+  `Failed: 0`, rc=0 — the wrapper died before its summary line. The wrapper
+  now owns an EXIT trap that prints the summary on ANY builtin exit
+  (fixture.sh's install-once guard is pre-set so trap ownership is not
+  contested; `beads-ledger.sh`, the one spec that re-arms EXIT, chains
+  `__spec_wrapper_exit`; the runner's missing-summary FAILURE is the
+  guarantee, and a lint leg cheaply catches the static shapes — widened at
+  R7-F4 to multi-signal/numeric-0/trailing-comment forms, with a
+  variable-spelled signal named as the residual only runtime can catch),
+  and the
+  classifier grew three arms: summary-counted failures under rc=0 are
+  FAILED, transcript `FAIL:` lines the summary never counted are FAILED,
+  and a missing summary line under rc=0 is FAILED — never SKIPPED. A spec
+  that measures N assertions and THEN skips is PASSED with its count
+  (pre-fix: SKIPPED, assertions vanished). R4-F2: both runners scored
+  rc=0 as PASSED over transcripts containing `FAIL:` lines — a
+  backgrounded assertion failing inside the sweep's 2s grace window landed
+  its FAIL: in the still-linked capture file, was COUNTED as an executed
+  assertion, and passed (reproduced both tiers). New transcript arm in
+  both: rc=0 + line-initial `FAIL:` = FAILED, closing the grace window
+  from the other side (within-grace failures caught by transcript,
+  beyond-grace by the sweep — no duration of failing background work is
+  green). R4-F3/R5-F2 (found independently by both reviewers): L2's
+  `--filter` matching nothing left `Total: 0`, rc=0 — this task's defect
+  sentence in the tier's own sibling runner, hit for real by QA via a BRE
+  alternation; L2 now carries L1's guard (rc=2, names the no-match).
+  R4-F4: INT/TERM to either runner signalled only the active spec's
+  process GROUP, stranding an out-of-group descendant on a live ppid chain
+  (`setsid sleep & wait` — reproduced on Linux, both runners, descendant
+  alive past exit 130). Both interrupt handlers and both watchdog cap
+  paths now snapshot the ppid tree BEFORE the polite TERM pass and KILL
+  both the snapshot and the group after the grace (verified on Linux:
+  descendant REAPED, rc=130). R5-F3: the runner header claimed set -m side
+  effects were "measured on … Linux bash 5" before anyone had measured on
+  Linux; the sentence now carries its actual provenance including this
+  round's measurement (0 job-notice lines across 5 full 36-spec tier runs,
+  ubuntu:24.04 bash 5.2.21, command in-file). Plus QA's nits: failed
+  `assert_contains` in the paired spec now prints the haystack (`| `
+  -prefixed so quoted runner output cannot feed the outer runner's
+  anchors), and survivor lines strip control bytes before the width cut.
+  `runner-completeness.test.sh` grows 149 → 192: early-exit/exec/summary
+  legs, transcript-arm legs (deterministic and Sol's timing shape),
+  zero-match twins for L2, portable-setsid interrupt legs against both
+  runners (perl POSIX, macOS has no setsid(1)), scratch-lifecycle legs via
+  an mktemp PATH shim (TMPDIR-scoping was VACUOUS on macOS — BSD mktemp
+  ignores it for `-d -t`; caught by running the no-rm reddening mutation,
+  which is the pairing requirement doing its job on its own control), a
+  no-EXIT-trap structure pin with fixture control, the trap-chain lint,
+  and THREE new mutants (L1 transcript arm, L2 filter guard, L2
+  accounting). Hand-run reddening mutations, each observed red: interrupt
+  reverted to group-only signals → 12.30 alive; `finish` without its rm →
+  12.35 names the surviving path; summary trap excised alone →
+  12.10-12.12 lose the pass-then-skip accounting.
+  The R6/R7 rounds (Sol, 1 HIGH; QA, 1 HIGH + 1 MEDIUM + 2 LOW — QA's
+  factorial falsified this entry's own earlier probe-effect account, and
+  the paragraphs above now carry the corrected one) then closed the
+  escalation's remaining honesty gaps. R6-F1: the pre-TERM snapshot is not
+  a closed set — a TERM handler can SPAWN during the grace window, and the
+  runner also TERMed its own watchdog the moment `wait` returned, so on
+  the common path (leader dies politely) the KILL pass never ran at all:
+  reproduced on macOS AND Linux with a setsid shell whose TERM trap
+  backgrounds a sleep — interrupt path stranded the spawned child, cap
+  path stranded the SHELL TOO. Per the R6 scope ruling the fix is bounded,
+  not an arms race (chasing a re-spawning tree needs cgroups/namespaces):
+  one shared `escalate_kill()` now re-walks ONCE from every snapshot
+  member still alive after the grace, the runner lets a FIRED watchdog
+  finish (marker-gated wait), every kill site names what refused TERM
+  before KILLing it and names anything it could not kill as a `survivor:`
+  line, and every "guarantee" claim in both runners and the tests README
+  is rewritten to the measured truth: two bounded walks, named survivors,
+  stated limits. R7-F2: the R4-F1 summary trap moved two specs from
+  SKIPPED to an UNQUALIFIED green — `post-edit.sh` `PASSED (101
+  assertion(s))` of a 115-assertion full run under `BD_SHIM_ONLY=1` — so
+  L2 now carries L1's `SECTION_SKIP_RE` and a `Partial:` counter
+  (measured, macOS with bd off PATH + BD_SHIM_ONLY=1, final bytes:
+  `Total: 44 Passed: 12 Failed: 1 Skipped: 31 Partial: 2`, the sole red
+  the pre-existing installer-v3-upgrade 8e-B), and test.yml's l2-component
+  comment now states the measured coverage instead of the "7-spec
+  remainder / never as passes" claim this change set's own fix falsified.
+  R7-F3: SIGHUP — the closed-terminal path — leaked the scratch dir 5/5
+  with `finish` unreached (rc=129, measured both platforms); both runners
+  now trap HUP through the same interrupt path (0/5 leaks, rc=130), and
+  the disclosed residual is exactly `set -u` aborts and SIGKILL. R7-F4:
+  the trap-chain scan matched only the canonical single-signal form (four
+  evasions scored 0); it now catches multi-signal, numeric-0 and
+  trailing-comment forms, names the variable-spelled signal as invisible
+  to any static scan, and the runtime missing-summary FAILURE — verified
+  by QA against real evasions — is documented as the guarantee.
+  `runner-completeness.test.sh` grows 192 → 211: the widened-scan evasion
+  controls (12.43a-e, plus a false-positive control over chained/reset/
+  RETURN/numeral shapes), grace-window respawn legs against both runners
+  and both kill paths (12.44-12.47), HUP lifecycle legs (12.48/12.49), L2
+  partial legs (12.50-12.53), and a TWELFTH committed mutant (the
+  L2-PARTIAL excision, 12.54-12.56 — the R7-F2 deception on demand). Leg
+  5.9 was rewritten for the new architecture (the escalation, not the
+  sweep, now kills a TERM-refuser on the timeout path — so it must NAME
+  the kill, and does). Five hand-run reddening mutations, each observed
+  red on exactly its legs with sha-verified byte-identical restores:
+  pre-widening regex → 12.43a/c/d; RESNAPSHOT excised → 12.45/12.46;
+  watchdog-wait reverted → 12.46 + 5.9; HUP untrapped → 12.48/12.49;
+  refusers report stripped → 5.9. R8-F1 (Sol, on the R6/R7 bytes) then
+  caught the escalation's own report lying about WHY it had killed: every
+  member of the kill set was named `refused TERM, KILLed:`, including
+  processes the post-grace re-walk had found that were BORN after the TERM
+  pass and never received one — which sends a maintainer hunting a
+  signal-handling defect that does not exist. Reproduced on the shipped
+  bytes with Sol's shape, a setsid'd shell whose TERM trap backgrounds a
+  child: the trap-spawned child — absent from the pre-TERM snapshot and in
+  a different process group — was named a TERM refuser, and so was a
+  `sleep 1` the shell's own loop had started after the TERM. The report now
+  attributes only what the escalation can KNOW. It TERMed the pre-TERM
+  snapshot itself, so a snapshot member still alive a full grace later did
+  refuse (`refused TERM, KILLed:`); everything else is named by MEMBERSHIP
+  (`not in the TERM snapshot, KILLed:`) and claims no signal in either
+  direction. That second label matters: the FIRST attempt at this fix
+  called it "discovered after TERM pass", which reproduces as the same
+  defect inverted — a process double-forked before the snapshot has no ppid
+  chain back to the leader and is invisible to `tree_pids`, but it KEEPS
+  the spec's pgid, so the group TERM does reach it and it can refuse, and
+  the label would deny a signal-handling defect that IS there. Both wrong
+  labels were measured against the shipped escalation and then run as
+  reddening mutations in BOTH runners: each reds exactly 12.46c, 12.47b and
+  12.47d (tier rc=1), disturbing no other leg, while the two controls that
+  observe the TERM and the kill themselves stay green — which is what makes
+  the reddening about the attribution rather than about the escalation.
+  `runner-completeness.test.sh` grows 211 → 216: two grace-window
+  attribution legs (12.46c/12.47b, one per runner) and three for the other
+  population (12.47c-e), where the double-forked orphan RECORDS its own
+  TERM — so the leg OBSERVES the delivery the wrong label would have
+  denied instead of arguing about it, and needs no `perl`, covering the
+  machine where 12.44-12.47 skip. L2 tier caveat, restated for the
+  PARTIAL era: under `BD_SHIM_ONLY=1` CI, specs that ran assertions
+  before their bd gate read PASSED-but-INCOMPLETE with a `Partial:`
+  count rather than unqualified passes; the assertion totals remain
+  environment-sensitive and the l2-component job still pins no numbers —
+  the L2 floor stays u84b's territory.
+- **`review-config` ships `max_review_iterations=12` and
+  `timeout_seconds=2400`** (`iu5o`, operator decision; both installers copy
+  the file to every target). The in-file rationale carries the measurement
+  that cuts against the larger numbers: Sol completed a real 1008-line review
+  payload in 66s of the original 300s budget — the timeout was never the
+  blocker; what blocked the lane was `max_review_iterations=3` returning
+  rc=6 at zero seconds, and the iteration counter is lane-blind (Claude
+  rounds consume Codex eligibility — the defect is `nq5f`; when it lands the
+  cap should be revisited down). The larger timeout is headroom for a wedged
+  turn's worst case (40 min vs 5 min before degrading to the Claude path),
+  not a per-turn spend increase. The shipped values are now asserted by L2
+  (`codex-review.sh` spec section C8): the iteration cap is bracketed
+  behaviourally at the rc=6 boundary (12 admitted, 13 refused) against the
+  shipped file's bytes, with a drifted-config negative control — a
+  spec-authored fixture config is exactly how the first raise rode through
+  provably untested.
+
 ## [4.1.0] - 2026-07-30
 
 **The verifiable install.** Through 4.0.0 the plugin had no answer to "what
