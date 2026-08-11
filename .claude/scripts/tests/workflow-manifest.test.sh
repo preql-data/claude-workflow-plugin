@@ -38,6 +38,10 @@
 # SECTIONS
 #   1. Synthetic-source surface: a tiny fixture tree proves both what IS
 #      enumerated (with the right class) and what is EXCLUDED.
+#   1g. The governing-artifact query (claude-workflow-plugin-s5qf): the same
+#      enumeration re-served without hashes, plus the named runtime-contract
+#      files, for F1's doc-only classifier — and the negative control that it
+#      did NOT widen the install surface it borrows.
 #   2. Determinism: two consecutive generate runs are byte-identical.
 #   3. Real-repo sanity: named assets present, operator memory and the
 #      plugin's own L1 suite absent.
@@ -334,6 +338,163 @@ assert_eq "synthetic tree yields 4 operator rows" "4" \
     "$(awk -F'\t' '$2 == "operator"' "$SYN_TSV" | wc -l | tr -d ' ')"
 assert_eq "synthetic tree yields 2 merged rows" "2" \
     "$(awk -F'\t' '$2 == "merged"' "$SYN_TSV" | wc -l | tr -d ' ')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 1g: the governing-artifact query (claude-workflow-plugin-s5qf) ==="
+#
+# `governing` is what verify-before-stop.sh's F1 fast path asks instead of
+# guessing whether a `.md` is documentation or is the system. Two properties
+# carry the whole design and both are silent-rot candidates:
+#
+#   IT IS THE SAME ENUMERATION. If `governing` ever answered from a list of its
+#   own, the fix would have minted the second vocabulary it exists to avoid —
+#   and that list would drift from the surface exactly the way install.sh's
+#   hardcoded agent list drifted from the shipped agents (LESSONS.md,
+#   2026-06-12). So the superset relation below is asserted PATH BY PATH
+#   against `generate`, not spot-checked.
+#
+#   IT IS NOT AN INSTALL SURFACE. CLAUDE.md is in the governing set and must
+#   never reach a manifest row: it is never-touched operator memory, the
+#   installer does not seed it, and an uninstall walk that enumerated it would
+#   offer to move an operator's own project memory out of their project. The
+#   negative control for that is asserted on `generate`, from both sides.
+
+GOV_TSV="$WORK/synthetic-governing.tsv"
+bash "$SCRIPT" governing "$SYN" > "$GOV_TSV" 2>"$WORK/governing.err" && RC=0 || RC=$?
+assert_eq "governing on the synthetic tree exits 0" "0" "$RC"
+assert_eq "governing on the synthetic tree writes nothing to stderr" \
+    "" "$(cat "$WORK/governing.err")"
+
+# Usage errors are exit 2, same contract as generate.
+bash "$SCRIPT" governing >/dev/null 2>&1 && RC=0 || RC=$?
+assert_eq "governing without <source-root> is a usage error (exit 2)" "2" "$RC"
+bash "$SCRIPT" governing "$WORK/definitely-not-here" >/dev/null 2>&1 && RC=0 || RC=$?
+assert_eq "governing with a nonexistent source root is a usage error (exit 2)" "2" "$RC"
+
+# ROW GRAMMAR: <path><TAB><origin>, TWO fields. The consumer looks the path up
+# by EXACT equality on field 1 and reads field 2 as the origin, so a third
+# column would silently break every lookup — which is why the hashed/no-hash
+# switch has a leg of its own rather than being trusted.
+GOV_ROW_RE="^[^${TAB}]+${TAB}(workflow|operator|merged|runtime-contract)$"
+assert_eq "governing rows are <path>TAB<origin> and nothing else" "0" \
+    "$(grep -vE "$GOV_ROW_RE" "$GOV_TSV" | grep -c . | tr -d '[:space:]')"
+assert_eq "governing rows carry exactly 2 tab-separated fields (no hash column)" "0" \
+    "$(awk -F'\t' 'NF != 2' "$GOV_TSV" | grep -c . | tr -d '[:space:]')"
+assert_eq "governing output is in LC_ALL=C sort order" "0" \
+    "$(LC_ALL=C sort "$GOV_TSV" | cmp -s - "$GOV_TSV" && echo 0 || echo 1)"
+
+# SUPERSET, path by path. Every shipped-surface path is a governing path, with
+# its manifest class carried through unchanged as the origin.
+cut -f1 "$SYN_TSV" | LC_ALL=C sort > "$WORK/gen-paths.txt"
+cut -f1 "$GOV_TSV" | LC_ALL=C sort > "$WORK/gov-paths.txt"
+assert_eq "every generate path is also a governing path (no row lost)" "" \
+    "$(LC_ALL=C comm -23 "$WORK/gen-paths.txt" "$WORK/gov-paths.txt" | tr '\n' ' ' | sed 's/ *$//')"
+MISMATCHED_ORIGIN=0
+while IFS=$'\t' read -r gp gc _; do
+    [ "$(field_of "$GOV_TSV" "$gp" 2)" = "$gc" ] || MISMATCHED_ORIGIN=$((MISMATCHED_ORIGIN + 1))
+done < "$SYN_TSV"
+assert_eq "every shipped path's origin IS its manifest class, unchanged" "0" "$MISMATCHED_ORIGIN"
+
+# THE ONE ADDITION, and it is named rather than scanned for.
+assert_eq "governing: CLAUDE.md is present with origin runtime-contract" \
+    "runtime-contract" "$(field_of "$GOV_TSV" "CLAUDE.md" 2)"
+assert_eq "governing: the ONLY runtime-contract row is CLAUDE.md" "1" \
+    "$(awk -F'\t' '$2 == "runtime-contract"' "$GOV_TSV" | wc -l | tr -d ' ')"
+assert_eq "governing: exactly one row more than generate" \
+    "$(( $(wc -l < "$SYN_TSV" | tr -d ' ') + 1 ))" "$(wc -l < "$GOV_TSV" | tr -d ' ')"
+
+# ANTI-OVERREACH. An ordinary operator doc must not become governing just by
+# sitting next to one that is. These are the SAME three out-of-surface docs
+# Section 1 asserts against `generate`; the query inherits the exclusion
+# because it inherits the enumeration, and that inheritance is the claim.
+assert_eq "governing: docs/ARCHITECTURE.md (a repo doc that is not shipped) is NOT governing" \
+    "0" "$(row_count "$GOV_TSV" "docs/ARCHITECTURE.md")"
+assert_eq "governing: docs/al-*.md (a dated AgentLint report) is NOT governing" \
+    "0" "$(row_count "$GOV_TSV" "docs/al-2026-01-01-000000-deadbeef.md")"
+assert_eq "governing: docs/plans/README.md is NOT governing" \
+    "0" "$(row_count "$GOV_TSV" "docs/plans/README.md")"
+assert_eq "governing: .claude/settings.local.json (per-machine) is NOT governing" \
+    "0" "$(row_count "$GOV_TSV" ".claude/settings.local.json")"
+assert_eq "governing: .claude/scripts/tests/ never appears" \
+    "0" "$(prefix_count "$GOV_TSV" ".claude/scripts/tests/")"
+# THE RESIDUAL, PINNED. docs/specs/<task-id>.md is the v5 design record
+# (fkm.3 / D1). docs/ is never scanned, so the query cannot see it and F1 still
+# fast-paths it. This is asserted rather than merely written down so that D1
+# closing it is a LOUD test change and not a silent behaviour drift.
+mkfile "$SYN" "docs/specs/claude-workflow-plugin-abc.md" "# a design record"
+bash "$SCRIPT" governing "$SYN" > "$WORK/governing-with-spec.tsv"
+assert_eq "governing: docs/specs/<task-id>.md is NOT governing yet — the fkm.3/D1 residual" \
+    "0" "$(row_count "$WORK/governing-with-spec.tsv" "docs/specs/claude-workflow-plugin-abc.md")"
+rm -rf "${SYN:?}/docs/specs"
+
+# NEGATIVE CONTROL, both directions: adding the governing query must not have
+# widened the INSTALL surface. Section 1 already asserts CLAUDE.md is excluded
+# from generate; this re-asserts it AFTER the query exists, which is the only
+# ordering that can catch runtime_contract_rows leaking into generate_rows.
+bash "$SCRIPT" generate "$SYN" > "$WORK/generate-recheck.tsv"
+assert_eq "control: generate STILL emits no CLAUDE.md row" \
+    "0" "$(row_count "$WORK/generate-recheck.tsv" "CLAUDE.md")"
+assert_eq "control: generate STILL emits no runtime-contract class token" "0" \
+    "$(awk -F'\t' '$2 == "runtime-contract"' "$WORK/generate-recheck.tsv" | wc -l | tr -d ' ')"
+assert_eq "control: generate output is unchanged by the query's existence" \
+    "0" "$(cmp -s "$WORK/generate-recheck.tsv" "$SYN_TSV" && echo 0 || echo 1)"
+assert_eq "control: generate still satisfies the 3-column hashed row grammar" \
+    "0" "$(check_table_format "$WORK/generate-recheck.tsv" && echo 0 || echo $?)"
+
+# AN UNDECLARED TREE DECLARES NOTHING. A source root with no plugin surface and
+# no CLAUDE.md yields an EMPTY set — which is what makes the consumer's fast
+# path unchanged on any install that never declares one. Asserted with a
+# discriminator (the seeded tree is non-empty) so "empty" cannot be satisfied
+# by a query that always returns nothing.
+BARE="$WORK/bare-source"
+mkdir -p "$BARE"
+mkfile "$BARE" "README.md"        "# just a readme"
+mkfile "$BARE" "docs/guide.md"    "# just a guide"
+bash "$SCRIPT" governing "$BARE" > "$WORK/governing-bare.tsv" && RC=0 || RC=$?
+assert_eq "governing on a tree with no declared surface exits 0" "0" "$RC"
+assert_eq "governing on a tree with no declared surface is EMPTY" "0" \
+    "$(grep -c . "$WORK/governing-bare.tsv" | tr -d '[:space:]')"
+assert_eq "discriminator: the SEEDED tree is not empty (so 'empty' means something)" \
+    "yes" "$([ "$(grep -c . "$GOV_TSV")" -gt 0 ] && echo yes || echo no)"
+# ...and a tree whose ONLY declaration is CLAUDE.md yields exactly that row.
+mkfile "$BARE" "CLAUDE.md" "# operator memory"
+bash "$SCRIPT" governing "$BARE" > "$WORK/governing-bare2.tsv"
+assert_eq "a tree whose only declaration is CLAUDE.md yields exactly one row" "1" \
+    "$(grep -c . "$WORK/governing-bare2.tsv" | tr -d '[:space:]')"
+assert_eq "...and that row is CLAUDE.md/runtime-contract" \
+    "runtime-contract" "$(field_of "$WORK/governing-bare2.tsv" "CLAUDE.md" 2)"
+
+# NO HASHING HAPPENS, proved by behaviour rather than by reading the switch.
+# generate DIES on a file it cannot hash (hash_file exits 1 rather than emit a
+# plausible-but-wrong digest); governing never opens the file, so it succeeds.
+# The precondition is asserted because chmod 000 does not restrict root, and a
+# suite running as root would otherwise pass this pair vacuously (LESSONS.md,
+# 2026-07-29).
+UNREADABLE="$WORK/unreadable-source"
+mkdir -p "$UNREADABLE"
+mkfile "$UNREADABLE" ".claude/agents/qa.md" "readable agent"
+mkfile "$UNREADABLE" ".claude/agents/locked.md" "unreadable agent"
+chmod 000 "$UNREADABLE/.claude/agents/locked.md" 2>/dev/null || true
+if [ -r "$UNREADABLE/.claude/agents/locked.md" ]; then
+    printf '  note: unreadable-file legs SKIPPED - chmod 000 did not deny this user\n'
+    printf '        (running as root?). Moves neither counter.\n'
+else
+    assert_eq "precondition: the locked file really is unreadable" "no" \
+        "$([ -r "$UNREADABLE/.claude/agents/locked.md" ] && echo yes || echo no)"
+    bash "$SCRIPT" generate "$UNREADABLE" >/dev/null 2>&1 && RC=0 || RC=$?
+    assert_eq "generate FAILS on a file it cannot hash (exit 1, never a fake digest)" "1" "$RC"
+    bash "$SCRIPT" governing "$UNREADABLE" > "$WORK/governing-unreadable.tsv" 2>/dev/null && RC=0 || RC=$?
+    assert_eq "governing SUCCEEDS on the same tree — it hashes nothing" "0" "$RC"
+    assert_eq "...and still enumerates the unreadable path" "workflow" \
+        "$(field_of "$WORK/governing-unreadable.tsv" ".claude/agents/locked.md" 2)"
+    chmod 644 "$UNREADABLE/.claude/agents/locked.md" 2>/dev/null || true
+fi
+
+# DETERMINISM, same contract as generate: downstream compares are byte-level.
+bash "$SCRIPT" governing "$SYN" > "$WORK/governing-run2.tsv"
+assert_eq "two consecutive governing runs on the same tree are byte-identical" "0" \
+    "$(cmp -s "$GOV_TSV" "$WORK/governing-run2.tsv" && echo 0 || echo 1)"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -998,6 +1159,58 @@ else
     printf '  note: META 4 SKIPPED - manifests/%s.sha256 is not in this checkout,\n' "$RELEASE_TAG"
     printf '        so there is no frozen table to mutate. Moves neither counter.\n'
 fi
+
+# META 5 — the runtime-contract entry is load-bearing (s5qf). Neutralise ONLY
+# the body of runtime_contract_rows in a COPY: CLAUDE.md must leave the
+# governing set while every shipped-surface row stays. Without this, Section
+# 1g's CLAUDE.md leg could be passing because CLAUDE.md sneaked in through some
+# scan — which would be the leak the section's negative control exists to
+# forbid, passing as the feature.
+#
+# Anchored on the emit_row TEXT, never a line number (LESSONS.md, 2026-06-13).
+META_NORC="$WORK/workflow-manifest-no-runtime-contract.sh"
+sed 's#^    emit_row runtime-contract "CLAUDE.md"$#    :#' "$SCRIPT" > "$META_NORC"
+assert_eq "META: the runtime-contract neutralisation APPLIED (copy differs)" "1" \
+    "$(cmp -s "$META_NORC" "$SCRIPT" && echo 0 || echo 1)"
+assert_eq "META: the neutralised copy is still syntactically valid bash" "0" \
+    "$(bash -n "$META_NORC" 2>/dev/null && echo 0 || echo 1)"
+META_NORC_TSV="$WORK/governing-no-runtime-contract.tsv"
+bash "$META_NORC" governing "$SYN" > "$META_NORC_TSV" 2>/dev/null && RC=0 || RC=$?
+assert_eq "META: the neutralised copy still runs governing" "0" "$RC"
+assert_eq "META: without runtime_contract_rows, CLAUDE.md is NOT governing (1g WOULD fail)" \
+    "0" "$(row_count "$META_NORC_TSV" "CLAUDE.md")"
+# DISCRIMINATOR: the neutralisation removed exactly one thing. If the shipped
+# surface had gone too, the leg above would be measuring a broken script.
+assert_eq "META: ...while the shipped surface is untouched (.claude/agents/qa.md still governing)" \
+    "workflow" "$(field_of "$META_NORC_TSV" ".claude/agents/qa.md" 2)"
+# RESTORE CONTROL: the shipped copy, same tree, same invocation.
+bash "$SCRIPT" governing "$SYN" > "$WORK/governing-restore.tsv"
+assert_eq "META: restore control — the SHIPPED copy puts CLAUDE.md back" \
+    "runtime-contract" "$(field_of "$WORK/governing-restore.tsv" "CLAUDE.md" 2)"
+
+# META 6 — the no-hash switch is load-bearing (s5qf). Force generate_governing
+# to hash and the query gains a third column. The consumer
+# (verify-before-stop.sh's governing_artifact_origin) reads field 2 as the
+# origin and matches field 1 by exact equality, so a three-column answer does
+# not error anywhere — it just stops meaning what the reader thinks, which is
+# why "2 fields" is asserted rather than assumed.
+META_HASHED="$WORK/workflow-manifest-hashed-governing.sh"
+# shellcheck disable=SC2016  # matching the LITERAL text `$root` / `$raw` in the
+# script under test, not expanding it — the whole point is to rewrite that line.
+sed 's#^    ( cd "$root" \&\& MANIFEST_EMIT_HASH=0 governing_rows ) > "$raw"$#    ( cd "$root" \&\& require_hash_tool \&\& MANIFEST_EMIT_HASH=1 governing_rows ) > "$raw"#' \
+    "$SCRIPT" > "$META_HASHED"
+assert_eq "META: the hashed-governing mutation APPLIED (copy differs)" "1" \
+    "$(cmp -s "$META_HASHED" "$SCRIPT" && echo 0 || echo 1)"
+assert_eq "META: the hashed copy is still syntactically valid bash" "0" \
+    "$(bash -n "$META_HASHED" 2>/dev/null && echo 0 || echo 1)"
+META_HASHED_TSV="$WORK/governing-hashed.tsv"
+bash "$META_HASHED" governing "$SYN" > "$META_HASHED_TSV" 2>/dev/null && RC=0 || RC=$?
+assert_eq "META: the hashed copy still runs governing" "0" "$RC"
+assert_eq "META: with hashing forced on, rows carry 3 fields (the 1g grammar leg WOULD fail)" \
+    "0" "$(awk -F'\t' 'NF == 2' "$META_HASHED_TSV" | grep -c . | tr -d '[:space:]')"
+# RESTORE CONTROL.
+assert_eq "META: restore control — the SHIPPED copy emits 2-field rows" "0" \
+    "$(awk -F'\t' 'NF != 2' "$WORK/governing-restore.tsv" | grep -c . | tr -d '[:space:]')"
 
 # --- Summary ---------------------------------------------------------------
 

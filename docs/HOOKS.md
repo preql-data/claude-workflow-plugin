@@ -1361,18 +1361,79 @@ Two further properties, both pinned by
   documentation *deletion* while buying nothing: a deleted file ships no
   content. So the veto can only narrow the name arms, never widen them.
 
-**What it costs, and what it still cannot see.** A `docs/` tree carrying
-non-prose files stops fast-pathing: `docs/img/diagram.png`,
-`docs/fixtures/payload.json`, an extension-less `docs/Makefile` or `docs/README`
-now need a QA round when they change alone. That is the correct direction — F1's
-whole licence is that there is nothing to review — and `docs/README` is now
-merely consistent with the repo-root `README`, which never had an arm. What
-remains: for anything not affirmatively executable the classifier still reads
-content type off the NAME, so a `.txt` that is a golden test assertion, and a
-`.md` that is an agent prompt or a rubric (this repo's own `CLAUDE.md` and
-`.claude/agents/*.md` are behaviour-bearing markdown), classify as
-documentation. Those are facts about a project's layout that no path or content
-check recovers.
+**What it costs.** A `docs/` tree carrying non-prose files stops fast-pathing:
+`docs/img/diagram.png`, `docs/fixtures/payload.json`, an extension-less
+`docs/Makefile` or `docs/README` now need a QA round when they change alone.
+That is the correct direction — F1's whole licence is that there is nothing to
+review — and `docs/README` is now merely consistent with the repo-root `README`,
+which never had an arm.
+
+**A document the project declares as its own surface is not documentation about
+the system — it IS the system** (`claude-workflow-plugin-s5qf`). `bbh` closed
+the shape half and disclosed the half it could not: an agent prompt, a rubric,
+`CLAUDE.md` and the lessons ledger are markdown carrying neither an exec bit nor
+a `#!`, so the content veto correctly has no opinion about them and the `*.md`
+arm called them documentation. They are executable policy in prose — the runtime
+loads `.claude/agents/*.md` as the agent, the grader reads `.claude/rubrics/*.md`
+as its criteria and `LESSONS.md` as criteria by reference. The live illustration
+is on `bbh`'s own change set: `.claude/agents/qa.md` was a member of it, and had
+that edit landed alone F1 would have released an unreviewed change to the QA
+agent's own prompt.
+
+The fix adds **no third path arm** — that would be `bbh`'s inference wearing a
+new suffix. It asks a question with a factual answer instead: *is this path one
+the project declares it ships?* The answer already exists, in
+`workflow-manifest.sh` — the enumeration `install.sh` copies from and every
+frozen table under `manifests/` is cut from. A new `governing <source-root>`
+subcommand re-serves it without hashes as `<path><TAB><origin>`, plus the named
+runtime-contract files the plugin does not ship but whose content governs it
+(`CLAUDE.md`, which Claude Code auto-loads into every agent's context).
+`is_doc_only_path` looks the path up by exact equality and vetoes on a hit,
+logging the path and the origin.
+
+| property | behaviour |
+| --- | --- |
+| covered today | `.claude/agents/*.md`, `.claude/rubrics/*.md`, `.claude/commands/*.md`, `.claude/skills/**`, `.claude/vendor/**`, `LESSONS.md`, `docs/HOOKS.md`, `docs/CODEX_SETUP.md`, `CLAUDE.md` |
+| generalises | a NEW declared artifact is covered with no list edited anywhere — create `.claude/agents/designer.md` and it is disqualified on the next Stop |
+| anti-overreach | an ordinary doc is untouched, *including in the same directory*: `.claude/agents/notes.txt` still fast-paths, because the manifest scans that directory for `*.md` and does not declare it |
+| fails OPEN | if the query cannot run (manifest script absent, or it failed) the set is empty, nothing is vetoed, and F1 behaves exactly as before — logged once to `sync-errors.log`, never silent |
+| never an install row | `CLAUDE.md` reaches the governing set only through `governing`; `generate` still omits it, so no upgrade verdict and no uninstall walk sees it |
+| cost | maxdepth-1 scans plus three pruned walks over `.claude/`, no digests, at most once per Stop: **0.032s / 134 rows** on this repo at `b8f0095`, versus 0.339s for the hashed `generate` |
+
+**Availability, measured rather than assumed** — over this repo's whole history
+at `b8f0095`, 142 non-merge commits, classifier extracted from the shipped hook
+and driven per path, manifest regenerated from each commit's own tree via `git
+archive`: **7** commits were doc-only (F1-eligible) and **1** of those also
+touched a governing artifact (`ea6ae385`, `docs/HOOKS.md` alone). Counted from
+churn instead: **60** commits touched a veto-reachable governing artifact and
+**59** carried a reviewable path anyway, so F1 was never available to them. These
+files change constantly here (`LESSONS.md` 37, `docs/HOOKS.md` 23,
+`.claude/agents/qa.md` 22) and essentially never alone.
+
+**What still cannot be seen.** For anything not affirmatively executable and not
+declared, the classifier still reads content type off the NAME: a `.txt` that is
+a golden test assertion, a bare `LICENSE` that is really a data file, and any
+behaviour-bearing document an install target keeps where the manifest does not
+look. Two specific residuals:
+
+- `docs/specs/<task-id>.md`, the v5 design record. `docs/` is deliberately never
+  scanned — in an install target it is the *operator's* directory, and a
+  `scan_flat` there would enumerate their own docs and let the uninstall walk
+  offer to move them out of their project. `claude-workflow-plugin-fkm.3` (D1)
+  owns that artifact and can disqualify it from the design RECORD that names the
+  file, or from a marker the designer writes into it — affirmative evidence
+  about that document rather than another path glob.
+- a **deletion** of a declared path, which resolves to no file and so is not in
+  the enumeration. The same asymmetry, and the same defence, as the content
+  veto's deletion contract above; a *correct* deletion of a plugin-owned
+  artifact also moves `.claude-plugin/plugin.json` or a frozen table, neither of
+  which is doc-named.
+
+Both vetoes are pinned by
+`.claude/scripts/tests/doc-only-classifier.test.sh` (sections 4-8, including a
+strip-the-region META for each) and at the hook level by
+`.claude/tests/component/specs/verify-before-stop.sh` legs 9-10; the query
+itself by `.claude/scripts/tests/workflow-manifest.test.sh` section 1g.
 
 **The fast path is bound to the change set it judged, and it no longer speaks
 for a task an implementer is working on** (`claude-workflow-plugin-qzv`, the

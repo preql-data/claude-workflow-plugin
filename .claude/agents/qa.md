@@ -31,7 +31,7 @@ When the `Stop` hook (`verify-before-stop.sh`) fires, it runs technical checks (
 
 Block-reason shapes you may see and what to do with each:
 
-1. **Doc-only auto-approval (F1)** — when every changed file is a markdown/RST/text/LICENSE/CHANGELOG/docs path, the gate skips test/lint and auto-approves with the summary `"Auto-approved: doc-only changes detected (F1 fast path)"`. No QA action required; the iteration counter and tracking files are wiped.
+1. **Doc-only auto-approval (F1)** — when `is_doc_only_path` accepts every changed file, the gate skips test/lint and auto-approves with the summary `"Auto-approved: doc-only change-set detected (F1 fast path) — no reviewable source changed."`. No QA action required; the iteration counter and tracking files are wiped. **Read "doc-only" as whatever that function says and nothing else** — this line deliberately does not enumerate its arms, because the enumeration that used to sit here said "docs path" and stayed wrong for three rounds after `bbh` removed it. A documentation NAME is necessary and not sufficient: executable content is refused (`bbh`) and so is any path the project declares as its own surface (`s5qf`). Section 10's "Reconcile task state before you report" carries the detail and the residual; `docs/HOOKS.md` carries the full table.
 
 2. **Verification failed (J19 iterative loop)** — test, lint, or type-check failed. The block-reason includes:
    - The current iteration counter (e.g., "iteration 2 of 3").
@@ -872,12 +872,19 @@ paraphrase it here or anywhere; the paraphrase in this paragraph was wrong for
 three consecutive rounds. Since `claude-workflow-plugin-bbh` it no longer treats
 a file's *position* (anything under `docs/`) or a name glob (`LICENSE.*`) as
 documentation, and it never classifies a file with the executable bit set or a
-`#!` first line as doc-only. What still reaches the exemption is documentation
-by NAME — including a `.txt` that is really a golden test assertion and a `.md`
-that is really an agent prompt or a rubric. If you authored one of those during
-a review, that is the case to watch for. The exemption, its bound and the
-residual are set out in the `F1-CHANGE-SET-BINDING` region header of
-`verify-before-stop.sh`.
+`#!` first line as doc-only. Since `claude-workflow-plugin-s5qf` it also refuses
+any path the project DECLARES as part of its own surface — every
+`workflow-manifest.sh` row plus `CLAUDE.md` — so an agent prompt, a rubric,
+`.claude/commands/*.md`, a skill, `LESSONS.md` and `docs/HOOKS.md` are no longer
+fast-pathable, and a NEW declared artifact is covered with no list edited
+anywhere. What still reaches the exemption is documentation by NAME that nothing
+declares: a `.txt` that is really a golden test assertion, a bare `LICENSE` that
+is really a data file, `docs/specs/<task-id>.md` (the v5 design record —
+`docs/` is never scanned, so `claude-workflow-plugin-fkm.3` owns it), and the
+DELETION of an otherwise-declared path. If you authored one of those during a
+review, that is the case to watch for. The exemption, its bound and the
+remaining residual are set out in the `F1-CHANGE-SET-BINDING` and
+`GOVERNING-ARTIFACT-VETO` region headers of `verify-before-stop.sh`.
 
 ### Record the contract — AFTER the gate call, not before
 

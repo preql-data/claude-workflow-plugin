@@ -1748,6 +1748,144 @@ assert_eq "vbs-qzv-9E: ...with its approval recorded" "1" "$(qzv_record_count "$
 # supposed to be a live doc-only member of the change set.
 rm -f "$FIXTURE_QZV/docs/deploy.sh" "$FIXTURE_QZV/docs/install.txt" "$FIXTURE_QZV/LICENSE.sh"
 
+# --- Leg 10: A GOVERNING ARTIFACT IS NEVER DOC-ONLY (s5qf) -------------------
+#
+# bbh closed the half of the classifier that read content type off a path's
+# POSITION or NAME GLOB, and disclosed the half it could not: a `.md` that is an
+# agent prompt, a rubric or CLAUDE.md carries neither an exec bit nor a `#!`, so
+# the content veto correctly has no opinion about it and the `*.md` arm calls it
+# documentation. The live illustration was on bbh's own change set —
+# `.claude/agents/qa.md` was a member of it, and had that edit landed alone F1
+# would have auto-approved a change to the QA agent's own prompt with
+# `reviewed_by=none`.
+#
+# `doc-only-classifier.test.sh` sections 6-8 measure the classifier itself.
+# THESE legs are the hook-level consequence: that the answer reaches the Stop
+# DECISION, the approval record and the label. 10B is the half that matters
+# most — the control lives in the SAME directory as 10A's subject and must
+# still fast-path, because the veto reads the project's declared enumeration
+# and not the directory. If it read the directory it would be the path-shape
+# inference bbh removed, wearing a new suffix.
+TID_Q10=$(cd "$FIXTURE_QZV" && bd create "s5qf: an agent prompt is NOT doc-only" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10" --status in_progress >/dev/null 2>&1) || true
+mkdir -p "$FIXTURE_QZV/.claude/agents"
+printf 'You are the designer specialist.\n' > "$FIXTURE_QZV/.claude/agents/designer.md"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10: precondition — the change set is exactly one path" "1" \
+    "$(grep -c . "$TRACK_QZV/changed-files.txt" | tr -d '[:space:]')"
+# THE DISCRIMINATOR. Both preconditions rule the bbh veto out: this file is mode
+# 644 and its first bytes are not `#!`, so if the Stop blocks it can only be the
+# s5qf veto that did it. Without these, leg 10 would pass just as well against a
+# fixture where the file happened to be executable.
+assert_eq "vbs-qzv-10: precondition — NOT executable (so the bbh content veto cannot fire)" "no" \
+    "$([ -x "$FIXTURE_QZV/.claude/agents/designer.md" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10: precondition — no shebang either (same reason)" "no" \
+    "$([ "$(head -c 2 "$FIXTURE_QZV/.claude/agents/designer.md")" = '#!' ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10: precondition — and the project DECLARES it (manifest row, class workflow)" \
+    "workflow" "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" governing "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == ".claude/agents/designer.md" { print $2 }')"
+Q10_JSON=$(qzv_json)
+assert_eq "vbs-qzv-10: an agent prompt alone BLOCKS (was: auto-approved, reviewed_by=none)" \
+    "block" "$(printf '%s' "$Q10_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+assert_contains "vbs-qzv-10: ...through the ordinary QA-required path" \
+    "require QA review" "$(printf '%s' "$Q10_JSON" | jq -r '.reason // empty')"
+assert_eq "vbs-qzv-10: ...and NOTHING was approved (was: 1 record, reviewed_by=none)" \
+    "0" "$(qzv_record_count "$TID_Q10")"
+assert_eq "vbs-qzv-10: ...and no qa-approved label was written" "0" \
+    "$(printf ',%s,' "$(qzv_labels "$TID_Q10")" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+
+# CONTROL 10B — ANTI-OVERREACH, in the SAME DIRECTORY. `.claude/agents/` is
+# scanned for `*.md`, so a `.txt` beside the prompts is not a declared path and
+# must keep the fast path. This is the leg that distinguishes reading the
+# ENUMERATION from reading the directory; without it, leg 10 passes for a
+# fixture that blocks everything under .claude/.
+TID_Q10B=$(cd "$FIXTURE_QZV" && bd create "s5qf: CONTROL an undeclared doc beside the prompts fast-paths" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10B" --status in_progress >/dev/null 2>&1) || true
+printf 'scratch notes, not an agent\n' > "$FIXTURE_QZV/.claude/agents/notes.txt"
+printf '%s/.claude/agents/notes.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10B" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10B"
+printf '%s/.claude/agents/notes.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10B: precondition — it is NOT a declared path" "" \
+    "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" governing "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == ".claude/agents/notes.txt" { print $2 }')"
+assert_eq "vbs-qzv-10B: CONTROL — an undeclared .txt in the SAME directory auto-approves" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-10B: ...with its approval recorded" "1" "$(qzv_record_count "$TID_Q10B")"
+
+# 10C — CLAUDE.md, the named runtime-contract entry. It is deliberately NOT a
+# manifest row (the installer never seeds it and an uninstall walk must never
+# offer to move an operator's own project memory), so it reaches the governing
+# set by being NAMED, the way docs/HOOKS.md and .worktreeinclude are named in
+# the surface. Claude Code auto-loads it into every agent's context, which makes
+# it a fact about the runtime rather than an inference from `.md`.
+TID_Q10C=$(cd "$FIXTURE_QZV" && bd create "s5qf: CLAUDE.md is NOT doc-only" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10C" --status in_progress >/dev/null 2>&1) || true
+printf '# project memory\nrule: delegate to a specialist\n' > "$FIXTURE_QZV/CLAUDE.md"
+printf '%s/CLAUDE.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10C" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10C"
+printf '%s/CLAUDE.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10C: precondition — CLAUDE.md is NOT an install-surface row" "0" \
+    "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" generate "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == "CLAUDE.md"' | grep -c . | tr -d '[:space:]')"
+assert_eq "vbs-qzv-10C: precondition — ...but it IS a governing artifact, by name" \
+    "runtime-contract" "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" governing "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == "CLAUDE.md" { print $2 }')"
+assert_eq "vbs-qzv-10C: a CLAUDE.md-only change set BLOCKS (was: auto-approved)" \
+    "block" "$(qzv_decision)"
+assert_eq "vbs-qzv-10C: ...and nothing was approved for it" "0" "$(qzv_record_count "$TID_Q10C")"
+
+# 10D — THE ABSENT-DECLARATION ARM, at the hook. The plugin installs into
+# arbitrary projects and a partial install must not deadlock every documentation
+# commit, so an unanswerable query fails OPEN: the classifier behaves exactly as
+# it did before s5qf. Removed rather than emptied, because "the tool is not
+# there" is the shape a partial install actually has. `.claude/scripts/` is
+# gitignored in this fixture, so this instrumentation cannot enter the change set
+# and make the ALLOW happen for the wrong reason (LESSONS.md, 2026-08-04).
+TID_Q10D=$(cd "$FIXTURE_QZV" && bd create "s5qf: an unanswerable query fails OPEN" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10D" --status in_progress >/dev/null 2>&1) || true
+Q10_WFM="$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh"
+Q10_WFM_SAVED="$FIXTURE_QZV/.claude/.qa-tracking/wfm-saved-target"
+readlink "$Q10_WFM" > "$Q10_WFM_SAVED" 2>/dev/null || printf '' > "$Q10_WFM_SAVED"
+rm -f "$Q10_WFM"
+printf 'You are the designer specialist, revised.\n' > "$FIXTURE_QZV/.claude/agents/designer.md"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10D" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10D"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10D: precondition — the query tool really is gone" "no" \
+    "$([ -f "$Q10_WFM" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10D: with the query unanswerable, the SAME path auto-approves again (fail-open)" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-10D: ...with its approval recorded" "1" "$(qzv_record_count "$TID_Q10D")"
+assert_eq "vbs-qzv-10D: ...and the fail-open is LOGGED, not silent" "1" \
+    "$(grep -c 'governing-artifact query is unavailable' "$TRACK_QZV/sync-errors.log" 2>/dev/null | tr -d '[:space:]')"
+# RESTORE CONTROL. Put the tool back and the identical path blocks again — so
+# 10D measured the tool's absence and not some drift the legs above introduced.
+if [ -s "$Q10_WFM_SAVED" ]; then ln -sf "$(cat "$Q10_WFM_SAVED")" "$Q10_WFM"; fi
+rm -f "$Q10_WFM_SAVED"
+TID_Q10E=$(cd "$FIXTURE_QZV" && bd create "s5qf: RESTORE control, the query is back" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10E" --status in_progress >/dev/null 2>&1) || true
+printf 'You are the designer specialist, revised twice.\n' > "$FIXTURE_QZV/.claude/agents/designer.md"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10E" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10E"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10E: precondition — the query tool is back" "yes" \
+    "$([ -f "$Q10_WFM" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10E: RESTORE control — the identical path BLOCKS again" \
+    "block" "$(qzv_decision)"
+assert_eq "vbs-qzv-10E: ...and nothing was approved for it" "0" "$(qzv_record_count "$TID_Q10E")"
+# Leave the fixture as the legs below expect: docs/notes.md is the only live
+# doc-only member of the change set, and nothing under .claude/agents/ survives
+# to make a later change set accidentally governing.
+rm -rf "$FIXTURE_QZV/.claude/agents"
+
 # ---------------------------------------------------------------------------
 # qzv META (spec-mandated): strip the F1-CHANGE-SET-BINDING regions from a copy
 # and leg 1 must AUTO-APPROVE again — the live defect, reproduced.

@@ -43,6 +43,12 @@
 #       Paths are relative to <source-root> (e.g. .claude/agents/qa.md).
 #       No header, no comments, no timestamps.
 #
+#   governing <source-root>
+#       Sorted TSV on stdout, one row per GOVERNING ARTIFACT:
+#           <path><TAB><origin>
+#       No hashes, no hash tool required. See THE GOVERNING-ARTIFACT QUERY
+#       below for what "governing" means and who asks.
+#
 #   classify --target <dir> --source <dir> --old-table <file>
 #       Sorted TSV on stdout, one row per SOURCE-manifest entry:
 #           <path><TAB><class><TAB><verdict>
@@ -89,6 +95,14 @@ Usage: workflow-manifest.sh <subcommand> [options]
       sorted TSV, <path><TAB><class><TAB><sha256>, one row per shipped
       file, paths relative to <source-root>. Deterministic: no header,
       no timestamps, LC_ALL=C sort order.
+
+  governing <source-root>
+      Print the GOVERNING-ARTIFACT set for the tree at <source-root>:
+      sorted TSV, <path><TAB><origin>, paths relative to <source-root>.
+      Every shipped-surface path (origin = its manifest class) plus the
+      named runtime-contract files the plugin does not ship but whose
+      content governs how it behaves (origin = runtime-contract).
+      No hashes, so no sha256 tool is needed.
 
   classify --target <dir> --source <dir> --old-table <file>
       Print an upgrade plan for the install at <dir> against the plugin
@@ -224,11 +238,23 @@ hash_file() {
 # A single file that is absent is simply omitted — a v3.5 tree has no
 # .claude/model-roles and that is not an error, it is the whole reason we
 # freeze a table per release.
+#
+# MANIFEST_EMIT_HASH=0 drops the third column and, with it, the entire hashing
+# dependency: `governing` needs the ENUMERATION, not the digests, and hashing
+# ~130 files to answer "is this path plugin-owned?" would put a sha256 tool on
+# the Stop hook's critical path for nothing. The hashed branch below is
+# untouched by that switch — byte-for-byte the statement that produced every
+# frozen table under manifests/ — so `generate` output cannot move with it.
+MANIFEST_EMIT_HASH=1
 emit_row() {
     local class="$1"
     local rel="$2"
     local h
     [ -f "$rel" ] || return 0
+    if [ "$MANIFEST_EMIT_HASH" = "0" ]; then
+        printf '%s\t%s\n' "$rel" "$class"
+        return 0
+    fi
     h=$(hash_file "$rel")
     printf '%s\t%s\t%s\n' "$rel" "$class" "$h"
 }
@@ -359,6 +385,115 @@ generate_manifest() {
     LC_ALL=C sort "$raw"
 }
 
+# GOVERNING-ARTIFACT-SURFACE BEGIN (claude-workflow-plugin-s5qf)
+#
+# THE GOVERNING-ARTIFACT QUERY
+# ----------------------------
+# WHO ASKS. `verify-before-stop.sh`'s `is_doc_only_path`, and nothing else
+# today. F1 — the doc-only fast path — auto-approves a change set with
+# `reviewed_by=none` when every path in it is documentation. The classifier
+# decides "documentation" from the file's NAME (`*.md`, `*.txt`, a bare
+# `LICENSE`), narrowed by an affirmative content veto that catches anything the
+# OS will execute (claude-workflow-plugin-bbh). An agent prompt, a rubric and a
+# lessons ledger are markdown, carry no exec bit and no `#!`, and so are
+# documentation to every check in that function.
+#
+# THEY ARE NOT DOCUMENTATION. They are executable policy in prose: the grader
+# reads `.claude/rubrics/*.md` as its criteria and `LESSONS.md` as criteria by
+# reference, the runtime reads `.claude/agents/*.md` as the agent, and
+# `.claude/skills/**/SKILL.md` is loaded and followed. `.md` eligibility for
+# these is the same category error `LICENSE.sh` was: a NAME asserting a content
+# type it does not have. bbh deleted two arms for inferring content type from a
+# path's shape; a `docs/specs/` arm, or a `.claude/agents/` arm, would be that
+# identical inference wearing a different suffix.
+#
+# SO THIS ASKS A DIFFERENT QUESTION, and it is one this file already answers:
+# IS THIS PATH PART OF THE PLUGIN'S OWN DECLARED SURFACE? That is not an
+# inference about the file — it is a lookup in the enumeration install.sh
+# copies from and every frozen table under manifests/ is cut from. A path is in
+# it because the project SAYS it ships that path, which is exactly the "fact
+# about a project's layout" the bbh region header says no shape or content
+# check can recover.
+#
+# WHY THE WHOLE SURFACE AND NOT A "GOVERNING" SUBSET. Because a subset would
+# have to be minted here, and a minted list is a new place for the next
+# artifact to be missing — the objection that removed the `docs/` arm rather
+# than narrowing it. The manifest's own header already states the property that
+# makes the whole surface the right answer: workflow-class files are "plugin-
+# owned product ... an operator edit to one of them is a local fork, not a
+# setting". A local fork of plugin product is a change to the product. The two
+# shipped docs (docs/HOOKS.md, docs/CODEX_SETUP.md) are inside for that reason
+# and not by accident; docs/HOOKS.md in particular is a contract this repo's
+# own specs assert against.
+#
+# WHAT IT COSTS, measured rather than assumed, because that is the half of a
+# fast-path change that is usually skipped. Over this repo's whole history at
+# b8f0095 — 142 non-merge commits, classifier extracted from the shipped hook
+# and driven per path, manifest regenerated from each commit's own tree via
+# `git archive`:
+#     7 commits were doc-only, i.e. F1-eligible;
+#     1 of those 7 also touched a governing artifact (ea6ae385, docs/HOOKS.md
+#       alone) and would now need a QA round.
+# Counted the other way round, from churn: 60 commits touched a veto-reachable
+# governing artifact, and 59 of them carried a reviewable path anyway, so F1
+# was never available to them. Governing artifacts change CONSTANTLY here
+# (LESSONS.md 37, docs/HOOKS.md 23, .claude/agents/qa.md 22) and essentially
+# never alone. The availability cost is 1 commit in 142, not the broad loss the
+# churn figures suggest at a glance.
+#
+# WHAT IT DOES NOT REACH, stated because a fast path that auto-approves is
+# allowed to be narrow and is not allowed to be wrong:
+#   * A DELETION. The enumeration is built from files that exist, so deleting
+#     `.claude/agents/qa.md` alone is still doc-only. This is the same
+#     asymmetry the content veto documents and defends — an absent file is not
+#     evidence — and closing it would need a path-SHAPE rule for "would have
+#     been a row", i.e. the inference bbh removed. Deleting a plugin-owned
+#     artifact correctly also moves .claude-plugin/plugin.json or a frozen
+#     table, neither of which is doc-named, so a correct deletion is not
+#     doc-only anyway.
+#   * `docs/specs/<task-id>.md`, the v5 design record (claude-workflow-plugin-
+#     fkm.3 / D1). docs/ is deliberately never scanned — see DELIBERATELY
+#     EXCLUDED above — and adding a scan there would enumerate an operator's
+#     own docs and widen the uninstall walk. D1 owns the artifact and should
+#     disqualify it the way it can afford to: from the design RECORD that names
+#     the file, or from a machine-readable marker the designer writes INTO it.
+#     Either is affirmative evidence about that document. A reader built here
+#     for a marker nothing writes yet would be a guard whose failure nobody can
+#     produce, which this file's neighbour already names as presumed vacuous.
+#
+# runtime_contract_rows — files the plugin does NOT ship, whose content
+# nonetheless governs how it behaves. `generate_rows` must never call this and
+# no install path may read it: these are not part of the shipped surface, they
+# have no class, no upgrade verdict and no uninstall row. CLAUDE.md is here
+# because Claude Code auto-loads it into every agent's context — a product fact
+# about the runtime, the same kind of fact as `.claude/settings.json` being the
+# settings file, and not an inference from `.md` or from sitting at the root.
+# Naming an individual file is house-consistent: the surface above names
+# docs/HOOKS.md, docs/CODEX_SETUP.md and .worktreeinclude one by one.
+runtime_contract_rows() {
+    emit_row runtime-contract "CLAUDE.md"
+}
+
+governing_rows() {
+    generate_rows
+    runtime_contract_rows
+}
+
+# generate_governing <source-root> -> sorted TSV on stdout.
+# Same all-or-nothing discipline as generate_manifest: buffered to a file and
+# sorted separately, so a failing left-hand side can never hide behind sort's
+# exit status and hand a caller a silently truncated set. For THIS caller a
+# truncated set is a missed veto, i.e. a release nobody reviewed.
+generate_governing() {
+    local root="$1"
+    local raw
+    mk_workdir
+    raw="$WORK_DIR/governing.tsv"
+    ( cd "$root" && MANIFEST_EMIT_HASH=0 governing_rows ) > "$raw"
+    LC_ALL=C sort "$raw"
+}
+# GOVERNING-ARTIFACT-SURFACE END (claude-workflow-plugin-s5qf)
+
 # ---------------------------------------------------------------------------
 # generate
 
@@ -369,6 +504,23 @@ cmd_generate() {
     [ -d "$root" ] || usage_error "generate: source root not found: $root"
     require_hash_tool
     generate_manifest "$root"
+}
+
+# ---------------------------------------------------------------------------
+# governing
+#
+# No require_hash_tool: the enumeration carries no digests, so this answers on
+# a box with neither sha256sum, shasum nor openssl. That matters because the
+# caller is a Stop hook, and a gate that silently stops vetoing when a hashing
+# tool is missing would be the worst kind of failure — invisible and in the
+# releasing direction.
+
+cmd_governing() {
+    local root="${1:-}"
+    [ -n "$root" ] || usage_error "governing requires <source-root>"
+    [ "$#" -le 1 ] || usage_error "governing takes exactly one argument"
+    [ -d "$root" ] || usage_error "governing: source root not found: $root"
+    generate_governing "$root"
 }
 
 # ---------------------------------------------------------------------------
@@ -515,6 +667,10 @@ case "${1:-}" in
     generate)
         shift
         cmd_generate "$@"
+        ;;
+    governing)
+        shift
+        cmd_governing "$@"
         ;;
     classify)
         shift
