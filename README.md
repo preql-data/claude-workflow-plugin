@@ -297,11 +297,15 @@ enforce that contract — `prevent-orchestrator-edits.sh` blocks Write/Edit
 from the orchestrator role, and `verify-before-stop.sh` refuses Stop
 without `qa-approved` on the active task. Cross-repo work and GitHub
 auto-linking land via I3/I8 hooks (`bd-github-link.sh`,
-`current-task.sh`). Two of the seven agents are spawned from the root
-conversation only (the `grader` for rubric verdicts and the `judge`
-for mutation classification) because Claude Code subagents cannot
-spawn other subagents — both arrive via root-orchestrated relays
-(`RUBRIC-RELAY` and `JUDGE-RELAY`).
+`current-task.sh`). Three of the nine agents are spawned from the root
+conversation only (the `grader` for rubric verdicts, the `judge`
+for mutation classification, and the `design-reviewer` for design
+verdicts) because Claude Code subagents cannot spawn other subagents —
+all three arrive via root-orchestrated relays (`RUBRIC-RELAY`,
+`JUDGE-RELAY`, and the design relay). The nine agents ride five model
+role classes (`designer`, `design_reviewer`, `orchestrator`,
+`implementer`, `reviewer`), each pinned to a *strategy* rather than a
+model version in `.claude/model-roles`.
 
 For the deep dive, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 For the test pyramid that gates every change, read

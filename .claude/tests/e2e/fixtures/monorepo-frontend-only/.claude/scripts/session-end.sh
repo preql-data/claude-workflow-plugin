@@ -110,4 +110,32 @@ if [ -f "$SWEEP_SH" ]; then
     fi
 fi
 
+# v5.0.0 Phase D0: BEST-EFFORT restore of a per-unit implementer escalation.
+#
+# `model-select.sh escalate <task-id>` repins the implementer lane; `restore`
+# puts it back. This is ONE of three restore paths, deliberately, because a
+# session that dies never reaches this hook at all:
+#   1. here, at SessionEnd (the tidy case);
+#   2. the next SessionStart's `model-select.sh apply`, which rewrites the
+#      implementer lane from the resolved artifact whatever state it was left
+#      in — so a crash self-heals at the next session even if this never ran;
+#   3. `model-select.sh restore` by hand, which is idempotent.
+#
+# BEST-EFFORT IS THE WHOLE CONTRACT. SessionEnd's output and exit code are
+# IGNORED by the runtime (it cannot block termination), so a failure here has
+# no channel to report on — which is exactly why path 2 exists and why this leg
+# must never be the only one. `restore` is a no-op when no escalation is
+# active, so the common path costs one file test.
+ESCALATION_STATE="$PROJECT_DIR/.claude/.qa-tracking/implementer-escalation.json"
+MODEL_SELECT_SH="$PROJECT_DIR/.claude/scripts/model-select.sh"
+if [ -f "$ESCALATION_STATE" ] && [ -f "$MODEL_SELECT_SH" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 8 bash "$MODEL_SELECT_SH" restore >/dev/null 2>&1 || true
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout 8 bash "$MODEL_SELECT_SH" restore >/dev/null 2>&1 || true
+    else
+        bash "$MODEL_SELECT_SH" restore >/dev/null 2>&1 || true
+    fi
+fi
+
 echo "{}"

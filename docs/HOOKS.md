@@ -2213,13 +2213,69 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 | `tech-debt.sh` | TECHNICAL_DEBT.md append (J22). Subcommands: `add <severity> <file:line> <effort> <description>`, `list`. Optional `--bd-task` creates a paired Beads task and links it to the active task with an explicit `bd dep add` (it used `--deps blocks:` until bd 1.1.2, which records that edge backwards). |
 | `bd-github-link.sh` | I3 Beads ↔ GitHub auto-link. PostToolUse hook on Bash invocations. When a Beads task closes, posts a `gh issue comment` linking back; when `gh pr create` runs, parses `Closes #N` and writes `gh-link:` into the task notes. |
 | `detect-stack.sh` | F8/J17 polyglot test runner detection. Emits JSON `{runner, test_cmd, lint_cmd, type_cmd, manifest, overrides}`. Supports npm, pytest, go, cargo, maven, gradle, phpunit, rake, swift, dotnet, make, plus `.claude/test-cmd` overrides. |
-| `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`. Drains stdin (Claude Code passes a session envelope it doesn't need). |
+| `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`, plus the model segment described below. **Reads** stdin (it did drain it until v5.0.0 / D0): the session envelope is the ONLY place the live session model is observable, so the session-model guard has to live here. |
 | `worktree-sweep.sh` | v4.1 (C1b) sweeper for the subagent worktrees at `.claude/worktrees/<name>`. Ones with NO changes are auto-removed when the subagent finishes; ones WITH changes survive, and until this script nothing removed them. **Dry run is the default; `--apply` is the only thing that removes**, and removal is `git worktree remove` + `git worktree prune` — there is no `rm -rf` in the file and `worktree remove` is never `--force`d (both asserted structurally by `worktree-sweep.test.sh`). A worktree is removable only if ALL of: (1) its `cd … && pwd -P`-**resolved** path is physically inside the resolved `.claude/worktrees/` — a string-prefix test is not a containment guard, and this is what excludes an operator's sibling checkout whose name merely *extends* the root's; (2) same repo by `--git-common-dir` identity; (3) `git status --porcelain` empty; (4) `@{upstream}..HEAD` == 0 commits, else `merge-base --is-ancestor <branch> <default>` — **decided locally, never a fetch**; (5) directory mtime older than `--age-days` (default 7); (6) a Beads task resolved from EVIDENCE (the worktree's own `.qa-tracking/current-task`, else a task-shaped branch token bd actually knows) that bd reports `closed`. Any error, unreadable path or ambiguity is NOT a candidate, and each keeper prints its FIRST failing gate. Worktree NAMING is deliberately off the safety path. Flags: `--apply`, `--age-days N`, `--report-only` (wins over `--apply`), `--json`, `--max-candidates N` (default 16, the same bound as the Stop hook's `WTRES_MAX_CANDIDATES`), `--help`. Exit 0 / 1 (a removal failed) / 2 (bad invocation). Invoked report-only by `session-end.sh`; see "Worktree sweep (report-only)". |
 | `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Twelve named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `beads_ledger`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, and drives both gate hooks. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
 
 Each helper is independently testable via the L1 bash unit tier
 (`.claude/scripts/tests/*.sh`) — see `.claude/tests/README.md` for the
 five-tier pyramid that exercises them.
+
+### The statusline model segment and the session-model guard (v5.0.0 / D0)
+
+`statusline.sh` renders the resolved role→model mapping from
+`.claude/.qa-tracking/model-roles-resolved.json`, grouped so five roles fit on a
+shared line: roles with the same model are joined with `+` in the fixed order
+`des dsr orch impl rev`, groups are space-separated, and at most three groups
+print before the tail becomes ` +<k> more`. All roles equal with both review
+lanes on Claude collapses to ` • model: <short>`. A non-Claude lane substitutes
+the literal `sol` for that lane. **The render iterates the roles PRESENT in
+`.roles`**, so a leftover three-role v4 artifact still renders correctly with no
+upgrade step.
+
+Three flags may follow, in this order:
+
+| Flag | Source | Meaning |
+| --- | --- | --- |
+| `!esc` | `.claude/.qa-tracking/implementer-escalation.json` exists | A per-unit implementer escalation is active, so the implementer lane is not on its configured strategy. Reverse with `model-select.sh restore`. |
+| `!id` | `.identity_collapse` in the artifact | `designer` and `design_reviewer` resolved to the same model on the Claude design lane. Reported, never blocking; the two clearances are in the `.claude/model-roles` header. |
+| `!sess` | `.claude/.qa-tracking/session-model-drift.json` | The live session model differs from the resolved `orchestrator` id. |
+
+**The session-model guard is read-compare-write only.** The statusline runs on
+every render, so the drift record is rewritten only when the `(expected, live)`
+pair it holds would change, and removed only when a *completed* comparison finds
+no drift. An absent envelope, an absent `.model.id`, an absent artifact or a
+missing `jq` all mean "no comparison was possible", which is **not** the same as
+"no drift" — those paths leave any existing record exactly as they found it.
+`session-start.sh` Warning 8 re-validates the record against the current
+artifact (a record whose `expected` no longer matches is stale and is not
+reported) and emits the fix verbatim. Nothing here ever blocks.
+
+**The comparison is by model identity, not by id string.** A trailing bracketed
+context-window marker (`claude-fable-5[1m]`) is separated from the base id
+before comparing, and the rule is asymmetric:
+
+| resolved `orchestrator` | live session model | verdict |
+| --- | --- | --- |
+| `claude-fable-5` | `claude-fable-5[1m]` | **no drift** — same model, and the resolver named no variant to violate |
+| `claude-fable-5[1m]` | `claude-fable-5` | **drift** — `pick_best` sorts `_ctx` DESC, so a resolved `[1m]` was a deliberate pick, and the fix line names it |
+| `claude-fable-5` | `claude-opus-4-5[1m]` | **drift** — different model |
+
+Row 1 is why this exists: as literal equality the guard reported the 1M variant
+of the *correct* model as drift on every render, with a fix line that moved the
+operator to a smaller context window. Row 2 is why both sides are not simply
+stripped — that would trade a true positive away to fix the false one. Sharp
+edge that remains: an id differing in any other way (a dated variant, an alias)
+is still reported as drift; this hook cannot know an alias resolves to the same
+weights, and the fix line names the exact id either way.
+
+Warnings 9 and 10 carry the other two D0 notices — identity collapse, and the
+`missing_keys` list that makes an un-upgraded `operator`-class
+`.claude/model-roles` visible. **None of the three routes through
+`model-select.sh`'s `_warn`**: Warning 2 keeps only the LAST `^model-select:`
+line, so a new loud warning added to the helper is swallowed by whatever the
+helper prints afterwards. Each notice rides the artifact or its own state file
+and is read from disk at SessionStart, where it gets its own line.
 
 ---
 

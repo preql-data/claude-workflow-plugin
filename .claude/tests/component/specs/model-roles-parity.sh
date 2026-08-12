@@ -12,8 +12,10 @@
 #   P1. Positive parity — an opus-class apply lands orchestrator/reviewer on
 #       the top pick and implementer on the newest opus, and EVERY agent's
 #       frontmatter matches its role's id in the artifact.
-#   P2. all-`top` model-roles reproduces v3.5 lockstep — all seven agents
-#       end on one identical id.
+#   P2. all-`top` model-roles reproduces v3.5 lockstep — EVERY agent in the
+#       role map ends on one identical id. The agent set is discovered from
+#       `--print-role-map` (v5.0.0 / D0), not listed, so a newly-shipped lane
+#       is covered without an edit here.
 #   P3. META-TEST (required by the plan): a liar `pick_for_role` that
 #       misroutes the implementer lane (returns the top pick instead of the
 #       opus subset) makes the frontmatter diverge from the honest resolved
@@ -48,10 +50,21 @@ cat > "$RANKING" <<'RANKING'
 claude-opus
 RANKING
 
-# Seed all seven agents at a common base pin.
+# ALL_AGENTS — every agent the role map claims, DISCOVERED from
+# `--print-role-map` rather than listed (v5.0.0 / D0).
+#
+# This was seven names spelled out. The spec's whole claim is that frontmatter
+# and the resolved artifact agree for EVERY agent, and a hardcoded list quietly
+# narrows "every" to "the ones this file happened to know about in 2026-07" —
+# so a newly-shipped lane would be unpinned, unasserted, and green. The map is
+# the same source of truth the rewrite itself derives from, which is exactly
+# what makes the comparison meaningful.
+ALL_AGENTS=$(bash "$APPLY" --print-role-map 2>/dev/null | awk -F'\t' '{print $2}')
+
+# Seed every agent in the role map at a common base pin.
 seed_agents() {
     local pin="$1" agent
-    for agent in orchestrator qa backend frontend devops grader judge; do
+    for agent in $ALL_AGENTS; do
         cat > "$AGENTS_DIR/$agent.md" <<EOF
 ---
 name: $agent
@@ -63,6 +76,13 @@ EOF
     done
 }
 seed_agents "claude-base-0"
+
+# NON-VACUITY: a discovery list that came back empty would make seed_agents a
+# no-op and every loop below iterate zero times — a spec that passes by
+# checking nothing. The floor is a floor, not an exact count, so shipping or
+# retiring an agent does not touch this line.
+assert_eq "model-roles-parity: the role map discovered a plausible agent set (>= 7)" \
+    "yes" "$([ "$(printf '%s\n' "$ALL_AGENTS" | grep -c .)" -ge 7 ] && echo yes || echo no)"
 
 cat > "$FIXTURE/.claude/settings.json" <<'JSON'
 {
@@ -145,7 +165,8 @@ fi
 cp "$ARTIFACT" "$HONEST"
 
 # ---------------------------------------------------------------------------
-# Spec P2: all-`top` model-roles reproduces v3.5 lockstep (all seven equal).
+# Spec P2: all-`top` model-roles reproduces v3.5 lockstep (every discovered
+# agent equal).
 # ---------------------------------------------------------------------------
 cat > "$ROLES_FILE" <<'ROLES'
 orchestrator=top
@@ -159,12 +180,20 @@ bash "$MS" apply --quiet 2>/dev/null >/dev/null
 
 P2_ALL_EQUAL=1
 P2_FIRST=$(agent_pin orchestrator)
-for agent in qa backend frontend devops grader judge; do
+P2_CHECKED=0
+for agent in $ALL_AGENTS; do
+    [ "$agent" = "orchestrator" ] && continue
+    P2_CHECKED=$((P2_CHECKED + 1))
     if [ "$(agent_pin "$agent")" != "$P2_FIRST" ]; then
         P2_ALL_EQUAL=0
     fi
 done
 assert_eq "P2: all-top pins every agent to one id (v3.5 lockstep)" "1" "$P2_ALL_EQUAL"
+# The counter is the non-vacuity leg for the loop above: "every agent matched"
+# is trivially true over an empty set, and that is the failure a discovery
+# conversion can introduce without changing a single verdict.
+assert_eq "P2: the lockstep check actually compared every non-orchestrator agent" \
+    "$(printf '%s\n' "$ALL_AGENTS" | grep -c . | awk '{print $1 - 1}')" "$P2_CHECKED"
 assert_eq "P2: the lockstep id is the top pick (fable-9)" "claude-fable-9" "$P2_FIRST"
 
 # ---------------------------------------------------------------------------

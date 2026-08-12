@@ -482,10 +482,34 @@ mkdir -p "$SYNTH/.claude/agents" "$SYNTH/.claude/scripts" "$SYNTH/.claude/hooks"
     "$SYNTH/.claude/vendor/superpowers/brainstorming" \
     "$SYNTH/.claude/mcp/bd-mcp" "$SYNTH/.claude/mcp/code-graph-mcp" \
     "$SYNTH/.claude-plugin" "$SYNTH/docs" "$SYNTH/bin"
-for agent in orchestrator qa backend frontend devops; do
-    printf -- '---\nmodel: test\n---\nsynthetic %s agent\n' "$agent" \
-        > "$SYNTH/.claude/agents/$agent.md"
-done
+# The synthetic agent set is READ OUT OF install.sh's own required-source
+# list, not spelled out (v5.0.0 / D0).
+#
+# It WAS five names, and it broke the moment D0 added designer.md and
+# design-reviewer.md to that list: install.sh aborted with "Plugin source
+# missing" at the source check, BEFORE the flag-exclusivity flip this section
+# measures, so three METAs failed for a reason that was not their own. That is
+# the same failure this file already documents three times below for the
+# helper list, the vendored tree and the shipped-docs subset — a synthetic
+# source hand-maintained against a list that keeps growing.
+#
+# Deriving it closes the class instead of paying it a fourth time: whatever
+# install.sh requires, the synthetic source now has.
+SYNTH_AGENT_COUNT=0
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    SYNTH_AGENT_COUNT=$((SYNTH_AGENT_COUNT + 1))
+    printf -- '---\nmodel: test\n---\nsynthetic %s agent\n' "$(basename "$rel" .md)" \
+        > "$SYNTH/.claude/agents/$(basename "$rel")"
+done <<EOF
+$(sed -n 's/^[[:space:]]*"\(\.claude\/agents\/[^"]*\.md\)"[[:space:]]*\\$/\1/p' "$PROJECT_DIR/install.sh")
+EOF
+# Non-vacuity: if the extraction pattern ever stops matching install.sh's
+# formatting it yields ZERO agents, the synthetic source is unusable, and every
+# META below fails opaquely at the source check. Fail here instead, where the
+# message says what actually went wrong.
+assert_eq "synthetic source: agent list extracted from install.sh's required list (>= 5)" \
+    "yes" "$([ "$SYNTH_AGENT_COUNT" -ge 5 ] && echo yes || echo "no($SYNTH_AGENT_COUNT)")"
 # Every helper on install.sh's required-source list. workflow-doctor joined it
 # in v4.1 / C0a; a missing entry aborts the mutant run with "Plugin source
 # missing" before the exit-code flip this section measures can happen.

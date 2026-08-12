@@ -887,9 +887,24 @@ fi
 
 ARTIFACT="$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json"
 
-# The R-block asserts on all SEVEN agents; seed grader/judge alongside the
-# five the earlier specs use so the parity + byte-unchanged checks are real.
-for agent in grader judge; do
+# MS_ALL_AGENTS — every agent in the role map, DISCOVERED from
+# `--print-role-map` (v5.0.0 / D0) rather than spelled out.
+#
+# Seven loops in this file iterated a hardcoded seven-name list. Each one
+# either re-pins every agent before a case, or snapshots every agent to prove
+# an all-or-nothing path touched nothing — and BOTH claims are about "every
+# agent", so a lane the list did not know about was silently outside the
+# strongest assertions this spec makes (ms-R4's byte-unchanged check most of
+# all). The map is the rewrite's own target set, which is the only list that
+# can be right by construction.
+MS_ALL_AGENTS=$(bash "$APPLY" --print-role-map 2>/dev/null | awk -F'\t' '{print $2}')
+assert_eq "ms-R0: the role map discovered a plausible agent set (>= 7)" \
+    "yes" "$([ "$(printf '%s\n' "$MS_ALL_AGENTS" | grep -c .)" -ge 7 ] && echo yes || echo no)"
+
+# The R-block asserts on EVERY agent; seed the ones the earlier specs did not
+# create so the parity + byte-unchanged checks are real rather than skipped.
+for agent in $MS_ALL_AGENTS; do
+    [ -f "$AGENTS_DIR/$agent.md" ] && continue
     cat > "$AGENTS_DIR/$agent.md" <<EOF
 ---
 name: $agent
@@ -899,6 +914,17 @@ model: claude-opus-4-7
 stub body for $agent
 EOF
 done
+
+# ms_reset_pins — put every discovered agent back on the common base pin.
+# Replaces six copies of the same awk-rewrite loop.
+ms_reset_pins() {
+    local agent
+    for agent in $MS_ALL_AGENTS; do
+        awk '/^model:/{print "model: claude-opus-4-7"; next} {print}' \
+            "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
+            && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
+    done
+}
 
 # Default V1 role map for the R-block: orchestrator/reviewer top, implementer
 # opus-class.
@@ -941,11 +967,7 @@ claude-opus
 RANKING
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_OPUS_PRESENT"
-for agent in orchestrator qa backend frontend devops grader judge; do
-    awk '/^model:/{print "model: claude-opus-4-7"; next} {print}' \
-        "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
-        && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
-done
+ms_reset_pins
 bash "$MS" apply --quiet 2>/tmp/ms-r1.err >/dev/null
 PIN_R1_ORCH=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
 PIN_R1_IMPL=$(grep -E '^model:' "$AGENTS_DIR/backend.md" | head -1 | awk '{print $2}')
@@ -1012,28 +1034,39 @@ RANKING
 seed_role_map
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_MANUAL_ADOPT"
-for agent in orchestrator qa backend frontend devops grader judge; do
-    awk '/^model:/{print "model: claude-opus-4-7"; next} {print}' \
-        "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
-        && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
-done
-# Snapshot all seven files (whole file, not just the pin).
+ms_reset_pins
+# Snapshot EVERY discovered agent file (whole file, not just the pin).
+#
+# The snapshot rides a temp FILE keyed by name, not `eval PRE_R4_<agent>=`.
+# An agent whose filename contains a hyphen — `design-reviewer.md`, shipped in
+# v5.0.0 — is not a legal bash variable name, so the eval form would have
+# failed at exactly the moment the discovery conversion made it reachable.
+R4_SNAP="$FIXTURE/.claude/.qa-tracking/.r4-snapshot"
+: > "$R4_SNAP"
 R4_UNCHANGED=1
 R4_DRIFT=""
-for agent in orchestrator qa backend frontend devops grader judge; do
-    eval "PRE_R4_${agent}=\$(shasum -a 256 \"\$AGENTS_DIR/\$agent.md\" | awk '{print \$1}')"
+R4_CHECKED=0
+for agent in $MS_ALL_AGENTS; do
+    printf '%s\t%s\n' "$agent" \
+        "$(shasum -a 256 "$AGENTS_DIR/$agent.md" | awk '{print $1}')" >> "$R4_SNAP"
 done
 bash "$MS" apply --quiet 2>/tmp/ms-r4.err >/dev/null
 RC_R4=$?
-for agent in orchestrator qa backend frontend devops grader judge; do
+while IFS="$(printf '\t')" read -r agent pre; do
+    [ -n "$agent" ] || continue
+    R4_CHECKED=$((R4_CHECKED + 1))
     NOW=$(shasum -a 256 "$AGENTS_DIR/$agent.md" | awk '{print $1}')
-    eval "PRE=\$PRE_R4_${agent}"
-    if [ "$NOW" != "$PRE" ]; then
+    if [ "$NOW" != "$pre" ]; then
         R4_UNCHANGED=0; R4_DRIFT="${R4_DRIFT:+$R4_DRIFT,}$agent"
     fi
-done
+done < "$R4_SNAP"
 assert_eq "ms-R4: apply exit 0 under all-or-nothing manual-adopt" "0" "$RC_R4"
-assert_eq "ms-R4: all seven agent files byte-identical (no drift: '$R4_DRIFT')" "1" "$R4_UNCHANGED"
+assert_eq "ms-R4: every agent file byte-identical (no drift: '$R4_DRIFT')" "1" "$R4_UNCHANGED"
+# Non-vacuity for the byte-unchanged claim: "nothing changed" is trivially
+# true over zero files, and that is precisely what an empty discovery list
+# would produce.
+assert_eq "ms-R4: the byte-unchanged check covered every discovered agent" \
+    "$(printf '%s\n' "$MS_ALL_AGENTS" | grep -c .)" "$R4_CHECKED"
 assert_eq "ms-R4: NO artifact written on the manual-adopt path" "1" \
     "$([ ! -f "$ARTIFACT" ] && echo 1 || echo 0)"
 RESULT_R4=$(grep '^model-select:' /tmp/ms-r4.err | tail -1)
@@ -1187,11 +1220,7 @@ seed_role_map
 seed_tier_ranking
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_TIER_VS_RECENCY"
-for agent in orchestrator qa backend frontend devops grader judge; do
-    awk '/^model:/{print "model: claude-opus-4-7"; next} {print}' \
-        "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
-        && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
-done
+ms_reset_pins
 bash "$MS" apply --quiet 2>/tmp/ms-t2.err >/dev/null
 RC_T2=$?
 assert_eq "ms-T2: apply exit 0" "0" "$RC_T2"
@@ -1250,11 +1279,7 @@ seed_role_map
 seed_tier_ranking
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_TOPCLASS_BOGUS_DATE"
-for agent in orchestrator qa backend frontend devops grader judge; do
-    awk '/^model:/{print "model: claude-opus-4-7"; next} {print}' \
-        "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
-        && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
-done
+ms_reset_pins
 OUT_T5=$(bash "$MS" resolve 2>/tmp/ms-t5.err)
 ID_T5=$(ms_extract_id "$OUT_T5")
 assert_eq "ms-T5: bogus-dated TOP-class entry still wins its class (no silent downgrade to opus-5)" \
@@ -1269,7 +1294,9 @@ RC_T5=$?
 assert_eq "ms-T5: apply exit 0 (fail-open)" "0" "$RC_T5"
 T5_UNCHANGED=1
 T5_DRIFT=""
-for agent in orchestrator qa backend frontend devops grader judge; do
+T5_CHECKED=0
+for agent in $MS_ALL_AGENTS; do
+    T5_CHECKED=$((T5_CHECKED + 1))
     PIN_T5=$(grep -E '^model:' "$AGENTS_DIR/$agent.md" | head -1 | awk '{print $2}')
     if [ "$PIN_T5" != "claude-opus-4-7" ]; then
         T5_UNCHANGED=0; T5_DRIFT="${T5_DRIFT:+$T5_DRIFT,}$agent=$PIN_T5"
@@ -1277,6 +1304,8 @@ for agent in orchestrator qa backend frontend devops grader judge; do
 done
 assert_eq "ms-T5: every pin unchanged on the manual-adopt path (drift: '$T5_DRIFT')" \
     "1" "$T5_UNCHANGED"
+assert_eq "ms-T5: the unchanged-pin check covered every discovered agent" \
+    "$(printf '%s\n' "$MS_ALL_AGENTS" | grep -c .)" "$T5_CHECKED"
 
 # ---------------------------------------------------------------------------
 # Spec TM (META-TEST for ms-T1, REQUIRED by the en9 spec): a pick_best whose

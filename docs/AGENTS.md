@@ -6,17 +6,41 @@ Complete documentation of all AI agent prompts in the claude-workflow plugin.
 
 ## Overview
 
-The plugin includes 7 agents:
+The plugin includes 9 agents:
 
 | Agent | Role | File |
 |-------|------|------|
 | **Orchestrator** | Central coordinator | `agents/orchestrator.md` |
+| **Designer** | Produces the design artifact — problem framing, testable acceptance criteria, and the decomposition into independently buildable units. Writes no implementation code (v5.0.0; prompt body lands in Phase D1) | `agents/designer.md` |
+| **Design reviewer** | Separate-context reviewer of the design artifact, scored against `.claude/rubrics/design.md`. Spawned by the root orchestrator — the designer cannot spawn its own reviewer — and must resolve to an identity distinct from the designer (v5.0.0; prompt body lands in Phase D2) | `agents/design-reviewer.md` |
 | **Backend** | API/DB specialist | `agents/backend.md` |
 | **Frontend** | UI/UX specialist | `agents/frontend.md` |
 | **DevOps** | CI/CD specialist | `agents/devops.md` |
 | **QA** | Quality gate | `agents/qa.md` |
 | **Grader** | Separate-context rubric scorer (spawned by the root orchestrator at QA's request — subagents cannot spawn subagents per the Claude Code docs, so the spawn is relayed) | `agents/grader.md` |
 | **Judge** | Separate-context mutation classifier (spawned by the root orchestrator from the C.1 mutation-sweep packet — subagents cannot spawn subagents, so the harness writes a judge-packet to disk and the orchestrator relays it; classifies surviving mutants as `equivalent` or `genuine`) | `agents/judge.md` |
+
+### Model role classes
+
+The nine agents ride **five** role classes, mapped in `.claude/model-roles` and
+resolved at SessionStart by `model-select.sh`. A class is pinned to a
+*strategy*, never to a model version:
+
+| Class | Agents | Default strategy |
+|---|---|---|
+| `designer` | `designer` | `top` |
+| `design_reviewer` | `design-reviewer` | `top` |
+| `orchestrator` | `orchestrator` | `top` |
+| `implementer` | `backend`, `frontend`, `devops` | `sonnet-class` |
+| `reviewer` | `qa`, `grader`, `judge` | `top` |
+
+A strategy is `top` (the newest model in the most capable family available) or
+`<family>-class` (the newest `claude-<family>-*`). Two surfaces are **not**
+roles and own no agent files: `implementer_class_high`, the per-unit escalation
+strategy, and the two lane keys `reviewer_lane` / `design_reviewer_lane`, which
+decide *which* reviewer is engaged and never change a frontmatter pin. See the
+header of `.claude/model-roles` for the full grammar, the identity-collapse
+condition and its two clearances.
 
 ---
 

@@ -801,6 +801,69 @@ if [ "$SS_TRACKER_STATE" = "preserved-cycle-in-flight" ]; then
 - change-set tracker CARRIED OVER (94d.1): a review cycle is in flight on '$SS_ACTIVE_TASK', so .claude/.qa-tracking/changed-files.txt was NOT reset and still holds $SS_TRACKER_PATHS path(s) from before this session boundary. That is deliberate — the tracker is what change_set_hash is computed over, and rebuilding it from 'git status' can only ever recover a SUBSET (a reverted-content file and the gate's own artifacts are invisible to git). If that cycle is actually finished, clear it: bash .claude/scripts/current-task.sh clear"
 fi
 
+# Warnings 8-10: the three v5.0.0 Phase D0 model-role notices.
+#
+# THESE DELIBERATELY DO NOT RIDE model-select.sh's `_warn`. Warning 2 above
+# keeps only the LAST line matching '^model-select:' (`| tail -1`), which
+# collapses a chain of helper diagnostics into one outcome line — correct for
+# what it was built for, and fatal for anything new: a loud warning added to
+# the helper is swallowed by whatever the helper says afterwards. So each new
+# notice RIDES THE RESOLVED ARTIFACT (or its own state file) and is read from
+# disk here, where it gets its own line and cannot be shadowed.
+#
+# All three are fail-open and read-only: no jq, no artifact, or an unparseable
+# artifact means no warning, never a bad one.
+SS_ROLES_ARTIFACT="$QA_TRACKING_DIR/model-roles-resolved.json"
+SS_DRIFT_FILE="$QA_TRACKING_DIR/session-model-drift.json"
+
+if command -v jq >/dev/null 2>&1; then
+    # Warning 8: the live session model is not the resolved orchestrator model.
+    #
+    # The comparison itself CANNOT happen here — the session model appears only
+    # in the statusline's stdin envelope and this hook never reads stdin — so
+    # statusline.sh performs it and persists the result. What happens here is
+    # RE-VALIDATION: a record whose `expected` no longer matches the current
+    # artifact is stale (the artifact moved since it was written, e.g. a new
+    # model was adopted), and reporting a stale expectation would send the
+    # operator to the wrong /model command. Only a record that still agrees
+    # with the artifact is surfaced, and it is surfaced with the fix verbatim.
+    if [ -f "$SS_DRIFT_FILE" ] && [ -f "$SS_ROLES_ARTIFACT" ]; then
+        SS_DRIFT_EXPECTED=$(jq -r '.expected // empty' "$SS_DRIFT_FILE" 2>/dev/null || echo "")
+        SS_DRIFT_LIVE=$(jq -r '.live // empty' "$SS_DRIFT_FILE" 2>/dev/null || echo "")
+        SS_ORCH_NOW=$(jq -r '.roles.orchestrator // empty' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo "")
+        if [ -n "$SS_DRIFT_EXPECTED" ] && [ "$SS_DRIFT_EXPECTED" = "$SS_ORCH_NOW" ]; then
+            WARNINGS+="
+- session-model drift: the root session is the ORCHESTRATOR seat, but it last rendered on '${SS_DRIFT_LIVE:-<unknown>}' while the orchestrator role class resolves to '$SS_DRIFT_EXPECTED'. Never blocking. Fix: /model $SS_DRIFT_EXPECTED  (or relaunch via: make session)"
+        fi
+    fi
+
+    if [ -f "$SS_ROLES_ARTIFACT" ]; then
+        # Warning 9: designer and design_reviewer collapsed to one identity.
+        # Reported, never blocked (decision 3) — a block would make the
+        # Codex-absent arm unrunnable. On a stock install without Codex both
+        # lanes are `top`, so this is EXPECTED to be lit; the line therefore
+        # leads with the clearances rather than with alarm.
+        if [ "$(jq -r '.identity_collapse // false' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo false)" = "true" ]; then
+            SS_DESIGNER_ID=$(jq -r '.roles.designer // "?"' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo "?")
+            WARNINGS+="
+- design identity collapse: designer and design_reviewer both resolve to '$SS_DESIGNER_ID' on the claude design lane, so a design would be reviewed by its own model identity. Not a block — pins are written and the workflow runs. Two clearances: install Codex (docs/CODEX_SETUP.md; the design lane then resolves to Sol) or set design_reviewer=<family>-class in .claude/model-roles."
+        fi
+
+        # Warning 10: config keys this install's .claude/model-roles lacks.
+        #
+        # .claude/model-roles is manifest class `operator`, so an install whose
+        # copy was EDITED gets the v5 defaults as a `.claude/model-roles.new`
+        # SIDECAR and keeps running its old key set. Every missing key fails
+        # OPEN (missing == `top`), so without this line the install silently
+        # runs a v4 role map under a v5 workflow — no error, no symptom.
+        SS_MISSING_KEYS=$(jq -r '(.missing_keys // []) | join(", ")' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo "")
+        if [ -n "$SS_MISSING_KEYS" ]; then
+            WARNINGS+="
+- .claude/model-roles is missing key(s): $SS_MISSING_KEYS. Each one falls back to 'top', so nothing errors and nothing is visible without this line. If .claude/model-roles.new exists, your copy was customised and the upgrade wrote the new defaults beside it rather than over it — merge the missing keys across."
+        fi
+    fi
+fi
+
 # 1. Get bd prime output (Beads' built-in agent context).
 # Every bd block from here down is gated on BD_AVAILABLE. They were all already
 # fail-open (`|| echo ""`), so the guard is not what keeps them safe — it is

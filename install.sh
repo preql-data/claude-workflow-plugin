@@ -775,12 +775,22 @@ fi
 # never be installed — the same class of silent failure, one layer down.
 # Cross-checked by .claude/scripts/tests/mcp-deps.test.sh, which asserts both
 # files are git-tracked at lockfileVersion 3 with zero install scripts.
+#
+# designer.md / design-reviewer.md (v5.0.0 / D0) are required for the same
+# reason the five above are: v5 makes design a MANDATORY phase with its own
+# review loop, so a target missing either agent cannot run the workflow it
+# advertises — the orchestrator's design relay would spawn an agent type the
+# SDK never loaded and fall through to general-purpose, silently. grader.md and
+# judge.md stay OUT of this list deliberately: both are optional-tier surfaces
+# whose absence degrades a feature rather than breaking the core loop.
 for required in \
     ".claude/agents/orchestrator.md" \
     ".claude/agents/qa.md" \
     ".claude/agents/backend.md" \
     ".claude/agents/frontend.md" \
     ".claude/agents/devops.md" \
+    ".claude/agents/designer.md" \
+    ".claude/agents/design-reviewer.md" \
     ".claude/scripts/session-start.sh" \
     ".claude/scripts/intent-router.sh" \
     ".claude/scripts/post-edit.sh" \

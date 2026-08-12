@@ -67,18 +67,31 @@ AGENTS_DIR="$PROJECT_DIR/.claude/agents"
 # other subagents via Task() (its tool list includes Task; subagents'
 # Task tool, even when granted, has no effect per the docs cited above).
 #
-# judge.md (C.2) is included here for the same reason as grader.md: the
-# judge is spawned BY the orchestrator from the mutation-sweep packet,
-# never by another subagent. Re-nesting the judge spawn (e.g., having QA
-# spawn it) would be structurally unreachable per the docs.
-NON_ORCHESTRATOR_AGENTS=(
-    "$AGENTS_DIR/qa.md"
-    "$AGENTS_DIR/backend.md"
-    "$AGENTS_DIR/frontend.md"
-    "$AGENTS_DIR/devops.md"
-    "$AGENTS_DIR/grader.md"
-    "$AGENTS_DIR/judge.md"
-)
+# judge.md (C.2) is covered for the same reason as grader.md: the judge is
+# spawned BY the orchestrator from the mutation-sweep packet, never by another
+# subagent. Re-nesting the judge spawn (e.g., having QA spawn it) would be
+# structurally unreachable per the docs. The same holds for design-reviewer.md
+# (v5.0.0 / D2): the designer cannot spawn its own reviewer, so that spawn is
+# relayed from the root exactly like the grader's.
+#
+# DISCOVERY, not a hardcoded list (v5.0.0 / D0). This was six spelled-out
+# paths, which is a list that can only ever be right for the release that
+# wrote it: an agent shipped afterwards is silently NOT CHECKED, and the
+# failure is invisible — a green suite over a file nothing read. The glob
+# minus orchestrator.md covers every agent that exists now and every agent
+# added later, with no edit. The count assertion below is what keeps the glob
+# itself honest: a glob that matched nothing would otherwise pass this
+# section by checking zero files.
+NON_ORCHESTRATOR_AGENTS=()
+SHELL_OPT_NULLGLOB_NNS=$(shopt -p nullglob)
+shopt -s nullglob
+for _agent_md in "$AGENTS_DIR"/*.md; do
+    case "$(basename "$_agent_md")" in
+        orchestrator.md) continue ;;
+    esac
+    NON_ORCHESTRATOR_AGENTS+=("$_agent_md")
+done
+eval "$SHELL_OPT_NULLGLOB_NNS"
 
 # Relay sentinels — fixed strings so whitespace/case don't drift.
 QA_RELAY_SENTINEL='RUBRIC-RELAY: status=needs-grading'
@@ -168,6 +181,18 @@ check_no_spawn() {
 }
 
 # --- Real agents: spawn-directive freedom ---------------------------------
+
+# NON-VACUITY GUARD for the glob above. A discovery list that resolved to
+# nothing — wrong AGENTS_DIR, nullglob eating a bad pattern — would sail
+# through the loop below asserting nothing at all, which is precisely the
+# "green because it checked zero files" failure the discovery conversion could
+# otherwise introduce. The floor is deliberately a FLOOR, not the exact count:
+# pinning the count would put this test back in the business of knowing how
+# many agents ship, which is the coupling being removed.
+assert_eq "no-nested-spawn: the agent glob discovered a plausible set (>= 6 non-orchestrator agents)" \
+    "yes" "$([ "${#NON_ORCHESTRATOR_AGENTS[@]}" -ge 6 ] && echo yes || echo "no(${#NON_ORCHESTRATOR_AGENTS[@]})")"
+assert_eq "no-nested-spawn: orchestrator.md is excluded from the discovered set" \
+    "0" "$(printf '%s\n' "${NON_ORCHESTRATOR_AGENTS[@]}" | grep -c '/orchestrator\.md$' || true)"
 
 for f in "${NON_ORCHESTRATOR_AGENTS[@]}"; do
     name=$(basename "$f" .md)

@@ -18,13 +18,21 @@ keyword trigger). Per cross-cutting principle 4, it is always-on.
 
 ## Mandatory roles
 
-The plugin enforces a three-layer role split. The user types intent in plain
+The plugin enforces a layered role split. The user types intent in plain
 English; Claude internally maps to these roles.
 
 - **Orchestrator** — coordinates and delegates. Does NOT write implementation
   code. Tool list omits `Write`/`Edit`/`MultiEdit`; the
   `prevent-orchestrator-edits.sh` PreToolUse hook is a defense-in-depth
   complement.
+- **Designer** — `@designer`. Produces the design artifact and nothing else:
+  problem framing, testable acceptance criteria, and the decomposition into
+  independently buildable units. Writes no implementation code. (v5.0.0; the
+  prompt body lands in Phase D1.)
+- **Design reviewer** — `@design-reviewer`. Reviews that artifact in a fresh
+  context against `.claude/rubrics/design.md`, and must resolve to an identity
+  distinct from the designer. Spawned from the ROOT, never by the designer:
+  subagents cannot spawn subagents. (v5.0.0; the prompt body lands in Phase D2.)
 - **Specialists** — `@backend`, `@frontend`, `@devops`. Implement code in
   their domain. Have full broad tool access.
 - **QA** — mandatory gate. No code reaches the user without QA approval. QA

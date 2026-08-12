@@ -671,12 +671,18 @@ try {
     # target's dependency install is `npm ci`, which REFUSES without a
     # lockfile — a truncated clone would otherwise yield a target whose MCP
     # servers can never be installed. Kept in sync with install.sh's list.
+    # designer.md / design-reviewer.md (v5.0.0 / D0): v5 makes design a
+    # mandatory phase with its own review loop, so a target missing either
+    # cannot run the workflow it advertises. grader.md / judge.md stay out,
+    # as in install.sh - optional tiers, not the core loop.
     $Required = @(
         ".claude/agents/orchestrator.md",
         ".claude/agents/qa.md",
         ".claude/agents/backend.md",
         ".claude/agents/frontend.md",
         ".claude/agents/devops.md",
+        ".claude/agents/designer.md",
+        ".claude/agents/design-reviewer.md",
         ".claude/scripts/session-start.sh",
         ".claude/scripts/intent-router.sh",
         ".claude/scripts/post-edit.sh",

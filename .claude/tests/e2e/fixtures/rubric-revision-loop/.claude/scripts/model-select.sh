@@ -6,14 +6,23 @@
 # .claude/model-ranking, and (in the `apply` path) rewrites each agent's
 # model: pin PER ROLE via the shared workflow-model-apply.sh helper.
 #
-# Role-aware resolution (V1):
-#   .claude/model-roles maps each role to a strategy — orchestrator/reviewer
-#   default to `top` (the single best pick, exactly v3.5), implementer to
-#   `opus-class` (the newest claude-opus-* in the listing, auto-adopting the
-#   next Opus generation the moment the account lists it). `resolve` still
-#   prints the account-wide top pick; `apply` resolves all three roles and
-#   rewrites each lane independently; the resolved mapping is written to
-#   .claude/.qa-tracking/model-roles-resolved.json for the statusline.
+# Role-aware resolution (V1, expanded to FIVE roles by v5.0.0 Phase D0):
+#   .claude/model-roles maps each role to a strategy. The roles are
+#   designer, design_reviewer, orchestrator, implementer and reviewer —
+#   enumerated ONCE, in ALL_ROLES. A strategy is `top` (the single best pick,
+#   exactly v3.5) or `<family>-class` (the newest claude-<family>-* in the
+#   listing, auto-adopting the next generation of that family the moment the
+#   account lists it). `resolve` still prints the account-wide top pick;
+#   `apply` resolves every role and rewrites each lane independently; the
+#   resolved mapping is written to
+#   .claude/.qa-tracking/model-roles-resolved.json (schema 2) for the
+#   statusline.
+#
+#   Two surfaces are NOT roles and never appear under `roles` in the artifact:
+#   `implementer_class_high` (the per-unit escalation strategy, resolved
+#   through the same path and recorded under `escalation`) and the two lane
+#   keys (`reviewer_lane`, `design_reviewer_lane`), which decide WHICH
+#   reviewer is engaged, never what any frontmatter pin says.
 #
 # Subcommands:
 #   resolve [--quiet] [--refresh]
@@ -115,9 +124,33 @@ ORCH_AGENT="$PROJECT_DIR/.claude/agents/orchestrator.md"
 # v4.0.0 Phase V1 (bi3.1): role-aware resolution surfaces.
 IMPL_AGENT="$PROJECT_DIR/.claude/agents/backend.md"   # implementer lane representative
 REVIEWER_AGENT="$PROJECT_DIR/.claude/agents/qa.md"    # reviewer lane representative
+# v5.0.0 Phase D0 (fkm.2): the two design lanes. Each role in ALL_ROLES MUST
+# have a representative-file constant AND an explicit arm in current_pin() —
+# see the hazard note on that function.
+DESIGNER_AGENT="$PROJECT_DIR/.claude/agents/designer.md"
+DESIGN_REVIEWER_AGENT="$PROJECT_DIR/.claude/agents/design-reviewer.md"
 MODEL_ROLES_FILE="$PROJECT_DIR/.claude/model-roles"
 ROLES_ARTIFACT="$PROJECT_DIR/.claude/.qa-tracking/model-roles-resolved.json"
 CODEX_DETECT="$PROJECT_DIR/.claude/scripts/codex-detect.sh"
+
+# ALL_ROLES — the role set, defined ONCE. cmd_status, cmd_roles and cmd_apply
+# all iterate this; adding a sixth role means editing this line, adding a
+# current_pin() arm, and adding a workflow-model-apply.sh role_agents() arm.
+# Nothing else enumerates roles.
+#
+# ORDER IS LOAD-BEARING for the statusline: it is the fixed render order
+# `des dsr orch impl rev`.
+#
+# `implementer_class_high` is deliberately ABSENT. It is a STRATEGY, not a
+# role: it owns no agent files and must never appear under `roles` in the
+# artifact, because specs/model-roles-parity.sh's check_parity walks
+# `--print-role-map` and would look for an agent file to match it.
+ALL_ROLES="designer design_reviewer orchestrator implementer reviewer"
+
+# The escalation strategy key. Not a role (see ALL_ROLES).
+ESCALATION_KEY="implementer_class_high"
+ESCALATION_STATE="$PROJECT_DIR/.claude/.qa-tracking/implementer-escalation.json"
+COLLAPSE_FLAG="$PROJECT_DIR/.claude/.qa-tracking/design-family-collapse"
 # Filesystem side-channel: pick_for_role writes "true"/"false" here so
 # cmd_apply can read the implementer opus-class fallback flag across the
 # $(...) subshell boundary (a shell variable set inside command
@@ -131,11 +164,17 @@ REFRESH=0
 SUBCMD="${1:-}"
 shift || true
 
+# ARG1 — the first NON-FLAG positional after the subcommand. `escalate` needs
+# a task id; every other subcommand ignores it. Unknown flags stay ignored (the
+# pre-D0 contract) so a future flag added to one subcommand cannot break the
+# others.
+ARG1=""
 while [ "${1:-}" != "" ]; do
     case "$1" in
         --quiet|-q) QUIET=1 ;;
         --refresh)  REFRESH=1 ;;
-        *) ;;  # ignore unknown args; subcommand-specific positional args are absent today
+        --*)        ;;  # ignore unknown flags
+        *)          [ -z "$ARG1" ] && ARG1="$1" ;;
     esac
     shift
 done
@@ -493,20 +532,86 @@ _model_roles_value() {
         | sed -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//"
 }
 
-# role_strategy <role> — resolve a role to its selection strategy
-# (top|opus-class). Fail-open: a missing file or missing key is the quiet
-# v3.5-parity default of `top`; a PRESENT-but-unrecognised value is a
-# surprising misconfiguration, so that path warns loudly before falling
-# back to `top`.
+# STRATEGY_CLASS_RE — the family-class strategy grammar (v5.0.0 / D0).
+#
+# Before D0 the only class strategy was the LITERAL `opus-class`, spelled out
+# in the enum, in the pick_for_role jq filter and in two warnings. That literal
+# is now ONE rule: any `<family>-class` where <family> is a lowercase
+# alphanumeric token. `opus-class`, `sonnet-class`, `fable-class`,
+# `haiku-class` and every family shipped in the future parse from it with no
+# edit here.
+#
+# The family is NOT validated against .claude/model-ranking. Gating selection
+# on the tier list would kill day-zero adoption of a new family — the exact
+# property pick_best:class_for() exists to preserve (an unknown family is
+# ranked in the TOP class, proven by ms-T3). The cost of not gating is that a
+# typo (`sonnnet-class`) resolves to an empty subset and silently falls back to
+# `top`; pick_for_role's empty-subset warning therefore adds a
+# "not a known tier — check for a typo" hint when the family is absent from
+# BOTH the tier list and the exclusion list. Diagnostic, never a gate.
+STRATEGY_CLASS_RE='^[a-z][a-z0-9]*-class$'
+
+# role_strategy <role> — resolve a role (or the escalation key) to its
+# selection strategy (`top` | `<family>-class`). Fail-open: a missing file or
+# missing key is the quiet v3.5-parity default of `top`; a PRESENT-but-
+# unrecognised value is a surprising misconfiguration, so that path warns
+# loudly before falling back to `top`.
 role_strategy() {
     local role="$1" val
     val=$(_model_roles_value "$role")
     case "$val" in
-        top|opus-class) printf '%s' "$val" ;;
-        "")             printf 'top' ;;   # missing key/file: quiet v3.5 default
+        top) printf 'top' ;;
+        "")  printf 'top' ;;   # missing key/file: quiet v3.5 default
         *)
-            _warn "unknown strategy '$val' for role '$role' in $MODEL_ROLES_FILE; falling back to top"
-            printf 'top'
+            if printf '%s' "$val" | grep -Eq "$STRATEGY_CLASS_RE"; then
+                printf '%s' "$val"
+            else
+                _warn "unknown strategy '$val' for role '$role' in $MODEL_ROLES_FILE; falling back to top"
+                printf 'top'
+            fi
+            ;;
+    esac
+}
+
+# _family_known <family> — exit 0 when `claude-<family>` appears in the ranking
+# file as either a capability tier or an exclusion. An EXCLUDED family counts
+# as known: `!claude-haiku` is the operator saying they know about haiku and
+# dropped it deliberately, which is not a typo.
+_family_known() {
+    local fam="$1"
+    if load_tiers | grep -qx "claude-$fam"; then
+        return 0
+    fi
+    if load_exclusions | grep -qx "claude-$fam"; then
+        return 0
+    fi
+    return 1
+}
+
+# _typo_hint <family> — the trailing clause appended to the empty-subset
+# warning when the family is in neither ranking list. Empty otherwise.
+_typo_hint() {
+    local fam="$1"
+    if _family_known "$fam"; then
+        printf ''
+    else
+        printf " (claude-%s is not a known tier in %s — check for a typo)" \
+            "$fam" "$RANKING_FILE"
+    fi
+}
+
+# _lane_config <key> — read a lane key (auto|claude), default auto. An
+# unrecognised value warns and falls back to auto. Shared by reviewer_lane and
+# design_reviewer_lane so the two can never drift in parse semantics.
+_lane_config() {
+    local key="$1" val
+    val=$(_model_roles_value "$key")
+    case "$val" in
+        auto|claude) printf '%s' "$val" ;;
+        "")          printf 'auto' ;;
+        *)
+            _warn "unknown $key '$val' in $MODEL_ROLES_FILE; falling back to auto"
+            printf 'auto'
             ;;
     esac
 }
@@ -514,16 +619,49 @@ role_strategy() {
 # reviewer_lane_config — read the reviewer_lane key (auto|claude), default
 # auto. An unrecognised value warns and falls back to auto.
 reviewer_lane_config() {
-    local val
-    val=$(_model_roles_value "reviewer_lane")
-    case "$val" in
-        auto|claude) printf '%s' "$val" ;;
-        "")          printf 'auto' ;;
-        *)
-            _warn "unknown reviewer_lane '$val' in $MODEL_ROLES_FILE; falling back to auto"
-            printf 'auto'
-            ;;
-    esac
+    _lane_config "reviewer_lane"
+}
+
+# design_reviewer_lane_config — the design lane's equivalent (v5.0.0 / D0).
+design_reviewer_lane_config() {
+    _lane_config "design_reviewer_lane"
+}
+
+# ---------------------------------------------------------------------------
+# Codex probe memoisation (v5.0.0 / D0).
+#
+# Two lanes now consult .claude/scripts/codex-detect.sh. The probe must run
+# ONCE PER INVOCATION, not once per lane — it shells out, and doubling that on
+# every SessionStart is a cost with no information in it.
+#
+# CALL THIS AS A STATEMENT, NOT INSIDE $(...). A subshell assignment never
+# propagates to its parent (the same Bash constraint that shaped pick_best's
+# MANUAL stdout contract — see the file header), so the memo is only shared
+# when the probe runs in a shell that is an ANCESTOR of both `$(detect_*)`
+# substitutions. cmd_apply and cmd_status therefore prime it explicitly before
+# resolving lanes. Each detect_* function still primes it itself, so a caller
+# that forgets is CORRECT and merely pays for two probes.
+#
+# The prime is UNCONDITIONAL, which costs one probe on the paths where an env
+# seam or `<lane>=claude` would have short-circuited it. That is deliberate:
+# the alternative is re-deriving each lane's precedence rules at the call site
+# to decide whether a probe could be needed, which duplicates the logic these
+# functions own (and would emit a second warning for a bad lane value). One
+# bounded, exit-0-by-contract probe per invocation is the cheaper trade. The
+# outer bound is unchanged and still lives at the caller: session-start.sh
+# wraps the whole `apply` in `timeout 8`.
+# ---------------------------------------------------------------------------
+_CODEX_PROBE_STATE="unrun"
+_CODEX_PROBE_VALUE=""
+
+_codex_probe_once() {
+    [ "$_CODEX_PROBE_STATE" = "done" ] && return 0
+    _CODEX_PROBE_STATE="done"
+    _CODEX_PROBE_VALUE=""
+    if [ -x "$CODEX_DETECT" ]; then
+        _CODEX_PROBE_VALUE=$(bash "$CODEX_DETECT" 2>/dev/null || true)
+    fi
+    return 0
 }
 
 # detect_reviewer_lane — resolve the effective reviewer lane. Never blocks;
@@ -544,13 +682,34 @@ detect_reviewer_lane() {
         printf 'claude'
         return
     fi
-    if [ -x "$CODEX_DETECT" ]; then
-        local probed
-        probed=$(bash "$CODEX_DETECT" 2>/dev/null || true)
-        if [ -n "$probed" ]; then
-            printf '%s' "$probed"
-            return
-        fi
+    _codex_probe_once
+    if [ -n "$_CODEX_PROBE_VALUE" ]; then
+        printf '%s' "$_CODEX_PROBE_VALUE"
+        return
+    fi
+    printf 'claude'
+}
+
+# detect_design_reviewer_lane — the design lane's equivalent (v5.0.0 / D0).
+# Identical precedence with the design keys/env seam. Sol-first is already what
+# `auto` means, so no separate ordering rule is needed.
+#
+# Like the reviewer lane, this NEVER changes a frontmatter pin: design-reviewer
+# agents always carry a Claude `model:` pin, and the lane decides only which
+# reviewer is engaged and how the statusline renders (`claude` vs `sol`).
+detect_design_reviewer_lane() {
+    if [ -n "${WORKFLOW_DESIGN_REVIEWER_LANE:-}" ]; then
+        printf '%s' "$WORKFLOW_DESIGN_REVIEWER_LANE"
+        return
+    fi
+    if [ "$(design_reviewer_lane_config)" = "claude" ]; then
+        printf 'claude'
+        return
+    fi
+    _codex_probe_once
+    if [ -n "$_CODEX_PROBE_VALUE" ]; then
+        printf '%s' "$_CODEX_PROBE_VALUE"
+        return
     fi
     printf 'claude'
 }
@@ -558,25 +717,37 @@ detect_reviewer_lane() {
 # pick_for_role <models-json> <strategy> — resolve one role's best id,
 # preserving pick_best's stdout contract (`<id>` | `MANUAL\t<id>` | rc=1).
 #
-#   top         -> pick_best over the full listing (unchanged).
-#   opus-class  -> pick_best over the claude-opus-* subset. Ranking
-#                  exclusions still apply (pick_best applies them inside the
-#                  subset). An empty subset OR a fully-excluded subset warns
-#                  and falls back to pick_best over the full listing.
+#   top             -> pick_best over the full listing (unchanged).
+#   <family>-class  -> pick_best over the claude-<family>-* subset. Ranking
+#                      exclusions still apply (pick_best applies them inside
+#                      the subset). An empty subset OR a fully-excluded subset
+#                      warns and falls back to pick_best over the full listing.
 #
-# When ROLE_FALLBACK_FILE is set, writes "true" on the opus-class fallback
-# path and "false" otherwise so cmd_apply can record implementer_fallback
-# in the artifact (see the constant's comment for the subshell rationale).
+# The family is derived from the strategy (`family="${strategy%-class}"`,
+# `prefix="claude-$family-"`) rather than matched against an enum, so
+# `sonnet-class` / `fable-class` / `haiku-class` and every future family work
+# with no edit here. See STRATEGY_CLASS_RE for why the family is not validated
+# against the ranking file and what replaces that validation.
+#
+# When ROLE_FALLBACK_FILE is set, writes "true" on the class fallback path and
+# "false" otherwise so cmd_apply can record the per-role fallback flag in the
+# artifact (see the constant's comment for the subshell rationale).
 pick_for_role() {
     local models="$1" strategy="$2"
     case "$strategy" in
-        opus-class)
-            local subset n
+        top)
+            [ -n "$ROLE_FALLBACK_FILE" ] && printf 'false' > "$ROLE_FALLBACK_FILE"
+            pick_best "$models"
+            ;;
+        *-class)
+            local family prefix subset n
+            family="${strategy%-class}"
+            prefix="claude-$family-"
             subset=$(printf '%s' "$models" \
-                | jq -c '[.[] | select(.id | startswith("claude-opus-"))]' 2>/dev/null)
+                | jq -c --arg p "$prefix" '[.[] | select(.id | startswith($p))]' 2>/dev/null)
             n=$(printf '%s' "$subset" | jq -r 'length' 2>/dev/null)
             if [ -z "$n" ] || [ "$n" = "0" ]; then
-                _warn "no claude-opus-* model in listing; implementer falls back to top"
+                _warn "no ${prefix}* model in listing; '$strategy' falls back to top$(_typo_hint "$family")"
                 [ -n "$ROLE_FALLBACK_FILE" ] && printf 'true' > "$ROLE_FALLBACK_FILE"
                 pick_best "$models"
                 return
@@ -585,7 +756,7 @@ pick_for_role() {
             sub_pick=$(pick_best "$subset")
             sub_rc=$?
             if [ "$sub_rc" -ne 0 ] || [ -z "$sub_pick" ]; then
-                _warn "all claude-opus-* models excluded by ranking; implementer falls back to top"
+                _warn "all ${prefix}* models excluded by ranking; '$strategy' falls back to top"
                 [ -n "$ROLE_FALLBACK_FILE" ] && printf 'true' > "$ROLE_FALLBACK_FILE"
                 pick_best "$models"
                 return
@@ -593,31 +764,95 @@ pick_for_role() {
             [ -n "$ROLE_FALLBACK_FILE" ] && printf 'false' > "$ROLE_FALLBACK_FILE"
             printf '%s\n' "$sub_pick"
             ;;
-        top|*)
+        *)
+            # Unreachable via role_strategy (which returns `top` or a value
+            # matching STRATEGY_CLASS_RE). Kept so a direct caller with a
+            # malformed strategy degrades to the fail-open default rather than
+            # falling out of the case with no output.
             [ -n "$ROLE_FALLBACK_FILE" ] && printf 'false' > "$ROLE_FALLBACK_FILE"
             pick_best "$models"
             ;;
     esac
 }
 
-# write_roles_artifact — atomically write the resolved-mapping artifact.
-# Args: orch_id impl_id rev_id orch_strat impl_strat rev_strat impl_fallback lane source
+# _missing_role_keys — print the space-separated subset of the config keys this
+# install's .claude/model-roles does NOT carry.
+#
+# WHY THIS EXISTS (correction 14). `.claude/model-roles` is manifest class
+# `operator`, so an install whose copy was EDITED receives the v5 defaults as a
+# `.claude/model-roles.new` SIDECAR and keeps running its old key set — which
+# on a v4 install means no `designer`, no `design_reviewer`, no
+# `implementer_class_high`, and `implementer=opus-class`. Every one of those
+# fails OPEN (a missing key is `top`), so nothing errors and nothing is
+# visible. This list is what makes it visible: it rides the artifact, the
+# statusline reads the rest of the artifact anyway, and session-start.sh turns
+# it into a one-line warning naming the sidecar.
+_missing_role_keys() {
+    local k out=""
+    for k in $ALL_ROLES "$ESCALATION_KEY"; do
+        if [ -z "$(_model_roles_value "$k")" ]; then
+            out="${out:+$out }$k"
+        fi
+    done
+    printf '%s' "$out"
+}
+
+# write_roles_artifact — atomically write the resolved-mapping artifact
+# (SCHEMA 2, v5.0.0 / D0).
+#
+# Args:
+#   $1 tsv    path to a `role<TAB>strategy<TAB>pick<TAB>fallback` file, one
+#             line per role, in ALL_ROLES order
+#   $2 reviewer_lane   $3 design_reviewer_lane
+#   $4 implementer_fallback (json bool)
+#   $5 escalation_strategy  $6 escalation_resolved
+#   $7 identity_collapse    (json bool)
+#   $8 missing_keys         (space-separated; may be empty)
+#   $9 listing source
+#
+# The nine flat variables schema 1 used are gone: five roles x three fields
+# would have been fifteen. The TSV is built by ONE loop in cmd_apply and
+# consumed by ONE jq pass here — bash 3.2 is the floor, so no associative
+# arrays.
+#
+# `implementer_fallback` is RETAINED as a top-level boolean even though
+# `fallbacks.implementer` now carries the same fact: ms-R1 and ms-R2 assert on
+# the top-level key, and a schema bump is not a licence to break the readers
+# that motivated the field.
+#
 # On any failure the previous artifact is left untouched (stale-beats-none).
 write_roles_artifact() {
-    local orch="$1" impl="$2" rev="$3" os="$4" is="$5" rs="$6" fb="$7" lane="$8" src="$9"
+    local tsv="$1" rlane="$2" dlane="$3" fb="$4" escs="$5" escr="$6" \
+          collapse="$7" missing="$8" src="$9"
     mkdir -p "$(dirname "$ROLES_ARTIFACT")"
-    local ts
+    local ts missing_json
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    if jq -n \
+    missing_json=$(printf '%s' "$missing" \
+        | jq -R -c 'split(" ") | map(select(length > 0))' 2>/dev/null) \
+        || missing_json='[]'
+    [ -n "$missing_json" ] || missing_json='[]'
+    if jq -R -s \
         --arg ts "$ts" --arg src "$src" \
-        --arg orch "$orch" --arg impl "$impl" --arg rev "$rev" \
-        --arg os "$os" --arg is "$is" --arg rs "$rs" \
-        --argjson fb "$fb" --arg lane "$lane" \
-        '{resolved_at:$ts, listing_source:$src,
-          roles:{orchestrator:$orch, implementer:$impl, reviewer:$rev},
-          strategies:{orchestrator:$os, implementer:$is, reviewer:$rs},
-          implementer_fallback:$fb, reviewer_lane:$lane}' \
-        > "$ROLES_ARTIFACT.tmp" 2>/dev/null; then
+        --arg rlane "$rlane" --arg dlane "$dlane" \
+        --argjson fb "$fb" \
+        --arg escs "$escs" --arg escr "$escr" \
+        --argjson collapse "$collapse" \
+        --argjson missing "$missing_json" \
+        '
+        [ split("\n")[] | select(length > 0) | split("\t") ] as $rows
+        | { schema: 2,
+            resolved_at: $ts,
+            listing_source: $src,
+            roles:      ($rows | map({key: .[0], value: .[2]}) | from_entries),
+            strategies: ($rows | map({key: .[0], value: .[1]}) | from_entries),
+            fallbacks:  ($rows | map({key: .[0], value: (.[3] == "true")}) | from_entries),
+            implementer_fallback: $fb,
+            reviewer_lane: $rlane,
+            design_reviewer_lane: $dlane,
+            escalation: { strategy: $escs, resolved: $escr },
+            identity_collapse: $collapse,
+            missing_keys: $missing }
+        ' < "$tsv" > "$ROLES_ARTIFACT.tmp" 2>/dev/null; then
         mv "$ROLES_ARTIFACT.tmp" "$ROLES_ARTIFACT"
     else
         rm -f "$ROLES_ARTIFACT.tmp"
@@ -635,14 +870,48 @@ write_roles_artifact() {
 # is enough). The no-arg form defaults to `orchestrator` — that preserves
 # the pre-V1 contract (current_pin == orchestrator pin) for any caller or
 # test wrapper that invokes it without a role.
+#
+# EVERY ROLE IN ALL_ROLES NEEDS AN ARM HERE, AND THE CATCH-ALL WARNS.
+#
+# Through v4.1 the last arm was `orchestrator|*)`, a SILENT catch-all, and it
+# is the sharpest hazard D0 had to disarm. A role with no arm read
+# orchestrator.md's pin, so _apply_role compared the NEW lane's desired model
+# against the ORCHESTRATOR's current one, found them equal on the common case
+# where both resolve to `top`, and returned 1 — "no switch needed". No error,
+# no warning, exit 0. Both design lanes would have reported as pinned and never
+# been written, and the only observable would have been a switch count one or
+# two lower than expected in a line nobody diffs.
+#
+# So `orchestrator` is now its own arm and `*)` is a loud fallback. It still
+# reads the orchestrator file (fail-open: a diagnostic must not make the
+# resolver stop resolving) but it says so, and the message names the failure
+# mode rather than the symptom. Guarded by model-roles.test.sh section 6,
+# whose reddening mutation deletes the `designer)` arm from a copy and asserts
+# the copy reads orchestrator.md's pin for the designer role.
+# _role_agent_file <role> — the path of the role's representative agent file.
+# Extracted so current_pin (which READS the pin) and _apply_role (which decides
+# whether the lane is present at all) resolve it through one arm set. Two
+# copies of this case statement is exactly the drift the catch-all note below
+# is about.
+_role_agent_file() {
+    local role="$1"
+    case "$role" in
+        designer)        printf '%s' "$DESIGNER_AGENT" ;;
+        design_reviewer) printf '%s' "$DESIGN_REVIEWER_AGENT" ;;
+        orchestrator)    printf '%s' "$ORCH_AGENT" ;;
+        implementer)     printf '%s' "$IMPL_AGENT" ;;
+        reviewer)        printf '%s' "$REVIEWER_AGENT" ;;
+        *)
+            _warn "role '$role' has no representative agent file; falling back to the orchestrator's. A role missing an arm here reads ANOTHER lane's pin, so _apply_role can compare it against the wrong current value and skip that lane's rewrite with no error. Add an arm to _role_agent_file() in $0."
+            printf '%s' "$ORCH_AGENT"
+            ;;
+    esac
+}
+
 current_pin() {
     local role="${1:-orchestrator}"
     local f
-    case "$role" in
-        implementer) f="$IMPL_AGENT" ;;
-        reviewer)    f="$REVIEWER_AGENT" ;;
-        orchestrator|*) f="$ORCH_AGENT" ;;
-    esac
+    f=$(_role_agent_file "$role")
     [ -f "$f" ] || return 0
     grep -E '^model:' "$f" | head -1 | awk '{print $2}'
 }
@@ -762,11 +1031,58 @@ cmd_resolve() {
 # ---------------------------------------------------------------------------
 
 # _apply_role <role> <new-id> — rewrite one lane when its representative
-# pin differs from <new-id>, and record a role-tagged switch. Returns 0
-# when a switch happened (so the caller can count switches), 1 on no-op or
-# a rewrite failure. Honors QUIET for the per-file rewrite chatter.
+# pin differs from <new-id>, and record a role-tagged switch. Honors QUIET for
+# the per-file rewrite chatter.
+#
+# THE EXIT STATUS IS AN INTERFACE, NOT A BOOLEAN (QA R1-F5). It returned 1 for
+# three outcomes that are not interchangeable, and both escalate and restore
+# read that 1 as "already there":
+#
+#   0  switched  the rewrite ran and the pin moved.
+#   1  no-op     the lane is already at <new-id>. Nothing to do, nothing wrong.
+#   2  skipped   no representative agent file — the lane does not exist here.
+#                NOTHING was rewritten; the helper was never called.
+#   3  failed    the helper ran and FAILED. The pin did not move, and a
+#                multi-file class may have moved PARTIALLY.
+#
+# Measured on the shipped code before the fix: with a helper that exits 1,
+# `restore` printed "rewrite helper failed for role implementer" and then
+# "restore: implementer lane already at claude-sonnet-7 (no rewrite needed)"
+# — while the pin was still claude-opus-5-0 — and deleted the escalation
+# record, leaving a lane that `restore` could no longer put back. Deleting a
+# record on the strength of a failure is the part that made it unrecoverable,
+# and a status that cannot tell a failure from a no-op is what let it.
+#
+# cmd_apply's `_apply_role … && switched=$((switched + 1))` is unaffected: it
+# counts only 0, and 1/2/3 are all "did not switch" there.
 _apply_role() {
-    local role="$1" new="$2" cur apply_out
+    local role="$1" new="$2" cur apply_out f
+
+    # A LANE WHOSE REPRESENTATIVE AGENT FILE DOES NOT EXIST IS SKIPPED
+    # ENTIRELY — no rewrite, no switch count, no audit comment.
+    #
+    # Without this the lane PHANTOM-SWITCHES on every single run. current_pin
+    # returns EMPTY for a missing file, so `"" != "$new"` holds forever: the
+    # helper is invoked (it skips the missing file and exits 0), the switch is
+    # counted, and a `MODEL SWITCH [<role>] <none> -> <id>` comment is written
+    # to the meta-task. The file never appears, so it repeats at every
+    # SessionStart — an unbounded stream of audit entries for a rewrite that
+    # never happened, and a switch count that never reaches zero.
+    #
+    # D0 made this reachable: designer.md / design-reviewer.md legitimately do
+    # not exist on a v4 install being upgraded, or on any install rendered
+    # before this release. It was latent for implementer/reviewer too (a
+    # missing backend.md or qa.md would do the same), and install.sh
+    # hard-requiring those five is the only reason it was never seen.
+    #
+    # Caught by ms-G's `(0 switched)` assertion: an apply where every existing
+    # pin already matched reported `(2 switched)`.
+    f=$(_role_agent_file "$role")
+    if [ ! -f "$f" ]; then
+        [ "$QUIET" -ne 1 ] && _warn "skipping role '$role': no agent file at $f (nothing to pin)"
+        return 2
+    fi
+
     cur=$(current_pin "$role")
     if [ "$cur" = "$new" ]; then
         return 1
@@ -774,11 +1090,24 @@ _apply_role() {
     if ! apply_out=$(bash "$APPLY_HELPER" --role "$role" "$new" 2>&1); then
         _result "rewrite helper failed for role $role (kept pin ${cur:-<none>})"
         [ "$QUIET" -ne 1 ] && printf '%s\n' "$apply_out" >&2
-        return 1
+        return 3
     fi
     [ "$QUIET" -ne 1 ] && printf '%s\n' "$apply_out" >&2
     record_switch_role "$role" "$cur" "$new"
     return 0
+}
+
+# _scratch_path <label> — a writable scratch path, preferring mktemp and
+# falling back inside .claude/.qa-tracking when TMPDIR is unusable. Shared by
+# the fallback side-channel and the role TSV so both degrade the same way.
+_scratch_path() {
+    local label="$1" p
+    p=$(mktemp "${TMPDIR:-/tmp}/model-roles-$label.XXXXXX" 2>/dev/null || true)
+    if [ -z "$p" ]; then
+        mkdir -p "$PROJECT_DIR/.claude/.qa-tracking" 2>/dev/null || true
+        p="$PROJECT_DIR/.claude/.qa-tracking/.model-roles-$label"
+    fi
+    printf '%s' "$p"
 }
 
 cmd_apply() {
@@ -794,103 +1123,367 @@ cmd_apply() {
     fi
     unknown_families_warning "$models"
 
-    # Strategy per role (fail-open to top on a missing/bad model-roles).
-    local orch_strat impl_strat rev_strat
-    orch_strat=$(role_strategy orchestrator)
-    impl_strat=$(role_strategy implementer)
-    rev_strat=$(role_strategy reviewer)
-
-    # Resolve ALL THREE roles FIRST, before touching any pin. The
-    # implementer opus-class fallback flag rides a filesystem side-channel
-    # (ROLE_FALLBACK_FILE) so it survives the pick_for_role $(...) subshell.
-    ROLE_FALLBACK_FILE=$(mktemp "${TMPDIR:-/tmp}/model-roles-fb.XXXXXX" 2>/dev/null || true)
-    if [ -z "$ROLE_FALLBACK_FILE" ]; then
-        mkdir -p "$PROJECT_DIR/.claude/.qa-tracking" 2>/dev/null || true
-        ROLE_FALLBACK_FILE="$PROJECT_DIR/.claude/.qa-tracking/.model-roles-fb"
-    fi
+    # ONE loop over ALL_ROLES resolves every lane into a TSV
+    # (`role<TAB>strategy<TAB>pick<TAB>fallback`), and ONE jq pass turns that
+    # into the artifact. v4.1 carried nine flat variables for three roles; five
+    # roles would have been fifteen, and bash 3.2 (the floor) has no
+    # associative arrays. Adding a sixth role now costs one word in ALL_ROLES.
+    #
+    # Resolution happens for EVERY role BEFORE any pin is touched, unchanged
+    # from V1: the manual-adopt gate is all-or-nothing, so a partially-bogus
+    # listing must never leave the lanes straddling model generations.
+    ROLE_FALLBACK_FILE=$(_scratch_path fb)
     : > "$ROLE_FALLBACK_FILE" 2>/dev/null || true
+    local tsv
+    tsv=$(_scratch_path tsv)
+    : > "$tsv" 2>/dev/null || true
 
-    local orch_pick impl_pick rev_pick impl_fallback
-    orch_pick=$(pick_for_role "$models" "$orch_strat")
-    impl_pick=$(pick_for_role "$models" "$impl_strat")
-    impl_fallback=$(cat "$ROLE_FALLBACK_FILE" 2>/dev/null || printf 'false')
-    rev_pick=$(pick_for_role "$models" "$rev_strat")
+    # Prime the codex probe HERE, in the parent shell, so both
+    # $(detect_*_lane) subshells below inherit the memo and the probe shells
+    # out once per invocation rather than once per lane.
+    _codex_probe_once
+
+    local role strat pick fb pick_id
+    local manual=0 no_candidate=0 impl_fallback="false"
+    local designer_pick="" design_reviewer_pick=""
+    for role in $ALL_ROLES; do
+        strat=$(role_strategy "$role")
+        : > "$ROLE_FALLBACK_FILE" 2>/dev/null || true
+        pick=$(pick_for_role "$models" "$strat")
+        fb=$(cat "$ROLE_FALLBACK_FILE" 2>/dev/null || printf 'false')
+        [ -n "$fb" ] || fb="false"
+        [ "$role" = "implementer" ] && impl_fallback="$fb"
+
+        # pick_best's MANUAL path prefixes the id with `MANUAL<TAB>`, and a TAB
+        # inside a TSV cell would silently shift every later column. Strip it
+        # here and carry the flag in $manual instead; the MANUAL path bails
+        # before the artifact is written, so the stripped row is never
+        # serialised.
+        case "$pick" in
+            MANUAL$'\t'*)
+                manual=1
+                pick_id="${pick#MANUAL$'\t'}"
+                _result "manual adoption required for $role '$pick_id' — run /workflow-model --role $role $pick_id"
+                ;;
+            "")
+                no_candidate=1
+                pick_id=""
+                ;;
+            *) pick_id="$pick" ;;
+        esac
+        [ "$role" = "designer" ]        && designer_pick="$pick_id"
+        [ "$role" = "design_reviewer" ] && design_reviewer_pick="$pick_id"
+        printf '%s\t%s\t%s\t%s\n' "$role" "$strat" "$pick_id" "$fb" >> "$tsv"
+    done
+
+    # Escalation (v5.0.0 / D0). Resolved through the SAME role_strategy +
+    # pick_for_role path so it can never drift from the lanes, but recorded
+    # under `escalation` rather than `roles`: it owns no agent files, so a
+    # roles[] entry would make check_parity look for one.
+    local esc_strat esc_pick
+    esc_strat=$(role_strategy "$ESCALATION_KEY")
+    : > "$ROLE_FALLBACK_FILE" 2>/dev/null || true
+    esc_pick=$(pick_for_role "$models" "$esc_strat")
+    case "$esc_pick" in
+        MANUAL$'\t'*) esc_pick="${esc_pick#MANUAL$'\t'}" ;;
+    esac
+
     rm -f "$ROLE_FALLBACK_FILE" 2>/dev/null || true
     ROLE_FALLBACK_FILE=""
-    [ -n "$impl_fallback" ] || impl_fallback="false"
 
     # No-candidate on ANY role -> fail-open, keep every pin, no artifact.
-    if [ -z "$orch_pick" ] || [ -z "$impl_pick" ] || [ -z "$rev_pick" ]; then
+    if [ "$no_candidate" -eq 1 ]; then
+        rm -f "$tsv" 2>/dev/null || true
         _result "ranking produced no candidate for one or more roles; keeping current pin"
         return 0
     fi
 
-    # All-or-nothing manual-adopt gate: if ANY role's winner needs manual
-    # adoption (unparseable created_at, surfaced by pick_best as a MANUAL\t
-    # stdout prefix), emit a loud per-role notice, keep EVERY pin unchanged,
-    # and do NOT write the artifact. A partially-bogus listing must never
-    # leave the lanes straddling mixed model generations.
-    local manual=0 mid
-    case "$orch_pick" in
-        MANUAL$'\t'*)
-            manual=1; mid="${orch_pick#MANUAL$'\t'}"
-            _result "manual adoption required for orchestrator '$mid' — run /workflow-model --role orchestrator $mid"
-            ;;
-    esac
-    case "$impl_pick" in
-        MANUAL$'\t'*)
-            manual=1; mid="${impl_pick#MANUAL$'\t'}"
-            _result "manual adoption required for implementer '$mid' — run /workflow-model --role implementer $mid"
-            ;;
-    esac
-    case "$rev_pick" in
-        MANUAL$'\t'*)
-            manual=1; mid="${rev_pick#MANUAL$'\t'}"
-            _result "manual adoption required for reviewer '$mid' — run /workflow-model --role reviewer $mid"
-            ;;
-    esac
     if [ "$manual" -eq 1 ]; then
+        rm -f "$tsv" 2>/dev/null || true
         _result "manual adoption required for one or more roles; keeping ALL pins unchanged (no artifact written)"
         return 0
     fi
 
     if [ ! -x "$APPLY_HELPER" ]; then
+        rm -f "$tsv" 2>/dev/null || true
         _result "missing apply helper at $APPLY_HELPER; skipping rewrite"
         return 0
     fi
 
-    # Determine the reviewer lane, then persist the resolved mapping
-    # atomically BEFORE the rewrites (a rewrite crash still leaves a
-    # truthful artifact of intent; fail-open paths above leave the previous
-    # artifact untouched — stale beats none).
-    local lane source
+    local lane dlane source
     lane=$(detect_reviewer_lane)
+    dlane=$(detect_design_reviewer_lane)
     source="api"; cache_fresh && source="cache"
-    write_roles_artifact "$orch_pick" "$impl_pick" "$rev_pick" \
-        "$orch_strat" "$impl_strat" "$rev_strat" "$impl_fallback" "$lane" "$source"
 
-    # Per-role apply.
-    local switched=0
-    _apply_role orchestrator "$orch_pick" && switched=$((switched + 1))
-    _apply_role implementer  "$impl_pick" && switched=$((switched + 1))
-    _apply_role reviewer     "$rev_pick"  && switched=$((switched + 1))
+    # IDENTITY COLLAPSE (decision 3): the designer and its reviewer resolving
+    # to one identity is a LOUD WARNING plus flags, never a block — a block
+    # would make the Codex-absent arm unrunnable, which is the whole fallback
+    # path. Condition: identical resolved id AND the design lane is `claude`.
+    # On the Sol lane the reviewing identity is not a Claude model at all, so
+    # equal Claude pins do not collapse anything.
+    #
+    # On a stock install without Codex, `designer` and `design_reviewer` are
+    # both `top` and this flag is therefore PERMANENTLY LIT. That is a known
+    # consequence of the locked default, documented with its two clearances in
+    # the .claude/model-roles header (install Codex, or set
+    # design_reviewer=<family>-class).
+    local collapse="false"
+    if [ -n "$designer_pick" ] && [ "$designer_pick" = "$design_reviewer_pick" ] \
+        && [ "$dlane" = "claude" ]; then
+        collapse="true"
+        _warn "identity collapse: designer and design_reviewer both resolve to '$designer_pick' on the claude design lane, so a design would be reviewed by its own model identity. Pins are still written and the session is NOT blocked. Clear it by installing Codex (design_reviewer_lane=auto then resolves to the Sol lane) or by setting design_reviewer to a family-class distinct from top in $MODEL_ROLES_FILE."
+    fi
+    mkdir -p "$(dirname "$COLLAPSE_FLAG")" 2>/dev/null || true
+    if [ "$collapse" = "true" ]; then
+        printf 'designer=%s design_reviewer=%s design_reviewer_lane=%s\n' \
+            "$designer_pick" "$design_reviewer_pick" "$dlane" > "$COLLAPSE_FLAG" 2>/dev/null || true
+    else
+        rm -f "$COLLAPSE_FLAG" 2>/dev/null || true
+    fi
+
+    # Persist the resolved mapping atomically BEFORE the rewrites (a rewrite
+    # crash still leaves a truthful artifact of intent; fail-open paths above
+    # leave the previous artifact untouched — stale beats none).
+    write_roles_artifact "$tsv" "$lane" "$dlane" "$impl_fallback" \
+        "$esc_strat" "$esc_pick" "$collapse" "$(_missing_role_keys)" "$source"
+
+    # Per-role apply, driven by the same TSV. Reading the picks back from the
+    # file the artifact was written from means the rewrite and the artifact
+    # cannot disagree about what was resolved.
+    local switched=0 summary=""
+    while IFS="$(printf '\t')" read -r role strat pick fb; do
+        [ -n "$role" ] || continue
+        _apply_role "$role" "$pick" && switched=$((switched + 1))
+        summary="${summary:+$summary }$role=$pick"
+    done < "$tsv"
+    rm -f "$tsv" 2>/dev/null || true
 
     local lane_note=""
-    [ "$lane" != "claude" ] && lane_note=" lane=$lane"
-    _result "roles: orch=$orch_pick impl=$impl_pick rev=$rev_pick${lane_note} ($switched switched)"
+    [ "$lane" != "claude" ] && lane_note=" reviewer_lane=$lane"
+    [ "$dlane" != "claude" ] && lane_note="$lane_note design_reviewer_lane=$dlane"
+    [ "$collapse" = "true" ] && lane_note="$lane_note identity_collapse=true"
+    _result "roles: $summary${lane_note} ($switched switched)"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands: escalate / restore (per-unit implementer escalation, D0).
+#
+# WHAT THIS IS, EXACTLY. A design unit may declare `implementer_class: high`;
+# that declaration is mechanised as the Beads label `impl-class-high`, and the
+# label is the ONLY machine surface. `escalate` resolves the
+# `implementer_class_high` strategy through the same role_strategy +
+# pick_for_role path the lanes use, records the intent, and repins the
+# implementer lane. `restore` puts the previous pin back.
+#
+# WHAT THIS IS NOT. Whether the Claude Code runtime honours a frontmatter
+# `model:` change made MID-SESSION is not established anywhere in this tree and
+# cannot be verified offline. So the claim this makes — in tests, in docs, in
+# release notes — is exactly: a declared, audited, reversible pin change. Never
+# "the unit ran on Opus."
+#
+# WHY IT IS NOT WIRED INTO qa-gate.sh. The gate stays free of model concerns.
+# `reviewer-lane-degradation.sh` already asserts zero `codex|reviewer[._]lane`
+# matches in the three gate scripts for the same reason: a gate that reasons
+# about model selection acquires a second, invisible way to refuse.
+#
+# CRASH SELF-HEALS THREE WAYS: session-end.sh calls `restore` best-effort, the
+# next SessionStart `cmd_apply` rewrites the implementer lane from the resolved
+# artifact regardless of the escalation state, and `restore` is idempotent so
+# an operator can always run it by hand.
+# ---------------------------------------------------------------------------
+
+cmd_escalate() {
+    local task="$ARG1"
+    if [ -z "$task" ]; then
+        _result "escalate: missing <task-id> (usage: model-select.sh escalate <task-id>)"
+        return 0
+    fi
+
+    local models rc
+    models=$(get_models)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _result "escalate: model listing unavailable; keeping the current implementer pin"
+        return 0
+    fi
+
+    local strat pick
+    strat=$(role_strategy "$ESCALATION_KEY")
+    pick=$(pick_for_role "$models" "$strat")
+    case "$pick" in
+        MANUAL$'\t'*)
+            _result "escalate: winner '${pick#MANUAL$'\t'}' needs manual adoption; keeping the current implementer pin"
+            return 0
+            ;;
+        "")
+            _result "escalate: ranking produced no candidate for '$strat'; keeping the current implementer pin"
+            return 0
+            ;;
+    esac
+
+    local cur
+    cur=$(current_pin implementer)
+
+    # IDEMPOTENT. Re-escalating the same task to the same id is a no-op, and
+    # must NOT overwrite previous_pin — doing so would record the escalated id
+    # as the thing to restore to, and `restore` would then be a no-op forever.
+    if [ -f "$ESCALATION_STATE" ] && command -v jq >/dev/null 2>&1; then
+        local prev_task prev_res
+        prev_task=$(jq -r '.task_id // empty' "$ESCALATION_STATE" 2>/dev/null || true)
+        prev_res=$(jq -r '.resolved // empty' "$ESCALATION_STATE" 2>/dev/null || true)
+        if [ "$prev_task" = "$task" ] && [ "$prev_res" = "$pick" ] && [ "$cur" = "$pick" ]; then
+            _result "escalate: '$task' already escalated to $pick (no change)"
+            return 0
+        fi
+    fi
+
+    if [ ! -x "$APPLY_HELPER" ]; then
+        _result "escalate: missing apply helper at $APPLY_HELPER; skipping rewrite"
+        return 0
+    fi
+
+    # previous_pin IS THE PRE-ESCALATION PIN, NOT "WHATEVER THE PIN IS NOW"
+    # (QA R1-F5). The idempotency guard above only catches a re-escalation of
+    # the SAME task to the SAME id; escalating a DIFFERENT task while one is
+    # live fell through to here and recorded previous_pin=$cur — which by then
+    # is the ESCALATED id. Measured: escalate A, escalate B, restore, and the
+    # lane came back to claude-opus-5-0 instead of claude-sonnet-7, with every
+    # later restore a no-op against a record that could not undo anything.
+    #
+    # So a live record's previous_pin is carried forward verbatim. D0 ships no
+    # caller, but D4/D5 run parallel unit batches over ONE implementer lane,
+    # which is exactly where a second escalation arrives while the first is up.
+    # `supersedes` keeps the displaced task id in the audit trail rather than
+    # dropping it, and it is present only when there was one.
+    local prev_pin="$cur" superseded="" live_prev live_task
+    if [ -f "$ESCALATION_STATE" ] && command -v jq >/dev/null 2>&1; then
+        live_prev=$(jq -r '.previous_pin // empty' "$ESCALATION_STATE" 2>/dev/null || true)
+        live_task=$(jq -r '.task_id // empty' "$ESCALATION_STATE" 2>/dev/null || true)
+        if [ -n "$live_prev" ]; then
+            prev_pin="$live_prev"
+            if [ "$live_task" != "$task" ]; then
+                superseded="$live_task"
+                _warn "escalate: an escalation for '${live_task:-<unknown>}' is already live on the implementer lane; previous_pin stays '$prev_pin' so restore still returns the lane to its pre-escalation model"
+            fi
+        fi
+    fi
+
+    # WRITE THE STATE BEFORE THE REWRITE. If the rewrite crashes half way, the
+    # recorded previous_pin is what makes the lane recoverable; a state file
+    # written afterwards would be missing in exactly the case it is needed.
+    mkdir -p "$(dirname "$ESCALATION_STATE")" 2>/dev/null || true
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if jq -n --arg task "$task" --arg ts "$ts" --arg strat "$strat" \
+        --arg pick "$pick" --arg prev "$prev_pin" --arg sup "$superseded" \
+        '{task_id:$task, escalated_at:$ts, strategy:$strat, resolved:$pick,
+          previous_pin:$prev,
+          restore_command:"bash .claude/scripts/model-select.sh restore",
+          claim:"declared, audited, reversible pin change; NOT evidence that any subagent ran on this model"}
+         + (if $sup == "" then {} else {supersedes:$sup} end)' \
+        > "$ESCALATION_STATE.tmp" 2>/dev/null; then
+        mv "$ESCALATION_STATE.tmp" "$ESCALATION_STATE"
+    else
+        rm -f "$ESCALATION_STATE.tmp" 2>/dev/null || true
+        _result "escalate: could not record escalation state; refusing to repin (the lane would not be restorable)"
+        return 0
+    fi
+
+    # Each _apply_role outcome gets its own answer. `|| ar_rc=$?` rather than
+    # `if`, because the interesting statuses are the non-zero ones.
+    local ar_rc=0
+    _apply_role implementer "$pick" || ar_rc=$?
+    case "$ar_rc" in
+        0) _result "escalate: implementer lane pinned to $pick for '$task' (was ${cur:-<none>}); reverse with: model-select.sh restore" ;;
+        1) _result "escalate: implementer lane already at $pick for '$task' (no rewrite needed)" ;;
+        2)
+            # Nothing was rewritten — the skip happens BEFORE the helper call —
+            # so a record here would claim an escalation that provably did not
+            # happen and would light !esc on the statusline until someone ran
+            # restore. Drop it. This is not the crash case the write-first rule
+            # above protects: we know exactly what did not happen.
+            rm -f "$ESCALATION_STATE" 2>/dev/null || true
+            _result "escalate: no agent file for the implementer lane; NOTHING was repinned for '$task' and the escalation record was dropped"
+            ;;
+        *)
+            _result "escalate: the rewrite helper FAILED; the implementer lane was NOT pinned to $pick for '$task'. The escalation record is KEPT so 'model-select.sh restore' can undo a partial rewrite — run it before retrying."
+            ;;
+    esac
+}
+
+cmd_restore() {
+    if [ ! -f "$ESCALATION_STATE" ]; then
+        _result "restore: no active escalation (nothing to do)"
+        return 0
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        _result "restore: jq unavailable; cannot read $ESCALATION_STATE"
+        return 0
+    fi
+    local prev task
+    prev=$(jq -r '.previous_pin // empty' "$ESCALATION_STATE" 2>/dev/null || true)
+    task=$(jq -r '.task_id // empty' "$ESCALATION_STATE" 2>/dev/null || true)
+    if [ -z "$prev" ]; then
+        # No previous pin recorded (the lane was unpinned when it escalated).
+        # Dropping the state is still the right move: leaving it would make
+        # every later restore a no-op against a record it cannot act on.
+        rm -f "$ESCALATION_STATE" 2>/dev/null || true
+        _result "restore: escalation record for '${task:-<unknown>}' had no previous pin; cleared the record, left the pin alone"
+        return 0
+    fi
+    if [ ! -x "$APPLY_HELPER" ]; then
+        _result "restore: missing apply helper at $APPLY_HELPER; escalation record kept for a later retry"
+        return 0
+    fi
+    # THE RECORD IS DROPPED ONLY WHEN THE LANE IS PROVABLY BACK (QA R1-F5). It
+    # used to be `rm -f` unconditionally, one line after a rewrite failure the
+    # helper had already reported — so the single artifact that made the lane
+    # restorable was deleted on exactly the runs where it was still needed.
+    #
+    # Keeping it on failure cannot strand anything: session-end.sh runs restore
+    # best-effort every session, and once the pin is back the retry lands on the
+    # rc=1 no-op arm, which clears the record. A stale !esc flag is visible and
+    # self-healing; a lost record is neither.
+    local ar_rc=0
+    _apply_role implementer "$prev" || ar_rc=$?
+    case "$ar_rc" in
+        0)
+            _result "restore: implementer lane returned to $prev (was escalated for '${task:-<unknown>}')"
+            rm -f "$ESCALATION_STATE" 2>/dev/null || true
+            ;;
+        1)
+            _result "restore: implementer lane already at $prev (no rewrite needed)"
+            rm -f "$ESCALATION_STATE" 2>/dev/null || true
+            ;;
+        2)
+            _result "restore: no agent file for the implementer lane, so nothing could be repinned to $prev; the escalation record is KEPT (other members of the class may still be escalated)"
+            ;;
+        *)
+            _result "restore: the rewrite helper FAILED; the implementer lane was NOT returned to $prev. The escalation record is KEPT — fix the helper and rerun: model-select.sh restore"
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
 # Subcommand: status.
 # ---------------------------------------------------------------------------
 
-# _drift_check <role> <agent...> — warn when members of a role class hold
-# different pins (intra-role lockstep drift). Silent when they agree or a
-# member file is absent.
+# _drift_check <role> — warn when members of a role class hold different pins
+# (intra-role lockstep drift). Silent when they agree or a member file is
+# absent.
+#
+# DISCOVERY, not a hardcoded member list (D0): the class members come from
+# `workflow-model-apply.sh --print-role-map`, which derives them from
+# role_agents() — the single source of truth the rewrite itself uses. Before
+# D0 this function was called with the member names spelled out, so a class
+# that gained an agent kept checking the old set and reported "no drift" over
+# a member it never read.
 _drift_check() {
-    local role="$1"; shift
-    local first="" agent pin f
-    for agent in "$@"; do
+    local role="$1"
+    local first="" agent pin f maprole
+    while IFS="$(printf '\t')" read -r maprole agent; do
+        [ "$maprole" = "$role" ] || continue
+        [ -n "$agent" ] || continue
         f="$PROJECT_DIR/.claude/agents/$agent.md"
         [ -f "$f" ] || continue
         pin=$(grep -E '^model:' "$f" | head -1 | awk '{print $2}')
@@ -899,7 +1492,9 @@ _drift_check() {
         elif [ "$pin" != "$first" ]; then
             _warn "intra-role drift in '$role': $agent pinned '$pin' but '$first' expected — run model-select.sh apply or /workflow-model --role $role <id>"
         fi
-    done
+    done <<EOF
+$(bash "$APPLY_HELPER" --print-role-map 2>/dev/null || true)
+EOF
 }
 
 cmd_status() {
@@ -911,8 +1506,11 @@ cmd_status() {
         models=$(read_cache_models)
     fi
 
-    printf 'role           strategy    pinned                    resolved\n'
-    for role in orchestrator implementer reviewer; do
+    # Prime the codex probe once for both lane reads below.
+    _codex_probe_once
+
+    printf 'role              strategy       pinned                    resolved\n'
+    for role in $ALL_ROLES; do
         strat=$(role_strategy "$role")
         pin=$(current_pin "$role")
         resolved="<no cache>"
@@ -926,21 +1524,31 @@ cmd_status() {
                 *)            resolved="$raw" ;;
             esac
         fi
-        printf '  %-13s%-12s%-26s%s\n' "$role" "$strat" "${pin:-<unset>}" "$resolved"
+        printf '  %-16s%-15s%-26s%s\n' "$role" "$strat" "${pin:-<unset>}" "$resolved"
     done
 
+    # The escalation strategy is reported OUTSIDE the role table, because it is
+    # not a role: it owns no agent files, so it has no "pinned" column.
+    printf '  %-16s%-15s%-26s%s\n' "(escalation)" "$(role_strategy "$ESCALATION_KEY")" \
+        "-" "$([ -f "$ESCALATION_STATE" ] && printf 'ACTIVE' || printf 'inactive')"
+
     if [ "$age" -lt 0 ]; then
-        printf 'cache:         absent\n'
+        printf 'cache:              absent\n'
     elif cache_fresh; then
-        printf 'cache:         fresh (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
+        printf 'cache:              fresh (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
     else
-        printf 'cache:         stale (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
+        printf 'cache:              stale (%ds old, TTL %ds)\n' "$age" "$CACHE_TTL_SECONDS"
     fi
     printf 'reviewer lane: %s\n' "$(detect_reviewer_lane)"
+    printf 'design reviewer lane: %s\n' "$(detect_design_reviewer_lane)"
+    local missing
+    missing=$(_missing_role_keys)
+    [ -n "$missing" ] && printf 'missing model-roles keys: %s\n' "$missing"
 
-    # Intra-role lockstep drift warnings (implementer/reviewer classes).
-    _drift_check implementer backend frontend devops
-    _drift_check reviewer qa grader judge
+    # Intra-role lockstep drift warnings, over every class in the role map.
+    for role in $ALL_ROLES; do
+        _drift_check "$role"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -953,7 +1561,7 @@ cmd_status() {
 # interface for tests and operators.
 cmd_roles() {
     local role strat rid
-    for role in orchestrator implementer reviewer; do
+    for role in $ALL_ROLES; do
         strat=$(role_strategy "$role")
         rid=""
         if [ -f "$ROLES_ARTIFACT" ]; then
@@ -972,9 +1580,12 @@ case "$SUBCMD" in
     apply)    cmd_apply ;;
     status)   cmd_status ;;
     roles)    cmd_roles ;;
+    escalate) cmd_escalate ;;
+    restore)  cmd_restore ;;
     ""|help|-h|--help)
         cat <<'USAGE'
-model-select.sh — automatic best-model selection (spec 0.3 + V1 roles).
+model-select.sh — automatic best-model selection (spec 0.3 + V1 roles + D0
+five-role expansion).
 
 Usage:
   model-select.sh resolve [--quiet] [--refresh]
@@ -983,13 +1594,27 @@ Usage:
       resolve every role -> rewrite each lane's pins -> record switches
   model-select.sh status
       print the per-role table (role, strategy, pinned id, resolved id),
-      cache state, reviewer lane, and any intra-role drift
+      cache state, both review lanes, missing config keys, intra-role drift
   model-select.sh roles
       print "role\tstrategy\tresolved-id" (config + resolved artifact)
+  model-select.sh escalate <task-id>
+      resolve `implementer_class_high` and repin the implementer lane to it,
+      recording the previous pin first so the change is reversible
+  model-select.sh restore
+      undo an escalation: put the recorded previous implementer pin back
 
-Roles and strategies live in .claude/model-roles (orchestrator/implementer/
-reviewer -> top|opus-class; optional reviewer_lane=auto|claude). The
-resolved mapping is written to .claude/.qa-tracking/model-roles-resolved.json.
+Roles (designer, design_reviewer, orchestrator, implementer, reviewer) and
+their strategies live in .claude/model-roles. A strategy is `top` or
+`<family>-class` (opus-class, sonnet-class, ... — any lowercase family; the
+grammar is one rule, not an enum). Optional: reviewer_lane and
+design_reviewer_lane (auto|claude), and implementer_class_high, which is a
+strategy rather than a role and owns no agent files. The resolved mapping is
+written to .claude/.qa-tracking/model-roles-resolved.json (schema 2).
+
+Escalation is a DECLARED, AUDITED, REVERSIBLE pin change. Whether the runtime
+honours a mid-session frontmatter model: change is not established here and is
+not verifiable offline, so nothing in this tree claims an escalated unit RAN
+on the escalated model.
 
 Honors $ANTHROPIC_API_KEY for the /v1/models lookup. Caches results in
 .claude/.qa-tracking/model-select-cache.json for 3600 seconds. Fails open

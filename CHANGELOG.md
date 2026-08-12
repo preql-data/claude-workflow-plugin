@@ -18,7 +18,179 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Model role classes expand from three to five** (`fkm.2`, v5.0.0 Phase D0).
+  `designer` and `design_reviewer` join `orchestrator`, `implementer` and
+  `reviewer`. Two new agents ship with their frontmatter and manifest
+  registration — `.claude/agents/designer.md` and
+  `.claude/agents/design-reviewer.md` — with the prompt bodies deliberately
+  left to Phases D1 and D2. They are created and registered in the same change
+  because an agent file that exists on disk and is absent from
+  `.claude-plugin/plugin.json` is silently invisible to the SDK: no error
+  surfaces anywhere.
+
+  - **The role set is now defined once.** `ALL_ROLES` in `model-select.sh` and
+    `CONCRETE_ROLES` in `workflow-model-apply.sh` are the only enumerations;
+    `status`, `roles`, `apply` and the drift check all iterate them, and a test
+    asserts the two agree. `cmd_apply` replaced nine flat variables with a
+    `role\tstrategy\tpick\tfallback` scratch file built by one loop and consumed
+    by one `jq` pass (bash 3.2 is the floor — no associative arrays).
+
+  - **`current_pin()` gained an explicit arm per role, and its catch-all now
+    warns.** This was the sharp edge of the expansion: the previous last arm was
+    `orchestrator|*)`, a silent catch-all, so a role with no arm read
+    `orchestrator.md`'s pin. `_apply_role` then compared the new lane's desired
+    model against the *orchestrator's* current one, found them equal, and
+    skipped the rewrite — no error, no warning, exit 0. Both design lanes would
+    have reported as pinned and never been written. Guarded by a META that
+    strips the `designer)` arm and asserts the lane goes unwritten while the
+    resolver still exits 0.
+
+  - **A lane whose representative agent file is absent is now skipped
+    entirely** — no rewrite, no switch count, no meta-task audit comment.
+    `current_pin` returns empty for a missing file, so `"" != "$desired"` held
+    on every run: the lane "switched" forever, was counted forever, and wrote a
+    `MODEL SWITCH [<role>] <none> -> <id>` audit comment forever, for a file
+    that does not exist. D0 made it reachable (`designer.md` /
+    `design-reviewer.md` legitimately do not exist on a v4 install being
+    upgraded); it was latent before that for any of the five. Found by the
+    component tier's `ms-G` assertion, which reported `(2 switched)` for an
+    apply where every existing pin already matched.
+
+  - **Strategy grammar generalised** from the `opus-class` literal to
+    `^[a-z][a-z0-9]*-class$`, so `sonnet-class`, `fable-class`, `haiku-class`
+    and any future family parse from one rule. Selection is deliberately NOT
+    gated on the family appearing in `.claude/model-ranking` — gating would kill
+    day-zero adoption of a new family — so a misspelt family instead earns a
+    "not a known tier — check for a typo" hint on the fallback warning.
+
+  - **Per-unit implementer escalation.** `model-select.sh escalate <task-id>`
+    resolves the new `implementer_class_high` strategy through the same
+    resolution path as the lanes, records the previous pin atomically **before**
+    repinning, and `restore` reverses it. Both are idempotent, and three restore
+    paths mean a crash self-heals: `session-end.sh` best-effort, the next
+    SessionStart `apply`, and an explicit `restore`. Deliberately **not** wired
+    into `qa-gate.sh` — the gate stays free of model concerns.
+
+    `_apply_role`'s exit status is an **interface, not a boolean**: `0` switched,
+    `1` no-op, `2` no agent file, `3` the rewrite helper failed. It returned `1`
+    for the last three alike, so both `escalate` and `restore` answered a
+    failure with "already at `<id>` (no rewrite needed)" one line after the
+    helper reported it — and `restore` then deleted the escalation record, the
+    one artifact that made the lane restorable. The record is now dropped only
+    when the lane is provably back (rc 0 or 1); a failure keeps it, and
+    `session-end.sh`'s next best-effort `restore` clears it once the pin
+    returns. Separately, `previous_pin` is the **pre-escalation** pin: escalating
+    a second task while one was live overwrote it with the escalated id, which
+    made every later `restore` a no-op. A live record's `previous_pin` is now
+    carried forward and the displaced task id is kept under `supersedes`.
+    D0 ships no caller for either path — D4/D5's parallel unit batches over one
+    implementer lane are where a second escalation actually arrives.
+
+    Escalation is a **declared, audited, reversible pin change and nothing
+    more.** Whether the Claude Code runtime honours a mid-session frontmatter
+    `model:` change is not established anywhere in this tree and is not
+    verifiable offline, so no test, doc or line here claims an escalated unit
+    *ran* on the escalated model.
+
+  - **Resolved-artifact schema 2**: five `roles`, five `strategies`, five
+    `fallbacks`, both lane keys, `escalation:{strategy,resolved}`,
+    `identity_collapse`, and `missing_keys`. The top-level
+    `implementer_fallback` boolean is retained because existing readers assert
+    on it. Escalation stays out of `roles` — it owns no agent files, and a
+    `roles[]` entry would make the role-map parity check look for one.
+
+  - **Identity collapse is reported, never blocked.** When `designer` and
+    `design_reviewer` resolve to the same model *and* the design lane is
+    `claude`, the resolver warns, writes
+    `.claude/.qa-tracking/design-family-collapse`, sets `identity_collapse` in
+    the artifact and lights `!id` on the statusline — then writes every pin and
+    exits 0. Blocking would make the Codex-absent arm unrunnable. On a stock
+    install without Codex the flag is permanently lit; the two clearances
+    (install Codex, or give `design_reviewer` a distinct family-class) are
+    documented in the `.claude/model-roles` header.
+
+  - **Session-model guard.** The root session is the orchestrator seat, and the
+    live session model is observable ONLY in the statusline's stdin envelope —
+    `session-start.sh` never reads stdin. So `statusline.sh` now reads that
+    envelope rather than draining it, compares `.model.id` against the resolved
+    orchestrator id, and persists the result read-compare-write (it runs on
+    every render). SessionStart Warning 8 re-validates the record against the
+    current artifact and prints the fix verbatim. Never blocks.
+
+    The comparison is by **model identity, not id string**. As literal equality
+    it made `claude-fable-5[1m]` — the 1M-context variant of the *correct*
+    model — read as drift forever, with a fix line telling the operator to move
+    to a smaller context window; this repo's own drift record carried that
+    shape. A trailing bracketed context-window marker is now separated from the
+    base id, and the rule is deliberately **asymmetric**: when the resolver
+    named no variant, any variant of that model matches; when it named one
+    (`pick_best` sorts `_ctx` DESC, so a resolved `[1m]` is a deliberate pick),
+    a session that is not on it is still drift and the fix line names the
+    variant. Stripping both sides would have deleted that true positive to fix
+    the false one.
+
+  - **SessionStart Warnings 8, 9 and 10 are covered by tests.** They shipped
+    with none — 63 lines of operator-facing notices with no assertion in any
+    tier (QA finding R1-F1). `model-roles.test.sh` section 10 now drives the
+    real hook in a hermetic sandbox and parses the envelope it emits: one
+    positive over state produced by the shipped resolver and the shipped
+    statusline, three negatives (a stale drift record, a config with nothing to
+    report, no artifact at all), and three METAs that disable one notice each
+    and prove the other two still fire. Warning 10 is the only surface that
+    makes correction 14 visible, and its regression mode is silence — the same
+    silence it exists to break.
+
+  - **Statusline renders five roles** by grouping equal values with `+` in the
+    fixed order `des dsr orch impl rev`, three groups then ` +<k> more`. It
+    iterates the roles PRESENT in the artifact, so a leftover three-role v4
+    artifact still renders with no upgrade step.
+
 ### Changed
+
+- **`implementer` moves from `opus-class` to `sonnet-class`** (`fkm.2`). A
+  deliberate quality-for-cost trade that the reviewed design artifact and the
+  green-to-green per-unit tests are meant to absorb, with per-unit escalation as
+  the safety valve. **Note the sequencing: this lands in D0 while that safety
+  machinery lands in D1-D5.** Track grader rounds per implementation task before
+  and after; the revert is one line in `.claude/model-roles`.
+
+- **`orchestrator` and `reviewer` keep `top`, which is NOT what the plan's D0
+  table specifies** (`fkm.2`, tracked as `fkm.10`; QA finding R1-F3). The plan
+  asks for latest Opus-class on `orchestrator`, and Sol-via-Codex with a latest
+  Opus-class fallback on `reviewer`. The Sol half ships; the two tiers do not.
+  Correction 7 licenses `top` for the DESIGN lanes only, and the reason does not
+  transfer: there `top` IS the Fable class the plan named, whereas Opus is not
+  the top family, so `top` on these two lanes is a *higher* tier than specified.
+  Deferred to D4 rather than applied here because D0 ships no working designer,
+  which leaves the orchestrator seat doing design-shaped work; because this
+  phase already lands one tier drop ahead of the machinery meant to absorb it;
+  and because `reviewer` is the gate's own seat. Recorded here and in the
+  `.claude/model-roles` header rather than left to be inferred — a deviation
+  nobody wrote down is indistinguishable from an oversight, which is the
+  standard this release is built on.
+
+- **Eight files stopped hardcoding agent/role lists** (`fkm.2`). The unit is a
+  FILE that no longer enumerates agents or roles, which is what the list below
+  can be counted against; two of the eight carried two enumerations apiece
+  (`workflow-model-apply.sh`, `model-roles.test.sh`), so the site count is ten.
+  The files:
+  `workflow-model-apply.sh`'s `all` role and its missing-file skip (which
+  name-tested `grader`/`judge` and would have printed a scary line for every
+  agent shipped afterwards), `model-select.sh`'s intra-role drift check,
+  `no-nested-spawn-instructions.test.sh`'s agent list,
+  `model-roles.test.sh`'s role and agent sets, the seven-agent loops in
+  `specs/model-select.sh` and `specs/model-roles-parity.sh`,
+  `specs/installer-mcp-config.sh`'s per-release agent presence assertions, and
+  `installer-flags.test.sh`'s synthetic source. Each conversion ships a
+  non-vacuity leg, because "every agent matched" is trivially true over an empty
+  set — which is the one failure a discovery conversion can introduce silently.
+
+  `specs/model-select.sh`'s ms-R4 snapshot also moved off
+  `eval PRE_R4_<agent>=`: `design-reviewer` is not a legal bash variable name,
+  so that form would have failed at exactly the moment discovery made it
+  reachable.
 
 - **The test runners stop scoring absence as green** (`a9hh`, `mwrb`). Both
   tier runners (`.claude/scripts/tests/run-tests.sh`,
