@@ -1414,20 +1414,62 @@ files change constantly here (`LESSONS.md` 37, `docs/HOOKS.md` 23,
 declared, the classifier still reads content type off the NAME: a `.txt` that is
 a golden test assertion, a bare `LICENSE` that is really a data file, and any
 behaviour-bearing document an install target keeps where the manifest does not
-look. Two specific residuals:
+look. One specific residual:
 
-- `docs/specs/<task-id>.md`, the v5 design record. `docs/` is deliberately never
-  scanned — in an install target it is the *operator's* directory, and a
-  `scan_flat` there would enumerate their own docs and let the uninstall walk
-  offer to move them out of their project. `claude-workflow-plugin-fkm.3` (D1)
-  owns that artifact and can disqualify it from the design RECORD that names the
-  file, or from a marker the designer writes into it — affirmative evidence
-  about that document rather than another path glob.
 - a **deletion** of a declared path, which resolves to no file and so is not in
   the enumeration. The same asymmetry, and the same defence, as the content
   veto's deletion contract above; a *correct* deletion of a plugin-owned
   artifact also moves `.claude-plugin/plugin.json` or a frozen table, neither of
   which is doc-named.
+
+**The design artifact was the other residual, and v5 D1
+(`claude-workflow-plugin-fkm.3`) closed it.** `docs/specs/*.md` is now declared
+in `runtime_contract_rows` beside `CLAUDE.md`, with origin `design-artifact`, so
+a change set consisting of exactly the design document no longer auto-approves
+with `reviewed_by=none`. It is the same mechanism as `CLAUDE.md` — a fact the
+project states about its own layout, inside the function `generate_rows` never
+calls, so still no install row, no upgrade verdict and no uninstall walk — with
+one difference stated plainly: `CLAUDE.md` is a named file and this is a
+**declared directory**, because the artifact is named for the task it designs
+and the set is only knowable at scan time. It remains a declaration rather than
+the path inference `bbh` removed: the row exists because the workflow writes its
+design artifact there, not because the name ends in `.md` or sits under `docs/`.
+An operator's own `docs/architecture.md`, and every other file in `docs/`, are
+untouched. Availability cost: one QA round per design revision, which is the
+review the design phase mandates anyway.
+
+**The declared directory is scanned for ENTRIES, not for regular files** (QA
+round 2 on that task, finding R2-F2). `scan_flat`, which builds the shipped
+surface, uses `find -maxdepth 1 -type f` — and that **excludes symlinks**, so a
+`docs/specs/<task-id>.md` pointing anywhere emitted no governing row at all and
+the fast path reopened for the design artifact itself. The declaration therefore
+has its own scanner, `scan_declared_dir`, which enumerates entries and declares a
+symlink — dangling ones included, on the same "an absent target is not evidence"
+reasoning the deletion residual above states. `scan_flat` is deliberately
+unchanged: it builds the surface whose output is frozen per release under
+`manifests/`, and `install.sh` copies files rather than links, so widening it
+would move frozen rows for a case no install path produces. The boundary is
+asserted from both sides — a symlink in the declared directory IS governing, a
+symlink in `.claude/agents/` leaves `generate` byte-identical.
+
+**The declared directory itself is scanned even when it is a symlink, and a
+directory it cannot READ is a failure rather than an empty answer** (QA round 4
+on the same task, findings R4-F3 and R4-F2). `find` will not descend a final
+directory-symlink operand without `-H`/`-L` — the same on BSD find and GNU
+findutils — while the `[ -d ]` guard above it does follow, so a `docs/specs`
+that is a symlink passed the guard and produced a silently empty scan. The
+scanner passes `-H`, which follows command-line operands only, leaving entries
+*inside* the directory reported as themselves. And the enumeration's exit status
+is now read: it used to run inside a process substitution with `2>/dev/null`, so
+a directory that is searchable but not listable (mode `0311`) returned zero rows
+at rc 0 while the artifact stayed readable by name. `governing` now exits
+non-zero and quotes find's own diagnostic. **Operationally that means one thing
+worth knowing:** if the declared directory's permissions are broken, the whole
+governing query fails, and `load_governing_set` logs
+`F1: the governing-artifact query failed …` to `sync-errors.log` and classifies
+as it did before the declaration existed. That is the documented fail-open on an
+*unanswerable* query; what changed is that an unreadable directory is now
+unanswerable instead of answering "nothing is declared".
 
 Both vetoes are pinned by
 `.claude/scripts/tests/doc-only-classifier.test.sh` (sections 4-8, including a

@@ -7,8 +7,26 @@ session that produced them ends.
 
 ## Index
 
-- `v5-design-phase.md` — v5.0.0 major release: design becomes a first-class,
-  independently reviewed, continuously enforced workflow phase. Phase P
+- `v5-design-phase-plan.md` — **the plan for v5.0.0, and the one to brief from.**
+  Mirrored 2026-08-12 from `~/.claude/plans/v5-0-0-design-stateless-wilkinson.md`
+  (`claude-workflow-plugin-omiv`), byte-for-byte below a provenance comment. It
+  carries the six planning decisions, the fourteen corrections to the directive
+  **in full**, and the per-phase detail established from source: Phase P's P0–P9
+  breakdown, D1's artifact schema, record grammars and two-layer edit ban, D2's
+  DS1–DS8 rubric and enforcement sites, D7's release checklist.
+  **Status**: see the `v5-design-phase.md` entry below — one arc, two documents.
+  **Read this one first.** The directive entry below is the input it was written
+  against; where they disagree, this file governs.
+
+- `v5-design-phase.md` — **the DIRECTIVE for v5.0.0** (the operator's original
+  request), preserved verbatim with a fourteen-item summary of the correction
+  layer appended. It is an input, not a plan: briefs citing sections by name
+  ("Corrections to the directive", "Phase D0 — role classes 3 → 5") are citing
+  the plan above, whose sections do not exist in this file. Kept under its
+  original filename because `qa-gate.sh`, `review-check.sh` and `HANDOFF.md`
+  already cite that path. Its scope, for the index: design becomes a
+  first-class, independently reviewed, continuously enforced workflow phase.
+  Phase P
   (prerequisite hardening of the signals v4.1 proved unreliable — `94d`
   change-set coverage, `qzv` label binding, `1nz` concurrent writers, `dxz`
   code-graph, `8zi`/`2ty`, runtime contract validation, `LESSONS.md` scoping,
@@ -27,7 +45,8 @@ session that produced them ends.
   real artifact. **Unplanned**: `bd` was upgraded 0.47.1 → 1.1.2
   (`claude-workflow-plugin-vfh`) after the committed `.beads/issues.jsonl`
   was found to be unimportable — a fresh clone recovered zero issues.
-  Session plan mirror at `~/.claude/plans/v5-0-0-design-stateless-wilkinson.md`.
+  Session plan mirror at `~/.claude/plans/v5-0-0-design-stateless-wilkinson.md`,
+  now also in-repo as `v5-design-phase-plan.md` (D1 / `omiv`).
 
 - `v4.1-upgrade-wave.md` — v4.1.0 minor release: U0 installer v3.5→v4
   upgrade path (priority), U1 follow-up burn-down (gz3/gl6/bjx), U2
@@ -94,6 +113,14 @@ session that produced them ends.
 
 ## Adding a new plan
 
+0. **Mirror the PLAN, not the request that produced it.** A planning session
+   normally leaves two documents: the operator's directive and the plan written
+   against it, the second of which exists precisely because the first is wrong
+   somewhere. Copying only the directive is the shape that produced
+   `claude-workflow-plugin-omiv` — every brief for v5 cited correction sections
+   that were not in the file it pointed at, and work stayed correct only because
+   the orchestrator carried the corrections inline each time. If both documents
+   are worth keeping, index both and say in each which one governs.
 1. Write the plan as a single markdown file in this directory.
 2. Open a Beads epic linked to the plan via `bd doc write`.
 3. Reference the plan from `CLAUDE.md` only if it is the active plan;

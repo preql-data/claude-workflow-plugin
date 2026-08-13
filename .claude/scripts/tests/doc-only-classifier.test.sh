@@ -472,7 +472,7 @@ assert_eq "6.0b the query tool really is beside it (not a stub, not absent)" "1"
 GROOT="$WORK/gov-project"
 mkdir -p "$GROOT/.claude/agents" "$GROOT/.claude/rubrics" "$GROOT/.claude/commands" \
          "$GROOT/.claude/skills/workflow-engine" "$GROOT/.claude/scripts" \
-         "$GROOT/docs/specs"
+         "$GROOT/docs/specs" "$GROOT/docs/design-notes"
 printf '# project memory\n'   > "$GROOT/CLAUDE.md"
 printf '# readme\n'           > "$GROOT/README.md"
 printf '# changelog\n'        > "$GROOT/CHANGELOG.md"
@@ -487,6 +487,21 @@ printf '#!/bin/bash\n'        > "$GROOT/.claude/scripts/qa-gate.sh"
 printf '# hooks reference\n'  > "$GROOT/docs/HOOKS.md"
 printf '# architecture\n'     > "$GROOT/docs/ARCHITECTURE.md"
 printf '# a design record\n'  > "$GROOT/docs/specs/claude-workflow-plugin-abc.md"
+# The anti-overreach partner for the design-artifact declaration (fkm.3 / D1):
+# a sibling directory under docs/ that the project declares NOTHING about. If
+# this ever classified reviewable, the declaration would have become the
+# path-shape inference bbh removed, wearing a different suffix.
+printf '# an operator note\n' > "$GROOT/docs/design-notes/idea.md"
+# A SYMLINKED design artifact (fkm.3 QA round 2, R2-F2). The declaration scanned
+# `find -maxdepth 1 -type f`, which EXCLUDES symlinks, so this path produced no
+# governing row at all and the F1 doc-only fast path reopened for the one
+# document the design phase exists to review. Its anti-overreach partner is a
+# symlink of the same shape in the undeclared sibling directory: the fix must be
+# "the DECLARED directory is scanned for entries", never "symlinks are special".
+mkdir -p "$GROOT/outside"
+printf '# a design record reached through a link\n' > "$GROOT/outside/linked-design.md"
+ln -sfn "../../outside/linked-design.md" "$GROOT/docs/specs/claude-workflow-plugin-lnk.md"
+ln -sfn "../../outside/linked-design.md" "$GROOT/docs/design-notes/linked-idea.md"
 # NOT created yet — 6f measures what happens when D0 adds it.
 GOV_ABSENT_AGENT=".claude/agents/designer.md"
 
@@ -505,6 +520,9 @@ CHANGELOG.md
 docs/ARCHITECTURE.md
 .claude/agents/notes.txt
 docs/specs/claude-workflow-plugin-abc.md
+docs/specs/claude-workflow-plugin-lnk.md
+docs/design-notes/idea.md
+docs/design-notes/linked-idea.md
 .claude/scripts/qa-gate.sh
 $GROOT/.claude/agents/qa.md
 $GROOT/README.md
@@ -535,14 +553,40 @@ for p in README.md CHANGELOG.md docs/ARCHITECTURE.md .claude/agents/notes.txt; d
         "DOC-ONLY" "$(verdict_of "$GOV" "$p")"
 done
 
-# 6c. THE DISCLOSED RESIDUAL, pinned so D1 closing it is loud rather than
-# silent. docs/ is deliberately never scanned by the manifest (an install
-# target's docs/ belongs to the operator), so the v5 design record at
-# docs/specs/<task-id>.md is still fast-pathable. claude-workflow-plugin-fkm.3
-# owns it and can disqualify it from the record that NAMES the file, which is
-# affirmative evidence rather than another path glob.
-assert_eq "6c residual: docs/specs/<task-id>.md is still DOC-ONLY (fkm.3 / D1 owns this)" \
-    "DOC-ONLY" "$(verdict_of "$GOV" "docs/specs/claude-workflow-plugin-abc.md")"
+# 6c. THE RESIDUAL THIS LEG USED TO PIN IS CLOSED (claude-workflow-plugin-fkm.3
+# / v5 D1). It read: "docs/specs/<task-id>.md is still DOC-ONLY", and it was
+# written so that D1 closing it would be a loud test change rather than a silent
+# behaviour drift. This is that change.
+#
+# The design artifact is the one document the whole design phase exists to
+# review, and while it was doc-only a change set consisting of exactly the design
+# auto-approved with reviewed_by=none. D1 declares docs/specs/*.md in
+# runtime_contract_rows beside CLAUDE.md, with its own origin token, so the
+# governing query sees it. It is still a DECLARATION and not the path-shape
+# inference bbh removed — the row exists because the workflow writes its design
+# artifact there, which is a fact about the project's layout, not because the
+# name ends in .md or sits under docs/.
+#
+# NOTE THIS LEG DEPENDS ON THE ARTIFACT EXISTING in the synthetic tree: the
+# enumeration is built from files that exist (the same deletion asymmetry the
+# region header states). classify_all's tree seeds it, so a leg that silently
+# stopped seeding it would fail here rather than pass.
+assert_eq "6c CLOSED: docs/specs/<task-id>.md is REVIEWABLE — the declared design artifact (fkm.3 / D1)" \
+    "reviewable" "$(verdict_of "$GOV" "docs/specs/claude-workflow-plugin-abc.md")"
+# ANTI-OVERREACH for the new declaration, and it is the leg that distinguishes
+# "declared directory" from "anything under docs/": a sibling directory in docs/
+# is the operator's and must keep the fast path.
+assert_eq "6c anti-overreach: docs/design-notes/idea.md (NOT the declared dir) is still DOC-ONLY" \
+    "DOC-ONLY" "$(verdict_of "$GOV" "docs/design-notes/idea.md")"
+# 6c2. THE SAME CLAIM FOR A SYMLINKED ARTIFACT (fkm.3 QA round 2, R2-F2). The
+# declaration's scan excluded symlinks, so this exact path had NO governing row
+# and auto-approved with reviewed_by=none — the F1 hole D1 exists to close,
+# reopened for the design artifact itself by one `ln -s`. The partner leg is
+# what keeps the fix a DECLARATION rather than a rule about link types.
+assert_eq "6c2 CLOSED: a SYMLINKED artifact in the declared dir is REVIEWABLE too" \
+    "reviewable" "$(verdict_of "$GOV" "docs/specs/claude-workflow-plugin-lnk.md")"
+assert_eq "6c2 anti-overreach: an identical symlink in the UNDECLARED sibling dir is DOC-ONLY" \
+    "DOC-ONLY" "$(verdict_of "$GOV" "docs/design-notes/linked-idea.md")"
 
 # 6d. Not a doc name at all -> unchanged; the veto is never consulted.
 assert_eq "6d .claude/scripts/qa-gate.sh is reviewable by NAME, before any veto" \

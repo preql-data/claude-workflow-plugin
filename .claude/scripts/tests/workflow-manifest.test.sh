@@ -418,15 +418,195 @@ assert_eq "governing: .claude/settings.local.json (per-machine) is NOT governing
     "0" "$(row_count "$GOV_TSV" ".claude/settings.local.json")"
 assert_eq "governing: .claude/scripts/tests/ never appears" \
     "0" "$(prefix_count "$GOV_TSV" ".claude/scripts/tests/")"
-# THE RESIDUAL, PINNED. docs/specs/<task-id>.md is the v5 design record
-# (fkm.3 / D1). docs/ is never scanned, so the query cannot see it and F1 still
-# fast-paths it. This is asserted rather than merely written down so that D1
-# closing it is a LOUD test change and not a silent behaviour drift.
+# THE RESIDUAL THIS PINNED IS CLOSED (claude-workflow-plugin-fkm.3 / v5 D1).
+# The leg read "docs/specs/<task-id>.md is NOT governing yet", asserted rather
+# than merely written down so that D1 closing it would be a LOUD test change and
+# not a silent behaviour drift. This is that change.
+#
+# The design artifact is declared in runtime_contract_rows beside CLAUDE.md, with
+# its OWN origin token, because the two declarations are different in kind:
+# CLAUDE.md is one named file, and the artifact is named for the task it designs,
+# so only the directory can be declared. Everything else about the mechanism is
+# unchanged — still outside generate_rows, so still no install row, no upgrade
+# verdict and no uninstall walk (the two controls below re-assert exactly that).
 mkfile "$SYN" "docs/specs/claude-workflow-plugin-abc.md" "# a design record"
+mkfile "$SYN" "docs/specs/claude-workflow-plugin-def.md" "# another design record"
+# ANTI-OVERREACH, seeded in the same tree so the two answers are measured
+# together: a SIBLING directory under docs/ that the project declares nothing
+# about must stay out. This is the leg that distinguishes "a declared directory"
+# from "anything under docs/", i.e. from the path-shape inference bbh removed.
+mkfile "$SYN" "docs/design-notes/idea.md" "# an operator note"
 bash "$SCRIPT" governing "$SYN" > "$WORK/governing-with-spec.tsv"
-assert_eq "governing: docs/specs/<task-id>.md is NOT governing yet — the fkm.3/D1 residual" \
-    "0" "$(row_count "$WORK/governing-with-spec.tsv" "docs/specs/claude-workflow-plugin-abc.md")"
-rm -rf "${SYN:?}/docs/specs"
+assert_eq "governing: docs/specs/<task-id>.md IS governing (fkm.3/D1 closed the residual)" \
+    "1" "$(row_count "$WORK/governing-with-spec.tsv" "docs/specs/claude-workflow-plugin-abc.md")"
+assert_eq "governing: ...with origin design-artifact, not runtime-contract" \
+    "design-artifact" "$(field_of "$WORK/governing-with-spec.tsv" "docs/specs/claude-workflow-plugin-abc.md" 2)"
+assert_eq "governing: the declaration is the DIRECTORY, so a second artifact needs no edit" \
+    "1" "$(row_count "$WORK/governing-with-spec.tsv" "docs/specs/claude-workflow-plugin-def.md")"
+assert_eq "governing: exactly 2 design-artifact rows, i.e. the scan is bounded to that directory" \
+    "2" "$(awk -F'\t' '$2 == "design-artifact"' "$WORK/governing-with-spec.tsv" | wc -l | tr -d ' ')"
+assert_eq "governing anti-overreach: docs/design-notes/idea.md is NOT governing" \
+    "0" "$(row_count "$WORK/governing-with-spec.tsv" "docs/design-notes/idea.md")"
+assert_eq "governing: docs/ARCHITECTURE.md is STILL not governing with docs/specs declared" \
+    "0" "$(row_count "$WORK/governing-with-spec.tsv" "docs/ARCHITECTURE.md")"
+
+# THE DECLARATION ENUMERATES DIRECTORY ENTRIES, NOT REGULAR FILES (fkm.3 QA
+# round 2, R2-F2). `scan_flat`'s `find -maxdepth 1 -type f` EXCLUDES symlinks,
+# and that was measured against the shipped scan before this: a symlinked
+# artifact produced NO row, so the F1 doc-only fast path reopened for the one
+# document the design phase exists to review — a change set of exactly that path
+# auto-approved with reviewed_by=none. A dangling link is declared for the same
+# reason an absent target is not evidence: the declaration is about the PATH.
+mkdir -p "$SYN/outside"
+printf '# a design record reached through a link\n' > "$SYN/outside/linked-design.md"
+ln -sfn "../../outside/linked-design.md" "$SYN/docs/specs/claude-workflow-plugin-lnk.md"
+ln -sfn "../../outside/gone.md"          "$SYN/docs/specs/claude-workflow-plugin-dead.md"
+# ANTI-OVERREACH partner, in the same tree so both answers are measured together.
+ln -sfn "../../outside/linked-design.md" "$SYN/docs/design-notes/linked-idea.md"
+bash "$SCRIPT" governing "$SYN" > "$WORK/governing-with-links.tsv"
+assert_eq "governing: a SYMLINKED artifact in the declared dir IS declared (R2-F2)" \
+    "1" "$(row_count "$WORK/governing-with-links.tsv" "docs/specs/claude-workflow-plugin-lnk.md")"
+assert_eq "governing: ...with the same design-artifact origin a regular file gets" \
+    "design-artifact" "$(field_of "$WORK/governing-with-links.tsv" "docs/specs/claude-workflow-plugin-lnk.md" 2)"
+assert_eq "governing: a DANGLING link is declared too (an absent target is not evidence)" \
+    "1" "$(row_count "$WORK/governing-with-links.tsv" "docs/specs/claude-workflow-plugin-dead.md")"
+assert_eq "governing: ...and its row is still <path>TAB<origin>, two fields" \
+    "0" "$(awk -F'\t' '$1 == "docs/specs/claude-workflow-plugin-dead.md" && NF != 2' "$WORK/governing-with-links.tsv" | grep -c . | tr -d '[:space:]')"
+assert_eq "governing: the two regular artifacts are still there (the scan did not swap one set for another)" \
+    "2" "$(awk -F'\t' '$1 == "docs/specs/claude-workflow-plugin-abc.md" || $1 == "docs/specs/claude-workflow-plugin-def.md"' "$WORK/governing-with-links.tsv" | wc -l | tr -d ' ')"
+assert_eq "governing anti-overreach: an identical symlink in the UNDECLARED sibling dir is NOT governing" \
+    "0" "$(row_count "$WORK/governing-with-links.tsv" "docs/design-notes/linked-idea.md")"
+# AND THE SHIPPED SURFACE IS UNTOUCHED. scan_flat still skips symlinks, which is
+# what keeps every frozen table under manifests/ reproducible — install.sh copies
+# files, not links, so a link in .claude/agents/ is not a shipped artifact.
+ln -sfn "qa.md" "$SYN/.claude/agents/linked-agent.md"
+bash "$SCRIPT" generate "$SYN" > "$WORK/generate-with-links.tsv"
+assert_eq "control: a symlink in .claude/agents/ does NOT enter the shipped surface" \
+    "0" "$(row_count "$WORK/generate-with-links.tsv" ".claude/agents/linked-agent.md")"
+assert_eq "control: ...so generate is byte-identical to the run before any link existed" \
+    "0" "$(cmp -s "$WORK/generate-with-links.tsv" "$SYN_TSV" && echo 0 || echo 1)"
+assert_eq "control: ...and governing does not declare it either (it is not in the declared dir)" \
+    "0" "$(row_count "$WORK/governing-with-links.tsv" ".claude/agents/linked-agent.md")"
+# THE HASH-COLUMN GUARD. The dangling branch has no digest to emit. If a future
+# caller turned hashing on it would put a two-field row into a three-field table
+# and the consumer's field-2 origin read would silently start reading a hash, so
+# the scan DIES instead — the same "no sentinel, ever" rule hash_file follows.
+META_DECL_HASHED="$WORK/workflow-manifest-declared-hashed.sh"
+# shellcheck disable=SC2016  # rewriting the LITERAL text of that line, not expanding it.
+sed 's#^    ( cd "$root" \&\& MANIFEST_EMIT_HASH=0 governing_rows ) > "$raw"$#    ( cd "$root" \&\& require_hash_tool \&\& MANIFEST_EMIT_HASH=1 governing_rows ) > "$raw"#' \
+    "$SCRIPT" > "$META_DECL_HASHED"
+assert_eq "META: the hashed-declaration mutation APPLIED (copy differs)" "1" \
+    "$(cmp -s "$META_DECL_HASHED" "$SCRIPT" && echo 0 || echo 1)"
+bash "$META_DECL_HASHED" governing "$SYN" > "$WORK/governing-declared-hashed.tsv" 2>"$WORK/declared-hashed.err" && RC=0 || RC=$?
+assert_eq "META: with hashing on, a DANGLING declared link REFUSES rather than emitting a short row" \
+    "1" "$([ "$RC" -ne 0 ] && echo 1 || echo 0)"
+assert_eq "META: ...naming the condition rather than dying obscurely" "1" \
+    "$(grep -c 'declared but has no hashable content' "$WORK/declared-hashed.err" | tr -d '[:space:]')"
+assert_eq "META: ...and no two-field row reached the output" "0" \
+    "$(awk -F'\t' 'NF == 2' "$WORK/governing-declared-hashed.tsv" 2>/dev/null | grep -c . | tr -d '[:space:]')"
+# RESTORE CONTROL: the shipped copy, same tree with the same dangling link.
+assert_eq "META: restore control — the SHIPPED (hashless) copy declares it and exits 0" \
+    "1" "$(row_count "$WORK/governing-with-links.tsv" "docs/specs/claude-workflow-plugin-dead.md")"
+rm -f "$SYN/.claude/agents/linked-agent.md"
+# AND IT STILL NEVER REACHES THE INSTALL SURFACE — the same both-directions
+# control the CLAUDE.md row gets, run against a tree that HAS artifacts in it.
+bash "$SCRIPT" generate "$SYN" > "$WORK/generate-with-spec.tsv"
+assert_eq "control: generate emits no docs/specs row" "0" \
+    "$(prefix_count "$WORK/generate-with-spec.tsv" "docs/specs/")"
+assert_eq "control: generate emits no design-artifact class token" "0" \
+    "$(awk -F'\t' '$2 == "design-artifact"' "$WORK/generate-with-spec.tsv" | wc -l | tr -d ' ')"
+assert_eq "control: generate output is byte-unchanged by the artifacts' existence" \
+    "0" "$(cmp -s "$WORK/generate-with-spec.tsv" "$SYN_TSV" && echo 0 || echo 1)"
+
+# --- THE DECLARED DIRECTORY ITSELF (fkm.3 QA round 4, R4-F2 + R4-F3) -------
+# The round-2 scan fixed what the declared directory CONTAINS. Round 3 found two
+# ways the DIRECTORY defeats the scan, and both end in the same place: a
+# `governing` run that exits 0 with no design-artifact row, which the consumer
+# reads as "nothing is declared" and hands the doc-only fast path.
+#
+#   R4-F3  the declared path is itself a directory SYMLINK. `find` will not
+#          descend a final symlink operand without -H/-L — measured identical on
+#          BSD find and GNU findutils 4.10.0 — while the `[ -d "$dir" ]` guard
+#          above it DOES follow. So the guard passes, the scan is silently empty,
+#          and `ls docs/specs/` lists an artifact `governing` never mentions.
+#   R4-F2  the directory is searchable but not listable (mode 0311). find's
+#          diagnostic went to /dev/null and its STATUS was lost to process
+#          substitution, so the scan returned 0 rows at rc 0 while the artifact
+#          stayed stat-able, readable and hashable by name.
+#
+# R4-F2 falsifies an invariant its own consumer documents: load_governing_set
+# captures the query's rc precisely because "an empty set from a FAILED run is
+# not [legitimate]". The outer layer checks carefully and the inner layer
+# returned 0, which defeated it.
+#
+# Both are driven in HERMETIC roots rather than in $SYN: one of them has to
+# restructure docs/specs into a symlink and the other has to make it unreadable,
+# and neither should be able to disturb the legs above.
+declared_root() {                  # $1 = root, $2 = plain | link
+    local root="$1" shape="$2"
+    rm -rf "${root:?}"
+    mkdir -p "$root/docs"
+    if [ "$shape" = "link" ]; then
+        mkdir -p "$root/docs/specs-real"
+        printf '# a design record\n' > "$root/docs/specs-real/claude-workflow-plugin-dir.md"
+        ln -sfn "specs-real" "$root/docs/specs"
+    else
+        mkdir -p "$root/docs/specs"
+        printf '# a design record\n' > "$root/docs/specs/claude-workflow-plugin-dir.md"
+    fi
+}
+
+# CONTROL FIRST: the same bare root with a REAL directory. Without it, a "1" in
+# the symlink leg below could be unreachable in a root this small and the leg
+# would be measuring the fixture rather than the scan.
+declared_root "$WORK/decl-plain" plain
+bash "$SCRIPT" governing "$WORK/decl-plain" > "$WORK/governing-decl-plain.tsv"
+assert_eq "governing CONTROL: a plain declared directory in a bare root emits its artifact row" \
+    "1" "$(row_count "$WORK/governing-decl-plain.tsv" "docs/specs/claude-workflow-plugin-dir.md")"
+
+declared_root "$WORK/decl-link" link
+assert_eq "precondition: the declared path is a directory SYMLINK in this root" "yes" \
+    "$([ -L "$WORK/decl-link/docs/specs" ] && echo yes || echo no)"
+# A GLOB, not `ls | grep`: this is a readdir THROUGH the symlinked directory,
+# which is the claim — the artifact is listable by the declared spelling while
+# `governing` says nothing about it.
+assert_eq "precondition: ...and the artifact IS listed through it, so the scan has something to find" \
+    "1" "$(set -- "$WORK/decl-link/docs/specs"/*.md; [ -e "$1" ] && echo "$#" || echo 0)"
+bash "$SCRIPT" governing "$WORK/decl-link" > "$WORK/governing-decl-link.tsv"
+assert_eq "governing: a declared directory reached through a SYMLINK is still scanned (R4-F3)" \
+    "1" "$(row_count "$WORK/governing-decl-link.tsv" "docs/specs/claude-workflow-plugin-dir.md")"
+assert_eq "governing: ...with the same design-artifact origin a real directory's artifact gets" \
+    "design-artifact" "$(field_of "$WORK/governing-decl-link.tsv" "docs/specs/claude-workflow-plugin-dir.md" 2)"
+
+# THE ENUMERATION'S STATUS IS THE DECLARATION'S STATUS.
+LOCK_ROOT="$WORK/decl-locked"
+declared_root "$LOCK_ROOT" plain
+bash "$SCRIPT" governing "$LOCK_ROOT" > "$WORK/governing-decl-unlocked.tsv" 2>/dev/null && UNLOCK_RC=0 || UNLOCK_RC=$?
+assert_eq "governing CONTROL: the same root while readable — rc 0 AND the row present" "0/1" \
+    "$UNLOCK_RC/$(row_count "$WORK/governing-decl-unlocked.tsv" "docs/specs/claude-workflow-plugin-dir.md")"
+chmod 0311 "$LOCK_ROOT/docs/specs" 2>/dev/null || true
+# Skipped as root, where 0311 does not deny — asserted, not assumed, for the
+# reason the mode-000 leg in design-artifact.test.sh states: a leg that cannot
+# fail is worse than an absent one.
+if find "$LOCK_ROOT/docs/specs" -maxdepth 1 -name '*.md' -print >/dev/null 2>&1; then
+    printf '  SKIP: governing enumeration-failure legs (this user can list a mode-0311 directory; likely root)\n'
+else
+    assert_eq "precondition: the artifact is STILL readable by name while the directory is unlistable" \
+        "1" "$(grep -c 'a design record' "$LOCK_ROOT/docs/specs/claude-workflow-plugin-dir.md" 2>/dev/null | tr -d '[:space:]')"
+    bash "$SCRIPT" governing "$LOCK_ROOT" > "$WORK/governing-decl-locked.tsv" 2>"$WORK/decl-locked.err" && LOCK_RC=0 || LOCK_RC=$?
+    assert_eq "governing: an ENUMERATION FAILURE is a FAILED query, not an empty one (R4-F2)" "1" \
+        "$([ "$LOCK_RC" -ne 0 ] && echo 1 || echo 0)"
+    assert_eq "governing: ...and it says so, naming the directory it could not read" "1" \
+        "$(grep -c "could not ENUMERATE the declared directory" "$WORK/decl-locked.err" | tr -d '[:space:]')"
+    assert_eq "governing: ...carrying find's own diagnostic, which used to go to /dev/null" "1" \
+        "$(grep -cE "find said: [^[:space:]]" "$WORK/decl-locked.err" | tr -d '[:space:]')"
+    assert_eq "governing: ...and NO row reached stdout, so no partial set can pass for a whole one" "0" \
+        "$(grep -c . "$WORK/governing-decl-locked.tsv" 2>/dev/null | tr -d '[:space:]')"
+fi
+chmod 0755 "$LOCK_ROOT/docs/specs" 2>/dev/null || true
+rm -rf "${WORK:?}/decl-plain" "${WORK:?}/decl-link" "${WORK:?}/decl-locked"
+
+rm -rf "${SYN:?}/docs/specs" "${SYN:?}/docs/design-notes" "${SYN:?}/outside"
 
 # NEGATIVE CONTROL, both directions: adding the governing query must not have
 # widened the INSTALL surface. Section 1 already asserts CLAUDE.md is excluded

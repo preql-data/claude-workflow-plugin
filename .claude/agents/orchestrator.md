@@ -108,9 +108,13 @@ negotiable:
   amount of design dialogue is a sign-off on anything. If you find yourself
   running a second acceptance procedure, you are running someone else's
   workflow.
-- **Spec location.** The design lands on the Beads task via
-  `bd_doc_write(task_id=…, name="spec")` per section 4a — never in a file under
-  `docs/`, which belongs to the operator.
+- **Spec location.** The per-task implementation SPEC lands on the Beads task via
+  `bd_doc_write(task_id=…, name="spec")` per section 4a — never in an ad-hoc file
+  under `docs/`, which belongs to the operator. ONE exception, and it is a named
+  path rather than a licence: the v5 design artifact at `docs/specs/<task-id>.md`,
+  which the designer writes, `qa-gate.sh design-record` hash-binds, and the gate
+  reads. That file is a gate input with a schema and a digest, not documentation
+  the operator has to maintain.
 - **Debugging.** Where any vendored material prescribes a debugging threshold or
   sequence, the delimited EBF-CORE region in `qa.md`, `backend.md`,
   `frontend.md` and `devops.md` wins. That region says so itself, in its first

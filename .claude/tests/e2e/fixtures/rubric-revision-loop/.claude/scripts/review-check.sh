@@ -18,6 +18,9 @@
 #   validate-request  <file>                    schema-check a review request
 #   validate-artifact <file>                    schema-check a review artifact
 #   validate-completion <file>                  schema-check an F7 completion payload
+#   validate-design   <file>                    schema-check a v5 design artifact
+#                                               (prose sections + the one
+#                                               DESIGN-UNITS machine block)
 #   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
 #                                               independence + open-finding count
 #                                               + the ROUNDS count (see below)
@@ -429,6 +432,316 @@ cmd_validate_completion() {
 }
 
 # ---------------------------------------------------------------------------
+# validate-design (v5 Phase D1 / claude-workflow-plugin-fkm.3)
+# ---------------------------------------------------------------------------
+#
+# THE DESIGN ARTIFACT is a Markdown document a human reads, carrying ONE machine
+# block a program reads. This validates the machine block, plus the presence of
+# the prose sections the artifact is required to have. It does not judge design
+# quality — `.claude/rubrics/design.md` and the design reviewer do that (D2), the
+# same division validate-completion's tail states for coverage notes.
+#
+# THE EXTRACTION IS SPECIFIED HERE FROM SCRATCH, and deliberately not modelled on
+# `epic-gate.sh files_changed_of`, which the v5 plan pointed at as "the same
+# discipline". Measured against that idiom at acc4ce1: it is four piped `jq`
+# invocations whose selector is `jq -R 'capture("(?<j>\\{[^{}]*\"files_changed\"
+# [^{}]*\\})"; "g")'`. `jq -R` is LINE-ORIENTED, so a PRETTY-PRINTED object never
+# matches (each line is a separate input and no single line contains the whole
+# object), and `[^{}]*` cannot cross a brace, so any NESTED object never matches
+# either. Both return `[]` — indistinguishable from "no block", from "malformed
+# block", and from "jq is missing", all four with no error key. An LLM writing a
+# fenced JSON block pretty-prints it essentially always, and every unit in this
+# schema is a nested object, so that idiom would report ZERO UNITS for the normal
+# case and every coherence check downstream would pass vacuously over nothing.
+#
+# THE FOUR RULES THIS ONE FOLLOWS INSTEAD, each with the precedent it comes from:
+#
+#   1. COUNT THE SENTINELS; REFUSE ON ANYTHING BUT EXACTLY ONE PAIR, in order.
+#      Nothing enforces "one machine block", and an artifact amended in place
+#      across D2 review rounds will plausibly grow a second. An `awk /BEGIN/,/END/`
+#      range silently RE-OPENS on a second BEGIN and concatenates two blocks into
+#      one unparseable string; a `tail -1` selector would silently pick the last.
+#      Refusing is the only answer that cannot be wrong quietly.
+#
+#   2. THE SENTINELS MUST OWN THEIR LINE. `review-check.sh`'s own ROUNDS block
+#      records why: on claude-workflow-plugin-8zi, BEFORE any artifact existed,
+#      `grep -c REVIEW-ARTIFACT` returned 1 and the hit was PROSE inside a
+#      reviewer's note. Agents quote record grammars constantly, and a design
+#      artifact is a document ABOUT a design — the single most likely place for
+#      someone to write the sentinel inside a sentence. Whole-line anchoring makes
+#      a quoted mention a non-match; a quoted mention that IS alone on its line
+#      makes the count 2 and is refused by rule 1, which is the safe direction.
+#
+#   3. UNPARSEABLE IS NEVER ZERO. Every failure below has its own error_key and a
+#      non-zero exit. `cmd_gate`'s MALFORMED-ARTIFACT-GUARD refuses to read a
+#      token-less record as zero findings for exactly this reason, and
+#      `max_record_ts` prints the literal `unparseable` rather than empty so a
+#      caller can tell "absent" from "unreadable". Zero units must mean the
+#      designer declared none, never that this function could not read them.
+#
+#   4. FENCE STRIPPING IS ANCHORED TO THE BLOCK. The repo's only prior fence
+#      handling (in the external-review helper under .claude/scripts/, named
+#      there rather than here — this file is required to carry zero references to
+#      any specific review transport, and a structural spec greps for exactly
+#      that) strips ``` lines unconditionally over the whole input, which would
+#      concatenate a nested example fence into the JSON. Here the block must be
+#      EITHER bare JSON or exactly one fence pair wrapping it, and any other
+#      arrangement is named and refused.
+#
+# WHY THE PROSE SECTIONS ARE CHECKED HERE TOO: they are a SHAPE fact ("does the
+# document have a Problem section?"), not a quality judgement, and the release
+# directive asks for "missing required section rejected" as an L1 assertion. The
+# check is presence of the heading, nothing more.
+DESIGN_UNITS_BEGIN_RE='^[[:space:]]*<!-- DESIGN-UNITS BEGIN -->[[:space:]]*$'
+DESIGN_UNITS_END_RE='^[[:space:]]*<!-- DESIGN-UNITS END -->[[:space:]]*$'
+
+# The prose sections a design artifact must carry, as `## ` headings. Matched
+# case-insensitively on the heading text and nothing else.
+DESIGN_REQUIRED_SECTIONS="Problem|Approaches considered|Chosen approach|Units|Global constraints|Out of scope|Verification plan|Revision log"
+
+# emit_validate_design <ok> <error_key> <observations> <unit-count> <unit-ids-json> [task-id]
+# emit_validate's four keys plus the three a caller needs in order to write a
+# record without re-parsing the block: how many units were declared, which, and
+# the task the artifact says it designs. That last one is on the envelope
+# DELIBERATELY — qa-gate.sh's design-record needs it for its decoy check, and
+# extracting it there with its own awk/jq would be a SECOND parser for one
+# grammar, which is the thing this script exists to prevent (see the header, and
+# the way compute_change_set_hash defers to impact-report.sh --hash-only).
+emit_validate_design() {
+    local ok="$1" ekey="$2" obs="$3" n="$4" ids="$5" tid="${6:-}"
+    # shellcheck disable=SC2016
+    printf '{"ok":%s,"subcommand":"validate-design","error_key":%s,"observations":%s,"units":%s,"unit_ids":%s,"task_id":%s}\n' \
+        "$ok" \
+        "$(printf '%s' "$ekey" | jq -Rs .)" \
+        "$(printf '%s' "$obs" | jq -Rs .)" \
+        "$n" \
+        "$ids" \
+        "$(printf '%s' "$tid" | jq -Rs .)"
+}
+
+cmd_validate_design() {
+    local file="${1:-}"
+    if [ -z "$file" ]; then
+        emit_validate_design "false" "usage" "validate-design requires <file>" "0" "[]"
+        exit 1
+    fi
+    if [ ! -f "$file" ]; then
+        emit_validate_design "false" "usage" "file not found: $file" "0" "[]"
+        exit 1
+    fi
+    if [ ! -s "$file" ]; then
+        emit_validate_design "false" "design_artifact_empty" \
+            "the design artifact at $file is zero bytes; an empty artifact is refused here rather than read as a design with no units" "0" "[]"
+        exit 4
+    fi
+
+    # --- prose sections -----------------------------------------------------
+    # Read line by line rather than `for s in $LIST` under a swapped IFS. An
+    # unquoted expansion performs PATHNAME EXPANSION as well as word splitting,
+    # and this file's sibling records what that costs: a completion-payload key
+    # named `[c]lean1` expanded to `clean1` when a file of that name happened to
+    # exist in the process's working directory and stayed `[c]lean1` when it did
+    # not, so one payload got opposite verdicts decided by an unrelated
+    # directory. The list here is a constant with no metacharacter in it today,
+    # which makes this structural rather than a fix — the next section name to be
+    # added cannot reintroduce it.
+    local section missing_sections=""
+    while IFS= read -r section; do
+        [ -n "$section" ] || continue
+        if ! grep -qiE "^##+[[:space:]]+${section}[[:space:]]*\$" "$file" 2>/dev/null; then
+            missing_sections="${missing_sections:+$missing_sections, }$section"
+        fi
+    done <<< "$(printf '%s' "$DESIGN_REQUIRED_SECTIONS" | tr '|' '\n')"
+    if [ -n "$missing_sections" ]; then
+        emit_validate_design "false" "design_section_missing" \
+            "the design artifact is missing required section heading(s): $missing_sections. Each must appear as its own '## <name>' heading" "0" "[]"
+        exit 4
+    fi
+
+    # --- rule 1 + 2: exactly one sentinel pair, each owning its line ---------
+    local n_begin n_end
+    n_begin=$(grep -cE "$DESIGN_UNITS_BEGIN_RE" "$file" 2>/dev/null) || n_begin=0
+    n_end=$(grep -cE "$DESIGN_UNITS_END_RE" "$file" 2>/dev/null) || n_end=0
+    n_begin=$(printf '%s' "$n_begin" | tr -d ' \n')
+    n_end=$(printf '%s' "$n_end" | tr -d ' \n')
+    if [ "$n_begin" != "1" ] || [ "$n_end" != "1" ]; then
+        emit_validate_design "false" "design_units_sentinels" \
+            "the artifact must carry EXACTLY ONE '<!-- DESIGN-UNITS BEGIN -->' / '<!-- DESIGN-UNITS END -->' pair, each alone on its own line; found begin=$n_begin end=$n_end. Two blocks (an in-place amendment that appended rather than revised) or none are both refused rather than guessed at" "0" "[]"
+        exit 4
+    fi
+    local ln_begin ln_end
+    ln_begin=$(grep -nE "$DESIGN_UNITS_BEGIN_RE" "$file" | head -1 | cut -d: -f1)
+    ln_end=$(grep -nE "$DESIGN_UNITS_END_RE" "$file" | head -1 | cut -d: -f1)
+    if [ "$ln_end" -le "$ln_begin" ]; then
+        emit_validate_design "false" "design_units_sentinels_disordered" \
+            "the DESIGN-UNITS END sentinel (line $ln_end) precedes or equals BEGIN (line $ln_begin)" "0" "[]"
+        exit 4
+    fi
+
+    # --- extract strictly between them --------------------------------------
+    local block
+    block=$(awk -v b="$ln_begin" -v e="$ln_end" 'NR > b && NR < e' "$file" 2>/dev/null)
+
+    # --- rule 4: anchored fence handling ------------------------------------
+    # Trim blank lines at both ends, then accept either bare JSON or exactly one
+    # fence pair wrapping it. Any other arrangement is named.
+    block=$(printf '%s\n' "$block" | awk 'NF {p = 1} p' | awk '{a[NR] = $0} END {last = 0; for (i = 1; i <= NR; i++) if (a[i] ~ /[^ \t]/) last = i; for (i = 1; i <= last; i++) print a[i]}')
+    local n_fence
+    n_fence=$(printf '%s\n' "$block" | grep -cE '^[[:space:]]*```' 2>/dev/null) || n_fence=0
+    n_fence=$(printf '%s' "$n_fence" | tr -d ' \n')
+    if [ "$n_fence" != "0" ]; then
+        if [ "$n_fence" != "2" ]; then
+            emit_validate_design "false" "design_block_fences" \
+                "the DESIGN-UNITS block contains $n_fence code-fence line(s); it must contain either none (bare JSON) or exactly two (one fence pair wrapping the JSON). A nested fence would otherwise be concatenated into the JSON" "0" "[]"
+            exit 4
+        fi
+        local first_line last_line
+        first_line=$(printf '%s\n' "$block" | head -1)
+        last_line=$(printf '%s\n' "$block" | tail -1)
+        if ! printf '%s' "$first_line" | grep -qE '^[[:space:]]*```' \
+            || ! printf '%s' "$last_line" | grep -qE '^[[:space:]]*```[[:space:]]*$'; then
+            emit_validate_design "false" "design_block_fences_unanchored" \
+                "the DESIGN-UNITS block has two fence lines but they do not open and close the block; the JSON must be the whole of the fenced body" "0" "[]"
+            exit 4
+        fi
+        block=$(printf '%s\n' "$block" | sed '1d;$d')
+    fi
+    if [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ]; then
+        emit_validate_design "false" "design_block_empty" \
+            "the DESIGN-UNITS block is empty; refusing to read an empty block as a design with zero units" "0" "[]"
+        exit 4
+    fi
+
+    # --- rule 3: parse, or say so -------------------------------------------
+    if ! printf '%s' "$block" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        emit_validate_design "false" "design_block_unparseable" \
+            "the DESIGN-UNITS block is not a parseable JSON object. It is refused rather than read as zero units — a design nothing can parse is not a design with no work in it" "0" "[]"
+        exit 4
+    fi
+
+    # --- schema -------------------------------------------------------------
+    # ONE jq pass, first offending item wins, so the error names a field rather
+    # than reporting "something was wrong". Structured exactly like
+    # validate-completion's type_err pass, for the same reason.
+    local schema_err
+    schema_err=$(printf '%s' "$block" | jq -r '
+        def nonempty_string: (type == "string") and ((gsub("[[:space:]]";"")) != "");
+        def strarray: (type == "array") and (length > 0) and (all(.[]; nonempty_string));
+        . as $d
+        | (if ($d.units? | type) == "array" then $d.units else [] end) as $u
+        | [ ( if ($d.contract_version? // "") != "1" then "contract_version_invalid" else empty end),
+            ( if ($d.task_id? | nonempty_string) | not then "task_id_missing" else empty end),
+            ( if ($d.designer_identity? | nonempty_string) | not then "designer_identity_missing" else empty end),
+            ( if ($d.units? | type) != "array" then "units_not_an_array"
+              elif ($u | length) == 0 then "units_empty" else empty end),
+            ( $u | to_entries[]
+              | .key as $i | .value as $x
+              | ( if ($x | type) != "object" then "unit_not_an_object:\($i)"
+                  elif ($x.unit_id? | nonempty_string) | not then "unit_id_missing:\($i)"
+                  elif ($x.unit_id | test("^[A-Za-z0-9._-]+$") | not) then "unit_id_invalid_chars:\($x.unit_id)"
+                  elif ($x.goal? | nonempty_string) | not then "unit_goal_missing:\($x.unit_id)"
+                  elif ($x.verification? | nonempty_string) | not then "unit_verification_missing:\($x.unit_id)"
+                  elif ($x.files? | strarray) | not then "unit_files_missing:\($x.unit_id)"
+                  elif ($x.acceptance? | type) != "array" or ($x.acceptance | length) == 0
+                       then "unit_acceptance_missing:\($x.unit_id)"
+                  elif ($x.acceptance | any(.[]; (type != "object")
+                                                 or ((.id? | nonempty_string) | not)
+                                                 or ((.text? | nonempty_string) | not)))
+                       then "unit_acceptance_id_missing:\($x.unit_id)"
+                  elif ($x.depends_on? | type) != "array" then "unit_depends_on_not_an_array:\($x.unit_id)"
+                  elif ($x.implementer_class? // "standard") == "high"
+                       and (($x.escalation_reason? | (type == "string") and (gsub("[[:space:]]";"") != "")) | not)
+                       then "unit_escalation_without_reason:\($x.unit_id)"
+                  else empty end ) ),
+            ( ($u | map(.unit_id?) | group_by(.) | map(select(length > 1) | .[0]))[]? | "unit_id_duplicate:\(.)" ),
+            ( [ $u[] | .acceptance? // [] | .[]? | .id? ] | group_by(.) | map(select(length > 1) | .[0])[]?
+              | "acceptance_id_duplicate:\(.)" ),
+            # `index($dep)` with the dependency BOUND FIRST, never `index(.)`.
+            # A function argument in jq is evaluated against that function s
+            # INPUT, so `$ids | index(.)` searches $ids for $ids and returns 0
+            # for every dependency — the check would pass unconditionally.
+            # Measured before the fix: a unit depending on an undeclared "U9"
+            # validated clean.
+            ( ($u | map(.unit_id?)) as $ids
+              | $u[] | .unit_id as $me | (.depends_on? // [])[]? | . as $dep
+              | if $dep == $me then "unit_depends_on_self:\($me)"
+                elif ($ids | index($dep)) == null then "unit_depends_on_undeclared:\($me)->\($dep)"
+                else empty end )
+          ]
+        | .[0] // ""
+    ' 2>/dev/null) || schema_err="jq_failed"
+    if [ -n "$schema_err" ]; then
+        local detail="the design contract failed its schema check: $schema_err"
+        case "$schema_err" in
+            unit_files_missing:*)
+                detail="$schema_err — every unit must declare a NON-EMPTY \`files\` array of paths. That field is not documentation: D4 computes parallel batches from the intersection of declared file sets and D5 checks what a unit touched against it, so a unit with no declared files makes both checks pass over nothing"
+                ;;
+            unit_acceptance_id_missing:*)
+                detail="$schema_err — every acceptance criterion must be an object with a non-empty \`id\` and \`text\`. The id is what the coherence rollup maps a passing test back to; a criterion without one cannot be reported as covered or uncovered"
+                ;;
+            unit_escalation_without_reason:*)
+                detail="$schema_err — a unit marked \`implementer_class: high\` must carry \`escalation_reason\`. Escalation is a declared, audited, reversible pin change and the reason is the audit"
+                ;;
+            unit_depends_on_undeclared:*)
+                detail="$schema_err — a unit depends on an id no unit declares, so the dependency graph cannot be scheduled"
+                ;;
+            jq_failed)
+                detail="the schema check could not be run (jq failed on the parsed block); refusing rather than reporting a design that was never checked"
+                ;;
+        esac
+        emit_validate_design "false" "$schema_err" "$detail" "0" "[]"
+        exit 4
+    fi
+
+    # --- acyclicity, computed rather than judged ----------------------------
+    # Kahn's algorithm: repeatedly drop units all of whose dependencies are
+    # already dropped. Anything left is in a cycle. A cyclic artifact is
+    # unschedulable by construction, and finding that out at D4 (after tasks are
+    # created) rather than here is strictly worse.
+    #
+    # `index($i)` with the id BOUND FIRST, for the reason spelled out in the
+    # schema pass above. The unbound spelling `index(.id)` does not merely
+    # return a wrong answer here, it makes jq ABORT ("Cannot index array with
+    # string \"id\""), and the abort is only reachable once something becomes
+    # ready — so a pure two-unit cycle was still caught while every graph with a
+    # root silently reported "acyclic" from a jq that never ran. Both shapes were
+    # reproduced before this fix.
+    #
+    # A FAILED COMPUTATION IS NOT "NO CYCLE". The rc is captured and reported
+    # rather than swallowed into an empty string, per rule 3 above.
+    local cyclic cyc_rc=0
+    cyclic=$(printf '%s' "$block" | jq -r '
+        def kahn:
+            . as $s
+            | ([ $s.left[] | select( ([.deps[]] - $s.done) == [] ) ] | map(.id)) as $ready
+            | if ($ready | length) == 0
+              then $s
+              else { done: ($s.done + $ready),
+                     left: [ $s.left[] | select( .id as $i | ($ready | index($i)) == null ) ] } | kahn
+              end;
+        { done: [], left: [ .units[] | {id: .unit_id, deps: (.depends_on // [])} ] }
+        | kahn | .left | map(.id) | join(",")
+    ' 2>/dev/null) || cyc_rc=$?
+    if [ "$cyc_rc" -ne 0 ]; then
+        emit_validate_design "false" "design_units_cycle_check_failed" \
+            "the unit dependency graph could not be checked for cycles (jq exited $cyc_rc); refusing rather than reporting an artifact whose schedulability was never established" "0" "[]"
+        exit 4
+    fi
+    if [ -n "$cyclic" ]; then
+        emit_validate_design "false" "design_units_cyclic" \
+            "the unit dependency graph has a cycle; these units can never become ready: $cyclic" "0" "[]"
+        exit 4
+    fi
+
+    local n ids art_tid
+    n=$(printf '%s' "$block" | jq -r '.units | length' 2>/dev/null) || n=0
+    ids=$(printf '%s' "$block" | jq -c '[.units[].unit_id]' 2>/dev/null) || ids="[]"
+    art_tid=$(printf '%s' "$block" | jq -r '.task_id // ""' 2>/dev/null) || art_tid=""
+    emit_validate_design "true" "" "design contract valid: $n unit(s)" "$n" "$ids" "$art_tid"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
 # gate — independence + open-finding count over the record comments.
 # ---------------------------------------------------------------------------
 
@@ -808,6 +1121,7 @@ case "$SUB" in
     validate-request)  cmd_validate_request "$@" ;;
     validate-artifact) cmd_validate_artifact "$@" ;;
     validate-completion) cmd_validate_completion "$@" ;;
+    validate-design)   cmd_validate_design "$@" ;;
     gate)              cmd_gate "$@" ;;
     ""|-h|--help)
         cat >&2 <<'USAGE'
@@ -828,6 +1142,26 @@ Usage: review-check.sh <subcommand> [args]
                                               llm_observations and
                                               context_coverage must be non-empty
                                               after trimming
+  validate-design <file>                      schema-check a v5 design artifact:
+                                              the eight required '## ' prose
+                                              sections; EXACTLY ONE
+                                              <!-- DESIGN-UNITS BEGIN/END -->
+                                              pair, each alone on its line; the
+                                              block is bare JSON or exactly one
+                                              fence pair; contract_version "1",
+                                              task_id, designer_identity, and a
+                                              non-empty units[] where every unit
+                                              declares unit_id (unique),
+                                              goal, verification, a NON-EMPTY
+                                              files[], acceptance[] of
+                                              {id, text}, an array depends_on
+                                              naming only declared unit_ids, and
+                                              escalation_reason whenever
+                                              implementer_class is high; the
+                                              dependency graph must be acyclic.
+                                              Reports units / unit_ids on the
+                                              envelope. Never reads an
+                                              unparseable block as zero units
   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
                                               independence + open-finding count,
                                               plus rounds/rounds_hash: how many

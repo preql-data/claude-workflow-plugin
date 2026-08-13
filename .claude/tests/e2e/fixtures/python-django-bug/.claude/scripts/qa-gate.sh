@@ -2084,14 +2084,21 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               The verdict is recorded in the approval comment as
               `[completion cross-check: ...]` whenever it is not clean.
 
-              The approval comment records the reviewer AND the approving
+              The approval comment records the reviewer, the approving
               checkout (3mg.2 — `worktree=` is the %20-encoded git toplevel,
               or `none`; the Stop hook resolves cross-worktree approvals
-              through it):
+              through it) AND, since v5 D1, the design artifact's content hash
+              when a DESIGN-ARTIFACT record exists AND a live re-hash of
+              docs/specs/<task-id>.md still agrees with it (otherwise the token
+              is omitted and the envelope names why):
                 QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id>
-                worktree=<tok> at <ts>: <summary>
+                worktree=<tok> design_hash=<h> at <ts>: <summary>
+              Every optional MACHINE field carries its own trailing space and
+              defaults to empty. The bracketed suffixes are free-text audit
+              prose appended AFTER the summary, all six of them:
                 [ [impact-report bypass: ...]][ [review bypass: ...]]
-                [ [reconstructed change set accepted: ...]]
+                [ [rubric mismatch: ...]][ [reconstructed change set accepted: ...]]
+                [ [completion bypass: ...]][ [completion cross-check: ...]]
   block   <task-id> <reason>
   baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
               Write .claude/.qa-tracking/gate-baseline — the snapshot of
@@ -2181,6 +2188,40 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               name, the digest) must match ^[A-Za-z0-9._+-]+$ and is REJECTED,
               never sanitised (the claude-workflow-plugin-bjx class).
               `approve` REFUSES without this record.
+  design-record <task-id> [--file <artifact>] [--designer <id>]
+                [--accept-foreign-paths '<reason>'] ['<summary>']
+              v5 D1: record the DESIGNER's artifact and bind its bytes.
+              Validates via review-check.sh `validate-design` (the ONE
+              validator), hashes the artifact's RAW BYTES through
+              workflow-manifest.sh `hash-file` (which refuses BEFORE hashing on
+              a missing/unreadable/EMPTY path), and appends:
+                DESIGN-ARTIFACT v1 task=<tid> designer=<id> design_hash=<h>
+                units=<n> at <ts>: <summary>[ [foreign paths accepted: <r>]]
+              --file is an ASSERTION, not an input: the artifact is always
+              docs/specs/<task-id>.md, and --file may only say so (absolute or
+              repo-relative), or be omitted — the record carries the hash and
+              NO path, which is only sound while the path is derivable from the
+              task id. Anything else -> `artifact_path_not_derived`.
+              THE EDIT BAN'S SECOND LAYER. Refuses `artifact_outside_spec_dir`
+              when what sits at the derived path does not resolve into
+              docs/specs/ (a symlinked leaf, a moved directory), and
+              `designer_touched_source` when the change set holds a path that
+              is not this task's design artifact — a source file, a second file
+              beside it in docs/specs/, or another task's design — while no
+              IMPLEMENTER record exists on the task (the check switches off at
+              implementer SPAWN, not at completion). The change set is the
+              SESSION's, so the audited --accept-foreign-paths records a reason
+              for work that was not the designer's. Both resolve the DIRECTORY
+              through ONE physical predicate (`..` and intermediate symlinks)
+              and differ only in the LEAF: the record follows it, because the
+              question is which bytes those are; the tracker does not, because
+              the question is which path was written. Both return an exit
+              status rather than a path, so no pathname crosses a command
+              substitution.
+              Refuses `design_artifact_changed_during_record` when the artifact
+              moves between the validator's read and the hash — in CONTENT or
+              in CONTAINMENT — rather than binding bytes no validator saw, or
+              bytes never shown to be the declared directory's.
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -3537,8 +3578,18 @@ cmd_approve() {
     # silently corrupt every hash comparison. Regression: the L1
     # review-separation.test.sh section 4 compat + META assertions run the
     # readers' EXACT expressions against a freshly written record. Final shape:
-    #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok> at <ts>: <summary>
+    #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
+    #     design_hash=<h> at <ts>: <summary>
     #     [ [impact-report bypass: <reason>]][ [review bypass: <reason>]]
+    #     [ [rubric mismatch: …]][ [reconstructed change set accepted: …]]
+    #     [ [completion bypass: …]][ [completion cross-check: …]]
+    # Six suffix spellings from five sites; the two `completion cross-check`
+    # bodies differ in text and share the marker. Keep this list and the `approve`
+    # usage text in step — both had drifted by two releases before D1.
+    # Every optional MACHINE field carries its own trailing space and defaults to
+    # empty, so a build with any one of their sentinel regions stripped writes a
+    # record with no dangling token and no double space. Every optional SUFFIX is
+    # free-text audit prose appended after the summary.
     local ts comment_suffix=""
     if [ "$bypass_impact" = "1" ]; then
         comment_suffix=" [impact-report bypass: $bypass_reason]"
@@ -3605,7 +3656,83 @@ cmd_approve() {
     # the falsifiable form of "adding this token cannot regress the readers".
     worktree_field="worktree=$(approval_worktree_token) "
     # WORKTREE-TOKEN END (v4 V4 / claude-workflow-plugin-3mg.2)
-    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}at $ts: $summary$comment_suffix"
+
+    # Same empty-default-outside-the-sentinels discipline as worktree_field: the
+    # L1 META strips this region and asserts the copy still approves and still
+    # writes a coherent pre-D1 record with no double space.
+    local design_field="" design_binding_obs=""
+    # DESIGN-BINDING-TOKEN BEGIN (v5 D1 / claude-workflow-plugin-fkm.3)
+    #
+    # A FOURTH MACHINE TOKEN, not a bracketed suffix, and the choice is
+    # load-bearing rather than stylistic:
+    #
+    #   * THE SUFFIX SPACE IS SELF-ASSERTED. `$summary` is built from bare
+    #     positionals with no validation and is interpolated on this same line,
+    #     immediately before $comment_suffix — and both readers of the existing
+    #     markers use `grep -qF '[review bypass:'` over the whole comment text
+    #     (verify-before-stop.sh, two sites). So `approve <tid> 'done [review
+    #     bypass: x]'` already satisfies that skip today, which is filed
+    #     separately as claude-workflow-plugin-yrij. A value the gate must TRUST
+    #     cannot live in a space the person typing the command controls. Every
+    #     one of the six existing suffix bodies is unvalidated human prose; none
+    #     is a value a program extracts and compares.
+    #   * THERE IS NO TOKEN BUDGET. The compatibility contract above constrains
+    #     token ORDER, not COUNT: everything since llh.18 goes AFTER
+    #     change_set_hash, separated by a space. Every reader is an anchored
+    #     capture that a further appended key=value cannot disturb, and this
+    #     token goes last, immediately before ` at <ts>`.
+    #
+    # THE LADDER, four arms, the same shape and the same doctrine as
+    # grade-record's change-set binding ladder — "unbound with the reason named"
+    # is the bottom, never silence:
+    #   1. A DESIGN-ARTIFACT record exists AND a live re-hash of the artifact
+    #      agrees with it -> BIND. That agreement is the whole enforcement: it
+    #      is a live recompute rather than a label, so a one-byte post-approval
+    #      edit to the design moves the artifact away from every record that
+    #      names it, exactly as a post-approval code edit moves change_set_hash.
+    #   2. A record exists but the artifact on disk hashes differently -> NO
+    #      token, both hashes named. The design moved after it was recorded and
+    #      this approval cannot say which bytes it covers.
+    #   3. A record exists but the artifact cannot be hashed at all (absent,
+    #      unreadable, empty) -> NO token, reason named. Never a placeholder:
+    #      zero bytes digest to a constant that would compare equal to itself
+    #      forever.
+    #   4. No record -> NO token, reason named. Ordinary today: nothing has a
+    #      design yet. D2 turns this arm into a refusal; D1 records the fact.
+    #
+    # ARM 1a IS THE CONTAINMENT ONE, and it uses the SAME predicate design-record
+    # uses (fkm.3 QA round 2, R2-F2). This is the THIRD caller of that question,
+    # and the round that added it was about two callers answering it differently:
+    # without this arm, replacing the recorded artifact with a symlink to an
+    # outside file would have this re-hash follow the link, agree with the
+    # recorded digest whenever the outside bytes matched, and report VERIFIED for
+    # a document the declaration in workflow-manifest.sh does not govern.
+    local recorded_design_hash live_design_hash design_artifact_path dh_rc=0
+    recorded_design_hash=$(latest_design_artifact_hash "$tid") || recorded_design_hash=""
+    if [ -z "$recorded_design_hash" ]; then
+        design_binding_obs="; no design binding (no DESIGN-ARTIFACT record on $tid)"
+    elif ! is_sha256_hex "$recorded_design_hash"; then
+        design_binding_obs="; WARNING no design binding — the DESIGN-ARTIFACT record's design_hash='$recorded_design_hash' is not 64 hex characters, so it names no reproducible bytes"
+    else
+        design_artifact_path=$(design_artifact_path_for "$tid")
+        if ! design_path_is_contained "$design_artifact_path"; then
+            design_binding_obs="; WARNING no design binding — $design_artifact_path does not resolve INSIDE $DESIGN_SPEC_SUBDIR/ (a symlink out of the declared directory, or a directory that has moved), so whatever it hashes to now is not the artifact that declaration governs"
+        else
+            live_design_hash=$(bash "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" \
+                hash-file "$design_artifact_path" 2>/dev/null) || dh_rc=$?
+            if [ "$dh_rc" -ne 0 ] || ! is_sha256_hex "$live_design_hash"; then
+                design_binding_obs="; WARNING no design binding — $design_artifact_path could not be hashed now (rc=$dh_rc), so the recorded design_hash=$recorded_design_hash cannot be corroborated against the bytes on disk"
+            elif [ "$live_design_hash" != "$recorded_design_hash" ]; then
+                design_binding_obs="; WARNING no design binding — the design artifact has CHANGED since it was recorded (recorded=$recorded_design_hash, on disk now=$live_design_hash). Re-record it (qa-gate.sh design-record $tid) so the approval names the bytes it covers"
+            else
+                design_field="design_hash=$recorded_design_hash "
+                design_binding_obs="; design binding VERIFIED — $design_artifact_path still hashes to the recorded design_hash=$recorded_design_hash"
+            fi
+        fi
+    fi
+    # DESIGN-BINDING-TOKEN END (v5 D1 / claude-workflow-plugin-fkm.3)
+
+    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}at $ts: $summary$comment_suffix"
 
     # Step 2 (gz3: after the record): THE terminal-label transition. One call
     # replaces what were four separate steps — add qa-approved, remove
@@ -3759,7 +3886,7 @@ cmd_approve() {
     # because keeping them is free and an operator may well be greping them from
     # memory; they are NOT kept because a test pins them. $sweep_obs is the token
     # that reports the FULL cleared set, which is what the counters cannot.
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}$binding_obs${expect_hash_obs:-}$stale_label_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}$binding_obs${design_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -4891,6 +5018,682 @@ cmd_completion_record() {
         "comment posted at $ts: $comment_text; validated payload persisted at $payload_file (approve re-digests it and cross-checks files_changed against the change set it binds)"
 }
 
+# ---------------------------------------------------------------------------
+# DESIGN-ARTIFACT BEGIN (v5 Phase D1 / claude-workflow-plugin-fkm.3)
+#
+# design-record <tid> [--file <artifact>] [--designer <id>]
+#               [--accept-foreign-paths '<reason>'] ['<summary>']
+#
+# THE DESIGNER'S RECORD: this artifact, at these bytes, is the design for this
+# task. It is NOT the design reviewer's verdict — that is D2's own record, with
+# its own grammar, its own author and its own lifetime. The v5 plan folded both
+# into one subcommand name; they are split here because D2's independence check
+# ("a verdict whose reviewer identity equals the designer's is refused") needs a
+# durable statement of WHO the designer was, which only a separate record can
+# carry. One subcommand writing two grammars would have to invent that anyway.
+#
+#   DESIGN-ARTIFACT v1 task=<tid> designer=<id> design_hash=<h> units=<n> at <ts>: <summary>
+#
+# Same shape as REVIEW-ARTIFACT / COMPLETION / ARBITRATION: machine prefix first,
+# ` at <ISO-8601-UTC>` last before the colon, free text after it. No schema lives
+# here — validation is the subprocess call to review-check.sh `validate-design`,
+# the ONE validator, exactly as review-record and completion-record do.
+#
+# THE EDIT BAN'S SECOND LAYER LIVES IN THIS FUNCTION. Layer 1 is designer.md's
+# tools list, which omits Bash and Edit; it is NOT airtight and is not claimed to
+# be, because `Write` is retained (the designer has to author its own artifact)
+# and Write overwrites any path in the tree. Layer 1 closes the shell vector and
+# the patch vector. THIS is the layer that makes writing a source file
+# consequential:
+#
+#   artifact_path_not_derived   --file is not the path derived from the task id
+#   artifact_outside_spec_dir   what sits at that path does not resolve into
+#                               docs/specs/ (a symlinked leaf, a moved directory)
+#   designer_touched_source     the change set holds a path that is not this
+#                               task's one design artifact — a source file, a
+#                               second file beside it in docs/specs/, or ANOTHER
+#                               task's design — while NO IMPLEMENTER record
+#                               exists on the task
+#
+# The second is PHASE-SCOPED, and the phase boundary is the IMPLEMENTER record
+# `subagent-start.sh` posts at SPAWN — not the COMPLETION record, which is
+# written at FINISH and would leave the check armed through the entire
+# implementation window. Once an implementer has spawned, source paths in the
+# change set are the expected state and the check is off.
+#
+# TWO HONEST LIMITS, stated rather than discovered later:
+#   * The change set is the SESSION's, not the designer's. Nothing attributes a
+#     tracked path to an agent. So an orchestrator edit made before the designer
+#     was spawned reads identically to a designer edit — hence the audited
+#     `--accept-foreign-paths '<reason>'`, whose reason lands in the record.
+#   * `record_implementer` is BEST-EFFORT (subagent-start.sh returns early with
+#     no bd, no .beads, or no resolvable task). Absence of the record is not
+#     proof implementation has not started, which is why the check REFUSES on an
+#     unestablished answer rather than assuming the permissive branch.
+#
+# WHY NOT A PreToolUse PATH SCOPE, which the release directive asked for: the
+# repo already paid for that. LESSONS.md records the P0 where fail-closing
+# prevent-orchestrator-edits.sh on an identity the runtime does not surface to
+# PreToolUse denied legitimate specialist Write/Edit — a P0 traded for a P2. That
+# hook is untouched here, deliberately.
+DESIGN_SPEC_SUBDIR="docs/specs"
+
+# design_artifact_path_for <tid> — the ONE derivation of the artifact path from
+# the task id. The record carries the HASH and no path, which is only sound
+# because the path is derivable: an unfindable artifact and a hash that names
+# bytes nobody can locate are the same defect. Same task-id sanitisation as
+# impact_report_path_for and completion_payload_path_for.
+#
+# SINCE ROUND 5 THIS IS THE *ONLY* SOURCE OF AN ARTIFACT PATH — `--file` asserts
+# this value rather than supplying one — so `tr -c 'A-Za-z0-9._-' '_'` is now
+# load-bearing for every caller rather than for `approve` alone. It cannot emit a
+# slash, so no `..` segment, no intermediate directory and no newline can enter a
+# derived path; that was already why R4-F1's escape had two live sites and not
+# three. Admit `/` (or a newline) to this class and every one of them reopens,
+# with no other edit anywhere in the file.
+#
+# TWO COMMAND SUBSTITUTIONS SURVIVE HERE, named rather than left to look like
+# oversights: the `tr` capture cannot end in a newline (a newline is IN the
+# complement class and becomes `_`), and the CALLERS' capture of this function
+# cannot lose a byte because the format string ends in a literal `d`.
+design_artifact_path_for() {
+    local sanitized
+    sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    printf '%s/%s/%s.md' "$PROJECT_DIR" "$DESIGN_SPEC_SUBDIR" "$sanitized"
+}
+
+# ONE PHYSICAL NOTION OF *WHERE*, AND TWO QUESTIONS THAT SHARE IT (fkm.3 QA
+# rounds 2-6).
+#
+# READ THIS BEFORE "RE-UNIFYING" THE PREDICATES. The split below is
+# NOT THE ROUND-2 SHAPE RESTORED, and the difference is the whole finding.
+# Round 2 found a LEXICAL tracker beside a PHYSICAL design-record: two
+# notions of "inside", so one `..` segment made a source path read as NOT FOREIGN
+# while the same path spelled plainly was refused, and a symlinked leaf made the
+# record bind an outside file's bytes. Round 5 collapsed the pair into one
+# predicate, which was right. Round 6 (R6-F1) then found that the collapse had
+# given BOTH callers the RECORD caller's answer — and the two callers do not ask
+# the same question:
+#
+#   `design-record` and `approve` ask "are the BYTES here the declared
+#   artifact?", and for them the LEAF MUST BE FOLLOWED: `docs/specs/<tid>.md ->
+#   ../../outside/x.md` otherwise hashes the outside file, which is R2-F2 and is
+#   the whole reason the follow exists.
+#
+#   the tracker scan asks "is this ENTRY the one file this design may touch?",
+#   and for it THE LEAF MUST NOT BE FOLLOWED. The entry names a location in the
+#   source tree; where it points is a different fact about a different file.
+#   Following it classified `src/runtime -> ../docs/specs/<tid>.md` by its
+#   target, so a source-tree symlink vanished from the foreign set — and, worse
+#   because it needs no symlink and no filesystem precondition at all, it let
+#   `docs/specs/<OTHER-TASK>.md` and `docs/specs/notes.txt` read as CONTAINED. A
+#   designer holding only `Write` could clobber another task's design artifact
+#   and still record. All three instances were measured against the round-5
+#   bytes; the middle one is what set the severity.
+#
+# WHAT THE TWO SHARE IS THE ONLY THING THAT WAS EVER WRONG WHEN THEY DIVERGED:
+# the DIRECTORY comparison. `design_dir_is_spec_dir` is its single copy, it is
+# PHYSICAL, and neither caller has one of its own — so there is no second notion
+# of "inside" here to drift. The split is one statement wide: whether the leaf is
+# resolved before that comparison runs.
+#
+# WHY THE PREDICATES RETURN A STATUS AND NOT A PATH — the round-5 shape fix, and
+# the reason four consecutive rounds of findings all landed here. Every one of
+# them had ONE root: a PATHNAME crossed a COMMAND SUBSTITUTION. `$( )` strips
+# EVERY trailing newline and cannot tell a newline that terminates a command's
+# output from a newline that is the last byte of a filename. The class had eleven
+# spellings in this region — two `$(dirname …)`, four `$(basename …)`, and five
+# CALLER captures of the answer these functions used to print. That last group is
+# the one nobody reported and the one that makes a partial fix DECORATIVE: a
+# byte-preserving walk whose result is captured with `$( )` is truncated at the
+# caller instead, and for a container ending in a newline that turns "outside"
+# into "inside" one frame later (measured: with the walk fixed and the capture
+# left, a tracker line reaching `docs/specs\n/pwn.sh` through a symlink read as
+# NOT foreign). So no path is printed at all now: both directories are compared
+# INSIDE one subshell, as `$PWD`, and the only thing that crosses the boundary is
+# an exit status. The SEAM THIS ROUND INTRODUCES OBEYS THE SAME RULE — the
+# resolved leaf reaches the shared core as an ARGUMENT, which preserves every
+# byte. `docs/specs\n` and `docs/specs` are different directories here, which is
+# what the kernel has always thought.
+
+# design_dir_is_spec_dir <path> — 0 when <path>'s PARENT DIRECTORY, resolved
+# PHYSICALLY, IS the declared design directory; 1 for everything else. THE SHARED
+# CORE. It never inspects <path>'s own last component and never follows it: a
+# caller that wants the leaf followed resolves it first and hands the result in.
+#
+#   * A RELATIVE path is taken against $PROJECT_DIR — the tracker's spelling
+#     (reconcile_tracker and `git status` produce repo-relative paths). `--file`
+#     no longer arrives here in any spelling but the derived one, so one path
+#     spelling cannot mean two different files; see cmd_design_record.
+#   * THE WALK IS PHYSICAL, AND `cd -P` IS WHAT MAKES IT SO (fkm.3 QA round 4,
+#     R4-F1). Bare `cd` is bash LOGICAL mode: it collapses `..` LEXICALLY and
+#     falls back to physical resolution only when the reduced path fails to
+#     chdir. So `docs/specs/<dirlink>/../x` reduced to `docs/specs`, which
+#     exists, so the fallback never ran and the predicate answered for the
+#     SPELLING while the kernel opened <dirlink>'s real parent. `pwd -P` cannot
+#     repair that — it reports where the `cd` landed, by which time the wrong
+#     directory is already chosen, which is why the sentence that used to sit
+#     here crediting `pwd -P` with resolving `..` was not merely imprecise but
+#     the reason nobody added `-P`.
+#   * `dirname` IS SPELLED IN PARAMETER EXPANSION, and the trailing-slash loop is
+#     part of the spelling rather than defensive noise. `${p%/*}` alone is NOT
+#     `dirname`: dirname strips trailing slashes FIRST, which is what makes the
+#     bare entry `docs/specs/` answer `docs`. Same answer as the subprocess for
+#     `/a/b`, `/a/b/`, `/a`, `/`, `//` and `/a/b//` — and, unlike the subprocess,
+#     the same BYTES.
+#   * NESTED IS FOREIGN. `docs/specs/sub/deep.md`'s parent is not the declared
+#     directory: one directory level is exactly what the declaration in
+#     workflow-manifest.sh scans (`-maxdepth 1`), so the Stop-gate veto could not
+#     see a nested file either. The design phase produces ONE file, in ONE
+#     directory.
+#   * FAIL-CLOSED: an empty argument, an unreachable path and an unreachable
+#     declared directory are all "not the declared directory" (a location we
+#     cannot prove is the declared one is not it).
+design_dir_is_spec_dir() (
+    local p="${1:-}" here
+    [ -n "$p" ] || return 1
+    case "$p" in /*) ;; *) p="$PROJECT_DIR/$p" ;; esac
+    while [ "${p%/}" != "$p" ] && [ -n "${p%/}" ]; do p="${p%/}"; done
+    p="${p%/*}"
+    [ -n "$p" ] || p="/"
+    cd -P "$p" 2>/dev/null || return 1
+    here="$PWD"
+    cd -P "$PROJECT_DIR/$DESIGN_SPEC_SUBDIR" 2>/dev/null || return 1
+    [ "$here" = "$PWD" ]
+)
+
+# design_path_is_contained <path> — 0 when <path>'s FINAL TARGET sits DIRECTLY in
+# the declared design directory. THE RECORD SIDE'S QUESTION ("are the bytes here
+# the artifact?"), so it FOLLOWS the leaf, bounded, and then asks the shared core
+# about what it landed on. Never fails the caller: an unresolvable path, a
+# symlink loop and an empty argument are all "not contained".
+#
+#   * LEAF SYMLINKS ARE FOLLOWED, bounded. `readlink -f` / `realpath` would each
+#     be one line and neither is portable enough for this file: BSD readlink had
+#     no -f before macOS 12.3 and coreutils realpath is not on a stock macOS at
+#     all, while this script runs on both. A symlink LOOP exhausts the hop budget
+#     (and now fails `-ef` first) and resolves to not-contained.
+#   * `readlink`'S OUTPUT IS THE ONE COMMAND SUBSTITUTION LEFT, AND `-ef` IS WHAT
+#     MAKES IT HONEST (fkm.3 QA round 3, R3-F3 — CLOSED here, not disclosed). A
+#     link pointing at `alias\n` reads back as `alias`, so the walk inspected one
+#     path while the kernel opened another; driven end to end it produced a
+#     record binding an OUTSIDE decoy's digest. There is no portable
+#     byte-preserving reader (`readlink -z` is not on a stock macOS), so the
+#     reconstruction is CHECKED instead: `[ "$prev" -ef "$p" ]` is bash's
+#     device+inode comparison and it follows both sides, so a truncated target
+#     names a different file (or none) and is FALSE, while an honest link —
+#     relative, absolute, or a chain — stays TRUE. Both directions measured. One
+#     verdict changes with it: a DANGLING link inside the directory is now
+#     not-contained rather than inheriting its dirname's answer — fail-closed,
+#     and not a contradiction of workflow-manifest.sh declaring dangling links,
+#     because "governed by the veto" and "provably the artifact" are different
+#     questions.
+#   * `-ef` IS A DEVICE+INODE TEST AND NOT A NAME TEST, so it is DEFEATED BY A
+#     HARDLINK — the one case where a name truncated by `$(dirname …)` still
+#     names the same file (fkm.3 QA round 6, R6-F2, which built it in six lines
+#     after round 5 claimed no such case existed). That is why the IN-LOOP
+#     dirname is spelled `${p%/*}` too, and why the consequence is driven rather
+#     than argued: design-artifact.test.sh section 9.5 inverts the verdict from
+#     foreign to CONTAINED against that one mutation.
+design_path_is_contained() {
+    local p="${1:-}" hops=0 target prev
+    [ -n "$p" ] || return 1
+    case "$p" in /*) ;; *) p="$PROJECT_DIR/$p" ;; esac
+    while [ -L "$p" ]; do
+        [ "$hops" -lt 40 ] || return 1
+        target=$(readlink "$p" 2>/dev/null) || target=""
+        [ -n "$target" ] || return 1
+        prev="$p"
+        case "$target" in
+            /*) p="$target" ;;
+            *)  p="${p%/*}/$target" ;;
+        esac
+        [ "$prev" -ef "$p" ] || return 1
+        hops=$((hops + 1))
+    done
+    design_dir_is_spec_dir "$p"
+}
+
+# design_entry_is_artifact <path> <leaf-name> — 0 when <path>, TAKEN AS THE NAME
+# IT IS, is this task's one design artifact: its parent directory resolves
+# physically to the declared one AND its own last component is <leaf-name>. THE
+# TRACKER SIDE'S QUESTION. It reads no link target, so an entry is judged where
+# it SITS, and a file is not the artifact merely by being in the directory.
+#
+#   * THE DIRECTORY ARM RUNS FIRST, and the order is deliberate. Both arms must
+#     hold, so the VERDICT is identical either way; what the order decides is
+#     which arm a refusal is ATTRIBUTABLE to, and therefore which arm the
+#     historical legs still exercise — R2-F1's `..`, R4-F1's `..` after a
+#     directory symlink, the symlinked root, the maxdepth-1 rule. After this
+#     split a hostile source path is refused by its NAME long before its
+#     directory is interesting, so sections 6.11 and 6.12 of
+#     design-artifact.test.sh pin each arm with legs the other cannot satisfy.
+#   * NO TRAILING-SLASH RULE HERE, deliberately — this is where it would be WRONG
+#     rather than redundant. `docs/specs/` has an EMPTY last component, which is
+#     not the artifact's name, so the bare directory entry is refused; and
+#     `docs/specs/<tid>.md/` (a file spelled as a directory) is refused too. Both
+#     are the fail-closed answer for spellings nothing in the workflow emits —
+#     `docs/specs/` reaches the tracker only when reconcile_tracker's `?? dir/`
+#     expansion is unavailable, where refusing (with the audited bypass
+#     available) is the fail-closed answer under an unreadable git.
+#   * FAIL-CLOSED ON AN EMPTY NAME: with no <leaf-name>, nothing is the artifact,
+#     so every entry is foreign and design-record refuses. The one caller derives
+#     the name from the task id, where the format string guarantees a `.md` tail.
+design_entry_is_artifact() {
+    local p="${1:-}" want="${2:-}"
+    [ -n "$p" ] && [ -n "$want" ] || return 1
+    design_dir_is_spec_dir "$p" || return 1
+    [ "${p##*/}" = "$want" ]
+}
+
+# design_foreign_paths <artifact-leaf-name> — the denylist-filtered tracked paths
+# that are NOT this task's design artifact, one per line. The denylist is the
+# shared one (workflow-denylist.sh), so the gate's own churn — .qa-tracking,
+# .beads, the spawn log the designer's own spawn appends to — is not mistaken
+# for work.
+#
+# THE CALLER'S CAPTURE OF THIS FUNCTION IS ONE OF THE TWO EXCEPTIONS SECTION 8
+# SUBTRACTS, and it is safe for a reason rather than by convention: what crosses
+# the substitution is a LINE-DELIMITED LIST, counted and printed into a
+# diagnostic and never opened. changed-files.txt is line-delimited, so no entry
+# can carry the byte `$( )` eats.
+design_foreign_paths() {
+    local want="${1:-}"
+    local tracking="$QA_TRACKING_DIR/changed-files.txt" line
+    [ -s "$tracking" ] || return 0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        if [ -n "${WORKFLOW_DENYLIST_REGEX:-}" ] && [[ "$line" =~ $WORKFLOW_DENYLIST_REGEX ]]; then
+            continue
+        fi
+        if ! design_entry_is_artifact "$line" "$want"; then
+            printf '%s\n' "$line"
+        fi
+    done < <(LC_ALL=C sort -u "$tracking" 2>/dev/null)
+}
+
+# is_sha256_hex <value> — A SHAPE TEST, NEVER AN IDENTITY TEST, borrowed
+# verbatim in spirit from verify-before-stop.sh's _vl_is_hash and its rationale.
+# It refuses `sha256-unavailable`, any truncation of it, the empty string, and a
+# digest a hash tool cut short — including whatever the next degradation
+# spelling turns out to be. An identity test can only refuse a value somebody has
+# already been surprised by.
+is_sha256_hex() {
+    local v="${1:-}"
+    case "$v" in
+        "" | *[!0-9a-fA-F]*) return 1 ;;
+    esac
+    [ "${#v}" -eq 64 ]
+}
+
+cmd_design_record() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-record" "" "missing_task_id" \
+            "design-record requires <task-id> as first positional argument" \
+            "qa-gate.sh design-record <task-id> [--file <path>] [--designer <id>]"
+        exit 1
+    fi
+    shift || true
+
+    local artifact="" designer="designer" summary="" accept_foreign=0 foreign_reason=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                artifact="${2:-}"
+                if [ -z "$artifact" ]; then
+                    emit_error_json "design-record" "$tid" "missing_file_path" \
+                        "--file requires a path argument" \
+                        "qa-gate.sh design-record $tid --file <path>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --designer)
+                designer="${2:-}"
+                if [ -z "$designer" ]; then
+                    emit_error_json "design-record" "$tid" "missing_designer" \
+                        "--designer requires an identity argument" \
+                        "qa-gate.sh design-record $tid --designer <identity>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --accept-foreign-paths)
+                foreign_reason="${2:-}"
+                if [ -z "$foreign_reason" ]; then
+                    emit_error_json "design-record" "$tid" "missing_bypass_reason" \
+                        "--accept-foreign-paths requires a reason; it is recorded in the audit trail" \
+                        "qa-gate.sh design-record $tid --accept-foreign-paths '<reason>'"
+                    exit 1
+                fi
+                accept_foreign=1
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                if [ -z "$summary" ]; then summary="$1"; else summary="$summary $1"; fi
+                shift || true
+                ;;
+        esac
+    done
+    [ -n "$summary" ] || summary="design artifact recorded"
+
+    require_bd "design-record" "$tid"
+
+    # --- the artifact is DERIVED; --file only ASSERTS that derivation --------
+    #
+    # `--file` IS AN ASSERTION, NOT AN INPUT (fkm.3 QA round 5, and the reason
+    # this region stopped growing). Containment forces the artifact into
+    # $DESIGN_SPEC_SUBDIR and the record's own soundness condition forces the
+    # NAME to <tid>.md — the record carries the HASH and no path, which is only
+    # sound while the path is derivable from the task id. So the only value the
+    # argument can legitimately hold is the path this function already computes.
+    #
+    # Every hostile spelling four review rounds found here arrived through it —
+    # R2-F1's `..` traversal, R2-F2's symlinked leaf, R4-F1's `..` after a
+    # directory symlink, R5-F1's component named with a trailing newline, R5-F2's
+    # second file named `<tid>.md\n`. None of them is filtered now; none can be
+    # CARRIED. That is the difference between removing an input and hardening a
+    # predicate, and it is why the predicate above is left doing the one job that
+    # still HAS an attacker-supplied input: the TRACKER.
+    #
+    # It stays an argument because callers pass it and an explicit mismatch is a
+    # better answer than silently recording something else. Two spellings are
+    # accepted, both compared as STRINGS against values computed here and never
+    # resolved: the absolute derived path, and its repo-relative spelling, which
+    # is what a designer types and what designer.md's handoff block prints.
+    local derived derived_rel
+    derived=$(design_artifact_path_for "$tid")
+    derived_rel="${derived#"$PROJECT_DIR"}"
+    derived_rel="${derived_rel#/}"
+    if [ -n "$artifact" ] && [ "$artifact" != "$derived" ] && [ "$artifact" != "$derived_rel" ]; then
+        emit_error_json "design-record" "$tid" "artifact_path_not_derived" \
+            "--file names '$artifact', which is not the artifact this task can record. The record carries the HASH and no path, so the path must be derivable from the task id: $derived, or its repo-relative spelling $derived_rel. --file ASSERTS that derivation; it cannot point the record at other bytes. Write the design there and pass it, or pass nothing" \
+            "qa-gate.sh design-record $tid --file $derived"
+        exit 1
+    fi
+    artifact="$derived"
+    if ! ( cd -P "$PROJECT_DIR/$DESIGN_SPEC_SUBDIR" 2>/dev/null ); then
+        emit_error_json "design-record" "$tid" "design_spec_dir_missing" \
+            "the design spec directory does not exist at $PROJECT_DIR/$DESIGN_SPEC_SUBDIR, so no artifact can be under it. Create it and write the artifact to $derived" \
+            "qa-gate.sh design-record $tid --file $derived"
+        exit 1
+    fi
+    if [ ! -f "$artifact" ]; then
+        emit_error_json "design-record" "$tid" "artifact_not_found" \
+            "no design artifact at $artifact. The record binds a hash of the bytes on disk, so there is nothing to bind" \
+            "qa-gate.sh design-record $tid --file $derived"
+        exit 1
+    fi
+    # THE SAME PREDICATE THE TRACKER SCAN USES, so the two halves of the edit ban
+    # cannot disagree about what "inside" means. Still load-bearing after the
+    # argument was closed, because the derived path is a SPELLING and what sits
+    # at it is not: `-f` above follows a leaf symlink, so
+    # `docs/specs/<tid>.md -> ../../outside/x.md` would otherwise be hashed as
+    # the outside file's bytes (measured; R2-F2).
+    if ! design_path_is_contained "$artifact"; then
+        emit_error_json "design-record" "$tid" "artifact_outside_spec_dir" \
+            "the design artifact must live directly in $PROJECT_DIR/$DESIGN_SPEC_SUBDIR, and '$artifact' does not resolve to a file there — check whether it is a symlink out of the directory, or whether the directory itself has moved. A designer holding Write can create any file in the tree; this is the consequence that makes doing so unrecordable, and therefore ungateable, rather than a sandbox that prevents it" \
+            "qa-gate.sh design-record $tid --file $derived"
+        exit 1
+    fi
+
+    # --- designer_touched_source -------------------------------------------
+    # Phase-scoped on the IMPLEMENTER record, read through review-check.sh — the
+    # ONE record parser — rather than re-grepping the grammar here. `gate` exits
+    # 4 with error_key=review_artifact_missing on a task with no review yet,
+    # which is exactly this task's state, and that envelope still carries
+    # latest_implementer_ts. The rc is therefore ignored and the KEY is read;
+    # a MISSING key is UNESTABLISHED (review-check.sh's own contract says so) and
+    # is treated as "cannot prove implementation has started", i.e. armed.
+    local impl_ts="" impl_established=0
+    if [ -f "$REVIEW_CHECK_SCRIPT" ]; then
+        local rc_out
+        rc_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$tid" 2>/dev/null || true)
+        if printf '%s' "$rc_out" | jq -e 'has("latest_implementer_ts")' >/dev/null 2>&1; then
+            impl_established=1
+            impl_ts=$(printf '%s' "$rc_out" | jq -r '.latest_implementer_ts // ""' 2>/dev/null || echo "")
+        fi
+    fi
+    local foreign="" foreign_n=0 foreign_note=""
+    if [ "$impl_established" = "1" ] && [ -n "$impl_ts" ]; then
+        foreign_note="; designer_touched_source is OFF — an implementer has already spawned on this task (latest IMPLEMENTER record at $impl_ts), so source paths in the change set are the expected state"
+    else
+        # THE LEAF NAME IS THE SECOND ARGUMENT, and passing it is what makes the
+        # tracker's question answerable without following a target (R6-F1). It is
+        # taken from the DERIVED path by parameter expansion — never `basename`,
+        # which is the class round 5 deleted from this region.
+        foreign=$(design_foreign_paths "${derived##*/}")
+        foreign_n=$(printf '%s' "$foreign" | grep -c . | tr -d ' \n')
+        [ -n "$foreign_n" ] || foreign_n=0
+        if [ "$foreign_n" -gt 0 ] && [ "$accept_foreign" != "1" ]; then
+            emit_error_json "design-record" "$tid" "designer_touched_source" \
+                "the change set holds $foreign_n path(s) that are not this task's design artifact ($DESIGN_SPEC_SUBDIR/${derived##*/}) and no IMPLEMENTER record exists on $tid$([ "$impl_established" = "1" ] || printf '%s' " (and the implementer question could not be answered at all, so it is treated as unstarted)"), so this design cannot be recorded over them: $(printf '%s' "$foreign" | head -12 | tr '\n' ' '). The design phase produces ONE file: a source path, a second file beside the artifact in $DESIGN_SPEC_SUBDIR/, and ANOTHER task's design artifact are all equally not this one. If those paths are someone else's session work rather than the designer's, say so and proceed: qa-gate.sh design-record $tid --accept-foreign-paths '<reason>'" \
+                "qa-gate.sh design-record $tid --accept-foreign-paths '<reason>'"
+            exit 1
+        fi
+        if [ "$foreign_n" -gt 0 ]; then
+            foreign_note="; ACCEPTED $foreign_n foreign path(s) on the audited bypass"
+        fi
+    fi
+
+    # --- the OPENING bracket of the record's read window --------------------
+    # (fkm.3 QA round 2, R2-F3.) The record's whole claim is "these bytes are a
+    # valid design". Validation and hashing are two SEPARATE opens of one path —
+    # and the validator itself opens it a dozen times (one grep per required
+    # section, two sentinel counts, an awk extraction). Nothing pinned the
+    # content across any of that, and the consequence was reproduced rather than
+    # reasoned about: with a writer landing between the validator's read and
+    # hash-file's, design-record posted design_hash(B) where B was
+    # schema-invalid (it re-validated as design_section_missing), and a later
+    # approve — rehashing the same B — would report "design binding VERIFIED"
+    # over bytes no validator ever accepted.
+    #
+    # So the bytes are BRACKETED: hashed here, hashed again after the validator
+    # returns, and the record is refused unless the two agree. That covers the
+    # validator's own repeated reads as well as the gap after them, which a
+    # "hash once, then validate the same path" ordering would not.
+    #
+    # THE BRACKET CLOSES OVER CONTAINMENT TOO (fkm.3 QA round 3, R3-F4). The
+    # first version of it bracketed only CONTENT, so replacing the leaf with a
+    # symlink to a BYTE-IDENTICAL file outside the declared directory, inside
+    # this window, left both hashes agreeing and produced a record over bytes
+    # never shown to belong to the declared directory. So the closing bracket
+    # re-runs the SAME predicate the opening containment check ran and compares
+    # the two answers — two lines, the existing predicate, and the existing
+    # error key. It does not make the window atomic (nothing check-then-use
+    # can); it raises containment to the fidelity content already had, so the
+    # residual below is ONE caveat covering both rather than two side by side.
+    #
+    # THE FAILURE IS DEFERRED, not reported here, so the ERROR KEYS keep their
+    # order: an empty or unhashable artifact must still be named by the
+    # validator (design_artifact_empty) rather than by the hasher, exactly as it
+    # was before this bracket existed.
+    #
+    # WHAT IT DOES NOT CLOSE, stated rather than left for the next reviewer: an
+    # A -> B -> A oscillation that restores the original state before the second
+    # read, where the validator happened to see B — the same shape for the bytes
+    # and for the directory entry. Both brackets then agree and the record binds
+    # A. Closing that needs a snapshot the validator reads instead of the path,
+    # which would put a temp path into every diagnostic the designer sees; the
+    # exposure is a writer that can both time sub-second oscillation and restore
+    # the exact original state, which is a smaller risk than a validator whose
+    # error messages name a file the designer never wrote.
+    #
+    # THE SAME RESIDUAL HAS A SECOND, NARROWER INSTANCE (fkm.3 QA round 6,
+    # R6-F3): `[ "$prev" -ef "$p" ]` in the containment walk is TWO stat calls,
+    # so a replace landing between them is invisible to it. Only that case is
+    # genuinely uncaught — a bind mount answers with a different st_dev and a
+    # dangling target answers with nothing, both FALSE and therefore
+    # fail-closed, and a hardlink answers TRUE, which is correct because the
+    # same inode is the same bytes.
+    local manifest_tool pre_hash="" pre_rc=0 hash_tool_missing=0
+    manifest_tool="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+    if [ -f "$manifest_tool" ]; then
+        pre_hash=$(bash "$manifest_tool" hash-file "$artifact" 2>/dev/null) || pre_rc=$?
+    else
+        hash_tool_missing=1
+    fi
+
+    # --- schema, through the ONE validator ---------------------------------
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        emit_error_json "design-record" "$tid" "validator_unavailable" \
+            "cannot record a design: the ONE validator is missing at $REVIEW_CHECK_SCRIPT, so the artifact cannot be schema-checked. FAILS CLOSED by design — an unvalidated record is one the gate would then trust" \
+            "qa-gate.sh design-record $tid --file $artifact"
+        exit 2
+    fi
+    local vout vok vkey vobs units
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null || true)
+    vok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
+    if [ "$vok" != "true" ]; then
+        vkey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_design_artifact"' 2>/dev/null || echo "invalid_design_artifact")
+        [ -z "$vkey" ] && vkey="invalid_design_artifact"
+        vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null || echo "")
+        emit_error_json "design-record" "$tid" "$vkey" \
+            "the design artifact failed validation via review-check.sh: $vkey${vobs:+ — $vobs}" \
+            "see review-check.sh validate-design $artifact"
+        exit 1
+    fi
+    units=$(printf '%s' "$vout" | jq -r '.units // 0' 2>/dev/null || echo "0")
+    case "$units" in ''|*[!0-9]*) units="0" ;; esac
+
+    # --- the artifact's own task_id must be this task -----------------------
+    # The decoy check completion-record documents, in its design form: a record
+    # on task B binding an artifact whose units name task A would send every
+    # downstream reader to the wrong design.
+    #
+    # READ OFF THE VALIDATOR'S ENVELOPE, never re-extracted here. An awk/sed pass
+    # over the DESIGN-UNITS block in this file would be a SECOND parser for one
+    # grammar — precisely what review-check.sh exists to prevent, and what its
+    # header and the F1 counting note both say in as many words.
+    local art_tid
+    art_tid=$(printf '%s' "$vout" | jq -r '.task_id // ""' 2>/dev/null || echo "")
+    if [ -n "$art_tid" ] && [ "$art_tid" != "$tid" ]; then
+        emit_error_json "design-record" "$tid" "artifact_task_id_mismatch" \
+            "the artifact's own task_id='$art_tid' is not the task being recorded ('$tid')" \
+            "qa-gate.sh design-record $art_tid --file $artifact"
+        exit 1
+    fi
+
+    # --- the hash, and the proof it names the bytes that were validated ------
+    # Delegated to workflow-manifest.sh `hash-file`, which refuses BEFORE hashing
+    # on a missing, unreadable or EMPTY path. That ordering is the point: zero
+    # bytes digest to e3b0c442…, which is 64 valid hex, constant across calls,
+    # and identical to the empty change set's hash — so a binding taken over an
+    # absent artifact would compare EQUAL to itself forever and every "the
+    # binding must fail" assertion downstream would pass vacuously.
+    local design_hash post_hash="" post_rc=0
+    if [ "$hash_tool_missing" = "1" ]; then
+        emit_error_json "design-record" "$tid" "hash_tool_unavailable" \
+            "cannot hash the design artifact: workflow-manifest.sh is missing at $manifest_tool. FAILS CLOSED — a record without a real binding is a record the gate would trust for nothing" \
+            "restore .claude/scripts/workflow-manifest.sh"
+        exit 2
+    fi
+    if [ "$pre_rc" -ne 0 ] || ! is_sha256_hex "$pre_hash"; then
+        emit_error_json "design-record" "$tid" "design_hash_unavailable" \
+            "the design artifact could not be hashed into 64 hex characters (workflow-manifest.sh hash-file exited $pre_rc, produced '${pre_hash:-<empty>}'). Refused rather than recorded with a placeholder: a degradation sentinel is CONSTANT, so it compares equal to itself and to every other artifact, and the binding becomes unfailable" \
+            "bash .claude/scripts/workflow-manifest.sh hash-file $artifact"
+        exit 2
+    fi
+    # THE CLOSING BRACKET. Same call, after the validator has finished reading.
+    post_hash=$(bash "$manifest_tool" hash-file "$artifact" 2>/dev/null) || post_rc=$?
+    if [ "$post_rc" -ne 0 ] || ! is_sha256_hex "$post_hash"; then
+        emit_error_json "design-record" "$tid" "design_hash_unavailable" \
+            "the design artifact hashed cleanly before validation and could NOT be hashed after it (workflow-manifest.sh hash-file exited $post_rc, produced '${post_hash:-<empty>}'). Something changed the artifact while this command was reading it; nothing is recorded" \
+            "bash .claude/scripts/workflow-manifest.sh hash-file $artifact"
+        exit 2
+    fi
+    if [ "$post_hash" != "$pre_hash" ]; then
+        emit_error_json "design-record" "$tid" "design_artifact_changed_during_record" \
+            "the design artifact changed WHILE it was being recorded: it hashed $pre_hash before validation and $post_hash after it. The record would have bound bytes the validator never saw, so nothing is recorded. Re-run once the artifact has stopped moving" \
+            "qa-gate.sh design-record $tid --file $artifact"
+        exit 1
+    fi
+    # THE CONTAINMENT HALF OF THE SAME BRACKET. Identical bytes at a path that
+    # has moved OUT of the declared directory pass every check above. Re-ASKING
+    # the predicate is the same guarantee the old two-answers comparison gave —
+    # there is only one declared directory, so "still contained" and "contained
+    # where it was" are one statement — without carrying a path across the
+    # window in a variable to make it.
+    if ! design_path_is_contained "$artifact"; then
+        emit_error_json "design-record" "$tid" "design_artifact_changed_during_record" \
+            "the design artifact MOVED while it was being recorded: '$artifact' resolved INSIDE $PROJECT_DIR/$DESIGN_SPEC_SUBDIR before validation and does not after it. The record would have bound bytes never established as the declared directory's, so nothing is recorded. Re-run once the artifact has stopped moving" \
+            "qa-gate.sh design-record $tid --file $artifact"
+        exit 1
+    fi
+    design_hash="$pre_hash"
+
+    # --- write ---------------------------------------------------------------
+    # Every scalar interpolated into the one-line record passes the bjx grammar
+    # guard. `design_hash` is ours, and is checked anyway — "this value is ours"
+    # is exactly the assumption bjx's rubric_version shipped on.
+    assert_record_scalar "design-record" "$tid" "task" "$tid"
+    assert_record_scalar "design-record" "$tid" "designer" "$designer"
+    assert_record_scalar "design-record" "$tid" "design_hash" "$design_hash"
+    assert_record_scalar "design-record" "$tid" "units" "$units"
+
+    # The bracketed suffix carries FREE-TEXT AUDIT PROSE and nothing a program
+    # compares — the distinction ruling 1 of this phase turns on. `$summary` is
+    # unvalidated positional text sitting on the same line, so a value the gate
+    # must TRUST cannot live in that space; `design_hash` is a machine token
+    # before the timestamp for precisely that reason.
+    local record_suffix=""
+    [ "$accept_foreign" = "1" ] && record_suffix=" [foreign paths accepted: $foreign_reason]"
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="DESIGN-ARTIFACT v1 task=$tid designer=$designer design_hash=$design_hash units=$units at $ts: $summary$record_suffix"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "design-record" "$tid" "recorded" \
+        "comment posted at $ts: $comment_text; artifact $artifact bound at design_hash=$design_hash over its RAW BYTES (reproduce with: shasum -a 256 $artifact)$foreign_note"
+}
+
+# latest_design_artifact_hash <tid> — the design_hash of the LAST
+# `DESIGN-ARTIFACT v1 ` record on the task, or empty.
+#
+# `startswith("DESIGN-ARTIFACT v1 ")` rather than a substring search, for the
+# reason latest_completion_record and review-check.sh's ROUNDS block both
+# document at length: agents QUOTE record grammars in comments constantly, and a
+# prose mention must not be able to satisfy a binding. The token is read with a
+# SINGLE anchored capture carrying the SAME character class the writer validated
+# — `[A-Za-z0-9-]`, the class every other hash reader in this workflow uses
+# (verify-before-stop.sh's change_set_hash captures) — so writer and reader
+# cannot diverge in a way only a live record would reveal.
+#
+# THE TWO GUARDS ARE REDUNDANT BY CONSTRUCTION, NOT HALF-TESTED, and a mutation
+# run will say so: removing either the startswith() filter or the `^` in the
+# capture reddens NOTHING, because startswith guarantees the anchor position the
+# `^` re-asserts over the same single-line string. Redundancy that survives
+# single-point removal is what a guard should look like; making each
+# individually load-bearing would mean each covers a case the other does not,
+# i.e. LESS overlap and more holes. THE CAVEAT, because it is the thing a future
+# edit can break silently: the redundancy holds only while BOTH read the SAME
+# string. Let the filter see one value and the capture another — a pre-processed
+# variable, a joined multi-line body — and this stops being two guards and
+# becomes one, with no test change to announce it.
+#
+# Never fails the caller: no bd, no task, unparseable JSON -> empty, rc 0.
+latest_design_artifact_hash() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    bd_show_with_comments "$tid" \
+        | jq -r '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("DESIGN-ARTIFACT v1 "))
+              | ( [ capture("^DESIGN-ARTIFACT v1 task=[A-Za-z0-9._+-]+ designer=[A-Za-z0-9._+-]+ design_hash=(?<h>[A-Za-z0-9-]+) ") ]
+                  | first | .h? // "" )
+              | select(. != "")
+            ]
+            | last // ""
+        ' 2>/dev/null || true
+    return 0
+}
+# DESIGN-ARTIFACT END (v5 Phase D1 / claude-workflow-plugin-fkm.3)
+
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
     local tid="${1:-}" fid="${2:-}"
@@ -5070,6 +5873,7 @@ case "$SUB" in
     grade-record) cmd_grade_record "$@" ;;
     review-record)   cmd_review_record "$@" ;;
     completion-record) cmd_completion_record "$@" ;;
+    design-record)   cmd_design_record "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     ""|-h|--help|help)

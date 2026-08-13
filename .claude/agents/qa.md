@@ -877,11 +877,12 @@ any path the project DECLARES as part of its own surface — every
 `workflow-manifest.sh` row plus `CLAUDE.md` — so an agent prompt, a rubric,
 `.claude/commands/*.md`, a skill, `LESSONS.md` and `docs/HOOKS.md` are no longer
 fast-pathable, and a NEW declared artifact is covered with no list edited
-anywhere. What still reaches the exemption is documentation by NAME that nothing
-declares: a `.txt` that is really a golden test assertion, a bare `LICENSE` that
-is really a data file, `docs/specs/<task-id>.md` (the v5 design record —
-`docs/` is never scanned, so `claude-workflow-plugin-fkm.3` owns it), and the
-DELETION of an otherwise-declared path. If you authored one of those during a
+anywhere. Since `claude-workflow-plugin-fkm.3` (v5 D1) that declaration also
+covers `docs/specs/*.md`, the design artifact, so a change set that is exactly a
+design document gets a review round rather than the fast path. What still reaches
+the exemption is documentation by NAME that nothing declares: a `.txt` that is
+really a golden test assertion, a bare `LICENSE` that is really a data file, and
+the DELETION of an otherwise-declared path. If you authored one of those during a
 review, that is the case to watch for. The exemption, its bound and the
 remaining residual are set out in the `F1-CHANGE-SET-BINDING` and
 `GOVERNING-ARTIFACT-VETO` region headers of `verify-before-stop.sh`.

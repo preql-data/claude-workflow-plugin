@@ -1,15 +1,33 @@
 # v5.0.0 — Design as a first-class, reviewed, continuously-enforced phase
 
+> **THIS IS THE DIRECTIVE, NOT THE PLAN.** The plan is
+> [`v5-design-phase-plan.md`](v5-design-phase-plan.md) beside it, and **where the
+> two disagree the plan wins** — it exists because this directive is wrong in
+> fourteen enumerated ways. Do not brief anyone from this file alone
+> (`claude-workflow-plugin-omiv`).
+>
+> What is here that is not there: nothing. What is THERE that is not here: the
+> corrections in full rather than in summary, and the per-phase detail
+> established from source — Phase P's P0–P9 breakdown, D1's artifact schema,
+> record grammars and edit-ban layers (70 lines against the 9 below), D2's
+> DS1–DS8 rubric, D7's release checklist. Briefs have cited sections by name
+> ("Corrections to the directive", "Phase D0 — role classes 3 → 5") that exist
+> only in the plan; a reader who lands here cannot see them, and one such
+> reader produced a false "the plan contradicts itself" finding by comparing
+> directive text against a correction written to overrule it.
+>
 > **Status (2026-08-02):** IN PROGRESS on branch `v5/design-phase`, cut from `main`
 > at `bb8fce7` (the PR #4 merge, which carries v4.0.0 and v4.1.0).
 >
 > The directive below is preserved verbatim as the operator wrote it. Six decisions
 > taken at planning time, and fourteen corrections established from source, live in
-> the **Correction layer** section at the end of this file. Where the correction
-> layer and the directive text disagree, **the correction layer governs** — the same
-> convention `v4.1-upgrade-wave.md` uses.
+> the **Correction layer** section at the end of this file — the summary form; the
+> full text is in the plan. Where the correction layer and the directive text
+> disagree, **the correction layer governs** — the same convention
+> `v4.1-upgrade-wave.md` uses.
 >
-> Session plan mirror: `~/.claude/plans/v5-0-0-design-stateless-wilkinson.md`.
+> Session plan mirror: `~/.claude/plans/v5-0-0-design-stateless-wilkinson.md`,
+> mirrored into this repo as `v5-design-phase-plan.md` on 2026-08-12.
 
 ---
 

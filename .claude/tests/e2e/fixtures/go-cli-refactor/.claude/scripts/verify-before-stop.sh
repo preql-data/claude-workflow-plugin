@@ -1343,17 +1343,21 @@ governing_artifact_origin() {
 # has already written down, by asking the shipped-surface manifest instead of
 # guessing (GOVERNING-ARTIFACT-VETO above). CLAUDE.md, .claude/agents/*.md,
 # .claude/rubrics/*.md, .claude/commands/*.md, LESSONS.md, the skills and the
-# vendored references are covered by that query today.
+# vendored references are covered by that query today — and, since
+# claude-workflow-plugin-fkm.3 (v5 D1), so is `docs/specs/*.md`, the design
+# artifact. That one was this file's own named residual for a release: a design
+# document is the thing the whole design phase exists to review, and while it
+# was doc-only a change set consisting of exactly the design auto-approved with
+# reviewed_by=none. It is declared rather than pattern-matched — see the
+# design-artifact row in workflow-manifest.sh's runtime_contract_rows for why a
+# declared directory is still a declaration and not the path inference bbh
+# removed.
 #
 # WHAT REMAINS UNCOVERED, precisely:
 #   * a path the project does not declare. A `.txt` that is a golden test
 #     assertion, a bare `LICENSE` that is really a data file, and any
 #     behaviour-bearing document an install target keeps somewhere the manifest
 #     does not enumerate, all still classify as documentation.
-#   * `docs/specs/<task-id>.md`, the v5 design record (fkm.3 / D1). docs/ is
-#     deliberately never scanned by the manifest, so the query cannot see it;
-#     D1 owns that artifact and can disqualify it from the record that names it
-#     rather than from its path.
 #   * a DELETION of a declared path, which resolves to no file and so is not in
 #     the enumeration. The same asymmetry, and the same defence, as the content
 #     veto's deletion contract above.

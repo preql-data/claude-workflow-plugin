@@ -20,6 +20,200 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The design phase gets an artifact, a schema, a hash binding, and an edit
+  ban** (`fkm.3`, v5.0.0 Phase D1). The designer's prompt body ships, the design
+  artifact at `docs/specs/<task-id>.md` gets a machine-checkable contract, and
+  the approval record gains a fourth machine token that names the bytes the
+  design was.
+
+  - **`review-check.sh validate-design <file>`** — the ONE validator gains a
+    fourth schema, beside `validate-request` / `validate-artifact` /
+    `validate-completion`. It checks eight required `## ` prose sections and one
+    `<!-- DESIGN-UNITS BEGIN/END -->` block: `contract_version`, `task_id`,
+    `designer_identity`, and a non-empty `units[]` where every unit declares a
+    unique `unit_id`, a `goal`, a `verification` command, a **non-empty
+    `files[]`**, `acceptance[]` of `{id, text}`, a `depends_on` naming only
+    declared unit ids, and an `escalation_reason` whenever `implementer_class`
+    is `high` — with the dependency graph checked for cycles.
+
+    The extraction is specified from scratch rather than modelled on
+    `epic-gate.sh files_changed_of`, which the plan pointed at. Measured: that
+    idiom's selector is `jq -R 'capture("\\{[^{}]*\"…\"[^{}]*\\}")'`, and `jq
+    -R` is line-oriented, so a PRETTY-PRINTED object never matches and
+    `[^{}]*` cannot cross a brace, so a NESTED object never matches either.
+    Driven over this release's own example artifact it returns `[]` — which is
+    what "zero units" would have meant, indistinguishable from a malformed
+    block, from an absent one, and from jq being missing. Every refusal here
+    carries its own `error_key` and a non-zero exit; none reads as zero units.
+
+  - **`workflow-manifest.sh hash-file <path>`** — the design binding's digest,
+    over RAW BYTES, so `shasum -a 256 <file>` reproduces a recorded binding by
+    hand. It **refuses before hashing** on a missing, unreadable or empty path.
+    That ordering is the point: zero bytes digest to
+    `e3b0c442…`, which `impact-report.test.sh` pins as the EMPTY CHANGE SET
+    constant — 64 valid hex, stable across calls — so a binding taken over an
+    absent artifact compares equal to itself forever and any "strip the hash and
+    the binding must fail" test passes vacuously.
+
+    This is a deliberate departure from the plan, which spelled it
+    `impact-report.sh --hash-file` piping the file through
+    `sed -e 's/\r$//' -e 's/[[:space:]]*$//'`. Both defects were measured and
+    both are now negative controls in the spec: that spelling returns the
+    empty-set constant at rc 0 for a missing artifact, and its normalisation
+    collapses a Markdown **hard line break** (two trailing spaces) so
+    `line one  \nline two` and `line one\nline two` hash identically — a real
+    content edit made invisible to the hash that exists to detect it, in a
+    Markdown artifact. `s/\r$//` is additionally redundant: POSIX
+    `[[:space:]]` includes CR, measured byte-identical.
+
+  - **`qa-gate.sh design-record <tid>`** — writes
+    `DESIGN-ARTIFACT v1 task=… designer=… design_hash=… units=… at <ts>: …`,
+    and is **layer 2 of the designer edit ban**. It refuses
+    `artifact_path_not_derived` when `--file` names anything but the path
+    derived from the task id, `artifact_outside_spec_dir` when what sits at that
+    path does not resolve into `docs/specs/`, and `designer_touched_source` when
+    the change set holds a path outside that directory while no `IMPLEMENTER`
+    record exists on the task. The phase boundary is the implementer's SPAWN
+    record, not its
+    COMPLETION record — keying on completion would leave the check armed through
+    the whole implementation window. The change set is the SESSION's rather than
+    the designer's, so an audited `--accept-foreign-paths '<reason>'` records
+    the reason in the record.
+
+    **Both checks answer containment through ONE physical predicate** (QA round
+    2, findings R2-F1 and R2-F2). They did not at first, and the two halves
+    disagreeing is what the round found: the tracker scan reduced paths
+    LEXICALLY, so `$PROJECT_DIR/docs/specs/../../src/pwn.sh` read as "inside the
+    design directory" and `design-record` answered `recorded` with a source file
+    in the change set — while the same path spelled plainly was refused. The
+    `--file` check resolved only `dirname()`, so `docs/specs/<tid>.md` pointing
+    at `../../outside/design.md` was accepted and the record bound the outside
+    file's bytes, measured identical to `shasum -a 256` of it. One predicate now
+    resolves `..`, intermediate symlinks and the LEAF, for the tracker, for
+    `--file`, and for `approve`'s live re-hash; an unresolvable path is FOREIGN,
+    which is the fail-closed direction the old comment claimed and the old code
+    did not do. A nested `docs/specs/sub/x.md` is foreign too — the declaration
+    scans one directory level, so the Stop-gate veto could not see a nested file
+    either.
+
+    **And the predicate resolves physically because it says `cd -P`** (QA round
+    4, R4-F1 — the round-2 fix was incomplete and both reviewers found it, from
+    different fixtures). Bare `cd` is bash LOGICAL mode: it collapses `..`
+    LEXICALLY and only falls back to physical resolution when the reduced path
+    fails to `chdir`. So a `..` FOLLOWING a directory symlink resolved against
+    the spelling — `docs/specs/<dirlink>/..` reduced to `docs/specs`, which
+    exists, so the fallback never ran — and `pwd -P` could not repair it,
+    because it reports where the `cd` landed. Measured end to end at two of the
+    three callers with one directory symlink as the only ingredient: the tracker
+    answered `status=recorded` with a source path in the change set while the
+    same file spelled plainly was refused, and `--file` bound an outside decoy's
+    digest. The third caller, `approve`'s re-hash, was spared only because it
+    re-hashes a DERIVED path and the derivation's `tr -c 'A-Za-z0-9._-'` cannot
+    emit a slash; the code now says so where the sanitiser is, so widening that
+    class cannot quietly open a third site.
+
+    **Then round 5 named the CLASS the first four rounds had each been fixing
+    one spelling of: a pathname round-tripped through a command substitution.**
+    `$( )` strips every trailing newline and cannot tell a command's output
+    terminator from a filename's last byte. The region held eleven of them — two
+    `$(dirname …)`, four `$(basename …)`, one `$(readlink …)`, and five CALLER
+    captures of the answer the predicate used to print. Three moves, in the order
+    that matters. `--file` became an **assertion**: it may only name the path
+    derived from the task id, so R2-F1, R2-F2, R4-F1, R5-F1 and R5-F2 stop
+    *existing* rather than being filtered, and the predicate is left doing the
+    one job that still has an attacker-supplied input — the tracker. The
+    predicate now returns an **exit status** rather than a path, comparing both
+    directories as `$PWD` inside one subshell, with `dirname` spelled in
+    parameter expansion (`${p%/*}` plus dirname's trailing-slash rule, so
+    `docs/specs/` still answers `docs`). And the one surviving substitution,
+    `readlink`'s, is proven honest by `[ "$prev" -ef "$p" ]` — bash's
+    device+inode comparison, FALSE for a target read back one byte short and TRUE
+    for an honest link, relative or absolute or chained. That **closes** the
+    newline residual this entry used to disclose, so the disclosure is gone
+    rather than sitting beside the fix; one verdict changed with it, a dangling
+    symlink inside the declared directory being foreign now. Every shape was
+    driven end to end against the unfixed bytes first: each produced a
+    `DESIGN-ARTIFACT` record, two of them binding an outside decoy's digest and
+    one binding a second file in the directory named `<tid>.md` with a trailing
+    newline. Net effect on the region: eight lines of code fewer, eleven path
+    round-trips fewer, two functions fewer, one argument no longer an input.
+
+    **The record's read window brackets containment, not only content** (QA
+    round 3, R3-F4). The round-2 bracket hashed before and after validation, so
+    replacing the leaf with a symlink to a byte-identical file outside the
+    declared directory inside that window left both hashes agreeing and produced
+    a record over bytes never shown to belong there. The closing bracket now
+    re-runs the same containment predicate and compares it to the opening
+    answer, refusing with the same `design_artifact_changed_during_record`. It
+    does not make the window atomic — nothing check-then-use can — so one
+    caveat, an A -> B -> A oscillation that restores the original state before
+    the second read, now covers content and containment together instead of two
+    caveats side by side.
+
+    **The record binds the bytes the validator saw** (R2-F3). `validate-design`
+    and `hash-file` are separate opens of one path — and the validator itself
+    opens it a dozen times — so a writer landing in that window produced a record
+    naming schema-invalid bytes, which a later `approve` then re-hashed and
+    reported as `design binding VERIFIED`. Reproduced, then closed: the artifact
+    is hashed before and after validation and the record is refused
+    (`design_artifact_changed_during_record`) unless the two agree.
+
+    **And round 6 found that ONE predicate was one too few, because the two
+    callers ask different questions** (R6-F1). The round-5 collapse was right
+    about the DIRECTORY and wrong about the LEAF: it gave both callers the
+    record caller's answer. `design-record` and `approve` ask "are the BYTES
+    here the declared artifact?", which must follow a leaf symlink — that is
+    R2-F2 and it stays. The tracker scan asks "is this ENTRY the one file this
+    design may touch?", and a tracker entry is
+    **classified as an ENTRY, not as its target**: it names a location in the
+    source tree, and where it points is a fact about a different file. Following
+    it meant a source-tree symlink `src/runtime` aimed at `docs/specs/<tid>.md`
+    disappeared from the foreign set — and, needing no symlink and no filesystem
+    precondition at all, that another task's `docs/specs/<other-tid>.md` and a
+    plain `docs/specs/notes.txt` read as CONTAINED, so a designer holding only
+    `Write` could clobber another task's design and still record. All three
+    measured. The fix keeps ONE physical directory comparison shared
+    by both callers — so there is still no second notion of "inside" to drift,
+    which is what round 2 was about — and splits only the leaf: the tracker
+    compares the entry's last component with the derived filename using
+    `${p##*/}`, never `basename`. `designer_touched_source` now means "not this
+    task's one design artifact" rather than "outside `docs/specs/`", and the
+    message, `designer.md` and the usage block say so.
+
+  - **Layer 1 is `designer.md`'s tools list, which now omits `Bash` and
+    `Edit`** — two tokens; `MultiEdit` and `Task` were never granted. It is
+    **not airtight and is not claimed to be**: `Write` is retained because the
+    artifact is the designer's only deliverable, and `Write` overwrites any path
+    in the tree. Layer 1 closes the shell vector and the patch vector; layer 2 is
+    what makes writing anything else consequential. `prevent-orchestrator-edits.sh`
+    is deliberately untouched — `LESSONS.md` records the P0 from fail-closing it
+    on an identity the runtime does not surface to PreToolUse.
+
+  - **The approval record gains `design_hash=<h>` as a FOURTH MACHINE TOKEN**,
+    after `worktree=` and immediately before ` at <ts>`, not as a bracketed
+    suffix. Two reasons, both load-bearing. The token-order contract constrains
+    ORDER, not COUNT, and every existing reader is an anchored capture an
+    appended `key=value` cannot disturb. And the suffix space is self-asserted:
+    `$summary` is built from unvalidated positionals and interpolated on the same
+    line, while both readers of the existing markers `grep -qF '[review bypass:'`
+    over the whole comment — so a value the gate must TRUST cannot live there.
+    (That pre-existing exposure is filed separately as
+    `claude-workflow-plugin-yrij`.) The binding runs a four-arm ladder in the
+    manner of `grade-record`'s: bind only when a live re-hash of the artifact
+    agrees with the recorded one; otherwise write NO token and NAME the reason —
+    the design moved, the artifact is unhashable, or there is no record. A
+    one-byte post-approval edit to the design therefore un-binds the next
+    approval exactly as a post-approval code edit moves `change_set_hash`.
+
+  - **The designer's prompt body ships.** It carries the artifact's required
+    sections and unit contract, the controlling standard ("an implementer must
+    be able to build each unit without guessing"), escalation as a *declared*
+    pin change rather than a claim that a unit ran on a model, `impact_of` as a
+    required pass, and a handoff block — the designer has no shell, so it cannot
+    record its own artifact and hands the command back instead of pretending to
+    run it. It is also told, explicitly, that it receives no hook-injected
+    context: `subagent-start.sh`'s injection is implementer-roles-only.
+
 - **Model role classes expand from three to five** (`fkm.2`, v5.0.0 Phase D0).
   `designer` and `design_reviewer` join `orchestrator`, `implementer` and
   `reviewer`. Two new agents ship with their frontmatter and manifest
@@ -148,6 +342,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     artifact still renders with no upgrade step.
 
 ### Changed
+
+- **`docs/specs/*.md` is now a GOVERNING ARTIFACT, so a design document no
+  longer takes the F1 doc-only fast path** (`fkm.3`, closing the residual
+  `s5qf` disclosed and two shipped tests pinned). Before this, a change set
+  consisting of exactly the design auto-approved with `reviewed_by=none` — the
+  one deliverable the design phase exists to review taking the ungated exit.
+  It is declared in `runtime_contract_rows` beside `CLAUDE.md`, with origin
+  `design-artifact`, so it is still outside `generate_rows`: no install row, no
+  upgrade verdict, no uninstall walk, and `generate`'s output is byte-unchanged.
+  The one difference from `CLAUDE.md` is stated plainly in the code: that is a
+  named file and this is a **declared directory**, because the artifact is named
+  for the task it designs. It remains a declaration rather than the path-shape
+  inference `bbh` removed — the row exists because the workflow writes its design
+  artifact there, not because the name ends in `.md` or sits under `docs/`. An
+  operator's own `docs/` is untouched, and an anti-overreach leg pins that a
+  sibling directory under `docs/` still fast-paths. The two deliberate tripwires
+  (`doc-only-classifier.test.sh` 6c, `workflow-manifest.test.sh`) flip in this
+  same commit, as their headers asked.
+
+  **The declared directory is scanned for ENTRIES, not for regular files** (QA
+  round 2, R2-F2). `scan_flat`'s `find -maxdepth 1 -type f` excludes symlinks,
+  so a symlinked `docs/specs/<task-id>.md` produced no governing row at all and
+  the fast path reopened for the very artifact this declaration closes. The
+  declaration now has its own scanner, which declares symlinks — dangling ones
+  included, on the same reasoning the deletion residual states, and it dies
+  rather than emit a digest-less row if a future caller ever turns hashing on.
+  `scan_flat` is deliberately unchanged: it builds the surface frozen per
+  release under `manifests/`, and `install.sh` copies files rather than links.
+  Asserted from both sides — a symlink in the declared directory is governing, a
+  symlink in `.claude/agents/` leaves `generate` byte-identical. This does not
+  reach a DELETED declared path, which stays out of every enumeration and is
+  tracked as `claude-workflow-plugin-mdnc`.
+
+  **The declared DIRECTORY defeated that scanner in two more ways, and both are
+  closed** (QA round 4, R4-F3 and R4-F2 — independently reported by both
+  reviewers). If `docs/specs` is itself a directory symlink, `find` will not
+  descend a final symlink operand without `-H`/`-L` — identical on BSD find and
+  GNU findutils 4.10.0 — while the `[ -d ]` guard above it does follow, so the
+  guard passed and the scan came back silently empty: `ls docs/specs/` listed
+  the artifact and `governing` emitted no row for it. The scan now passes `-H`,
+  which follows command-line operands only, so entries *inside* the directory
+  are still reported as themselves. And a directory that is searchable but not
+  listable (mode `0311`) used to yield zero rows **at rc 0**, because find's
+  diagnostic went to `/dev/null` and its exit status was lost to process
+  substitution — a check failing open and silently. That falsified an invariant
+  its own consumer documents: `load_governing_set` captures this query's rc
+  precisely because "an empty set from a FAILED run is not [legitimate]". The
+  enumeration is now read from a file whose status can be checked, and a failed
+  one dies with find's own diagnostic quoted in the message. What the consumer
+  then does is unchanged — it logs and classifies as it did before the
+  declaration existed, which is `s5qf`'s deliberate fail-open on an
+  *unanswerable* query. The defect was that the query had been ANSWERING.
+
+- **`orchestrator.md`'s Spec-location clause is narrowed rather than deleted.**
+  Per-task implementation SPECs still go on the Beads task via `bd_doc_write`
+  per section 4a and still never into an ad-hoc file under `docs/`; the one
+  exception named is the design artifact, which is a gate input with a schema
+  and a digest. The clause count, the four wiring sentinels and the
+  exactly-once appearance of the count sentence are all unchanged.
+
+- **`CLAUDE.md` said "five agent prompts"; the tree has nine.** Corrected. It
+  matters more than the other stale censuses because `CLAUDE.md` is the sole
+  `runtime_contract_rows` entry and is auto-loaded into every agent's context —
+  including the designer's, which would otherwise decompose against a system
+  that stopped existing at D0. (`README.md` and `HANDOFF.md` carry the same
+  class of stale count and are tracked separately as
+  `claude-workflow-plugin-l1wk`.)
+
+- **The v5 plan is mirrored into the repo** (`claude-workflow-plugin-omiv`).
+  `docs/plans/v5-design-phase.md` was the operator's DIRECTIVE plus a
+  fourteen-line summary of the corrections; the plan it was turned into — which
+  exists because the directive is wrong in fourteen enumerated ways, and which
+  carries the per-phase detail established from source — had never been
+  mirrored. Briefs have cited sections by name that do not exist in the file
+  they point at, and one such reader produced a false "the plan contradicts
+  itself" finding by comparing directive text against a correction written to
+  overrule it. Both files are now indexed in `docs/plans/README.md`, each says
+  which one governs, and the "Adding a new plan" recipe gained the step whose
+  absence caused it. Neither is scanned by `workflow-manifest.sh`, so neither
+  becomes an install row.
+
 
 - **`implementer` moves from `opus-class` to `sonnet-class`** (`fkm.2`). A
   deliberate quality-for-cost trade that the reviewed design artifact and the
