@@ -1420,7 +1420,14 @@ look. One specific residual:
   the enumeration. The same asymmetry, and the same defence, as the content
   veto's deletion contract above; a *correct* deletion of a plugin-owned
   artifact also moves `.claude-plugin/plugin.json` or a frozen table, neither of
-  which is doc-named.
+  which is doc-named. **This one is now MEASURED rather than described** —
+  `doc-only-classifier.test.sh` section 6h.3 drives the deletion of an agent
+  prompt, a rubric, `CLAUDE.md` and a design artifact and pins the current
+  DOC-ONLY verdict, with a surviving declared sibling as the discriminator, so
+  closing it is a loud test change rather than a silent drift. Tracked as
+  `claude-workflow-plugin-e4ox`, which also carries the costed design (the
+  declaration's *rules* rather than its results) and the reason it was filed
+  instead of half-built.
 
 **The design artifact was the other residual, and v5 D1
 (`claude-workflow-plugin-fkm.3`) closed it.** `docs/specs/*.md` is now declared
@@ -1471,11 +1478,93 @@ as it did before the declaration existed. That is the documented fail-open on an
 *unanswerable* query; what changed is that an unreadable directory is now
 unanswerable instead of answering "nothing is declared".
 
+**An exact-path match over un-normalised strings is not an exact match over
+paths** (`claude-workflow-plugin-mdnc`). The declaration's membership test is
+exact string equality — deliberately, because a pattern match would widen the
+veto — but until this fix the *reduction* that produced the string chained its
+attempts with `elif`, so the first attempt that produced **any** string won and
+the rest were never tried. Producing a string is not finding the artifact, and a
+bare `.` was enough to defeat the whole veto. Measured, with the canonical
+spellings reading `reviewable` beside them and every anti-overreach control
+holding:
+
+| spelling | verdict before |
+| --- | --- |
+| `$ROOT/./docs/specs/T-1.md` | `DOC-ONLY` |
+| `docs/./specs/T-1.md` | `DOC-ONLY` |
+| `docs/specs/../specs/T-1.md` | `DOC-ONLY` |
+| `.claude/agents/../agents/qa.md` | `DOC-ONLY` |
+
+uniformly across **every** declared path — agent prompts, rubrics, `CLAUDE.md`
+and the design artifact. Anything that records a path with a dot in it reached
+the ungated exit, which made two shipped announcements false at once: `bbh`
+announced path-shape inference was gone, and `s5qf` announced governing
+artifacts are disqualified from the fast path.
+
+The fix is **every reduction is a candidate and any hit wins**, with three of
+the six candidates handed to the shell's own path machinery rather than to
+string surgery. All three are different functions of the same input, and none
+subsumes the others:
+
+| # | reduction | what only it can answer |
+| --- | --- | --- |
+| 4 | `cd -P` on the parent — **kernel-physical** | a symlinked directory mid-path *inside* the tree (`docs/speclink/T-1.md`) |
+| 5 | `cd` on the parent — **logical** | an artifact under a declared directory that is itself a symlink *out* of the tree; resolve that physically and the answer leaves the root |
+| 6 | `cd` then `cd -P .` — **physical resolution of the logical collapse** | a path reaching the tree through an alias with a `..` after a symlink, and a `CLAUDE_PROJECT_DIR` containing `..` |
+
+The leaf name is never resolved: a declared artifact may itself be a symlink and
+is declared under its own name, which is also why a **hardlink** to a governing
+artifact under an undeclared name still fast-paths. This veto asks what the
+project declares about a path, never what inode sits behind it. Every `cd`
+capture uses a sentinel byte (`printf '%sX'`, then `${…%X}`) because `$( )` eats
+trailing newlines and cannot tell one that ends the output from one that is the
+last byte of a directory name.
+
+**Candidate 6 is `s5qf`'s own reduction, kept rather than replaced, and the
+reason it is called out is that the first cut of this fix DELETED it.** `cd -P
+"$d"` was substituted for `cd "$d" && pwd -P` at two sites — the parent
+reduction and `_GOV_ROOT_PHYS` itself — on the reading that `-P` was a
+*correction*. It is not; it is a second question, and the two answers diverge
+exactly when a symlink precedes a `..`. The substitution therefore removed a
+reduction, and the removal failed **open**: measured on macOS bash 3.2.57 and
+ubuntu bash 5.2.21 aarch64, `$P/alias/.claude/x/../agents/qa.md` went back to
+`DOC-ONLY`, and with `CLAUDE_PROJECT_DIR` spelled `$R/.claude/x/../..` the root
+itself resolved outside the tree so **every** absolute governing path missed
+every candidate. The rule the region now states: **never remove a reduction,
+only add one.** The original defect was removal by short-circuit (`elif`); this
+would have been removal by substitution.
+
+Operationally: the fork-free candidates answer the common cases (a relative path
+from `git status`, an absolute path from `post-edit.sh`), so the three `cd`
+subshells run only on a path that already missed — i.e. on ordinary
+documentation, of which a doc-only change set has a handful.
+
 Both vetoes are pinned by
-`.claude/scripts/tests/doc-only-classifier.test.sh` (sections 4-8, including a
+`.claude/scripts/tests/doc-only-classifier.test.sh` (sections 4-10, including a
 strip-the-region META for each) and at the hook level by
 `.claude/tests/component/specs/verify-before-stop.sh` legs 9-10; the query
-itself by `.claude/scripts/tests/workflow-manifest.test.sh` section 1g.
+itself by `.claude/scripts/tests/workflow-manifest.test.sh` section 1g. Section
+6h drives the full spelling matrix — `./`, `../`, a leaf symlink, a directory
+symlink mid-path, a hardlink, a root and leaves containing **spaces** and
+**non-ASCII** characters — each paired with the identical spelling aimed at an
+ordinary document, which must still fast-path. The space-and-unicode root is not
+padding: a character-class filter proposed during this arc read correct and
+would have refused every project living under `/My Drive`, and only measurement
+caught it.
+
+**Section 10 is the leg that catches a reduction being removed, and it exists
+because sections 1-9 structurally could not.** Every one of them drives *one*
+artifact — 6h runs the shipped bytes, 9 runs the shipped bytes against a
+region-stripped copy of themselves — while monotonicity is a claim about the
+DIFFERENCE between the old artifact and the new one. 109 green assertions were
+compatible with the fail-open above. Section 10 therefore runs BOTH: a
+sha256-pinned frozen copy of the pre-`mdnc` classifier
+(`.claude/scripts/tests/fixtures/gov-classifier-baseline-s5qf.sh`, never
+maintained, never refreshed) and — while the tree is dirty — the same extraction
+from `git show HEAD:`, sweeping 1219 paths across 9 project roots and asserting
+that **zero** of them lose the veto. Its negative control is the defect itself:
+strip the `GOV-LPHYS` region and the differential must name the alias route and
+the three artifacts under the `..`-bearing root.
 
 **The fast path is bound to the change set it judged, and it no longer speaks
 for a task an implementer is working on** (`claude-workflow-plugin-qzv`, the

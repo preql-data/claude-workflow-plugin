@@ -2,7 +2,7 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help session test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test clean
+.PHONY: help session test test-component test-all test-linux test-linux-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test clean
 
 help:
 	@echo "Targets:"
@@ -10,6 +10,8 @@ help:
 	@echo "  test              — run the plugin's bash test suite (L1 unit)"
 	@echo "  test-component    — run hook-pipeline component tests (L2; Phase B)"
 	@echo "  test-all          — run L1 unit + L2 component tiers (offline; CI-friendly)"
+	@echo "  test-linux        — run the L1 tier inside a Linux container (GNU tooling; needs docker)"
+	@echo "  test-linux-all    — same, L1 + L2. Reports which tiers ran; a skip is never a pass"
 	@echo "  test-live         — run live E2E for ONE OR MORE fixtures (requires FIXTURE=name OR FIXTURES=\"a b c\";"
 	@echo "                      paid; needs ANTHROPIC_API_KEY; pass CONFIRM=1 to skip the cost prompt; RECORD=1 to refresh cassettes)"
 	@echo "  test-e2e          — DEPRECATED alias (prints pointer to test-live and exits 2)"
@@ -51,6 +53,28 @@ test-component:
 # `test` scope (L1 only) so anything that pinned `make test` keeps working;
 # new wiring (CI, docs) should target `test-all` for the full offline gate.
 test-all: test test-component
+
+# THE LINUX TIER. Everything above runs on whatever the developer's box is,
+# which here is macOS: BSD find, BSD sed, `shasum`, bash 3.2. CI runs on
+# ubuntu-latest: GNU findutils, GNU coreutils, `sha256sum`, bash 5.2. These two
+# targets run the SAME tier bytes against the second set, in a container, before
+# a push — so a red CI run is one unknown (the code) rather than two (the code
+# and the CI wiring nobody has exercised either).
+#
+# The repo is bind-mounted READ-ONLY and the mount is verified per run (the
+# driver hashes the tracked tree on both sides and refuses a mismatch), so this
+# is safe to run mid-session: a container cannot write into .beads/ or
+# .claude/.qa-tracking/ and cannot leave root-owned files in the checkout.
+#
+# EXIT CODES ARE THREE-VALUED, matching the L1 runner's outcome discipline:
+# 0 every requested tier ran and passed, 1 a tier ran and failed, 2 the tier
+# could NOT be measured (no docker, no daemon, build failure, byte mismatch).
+# A missing docker is a named skip and exit 2 — never a silent green.
+test-linux:
+	bash .claude/tests/linux/run-linux-tier.sh --tiers l1
+
+test-linux-all:
+	bash .claude/tests/linux/run-linux-tier.sh --tiers l1,l2 --keep-going
 
 # L3 live tier — MANUAL ONLY. Per v3.1.0 spec item 0.8, live testing is
 # a development-cycle activity, gated behind explicit operator invocation
@@ -280,7 +304,7 @@ shellcheck:
 		echo "shellcheck not on PATH (skipping); install via 'brew install shellcheck' or apt for stricter local lint"; \
 		exit 0; \
 	else \
-		shellcheck .claude/scripts/*.sh .claude/scripts/tests/*.sh .claude/tests/mutation/*.sh .claude/tests/mutation/lib/*.sh install.sh uninstall.sh; \
+		shellcheck .claude/scripts/*.sh .claude/scripts/tests/*.sh .claude/tests/linux/*.sh .claude/tests/mutation/*.sh .claude/tests/mutation/lib/*.sh install.sh uninstall.sh; \
 	fi
 
 check:

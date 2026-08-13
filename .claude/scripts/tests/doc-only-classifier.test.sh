@@ -30,6 +30,13 @@
 #      discriminator so the absence cannot be satisfied by a broken query
 #   8  GOVERNING-VETO META: strip the region and section 6 goes back to the
 #      defect
+#   9  PATH-REDUCTION META: which sentinel region carries the mdnc fix, by
+#      stripping one at a time and re-driving section 6h's exact inputs
+#  10  MONOTONICITY: the differential against what shipped BEFORE — a frozen,
+#      sha256-pinned copy of the 0de5ceb classifier plus (when the tree is
+#      dirty) HEAD's. Sections 1-9 all drive ONE artifact, and a monotonicity
+#      claim is a claim about the DIFFERENCE between two, which is why 109
+#      green assertions could not see mdnc's R1-F1 fail-open.
 #
 # Offline, self-contained; exit 0 all pass / 1 any fail / 2 invocation error.
 
@@ -693,6 +700,279 @@ assert_eq "6g ...and the query did not report itself unavailable (it really ran)
     "$(grep -c 'governing-artifact query is unavailable\|governing-artifact query failed' "$GOV_ERR" | tr -d '[:space:]')"
 
 # ---------------------------------------------------------------------------
+# 6h. EVERY SPELLING OF A DECLARED PATH (claude-workflow-plugin-mdnc)
+# ---------------------------------------------------------------------------
+# THE MEASURED DEFECT THIS SECTION EXISTS FOR. The veto's membership test is an
+# EXACT STRING MATCH against the enumeration, which is right — but until mdnc
+# the REDUCTION that produced the string chained its attempts with `elif`, so
+# the first attempt that produced ANY string won and the rest were never tried.
+# A bare dot was enough to defeat it. Measured against the shipped classifier,
+# with the canonical spellings measuring `reviewable` beside them:
+#
+#   $ROOT/./docs/specs/T-1.md        -> DOC-ONLY
+#   docs/./specs/T-1.md              -> DOC-ONLY
+#   docs/specs/../specs/T-1.md       -> DOC-ONLY
+#   .claude/agents/../agents/qa.md   -> DOC-ONLY
+#
+# uniformly across EVERY declared path — agent prompts, rubrics, CLAUDE.md and
+# the design artifact. That is a release-authorising bypass reachable by any
+# tool that records a path with a dot in it, and it made two ANNOUNCED claims
+# false at once: bbh announced that path-shape inference was gone, and s5qf
+# announced that governing artifacts are disqualified from the fast path.
+#
+# EVERY ROW IS A PAIR. A spelling leg alone would pass just as well under a
+# classifier that had given up and called everything reviewable, so each
+# spelling is driven TWICE — once against a declared artifact (expect
+# `reviewable`) and once against an ordinary document reached by the identical
+# spelling machinery (expect `DOC-ONLY`). The controls are what make the legs
+# above mean "the reduction is correct" rather than "the veto got greedy".
+#
+# THE FIXTURE'S SHAPE IS ITSELF EVIDENCE, and two parts of it are here because
+# reasoning got them wrong first:
+#   * THE ROOT NAME CARRIES A SPACE AND A NON-ASCII CHARACTER. A character-class
+#     filter over paths was proposed during this arc, read correct, and would
+#     have refused every project living under `/My Drive`. Only measurement
+#     caught it, so the root is named to make that class of mistake fail here.
+#   * A HARDLINK to a declared artifact, under an UNDECLARED name, must stay
+#     DOC-ONLY. D1 measured that a hardlink defeats `-ef` — same inode, wrong
+#     name — so this leg is the control that keeps the reduction PATH-based. It
+#     is the leg that goes red the day someone "simplifies" this into an inode
+#     comparison.
+# ---------------------------------------------------------------------------
+
+# The root: a space AND a non-ASCII character, deliberately.
+SPELL_ROOT="$WORK/gov spéc project"
+mkdir -p "$SPELL_ROOT/.claude/agents" "$SPELL_ROOT/.claude/rubrics" \
+         "$SPELL_ROOT/.claude/scripts" "$SPELL_ROOT/docs/specs" \
+         "$SPELL_ROOT/docs/design-notes" "$SPELL_ROOT/outside"
+printf '# project memory\n'   > "$SPELL_ROOT/CLAUDE.md"
+printf '# readme\n'           > "$SPELL_ROOT/README.md"
+printf 'qa agent\n'           > "$SPELL_ROOT/.claude/agents/qa.md"
+printf 'scratch notes\n'      > "$SPELL_ROOT/.claude/agents/notes.txt"
+printf 'default rubric\n'     > "$SPELL_ROOT/.claude/rubrics/default.md"
+printf '#!/bin/bash\n'        > "$SPELL_ROOT/.claude/scripts/qa-gate.sh"
+printf '# a design record\n'  > "$SPELL_ROOT/docs/specs/T-1.md"
+printf '# spaced design\n'    > "$SPELL_ROOT/docs/specs/T 2 spaced.md"
+printf '# unicode design\n'   > "$SPELL_ROOT/docs/specs/T-3-café.md"
+printf 'not markdown\n'       > "$SPELL_ROOT/docs/specs/sidecar.txt"
+printf '# an operator note\n' > "$SPELL_ROOT/docs/design-notes/idea.md"
+printf '# spaced note\n'      > "$SPELL_ROOT/docs/design-notes/n 2 spaced.md"
+printf '# unicode note\n'     > "$SPELL_ROOT/docs/design-notes/n-3-café.md"
+printf '# linked design\n'    > "$SPELL_ROOT/outside/linked-design.md"
+printf '# linked note\n'      > "$SPELL_ROOT/outside/linked-note.md"
+# a declared artifact that IS a symlink, and its undeclared twin
+ln -sfn "../../outside/linked-design.md" "$SPELL_ROOT/docs/specs/T-4-link.md"
+ln -sfn "../../outside/linked-note.md"   "$SPELL_ROOT/docs/design-notes/linked-idea.md"
+# a DIRECTORY symlink mid-path, one into the declared dir and one into the
+# undeclared sibling, so the control travels the same machinery
+ln -sfn "specs"        "$SPELL_ROOT/docs/speclink"
+ln -sfn "design-notes" "$SPELL_ROOT/docs/notelink"
+# a HARDLINK to a declared artifact under an undeclared name
+ln "$SPELL_ROOT/.claude/agents/qa.md" "$SPELL_ROOT/docs/design-notes/hardlink-to-qa.md"
+
+# Preconditions. Each one is a fact a later leg's meaning depends on; without
+# them a leg could pass because the fixture never got built.
+assert_eq "6h.0 precondition: the project root name contains a SPACE" "yes" \
+    "$([ "${SPELL_ROOT#* }" != "$SPELL_ROOT" ] && echo yes || echo no)"
+assert_eq "6h.0b precondition: ...and a non-ASCII character" "yes" \
+    "$(printf '%s' "$SPELL_ROOT" | LC_ALL=C grep -q '[^ -~]' && echo yes || echo no)"
+assert_eq "6h.0c precondition: the declared leaf T-4-link.md really is a symlink" "yes" \
+    "$([ -L "$SPELL_ROOT/docs/specs/T-4-link.md" ] && echo yes || echo no)"
+assert_eq "6h.0d precondition: docs/speclink really is a directory symlink" "yes" \
+    "$([ -L "$SPELL_ROOT/docs/speclink" ] && [ -d "$SPELL_ROOT/docs/speclink" ] && echo yes || echo no)"
+assert_eq "6h.0e precondition: the hardlink really shares qa.md's inode" "same" \
+    "$([ "$SPELL_ROOT/.claude/agents/qa.md" -ef "$SPELL_ROOT/docs/design-notes/hardlink-to-qa.md" ] && echo same || echo different)"
+assert_eq "6h.0f precondition: ...under a DIFFERENT name (that is the whole leg)" "differ" \
+    "$([ "$(basename "$SPELL_ROOT/.claude/agents/qa.md")" != "hardlink-to-qa.md" ] && echo differ || echo same)"
+
+# THE DECLARED half of every pair.
+cat > "$WORK/spell-gov.txt" <<EOF
+docs/specs/T-1.md
+$SPELL_ROOT/docs/specs/T-1.md
+$SPELL_ROOT/./docs/specs/T-1.md
+./docs/specs/T-1.md
+docs/./specs/T-1.md
+docs/specs/../specs/T-1.md
+$SPELL_ROOT/docs/specs/../specs/T-1.md
+.claude/agents/qa.md
+./.claude/agents/qa.md
+.claude/agents/../agents/qa.md
+$SPELL_ROOT/./.claude/agents/qa.md
+$SPELL_ROOT/.claude/agents/../agents/qa.md
+CLAUDE.md
+./CLAUDE.md
+$SPELL_ROOT/./CLAUDE.md
+.claude/rubrics/../rubrics/default.md
+docs/speclink/T-1.md
+$SPELL_ROOT/docs/speclink/T-1.md
+$SPELL_ROOT/./docs/speclink/T-1.md
+docs/specs/T-4-link.md
+$SPELL_ROOT/./docs/specs/T-4-link.md
+docs/speclink/T-4-link.md
+docs/specs/T 2 spaced.md
+$SPELL_ROOT/./docs/specs/T 2 spaced.md
+docs/speclink/T 2 spaced.md
+docs/specs/T-3-café.md
+$SPELL_ROOT/./docs/specs/T-3-café.md
+docs/speclink/T-3-café.md
+EOF
+# THE ORDINARY-DOCUMENT half: the same spellings, aimed at documents the
+# project declares nothing about. Every one of these must keep the fast path.
+cat > "$WORK/spell-doc.txt" <<EOF
+docs/design-notes/idea.md
+$SPELL_ROOT/docs/design-notes/idea.md
+$SPELL_ROOT/./docs/design-notes/idea.md
+./docs/design-notes/idea.md
+docs/./design-notes/idea.md
+docs/design-notes/../design-notes/idea.md
+$SPELL_ROOT/docs/design-notes/../design-notes/idea.md
+.claude/agents/notes.txt
+./.claude/agents/notes.txt
+.claude/agents/../agents/notes.txt
+$SPELL_ROOT/./.claude/agents/notes.txt
+README.md
+./README.md
+$SPELL_ROOT/./README.md
+docs/notelink/idea.md
+$SPELL_ROOT/./docs/notelink/idea.md
+docs/design-notes/linked-idea.md
+$SPELL_ROOT/./docs/design-notes/linked-idea.md
+docs/notelink/linked-idea.md
+docs/design-notes/n 2 spaced.md
+$SPELL_ROOT/./docs/design-notes/n 2 spaced.md
+docs/design-notes/n-3-café.md
+$SPELL_ROOT/./docs/design-notes/n-3-café.md
+docs/specs/sidecar.txt
+$SPELL_ROOT/./docs/specs/sidecar.txt
+docs/design-notes/hardlink-to-qa.md
+$SPELL_ROOT/./docs/design-notes/hardlink-to-qa.md
+$SPELL_ROOT/docs/design-notes/../design-notes/hardlink-to-qa.md
+EOF
+
+SPELL_GOV=$(classify_all "$GOV_LIB" "$SPELL_ROOT" "$WORK/spell-gov.txt" 2>/dev/null)
+SPELL_DOC=$(classify_all "$GOV_LIB" "$SPELL_ROOT" "$WORK/spell-doc.txt" 2>/dev/null)
+
+while IFS= read -r sp; do
+    [ -z "$sp" ] && continue
+    assert_eq "6h declared, every spelling: $sp is REVIEWABLE" \
+        "reviewable" "$(verdict_of "$SPELL_GOV" "$sp")"
+done < "$WORK/spell-gov.txt"
+while IFS= read -r sp; do
+    [ -z "$sp" ] && continue
+    assert_eq "6h control, same spelling machinery: $sp still fast-paths" \
+        "DOC-ONLY" "$(verdict_of "$SPELL_DOC" "$sp")"
+done < "$WORK/spell-doc.txt"
+
+# 6h.1 THE DECLARED DIRECTORY IS ITSELF A SYMLINK OUT OF THE TREE. fkm.3's
+# R4-F3 already had to teach the SCAN about this shape (`find -H`), and the
+# artifact is declared under its `docs/specs/...` spelling. Resolve that path's
+# parent PHYSICALLY and the answer leaves the root entirely — so a
+# resolution-only reduction stops vetoing the one document the design phase
+# exists to review. Measured: with only the physical candidate,
+# `$ROOT/./docs/specs/T-9.md` here read DOC-ONLY. This is the leg the LOGICAL
+# candidate exists for.
+OUTDIR_ROOT="$WORK/gov-outdir-project"
+mkdir -p "$OUTDIR_ROOT/docs" "$OUTDIR_ROOT/.claude/agents" "$WORK/outdir-specs"
+printf '# project memory\n' > "$OUTDIR_ROOT/CLAUDE.md"
+printf '# readme\n'         > "$OUTDIR_ROOT/README.md"
+printf 'qa agent\n'         > "$OUTDIR_ROOT/.claude/agents/qa.md"
+printf '# design\n'         > "$WORK/outdir-specs/T-9.md"
+printf '# a note\n'         > "$WORK/outdir-specs/note.txt"
+# The link sits AT $OUTDIR_ROOT/docs/specs, so a relative target resolves from
+# $OUTDIR_ROOT/docs — two levels up is $WORK. Written out because getting it
+# wrong produced a DANGLING link the first time, which fails as a missing
+# governing row two legs later rather than as a broken fixture.
+ln -sfn "../../outdir-specs" "$OUTDIR_ROOT/docs/specs"
+OUTDIR_ROOT_PHYS=$(cd -P "$OUTDIR_ROOT" && pwd)
+OUTDIR_SPECS_PHYS=$(cd -P "$OUTDIR_ROOT/docs/specs" 2>/dev/null && pwd)
+assert_eq "6h.1 precondition: docs/specs is a symlink whose target is OUTSIDE the root" "outside" \
+    "$([ -L "$OUTDIR_ROOT/docs/specs" ] && [ -n "$OUTDIR_SPECS_PHYS" ] && \
+       { [ "${OUTDIR_SPECS_PHYS#"$OUTDIR_ROOT_PHYS"/}" = "$OUTDIR_SPECS_PHYS" ] && echo outside || echo inside; })"
+assert_eq "6h.1b precondition: the declaration still emits a row for it (find -H, fkm.3 R4-F3)" "1" \
+    "$(bash "$GOVDIR/workflow-manifest.sh" governing "$OUTDIR_ROOT" | grep -c '^docs/specs/T-9\.md	' | tr -d '[:space:]')"
+cat > "$WORK/outdir.txt" <<EOF
+docs/specs/T-9.md
+$OUTDIR_ROOT/docs/specs/T-9.md
+$OUTDIR_ROOT/./docs/specs/T-9.md
+./docs/specs/T-9.md
+README.md
+$OUTDIR_ROOT/./README.md
+docs/specs/note.txt
+EOF
+OUTDIR_OUT=$(classify_all "$GOV_LIB" "$OUTDIR_ROOT" "$WORK/outdir.txt" 2>/dev/null)
+for sp in "docs/specs/T-9.md" "$OUTDIR_ROOT/docs/specs/T-9.md" \
+          "$OUTDIR_ROOT/./docs/specs/T-9.md" "./docs/specs/T-9.md"; do
+    assert_eq "6h.1c out-of-tree declared dir: $sp is REVIEWABLE" \
+        "reviewable" "$(verdict_of "$OUTDIR_OUT" "$sp")"
+done
+for sp in "README.md" "$OUTDIR_ROOT/./README.md" "docs/specs/note.txt"; do
+    assert_eq "6h.1d control: $sp still fast-paths" \
+        "DOC-ONLY" "$(verdict_of "$OUTDIR_OUT" "$sp")"
+done
+
+# 6h.2 CONTAINMENT SURVIVES THE NEW REDUCTION. The section-6e2 containment leg
+# drives the string attempts; this drives the KERNEL one, which resolves an
+# arbitrary directory and is therefore the new place an out-of-tree path could
+# leak in. Same equal-length-sibling discipline as 6e2 — see that leg's note for
+# why a differently-sized name is not a control.
+SPELL_SIB="$WORK/gov spéc projeXX"
+mkdir -p "$SPELL_SIB/.claude/agents"
+printf 'someone else s qa agent\n' > "$SPELL_SIB/.claude/agents/qa.md"
+assert_eq "6h.2 precondition: the sibling root is the SAME LENGTH as the declaring one" "yes" \
+    "$([ "${#SPELL_SIB}" = "${#SPELL_ROOT}" ] && echo yes || echo no)"
+cat > "$WORK/spell-other.txt" <<EOF
+$SPELL_SIB/.claude/agents/qa.md
+$SPELL_SIB/./.claude/agents/qa.md
+$SPELL_SIB/.claude/agents/../agents/qa.md
+EOF
+SPELL_OTHER=$(classify_all "$GOV_LIB" "$SPELL_ROOT" "$WORK/spell-other.txt" 2>/dev/null)
+while IFS= read -r sp; do
+    [ -z "$sp" ] && continue
+    assert_eq "6h.2b containment: another tree's identical path stays DOC-ONLY — $sp" \
+        "DOC-ONLY" "$(verdict_of "$SPELL_OTHER" "$sp")"
+done < "$WORK/spell-other.txt"
+
+# 6h.3 THE DELETION RESIDUAL, PINNED RATHER THAN CLAIMED CLOSED. mdnc has two
+# halves and this change fixes ONE of them. The enumeration is built from
+# entries that EXIST, so after `rm .claude/agents/qa.md` there is no row to
+# match and no reduction can invent one: the deletion of a governing artifact
+# still takes the fast path with reviewed_by=none. These legs assert the
+# CURRENT behaviour so that closing it later is a loud test change rather than
+# a silent drift — the same convention 6c used for the design artifact before
+# D1 closed it. Do not read them as endorsement; read them as the residual
+# being measured instead of described.
+DEL_ROOT="$WORK/gov-deletion-project"
+mkdir -p "$DEL_ROOT/.claude/agents" "$DEL_ROOT/.claude/rubrics" "$DEL_ROOT/docs/specs"
+printf '# project memory\n' > "$DEL_ROOT/CLAUDE.md"
+printf '# readme\n'         > "$DEL_ROOT/README.md"
+printf 'qa agent\n'         > "$DEL_ROOT/.claude/agents/qa.md"
+printf 'keeper agent\n'     > "$DEL_ROOT/.claude/agents/keeper.md"
+printf 'default rubric\n'   > "$DEL_ROOT/.claude/rubrics/default.md"
+printf '# a design\n'       > "$DEL_ROOT/docs/specs/T-1.md"
+cat > "$WORK/del.txt" <<'EOF'
+.claude/agents/qa.md
+.claude/rubrics/default.md
+CLAUDE.md
+docs/specs/T-1.md
+.claude/agents/keeper.md
+README.md
+EOF
+DEL_BEFORE=$(classify_all "$GOV_LIB" "$DEL_ROOT" "$WORK/del.txt" 2>/dev/null)
+assert_eq "6h.3 precondition: BEFORE deletion the artifact is REVIEWABLE" "reviewable" \
+    "$(verdict_of "$DEL_BEFORE" ".claude/agents/qa.md")"
+rm -f "$DEL_ROOT/.claude/agents/qa.md" "$DEL_ROOT/.claude/rubrics/default.md" \
+      "$DEL_ROOT/CLAUDE.md" "$DEL_ROOT/docs/specs/T-1.md"
+DEL_AFTER=$(classify_all "$GOV_LIB" "$DEL_ROOT" "$WORK/del.txt" 2>/dev/null)
+for sp in ".claude/agents/qa.md" ".claude/rubrics/default.md" "CLAUDE.md" "docs/specs/T-1.md"; do
+    assert_eq "6h.3b OPEN RESIDUAL (mdnc, unfixed): DELETING $sp still fast-paths" \
+        "DOC-ONLY" "$(verdict_of "$DEL_AFTER" "$sp")"
+done
+assert_eq "6h.3c discriminator: a surviving declared sibling is still REVIEWABLE" "reviewable" \
+    "$(verdict_of "$DEL_AFTER" ".claude/agents/keeper.md")"
+assert_eq "6h.3d discriminator: an ordinary doc is DOC-ONLY for its own reason" "DOC-ONLY" \
+    "$(verdict_of "$DEL_AFTER" "README.md")"
+
+# ---------------------------------------------------------------------------
 # 7. AN EMPTY OR ABSENT DECLARATION CHANGES NOTHING
 # ---------------------------------------------------------------------------
 # This plugin installs into arbitrary projects. A project that declares no
@@ -817,6 +1097,474 @@ else
     assert_eq "8.10 restore control: the SHIPPED copy disqualifies the identical prompt" \
         "reviewable" "$(verdict_of "$GOV_RESTORE" ".claude/agents/qa.md")"
 fi
+
+# ---------------------------------------------------------------------------
+# 9. PATH-REDUCTION META (claude-workflow-plugin-mdnc)
+# ---------------------------------------------------------------------------
+# Section 6h asserts that every spelling of a declared path is refused. On its
+# own that is satisfiable by a classifier that refuses everything, and section
+# 6h's own DOC-ONLY controls rule that out — but neither says WHICH code
+# carries the fix. This section does, by removing one sentinel region at a
+# time from a copy of the shipped script and re-driving 6h's exact inputs.
+#
+# TWO REGIONS, TWO DIFFERENT CLAIMS, and the second one is deliberately not the
+# first one repeated:
+#   GOV-PATH-RESOLUTION  — strip it and the dot / dot-dot / directory-symlink
+#                          spellings return to DOC-ONLY. That is the measured
+#                          mdnc defect, reproduced on demand.
+#   GOV-LITERAL-PREFIX   — strip it and NOTHING in the 6h matrix moves. That is
+#                          the honest claim about that region: it is a fork-free
+#                          fast path, not the fix, and this leg is what would
+#                          catch it silently becoming load-bearing again.
+# A region whose removal changes nothing is normally a dead-code smell; the
+# reason this one stays is written where it lives, and its residual (a parent
+# directory that cannot be traversed) is declared UNPAIRED there rather than
+# dressed up in a fixture that cannot reach it.
+mk_region_mutant() {
+    local region="$1" out="$2" lib="$3"
+    awk -v r="$region" '
+        $0 ~ ("^ *# --- " r "-BEGIN") { skip = 1; next }
+        $0 ~ ("^ *# --- " r "-END")   { skip = 0; next }
+        !skip { print }' "$VBS" > "$out"
+    extract_classifier "$out" "$lib"
+}
+
+# code_grep_count <pattern> <file> — occurrences on NON-COMMENT lines only.
+#
+# EVERY PRESENCE PROBE IN SECTIONS 9 AND 10 GOES THROUGH THIS, and the reason is
+# that the bare form was measured wrong DURING this round. These regions
+# describe their own code at length; adding one sentence to the resolution
+# region's header — "`cd -P "$pdir"` in place of ..." — took 9.5d from 1 to 2
+# without touching a line of code, because the sentence quotes the pattern. That
+# is the same defect section 3.4 already carries a note about (LESSONS.md,
+# 2026-08-08: "grepping for the deleted pattern returns the prose"), and the
+# same defence: read code lines only, so a probe cannot be satisfied — or
+# defeated — by being described.
+code_grep_count() {
+    grep -v '^[[:space:]]*#' "$2" | grep -c "$1" | tr -d '[:space:]'
+}
+
+RES_SRC="$WORK/vbs-nores.sh"
+RES_LIB="$GOVDIR/nores.sh"
+mk_region_mutant "GOV-PATH-RESOLUTION" "$RES_SRC" "$RES_LIB"
+assert_eq "9.0 GUARD: the resolution strip APPLIED (mutant differs from shipped)" "differs" \
+    "$(cmp -s "$GOV_LIB" "$RES_LIB" && echo identical || echo differs)"
+assert_eq "9.0b the mutant parses" "0" \
+    "$(bash -n "$RES_LIB" 2>/dev/null && echo 0 || echo 1)"
+# shellcheck disable=SC2016  # matching the LITERAL text `cd -P "$pdir"` in the
+# extracted classifier, not expanding $pdir. Same for the `${abs:` reads below.
+assert_eq "9.0c the strip took the resolution region and nothing of it survives" "0" \
+    "$(code_grep_count 'cd -P "\$pdir"' "$RES_LIB")"
+# shellcheck disable=SC2016
+assert_eq "9.0d discriminator: the literal-prefix region SURVIVED (this strip took ONE thing)" "1" \
+    "$(code_grep_count 'c_logical=\${abs:' "$RES_LIB")"
+
+RES_GOV=$(classify_all "$RES_LIB" "$SPELL_ROOT" "$WORK/spell-gov.txt" 2>/dev/null)
+# The four spellings the task filed, by name, each one back to the defect.
+for sp in "$SPELL_ROOT/./docs/specs/T-1.md" \
+          "docs/./specs/T-1.md" \
+          "docs/specs/../specs/T-1.md" \
+          ".claude/agents/../agents/qa.md" \
+          "./CLAUDE.md" \
+          "docs/speclink/T-1.md" \
+          "$SPELL_ROOT/./docs/specs/T 2 spaced.md" \
+          "$SPELL_ROOT/./docs/specs/T-3-café.md"; do
+    assert_eq "9.1 META: without resolution, $sp is DOC-ONLY (6h WOULD fail)" \
+        "DOC-ONLY" "$(verdict_of "$RES_GOV" "$sp")"
+done
+# Discriminators: the mutant still classifies the CANONICAL spellings correctly,
+# so 9.1 is attributable to the reduction and not to a broken query or a
+# classifier that stopped working.
+for sp in "docs/specs/T-1.md" ".claude/agents/qa.md" "CLAUDE.md" \
+          "$SPELL_ROOT/docs/specs/T-1.md"; do
+    assert_eq "9.2 META discriminator: the mutant still refuses the CANONICAL $sp" \
+        "reviewable" "$(verdict_of "$RES_GOV" "$sp")"
+done
+# ...and it still fast-paths ordinary documentation, so it has not simply died.
+RES_DOC=$(classify_all "$RES_LIB" "$SPELL_ROOT" "$WORK/spell-doc.txt" 2>/dev/null)
+assert_eq "9.2b META discriminator: the mutant still fast-paths an ordinary doc" "DOC-ONLY" \
+    "$(verdict_of "$RES_DOC" "docs/design-notes/idea.md")"
+# RESTORE CONTROL: the shipped copy, same inputs, same call shape.
+assert_eq "9.3 restore control: the SHIPPED copy refuses the identical dot spelling" "reviewable" \
+    "$(verdict_of "$SPELL_GOV" "$SPELL_ROOT/./docs/specs/T-1.md")"
+
+# The out-of-tree declared directory is the case the LOGICAL half of the region
+# answers; strip the region and it goes too, which is what separates 6h.1 from
+# a re-run of the legs above.
+RES_OUTDIR=$(classify_all "$RES_LIB" "$OUTDIR_ROOT" "$WORK/outdir.txt" 2>/dev/null)
+assert_eq "9.4 META: without resolution, the out-of-tree declared dir loses the dot spelling too" \
+    "DOC-ONLY" "$(verdict_of "$RES_OUTDIR" "$OUTDIR_ROOT/./docs/specs/T-9.md")"
+assert_eq "9.4b META discriminator: ...while its canonical spelling still resolves" "reviewable" \
+    "$(verdict_of "$RES_OUTDIR" "$OUTDIR_ROOT/docs/specs/T-9.md")"
+
+LIT_SRC="$WORK/vbs-nolit.sh"
+LIT_LIB="$GOVDIR/nolit.sh"
+mk_region_mutant "GOV-LITERAL-PREFIX" "$LIT_SRC" "$LIT_LIB"
+assert_eq "9.5 GUARD: the literal-prefix strip APPLIED (mutant differs from shipped)" "differs" \
+    "$(cmp -s "$GOV_LIB" "$LIT_LIB" && echo identical || echo differs)"
+assert_eq "9.5b the mutant parses" "0" \
+    "$(bash -n "$LIT_LIB" 2>/dev/null && echo 0 || echo 1)"
+# shellcheck disable=SC2016  # literal text in the extracted classifier, as above.
+assert_eq "9.5c no literal-prefix reduction survives the strip" "0" \
+    "$(code_grep_count 'c_logical=\${abs:' "$LIT_LIB")"
+# shellcheck disable=SC2016
+assert_eq "9.5d discriminator: the resolution region SURVIVED (this strip took ONE thing)" "1" \
+    "$(code_grep_count 'cd -P "\$pdir"' "$LIT_LIB")"
+# 3b lives inside GOV-LITERAL-PREFIX, so the strip must take it too — otherwise
+# 9.6's "nothing moves" would be measuring a region that still carries a
+# reduction. shellcheck disable=SC2016 as above.
+# shellcheck disable=SC2016
+assert_eq "9.5e ...and candidate 3b went with it (it lives in this region)" "0" \
+    "$(code_grep_count 'c_lphys=\${abs:' "$LIT_LIB")"
+classify_all "$LIT_LIB" "$SPELL_ROOT" "$WORK/spell-gov.txt" 2>/dev/null > "$WORK/lit-gov.txt"
+classify_all "$LIT_LIB" "$SPELL_ROOT" "$WORK/spell-doc.txt" 2>/dev/null > "$WORK/lit-doc.txt"
+printf '%s\n' "$SPELL_GOV" > "$WORK/ship-gov.txt"
+printf '%s\n' "$SPELL_DOC" > "$WORK/ship-doc.txt"
+assert_eq "9.6 the literal-prefix region is an OPTIMISATION: strip it and every 6h declared verdict is unchanged" \
+    "identical" "$(cmp -s "$WORK/ship-gov.txt" "$WORK/lit-gov.txt" && echo identical || echo differs)"
+assert_eq "9.6b ...and every 6h control verdict too" \
+    "identical" "$(cmp -s "$WORK/ship-doc.txt" "$WORK/lit-doc.txt" && echo identical || echo differs)"
+assert_eq "9.6c ...over a NON-EMPTY comparison (so 'identical' means something)" "yes" \
+    "$([ -s "$WORK/lit-gov.txt" ] && [ -s "$WORK/lit-doc.txt" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 10. MONOTONICITY — THE DIFFERENTIAL AGAINST WHAT SHIPPED BEFORE
+#     (claude-workflow-plugin-mdnc R1-F1)
+# ---------------------------------------------------------------------------
+# WHY THIS SECTION EXISTS, and it is a lesson about test SHAPE rather than about
+# path resolution. mdnc's first cut shipped 109 new assertions and a stated
+# safety invariant — "every candidate can only ADD a hit", "the change can only
+# turn DOC-ONLY into reviewable and never the reverse". The invariant was FALSE,
+# in the fail-open direction, at two sites: `cd -P "$d"` had been substituted for
+# `cd "$d" && pwd -P`, which is a different function (they diverge exactly when a
+# symlink precedes a `..`), so a reduction was DELETED rather than added and a
+# declared governing artifact went back to taking the doc-only fast path with
+# reviewed_by=none.
+#
+# NOT ONE of those 109 assertions could see it, and the reason generalises:
+# THEY ALL RAN ONE ARTIFACT. Section 6h drives spellings against the shipped
+# bytes; section 9 compares the shipped bytes against a REGION-STRIPPED copy of
+# themselves. A monotonicity claim is a claim about the DIFFERENCE BETWEEN TWO
+# ARTIFACTS — the old one and the new one — so no amount of exercising the new
+# one alone can test it. This section runs BOTH.
+#
+# THE BASELINES, and why there are two:
+#   FROZEN  .claude/scripts/tests/fixtures/gov-classifier-baseline-s5qf.sh —
+#           the classifier as it stood at 0de5ceb, checked in and sha256-pinned.
+#           This one is ALWAYS available (no git, no network, no history depth)
+#           and never becomes vacuous, because the pin cannot move. It carries
+#           the durable invariant: every path s5qf refused the fast path to, the
+#           shipped classifier still refuses.
+#   HEAD    the same extraction from `git show HEAD:` — the review-time arm,
+#           and the one that would have caught R1-F1 in round 1. It is live
+#           exactly while the change is uncommitted, which is when QA reads it.
+#           On a clean tree HEAD and the worktree are the same bytes, so this
+#           arm has nothing to compare and says so; the FROZEN arm is what keeps
+#           the section load-bearing either way. Announced rather than silent —
+#           a baseline that quietly stopped running is the failure mode this
+#           whole section is about.
+#
+# THE NEGATIVE CONTROL is the defect itself, reconstructed: strip the GOV-LPHYS
+# region from the shipped script and you have the bytes that were blocked, so
+# the differential must report the two measured shapes moving reviewable ->
+# DOC-ONLY. Without that leg "0 regressions" is satisfiable by a comparison that
+# never ran.
+#
+# HARNESS CONTROLS, because this harness has already been fooled once. QA's
+# first container run of the same differential returned `reviewable` for every
+# path — an empty bind mount, the classifier never loaded — and that is the
+# third recorded instance of the ALL-ONE-ANSWER shape on this task family. So
+# before any verdict is believed: each side must produce BOTH verdicts over the
+# sweep, and the two sides must produce the same NUMBER of verdicts as the sweep
+# had inputs.
+# ---------------------------------------------------------------------------
+
+# The sweep is a list of (project-dir, paths-file) pairs. Most of it is fixtures
+# sections 3 and 6h already built — reusing them is deliberate: they are the
+# anti-overreach controls, so "zero ordinary documents moved" is measured over
+# the same inputs that pin the fix, not over a friendlier set invented here.
+MONO_PDIR=()
+MONO_PATHS=()
+mono_pair() { MONO_PDIR+=("$1"); MONO_PATHS+=("$2"); }
+
+# 10.A THE ALIAS ROUTE — the first shape the substitution broke. The project is
+# reached through a symlink to its root, and a `..` follows a symlink that
+# points OUT of the tree. The kernel's `..` and bash's lexical `..` then name
+# different directories, and BOTH exist, so `cd -P` succeeds and lands somewhere
+# plausible and wrong.
+ALIAS_BASE="$WORK/gov-alias"
+mkdir -p "$ALIAS_BASE/proj/.claude/agents" "$ALIAS_BASE/proj/docs/specs" \
+         "$ALIAS_BASE/elsewhere/hole/dir" "$ALIAS_BASE/elsewhere/hole/agents"
+printf '# project memory\n' > "$ALIAS_BASE/proj/CLAUDE.md"
+printf '# readme\n'         > "$ALIAS_BASE/proj/README.md"
+printf 'qa agent\n'         > "$ALIAS_BASE/proj/.claude/agents/qa.md"
+printf 'scratch notes\n'    > "$ALIAS_BASE/proj/.claude/agents/notes.txt"
+printf '# a design\n'       > "$ALIAS_BASE/proj/docs/specs/T-1.md"
+# The decoy: the kernel's answer for `.claude/x/..` has an `agents` child too,
+# so candidate 4 produces a real directory rather than failing. A fixture where
+# `cd -P` merely fails would understate the defect.
+printf 'another tree\n'     > "$ALIAS_BASE/elsewhere/hole/agents/qa.md"
+ln -sfn "proj"                              "$ALIAS_BASE/alias"
+ln -sfn "$ALIAS_BASE/elsewhere/hole/dir"    "$ALIAS_BASE/proj/.claude/x"
+ALIAS_PATH="$ALIAS_BASE/alias/.claude/x/../agents/qa.md"
+ALIAS_PDIR="${ALIAS_PATH%/*}"
+ALIAS_KERNEL=$(cd -P "$ALIAS_PDIR" 2>/dev/null && pwd)
+ALIAS_LOGPHYS=$(cd "$ALIAS_PDIR" 2>/dev/null && pwd -P)
+assert_eq "10.A0 precondition: the alias really is a symlink to the project root" "yes" \
+    "$([ -L "$ALIAS_BASE/alias" ] && [ -d "$ALIAS_BASE/alias" ] && echo yes || echo no)"
+assert_eq "10.A0b precondition: .claude/x really is a symlink pointing OUT of the tree" "outside" \
+    "$([ -L "$ALIAS_BASE/proj/.claude/x" ] && \
+       { [ "${ALIAS_KERNEL#"$(cd -P "$ALIAS_BASE/proj" && pwd)"/}" = "$ALIAS_KERNEL" ] && echo outside || echo inside; })"
+assert_eq "10.A0c precondition: BOTH readings of the parent exist (so 'cd -P' does not merely fail)" "yes" \
+    "$([ -n "$ALIAS_KERNEL" ] && [ -n "$ALIAS_LOGPHYS" ] && echo yes || echo no)"
+assert_eq "10.A0d precondition: ...and they DISAGREE — without this the leg is vacuous" "differ" \
+    "$([ "$ALIAS_KERNEL" != "$ALIAS_LOGPHYS" ] && echo differ || echo same)"
+cat > "$WORK/mono-alias.txt" <<EOF
+$ALIAS_PATH
+$ALIAS_BASE/alias/.claude/agents/qa.md
+$ALIAS_BASE/proj/.claude/agents/qa.md
+$ALIAS_BASE/alias/./docs/specs/T-1.md
+.claude/agents/qa.md
+CLAUDE.md
+$ALIAS_BASE/alias/.claude/x/../agents/notes.txt
+$ALIAS_BASE/alias/README.md
+README.md
+EOF
+mono_pair "$ALIAS_BASE/proj" "$WORK/mono-alias.txt"
+
+# 10.B A `..`-BEARING PROJECT_DIR — the second shape, and the worse one: the
+# ROOT itself is computed wrong, so every absolute governing path misses every
+# candidate at once. CLAUDE_PROJECT_DIR is whatever the launching environment
+# put there; this is not an exotic spelling for a wrapper script to produce.
+DD_BASE="$WORK/gov-dotdot"
+DD_ROOT="$DD_BASE/root"
+mkdir -p "$DD_ROOT/.claude/agents" "$DD_ROOT/docs/specs" "$DD_BASE/far/deep/inner"
+printf '# project memory\n' > "$DD_ROOT/CLAUDE.md"
+printf '# readme\n'         > "$DD_ROOT/README.md"
+printf 'qa agent\n'         > "$DD_ROOT/.claude/agents/qa.md"
+printf 'scratch notes\n'    > "$DD_ROOT/.claude/agents/notes.txt"
+printf '# a design\n'       > "$DD_ROOT/docs/specs/T-1.md"
+ln -sfn "$DD_BASE/far/deep/inner" "$DD_ROOT/.claude/x"
+DD_PD="$DD_ROOT/.claude/x/../.."
+DD_KERNEL=$(cd -P "$DD_PD" 2>/dev/null && pwd)
+DD_LOGPHYS=$(cd "$DD_PD" 2>/dev/null && pwd -P)
+DD_ROOT_PHYS=$(cd -P "$DD_ROOT" 2>/dev/null && pwd)
+assert_eq "10.B0 precondition: the two readings of PROJECT_DIR DISAGREE" "differ" \
+    "$([ -n "$DD_KERNEL" ] && [ -n "$DD_LOGPHYS" ] && [ "$DD_KERNEL" != "$DD_LOGPHYS" ] && echo differ || echo same)"
+assert_eq "10.B0b precondition: the LOGICAL reading is the real root (so the kernel one is the wrong answer)" "yes" \
+    "$([ "$DD_LOGPHYS" = "$DD_ROOT_PHYS" ] && echo yes || echo no)"
+cat > "$WORK/mono-dotdot.txt" <<EOF
+$DD_ROOT/.claude/agents/qa.md
+$DD_ROOT/CLAUDE.md
+$DD_ROOT/docs/specs/T-1.md
+.claude/agents/qa.md
+CLAUDE.md
+docs/specs/T-1.md
+$DD_ROOT/.claude/agents/notes.txt
+$DD_ROOT/README.md
+README.md
+EOF
+mono_pair "$DD_PD"   "$WORK/mono-dotdot.txt"
+mono_pair "$DD_ROOT" "$WORK/mono-dotdot.txt"
+
+# ...and the fixtures the earlier sections already built. These carry the
+# anti-overreach half: 27 declared spellings, 27 ordinary-document controls, the
+# equal-length sibling root, the out-of-tree declared directory, the deletion
+# residual, and — when section 3 ran its else-branch — 1120 name/position shapes
+# that have nothing to do with the governing veto at all.
+mono_pair "$SPELL_ROOT"  "$WORK/spell-gov.txt"
+mono_pair "$SPELL_ROOT"  "$WORK/spell-doc.txt"
+mono_pair "$SPELL_ROOT"  "$WORK/spell-other.txt"
+mono_pair "$OUTDIR_ROOT" "$WORK/outdir.txt"
+mono_pair "$DEL_ROOT"    "$WORK/del.txt"
+[ -f "$WORK/cross.txt" ] && mono_pair "$WORK/nonexistent-root" "$WORK/cross.txt"
+
+MONO_INPUTS=0
+for _f in "${MONO_PATHS[@]}"; do
+    MONO_INPUTS=$((MONO_INPUTS + $(grep -c . "$_f" | tr -d '[:space:]')))
+done
+# Pinned, for the same reason EXPECTED_SPECS is pinned one tier up: a sweep that
+# quietly shrank is a differential that quietly stopped looking. 1219 = 9 alias
+# + 9+9 dot-dot-PROJECT_DIR (two roots) + 28 declared spellings + 28 ordinary
+# controls + 3 sibling-root + 7 out-of-tree + 6 deletion + 1120 name/position.
+assert_eq "10.0 the sweep is NON-EMPTY and the expected size (9 pairs, 1219 paths)" "1219" "$MONO_INPUTS"
+assert_eq "10.0b ...over the expected number of (project-dir, paths) pairs" "9" "${#MONO_PDIR[@]}"
+
+# mono_sweep <baseline-lib> <candidate-lib> <tag>
+#   Drives every pair through both libs and writes, into $WORK:
+#     mono-<tag>.cmp   baseline-verdict TAB candidate-verdict TAB path
+#     mono-<tag>.reg   the paths that went reviewable -> DOC-ONLY  (FAIL-OPEN)
+#     mono-<tag>.imp   the paths that went DOC-ONLY -> reviewable  (the fix)
+#   `paste` is safe here because classify_all emits one line per NON-EMPTY input
+#   line in input order; the line-count guard below is what keeps that true
+#   rather than assumed.
+mono_sweep() {
+    local blib="$1" clib="$2" tag="$3" i=0 n
+    : > "$WORK/mono-$tag.cmp"
+    n=${#MONO_PDIR[@]}
+    while [ "$i" -lt "$n" ]; do
+        grep . "${MONO_PATHS[$i]}" > "$WORK/mono-in.txt"
+        classify_all "$blib" "${MONO_PDIR[$i]}" "$WORK/mono-in.txt" 2>/dev/null | cut -f1 > "$WORK/mono-b.txt"
+        classify_all "$clib" "${MONO_PDIR[$i]}" "$WORK/mono-in.txt" 2>/dev/null | cut -f1 > "$WORK/mono-c.txt"
+        paste "$WORK/mono-b.txt" "$WORK/mono-c.txt" "$WORK/mono-in.txt" >> "$WORK/mono-$tag.cmp"
+        i=$((i + 1))
+    done
+    awk -F'\t' '$1=="reviewable" && $2=="DOC-ONLY" { print $3 }' "$WORK/mono-$tag.cmp" > "$WORK/mono-$tag.reg"
+    awk -F'\t' '$1=="DOC-ONLY" && $2=="reviewable" { print $3 }' "$WORK/mono-$tag.cmp" > "$WORK/mono-$tag.imp"
+}
+mono_count() { grep -c . "$WORK/mono-$1.$2" 2>/dev/null | tr -d '[:space:]'; }
+mono_verdicts() { awk -F'\t' -v c="$2" '{ print $c }' "$WORK/mono-$1.cmp" | sort -u | tr '\n' ',' ; }
+
+# --- the FROZEN baseline ---------------------------------------------------
+BASELINE_SRC="$PROJECT_DIR/.claude/scripts/tests/fixtures/gov-classifier-baseline-s5qf.sh"
+# The pin. It is not decoration: without it, "refresh the baseline to match what
+# we ship" is a one-line change that silently deletes the invariant and leaves
+# every assertion below green. Regenerating the file from 0de5ceb reproduces
+# this digest; see the fixture's own header for the command.
+BASELINE_SHA_EXPECTED="620d631e12ab59421acdea7f3606b8cbf9d855fa2c315691bcd79e307ec6c41f"
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | cut -d' ' -f1
+    else shasum -a 256 < "$1" | cut -d' ' -f1; fi
+}
+assert_eq "10.1 the frozen baseline fixture is present" "yes" \
+    "$([ -f "$BASELINE_SRC" ] && echo yes || echo no)"
+assert_eq "10.1b ...and is the PINNED bytes (an 'update' to match today's ship is the failure this catches)" \
+    "$BASELINE_SHA_EXPECTED" "$(sha256_of "$BASELINE_SRC" 2>/dev/null)"
+BASE_LIB="$GOVDIR/baseline-s5qf.sh"
+cp "$BASELINE_SRC" "$BASE_LIB"
+assert_eq "10.1c the baseline parses" "0" \
+    "$(bash -n "$BASE_LIB" 2>/dev/null && echo 0 || echo 1)"
+assert_eq "10.1d the baseline defines the classifier and the governing veto" "2" \
+    "$(grep -cE '^(is_doc_only_path|governing_artifact_origin)\(\) \{$' "$BASE_LIB" | tr -d '[:space:]')"
+assert_eq "10.1e ANTI-VACUITY: the baseline is NOT the shipped bytes (else this compares a file with itself)" \
+    "differs" "$(cmp -s "$GOV_LIB" "$BASE_LIB" && echo identical || echo differs)"
+
+mono_sweep "$BASE_LIB" "$GOV_LIB" "frozen"
+# HARNESS CONTROLS FIRST — see the all-one-answer note in this section's header.
+assert_eq "10.2 harness: the comparison covers every swept path" "$MONO_INPUTS" \
+    "$(grep -c . "$WORK/mono-frozen.cmp" | tr -d '[:space:]')"
+assert_eq "10.2b harness: the BASELINE produced both verdicts (not all-one-answer)" "DOC-ONLY,reviewable," \
+    "$(mono_verdicts frozen 1)"
+assert_eq "10.2c harness: the SHIPPED classifier produced both verdicts too" "DOC-ONLY,reviewable," \
+    "$(mono_verdicts frozen 2)"
+
+# THE CLAIM. Zero paths lost the veto; the fix is not vacuous.
+MONO_REG=$(mono_count frozen reg)
+if [ "$MONO_REG" != "0" ]; then
+    printf '  differential: paths that LOST the governing veto since 0de5ceb:\n'
+    while IFS= read -r _p; do [ -n "$_p" ] && printf '    %s\n' "$_p"; done < "$WORK/mono-frozen.reg"
+fi
+printf '  differential: 0de5ceb -> shipped over %s path(s): %s gained the veto, %s lost it\n' \
+    "$MONO_INPUTS" "$(mono_count frozen imp)" "$MONO_REG"
+assert_eq "10.3 MONOTONE vs the frozen s5qf baseline: 0 paths went reviewable -> DOC-ONLY" "0" "$MONO_REG"
+assert_eq "10.3b ...and the sweep is not vacuous: the fix moved paths the OTHER way" "yes" \
+    "$([ "$(mono_count frozen imp)" -gt 0 ] && echo yes || echo no)"
+
+# --- the NEGATIVE CONTROL: the defect, reconstructed ------------------------
+# Strip GOV-LPHYS and the shipped script becomes the bytes QA blocked: the
+# kernel-physical reduction alone, with s5qf's composition deleted. Three spans
+# carry the region (the root in load_governing_set, candidate 3b, candidate 6);
+# the variables they assign are declared OUTSIDE them, so the strip leaves empty
+# candidates rather than an unbound-variable crash — which would fail this leg
+# for the wrong reason and prove nothing about resolution.
+LPH_SRC="$WORK/vbs-nolphys.sh"
+LPH_LIB="$GOVDIR/nolphys.sh"
+mk_region_mutant "GOV-LPHYS" "$LPH_SRC" "$LPH_LIB"
+assert_eq "10.4 GUARD: the GOV-LPHYS strip APPLIED (mutant differs from shipped)" "differs" \
+    "$(cmp -s "$GOV_LIB" "$LPH_LIB" && echo identical || echo differs)"
+assert_eq "10.4b the mutant parses" "0" \
+    "$(bash -n "$LPH_LIB" 2>/dev/null && echo 0 || echo 1)"
+# shellcheck disable=SC2016  # literal text in the extracted classifier.
+assert_eq "10.4c the strip took all three GOV-LPHYS spans: the root capture is gone" "0" \
+    "$(code_grep_count '_GOV_ROOT_LPHYS=\$(cd' "$LPH_LIB")"
+# shellcheck disable=SC2016
+assert_eq "10.4c2 ...candidate 3b is gone" "0" \
+    "$(code_grep_count 'c_lphys=\${abs:' "$LPH_LIB")"
+# shellcheck disable=SC2016
+assert_eq "10.4c3 ...and candidate 6 is gone" "0" \
+    "$(code_grep_count 'pdir_lphys=\$(cd' "$LPH_LIB")"
+# shellcheck disable=SC2016
+assert_eq "10.4d discriminator: candidate 4 SURVIVED (this strip took ONE thing)" "1" \
+    "$(code_grep_count 'cd -P "\$pdir"' "$LPH_LIB")"
+# shellcheck disable=SC2016
+assert_eq "10.4e discriminator: ...and so did candidate 5" "1" \
+    "$(code_grep_count 'pdir_log=\$(cd' "$LPH_LIB")"
+
+mono_sweep "$BASE_LIB" "$LPH_LIB" "nolphys"
+assert_eq "10.5 harness: the negative control's comparison covers every swept path" "$MONO_INPUTS" \
+    "$(grep -c . "$WORK/mono-nolphys.cmp" | tr -d '[:space:]')"
+assert_eq "10.5b NEGATIVE CONTROL: without GOV-LPHYS the differential REPORTS the fail-open" "yes" \
+    "$([ "$(mono_count nolphys reg)" -gt 0 ] && echo yes || echo no)"
+# ...and it reports the two shapes that were actually measured, by name, so the
+# control cannot be satisfied by some unrelated path drifting.
+assert_eq "10.5c NEGATIVE CONTROL names the alias route" "1" \
+    "$(grep -cxF "$ALIAS_PATH" "$WORK/mono-nolphys.reg" | tr -d '[:space:]')"
+assert_eq "10.5d NEGATIVE CONTROL names the \`..\`-bearing PROJECT_DIR's artifacts" "3" \
+    "$(grep -cxF -e "$DD_ROOT/.claude/agents/qa.md" -e "$DD_ROOT/CLAUDE.md" \
+        -e "$DD_ROOT/docs/specs/T-1.md" "$WORK/mono-nolphys.reg" | tr -d '[:space:]')"
+# ATTRIBUTION. The mutant has not simply died: it still refuses the canonical
+# spellings and still fast-paths ordinary documentation, so 10.5b-d are about
+# the deleted reduction rather than about a classifier that stopped working.
+LPH_SPELL=$(classify_all "$LPH_LIB" "$SPELL_ROOT" "$WORK/spell-gov.txt" 2>/dev/null)
+LPH_DOC=$(classify_all "$LPH_LIB" "$SPELL_ROOT" "$WORK/spell-doc.txt" 2>/dev/null)
+assert_eq "10.5e attribution: the mutant still refuses the canonical .claude/agents/qa.md" "reviewable" \
+    "$(verdict_of "$LPH_SPELL" ".claude/agents/qa.md")"
+assert_eq "10.5f attribution: ...and still fast-paths an ordinary document" "DOC-ONLY" \
+    "$(verdict_of "$LPH_DOC" "docs/design-notes/idea.md")"
+# ...and it moved NOTHING in the section-6h matrix, which is precisely why 109
+# green assertions could not see the defect. This leg is the record of that.
+assert_eq "10.5g THE REASON 6h COULD NOT SEE IT: the mutant's 6h declared verdicts are UNCHANGED" \
+    "identical" "$(printf '%s\n' "$LPH_SPELL" > "$WORK/lph-gov.txt"; \
+                   cmp -s "$WORK/ship-gov.txt" "$WORK/lph-gov.txt" && echo identical || echo differs)"
+
+# --- the HEAD arm ----------------------------------------------------------
+# Live while the change is uncommitted, which is when it matters. Silent about
+# nothing: it prints which state it was in.
+HEAD_STATE="unavailable"
+HEAD_LIB="$GOVDIR/head.sh"
+if command -v git >/dev/null 2>&1 && \
+   git -C "$PROJECT_DIR" rev-parse --verify -q HEAD >/dev/null 2>&1 && \
+   git -C "$PROJECT_DIR" show "HEAD:.claude/scripts/verify-before-stop.sh" > "$WORK/vbs-head.sh" 2>/dev/null; then
+    extract_classifier "$WORK/vbs-head.sh" "$HEAD_LIB"
+    if cmp -s "$GOV_LIB" "$HEAD_LIB"; then
+        HEAD_STATE="clean"
+    else
+        HEAD_STATE="differs"
+    fi
+fi
+printf '  differential: frozen baseline ACTIVE (0de5ceb, pinned); HEAD arm %s\n' "$HEAD_STATE"
+case "$HEAD_STATE" in
+    differs)
+        mono_sweep "$HEAD_LIB" "$GOV_LIB" "head"
+        assert_eq "10.6 harness: the HEAD comparison covers every swept path" "$MONO_INPUTS" \
+            "$(grep -c . "$WORK/mono-head.cmp" | tr -d '[:space:]')"
+        assert_eq "10.6b harness: HEAD produced both verdicts (not all-one-answer)" "DOC-ONLY,reviewable," \
+            "$(mono_verdicts head 1)"
+        MONO_HREG=$(mono_count head reg)
+        printf '  differential: HEAD -> worktree over %s path(s): %s gained the veto, %s lost it\n' \
+            "$MONO_INPUTS" "$(mono_count head imp)" "$MONO_HREG"
+        if [ "$MONO_HREG" != "0" ]; then
+            printf '  differential: paths this WORKING TREE takes away from HEAD:\n'
+            while IFS= read -r _p; do [ -n "$_p" ] && printf '    %s\n' "$_p"; done < "$WORK/mono-head.reg"
+        fi
+        assert_eq "10.6c MONOTONE vs HEAD: the uncommitted change removes no veto" "0" "$MONO_HREG"
+        ;;
+    clean|unavailable)
+        # NOT A SKIP MARKER, deliberately, and the assertion below is why this
+        # is honest rather than convenient. `clean` means the worktree's
+        # classifier IS HEAD's, so there is no second artifact to compare;
+        # `unavailable` means git or the object is missing, which every other
+        # git-dependent spec in this tier already fails outright on. In both
+        # states the load-bearing claim is the same one, so it is ASSERTED
+        # rather than announced: the frozen arm ran over the whole sweep and was
+        # not vacuous. That can fail — a shrunken sweep or a baseline refreshed
+        # to match today's ship makes it fail — which is what separates it from
+        # a line of prose.
+        assert_eq "10.6 HEAD arm $HEAD_STATE — the FROZEN arm carried the section (full sweep, non-vacuous)" "yes" \
+            "$([ "$(grep -c . "$WORK/mono-frozen.cmp" | tr -d '[:space:]')" = "$MONO_INPUTS" ] && \
+               [ "$(mono_count frozen imp)" -gt 0 ] && echo yes || echo no)"
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 echo ""

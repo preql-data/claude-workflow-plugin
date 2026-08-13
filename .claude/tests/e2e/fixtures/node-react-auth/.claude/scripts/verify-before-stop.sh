@@ -1143,6 +1143,10 @@ _GOV_SET=""
 _GOV_LOADED=0
 _GOV_ROOT=""
 _GOV_ROOT_PHYS=""
+# Declared OUTSIDE the GOV-LPHYS region on purpose: section 10's negative
+# control strips that region to reproduce the fail-open, and the strip must
+# leave a defined-but-empty variable rather than an unbound one under `set -u`.
+_GOV_ROOT_LPHYS=""
 
 # Resolved relative to THIS script (BASH_SOURCE), not $PROJECT_DIR — the same
 # rule, and the same reason, as the workflow-denylist lookup above: the gate may
@@ -1180,8 +1184,65 @@ load_governing_set() {
     # trailing-slash leg in doc-only-classifier.test.sh as a control on this
     # line — it pins the OUTCOME, which three arms cover.
     _GOV_ROOT="${PROJECT_DIR%/}"
-    _GOV_ROOT_PHYS=$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P) || _GOV_ROOT_PHYS=""
+    # THREE SPELLINGS OF THE SAME ROOT, all trailing-slash-free, and the third
+    # one is here because DROPPING IT WAS A MEASURED FAIL-OPEN. Read this whole
+    # note before touching any of them.
+    #
+    # `${x%/}` keeps the FIRST reduction attempt correct on its own terms: with
+    # PROJECT_DIR="/a/b/" the literal prefix would otherwise be "/a/b//", which
+    # no recorded path starts with. It is DEFENCE IN DEPTH, not the thing that
+    # makes that case work, and the difference is stated because it was
+    # measured: removing this strip reddens NOTHING, because no `-P` capture
+    # ever yields a trailing slash, so attempt 2 already catches the case and
+    # attempt 3 catches it again. Do not read the trailing-slash leg in
+    # doc-only-classifier.test.sh as a control on this line — it pins the
+    # OUTCOME, which three arms cover.
+    #
+    # `printf '%sX'` then `${...%X}` keeps every capture BYTE-PRESERVING. `$( )`
+    # strips every trailing newline, and it cannot tell a newline that
+    # terminates output from one that is the last byte of a directory name — so
+    # a root whose name ends in a newline used to be captured SHORT, and every
+    # comparison below it then answered for a different path (LESSONS.md, the
+    # fkm.3 entry: "a pathname round-tripped through a command substitution is a
+    # defect class"). Both sides of every comparison below are captured this
+    # way, because a comparison is only as byte-safe as its less careful half.
+    # Measured on bash 3.2.57: a directory whose name ends in a newline captures
+    # 89 bytes through the sentinel and 88 through `$(... && pwd -P)`.
+    #
+    # `_GOV_ROOT_PHYS` AND `_GOV_ROOT_LPHYS` ARE DIFFERENT FUNCTIONS OF THE SAME
+    # INPUT, AND BOTH ARE KEPT.
+    #   * `cd -P "$PROJECT_DIR"` is KERNEL-PHYSICAL: the kernel resolves every
+    #     component, so `a/link/..` lands in the parent of link's TARGET.
+    #   * `cd "$PROJECT_DIR"` then `cd -P .` is PHYSICAL-OF-THE-LOGICAL-COLLAPSE:
+    #     bash folds `..` lexically first, so `a/link/..` lands in `a`, and the
+    #     result is then resolved physically. (`cd -P .` rather than `pwd -P`
+    #     purely so the answer comes back through `$PWD` and can carry the
+    #     sentinel; measured equal to `cd "$d" && pwd -P` on bash 3.2.57 and
+    #     5.2.21.)
+    # They diverge exactly when a symlink precedes a `..`, and a CLAUDE_PROJECT_DIR
+    # of that shape is not hypothetical. MEASURED, both platforms: with
+    # PROJECT_DIR spelled `$R/.claude/x/../..` where `.claude/x` is a symlink out
+    # of the tree, the kernel answer is two levels below the link's target — a
+    # WRONG ROOT — and every absolute governing path then misses every candidate
+    # and takes the doc-only fast path with reviewed_by=none. An earlier draft of
+    # this fix computed only the kernel answer, having read `-P` as a correction
+    # to `cd`+`pwd -P` rather than as a second question; that draft turned three
+    # of three declared artifacts from reviewable to DOC-ONLY in the differential
+    # harness (doc-only-classifier.test.sh section 10), which is the failure this
+    # task exists to repair, reintroduced one level up.
+    #
+    # THE RULE, and it is the whole of this fix: NEVER REMOVE A REDUCTION, ONLY
+    # ADD ONE. The original defect was removal by short-circuit (`elif`); this
+    # was very nearly removal by substitution. Section 10 is the leg that makes
+    # a future substitution loud.
+    _GOV_ROOT_PHYS=$(cd -P "$PROJECT_DIR" 2>/dev/null && printf '%sX' "$PWD") || _GOV_ROOT_PHYS=""
+    _GOV_ROOT_PHYS="${_GOV_ROOT_PHYS%X}"
     _GOV_ROOT_PHYS="${_GOV_ROOT_PHYS%/}"
+    # --- GOV-LPHYS-BEGIN (claude-workflow-plugin-mdnc R1-F1) ----------------
+    _GOV_ROOT_LPHYS=$(cd "$PROJECT_DIR" 2>/dev/null && cd -P . 2>/dev/null && printf '%sX' "$PWD") || _GOV_ROOT_LPHYS=""
+    _GOV_ROOT_LPHYS="${_GOV_ROOT_LPHYS%X}"
+    _GOV_ROOT_LPHYS="${_GOV_ROOT_LPHYS%/}"
+    # --- GOV-LPHYS-END ------------------------------------------------------
     if [ -z "$_GOV_TOOL" ] || [ ! -f "$_GOV_TOOL" ]; then
         log_sync_error "F1: the governing-artifact query is unavailable (workflow-manifest.sh not found beside this hook), so the doc-only fast path classifies exactly as it did before claude-workflow-plugin-s5qf; a change to an agent prompt, a rubric or CLAUDE.md alone can auto-approve"
         return 0
@@ -1206,72 +1267,343 @@ load_governing_set() {
 # match — a declared path containing a glob metacharacter must not widen the
 # veto.
 #
-# REDUCING AN ABSOLUTE PATH, which is where this gets its sharp edges. Paths
-# arrive in both spellings: post-edit.sh records `tool_input.file_path`
-# verbatim (absolute) while `git status --porcelain` yields repo-relative ones.
-# A relative path is already in the enumeration's spelling; an absolute one has
-# to be reduced, and getting that wrong fails OPEN and SILENTLY — the veto
-# simply never fires. The four spellings were probed against this function
-# rather than reasoned about, because two of them were wrong the first time:
+# REDUCING A PATH TO THE ENUMERATION'S SPELLING, which is where this gets its
+# sharp edges. Paths arrive in both forms: post-edit.sh records
+# `tool_input.file_path` verbatim (absolute) while `git status --porcelain`
+# yields repo-relative ones. Either has to be reduced to the relative spelling
+# the enumeration uses, and getting that wrong fails OPEN and SILENTLY — the
+# veto simply never fires.
 #
-#   PROJECT_DIR       incoming path      before   now
-#   /var/x            /var/x/f.md        HIT      HIT   literal prefix
-#   /var/x            /private/var/x/f.md MISS->  HIT   resolved-root prefix
-#   /var/x/           /var/x/f.md        MISS     HIT   trailing slash stripped
-#   /private/var/x    /var/x/f.md        MISS     HIT   resolve the PATH too
+# EVERY REDUCTION IS A CANDIDATE, AND ANY HIT WINS. That control flow IS the
+# claude-workflow-plugin-mdnc fix, and it is the whole of it. The shipped
+# version chained the reductions with `elif`, so the FIRST one that produced a
+# string won and the rest were never tried — and "produced a string" is not
+# "found the artifact". One `.` was enough to defeat it:
 #
-# The last row is why the third attempt exists: when PROJECT_DIR is already
-# physical there is no second root spelling left to try, so the only way to
-# meet a symlinked incoming path is to resolve that path's own directory. It
-# costs one subshell, and ONLY on paths the two string attempts missed — the
-# common case stays fork-free. A path whose directory cannot be resolved (a
-# deletion) yields no reduction, which is the deletion residual the region
-# header already states rather than a new one.
+#   $ROOT/./docs/specs/T-1.md        the literal prefix strips, leaving
+#                                    `./docs/specs/T-1.md`, which is no key
+#   docs/./specs/T-1.md              a relative path was used VERBATIM
+#   docs/specs/../specs/T-1.md       likewise
+#   .claude/agents/../agents/qa.md   likewise
+#
+# All four measured DOC-ONLY against the shipped classifier with the canonical
+# spellings measuring `reviewable` beside them, uniformly across every declared
+# path — agent prompts, rubrics, CLAUDE.md and the design artifact. That is a
+# release-authorising bypass reachable by anything that records a path with a
+# dot in it, and it made two ANNOUNCED claims false: bbh announced that
+# path-shape inference was gone, and s5qf announced that governing artifacts
+# are disqualified from the fast path.
+#
+# THE CANDIDATES, in the order they are tried:
+#
+#   1. the path VERBATIM, when it is already relative — the common case, and
+#      the enumeration's own spelling.
+#   2. the literal prefix `$_GOV_ROOT/` stripped.
+#   3. the literal prefix `$_GOV_ROOT_PHYS/` stripped.
+#   3b. the literal prefix `$_GOV_ROOT_LPHYS/` stripped.
+#   4. `cd -P` on the parent — the KERNEL-PHYSICAL directory, every component
+#      resolved — with the leaf name kept verbatim beside it.
+#   5. `cd` on the parent — the LOGICAL directory, `.` and `..` collapsed by
+#      the shell, symlink names preserved — same leaf.
+#   6. `cd` then `cd -P .` on the parent — the PHYSICAL RESOLUTION OF THE
+#      LOGICAL COLLAPSE, compared against `$_GOV_ROOT_LPHYS`, same leaf.
+#
+# 1-3b cost nothing and are tried in ONE pass over the enumeration; 4-6 cost one
+# subshell each and run only when that pass missed, so a change set of ordinary
+# relative paths stays fork-free.
+#
+# 3b AND 6 ARE THE PRE-mdnc REDUCTIONS, KEPT RATHER THAN REPLACED, and that is
+# the point of the whole region. The s5qf version reduced with
+# `cd "$pdir" && pwd -P` against a root computed the same way; an early draft of
+# this fix read `cd -P` as a CORRECTION to that and substituted it. It is not a
+# correction, it is a different function of the same input (see
+# load_governing_set for which, and where they diverge). MEASURED, macOS bash
+# 3.2.57 and ubuntu bash 5.2.21 aarch64, HEAD-vs-worktree differential: the
+# substitution moved `$P/alias/.claude/x/../agents/qa.md` and — with PROJECT_DIR
+# spelled `$R/.claude/x/../..` — all three of that tree's declared artifacts from
+# `reviewable` to `DOC-ONLY`. Every one of those is a governing artifact taking
+# the fast path with reviewed_by=none, which is the defect this task exists to
+# close. So the candidate set is a strict SUPERSET of the one it replaced:
+# candidates 1, 2, 3b and 6 between them perform every reduction s5qf performed.
+# Section 10 of doc-only-classifier.test.sh is the standing proof, and its
+# negative control is this region stripped back to the substitution.
+#
+# WHY THERE ARE TWO KERNEL CANDIDATES AND NOT ONE. Because a DECLARED
+# DIRECTORY MAY ITSELF BE A SYMLINK OUT OF THE TREE — `docs/specs ->
+# /elsewhere/specs` is the case fkm.3's R4-F3 already had to handle in the
+# scan, and `find -H` declares the artifact under its `docs/specs/...`
+# spelling. Resolve that path's parent PHYSICALLY and you get
+# `/elsewhere/specs`, which is not under the root at all, so the veto would
+# stop firing on the one artifact the design phase exists to review. Measured
+# rather than predicted: with only the physical candidate,
+# `$ROOT/./docs/specs/T-9.md` under such a directory still read DOC-ONLY. The
+# LOGICAL candidate answers it, and the physical one answers a symlinked
+# directory INSIDE the tree; neither subsumes the other.
+#
+# WHY THE LEAF IS NEVER RESOLVED. A declared artifact may BE a symlink —
+# `scan_declared_dir` enumerates directory entries precisely so that a
+# symlinked design artifact is declared (fkm.3 R2-F2) — and it is declared
+# under its OWN name, not its target's. Resolving the leaf would look up the
+# target and miss the row. So resolution stops at the parent, which is also why
+# a HARDLINK to a governing artifact under an undeclared name stays DOC-ONLY:
+# this veto asks what the project DECLARES about a path, never what inode sits
+# behind it. D1 measured that distinction the hard way — a hardlink defeats
+# `-ef`, same inode, wrong name — so no inode comparison appears here.
+#
+# WHAT THIS STILL DOES NOT REACH: a DELETION of a declared path. The
+# enumeration is built from entries that EXIST, so after `rm .claude/agents/
+# qa.md` no row is emitted for it and no amount of correct reduction can find
+# one. That is claude-workflow-plugin-mdnc's other half, and it is NOT fixed
+# here — it needs the declaration's RULES (directory + glob) rather than its
+# results, which means a new surface on workflow-manifest.sh. Filed separately
+# rather than half-built; see the task's notes for the costed design.
+#
+# COST. The kernel candidates run only on a path the first pass MISSED — i.e.
+# on ordinary documentation, of which a doc-only change set has a handful, and
+# never on a relative governing path.
+#
+# Measured, macOS bash 3.2.57, idle box, 4-row synthetic enumeration, 300 calls
+# per arm, five runs, median below (spread in brackets). Probe: extract this
+# region and is_doc_only_path with the same awk doc-only-classifier.test.sh
+# uses, place the extraction beside a copy of workflow-manifest.sh so the query
+# resolves, call once to warm the memo, then time each arm with `date +%s%N`:
+#   relative governing path, candidate 1 hits   0.26 ms  [0.251-0.279]
+#   ordinary doc, misses everything (2 forks)   1.56 ms  [1.547-1.573]
+#   dot-spelled governing path, candidate 4/5   1.64 ms  [1.600-1.916]
+# So the fix costs ~1.3ms on a path that was already going to be classified
+# documentation, and nothing at all on the common relative-path hit.
 #
 # An absolute path under none of these belongs to ANOTHER tree, and another
 # tree's layout is not something this project declared anything about.
+
+# _gov_lookup <candidate>... — ONE pass over the enumeration; sets
+# $GOV_VETO_ORIGIN and returns 0 as soon as any candidate equals a declared
+# path. Membership is EXACT STRING EQUALITY, never a pattern match, so a
+# declared path containing a glob metacharacter cannot widen the veto. Empty
+# candidates are skipped rather than matched: a reduction that did not apply
+# must not compare equal to a declared path that is somehow empty.
+#
+# The herestring is load-bearing — a pipe would run the loop in a subshell and
+# $GOV_VETO_ORIGIN would not survive it.
+_gov_lookup() {
+    local gpath gorigin c
+    while IFS=$'\t' read -r gpath gorigin; do
+        for c in "$@"; do
+            [ -n "$c" ] || continue
+            if [ "$gpath" = "$c" ]; then
+                GOV_VETO_ORIGIN="$gorigin"
+                return 0
+            fi
+        done
+    done <<< "$_GOV_SET"
+    return 1
+}
+
+# _gov_rel_under <dir> <root> <leaf> — set $_GOV_REL to the root-relative
+# spelling of "<dir>/<leaf>", 0 on success; 1 (and $_GOV_REL empty) when <dir>
+# is neither <root> nor inside it.
+#
+# IT SETS A GLOBAL RATHER THAN PRINTING, and that is not a style choice. A
+# pathname captured through `$( )` loses every trailing newline, and the shell
+# cannot tell a newline that ended the output from one that is the last byte of
+# the filename — so `rel=$(build_rel ...)` would silently answer for a DIFFERENT
+# path than the kernel opens. That is a recorded defect class in this repo
+# (LESSONS.md, the fkm.3 entry: eleven instances in one containment predicate,
+# five of them the CALLER's capture of a correct answer), and the two vetoes
+# above already use globals — $GOV_VETO_ORIGIN, $DOC_VETO_REASON — for exactly
+# this reason.
+_GOV_REL=""
+_gov_rel_under() {
+    local dir="$1" root="$2" leaf="$3"
+    _GOV_REL=""
+    [ -n "$dir" ] || return 1
+    [ -n "$root" ] || return 1
+    [ -n "$leaf" ] || return 1
+    if [ "$dir" = "$root" ]; then
+        _GOV_REL="$leaf"
+        return 0
+    fi
+    # The separator is part of the test: a sibling root whose name merely
+    # EXTENDS this one ("/a/proj2" against "/a/proj") must not reduce. Same
+    # containment discipline as the literal-prefix candidates above.
+    if [ "${dir#"$root"/}" != "$dir" ]; then
+        _GOV_REL="${dir:$(( ${#root} + 1 ))}/$leaf"
+        return 0
+    fi
+    return 1
+}
+
 governing_artifact_origin() {
     local p="$1"
-    local rel="" pdir pbase gpath gorigin
+    local abs pdir pbase pdir_phys pdir_log pdir_lphys
+    local c_verbatim="" c_logical="" c_physical="" c_resolved="" c_logres=""
+    # Declared OUTSIDE the GOV-LPHYS spans below, so that stripping those spans
+    # (section 10's negative control) leaves empty candidates — which
+    # `_gov_lookup` skips — rather than unbound variables under `set -u`.
+    local c_lphys="" c_lphysres=""
     GOV_VETO_ORIGIN=""
     [ -n "$p" ] || return 1
     load_governing_set
     [ -n "$_GOV_SET" ] || return 1
+
+    # CANDIDATE 1, and the absolutisation the rest need. A relative path is
+    # relative to the ENUMERATION'S ROOT, never to this process's cwd: the hook
+    # runs from wherever the session happens to be, and the content veto above
+    # resolves relative paths the same way for the same reason.
     case "$p" in
-        /*)
-            if [ -n "$_GOV_ROOT" ] && [ "${p#"$_GOV_ROOT"/}" != "$p" ]; then
-                rel=${p:$(( ${#_GOV_ROOT} + 1 ))}
-            elif [ -n "$_GOV_ROOT_PHYS" ] && [ "${p#"$_GOV_ROOT_PHYS"/}" != "$p" ]; then
-                rel=${p:$(( ${#_GOV_ROOT_PHYS} + 1 ))}
-            elif [ -n "$_GOV_ROOT_PHYS" ]; then
-                pbase="${p##*/}"
-                pdir="${p%/*}"
-                [ -n "$pdir" ] || pdir="/"
-                pdir=$(cd "$pdir" 2>/dev/null && pwd -P) || pdir=""
-                if [ -z "$pdir" ] || [ -z "$pbase" ]; then
-                    return 1
-                elif [ "$pdir" = "$_GOV_ROOT_PHYS" ]; then
-                    rel="$pbase"
-                elif [ "${pdir#"$_GOV_ROOT_PHYS"/}" != "$pdir" ]; then
-                    rel="${pdir:$(( ${#_GOV_ROOT_PHYS} + 1 ))}/$pbase"
-                else
-                    return 1
-                fi
-            else
-                return 1
-            fi
-            ;;
-        *) rel="$p" ;;
+        /*) abs="$p" ;;
+        *)  c_verbatim="$p"; abs="$_GOV_ROOT/$p" ;;
     esac
-    [ -n "$rel" ] || return 1
-    while IFS=$'\t' read -r gpath gorigin; do
-        if [ "$gpath" = "$rel" ]; then
-            GOV_VETO_ORIGIN="$gorigin"
-            break
+
+    # --- GOV-LITERAL-PREFIX-BEGIN (s5qf; kept as an OPTIMISATION by mdnc) -----
+    # Candidates 2, 3 and 3b: strip any spelling of the root as a literal
+    # prefix. THIS IS NOT WHERE THE FIX FOR THE `elif` DEFECT LIVES, and the
+    # region says so because measuring it is what corrected an earlier draft of
+    # this comment which claimed it was. Two honest reasons to keep it:
+    #
+    #   1. IT IS THE FORK-FREE FAST PATH. post-edit.sh records absolute paths,
+    #      so the common case is an absolute path under the root; answering it
+    #      here costs no subshell at all, while candidates 4-6 cost three.
+    #   2. It is a fallback for a parent directory that cannot be TRAVERSED.
+    #      `cd` needs search permission and an existing path; a literal prefix
+    #      strip needs neither.
+    #
+    # ITS CONTROL, and the part of it that is UNPAIRED, stated plainly. What IS
+    # controlled: strip this region and every verdict in the section-6h matrix
+    # is UNCHANGED — that is the leg proving the `elif` fix lives in the
+    # resolution region below rather than here, and it fails loudly if these
+    # ever start carrying an answer of their own. It stays true with 3b present
+    # because candidate 6 answers 3b's cases too, by a different route; section
+    # 9 measures that rather than assuming it. What is NOT controlled: reason 2.
+    # Producing it needs the parent to become untraversable AFTER the
+    # enumeration was built (the row only exists because the scan could list
+    # the directory moments earlier), i.e. a TOCTOU window, and this repo's
+    # convention is to declare such a guard UNPAIRED rather than ship a
+    # steady-state fixture that cannot actually exercise it.
+    if [ -n "$_GOV_ROOT" ] && [ "${abs#"$_GOV_ROOT"/}" != "$abs" ]; then
+        c_logical=${abs:$(( ${#_GOV_ROOT} + 1 ))}
+    fi
+    if [ -n "$_GOV_ROOT_PHYS" ] && [ "${abs#"$_GOV_ROOT_PHYS"/}" != "$abs" ]; then
+        c_physical=${abs:$(( ${#_GOV_ROOT_PHYS} + 1 ))}
+    fi
+    # --- GOV-LPHYS-BEGIN (claude-workflow-plugin-mdnc R1-F1) ----------------
+    # CANDIDATE 3b, and it is not a duplicate of 3. `_GOV_ROOT_LPHYS` differs
+    # from `_GOV_ROOT_PHYS` exactly when PROJECT_DIR puts a `..` after a
+    # symlink, and that is the shape where the kernel answer is a WRONG root:
+    # measured, a PROJECT_DIR of `$R/.claude/x/../..` made every absolute
+    # governing path under `$R` miss every other candidate.
+    if [ -n "$_GOV_ROOT_LPHYS" ] && [ "${abs#"$_GOV_ROOT_LPHYS"/}" != "$abs" ]; then
+        c_lphys=${abs:$(( ${#_GOV_ROOT_LPHYS} + 1 ))}
+    fi
+    # --- GOV-LPHYS-END ------------------------------------------------------
+    # --- GOV-LITERAL-PREFIX-END ---------------------------------------------
+
+    _gov_lookup "$c_verbatim" "$c_logical" "$c_physical" "$c_lphys" && return 0
+
+    # --- GOV-PATH-RESOLUTION-BEGIN (claude-workflow-plugin-mdnc) -------------
+    # Candidates 4, 5 and 6: hand the parent directory to `cd` and read back
+    # where it landed, keeping the leaf name beside it byte for byte. THE
+    # SHELL'S OWN PATH MACHINERY DOES THE WORK — there is no hand-rolled `/./`
+    # stripping or `..` regex anywhere in this region, because a string rewrite
+    # of a pathname is a guess about what the kernel would do and this repo has
+    # already paid for several of those.
+    #
+    # THREE ANSWERS, ALL LEGITIMATE, so all three are candidates:
+    #   4. `cd -P` — the KERNEL-PHYSICAL answer, every component resolved. This
+    #      is the file that actually gets opened, and it is what makes a
+    #      symlinked DIRECTORY mid-path (`docs/speclink/T-1.md`) reduce to the
+    #      declared `docs/specs/T-1.md`.
+    #   5. `cd` — the LOGICAL answer: `.` and `..` collapsed, symlink NAMES
+    #      preserved. This is what the PROJECT spelled, and it is the only
+    #      route to an artifact under a declared directory that is itself a
+    #      symlink pointing OUT of the tree: there the physical answer leaves
+    #      the root entirely, so candidate 4 produces nothing and candidates
+    #      2/3 are defeated by the leading dot.
+    #   6. `cd` then `cd -P .` — the PHYSICAL RESOLUTION OF THE LOGICAL
+    #      COLLAPSE. This is s5qf's own reduction (`cd "$pdir" && pwd -P`),
+    #      re-spelled to carry the sentinel byte, and it is COMPARED AGAINST
+    #      `$_GOV_ROOT_LPHYS` — the root computed the same way — because a
+    #      reduction is only meaningful against a root reduced by the same
+    #      function. It is the only candidate that answers a path reaching the
+    #      tree through an ALIAS with a `..` after it
+    #      (`$P/alias/.claude/x/../agents/qa.md`, alias -> proj, .claude/x a
+    #      link out of the tree): 4 fails or lands outside, 5 keeps the alias
+    #      name so it is under no root spelling, and 2/3/3b are defeated by the
+    #      `..`. MEASURED on both platforms; it is finding R1-F1.
+    # None of the three subsumes the others, which is why removing any of them
+    # is a fail-open rather than a simplification.
+    # Measured identical on macOS bash 3.2.57 and Linux bash 5.2.21 (probe:
+    # `cd`/`cd -P` into `proj/./docs/specs` where `docs/specs` is a relative
+    # symlink out of the tree — logical PWD `proj/docs/specs`, physical PWD the
+    # target, on both). Neither `cd` invents a directory: a component that does
+    # not exist fails BOTH forms, measured on both platforms
+    # (`proj/nonexistent/../docs` -> cd fails even though the collapsed path
+    # exists), so a candidate is only ever produced for a path that is really
+    # traversable.
+    #
+    # `printf '%sX'` + `${...%X}`: `$( )` eats every trailing newline and cannot
+    # tell one that terminates output from one that is the last byte of a
+    # directory name. The sentinel byte makes the capture exact. Both sides of
+    # every comparison are captured this way (see load_governing_set).
+    #
+    # `${abs%/*}` is NOT dirname and is not used as one — dirname strips
+    # trailing slashes first. Here `abs` is a path to a FILE that already
+    # matched a documentation-name arm, so it has no trailing slash; the
+    # empty-leaf guard below is what keeps that assumption from being silent.
+    #
+    # WRONG-DIRECTION RISK, stated: a lexical `..` and the kernel's `..`
+    # disagree when a symlink precedes the `..`, so candidate 5 can name a path
+    # the kernel would not open. ADDING a candidate can only ADD a hit, and a
+    # hit means REVIEWABLE — so the worst case is a change set that gets
+    # reviewed when it might not have needed to be. The opposite error, a missed
+    # hit, is a release nobody reviewed, which is this whole task.
+    #
+    # READ THAT PARAGRAPH AS THE NARROW CLAIM IT IS. "Only adds a hit" is true
+    # of ADDING a candidate and false of CHANGING one, and an earlier draft of
+    # this region used it to license a substitution — `cd -P "$pdir"` in place
+    # of `cd "$pdir" && pwd -P`. Those are different functions, so the swap
+    # DELETED a reduction, and the deletion failed OPEN: two shapes moved from
+    # `reviewable` to `DOC-ONLY` on both platforms (R1-F1). Candidate 6 exists
+    # because of that, and section 10 is the standing leg that makes the next
+    # such substitution fail a test instead of a release.
+    #
+    # Excise this region and every dot / dot-dot / directory-symlink leg in
+    # doc-only-classifier.test.sh section 6h returns to DOC-ONLY — the exact
+    # measured defect quoted at the top of this header — while the canonical
+    # spellings stay green.
+    pbase="${abs##*/}"
+    pdir="${abs%/*}"
+    [ -n "$pdir" ] || pdir="/"
+    if [ -n "$pbase" ]; then
+        pdir_phys=$(cd -P "$pdir" 2>/dev/null && printf '%sX' "$PWD") || pdir_phys=""
+        pdir_phys="${pdir_phys%X}"
+        if _gov_rel_under "$pdir_phys" "$_GOV_ROOT_PHYS" "$pbase"; then
+            c_resolved="$_GOV_REL"
         fi
-    done <<< "$_GOV_SET"
-    [ -n "$GOV_VETO_ORIGIN" ] || return 1
-    return 0
+        pdir_log=$(cd "$pdir" 2>/dev/null && printf '%sX' "$PWD") || pdir_log=""
+        pdir_log="${pdir_log%X}"
+        if _gov_rel_under "$pdir_log" "$_GOV_ROOT" "$pbase"; then
+            c_logres="$_GOV_REL"
+        elif _gov_rel_under "$pdir_log" "$_GOV_ROOT_PHYS" "$pbase"; then
+            c_logres="$_GOV_REL"
+        fi
+        # --- GOV-LPHYS-BEGIN (claude-workflow-plugin-mdnc R1-F1) ------------
+        # CANDIDATE 6. `cd` then `cd -P .` is `cd "$pdir" && pwd -P` — the
+        # reduction s5qf performed — with the answer coming back through `$PWD`
+        # so it can carry the sentinel byte. Measured equal to `pwd -P` on bash
+        # 3.2.57 and 5.2.21, and strictly better on a directory whose name ends
+        # in a newline (89 bytes captured against 88).
+        pdir_lphys=$(cd "$pdir" 2>/dev/null && cd -P . 2>/dev/null && printf '%sX' "$PWD") || pdir_lphys=""
+        pdir_lphys="${pdir_lphys%X}"
+        if _gov_rel_under "$pdir_lphys" "$_GOV_ROOT_LPHYS" "$pbase"; then
+            c_lphysres="$_GOV_REL"
+        fi
+        # --- GOV-LPHYS-END --------------------------------------------------
+    fi
+    _gov_lookup "$c_resolved" "$c_logres" "$c_lphysres" && return 0
+    # --- GOV-PATH-RESOLUTION-END (claude-workflow-plugin-mdnc) --------------
+
+    return 1
 }
 # GOVERNING-ARTIFACT-VETO END (claude-workflow-plugin-s5qf)
 

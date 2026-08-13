@@ -191,7 +191,7 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # pretending the subset describes the tier. Skips still fail filtered runs —
 # exit 0 always means "everything selected ran and passed".
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=37
+EXPECTED_SPECS=38
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

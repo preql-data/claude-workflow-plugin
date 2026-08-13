@@ -15,6 +15,13 @@ below.
 | L3 — vitest unit | `.claude/tests/e2e/specs/*.unit.spec.ts` | Harness internals: trace schema, normalization, custom matchers, the invariant engine | Offline | `make test-e2e-unit`, CI |
 | L3 — live e2e | `.claude/tests/e2e/specs/<fixture>.spec.ts` | Plugin behaviour end-to-end against real Claude, asserted via fixture-declared invariants | Live (~$5–10 per fixture) | `make test-live FIXTURE=<name>` (manual only) |
 
+The tiers above are a statement about WHAT is covered. Where they RUN is a
+second axis, and it is not free: every one of them is authored and measured on
+macOS while CI runs Linux. `make test-linux` re-runs L1 (and L2) unchanged
+inside an `ubuntu:24.04` container so that difference is measurable before a
+push rather than after one — see
+[The Linux tier](#the-linux-tier-make-test-linux) below.
+
 The retired L4 daily drift watch and any automatic L3-live PR/cron runs
 were removed in v3.1.0 spec item 0.8. CI consumes zero API spend on a
 normal PR or push run.
@@ -43,6 +50,8 @@ what 4ms of deterministic logic can prove.
 make test              # L1 bash unit tests
 make test-component    # L2 component tier
 make test-all          # L1 + L2 (the offline gate)
+make test-linux        # L1 inside a Linux container (GNU tooling; needs docker)
+make test-linux-all    # L1 + L2 inside the container
 make test-e2e-unit     # L3 vitest unit tier (offline; includes the invariant engine specs)
 make manifest-validate # Zod-replica check of .claude-plugin/plugin.json
 make test-ci           # L1 + L2 + L3-unit + manifest (what CI runs)
@@ -53,13 +62,83 @@ make cassette-diff     # diff the most recent replay vs its committed golden (de
 ```
 
 `make test-ci` is the local mirror of what the GitHub Actions
-`tests` workflow runs. If `test-ci` is green locally, CI will be green too.
-Mirroring is why `test-ci` — and only `test-ci`, not `make test` — exports
-`STRICT_SECTIONS=1`: the CI `l1-unit` job sets it, so without it here a
-skipped section would be green locally and red in CI, which is the direction
-that costs a push. The price is that `test-ci` wants what CI provisions —
-`npm ci` in **both** `.claude/mcp/bd-mcp` and `.claude/mcp/code-graph-mcp` —
-and says which one is missing when it is not there.
+`tests` workflow runs. Mirroring is why `test-ci` — and only `test-ci`, not
+`make test` — exports `STRICT_SECTIONS=1`: the CI `l1-unit` job sets it, so
+without it here a skipped section would be green locally and red in CI, which is
+the direction that costs a push. The price is that `test-ci` wants what CI
+provisions — `npm ci` in **both** `.claude/mcp/bd-mcp` and
+`.claude/mcp/code-graph-mcp` — and says which one is missing when it is not
+there.
+
+**`test-ci` mirrors CI's TIER SET, not CI's PLATFORM, and that gap is real
+rather than theoretical.** This paragraph used to read "if `test-ci` is green
+locally, CI will be green too"; the first time the tiers were actually run on
+Linux, at `0de5ceb`, that sentence was false in three separate places at once —
+`design-artifact.test.sh` red on GNU `sha256sum`'s filename escaping,
+`doc-only-classifier.test.sh` PARTIAL (and therefore red under
+`STRICT_SECTIONS=1`) because its symlink-spelling arm keys on `mktemp`'s root,
+and two specs failing rather than skipping on an absent `python3`. Every one of
+those is invisible to a green macOS run by construction. `make test-linux` is
+what closes the gap; run it before a push, not instead of `test-ci`.
+
+### The Linux tier (`make test-linux`)
+
+Everything above runs on the developer's own box, which here is macOS: BSD
+`find`, BSD `sed`, `shasum`, bash 3.2. CI runs ubuntu-latest: GNU findutils, GNU
+coreutils, `sha256sum`, bash 5.2. `make test-linux` runs the **same tier bytes**
+against the second set inside a container, so a red CI run is one unknown rather
+than two.
+
+- **`.claude/tests/linux/Dockerfile`** provisions what the CI `l1-unit` job
+  provisions — `ubuntu:24.04`, bd 1.1.2 and node 20 from pinned,
+  sha256-verified artifacts, a non-root default user — and its header lists,
+  explicitly, every way it still differs from CI (architecture is the big one:
+  it builds native, so an Apple Silicon box runs `linux/arm64` while CI is
+  `linux/amd64`; pass `CWP_LINUX_PLATFORM=linux/amd64` to cross-check under
+  emulation).
+- **The repo is bind-mounted READ-ONLY**, and the mount is *verified* every run:
+  `repo-bytes.sh` hashes the tracked working tree on both sides and the run
+  refuses a mismatch, so "the real bytes, not a copy" is a checked claim rather
+  than an asserted one. Read-only means the target is safe to run mid-session —
+  a container cannot write into `.beads/` or `.claude/.qa-tracking/`, and cannot
+  leave root-owned files in your checkout. Measured: the whole L1 tier runs to
+  completion against it, because every spec builds its fixtures under the
+  container's own `/tmp`.
+- **The report names every tier's status, including the ones that did not run.**
+  A container target that silently runs a subset is the exact defect this
+  convention exists to prevent, so `NOT RUN` is a first-class row and is never
+  scored as a pass.
+- **Exit codes are three-valued**, matching the L1 runner's outcome discipline:
+  `0` every requested tier ran and passed, `1` a tier ran and failed, `2` the
+  tier could **not** be measured (no docker, no daemon, a build failure, a byte
+  mismatch, a byte check that could not be *performed*, a tree edited under the
+  run, or docker's own `125`/`126`/`127`). A missing docker prints a named skip
+  and exits 2 — never a silent green.
+- **A stale image is detected, not trusted.** The image carries the sha256 of
+  the Dockerfile that built it as a label, and the default mode rebuilds when
+  they disagree. This is here because it bit on the second run: the Dockerfile
+  gained a package, the image already existed, the run reused it, and the tier
+  reported a result for bytes that were not being shipped. On a host with no
+  `sha256sum`/`shasum` the report says `staleness UNCHECKED` rather than
+  claiming a digest match it did not compute.
+
+**All four of those checks are PAIRED, by
+`.claude/scripts/tests/linux-tier-driver.test.sh`** — mount identity, mid-run
+drift, stale-image detection, and tier-status/exit discipline, each driven
+beside the same cell with its condition removed. That spec runs the **real
+driver bytes** through the `${DOCKER:-docker}` seam with a recorded stub and the
+**real `repo-bytes.sh`** over a three-file git fixture, so leg 4 (an executable
+observed running) is present rather than claimed.
+
+It exists because the tier shipped without it and the first control found a
+false green: when the byte verification could not **run** — as distinct from
+running and disagreeing — the driver fell through, printed `VERDICT: every
+requested tier ran on Linux and passed`, and exited 0, while the same condition
+also switched off the moved-under-the-run detector that had been added because
+it bit. Both are fixed (`claude-workflow-plugin-mdnc` R1-F2/F3/F4); the point
+worth keeping is that **a target whose stated purpose is "every failure mode is
+loud" is exactly the kind of thing that ships with no leg watching a failure
+mode being loud.** Nothing in the four checks is declared UNPAIRED.
 
 ### Runner outcome semantics (a9hh / mwrb)
 
