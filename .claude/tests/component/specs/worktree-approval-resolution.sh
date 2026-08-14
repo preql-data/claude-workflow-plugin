@@ -288,7 +288,7 @@ approve_in() {
     bd comments add "$tid" "IMPLEMENTER: role=devops task=$tid at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
     hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" review-record "$tid" --file "$art" >/dev/null 2>&1
     # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
@@ -319,7 +319,7 @@ JSON
     # sections 1.1-1.3 assert the grammar of.
     local pay="$root/.claude/.qa-tracking/completion-draft-$san.json"
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"devops","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
     CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" "$summary" 2>&1 | tail -1
@@ -333,7 +333,7 @@ record_artifact() {
     san=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
     art="$PTRACK/review-artifact-$san-r$iter.json"
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewed_hash":"h$iter","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"h$iter","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
 JSON
     CLAUDE_PROJECT_DIR="$PRIM" bash "$PQG" review-record "$tid" --file "$art" >/dev/null 2>&1
 }

@@ -1787,6 +1787,50 @@ assert_record_scalar() {
     return 0
 }
 
+# assert_record_model_scalar <subcommand> <tid> <field> <value> — the SAME
+# bjx discipline as assert_record_scalar (reject, never sanitise; a space, a
+# colon or a comma would still move a field boundary the same way), but with
+# a WIDER class for a MODEL ID specifically (claude-workflow-plugin-46w9):
+# `[A-Za-z0-9._+-]` truncates `claude-opus-5[1m]` at the bracket — a real,
+# observed runtime id (see the ledger note on claude-workflow-plugin-gz3) —
+# which would make the guard refuse to record a specialist's own honest
+# self-report. Deliberately a SEPARATE function rather than widening
+# assert_record_scalar's class: task/role/field_name/payload_sha have no
+# legitimate reason to contain a bracket, colon or slash, and loosening their
+# shared guard to accommodate a different data type would widen the security
+# boundary for fields that never asked for it. The class still excludes
+# space and comma — the two characters actually implicated in the historical
+# bjx/P8 defects this guard's sibling documents — so relocating a field
+# boundary or splitting a csv is still impossible.
+assert_record_model_scalar() {
+    local sub="$1" tid="$2" field="$3" value="$4"
+    if [ -z "$value" ]; then
+        emit_error_json "$sub" "$tid" "${field}_empty" \
+            "$field is empty; it is interpolated into the record's machine prefix, where an empty value collapses two tokens into one" \
+            "qa-gate.sh $sub <task-id> [--file <path>]"
+        exit 1
+    fi
+    # BASH CASE/GLOB, not `grep -qE`, and that is load-bearing rather than a
+    # style choice: `grep` is LINE-ORIENTED, so `printf '%s' "$value" | grep
+    # -qE '^CLASS$'` returns success as soon as ANY line of a multi-line
+    # value matches — an embedded-newline value like "claude-sonnet-5\nDROP
+    # TABLE students" would be ACCEPTED because its first line alone passes,
+    # which is exactly the vg8/bjx defect shape this file exists to close.
+    # Measured directly while building this check (a grep-based first draft
+    # accepted that exact input). `case` pattern-matches the PARAMETER'S
+    # FULL VALUE as one string, so an embedded control character is just
+    # another character outside the class — no line-splitting possible.
+    case "$value" in
+        *[!]A-Za-z0-9._:/[-]*)
+            emit_error_json "$sub" "$tid" "${field}_invalid_chars" \
+                "$field='$value' contains a character outside the model-id class [A-Za-z0-9._:/\\[\\]-]; it is interpolated into the record's machine prefix, where a space, a comma or a newline would move a field boundary (the claude-workflow-plugin-bjx class). Rejected, not sanitised. If this is a genuine model id the class needs widening — test against the real id first" \
+                "qa-gate.sh $sub <task-id> [--file <path>]"
+            exit 1
+            ;;
+    esac
+    return 0
+}
+
 # completion_files_crosscheck <tid> <recorded-payload-sha> — THE INDEPENDENT
 # COMPLETENESS WITNESS (claude-workflow-plugin-fkm.1.20).
 #
@@ -2167,26 +2211,35 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               JSON via review-check.sh (the ONE validator) then appends the
               load-bearing comment:
                 REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> model=<m>
-                reviewed_hash=<h> risk_threshold=<sev> verdict=<v>
+                pin=<p> reviewed_hash=<h> risk_threshold=<sev> verdict=<v>
                 stopped_by=<s> findings=[<id>:<sev>,...] at <ts>: <summary>
-              (empty findings render as findings=[]). Record writer only —
-              no approve/Stop enforcement.
+              (empty findings render as findings=[]). `model`/`pin` (46w9) are
+              reviewer_model (a runtime self-report, not a restated
+              frontmatter pin) / reviewer_pin (the frontmatter reading, moved
+              to its own field). Record writer only — no approve/Stop
+              enforcement.
   completion-record <task-id> [--file <path>]
               P7: record the F7 specialist completion contract. Validates the
               payload JSON via review-check.sh `validate-completion` (the ONE
               validator — no second schema lives here), persists the validated
               bytes to .claude/.qa-tracking/completion-<task-id>.json, and
               appends:
-                COMPLETION v1 task=<tid> role=<r> fields=<csv>
+                COMPLETION v1 task=<tid> role=<r> model=<m> pin=<p> fields=<csv>
                 payload_sha=<sha256> at <ts>: <n> file(s), <m> test(s)
               Required payload keys: the canonical seven (task_id,
               files_changed, tests_added, decisions, blockers,
-              llm_observations, context_coverage) plus `role`. The four
-              free-form fields are NEVER interpolated — only their presence
-              and the digest reach the record, which is the injection
-              boundary. Every interpolated scalar (task, role, each field
-              name, the digest) must match ^[A-Za-z0-9._+-]+$ and is REJECTED,
-              never sanitised (the claude-workflow-plugin-bjx class).
+              llm_observations, context_coverage) plus `role`, `model` and
+              `pin` (46w9) — `pin` is the specialist's own static frontmatter
+              `model:` reading, `model` is a RUNTIME SELF-REPORT, and their
+              divergence across a task's records is the production
+              measurement of whether the runtime honours a frontmatter model
+              change. The four free-form fields are NEVER interpolated — only
+              their presence and the digest reach the record, which is the
+              injection boundary. task/role/each field name/the digest must
+              match ^[A-Za-z0-9._+-]+$; model/pin use the WIDER model-id class
+              [A-Za-z0-9._:/\[\]-]$ (a real id like claude-opus-5[1m] would be
+              truncated by the stricter class) — both REJECTED, never
+              sanitised (the claude-workflow-plugin-bjx class).
               `approve` REFUSES without this record.
   design-record <task-id> [--file <artifact>] [--designer <id>]
                 [--accept-foreign-paths '<reason>'] ['<summary>']
@@ -4759,11 +4812,19 @@ cmd_review_record() {
         exit 1
     fi
 
-    # Extract the grammar fields from the validated artifact.
-    local iter reviewer model hash rt verdict stopped findings_token fc summary ts comment_text
+    # Extract the grammar fields from the validated artifact. `pin` (46w9) is
+    # reviewer_pin, abbreviated the same way reviewer_model already is to
+    # `model` — see the ART_REVIEWER_PIN comment in review-check.sh's cmd_gate
+    # for why "pin=" cannot collide with any other token in this grammar. Both
+    # reviewer_model and reviewer_pin already passed validate-artifact's
+    # control-character AND model-id-class checks above (ok=true would not
+    # have been reached otherwise), so no second bjx guard is needed here —
+    # this function has never re-validated its other extracted scalars either.
+    local iter reviewer model pin hash rt verdict stopped findings_token fc summary ts comment_text
     iter=$(printf '%s' "$raw" | jq -r '.iterations' 2>/dev/null)
     reviewer=$(printf '%s' "$raw" | jq -r '.reviewer_identity' 2>/dev/null)
     model=$(printf '%s' "$raw" | jq -r '.reviewer_model' 2>/dev/null)
+    pin=$(printf '%s' "$raw" | jq -r '.reviewer_pin' 2>/dev/null)
     hash=$(printf '%s' "$raw" | jq -r '.reviewed_hash' 2>/dev/null)
     rt=$(printf '%s' "$raw" | jq -r '.risk_threshold' 2>/dev/null)
     verdict=$(printf '%s' "$raw" | jq -r '.verdict' 2>/dev/null)
@@ -4776,7 +4837,7 @@ cmd_review_record() {
         summary="findings — $fc finding(s) reported"
     fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    comment_text="REVIEW-ARTIFACT v1 iteration=$iter reviewer=$reviewer model=$model reviewed_hash=$hash risk_threshold=$rt verdict=$verdict stopped_by=$stopped findings=[$findings_token] at $ts: $summary"
+    comment_text="REVIEW-ARTIFACT v1 iteration=$iter reviewer=$reviewer model=$model pin=$pin reviewed_hash=$hash risk_threshold=$rt verdict=$verdict stopped_by=$stopped findings=[$findings_token] at $ts: $summary"
     add_comment "$tid" "$comment_text"
     emit_json 1 "review-record" "$tid" "recorded" "comment posted at $ts: $comment_text"
 }
@@ -4792,7 +4853,21 @@ cmd_review_record() {
 # compute_change_set_hash defers to impact-report.sh --hash-only).
 #
 # RECORD GRAMMAR, one line, machine prefix first:
-#   COMPLETION v1 task=<tid> role=<r> fields=<csv> payload_sha=<sha256> at <ts>: <n> file(s), <m> test(s)
+#   COMPLETION v1 task=<tid> role=<r> model=<m> pin=<p> fields=<csv> payload_sha=<sha256> at <ts>: <n> file(s), <m> test(s)
+#
+# model=/pin= (claude-workflow-plugin-46w9), added right after role=: `pin` is
+# the specialist's own STATIC frontmatter `model:` reading, `model` is a
+# RUNTIME SELF-REPORT (what the specialist states about its own identity —
+# never re-derived from the frontmatter a second time). Their NAMES already
+# reach `fields_csv` below (both are required, validated payload keys), but a
+# name in a csv only answers "was this field present" — the VALUE is what the
+# 46w9 measurement needs, and the persisted payload file is NOT the durable
+# side of this record (see completion_payload_path_for's header: the bd
+# comment is the cross-checkout-visible statement, the on-disk file is only
+# what it digests), so the values are embedded here exactly as role's already
+# is. Validated by assert_record_model_scalar — the WIDER model-id class, not
+# assert_record_scalar's — see that function's header for why they are
+# deliberately separate guards rather than one sharing a widened class.
 #
 # WHAT IS AND IS NOT IN IT. The four FREE-FORM fields (`decisions`, `blockers`,
 # `llm_observations`, `context_coverage`) are NEVER interpolated: only their
@@ -4908,9 +4983,19 @@ cmd_completion_record() {
 
     # Grammar fields from the validated payload. `fields_csv` is NOT read here —
     # it is BUILT below from the keys this function has individually validated.
-    local payload_tid role nfiles ntests
+    local payload_tid role model pin nfiles ntests
     payload_tid=$(printf '%s' "$raw" | jq -r '.task_id' 2>/dev/null)
     role=$(printf '%s' "$raw" | jq -r '.role' 2>/dev/null)
+    # model/pin (46w9): embedded as explicit VALUE tokens, same treatment as
+    # role — their NAMES already reach `fields_csv` below (they are validated
+    # payload keys), but a name in a csv answers "was this field present", not
+    # "what did it say". The comment is the durable, cross-checkout record
+    # (the persisted payload file is not — see completion_payload_path_for's
+    # header); embedding the values here is what lets a LATER analysis (the
+    # review-round baseline backfill this task was discovered from) query
+    # model attribution from `bd show` alone, on a task closed long ago.
+    model=$(printf '%s' "$raw" | jq -r '.model' 2>/dev/null)
+    pin=$(printf '%s' "$raw" | jq -r '.pin' 2>/dev/null)
     nfiles=$(printf '%s' "$raw" | jq -r '.files_changed | length' 2>/dev/null)
     ntests=$(printf '%s' "$raw" | jq -r '.tests_added | length' 2>/dev/null)
 
@@ -4969,6 +5054,11 @@ cmd_completion_record() {
     # function would carry on and write the record it had just refused.
     assert_record_scalar "completion-record" "$tid" "task" "$tid"
     assert_record_scalar "completion-record" "$tid" "role" "$role"
+    # model/pin use the WIDER model-id class (assert_record_model_scalar), not
+    # assert_record_scalar's — see that function's header for why the two are
+    # deliberately separate rather than one guard sharing a widened class.
+    assert_record_model_scalar "completion-record" "$tid" "model" "$model"
+    assert_record_model_scalar "completion-record" "$tid" "pin" "$pin"
     local fname fields_csv=""
     while IFS= read -r -d '' fname; do
         assert_record_scalar "completion-record" "$tid" "field_name" "$fname"
@@ -5012,7 +5102,13 @@ cmd_completion_record() {
 
     local ts comment_text
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    comment_text="COMPLETION v1 task=$tid role=$role fields=$fields_csv payload_sha=$payload_sha at $ts: $nfiles file(s), $ntests test(s)"
+    # model=/pin= sit right after role= and before fields= (46w9). Every
+    # reader of this grammar extracts by NAME (grep -oE 'role=...',
+    # 'payload_sha=...'), never by position, so inserting new name=value
+    # tokens here is safe for the readers above (completion_role,
+    # completion_roles_seen, latest_implementer_completion_record) exactly as
+    # it was for REVIEW-ARTIFACT's model= and IMPLEMENTER's model=/pin=.
+    comment_text="COMPLETION v1 task=$tid role=$role model=$model pin=$pin fields=$fields_csv payload_sha=$payload_sha at $ts: $nfiles file(s), $ntests test(s)"
     add_comment "$tid" "$comment_text"
     emit_json 1 "completion-record" "$tid" "recorded" \
         "comment posted at $ts: $comment_text; validated payload persisted at $payload_file (approve re-digests it and cross-checks files_changed against the change set it binds)"

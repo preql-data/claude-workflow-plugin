@@ -93,7 +93,7 @@ record_artifact() {
     art="$TRACK/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r$iter.json"
     mkdir -p "$TRACK" 2>/dev/null || true
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"every acceptance criterion traced to a test","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"every acceptance criterion traced to a test","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
 JSON
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
 }

@@ -105,9 +105,10 @@
 # NOW: runtime enforcement EXISTS, and this spec's ceiling moved rather than
 # disappeared. Precisely what changed:
 #   - `review-check.sh validate-completion` REJECTS a payload that omits any of
-#     the canonical seven (or `role`), carries a control character in `task_id`
-#     or `role`, types a field wrongly, or leaves `llm_observations` /
-#     `context_coverage` empty after trimming.
+#     the canonical seven (or `role`, `model`, `pin` — claude-workflow-plugin-46w9),
+#     carries a control character in `task_id` or `role`, types a field wrongly,
+#     leaves `llm_observations` / `context_coverage` empty after trimming, or
+#     has a `model` / `pin` that fails the model-id character class.
 #   - `qa-gate.sh completion-record` records a validated payload and refuses
 #     every grammar-injecting scalar (the bjx class).
 #   - `qa-gate.sh approve` REFUSES (exit 2, completion_record_missing) without

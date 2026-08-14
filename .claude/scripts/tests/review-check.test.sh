@@ -62,7 +62,7 @@ ekey_of() { printf '%s' "$1" | jq -r '.error_key // ""' 2>/dev/null || echo ""; 
 
 # A valid request + artifact used as the mutation base.
 VALID_REQ='{"contract_version":"1","task_id":"t-1","iteration":1,"risk_threshold":"high","stop_condition":"no critical/high remain","change_set_hash":"h","spec":"s","diff":"d","completion_contract":"c","impact_report":"i"}'
-VALID_ART='{"contract_version":"1","task_id":"t-1","reviewer_identity":"sol-codex","reviewer_model":"m","reviewed_hash":"h","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"high","location":"a.ts:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}'
+VALID_ART='{"contract_version":"1","task_id":"t-1","reviewer_identity":"sol-codex","reviewer_model":"m","reviewer_pin":"m","reviewed_hash":"h","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"high","location":"a.ts:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}'
 
 # ---------------------------------------------------------------------------
 echo "=== Section 1: validate-request ==="

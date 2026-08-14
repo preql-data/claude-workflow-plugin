@@ -190,8 +190,14 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # selects a subset, so the runner says the floor is disarmed rather than
 # pretending the subset describes the tier. Skips still fail filtered runs —
 # exit 0 always means "everything selected ran and passed".
+#
+# THIS NUMBER AND `ls .claude/scripts/tests/*.test.sh | wc -l` DISAGREE BY
+# CONSTRUCTION, ALWAYS BY EXACTLY ONE: discovery below is `find ... -name
+# '*.sh' ! -name 'run-tests.sh'`, not a `*.test.sh` glob, so
+# phase5-synthetic-tests.sh (no `.test.sh` suffix) counts here but not there.
+# Verify a bump against a clean `make test` run, never against a file count.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=38
+EXPECTED_SPECS=39
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

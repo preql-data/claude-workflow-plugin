@@ -102,7 +102,7 @@ record_artifact() {
     local art
     art="$TRACK/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r$iter.json"
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewed_hash":"h$iter","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"h$iter","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
 JSON
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
 }

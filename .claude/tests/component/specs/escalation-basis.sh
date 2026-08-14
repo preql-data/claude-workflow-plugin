@@ -38,6 +38,33 @@
 #      while the iteration counter stays frozen at the cap.
 #   G. `enter` WIPES the auto-defer counter, so the first escalated Stop of a
 #      fresh cycle can never auto-defer immediately.
+#   I. RECONCILE SURVIVAL (claude-workflow-plugin-0in1, added after this spec's
+#      initial landing). Rounds counted by hash EQUALITY alone silently zero a
+#      real, findings-bearing review the moment the gate's OWN housekeeping
+#      (reconcile_tracker, run by the Stop hook on every fire) folds in a
+#      git-visible path no Write/Edit hook ever saw — same bytes, wider
+#      tracker. Measured on claude-workflow-plugin-fkm.3: four HIGH findings
+#      landed, reconcile grew the tracker with no specialist active, and the
+#      NEXT Stop reported "no reviewer has disagreed with anything" over a
+#      task carrying four open HIGH findings. Leg I reproduces that sequence
+#      end to end (a real git-visible untracked file, not a test-side tracker
+#      rewrite) and its META restores hash-equality-only counting to prove the
+#      false text returns without the fix.
+#      NOTE ON LEGS C AND H: 0in1's fix does NOT touch the property they pin —
+#      a change set that moves because of GENUINE new work still starts a
+#      fresh round count (claude-workflow-plugin-2ty's "a new change set has
+#      needed no rounds yet"). The two are distinguished by whether an
+#      IMPLEMENTER record is newer than the round in question (reconcile posts
+#      no bd comment of its own and is the only OTHER writer of the tracker
+#      that feeds change_set_hash). Leg C never opens a cycle (no `enter`), so
+#      the cycle-survival rule was never reachable there and it needed no
+#      change. Leg H DOES open a cycle, so its fixture (and META R1c's, which
+#      shares the same shape) now posts an IMPLEMENTER record before moving
+#      the tracker — modelling the GENUINE-new-work case explicitly rather
+#      than leaving it implicit, which is what made the fixture ambiguous
+#      between "reconcile" and "real work" once the rule could tell them
+#      apart. See the CYCLE-SURVIVAL region in review-check.sh's cmd_gate for
+#      the full reasoning.
 #
 # escalation-binding.sh (the spec 0.2 regression suite) is deliberately NOT
 # modified: its cap-drive legs all fail the suite, so they exercise the
@@ -108,7 +135,7 @@ seed_round() {
     local art
     art="$root/.claude/.qa-tracking/round-$(san "$tid")-r$iter.json"
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"seeded","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"seeded round $iter","verdict":"approve","findings":[],"iterations":$iter,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"seeded","reviewer_pin":"seeded","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"seeded round $iter","verdict":"approve","findings":[],"iterations":$iter,"stopped_by":"verdict"}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
         review-record "$tid" --file "$art" >/dev/null 2>&1
@@ -538,8 +565,14 @@ assert_eq "H: precondition — three rounds against the current hash escalate" \
 assert_contains "H: precondition — and that Stop's banner claims the cap, correctly" \
     "cap reached" "$STOP_REASON"
 
-# Move the change set: the three records now describe a hash that is no longer
-# current, so rounds drops to 0 while the escalation label stays.
+# Move the change set: a FRESH specialist turn (0in1's cycle-survival rule
+# needs this to be modelled explicitly now — see the CYCLE-SURVIVAL region in
+# review-check.sh's cmd_gate) genuinely touches a new file, so the three
+# existing rounds do NOT carry forward: they reviewed a diff this one is no
+# longer the whole of. A sentinel-future timestamp (the same device
+# subagent-start.sh's and verify-before-stop.sh's own specs use) keeps this
+# deterministically AFTER the seeded rounds regardless of wall-clock timing.
+bd comments add "$TID_H" "IMPLEMENTER: role=backend task=$TID_H at 2099-01-01T00:00:00Z" >/dev/null 2>&1
 printf 'src/handler.ts\nsrc/other.ts\n' > "$TRACK_H/changed-files.txt"
 HASH_HY=$(CLAUDE_PROJECT_DIR="$FIX_H" bash "$IR_H" --hash-only 2>/dev/null || echo "")
 assert_eq "H: precondition — the change set moved" "1" \
@@ -646,6 +679,9 @@ if assert_mutant_applied "2ty META-R1c note ignores the live escalation" "$REAL_
     fire "$VBS_MC"
     assert_eq "META R1c: precondition — the mutant escalated the task for real" \
         "1" "$(has_label_ct "$TID_MC" "qa-escalated")"
+    # Same 0in1 modelling fix as leg H: a genuine specialist turn, not an
+    # unmodelled tracker rewrite, is why rounds must drop for the new hash.
+    bd comments add "$TID_MC" "IMPLEMENTER: role=backend task=$TID_MC at 2099-01-01T00:00:00Z" >/dev/null 2>&1
     printf 'src/handler.ts\nsrc/other.ts\n' > "$TRACK_M/changed-files.txt"
     fire "$VBS_MC"
     assert_eq "META R1c: WITHOUT the live-escalation clause an ESCALATED Stop claims SUPPRESSED (repro (c) returns)" \
@@ -653,6 +689,131 @@ if assert_mutant_applied "2ty META-R1c note ignores the live escalation" "$REAL_
     # Discriminator: the mutant reached the escalated readout, not some earlier exit.
     assert_contains "META R1c: the mutant ran the real gate (escalated readout reached)" \
         "ESCALATION: Iteration" "$STOP_REASON"
+fi
+
+# ===========================================================================
+# LEG I — RECONCILE SURVIVAL (claude-workflow-plugin-0in1). Reproduces the
+# fkm.3 sequence end to end, through the REAL mechanism (a git-visible file no
+# Write/Edit hook ever saw, discovered by the Stop hook's OWN reconcile step —
+# not a test-side tracker rewrite): a cycle opens, a reviewer posts real HIGH
+# findings against the change set as it stands, then a file lands outside the
+# tracker with NO specialist active since the review. The round must survive
+# (rounds stays 1, not 0) and the false "no reviewer has disagreed with
+# anything" / "SUPPRESSED" text must not print.
+
+mk_fixture
+FIX_I="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_I="$FIX_I/.claude/scripts/verify-before-stop.sh"
+QG_I="$FIX_I/.claude/scripts/qa-gate.sh"
+RC_I="$FIX_I/.claude/scripts/review-check.sh"
+TRACK_I="$FIX_I/.claude/.qa-tracking"
+IR_I="$FIX_I/.claude/scripts/impact-report.sh"
+stack_stub "$FIX_I" "$NPM_RUNNER_JSON"
+mk_shim "npm" "$FIX_I" 0 "PASS  12 tests passed" >/dev/null
+
+# A real git checkout, the same isolation shape verify-before-stop.sh's own
+# qzv fixture uses (its comment records WHY: without the ignore, the
+# reconciler folds the harness's OWN scaffolding into the change set too).
+printf 'bin/\n.claude/scripts/\n.claude/.qa-tracking/\n' > "$FIX_I/.gitignore"
+mkdir -p "$FIX_I/src"
+printf 'export function handler() {}\n' > "$FIX_I/src/handler.ts"
+(cd "$FIX_I" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+
+TID_I=$(cd "$FIX_I" && bd create "reconcile must not zero a landed review" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_I" enter "$TID_I" >/dev/null
+bd label add "$TID_I" qa-pending >/dev/null 2>&1
+# The specialist who made the ORIGINAL edit, posted before the review — so
+# LATEST_IMPLEMENTER_TS predates the round and cannot exclude it.
+bd comments add "$TID_I" "IMPLEMENTER: role=backend task=$TID_I at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
+printf 'src/handler.ts\n' > "$TRACK_I/changed-files.txt"
+HASH_IX=$(CLAUDE_PROJECT_DIR="$FIX_I" bash "$IR_I" --hash-only 2>/dev/null || echo "")
+assert_eq "I: precondition — the reviewed change set has a computable hash" "1" \
+    "$([ -n "$HASH_IX" ] && echo 1 || echo 0)"
+
+# The review lands FOUR HIGH findings against the hash the tracker shows RIGHT
+# NOW — the shape fkm.3 measured, not a synthetic zero-findings seed.
+ART_I="$FIX_I/.claude/.qa-tracking/round-I.json"
+cat > "$ART_I" <<JSON
+{"contract_version":"1","task_id":"$TID_I","reviewer_identity":"sol-codex","reviewer_model":"seeded","reviewer_pin":"seeded","reviewed_hash":"$HASH_IX","risk_threshold":"high","stop_condition":"seeded review","verdict":"findings","findings":[{"id":"R1-F1","severity":"high","location":"x","evidence":"y","description":"z"},{"id":"R1-F2","severity":"high","location":"x","evidence":"y","description":"z"},{"id":"R1-F3","severity":"high","location":"x","evidence":"y","description":"z"},{"id":"R1-F4","severity":"high","location":"x","evidence":"y","description":"z"}],"iterations":1,"stopped_by":"verdict"}
+JSON
+CLAUDE_PROJECT_DIR="$FIX_I" bash "$QG_I" review-record "$TID_I" --file "$ART_I" >/dev/null 2>&1
+I_ROUNDS_PRE=$(CLAUDE_PROJECT_DIR="$FIX_I" bash "$RC_I" \
+    gate "$TID_I" --change-set-hash "$HASH_IX" 2>/dev/null | jq -r '.rounds // "?"' 2>/dev/null || echo "?")
+assert_eq "I: precondition — the review counts against the hash it reviewed" "1" "$I_ROUNDS_PRE"
+
+# A git-visible file lands OUTSIDE the tracker — exactly the mechanism 94d's
+# reconcile_tracker exists to fold in (a Bash write, invisible to
+# post-edit.sh) and exactly fkm.3's trigger. NO implementer record is posted
+# for this: nothing but reconcile's own housekeeping can explain the
+# tracker's growth on the next Stop.
+printf 'export function other() {}\n' > "$FIX_I/src/other.ts"
+
+# The Stop fires: its OWN reconcile-tracker step (94d) discovers src/other.ts
+# and folds it in before this Stop reads anything else — the real mechanism,
+# not a test-side rewrite of changed-files.txt.
+fire "$VBS_I"
+assert_decision "I: the Stop blocks (four open HIGH findings, unresolved)" "$STOP_OUT" "block"
+TRACKED_I=$(grep -c . "$TRACK_I/changed-files.txt" 2>/dev/null || echo 0)
+TRACKED_I=$(printf '%s' "$TRACKED_I" | tr -d '[:space:]')
+assert_eq "I: precondition — the Stop's OWN reconcile grew the tracker to 2 paths" "2" "$TRACKED_I"
+HASH_IY=$(CLAUDE_PROJECT_DIR="$FIX_I" bash "$IR_I" --hash-only 2>/dev/null || echo "")
+assert_eq "I: precondition — the reconcile-driven fold moved the hash" "1" \
+    "$([ -n "$HASH_IY" ] && [ "$HASH_IY" != "$HASH_IX" ] && echo 1 || echo 0)"
+
+I_POST_OUT=$(CLAUDE_PROJECT_DIR="$FIX_I" bash "$RC_I" gate "$TID_I" --change-set-hash "$HASH_IY" 2>/dev/null)
+assert_eq "I: the review SURVIVES reconcile's own housekeeping (rounds=1, not 0)" \
+    "1" "$(printf '%s' "$I_POST_OUT" | jq -r '.rounds // "?"')"
+assert_eq "I: ...and the envelope names WHY (rounds_basis=cycle)" \
+    "cycle" "$(printf '%s' "$I_POST_OUT" | jq -r '.rounds_basis // "?"')"
+assert_eq "I: ...naming that the surviving round is against a stale hash" \
+    "1" "$(printf '%s' "$I_POST_OUT" | jq -r '.rounds_stale_hash_count // "?"')"
+assert_eq "I: the four HIGH findings are still visible to the gate" \
+    "4" "$(printf '%s' "$I_POST_OUT" | jq -r '.open_findings // "?"')"
+
+assert_eq "I: the false 'no reviewer has disagreed' text does NOT print" \
+    "0" "$(count_in "$STOP_REASON" 'no reviewer has disagreed')"
+assert_eq "I: ...nor the SUPPRESSED claim (a reviewer HAS spoken, with 4 open HIGH findings)" \
+    "0" "$(count_in "$STOP_REASON" 'SUPPRESSED')"
+assert_contains "I: ...and the basis line reports the surviving round" \
+    "independent review rounds against this change set=1" "$STOP_REASON"
+
+# ===========================================================================
+# META I — restore hash-equality-ONLY counting (the pre-0in1 rule) in a copy
+# of review-check.sh. The identical bd state — same task, same review, same
+# reconciled hash — must then report rounds=0, reproducing the defect, proving
+# leg I measures the cycle-survival rule and not some unrelated reason the
+# false text stayed absent.
+
+REAL_RC_I=$(readlink "$FIX_I/.claude/scripts/review-check.sh" \
+    || printf '%s' "$FIX_I/.claude/scripts/review-check.sh")
+RC_IM="$FIX_I/.claude/scripts/review-check-hash-only.sh"
+sed 's/CYCLE_ESTABLISHED="1"/CYCLE_ESTABLISHED="0"/' "$REAL_RC_I" > "$RC_IM"
+chmod +x "$RC_IM"
+if assert_mutant_applied "0in1 META-I hash-equality-only restored" "$REAL_RC_I" "$RC_IM"; then
+    assert_eq "META I: mutated review-check.sh parses" "0" \
+        "$(bash -n "$RC_IM" 2>/dev/null && echo 0 || echo 1)"
+    # WHICH mutation landed: CYCLE_ESTABLISHED can now never reach "1", so the
+    # literal "0" assignment appears twice (the original declaration plus the
+    # neutralised branch) where the shipped script has it once.
+    MI_ORIG=$(grep -c 'CYCLE_ESTABLISHED="0"' "$REAL_RC_I" || true)
+    MI_ORIG=$(printf '%s' "$MI_ORIG" | tr -d '[:space:]')
+    MI_MUT=$(grep -c 'CYCLE_ESTABLISHED="0"' "$RC_IM" || true)
+    MI_MUT=$(printf '%s' "$MI_MUT" | tr -d '[:space:]')
+    assert_eq "META I: the substitution landed exactly once" "1" "$((MI_MUT - MI_ORIG))"
+
+    META_I_OUT=$(CLAUDE_PROJECT_DIR="$FIX_I" bash "$RC_IM" gate "$TID_I" --change-set-hash "$HASH_IY" 2>/dev/null)
+    assert_eq "META I: WITHOUT the cycle-survival rule the SAME review reports rounds=0 (the 0in1 defect)" \
+        "0" "$(printf '%s' "$META_I_OUT" | jq -r '.rounds // "?"')"
+    assert_eq "META I: ...and basis is reported hash_equality, not cycle" \
+        "hash_equality" "$(printf '%s' "$META_I_OUT" | jq -r '.rounds_basis // "?"')"
+    # Discriminator: the mutant still ran the real predicate — independence and
+    # the four open findings are unaffected, so the rounds difference is the
+    # cycle-survival rule and nothing else.
+    assert_eq "META I: the mutant still reports the 4 open findings (ran the real predicate)" \
+        "4" "$(printf '%s' "$META_I_OUT" | jq -r '.open_findings // "?"')"
 fi
 
 [ "$FAIL" -eq 0 ]

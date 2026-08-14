@@ -31,6 +31,13 @@
 #   malformed_retry          number of corrective codex-reply turns allowed
 #                            when the model's first message fails artifact
 #                            validation. Default: 1.
+#   max_request_bytes        hard cap on the REQUEST FILE'S byte size (the
+#                            file codex-review.sh receives via --request, NOT
+#                            the wrapped envelope it stages for jq --rawfile).
+#                            Checked BEFORE the Codex server is spawned;
+#                            exceeding it exits 7 with no artifact and no
+#                            spend. Built-in default when unset: 100000.
+#                            Shipped: 100000 — see the rationale below.
 #
 # WHY THE SHIPPED VALUES ARE 12 AND 2400 (iu5o, operator decision 2026-08-10;
 # grader conditions from fkm.1.11 rubric v2: rationale in-file, CHANGELOG
@@ -64,9 +71,36 @@
 # raise is how long a WEDGED turn can hold the machine before the caller
 # degrades to the Claude path: 40 minutes instead of 5. That trade is
 # accepted, stated, and bounded by exactly this line.
+#
+# WHY max_request_bytes=100000 (nq5f, operator-recorded measurement,
+# 2026-08-13; see the comment thread on claude-workflow-plugin-nq5f — these
+# are the operator's own reported round-trip figures, not a command this file
+# re-ran). Two points are MEASURED; 100000 is CHOSEN from them, not one of
+# them: a ~88KB request completed in 326s, 493s, 496s, 613s, 635s across five
+# separate rounds; a ~144KB request EXHAUSTED the entire 2400s
+# timeout_seconds budget above, with NO artifact and (before the fkm.1.14
+# fold-in below) no way to tell "still generating" from "server exited". The
+# two points are NOT LINEAR — a 1.6x size increase did not cost 1.6x the
+# time, it cost the whole budget — and two points cannot be interpolated or
+# extrapolated into a curve regardless: deriving a relationship needs a third
+# measurement at minimum, which does not exist yet. 100000 sits BETWEEN the
+# two, rounded for legibility (a round number an operator reads correctly
+# under time pressure) and closer to the confirmed-good side than the
+# confirmed-bad one — a JUDGMENT CALL, not a derivation, and EXPECTED TO MOVE
+# once a third measurement exists to reason from. It errs LOW on purpose: a
+# refusal at this bound is a CHEAP wrong answer (rescope the request smaller,
+# re-run, seconds lost), while a timeout at 2400s is an EXPENSIVE one (40
+# minutes of nothing) — that cost asymmetry, not the measurement, is why the
+# bound sits toward the cheap side of the uncertainty rather than centred in
+# it. D2's packet (review artifact + grilling record + impact report +
+# lessons) is expected to exceed 144KB on its own, which is exactly why this
+# refusal has to exist BEFORE D2 lands, not after the first D2 review turn
+# silently burns 40 minutes the same way. Revisit UP only against a new
+# measurement, never against a guess.
 
 risk_threshold_default=high
 max_findings=10
 max_review_iterations=12
 timeout_seconds=2400
 malformed_retry=1
+max_request_bytes=100000

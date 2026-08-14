@@ -1309,7 +1309,7 @@ p7_seed_review() {   # implementer + independent clean artifact, NO completion r
     (cd "$FIXTURE_P7" && bd comments add "$tid" \
         "IMPLEMENTER: role=backend task=$tid at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1)
     art="$TRACK_P7/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
-    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"m","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"m","reviewer_pin":"m","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$h" > "$art"
     CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" review-record "$tid" --file "$art" >/dev/null 2>&1
 }
@@ -1320,7 +1320,9 @@ p7_settle() {   # absorb incidental fixture dirt, then refresh the report for th
 p7_payload() {  # p7_payload <tid> <files-json> -> path
     local tid="$1" files="$2" p
     p="$TRACK_P7/p7-payload-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
-    printf '{"task_id":"%s","role":"backend","files_changed":%s,"tests_added":["t.sh::a"],"decisions":["d"],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    # model/pin (46w9): required transport keys alongside role now — see
+    # validate-completion's missing_key:model/missing_key:pin checks.
+    printf '{"task_id":"%s","role":"backend","model":"seeded","pin":"seeded","files_changed":%s,"tests_added":["t.sh::a"],"decisions":["d"],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
         "$tid" "$files" > "$p"
     printf '%s' "$p"
 }
@@ -1336,8 +1338,10 @@ assert_json_field "P7-1: completion-record status=recorded" "$P7A_OUT" '.status'
 P7A_REC=$(bd_show_with_comments "$TID_P7A" "$FIXTURE_P7" \
     | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
     | grep '^COMPLETION v1 ' | tail -1)
+# model=/pin= (46w9) sit between role= and fields=, same position the
+# writer's comment_text builds them at.
 assert_match "P7-1: the record matches the COMPLETION v1 grammar" \
-    '^COMPLETION v1 task=[A-Za-z0-9._-]+ role=backend fields=[A-Za-z0-9._,+-]+ payload_sha=[A-Za-z0-9._+-]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: 1 file\(s\), 1 test\(s\)$' \
+    '^COMPLETION v1 task=[A-Za-z0-9._-]+ role=backend model=seeded pin=seeded fields=[A-Za-z0-9._,+-]+ payload_sha=[A-Za-z0-9._+-]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: 1 file\(s\), 1 test\(s\)$' \
     "$P7A_REC"
 # payload_sha binds the PERSISTED artifact: recompute it independently.
 # The artifact is keyed on task AND role (QA R1-F4): task-keyed storage let a
@@ -1386,12 +1390,98 @@ P7B_RECS=$(bd_show_with_comments "$TID_P7B" "$FIXTURE_P7" \
     | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
 assert_eq "P7-2: a rejected payload writes NO record" "0" "$P7B_RECS"
 
+# --- P7-2b/2c: the ONE validator rejects a payload missing model / pin -----
+# 46w9: model/pin are required transport keys alongside role (see
+# validate-completion's missing_key:model/missing_key:pin checks and
+# completion_payload_path_for's header). Zero coverage existed for either
+# branch before this leg — P7-1..P7-4d all built payloads with both fields
+# already present, so a copy-paste that wired the has-check for one field but
+# not the other would have shipped invisibly.
+TID_P7B2=$(p7_new "P7: missing model" "src/p7b2.ts")
+P7B2_PAY="$TRACK_P7/p7b2.json"
+printf '{"task_id":"%s","role":"backend","pin":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7B2" > "$P7B2_PAY"
+P7B2_RC=0
+P7B2_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7B2" --file "$P7B2_PAY" 2>/dev/null) || P7B2_RC=$?
+assert_eq "P7-2b: completion-record refuses a payload missing model (rc=1)" "1" "$P7B2_RC"
+assert_json_field "P7-2b: error_key=missing_key:model" \
+    "$P7B2_OUT" '.error_key' "missing_key:model"
+P7B2_DRC=0
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$RC_P7" validate-completion "$P7B2_PAY" >/dev/null 2>&1 || P7B2_DRC=$?
+assert_eq "P7-2b: review-check.sh validate-completion agrees (rc=4)" "4" "$P7B2_DRC"
+P7B2_RECS=$(bd_show_with_comments "$TID_P7B2" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
+assert_eq "P7-2b: a rejected payload writes NO record" "0" "$P7B2_RECS"
+
+TID_P7B3=$(p7_new "P7: missing pin" "src/p7b3.ts")
+P7B3_PAY="$TRACK_P7/p7b3.json"
+printf '{"task_id":"%s","role":"backend","model":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7B3" > "$P7B3_PAY"
+P7B3_RC=0
+P7B3_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7B3" --file "$P7B3_PAY" 2>/dev/null) || P7B3_RC=$?
+assert_eq "P7-2c: completion-record refuses a payload missing pin (rc=1)" "1" "$P7B3_RC"
+assert_json_field "P7-2c: error_key=missing_key:pin" \
+    "$P7B3_OUT" '.error_key' "missing_key:pin"
+P7B3_DRC=0
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$RC_P7" validate-completion "$P7B3_PAY" >/dev/null 2>&1 || P7B3_DRC=$?
+assert_eq "P7-2c: review-check.sh validate-completion agrees (rc=4)" "4" "$P7B3_DRC"
+P7B3_RECS=$(bd_show_with_comments "$TID_P7B3" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
+assert_eq "P7-2c: a rejected payload writes NO record" "0" "$P7B3_RECS"
+
+# --- P7-2d/2e: model/pin values failing the model-id character class ------
+# The WIDER class (letters, digits, ., -, :, /, [, ]) still excludes a space,
+# so a self-reported model string containing one (a plausible slip — e.g.
+# copy-pasting a sentence instead of an id) is rejected rather than silently
+# truncated or split.
+TID_P7B4=$(p7_new "P7: model fails the character class" "src/p7b4.ts")
+P7B4_PAY="$TRACK_P7/p7b4.json"
+printf '{"task_id":"%s","role":"backend","model":"claude opus","pin":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7B4" > "$P7B4_PAY"
+P7B4_RC=0
+P7B4_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7B4" --file "$P7B4_PAY" 2>/dev/null) || P7B4_RC=$?
+assert_eq "P7-2d: completion-record refuses a model value with a space (rc=1)" "1" "$P7B4_RC"
+assert_json_field "P7-2d: error_key=field_invalid_chars:model" \
+    "$P7B4_OUT" '.error_key' "field_invalid_chars:model"
+P7B4_RECS=$(bd_show_with_comments "$TID_P7B4" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
+assert_eq "P7-2d: a rejected payload writes NO record" "0" "$P7B4_RECS"
+
+TID_P7B5=$(p7_new "P7: pin fails the character class" "src/p7b5.ts")
+P7B5_PAY="$TRACK_P7/p7b5.json"
+printf '{"task_id":"%s","role":"backend","model":"m","pin":"claude opus","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7B5" > "$P7B5_PAY"
+P7B5_RC=0
+P7B5_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7B5" --file "$P7B5_PAY" 2>/dev/null) || P7B5_RC=$?
+assert_eq "P7-2e: completion-record refuses a pin value with a space (rc=1)" "1" "$P7B5_RC"
+assert_json_field "P7-2e: error_key=field_invalid_chars:pin" \
+    "$P7B5_OUT" '.error_key' "field_invalid_chars:pin"
+P7B5_RECS=$(bd_show_with_comments "$TID_P7B5" "$FIXTURE_P7" \
+    | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' \
+    | grep -c '^COMPLETION v1 ' | tr -d '[:space:]')
+assert_eq "P7-2e: a rejected payload writes NO record" "0" "$P7B5_RECS"
+# Restore control: the SAME two payloads with a legal model/pin RECORD.
+TID_P7B4C=$(p7_new "P7: model/pin restore control" "src/p7b4c.ts")
+P7B4C_PAY="$TRACK_P7/p7b4c.json"
+printf '{"task_id":"%s","role":"backend","model":"claude-opus-5[1m]","pin":"claude-opus-5","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+    "$TID_P7B4C" > "$P7B4C_PAY"
+P7B4C_RC=0
+P7B4C_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7B4C" --file "$P7B4C_PAY" 2>/dev/null) || P7B4C_RC=$?
+assert_eq "P7-2f: RESTORE CONTROL — a bracket-suffixed real model id and a plain pin both record (rc=0)" \
+    "0" "$P7B4C_RC"
+assert_json_field "P7-2f: ...ok=true" "$P7B4C_OUT" '.ok' "true"
+
 # --- P7-3: a control character in a grammar-bearing scalar (layer 1) -------
 # The vg8 class: role is embedded verbatim in a ONE-LINE record, so a newline
 # splits it and every later token lands on a line no reader parses.
 TID_P7C=$(p7_new "P7: newline in role" "src/p7c.ts")
 P7C_PAY="$TRACK_P7/p7c.json"
-printf '{"task_id":"%s","role":"back\\nend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+# model/pin (46w9): present and valid, so the has-checks pass and the control
+# character in `role` is what the validator actually trips over.
+printf '{"task_id":"%s","role":"back\\nend","model":"m","pin":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
     "$TID_P7C" > "$P7C_PAY"
 P7C_RC=0
 P7C_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7C" --file "$P7C_PAY" 2>/dev/null) || P7C_RC=$?
@@ -1409,7 +1499,9 @@ assert_json_field "P7-3: error_key=scalar_contains_control_char:role" \
 TID_P7D=$(p7_new "P7: role injection" "src/p7d.ts")
 P7D_PAY="$TRACK_P7/p7d.json"
 P7D_EVIL='backend fields=x payload_sha=deadbeef at 1999-01-01T00:00:00Z: 99 file(s), 99 test(s)'
-printf '{"task_id":"%s","role":"%s","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+# model/pin (46w9): valid values, so the injection under test is isolated to
+# `role` — a missing/invalid model or pin would trip a DIFFERENT check first.
+printf '{"task_id":"%s","role":"%s","model":"m","pin":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
     "$TID_P7D" "$P7D_EVIL" > "$P7D_PAY"
 # It really is control-char-free, i.e. layer 1 cannot be what stops it.
 P7D_VRC=0
@@ -1430,7 +1522,7 @@ assert_eq "P7-4: ...and no forged record reached the task" "0" "$P7D_RECS"
 # and is comma-joined into `fields=`.
 TID_P7D2=$(p7_new "P7: key-name injection" "src/p7d2.ts")
 P7D2_PAY="$TRACK_P7/p7d2.json"
-printf '{"task_id":"%s","role":"backend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","evil at 1999: 0 file(s)":"x"}\n' \
+printf '{"task_id":"%s","role":"backend","model":"m","pin":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","evil at 1999: 0 file(s)":"x"}\n' \
     "$TID_P7D2" > "$P7D2_PAY"
 P7D2_RC=0
 P7D2_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7D2" --file "$P7D2_PAY" 2>/dev/null) || P7D2_RC=$?
@@ -1451,7 +1543,7 @@ assert_json_field "P7-4b: ...error_key=field_name_invalid_chars" \
 # rendered as two members.
 TID_P7C2=$(p7_new "P7: comma in a key name" "src/p7c2.ts")
 P7C2_PAY="$TRACK_P7/p7c2.json"
-printf '{"task_id":"%s","role":"backend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","a,b":"x"}\n' \
+printf '{"task_id":"%s","role":"backend","model":"m","pin":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","a,b":"x"}\n' \
     "$TID_P7C2" > "$P7C2_PAY"
 P7C2_RC=0
 P7C2_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7C2" --file "$P7C2_PAY" 2>/dev/null) || P7C2_RC=$?
@@ -1474,7 +1566,7 @@ assert_eq "P7-4c: ...and no record with a split csv reached the task" "0" "$P7C2
 # happened to run somewhere without the decoy.
 TID_P7D3=$(p7_new "P7: glob metachar in a key name" "src/p7d3.ts")
 P7D3_PAY="$TRACK_P7/p7d3.json"
-printf '{"task_id":"%s","role":"backend","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","[c]lean1":"x"}\n' \
+printf '{"task_id":"%s","role":"backend","model":"m","pin":"m","files_changed":[],"tests_added":[],"decisions":[],"blockers":[],"llm_observations":"o","context_coverage":"c","[c]lean1":"x"}\n' \
     "$TID_P7D3" > "$P7D3_PAY"
 mkdir -p "$FIXTURE_P7/globdir-with" "$FIXTURE_P7/globdir-without"
 : > "$FIXTURE_P7/globdir-with/clean1"          # the decoy the glob would expand to
@@ -1567,7 +1659,7 @@ CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7I" --fi
 # QA's own contract, recorded AFTER — files_changed [] because QA verifies
 # rather than authors, which is exactly why reading it as the witness is wrong.
 P7I_QA="$TRACK_P7/p7i-qa.json"
-printf '{"task_id":"%s","role":"qa","files_changed":[],"tests_added":[],"decisions":["reviewed"],"blockers":[],"llm_observations":"o","context_coverage":"c","approved":true,"files_verified":["src/p7i-one.ts"]}\n' \
+printf '{"task_id":"%s","role":"qa","model":"m","pin":"m","files_changed":[],"tests_added":[],"decisions":["reviewed"],"blockers":[],"llm_observations":"o","context_coverage":"c","approved":true,"files_verified":["src/p7i-one.ts"]}\n' \
     "$TID_P7I" > "$P7I_QA"
 CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7I" --file "$P7I_QA" >/dev/null 2>&1
 # The artifacts must COEXIST — task-keyed storage let the second write clobber
@@ -1600,7 +1692,7 @@ assert_eq "P7-7b: ...and the durable record carries the token (pre-fix: none at 
 TID_P7J=$(p7_new "P7: only a reviewer contract" "src/p7j.ts")
 p7_seed_review "$TID_P7J"
 P7J_QA="$TRACK_P7/p7j-qa.json"
-printf '{"task_id":"%s","role":"qa","files_changed":[],"tests_added":[],"decisions":["reviewed"],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
+printf '{"task_id":"%s","role":"qa","model":"m","pin":"m","files_changed":[],"tests_added":[],"decisions":["reviewed"],"blockers":[],"llm_observations":"o","context_coverage":"c"}\n' \
     "$TID_P7J" > "$P7J_QA"
 CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7J" --file "$P7J_QA" >/dev/null 2>&1
 p7_settle "$TID_P7J"

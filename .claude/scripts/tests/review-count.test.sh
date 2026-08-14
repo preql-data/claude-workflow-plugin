@@ -376,6 +376,234 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 7: CYCLE-SURVIVAL — a round survives housekeeping-driven hash movement within one open cycle (0in1) ==="
+# MEASURED on claude-workflow-plugin-fkm.3: reconcile_tracker (the Stop hook's
+# OWN housekeeping, run on every fire) folded a previously-untracked but
+# already-existing path into the tracker mid-review, moving change_set_hash
+# with the reviewed CONTENT unchanged. Pure hash-equality then reported
+# rounds=0 over a task carrying four open HIGH findings — the escalation
+# machinery's "no reviewer has disagreed with anything" text is a direct,
+# false consequence.
+#
+# The fix is a per-round EXCEPTION, not a blanket "count everything in the
+# cycle": claude-workflow-plugin-2ty deliberately resets rounds when a change
+# set moves because of GENUINE new work ("a new change set has needed no
+# rounds yet"), and that must survive too (component spec
+# escalation-basis.sh legs C/H pin it at the integration level). The
+# exception requires ALL of: a cycle open (a `QA-GATE: entered` record),
+# the round's own timestamp inside it, and no `IMPLEMENTER` record newer
+# than the round — reconcile posts no bd comment of its own and is the only
+# OTHER writer of the tracker, so "no implementer since" leaves reconcile as
+# the only explanation for the hash's movement.
+
+# art_hashed_ts <iteration> <reviewed_hash> <ts> — like art_hashed above, but
+# with an EXPLICIT own record timestamp, needed here to control ordering
+# against a QA-GATE: entered / IMPLEMENTER record precisely.
+art_hashed_ts() {
+    printf 'REVIEW-ARTIFACT v1 iteration=%s reviewer=qa-claude model=m reviewed_hash=%s risk_threshold=high verdict=approve stopped_by=verdict findings=[] at %s: round %s' \
+        "$1" "$2" "$3" "$1"
+}
+gate_entered_at() { printf 'QA-GATE: entered at %s' "$1"; }
+implementer_at()  { printf 'IMPLEMENTER: role=backend task=t-1 at %s' "$1"; }
+roundsbasis_of()    { printf '%s' "$1" | jq -r '.rounds_basis // "?"' 2>/dev/null || echo "?"; }
+roundsstale_of()    { printf '%s' "$1" | jq -r '.rounds_stale_hash_count // "?"' 2>/dev/null || echo "?"; }
+
+# 7.1 THE BASELINE REPRODUCTION: a cycle is open, one round landed against h1,
+# and NOTHING else happened — no implementer record at all — before the
+# reference moves to h2. The round must SURVIVE (rounds=1), not reset to 0.
+C71=$(mk_comments \
+    "$(gate_entered_at 2026-08-06T00:00:00Z)" \
+    "$(art_hashed_ts 1 h1 2026-08-06T00:01:00Z)")
+run_gate_ref "$C71" --change-set-hash h2
+assert_eq "7.1 reconcile-only movement: rounds SURVIVES (1, not reset to 0)" "1" "$(rounds_of "$GATE_OUT")"
+assert_eq "7.1 ...rounds_basis=cycle (the exception was available and used)" "cycle" "$(roundsbasis_of "$GATE_OUT")"
+assert_eq "7.1 ...rounds_stale_hash_count=1 (the surviving round is against a stale hash)" \
+    "1" "$(roundsstale_of "$GATE_OUT")"
+
+# 7.2 CONTROL: the identical comments, referenced against h1 (the round's OWN
+# hash) rather than h2. Counted via plain equality this time — no round is
+# "stale" against its own hash.
+run_gate_ref "$C71" --change-set-hash h1
+assert_eq "7.2 control: exact-hash reference still counts 1 via equality" "1" "$(rounds_of "$GATE_OUT")"
+assert_eq "7.2 ...rounds_stale_hash_count=0 (nothing needed the exception)" "0" "$(roundsstale_of "$GATE_OUT")"
+
+# 7.3 NO CYCLE ESTABLISHED (no QA-GATE: entered record at all — e.g. a
+# --comments-json seam with no enter, as every OTHER section in this file
+# uses): falls back to hash-equality ONLY, unchanged from pre-0in1 behaviour.
+# This is what keeps section 6 above green without any changes.
+C73=$(mk_comments "$(art_hashed_ts 1 h1 2026-08-06T00:01:00Z)")
+run_gate_ref "$C73" --change-set-hash h2
+assert_eq "7.3 no established cycle: rounds resets to 0 (today's behaviour, unchanged)" \
+    "0" "$(rounds_of "$GATE_OUT")"
+assert_eq "7.3 ...rounds_basis=hash_equality (the exception was never available)" \
+    "hash_equality" "$(roundsbasis_of "$GATE_OUT")"
+
+# 7.4 A ROUND FROM A PRIOR CYCLE must not carry forward into a fresh one: the
+# round's own timestamp PRECEDES the (current) QA-GATE: entered record, so
+# even though a cycle IS open now, this round is not IN it.
+C74=$(mk_comments \
+    "$(art_hashed_ts 1 h1 2026-08-06T00:00:00Z)" \
+    "$(gate_entered_at 2026-08-06T02:00:00Z)")
+run_gate_ref "$C74" --change-set-hash h2
+assert_eq "7.4 a round predating the current cycle does NOT survive" "0" "$(rounds_of "$GATE_OUT")"
+assert_eq "7.4 ...rounds_basis is still cycle (the cycle IS established; this round just isn't in it)" \
+    "cycle" "$(roundsbasis_of "$GATE_OUT")"
+
+# 7.5 2ty PRESERVED AT THE UNIT LEVEL: an IMPLEMENTER record NEWER than the
+# round means genuine new work may have landed since — the round does NOT
+# survive.
+C75=$(mk_comments \
+    "$(gate_entered_at 2026-08-06T00:00:00Z)" \
+    "$(art_hashed_ts 1 h1 2026-08-06T00:01:00Z)" \
+    "$(implementer_at 2026-08-06T00:02:00Z)")
+run_gate_ref "$C75" --change-set-hash h2
+assert_eq "7.5 an IMPLEMENTER record newer than the round EXCLUDES it (2ty preserved)" \
+    "0" "$(rounds_of "$GATE_OUT")"
+
+# 7.6 ...but an IMPLEMENTER record OLDER than the round (the specialist who
+# made the ORIGINAL edit, before anyone reviewed it) does not exclude it.
+C76=$(mk_comments \
+    "$(gate_entered_at 2026-08-06T00:00:00Z)" \
+    "$(implementer_at 2026-08-06T00:00:30Z)" \
+    "$(art_hashed_ts 1 h1 2026-08-06T00:01:00Z)")
+run_gate_ref "$C76" --change-set-hash h2
+assert_eq "7.6 an IMPLEMENTER record OLDER than the round does not exclude it" \
+    "1" "$(rounds_of "$GATE_OUT")"
+
+# 7.7 An IMPLEMENTER record that matches the grammar prefix but carries no
+# extractable timestamp reads as UNPARSEABLE, never as "newer than the round"
+# — this counter must never fail TOWARD suppression on ambiguity, the same
+# governing rule the anchor-width note above states for the firstline match.
+C77=$(mk_comments \
+    "$(gate_entered_at 2026-08-06T00:00:00Z)" \
+    "IMPLEMENTER: role=backend implemented the feature, no timestamp token here" \
+    "$(art_hashed_ts 1 h1 2026-08-06T00:01:00Z)")
+run_gate_ref "$C77" --change-set-hash h2
+assert_eq "7.7 an unparseable IMPLEMENTER record is treated as no-evidence, not as newer (round survives)" \
+    "1" "$(rounds_of "$GATE_OUT")"
+
+# 7.8 An UNPARSEABLE cycle marker (matches the QA-GATE: entered prefix but
+# carries no extractable ISO timestamp) never manufactures the exception
+# either: the positive claim needs evidence, and there is none here.
+C78=$(mk_comments \
+    "QA-GATE: entered at some-day-soon-ish, no real timestamp" \
+    "$(art_hashed_ts 1 h1 2026-08-06T00:01:00Z)")
+run_gate_ref "$C78" --change-set-hash h2
+assert_eq "7.8 an unparseable cycle marker falls back to hash_equality (no exception)" \
+    "0" "$(rounds_of "$GATE_OUT")"
+assert_eq "7.8 ...rounds_basis=hash_equality" "hash_equality" "$(roundsbasis_of "$GATE_OUT")"
+
+# 7.9 An artifact with NO reviewed_hash token cannot survive via the cycle
+# exception either — mirrors 6.7's convention (unattributable is not a match
+# for everything) rather than the anchor-width convention: the exception is a
+# POSITIVE claim and an unattributed record cannot support one.
+C79=$(mk_comments \
+    "$(gate_entered_at 2026-08-06T00:00:00Z)" \
+    "REVIEW-ARTIFACT v1 iteration=1 reviewer=qa-claude model=m risk_threshold=high verdict=approve stopped_by=verdict findings=[] at 2026-08-06T00:01:00Z: no hash token")
+run_gate_ref "$C79" --change-set-hash h2
+assert_eq "7.9 no reviewed_hash token: still 0 even with a cycle established" "0" "$(rounds_of "$GATE_OUT")"
+
+# ---------------------------------------------------------------------------
+# 7.10 META (load-bearing): neutralise the cycle-survival rule in a checker
+# copy — CYCLE_ESTABLISHED can never reach "1" — and re-run 7.1's EXACT input.
+# It must report rounds=0, reproducing the 0in1 defect and proving 7.1 is
+# sensitive to the added rule rather than passing for an unrelated reason.
+NOCYCLE_GATE="$WORK/review-check-hash-only.sh"
+sed 's/CYCLE_ESTABLISHED="1"/CYCLE_ESTABLISHED="0"/' "$RCHECK" > "$NOCYCLE_GATE"
+chmod +x "$NOCYCLE_GATE"
+NC_ORIG=$(grep -c 'CYCLE_ESTABLISHED="0"' "$RCHECK" || true)
+NC_ORIG=$(printf '%s' "$NC_ORIG" | tr -d '[:space:]')
+NC_MUT=$(grep -c 'CYCLE_ESTABLISHED="0"' "$NOCYCLE_GATE" || true)
+NC_MUT=$(printf '%s' "$NC_MUT" | tr -d '[:space:]')
+assert_eq "7.10 META: the substitution landed exactly once (mutant differs from source)" "1" "$((NC_MUT - NC_ORIG))"
+assert_eq "7.10 META: mutated checker parses" "0" \
+    "$(bash -n "$NOCYCLE_GATE" 2>/dev/null && echo 0 || echo 1)"
+printf '%s' "$C71" > "$WORK/comments.json"
+META_NC_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$NOCYCLE_GATE" gate t-1 \
+    --comments-json "$WORK/comments.json" --change-set-hash h2 2>/dev/null)
+assert_eq "7.10 META: WITHOUT the cycle-survival rule, 7.1's SAME input reports rounds=0 (the 0in1 defect)" \
+    "0" "$(rounds_of "$META_NC_OUT")"
+assert_eq "7.10 META: ...and rounds_basis reads hash_equality, not cycle" \
+    "hash_equality" "$(roundsbasis_of "$META_NC_OUT")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 8: cap_terminated — a review that stopped at a CAP is incomplete by construction (nq5f) ==="
+# claude-workflow-plugin-nq5f: a review terminating at cap:max_review_iterations
+# (or cap:max_findings / cap:timeout) ran out of TURNS or BUDGET, not out of
+# things to find — its verdict is a FLOOR, not a ceiling, and a reader must be
+# able to see that MECHANICALLY rather than by re-deriving the stopped_by enum
+# split by hand every time (qa-claude did exactly that by hand during D1 and
+# immediately found a sibling defect one screen away).
+
+# art_line_stopped <reviewer> <threshold> <findings-token> <stopped_by> — like
+# art_line, but stopped_by is a parameter instead of the hardcoded "verdict".
+art_line_stopped() {
+    printf 'REVIEW-ARTIFACT v1 iteration=1 reviewer=%s model=m reviewed_hash=h risk_threshold=%s verdict=findings stopped_by=%s findings=[%s] at 2026-07-25T00:00:00Z: summary' \
+        "$1" "$2" "$4" "$3"
+}
+# NOTE: NOT `.artifact.cap_terminated // "?"` — jq's `//` falls through on a
+# LITERAL `false`, not only on absence, which would silently misreport every
+# non-cap-terminated case here as "?" (measured: it did, on the first run of
+# this section). `has()` is the correct idiom, matching rounds_of above.
+capterm_of() { printf '%s' "$1" | jq -r '.artifact | if has("cap_terminated") then (.cap_terminated|tostring) else "?" end' 2>/dev/null || echo "?"; }
+
+# 8.1 the two NON-cap conclusions: complete, cap_terminated=false.
+run_gate "$(mk_comments "$(art_line_stopped sol-codex high '' verdict)")"
+assert_eq "8.1 stopped_by=verdict: cap_terminated=false" "false" "$(capterm_of "$GATE_OUT")"
+run_gate "$(mk_comments "$(art_line_stopped sol-codex high '' stop_condition)")"
+assert_eq "8.1 stopped_by=stop_condition: cap_terminated=false" "false" "$(capterm_of "$GATE_OUT")"
+
+# 8.2 all three CAP conclusions: incomplete, cap_terminated=true.
+run_gate "$(mk_comments "$(art_line_stopped sol-codex high '' cap:max_findings)")"
+assert_eq "8.2 stopped_by=cap:max_findings: cap_terminated=true" "true" "$(capterm_of "$GATE_OUT")"
+run_gate "$(mk_comments "$(art_line_stopped sol-codex high '' cap:max_review_iterations)")"
+assert_eq "8.2 stopped_by=cap:max_review_iterations: cap_terminated=true" "true" "$(capterm_of "$GATE_OUT")"
+run_gate "$(mk_comments "$(art_line_stopped sol-codex high '' cap:timeout)")"
+assert_eq "8.2 stopped_by=cap:timeout: cap_terminated=true" "true" "$(capterm_of "$GATE_OUT")"
+
+# 8.3 cap_terminated is reported even when the cap-terminated review is
+# otherwise CLEAN (verdict=findings but findings=[] here is a stand-in for
+# "nothing found before the budget ran out" — exactly the shape that must not
+# be read as "reviewed and clean"). The gate's OPEN-FINDINGS verdict (exit 0
+# here, since there is nothing to resolve) is UNCHANGED by this fix — nq5f
+# exposes the signal for a caller to consult, it does not itself add a new
+# hard refusal to the open-findings gate.
+CAPCLEAN_COMMENTS=$(mk_comments "$(art_line_stopped sol-codex high '' cap:max_review_iterations)")
+run_gate "$CAPCLEAN_COMMENTS"
+assert_eq "8.3 a cap-terminated, zero-findings review still passes the OPEN-FINDINGS gate (exit 0; unchanged scope)" \
+    "0" "$GATE_EXIT"
+assert_eq "8.3 ...but cap_terminated=true is still reported, so a caller can refuse to treat it as sufficient" \
+    "true" "$(capterm_of "$GATE_OUT")"
+
+# ---------------------------------------------------------------------------
+# 8.4 META (load-bearing): break the cap:* classification in a checker copy —
+# treat NOTHING as cap-terminated — and the SAME cap:max_review_iterations
+# input must then report cap_terminated=false, proving 8.2 is sensitive to the
+# classification rather than passing for an unrelated reason.
+NOCAPCLASS_GATE="$WORK/review-check-nocapclass.sh"
+sed 's/cap:\*) ART_CAP_TERMINATED="true" ;;/no-such-prefix-*) ART_CAP_TERMINATED="true" ;;/' \
+    "$RCHECK" > "$NOCAPCLASS_GATE"
+chmod +x "$NOCAPCLASS_GATE"
+if cmp -s "$RCHECK" "$NOCAPCLASS_GATE"; then
+    assert_eq "8.4 META: the substitution applied (mutant differs from source)" "differs" "identical"
+else
+    assert_eq "8.4 META: the substitution applied (mutant differs from source)" "differs" "differs"
+    assert_eq "8.4 META: mutated checker parses" "0" \
+        "$(bash -n "$NOCAPCLASS_GATE" 2>/dev/null && echo 0 || echo 1)"
+    printf '%s' "$(mk_comments "$(art_line_stopped sol-codex high '' cap:max_review_iterations)")" > "$WORK/comments.json"
+    META_NCC_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$NOCAPCLASS_GATE" gate t-1 \
+        --comments-json "$WORK/comments.json" 2>/dev/null)
+    assert_eq "8.4 META: WITHOUT the classification a cap-terminated review reports cap_terminated=false (the nq5f gap)" \
+        "false" "$(capterm_of "$META_NCC_OUT")"
+    # Discriminator: the mutant still reports the real stopped_by value, so the
+    # cap_terminated difference is the classification and nothing else.
+    assert_eq "8.4 META: the mutant still reports the real stopped_by (ran the real predicate)" \
+        "cap:max_review_iterations" "$(printf '%s' "$META_NCC_OUT" | jq -r '.artifact.stopped_by // "?"')"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"
     for t in "${FAILED_TESTS[@]}"; do printf '  - %s\n' "$t"; done

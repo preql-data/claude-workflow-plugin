@@ -5,7 +5,7 @@
 # review-record / resolve-finding / arbitrate are the ONLY writers of their
 # load-bearing V3 comment grammars. This spec posts real Beads comments and
 # greps them back to prove BYTE-EXACT grammar, plus the rejection paths:
-#   R1  review-record posts:  REVIEW-ARTIFACT v1 iteration=.. reviewer=.. model=..
+#   R1  review-record posts:  REVIEW-ARTIFACT v1 iteration=.. reviewer=.. model=.. pin=..
 #       reviewed_hash=.. risk_threshold=.. verdict=.. stopped_by=.. findings=[..] at <ts>: ..
 #   R2  resolve-finding posts: RESOLVED <id> at <ts>: fix=<ref> test=<ref> — <summary>
 #   R3  arbitrate posts:       ARBITRATION <id> decision=<d> at <ts>: <rationale>
@@ -38,18 +38,20 @@ bd comments add "$TID" "IMPLEMENTER: role=backend implemented the feature" >/dev
 # ---------------------------------------------------------------------------
 # R1: review-record posts the REVIEW-ARTIFACT v1 grammar byte-exactly.
 cat > "$FIXTURE/art.json" <<EOF
-{"contract_version":"1","task_id":"$TID","reviewer_identity":"sol-codex","reviewer_model":"gpt-5.6-sol","reviewed_hash":"deadbeef","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a.ts:10","evidence":"e","description":"d"},{"id":"R1-F2","severity":"low","location":"b.ts:2","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$TID","reviewer_identity":"sol-codex","reviewer_model":"gpt-5.6-sol","reviewer_pin":"gpt-5.6-sol","reviewed_hash":"deadbeef","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a.ts:10","evidence":"e","description":"d"},{"id":"R1-F2","severity":"low","location":"b.ts:2","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}
 EOF
 REC_OUT=$(bash "$QAGATE" review-record "$TID" --file "$FIXTURE/art.json" 2>/dev/null)
 assert_json_field "R1 review-record: ok=true" "$REC_OUT" ".ok|tostring" "true"
 REC_COMMENT=$(latest_comment_matching '^REVIEW-ARTIFACT v1 ')
+# 46w9: pin= sits right after model=, before reviewed_hash= — see qa-gate.sh's
+# cmd_review_record comment for why the position is safe for every reader.
 assert_match "R1 review-record: grammar byte-exact" \
-    "^REVIEW-ARTIFACT v1 iteration=1 reviewer=sol-codex model=gpt-5\.6-sol reviewed_hash=deadbeef risk_threshold=high verdict=findings stopped_by=verdict findings=\[R1-F1:critical,R1-F2:low\] at ${ISO}: " \
+    "^REVIEW-ARTIFACT v1 iteration=1 reviewer=sol-codex model=gpt-5\.6-sol pin=gpt-5\.6-sol reviewed_hash=deadbeef risk_threshold=high verdict=findings stopped_by=verdict findings=\[R1-F1:critical,R1-F2:low\] at ${ISO}: " \
     "$REC_COMMENT"
 
 # empty findings render as findings=[].
 cat > "$FIXTURE/art_approve.json" <<EOF
-{"contract_version":"1","task_id":"$TID","reviewer_identity":"qa-claude","reviewer_model":"claude","reviewed_hash":"cafe","risk_threshold":"high","stop_condition":"x","verdict":"approve","findings":[],"iterations":2,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$TID","reviewer_identity":"qa-claude","reviewer_model":"claude","reviewer_pin":"claude","reviewed_hash":"cafe","risk_threshold":"high","stop_condition":"x","verdict":"approve","findings":[],"iterations":2,"stopped_by":"verdict"}
 EOF
 bash "$QAGATE" review-record "$TID" --file "$FIXTURE/art_approve.json" >/dev/null 2>&1
 APPROVE_COMMENT=$(latest_comment_matching '^REVIEW-ARTIFACT v1 iteration=2 ')

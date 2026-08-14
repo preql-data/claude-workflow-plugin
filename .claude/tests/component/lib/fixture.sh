@@ -414,7 +414,7 @@ seed_review_records() {
     local art="$root/.claude/.qa-tracking/review-artifact-$sanitized-r1.json"
     mkdir -p "$root/.claude/.qa-tracking" 2>/dev/null || true
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"seeded-fixture","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"seeded fixture: every acceptance criterion traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"seeded fixture: every acceptance criterion traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
 JSON
 
     if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
@@ -462,7 +462,7 @@ seed_completion_record() {
     pay="$root/.claude/.qa-tracking/completion-draft-$sanitized.json"
     mkdir -p "$root/.claude/.qa-tracking" 2>/dev/null || true
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"$role","files_changed":$files_json,"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the component fixture harness","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+{"task_id":"$tid","role":"$role","model":"seeded","pin":"seeded","files_changed":$files_json,"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the component fixture harness","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
 JSON
     if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
             completion-record "$tid" --file "$pay" >/dev/null 2>&1; then

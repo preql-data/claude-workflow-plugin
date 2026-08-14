@@ -57,7 +57,7 @@ TID=$(bd create "degradation proof" -t task --json 2>/dev/null | jq -r '.id // e
 # --comments-json seam keeps the gate deterministic regardless of how many
 # times review-record has appended to the live task.
 cat > "$FIXTURE/art.json" <<EOF
-{"contract_version":"1","task_id":"$TID","reviewer_identity":"qa-claude","reviewer_model":"claude","reviewed_hash":"h","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$TID","reviewer_identity":"qa-claude","reviewer_model":"claude","reviewer_pin":"claude","reviewed_hash":"h","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}
 EOF
 cat > "$FIXTURE/comments.json" <<'EOF'
 ["IMPLEMENTER: role=backend built it",

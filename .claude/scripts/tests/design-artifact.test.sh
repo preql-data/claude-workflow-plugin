@@ -555,11 +555,11 @@ seed_approvable() {
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     [ -z "$hash" ] && hash="unverified"
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
-    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$hash" > "$art"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
     pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
-    printf '{"task_id":"%s","role":"devops","files_changed":[],"tests_added":[],"decisions":["seeded"],"blockers":[],"llm_observations":"seeded by the design-artifact fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}\n' \
+    printf '{"task_id":"%s","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded"],"blockers":[],"llm_observations":"seeded by the design-artifact fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}\n' \
         "$tid" > "$pay"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }

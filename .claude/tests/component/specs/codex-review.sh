@@ -63,9 +63,9 @@ EOF
 
 # Artifact texts the stub will return (task_id/iterations deliberately WRONG so
 # we can prove codex-review FORCES the authoritative values).
-APPROVE_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewed_hash":"h123","risk_threshold":"low","stop_condition":"x","verdict":"approve","findings":[],"iterations":99,"stopped_by":"verdict"}'
-FINDINGS_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewed_hash":"h123","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a.ts:10","evidence":"unsanitized input","description":"sqli"}],"iterations":1,"stopped_by":"verdict"}'
-CAPHIT_TEXT=$(jq -nc '{contract_version:"1",task_id:"WRONG",reviewer_identity:"x",reviewer_model:"x",reviewed_hash:"h123",risk_threshold:"high",stop_condition:"x",verdict:"findings",findings:[range(0;13)|{id:("R1-F"+(.+1|tostring)),severity:"high",location:"a:1",evidence:"e",description:"d"}],iterations:1,stopped_by:"verdict"}')
+APPROVE_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewer_pin":"x","reviewed_hash":"h123","risk_threshold":"low","stop_condition":"x","verdict":"approve","findings":[],"iterations":99,"stopped_by":"verdict"}'
+FINDINGS_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewer_pin":"x","reviewed_hash":"h123","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a.ts:10","evidence":"unsanitized input","description":"sqli"}],"iterations":1,"stopped_by":"verdict"}'
+CAPHIT_TEXT=$(jq -nc '{contract_version:"1",task_id:"WRONG",reviewer_identity:"x",reviewer_model:"x",reviewer_pin:"x",reviewed_hash:"h123",risk_threshold:"high",stop_condition:"x",verdict:"findings",findings:[range(0;13)|{id:("R1-F"+(.+1|tostring)),severity:"high",location:"a:1",evidence:"e",description:"d"}],iterations:1,stopped_by:"verdict"}')
 
 # run_review — invoke the driver with the stub. Args after the fixed ones are
 # passed through. Sets RR_OUT (stdout, the artifact path) + RR_EXIT.
@@ -83,7 +83,8 @@ run_review() {
 # ---------------------------------------------------------------------------
 # C1: approve verdict -> valid artifact with forced fields.
 rm -f "$TRACK"/review-artifact-cr-1-r1.json
-run_review "$APPROVE_TEXT" "$APPROVE_TEXT" 0 ""
+C1LOG="$FIXTURE/c1-stub.log"
+run_review "$APPROVE_TEXT" "$APPROVE_TEXT" 0 "$C1LOG"
 assert_eq "C1 approve: exit 0" "0" "$RR_EXIT"
 assert_eq "C1 approve: artifact path echoed + exists" "1" \
     "$([ -n "$RR_OUT" ] && [ -f "$RR_OUT" ] && echo 1 || echo 0)"
@@ -92,11 +93,58 @@ assert_json_field "C1 approve: task_id FORCED to cr-1" "$(cat "$RR_OUT")" ".task
 assert_json_field "C1 approve: iterations FORCED to 1" "$(cat "$RR_OUT")" ".iterations|tostring" "1"
 assert_json_field "C1 approve: reviewer_identity FORCED to sol-codex" "$(cat "$RR_OUT")" ".reviewer_identity" "sol-codex"
 assert_json_field "C1 approve: reviewer_model from -m arg" "$(cat "$RR_OUT")" ".reviewer_model" "stub-sol"
+# 46w9: reviewer_pin is FORCED to the same value as reviewer_model (see
+# codex-review.sh's FINAL transformation comment for why the Sol lane has no
+# separate frontmatter-vs-self-report split to preserve).
+assert_json_field "C1 approve: reviewer_pin FORCED to the same value" "$(cat "$RR_OUT")" ".reviewer_pin" "stub-sol"
 assert_json_field "C1 approve: risk_threshold FORCED from request" "$(cat "$RR_OUT")" ".risk_threshold" "high"
 
 # The written artifact validates through the ONE validator.
 VOUT=$(bash "$RCHECK" validate-artifact "$RR_OUT" 2>/dev/null)
 assert_json_field "C1 approve: artifact passes validate-artifact" "$VOUT" ".ok|tostring" "true"
+
+# 46w9: the ENVELOPE (the actual prompt sent to Sol) must ask for
+# reviewer_pin — the stub bypasses real generation entirely (it just returns
+# STUB_CODEX_FIRST_TEXT verbatim), so nothing else in this spec exercises
+# whether a REAL Sol turn would ever be told to produce the field its own
+# candidate must carry to pass validate-artifact. Without this, C1-C9 could
+# all stay green while a real Sol call degrades every turn (validate_candidate
+# rejecting a candidate that never had the field asked for) — the exact
+# failure mode the FRAME-GUARD/PACKET-BUDGET legs elsewhere in this spec exist
+# to catch for OTHER silent-degradation shapes.
+DELIVERED_PROMPT=$(jq -r 'select(.method=="tools/call" and .params.name=="codex") | .params.arguments.prompt' "$C1LOG" 2>/dev/null)
+assert_contains "C1 approve: the envelope Sol actually receives asks for reviewer_pin" \
+    "reviewer_pin" "$DELIVERED_PROMPT"
+
+# META (46w9): remove reviewer_pin from the envelope template in a copy — the
+# SAME real driver, run against the SAME stub — and confirm the delivered
+# prompt no longer asks for it, proving the assertion above is sensitive to
+# the envelope's actual content rather than passing for an unrelated reason
+# (e.g. reading a stale log, or a stub that always echoes something matching).
+NOENVPIN="$FIXTURE/codex-review-noenvpin.sh"
+sed 's/"reviewer_pin":"\$CODEX_MODEL",//' "$(plugin_root)/.claude/scripts/codex-review.sh" > "$NOENVPIN"
+chmod +x "$NOENVPIN"
+if assert_mutant_applied "C1 envelope-pin META" "$(plugin_root)/.claude/scripts/codex-review.sh" "$NOENVPIN"; then
+    assert_eq "META: the mutated driver still parses" "0" \
+        "$(bash -n "$NOENVPIN" 2>/dev/null && echo 0 || echo 1)"
+    rm -f "$TRACK"/review-artifact-cr-1-r1.json
+    NOENVPINLOG="$FIXTURE/c1-noenvpin-stub.log"
+    RR_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB -m stub-sol" \
+        STUB_CODEX_FIRST_TEXT="$APPROVE_TEXT" STUB_CODEX_REPLY_TEXT="$APPROVE_TEXT" \
+        STUB_CODEX_SLEEP_MS=0 STUB_LOG="$NOENVPINLOG" \
+        bash "$NOENVPIN" cr-1 --request "$FIXTURE/req.json" --iteration 1 2>/dev/null)
+    RR_EXIT=$?
+    MUT_PROMPT=$(jq -r 'select(.method=="tools/call" and .params.name=="codex") | .params.arguments.prompt' "$NOENVPINLOG" 2>/dev/null)
+    assert_not_contains "META: WITHOUT the envelope text, Sol is never asked for reviewer_pin (the assertion above WOULD fail)" \
+        "reviewer_pin" "$MUT_PROMPT"
+    # Discriminator: the mutant still ran the real turn and produced an
+    # artifact (the FINAL-transformation safety net still forces the field),
+    # so the missing-from-envelope state is real and not a broken run.
+    assert_eq "META: the mutant still writes a valid artifact (the safety-net force still runs)" \
+        "0" "$RR_EXIT"
+    assert_json_field "META: ...with reviewer_pin still present, forced rather than asked for" \
+        "$(cat "$RR_OUT")" ".reviewer_pin" "stub-sol"
+fi
 
 # review-record posts the record comment (bd-backed; guarded).
 if command -v bd >/dev/null 2>&1; then
@@ -272,7 +320,16 @@ else
     assert_eq "C6 calibration: the OLD --arg argv form genuinely fails on this payload" "1" \
         "$([ -z "$ARGV_PROBE" ] && echo 1 || echo 0)"
 
+    # max_request_bytes (claude-workflow-plugin-nq5f) is an ORTHOGONAL,
+    # TIME-BUDGET policy check that now runs before the marshalling this leg
+    # exists to prove — it is not the argv ceiling fkm.1.12 removed (that
+    # warning, a few screens up, is about not reinstating an ARGV-SIZE
+    # ceiling; this is a wall-clock-completion budget, checked and refused
+    # before any transport is attempted at all). Raise it comfortably above
+    # BIGREQ's own size so C6 isolates the TRANSPORT mechanism exactly as it
+    # already isolates timeout_seconds via write_config 30.
     write_config 30
+    printf 'max_request_bytes=%s\n' "$(( OVERSIZE + 65536 ))" >> "$FIXTURE/.claude/review-config"
     rm -f "$GUARD_ART"
     C6LOG="$FIXTURE/c6-stub.log"
     run_driver "$CR" "$BIGREQ" "$C6LOG" "$APPROVE_TEXT"
@@ -355,11 +412,72 @@ assert_eq "META: without the guard the exit code is UNCHANGED (5) — invisible 
 assert_not_contains "META: without the guard the marshalling failure is NEVER named" \
     "could not marshal the codex tool call" "$RD_ERR"
 assert_contains "META: without the guard it misreports a wall-clock timeout instead" \
-    "exceeded 3s wall-clock budget" "$RD_ERR"
+    "3s wall-clock budget" "$RD_ERR"
+# nq5f's wait_fail_reason disambiguates rc=1 (deadline, server alive) from
+# rc=2 (server exited) — this leg's server IS alive (send_frame wrote a real
+# frame that reached it; only the ORIGINAL marshalling never happened, so
+# nothing was ever waiting to reply), so the misreport must claim STILL ALIVE
+# rather than either the correct marshalling failure or the OTHER wrong guess.
+assert_contains "META: ...and specifically claims the server was STILL ALIVE (the rc=1 branch, not rc=2)" \
+    "STILL ALIVE" "$RD_ERR"
 assert_eq "META: without the guard it burned the WHOLE 3s budget (${RD_SECS}s) on a request never sent" "1" \
     "$([ "$RD_SECS" -ge 3 ] && echo 1 || echo 0)"
 assert_not_contains "META: and still no frame reached the server" \
     '"method":"tools/call"' "$(cat "$METALOG" 2>/dev/null)"
+write_config
+
+# ---------------------------------------------------------------------------
+# C9 (claude-workflow-plugin-nq5f): a request exceeding max_request_bytes is
+# refused BEFORE any Sol call is attempted — exit 7, no artifact, no frame
+# reaches the server, and it returns essentially instantly (no wall-clock
+# spend at all, unlike the C4 timeout path, which has to wait out the budget).
+#
+# The cap is shrunk BELOW the existing baseline request's own size, so the
+# leg needs no purpose-built oversized fixture — write_config's template
+# carries no max_request_bytes key (unrecognised keys / a missing key both
+# fail-open to the built-in 100000 default), so it is appended directly.
+write_config 30
+REQ_BYTES=$(wc -c < "$FIXTURE/req.json" 2>/dev/null | tr -d '[:space:]')
+CAP_BELOW=$(( REQ_BYTES - 1 ))
+printf 'max_request_bytes=%s\n' "$CAP_BELOW" >> "$FIXTURE/.claude/review-config"
+
+rm -f "$GUARD_ART"
+C9LOG="$FIXTURE/c9-stub.log"
+run_driver "$CR" "$FIXTURE/req.json" "$C9LOG" "$APPROVE_TEXT"
+assert_eq "C9 oversize: exit 7 — refused before any Sol call" "7" "$RD_EXIT"
+assert_contains "C9 oversize: names the byte counts against the cap" \
+    "exceeding max_request_bytes=$CAP_BELOW" "$RD_ERR"
+assert_eq "C9 oversize: NO artifact written" "1" \
+    "$([ ! -f "$GUARD_ART" ] && echo 1 || echo 0)"
+assert_not_contains "C9 oversize: no frame reached the server (refused before spawn)" \
+    '"method":"tools/call"' "$(cat "$C9LOG" 2>/dev/null)"
+assert_eq "C9 oversize: refused near-instantly (no wall-clock spend), ${RD_SECS}s against a 30s budget" "1" \
+    "$([ "$RD_SECS" -lt 5 ] && echo 1 || echo 0)"
+
+# META C9: strip the PACKET-BUDGET region from a copy — the IDENTICAL
+# oversized-per-cap request (same file, same shrunk cap still in the fixture
+# config) must then proceed all the way to a REAL stubbed Sol call instead of
+# being refused, proving C9 is sensitive to the guard rather than passing for
+# an unrelated reason (e.g. a stale artifact, a config the driver never read).
+MUT_NOCAP="$FIXTURE/codex-review-nocap.sh"
+awk '/^# PACKET-BUDGET BEGIN \(/{skip=1} !skip{print} /^# PACKET-BUDGET END \(/{skip=0}' \
+    "$(plugin_root)/.claude/scripts/codex-review.sh" > "$MUT_NOCAP"
+assert_eq "META C9: the PACKET-BUDGET block is gone from the mutant" "0" \
+    "$(grep -c 'PACKET-BUDGET' "$MUT_NOCAP" 2>/dev/null | tr -d '[:space:]')"
+assert_eq "META C9: excising the guard actually removed lines" "1" \
+    "$([ "$(wc -l < "$(plugin_root)/.claude/scripts/codex-review.sh")" -gt "$(wc -l < "$MUT_NOCAP")" ] && echo 1 || echo 0)"
+assert_eq "META C9: the mutant still parses as bash" "1" \
+    "$(bash -n "$MUT_NOCAP" 2>/dev/null && echo 1 || echo 0)"
+
+rm -f "$GUARD_ART"
+METAC9LOG="$FIXTURE/meta-c9-stub.log"
+run_driver "$MUT_NOCAP" "$FIXTURE/req.json" "$METAC9LOG" "$APPROVE_TEXT"
+assert_eq "META C9: WITHOUT the guard the SAME oversized-per-cap request now exits 0 (reaches Sol)" \
+    "0" "$RD_EXIT"
+assert_contains "META C9: ...and a real (stubbed) tools/call frame reached the server" \
+    '"method":"tools/call"' "$(cat "$METAC9LOG" 2>/dev/null)"
+assert_eq "META C9: ...and an artifact WAS written this time (the refusal is gone)" "1" \
+    "$([ -f "$GUARD_ART" ] && echo 1 || echo 0)"
 write_config
 
 # ---------------------------------------------------------------------------

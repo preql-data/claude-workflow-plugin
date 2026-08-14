@@ -977,28 +977,40 @@ The specialist records the contract as its LAST action:
 bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" --file <payload.json>
 ```
 
-The payload is the seven fields above plus one transport key,
-`"role"`, which supplies the record's `role=` token — the record has to
-name who completed the task. It is NOT an eighth F7 field; the seven
-are unchanged.
+The payload is the seven fields above plus three transport keys —
+`"role"`, `"model"`, `"pin"` (claude-workflow-plugin-46w9) — none of
+them an eighth F7 field; the seven are unchanged. `role` supplies the
+record's `role=` token, naming who completed the task; what `model`
+and `pin` each mean, and why both are required, is in the next bullet.
 
 Three mechanisms, each in one place:
 
 - **`review-check.sh validate-completion`** is the ONE validator. It
-  rejects a payload missing any of the seven (or `role`), a control
-  character in `task_id` or `role`, a wrongly-typed field, a
-  non-string entry in `files_changed`, or an `llm_observations` /
-  `context_coverage` that is empty after trimming. That last one makes
-  this document's two "a completion payload without it is malformed"
-  sentences mechanical rather than aspirational.
+  rejects a payload missing any of the seven (or `role`, `model`,
+  `pin` — claude-workflow-plugin-46w9), a control character in
+  `task_id` or `role`, a wrongly-typed field, a non-string entry in
+  `files_changed`, an `llm_observations` / `context_coverage` that is
+  empty after trimming, or a `model` / `pin` that fails the model-id
+  character class. That last-but-one makes this document's two "a
+  completion payload without it is malformed" sentences mechanical
+  rather than aspirational.
 - **`qa-gate.sh completion-record`** validates through that subprocess
   — it carries no second schema — then persists the payload to
   `.claude/.qa-tracking/completion-<task-id>.json` and appends
-  `COMPLETION v1 task=<tid> role=<r> fields=<csv> payload_sha=<sha256>
-  at <ts>: <n> file(s), <m> test(s)`. Every interpolated scalar must
-  match `^[A-Za-z0-9._+-]+$` and is REJECTED, never sanitised. The four
-  free-form fields are never interpolated: only their presence and the
-  digest reach the record, which is the injection boundary.
+  `COMPLETION v1 task=<tid> role=<r> model=<m> pin=<p> fields=<csv>
+  payload_sha=<sha256> at <ts>: <n> file(s), <m> test(s)`. `task`,
+  `role`, each field name and the digest must match
+  `^[A-Za-z0-9._+-]+$`; `model`/`pin` use the WIDER model-id class
+  `[A-Za-z0-9._:/\[\]-]` (a real id like `claude-opus-5[1m]` would be
+  truncated by the stricter class) — both REJECTED, never sanitised.
+  `pin` is the specialist's own static frontmatter `model:` reading;
+  `model` is a RUNTIME SELF-REPORT, never re-derived from the
+  frontmatter — their divergence across a task's records, compared
+  against the `model=`/`pin=` the SubagentStart hook records at spawn,
+  is the production measurement of whether the runtime honours a
+  frontmatter `model:` pin at all. The four free-form fields are never
+  interpolated: only their presence and the digest reach the record,
+  which is the injection boundary.
 - **`qa-gate.sh approve`** REFUSES (exit 2,
   `error_key=completion_record_missing`) without such a record.
   `--no-completion '<reason>'` is the audited bypass, for the case

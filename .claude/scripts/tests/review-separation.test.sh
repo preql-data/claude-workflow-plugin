@@ -218,7 +218,7 @@ record_completion() {
     local tid="$1" file="$2" pay
     pay="$TRACK/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"backend","files_changed":["$file"],"tests_added":["review-separation.test.sh::seeded"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the review-separation fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+{"task_id":"$tid","role":"backend","model":"seeded","pin":"seeded","files_changed":["$file"],"tests_added":["review-separation.test.sh::seeded"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the review-separation fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
 JSON
     bash "$QG" completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }
@@ -254,7 +254,7 @@ record_artifact() {
     local art
     art="$TRACK/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewed_hash":"$(current_hash)","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":1,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$(current_hash)","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":1,"stopped_by":"verdict"}
 JSON
     bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
 }

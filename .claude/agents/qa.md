@@ -394,7 +394,8 @@ Treat ANY value other than the literal `codex` as `claude` — including a JSON 
   "contract_version": "1",
   "task_id": "<beads-id>",
   "reviewer_identity": "qa-claude",
-  "reviewer_model": "<your own pinned model, from this file's `model:` frontmatter>",
+  "reviewer_model": "<a RUNTIME SELF-REPORT — state the model you understand yourself to be running as right now, from your own awareness, NOT derived by re-reading this file's `model:` frontmatter a second time>",
+  "reviewer_pin": "<this file's OWN `model:` frontmatter line, read directly — the declared/expected value, kept separate from the self-report above>",
   "reviewed_hash": "<the change_set_hash from the request>",
   "risk_threshold": "<the request's risk_threshold>",
   "stop_condition": "<the request's stop_condition>",
@@ -413,9 +414,13 @@ Treat ANY value other than the literal `codex` as `claude` — including a JSON 
 }
 ```
 
-Finding ids follow the grammar `R<review-iteration>-F<n>` (`R1-F1`, `R1-F2`, ...). `verdict` is `approve` only when nothing at or above `risk_threshold` remains; anything else is `findings`. The grammar-bearing scalars (`task_id`, `reviewer_identity`, `reviewer_model`, `reviewed_hash`, `risk_threshold`, `verdict`, `stopped_by`, and each finding's `id`/`severity`) must be single-line — an embedded newline splits the one-line record comment downstream and the validator rejects it (`scalar_contains_control_char`). Free-form prose in `location`/`evidence`/`description` may span lines.
+**`reviewer_model` vs `reviewer_pin` (claude-workflow-plugin-46w9) — do not fill both from the same source.** `reviewer_pin` is a mechanical fact: this file's own `model:` frontmatter line, read verbatim. `reviewer_model` is a claim about what actually ran THIS turn, and the only source for that claim is your own awareness of your identity — restating the frontmatter is not evidence of it, and measured practice shows the two can diverge with no config change in between (this file's pin has been `claude-fable-5` since 2026-07-25; ledger records exist of a qa spawn whose review was actually performed by a different model, e.g. `claude-opus-5[1m]`, recorded honestly rather than papered over with the pin). Filling `reviewer_model` from the frontmatter — the previous instruction here — makes the field state config, not evidence, which is exactly backwards for a field whose entire purpose is to let a later analysis compare the two and see whether they agree. Both fields use the SAME character class: letters, digits, `.`, `-`, `:`, `/`, `[`, `]` — reject anything else rather than guessing at a sanitised value, and if your own model id does not fit that class, say so in `llm_observations` rather than silently truncating it.
+
+Finding ids follow the grammar `R<review-iteration>-F<n>` (`R1-F1`, `R1-F2`, ...). `verdict` is `approve` only when nothing at or above `risk_threshold` remains; anything else is `findings`. The grammar-bearing scalars (`task_id`, `reviewer_identity`, `reviewer_model`, `reviewer_pin`, `reviewed_hash`, `risk_threshold`, `verdict`, `stopped_by`, and each finding's `id`/`severity`) must be single-line — an embedded newline splits the one-line record comment downstream and the validator rejects it (`scalar_contains_control_char`). Free-form prose in `location`/`evidence`/`description` may span lines.
 
 Bounded diligence applies to this lane too, from the same `.claude/review-config`: report at most `max_findings` (most severe first; on truncation set `stopped_by: "cap:max_findings"`), and do not run a review iteration above `max_review_iterations` (stop and say so rather than looping).
+
+**A `cap:*` `stopped_by` means the review is incomplete by construction — never treat it as a completed pass on its own (claude-workflow-plugin-nq5f).** `stopped_by: "cap:max_findings"`, `"cap:max_review_iterations"`, and `"cap:timeout"` all mean the review ran out of TURNS or BUDGET, not out of things to find; its `verdict` is a FLOOR on what is wrong, never a ceiling. `verdict` and `stop_condition` are the only two ways a review concludes on its own terms. `review-check.sh gate`'s envelope names this mechanically now — `.artifact.cap_terminated` is `true` for every `cap:*` value and `false` for the other two — so read it rather than re-deriving the enum split by eye every time; a prior QA pass did exactly that by hand during D1 and immediately found a sibling defect one screen from the capped reviewer's own finding, which is the judgement this field turns into a mechanical check anyone (including a future automated gate) can run. A `cap_terminated: true` artifact — whatever its `verdict` — is not sufficient grounds by itself to `qa-gate.sh approve`: continue investigating yourself (another review module, a second pass, a manual read of the capped area) before treating the change set as clean.
 
 ```bash
 ART="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-artifact-$TID-r$REVIEW_ITERATION.json"
@@ -452,7 +457,7 @@ The sentinel `REVIEW-RELAY: status=needs-review` MUST appear verbatim in `llm_ob
 
 On this spawn you do NOT run `codex-review.sh` yourself (it drives an MCP server and is a PAID external call the orchestrator cost-gates at the root — the same structural reason the grader spawn lives at the root), do NOT call `qa-gate.sh approve`, and do NOT call `qa-gate.sh block`.
 
-**On re-engagement.** The orchestrator has recorded the artifact, so the latest `REVIEW-ARTIFACT v1` comment on `bd show $TASK_ID` carries it; read it the same way section 6c reads the RUBRIC comment. Fold it into the packet as item 8 and proceed. If the orchestrator reports the Codex lane degraded (its driver exited 5 — timeout or server failure), run the `claude` lane THIS round instead: author the artifact yourself per the block above, and record the degradation in `llm_observations` so the audit trail shows which lane actually produced the review.
+**On re-engagement.** The orchestrator has recorded the artifact, so the latest `REVIEW-ARTIFACT v1` comment on `bd show $TASK_ID` carries it; read it the same way section 6c reads the RUBRIC comment. Fold it into the packet as item 8 and proceed. If the orchestrator reports the Codex lane degraded (its driver exited 5 — timeout or server failure, or 7 — the assembled request exceeded `max_request_bytes` and was refused before any Sol call was attempted), run the `claude` lane THIS round instead: author the artifact yourself per the block above, and record the degradation in `llm_observations` so the audit trail shows which lane actually produced the review. If Sol's artifact DID land but carries `stopped_by: "cap:*"` (`review-check.sh gate`'s `.artifact.cap_terminated: true`), it is not a degradation and not a pass either — Sol ran out of budget rather than concluding, so treat it exactly as the cap-terminated guidance above says: fold it into the packet, but do not let it alone justify approval, and note in `llm_observations` which cap fired.
 
 ### 6p.3 What the artifact does and does not do
 
@@ -898,14 +903,16 @@ An earlier draft of this section told you to record FIRST, and that instruction 
 If `approve` refuses with `completion_record_missing`, do NOT satisfy it by recording your own contract first. Read the refusal as the signal it is: either the specialist finished without recording its contract, in which case block and send it back, or there was genuinely no specialist, in which case the audited `--no-completion '<reason>'` bypass is the honest exit and the reason should say which.
 
 ```bash
-# The payload is the JSON object above with ONE key added: "role": "qa".
+# The payload is the JSON object above with THREE keys added: "role": "qa",
+# plus "model" and "pin" (claude-workflow-plugin-46w9).
 # A QUOTED heredoc keeps backticks and apostrophes literal — see the bullets.
 bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" <<'PAYLOAD'
-{ "role": "qa", "task_id": "...", ... }
+{ "role": "qa", "model": "...", "pin": "...", "task_id": "...", ... }
 PAYLOAD
 ```
 
-- `role` is the one key beyond the seven. It is transport metadata for the record's `role=` token — the record has to name who completed the task — not an eighth F7 field. The seven and the QA superset are unchanged; your extra keys are recorded in the `fields=` list and are welcome.
+- `role` is transport metadata for the record's `role=` token — the record has to name who completed the task — not an eighth F7 field. The seven and the QA superset are unchanged; your extra keys are recorded in the `fields=` list and are welcome.
+- `model`/`pin` (46w9) are the SAME two fields section 6-prime's `reviewer_model`/`reviewer_pin` are, applied to the completion record rather than the review artifact: `pin` is this file's own `model:` frontmatter line, read directly; `model` is a RUNTIME SELF-REPORT — state what you understand yourself to be running as, never re-derived from the frontmatter. Required on every completion record regardless of role, same character class as `reviewer_model`/`reviewer_pin` (letters, digits, `.`, `-`, `:`, `/`, `[`, `]`), rejected rather than sanitised if it does not fit.
 - Use a quoted heredoc, or `--file <path>`. Never assemble the JSON in a double-quoted shell string: a backtick in `llm_observations` runs as command substitution, and a single-quoted one ends at the first apostrophe — `LESSONS.md` records six ledger entries that lost their possessives to exactly that.
 - The payload is VALIDATED before it is recorded, by `review-check.sh validate-completion`. A missing key, a control character in `task_id` or `role`, a non-array `files_changed`, or an empty `llm_observations` / `context_coverage` is rejected with a structured error naming the field. An empty mandatory field is now a failure rather than a habit.
 - On a **block**, record the contract too. The refusal only gates `approve`, but the record is the durable statement of what the review covered, and the next cycle's reviewer reads it.
