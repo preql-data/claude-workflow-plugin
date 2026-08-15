@@ -1046,8 +1046,19 @@ wipe_iteration_state() {
 #
 # Two naming conventions are cleaned because two producers exist: qa.md's
 # section 6-prime writes `review-request-<task-id>.json` with the RAW id,
-# while the driver writes `review-artifact-<sanitized>-r<n>.json`. We remove
-# both spellings rather than assume. Idempotent and silent by design.
+# while the driver used to write `review-artifact-<sanitized>-r<n>.json` here
+# too. We remove both spellings rather than assume. Idempotent and silent by
+# design.
+#
+# WHAT THIS DELIBERATELY DOES NOT REACH (v5 D2 / claude-workflow-plugin-rqer):
+# the canonical review-artifact copy now lives OUTSIDE this directory, at
+# $REVIEW_ARTIFACT_SUBDIR (docs/reviews/) — see review_artifact_path_for's
+# header for why. Nothing below globs that directory, and it must not start:
+# that copy is the evidence the artifact_hash= binding above was made
+# against, so it has to outlive the cycle exactly as
+# completion-payload-<tid>.json and impact-report-<tid>.json already do (see
+# the COMPLETION CONTRACT note earlier in this file). The scratch-file wipe
+# below is scoped to $QA_TRACKING_DIR alone, by construction, not by omission.
 wipe_review_artifacts() {
     local tid="$1"
     [ -n "$tid" ] || return 0
@@ -3714,6 +3725,7 @@ cmd_approve() {
     # L1 META strips this region and asserts the copy still approves and still
     # writes a coherent pre-D1 record with no double space.
     local design_field="" design_binding_obs=""
+    local review_file_hash_field="" review_file_binding_obs=""
     # DESIGN-BINDING-TOKEN BEGIN (v5 D1 / claude-workflow-plugin-fkm.3)
     #
     # A FOURTH MACHINE TOKEN, not a bracketed suffix, and the choice is
@@ -3785,7 +3797,50 @@ cmd_approve() {
     fi
     # DESIGN-BINDING-TOKEN END (v5 D1 / claude-workflow-plugin-fkm.3)
 
-    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}at $ts: $summary$comment_suffix"
+    # REVIEW-ARTIFACT-BINDING-TOKEN BEGIN (v5 D2 / claude-workflow-plugin-rqer)
+    #
+    # AC-3's mirror of the DESIGN-BINDING-TOKEN ladder immediately above: a
+    # live re-hash of the review artifact, not a label, so a one-byte
+    # post-record edit moves the artifact away from every record that names
+    # it — same doctrine, same four-arm ladder ("BIND" / "changed since
+    # recorded" / "cannot be hashed now" / "no record"), same "no token,
+    # reason named" floor instead of silence.
+    #
+    # INDEPENDENT of --no-review, deliberately: a fresh call to review-check.sh
+    # gate is made here rather than reusing $review_out from the
+    # REVIEW-SEPARATION block above, because that block's call is SKIPPED
+    # entirely on the --no-review bypass path, and whether the review artifact
+    # file still matches its own record is a fact about the FILE, not about
+    # whether the review-separation POLICY gate was waived for this approval.
+    local recorded_review_hash="" recorded_review_iter="" live_review_hash=""
+    local review_artifact_path="" review_hash_rc=0 art_gate_out=""
+    art_gate_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$tid" 2>/dev/null || true)
+    recorded_review_hash=$(printf '%s' "$art_gate_out" | jq -r '.artifact.artifact_hash // ""' 2>/dev/null || echo "")
+    recorded_review_iter=$(printf '%s' "$art_gate_out" | jq -r '.artifact.iteration // ""' 2>/dev/null || echo "")
+    if [ -z "$recorded_review_hash" ]; then
+        review_file_binding_obs="; no review-artifact binding (no artifact_hash= on the latest REVIEW-ARTIFACT v1 record for $tid — pre-rqer record, or no review recorded yet)"
+    elif ! is_sha256_hex "$recorded_review_hash"; then
+        review_file_binding_obs="; WARNING no review-artifact binding — the latest record's artifact_hash='$recorded_review_hash' is not 64 hex characters, so it names no reproducible bytes"
+    else
+        review_artifact_path=$(review_artifact_path_for "$tid" "$recorded_review_iter")
+        if ! review_path_is_contained "$review_artifact_path"; then
+            review_file_binding_obs="; WARNING no review-artifact binding — $review_artifact_path does not resolve INSIDE $REVIEW_ARTIFACT_SUBDIR/ (a symlink out of the declared directory, or a directory that has moved), so whatever it hashes to now is not the artifact that record governs"
+        else
+            live_review_hash=$(bash "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" \
+                hash-file "$review_artifact_path" 2>/dev/null) || review_hash_rc=$?
+            if [ "$review_hash_rc" -ne 0 ] || ! is_sha256_hex "$live_review_hash"; then
+                review_file_binding_obs="; WARNING no review-artifact binding — $review_artifact_path could not be hashed now (rc=$review_hash_rc), so the recorded artifact_hash=$recorded_review_hash cannot be corroborated against the bytes on disk"
+            elif [ "$live_review_hash" != "$recorded_review_hash" ]; then
+                review_file_binding_obs="; WARNING no review-artifact binding — the review artifact has CHANGED since it was recorded (recorded=$recorded_review_hash, on disk now=$live_review_hash). Re-run review-record so the approval names the bytes it covers"
+            else
+                review_file_hash_field="artifact_hash=$recorded_review_hash "
+                review_file_binding_obs="; review-artifact binding VERIFIED — $review_artifact_path still hashes to the recorded artifact_hash=$recorded_review_hash"
+            fi
+        fi
+    fi
+    # REVIEW-ARTIFACT-BINDING-TOKEN END (v5 D2 / claude-workflow-plugin-rqer)
+
+    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}at $ts: $summary$comment_suffix"
 
     # Step 2 (gz3: after the record): THE terminal-label transition. One call
     # replaces what were four separate steps — add qa-approved, remove
@@ -3939,7 +3994,7 @@ cmd_approve() {
     # because keeping them is free and an operator may well be greping them from
     # memory; they are NOT kept because a test pins them. $sweep_obs is the token
     # that reports the FULL cleared set, which is what the counters cannot.
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}$binding_obs${design_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}$binding_obs${design_binding_obs:-}${review_file_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -4711,6 +4766,107 @@ cmd_grade_record() {
 # Validation is delegated to review-check.sh (the ONE validator); this file
 # never re-implements the schema and never references any reviewer transport.
 
+# ---------------------------------------------------------------------------
+# REVIEW-ARTIFACT CANONICAL PATH (v5 D2 / claude-workflow-plugin-rqer).
+#
+# WHY THIS EXISTS. Before this, the external reviewer driver and the Claude
+# reviewer lane both wrote the review artifact into .claude/.qa-tracking/, which
+# wipe_review_artifacts (above) deletes on every COMPLETED approve — by
+# design, per its own header — and which workflow_self_written
+# (workflow-denylist.sh:265) excludes from the change set. So the artifact
+# never outlived a review cycle and no approval ever attested to it (the
+# operator directive on this task's Beads record: "an artifact outside the
+# change set is an artifact no approval attests to"). This block gives the
+# artifact a SECOND, DURABLE home: a committed, task-derived path OUTSIDE
+# .claude/.qa-tracking/, so it survives approve and enters the change set —
+# deliberately the SAME shape as a design artifact (see DESIGN_SPEC_SUBDIR /
+# design_artifact_path_for / design_path_is_contained below; this block
+# mirrors all three).
+#
+# THE PATH IS DERIVED, NEVER SUPPLIED. cmd_review_record's --file, if given,
+# must ASSERT this derivation rather than name arbitrary bytes — see its
+# artifact_path_not_derived refusal, which mirrors design-record's exactly.
+#
+# KEYED ON (task id, iteration), not task id alone: a review has MANY rounds
+# (review-artifact-<tid>-r1.json, -r2.json, ...), unlike a design's single
+# artifact. The iteration is read from the artifact's OWN `iterations` field
+# (already schema-checked for KEY PRESENCE by review-check.sh's
+# validate-artifact by the time this runs, though not for type/format) rather
+# than a second CLI argument, so there is exactly one source of truth for
+# "which round is this" — and the SAME sanitisation that makes the task id
+# safe to interpolate into a path makes an untyped `iterations` value safe
+# too: `tr -c 'A-Za-z0-9._-' '_'` cannot emit a slash, so neither input can
+# carry a `..` segment, an intermediate directory, or a newline into the
+# derived path, regardless of what `iterations` actually contains.
+#
+# The external reviewer driver writes here directly now (no
+# .claude/.qa-tracking hand-off copy) and its own path computation MUST match
+# this format string byte for byte — pinned against drift by
+# .claude/tests/component/specs/codex-review.sh's art_path() helper, which
+# independently re-derives this same path and asserts a file does/does not
+# exist there across its C1-C9 legs (R1-F3, QA round 1: this comment
+# previously cited review-artifact-durability.sh's Leg A, which drives the
+# CLAUDE lane through cmd_review_record over stdin and never invokes the
+# external driver at all, so it cannot pin the DRIVER's own path
+# computation — only codex-review.sh's own component spec drives the driver).
+REVIEW_ARTIFACT_SUBDIR="docs/reviews"
+
+# review_artifact_path_for <tid> <iteration> — the ONE derivation of the
+# review artifact path from (task id, iteration). Same sanitisation as
+# impact_report_path_for / completion_payload_path_for / design_artifact_path_for.
+review_artifact_path_for() {
+    local sanitized iter_sanitized
+    sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    iter_sanitized=$(printf '%s' "$2" | tr -c 'A-Za-z0-9._-' '_')
+    printf '%s/%s/%s-r%s.json' "$PROJECT_DIR" "$REVIEW_ARTIFACT_SUBDIR" "$sanitized" "$iter_sanitized"
+}
+
+# review_dir_is_review_subdir <path> — 0 when <path>'s PARENT DIRECTORY,
+# resolved PHYSICALLY, IS the declared review-artifact directory. THE SHARED
+# CORE, mirroring design_dir_is_spec_dir byte for byte (same `cd -P`
+# discipline — see its own comment above for why bare `cd` is wrong here:
+# LOGICAL mode collapses `..` LEXICALLY, so a directory symlink can make the
+# predicate answer for the SPELLING while the kernel opens a different
+# parent).
+review_dir_is_review_subdir() (
+    local p="${1:-}" here
+    [ -n "$p" ] || return 1
+    case "$p" in /*) ;; *) p="$PROJECT_DIR/$p" ;; esac
+    while [ "${p%/}" != "$p" ] && [ -n "${p%/}" ]; do p="${p%/}"; done
+    p="${p%/*}"
+    [ -n "$p" ] || p="/"
+    cd -P "$p" 2>/dev/null || return 1
+    here="$PWD"
+    cd -P "$PROJECT_DIR/$REVIEW_ARTIFACT_SUBDIR" 2>/dev/null || return 1
+    [ "$here" = "$PWD" ]
+)
+
+# review_path_is_contained <path> — 0 when <path>'s FINAL TARGET sits DIRECTLY
+# in the declared review-artifact directory. Mirrors design_path_is_contained's
+# bounded, `-ef`-checked symlink walk byte for byte (see its comment for the
+# R3-F3 rationale: `readlink`'s output is the one command substitution here,
+# and `-ef` is what makes the reconstruction honest rather than trusting a
+# possibly-truncated read-back). Never fails the caller: an unresolvable path,
+# a symlink loop, and an empty argument are all "not contained".
+review_path_is_contained() {
+    local p="${1:-}" hops=0 target prev
+    [ -n "$p" ] || return 1
+    case "$p" in /*) ;; *) p="$PROJECT_DIR/$p" ;; esac
+    while [ -L "$p" ]; do
+        [ "$hops" -lt 40 ] || return 1
+        target=$(readlink "$p" 2>/dev/null) || target=""
+        [ -n "$target" ] || return 1
+        prev="$p"
+        case "$target" in
+            /*) p="$target" ;;
+            *)  p="${p%/*}/$target" ;;
+        esac
+        [ "$prev" -ef "$p" ] || return 1
+        hops=$((hops + 1))
+    done
+    review_dir_is_review_subdir "$p"
+}
+
 # finding_id_in_latest_artifact <tid> <finding-id> -> 0 if the id appears in the
 # findings=[...] token of the LATEST /^REVIEW-ARTIFACT v1 / comment.
 finding_id_in_latest_artifact() {
@@ -4812,6 +4968,107 @@ cmd_review_record() {
         exit 1
     fi
 
+    # --- CANONICAL PATH (v5 D2 / claude-workflow-plugin-rqer) ---------------
+    # The artifact is DERIVED, never supplied — --file only ASSERTS that
+    # derivation, the same discipline design-record's --file already
+    # enforces (see review_artifact_path_for's header for why this is the
+    # same shape). `iter` is read here, ahead of the "extract the grammar
+    # fields" section below, because the derivation needs it first.
+    local iter derived derived_rel
+    iter=$(printf '%s' "$raw" | jq -r '.iterations' 2>/dev/null)
+    derived=$(review_artifact_path_for "$tid" "$iter")
+    derived_rel="${derived#"$PROJECT_DIR"}"
+    derived_rel="${derived_rel#/}"
+    if [ -n "$input_path" ] && [ "$input_path" != "$derived" ] && [ "$input_path" != "$derived_rel" ]; then
+        emit_error_json "review-record" "$tid" "artifact_path_not_derived" \
+            "--file names '$input_path', which is not the artifact this round can record. The record carries the HASH and no path, so the path must be derivable from the task id and iteration: $derived, or its repo-relative spelling $derived_rel. --file ASSERTS that derivation; it cannot point the record at other bytes. Write the artifact there, or pipe it via stdin instead — review-record then writes it there for you" \
+            "qa-gate.sh review-record $tid --file $derived  OR  printf '%s' \"\$JSON\" | qa-gate.sh review-record $tid"
+        exit 1
+    fi
+
+    # Whatever is CURRENTLY at $derived (nothing, an earlier round of ours, or
+    # — what this refuses — something a symlink or a same-named directory has
+    # put there) is checked BEFORE we touch it. `-e` alone would miss a
+    # dangling symlink; `-L` catches that case too. A same-named DIRECTORY is
+    # refused explicitly and separately: `review_path_is_contained` only asks
+    # where the entry SITS, not what kind of thing it is, and `mv` into an
+    # existing directory renames INTO it rather than replacing it — silently
+    # landing the artifact somewhere other than $derived, which is exactly
+    # the unchecked-mv failure shape reported alongside this fix for the
+    # external reviewer driver's own writer, reproduced here on purpose
+    # rather than inherited.
+    if { [ -e "$derived" ] || [ -L "$derived" ]; } && ! review_path_is_contained "$derived"; then
+        emit_error_json "review-record" "$tid" "artifact_outside_review_dir" \
+            "the review artifact must live directly in $PROJECT_DIR/$REVIEW_ARTIFACT_SUBDIR, and '$derived' does not resolve to a file there — check whether it is a symlink out of the directory. Refusing rather than recording bytes never shown to belong to the declared directory" \
+            "inspect and remove $derived, then re-run qa-gate.sh review-record $tid"
+        exit 1
+    fi
+    if [ -d "$derived" ]; then
+        emit_error_json "review-record" "$tid" "artifact_path_is_directory" \
+            "the canonical review-artifact path $derived is a directory, not a file — cannot write or hash an artifact there" \
+            "remove or rename the directory at $derived, then re-run qa-gate.sh review-record $tid"
+        exit 1
+    fi
+
+    mkdir -p "$(dirname "$derived")" 2>/dev/null || true
+
+    if [ -n "$input_path" ]; then
+        # The caller already placed the (now derivation-checked, now
+        # containment-checked) bytes at $derived; nothing to write.
+        if [ ! -f "$derived" ]; then
+            emit_error_json "review-record" "$tid" "artifact_not_found" \
+                "no review artifact at $derived. The record binds a hash of the bytes on disk, so there is nothing to bind" \
+                "qa-gate.sh review-record $tid --file $derived"
+            exit 1
+        fi
+    else
+        # stdin path: review-record IS the writer. This is what closes the
+        # Claude-lane gap by CONSEQUENCE rather than by prose instruction —
+        # qa.md used to instruct authoring the artifact with the Write tool at
+        # a specific path with nothing downstream able to tell if that step
+        # was skipped; piping to this command now produces a real, hashed
+        # file regardless of whether the caller performed a separate write.
+        local write_tmp
+        write_tmp="$derived.tmp.$$"
+        if ! printf '%s' "$raw" > "$write_tmp" 2>/dev/null; then
+            rm -f "$write_tmp" 2>/dev/null || true
+            emit_error_json "review-record" "$tid" "artifact_write_failed" \
+                "could not stage the review artifact for writing at $derived (disk full, or the directory is not writable)" \
+                "qa-gate.sh review-record $tid --file <path>  OR  stdin pipe"
+            exit 1
+        fi
+        if ! mv "$write_tmp" "$derived" 2>/dev/null; then
+            rm -f "$write_tmp" 2>/dev/null || true
+            emit_error_json "review-record" "$tid" "artifact_write_failed" \
+                "could not move the review artifact into place at $derived" \
+                "qa-gate.sh review-record $tid --file <path>  OR  stdin pipe"
+            exit 1
+        fi
+    fi
+
+    # --- the hash, over the RAW BYTES now resting at the canonical path -----
+    # Same instrument the design side uses (AC-3): workflow-manifest.sh
+    # hash-file, which refuses BEFORE hashing on missing/unreadable/EMPTY
+    # (never the constant e3b0c442… degradation sentinel — see its own header
+    # for why that matters: a binding over it would compare equal to itself
+    # forever).
+    local manifest_tool artifact_hash art_hash_rc=0
+    manifest_tool="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+    if [ ! -f "$manifest_tool" ]; then
+        emit_error_json "review-record" "$tid" "hash_tool_unavailable" \
+            "cannot hash the review artifact: workflow-manifest.sh is missing at $manifest_tool. FAILS CLOSED — a record without a real binding is a record the gate would trust for nothing" \
+            "restore .claude/scripts/workflow-manifest.sh"
+        exit 2
+    fi
+    artifact_hash=$(bash "$manifest_tool" hash-file "$derived" 2>/dev/null) || art_hash_rc=$?
+    if [ "$art_hash_rc" -ne 0 ] || ! is_sha256_hex "$artifact_hash"; then
+        emit_error_json "review-record" "$tid" "artifact_hash_unavailable" \
+            "the review artifact at $derived could not be hashed into 64 hex characters (workflow-manifest.sh hash-file exited $art_hash_rc, produced '${artifact_hash:-<empty>}'). Refused rather than recorded with a placeholder" \
+            "bash .claude/scripts/workflow-manifest.sh hash-file $derived"
+        exit 2
+    fi
+    assert_record_scalar "review-record" "$tid" "artifact_hash" "$artifact_hash"
+
     # Extract the grammar fields from the validated artifact. `pin` (46w9) is
     # reviewer_pin, abbreviated the same way reviewer_model already is to
     # `model` — see the ART_REVIEWER_PIN comment in review-check.sh's cmd_gate
@@ -4820,8 +5077,7 @@ cmd_review_record() {
     # control-character AND model-id-class checks above (ok=true would not
     # have been reached otherwise), so no second bjx guard is needed here —
     # this function has never re-validated its other extracted scalars either.
-    local iter reviewer model pin hash rt verdict stopped findings_token fc summary ts comment_text
-    iter=$(printf '%s' "$raw" | jq -r '.iterations' 2>/dev/null)
+    local reviewer model pin hash rt verdict stopped findings_token fc summary ts comment_text
     reviewer=$(printf '%s' "$raw" | jq -r '.reviewer_identity' 2>/dev/null)
     model=$(printf '%s' "$raw" | jq -r '.reviewer_model' 2>/dev/null)
     pin=$(printf '%s' "$raw" | jq -r '.reviewer_pin' 2>/dev/null)
@@ -4837,9 +5093,9 @@ cmd_review_record() {
         summary="findings — $fc finding(s) reported"
     fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    comment_text="REVIEW-ARTIFACT v1 iteration=$iter reviewer=$reviewer model=$model pin=$pin reviewed_hash=$hash risk_threshold=$rt verdict=$verdict stopped_by=$stopped findings=[$findings_token] at $ts: $summary"
+    comment_text="REVIEW-ARTIFACT v1 iteration=$iter reviewer=$reviewer model=$model pin=$pin reviewed_hash=$hash risk_threshold=$rt verdict=$verdict stopped_by=$stopped findings=[$findings_token] artifact_hash=$artifact_hash at $ts: $summary"
     add_comment "$tid" "$comment_text"
-    emit_json 1 "review-record" "$tid" "recorded" "comment posted at $ts: $comment_text"
+    emit_json 1 "review-record" "$tid" "recorded" "comment posted at $ts: $comment_text; artifact $derived bound at artifact_hash=$artifact_hash over its RAW BYTES (reproduce with: shasum -a 256 $derived)"
 }
 
 # ---------------------------------------------------------------------------

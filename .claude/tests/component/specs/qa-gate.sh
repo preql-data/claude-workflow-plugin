@@ -1311,7 +1311,9 @@ p7_seed_review() {   # implementer + independent clean artifact, NO completion r
     art="$TRACK_P7/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
     printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"m","reviewer_pin":"m","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$h" > "$art"
-    CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
+    CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" review-record "$tid" < "$art" >/dev/null 2>&1
 }
 p7_settle() {   # absorb incidental fixture dirt, then refresh the report for the CURRENT set
     baseline_incidental_dirt "$FIXTURE_P7"

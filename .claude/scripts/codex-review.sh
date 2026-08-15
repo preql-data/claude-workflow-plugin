@@ -46,7 +46,6 @@
 set -u
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 REVIEW_CONFIG="$PROJECT_DIR/.claude/review-config"
 REVIEW_CHECK="$PROJECT_DIR/.claude/scripts/review-check.sh"
 USER_CONFIG="${CODEX_USER_CONFIG:-$HOME/.claude.json}"
@@ -67,7 +66,8 @@ if [ -z "$TASK_ID" ] || [ "$TASK_ID" = "-h" ] || [ "$TASK_ID" = "--help" ]; then
     cat >&2 <<'USAGE'
 Usage: codex-review.sh <task-id> --request <file> --iteration <n>
 Drives the optional Sol (Codex) review turn and writes a validated review
-artifact to .claude/.qa-tracking/review-artifact-<task-id>-r<n>.json.
+artifact to docs/reviews/<task-id>-r<n>.json (claude-workflow-plugin-rqer:
+moved from .claude/.qa-tracking/, which is wiped on every completed approve).
 Exit: 0 ok | 1 usage | 4 invalid request | 5 no artifact (degrade) | 6 iteration cap
       | 7 request exceeds max_request_bytes (refused before any Sol call).
 USAGE
@@ -503,15 +503,71 @@ FINAL=$(printf '%s' "$VALID_JSON" | jq \
     '.task_id=$tid | .iterations=$it | .risk_threshold=$rt | .stop_condition=$sc | .reviewer_identity="sol-codex" | .reviewer_model=$model | .reviewer_pin=$model')
 
 SANITIZED_TID=$(printf '%s' "$TASK_ID" | tr -c 'A-Za-z0-9._-' '_')
-ART_FILE="$QA_TRACKING_DIR/review-artifact-$SANITIZED_TID-r$ITER.json"
-mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
+# CANONICAL PATH (claude-workflow-plugin-rqer / v5 D2): the review artifact's
+# durable home is docs/reviews/, NOT .claude/.qa-tracking/ — the latter is
+# wiped by qa-gate.sh's wipe_review_artifacts on every completed approve
+# (deliberately, per its header) and excluded from the change set by
+# workflow_self_written (workflow-denylist.sh:265), so an artifact written
+# there never outlived a review cycle and no approval ever attested to it.
+# This format string MUST match qa-gate.sh's review_artifact_path_for byte
+# for byte — the two are pinned against drift by
+# .claude/tests/component/specs/codex-review.sh's art_path() helper, which
+# independently re-derives this same path and asserts a file does/does not
+# exist there across the C1-C9 legs (R1-F3: review-artifact-durability.sh's
+# Leg A drives the CLAUDE lane through qa-gate.sh review-record over stdin
+# and never invokes this driver at all, so it cannot pin this driver's own
+# path computation — corrected here after QA round 1 named both this
+# comment and qa-gate.sh's review_artifact_path_for header for citing it).
+ART_FILE="$PROJECT_DIR/docs/reviews/$SANITIZED_TID-r$ITER.json"
+if ! mkdir -p "$(dirname "$ART_FILE")" 2>/dev/null; then
+    fail_no_artifact "could not create the review artifact directory at $(dirname "$ART_FILE"); no artifact"
+fi
 TMP="$ART_FILE.tmp.$$"
-if printf '%s' "$FINAL" | jq . > "$TMP" 2>/dev/null; then
-    mv "$TMP" "$ART_FILE"
-else
+if ! printf '%s' "$FINAL" | jq . > "$TMP" 2>/dev/null; then
     rm -f "$TMP" 2>/dev/null || true
     fail_no_artifact "failed to assemble the final artifact JSON"
 fi
+# CHECKED mv, ROUND 2 (claude-workflow-plugin-rqer, QA round-1 R1-F1). The
+# round-1 version of this comment claimed an exit-status check on `mv` alone
+# closed the pre-existing-directory shape below. IT DID NOT, and structurally
+# could not: POSIX mv renames INTO an existing directory rather than
+# replacing it, so `mv "$TMP" "$ART_FILE"` returns rc=0 when $ART_FILE
+# already exists as a directory — reproduced against THIS shipped driver
+# with a stub server: a directory pre-placed at the derived path made the
+# driver exit 0, print the canonical path on stdout, and strand the
+# assembled JSON at "$ART_FILE/$(basename "$TMP")" instead of at $ART_FILE
+# itself. mv is not lying about its own result in that shape; the result is
+# just not the one this script needs, which is exactly why a bare exit-status
+# check cannot see it. qa-gate.sh's cmd_review_record already refuses this
+# same shape downstream (its artifact_path_is_directory check) before it
+# ever writes — that is the in-repo precedent mirrored below, applied here
+# where the bytes are actually produced rather than only where they are
+# later read back.
+#
+# Refuse BEFORE attempting the move, so no stray file is ever created inside
+# the directory, and reconfirm AFTER the move that a regular file actually
+# landed at $ART_FILE. Two checks, not one: the pre-check avoids littering
+# the directory on the KNOWN shape; the post-check is the general proof that
+# a file exists, which also covers a same-instant race between the pre-check
+# and the move. What the plain `! mv ...` branch below still catches, and
+# ALL it now claims to catch, is a full disk or a permissions error mid-move
+# — the scope this round's own completion record already stated accurately;
+# only this comment previously overclaimed the directory shape too.
+# DIR-SHAPE-GUARD BEGIN (claude-workflow-plugin-rqer)
+if [ -d "$ART_FILE" ]; then
+    rm -f "$TMP" 2>/dev/null || true
+    fail_no_artifact "the derived artifact path $ART_FILE already exists as a directory; refusing to move the assembled artifact there rather than have mv silently rename it INTO the directory; no artifact"
+fi
+# DIR-SHAPE-GUARD END (claude-workflow-plugin-rqer)
+if ! mv "$TMP" "$ART_FILE" 2>/dev/null; then
+    rm -f "$TMP" 2>/dev/null || true
+    fail_no_artifact "could not move the assembled artifact into place at $ART_FILE (disk full or a permissions error); no artifact"
+fi
+# POST-MOVE-GUARD BEGIN (claude-workflow-plugin-rqer)
+if [ ! -f "$ART_FILE" ]; then
+    fail_no_artifact "the move to $ART_FILE reported success but no regular file exists there afterward; no artifact"
+fi
+# POST-MOVE-GUARD END (claude-workflow-plugin-rqer)
 
 printf '%s\n' "$ART_FILE"
 exit 0

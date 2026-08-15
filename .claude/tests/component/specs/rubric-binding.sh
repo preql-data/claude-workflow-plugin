@@ -385,7 +385,13 @@ assert_eq "rubric-bind-C0: precondition — and closed the cycle" \
 
 # Restore EXACTLY the change set that was graded (approve truncates the
 # tracker), so the hash test would pass and only the cycle test can fire.
-seed_tracker "$FC" "src/c.ts"
+# claude-workflow-plugin-rqer (v5 D2): "exactly the change set that was
+# graded" now includes docs/reviews/$TID_C-r1.json too — armed_cycle's
+# seed_review_records reconciled it in before HASH_C (above) was captured,
+# so leaving it out here would make this restoration NOT byte-identical to
+# what HASH_C actually named, for a reason having nothing to do with the
+# cycle invariant this section tests.
+seed_tracker "$FC" "src/c.ts" "$FC/docs/reviews/$TID_C-r1.json"
 HASH_C_NOW=$(ir "$FC" --hash-only 2>/dev/null || echo "")
 assert_eq "rubric-bind-C1: precondition — the change set is byte-identical to the graded one" \
     "same" "$([ "$HASH_C" = "$HASH_C_NOW" ] && echo same || echo differs)"
@@ -1117,6 +1123,14 @@ qg "$FL" enter "$TID_L1" >/dev/null 2>&1
 assert_eq "rubric-bind-L1: precondition — the verdict for set A is preserved" \
     "yes" "$(has_label_of "$FL" "$TID_L1" "rubric-satisfied")"
 seed_tracker "$FL" "src/l.ts" "src/l2.ts"
+# claude-workflow-plugin-rqer (v5 D2): this overwrite drops the review
+# artifact path the earlier `enter` (line above) had already reconciled in —
+# the artifact FILE is still real and uncommitted, so a reconcile (which,
+# unlike a bare `ir` regenerate, actually re-discovers git-visible dirt)
+# rediscovers it before the report is regenerated. B1's equivalent sequence
+# does this implicitly because ITS seed_tracker precedes its own `enter`
+# call; here `enter` already ran, so it is done explicitly.
+qg "$FL" reconcile-tracker >/dev/null 2>&1
 ir "$FL" "$TID_L1" >/dev/null 2>&1
 L_APPROVED=$(ir "$FL" --hash-only 2>/dev/null || echo "")
 assert_eq "rubric-bind-L1: precondition — the approval will bind a different set" \

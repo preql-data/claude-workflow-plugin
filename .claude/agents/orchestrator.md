@@ -610,7 +610,7 @@ RC=$?
 printf 'codex-review exit=%s artifact=%s\n' "$RC" "${ART:-<none>}"
 ```
 
-On success the driver prints the artifact path on stdout and exits 0. It validates the request through `review-check.sh`, drives the Codex MCP server over JSON-RPC in a read-only sandbox, bounds the turn by every cap in `review-config`, and writes a schema-valid artifact to `.claude/.qa-tracking/review-artifact-<task-id>-r<n>.json`. You do not paste a prompt or parse model output — the driver owns the transport.
+On success the driver prints the artifact path on stdout and exits 0. It validates the request through `review-check.sh`, drives the Codex MCP server over JSON-RPC in a read-only sandbox, bounds the turn by every cap in `review-config`, and writes a schema-valid artifact to `docs/reviews/<task-id>-r<n>.json` (claude-workflow-plugin-rqer, v5 D2: the canonical, committed location — moved from `.claude/.qa-tracking/`, which `qa-gate.sh approve` wipes on every completed cycle). You do not paste a prompt or parse model output — the driver owns the transport.
 
 **Step C — record the artifact, then re-engage QA.**
 
@@ -618,7 +618,7 @@ On success the driver prints the artifact path on stdout and exits 0. It validat
 bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TASK_ID" --file "$ART"
 ```
 
-`review-record` re-validates through the same one validator and appends the durable `REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> ... findings=[<id>:<sev>,...] at <ts>: <summary>` comment. It is a record writer only: no labels change, no approval is created. Then re-engage QA with a fresh spawn so it folds the artifact into the packet:
+`review-record` re-validates through the same one validator, hashes the artifact (`workflow-manifest.sh hash-file`) and appends the durable `REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> ... findings=[<id>:<sev>,...] artifact_hash=<64 hex> at <ts>: <summary>` comment — the hash names the bytes at `$ART`, so a later approval's own re-verification can tell whether they are still the ones reviewed. It is a record writer only: no labels change, no approval is created. `--file "$ART"` works here because `$ART` is already the driver's own canonical path; review-record refuses a `--file` naming anywhere else (`artifact_path_not_derived`), it does not silently record different bytes. Then re-engage QA with a fresh spawn so it folds the artifact into the packet:
 
 ```
 Task("@qa", "Independent review recorded for $TASK_ID (review iteration $REVIEW_ITERATION, reviewer=sol-codex). Read the latest REVIEW-ARTIFACT comment, fold it into the grading packet as ADVISORY item 8 per qa.md section 6-prime, and continue the gate. The artifact informs your verdict; it does not bind it.")

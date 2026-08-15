@@ -188,9 +188,39 @@ FA="$COMPONENT_FIXTURE_PATH"
 
 TID_A=$(new_task "$FA" "gz3: printed remediation recovers")
 armed_cycle "$FA" "$TID_A" "src/a.ts"
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — armed_cycle's own seed_review_records call already
+# reconciled its canonical artifact in (AC-4), so this is exactly the set
+# approve is about to bind. A `reconcile-tracker` call AFTER approve cannot
+# recover it: approve's own baseline refresh is a FULL, unconditional
+# snapshot of everything dirty at that instant (0wk.2 — "everything dirty
+# right now has been reviewed"), so by the time a later reconcile runs, the
+# artifact (and any other incidental fixture dirt already swept in by an
+# earlier `enter`) reads as ALREADY BASELINED, pre-existing, and reconcile
+# adds nothing — measured directly: the "restore the same 2 files, then
+# reconcile" shape recomputed a DIFFERENT hash than the one just approved.
+TID_A_TRACKER_SNAPSHOT=$(cat "$FA/.claude/.qa-tracking/changed-files.txt" 2>/dev/null)
 qg "$FA" approve "$TID_A" "reviewed a.ts" >/dev/null 2>&1
-seed_tracker "$FA" "src/a.ts"
+printf '%s\n' "$TID_A_TRACKER_SNAPSHOT" > "$FA/.claude/.qa-tracking/changed-files.txt"
 ct "$FA" set "$TID_A" >/dev/null 2>&1
+# claude-workflow-plugin-rqer round 2 (QA R1-F4): this section used to carry
+# two "DEBUG A0" lines here that fired a FULL, unasserted verify-before-stop.sh
+# invocation before the one below. That extra call is itself a successful
+# release on the matching-approval path, and a successful release TRUNCATES
+# changed-files.txt (verify-before-stop.sh's own "Clean up tracking" section,
+# by design — the same tracker reset qa-gate.sh approve does). So the debug
+# call silently consumed the tracker this assertion depends on, and the ONE
+# call actually measured below had to reconstruct the change set from `git
+# status` instead (qa-gate.sh reconcile_tracker's absent-tracker fallback) —
+# a DIFFERENT, DEGRADED arm that still returns ALLOW even when the intended
+# "labeled, hash-matching approval" path is broken. Measured directly: with
+# the debug lines in place, sync-errors.log recorded a
+# "reconcile_tracker: changed-files.txt was absent-or-empty ... REBUILT from
+# git status alone" line between the debug call and this one; with them
+# removed, this ONE call produces no such line and changed-files.txt still
+# holds the FULL restored snapshot right up to the call it makes. Do not
+# reintroduce a probe call here: any extra Stop invocation before this
+# assertion reproduces the same masking.
 assert_eq "approve-idem-A0: control — the matching approval RELEASES" \
     "ALLOW" "$(stop_decision "$FA")"
 
@@ -264,13 +294,19 @@ FB="$COMPONENT_FIXTURE_PATH"
 
 TID_B=$(new_task "$FB" "gz3: matching-hash re-approve")
 armed_cycle "$FB" "$TID_B" "src/b1.ts"
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — see the A0 note above for why a POST-approve
+# `reconcile-tracker` cannot recover it (approve's own baseline refresh
+# consumes the "newness" of everything dirty at that instant, including
+# armed_cycle's canonical review artifact).
+TID_B_TRACKER_SNAPSHOT=$(cat "$FB/.claude/.qa-tracking/changed-files.txt" 2>/dev/null)
 qg "$FB" approve "$TID_B" "reviewed b1.ts" >/dev/null 2>&1
 assert_eq "approve-idem-B0: precondition — one bound record after the first approve" \
     "1" "$(record_count "$FB" "$TID_B")"
 
 # B1. The same change set back in the tracker: the live recompute matches the
 # recorded hash -> no-op.
-seed_tracker "$FB" "src/b1.ts"
+printf '%s\n' "$TID_B_TRACKER_SNAPSHOT" > "$FB/.claude/.qa-tracking/changed-files.txt"
 B1_OUT=$(qg "$FB" approve "$TID_B" "same approval again" 2>&1 | tail -1)
 assert_json_field "approve-idem-B1: a matching-hash re-approve still succeeds" "$B1_OUT" '.status' "approved"
 assert_contains "approve-idem-B1: ...as an explicit idempotent no-op" "idempotent no-op" "$B1_OUT"
@@ -1019,6 +1055,12 @@ if assert_mutant_applied "approve-idem-IM META" "$QG_REAL_IM" "$QG_IM_MUT"; then
     armed_cycle "$FIM" "$TID_IM" "src/im.ts"
     IM_CLASSIFIED=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
     seed_tracker "$FIM" "src/im.ts" "src/im-arrived-late.ts"
+    # claude-workflow-plugin-rqer (v5 D2): reconcile BEFORE regenerating, so
+    # armed_cycle's own canonical review artifact (still real and uncommitted
+    # on disk) is folded back into the "bindable" set this leg's whole point
+    # is to classify — the shipped qa-gate.sh's reconcile, since the IM
+    # mutation touches only the --expect-hash refusal, never this.
+    qg "$FIM" reconcile-tracker >/dev/null 2>&1
     ir "$FIM" "$TID_IM" >/dev/null 2>&1
     IM_BOUND=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
     assert_eq "approve-idem-IM META: precondition — classified and bindable sets differ" \
@@ -1041,6 +1083,9 @@ if assert_mutant_applied "approve-idem-IM META" "$QG_REAL_IM" "$QG_IM_MUT"; then
     armed_cycle "$FIM" "$TID_IMC" "src/imc.ts"
     IMC_CLASSIFIED=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
     seed_tracker "$FIM" "src/imc.ts" "src/imc-arrived-late.ts"
+    # claude-workflow-plugin-rqer (v5 D2): same reconcile-before-regenerate
+    # reasoning as TID_IM above.
+    qg "$FIM" reconcile-tracker >/dev/null 2>&1
     ir "$FIM" "$TID_IMC" >/dev/null 2>&1
     IMC_RC=0
     ( cd "$FIM" && CLAUDE_PROJECT_DIR="$FIM" bash "$FIM/.claude/scripts/qa-gate.sh" approve "$TID_IMC" \

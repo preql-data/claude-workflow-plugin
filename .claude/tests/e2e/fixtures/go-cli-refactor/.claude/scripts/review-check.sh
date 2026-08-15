@@ -55,6 +55,26 @@
 # to their own signal, never as "zero rounds" — the same discriminator the F1
 # fast path applies to `cycle_opened_ts`.
 #
+# ROUNDS SURVIVE A CYCLE'S OWN HOUSEKEEPING (claude-workflow-plugin-0in1). Pure
+# hash-equality silently zeroes a real, findings-bearing review the moment
+# `change_set_hash` moves for ANY reason — including reconcile_tracker, which
+# the Stop hook runs on EVERY fire and which only ever ADDS git-visible paths
+# the post-edit tracker missed (same bytes, wider tracker). Measured on
+# claude-workflow-plugin-fkm.3: four HIGH findings landed, reconcile grew the
+# tracker with no specialist touching a file, and `gate --change-set-hash
+# <post-reconcile hash>` reported rounds=0 — verify-before-stop.sh then printed
+# "no reviewer has disagreed with anything" over a task carrying four open HIGH
+# findings. See the CYCLE-SURVIVAL region in `cmd_gate` for the counting rule
+# (an exception that requires positive evidence — a cycle marker, an in-cycle
+# round timestamp, no newer IMPLEMENTER record — never a default), and its two
+# new envelope keys: `rounds_basis` (`"cycle"` when that evidence was available
+# to consult, `"hash_equality"` when it was not — a reader is never left to
+# infer which rule produced the number) and `rounds_stale_hash_count` (how many
+# of the counted rounds needed the exception rather than an exact hash match —
+# the "say so instead of going silent" half of the fix; the script cannot
+# invert a hash back into the path list it was taken over, so it reports how
+# many rounds are affected rather than fabricating a per-path diff).
+#
 # Severity enum (D8, ordered): critical > high > medium > low > info. The
 # risk_threshold uses the same enum. `gate` counts a finding as open when its
 # severity rank is >= the artifact's risk_threshold rank.
@@ -175,7 +195,7 @@ cmd_validate_artifact() {
     fi
 
     local k has
-    for k in contract_version task_id reviewer_identity reviewer_model reviewed_hash risk_threshold stop_condition verdict findings iterations stopped_by; do
+    for k in contract_version task_id reviewer_identity reviewer_model reviewer_pin reviewed_hash risk_threshold stop_condition verdict findings iterations stopped_by; do
         has=$(printf '%s' "$raw" | jq -r --arg k "$k" 'has($k)' 2>/dev/null || echo "false")
         if [ "$has" != "true" ]; then
             emit_validate "validate-artifact" "false" "missing_key:$k" "artifact missing required key: $k"
@@ -201,7 +221,7 @@ cmd_validate_artifact() {
     ctrl_field=$(printf '%s' "$raw" | jq -r '
         def ctrl: (type == "string") and test("[[:cntrl:]]");
         . as $a
-        | ((["contract_version","task_id","reviewer_identity","reviewer_model",
+        | ((["contract_version","task_id","reviewer_identity","reviewer_model","reviewer_pin",
              "reviewed_hash","risk_threshold","verdict","stopped_by"]
             | map(select(($a[.]? // "") | ctrl)))
            + (($a.findings? // [])
@@ -214,6 +234,26 @@ cmd_validate_artifact() {
     if [ -n "$ctrl_field" ]; then
         emit_validate "validate-artifact" "false" "scalar_contains_control_char:$ctrl_field" \
             "$ctrl_field contains a control character (newline/CR/tab); record-grammar scalars must be single-line"
+        exit 4
+    fi
+
+    # CHARACTER CLASS for reviewer_model/reviewer_pin (claude-workflow-plugin-
+    # bjx class, applied to a model id — same reasoning and same tested corpus
+    # as validate-completion's model/pin check; see that function's comment).
+    # reviewer_model is now a RUNTIME SELF-REPORT (qa.md 6-prime) rather than a
+    # restated frontmatter value, and reviewer_pin is the frontmatter reading
+    # moved to its own honest field name — both need this check for the same
+    # reason model/pin do: a class that rejects the session's own model id
+    # (`claude-opus-5[1m]`, `gpt-5.6-sol`) is worse than none.
+    local rclass_err
+    rclass_err=$(printf '%s' "$raw" | jq -r '
+        def id_ok: (type == "string") and test("^[]A-Za-z0-9._:/[-]+$");
+        . as $a
+        | ([ "reviewer_model", "reviewer_pin" ] | map(select(($a[.]? // "") | id_ok | not)))[0] // ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$rclass_err" ]; then
+        emit_validate "validate-artifact" "false" "field_invalid_chars:$rclass_err" \
+            "$rclass_err contains a character outside the model-id class [A-Za-z0-9._:/\\[\\]-]; if this is a genuine model id the class needs widening (test against the real id first — see bjx), never work around this by sanitising the value"
         exit 4
     fi
 
@@ -370,12 +410,30 @@ cmd_validate_completion() {
         exit 4
     fi
 
-    # Note 3: control characters in the two scalars the record grammar embeds.
+    # model/pin (claude-workflow-plugin-46w9): required in the SAME shape as
+    # role — transport metadata for the record grammar, not F7 fields. `pin`
+    # is the specialist's own STATIC frontmatter `model:` reading; `model` is
+    # a RUNTIME SELF-REPORT (what the specialist states about its own
+    # identity, not derived by re-reading its frontmatter a second time).
+    # Recording both is the point: their divergence is the production
+    # measurement of whether the runtime honours the frontmatter pin, and
+    # that measurement needs BOTH present on every completion record to mean
+    # anything, not just when they happen to agree.
+    for k in model pin; do
+        has=$(printf '%s' "$raw" | jq -r --arg k "$k" 'has($k)' 2>/dev/null || echo "false")
+        if [ "$has" != "true" ]; then
+            emit_validate "validate-completion" "false" "missing_key:$k" \
+                "completion payload missing required key: $k — recorded alongside role; $k is transport metadata for the record grammar (46w9), not an F7 field"
+            exit 4
+        fi
+    done
+
+    # Note 3: control characters in the scalars the record grammar embeds.
     local ctrl_field
     ctrl_field=$(printf '%s' "$raw" | jq -r '
         def ctrl: (type == "string") and test("[[:cntrl:]]");
         . as $p
-        | ((["task_id","role"] | map(select(($p[.]? // "") | ctrl)))
+        | ((["task_id","role","model","pin"] | map(select(($p[.]? // "") | ctrl)))
           )[0] // ""
     ' 2>/dev/null || echo "")
     if [ -n "$ctrl_field" ]; then
@@ -384,9 +442,12 @@ cmd_validate_completion() {
         exit 4
     fi
 
-    # Note 4/5: per-field types, then the two mandatory non-empty strings.
-    # ONE jq pass, first offending field wins, so the error names a field
-    # rather than reporting "something was wrong".
+    # Note 4/5: per-field types, then the mandatory non-empty strings. ONE jq
+    # pass, first offending field wins, so the error names a field rather than
+    # reporting "something was wrong". Runs BEFORE the character-class check
+    # below on purpose: a non-string or empty model/pin should be reported as
+    # a type/empty problem, not as "wrong characters" — id_ok would also
+    # reject it, but with a more confusing message.
     local type_err
     type_err=$(printf '%s' "$raw" | jq -r '
         def nonempty_string: (type == "string") and ((gsub("[[:space:]]";"")) != "");
@@ -397,6 +458,12 @@ cmd_validate_completion() {
             (if ($p.role | type) != "string" then "field_type_invalid:role"
              elif ($p.role | nonempty_string) | not then "field_empty:role"
              else empty end),
+            (["model","pin"]
+             | map(. as $k
+                   | if ($p[$k] | type) != "string" then "field_type_invalid:" + $k
+                     elif ($p[$k] | nonempty_string) | not then "field_empty:" + $k
+                     else empty end)
+             | .[]),
             (["files_changed","tests_added","decisions","blockers"]
              | map(select(($p[.] | type) != "array") | "field_type_invalid:" + .)
              | .[]),
@@ -424,6 +491,31 @@ cmd_validate_completion() {
                 ;;
         esac
         emit_validate "validate-completion" "false" "$type_err" "$detail"
+        exit 4
+    fi
+
+    # CHARACTER CLASS for model/pin (claude-workflow-plugin-bjx class, applied
+    # to a model id): reject, never sanitise. Real model ids in this tree
+    # contain letters, digits, `.`, `-`, `:`, `/` AND BRACKETS —
+    # `claude-opus-5[1m]` is a real, observed runtime id (see the ledger note
+    # on claude-workflow-plugin-gz3: "the model that actually performed the
+    # review rather than the pin that would normally apply"). The class below
+    # is tested against that exact corpus (subagent-start.sh's
+    # model_id_class_ok is the byte-identical sibling check on the writing
+    # side); a class that rejected the session's own model id would be worse
+    # than none, because it would make the self-report mechanism unusable on
+    # the one id it most needs to carry. Runs AFTER type_err above, which
+    # already established both fields are non-empty strings, so a failure
+    # here is unambiguously about the characters and nothing else.
+    local class_err
+    class_err=$(printf '%s' "$raw" | jq -r '
+        def id_ok: (type == "string") and test("^[]A-Za-z0-9._:/[-]+$");
+        . as $p
+        | ([ "model", "pin" ] | map(select(($p[.]? // "") | id_ok | not)))[0] // ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$class_err" ]; then
+        emit_validate "validate-completion" "false" "field_invalid_chars:$class_err" \
+            "$class_err contains a character outside the model-id class [A-Za-z0-9._:/\\[\\]-]; if this is a genuine model id the class needs widening (test against the real id first — see bjx), never work around this by sanitising the value"
         exit 4
     fi
 
@@ -747,7 +839,9 @@ cmd_validate_design() {
 
 # emit_gate <exit-code> <ok> <error_key> <observations>  (reads the parsed
 # globals: ART_*, REVIEWER, THRESHOLD, IMPL_JSON, OPEN_JSON, OPEN_COUNT,
-# INDEPENDENT, CYCLE_OPENED_TS, LATEST_IMPLEMENTER_TS, ROUNDS, ROUNDS_HASH).
+# INDEPENDENT, CYCLE_OPENED_TS, LATEST_IMPLEMENTER_TS, ROUNDS, ROUNDS_HASH,
+# ROUNDS_BASIS, ROUNDS_STALE_HASH_COUNT, ART_CAP_TERMINATED, ART_REVIEWER_PIN,
+# ART_FILE_HASH).
 # Prints the rich envelope, then exits with <exit-code>.
 emit_gate() {
     local code="$1" ok="$2" ekey="$3" obs="$4"
@@ -756,14 +850,17 @@ emit_gate() {
         --arg it "${ART_ITER:-}" \
         --arg rev "${REVIEWER:-}" \
         --arg model "${ART_MODEL:-}" \
+        --arg pin "${ART_REVIEWER_PIN:-}" \
         --arg hash "${ART_HASH:-}" \
         --arg thr "${THRESHOLD:-}" \
         --arg verdict "${ART_VERDICT:-}" \
         --arg stopped "${ART_STOPPED:-}" \
         --arg findings "${ART_FINDINGS:-}" \
-        '{iteration:$it, reviewer:$rev, model:$model, reviewed_hash:$hash, risk_threshold:$thr, verdict:$verdict, stopped_by:$stopped, findings_token:$findings}')
+        --argjson capterm "${ART_CAP_TERMINATED:-false}" \
+        --arg filehash "${ART_FILE_HASH:-}" \
+        '{iteration:$it, reviewer:$rev, model:$model, reviewer_pin:$pin, reviewed_hash:$hash, risk_threshold:$thr, verdict:$verdict, stopped_by:$stopped, findings_token:$findings, cap_terminated:$capterm, artifact_hash:$filehash}')
     # shellcheck disable=SC2016
-    printf '{"ok":%s,"subcommand":"gate","artifact":%s,"reviewer_identity":%s,"implementers":%s,"cycle_opened_ts":%s,"latest_implementer_ts":%s,"independent":%s,"open_findings":%s,"open_finding_ids":%s,"rounds":%s,"rounds_hash":%s,"error_key":%s,"observations":%s}\n' \
+    printf '{"ok":%s,"subcommand":"gate","artifact":%s,"reviewer_identity":%s,"implementers":%s,"cycle_opened_ts":%s,"latest_implementer_ts":%s,"independent":%s,"open_findings":%s,"open_finding_ids":%s,"rounds":%s,"rounds_hash":%s,"rounds_basis":%s,"rounds_stale_hash_count":%s,"error_key":%s,"observations":%s}\n' \
         "$ok" \
         "$artifact_json" \
         "$(printf '%s' "${REVIEWER:-}" | jq -Rs .)" \
@@ -775,6 +872,8 @@ emit_gate() {
         "${OPEN_JSON:-[]}" \
         "${ROUNDS:-0}" \
         "$(printf '%s' "${ROUNDS_HASH:-}" | jq -Rs .)" \
+        "$(printf '%s' "${ROUNDS_BASIS:-hash_equality}" | jq -Rs .)" \
+        "${ROUNDS_STALE_HASH_COUNT:-0}" \
         "$(printf '%s' "$ekey" | jq -Rs .)" \
         "$(printf '%s' "$obs" | jq -Rs .)"
     exit "$code"
@@ -943,9 +1042,10 @@ cmd_gate() {
     # Parsed-artifact globals consumed by emit_gate.
     REVIEWER=""; THRESHOLD=""; ART_ITER=""; ART_MODEL=""; ART_HASH=""
     ART_VERDICT=""; ART_STOPPED=""; ART_FINDINGS=""; IMPL_JSON="[]"
+    ART_CAP_TERMINATED="false"; ART_REVIEWER_PIN=""; ART_FILE_HASH=""
     OPEN_JSON="[]"; OPEN_COUNT="0"; INDEPENDENT="true"
     CYCLE_OPENED_TS=""; LATEST_IMPLEMENTER_TS=""
-    ROUNDS="0"; ROUNDS_HASH=""
+    ROUNDS="0"; ROUNDS_HASH=""; ROUNDS_BASIS="hash_equality"; ROUNDS_STALE_HASH_COUNT="0"
 
     # qzv: resolved BEFORE the artifact gate below, deliberately. The F1 fast
     # path's only caller state is a task with NO review artifact — F1 fires on
@@ -1004,19 +1104,80 @@ cmd_gate() {
     if [ -z "$ROUNDS_HASH" ] && [ -n "$art" ]; then
         ROUNDS_HASH=$(printf '%s' "$art" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
     fi
-    ROUNDS=$(awk -v ref="$ROUNDS_HASH" '
-        BEGIN { n = 0 }
+
+    # CYCLE-SURVIVAL BEGIN (claude-workflow-plugin-0in1)
+    #
+    # A round whose OWN reviewed_hash differs from the reference can still
+    # count — but only on POSITIVE evidence that nothing besides the gate's own
+    # housekeeping (reconcile_tracker) could explain the difference. That
+    # evidence is: a review cycle is open (CYCLE_OPENED_TS established), the
+    # round's own record timestamp falls inside it, and no `IMPLEMENTER: role=`
+    # record is newer than the round. reconcile_tracker posts no bd comment of
+    # its own and is the only other writer of the tracker that feeds
+    # change_set_hash (see qa-gate.sh's cmd_reconcile_tracker header), so "no
+    # implementer has been active since this round" leaves reconcile as the only
+    # thing that could have moved the hash.
+    #
+    # THIS IS DELIBERATELY NARROWER than "count everything in the open cycle".
+    # claude-workflow-plugin-2ty made rounds reset when a change set moves for
+    # GENUINE new work ("a new change set has needed no rounds yet"), and
+    # escalation-basis.sh legs C and H are the tested proof that property must
+    # survive — reconcile-only growth and genuine-new-work growth move
+    # change_set_hash identically (it hashes the path LIST, not contents), so
+    # only a per-round, evidence-gated exception can tell them apart without
+    # reopening either of those legs. Missing evidence (an unestablished cycle,
+    # an unparseable round timestamp) never manufactures the exception — only
+    # equality counts then, i.e. today's shipped behaviour, unchanged. That
+    # mirrors 6.7's convention below (an unattributable record is not a match
+    # for everything) rather than the anchor-width convention above (count on
+    # ambiguity): this exception is a POSITIVE claim and needs evidence, not
+    # its absence.
+    CYCLE_ESTABLISHED="0"
+    if [ -n "$CYCLE_OPENED_TS" ] && [ "$CYCLE_OPENED_TS" != "unparseable" ]; then
+        CYCLE_ESTABLISHED="1"
+    fi
+    ROUNDS_BASIS="hash_equality"
+    [ "$CYCLE_ESTABLISHED" = "1" ] && ROUNDS_BASIS="cycle"
+
+    # An unparseable LATEST_IMPLEMENTER_TS means there IS an implementer record
+    # but its timestamp could not be read — never treated as "an implementer
+    # might be newer" (that would fail TOWARD suppression, the direction this
+    # counter must never fail in); treated the same as no record at all.
+    IMPL_TS_FOR_CMP="$LATEST_IMPLEMENTER_TS"
+    [ "$IMPL_TS_FOR_CMP" = "unparseable" ] && IMPL_TS_FOR_CMP=""
+
+    ROUNDS_PAIR=$(LC_ALL=C awk -v ref="$ROUNDS_HASH" -v cycok="$CYCLE_ESTABLISHED" \
+        -v cyc="$CYCLE_OPENED_TS" -v implts="$IMPL_TS_FOR_CMP" '
+        BEGIN { n = 0; stale = 0 }
         ref == "" { next }
         /^[[:space:]]*REVIEW-ARTIFACT v1 / {
+            h = ""
             if (match($0, /reviewed_hash=[A-Za-z0-9._-]+/)) {
-                if (substr($0, RSTART + 14, RLENGTH - 14) == ref) { n++ }
+                h = substr($0, RSTART + 14, RLENGTH - 14)
             }
+            if (h == ref) { n++; next }
+            if (cycok != "1") { next }
+            if (h == "") { next }
+            ownts = ""
+            if (match($0, / at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z:/)) {
+                ownts = substr($0, RSTART + 4, RLENGTH - 5)
+            }
+            if (ownts == "") { next }
+            if (ownts < cyc) { next }
+            if (implts != "" && implts > ownts) { next }
+            n++; stale++
         }
-        END { print n + 0 }
-    ' "$firstlines" 2>/dev/null) || ROUNDS="0"
+        END { print (n + 0), (stale + 0) }
+    ' "$firstlines" 2>/dev/null) || ROUNDS_PAIR="0 0"
+    ROUNDS=$(printf '%s' "$ROUNDS_PAIR" | awk '{print $1}' 2>/dev/null) || ROUNDS="0"
+    ROUNDS_STALE_HASH_COUNT=$(printf '%s' "$ROUNDS_PAIR" | awk '{print $2}' 2>/dev/null) || ROUNDS_STALE_HASH_COUNT="0"
     case "$ROUNDS" in
         ''|*[!0-9]*) ROUNDS="0" ;;
     esac
+    case "$ROUNDS_STALE_HASH_COUNT" in
+        ''|*[!0-9]*) ROUNDS_STALE_HASH_COUNT="0" ;;
+    esac
+    # CYCLE-SURVIVAL END (claude-workflow-plugin-0in1)
     # ROUNDS end ---------------------------------------------------------------
 
     if [ -z "$art" ]; then
@@ -1026,11 +1187,48 @@ cmd_gate() {
     REVIEWER=$(printf '%s' "$art" | grep -oE 'reviewer=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
     THRESHOLD=$(printf '%s' "$art" | grep -oE 'risk_threshold=[A-Za-z0-9_]+' | head -1 | cut -d= -f2- || true)
     ART_ITER=$(printf '%s' "$art" | grep -oE 'iteration=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
-    ART_MODEL=$(printf '%s' "$art" | grep -oE 'model=[A-Za-z0-9._:/-]+' | head -1 | cut -d= -f2- || true)
+    # bjx: widened to include brackets (claude-workflow-plugin-46w9) — a real
+    # observed runtime id, `claude-opus-5[1m]`, was truncated at the `[` by
+    # the pre-46w9 class and silently lost its bracket suffix on read-back.
+    # `]` must be the character immediately after the opening `[` and `-` must
+    # be last: POSIX ERE does not treat `\[`/`\]` as escapes INSIDE a bracket
+    # expression (measured directly while building this check).
+    ART_MODEL=$(printf '%s' "$art" | grep -oE 'model=[]A-Za-z0-9._:/[-]+' | head -1 | cut -d= -f2- || true)
+    # "pin=" mirrors the SAME abbreviation "model=" already uses for the JSON
+    # field reviewer_model — the JSON payload key stays reviewer_pin (matching
+    # validate-artifact's schema), the comment TOKEN is short, consistent with
+    # this grammar's existing convention, and unambiguous (no other token name
+    # in this grammar contains "pin" as a substring).
+    ART_REVIEWER_PIN=$(printf '%s' "$art" | grep -oE 'pin=[]A-Za-z0-9._:/[-]+' | head -1 | cut -d= -f2- || true)
     ART_HASH=$(printf '%s' "$art" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    # artifact_hash= (v5 D2 / claude-workflow-plugin-rqer): the byte digest of
+    # the canonical artifact FILE (docs/reviews/<tid>-r<n>.json), as opposed
+    # to ART_HASH above, which is reviewed_hash — the CHANGE-SET hash the
+    # reviewer read. The two must never be conflated: one names bytes on
+    # disk today, the other names a claim about the past. Absent on any
+    # record written before this field existed — an empty string, read by
+    # cmd_approve's REVIEW-ARTIFACT-BINDING-TOKEN ladder as "no binding".
+    ART_FILE_HASH=$(printf '%s' "$art" | grep -oE 'artifact_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
     ART_VERDICT=$(printf '%s' "$art" | grep -oE 'verdict=[A-Za-z]+' | head -1 | cut -d= -f2- || true)
     ART_STOPPED=$(printf '%s' "$art" | grep -oE 'stopped_by=[A-Za-z0-9_:]+' | head -1 | cut -d= -f2- || true)
     ART_FINDINGS=$(printf '%s' "$art" | sed -nE 's/.*findings=\[([^]]*)\].*/\1/p' || true)
+
+    # ARTIFACT-COMPLETENESS (claude-workflow-plugin-nq5f). A review that stopped
+    # at a CAP (max_findings / max_review_iterations / timeout) ran out of TURNS
+    # or BUDGET, not out of things to find — it is incomplete by construction and
+    # its verdict is a FLOOR, not a ceiling (qa-claude treated a cap-terminated
+    # Sol round exactly this way BY HAND during D1 and immediately found a
+    # sibling defect one screen from Sol's own finding). `verdict` and
+    # `stop_condition` are the only two ways a review concludes on its own terms;
+    # every `cap:*` value is the other case. Exposed as a boolean so a caller
+    # never has to re-derive that split itself — see qa.md 6-prime's
+    # "cap-terminated" guidance for the one CURRENT consumer, and this is the
+    # primitive a future design-satisfied gate (D2) would consult rather than
+    # re-parsing `stopped_by`'s enum a second time.
+    ART_CAP_TERMINATED="false"
+    case "$ART_STOPPED" in
+        cap:*) ART_CAP_TERMINATED="true" ;;
+    esac
 
     # MALFORMED-ARTIFACT-GUARD-START (load-bearing; the L1 META strips to END)
     # Defense in depth for claude-workflow-plugin-vg8: a record line carrying no
@@ -1167,7 +1365,20 @@ Usage: review-check.sh <subcommand> [args]
                                               plus rounds/rounds_hash: how many
                                               REVIEW-ARTIFACT firstlines carry
                                               reviewed_hash=<h> (default <h> is
-                                              the latest artifact's own hash)
+                                              the latest artifact's own hash),
+                                              PLUS a round recorded inside the
+                                              currently open cycle whose hash
+                                              differs from <h> but no
+                                              IMPLEMENTER record is newer than
+                                              it (0in1 — reconcile_tracker's own
+                                              housekeeping must not zero a real
+                                              review). rounds_basis names which
+                                              rule produced the number ("cycle"
+                                              or "hash_equality");
+                                              rounds_stale_hash_count is how many
+                                              counted rounds needed the
+                                              exception rather than an exact
+                                              hash match
 Exit: 0 ok | 4 violation | 2 bd-unavailable | 1 usage.
 USAGE
         exit 1

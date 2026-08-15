@@ -840,7 +840,8 @@ cmd_validate_design() {
 # emit_gate <exit-code> <ok> <error_key> <observations>  (reads the parsed
 # globals: ART_*, REVIEWER, THRESHOLD, IMPL_JSON, OPEN_JSON, OPEN_COUNT,
 # INDEPENDENT, CYCLE_OPENED_TS, LATEST_IMPLEMENTER_TS, ROUNDS, ROUNDS_HASH,
-# ROUNDS_BASIS, ROUNDS_STALE_HASH_COUNT, ART_CAP_TERMINATED, ART_REVIEWER_PIN).
+# ROUNDS_BASIS, ROUNDS_STALE_HASH_COUNT, ART_CAP_TERMINATED, ART_REVIEWER_PIN,
+# ART_FILE_HASH).
 # Prints the rich envelope, then exits with <exit-code>.
 emit_gate() {
     local code="$1" ok="$2" ekey="$3" obs="$4"
@@ -856,7 +857,8 @@ emit_gate() {
         --arg stopped "${ART_STOPPED:-}" \
         --arg findings "${ART_FINDINGS:-}" \
         --argjson capterm "${ART_CAP_TERMINATED:-false}" \
-        '{iteration:$it, reviewer:$rev, model:$model, reviewer_pin:$pin, reviewed_hash:$hash, risk_threshold:$thr, verdict:$verdict, stopped_by:$stopped, findings_token:$findings, cap_terminated:$capterm}')
+        --arg filehash "${ART_FILE_HASH:-}" \
+        '{iteration:$it, reviewer:$rev, model:$model, reviewer_pin:$pin, reviewed_hash:$hash, risk_threshold:$thr, verdict:$verdict, stopped_by:$stopped, findings_token:$findings, cap_terminated:$capterm, artifact_hash:$filehash}')
     # shellcheck disable=SC2016
     printf '{"ok":%s,"subcommand":"gate","artifact":%s,"reviewer_identity":%s,"implementers":%s,"cycle_opened_ts":%s,"latest_implementer_ts":%s,"independent":%s,"open_findings":%s,"open_finding_ids":%s,"rounds":%s,"rounds_hash":%s,"rounds_basis":%s,"rounds_stale_hash_count":%s,"error_key":%s,"observations":%s}\n' \
         "$ok" \
@@ -1040,7 +1042,7 @@ cmd_gate() {
     # Parsed-artifact globals consumed by emit_gate.
     REVIEWER=""; THRESHOLD=""; ART_ITER=""; ART_MODEL=""; ART_HASH=""
     ART_VERDICT=""; ART_STOPPED=""; ART_FINDINGS=""; IMPL_JSON="[]"
-    ART_CAP_TERMINATED="false"; ART_REVIEWER_PIN=""
+    ART_CAP_TERMINATED="false"; ART_REVIEWER_PIN=""; ART_FILE_HASH=""
     OPEN_JSON="[]"; OPEN_COUNT="0"; INDEPENDENT="true"
     CYCLE_OPENED_TS=""; LATEST_IMPLEMENTER_TS=""
     ROUNDS="0"; ROUNDS_HASH=""; ROUNDS_BASIS="hash_equality"; ROUNDS_STALE_HASH_COUNT="0"
@@ -1199,6 +1201,14 @@ cmd_gate() {
     # in this grammar contains "pin" as a substring).
     ART_REVIEWER_PIN=$(printf '%s' "$art" | grep -oE 'pin=[]A-Za-z0-9._:/[-]+' | head -1 | cut -d= -f2- || true)
     ART_HASH=$(printf '%s' "$art" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    # artifact_hash= (v5 D2 / claude-workflow-plugin-rqer): the byte digest of
+    # the canonical artifact FILE (docs/reviews/<tid>-r<n>.json), as opposed
+    # to ART_HASH above, which is reviewed_hash — the CHANGE-SET hash the
+    # reviewer read. The two must never be conflated: one names bytes on
+    # disk today, the other names a claim about the past. Absent on any
+    # record written before this field existed — an empty string, read by
+    # cmd_approve's REVIEW-ARTIFACT-BINDING-TOKEN ladder as "no binding".
+    ART_FILE_HASH=$(printf '%s' "$art" | grep -oE 'artifact_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
     ART_VERDICT=$(printf '%s' "$art" | grep -oE 'verdict=[A-Za-z]+' | head -1 | cut -d= -f2- || true)
     ART_STOPPED=$(printf '%s' "$art" | grep -oE 'stopped_by=[A-Za-z0-9_:]+' | head -1 | cut -d= -f2- || true)
     ART_FINDINGS=$(printf '%s' "$art" | sed -nE 's/.*findings=\[([^]]*)\].*/\1/p' || true)

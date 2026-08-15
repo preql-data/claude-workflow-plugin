@@ -79,7 +79,15 @@ stop_decision() {
 # release path clears the tracker and current-task on every allow).
 restage() {
     bash "$CT" set "$1" >/dev/null 2>&1
-    printf '%s\n' "$2" > "$TRACK/changed-files.txt"
+    # AC-4 (claude-workflow-plugin-rqer): record_artifact's reconcile-tracker
+    # step already folded this task's review artifact into changed-files.txt
+    # as an ABSOLUTE path (reconcile_tracker's own documented convention),
+    # so a real approval's bound change set now legitimately contains it
+    # alongside the relative source file every caller here passes. Reproduce
+    # both, in reconcile_tracker's own spelling, so a Stop-hook hash
+    # recompute matches what approve actually bound instead of a strict
+    # subset of it.
+    printf '%s\n%s/docs/reviews/%s-r1.json\n' "$2" "$FIXTURE" "$1" > "$TRACK/changed-files.txt"
 }
 
 # record_artifact <tid> <iteration> <reviewer> <findings-json> — the REAL
@@ -95,7 +103,23 @@ record_artifact() {
     cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"every acceptance criterion traced to a test","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
 JSON
-    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" < "$art" >/dev/null 2>&1
+    # AC-6's explicitly-named seam: the artifact review-record just wrote is
+    # now itself a real, tracked path (AC-4 — it enters the change set), so
+    # the impact report `enter` generated earlier is STALE the instant this
+    # returns. "the impact report must be regenerated after the artifact
+    # lands and before approve, or approve refuses" (rqer fix spec AC-6).
+    # ORDER MATTERS: reconcile FIRST, so changed-files.txt already carries the
+    # new artifact path when impact-report.sh hashes it — impact-report.sh
+    # only reads the tracker as it stands, it does not itself discover
+    # git-visible dirt (that is reconcile_tracker's job, normally run by
+    # `approve` itself). Regenerating before reconciling would just re-hash
+    # the SAME stale list, and approve's own reconcile a moment later would
+    # move the tracker again, staling the report a second time.
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" "$tid" >/dev/null 2>&1 || true
 }
 
 # new_task <title> <changed-file> <impl-role> — create + stage + enter the gate
@@ -103,6 +127,17 @@ JSON
 # never masks the review refusal under test), then record the implementer.
 new_task() {
     local title="$1" file="$2" role="$3" tid
+    # claude-workflow-plugin-rqer (v5 D2): a PREVIOUS scenario's review
+    # artifact (docs/reviews/<other-tid>-r1.json) is a REAL, git-visible file
+    # that AC-5 deliberately leaves in place even after a SUCCESSFUL approve
+    # (only .claude/.qa-tracking scratch copies get wiped) — and every
+    # scenario in this spec shares one fixture/git-repo without ever
+    # committing. In production a task's own merge commits its own artifact
+    # before the NEXT task's cycle opens; reproduce that checkpoint here so
+    # an earlier scenario's artifact (or a self-review's, which never even
+    # reaches a successful approve to truncate the tracker) cannot leak into
+    # a later scenario's reconciled change set and mismatch its bound hash.
+    (cd "$FIXTURE" && git add -A && git commit -qm "checkpoint before: $title" 2>/dev/null) || true
     tid=$(cd "$FIXTURE" && bd create "$title" -t task -p 1 -l "$role,qa-pending" --json 2>/dev/null | jq -r '.id // empty')
     printf '%s\n' "$file" > "$TRACK/changed-files.txt"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" enter "$tid" >/dev/null 2>&1
@@ -252,6 +287,13 @@ CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" resolve-finding "$TID_FIX" R1-F1 \
 # Resolving CHANGES FILES, so the change-set legitimately moves: re-stage and
 # regenerate the impact report exactly as the real loop does.
 printf 'src/refund.ts\ntests/refund.test.sh\n' > "$TRACK/changed-files.txt"
+# claude-workflow-plugin-rqer (v5 D2): this OVERWRITE drops the review
+# artifact path record_artifact's own reconcile already folded in — the
+# artifact FILE is still real and uncommitted on disk, so reconcile
+# rediscovers it. Same AC-6 ordering as record_artifact: reconcile before
+# regenerating, or approve's own reconcile re-adds it a moment later and
+# stales the report a second time.
+CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
 CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" "$TID_FIX" >/dev/null 2>&1 || true
 RC=0
 OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$TID_FIX" "finding resolved with fix + covering test" 2>/dev/null) || RC=$?

@@ -4733,7 +4733,11 @@ Run the predicate directly for the full envelope:
 Then clear it, by error_key:
   review_artifact_missing    an independent reviewer (identity != every
                              recorded IMPLEMENTER role) must review the change
-                             set and record the artifact:
+                             set and record the artifact (claude-workflow-
+                             plugin-rqer: --file must be the derived path
+                             docs/reviews/$CURRENT_TASK-r<n>.json, or pipe the
+                             JSON via stdin instead and review-record writes
+                             it there for you):
                                bash .claude/scripts/qa-gate.sh review-record $CURRENT_TASK --file <artifact.json>
   reviewer_not_independent   the recorded reviewer also implemented this task;
                              a different identity must review it.

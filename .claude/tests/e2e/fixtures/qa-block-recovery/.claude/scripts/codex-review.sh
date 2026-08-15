@@ -24,6 +24,11 @@
 #      malformed-retry corrective turns) — NO artifact is written; the caller
 #      degrades to the Claude path
 #   6  iteration exceeds the max_review_iterations cap
+#   7  the request file exceeds max_request_bytes — refused BEFORE the Codex
+#      server is even spawned (claude-workflow-plugin-nq5f). A packet already
+#      measured to exhaust the full timeout_seconds budget with no artifact
+#      and no diagnosis (144KB, 2026-08-13) is refused loud and fast here
+#      instead of silently repeating that 40-minute dead end.
 #
 # Transport / stub seams (mirror impact-report.sh's CODE_GRAPH_MCP_BIN):
 #   CODEX_USER_CONFIG   registration source (default $HOME/.claude.json)
@@ -41,7 +46,6 @@
 set -u
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 REVIEW_CONFIG="$PROJECT_DIR/.claude/review-config"
 REVIEW_CHECK="$PROJECT_DIR/.claude/scripts/review-check.sh"
 USER_CONFIG="${CODEX_USER_CONFIG:-$HOME/.claude.json}"
@@ -62,8 +66,10 @@ if [ -z "$TASK_ID" ] || [ "$TASK_ID" = "-h" ] || [ "$TASK_ID" = "--help" ]; then
     cat >&2 <<'USAGE'
 Usage: codex-review.sh <task-id> --request <file> --iteration <n>
 Drives the optional Sol (Codex) review turn and writes a validated review
-artifact to .claude/.qa-tracking/review-artifact-<task-id>-r<n>.json.
-Exit: 0 ok | 1 usage | 4 invalid request | 5 no artifact (degrade) | 6 iteration cap.
+artifact to docs/reviews/<task-id>-r<n>.json (claude-workflow-plugin-rqer:
+moved from .claude/.qa-tracking/, which is wiped on every completed approve).
+Exit: 0 ok | 1 usage | 4 invalid request | 5 no artifact (degrade) | 6 iteration cap
+      | 7 request exceeds max_request_bytes (refused before any Sol call).
 USAGE
     exit 1
 fi
@@ -119,11 +125,46 @@ MAX_FINDINGS=$(read_cap max_findings 10)
 MAX_ITERS=$(read_cap max_review_iterations 3)
 TIMEOUT_S=$(read_cap timeout_seconds 300)
 MALFORMED_RETRY=$(read_cap malformed_retry 1)
+MAX_REQUEST_BYTES=$(read_cap max_request_bytes 100000)
 # Numeric sanity (fail-open to defaults on a garbled config line).
 printf '%s' "$MAX_FINDINGS" | grep -qE '^[0-9]+$' || MAX_FINDINGS=10
 printf '%s' "$MAX_ITERS" | grep -qE '^[0-9]+$' || MAX_ITERS=3
 printf '%s' "$TIMEOUT_S" | grep -qE '^[0-9]+$' || TIMEOUT_S=300
 printf '%s' "$MALFORMED_RETRY" | grep -qE '^[0-9]+$' || MALFORMED_RETRY=1
+printf '%s' "$MAX_REQUEST_BYTES" | grep -qE '^[0-9]+$' || MAX_REQUEST_BYTES=100000
+
+# PACKET-BUDGET BEGIN (claude-workflow-plugin-nq5f)
+#
+# REFUSE AN OVER-BUDGET PACKET NOW, before mkfifo, before spawning the Codex
+# server, before anything that costs real wall-clock time. Two points are
+# MEASURED (recorded on claude-workflow-plugin-nq5f, 2026-08-13): a ~88KB
+# request completed in 326-635s across five rounds; a ~144KB request EXHAUSTED
+# the full timeout_seconds budget (2400s) and produced no artifact and no
+# diagnosis at all. The two points are NOT linear (a 1.6x size increase did not
+# cost 1.6x the time — it cost the entire budget), and two points cannot be
+# interpolated or extrapolated into a curve regardless — a third measurement
+# would be the minimum for that, and it does not exist yet. max_request_bytes
+# is CHOSEN between the two, rounded for legibility and closer to the
+# confirmed-good side than the confirmed-bad one: a JUDGMENT CALL, not a
+# derivation, expected to move once a third measurement exists to reason from.
+# It errs low on purpose — a refusal here is a CHEAP wrong answer (rescope the
+# request smaller, re-run, seconds lost); a 2400s timeout is an EXPENSIVE one
+# (40 minutes of nothing). That cost asymmetry, not the measurement, is why the
+# bound sits toward the cheap side of the 88KB-144KB range rather than its
+# middle.
+#
+# byte size of the REQUEST FILE alone, not the assembled envelope (step 5,
+# below) — the request is what a caller (qa.md 6p.1, and D2's larger future
+# packet) actually controls the size of, and checking it here means refusing
+# before any per-call work happens at all, matching "at assembly time" rather
+# than "after we already started".
+REQUEST_BYTES=$(wc -c < "$REQUEST_FILE" 2>/dev/null | tr -d '[:space:]')
+[ -n "$REQUEST_BYTES" ] || REQUEST_BYTES=0
+if [ "$REQUEST_BYTES" -gt "$MAX_REQUEST_BYTES" ]; then
+    log "request file is ${REQUEST_BYTES} bytes, exceeding max_request_bytes=${MAX_REQUEST_BYTES} — refusing before any Sol call is attempted (a packet this size has previously exhausted the full timeout_seconds budget with no artifact and no diagnosis; scope the request smaller, e.g. one file's diff rather than the whole change set, and re-run)"
+    exit 7
+fi
+# PACKET-BUDGET END (claude-workflow-plugin-nq5f)
 
 # 3. Iteration cap (D-bounded: an iteration above the cap never calls Sol).
 if [ "$ITER" -gt "$MAX_ITERS" ]; then
@@ -192,7 +233,7 @@ grammar R$ITER-F<n> (for example R$ITER-F1, R$ITER-F2).
 
 Your final message MUST be a single JSON object of this shape:
 {"contract_version":"1","task_id":"$TASK_ID","reviewer_identity":"sol-codex",
- "reviewer_model":"$CODEX_MODEL","reviewed_hash":"<change-set hash from the request>",
+ "reviewer_model":"$CODEX_MODEL","reviewer_pin":"$CODEX_MODEL","reviewed_hash":"<change-set hash from the request>",
  "risk_threshold":"$REQ_RT","stop_condition":"$REQ_SC",
  "verdict":"approve"|"findings",
  "findings":[{"id":"R$ITER-F1","severity":"critical|high|medium|low|info",
@@ -258,10 +299,32 @@ fail_no_artifact() {
     exit 5
 }
 
+# wait_fail_reason <rc> <label> <id> — the human-facing text for a wait_id
+# failure, DISAMBIGUATING the two ways it fails (claude-workflow-plugin-
+# fkm.1.14): rc=1 means the DEADLINE was reached while the server was still
+# alive — Sol was still generating, this IS a timeout. rc=2 means the server
+# PROCESS EXITED before answering — this is NOT a timeout, the turn ended
+# abnormally. Conflating them in one message ("exceeded budget (or server
+# exited)") made a stalled call and a crashed server indistinguishable after
+# the fact, and the two need different follow-ups: a timeout says "scope the
+# packet smaller or accept the wait"; a server exit says "look at $ERR / the
+# Codex installation", not "wait longer next time".
+wait_fail_reason() {
+    local rc="$1" label="$2" id="$3"
+    case "$rc" in
+        1) printf '%s exceeded the %ss wall-clock budget — the server was STILL ALIVE at the deadline (id=%s never answered; Sol was still generating); no artifact' \
+            "$label" "$TIMEOUT_S" "$id" ;;
+        2) printf '%s: the server process EXITED before answering (id=%s never got a reply) — NOT a timeout, the turn ended abnormally; no artifact' \
+            "$label" "$id" ;;
+        *) printf '%s failed for an unrecognised reason (wait_id rc=%s, id=%s); no artifact' \
+            "$label" "$rc" "$id" ;;
+    esac
+}
+
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex-review","version":"1.0.0"}}}'
 send_frame "$INIT" || fail_no_artifact "could not write initialize frame (server gone)"
 wait_id 1; rc=$?
-[ "$rc" -eq 0 ] || fail_no_artifact "initialize handshake failed/timed out ($(tail -2 "$ERR" 2>/dev/null | tr '\n' ' '))"
+[ "$rc" -eq 0 ] || fail_no_artifact "$(wait_fail_reason "$rc" "initialize handshake" 1) ($(tail -2 "$ERR" 2>/dev/null | tr '\n' ' '))"
 send_frame '{"jsonrpc":"2.0","method":"notifications/initialized"}' || true
 
 # extract_final_text <request-id> -> prints stripped candidate text.
@@ -311,6 +374,15 @@ validate_candidate() {
 # would reinstate the ceiling this removes. $WORK is a mode-0700 mktemp dir
 # removed by the EXIT trap, so the envelope (which embeds the full change-set
 # diff) neither leaks to other users nor outlives the run.
+#
+# THIS IS NOT IN TENSION WITH THE max_request_bytes CHECK FURTHER UP (nq5f).
+# That check refuses on a MEASURED wall-clock-completion budget — a packet size
+# that has been observed to exhaust the ENTIRE timeout_seconds budget with no
+# artifact and no diagnosis — which is a fact about how long SOL takes to
+# process a prompt, and --rawfile does nothing to change that. The rule above
+# is about not reinstating an ARGV/TRANSPORT ceiling now that one doesn't
+# exist; the two are different axes and C6/C9 in the component spec each
+# isolate their own by raising the OTHER cap out of the way.
 #
 # CONSEQUENCE FOR ERROR MESSAGES, and it is a rule rather than a preference
 # (QA finding R2-F4): NO operator-facing message may cite $ENVELOPE_FILE or any
@@ -365,7 +437,7 @@ fi
 # FRAME-GUARD END (claude-workflow-plugin-fkm.1.12)
 send_frame "$CALL" || fail_no_artifact "could not write codex tool call (server gone)"
 wait_id 2; rc=$?
-[ "$rc" -eq 0 ] || fail_no_artifact "codex tool call exceeded ${TIMEOUT_S}s wall-clock budget (or server exited); no artifact"
+[ "$rc" -eq 0 ] || fail_no_artifact "$(wait_fail_reason "$rc" "codex tool call" 2)"
 
 THREAD=$(extract_thread 2)
 CANDIDATE=$(extract_text 2)
@@ -386,7 +458,7 @@ else
             '{jsonrpc:"2.0",id:$id,method:"tools/call",params:{name:"codex-reply",arguments:{threadId:$tid,prompt:$p}}}')
         send_frame "$REPLY" || break
         wait_id "$reply_id"; rc=$?
-        [ "$rc" -eq 0 ] || fail_no_artifact "corrective turn exceeded budget or server exited; no artifact"
+        [ "$rc" -eq 0 ] || fail_no_artifact "$(wait_fail_reason "$rc" "corrective turn" "$reply_id")"
         CANDIDATE=$(extract_text "$reply_id")
         if validate_candidate "$CANDIDATE"; then
             VALID_JSON=$(cat "$WORK/valid.json")
@@ -414,24 +486,88 @@ if [ "$NFIND" -gt "$MAX_FINDINGS" ]; then
     log "truncated findings $NFIND -> $MAX_FINDINGS (stopped_by=cap:max_findings)"
 fi
 
+# reviewer_pin (claude-workflow-plugin-46w9) is FORCED to the same value as
+# reviewer_model, for the same reason reviewer_model itself is forced rather
+# than trusted from Sol's own output: there is no frontmatter-vs-self-report
+# split for a config-driven, non-introspective transport like Sol (unlike a
+# Claude-based agent, which HAS its own `model:` frontmatter to compare
+# itself against) — $CODEX_MODEL is the only model-identity fact available
+# either way, so recording it under both names is accurate rather than
+# manufacturing a divergence signal that does not exist for this lane.
 FINAL=$(printf '%s' "$VALID_JSON" | jq \
     --arg tid "$TASK_ID" \
     --argjson it "$ITER" \
     --arg rt "$REQ_RT" \
     --arg sc "$REQ_SC" \
     --arg model "$CODEX_MODEL" \
-    '.task_id=$tid | .iterations=$it | .risk_threshold=$rt | .stop_condition=$sc | .reviewer_identity="sol-codex" | .reviewer_model=$model')
+    '.task_id=$tid | .iterations=$it | .risk_threshold=$rt | .stop_condition=$sc | .reviewer_identity="sol-codex" | .reviewer_model=$model | .reviewer_pin=$model')
 
 SANITIZED_TID=$(printf '%s' "$TASK_ID" | tr -c 'A-Za-z0-9._-' '_')
-ART_FILE="$QA_TRACKING_DIR/review-artifact-$SANITIZED_TID-r$ITER.json"
-mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
+# CANONICAL PATH (claude-workflow-plugin-rqer / v5 D2): the review artifact's
+# durable home is docs/reviews/, NOT .claude/.qa-tracking/ — the latter is
+# wiped by qa-gate.sh's wipe_review_artifacts on every completed approve
+# (deliberately, per its header) and excluded from the change set by
+# workflow_self_written (workflow-denylist.sh:265), so an artifact written
+# there never outlived a review cycle and no approval ever attested to it.
+# This format string MUST match qa-gate.sh's review_artifact_path_for byte
+# for byte — the two are pinned against drift by
+# .claude/tests/component/specs/codex-review.sh's art_path() helper, which
+# independently re-derives this same path and asserts a file does/does not
+# exist there across the C1-C9 legs (R1-F3: review-artifact-durability.sh's
+# Leg A drives the CLAUDE lane through qa-gate.sh review-record over stdin
+# and never invokes this driver at all, so it cannot pin this driver's own
+# path computation — corrected here after QA round 1 named both this
+# comment and qa-gate.sh's review_artifact_path_for header for citing it).
+ART_FILE="$PROJECT_DIR/docs/reviews/$SANITIZED_TID-r$ITER.json"
+if ! mkdir -p "$(dirname "$ART_FILE")" 2>/dev/null; then
+    fail_no_artifact "could not create the review artifact directory at $(dirname "$ART_FILE"); no artifact"
+fi
 TMP="$ART_FILE.tmp.$$"
-if printf '%s' "$FINAL" | jq . > "$TMP" 2>/dev/null; then
-    mv "$TMP" "$ART_FILE"
-else
+if ! printf '%s' "$FINAL" | jq . > "$TMP" 2>/dev/null; then
     rm -f "$TMP" 2>/dev/null || true
     fail_no_artifact "failed to assemble the final artifact JSON"
 fi
+# CHECKED mv, ROUND 2 (claude-workflow-plugin-rqer, QA round-1 R1-F1). The
+# round-1 version of this comment claimed an exit-status check on `mv` alone
+# closed the pre-existing-directory shape below. IT DID NOT, and structurally
+# could not: POSIX mv renames INTO an existing directory rather than
+# replacing it, so `mv "$TMP" "$ART_FILE"` returns rc=0 when $ART_FILE
+# already exists as a directory — reproduced against THIS shipped driver
+# with a stub server: a directory pre-placed at the derived path made the
+# driver exit 0, print the canonical path on stdout, and strand the
+# assembled JSON at "$ART_FILE/$(basename "$TMP")" instead of at $ART_FILE
+# itself. mv is not lying about its own result in that shape; the result is
+# just not the one this script needs, which is exactly why a bare exit-status
+# check cannot see it. qa-gate.sh's cmd_review_record already refuses this
+# same shape downstream (its artifact_path_is_directory check) before it
+# ever writes — that is the in-repo precedent mirrored below, applied here
+# where the bytes are actually produced rather than only where they are
+# later read back.
+#
+# Refuse BEFORE attempting the move, so no stray file is ever created inside
+# the directory, and reconfirm AFTER the move that a regular file actually
+# landed at $ART_FILE. Two checks, not one: the pre-check avoids littering
+# the directory on the KNOWN shape; the post-check is the general proof that
+# a file exists, which also covers a same-instant race between the pre-check
+# and the move. What the plain `! mv ...` branch below still catches, and
+# ALL it now claims to catch, is a full disk or a permissions error mid-move
+# — the scope this round's own completion record already stated accurately;
+# only this comment previously overclaimed the directory shape too.
+# DIR-SHAPE-GUARD BEGIN (claude-workflow-plugin-rqer)
+if [ -d "$ART_FILE" ]; then
+    rm -f "$TMP" 2>/dev/null || true
+    fail_no_artifact "the derived artifact path $ART_FILE already exists as a directory; refusing to move the assembled artifact there rather than have mv silently rename it INTO the directory; no artifact"
+fi
+# DIR-SHAPE-GUARD END (claude-workflow-plugin-rqer)
+if ! mv "$TMP" "$ART_FILE" 2>/dev/null; then
+    rm -f "$TMP" 2>/dev/null || true
+    fail_no_artifact "could not move the assembled artifact into place at $ART_FILE (disk full or a permissions error); no artifact"
+fi
+# POST-MOVE-GUARD BEGIN (claude-workflow-plugin-rqer)
+if [ ! -f "$ART_FILE" ]; then
+    fail_no_artifact "the move to $ART_FILE reported success but no regular file exists there afterward; no artifact"
+fi
+# POST-MOVE-GUARD END (claude-workflow-plugin-rqer)
 
 printf '%s\n' "$ART_FILE"
 exit 0

@@ -132,8 +132,10 @@ seed_review_records() {
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
     printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$reviewer" "$hash" > "$art"
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
-        review-record "$tid" --file "$art" >/dev/null 2>&1 || return 1
+        review-record "$tid" < "$art" >/dev/null 2>&1 || return 1
     # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
     # (exit 2, completion_record_missing) without a validated COMPLETION v1
     # record. Section 1.6's subject is the STATUSLINE's approved shape, which

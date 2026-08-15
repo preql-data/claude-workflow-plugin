@@ -223,6 +223,17 @@ seed_tracker() {
     for l in "$@"; do printf '%s\n' "$l" >> "$tracker"; done
 }
 
+# claude-workflow-plugin-rqer (v5 D2), AC-4/AC-6: every seed_tracker call
+# below that runs AFTER an approve on $TID_MIG also names
+# docs/reviews/$TID_MIG-r1.json (the canonical review artifact
+# seed_review_records wrote and reconciled in). That file is real,
+# uncommitted and part of what THAT approval actually bound — it is
+# deliberately NOT cleared by a fresh approve's baseline-write, exactly like
+# any other reviewable path — so a "restore the live session's change set"
+# reset that omits it no longer reproduces the approved hash. The ONE
+# seed_tracker call BEFORE the first review/approve (immediately below) is
+# deliberately NOT touched: the artifact does not exist yet at that point.
+
 # fast_stack_stub <fixture> — a detect-stack.sh that reports no test/lint/type
 # commands, so the technical-check pass is a no-op and the specs below measure
 # the GATE decision rather than a toolchain run.
@@ -453,7 +464,7 @@ bash "$QG_C" enter "$TID_MIG" >/dev/null 2>&1
 bash "$CT_C" set "$TID_MIG"
 seed_review_records "$TID_MIG" "qa-claude" "backend" "$FC"
 bash "$QG_C" approve "$TID_MIG" "reviewed both files; ships" >/dev/null 2>&1
-seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
+seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json"
 bash "$CT_C" set "$TID_MIG"
 assert_eq "denylist-C1: a matching approval record RELEASES (pre-migration control)" \
     "ALLOW" "$(stop_decision "$FC")"
@@ -463,10 +474,10 @@ assert_eq "denylist-C1: a matching approval record RELEASES (pre-migration contr
 DL_REAL_C=$(mutate_denylist_lib "$FC" '(^|/)harness3mg1/')
 assert_eq "denylist-C2 safety: the REAL plugin lib is untouched" "0" \
     "$(grep -c 'harness3mg1' "$DL_REAL_C" | tr -d '[:space:]')"
-seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
+seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json"
 bash "$CT_C" set "$TID_MIG"
 C3_DECISION=$(stop_decision "$FC")
-seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
+seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json"
 bash "$CT_C" set "$TID_MIG"
 C3_REASON=$(stop_reason "$FC")
 assert_eq "denylist-C3: the pre-migration approval no longer releases (fail closed)" \
@@ -511,7 +522,7 @@ assert_contains "denylist-C4: the printed approve writes a freshly-bound record 
     "change-set-bound approval record written" "$C4_APPROVE"
 assert_not_contains "denylist-C4: ...and is NOT reported as an idempotent no-op" \
     "idempotent no-op" "$C4_APPROVE"
-seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
+seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json"
 bash "$CT_C" set "$TID_MIG"
 assert_eq "denylist-C4: ...so following the printed remediation RELEASES the migrated cycle" \
     "ALLOW" "$(stop_decision "$FC")"
@@ -527,14 +538,14 @@ bash "$QG_C" enter "$TID_MIG" >/dev/null 2>&1
 bash "$CT_C" set "$TID_MIG"
 seed_review_records "$TID_MIG" "qa-claude" "backend" "$FC"
 bash "$QG_C" approve "$TID_MIG" "re-reviewed against the post-migration change set" >/dev/null 2>&1
-seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
+seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json"
 bash "$CT_C" set "$TID_MIG"
 assert_eq "denylist-C5: a fresh cycle (drop label -> enter -> approve) recovers" \
     "ALLOW" "$(stop_decision "$FC")"
 
 # C6. ONE landing = ONE migration: with the lib now stable, the recovered
 # approval keeps releasing. A second Stop must not re-block.
-seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH"
+seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json"
 bash "$CT_C" set "$TID_MIG"
 assert_eq "denylist-C6: the recovered approval keeps releasing (one landing, one migration)" \
     "ALLOW" "$(stop_decision "$FC")"
@@ -912,7 +923,7 @@ bash "$QG_D" enter "$TID_D5" >/dev/null 2>&1
 bash "$CT_D" set "$TID_D5"
 seed_review_records "$TID_D5" "qa-claude" "backend" "$FD5"
 bash "$QG_D" approve "$TID_D5" "reviewed under the pre-landing denylist" >/dev/null 2>&1
-seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS" "$FD5/docs/reviews/$TID_D5-r1.json"
 bash "$CT_D" set "$TID_D5"
 assert_eq "denylist-D5: the pre-landing approval RELEASES (control)" \
     "ALLOW" "$(stop_decision "$FD5")"
@@ -920,10 +931,10 @@ assert_eq "denylist-D5: the pre-landing approval RELEASES (control)" \
 # --- THE LANDING -----------------------------------------------------------
 restore_denylist_lib "$FD5" "$D5_REAL"
 
-seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS" "$FD5/docs/reviews/$TID_D5-r1.json"
 bash "$CT_D" set "$TID_D5"
 D5_DECISION=$(stop_decision "$FD5")
-seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS" "$FD5/docs/reviews/$TID_D5-r1.json"
 bash "$CT_D" set "$TID_D5"
 D5_REASON=$(stop_reason "$FD5")
 assert_eq "denylist-D5: after the landing the pre-landing approval no longer releases (fail closed)" \
@@ -951,7 +962,7 @@ while IFS= read -r d5_cmd; do
 done < "$D5_REMEDY"
 assert_contains "denylist-D5: the printed approve writes a freshly-bound record" \
     "change-set-bound approval record written" "$D5_APPROVE"
-seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS"
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS" "$FD5/docs/reviews/$TID_D5-r1.json"
 bash "$CT_D" set "$TID_D5"
 assert_eq "denylist-D5: ...so the printed recovery RELEASES the migrated cycle (one landing, one migration)" \
     "ALLOW" "$(stop_decision "$FD5")"

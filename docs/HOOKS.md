@@ -654,7 +654,7 @@ essentially every invocation, and never authored by the work under review:
 
 | Member | Why |
 | --- | --- |
-| `.claude/.qa-tracking/**` | Gate state: the tracker, the gate baseline, the impact report, the review artifacts. Not gitignored in every install — `install.sh` writes that rule only when the target has no `.gitignore` at all. |
+| `.claude/.qa-tracking/**` | Gate state: the tracker, the gate baseline, the impact report, the completion-contract payloads. Not gitignored in every install — `install.sh` writes that rule only when the target has no `.gitignore` at all. (The review artifact's CANONICAL copy no longer lives here — claude-workflow-plugin-rqer, v5 D2 moved it to `docs/reviews/<task-id>-r<n>.json`, a committed, task-derived path, precisely so a completed approve's cleanup of this directory cannot reach it. A scratch hand-off copy may still transiently appear under this directory in some flows and IS wiped on approve, same as before.) |
 | `.beads/interactions.jsonl` | bd rewrites it on **every** call, including the gate's own `add_comment` and `label add`. |
 
 **`.beads/issues.jsonl` is not a member.** It is the committed ledger, a real

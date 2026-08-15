@@ -417,10 +417,36 @@ seed_review_records() {
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"seeded fixture: every acceptance criterion traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
 JSON
 
+    # claude-workflow-plugin-rqer (v5 D2): review-record's --file now asserts
+    # the CANONICAL derived path (docs/reviews/<tid>-r<n>.json) rather than
+    # accepting an arbitrary one — see review_artifact_path_for in
+    # qa-gate.sh. Piped via stdin instead: review-record writes the canonical
+    # copy itself, so this seed's `$art` scratch file (left at its
+    # .qa-tracking path above, on purpose — a seed fixture, not the artifact
+    # under test) needs no renaming to satisfy the new check.
     if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
-            review-record "$tid" --file "$art" >/dev/null 2>&1; then
+            review-record "$tid" < "$art" >/dev/null 2>&1; then
         printf 'seed_review_records: qa-gate.sh review-record failed for %s\n' "$tid" >&2
         return 1
+    fi
+    # claude-workflow-plugin-rqer (v5 D2), AC-6's explicitly-named seam: the
+    # canonical artifact review-record just wrote (docs/reviews/<tid>-r1.json)
+    # is itself a real, tracked path now (AC-4 — it enters the change set),
+    # so any impact report already generated for $tid (by a caller's own
+    # `enter`) is stale the instant this returns. RECONCILE FIRST so the
+    # tracker already carries the new path when impact-report.sh hashes it —
+    # impact-report.sh only reads the tracker as it stands, it does not
+    # itself discover git-visible dirt (that is reconcile_tracker's job,
+    # normally run by `approve` itself). Regenerating before reconciling
+    # would just re-hash the SAME stale list, and approve's own reconcile a
+    # moment later would move the tracker again, staling the report a
+    # second time. Best-effort: a caller with no git repo or no impact
+    # report yet is unaffected either way.
+    if [ -f "$root/.claude/scripts/impact-report.sh" ]; then
+        CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
+            reconcile-tracker >/dev/null 2>&1 || true
+        CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" \
+            "$tid" >/dev/null 2>&1 || true
     fi
     seed_completion_record "$tid" "${role:-backend}" "$root" || return 1
     return 0

@@ -137,8 +137,11 @@ seed_round() {
     cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"seeded","reviewer_pin":"seeded","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"seeded round $iter","verdict":"approve","findings":[],"iterations":$iter,"stopped_by":"verdict"}
 JSON
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead so this scratch fixture needs no
+    # renaming.
     CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
-        review-record "$tid" --file "$art" >/dev/null 2>&1
+        review-record "$tid" < "$art" >/dev/null 2>&1
 }
 
 # ===========================================================================
@@ -739,7 +742,7 @@ ART_I="$FIX_I/.claude/.qa-tracking/round-I.json"
 cat > "$ART_I" <<JSON
 {"contract_version":"1","task_id":"$TID_I","reviewer_identity":"sol-codex","reviewer_model":"seeded","reviewer_pin":"seeded","reviewed_hash":"$HASH_IX","risk_threshold":"high","stop_condition":"seeded review","verdict":"findings","findings":[{"id":"R1-F1","severity":"high","location":"x","evidence":"y","description":"z"},{"id":"R1-F2","severity":"high","location":"x","evidence":"y","description":"z"},{"id":"R1-F3","severity":"high","location":"x","evidence":"y","description":"z"},{"id":"R1-F4","severity":"high","location":"x","evidence":"y","description":"z"}],"iterations":1,"stopped_by":"verdict"}
 JSON
-CLAUDE_PROJECT_DIR="$FIX_I" bash "$QG_I" review-record "$TID_I" --file "$ART_I" >/dev/null 2>&1
+CLAUDE_PROJECT_DIR="$FIX_I" bash "$QG_I" review-record "$TID_I" < "$ART_I" >/dev/null 2>&1
 I_ROUNDS_PRE=$(CLAUDE_PROJECT_DIR="$FIX_I" bash "$RC_I" \
     gate "$TID_I" --change-set-hash "$HASH_IX" 2>/dev/null | jq -r '.rounds // "?"' 2>/dev/null || echo "?")
 assert_eq "I: precondition — the review counts against the hash it reviewed" "1" "$I_ROUNDS_PRE"
@@ -752,13 +755,17 @@ assert_eq "I: precondition — the review counts against the hash it reviewed" "
 printf 'export function other() {}\n' > "$FIX_I/src/other.ts"
 
 # The Stop fires: its OWN reconcile-tracker step (94d) discovers src/other.ts
-# and folds it in before this Stop reads anything else — the real mechanism,
-# not a test-side rewrite of changed-files.txt.
+# AND the review artifact's own canonical file (claude-workflow-plugin-rqer:
+# review-record above just wrote a REAL, git-visible
+# docs/reviews/$TID_I-r1.json — that is AC-4, the artifact entering the
+# change set exactly like any other reviewable path) and folds both in
+# before this Stop reads anything else — the real mechanism, not a test-side
+# rewrite of changed-files.txt.
 fire "$VBS_I"
 assert_decision "I: the Stop blocks (four open HIGH findings, unresolved)" "$STOP_OUT" "block"
 TRACKED_I=$(grep -c . "$TRACK_I/changed-files.txt" 2>/dev/null || echo 0)
 TRACKED_I=$(printf '%s' "$TRACKED_I" | tr -d '[:space:]')
-assert_eq "I: precondition — the Stop's OWN reconcile grew the tracker to 2 paths" "2" "$TRACKED_I"
+assert_eq "I: precondition — the Stop's OWN reconcile grew the tracker to 3 paths (src/handler.ts seeded + src/other.ts and the review artifact discovered)" "3" "$TRACKED_I"
 HASH_IY=$(CLAUDE_PROJECT_DIR="$FIX_I" bash "$IR_I" --hash-only 2>/dev/null || echo "")
 assert_eq "I: precondition — the reconcile-driven fold moved the hash" "1" \
     "$([ -n "$HASH_IY" ] && [ "$HASH_IY" != "$HASH_IX" ] && echo 1 || echo 0)"

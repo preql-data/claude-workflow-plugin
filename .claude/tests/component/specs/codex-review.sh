@@ -34,7 +34,16 @@ CR="$FIXTURE/.claude/scripts/codex-review.sh"
 RCHECK="$FIXTURE/.claude/scripts/review-check.sh"
 QAGATE="$FIXTURE/.claude/scripts/qa-gate.sh"
 STUB="$(plugin_root)/.claude/tests/component/lib/stub-codex-mcp.js"
-TRACK="$FIXTURE/.claude/.qa-tracking"
+# CANONICAL REVIEW-ARTIFACT PATH (claude-workflow-plugin-rqer / v5 D2): the
+# durable home moved from .claude/.qa-tracking/ (wiped by
+# wipe_review_artifacts on every completed approve) to docs/reviews/ (a
+# tracked, committed location) — see qa-gate.sh's review_artifact_path_for,
+# whose format string this MUST match byte for byte, and which the driver
+# under test now writes to directly (no more .qa-tracking hand-off copy).
+art_path() {
+    # art_path <tid> <iteration>
+    printf '%s/docs/reviews/%s-r%s.json' "$FIXTURE" "$1" "$2"
+}
 
 if ! command -v node >/dev/null 2>&1; then
     printf 'SKIPPED: codex-review.sh spec (node not on PATH)\n'
@@ -82,7 +91,7 @@ run_review() {
 
 # ---------------------------------------------------------------------------
 # C1: approve verdict -> valid artifact with forced fields.
-rm -f "$TRACK"/review-artifact-cr-1-r1.json
+rm -f "$(art_path cr-1 1)"
 C1LOG="$FIXTURE/c1-stub.log"
 run_review "$APPROVE_TEXT" "$APPROVE_TEXT" 0 "$C1LOG"
 assert_eq "C1 approve: exit 0" "0" "$RR_EXIT"
@@ -127,7 +136,7 @@ chmod +x "$NOENVPIN"
 if assert_mutant_applied "C1 envelope-pin META" "$(plugin_root)/.claude/scripts/codex-review.sh" "$NOENVPIN"; then
     assert_eq "META: the mutated driver still parses" "0" \
         "$(bash -n "$NOENVPIN" 2>/dev/null && echo 0 || echo 1)"
-    rm -f "$TRACK"/review-artifact-cr-1-r1.json
+    rm -f "$(art_path cr-1 1)"
     NOENVPINLOG="$FIXTURE/c1-noenvpin-stub.log"
     RR_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB -m stub-sol" \
         STUB_CODEX_FIRST_TEXT="$APPROVE_TEXT" STUB_CODEX_REPLY_TEXT="$APPROVE_TEXT" \
@@ -151,7 +160,21 @@ if command -v bd >/dev/null 2>&1; then
     TID=$(bd create "codex-review spec task" -t task --json 2>/dev/null | jq -r '.id // empty')
     [ -z "$TID" ] && TID=$(bd list --json 2>/dev/null | jq -r '.[0].id // empty')
     if [ -n "$TID" ]; then
-        RR_REC=$(bash "$QAGATE" review-record "$TID" --file "$RR_OUT" 2>/dev/null)
+        # claude-workflow-plugin-rqer (v5 D2): review-record's --file now
+        # asserts the CANONICAL derived path, which is keyed on the task id
+        # being RECORDED against. $RR_OUT above was written for the "cr-1"
+        # fixture id every other C1-C9 leg uses, which is not $TID (a real
+        # bd task) — so this integration check needs its OWN artifact, driven
+        # against $TID, rather than reusing $RR_OUT and pointing --file at a
+        # path that could never be $TID's derived one.
+        jq -c --arg t "$TID" '.task_id=$t' "$FIXTURE/req.json" > "$FIXTURE/req-rr-record.json"
+        RR_REC_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB -m stub-sol" \
+            STUB_CODEX_FIRST_TEXT="$APPROVE_TEXT" STUB_CODEX_REPLY_TEXT="$APPROVE_TEXT" \
+            STUB_CODEX_SLEEP_MS=0 STUB_LOG="" \
+            bash "$CR" "$TID" --request "$FIXTURE/req-rr-record.json" --iteration 1 2>/dev/null)
+        assert_eq "C1 review-record fixture: driven against \$TID wrote a real artifact" "1" \
+            "$([ -n "$RR_REC_OUT" ] && [ -f "$RR_REC_OUT" ] && echo 1 || echo 0)"
+        RR_REC=$(bash "$QAGATE" review-record "$TID" --file "$RR_REC_OUT" 2>/dev/null)
         assert_json_field "C1 review-record: ok=true" "$RR_REC" ".ok|tostring" "true"
         POSTED=$(bd_show_with_comments "$TID" | jq -r '.[0].comments[].text' 2>/dev/null | grep -c '^REVIEW-ARTIFACT v1 ' || echo 0)
         assert_eq "C1 review-record: REVIEW-ARTIFACT comment posted" "1" "$POSTED"
@@ -162,7 +185,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # C2: findings above threshold -> review-check gate reports the finding open.
-rm -f "$TRACK"/review-artifact-cr-1-r1.json
+rm -f "$(art_path cr-1 1)"
 run_review "$FINDINGS_TEXT" "$FINDINGS_TEXT" 0 ""
 assert_eq "C2 findings: exit 0 (artifact written)" "0" "$RR_EXIT"
 assert_json_field "C2 findings: verdict=findings" "$(cat "$RR_OUT")" ".verdict" "findings"
@@ -177,7 +200,7 @@ assert_eq "C2 gate reports the finding open (exit 4)" "4" "$?"
 
 # ---------------------------------------------------------------------------
 # C3: max_findings+3 -> truncated + stopped_by=cap:max_findings.
-rm -f "$TRACK"/review-artifact-cr-1-r1.json
+rm -f "$(art_path cr-1 1)"
 run_review "$CAPHIT_TEXT" "$CAPHIT_TEXT" 0 ""
 assert_eq "C3 cap-hit: exit 0" "0" "$RR_EXIT"
 assert_json_field "C3 cap-hit: findings truncated to max_findings=10" "$(cat "$RR_OUT")" ".findings|length|tostring" "10"
@@ -187,16 +210,16 @@ CAPHIT_ARTIFACT="$RR_OUT"
 # ---------------------------------------------------------------------------
 # C4: server sleeps past the timeout cap -> exit 5, NO artifact.
 write_config 2   # timeout_seconds=2
-rm -f "$TRACK"/review-artifact-cr-1-r1.json
+rm -f "$(art_path cr-1 1)"
 run_review "$APPROVE_TEXT" "$APPROVE_TEXT" 10000 ""
 assert_eq "C4 timeout: exit 5" "5" "$RR_EXIT"
 assert_eq "C4 timeout: NO artifact file written" "1" \
-    "$([ ! -f "$TRACK/review-artifact-cr-1-r1.json" ] && echo 1 || echo 0)"
+    "$([ ! -f "$(art_path cr-1 1)" ] && echo 1 || echo 0)"
 write_config     # restore default timeout
 
 # ---------------------------------------------------------------------------
 # C5: prose-then-JSON first reply -> a corrective codex-reply turn is used.
-rm -f "$TRACK"/review-artifact-cr-1-r1.json
+rm -f "$(art_path cr-1 1)"
 STUBLOG="$FIXTURE/c5-stub.log"
 : > "$STUBLOG"
 PROSE_FIRST="Here is my review of the change:
@@ -206,7 +229,7 @@ $APPROVE_TEXT
 run_review "$PROSE_FIRST" "$APPROVE_TEXT" 0 "$STUBLOG"
 assert_eq "C5 corrective: exit 0 (recovered)" "0" "$RR_EXIT"
 assert_eq "C5 corrective: artifact written" "1" \
-    "$([ -f "$TRACK/review-artifact-cr-1-r1.json" ] && echo 1 || echo 0)"
+    "$([ -f "$(art_path cr-1 1)" ] && echo 1 || echo 0)"
 # The stub recorded exactly one codex-reply tool call (the corrective turn).
 REPLY_CALLS=$(grep -c '"name":"codex-reply"' "$STUBLOG" 2>/dev/null || echo 0)
 assert_eq "C5 corrective: exactly one codex-reply turn was used (stub-recorded)" "1" "$REPLY_CALLS"
@@ -240,7 +263,7 @@ assert_eq "META: the cap assertion (stopped_by==cap:max_findings) FAILS on the m
 # the C3 META reads that path AFTER C5 rewrites it. Driving cr-2 keeps these legs
 # from deleting a file another assertion depends on, whatever the run order.
 GUARD_TID="cr-2"
-GUARD_ART="$TRACK/review-artifact-$GUARD_TID-r1.json"
+GUARD_ART="$(art_path "$GUARD_TID" 1)"
 RD_OUT=""
 RD_EXIT=0
 RD_ERR=""
@@ -546,7 +569,7 @@ run_review_at() {
         bash "$CR" cr-1 --request "$FIXTURE/req-iter-$1.json" --iteration "$1" 2>/dev/null)
     RR_EXIT=$?
 }
-rm -f "$TRACK"/review-artifact-cr-1-r12.json "$TRACK"/review-artifact-cr-1-r13.json
+rm -f "$(art_path cr-1 12)" "$(art_path cr-1 13)"
 run_review_at 12
 assert_eq "C8 iteration 12 is ADMITTED by the shipped cap (rc=0 — the boundary's inside edge)" "0" "$RR_EXIT"
 assert_eq "C8 iteration 12 wrote a real artifact" "1" \
@@ -556,7 +579,7 @@ run_review_at 13
 assert_eq "C8 iteration 13 is REFUSED by the shipped cap (rc=6 — the boundary's outside edge, so the cap is EXACTLY 12)" \
     "6" "$RR_EXIT"
 assert_eq "C8 the refused iteration wrote NO artifact" "0" \
-    "$([ -f "$TRACK/review-artifact-cr-1-r13.json" ] && echo 1 || echo 0)"
+    "$([ -f "$(art_path cr-1 13)" ] && echo 1 || echo 0)"
 
 # NEGATIVE CONTROL (four-part; .claude/tests/README.md "The pairing
 # requirement"). Mutate a COPY of the shipped config back to the old default,
@@ -573,10 +596,93 @@ if assert_mutant_applied "C8-M drifted-config" "$SHIPPED_RC" "$MUT_RC"; then
         "6" "$RR_EXIT"
     # RESTORE CONTROL: shipped bytes back, same call shape, admitted again.
     cp "$SHIPPED_RC" "$FIXTURE/.claude/review-config"
-    rm -f "$TRACK"/review-artifact-cr-1-r12.json
+    rm -f "$(art_path cr-1 12)"
     run_review_at 12
     assert_eq "C8-M RESTORE: with the shipped bytes back, iteration 12 is admitted again (rc=0)" \
         "0" "$RR_EXIT"
 fi
+write_config
+
+# ===========================================================================
+# C10 (claude-workflow-plugin-rqer round 2, QA round-1 R1-F1): a directory
+# PRE-EXISTING at the derived artifact path must REFUSE, not silently succeed.
+#
+# THE DEFECT THIS CLOSES. POSIX mv renames INTO an existing directory rather
+# than replacing it, so the driver's bare `mv "$TMP" "$ART_FILE"` — checked
+# only for a NON-ZERO exit status — returned rc=0 when $ART_FILE already
+# existed as a directory: the driver printed the canonical path and exited 0
+# while the assembled artifact was actually stranded at
+# "$ART_FILE/$(basename "$TMP")". qa-gate.sh's review-record refuses this same
+# shape downstream (artifact_path_is_directory), so no FALSE RECORD could ever
+# result — but the driver itself misreported success, in exactly the shape a
+# round-1 comment claimed was already closed by the exit-status check alone.
+#
+# Two independent guards close it now (DIR-SHAPE-GUARD / POST-MOVE-GUARD in
+# the shipped driver): a pre-move `-d` refusal (never creates a stray file)
+# and a post-move `-f` reconfirmation (catches anything else that leaves a
+# non-file at $ART_FILE). The META below strips BOTH in one mutant —
+# stripping only one would leave the other still catching the shape, proving
+# nothing about either guard individually.
+# ===========================================================================
+rm -rf "$GUARD_ART"
+mkdir -p "$GUARD_ART"
+write_config 30
+C10LOG="$FIXTURE/c10-stub.log"
+run_driver "$CR" "$FIXTURE/req-guard.json" "$C10LOG" "$APPROVE_TEXT"
+assert_eq "C10 dir-shape: shipped driver REFUSES (exit 5) when a directory pre-exists at the derived path" \
+    "5" "$RD_EXIT"
+# NOT asserted here: RD_ERR's content. codex-review.sh's "tear the server
+# down" step (well before this guard, and unrelated to it — present
+# unmodified at HEAD 9488c69) does `exec 3>&- 2>/dev/null`, a BARE exec that
+# reassigns the SCRIPT'S OWN fd 2 to /dev/null for the rest of its execution.
+# That is a real, structural limitation on any external caller (this driver
+# is invoked the same way in production, via orchestrator.md's `bash
+# ".../codex-review.sh"`): every fail_no_artifact message emitted AFTER that
+# line — this guard's, the sibling mkdir/assemble/move guards', all of
+# them — never reaches a capturing `2>file` redirect placed around the whole
+# process, because the process itself severed the connection first. No
+# existing C1-C9 leg asserts message content on a POST-teardown exit either
+# (C4's timeout fires earlier, while still waiting on Sol, which is why ITS
+# message IS observable). This is pre-existing and out of R1-F1's scope
+# (the exit code and the two side-effect assertions below are what callers
+# and this spec actually rely on); reported as a follow-up rather than fixed
+# here.
+assert_eq "C10 dir-shape: the pre-placed directory is UNCHANGED (still a directory, nothing moved inside it)" \
+    "1" "$([ -d "$GUARD_ART" ] && [ -z "$(ls -A "$GUARD_ART" 2>/dev/null)" ] && echo 1 || echo 0)"
+assert_eq "C10 dir-shape: NOT a regular file (no silent success)" \
+    "0" "$([ -f "$GUARD_ART" ] && echo 1 || echo 0)"
+write_config
+
+# --- META: strip BOTH guards from a copy -> the pre-fix bug reproduces ----
+MUT_NODIRGUARD="$FIXTURE/codex-review-nodirguard.sh"
+awk '
+    /^# DIR-SHAPE-GUARD BEGIN \(/{skip=1; next}
+    /^# DIR-SHAPE-GUARD END \(/{skip=0; next}
+    /^# POST-MOVE-GUARD BEGIN \(/{skip=1; next}
+    /^# POST-MOVE-GUARD END \(/{skip=0; next}
+    !skip{print}
+' "$(plugin_root)/.claude/scripts/codex-review.sh" > "$MUT_NODIRGUARD"
+chmod +x "$MUT_NODIRGUARD"
+assert_mutant_applied "C10 dir-shape META" "$(plugin_root)/.claude/scripts/codex-review.sh" "$MUT_NODIRGUARD"
+assert_eq "C10 META: both guard sentinel blocks are gone from the mutant" "0" \
+    "$(grep -cE 'DIR-SHAPE-GUARD|POST-MOVE-GUARD' "$MUT_NODIRGUARD" 2>/dev/null | tr -d '[:space:]')"
+assert_eq "C10 META: the mutant still parses as bash" "1" \
+    "$(bash -n "$MUT_NODIRGUARD" 2>/dev/null && echo 1 || echo 0)"
+
+rm -rf "$GUARD_ART"
+mkdir -p "$GUARD_ART"
+write_config 30
+METAC10LOG="$FIXTURE/meta-c10-stub.log"
+run_driver "$MUT_NODIRGUARD" "$FIXTURE/req-guard.json" "$METAC10LOG" "$APPROVE_TEXT"
+assert_eq "C10 META: WITHOUT the guards, the driver reports SUCCESS (exit 0) against the SAME directory-pre-existing shape" \
+    "0" "$RD_EXIT"
+assert_eq "C10 META: ...and it printed the derived path as though it were the artifact" \
+    "1" "$([ "$RD_OUT" = "$GUARD_ART" ] && echo 1 || echo 0)"
+assert_eq "C10 META: ...but the derived path is STILL a directory, not a file (the exact silent drop R1-F1 reported)" \
+    "1" "$([ -d "$GUARD_ART" ] && echo 1 || echo 0)"
+assert_eq "C10 META: ...and NOT a regular file (the driver's own success claim is false)" \
+    "0" "$([ -f "$GUARD_ART" ] && echo 1 || echo 0)"
+assert_eq "C10 META: ...with the assembled JSON stranded INSIDE the directory instead of at it" \
+    "1" "$([ -n "$(ls -A "$GUARD_ART" 2>/dev/null)" ] && echo 1 || echo 0)"
 write_config
 

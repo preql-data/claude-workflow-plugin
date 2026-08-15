@@ -922,6 +922,18 @@ assert_eq "vbs-llh18: positive control (entered, not approved) blocks" "block" "
 # and the Stop hook's review-discipline re-check are satisfied; the case under
 # test is still the change-set BINDING.
 seed_review_records "$TID_POS" "qa-claude" "backend" "$FIXTURE_CSB"
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve. seed_review_records already reconciled its canonical
+# artifact into it (AC-4), so this is exactly the set approve is about to
+# bind — and a `reconcile-tracker` call AFTER approve cannot recover it:
+# approve's own baseline refresh is a FULL, unconditional snapshot of
+# everything dirty at that instant (0wk.2 — "everything dirty right now has
+# been reviewed"), so a later reconcile finds the artifact (and any other
+# incidental fixture dirt an earlier `enter` already swept in, here
+# .claude/scripts/detect-stack.sh) ALREADY BASELINED and adds nothing back —
+# measured directly: the "restore src/handler.ts, then reconcile" shape
+# recomputed a DIFFERENT hash than the one approve just bound.
+POS_TRACKER_SNAPSHOT=$(cat "$TRACK_CSB/changed-files.txt" 2>/dev/null)
 # Legit approve writes the change-set-bound record.
 POS_APPROVE=$(bash "$QG_CSB" approve "$TID_POS" "reviewed; ships safely" 2>&1)
 assert_json_field "vbs-llh18: legit approve succeeds" "$POS_APPROVE" '.status' "approved"
@@ -930,7 +942,7 @@ assert_contains "vbs-llh18: approve obs reports the change-set-bound record" \
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set (the legit Stop fires against the same reviewed files).
 bash "$CT_CSB" set "$TID_POS"
-printf 'src/handler.ts\n' > "$TRACK_CSB/changed-files.txt"
+printf '%s\n' "$POS_TRACKER_SNAPSHOT" > "$TRACK_CSB/changed-files.txt"
 # Direct proof the record carries the hash --hash-only computes for the
 # RESTORED change-set. Captured BEFORE the release assertion below, because
 # the RELEASE path runs vbs's QA-approved cleanup (it rm's changed-files.txt),
@@ -1065,11 +1077,16 @@ TID_MISS=$(cd "$FIXTURE_MISS" && bd create "missing impact-report fail-closed" -
 printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
 bash "$QG_MISS" enter "$TID_MISS" >/dev/null 2>&1     # generates the impact report
 seed_review_records "$TID_MISS" "qa-claude" "backend" "$FIXTURE_MISS"   # V3 (jio.1) MIGRATION
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — see the vbs-llh18 note above for why a POST-approve
+# `reconcile-tracker` cannot recover it (approve's own baseline refresh
+# consumes the "newness" of everything dirty at that instant).
+MISS_TRACKER_SNAPSHOT=$(cat "$TRACK_MISS/changed-files.txt" 2>/dev/null)
 bash "$QG_MISS" approve "$TID_MISS" "reviewed; ships safely" >/dev/null 2>&1
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set so the legit Stop fires against the same reviewed files.
 bash "$CT_MISS" set "$TID_MISS"
-printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
+printf '%s\n' "$MISS_TRACKER_SNAPSHOT" > "$TRACK_MISS/changed-files.txt"
 # Sanity: with impact-report.sh PRESENT, the matching record releases.
 assert_eq "vbs-llh18-miss: sanity — legit approve releases while impact-report.sh present" \
     "ALLOW" "$(miss_decision)"
@@ -1499,9 +1516,15 @@ bash "$CT_QZV" set "$TID_Q7"
 printf '%s/src-handler.ts\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
 seed_review_records "$TID_Q7" "qa-claude" "backend" "$FIXTURE_QZV"
 CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$IR_QZV" "$TID_Q7" >/dev/null 2>&1
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — see the vbs-llh18 note above for why a POST-approve
+# `reconcile-tracker` cannot recover it (approve's own baseline refresh
+# consumes the "newness" of everything dirty at that instant, including
+# seed_review_records' own canonical artifact).
+Q7_TRACKER_SNAPSHOT=$(cat "$TRACK_QZV/changed-files.txt" 2>/dev/null)
 bash "$QG_QZV" approve "$TID_Q7" "qzv: reviewed the real change set" >/dev/null 2>&1
 bash "$CT_QZV" set "$TID_Q7"
-printf '%s/src-handler.ts\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+printf '%s\n' "$Q7_TRACKER_SNAPSHOT" > "$TRACK_QZV/changed-files.txt"
 Q7_JSON=$(qzv_json)
 assert_eq "vbs-qzv-7: precondition — the reviewed change set RELEASES" \
     "ALLOW" "$(printf '%s' "$Q7_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"

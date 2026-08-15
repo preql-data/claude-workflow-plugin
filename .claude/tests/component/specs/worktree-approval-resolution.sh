@@ -290,7 +290,31 @@ approve_in() {
     cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
 JSON
-    CLAUDE_PROJECT_DIR="$root" bash "$qg" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" review-record "$tid" < "$art" >/dev/null 2>&1
+    # The artifact just written now lives at $root/docs/reviews/... — a
+    # TRACKED path, unlike the old .qa-tracking one — so it is real,
+    # git-visible dirt in THIS checkout from this instant. The impact report
+    # `enter` persisted above predates it, so approve's freshness check would
+    # refuse (impact_report_stale) without reconciling and regenerating here.
+    # Same CLAUDE_PROJECT_DIR="$root" scoping as everywhere else in this
+    # function, load-bearing for the same reason: reconcile inside the WRONG
+    # checkout would fold the artifact into a tracker approve never reads.
+    if [ -f "$root/.claude/scripts/impact-report.sh" ]; then
+        CLAUDE_PROJECT_DIR="$root" bash "$qg" reconcile-tracker >/dev/null 2>&1 || true
+        CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" \
+            "$tid" >/dev/null 2>&1 || true
+        # NOTE for callers: this regenerate makes the persisted
+        # impact-report-$san.json (which SURVIVES approve — see wtres-1.4)
+        # the source of truth for "the hash actually bound" from here on. A
+        # caller's OWN pre-artifact `--hash-only` capture, taken before this
+        # function ran, is a DIFFERENT (pre-cycle) hash now that the artifact
+        # enters the change set (AC-4/AC-6) — read the survived report
+        # instead of trying to thread a value out of this subshell (approve_in
+        # runs inside command substitution at every call site; a plain
+        # variable assignment here would not survive back to the caller).
+    fi
     # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
     # (exit 2, completion_record_missing) without a validated COMPLETION v1
     # record. Seeded here rather than bypassed with --no-completion, because
@@ -335,7 +359,9 @@ record_artifact() {
     cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"h$iter","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
 JSON
-    CLAUDE_PROJECT_DIR="$PRIM" bash "$PQG" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
+    CLAUDE_PROJECT_DIR="$PRIM" bash "$PQG" review-record "$tid" < "$art" >/dev/null 2>&1
 }
 
 comments_of() {
@@ -363,9 +389,16 @@ printf 'export const a = 1; // implemented in the worktree\n' > "$W/src/a.ts"
 printf 'export const b = 1; // implemented in the worktree\n' > "$W/src/b.ts"
 printf '%s\n%s\n' "$W/src/a.ts" "$W/src/b.ts" > "$WTRACK/changed-files.txt"
 
-W_APPROVED_HASH=$(CLAUDE_PROJECT_DIR="$W" bash "$W/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null)
 rm -f "$CANARY"
 APPROVE_OUT=$(approve_in "$W" "$TID" "$WQG" "reviewed in the worktree by qa-claude")
+# claude-workflow-plugin-rqer (v5 D2): approve_in's own reconcile now folds
+# the review artifact into W's tracker before approve runs, so the hash it
+# actually binds is the POST-artifact one, not a pre-cycle recompute. Read it
+# from $WREPORT (the persisted impact report, which SURVIVES approve — see
+# wtres-1.4 below) rather than recomputing: by the time this line runs,
+# approve already truncated the tracker, so a fresh --hash-only here would
+# read back the EMPTY-set hash, not the one actually bound.
+W_APPROVED_HASH=$(jq -r '.change_set_hash // empty' "$WREPORT" 2>/dev/null)
 assert_json_field "wtres-1.0: approve INSIDE the worktree succeeds" "$APPROVE_OUT" '.status' "approved"
 assert_eq "wtres-1.0: the canary proves an enter/approve cycle DOES boot the server (not a dud)" "fired" \
     "$([ -s "$CANARY" ] && echo fired || echo silent)"
@@ -374,8 +407,11 @@ APPROVAL_REC=$(comments_of "$TID" | grep 'QA-GATE APPROVED' | tail -1)
 W_TOKEN=$(printf '%s' "$W_TOPLEVEL" | sed 's/ /%20/g')
 assert_contains "wtres-1.1: the record names the approving worktree (worktree=<%20-token>)" \
     "worktree=$W_TOKEN " "$APPROVAL_REC"
+# claude-workflow-plugin-rqer (v5 D2): artifact_hash= lands directly before
+# `at` (qa-gate.sh:3843's token order) whenever a review-artifact binding
+# verifies — which it does here, since approve_in seeds a real record.
 assert_match "wtres-1.2: full grammar — hash, reviewed_by, worktree, then the timestamp" \
-    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
+    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ artifact_hash=[0-9a-f]{64} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
     "$APPROVAL_REC"
 assert_contains "wtres-1.3: the record binds the WORKTREE's change-set hash" \
     "change_set_hash=$W_APPROVED_HASH " "$APPROVAL_REC"
@@ -643,9 +679,11 @@ if [ "$W2_OK" = "1" ] && [ -e "$W2/.git" ]; then
     assert_eq "wtres-9b.2: ...and decodes back to the worktree's toplevel" \
         "$W2_TOPLEVEL" "$(printf '%s' "$REC3_TOKEN" | sed 's/%20/ /g; s/%25/%/g')"
     # The grammar assertion that would fail on an unencoded token: `at <ts>:`
-    # must still be the field right after the worktree token.
+    # must still be the field right after the worktree token (and, since
+    # claude-workflow-plugin-rqer / v5 D2, after artifact_hash= too — this
+    # TID3 cycle seeds a real review record via approve_in as well).
     assert_match "wtres-9b.3: the record grammar survives the spaced path" \
-        "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
+        "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ artifact_hash=[0-9a-f]{64} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
         "$REC3"
     # And the decode is load-bearing on the read side: resolution must release.
     TID_SAVE="$TID"; SAN_SAVE="$SAN"

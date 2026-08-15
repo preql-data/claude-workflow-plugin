@@ -104,15 +104,67 @@ record_artifact() {
     cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"h$iter","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
 JSON
-    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" < "$art" >/dev/null 2>&1
+    # DELIBERATELY no reconcile-tracker here (unlike this same helper's
+    # shape in other specs). This one is called for TWO different purposes
+    # in this file: (a) the FIRST round on a task, immediately followed by
+    # approve — that call site reconciles explicitly, right before its own
+    # approve, so approve's freshness check sees the artifact; (b) a LATER
+    # round recorded AFTER a task is already approved (D2/D4/D6's "the
+    # record changed, the file set did not" scenarios), where reconciling
+    # HERE would fold the new artifact into changed-files.txt and move the
+    # live hash, so the Stop hook's llh.18 comparison would block on a
+    # HASH MISMATCH — masking the review-discipline re-check this spec
+    # exists to prove. Folding a reconcile into a shared helper used both
+    # ways was the bug; each call site now owns the decision explicitly.
 }
 
 # restage <tid> <file> — put the task back in "this exact change-set is what
 # was approved" position (the release path rm's the tracker and clears
 # current-task on every allow, exactly as it does in production).
+#
+# claude-workflow-plugin-rqer (v5 D2): "what was approved" now includes
+# whichever docs/reviews/<tid>-r<n>.json path(s) were folded into the
+# tracker at the time of the reference approval — a restage that names only
+# the source file understates the approved set, the hook's live recompute
+# no longer matches the recorded hash, and a case meant to assert RELEASE
+# gets a spurious BLOCK instead, not because review discipline re-armed but
+# because this helper forgot a path.
+#
+# NEITHER a fresh glob NOR "whatever's in changed-files.txt right now" is
+# correct here, and both were tried and measured wrong before this comment:
+#   - A glob of every docs/reviews/*.json that exists on disk over-includes:
+#     record_artifact deliberately does NOT reconcile a LATER round recorded
+#     after a task is already approved (D2/D4/D6's "the record changed, the
+#     file set did not" scenarios), so a fresh glob folds that later,
+#     never-reconciled artifact in anyway, moving the live hash away from
+#     what is actually bound.
+#   - Reading changed-files.txt live is worse: a SUCCESSFUL approve
+#     TRUNCATES it, so by the time restage runs (always after an approve in
+#     this file) there is nothing left to read.
+#   Correct source: RESTAGE_ART_LINES, captured explicitly by the ONE call
+#   site that reconciles right before each approve (see D1/D6 META), which
+#   snapshots the tracker's docs/reviews/ line(s) at the one instant they are
+#   both present AND known-correct — after reconcile, before truncation.
+#
+# ABSOLUTE path, not relative — measured empirically, not assumed:
+# reconcile_tracker's own git-status-based discovery writes newly-found paths
+# into changed-files.txt as ABSOLUTE (fixture-root-prefixed) strings, while
+# entries this spec writes itself (like the bare `$file` below) stay
+# whatever spelling the caller chose. change_set_hash hashes the tracker's
+# raw string content — no path normalization — so a relative spelling here
+# byte-mismatches what reconcile actually bound and produces a hash the
+# recorded approval does not carry, even though it names the same file.
+RESTAGE_ART_LINES=""
 restage() {
-    bash "$CT" set "$1" >/dev/null 2>&1
-    printf '%s\n' "$2" > "$TRACK/changed-files.txt"
+    local tid="$1" file="$2"
+    bash "$CT" set "$tid" >/dev/null 2>&1
+    {
+        printf '%s\n' "$file"
+        [ -n "$RESTAGE_ART_LINES" ] && printf '%s\n' "$RESTAGE_ART_LINES"
+    } > "$TRACK/changed-files.txt"
 }
 
 # ---------------------------------------------------------------------------
@@ -122,6 +174,20 @@ printf 'src/handler.ts\n' > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID" >/dev/null 2>&1
 bd comments add "$TID" "IMPLEMENTER: role=backend task=$TID at 2026-07-26T00:00:00Z" >/dev/null 2>&1
 record_artifact "$TID" 1 "qa-claude" "[]"
+# claude-workflow-plugin-rqer (v5 D2): THIS call site reconciles (unlike
+# record_artifact itself, deliberately — see its own comment) because it is
+# immediately followed by approve, which refuses on impact_report_stale
+# without the artifact folded into the tracker first. Snapshot the
+# docs/reviews/ line(s) into TID_ART_LINES NOW — restage's own comment
+# explains why that snapshot, not a live read or a fresh glob, is correct.
+# TID_ART_LINES is the STABLE copy for this task (D4 zeroes the ACTIVE
+# RESTAGE_ART_LINES for its own unrelated task and D5 restores from here).
+if [ -f "$FIXTURE/.claude/scripts/impact-report.sh" ]; then
+    bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" "$TID" >/dev/null 2>&1 || true
+fi
+TID_ART_LINES=$(grep '/docs/reviews/' "$TRACK/changed-files.txt" 2>/dev/null || true)
+RESTAGE_ART_LINES="$TID_ART_LINES"
 # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve also refuses without a
 # validated COMPLETION v1 record. D1 is the CONTROL for this whole spec — "a
 # clean independent review releases" — so it has to reach a real approve.
@@ -174,6 +240,13 @@ assert_eq "D3: after arbitrate overrule -> RELEASE" "ALLOW" "$(stop_decision)"
 # is simultaneously the deliverable-4 assertion (F1 must approve with
 # --no-review, or every doc commit deadlocks on the review refusal).
 TID_DOC=$(cd "$FIXTURE" && bd create "doc-only fast path" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+# claude-workflow-plugin-rqer (v5 D2): reset restage's artifact-line memory —
+# D1 left TID's line active, and TID_DOC's approval is about to come from
+# the F1 --no-review fast path, which binds NO review artifact at all.
+# Carrying D1's leftover value into TID_DOC's tracker would be cross-task
+# contamination, not "what was approved" for THIS task. D5 (which reuses
+# $TID) restores from TID_ART_LINES.
+RESTAGE_ART_LINES=""
 printf 'docs/notes.md\n' > "$TRACK/changed-files.txt"
 bash "$CT" set "$TID_DOC" >/dev/null 2>&1
 assert_eq "D4: F1 doc-only fast path releases" "ALLOW" "$(stop_decision)"
@@ -202,6 +275,9 @@ assert_eq "D4: a [review bypass:] record still releases (audited escape honoured
 #
 # Same task and state as D3's release (clean, arbitrated, matching record) —
 # the ONLY variable is whether review-check.sh exists.
+# claude-workflow-plugin-rqer (v5 D2): restore restage's artifact-line memory
+# to TID's — D4 zeroed it for TID_DOC's unrelated no-review approval.
+RESTAGE_ART_LINES="$TID_ART_LINES"
 restage "$TID" "src/handler.ts"
 assert_eq "D5: sanity — this state releases while review-check.sh is present" \
     "ALLOW" "$(stop_decision)"
@@ -261,6 +337,15 @@ if [ "$STRIP_RC" -eq 0 ]; then
     bash "$QG" enter "$TID_META" >/dev/null 2>&1
     bd comments add "$TID_META" "IMPLEMENTER: role=backend task=$TID_META at 2026-07-26T00:00:00Z" >/dev/null 2>&1
     record_artifact "$TID_META" 1 "qa-claude" "[]"
+    # claude-workflow-plugin-rqer (v5 D2): reconcile before this approve, same
+    # reason as D1's (see that call site's comment) — and re-snapshot
+    # RESTAGE_ART_LINES for THIS task, since D6 META reuses restage() with a
+    # different tid.
+    if [ -f "$FIXTURE/.claude/scripts/impact-report.sh" ]; then
+        bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+        CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" "$TID_META" >/dev/null 2>&1 || true
+    fi
+    RESTAGE_ART_LINES=$(grep '/docs/reviews/' "$TRACK/changed-files.txt" 2>/dev/null || true)
     # P7 MIGRATION (see D1): the META rebuilds D2's approved state, which needs
     # a real approve to exist at all.
     seed_completion_record "$TID_META" "backend" "$FIXTURE"

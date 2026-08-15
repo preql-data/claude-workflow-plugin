@@ -387,7 +387,7 @@ LANE="${LANE:-claude}"
 
 Treat ANY value other than the literal `codex` as `claude` — including a JSON parse failure, the `claude/no-flag` literal `status` prints when no detection has run yet, and a missing file. The probe is fail-open by design: absence, misconfiguration, crash, hang, and a server exposing no `codex` tool all resolve to `claude`.
 
-**Lane `claude` — you author the artifact, then record it.** Write it to `.claude/.qa-tracking/review-artifact-<task-id>-r<n>.json`:
+**Lane `claude` — you author the artifact, then record it.** You do not need to place it at any particular path yourself: compose the JSON below and pipe it to `review-record`, which derives the canonical location (`docs/reviews/<task-id>-r<n>.json` — claude-workflow-plugin-rqer, v5 D2) and writes it there for you. This is deliberate, not merely convenient — a durable, hashed file existing now depends on running a command you already had to run, not on a separate Write-tool step nothing downstream can verify happened (see the closing note on this lane, below):
 
 ```json
 {
@@ -423,12 +423,12 @@ Bounded diligence applies to this lane too, from the same `.claude/review-config
 **A `cap:*` `stopped_by` means the review is incomplete by construction — never treat it as a completed pass on its own (claude-workflow-plugin-nq5f).** `stopped_by: "cap:max_findings"`, `"cap:max_review_iterations"`, and `"cap:timeout"` all mean the review ran out of TURNS or BUDGET, not out of things to find; its `verdict` is a FLOOR on what is wrong, never a ceiling. `verdict` and `stop_condition` are the only two ways a review concludes on its own terms. `review-check.sh gate`'s envelope names this mechanically now — `.artifact.cap_terminated` is `true` for every `cap:*` value and `false` for the other two — so read it rather than re-deriving the enum split by eye every time; a prior QA pass did exactly that by hand during D1 and immediately found a sibling defect one screen from the capped reviewer's own finding, which is the judgement this field turns into a mechanical check anyone (including a future automated gate) can run. A `cap_terminated: true` artifact — whatever its `verdict` — is not sufficient grounds by itself to `qa-gate.sh approve`: continue investigating yourself (another review module, a second pass, a manual read of the capped area) before treating the change set as clean.
 
 ```bash
-ART="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-artifact-$TID-r$REVIEW_ITERATION.json"
-bash "$CLAUDE_PROJECT_DIR/.claude/scripts/review-check.sh" validate-artifact "$ART"
-bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID" --file "$ART"
+# $ART_JSON is the object above, composed as a shell variable (e.g. via
+# jq -n or a heredoc) — NOT written to any path yourself first.
+printf '%s' "$ART_JSON" | bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID"
 ```
 
-`review-record` re-validates through the same one validator and appends the durable record comment (`REVIEW-ARTIFACT v1 iteration=... reviewer=... findings=[...] at <ts>: <summary>`). It is a record writer only — no labels change, no approval is created. Then continue to section 6 and carry the artifact into the packet as item 8.
+`review-record` re-validates through the same one validator, writes the validated JSON to the derived canonical path, hashes it (`workflow-manifest.sh hash-file`, the same instrument the design side uses), and appends the durable record comment — now carrying an `artifact_hash=<64 hex>` machine token alongside the existing ones (`REVIEW-ARTIFACT v1 iteration=... reviewer=... findings=[...] artifact_hash=... at <ts>: <summary>`), so the record names the bytes rather than restating them. It is a record writer only — no labels change, no approval is created. The canonical file survives `qa-gate.sh approve` (it is deliberately not touched by the completed-cycle cleanup that used to remove it) and enters the change set the approval binds, so the reviewer's own evidence, not just the record summarising it, outlives this cycle. If you already have the artifact at a real path (e.g. handed off by the Sol lane), `--file <path>` still works, but ONLY when `<path>` already equals that same derived location — it asserts the derivation, it does not let you point the record at other bytes. Then continue to section 6 and carry the artifact into the packet as item 8.
 
 **Lane `codex` — hand off to the orchestrator's relay.** Persist the request (the file above; optionally also `bd_doc_write(task_id="$TID", name="review-request", content=...)` so it survives the spawn boundary auditably) and return `qa_status: "needs-review"`:
 

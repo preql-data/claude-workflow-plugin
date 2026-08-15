@@ -113,7 +113,51 @@ is_implementer_role() {
 #
 # Grammar (load-bearing, matched by `^IMPLEMENTER: role=([a-z]+) ` in the
 # shipped counter — the trailing space after the role is part of the contract):
-#   IMPLEMENTER: role=<backend|frontend|devops> task=<tid> at <ISO8601-UTC>
+#   IMPLEMENTER: role=<backend|frontend|devops> task=<tid> model=<m> pin=<p> at <ISO8601-UTC>
+#
+# model=/pin= (claude-workflow-plugin-46w9) sit BEFORE `at <ts>`, deliberately —
+# review-check.sh's max_record_ts and this file's own max_record_ts_in both
+# anchor the timestamp at END OF LINE (` at $QZV_ISO_UTC_RE\$`), structurally
+# pinned byte-identical between the two files (review-check.test.sh asserts
+# it). Appending model=/pin= AFTER `at <ts>` would put trailing text past that
+# anchor and every record would read back as `unparseable` — the exact failure
+# the cycle-membership helper further down treats as "fail toward posting a
+# duplicate", which is merely noisy, but qzv.1's F1 fast path treats an
+# unparseable `latest_implementer_ts` as "cannot establish", which is the
+# FAIL-CLOSED direction for a DIFFERENT predicate (never auto-approve a
+# doc-only change set while an implementer might be in flight) — so the
+# position is not
+# cosmetic, it is what keeps both readers answering at all.
+#
+# WHAT THE TWO FIELDS ARE, and why they are NOT the same value read twice:
+#   pin=   the STATIC frontmatter `model:` line in THIS role's own agent file
+#          (.claude/agents/<role>.md), read directly — the declared intent.
+#   model= the RESOLVED pick for the "implementer" role class from
+#          model-roles-resolved.json (schema 2, model-select.sh), as of THIS
+#          spawn — what the resolver last computed, which `cmd_apply` is
+#          supposed to have already written into the frontmatter.
+# Both are read BEFORE the specialist's own turn starts, so NEITHER is a
+# confirmed fact about what the spawned session actually ran on — the
+# runtime's live model appears nowhere in this hook's stdin, and
+# model-select.sh's own header is explicit that whether a frontmatter
+# `model:` change is honoured is established nowhere in this tree. What a
+# pin/model DIVERGENCE here means is narrower and still real: the on-disk
+# frontmatter has drifted from what the resolver last computed (a stale
+# artifact, or a hand-edit since the last `cmd_apply`). The DEEPER question —
+# did the runtime actually honour either value — is what comparing THIS
+# record's fields against the specialist's OWN completion-record self-report
+# (F7's model=/pin=, written after the specialist has run and can introspect)
+# is for; that comparison is the "direct production measurement" 46w9 exists
+# to enable, and it needs a baseline recorded before the fact to compare
+# against, which is what this record now is.
+#
+# CHARACTER CLASS (claude-workflow-plugin-bjx class, applied here for the
+# first time to a MODEL id rather than a task id or role): real ids contain
+# hyphens, periods, digits AND BRACKETS (`claude-opus-5[1m]` is a real,
+# observed runtime id — see the ledger note on claude-workflow-plugin-gz3).
+# `unknown_model_class()` below is reject-only, never sanitising, and is
+# tested against exactly that corpus, INCLUDING the bracket form, because a
+# class that rejects the session's own model id is worse than none.
 #
 # Contract:
 #   - IDEMPOTENT per (role, task, REVIEW CYCLE): a re-spawn of the same
@@ -290,6 +334,58 @@ recorded_in_current_cycle() {
 }
 # IMPLEMENTER-CYCLE-KEY END (qzv.1)
 
+# MODEL-PIN-FIELDS BEGIN (claude-workflow-plugin-46w9)
+
+# unknown_model_class <value> -> 0 (matches) | 1 (does not). REJECT-ONLY —
+# this function never sanitises, it only says yes/no, matching the codebase's
+# bjx convention elsewhere (task_id/role scalars). Bracket expression syntax
+# is deliberate: POSIX ERE does not treat `\[`/`\]` as escapes INSIDE a
+# bracket expression (measured directly while building this — a
+# backslash-escaped form rejected every real id including plain
+# "claude-sonnet-5"), so a literal `]` must be the character immediately
+# after the opening `[` and a literal `-` must be last. Tested against the
+# real corpus this tree actually uses (see the comment on record_implementer)
+# — including the bracket form `claude-opus-5[1m]` — precisely because a
+# class that rejects the session's own model id is worse than none.
+model_id_class_ok() {
+    printf '%s' "$1" | grep -qE '^[]A-Za-z0-9._:/[-]+$'
+}
+
+# read_role_pin <role> -> the STATIC frontmatter `model:` value from
+# .claude/agents/<role>.md, or "unknown" when the file/line is missing or the
+# value fails the character class. Mirrors statusline.sh's read_model_pin,
+# generalised to any role's own file rather than hardcoding orchestrator.md.
+read_role_pin() {
+    local role="$1" file pin
+    file="$PROJECT_DIR/.claude/agents/${role}.md"
+    [ -f "$file" ] || { printf 'unknown'; return 0; }
+    pin=$(grep -E '^model:' "$file" 2>/dev/null | head -1 | awk '{print $2}')
+    if [ -z "$pin" ] || ! model_id_class_ok "$pin"; then
+        printf 'unknown'
+        return 0
+    fi
+    printf '%s' "$pin"
+}
+
+# resolved_model_for_class <role-class> -> the RESOLVED pick for that class
+# from model-roles-resolved.json (schema 2), or "unknown" when the artifact
+# is missing, unparseable, the key is absent, or the value fails the
+# character class. Never fails the caller — a missing/stale resolution is
+# recorded as "unknown", not silently treated as agreement with the pin.
+resolved_model_for_class() {
+    local class="$1" artifact model
+    artifact="$QA_TRACKING_DIR/model-roles-resolved.json"
+    [ -f "$artifact" ] || { printf 'unknown'; return 0; }
+    command -v jq >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+    model=$(jq -r --arg r "$class" '.roles[$r] // empty' "$artifact" 2>/dev/null || echo "")
+    if [ -z "$model" ] || ! model_id_class_ok "$model"; then
+        printf 'unknown'
+        return 0
+    fi
+    printf '%s' "$model"
+}
+# MODEL-PIN-FIELDS END (claude-workflow-plugin-46w9)
+
 record_implementer() {
     local role="$1" tid="$2"
     [ -n "$role" ] && [ -n "$tid" ] || return 1
@@ -343,9 +439,16 @@ record_implementer() {
         return 0
     fi
 
-    local ts
+    local ts pin model
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
-    local record="IMPLEMENTER: role=$role task=$tid at $ts"
+    # "implementer" is the role-CLASS key model-select.sh resolves against
+    # (ALL_ROLES has no separate backend/frontend/devops entries — the three
+    # share one class, and today one frontmatter value; see model-select.sh's
+    # IMPL_AGENT comment). $role picks WHICH file read_role_pin reads, so a
+    # future divergence between the three files is still reflected correctly.
+    pin=$(read_role_pin "$role")
+    model=$(resolved_model_for_class "implementer")
+    local record="IMPLEMENTER: role=$role task=$tid model=$model pin=$pin at $ts"
     # Newer Beads: `bd comments add` (plural). Older: `bd comment add`.
     if bd comments add "$tid" "$record" >/dev/null 2>&1 \
         || bd comment add "$tid" "$record" >/dev/null 2>&1; then

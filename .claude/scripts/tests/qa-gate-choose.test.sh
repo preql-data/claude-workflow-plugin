@@ -160,8 +160,28 @@ seed_review_records() {
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
     printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$reviewer" "$hash" > "$art"
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
-        review-record "$tid" --file "$art" >/dev/null 2>&1 || return 1
+        review-record "$tid" < "$art" >/dev/null 2>&1 || return 1
+    # claude-workflow-plugin-rqer (v5 D2): the artifact just written now lives
+    # at a TRACKED path (docs/reviews/), so this fixture's git-visible dirt
+    # includes it from this instant — but changed-files.txt does not know that
+    # yet. If a caller lets this function return with the tracker still
+    # absent-or-empty, the NEXT `approve` reconciles from a blank tracker via
+    # `git status`, and 94d.1's change_set_reconstructed refusal fires
+    # (measured: it names this fixture's own uncommitted `.claude/scripts/`
+    # and `bin/` as dropped-as-baselined, because `bd create` auto-inits git
+    # here and nothing in this fixture ever commits it). Reconcile now, while
+    # the caller still controls exactly what's dirty, then regenerate the
+    # impact report so approve's freshness check sees the WITH-artifact set
+    # rather than refusing on staleness a moment later.
+    if [ -f "$FIXTURE/.claude/scripts/impact-report.sh" ]; then
+        CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+            reconcile-tracker >/dev/null 2>&1 || true
+        CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" \
+            "$tid" >/dev/null 2>&1 || true
+    fi
     # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
     # (exit 2, completion_record_missing) unless the task carries a validated
     # COMPLETION v1 record. `choose approve` delegates straight to cmd_approve,

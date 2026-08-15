@@ -557,7 +557,9 @@ seed_approvable() {
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
     printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$hash" > "$art"
-    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" < "$art" >/dev/null 2>&1
     pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
     printf '{"task_id":"%s","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded"],"blockers":[],"llm_observations":"seeded by the design-artifact fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}\n' \
         "$tid" > "$pay"
@@ -584,9 +586,19 @@ APPROVAL=$(latest_approval "$APPR_TID")
 assert_eq "4.0 the approve under test succeeded" "approved" "$(json_field '.status' "$APPROVE_OUT")"
 assert_contains "4.1 the approval record carries design_hash= as a MACHINE token" \
     "design_hash=$APPR_DESIGN_HASH" "$APPROVAL"
+# claude-workflow-plugin-rqer (v5 D2): design_hash= is no longer necessarily
+# the LAST token before the timestamp — seed_approvable's review-record call
+# now binds a real canonical artifact too, so an artifact_hash=<64 hex> token
+# (AC-3) sits between design_hash= and ' at ' whenever that binding verifies,
+# which it does here. The token ORDER contract this pins is still "nothing
+# but a machine token, in the documented sequence, ever sits between
+# worktree= and the timestamp" — updated to name BOTH tokens that sequence
+# now covers, rather than silently degrading to "design_hash= appears
+# somewhere in the record" (which is what removing the anchor to ' at ' cheaply
+# would have measured).
 assert_eq "4.1b ...positioned AFTER worktree= and immediately before ' at ' (token ORDER contract)" \
     "yes" \
-    "$(printf '%s' "$APPROVAL" | grep -qE 'worktree=[^ ]+ design_hash=[0-9a-fA-F]{64} at [0-9]{4}-' && echo yes || echo no)"
+    "$(printf '%s' "$APPROVAL" | grep -qE 'worktree=[^ ]+ design_hash=[0-9a-fA-F]{64} artifact_hash=[0-9a-fA-F]{64} at [0-9]{4}-' && echo yes || echo no)"
 assert_contains "4.1c ...and approve NAMES the binding in its envelope" \
     "design binding VERIFIED" "$(json_field '.observations' "$APPROVE_OUT")"
 
@@ -620,8 +632,14 @@ assert_not_contains "4.2c the new token did not leak into reviewed_by" "design_h
 # worktree token is a filesystem path, and the reader would then return empty.
 # That is a false UNBOUND — the fail-closed direction, and the one a reader of a
 # security token should pick.
+# claude-workflow-plugin-rqer (v5 D2): the optional `(artifact_hash=[0-9a-fA-F]{64} )?`
+# group accounts for AC-3's new token, which sits between design_hash= and the
+# timestamp whenever a review-artifact binding also verifies on the same
+# approval. Optional, not required: callers here include records seeded
+# without a review artifact at all, and this reader's whole job is to find
+# design_hash= regardless of what does or does not follow it before ' at '.
 read_design_binding() {
-    printf '%s' "$1" | sed -nE 's/^QA-GATE APPROVED [^:]*design_hash=([0-9a-fA-F]{64}) at [0-9]{4}-.*/\1/p'
+    printf '%s' "$1" | sed -nE 's/^QA-GATE APPROVED [^:]*design_hash=([0-9a-fA-F]{64}) (artifact_hash=[0-9a-fA-F]{64} )?at [0-9]{4}-.*/\1/p'
 }
 STRIPPED=$(printf '%s' "$APPROVAL" | sed -E 's/design_hash=[0-9a-fA-F]+ //')
 assert_eq "4.3 META: the strip mutation actually removed the token" "yes" \

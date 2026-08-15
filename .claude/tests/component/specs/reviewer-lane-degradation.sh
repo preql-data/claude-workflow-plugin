@@ -67,7 +67,12 @@ EOF
 # run_sequence <output-file> — the identical sequence; outputs normalised.
 run_sequence() {
     {
-        bash "$QAGATE" review-record "$TID" --file "$FIXTURE/art.json" 2>/dev/null
+        # claude-workflow-plugin-rqer (v5 D2): --file now asserts the
+        # CANONICAL derived path; piped via stdin instead — deterministic
+        # given the FIXED $TID and identical content, so the byte-identical
+        # comparison below (which already normalises the timestamp) is
+        # unaffected.
+        bash "$QAGATE" review-record "$TID" < "$FIXTURE/art.json" 2>/dev/null
         bash "$RCHECK" gate "$TID" --comments-json "$FIXTURE/comments.json" 2>/dev/null
     } | sed -E "s/${ISO}/<TS>/g"
 }

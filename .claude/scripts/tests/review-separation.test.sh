@@ -256,7 +256,9 @@ record_artifact() {
     cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"$reviewer","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$(current_hash)","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":1,"stopped_by":"verdict"}
 JSON
-    bash "$QG" review-record "$tid" --file "$art" >/dev/null 2>&1
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
+    bash "$QG" review-record "$tid" < "$art" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -434,8 +436,15 @@ assert_contains "4.1 approval comment carries reviewed_by=qa-claude" \
 # Full grammar, byte-anchored: hash token, THEN reviewed_by, THEN worktree
 # (3mg.2), THEN `at <ts>:`. Token order is the compatibility contract — every
 # addition goes AFTER the hash, space-separated.
+# claude-workflow-plugin-rqer (v5 D2): the token order is change_set_hash,
+# reviewed_by, worktree, [design_hash], artifact_hash, at <ts> — verbatim
+# from cmd_approve's add_comment interpolation (qa-gate.sh:3843,
+# "${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}at $ts: ").
+# No design binding is established in this scenario, so design_hash is
+# absent, but the review-artifact binding IS established (record_artifact
+# ran above), so artifact_hash= is present and sits directly before `at`.
 assert_match "4.1 approval record grammar (hash, reviewed_by, worktree, timestamp)" \
-    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
+    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ artifact_hash=[0-9a-f]{64} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
     "$REC_CMT"
 # This fixture is a bare tempdir, NOT a git checkout, so the token records the
 # unresolvable case. `none` rather than an omitted token is the point: a stable
@@ -503,8 +512,13 @@ if [ "$TOKSTRIP_RC" -eq 0 ]; then
     assert_not_contains "4.2b META: the stripped writer emits NO worktree token" \
         "worktree=" "$NOTOK_CMT"
     # The pre-3mg.2 grammar, exactly — no dangling token, no double space.
+    # claude-workflow-plugin-rqer (v5 D2): only the WORKTREE-TOKEN region was
+    # stripped from this copy; the review-artifact-hash binding (a SEPARATE
+    # sentinel region — qa-gate.sh's REVIEW-ARTIFACT-BINDING-TOKEN block) is
+    # untouched, so record_artifact's real review-record binding still
+    # verifies and artifact_hash= still lands directly before `at`.
     assert_match "4.2b META: ...and the record is otherwise byte-shaped as v3.5" \
-        "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
+        "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude artifact_hash=[0-9a-f]{64} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
         "$NOTOK_CMT"
     # THE differential: both readers, both shapes, same extractions.
     assert_eq "4.2b META: the hash capture is IDENTICAL on the token-less record" \
