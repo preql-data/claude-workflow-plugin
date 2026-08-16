@@ -17,7 +17,11 @@
 #                                           already-entered arm, so a
 #                                           qa-gate-entered label is not evidence
 #                                           that enter ever ran.
-#   status  <task-id>                       Print one of: not-entered, entered, approved, blocked.
+#   status  <task-id>                       Print one of: not-entered, entered, approved, blocked
+#                                           — or, if the store could not be read at all (schema
+#                                           skew, an unreachable store, any reason), "unavailable"
+#                                           with ok:false and exit 3 (claude-workflow-plugin-j7kk,
+#                                           39cy). Unavailable is not not-entered.
 #   approve <task-id> [--expect-hash <hash>] [--no-impact-report '<reason>']
 #           [--no-review '<reason>'] <approval-summary>
 #                                           --expect-hash <h> names the change set
@@ -1023,6 +1027,16 @@ wipe_iteration_state() {
         rm -f "$QA_TRACKING_DIR/last-test-rc.$sanitized" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/last-failed-checks.$sanitized" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/last-runner.$sanitized" 2>/dev/null || true
+        # claude-workflow-plugin-j7kk (9xl4 cheap half): the skip-when-unchanged
+        # cache — verify-before-stop.sh's record_verified_state/
+        # verified_state_unchanged. MUST die with the rest of the per-cycle
+        # state: a stale record surviving `enter` or `choose continue` could
+        # match a NEW cycle's tree by coincidence (extremely unlikely, but the
+        # other four caches in this function are wiped on the same belt-and-
+        # braces reasoning, not because a collision is likely) and replay a
+        # PREVIOUS cycle's result instead of running the fresh one this
+        # transition exists to demand.
+        rm -f "$QA_TRACKING_DIR/last-verified-state.$sanitized" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/escalation-posted.$sanitized" 2>/dev/null || true
         # 2ty: the auto-defer counter (Stops that fired while qa-escalated was
         # already set). It MUST die with the rest of the per-cycle state: a count
@@ -2060,6 +2074,13 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               change_set_hash covers the whole git-visible delta. Both steps
               are tolerant: enter never fails because of either.
   status  <task-id>
+              Precedence: approved > blocked > entered > not-entered. Reads
+              labels via ONE `bd show`. If that read fails for any reason —
+              schema skew, an unreachable store, a wedged daemon — prints
+              {"ok":false,"status":"unavailable",...} and exits 3, rather
+              than falling through to "not-entered" (claude-workflow-plugin-
+              j7kk, 39cy: an unreachable store used to be indistinguishable
+              from a task that was simply never entered).
   approve <task-id> [--expect-hash <hash>] [--accept-reconstructed '<reason>']
           [--no-impact-report '<reason>'] [--no-review '<reason>']
           <approval-summary>
@@ -2324,13 +2345,45 @@ require_bd() {
     fi
 }
 
-# Read labels for a task as a comma-joined string (empty on miss).
+# Read labels for a task as a comma-joined string (empty on miss). Also
+# returns — as THIS FUNCTION'S OWN EXIT STATUS, not a global variable — the
+# underlying `bd show` exit code (claude-workflow-plugin-j7kk, 39cy), so a
+# caller that needs to distinguish "confirmed zero labels" from "could not
+# check at all" can: `labels="$(get_labels "$tid")"; rc=$?`. cmd_status is
+# the one that does.
+#
+# EXIT STATUS, NOT A GLOBAL — and this is not a style preference, it is the
+# fix for a bug this file SHIPPED once already. The first draft set a global
+# GET_LABELS_RC from inside get_labels() and had cmd_status read it back
+# after `labels="$(get_labels "$tid")"`. MEASURED, by actually running the
+# paired test below (not by reasoning about it): that never worked. A
+# command substitution forks a SUBSHELL, so GET_LABELS_RC=1 assigned inside
+# get_labels() dies with that subshell — the parent's GET_LABELS_RC stayed
+# at its unset-by-the-caller value (0) on every single call, so cmd_status's
+# reachability check never fired at all, and `bash -x` had to be read to see
+# it (`bash -x qa-gate.sh status <id>` shows `++ GET_LABELS_RC=1` inside the
+# subshell's own trace depth, then control returns to the parent with the
+# global untouched). This codebase already has the general form of this
+# gotcha written down twice — model-select.sh's ROLE_FALLBACK_FILE and
+# session-start.sh's ss_context() both route a subshell-local fact out
+# through a FILE instead of a variable — but a function's own RETURN STATUS
+# is not subject to it: `var=$(fn)` sets `$?` to fn's exit status in the
+# PARENT shell, even though nothing fn assigned survives.
+#
 # `bd show <id> --json` returns either an object or a 1-element array
 # depending on the bd version, so we handle both shapes.
 get_labels() {
-    bd show "$1" --json 2>/dev/null \
-        | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null \
-        || echo ""
+    local raw rc
+    raw=$(bd show "$1" --json 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        return "$rc"
+    fi
+    printf '%s' "$raw" \
+        | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null
+    # No explicit `return` after the pipe on purpose: this function's exit
+    # status is jq's — a bd-succeeded-but-unparseable response is ALSO
+    # "could not determine the labels", the same as a bd failure above.
 }
 
 has_label() {
@@ -2338,6 +2391,19 @@ has_label() {
     local labels
     labels="$(get_labels "$1")"
     echo ",$labels," | grep -q ",$2,"
+}
+
+# label_in <labels-csv> <label> — membership test over an ALREADY-FETCHED
+# comma-joined label list (same bounding-comma convention has_label uses),
+# so a caller that already called get_labels once does not re-query bd per
+# label. cmd_status is the caller: it used to call has_label up to five
+# times per invocation (rubric-satisfied, rubric-pending, qa-approved,
+# qa-blocked, qa-gate-entered), each re-running `bd show`.
+label_in() {
+    case "$1" in
+        *",$2,"*) return 0 ;;
+        *)        return 1 ;;
+    esac
 }
 
 add_label() {
@@ -2709,30 +2775,72 @@ cmd_status() {
     [ -z "$tid" ] && { usage; exit 1; }
     require_bd "status" "$tid"
 
+    # ONE bd show call for the whole subcommand (was up to five: has_label
+    # re-queried bd per label — rubric-satisfied, rubric-pending, qa-approved,
+    # qa-blocked, qa-gate-entered). This is ALSO the reachability check
+    # (claude-workflow-plugin-j7kk, 39cy): `bd show` failing for ANY reason —
+    # schema skew, an unreachable store, a wedged daemon — must not be
+    # reported as "no labels present". That reading is indistinguishable from
+    # a task that has simply never been entered, to every caller of this
+    # subcommand — MEASURED: this exact confusion shipped live as
+    # {"ok":true,"status":"not-entered"} against a store that could not be
+    # read at all, during the schema-skew incident this task fixes.
+    # Unavailable is not not-entered, so it gets its OWN status, ok:false, and
+    # a distinct non-zero exit code — never folded into the precedence
+    # cascade below, which is only ever reached once the read is confirmed to
+    # have worked.
+    local labels labels_rc=0
+    # THIS FILE RUNS UNDER `set -e` (line 155). A bare `labels="$(get_labels
+    # "$tid")"` on its own line is NOT one of set -e's exemptions (an `if`/
+    # `while`/`until` condition, or a command before `&&`/`||`) — MEASURED,
+    # by actually running the paired test below: when get_labels() returned
+    # non-zero, the script ABORTED right there under `set -e`, before a
+    # following `labels_rc=$?` line ever ran (bash -x showed the trace stop
+    # dead after `+ labels=`, no `exit 3`, no JSON, just termination). Using
+    # the command substitution as an `if` CONDITION is the documented set -e
+    # exemption, so the exit status is captured instead of triggering it.
+    if labels="$(get_labels "$tid")"; then
+        labels_rc=0
+    else
+        labels_rc=$?
+    fi
+    # --- STATUS-UNAVAILABLE-BEGIN (claude-workflow-plugin-j7kk) -------------
+    # $labels_rc, captured via the if/else above (not a global variable
+    # get_labels() might have set from inside it) — see get_labels()'s own
+    # header for why a global does not work (a subshell-boundary bug this
+    # file shipped once already), and the paragraph above for why even a
+    # plain `$?` read on the next line does not, under this file's `set -e`.
+    if [ "$labels_rc" -ne 0 ]; then
+        emit_json 0 "status" "$tid" "unavailable" "bd show $tid --json failed (rc=$labels_rc) — the store could not be read, so qa lifecycle state is UNKNOWN, not absent. Check bd reachability (bd doctor), bd-version-vs-store-schema compatibility (workflow-doctor.sh's beads check), and .beads/daemon.log before treating this as a task that needs QA entry."
+        exit 3
+    fi
+    # --- STATUS-UNAVAILABLE-END (claude-workflow-plugin-j7kk) ---------------
+    labels=",$labels,"
+
     # Spec Phase A: surface rubric state alongside the qa state. Precedence
     # matches the label semantics: satisfied > pending > none. The rubric
     # state is informational — it does NOT change the qa-state precedence
     # below (principle 6: qa-approved is the only Stop-hook signal).
     local rubric_state="none"
     local rubric_obs="no rubric labels present"
-    if has_label "$tid" "rubric-satisfied"; then
+    if label_in "$labels" "rubric-satisfied"; then
         rubric_state="satisfied"
         rubric_obs="rubric-satisfied label present"
-    elif has_label "$tid" "rubric-pending"; then
+    elif label_in "$labels" "rubric-pending"; then
         rubric_state="pending"
         rubric_obs="rubric-pending label present"
     fi
 
     # Precedence: approved > blocked > entered > not-entered.
-    if has_label "$tid" "qa-approved"; then
+    if label_in "$labels" "qa-approved"; then
         emit_json 1 "status" "$tid" "approved" "qa-approved label present; rubric=$rubric_state ($rubric_obs)"
         return 0
     fi
-    if has_label "$tid" "qa-blocked"; then
+    if label_in "$labels" "qa-blocked"; then
         emit_json 1 "status" "$tid" "blocked" "qa-blocked label present; rubric=$rubric_state ($rubric_obs)"
         return 0
     fi
-    if has_label "$tid" "qa-gate-entered"; then
+    if label_in "$labels" "qa-gate-entered"; then
         emit_json 1 "status" "$tid" "entered" "qa-gate-entered label present, awaiting approve/block; rubric=$rubric_state ($rubric_obs)"
         return 0
     fi
@@ -4801,14 +4909,14 @@ cmd_grade_record() {
 #
 # The external reviewer driver writes here directly now (no
 # .claude/.qa-tracking hand-off copy) and its own path computation MUST match
-# this format string byte for byte — pinned against drift by
-# .claude/tests/component/specs/codex-review.sh's art_path() helper, which
-# independently re-derives this same path and asserts a file does/does not
-# exist there across its C1-C9 legs (R1-F3, QA round 1: this comment
-# previously cited review-artifact-durability.sh's Leg A, which drives the
-# CLAUDE lane through cmd_review_record over stdin and never invokes the
-# external driver at all, so it cannot pin the DRIVER's own path
-# computation — only codex-review.sh's own component spec drives the driver).
+# this format string byte for byte — pinned against drift by the driver's own
+# review-recording component spec under .claude/tests/component/specs/ — its
+# art_path() helper independently re-derives this same path and asserts a
+# file does/does not exist there across its C1-C9 legs (R1-F3, QA round 1:
+# this comment previously cited review-artifact-durability.sh's Leg A, which
+# drives the CLAUDE lane through cmd_review_record over stdin and never
+# invokes the external driver at all, so it cannot pin the DRIVER's own path
+# computation — only that component spec drives the driver).
 REVIEW_ARTIFACT_SUBDIR="docs/reviews"
 
 # review_artifact_path_for <tid> <iteration> — the ONE derivation of the

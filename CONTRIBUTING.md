@@ -465,6 +465,37 @@ other legitimate option when the original work was simply not finished; the
 one thing that is never right is leaving the finding as a comment nobody's
 queries will return.
 
+### A phase's scope is re-audited against the tree before that phase starts
+
+**A multi-phase plan is written before its predecessor ships, so its
+described scope drifts by the time its own phase actually starts.** A plan
+section for phase N+1 is necessarily written against phase N's *anticipated*
+output — but phase N routinely lands with a different shape than the plan
+assumed, because review rounds rename a subcommand, a validator tightens
+from strings to objects, or a decision gets resolved differently mid-round.
+Reading the plan once at write time and once at delegation time both miss
+the drift that happens in the gap between them; the check has to happen
+again, against the CURRENT tree, right before the phase that depends on it
+starts.
+
+Concrete evidence, all from one phase (D2) whose plan section was written
+before its predecessor (D1) shipped:
+
+- It named a subcommand (`design-record`) that D1 had already taken for
+  something else.
+- It described `acceptance[]` entries as strings; the validator D1 actually
+  shipped requires them to be objects.
+- It specified a refusal (`artifact_path_changed`) that D1's shipped
+  derivation makes structurally impossible to reach.
+- It told the phase to add a binding block that D1 had already shipped,
+  warn-only.
+
+None of these are planning mistakes in isolation — each was a correct
+description of D1's ANTICIPATED shape at the time the plan was written. They
+are drift, and the fix is procedural, not a demand for a better plan: before
+implementing a phase, re-derive its scope against what the tree actually
+contains, not against the plan's description of the prior phase.
+
 ### Every number carries the command that produced it and the commit it was measured at
 
 Any number appearing in a `docs/RELEASE_AUDIT.md` row, a `CHANGELOG.md`
@@ -529,6 +560,25 @@ number checkable. And it is **not a licence to bury numbers in prose to avoid
 the requirement**: writing "the suite is comprehensive" instead of a count
 does not satisfy this rule, it evades it, and an adjective was never
 falsifiable in the first place.
+
+### The convention above extends to inferences, not only measurements
+
+**State what was observed, then verify before relaying the conclusion.** An
+inference relayed in the voice of an observation is indistinguishable from a
+measurement to everyone downstream — the reader has no way to tell "I
+checked, and X is true" from "X seems likely, and I am stating it plainly a
+second time until it reads as fact." The two conventions are the same
+discipline pointed at two different objects: a *number* needs the command
+that produced it; a *conclusion* needs to name that it is an inference and
+say what it was checked against, not merely reasoned toward.
+
+Measured across one multi-correction arc (the v5 design phase): three of
+five orchestrator corrections were conclusions reported as observations —
+each plausible, internally consistent, and unverifiable by a downstream
+reader without independently re-deriving the inference themselves. The fix
+is the same shape as the number rule above: name what you actually looked
+at, and write "I infer X because Y" rather than a bare "X," so a reader can
+tell which one they are trusting.
 
 ## Multi-repo workflows (I8)
 

@@ -113,7 +113,8 @@ The plugin ships two parallel MCP manifests. Each scope uses a different variabl
 {
   "mcpServers": {
     "bd":         { "type": "stdio", "command": "node",
-                    "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/bd-mcp/bin/bd-mcp.js"] },
+                    "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/bd-mcp/bin/bd-mcp.js"],
+                    "env": { "BD_CWD": "${CLAUDE_PROJECT_DIR:-.}" } },
     "code-graph": { "type": "stdio", "command": "node",
                     "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/code-graph-mcp/bin/code-graph-mcp.js"] }
   }
@@ -121,6 +122,8 @@ The plugin ships two parallel MCP manifests. Each scope uses a different variabl
 ```
 
 The `:-.` default is required. Per the Claude Code MCP docs ([code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)), `CLAUDE_PROJECT_DIR` is set in the *spawned MCP server's* environment, not in Claude Code's own environment — so a bare `${CLAUDE_PROJECT_DIR}` in a project-scoped `.mcp.json` is unresolved at substitution time and produces an MCP-diagnostics warning ("Missing environment variables: CLAUDE_PROJECT_DIR"). The `:-.` default falls back to the current working directory (which is the project root when Claude Code starts), which resolves the warning without changing semantics.
+
+The `bd` server's `env.BD_CWD` (claude-workflow-plugin-j7kk, 39cy) is the same substitution applied to a second slot: `exec-bd.js`'s `resolveBdCwd()` precedence is `opts.cwd` > `BD_CWD` > `CLAUDE_PROJECT_DIR` > `process.cwd()`, and the bd-mcp README's own env table calls `CLAUDE_PROJECT_DIR` only "usually" set by Claude Code for a spawned server. Setting `BD_CWD` explicitly removes the dependency on `CLAUDE_PROJECT_DIR` also being visible inside the spawned process's own environment — an MCP server that launched outside the project root would otherwise walk up to 8 parent directories from an unrelated `process.cwd()` looking for `.beads/`, and could resolve the wrong store, or none, with no error.
 
 `.claude-plugin/plugin.json` (the plugin manifest, applies when the plugin is loaded as a plugin) uses bare `${CLAUDE_PLUGIN_ROOT}`:
 

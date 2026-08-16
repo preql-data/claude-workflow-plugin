@@ -2240,6 +2240,223 @@ current_change_set_hash() {
     CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --hash-only 2>/dev/null || printf ''
 }
 
+# SKIP-UNCHANGED BEGIN (claude-workflow-plugin-j7kk / 9xl4's cheap structural half)
+#
+# THE PROBLEM THIS REGION REMOVES. This gate re-runs the FULL L1 suite (test +
+# lint + type, per detect-stack.sh) on EVERY non-escalated, non-deferred Stop —
+# including a Stop that fires again moments after the last one, against a tree
+# nobody has touched since. Measured this session: contention alone moved
+# approve-idempotency.sh from 753s to 853s on IDENTICAL bytes; two component
+# specs failed transiently and never reproduced in three isolated re-runs; a
+# specialist observed a second instance of a spec it never started; a reviewer
+# recorded its own run as partly contended by this gate's OWN Stop-hook L1 run.
+# Leases — WHO owns a run, so a second one can refuse instead of interleave —
+# are claude-workflow-plugin-9xl4's and are explicitly NOT built here. This is
+# the cheaper half: most of that contention is not two runs racing each other,
+# it is the SAME Stop hook re-verifying a tree it already verified, because
+# nothing told it that was safe to skip.
+#
+# THE SHAPE IS BORROWED, NOT INVENTED. The escalation contract already reuses a
+# cached suite result instead of re-running (see QA_ESCALATED below, and
+# SUITE_REUSED) — this region is a SECOND WAY TO REACH THE SAME REUSE, gated on
+# a different, provably-safe precondition, and it is why SUITE_REUSED stays a
+# single boolean with a REASON attached (SUITE_REUSE_REASON) rather than a
+# second flag: every consumer of "was the suite replayed this loop" (checks_
+# scope_claim/note, the FAILED_CHECKS readout, the review-discipline reuse at
+# REVIEW-DISCIPLINE) already has to answer that question correctly regardless
+# of WHY, and a parallel flag would have to be threaded through all of them a
+# second time to stay correct — or, more likely, would not be, and one of them
+# would silently keep saying "escalation contract" over a skip that was not one.
+#
+# WHAT MAKES A SKIP PROVABLY SAFE: TWO INSTRUMENTS, BOTH REQUIRED, NEITHER
+# TRUSTED ALONE.
+#
+#   tree_fingerprint()          CONTENT over the whole git-visible tree (HEAD +
+#                               every tracked diff + every untracked file's
+#                               bytes, minus the workflow's own bookkeeping).
+#                               See its own header above for the full invariant.
+#   current_change_set_hash()   a hash over the sorted, denylist-filtered PATH
+#                               LIST the tracker holds — the same instrument
+#                               change_set_hash approvals bind to.
+#
+# NEITHER SUFFICES ALONE, and the direction each is missing is stated because
+# it is the one this task named explicitly. current_change_set_hash hashes
+# WHICH PATHS changed, not their bytes: a second edit to a file that is
+# ALREADY in the tracked set leaves the path list — and so the hash — exactly
+# where it was, so a skip gated on it alone would replay a stale result over
+# new, unverified content. That gap is tree_fingerprint's whole job (its own
+# header names the identical blind spot in change_set_hash, "the same blind
+# spot as hashing a path list"), so requiring tree_fingerprint to ALSO match
+# closes it: a second edit to an already-tracked file moves the diff
+# tree_fingerprint hashes even though the path list does not move. The INVERSE
+# gap — tree_fingerprint blind to something change_set_hash would catch — is
+# not reachable: tree_fingerprint's tracked-diff input covers every tracked
+# path unfiltered (wider than the denylist-filtered change set) and its
+# untracked input covers every untracked path the workflow itself did not
+# write, so nothing in the reviewable change set can move without ALSO moving
+# tree_fingerprint. Requiring current_change_set_hash too is therefore
+# belt-and-braces rather than load-bearing on its own — but it is CHEAP
+# belt-and-braces (both instruments are already computed elsewhere in this file
+# for other reasons) and it means the skip decision rests on the same two
+# instruments the rest of the gate already reasons in, not a third one invented
+# for this feature and untested everywhere else. This exact distinction — that
+# change_set_hash "binds the tracked-file PATH LIST, not content" — is the open
+# subject of claude-workflow-plugin-k0mc; this region does not fix k0mc (a
+# stale tracker entry can still inflate the path list elsewhere in the gate)
+# and does not need to, because it never trusts current_change_set_hash
+# unaccompanied.
+#
+# BOTH READS REFUSE A SENTINEL, ON EITHER SIDE, THE SAME WAY broader_
+# verification_note refuses FP_NO_GIT/FP_NO_HASH and qa-gate.sh refuses
+# CHANGE_SET_HASH_UNAVAILABLE: a sentinel is a CONSTANT, and comparing two
+# constants equal is a false match dressed as a measurement. A host with no git
+# repo, no sha256 tool, a failed diff, or a missing impact-report.sh must never
+# read as "unchanged" — it must read as "cannot tell", which here means "do not
+# skip", the safe direction. record_verified_state (below) additionally
+# REFUSES TO PERSIST a sentinel or an empty hash, so a transient failure at
+# persist-time cannot poison a later comparison with a value that looks valid
+# but is not — it just leaves the PREVIOUS good record in place, which costs at
+# most one redundant re-run later and never a false skip.
+#
+# SCOPED TO AN ACTIVE TASK, like the escalation cache it reuses the shape of:
+# QA_ESCALATED can only become true when CURRENT_TASK is set (task_has_label
+# returns 1 on an empty id), and this predicate is likewise never consulted
+# without one (see the call site below). A no-Beads / single-task user sees no
+# behaviour change: every Stop still runs the full suite, exactly as before
+# this region existed — there is no per-session/legacy fallback cache the way
+# last_test_rc_file_for has one, because there is no cross-Stop identity to
+# key it on without a task id.
+#
+# WHAT THIS REGION DELIBERATELY DOES NOT DO: reorder, retry, or own anything.
+# It does not decide WHO may run the suite (9xl4's leases); it only decides
+# whether THIS Stop, alone, can prove nothing changed since the last time this
+# same gate actually ran the suite for this task, end to end.
+last_verified_state_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-verified-state"; return; }
+    printf '%s/last-verified-state.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+
+# record_verified_state <task-id> <fp-pre> <hash-pre> — call ONLY from the
+# branch that just ran the suite for real (never from a replay of any kind).
+# <fp-pre>/<hash-pre> are the SAME two instruments, read by the CALLER
+# immediately BEFORE the suite was dispatched (see the call site below). This
+# function takes its OWN, independent reading AFTER the suite has finished and
+# persists the record — the CONTENT-sensitive tree fingerprint and the
+# PATH-LIST change-set hash the NEXT Stop will compare against, plus a
+# timestamp for the human-readable note, as one tab-separated line
+# (VERIFICATION_LEDGER's own convention above, scoped per-task instead of
+# appended) — ONLY IF the post-run reading equals the pre-dispatch one on
+# BOTH instruments.
+#
+# claude-workflow-plugin-j7kk R1-F1 (QA round 1): the ORIGINAL version of this
+# function took a SINGLE reading, at call time — i.e. strictly AFTER the suite
+# already ran — with no pre-dispatch value to compare it against. A write
+# landing DURING the suite's own run window (this batch measured runs
+# 353-853s wide; a concurrent reviewer, a second gate run, or the suite's own
+# command touching a tracked file as a side effect all reach that window) was
+# therefore absorbed silently into the "verified" baseline: the NEXT Stop
+# would compare an unchanged (already-mutated) tree against that baseline,
+# match, and VERIFY_SKIP_UNCHANGED would replay a green the suite never
+# actually measured end-to-end over that content — precisely the unsafe
+# direction this feature exists to avoid, and strictly worse than the
+# contention it was built to remove. The fix is the comparison below: if what
+# moved between the caller's pre-dispatch reading and this function's own
+# post-run reading is not NOTHING, this writes nothing at all, leaving
+# whatever record (if any) already existed in place. The cost of a false
+# mismatch (e.g. a transient hash hiccup) is one redundant re-run next Stop;
+# the cost of persisting anyway is a future false skip — never trade toward
+# that direction, the same rule the sentinel refusals below already follow.
+#
+# Best-effort AND REFUSING, now twice over: a persist that cannot establish
+# either instrument (pre OR post, sentinel or empty) writes nothing, and a
+# persist where post disagrees with pre writes nothing — both degrade to "the
+# next Stop reruns the suite once more than strictly necessary", never to
+# "the next Stop trusts a value nobody verified end-to-end".
+record_verified_state() {
+    local tid="$1" fp_pre="$2" hash_pre="$3" fp_post hash_post ts
+    [ -n "$tid" ] || return 0
+
+    # A sentinel or empty PRE reading refuses exactly like a sentinel/empty
+    # POST reading always has: the caller could not establish an instrument
+    # before dispatch (no git repo, no sha256 tool, impact-report.sh missing),
+    # so there is nothing safe to compare the post-run reading against —
+    # persisting on an unestablished pre-value would silently disable the
+    # comparison this function exists to make.
+    case "$fp_pre" in "$FP_NO_GIT" | "$FP_NO_HASH" | "") return 0 ;; esac
+    [ -n "$hash_pre" ] || return 0
+
+    fp_post=$(tree_fingerprint)
+    case "$fp_post" in "$FP_NO_GIT" | "$FP_NO_HASH" | "") return 0 ;; esac
+    hash_post=$(current_change_set_hash) || hash_post=""
+    [ -n "$hash_post" ] || return 0
+
+    # THE ONE COMPARISON THIS FIX ADDS. Two sentinels comparing equal would be
+    # a false match (the same reasoning as every OTHER sentinel refusal in
+    # this file) — but that case is already excluded above, so this is a
+    # genuine content/path-list comparison: if EITHER instrument moved while
+    # the suite was running, the run this Stop just performed cannot be
+    # attributed to the CURRENT tree with any confidence, and persisting the
+    # post-run reading would be exactly the R1-F1 defect. Write nothing.
+    if [ "$fp_pre" != "$fp_post" ] || [ "$hash_pre" != "$hash_post" ]; then
+        return 0
+    fi
+
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '?')
+    printf '%s\t%s\t%s\n' "$ts" "$fp_post" "$hash_post" \
+        > "$(last_verified_state_file_for "$tid")" 2>/dev/null || true
+    return 0
+}
+
+# verified_state_unchanged <task-id> — prints "true" or "false" on stdout;
+# exit status is always 0 (this must never be the thing that trips `set -e` on
+# a host with a missing `cut`, the exact R4-F3 class tree_fingerprint's own
+# header documents). "true" means BOTH instruments match the last genuinely-run
+# suite's recorded state for this task, so this Stop may replay that result
+# instead of re-running anything. Every `cut`/`cat` is guarded for the same
+# reason broader_verification_note's are: a missing tool must degrade this
+# predicate to "false" (never skip), not abort the whole hook.
+verified_state_unchanged() {
+    local tid="$1" f line fp hash cur_fp cur_hash
+    [ -n "$tid" ] || { printf 'false'; return 0; }
+    f=$(last_verified_state_file_for "$tid")
+    [ -s "$f" ] || { printf 'false'; return 0; }
+    line=$(cat "$f" 2>/dev/null) || { printf 'false'; return 0; }
+    fp=$(printf '%s' "$line" | cut -f2) || fp=""
+    hash=$(printf '%s' "$line" | cut -f3) || hash=""
+    case "$fp" in "$FP_NO_GIT" | "$FP_NO_HASH" | "") printf 'false'; return 0 ;; esac
+    [ -n "$hash" ] || { printf 'false'; return 0; }
+
+    cur_fp=$(tree_fingerprint)
+    case "$cur_fp" in "$FP_NO_GIT" | "$FP_NO_HASH" | "") printf 'false'; return 0 ;; esac
+    cur_hash=$(current_change_set_hash) || cur_hash=""
+    [ -n "$cur_hash" ] || { printf 'false'; return 0; }
+
+    if [ "$fp" = "$cur_fp" ] && [ "$hash" = "$cur_hash" ]; then
+        printf 'true'
+    else
+        printf 'false'
+    fi
+    return 0
+}
+
+# verified_state_unchanged_detail <task-id> — the human-readable clause for the
+# reason text and the claim functions, in the same voice as broader_
+# verification_note's "LAST RECORDED" paragraph: names what it reused and when,
+# rather than asserting currency without evidence. Only meaningful to call
+# after verified_state_unchanged printed "true"; degrades to a plain sentence
+# if the record vanished between the two reads (best-effort, never fatal).
+verified_state_unchanged_detail() {
+    local tid="$1" line ts fp hash
+    line=$(cat "$(last_verified_state_file_for "$tid")" 2>/dev/null) || line=""
+    ts=$(printf '%s' "$line" | cut -f1) || ts=""
+    fp=$(printf '%s' "$line" | cut -f2) || fp=""
+    hash=$(printf '%s' "$line" | cut -f3) || hash=""
+    printf 'the tree (fingerprint %s) and the reviewable change set (hash %s) have not moved since the full run recorded at %s' \
+        "${fp:-?}" "${hash:-?}" "${ts:-?}"
+}
+# SKIP-UNCHANGED END (claude-workflow-plugin-j7kk)
+
 # bd_show_with_comments <task-id> — `bd show --json` that always carries
 # comment BODIES, across the supported bd range.
 #
@@ -2970,9 +3187,19 @@ if [ -n "$FASTPATH_CLASS" ]; then
         # `blocked` and `approved` are excluded deliberately: F1 was never going to
         # fire on those, so the note would be noise about a path that was not taken
         # for an unrelated reason.
+        #
+        # claude-workflow-plugin-j7kk R1-F3: `unavailable` (qa-gate.sh status's
+        # own spelling for "the store could not be read at all", distinct from
+        # this hook's generic `error` fallback) is a SECOND unreadable spelling
+        # and was missing here. Without it, an unavailable store with a
+        # non-safe F1 verdict still correctly blocks (the dispatch case a few
+        # lines down already excludes `unavailable` from the fast path) but
+        # composed no F1-declined explanation — silently reproducing, for one
+        # more status spelling, the exact gap this composition site was moved
+        # out here to prevent (see the placement note above).
         if [ "$F1_BINDING_VERDICT" != "safe" ]; then
             case "$GATE_STATUS" in
-                not-entered|entered|pending|error|"")
+                not-entered|entered|pending|error|unavailable|"")
                     F1_BINDING_NOTE="The $FASTPATH_CLASS fast path (F1) did NOT auto-approve this Stop (claude-workflow-plugin-qzv).
 
 Why: $F1_BINDING_DETAIL.
@@ -3282,6 +3509,25 @@ if [ -x "$DETECT_STACK" ]; then
     DETECT_JSON=$("$DETECT_STACK" 2>/dev/null || echo "{}")
 fi
 
+# SKIP-WHEN-UNCHANGED (claude-workflow-plugin-j7kk / 9xl4 cheap half): computed
+# here, ahead of ITERATION-BUMP, for the same reason QA_ESCALATED is computed
+# above rather than inline at the suite branch — "will this Stop run a
+# verification pass" already has one answer to give (escalated / deferred /
+# no command configured) and this is a SECOND way to reach "no". Mutually
+# exclusive with QA_ESCALATED by construction (the `&&` below), so the
+# existing escalation replay is completely undisturbed: it still takes
+# precedence at the suite-dispatch branch further down.
+#
+# Scoped to an active task for the same reason the escalation cache is (see
+# SKIP-UNCHANGED's header above): verified_state_unchanged has nothing to
+# compare against without one, and a no-Beads user sees no behaviour change.
+VERIFY_SKIP_UNCHANGED=false
+if [ -n "$CURRENT_TASK" ] && [ "$QA_ESCALATED" != "true" ]; then
+    if [ "$(verified_state_unchanged "$CURRENT_TASK")" = "true" ]; then
+        VERIFY_SKIP_UNCHANGED=true
+    fi
+fi
+
 # ITERATION-BUMP BEGIN (claude-workflow-plugin-2ty)
 #
 # THE COUNTER CHARGES VERIFICATION ITERATIONS, NOT STOP-HOOK PASSES.
@@ -3330,7 +3576,8 @@ if printf '%s' "$DETECT_JSON" \
 fi
 VERIFY_WILL_RUN=false
 if [ "$QA_DEFERRED" != "true" ] && [ "$QA_ESCALATED" != "true" ] \
-    && [ "$VERIFY_CMD_PRESENT" = "true" ]; then
+    && [ "$VERIFY_CMD_PRESENT" = "true" ] \
+    && [ "$VERIFY_SKIP_UNCHANGED" != "true" ]; then
     VERIFY_WILL_RUN=true
 fi
 if [ "$VERIFY_WILL_RUN" = "true" ]; then
@@ -3522,6 +3769,11 @@ fi
 # F8/J17 + B3: detect runner and run test/lint/type-check with timeouts.
 # Spec 0.2: while qa-escalated is set we MUST NOT re-run the full suite;
 # we reuse whatever the cap-hit Stop cached. This was the production bug.
+# claude-workflow-plugin-j7kk: a second, independent reason to reuse rather
+# than re-run — the tree and the reviewable change set have not moved since
+# the last genuine run (VERIFY_SKIP_UNCHANGED, computed above ITERATION-BUMP).
+# See SKIP-UNCHANGED's header for why this is not a third state machine but a
+# second precondition for the SAME SUITE_REUSED reuse.
 RUNNER="none"
 TEST_CMD=""
 LINT_CMD=""
@@ -3533,6 +3785,14 @@ LINT_FAIL_TAIL=""
 TYPE_FAIL_TAIL=""
 TEST_FAIL_CLASS=""        # "runner" | "assertion" | "" (set when we re-run or replay)
 SUITE_REUSED=false        # true when this Stop reused cached results
+SUITE_REUSE_REASON=""     # SHORT label, WHY — every consumer's terse mentions
+                          # print this instead of a hardcoded phrase (see
+                          # SKIP-UNCHANGED's header above for why one flag,
+                          # two causes)
+SUITE_REUSE_DETAIL=""     # OPTIONAL longer evidence sentence (concrete
+                          # fingerprint/hash/timestamp); empty when the short
+                          # reason needs no further evidence (escalation),
+                          # appended only by checks_scope_note
 
 if [ "$QA_ESCALATED" = "true" ]; then
     # Replay the cached state. If anything is missing we fall back to
@@ -3552,6 +3812,23 @@ if [ "$QA_ESCALATED" = "true" ]; then
     fi
     [ -s "$LRN_FILE" ] && RUNNER=$(head -1 "$LRN_FILE" | tr -d '\r\n')
     SUITE_REUSED=true
+    SUITE_REUSE_REASON="escalation contract"
+elif [ "$VERIFY_SKIP_UNCHANGED" = "true" ]; then
+    # claude-workflow-plugin-j7kk (9xl4 cheap half): a SECOND replay path,
+    # mutually exclusive with the escalation branch above (VERIFY_SKIP_UNCHANGED
+    # is computed `&& [ "$QA_ESCALATED" != "true" ]`). Same cache reads as the
+    # escalation replay — last_failed_checks_file_for / last_runner_file_for —
+    # because both replays are reusing the SAME "what did the last genuine run
+    # observe" record; only the PRECONDITION for reusing it differs.
+    LFC_FILE=$(last_failed_checks_file_for "$CURRENT_TASK")
+    LRN_FILE=$(last_runner_file_for "$CURRENT_TASK")
+    if [ -s "$LFC_FILE" ]; then
+        FAILED_CHECKS=$(cat "$LFC_FILE" 2>/dev/null || echo "")
+    fi
+    [ -s "$LRN_FILE" ] && RUNNER=$(head -1 "$LRN_FILE" | tr -d '\r\n')
+    SUITE_REUSED=true
+    SUITE_REUSE_REASON="tree and change-set unchanged since the last full run"
+    SUITE_REUSE_DETAIL=$(verified_state_unchanged_detail "$CURRENT_TASK")
 else
     # 2ty: DETECT_JSON was captured ONCE, above the iteration-bump decision (the
     # bump has to know whether this Stop has a suite to run before it charges an
@@ -3581,6 +3858,22 @@ else
     #   This preserves the real exit code (124 for GNU `timeout`, anything
     #   else for genuine failures) so downstream branches can distinguish
     #   timeout from failure.
+
+    # claude-workflow-plugin-j7kk (R1-F1 fix): read BOTH skip instruments HERE,
+    # immediately before any suite command runs — this IS "before dispatch".
+    # record_verified_state below takes its OWN independent reading AFTER the
+    # suite finishes and refuses to persist unless that later reading matches
+    # this one, so a write landing anywhere in the suite's run window (another
+    # process, or the suite's own command touching a tracked file as a side
+    # effect) cannot be blessed into the baseline a later Stop trusts. See
+    # record_verified_state's header for the full defect and why "refuse"
+    # rather than "persist anyway" is the only safe direction. This adds no new
+    # instrument or dependency: verified_state_unchanged's pre-dispatch read
+    # above (used only to decide VERIFY_SKIP_UNCHANGED) is discarded the moment
+    # that decision is made; this keeps a SECOND, later copy of the same two
+    # reads instead of throwing both away.
+    VERIFY_FP_PRE=$(tree_fingerprint)
+    VERIFY_HASH_PRE=$(current_change_set_hash) || VERIFY_HASH_PRE=""
 
     test_rc=0
     if [ -n "$TEST_CMD" ]; then
@@ -3648,6 +3941,17 @@ else
             # failure summary.
             rm -f "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
         fi
+        # claude-workflow-plugin-j7kk: this branch just ran the suite for
+        # real (never a replay), which is the ONLY state record_verified_state
+        # may be called from — it persists the CONTENT-sensitive tree
+        # fingerprint + change-set hash a LATER Stop compares against to decide
+        # VERIFY_SKIP_UNCHANGED. Persisted regardless of pass/fail, same as the
+        # three writes above: a skip replays whatever this run observed,
+        # whether that was green or red. R1-F1 fix: VERIFY_FP_PRE/
+        # VERIFY_HASH_PRE (captured immediately before dispatch, above) are
+        # passed through so record_verified_state can refuse to persist if
+        # its own post-run reading disagrees — see that function's header.
+        record_verified_state "$CURRENT_TASK" "$VERIFY_FP_PRE" "$VERIFY_HASH_PRE"
     fi
 fi
 
@@ -3687,7 +3991,12 @@ fi
 # the phrase anywhere is the regression this region exists to prevent.
 checks_scope_claim() {
     if [ "${SUITE_REUSED:-false}" = "true" ]; then
-        printf 'checks NOT re-run this loop — cached result replayed under the escalation contract'
+        # claude-workflow-plugin-j7kk: SUITE_REUSE_REASON names WHY, generalised
+        # from the escalation-only phrasing this line used to hardcode — see
+        # SKIP-UNCHANGED's header for why this is one flag with two causes
+        # rather than a second claim function.
+        printf 'checks NOT re-run this loop — cached result replayed (%s)' \
+            "${SUITE_REUSE_REASON:-escalation contract}"
         return 0
     fi
     local ran=""
@@ -3709,9 +4018,17 @@ checks_scope_claim() {
 checks_scope_note() {
     printf 'WHAT THIS GATE RAN, EXACTLY.\n'
     if [ "${SUITE_REUSED:-false}" = "true" ]; then
-        printf '  The suite was NOT re-run this loop (escalation contract). The result above
+        printf '  The suite was NOT re-run this loop (%s). The result above
   is the cached one from an earlier Stop at runner=%s; this loop executed no
-  test, lint or type command of its own.\n' "${RUNNER:-none}"
+  test, lint or type command of its own.\n' "${SUITE_REUSE_REASON:-escalation contract}" "${RUNNER:-none}"
+        # claude-workflow-plugin-j7kk: the skip-when-unchanged path names
+        # concrete evidence (fingerprint + hash + timestamp) here, in the same
+        # voice broader_verification_note's "LAST RECORDED" paragraph already
+        # uses — the escalation path has no equivalent evidence beyond the
+        # runner name just printed, so SUITE_REUSE_DETAIL stays empty there.
+        if [ -n "${SUITE_REUSE_DETAIL:-}" ]; then
+            printf '  Reused because %s.\n' "$SUITE_REUSE_DETAIL"
+        fi
     else
         if [ -n "${TEST_CMD:-}" ]; then
             printf '  RAN      tests       %s\n' "$TEST_CMD"
@@ -3935,10 +4252,22 @@ if [ -n "$FAILED_CHECKS" ]; then
         # drops when the change set moves, and this banner keys on the label).
         REASON="Verification gate ESCALATED (iteration $ITER; $(escalation_basis_claim)) — record a J21 choice before iterating further."
         if [ "$SUITE_REUSED" = "true" ]; then
+            # claude-workflow-plugin-j7kk: this Stop reached the escalation
+            # branch (QA_ESCALATED is the POST-mark_escalation_if_capped
+            # value, so an escalation just triggered THIS loop is reachable
+            # here too — see 2ty QA R1-F2 above), but the suite it is
+            # replaying may have been reused for either of TWO reasons: an
+            # earlier Stop's escalation, or THIS loop's own skip-when-
+            # unchanged. SUITE_REUSE_REASON names which; "see qa-gate.sh
+            # choose" only applies to the former, so it stays folded into
+            # the escalation-specific default rather than printed always.
+            reuse_clause="cached result replayed (${SUITE_REUSE_REASON:-escalation contract})"
+            if [ "${SUITE_REUSE_REASON:-escalation contract}" = "escalation contract" ]; then
+                reuse_clause="test suite NOT re-run this loop per the escalation contract — see qa-gate.sh choose ..."
+            fi
             REASON="$REASON
 
-Cached failure summary (test suite NOT re-run this loop per the
-escalation contract — see qa-gate.sh choose ...):
+Cached failure summary ($reuse_clause):
 
 $FAILED_CHECKS"
         else
@@ -3949,7 +4278,21 @@ Last failure summary:
 $FAILED_CHECKS"
         fi
     else
-        REASON="Verification failed (iteration $ITER of $MAX_ITERATIONS).
+        if [ "$SUITE_REUSED" = "true" ]; then
+            # claude-workflow-plugin-j7kk: QA_ESCALATED is false here by
+            # construction (the branch above is mutually exclusive), so
+            # SUITE_REUSED=true on this path can only be the skip-when-
+            # unchanged replay — never the escalation contract, which always
+            # takes the branch above. Saying "this gate runs the FULL test
+            # suite... on every iteration" below would be the exact overclaim
+            # fkm.1.11 exists to prevent, just relocated to this branch.
+            REASON="Verification failed (iteration $ITER of $MAX_ITERATIONS; checks NOT re-run this loop — ${SUITE_REUSE_REASON:-tree and change-set unchanged since the last full run}).
+
+Cached failure summary:
+
+$FAILED_CHECKS"
+        else
+            REASON="Verification failed (iteration $ITER of $MAX_ITERATIONS).
 
 $FAILED_CHECKS
 
@@ -3958,6 +4301,7 @@ type-check on every iteration, not just tests for changed files. Changes
 to module A might break module B's contract; only running A's tests
 would miss B's failure. That is a statement about SCOPING, not coverage:
 whatever commands ran, ran whole. Which commands those were is below."
+        fi
     fi
 
     # fkm.1.11: the failing path names the executed commands too. It never
@@ -4841,7 +5185,19 @@ No active Beads task detected. Create one (and write its id via
     # is now spelled out as the stages actually executed.
     if [ "$QA_ESCALATED" = "true" ]; then
         if [ "$SUITE_REUSED" = "true" ]; then
-            ESC_SUITE_CLAUSE="Test suite NOT re-run this loop per the escalation contract (runner=$RUNNER; the cached result below is what passed earlier)."
+            # claude-workflow-plugin-j7kk: the SAME ambiguity the FAILED_CHECKS
+            # path resolves above — mark_escalation_if_capped runs a few lines
+            # above THIS check too (line ~5034), so QA_ESCALATED can turn true
+            # HERE (ROUNDS alone reaching the cap while checks pass) on a Stop
+            # whose suite-dispatch decision was actually the skip-when-
+            # unchanged replay, not an earlier Stop's escalation. Name
+            # whichever it was rather than asserting "per the escalation
+            # contract" unconditionally.
+            if [ "${SUITE_REUSE_REASON:-escalation contract}" = "escalation contract" ]; then
+                ESC_SUITE_CLAUSE="Test suite NOT re-run this loop per the escalation contract (runner=$RUNNER; the cached result below is what passed earlier)."
+            else
+                ESC_SUITE_CLAUSE="Test suite NOT re-run this loop — ${SUITE_REUSE_REASON} (runner=$RUNNER; the cached result below is what passed earlier)."
+            fi
         else
             ESC_SUITE_CLAUSE="The detected runner's checks RAN and passed this loop (runner=$RUNNER); the escalation contract skips them only on later loops."
         fi
@@ -5063,6 +5419,10 @@ if [ -n "$CURRENT_TASK" ]; then
     rm -f "$(last_test_rc_file_for "$CURRENT_TASK")" 2>/dev/null || true
     rm -f "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
     rm -f "$(last_runner_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    # claude-workflow-plugin-j7kk: same belt-and-braces reasoning as the four
+    # lines above — qa-gate.sh's wipe_iteration_state already clears this on
+    # approve/enter/choose, this is the release path's own copy of that.
+    rm -f "$(last_verified_state_file_for "$CURRENT_TASK")" 2>/dev/null || true
     rm -f "$(escalation_posted_file_for "$CURRENT_TASK")" 2>/dev/null || true
     # 2ty: the auto-defer counter belongs to the cycle that just closed.
     rm -f "$(escalated_stops_file_for "$CURRENT_TASK")" 2>/dev/null || true

@@ -12,6 +12,22 @@
 # single one-line model-select: <message> entry under workflow_warnings,
 # so the operator still sees the outcome without re-deriving it.
 #
+# claude-workflow-plugin-j7kk (B2, R4-F1 ruling): --check was added to that
+# call. Filed defect: the unconditional write rewrote four TRACKED files
+# (three agent .md + settings.json, one shared mtime) mid an OPEN, UNRELATED
+# change set, with no files_changed list naming them — an approval covering
+# the rest of that change set would have attested to bytes no specialist
+# wrote and no reviewer read. --check runs the identical resolution and
+# reports any drift between the config and the applied pins LOUDLY, in the
+# one model-select: line below, but writes nothing; the write path
+# (`model-select.sh apply`, no --check) is reachable only by an explicit,
+# deliberate invocation, same as /workflow-model already is for a single
+# role. See claude-workflow-plugin-twyv for why the drift ALSO has to be
+# loud rather than merely non-writing: a config/frontmatter disagreement
+# that surfaces nowhere is indistinguishable from one that was never
+# checked, which is exactly the gap the auto-write had been silently
+# papering over.
+#
 # v4.1 C0c (claude-workflow-plugin-20e): THIS HOOK NO LONGER HAS AN EXIT PATH
 # THAT LOSES THE WORKFLOW CONTEXT. It always emits a valid
 # {"hookSpecificOutput": {"hookEventName": "SessionStart", ...}} envelope and
@@ -599,14 +615,14 @@ MODEL_SELECT_SH="$PROJECT_DIR/.claude/scripts/model-select.sh"
 MODEL_SELECT_MSG=""
 if [ -x "$MODEL_SELECT_SH" ]; then
     if command -v timeout >/dev/null 2>&1; then
-        MODEL_SELECT_STDERR=$(timeout 8 bash "$MODEL_SELECT_SH" apply --quiet 2>&1 >/dev/null || true)
+        MODEL_SELECT_STDERR=$(timeout 8 bash "$MODEL_SELECT_SH" apply --quiet --check 2>&1 >/dev/null || true)
     elif command -v gtimeout >/dev/null 2>&1; then
-        MODEL_SELECT_STDERR=$(gtimeout 8 bash "$MODEL_SELECT_SH" apply --quiet 2>&1 >/dev/null || true)
+        MODEL_SELECT_STDERR=$(gtimeout 8 bash "$MODEL_SELECT_SH" apply --quiet --check 2>&1 >/dev/null || true)
     else
         # No external timeout available (typical macOS without coreutils).
         # The helper bounds curl internally at --max-time 5, so the worst
         # case is bounded by jq + ranking parse + bd-call latency.
-        MODEL_SELECT_STDERR=$(bash "$MODEL_SELECT_SH" apply --quiet 2>&1 >/dev/null || true)
+        MODEL_SELECT_STDERR=$(bash "$MODEL_SELECT_SH" apply --quiet --check 2>&1 >/dev/null || true)
     fi
     # The helper logs informationals to stderr prefixed with "model-select:";
     # keep the most recent line so a chain of warnings collapses to one.

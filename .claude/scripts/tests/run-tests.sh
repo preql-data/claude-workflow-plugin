@@ -585,6 +585,82 @@ on_interrupt() {
 }
 trap on_interrupt INT TERM HUP
 
+# State vars initialised OUTSIDE the sentinel region below, same convention
+# as SURVIVOR_COUNT/SURVIVOR_IDS/LEAK_NOTE further down: the paired control
+# (runner-completeness.test.sh) excises the ARM region from a COPY, and that
+# mutant must still run under `set -u` — every later reference to these four
+# (the per-spec sampling block, the verdict elif, and the tail summary's
+# DISARMED reprint, none of which live inside THIS sentinel) must see a safe
+# default rather than an unbound-variable abort. An excised ARM behaves as
+# permanently DISARMED, not as a crash.
+PROTECTED_STORE="$PROJECT_DIR/.beads"
+STORE_CANARY_ARMED=0
+STORE_CANARY_DISARM_REASON="the STORE-CANARY-ARM region did not run"
+STORE_HASH_BEFORE=""
+# --- STORE-CANARY-ARM-BEGIN (claude-workflow-plugin-j7kk) -------------------
+# THE STRUCTURAL GUARD. A per-spec write-state canary on the protected Beads
+# store, keyed on STORE STATE, never on a test marker. It exists because
+# model-roles.test.sh — one of THIS runner's own 39 specs — was measured
+# CAN-REACH(WRITE) against production: 417 repo-root-cwd bd calls in one run
+# (186 comment, 151 show, 35 create, 35 list, 10 --version), landing 9,937+
+# synthetic `MODEL SWITCH` comments on a real task before that spec was fixed
+# (claude-workflow-plugin-j7kk census). The other 38 specs are isolated by
+# SEVEN different, undeclared conventions (cd into a fixture store; explicit
+# `bd -C <dir>`; a fixture `bin/bd` stub; a callee that cds itself; a
+# store-independent subcommand; no bd call on the path at all) and nothing
+# states which is required — so a future spec author can reproduce exactly
+# this defect, and nothing here would notice until someone went looking for
+# 9,937 comments by hand. Prevention has to be structural: a harness-level
+# guard that fails ANY spec whose environment resolves to the production
+# store, by name, rather than a per-spec fix the next author can omit.
+#
+# A per-writer guard (teach each of bd's ~11 write-capable production
+# scripts to refuse under a test marker) was rejected on two measured
+# grounds: it is per-writer, so the next bd-calling script omits it exactly
+# as model-select.sh:927 omitted the `.beads`-presence half of its own
+# availability guard; and it relocates harness-building into production
+# code, which this repo's own conventions (CLAUDE.md) treat as a smell.
+#
+# DETECTION PREDICATE: `dolt sql -q "SELECT hashof('HEAD')"` on the protected
+# store. Chosen over `bd context`'s cwd-resolution check (constant across
+# all 39 specs today — a REACHABILITY precondition, not a guard) and over a
+# dolt-CLI-free manifest hash (stability was measured, sensitivity to a
+# write was not — see the task's OQ-2). Cost ~0.12s/call, measured zero
+# false positives across 12 consecutive bd reads plus dolt SELECTs in the
+# same census; every bd write auto-commits, so a moved hash is real.
+#
+# THE PROTECTED STORE IS DERIVED, NEVER HARDCODED. PROJECT_DIR already
+# honors CLAUDE_PROJECT_DIR (see above), so the paired control in
+# runner-completeness.test.sh points this same mechanism at a SEEDED
+# FIXTURE store via the runner's existing lever — no new env knob, and no
+# need to contaminate production to prove the anti-contamination guard
+# works. A guard that hardcoded "$PROJECT_DIR/.beads" could only be paired
+# by causing the harm it exists to prevent, and would ship unpaired.
+if ! command -v dolt >/dev/null 2>&1; then
+    STORE_CANARY_DISARM_REASON="dolt is not on PATH"
+elif [ ! -d "$PROTECTED_STORE/embeddeddolt/beads/.dolt" ]; then
+    STORE_CANARY_DISARM_REASON="$PROTECTED_STORE/embeddeddolt/beads/.dolt does not exist (no embedded-Dolt store here — a store-less CI checkout, or a pre-1.1.x bd install)"
+else
+    STORE_HASH_BEFORE=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+    case "$STORE_HASH_BEFORE" in
+        ''|*[Hh]ashof*) STORE_CANARY_DISARM_REASON="could not read hashof('HEAD') from $PROTECTED_STORE (dolt query failed)"
+                        STORE_HASH_BEFORE="" ;;
+        *)              STORE_CANARY_ARMED=1 ;;
+    esac
+fi
+if [ "$STORE_CANARY_ARMED" = "1" ]; then
+    printf 'STORE-CANARY: ARMED — watching %s for unattributed writes during this run\n' "$PROTECTED_STORE"
+else
+    # HONEST DEGRADATION, LOUD AND COUNTED, NEVER A SILENT PASS. A store-less
+    # CI checkout has nothing to contaminate, so this does not fail the tier
+    # — but a permanently-DISARMED guard is indistinguishable from a working
+    # one unless every run says so, both here and in the summary.
+    printf 'STORE-CANARY: DISARMED — %s; this run cannot detect writes to %s\n' \
+        "$STORE_CANARY_DISARM_REASON" "$PROTECTED_STORE"
+fi
+# --- STORE-CANARY-ARM-END (claude-workflow-plugin-j7kk) ---------------------
+
 TOTAL=0
 PASS=0
 FAIL=0
@@ -714,6 +790,68 @@ for test_file in "${TESTS[@]}"; do
     # --- SURVIVOR-SWEEP-END (a9hh R2-F2) --------------------------------------
     CURRENT_SPEC_PGID=""
 
+    # State vars initialised OUTSIDE the sentinel, same convention as
+    # SURVIVOR_COUNT/SURVIVOR_IDS/LEAK_NOTE above: the paired control excises
+    # exactly the sentinel-delimited region from a COPY, and the excised
+    # mutant must still run under `set -u`, behaving as if this spec had
+    # never been sampled at all.
+    STORE_WRITES=0
+    STORE_NOTE=""
+    STORE_DETAIL=""
+    # --- STORE-CANARY-BEGIN (claude-workflow-plugin-j7kk) ---------------------
+    # Sampled HERE — after `wait "$spec_pid"` and after the survivor sweep —
+    # so a spec that backgrounded a writer has already been reaped or killed
+    # before this spec's "after" hash is taken; a write from that backgrounded
+    # process still counts (it happened during this spec's window), it is
+    # simply attributed at the earliest point it can be READ safely.
+    #
+    # Sampling carries the PREVIOUS spec's "after" as the next spec's
+    # "before" (STORE_HASH_BEFORE is reassigned at the bottom of this block,
+    # never reset per-iteration) — 40 hashof calls across a 39-spec tier, not
+    # 78: one at arm time, one per spec thereafter.
+    if [ "$STORE_CANARY_ARMED" = "1" ]; then
+        STORE_HASH_AFTER=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
+            && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+        if [ -n "$STORE_HASH_AFTER" ] && [ "$STORE_HASH_AFTER" != "$STORE_HASH_BEFORE" ]; then
+            STORE_WRITES=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
+                && dolt log --oneline "$STORE_HASH_BEFORE".."$STORE_HASH_AFTER" 2>/dev/null | wc -l | tr -d ' ')
+            case "$STORE_WRITES" in ''|*[!0-9]*) STORE_WRITES=1 ;; esac
+            STORE_DETAIL=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
+                && dolt log --oneline "$STORE_HASH_BEFORE".."$STORE_HASH_AFTER" 2>/dev/null | head -8)
+            # claude-workflow-plugin-j7kk R1-F2: the hash MOVED (this `if`
+            # only runs when it did) but the double-dot range can still
+            # legitimately report ZERO lines — not the empty-or-non-numeric
+            # shape the case guard above catches, but the well-formed numeric
+            # string "0" itself. That happens when AFTER is NOT reached by NEW
+            # commits on top of BEFORE: a mid-run rollback/reset (the
+            # v65-to-v53 schema rollback performed during this very batch is
+            # the live example of the class) moves HEAD to an ANCESTOR of
+            # BEFORE, so every commit reachable from AFTER is also reachable
+            # from BEFORE and the range is empty by construction; a `dolt log`
+            # call that fails transiently right after a successful `hashof`
+            # read degrades identically. Either way the store moved, and this
+            # canary must not read that as clean — "0 writes" was never a
+            # measurement of "nothing happened", only of "the range had
+            # nothing in it", and those are different claims. Escalate to the
+            # same STORE_WRITES=1 shape a genuine single write takes (so the
+            # dedicated FAIL arm below fires) with a DETAIL that names the
+            # actual observation instead of a fabricated commit count.
+            if [ "$STORE_WRITES" = "0" ]; then
+                STORE_WRITES=1
+                STORE_DETAIL="NON-LINEAR store movement: HEAD moved from $STORE_HASH_BEFORE to $STORE_HASH_AFTER but \`dolt log $STORE_HASH_BEFORE..$STORE_HASH_AFTER\` reported no commits — AFTER is not reachable via new commits on BEFORE (a rollback/reset-class move), or dolt log failed transiently after a successful hashof read"
+                STORE_NOTE="; the protected Beads store moved from $STORE_HASH_BEFORE to $STORE_HASH_AFTER by a NON-LINEAR change (not a chain of new commits — a rollback/reset-class move, or a transient dolt-log failure) while it ran"
+            else
+                STORE_NOTE="; the protected Beads store advanced by $STORE_WRITES commit(s) while it ran"
+            fi
+        fi
+        # Carry forward regardless of whether this spec moved it — a NO-OP
+        # write compares equal next iteration; a real move becomes the next
+        # spec's baseline, so a later spec is never blamed for an earlier
+        # one's commits.
+        [ -n "$STORE_HASH_AFTER" ] && STORE_HASH_BEFORE="$STORE_HASH_AFTER"
+    fi
+    # --- STORE-CANARY-END (claude-workflow-plugin-j7kk) -----------------------
+
     cat "$SPEC_OUT"
 
     # Assertion lines actually executed — the same `PASS:`/`FAIL:` shape the
@@ -754,15 +892,15 @@ for test_file in "${TESTS[@]}"; do
             [ "$WD_SURV_COUNT" -gt 0 ] && \
                 WD_SURV_NOTE="$WD_SURV_NOTE; $WD_SURV_COUNT process(es) SURVIVED the kill escalation — see survivor lines"
         fi
-        FAILED_FILES+=("$base (TIMEOUT: killed by the ${SPEC_TIMEOUT_S}s per-spec cap after emitting $ASSERTS assertion(s)$LEAK_NOTE$WD_SURV_NOTE)")
-        printf -- '--- %s: FAILED — TIMEOUT at the %ss per-spec cap (%s assertion(s) emitted in %ss; never a pass, never a skip%s%s) ---\n' \
-            "$base" "$SPEC_TIMEOUT_S" "$ASSERTS" "$ELAPSED_S" "$LEAK_NOTE" "$WD_SURV_NOTE"
+        FAILED_FILES+=("$base (TIMEOUT: killed by the ${SPEC_TIMEOUT_S}s per-spec cap after emitting $ASSERTS assertion(s)$LEAK_NOTE$WD_SURV_NOTE$STORE_NOTE)")
+        printf -- '--- %s: FAILED — TIMEOUT at the %ss per-spec cap (%s assertion(s) emitted in %ss; never a pass, never a skip%s%s%s) ---\n' \
+            "$base" "$SPEC_TIMEOUT_S" "$ASSERTS" "$ELAPSED_S" "$LEAK_NOTE" "$WD_SURV_NOTE" "$STORE_NOTE"
         [ -s "$WD_SURVIVORS" ] && cat "$WD_SURVIVORS"
     elif [ "$rc" -ne 0 ]; then
         FAIL=$((FAIL + 1))
-        FAILED_FILES+=("$base (rc=$rc, $ASSERTS assertion(s) in ${ELAPSED_S}s$LEAK_NOTE)")
-        printf -- '--- %s: FAILED rc=%s (%s assertion(s) in %ss%s) ---\n' \
-            "$base" "$rc" "$ASSERTS" "$ELAPSED_S" "$LEAK_NOTE"
+        FAILED_FILES+=("$base (rc=$rc, $ASSERTS assertion(s) in ${ELAPSED_S}s$LEAK_NOTE$STORE_NOTE)")
+        printf -- '--- %s: FAILED rc=%s (%s assertion(s) in %ss%s%s) ---\n' \
+            "$base" "$rc" "$ASSERTS" "$ELAPSED_S" "$LEAK_NOTE" "$STORE_NOTE"
     elif [ "$SURVIVOR_COUNT" -gt 0 ]; then
         # Exited 0 while its process group still held live work. Never a
         # pass and never a mere annotation: the transcript this spec was
@@ -774,9 +912,41 @@ for test_file in "${TESTS[@]}"; do
         # called left behind — unwaitable, but preventable at the source,
         # which is what TELEMETRY-DISARM does for bd's flusher.)
         FAIL=$((FAIL + 1))
-        FAILED_FILES+=("$base (exited 0 with $SURVIVOR_COUNT background process(es) still running — killed; a spec must end its background work before returning; $ASSERTS assertion(s) in ${ELAPSED_S}s)")
-        printf -- '--- %s: FAILED — returned with %s live background process(es), killed (%s assertion(s) in %ss); its output ends wherever they were, so no outcome read from it is complete ---\n' \
-            "$base" "$SURVIVOR_COUNT" "$ASSERTS" "$ELAPSED_S"
+        FAILED_FILES+=("$base (exited 0 with $SURVIVOR_COUNT background process(es) still running — killed; a spec must end its background work before returning; $ASSERTS assertion(s) in ${ELAPSED_S}s$STORE_NOTE)")
+        printf -- '--- %s: FAILED — returned with %s live background process(es), killed (%s assertion(s) in %ss)%s; its output ends wherever they were, so no outcome read from it is complete ---\n' \
+            "$base" "$SURVIVOR_COUNT" "$ASSERTS" "$ELAPSED_S" "$STORE_NOTE"
+    # --- STORE-CANARY-BEGIN (claude-workflow-plugin-j7kk) ---------------------
+    # A DEDICATED arm for a spec that would otherwise be entirely green but
+    # moved the protected store. Placed immediately after the SURVIVOR_COUNT
+    # arm and before TRANSCRIPT-FAIL, so a spec already failing for one of
+    # the reasons above keeps that reason (STORE_NOTE is appended to each of
+    # them instead); this arm exists for the spec that is not already red.
+    #
+    # L1 cannot attribute a Dolt commit to a PROCESS — no writer identity is
+    # recorded store-side (census, section 2.2 item 3: label writes carry no
+    # timestamp or attribution at all, and comment-writer provenance is
+    # self-reported and was WRONG in the one case measured, claiming a
+    # SessionStart apply for a write a test run actually made). So this is a
+    # REACHABILITY failure of the tier, not proven authorship: either this
+    # spec wrote, or another process wrote concurrently while it ran — both
+    # mean L1 ran against a live production store, and every record left
+    # behind is test-authored and must not be read as evidence.
+    #
+    # It does NOT roll back (deliberate — see the ARM block and the task's
+    # own measurement: genuine agent writes interleave with a contaminating
+    # spec in the same window, and an automatic revert would destroy real
+    # work alongside the synthetic records).
+    elif [ "$STORE_WRITES" -gt 0 ]; then
+        FAIL=$((FAIL + 1))
+        FAILED_FILES+=("$base (contaminated the protected Beads store: advanced by $STORE_WRITES commit(s) while this spec ran; $ASSERTS assertion(s) in ${ELAPSED_S}s)")
+        printf -- '--- %s: FAILED — the protected Beads store %s advanced by %s commit(s)\n' \
+            "$base" "$PROTECTED_STORE" "$STORE_WRITES"
+        printf '    while this spec ran. L1 cannot attribute a Dolt commit to a process, so this is a\n'
+        printf '    REACHABILITY failure of the tier, not proven authorship: either this spec wrote, or\n'
+        printf '    another process wrote concurrently — both mean L1 ran against a live production store.\n'
+        printf '    Commits below. Every record left by a spec is test-authored and must not be read as evidence. ---\n'
+        [ -n "$STORE_DETAIL" ] && printf '%s\n' "$STORE_DETAIL" | sed 's/^/    /'
+    # --- STORE-CANARY-END (claude-workflow-plugin-j7kk) -----------------------
     # --- TRANSCRIPT-FAIL-BEGIN (a9hh R4-F2) ----------------------------------
     # rc=0 with a FAIL: line in the transcript is a FAILURE the exit code
     # never carried. Reproduced on the shipped pre-fix runner, both shapes:
@@ -853,6 +1023,10 @@ printf 'Assertions executed: %d\n' "$ASSERTS_TOTAL"
 if [ "$TIMEOUT_COUNT" -gt 0 ]; then
     printf 'Timed out (counted in Failed): %d spec(s) at the %ss per-spec cap\n' \
         "$TIMEOUT_COUNT" "$SPEC_TIMEOUT_S"
+fi
+if [ "$STORE_CANARY_ARMED" != "1" ]; then
+    printf 'STORE-CANARY: DISARMED — %s; this run could not detect writes to %s\n' \
+        "$STORE_CANARY_DISARM_REASON" "$PROTECTED_STORE"
 fi
 
 if [ "$FAIL" -gt 0 ]; then

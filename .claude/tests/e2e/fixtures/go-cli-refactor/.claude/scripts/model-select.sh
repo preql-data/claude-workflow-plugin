@@ -35,7 +35,7 @@
 #       message goes to stderr and stdout is empty. --refresh bypasses the
 #       cache and forces an API round-trip (no-op without an API key).
 #
-#   apply [--quiet] [--refresh]
+#   apply [--quiet] [--refresh] [--check]
 #       Resolve ALL THREE roles first; if a role's resolved id differs from
 #       that lane's current pin, invoke workflow-model-apply.sh --role and
 #       record a role-tagged switch on the standing "Model selection log"
@@ -43,6 +43,22 @@
 #       listing (keep every pin, no artifact). Quiet suppresses per-file
 #       rewrite chatter; the one-line summary still prints. --refresh
 #       bypasses the cache (same semantics as resolve).
+#
+#       --check (claude-workflow-plugin-j7kk, B2, R4-F1 ruling): DETECT AND
+#       WARN, never write. Runs the identical resolution (including the
+#       resolved-mapping artifact, which is workflow bookkeeping under
+#       .claude/.qa-tracking/ — never a tracked file — so recording it is not
+#       what R4-F1 forbids), but the per-role step compares current_pin()
+#       against the resolved pick instead of calling workflow-model-apply.sh.
+#       Any disagreement is named in the ONE summary line session-start.sh's
+#       `tail -1 model-select:` collapse surfaces, together with the
+#       `/workflow-model --role <role> <id>` command that applies it. This is
+#       what SessionStart calls; the write path above is reachable only by an
+#       explicit invocation without --check (a human/agent running this
+#       script directly, or /workflow-model for a single role). Filed
+#       defect: four TRACKED files (three agent .md + settings.json) were
+#       rewritten by the OLD unconditional auto-apply mid an unrelated open
+#       change set, sharing one mtime, claimed by no files_changed list.
 #
 #   status
 #       Print the per-role table (role, strategy, pinned id, resolved id),
@@ -161,6 +177,7 @@ ROLE_FALLBACK_FILE=""
 
 QUIET=0
 REFRESH=0
+CHECK_ONLY=0
 SUBCMD="${1:-}"
 shift || true
 
@@ -168,11 +185,18 @@ shift || true
 # a task id; every other subcommand ignores it. Unknown flags stay ignored (the
 # pre-D0 contract) so a future flag added to one subcommand cannot break the
 # others.
+#
+# --check (claude-workflow-plugin-j7kk, B2): a GLOBAL flag, parsed here like
+# --quiet/--refresh, but only cmd_apply reads it. Kept global rather than
+# apply-specific so the "unknown flags are ignored" contract stays true of
+# every other subcommand that sees it on its argv (none currently do, but
+# nothing has to change here if one starts to).
 ARG1=""
 while [ "${1:-}" != "" ]; do
     case "$1" in
         --quiet|-q) QUIET=1 ;;
         --refresh)  REFRESH=1 ;;
+        --check)    CHECK_ONLY=1 ;;
         --*)        ;;  # ignore unknown flags
         *)          [ -z "$ARG1" ] && ARG1="$1" ;;
     esac
@@ -1250,11 +1274,28 @@ cmd_apply() {
     # Per-role apply, driven by the same TSV. Reading the picks back from the
     # file the artifact was written from means the rewrite and the artifact
     # cannot disagree about what was resolved.
-    local switched=0 summary=""
+    #
+    # claude-workflow-plugin-j7kk (B2, R4-F1 ruling): CHECK_ONLY branches this
+    # loop between WRITE (unchanged: _apply_role, exactly as every existing
+    # caller of `apply` without --check still gets) and DETECT-AND-WARN
+    # (current_pin() vs the resolved pick, compared, never written). An EMPTY
+    # current_pin (missing agent file) is not drift to report — it is
+    # _apply_role's own "nothing to pin" case, kept consistent here so
+    # --check and the write path agree about what counts as a lane worth
+    # naming.
+    local switched=0 summary="" drifted=""
     while IFS="$(printf '\t')" read -r role strat pick fb; do
         [ -n "$role" ] || continue
-        _apply_role "$role" "$pick" && switched=$((switched + 1))
         summary="${summary:+$summary }$role=$pick"
+        if [ "$CHECK_ONLY" -eq 1 ]; then
+            local cur
+            cur=$(current_pin "$role")
+            if [ -n "$cur" ] && [ "$cur" != "$pick" ]; then
+                drifted="${drifted:+$drifted; }$role: agent file has '$cur', config resolves '$pick' (apply: /workflow-model --role $role $pick)"
+            fi
+        else
+            _apply_role "$role" "$pick" && switched=$((switched + 1))
+        fi
     done < "$tsv"
     rm -f "$tsv" 2>/dev/null || true
 
@@ -1262,6 +1303,19 @@ cmd_apply() {
     [ "$lane" != "claude" ] && lane_note=" reviewer_lane=$lane"
     [ "$dlane" != "claude" ] && lane_note="$lane_note design_reviewer_lane=$dlane"
     [ "$collapse" = "true" ] && lane_note="$lane_note identity_collapse=true"
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+        # ONE _result call, deliberately never a separate _warn: session-
+        # start.sh keeps only the LAST "model-select:"-prefixed stderr line
+        # ("keep the most recent line so a chain of warnings collapses to
+        # one"), so the drift detail has to BE that line, not a warning
+        # printed before a summary line that would eclipse it.
+        if [ -n "$drifted" ]; then
+            _result "resolver drift (config vs applied pins) — NOTHING auto-applied (R4-F1): $drifted"
+        else
+            _result "roles: $summary${lane_note} (check-only: applied pins already match the config; 0 written)"
+        fi
+        return 0
+    fi
     _result "roles: $summary${lane_note} ($switched switched)"
 }
 

@@ -130,14 +130,108 @@ HANG_TOKEN="rc-orphan-$$-$(date +%s)"
 DECOY_PID=""
 DECOY_PID_L2=""
 
+# reap_respawn_orphans — claude-workflow-plugin-j7kk. The R6 respawn-pair
+# legs further down (mk_respawn_pair / the int/cap/l2c legs) deliberately
+# create a setsid'd shell PLUS a TERM-trap-spawned child that are, BY DESIGN,
+# outside every process group this file or the runner it drives can reach by
+# group-kill — that is the exact escapee shape those legs exist to reproduce.
+# Each leg's own inline `pkill -9 -f` immediately after its assertions is the
+# FAST path and is unchanged. This function is the SLOW path: called from the
+# EXIT trap (below) so a leg that errors out, or a run interrupted (any
+# signal SIGKILL cannot pre-empt) between "spawn" and its own pkill line,
+# still cannot leave one of these alive after this file's process exits.
+#
+# Found necessary by direct observation, not by reasoning about the code in
+# the abstract: nine such processes (three respawn pairs' worth, i.e. every
+# tag, from three separate historical $WORK directories, none matching the
+# run that found them) were discovered still resident — sleeping, ppid=1,
+# ordinary group leaders — days after whatever run created them, which only
+# fits an interrupted-before-its-own-cleanup run of this exact section (a
+# hard-killed enclosing process is the one thing even this sweep cannot reach
+# either, which is why the fast path per leg remains the primary defence and
+# this is explicitly the second one, not a replacement for it).
+#
+# Patterns match on the SHARED prefix each tag's own pkill already uses
+# (`$WORK/r6-outer-<tag>.sh`, `$HANG_TOKEN-resp-<tag>`) so one sweep call
+# covers whichever tags got as far as spawning, however far the section got.
+# `-f` matches the full command line, which survives the exec'd process even
+# after `$WORK` is removed — this function never removes it itself, so it is
+# safe to call standalone (see the pairing test right below it) as well as
+# from cleanup(), which calls it before its own `rm -rf "$WORK"`.
+reap_respawn_orphans() {
+    if [ -n "${WORK:-}" ]; then
+        pkill -9 -f "$WORK/r6-outer-" 2>/dev/null || true
+    fi
+    if [ -n "${HANG_TOKEN:-}" ]; then
+        pkill -9 -f "$HANG_TOKEN-resp-" 2>/dev/null || true
+    fi
+    return 0
+}
+
 # shellcheck disable=SC2329  # invoked via trap.
 cleanup() {
     [ -n "$DECOY_PID" ] && kill "$DECOY_PID" 2>/dev/null
     [ -n "$DECOY_PID_L2" ] && kill "$DECOY_PID_L2" 2>/dev/null
+    reap_respawn_orphans
     [ -d "$WORK" ] && rm -rf "$WORK"
     return 0
 }
 trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Pairing for reap_respawn_orphans, run NOW (before $WORK exists in earnest,
+# and long before the R6 legs that motivate it) so a failure here is
+# attributed to the sweep itself rather than to whatever fixture state the
+# rest of the file has built up by the time section 12h runs.
+#
+# NEGATIVE CONTROL FIRST: spawn a decoy shaped exactly like an R6 orphan
+# (setsid, argv matching both patterns) and show it is genuinely alive and
+# that killing it by PID (not by the sweep) is possible — establishing the
+# decoy is real before trusting anything the sweep reports about it.
+# ---------------------------------------------------------------------------
+if command -v perl >/dev/null 2>&1; then
+    # The decoy lives under $WORK itself, matching the EXACT pattern
+    # reap_respawn_orphans matches on the real R6 legs (`$WORK/r6-outer-`).
+    REAP_TAG="reap-probe"
+    REAP_OUTER_W="$WORK/r6-outer-$REAP_TAG.sh"
+    printf '#!/bin/bash\nexec -a %s-resp-%s sleep 31607\n' "$HANG_TOKEN" "$REAP_TAG" \
+        > "$WORK/reap-child-$REAP_TAG.sh"
+    {
+        printf '#!/bin/bash\n'
+        printf 'trap '\''bash "%s/reap-child-%s.sh" &'\'' TERM\n' "$WORK" "$REAP_TAG"
+        printf 'while :; do sleep 1; done\n'
+    } > "$REAP_OUTER_W"
+    perl -MPOSIX -e 'POSIX::setsid(); exec "bash",$ARGV[0]' "$REAP_OUTER_W" &
+    disown 2>/dev/null || true
+    REAP_SEEN="no"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -f "$REAP_OUTER_W" >/dev/null 2>&1 && { REAP_SEEN="yes"; break; }
+        sleep 1
+    done
+    assert_eq "reap-pair non-vacuity: the decoy outer shell is alive before the sweep runs" \
+        "yes" "$REAP_SEEN"
+
+    reap_respawn_orphans
+    sleep 1
+    assert_eq "reap-pair: reap_respawn_orphans kills the outer shell (the R6-shaped escapee)" \
+        "gone" "$(pgrep -f "$REAP_OUTER_W" >/dev/null 2>&1 && echo alive || echo gone)"
+
+    # RESTORE CONTROL / non-vacuity for the OTHER half: a process that does
+    # NOT match either pattern must survive the sweep, or this function would
+    # be a generic (and dangerous) kill-everything call rather than a
+    # targeted one.
+    perl -MPOSIX -e 'POSIX::setsid(); exec "sleep","31607"' &
+    UNRELATED_PID=$!
+    disown 2>/dev/null || true
+    sleep 1
+    reap_respawn_orphans
+    sleep 1
+    assert_eq "reap-pair CONTROL: an UNRELATED setsid'd process (matching neither pattern) survives the sweep" \
+        "alive" "$(kill -0 "$UNRELATED_PID" 2>/dev/null && echo alive || echo gone)"
+    kill -9 "$UNRELATED_PID" 2>/dev/null || true
+else
+    printf '  note: reap_respawn_orphans pairing SKIPPED - needs perl (same precondition as the R6 legs it protects)\n'
+fi
 
 # The floor constant, read out of the shipped runner to PARAMETERISE the
 # fixtures below (this is sizing, not proof — the proof legs all RUN the
@@ -1863,6 +1957,272 @@ assert_contains "12.55 SPECIFIC: the mutant reads the SAME fixture as an UNQUALI
     "l2-pass-then-skip.sh: PASSED (1 assertion(s)" "$RUN_OUT"
 assert_contains "12.56 SPECIFIC: with a green Partial-free summary over it" \
     "Skipped: 0  Partial: 0" "$RUN_OUT"
+
+# ===========================================================================
+printf -- '\n--- 13. THE STORE CANARY: run-tests.sh fails a spec BY NAME when it (or a concurrent writer) moves the protected Beads store (claude-workflow-plugin-j7kk) ---\n'
+# ===========================================================================
+# THE STRUCTURAL GUARD, and why it had to be one. model-roles.test.sh — one of
+# the shipped L1 runner's own 39 specs — was measured CAN-REACH(WRITE) against
+# PRODUCTION: 417 repo-root-cwd bd calls in one run (186 comment, 151 show, 35
+# create, 35 list, 10 --version), and store-side the task
+# claude-workflow-plugin-ofd carried 9,937+ synthetic `MODEL SWITCH` comments
+# before that spec's own isolation was fixed. The other 38 specs are isolated
+# by SEVEN different, undeclared conventions (cd into a fixture store;
+# explicit `bd -C <dir>`; a fixture bin/bd stub; a callee that cds itself; a
+# store-independent subcommand; no bd call on the path at all) and nothing
+# states which is required — so the NEXT spec author can reproduce exactly
+# this defect. The canary is the fix for THAT: it fails ANY spec whose
+# environment resolves to the production store, by name, regardless of which
+# of the seven (or an eighth nobody has invented yet) a future spec omits.
+#
+# Fixture store, using the runner's OWN existing lever (CLAUDE_PROJECT_DIR) —
+# no new env knob, and no need to contaminate production to prove the
+# anti-contamination guard works.
+if ! command -v bd >/dev/null 2>&1 || ! command -v dolt >/dev/null 2>&1; then
+    printf '  SKIPPED: bd and/or dolt not on PATH — the store-canary legs (13a-13e) need both\n'
+else
+    FX_CANARY="$WORK/store-canary"
+    FX_READONLY="$WORK/store-canary-readonly"
+    mkdir -p "$FX_CANARY" "$FX_READONLY"
+    # --database beads matches THIS repo's OWN embedded-Dolt layout
+    # (.beads/embeddeddolt/beads/.dolt) — the subdirectory name is NOT a
+    # fixed "beads" literal in general (a fresh `bd init` with no --database
+    # names it after the CURRENT DIRECTORY: measured here, a fixture at
+    # .../dryrun-fx defaulted to embeddeddolt/dryrun_fx/.dolt), so a fixture
+    # built without this flag would silently DISARM every leg below — the
+    # exact vacuity class this whole convention exists to catch. Explicit
+    # here rather than assumed.
+    ( cd "$FX_CANARY" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+    if [ ! -d "$FX_CANARY/.beads/embeddeddolt/beads/.dolt" ]; then
+        printf '  SKIPPED: could not initialise a fixture Dolt store at .beads/embeddeddolt/beads/.dolt for the store-canary legs\n'
+    else
+        # Clone BEFORE any contamination, so the read-only control fixture
+        # (13c) starts from the identical pristine state.
+        cp -R "$FX_CANARY/.beads" "$FX_READONLY/.beads" 2>/dev/null
+
+        mk_l1_fixture "$FX_CANARY" "$((EXPECTED - 1))"
+        cat > "$FX_CANARY/.claude/scripts/tests/zz-contaminator.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: contaminator ran\n'
+# Mechanism A (cd into the fixture store) — the ONLY way this bd call can
+# reach THIS spec's own store rather than wherever run-tests.sh's cwd
+# happens to be: bd resolves its store from cwd alone, never from
+# CLAUDE_PROJECT_DIR (claude-workflow-plugin-j7kk census, section 1.0).
+cd "$(dirname "$0")/../../.." && bd create "canary probe" -t task -p 4 >/dev/null 2>&1
+exit 0
+EOF
+
+        mk_l1_fixture "$FX_READONLY" "$((EXPECTED - 1))"
+        cat > "$FX_READONLY/.claude/scripts/tests/zz-reader.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: reader ran\n'
+cd "$(dirname "$0")/../../.." && bd list --json >/dev/null 2>&1
+exit 0
+EOF
+
+        sc_hash() {
+            # sc_hash <fixture-root>
+            ( cd "$1/.beads/embeddeddolt/beads" 2>/dev/null \
+                && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1 )
+        }
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13a. NON-VACUITY: the STORE-CANARY sentinel regions were FOUND and excised (the ARM region, and BOTH per-spec occurrences) ---\n'
+        # -----------------------------------------------------------------
+        # The per-spec sentinel pair (STORE-CANARY-BEGIN/END) is deliberately
+        # used TWICE in the shipped runner — once around the per-spec
+        # SAMPLING (after the survivor sweep) and once around the VERDICT
+        # elif (immediately before TRANSCRIPT-FAIL) — because the detection
+        # and the classification live ~90 lines apart, separated by
+        # unrelated TIMEOUT/rc/SURVIVOR_COUNT logic that must NOT be
+        # touched. A single awk pass toggling on ANY matching BEGIN/END
+        # excises both, restoring pre-guard behaviour byte-for-byte.
+        assert_eq "13a.1 the ARM sentinel pair is present exactly once in the shipped runner" \
+            "1 1" "$(grep -c 'STORE-CANARY-ARM-BEGIN' "$L1_RUNNER") $(grep -c 'STORE-CANARY-ARM-END' "$L1_RUNNER")"
+        assert_eq "13a.2 the per-spec sentinel pair occurs exactly twice (sampling + verdict)" \
+            "2 2" "$(grep -c 'STORE-CANARY-BEGIN' "$L1_RUNNER") $(grep -c 'STORE-CANARY-END' "$L1_RUNNER")"
+        MUT_SC="$WORK/run-tests.no-canary.sh"
+        awk '
+            /STORE-CANARY-ARM-BEGIN/ { skipping=1; foundArm=1; next }
+            /STORE-CANARY-ARM-END/   { skipping=0; next }
+            /STORE-CANARY-BEGIN/     { skipping=1; foundSpec++; next }
+            /STORE-CANARY-END/       { skipping=0; next }
+            !skipping { print }
+            END { if (!foundArm) exit 7; if (foundSpec != 2) exit 8 }
+        ' "$L1_RUNNER" > "$MUT_SC"
+        AWK_SC_RC=$?
+        assert_eq "13a.3 MUTANT: both the ARM region and both per-spec occurrences were FOUND and excised (awk found-check)" "0" "$AWK_SC_RC"
+        assert_eq "13a.4 MUTANT: the mutant differs from the shipped runner (the excision landed)" \
+            "differs" "$(cmp -s "$L1_RUNNER" "$MUT_SC" && echo identical || echo differs)"
+        assert_eq "13a.5 MUTANT: the mutant still parses (bash -n)" \
+            "0" "$(bash -n "$MUT_SC" 2>/dev/null; echo $?)"
+        # NOT a bare "STORE-CANARY absent from the mutant" check: the four
+        # state vars (PROTECTED_STORE, STORE_CANARY_ARMED,
+        # STORE_CANARY_DISARM_REASON, STORE_HASH_BEFORE) are DELIBERATELY
+        # initialised OUTSIDE this sentinel, exactly like SURVIVOR_COUNT
+        # above — so the excised mutant still runs under `set -u` and the
+        # tail summary's DISARMED reprint (also outside any sentinel) still
+        # fires safely instead of aborting on an unbound variable. What must
+        # be gone is the ARM's OWN diagnostic — proof the DETECTION
+        # mechanism, not merely its safe-default fallback text, was excised.
+        assert_eq "13a.6 MUTANT: the ARM's own arm-time diagnostic is gone (the detection mechanism itself was excised, not just its tail-summary fallback)" \
+            "0" "$(grep -c 'ARMED — watching' "$MUT_SC")"
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13b. SPECIFIC MISBEHAVIOUR: with the canary excised, a contaminating spec is PASSED, unreported ---\n'
+        # -----------------------------------------------------------------
+        HASH_BEFORE_B=$(sc_hash "$FX_CANARY")
+        run_l1 "$FX_CANARY" "$MUT_SC"
+        HASH_AFTER_B=$(sc_hash "$FX_CANARY")
+        assert_eq "13b.1 the fixture store's HEAD actually moved (the contaminator really did write — otherwise this leg proves nothing)" \
+            "differs" "$([ "$HASH_BEFORE_B" != "$HASH_AFTER_B" ] && echo differs || echo same)"
+        assert_eq "13b.2 the mutant runner exits 0 over the contaminating spec" "0" "$RUN_RC"
+        assert_contains "13b.3 the mutant classifies the contaminating spec PASSED" \
+            "zz-contaminator.sh: PASSED" "$RUN_OUT"
+        assert_contains "13b.4 the mutant's summary says Failed: 0" \
+            "Failed: 0" "$RUN_OUT"
+        assert_eq "13b.5 no verdict line anywhere mentions the protected store" \
+            "0" "$(printf '%s' "$RUN_OUT" | grep -c 'protected Beads store')"
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13c. RESTORE CONTROL: the SHIPPED runner, a read-only spec, a pristine fixture store — green, unmoved, no false positive ---\n'
+        # -----------------------------------------------------------------
+        # The false-positive control: a canary that fires on an ORDINARY
+        # READ would be a control nobody could leave armed (precedent: the
+        # P-B stability measurement in run-tests.sh's own ARM block —
+        # 12 consecutive bd reads, zero false positives).
+        HASH_BEFORE_C=$(sc_hash "$FX_READONLY")
+        run_l1 "$FX_READONLY"
+        HASH_AFTER_C=$(sc_hash "$FX_READONLY")
+        assert_eq "13c.1 RESTORE CONTROL: the shipped runner over a read-only fixture is green (rc=0)" "0" "$RUN_RC"
+        assert_contains "13c.2 ...the reader spec PASSED" "zz-reader.sh: PASSED" "$RUN_OUT"
+        assert_eq "13c.3 ...and the fixture store's HEAD did not move (no false positive on an ordinary read)" \
+            "$HASH_BEFORE_C" "$HASH_AFTER_C"
+        assert_absent "13c.4 ...with no contamination line anywhere in a clean run" \
+            "protected Beads store" "$RUN_OUT"
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13d. EXECUTION (the discriminator): the SHIPPED runner catches the SAME contaminator the mutant missed at 13b ---\n'
+        # -----------------------------------------------------------------
+        run_l1 "$FX_CANARY"
+        assert_eq "13d.1 SPECIFIC: the shipped runner exits non-zero over the contaminating spec" "1" "$RUN_RC"
+        assert_contains "13d.2 ...the failed-files entry NAMES the contaminating spec" \
+            "zz-contaminator.sh" "$(printf '%s\n' "$RUN_OUT" | grep -A3 'Failed tests:')"
+        assert_contains "13d.3 ...the verdict line names the fixture store path" \
+            "$FX_CANARY/.beads" "$RUN_OUT"
+        assert_contains "13d.4 ...and the printed detail names the bd verb that wrote" \
+            "bd: create" "$RUN_OUT"
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13e. DISARM: a target with .beads/ but no embedded-Dolt store DISARMS loudly, and the tier still exits 0 ---\n'
+        # -----------------------------------------------------------------
+        FX_NODOLT="$WORK/store-canary-no-dolt"
+        mk_l1_fixture "$FX_NODOLT" "$EXPECTED"
+        mkdir -p "$FX_NODOLT/.beads"
+        run_l1 "$FX_NODOLT"
+        assert_eq "13e.1 a target with .beads/ but no embedded Dolt store still exits 0 (nothing to contaminate)" "0" "$RUN_RC"
+        assert_contains "13e.2 ...and says so LOUDLY, both inline and in the summary (DISARMED is never a silent pass)" \
+            "STORE-CANARY: DISARMED" "$RUN_OUT"
+        assert_eq "13e.3 ...printed exactly twice (arm time + summary reprint)" \
+            "2" "$(printf '%s\n' "$RUN_OUT" | grep -c 'STORE-CANARY: DISARMED')"
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13f. claude-workflow-plugin-j7kk R1-F2: a NON-DESCENDANT store move (rollback/reset class) is NOT silently read as 0 writes ---\n'
+        # -----------------------------------------------------------------
+        # `dolt log A..B` traverses "commits reachable from B, not from A" —
+        # EMPTY whenever B is an ANCESTOR of A rather than a descendant reached
+        # by NEW commits on top of it. The v65-to-v53 Dolt schema rollback
+        # performed during this batch is the live example of the class; this
+        # leg reproduces it synthetically with `dolt reset --hard` back to an
+        # ancestor commit, confirmed against the real `dolt log` CLI (13f.1-3)
+        # before any runner is involved.
+        FX_ROLLBACK_MUT="$WORK/store-canary-rollback-mut"
+        FX_ROLLBACK_SHIP="$WORK/store-canary-rollback-ship"
+        mkdir -p "$FX_ROLLBACK_MUT"
+        ( cd "$FX_ROLLBACK_MUT" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        if [ ! -d "$FX_ROLLBACK_MUT/.beads/embeddeddolt/beads/.dolt" ]; then
+            printf '  SKIPPED: could not initialise a fixture Dolt store for the 13f non-descendant leg\n'
+        else
+            RB_ANCESTOR=$(sc_hash "$FX_ROLLBACK_MUT")
+            ( cd "$FX_ROLLBACK_MUT" && bd create "13f seed" -t task -p 4 >/dev/null 2>&1 )
+            RB_DESCENDANT=$(sc_hash "$FX_ROLLBACK_MUT")
+            assert_eq "13f.1 precondition: the seed commit really advanced HEAD (a descendant of the ancestor)" \
+                "differs" "$([ "$RB_ANCESTOR" != "$RB_DESCENDANT" ] && echo differs || echo same)"
+            RB_LOG_FORWARD=$(cd "$FX_ROLLBACK_MUT/.beads/embeddeddolt/beads" \
+                && dolt log --oneline "$RB_ANCESTOR".."$RB_DESCENDANT" 2>/dev/null | wc -l | tr -d ' ')
+            assert_eq "13f.2 precondition: the FORWARD range (ancestor..descendant) is non-empty (sanity: dolt log itself works here)" \
+                "yes" "$([ "$RB_LOG_FORWARD" -gt 0 ] && echo yes || echo no)"
+            RB_LOG_BACK=$(cd "$FX_ROLLBACK_MUT/.beads/embeddeddolt/beads" \
+                && dolt log --oneline "$RB_DESCENDANT".."$RB_ANCESTOR" 2>/dev/null | wc -l | tr -d ' ')
+            assert_eq "13f.3 precondition: the REVERSE range (descendant..ancestor) is EMPTY — the exact shape R1-F2 targets, confirmed before any runner is involved" \
+                "0" "$RB_LOG_BACK"
+
+            # Clone the SEEDED (descendant) state for the shipped-execution leg
+            # BEFORE any rollback spec runs — the same clone-before-contamination
+            # convention $FX_READONLY uses above, so both legs drive the
+            # IDENTICAL starting state.
+            mkdir -p "$FX_ROLLBACK_SHIP"
+            cp -R "$FX_ROLLBACK_MUT/.beads" "$FX_ROLLBACK_SHIP/.beads"
+
+            mk_l1_fixture "$FX_ROLLBACK_MUT" "$((EXPECTED - 1))"
+            cat > "$FX_ROLLBACK_MUT/.claude/scripts/tests/zz-rollback.sh" <<EOF
+#!/bin/bash
+printf '  PASS: rollback spec ran\n'
+cd "\$(dirname "\$0")/../../../.beads/embeddeddolt/beads" && dolt reset --hard $RB_ANCESTOR >/dev/null 2>&1
+exit 0
+EOF
+            chmod +x "$FX_ROLLBACK_MUT/.claude/scripts/tests/zz-rollback.sh"
+
+            mk_l1_fixture "$FX_ROLLBACK_SHIP" "$((EXPECTED - 1))"
+            cat > "$FX_ROLLBACK_SHIP/.claude/scripts/tests/zz-rollback.sh" <<EOF
+#!/bin/bash
+printf '  PASS: rollback spec ran\n'
+cd "\$(dirname "\$0")/../../../.beads/embeddeddolt/beads" && dolt reset --hard $RB_ANCESTOR >/dev/null 2>&1
+exit 0
+EOF
+            chmod +x "$FX_ROLLBACK_SHIP/.claude/scripts/tests/zz-rollback.sh"
+
+            # MUTANT: revert R1-F2 — the branch that escalates a well-formed
+            # "0" to STORE_WRITES=1 is disabled, restoring the pre-fix
+            # behaviour where a non-descendant move stays silently 0.
+            MUT_SC_NONDESC="$WORK/run-tests.no-nondescendant-fix.sh"
+            # shellcheck disable=SC2016  # single-quoted on purpose: matching
+            # literal source text in $L1_RUNNER, not expanding a variable.
+            sed 's/if \[ "\$STORE_WRITES" = "0" \]; then/if false; then/' \
+                "$L1_RUNNER" > "$MUT_SC_NONDESC"
+            assert_eq "13f.4 MUTANT non-vacuity: the mutant differs from the shipped runner (the R1-F2 branch guard was excised)" \
+                "differs" "$(cmp -s "$L1_RUNNER" "$MUT_SC_NONDESC" && echo identical || echo differs)"
+            assert_eq "13f.5 MUTANT: still parses (bash -n)" \
+                "0" "$(bash -n "$MUT_SC_NONDESC" 2>/dev/null; echo $?)"
+
+            run_l1 "$FX_ROLLBACK_MUT" "$MUT_SC_NONDESC"
+            assert_eq "13f.6 SPECIFIC MISBEHAVIOUR: under the pre-R1-F2 mutant, a non-descendant store move exits 0 (silently passed)" "0" "$RUN_RC"
+            assert_contains "13f.7 ...the rollback spec is classified PASSED" \
+                "zz-rollback.sh: PASSED" "$RUN_OUT"
+            assert_eq "13f.8 ...and Failed: 0 (the move went completely unreported)" \
+                "1" "$(printf '%s' "$RUN_OUT" | grep -c 'Failed: 0')"
+            assert_eq "13f.9 ...no verdict line anywhere mentions the protected store (the exact silent-pass R1-F2 describes)" \
+                "0" "$(printf '%s' "$RUN_OUT" | grep -c 'protected Beads store')"
+
+            # EXECUTION (the discriminator): the SHIPPED runner, the IDENTICAL
+            # rollback spec and starting state, catches it.
+            run_l1 "$FX_ROLLBACK_SHIP"
+            assert_eq "13f.10 EXECUTION: the SHIPPED runner exits non-zero over the SAME non-descendant move the mutant missed at 13f.6" "1" "$RUN_RC"
+            assert_contains "13f.11 ...the failed-files entry NAMES the rollback spec" \
+                "zz-rollback.sh" "$(printf '%s\n' "$RUN_OUT" | grep -A3 'Failed tests:')"
+            assert_contains "13f.12 ...and the printed detail says NON-LINEAR rather than fabricating a commit count" \
+                "NON-LINEAR" "$RUN_OUT"
+        fi
+
+        # SELF-PROTECTION PROPERTY: every fixture built above lives under
+        # $WORK ($FX_CANARY, $FX_READONLY, $FX_NODOLT, $FX_ROLLBACK_MUT,
+        # $FX_ROLLBACK_SHIP — all mktemp'd), never under the real .beads/. If
+        # any leg above had leaked to production, the OUTER canary — armed
+        # around THIS spec's own run inside the tier that invoked it — would
+        # fail this file by name the next time `make test` runs. The guard
+        # guards its own control.
+    fi
+fi
 
 # ===========================================================================
 printf '\nTotal: %d assertion(s)\n' "$((PASS + FAIL))"

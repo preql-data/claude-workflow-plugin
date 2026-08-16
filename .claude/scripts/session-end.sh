@@ -116,9 +116,20 @@ fi
 # puts it back. This is ONE of three restore paths, deliberately, because a
 # session that dies never reaches this hook at all:
 #   1. here, at SessionEnd (the tidy case);
-#   2. the next SessionStart's `model-select.sh apply`, which rewrites the
-#      implementer lane from the resolved artifact whatever state it was left
-#      in — so a crash self-heals at the next session even if this never ran;
+#   2. claude-workflow-plugin-j7kk (B2, R4-F1 ruling): the next SessionStart's
+#      `model-select.sh apply --check` used to be a PLAIN `apply` here, and
+#      that unconditional rewrite incidentally self-healed a stuck escalation
+#      too — a crash mid-escalation left the implementer lane pinned to the
+#      escalated model, and the next SessionStart silently corrected it as a
+#      side effect of its own unconditional resolve+write. --check removed
+#      the write, and with it that incidental self-heal: a stuck escalation
+#      now surfaces as an ordinary "resolver drift" warning (agent file has
+#      the escalated pin, config resolves the normal one) naming the explicit
+#      `/workflow-model --role implementer <id>` command to fix it, the same
+#      as any other config/frontmatter disagreement — never a silent rewrite.
+#      This is the intended consequence of the ruling, not a gap: a stuck
+#      escalation is one more tracked-file drift, and R4-F1 says detect it and
+#      name the fix, not apply it unasked.
 #   3. `model-select.sh restore` by hand, which is idempotent.
 #
 # BEST-EFFORT IS THE WHOLE CONTRACT. SessionEnd's output and exit code are

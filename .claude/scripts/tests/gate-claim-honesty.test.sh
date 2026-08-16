@@ -117,17 +117,33 @@
 #             both routes and the fingerprint freezes
 #   5  the Makefile dry-run guard: `make -n` must not mint a verification record
 #   5M META — remove the guard; the dry run mints a false green
+#   6  claude-workflow-plugin-j7kk (9xl4 cheap half) — the skip-when-unchanged
+#      predicate requires BOTH tree_fingerprint (content) and
+#      current_change_set_hash (path list) to match a persisted record before
+#      it says "unchanged"; the write side refuses to persist a sentinel and
+#      the read side refuses to match one, the same "both the writer and the
+#      reader refuse it" discipline section 4/rubric-binding.sh I4 already
+#      apply to change_set_hash. checks_scope_claim/note are also re-asserted
+#      here (6.11) for the new SUITE_REUSE_REASON/SUITE_REUSE_DETAIL
+#      parameters, including the pre-j7kk caller's unchanged default.
+#   6M META — the k0mc gap this section exists to close, reproduced on demand:
+#             narrow the predicate to the path-list hash alone (dropping the
+#             tree_fingerprint half) and a real content-only edit to an
+#             already-tracked file is WRONGLY read as "unchanged"
 #
 # THE COUNT, spelled out because it has been wrong once in this paragraph
-# (R1-F2) and once in the headline (R8-F4): TEN guards and FIVE numbered
+# (R1-F2) and once in the headline (R8-F4): ELEVEN guards and SIX numbered
 # sections, and the two numbers are not meant to agree. Section 1 is a
 # MEASUREMENT and is no guard; section 4 carries SEVEN — the fingerprint's
 # content sensitivity (paired by 4M), the readout's provenance claim (paired by
 # 4N), the fingerprint's INVARIANT (paired by 4P), the per-path fallback over the
 # untracked set (paired by 4Q), the diff flags that keep drivers out of input 2
 # (paired by 4R), the fallback's QUOTING CONVENTION (paired by 4S), and the
-# untracked hashes' FILTER BYPASS (paired by 4T). The check is mechanical, one
-# META per guard: 2M, 3M, 4M, 4N, 4P, 4Q, 4R, 4S, 4T, 5M.
+# untracked hashes' FILTER BYPASS (paired by 4T). Section 6 carries ONE — the
+# two-instrument requirement, paired by 6M; 6.11's checks_scope_claim/note
+# reassertion is coverage of an existing guard (3, paired by 3M) extended to a
+# new parameter, not a second guard of its own. The check is mechanical, one
+# META per guard: 2M, 3M, 4M, 4N, 4P, 4Q, 4R, 4S, 4T, 5M, 6M.
 #
 # 4P CARRIES TWO MUTATIONS UNDER ONE BANNER, and that is deliberate rather than
 # a miscount. The invariant has two halves — an input must CARRY CONTENT wherever
@@ -437,6 +453,11 @@ drive_scope() {
         # ("or export if used externally"), and a directive would cover only
         # the first assignment of a semicolon-separated line anyway. Harmless:
         # the functions run in this same subshell.
+        # shellcheck disable=SC2030,SC2031  # deliberately subshell-scoped —
+        # this function and drive_scope_reason (Section 6.11) both export the
+        # same names into THEIR OWN separate ( ) subshells so neither leaks
+        # into the shared top-level scope; each subshell's export is read only
+        # by the case arm three lines below it, never by the other subshell.
         export RUNNER="make" TEST_CMD="$t" LINT_CMD="$l" TYPE_CMD="$y" SUITE_REUSED="$reused"
         case "$what" in
             claim) checks_scope_claim ;;
@@ -2184,6 +2205,382 @@ assert_eq "5M.5 RESTORE CONTROL: the real guard, identical dry invocation, write
     "no" "$([ -s "$WORK/record.txt" ] && echo yes || echo no)"
 assert_eq "5M.6 RESTORE CONTROL: ...and does take the guarded branch" \
     "yes" "$([ -f "$WORK/skipped.marker" ] && echo yes || echo no)"
+
+# ===========================================================================
+# 6. claude-workflow-plugin-j7kk (9xl4 cheap half) — the skip-when-unchanged
+# predicate: BOTH tree_fingerprint (content) and current_change_set_hash (path
+# list) must match a persisted record before a Stop may replay it instead of
+# re-running the suite. Neither instrument is invented for this feature —
+# tree_fingerprint is section 4's own subject, and current_change_set_hash is
+# the SAME sha256 section 1 measures via impact-report.sh --hash-only — so this
+# section is short: it exercises the ONE new comparison, not two instruments
+# already pinned above.
+#
+# THE PROPERTY UNDER TEST, stated once because every leg below is a facet of
+# it: change_set_hash is a hash of WHICH PATHS changed, not their bytes (this
+# is section 1.2/2's own subject — "rewriting a listed file does NOT move
+# change_set_hash"). A second edit to a file ALREADY in the tracked set is
+# therefore invisible to it. A skip gated on change_set_hash alone would
+# replay a stale PASS or FAIL over new, unverified content. Requiring
+# tree_fingerprint too closes it, because tree_fingerprint hashes the DIFF
+# ITSELF (section 4's whole subject), which the second edit always moves.
+# ===========================================================================
+printf '\n--- 6. claude-workflow-plugin-j7kk: the skip predicate requires BOTH instruments ---\n'
+
+SKIP_REGION="$WORK/skip.sh"
+SKIP_RC=0
+extract_region "$VBS" "# SKIP-UNCHANGED BEGIN" "# SKIP-UNCHANGED END" "$SKIP_REGION" || SKIP_RC=$?
+assert_eq "6.0a non-vacuity: the SKIP-UNCHANGED sentinels exist" "0" "$SKIP_RC"
+assert_eq "6.0b the extracted region is valid bash on its own" \
+    "0" "$(bash -n "$SKIP_REGION" 2>/dev/null; echo $?)"
+
+# current_change_set_hash is NOT sentinel-wrapped (it is a general-purpose
+# instrument with three OTHER call sites in verify-before-stop.sh, not
+# SKIP-UNCHANGED-specific — wrapping it in a feature-named sentinel would
+# mislabel it for the next reader). Extracted by function name instead, the
+# same technique 3M's mutant construction already uses in this file.
+CCSH_REGION="$WORK/ccsh.sh"
+CCSH_RC=0
+awk '
+    $0 == "current_change_set_hash() {" { inf=1; found=1 }
+    inf { print }
+    inf && /^}$/ { inf=0 }
+    END { if (!found) exit 7 }
+' "$VBS" > "$CCSH_REGION" || CCSH_RC=$?
+assert_eq "6.0c non-vacuity: current_change_set_hash was found and extracted by name" \
+    "0" "$CCSH_RC"
+assert_eq "6.0d the extracted function is valid bash on its own" \
+    "0" "$(bash -n "$CCSH_REGION" 2>/dev/null; echo $?)"
+
+# last_verified_state_file_for (inside SKIP_REGION) calls sanitize_task_id,
+# which is declared near the top of verify-before-stop.sh (outside every
+# sentinel region — it is a file-wide helper, shared with iteration_file_for
+# and every other per-task cache path). Extracted the same way as
+# current_change_set_hash, by name, for the same reason: not feature-specific,
+# so not worth a sentinel of its own.
+SANID_REGION="$WORK/sanid.sh"
+SANID_RC=0
+awk '
+    $0 == "sanitize_task_id() {" { inf=1; found=1 }
+    inf { print }
+    inf && /^}$/ { inf=0 }
+    END { if (!found) exit 7 }
+' "$VBS" > "$SANID_REGION" || SANID_RC=$?
+assert_eq "6.0e non-vacuity: sanitize_task_id was found and extracted by name" \
+    "0" "$SANID_RC"
+
+# A real git sandbox, like section 4's $G — current_change_set_hash shells out
+# to the REAL impact-report.sh, which needs a real tracker file to hash.
+G6="$WORK/gitproj-skip"
+mkdir -p "$G6/src" "$G6/.claude/.qa-tracking"
+( cd "$G6" && git init -q . && git config user.email t@example.invalid && git config user.name t \
+    && printf 'one\n' > src/a.ts && git add src/a.ts && git commit -qm init ) >/dev/null 2>&1
+printf 'src/a.ts\n' > "$G6/.claude/.qa-tracking/changed-files.txt"
+
+# drive_skip_at <project-dir> <region> <fn> [args...] — sources the denylist
+# lib, the ledger region (tree_fingerprint + its sentinels), the
+# current_change_set_hash function and the given SKIP-UNCHANGED region (shipped
+# or mutant) into one subshell scoped at <project-dir>, then calls <fn>.
+drive_skip_at() {
+    local pd="$1" reg="$2" fn="$3"; shift 3
+    (
+        set -u
+        PROJECT_DIR="$pd"; QA_TRACKING_DIR="$pd/.claude/.qa-tracking"
+        # shellcheck disable=SC2034  # read by current_change_set_hash() after
+        # it is sourced from $CCSH_REGION below — shellcheck cannot trace a
+        # reader defined in a file generated at runtime by awk.
+        IMPACT_REPORT_SCRIPT="$IMPACT"
+        mkdir -p "$QA_TRACKING_DIR"
+        # shellcheck disable=SC1090
+        . "$DENYLIST_LIB"
+        # shellcheck disable=SC1090
+        . "$LEDGER_REGION"
+        # shellcheck disable=SC1090
+        . "$CCSH_REGION"
+        # shellcheck disable=SC1090
+        . "$SANID_REGION"
+        # shellcheck disable=SC1090
+        . "$reg"
+        "$fn" "$@"
+    )
+}
+drive_skip() { drive_skip_at "$G6" "$SKIP_REGION" "$@"; }
+
+# drive_record_at <project-dir> <region> <task-id> [args...] — claude-workflow-
+# plugin-j7kk R1-F1: record_verified_state now takes the pre-dispatch fp/hash
+# as explicit arguments (see its header in verify-before-stop.sh) instead of
+# reading them itself, so it can refuse to persist when its OWN post-run
+# reading disagrees with what the caller read before dispatch. This helper
+# reads both instruments through the SAME drive_skip_at harness immediately
+# before calling the writer — reproducing "nothing moved between the
+# pre-dispatch read and the persist", which is every 6.x/6M leg's own
+# precondition (nothing runs a "suite" between the two in this isolated
+# harness). The mid-suite-mutation case — pre disagrees with post — is Leg K
+# / META K in escalation-basis.sh, driven against the real, unmodified script
+# end to end rather than the extracted region.
+drive_record_at() {
+    local pd="$1" reg="$2" tid="$3" fp hash
+    fp=$(drive_skip_at "$pd" "$reg" tree_fingerprint)
+    hash=$(drive_skip_at "$pd" "$reg" current_change_set_hash)
+    drive_skip_at "$pd" "$reg" record_verified_state "$tid" "$fp" "$hash"
+}
+drive_record() { drive_record_at "$G6" "$SKIP_REGION" "$@"; }
+
+assert_eq "6.1 fresh sandbox, no prior record: verified_state_unchanged is false (nothing to reuse yet)" \
+    "false" "$(drive_skip verified_state_unchanged tsk1)"
+
+drive_record tsk1 >/dev/null
+STATE_FILE="$G6/.claude/.qa-tracking/last-verified-state.tsk1"
+assert_eq "6.2a record_verified_state wrote a state file" \
+    "yes" "$([ -s "$STATE_FILE" ] && echo yes || echo no)"
+assert_eq "6.2b the record is exactly one line" \
+    "1" "$(wc -l < "$STATE_FILE" | tr -d '[:space:]')"
+assert_eq "6.2c the record carries exactly 3 tab-separated fields (ts, fp, hash — VERIFICATION_LEDGER's own tab-separated convention, scoped per-task instead of appended)" \
+    "3" "$(awk -F'\t' '{print NF}' "$STATE_FILE")"
+
+assert_eq "6.3 immediately after persisting, with nothing else touched: verified_state_unchanged is true" \
+    "true" "$(drive_skip verified_state_unchanged tsk1)"
+
+# --- 6.4: THE k0mc PROPERTY, MEASURED before it is asserted -----------------
+HASH_BEFORE_EDIT=$(drive_skip current_change_set_hash)
+printf 'one-DIFFERENT\n' > "$G6/src/a.ts"
+HASH_AFTER_EDIT=$(drive_skip current_change_set_hash)
+assert_eq "6.4a MEASURED (k0mc): editing an ALREADY-TRACKED file's content does NOT move change_set_hash (the path list is unchanged) — the gap tree_fingerprint exists to close" \
+    "$HASH_BEFORE_EDIT" "$HASH_AFTER_EDIT"
+assert_eq "6.4b so change_set_hash ALONE would say 'unchanged' here, and it would be WRONG: the shipped predicate (both instruments) correctly says false" \
+    "false" "$(drive_skip verified_state_unchanged tsk1)"
+
+( cd "$G6" && git checkout -q -- src/a.ts )
+assert_eq "6.5 reverting the edit restores 'unchanged' — a pure function of state, matching tree_fingerprint's own section-4.4 precedent" \
+    "true" "$(drive_skip verified_state_unchanged tsk1)"
+
+printf 'two\n' > "$G6/src/b.ts"
+printf 'src/a.ts\nsrc/b.ts\n' > "$G6/.claude/.qa-tracking/changed-files.txt"
+assert_eq "6.6 a NEW file entering the tracked change set moves BOTH instruments: verified_state_unchanged is false" \
+    "false" "$(drive_skip verified_state_unchanged tsk1)"
+
+drive_record tsk1 >/dev/null
+assert_eq "6.7 re-persisting against the new state makes it the new baseline: verified_state_unchanged is true again" \
+    "true" "$(drive_skip verified_state_unchanged tsk1)"
+
+# --- 6.8/6.9: BOTH the writer and the reader refuse a sentinel --------------
+NOGIT="$WORK/no-git-skip"
+mkdir -p "$NOGIT/.claude/.qa-tracking"
+FP_NOGIT=$(drive_skip_at "$NOGIT" "$SKIP_REGION" tree_fingerprint)
+assert_eq "6.8a non-vacuity: the no-git target really produces the no-git sentinel" \
+    "no-git" "$FP_NOGIT"
+# Pass the JUST-PROVEN sentinel as fp-pre (the caller's pre-dispatch reading)
+# — record_verified_state's sentinel check runs on fp-pre BEFORE it ever
+# looks at hash-pre or takes its own post-run reading, so this exercises
+# exactly the fp-pre-is-a-sentinel branch regardless of the placeholder
+# hash-pre value.
+drive_skip_at "$NOGIT" "$SKIP_REGION" record_verified_state tskx "$FP_NOGIT" "deadbeef" >/dev/null
+assert_eq "6.8b WRITE-SIDE REFUSAL: record_verified_state persists NOTHING when the pre-dispatch tree_fingerprint reading is a sentinel (a transient failure costs one redundant re-run later, never a false skip)" \
+    "no" "$([ -e "$NOGIT/.claude/.qa-tracking/last-verified-state.tskx" ] && echo yes || echo no)"
+
+# A record whose fingerprint IS the sentinel, planted by hand (never by this
+# region's own writer, per 6.8b) — the shape a corrupted or hand-edited cache
+# file could take. The CURRENT read on this same no-git target is ALSO the
+# sentinel, so a naive identity comparison would call the two equal and say
+# "unchanged". Both sides refuse instead — the same discipline rubric-
+# binding.sh I4 states for change_set_hash ("Both the writer and the reader
+# refuse it"), applied here to tree_fingerprint.
+printf '2026-01-01T00:00:00Z\tno-git\tdeadbeef\n' > "$NOGIT/.claude/.qa-tracking/last-verified-state.tsky"
+assert_eq "6.9 READ-SIDE REFUSAL: a planted no-git record is refused even though the CURRENT read is ALSO no-git" \
+    "false" "$(drive_skip_at "$NOGIT" "$SKIP_REGION" verified_state_unchanged tsky)"
+
+DETAIL=$(drive_skip verified_state_unchanged_detail tsk1)
+assert_contains "6.10a the detail sentence names WHEN the reused run was recorded (same voice as broader_verification_note's LAST RECORDED paragraph)" \
+    "recorded at" "$DETAIL"
+assert_contains "6.10b ...and the current change-set hash, so a reader can verify it independently by re-running impact-report.sh --hash-only" \
+    "$(drive_skip current_change_set_hash)" "$DETAIL"
+
+# --- 6.11: checks_scope_claim/note, parameterised by SUITE_REUSE_REASON -----
+# Extends the EXISTING 3M-paired guard (checks_scope_claim/note must not
+# overclaim) to the new parameter, rather than adding a second guard: 3.14
+# already pins "NOT re-run this loop" for SUITE_REUSED=true; this pins that the
+# REASON clause is no longer hardcoded to "escalation contract".
+drive_scope_reason() {
+    local reason="$1" detail="$2" what="$3"
+    (
+        set -u
+        PROJECT_DIR="$WORK/noproj"; QA_TRACKING_DIR="$WORK/noproj/.claude/.qa-tracking"
+        mkdir -p "$QA_TRACKING_DIR"
+        # shellcheck disable=SC1090
+        . "$LEDGER_REGION"
+        # shellcheck disable=SC1090
+        . "$SCOPE_REGION"
+        # shellcheck disable=SC2030,SC2031  # deliberately subshell-scoped —
+        # see drive_scope's identical note above; this is the second, separate
+        # subshell that never shares state with the first.
+        export RUNNER="make" TEST_CMD="$REAL_TEST" LINT_CMD="$REAL_LINT" TYPE_CMD="" \
+               SUITE_REUSED=true SUITE_REUSE_REASON="$reason" SUITE_REUSE_DETAIL="$detail"
+        case "$what" in
+            claim) checks_scope_claim ;;
+            note)  checks_scope_note ;;
+        esac
+    )
+}
+REASON_SKIPUNCH="tree and change-set unchanged since the last full run"
+CLAIM_SKIPUNCH=$(drive_scope_reason "$REASON_SKIPUNCH" "" claim)
+assert_contains "6.11a checks_scope_claim, given a non-escalation SUITE_REUSE_REASON, prints THAT reason" \
+    "$REASON_SKIPUNCH" "$CLAIM_SKIPUNCH"
+assert_absent "6.11b ...and never claims 'escalation contract' when the reason is something else" \
+    "escalation contract" "$CLAIM_SKIPUNCH"
+DETAIL_TEXT="the tree (fingerprint abc123) and the reviewable change set (hash def456) have not moved since the full run recorded at 2026-01-01T00:00:00Z"
+NOTE_SKIPUNCH=$(drive_scope_reason "$REASON_SKIPUNCH" "$DETAIL_TEXT" note)
+assert_contains "6.11c checks_scope_note names the SPECIFIC reason (not 'escalation contract')" \
+    "$REASON_SKIPUNCH" "$NOTE_SKIPUNCH"
+assert_contains "6.11d ...and, when SUITE_REUSE_DETAIL is set, appends the concrete evidence sentence (same voice as Broader verification, LAST RECORDED, which also names concrete values rather than asserting currency)" \
+    "Reused because $DETAIL_TEXT" "$NOTE_SKIPUNCH"
+CLAIM_DEFAULT=$(drive_scope "$SCOPE_REGION" "$REAL_TEST" "$REAL_LINT" "" true claim)
+assert_contains "6.11e BACKWARD COMPAT: with SUITE_REUSE_REASON unset (the pre-j7kk escalation caller's own shape, re-asserting 3.14), the claim still defaults to 'escalation contract'" \
+    "escalation contract" "$CLAIM_DEFAULT"
+
+# ---------------------------------------------------------------------------
+# 6M. META — narrow the predicate to the path-list hash alone. The k0mc gap
+# this section exists to close must reopen: a real content-only edit to an
+# already-tracked file is then WRONGLY read as "unchanged".
+# ---------------------------------------------------------------------------
+printf '\n--- 6M. META: drop the tree_fingerprint half — the k0mc gap reopens ---\n'
+
+SKIP_MUT="$WORK/skip-mut.sh"
+# shellcheck disable=SC2016  # single-quoted on purpose: these are LITERAL
+# shell-source patterns to match/replace in the extracted region's text, not
+# expressions meant to expand against this script's own variables.
+sed 's/if \[ "\$fp" = "\$cur_fp" \] && \[ "\$hash" = "\$cur_hash" \]; then/if [ "$hash" = "$cur_hash" ]; then/' \
+    "$SKIP_REGION" > "$SKIP_MUT"
+# shellcheck disable=SC2016  # same reason: matching literal source text.
+assert_eq "6M.0a non-vacuity: the mutant's comparison really dropped the tree_fingerprint half" \
+    "0" "$(grep -c '\$fp" = "\$cur_fp"' "$SKIP_MUT" | tr -d '[:space:]')"
+# shellcheck disable=SC2016  # same reason: matching literal source text.
+assert_eq "6M.0b non-vacuity: ...and a hash-only comparison landed in its place" \
+    "1" "$(grep -c 'if \[ "\$hash" = "\$cur_hash" \]; then' "$SKIP_MUT" | tr -d '[:space:]')"
+assert_eq "6M.1 non-vacuity: the mutant differs from the shipped region" \
+    "yes" "$([ "$(shasum -a 256 "$SKIP_MUT" | awk '{print $1}')" != "$(shasum -a 256 "$SKIP_REGION" | awk '{print $1}')" ] && echo yes || echo no)"
+assert_eq "6M.2 the mutant is still valid bash" \
+    "0" "$(bash -n "$SKIP_MUT" 2>/dev/null; echo $?)"
+
+# A FRESH sandbox for the META, so it does not depend on $G6's accumulated
+# state from 6.1-6.11 above.
+G6M="$WORK/gitproj-skip-meta"
+mkdir -p "$G6M/src" "$G6M/.claude/.qa-tracking"
+( cd "$G6M" && git init -q . && git config user.email t@example.invalid && git config user.name t \
+    && printf 'one\n' > src/a.ts && git add src/a.ts && git commit -qm init ) >/dev/null 2>&1
+printf 'src/a.ts\n' > "$G6M/.claude/.qa-tracking/changed-files.txt"
+
+# Baseline through the SHIPPED writer (record_verified_state is untouched by
+# this mutation — only the COMPARISON changes), so both legs below read the
+# exact same persisted record.
+drive_record_at "$G6M" "$SKIP_REGION" tskm >/dev/null
+HASH_BASE_M=$(drive_skip_at "$G6M" "$SKIP_REGION" current_change_set_hash)
+printf 'one-DIFFERENT\n' > "$G6M/src/a.ts"
+HASH_AFTER_M=$(drive_skip_at "$G6M" "$SKIP_REGION" current_change_set_hash)
+assert_eq "6M.3 precondition: same k0mc shape as 6.4 — a content-only edit leaves the path list (and so change_set_hash) unchanged" \
+    "$HASH_BASE_M" "$HASH_AFTER_M"
+
+assert_eq "6M.4 SPECIFIC MISBEHAVIOUR: the mutant (hash-only comparison) WRONGLY reports 'true' over this real content edit — check 6.4b would FAIL on it" \
+    "true" "$(drive_skip_at "$G6M" "$SKIP_MUT" verified_state_unchanged tskm)"
+assert_eq "6M.5 RESTORE CONTROL: the SHIPPED predicate, the identical on-disk state, correctly says false" \
+    "false" "$(drive_skip_at "$G6M" "$SKIP_REGION" verified_state_unchanged tskm)"
+
+# ===========================================================================
+# 7. claude-workflow-plugin-j7kk R1-F3 — the F1-declined NOTE composition arm
+# (immediately before the F1 dispatch case, qzv) must cover EVERY status on
+# which F1 was eligible or unreadable, including `unavailable` (qa-gate.sh
+# status's own spelling for "the store could not be read at all" — distinct
+# from this hook's generic `error` fallback). Message-only: the dispatch arm
+# a few lines below already excludes `unavailable` from the fast path
+# correctly either way, so nothing here can change WHETHER the Stop blocks,
+# only whether it explains why.
+#
+# Extracted by literal text range rather than the surrounding
+# F1-CHANGE-SET-BINDING sentinel: that sentinel wraps ~300 lines including
+# review-check.sh subprocess calls this arm does not need. The snippet below
+# is a plain `if/case/fi` reading only FASTPATH_CLASS/F1_BINDING_VERDICT/
+# F1_BINDING_DETAIL/GATE_STATUS/CURRENT_TASK and calling log_sync_error —
+# fully self-contained, so it sources and runs directly with no stub beyond
+# log_sync_error itself.
+# ===========================================================================
+printf '\n--- 7. claude-workflow-plugin-j7kk R1-F3: F1_BINDING_NOTE composition covers GATE_STATUS=unavailable ---\n'
+
+F1NOTE_REGION="$WORK/f1note.sh"
+awk '
+    $0 == "        if [ \"$F1_BINDING_VERDICT\" != \"safe\" ]; then" { infound=1; found=1 }
+    infound { print }
+    infound && $0 == "        fi" { exit }
+    END { if (!found) exit 7 }
+' "$VBS" > "$F1NOTE_REGION"
+F1NOTE_RC=$?
+assert_eq "7.0a non-vacuity: the F1_BINDING_NOTE composition arm was found and extracted" "0" "$F1NOTE_RC"
+assert_eq "7.0b the extraction really produced a non-empty region" \
+    "yes" "$([ -s "$F1NOTE_REGION" ] && echo yes || echo no)"
+assert_eq "7.0c the extracted region is valid bash on its own" \
+    "0" "$(bash -n "$F1NOTE_REGION" 2>/dev/null; echo $?)"
+assert_contains "7.0d sanity: the extraction really ends at the case's own esac, not a truncated slice" \
+    "esac" "$(cat "$F1NOTE_REGION")"
+
+# drive_f1note <region> <verdict> <status> — sources a stub log_sync_error
+# (a plain no-op: the snippet's diagnostic-log call is not this test's
+# subject) plus the given region with the four inputs preset, then prints
+# whatever F1_BINDING_NOTE the region composed (empty if the arm's case did
+# not match).
+drive_f1note() {
+    local reg="$1" verdict="$2" status="$3"
+    (
+        set -u
+        # shellcheck disable=SC2034  # read by the region after it is sourced
+        # from $reg below — shellcheck cannot trace a reader defined in a
+        # file extracted at runtime by awk (same reasoning as
+        # $CCSH_REGION's IMPACT_REPORT_SCRIPT above).
+        FASTPATH_CLASS="doc-only"
+        # shellcheck disable=SC2034  # see FASTPATH_CLASS above
+        F1_BINDING_VERDICT="$verdict"
+        # shellcheck disable=SC2034  # see FASTPATH_CLASS above
+        F1_BINDING_DETAIL="stub detail for drive_f1note"
+        # shellcheck disable=SC2034  # see FASTPATH_CLASS above
+        GATE_STATUS="$status"
+        # shellcheck disable=SC2034  # see FASTPATH_CLASS above
+        CURRENT_TASK="tsk-f1note"
+        F1_BINDING_NOTE=""
+        # shellcheck disable=SC2329  # invoked from $reg after it is sourced
+        # below, not from this subshell directly — same reason the five
+        # assignments above need SC2034.
+        log_sync_error() { :; }
+        # shellcheck disable=SC1090
+        . "$reg"
+        printf '%s' "$F1_BINDING_NOTE"
+    )
+}
+
+assert_eq "7.1 precondition: a SAFE verdict composes no note regardless of status (the arm is gated on non-safe)" \
+    "" "$(drive_f1note "$F1NOTE_REGION" safe entered)"
+assert_eq "7.2 precondition: the ALREADY-COVERED not-entered status composes a note (regression check, unaffected by this fix)" \
+    "yes" "$([ -n "$(drive_f1note "$F1NOTE_REGION" unestablished not-entered)" ] && echo yes || echo no)"
+
+assert_eq "7.3 FIXED BEHAVIOUR (R1-F3): GATE_STATUS=unavailable with a non-safe verdict NOW composes an F1-declined explanation" \
+    "yes" "$([ -n "$(drive_f1note "$F1NOTE_REGION" unestablished unavailable)" ] && echo yes || echo no)"
+assert_contains "7.4 ...naming the verdict's own detail text (the same voice as every other status in this arm)" \
+    "stub detail for drive_f1note" "$(drive_f1note "$F1NOTE_REGION" unestablished unavailable)"
+
+# ---------------------------------------------------------------------------
+# META 7 — drop `unavailable` from the case pattern (the pre-R1-F3 shape).
+# The SAME inputs that composed a note at 7.3 must then compose NOTHING —
+# reproducing the silent-refusal message gap this fix closes.
+# ---------------------------------------------------------------------------
+F1NOTE_MUT="$WORK/f1note-mut.sh"
+sed 's/not-entered|entered|pending|error|unavailable|"")/not-entered|entered|pending|error|"")/' \
+    "$F1NOTE_REGION" > "$F1NOTE_MUT"
+assert_eq "META 7.0a non-vacuity: the mutant differs from the extracted region (unavailable was dropped)" \
+    "yes" "$([ "$(shasum -a 256 "$F1NOTE_MUT" | awk '{print $1}')" != "$(shasum -a 256 "$F1NOTE_REGION" | awk '{print $1}')" ] && echo yes || echo no)"
+assert_eq "META 7.0b non-vacuity: specifically, unavailable| is gone from the mutant's case pattern" \
+    "0" "$(grep -c 'unavailable|""' "$F1NOTE_MUT" | tr -d '[:space:]')"
+assert_eq "META 7.0c the mutant is still valid bash" \
+    "0" "$(bash -n "$F1NOTE_MUT" 2>/dev/null; echo $?)"
+assert_eq "META 7.1 SPECIFIC MISBEHAVIOUR: the SAME inputs that composed a note at 7.3 now compose NOTHING" \
+    "" "$(drive_f1note "$F1NOTE_MUT" unestablished unavailable)"
+assert_eq "META 7.2 RESTORE CONTROL: the mutant still covers the pre-existing not-entered status (only unavailable was removed)" \
+    "yes" "$([ -n "$(drive_f1note "$F1NOTE_MUT" unestablished not-entered)" ] && echo yes || echo no)"
 
 # ===========================================================================
 printf '\n=== gate-claim-honesty.test.sh ===\n'

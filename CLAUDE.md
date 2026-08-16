@@ -14,6 +14,7 @@ Use this checklist instead of front-loading every doc. Pick the row matching the
 - if you are adding a new CHECK of any kind (assertion, guard, CI job, gate condition) -> read `.claude/tests/README.md` § "The pairing requirement": it does not ship without a negative control, and at least one leg must observe the shipped artifact RUNNING
 - if you found a defect in work that is ALREADY CLOSED -> read `CONTRIBUTING.md` § "A finding discovered after a task closes opens a NEW task" (a comment on a closed task never surfaces in a ready-work query)
 - if you are writing a number into a report, audit row, CHANGELOG entry, task closure or review artifact -> read `CONTRIBUTING.md` § "Every number carries the command that produced it and the commit it was measured at"
+- if you are about to read a bd comment stream as evidence (round counts, model pins, artifact-by-hash binding) -> read `.beads/quarantine.tsv` first (`.claude/scripts/beads-quarantine.sh check <id>`); a quarantined task's comments are test-authored and must not be read as evidence — see claude-workflow-plugin-j7kk
 - if you are touching install / packaging -> read `install.sh`, `install.ps1`, `.claude-plugin/plugin.json`
 - if you are touching MCP servers -> read `docs/MCP_SERVERS.md` and `.claude/mcp/<server>/`
 - if you are debugging an MCP issue -> read `docs/MCP_SERVERS.md` and `.claude/mcp/<server>/`
@@ -60,8 +61,8 @@ make check
 When you finish a task, update Beads via `bd update <id>` rather than leaving notes in this file. The v3 upgrade plan at `docs/plans/v3-upgrade.md` (mirrored from `/Users/edk0/.claude/plans/we-are-working-on-dynamic-marshmallow.md`) is complete: Phases 0-7, the G8 test-harness epic, and the post-G8 closeout all shipped on `main` by 2026-05-11. See `CHANGELOG.md` `[3.0.0] - 2026-05-11` for the full per-phase breakdown.
 
 For multi-session continuity, refer to:
-- `bd list --status in_progress --json` for the live work queue.
-- `.beads/issues.jsonl` for Beads ground truth.
+- `bd list --status in_progress --json` (or the bd-mcp tools) for the live work queue — this is ground truth; the live store is always ahead of the export below.
+- `.beads/issues.jsonl` is a SNAPSHOT, not ground truth, and is currently stale: dated 2026-08-11 14:38, tracking 354 issues against 399 live (verify with `wc -l .beads/issues.jsonl` vs `bd count`, or the equivalent bd-mcp query). It was demoted from "ground truth" here because nothing refreshes it automatically and a consumer reading it for a task created after the export gets a well-formed EMPTY answer with no indication anything is missing — see claude-workflow-plugin-0rbi, which fixes the freshness gap. **Do not refresh it by running `bd export` before 0rbi lands**: the live store currently carries L1-test-authored contamination (see `.beads/quarantine.tsv`) that a refresh would write permanently into this git-tracked file.
 - `docs/AGENTLINT_REPORT.md` for the most recent harness audit.
 
 ## Rules (Don't / Instead / Because)

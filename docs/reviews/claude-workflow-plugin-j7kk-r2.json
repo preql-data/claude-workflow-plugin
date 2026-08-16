@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-j7kk",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "900ae48548c483e0e8f855c2009fb019ac27e8a6345b70d5536bdff49bd3f898",
+  "risk_threshold": "high",
+  "stop_condition": "All three R1 resolutions verified against the landed diff with their paired tests re-run by QA (escalation-basis Leg K + META K, runner-completeness 13f, gate-claim-honesty Sections 6+7); the v9dx correction-10 violation independently re-measured at both attribution endpoints (9488c69=0, c5d6706=2) and at the worktree (0/0/0 under the guard's exact regex, 14/14 mirrors byte-identical); the acceptance-run contention, tech-debt-instrument, and verification-discipline questions ruled on with evidence; and no critical/high finding remains in the gate or store-isolation paths.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "info",
+      "location": ".claude/scripts/verify-before-stop.sh:2394-2403 (record_verified_state comparison)",
+      "evidence": "The fix is a two-point comparison (pre-dispatch vs post-run). A write that lands mid-window AND is reverted byte-identically before the post-run read (A-to-B-to-A) passes it: pre==post, record persists, yet part of the suite executed over B. Attack enumeration during this review found no shipped writer class that does byte-identical restores in the project tree (specialists do not revert-to-identical; the L1 suite runs in scratch dirs; bd writes append; workflow-written untracked paths are outside tree_fingerprint by design), so the residual is theoretical under current writers. The in-code comment at :2397 says the comparison fires if EITHER instrument moved WHILE the suite was running — strictly it measures NET movement between the two reads, a slightly narrower claim.",
+      "description": "Documented-class TOCTOU residual of any two-point read, not a defect: the recorded baseline equals both endpoints of the run window, and the cost direction stays safe (a false persist requires a self-cancelling excursion, never an ordinary concurrent write). Worth one comment-line tightening (moved-between-reads vs moved-while-running) whenever the region is next edited; no fix round warranted."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "info",
+      "location": ".claude/tests/component/specs/escalation-basis.sh (Leg J region) / .claude/scripts/verify-before-stop.sh:3816-3831",
+      "evidence": "The skip-path replay slurps the SAME last-failed-checks/last-runner caches the escalation replay uses, with no green/red branch anywhere in the path; the caches are written regardless of pass/fail (:3929-3943, rm -f only on pass) and record_verified_state is called unconditionally (:3944-3954). Red replay through the SIBLING escalation path is driven by legs E/F; the skip path has green-replay legs (Leg J) and a live red carry-forward was observed by the coordinator this batch. No dedicated leg drives the skip path replaying a RED cached result.",
+      "description": "Symmetry holds by construction (color-blind mechanism, shared cache, shared branch shape), verified by code read and observed live. A dedicated skip-replays-red leg would be a cheap completeness addition next time escalation-basis is edited; not blocking, and demanding it now would be coverage theatre over a branch that does not exist."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tech-debt.sh:118 (bd create, best-effort) via .claude/scripts/qa-gate.sh:4372 (choose tech-debt)",
+      "evidence": "The 2026-08-16T06:17:10Z J21 tech-debt choice wrote the TECHNICAL_DEBT.md row but its --bd-task half produced no task: bd list --limit 0 shows nothing created in the window except claude-workflow-plugin-mruw (a different subject, 06:17:42Z), sync-errors.log has no choose-tech-debt failure line, and tech-debt.sh:118 documents the silent-fallback path (bd create piped to jq, empty on any failure). The envelope claimed only tech-debt row queued, so no false claim was made — but the debt had no queryable handle.",
+      "description": "Pre-existing best-effort design, OUT of this change set (cmd_choose and tech-debt.sh are not in the diff). Operational repair applied in-review: claude-workflow-plugin-7tfe filed with discovered-from j7kk, mirroring the row. Follow-up worth considering on the tech-debt.sh side: surface bd-create failure in the choose envelope instead of only in tech-debt.sh stdout (which qa-gate.sh discards)."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

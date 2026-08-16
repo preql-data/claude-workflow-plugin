@@ -584,13 +584,18 @@ assert_eq "upgrade-gate 2: the upgraded session-start hook exits 0 on a v3.5-upg
 assert_json_field "upgrade-gate 2: ...and emits a valid SessionStart envelope" \
     "$SS_OUT" '.hookSpecificOutput.hookEventName' "SessionStart"
 
-# session-start runs model-select.sh apply, whose JOB is to rewrite the model
-# pins in .claude/settings.json when a better snapshot exists. That is correct
-# behaviour and nothing here should assert against it - but it is tracked churn,
-# and the assertions below need a clean tree to be about the CLOSED TASK rather
-# than about settings drift. Restore tracked files to HEAD and assert the result
-# so a surprise (an untracked stray this .gitignore does not cover) fails loudly
-# instead of silently turning the next ALLOW into a BLOCK.
+# session-start runs `model-select.sh apply --check` (claude-workflow-plugin-
+# j7kk, B2: DETECT-AND-WARN since the R4-F1 ruling — this used to be a plain
+# `apply`, whose JOB was to rewrite the model pins in .claude/settings.json
+# and agent frontmatter whenever a better snapshot existed; --check reports
+# the same drift without writing). So this checkout should see NO tracked
+# churn from that call any more — but the git checkout + tracker reset below
+# stay as a defensive restore rather than an assumption: the assertions past
+# this point need a clean tree to be about the CLOSED TASK, not about
+# whatever session-start touched, and a surprise (an untracked stray this
+# .gitignore does not cover, or a future regression that reintroduces a
+# write) fails loudly instead of silently turning the next ALLOW into a
+# BLOCK.
 git -C "$T" checkout -- . >/dev/null 2>&1 || true
 : > "$TRACKER"
 assert_eq "upgrade-gate 2: precondition - the tree is clean and the tracker empty before the Stop" \

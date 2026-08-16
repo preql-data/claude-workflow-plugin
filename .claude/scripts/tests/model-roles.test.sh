@@ -38,6 +38,15 @@
 # artifact with a leg proving the mutation landed, an assertion naming the
 # check that would fail, a restore control, and at least one leg that RUNS the
 # shipped script rather than reading it.
+#
+#   12. apply --check is DETECT-AND-WARN, never a write (claude-workflow-
+#       plugin-j7kk, B2, R4-F1 ruling): a drifted sandbox is reported (naming
+#       role, current pin, resolved pin and the explicit apply command) with
+#       nothing written; a settled sandbox says so plainly; `apply` WITHOUT
+#       --check is unchanged (still writes, the same call site 6.1 already
+#       exercises); the META neutralises the CHECK_ONLY gate at BOTH of its
+#       call sites and proves --check would then ALSO write — the exact
+#       regression this flag exists to prevent.
 
 set -u
 
@@ -100,9 +109,96 @@ fi
 TESTROOT=$(mktemp -d "${TMPDIR:-/tmp}/model-roles-l1.XXXXXX")
 trap 'rm -rf "$TESTROOT"' EXIT
 
+# --- BD-ISOLATION-BEGIN (claude-workflow-plugin-j7kk) -----------------------
+# THIS FILE WAS CAN-REACH(WRITE) AGAINST THE PRODUCTION BEADS STORE.
+# MEASURED (census refutation run, claude-workflow-plugin-j7kk): a
+# PATH-shimmed, non-executing `bd` driven over every section of this file
+# recorded 417 repo-root-cwd bd calls (186 comment, 151 show, 35 create, 35
+# list, 10 --version), bodies `MODEL SWITCH [role] claude-base-0 -> ...`,
+# landing on this repo's real .beads store — corroborated store-side: the
+# task claude-workflow-plugin-ofd carried 9,937 such comments before this
+# fix, and RE-MEASURED during this fix's own session at 10,123 (exactly one
+# more 186-comment run), proving the exposure was still live, not merely
+# historical.
+#
+# THE MECHANISM new_sandbox() BELIEVED PROTECTED IT DID NOT. bd resolves its
+# store from CWD alone (census, section 1.0) — CLAUDE_PROJECT_DIR, BEADS_DIR,
+# BEADS_DB and --db are all INERT as store redirects on bd 1.2.2. This file
+# never changes cwd away from the repo root, so a real `bd` on PATH always
+# resolves the real .beads regardless of the CLAUDE_PROJECT_DIR each
+# new_sandbox() carries. find_or_create_meta_task()'s only availability
+# guard is `command -v bd` (model-select.sh:927) — no check that a .beads/
+# directory exists anywhere — so a real bd being reachable at all was
+# sufficient for every `... apply` call below to write a live audit comment.
+#
+# FIX: mechanism C (bd stub on PATH), chosen over mechanism A (cd into a
+# fixture store) because this file's subject is model-select.sh's DECISIONS,
+# not bd's storage, and it never relocates cwd today. ONE top-level PATH
+# mutation, not a per-sandbox stub inside new_sandbox(): every call site
+# below is `SB=$(new_sandbox)`, a command-substitution SUBSHELL — an
+# `export PATH=` executed inside new_sandbox() would die with that subshell
+# and never reach the caller, so a per-function fix would need every call
+# site individually re-taught `PATH="$SB/bin:$PATH"`, and the next one added
+# here would as reliably forget it as model-select.sh:927 forgot the
+# `.beads`-presence half of its own guard (census, section 1.3). A single
+# prepend, done once, before ANY sandbox exists, covers every current AND
+# future invocation in this file structurally.
+#
+# The stub REFUSES every subcommand (exit 1) rather than emulating one:
+# model-select.sh's own callers already tolerate a missing/failing bd
+# (find_or_create_meta_task returns 1 on `! command -v bd`; record_switch and
+# record_switch_role both `|| return 0`), so refusing changes no assertion in
+# this file — nothing here inspects the meta-task audit trail, only the
+# model PINS written to agent .md files and the warning text on stderr.
+BD_STUB_LOG="$TESTROOT/bd-stub-calls.log"
+BD_STUB_BIN=$(mktemp -d "$TESTROOT/bd-stub-bin.XXXXXX")
+cat > "$BD_STUB_BIN/bd" <<STUB
+#!/bin/bash
+# Isolation stub — claude-workflow-plugin-j7kk. Logs the subcommand (for
+# this file's own non-vacuity check, Section 11 below) and refuses, so no
+# invocation anywhere in this spec can reach a real Beads store.
+printf '%s\n' "\${1:-<empty>}" >> "$BD_STUB_LOG"
+exit 1
+STUB
+chmod +x "$BD_STUB_BIN/bd"
+export PATH="$BD_STUB_BIN:$PATH"
+
+# The read-only witness that the fix actually holds, not merely that it was
+# written: same predicate the L1 harness canary (run-tests.sh) uses — a
+# plain `SELECT hashof('HEAD')` never moves on a read (12 consecutive reads,
+# zero false positives, claude-workflow-plugin-j7kk census) — captured
+# BEFORE any sandbox in this file runs and compared after the LAST one, at
+# the foot of this file (Section 11). Gracefully DISARMED (informational,
+# non-fatal) when dolt or the store's embedded-Dolt layout is unavailable,
+# matching every other DISARM path this task adds; this is a defense-in-depth
+# self-check, not a substitute for the tier-wide guard, which is a separate,
+# paired addition to run-tests.sh / runner-completeness.test.sh.
+BD_ISOLATION_STORE="$PROJECT_DIR/.beads/embeddeddolt/beads"
+BD_ISOLATION_ARMED=0
+BD_ISOLATION_HASH_BEFORE=""
+if command -v dolt >/dev/null 2>&1 && [ -d "$BD_ISOLATION_STORE/.dolt" ]; then
+    BD_ISOLATION_HASH_BEFORE=$(cd "$BD_ISOLATION_STORE" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+    case "$BD_ISOLATION_HASH_BEFORE" in
+        ''|*[Hh]ashof*) BD_ISOLATION_ARMED=0 ;;
+        *)              BD_ISOLATION_ARMED=1 ;;
+    esac
+fi
+# --- BD-ISOLATION-END (claude-workflow-plugin-j7kk) -------------------------
+
 # new_sandbox — print a fresh project-root path with the plugin scripts
 # symlinked in and seven base-pinned agent files. Callers write their own
 # .claude/model-roles / model-ranking / artifact fixtures.
+#
+# bd ISOLATION IS NOT DONE HERE (claude-workflow-plugin-j7kk). This used to
+# be the whole bug: CLAUDE_PROJECT_DIR=$d (below) redirects the FILE surfaces
+# this sandbox builds, but bd itself resolves its store from cwd alone, so a
+# per-sandbox stub would need every `bash "$MS"/"$APPLY"/"$SL"/"$SS"` call
+# site to also carry `PATH="$d/bin:$PATH"` — and `new_sandbox` runs inside
+# `SB=$(new_sandbox)`, a command-substitution SUBSHELL, so an `export PATH=`
+# in here would die with it. See the BD-ISOLATION block at the top of this
+# file for the actual fix: one PATH mutation, done once, before any sandbox
+# exists.
 new_sandbox() {
     local d
     d=$(mktemp -d "$TESTROOT/sb.XXXXXX")
@@ -1486,6 +1582,162 @@ assert_contains "10.7-META discriminator: ...and Warning 10 too" "is missing key
 SB_107C=$(ss_positive_sandbox)
 assert_contains "10.7-META restore control: the SHIPPED hook emits the collapse line" \
     "design identity collapse" "$(ss_context "$SB_107C")"
+
+# ===========================================================================
+echo ""
+echo "=== Section 12: apply --check is DETECT-AND-WARN, never a write (claude-workflow-plugin-j7kk, B2, R4-F1 ruling) ==="
+#
+# THE DEFECT (filed, dated 2026-08-14T04:58:10): the OLD unconditional
+# session-start.sh -> `model-select.sh apply` call rewrote four TRACKED files
+# (three agent .md + settings.json, one shared mtime) mid an OPEN, UNRELATED
+# change set, with no files_changed list naming them — an approval covering
+# the rest of that change set would have attested to bytes no specialist
+# wrote and no reviewer read. R4-F1's ruling — already applied elsewhere in
+# this repo (beads-ledger.sh, session-start.sh's own ledger-divergence check,
+# session-end.sh) — is DETECT-AND-WARN, with an explicit apply step still
+# reachable. --check is the new flag; session-start.sh's automatic call now
+# passes it (a session-start.sh change, not exercised here — this file's
+# subject is model-select.sh's own contract).
+#
+# Placed BEFORE Section 11 on purpose: Section 11 takes its "production
+# store untouched across this ENTIRE file's run" snapshot at the bottom, so
+# 12.3's write-path call (the one assertion below that reaches _apply_role,
+# same as every other write-path assertion elsewhere in this file) has to
+# run before that snapshot to be covered by it.
+
+# 12.1: a config that would resolve EVERY role to a DIFFERENT pin than what
+# the agent files currently carry — the same base/orch shape as 6.1
+# (base=orch=claude-base-0, so every lane drifts against the resolved
+# claude-fable-9) but read through --check instead of driving a write.
+SB_121=$(ms_sandbox_with_listing "claude-base-0" "claude-base-0")
+BEFORE_121_DESIGNER=$(agent_pin_of "$SB_121/.claude/agents/designer.md")
+BEFORE_121_ORCH=$(agent_pin_of "$SB_121/.claude/agents/orchestrator.md")
+BEFORE_121_SETTINGS=$(cat "$SB_121/.claude/settings.json" 2>/dev/null || echo "<absent>")
+RES_121=$(CLAUDE_PROJECT_DIR="$SB_121" bash "$MS" apply --quiet --check 2>&1 >/dev/null | grep '^model-select:' | tail -1)
+assert_eq "12.1 --check does NOT rewrite the drifted designer lane" \
+    "$BEFORE_121_DESIGNER" "$(agent_pin_of "$SB_121/.claude/agents/designer.md")"
+assert_eq "12.1 --check does NOT rewrite the drifted orchestrator lane either" \
+    "$BEFORE_121_ORCH" "$(agent_pin_of "$SB_121/.claude/agents/orchestrator.md")"
+assert_eq "12.1 --check does NOT touch settings.json (the OTHER tracked file the filed defect named)" \
+    "$BEFORE_121_SETTINGS" "$(cat "$SB_121/.claude/settings.json" 2>/dev/null || echo "<absent>")"
+assert_contains "12.1 the ONE surfaced stderr line (session-start.sh's tail -1 'most recent line' collapse target) names the drift" \
+    "resolver drift" "$RES_121"
+assert_contains "12.1 ...naming the specific role, current pin and resolved pin" \
+    "designer: agent file has 'claude-base-0', config resolves 'claude-fable-9'" "$RES_121"
+assert_contains "12.1 ...and the exact explicit command that applies it" \
+    "/workflow-model --role designer claude-fable-9" "$RES_121"
+assert_contains "12.1 ...and states plainly that nothing auto-applied (R4-F1)" \
+    "NOTHING auto-applied" "$RES_121"
+
+# 12.2: NO drift (pins already match the resolved config) — --check must say
+# so plainly, distinctly from "N switched", so an operator cannot mistake a
+# check-only run for one that resolved anything.
+SB_122=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+RES_122=$(CLAUDE_PROJECT_DIR="$SB_122" bash "$MS" apply --quiet --check 2>&1 >/dev/null | grep '^model-select:' | tail -1)
+assert_not_contains "12.2 no drift: the summary never claims 'resolver drift'" \
+    "resolver drift" "$RES_122"
+assert_contains "12.2 ...and says so explicitly (0 written)" \
+    "0 written" "$RES_122"
+assert_eq "12.2 ...and the designer lane is genuinely untouched" \
+    "claude-fable-9" "$(agent_pin_of "$SB_122/.claude/agents/designer.md")"
+
+# 12.3 RESTORE CONTROL / regression guard: the IDENTICAL drifted shape as
+# 12.1, but `apply` WITHOUT --check — still WRITES exactly as every other
+# section in this file already exercises. This is what proves --check is an
+# ADDITIVE flag on an unchanged default, not a behaviour change to `apply`
+# itself (which model-roles.test.sh's other ~250 assertions depend on).
+SB_123=$(ms_sandbox_with_listing "claude-base-0" "claude-base-0")
+CLAUDE_PROJECT_DIR="$SB_123" bash "$MS" apply --quiet >/dev/null 2>&1
+assert_eq "12.3 RESTORE CONTROL: apply WITHOUT --check still writes the designer lane (default behaviour is unchanged)" \
+    "claude-fable-9" "$(agent_pin_of "$SB_123/.claude/agents/designer.md")"
+
+# ---------------------------------------------------------------------------
+# 12M. META — neutralise the CHECK_ONLY gate at BOTH its call sites (the
+# per-role compare-vs-write branch AND the reporting branch share the exact
+# text `if [ "$CHECK_ONLY" -eq 1 ]; then`, so one substitution mutates both).
+# The R4-F1 regression this guards against: --check would then ALSO write,
+# silently defeating the whole reason the flag exists.
+# ---------------------------------------------------------------------------
+MUT12_DIR=$(mktemp -d "$TESTROOT/checkmut.XXXXXX")
+MUT12="$MUT12_DIR/model-select.sh"
+# shellcheck disable=SC2016
+sed 's/if \[ "\$CHECK_ONLY" -eq 1 \]; then$/if [ "$CHECK_ONLY" -eq 9 ]; then/' "$MS" > "$MUT12"
+# shellcheck disable=SC2016  # single-quoted on purpose: matching LITERAL
+# shell-source text in the mutant file, not expanding this script's own vars.
+assert_eq "12M.0a non-vacuity: BOTH call sites were found and neutralised" \
+    "2" "$(grep -c 'if \[ "\$CHECK_ONLY" -eq 9 \]; then' "$MUT12" | tr -d '[:space:]')"
+# shellcheck disable=SC2016  # same reason as above.
+assert_eq "12M.0b non-vacuity: the ORIGINAL comparison is gone from both" \
+    "0" "$(grep -c 'if \[ "\$CHECK_ONLY" -eq 1 \]; then' "$MUT12" | tr -d '[:space:]')"
+assert_eq "12M.1 non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT12" "$MS" && echo same || echo differs)"
+assert_eq "12M.2 non-vacuity: the mutant still parses" \
+    "0" "$(bash -n "$MUT12" >/dev/null 2>&1 && echo 0 || echo 1)"
+
+SB_12M=$(ms_sandbox_with_listing "claude-base-0" "claude-base-0")
+rm -f "$SB_12M/.claude/scripts/model-select.sh"   # never cp over the symlink
+cp "$MUT12" "$SB_12M/.claude/scripts/model-select.sh"
+chmod +x "$SB_12M/.claude/scripts/model-select.sh"
+# workflow-model-apply.sh only touches settings.json for the implementer (or
+# `all`) role, and neither ms_sandbox_with_listing nor new_sandbox creates one
+# by default (they seed only .claude/agents/*.md) — seed the minimal shape
+# `_apply_role`'s helper reads/writes (`.env.CLAUDE_LATEST_OPUS`) so this leg
+# can observe that write path too, not just the agent-file one.
+printf '{"env":{}}' > "$SB_12M/.claude/settings.json"
+CLAUDE_PROJECT_DIR="$SB_12M" bash "$SB_12M/.claude/scripts/model-select.sh" apply --quiet --check >/dev/null 2>&1
+assert_eq "12M.3 SPECIFIC MISBEHAVIOUR: with the gate neutralised, --check WRITES the designer lane anyway (12.1's own assertion would FAIL on this mutant)" \
+    "claude-fable-9" "$(agent_pin_of "$SB_12M/.claude/agents/designer.md")"
+assert_eq "12M.4 SPECIFIC: ...and settings.json too (the second tracked file the filed defect named; implementer's representative is backend.md, also seeded at claude-base-0 -> claude-fable-9 by ms_sandbox_with_listing)" \
+    "yes" "$(jq -e '.env.CLAUDE_LATEST_OPUS == "claude-fable-9"' "$SB_12M/.claude/settings.json" >/dev/null 2>&1 && echo yes || echo no)"
+# RESTORE CONTROL: the identical scenario, shipped script, --check genuinely
+# writes nothing to EITHER tracked file (12.1 above re-asserted against a
+# freshly-built sandbox so the control is not a stale reading).
+SB_12MC=$(ms_sandbox_with_listing "claude-base-0" "claude-base-0")
+printf '{"env":{}}' > "$SB_12MC/.claude/settings.json"
+CLAUDE_PROJECT_DIR="$SB_12MC" bash "$MS" apply --quiet --check >/dev/null 2>&1
+assert_eq "12M.5 RESTORE CONTROL: the SHIPPED script, --check, the identical scenario, writes NOTHING to the designer lane" \
+    "claude-base-0" "$(agent_pin_of "$SB_12MC/.claude/agents/designer.md")"
+assert_eq "12M.6 RESTORE CONTROL: ...nor to settings.json" \
+    "no" "$(jq -e '.env.CLAUDE_LATEST_OPUS == "claude-fable-9"' "$SB_12MC/.claude/settings.json" >/dev/null 2>&1 && echo yes || echo no)"
+
+# ===========================================================================
+echo ""
+echo "=== Section 11: bd isolation holds for the file that used to be CAN-REACH(WRITE) (claude-workflow-plugin-j7kk) ==="
+#
+# Non-vacuity FIRST: the stub log must be non-empty, or "isolation held"
+# would be indistinguishable from "nothing in this file calls bd at all" —
+# and the census measured 417 calls, so it does not go untested by accident.
+BD_STUB_CALL_COUNT=0
+[ -f "$BD_STUB_LOG" ] && BD_STUB_CALL_COUNT=$(grep -c . "$BD_STUB_LOG" 2>/dev/null || echo 0)
+assert_eq "11.1 NON-VACUITY: this file DOES call bd somewhere (the stub logged >=1 invocation — isolation had something to isolate)" \
+    "yes" "$([ "${BD_STUB_CALL_COUNT:-0}" -ge 1 ] && echo yes || echo no)"
+# NOT "comment": the stub REFUSES unconditionally (exit 1, no stdout), so
+# `bd create ... --json | jq -r '.id // empty'` always yields an empty id and
+# find_or_create_meta_task() always returns 1 before record_switch_role ever
+# reaches its OWN `bd comment` call — `|| return 0` bails the caller out
+# first (MEASURED: 0/382 logged calls are `comment`, all `create`/`list`/
+# `--version`). That short-circuit is a property of a stub that always
+# fails, not evidence isolation is incomplete; what it call-shape DOES prove
+# is the two calls find_or_create_meta_task always attempts before it can
+# give up — the title lookup, and the create attempt behind it.
+assert_contains "11.2 the logged subcommands include find_or_create_meta_task's create attempt (the one this file used to write live, 35/run in the census)" \
+    "create" "$(cat "$BD_STUB_LOG" 2>/dev/null || true)"
+assert_contains "11.3 ...and the title lookup it tries first (list)" \
+    "list" "$(cat "$BD_STUB_LOG" 2>/dev/null || true)"
+
+# THE DIRECT WITNESS: the production store's HEAD did not move across this
+# entire file's run — not "the stub was installed", but "production was
+# provably untouched". Gracefully SKIPPED (never a silent pass, and never a
+# hard failure of the tier) when dolt or the embedded-Dolt layout is
+# unavailable, matching every DISARM path elsewhere in this task.
+if [ "$BD_ISOLATION_ARMED" = "1" ]; then
+    BD_ISOLATION_HASH_AFTER=$(cd "$BD_ISOLATION_STORE" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+    assert_eq "11.4 SPECIFIC: the production Beads store's HEAD is UNCHANGED across this entire file's run ($BD_STUB_CALL_COUNT stubbed bd invocation(s) were logged)" \
+        "$BD_ISOLATION_HASH_BEFORE" "$BD_ISOLATION_HASH_AFTER"
+else
+    printf '  note: 11.4 SKIPPED - dolt not on PATH or %s has no embedded Dolt store; cannot read the production store HEAD to verify\n' "$BD_ISOLATION_STORE"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

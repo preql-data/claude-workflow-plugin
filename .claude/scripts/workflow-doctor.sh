@@ -101,6 +101,53 @@ DOCTOR_TOOL_COUNTS="bd-mcp:21 code-graph-mcp:7"
 DOCTOR_MIN_BD_VERSION="0.47"
 DOCTOR_MIN_NODE_VERSION="18.17"
 
+# The validated <bd-binary-version>:<store-schema-version> pair for the
+# TARGET this doctor is running against (39cy rider, claude-workflow-plugin-
+# j7kk). DOCTOR_MIN_BD_VERSION above is a FLOOR — every one of bd 1.1.2,
+# 1.2.1 and 1.2.2 satisfies it — and floors cannot catch the hazard this one
+# exists for: bd auto-migrates a LOCAL (non-remote-backed) store's schema on
+# first run of a newer binary, with no confirmation and no opt-out (measured:
+# `bd migrate --help` — "Without subcommand, checks and updates database
+# metadata to current version" — and the installed binary's own embedded
+# changelog string "NEW: Auto-migrate SQLite to Dolt on first bd command";
+# `BD_ALLOW_REMOTE_MIGRATE` only gates a REMOTE-backed store, which this repo
+# does not configure). This repo lived that hazard directly: bd self-upgraded
+# 1.1.2 -> 1.2.1 -> 1.2.2 across one work arc, and 1.2.1 silently migrated
+# the Dolt schema, which then made `qa-gate.sh status` misreport an
+# unreachable store as "not-entered" (see cmd_status's own fix) until the
+# schema was rolled back to v53.
+#
+# EXACT EQUALITY is the point, same reasoning as DOCTOR_TOOL_COUNTS above: a
+# drift in EITHER direction — bd newer than the pin, or the store's own
+# schema version newer/older than what that bd version wrote — is the thing
+# to catch, not a floor satisfied by every version that ever shipped.
+#
+# THIS IS THE PIN. Update it in the SAME commit as a DELIBERATE bd upgrade or
+# a deliberate schema migration — exactly the EXPECTED_SPECS convention
+# (.claude/scripts/tests/run-tests.sh) applied to a second constant nobody
+# was watching. An untracked drift firing this check is the friction
+# working: it converts a silent, automatic version change back into a
+# reviewed one. "Disable unprompted self-upgrade" (the same 39cy rider) has
+# no bd-side lever to pull — there is no flag that turns off the local-store
+# auto-migration above, confirmed by reading `bd --help`, `bd config --help`,
+# `bd upgrade --help` and `bd migrate --help` in full — so prevention here IS
+# detection: pin the validated pair, fail loudly on drift, and let the FAIL's
+# own fix text (below) be the place a maintainer is told to update it
+# deliberately rather than let a package manager do it silently.
+#
+# check_beads() below is the ONLY check this pin's schema half can run
+# against (see that check's own header): the schema half needs the TARGET's
+# real .beads/embeddeddolt, which a sandboxed probe copy never carries by
+# design (mk_probe_sandbox() creates an EMPTY .beads/ on purpose). The
+# version half runs unconditionally; the schema half DISARMS (PASS,
+# informational) rather than fails when dolt is absent or the target's store
+# predates the embedded-Dolt layout — a version-only check on such a target
+# would compare against a pin measured against a Dolt-backed store and would
+# not be honest about what it actually verified.
+# BEGIN DOCTOR_BD_SCHEMA_PIN (workflow-doctor.test.sh extracts this block; keep the sentinels)
+DOCTOR_BD_SCHEMA_PIN="1.2.2:53"
+# END DOCTOR_BD_SCHEMA_PIN
+
 # Minimum bytes of post-frontmatter SKILL.md body. The `skill` check exists to
 # catch the one-line fallback stub session-start.sh substitutes when SKILL.md
 # is missing; the real body is ~13KB, the stub is ~200 bytes.
@@ -1041,12 +1088,17 @@ hook failure per fire and the gate it belonged to is simply absent."
 # ===========================================================================
 # Check: beads
 #
-# DELIBERATELY TOLERANT. Presence of .beads/ and reachability of `bd doctor`
-# are the only FAIL conditions. bd's section wording changes across versions
-# (0.47.1 prints "⚠ CLI Version ... (latest: ...)" on a perfectly healthy
-# install) and bd-compat.sh pins 0.47.1 only, so text parsing may downgrade to
-# a NOTE and never to a failure. A doctor that cried wolf on cosmetic bd
-# output would be turned off, which is worse than one that under-reports.
+# DELIBERATELY TOLERANT of bd's own free-text wording. Presence of .beads/,
+# reachability of `bd doctor`, and (claude-workflow-plugin-j7kk, 39cy) an
+# EXACT bd-version-vs-store-schema match against DOCTOR_BD_SCHEMA_PIN are the
+# three FAIL conditions — the third is a deterministic structural comparison
+# against a constant THIS repo maintains, not bd's own prose, so it is held
+# to a different standard than the text findings below. bd's section wording
+# changes across versions (0.47.1 prints "⚠ CLI Version ... (latest: ...)" on
+# a perfectly healthy install) and bd-compat.sh pins 0.47.1 only, so TEXT
+# parsing may downgrade to a NOTE and never to a failure. A doctor that cried
+# wolf on cosmetic bd output would be turned off, which is worse than one
+# that under-reports.
 #
 # THE ONE UNSANDBOXED CHECK, on purpose. `.beads/` is the workflow's live task
 # state; a probe copy would be checking a database nothing uses, which is not a
@@ -1122,6 +1174,69 @@ $(printf '%s\n' "$flagged" | sed 's/^[[:space:]]*/  /')"
         note="
 NOTE: bd doctor reported $warns advisory warning(s) (informational only). Run
 \`bd doctor\` in the target to read them."
+    fi
+
+    # bd-VERSION-vs-STORE-SCHEMA PIN (39cy). EXACT equality against
+    # DOCTOR_BD_SCHEMA_PIN (see that constant's own header for the full
+    # reasoning) — a deterministic structural comparison, not bd's free-text
+    # wording, so it does not inherit the "never fail on cosmetic output"
+    # tolerance above. READ-ONLY: `bd version` never writes, and the schema
+    # read is a direct `dolt sql` SELECT against the schema_migrations table
+    # bd itself queries internally (same predicate string bd's own binary
+    # embeds) — this does not invoke `bd doctor` a second time, so it cannot
+    # also be the thing that triggers that call's own WAL-checkpoint side
+    # effect (see this check's header). The sandboxed-copy helper this file
+    # uses for every OTHER dynamic check builds only an EMPTY .beads/ (see
+    # its own definition further down), so a probe copy carries no schema at
+    # all — this, like the `bd doctor` call above, has to read the REAL
+    # target instead.
+    local pin_bd_ver="${DOCTOR_BD_SCHEMA_PIN%%:*}" pin_schema_ver="${DOCTOR_BD_SCHEMA_PIN#*:}"
+    local live_bd_ver
+    live_bd_ver=$(env "PATH=$shim_path" bd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    local schema_store="$TARGET/.beads/embeddeddolt/beads"
+    if ! command -v dolt >/dev/null 2>&1 || [ ! -d "$schema_store/.dolt" ]; then
+        note="$note
+NOTE: bd-version-vs-schema pin DISARMED (dolt not on PATH, or $schema_store
+has no embedded-Dolt store — a store-less target, or a pre-1.1.x/SQLite bd
+install). Pinned pair (bd:schema): $DOCTOR_BD_SCHEMA_PIN."
+    else
+        local live_schema_ver
+        live_schema_ver=$(cd "$schema_store" 2>/dev/null \
+            && dolt sql -r csv -q "SELECT COALESCE(MAX(version),0) FROM schema_migrations" 2>/dev/null | tail -n1)
+        case "$live_schema_ver" in ''|*[!0-9]*) live_schema_ver="" ;; esac
+        if [ -z "$live_bd_ver" ] || [ -z "$live_schema_ver" ]; then
+            note="$note
+NOTE: bd-version-vs-schema pin could not be evaluated (\`bd --version\` or the
+schema_migrations query produced no parseable value). Pinned pair
+(bd:schema): $DOCTOR_BD_SCHEMA_PIN."
+        elif [ "$live_bd_ver:$live_schema_ver" = "$pin_bd_ver:$pin_schema_ver" ]; then
+            # STATE THE MATCH, not just the absence of a failure — a check
+            # that can silently do nothing extra on its happy path is
+            # indistinguishable from a check that never ran (the exact class
+            # this task exists to close). See "M-2 is data plumbing, not a
+            # check" for why THAT script states the opposite thing instead.
+            note="$note
+NOTE: bd-version-vs-schema pin OK ($live_bd_ver:$live_schema_ver matches $DOCTOR_BD_SCHEMA_PIN)."
+        elif [ "$live_bd_ver:$live_schema_ver" != "$pin_bd_ver:$pin_schema_ver" ]; then
+            record beads FAIL "bd-version-vs-schema DRIFT: installed bd $live_bd_ver / store schema v$live_schema_ver != pinned $DOCTOR_BD_SCHEMA_PIN (bd:schema)" \
+"bd auto-migrates a LOCAL (non-remote-backed) store's schema on first run of a
+NEWER binary, with no confirmation and no opt-out — this is bd's own
+documented behaviour (\`bd migrate --help\`: \"Without subcommand, checks and
+updates database metadata to current version\"), not a bug this doctor can
+fix. This repo lived the hazard directly: bd self-upgraded 1.1.2 -> 1.2.1 ->
+1.2.2 across one work arc, and 1.2.1 silently migrated the Dolt schema, which
+then made \`qa-gate.sh status\` misreport an unreachable store as
+\"not-entered\" until the schema was rolled back.
+If this drift was DELIBERATE (you meant to upgrade bd, or ran a migration on
+purpose): update DOCTOR_BD_SCHEMA_PIN in workflow-doctor.sh to
+\"$live_bd_ver:$live_schema_ver\" in the SAME commit — the EXPECTED_SPECS
+convention (run-tests.sh) applied to this pin.
+If it was NOT deliberate: something (a package manager, a reinstall script)
+upgraded bd without telling you. Pin bd at the OS/package-manager level (e.g.
+\`brew pin bd\`) so it cannot happen again unprompted, and read \`bd doctor\`'s
+own 'Database version and migration status' section for what changed."
+            return
+        fi
     fi
     record beads PASS ".beads/ present; \`bd doctor\` reachable (exit $rc)$note"
 }

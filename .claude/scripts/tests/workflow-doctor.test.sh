@@ -18,9 +18,13 @@
 #
 #   3. THE SANDBOX DESIGN IS LOAD-BEARING AND IS TESTED AS SUCH. session-start.sh
 #      wipes .qa-tracking/approved, truncates changed-files.txt, refreshes the
-#      gate baseline and calls model-select.sh apply (which REWRITES AGENT
-#      FRONTMATTER PINS). A doctor that ran those against the live tree would
-#      clear the operator's own QA approval as a side effect of a health check.
+#      gate baseline and calls model-select.sh apply --check (claude-workflow-
+#      plugin-j7kk, B2: DETECT-AND-WARN only since the R4-F1 ruling — the
+#      write path, `apply` without --check, still REWRITES AGENT FRONTMATTER
+#      PINS and is what this note originally described, but nothing calls it
+#      automatically any more). A doctor that ran the FIRST THREE against the
+#      live tree would clear the operator's own QA approval as a side effect
+#      of a health check.
 #      Section 5 asserts this in two halves with different owners: 5b seeds the
 #      gate artifacts into a COPIED target and asserts they survive, and its
 #      META proves the preservation comes from the sandbox indirection by
@@ -70,6 +74,14 @@
 #                failure), a perturbed .session-start must move it, and the skip
 #                branch that then runs must print a note while moving NEITHER
 #                counter — which is what keeps the run's exit code 0.
+#   META-TEST 8  (claude-workflow-plugin-j7kk, 39cy) bumping the SCHEMA half of
+#                DOCTOR_BD_SCHEMA_PIN by a few versions, against a freshly
+#                bd-init'd fixture whose real bd/schema pair matches the
+#                shipped pin (the control), flips `beads` from PASS to FAIL,
+#                proving the bd-version-vs-store-schema check is EXACT
+#                equality and not a floor — and a target whose .beads/ has no
+#                embedded-Dolt store at all still PASSES (DISARMED, never a
+#                failure over an environment gap the check cannot evaluate).
 #
 # Exit codes: 0 all assertions pass, 1 otherwise, 2 invocation error.
 
@@ -1166,6 +1178,84 @@ else
         assert_contains "META-TEST 4: the FAIL detail names both the observed and expected counts" \
             "expected exactly 22" \
             "$(jq -r '.checks[] | select(.name == "mcp_bd") | .detail' "$MUT4_JSON" 2>/dev/null || echo "")"
+    fi
+fi
+
+echo ""
+echo "--- META-TEST 8: bd-version-vs-store-schema pin is EXACT, not a floor (claude-workflow-plugin-j7kk, 39cy) ---"
+if ! command -v bd >/dev/null 2>&1 || ! command -v dolt >/dev/null 2>&1; then
+    printf '  note: META-TEST 8 SKIPPED - it needs both bd and dolt on PATH to build a real embedded-Dolt fixture store.\n'
+else
+    ONLY_BEADS8=$(all_but beads)
+    SCHEMA_TARGET="$WORK/target-schema-pin"
+    mk_target "$SCHEMA_TARGET"
+    # --database beads matches THIS repo's OWN embedded-Dolt layout
+    # (.beads/embeddeddolt/beads/.dolt) — a fresh `bd init` with no
+    # --database names the subdirectory after the CURRENT DIRECTORY instead
+    # (measured, claude-workflow-plugin-j7kk: a fixture at .../dryrun-fx
+    # defaulted to embeddeddolt/dryrun_fx/.dolt), which would silently
+    # DISARM the check under test rather than exercise it. mk_target()'s own
+    # `.beads/` is an empty placeholder (like mk_probe_sandbox()'s), so it is
+    # removed first rather than initialised into.
+    rm -rf "$SCHEMA_TARGET/.beads"
+    ( cd "$SCHEMA_TARGET" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+    if [ ! -d "$SCHEMA_TARGET/.beads/embeddeddolt/beads/.dolt" ]; then
+        printf '  note: META-TEST 8 SKIPPED - could not build a real embedded-Dolt fixture store at %s\n' \
+            "$SCHEMA_TARGET/.beads/embeddeddolt/beads/.dolt"
+    else
+        # CONTROL FIRST: the fresh fixture's installed bd/schema is whatever
+        # THIS host's bd actually writes on `bd init`, so the control is "the
+        # shipped doctor agrees with the pin over a store it just created" —
+        # never against a hardcoded expectation this spec would go stale
+        # against the day DOCTOR_BD_SCHEMA_PIN is deliberately updated.
+        CTRL8_JSON="$WORK/meta8-control.json"
+        doctor_run "$DOCTOR" "$SCHEMA_TARGET" "$CTRL8_JSON" --quiet --skip "$ONLY_BEADS8"
+        CTRL8_STATUS=$(status_of "$CTRL8_JSON" beads)
+        assert_eq "META-TEST 8 control: beads PASSES against a freshly bd-init'd fixture (this host's bd/schema pair matches the shipped pin by construction)" \
+            "PASS" "$CTRL8_STATUS"
+
+        if [ "$CTRL8_STATUS" != "PASS" ]; then
+            printf '  note: META-TEST 8 mutant leg skipped — the control did not pass (this host'\''s bd/schema pair does not match DOCTOR_BD_SCHEMA_PIN), so a mutant FAIL would not be attributable to the pin logic.\n'
+        else
+            MUT8="$WORK/doctor-mut8.sh"
+            # Anchored on the VARIABLE, not the current literal value (unlike
+            # META-TEST 4's hardcoded 21->22): DOCTOR_BD_SCHEMA_PIN is
+            # expected to change on every deliberate bd upgrade, and a sed
+            # anchored to today's exact value would silently stop mutating
+            # (and the non-vacuity checks below would catch that, but there
+            # is no reason to invite it). Only the SCHEMA half is bumped, so
+            # this specifically exercises "bd matches, schema does not".
+            sed -E 's/^(DOCTOR_BD_SCHEMA_PIN="[^:"]+):[0-9]+(")$/\1:99\2/' "$DOCTOR" > "$MUT8"
+            assert_eq "META-TEST 8: the mutant's schema half really changed to 99" "true" \
+                "$(grep -qE '^DOCTOR_BD_SCHEMA_PIN="[^:"]+:99"$' "$MUT8" && echo true || echo false)"
+            assert_eq "META-TEST 8: the mutant differs from the shipped doctor" \
+                "differs" "$(cmp -s "$DOCTOR" "$MUT8" && echo identical || echo differs)"
+            assert_eq "META-TEST 8: the mutant is still valid bash" "0" \
+                "$(bash -n "$MUT8" 2>/dev/null && echo 0 || echo 1)"
+            MUT8_JSON="$WORK/meta8-mutant.json"
+            doctor_run "$MUT8" "$SCHEMA_TARGET" "$MUT8_JSON" --quiet --skip "$ONLY_BEADS8"
+            assert_eq "META-TEST 8: an off-pin schema version flips beads to FAIL (equality, not a floor)" \
+                "FAIL" "$(status_of "$MUT8_JSON" beads)"
+            assert_contains "META-TEST 8: the FAIL detail names the DRIFT and both observed values" \
+                "bd-version-vs-schema DRIFT" \
+                "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$MUT8_JSON" 2>/dev/null || echo "")"
+            assert_contains "META-TEST 8: ...and the fix line tells the operator how to update the pin deliberately" \
+                "update DOCTOR_BD_SCHEMA_PIN" \
+                "$(jq -r '.checks[] | select(.name == "beads") | .fix' "$MUT8_JSON" 2>/dev/null || echo "")"
+        fi
+
+        # DISARM CONTROL: a target whose .beads/ exists but carries no
+        # embedded-Dolt store (mk_target()'s own default shape, and every
+        # OTHER section/fixture in this file) must not be penalised by a
+        # check this task just added — the pin is informational there, never
+        # a FAIL.
+        DISARM_JSON="$WORK/meta8-disarm.json"
+        doctor_run "$DOCTOR" "$FULL_TARGET" "$DISARM_JSON" --quiet --skip "$ONLY_BEADS8"
+        assert_eq "META-TEST 8 disarm: a target with .beads/ but no embedded-Dolt store still PASSES beads (the pin degrades, not fails)" \
+            "PASS" "$(status_of "$DISARM_JSON" beads)"
+        assert_contains "META-TEST 8 disarm: ...and says so by name" \
+            "DISARMED" \
+            "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$DISARM_JSON" 2>/dev/null || echo "")"
     fi
 fi
 

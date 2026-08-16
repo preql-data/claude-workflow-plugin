@@ -21,6 +21,10 @@
 #     side of the contract; the verify side is L2).
 #   - Malformed args: unknown choice, missing note, missing task id —
 #     each exits non-zero with a usage message on stderr.
+#   - (claude-workflow-plugin-j7kk, 39cy) `qa-gate.sh status` reporting
+#     "unavailable" rather than "not-entered" when `bd show` fails for any
+#     reason — this file already builds the bd-init'd fixture + pass-through
+#     wrapper this needs, so it lives here rather than in a new file.
 #
 # Conventions: this script mirrors bd-github-link.test.sh /
 # phase5-synthetic-tests.sh — plain bash, `set -u`, assert helpers,
@@ -419,6 +423,100 @@ ESC_GREP=$(printf '%s' "$ESC_GREP" | tr -d '[:space:]')
 assert_eq "enter: qa-escalated cleared on re-enter" "0" "$ESC_GREP"
 assert_contains "enter: qa-gate-entered re-set" \
     "qa-gate-entered" "$LABELS_RES"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section: status reports UNAVAILABLE, not not-entered, when bd cannot be read (claude-workflow-plugin-j7kk, 39cy) ==="
+#
+# THE BUG, reproduced rather than assumed: get_labels() used to swallow ANY
+# `bd show` failure into an empty string (`|| echo ""`), so has_label()
+# returned false for every qa lifecycle label and cmd_status's precedence
+# cascade fell through to its LAST arm — {"ok":true,"status":"not-entered"}
+# — over a store it never actually read. MEASURED live during the
+# schema-skew incident this fixes: `qa-gate.sh status` returned exactly that
+# JSON against an unreachable store. Unavailable is not not-entered: a task
+# already entered/approved/blocked would misreport as needing a first-time
+# QA entry.
+TID_UNAVAIL=$(bd create "status unavailable test" -t task -p 1 --json | jq -r '.id')
+bd label add "$TID_UNAVAIL" qa-approved >/dev/null 2>&1
+
+# A SEPARATE, LOCALLY-SCOPED bd wrapper whose `show` subcommand fails; every
+# other subcommand passes through to the real bd. Prepended to PATH for ONE
+# invocation only (inline VAR=val form on the command line), NEVER exported —
+# yj2 is exactly the hazard of a broken wrapper LEAKING into later
+# fixtures/sections via a persistent PATH mutation or a mk_bd_shim-style
+# `command -v bd` chain, and this section's whole point is a TARGETED
+# failure, not a poisoned suite.
+BROKEN_BIN=$(mktemp -d -t qa-gate-status-broken.XXXXXX)
+cat > "$BROKEN_BIN/bd" <<EOF
+#!/bin/bash
+if [ "\$1" = "show" ]; then
+    echo "bd: schema version mismatch (store is at a newer schema than this binary supports)" >&2
+    exit 1
+fi
+exec ${REAL_BD} "\$@"
+EOF
+chmod +x "$BROKEN_BIN/bd"
+
+# Non-vacuity: confirm the broken wrapper really does fail `bd show` before
+# trusting anything measured through it.
+BROKEN_SHOW_RC=0
+PATH="$BROKEN_BIN:$PATH" bd show "$TID_UNAVAIL" >/dev/null 2>&1 || BROKEN_SHOW_RC=$?
+assert_eq "status-unavailable: NON-VACUITY — the broken wrapper's bd show really fails" \
+    "1" "$BROKEN_SHOW_RC"
+
+STATUS_UNAVAIL=$(PATH="$BROKEN_BIN:$PATH" bash "$QG" status "$TID_UNAVAIL" 2>/dev/null)
+STATUS_UNAVAIL_RC=0
+PATH="$BROKEN_BIN:$PATH" bash "$QG" status "$TID_UNAVAIL" >/dev/null 2>&1 || STATUS_UNAVAIL_RC=$?
+
+assert_eq "status-unavailable: shipped qa-gate.sh reports ok:false when bd show fails, not ok:true" \
+    "false" "$(printf '%s' "$STATUS_UNAVAIL" | jq -r '.ok' 2>/dev/null)"
+assert_eq "status-unavailable: reports its OWN status (unavailable), never not-entered" \
+    "unavailable" "$(printf '%s' "$STATUS_UNAVAIL" | jq -r '.status' 2>/dev/null)"
+assert_contains "status-unavailable: names the underlying bd failure so an operator can act" \
+    "could not be read" "$STATUS_UNAVAIL"
+assert_eq "status-unavailable: exits non-zero (never rc=0, which the pre-fix report carried)" \
+    "yes" "$([ "$STATUS_UNAVAIL_RC" -ne 0 ] && echo yes || echo no)"
+
+# RESTORE CONTROL: same task, the SAME real bd (no PATH override), reports
+# the TRUE state (approved) — proving the failure above is about the broken
+# wrapper, not about this task or this script being unable to report status
+# in general.
+STATUS_OK=$(bash "$QG" status "$TID_UNAVAIL" 2>/dev/null)
+assert_eq "status-unavailable: RESTORE CONTROL — the real bd reports the task's true state (approved)" \
+    "approved" "$(printf '%s' "$STATUS_OK" | jq -r '.status' 2>/dev/null)"
+
+# THE MUTANT: excise the STATUS-UNAVAILABLE region from a COPY of qa-gate.sh
+# (placed alongside the real one so sibling-script resolution — e.g.
+# workflow-denylist.sh, resolved via BASH_SOURCE — still works) and
+# demonstrate the OLD, WRONG shape reproduces exactly over the SAME broken
+# store: {"ok":true,"status":"not-entered"}, rc=0 — the false success this
+# task fixes.
+MUT_QG="$FIXTURE/.claude/scripts/qa-gate.status-mutant.sh"
+awk '
+    /STATUS-UNAVAILABLE-BEGIN/ { skipping=1; found=1; next }
+    /STATUS-UNAVAILABLE-END/   { skipping=0; next }
+    !skipping { print }
+    END { if (!found) exit 7 }
+' "$QG" > "$MUT_QG"
+AWK_SU_RC=$?
+assert_eq "status-unavailable MUTANT: the region was FOUND and excised (awk found-check)" "0" "$AWK_SU_RC"
+assert_eq "status-unavailable MUTANT: the mutant differs from the shipped script" \
+    "differs" "$(cmp -s "$QG" "$MUT_QG" && echo identical || echo differs)"
+assert_eq "status-unavailable MUTANT: the mutant still parses (bash -n)" \
+    "0" "$(bash -n "$MUT_QG" 2>/dev/null; echo $?)"
+chmod +x "$MUT_QG"
+MUT_STATUS=$(PATH="$BROKEN_BIN:$PATH" bash "$MUT_QG" status "$TID_UNAVAIL" 2>/dev/null)
+MUT_RC=0
+PATH="$BROKEN_BIN:$PATH" bash "$MUT_QG" status "$TID_UNAVAIL" >/dev/null 2>&1 || MUT_RC=$?
+assert_eq "status-unavailable MUTANT: SPECIFIC — with the check excised, the SAME broken store reports ok:true" \
+    "true" "$(printf '%s' "$MUT_STATUS" | jq -r '.ok' 2>/dev/null)"
+assert_eq "status-unavailable MUTANT: ...and status:not-entered — the exact pre-fix false success" \
+    "not-entered" "$(printf '%s' "$MUT_STATUS" | jq -r '.status' 2>/dev/null)"
+assert_eq "status-unavailable MUTANT: ...exiting 0, not 3 (this is the false-success shape, reproduced)" \
+    "0" "$MUT_RC"
+
+rm -rf "$BROKEN_BIN" "$MUT_QG"
 
 # ---------------------------------------------------------------------------
 echo ""

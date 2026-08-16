@@ -66,6 +66,62 @@
 #      apart. See the CYCLE-SURVIVAL region in review-check.sh's cmd_gate for
 #      the full reasoning.
 #
+#   J. SKIP-WHEN-UNCHANGED (claude-workflow-plugin-j7kk, 9xl4's cheap
+#      structural half — added after this spec's initial landing, same as I).
+#      A real npm-backed Stop fired TWICE on an identical git tree: the
+#      second fire must not re-invoke npm, must not charge a second
+#      verification iteration (the SAME "iterations, not passes" rule POLL-
+#      ONLY/leg A already pins, extended to a second reason to say no), and
+#      must name the reuse in the block reason. A CONTENT-ONLY edit to the
+#      SAME tracked path between fires — the one shape change_set_hash alone
+#      cannot see, gate-claim-honesty.test.sh's own Section 6 subject — must
+#      force a genuine third npm invocation, proven here through the REAL
+#      hook rather than the isolated predicate. Seeding three review records
+#      is ITSELF a real tree change — qa-gate.sh review-record lands its
+#      artifact under docs/reviews/, not workflow bookkeeping — so a fourth
+#      fire genuinely re-runs (measured RED on the first draft of this leg,
+#      which wrongly expected a skip there) and, being the THIRD genuine run,
+#      escalates on ITER alone; a fifth fire, tree unchanged since the
+#      fourth, is a regression check that the PRE-EXISTING escalation-replay
+#      reading still fires correctly (the label from the fourth Stop's
+#      escalation is already set, so the fifth reads QA_ESCALATED=true at
+#      dispatch and correctly never reaches the new skip branch at all).
+#      NOT ESTABLISHED, and said so at the leg itself rather than left
+#      implied: whether ESC_SUITE_CLAUSE's ROUNDS-alone/still-a-skip branch —
+#      QA_ESCALATED turning true for the FIRST time on the exact Stop a skip
+#      also fires on — is reachable in production, and if so that it renders
+#      correctly there; this fixture cannot separate "ROUNDS reaches the cap"
+#      from "ITER already has" without a writer that seeds a round without
+#      touching the tree, which none of the shipped ones are. The fix mirrors
+#      SUITE_REUSE_REASON default-vs-named-reason branch), so it is not
+#      unexercised code, but this SPECIFIC call site has inspection, not a
+#      driven L2 assertion, behind it.
+#      META J: the same hash-only narrowing gate-claim-honesty.test.sh's 6M
+#      applies to the extracted predicate, applied instead to the real,
+#      unmodified verify-before-stop.sh — the content-only edit is then
+#      WRONGLY skipped.
+#
+#   K. R1-F1 FIX (claude-workflow-plugin-j7kk QA round 1) — a write landing
+#      DURING the suite's own run window, not between two Stops, must not be
+#      blessed into the skip baseline. Leg J's Stop 3 proves the skip catches
+#      a content-only edit made BETWEEN two Stop fires; Leg K proves the
+#      narrower, more dangerous case QA's review found uncovered — a mutation
+#      arriving WHILE the suite is dispatched, so record_verified_state's
+#      post-run reading and the caller's pre-dispatch reading are looking at
+#      two DIFFERENT tree states even though only one Stop fired. A real
+#      concurrent writer is not needed: the "npm" shim standing in for the
+#      test runner performs the write itself, as a side effect, before it
+#      exits — indistinguishable, from verify-before-stop.sh's point of view,
+#      from an external process racing it, and exactly reproducible. Stop 1
+#      (genuine run, mid-run write lands) must persist NO skip-state record;
+#      Stop 2 (nothing further touched) must therefore re-run the suite for
+#      real rather than replaying a green the suite never measured
+#      end-to-end over that content — QA's own stated acceptance for R1-F1.
+#      META K: reverting record_verified_state's pre/post comparison to an
+#      unconditional persist (the pre-fix shape) reproduces the defect
+#      exactly — Stop 1 persists despite the mid-run write, and Stop 2
+#      wrongly skips.
+#
 # escalation-binding.sh (the spec 0.2 regression suite) is deliberately NOT
 # modified: its cap-drive legs all fail the suite, so they exercise the
 # unsuppressed path and their continued passing is part of this change's evidence.
@@ -821,6 +877,411 @@ if assert_mutant_applied "0in1 META-I hash-equality-only restored" "$REAL_RC_I" 
     # cycle-survival rule and nothing else.
     assert_eq "META I: the mutant still reports the 4 open findings (ran the real predicate)" \
         "4" "$(printf '%s' "$META_I_OUT" | jq -r '.open_findings // "?"')"
+fi
+
+# ===========================================================================
+# LEG J — SKIP-WHEN-UNCHANGED (claude-workflow-plugin-j7kk, 9xl4's cheap
+# structural half). See the file header for the property under test.
+#
+# A REAL git checkout is required this time (unlike A-H, which are immune to
+# this feature precisely because they are NOT git repos — tree_fingerprint
+# returns the "no-git" sentinel there and the skip predicate refuses to
+# engage on a sentinel, on either side; see gate-claim-honesty.test.sh
+# Section 6's 6.8/6.9). Same isolation shape LEG I already uses.
+
+mk_fixture
+FIX_J="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_J="$FIX_J/.claude/scripts/verify-before-stop.sh"
+QG_J="$FIX_J/.claude/scripts/qa-gate.sh"
+CT_J="$FIX_J/.claude/scripts/current-task.sh"
+TRACK_J="$FIX_J/.claude/.qa-tracking"
+stack_stub "$FIX_J" "$NPM_RUNNER_JSON"
+mk_shim "npm" "$FIX_J" 0 "PASS  12 tests passed" >/dev/null
+NPM_LOG_J="$FIX_J/bin/npm.log"
+
+printf 'bin/\n.claude/scripts/\n.claude/.qa-tracking/\n' > "$FIX_J/.gitignore"
+mkdir -p "$FIX_J/src"
+printf 'export function handler() {}\n' > "$FIX_J/src/handler.ts"
+(cd "$FIX_J" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+
+TID_J=$(cd "$FIX_J" && bd create "skip-when-unchanged" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_J" enter "$TID_J" >/dev/null
+bd label add "$TID_J" qa-pending >/dev/null 2>&1
+bash "$CT_J" set "$TID_J" >/dev/null 2>&1
+printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+
+fire "$VBS_J"
+assert_decision "J: Stop 1 (genuine run) blocks — no approval yet" "$STOP_OUT" "block"
+NPM_J1=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+NPM_J1=$(printf '%s' "$NPM_J1" | tr -d '[:space:]')
+assert_eq "J: Stop 1 really ran npm (1 invocation)" "1" "$NPM_J1"
+ITER_J1=$(head -1 "$TRACK_J/iteration-count.$(san "$TID_J")" 2>/dev/null || echo "0")
+assert_eq "J: Stop 1 charged one verification iteration" "1" "$ITER_J1"
+STATE_GLOB_J=$(cd "$FIX_J" && ls .claude/.qa-tracking/last-verified-state.* 2>/dev/null | head -1)
+assert_eq "J: Stop 1 persisted a skip-state record for this task" \
+    "yes" "$([ -n "$STATE_GLOB_J" ] && [ -s "$FIX_J/$STATE_GLOB_J" ] && echo yes || echo no)"
+
+# --- Stop 2: IDENTICAL tree. Must SKIP, not re-run. -------------------------
+printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+fire "$VBS_J"
+assert_decision "J: Stop 2 (identical tree) still blocks (no approval was recorded)" "$STOP_OUT" "block"
+NPM_J2=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+NPM_J2=$(printf '%s' "$NPM_J2" | tr -d '[:space:]')
+assert_eq "J: Stop 2 did NOT re-invoke npm (still 1) — the skip fired" "1" "$NPM_J2"
+ITER_J2=$(head -1 "$TRACK_J/iteration-count.$(san "$TID_J")" 2>/dev/null || echo "0")
+assert_eq "J: Stop 2 did NOT charge a second verification iteration (SUITE_REUSED's 'iterations, not passes' rule, extended)" \
+    "1" "$ITER_J2"
+assert_contains "J: Stop 2's reason says the checks were NOT re-run this loop" \
+    "NOT re-run this loop" "$STOP_REASON"
+assert_contains "J: ...and names the SPECIFIC reason" \
+    "tree and change-set unchanged since the last full run" "$STOP_REASON"
+assert_eq "J: ...and never claims the escalation contract (QA_ESCALATED is false throughout this leg)" \
+    "0" "$(count_in "$STOP_REASON" 'escalation contract')"
+
+# --- Stop 3: CONTENT-ONLY edit to the SAME path (the k0mc shape). Must RUN. -
+printf 'export function handler() { return 1; }\n' > "$FIX_J/src/handler.ts"
+printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+fire "$VBS_J"
+assert_decision "J: Stop 3 (content-only edit, same path) still blocks" "$STOP_OUT" "block"
+NPM_J3=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+NPM_J3=$(printf '%s' "$NPM_J3" | tr -d '[:space:]')
+assert_eq "J: Stop 3 DID re-invoke npm (2) — a content-only edit to an already-tracked path is the one thing change_set_hash alone cannot see, and the real hook still catches it" \
+    "2" "$NPM_J3"
+ITER_J3=$(head -1 "$TRACK_J/iteration-count.$(san "$TID_J")" 2>/dev/null || echo "0")
+assert_eq "J: Stop 3 charged a second verification iteration (a genuine run happened)" "2" "$ITER_J3"
+
+# --- Stop 4: seeding rounds is ITSELF a real tree change (RED, measured) ----
+# FIRST ATTEMPT at this leg fired straight into a single "Stop 4" after
+# seeding three rounds and asserted the skip fired there AND named the skip
+# as Stop 4's escalation reason. Neither held, and each RED taught something:
+#
+#   RED 1 — npm ran a THIRD time (actual 3, expected 2): seed_round's writer
+#   (qa-gate.sh review-record) lands its artifact at the rqer-derived path
+#   UNDER docs/reviews/ (REVIEW_ARTIFACT_SUBDIR), a real git-visible file, not
+#   workflow bookkeeping under .qa-tracking/. Three seeded rounds is three NEW
+#   untracked files — exactly the tree movement tree_fingerprint exists to
+#   catch. Fixed by splitting into a settling Stop 4 (accepts the real
+#   re-run) and a Stop 5 that fires with nothing further touched.
+#
+#   RED 2, after that split — Stop 5's message still said "per the
+#   escalation contract", not the skip reason. Root cause, confirmed by
+#   reading the mechanism rather than patching the assertion: by "Stop 4"
+#   this leg has ALREADY run the suite for real THREE times (Stop 1, Stop 3,
+#   Stop 4), so ITER alone reaches MAX_ITERATIONS=3 there — Stop 4 escalates
+#   on ITER ALONE, before ROUNDS enters into it at all, and does so as a
+#   GENUINE run (SUITE_REUSED=false at that dispatch), which is the
+#   pre-existing, already-correct 2ty case. The qa-escalated LABEL this sets
+#   is then already TRUE by the time Stop 5 fires, so Stop 5's own
+#   suite-dispatch reads QA_ESCALATED=true BEFORE it ever asks whether a
+#   skip is possible — it correctly takes the ORIGINAL escalation-replay
+#   branch, and "per the escalation contract" is the ACCURATE thing to say
+#   there (a prior escalation genuinely did happen, at Stop 4).
+#
+#   THE SPECIFIC INTERACTION THE ESC_SUITE_CLAUSE FIX TARGETS — QA_ESCALATED
+#   turning true FOR THE FIRST TIME on the exact same Stop a skip fires on,
+#   via ROUNDS rather than a prior escalation — could not be constructed in
+#   this fixture: reaching it needs ITER to still be BELOW the cap when
+#   ROUNDS reaches it, but this leg's own Stop 1/3/4 already spend all three
+#   real-run "iterations" getting the skip mechanism itself under test, and
+#   the ONLY writer that can seed a round (review-record) always disturbs
+#   the tree, so the Stop immediately after seeding is never a skip — by the
+#   time one IS possible again, the label from that intervening real run has
+#   already made the (correct) escalation-contract reading apply instead.
+#   NOT ESTABLISHED, stated plainly rather than left as a red assertion:
+#   whether ESC_SUITE_CLAUSE's ROUNDS-alone/still-a-skip branch is reachable
+#   in production and, if so, that it renders correctly there. The FIX
+#   mirrors the identical, ALREADY-PROVEN pattern in the FAILED_CHECKS path a
+#   few hundred lines above (same SUITE_REUSE_REASON default-vs-named-reason
+#   branch), so it is not unexercised code — checks_scope_claim/note's
+#   parameterisation is unit-tested directly in gate-claim-honesty.test.sh
+#   Section 6.11 — but this SPECIFIC call site has inspection, not a driven
+#   assertion, behind it.
+IR_J="$FIX_J/.claude/scripts/impact-report.sh"
+HASH_J3=$(CLAUDE_PROJECT_DIR="$FIX_J" bash "$IR_J" --hash-only 2>/dev/null || echo "")
+assert_eq "J: precondition — Stop 3's change set has a computable hash to seed rounds against" \
+    "1" "$([ -n "$HASH_J3" ] && echo 1 || echo 0)"
+seed_round "$TID_J" 1 "$HASH_J3"
+seed_round "$TID_J" 2 "$HASH_J3"
+seed_round "$TID_J" 3 "$HASH_J3"
+
+printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+fire "$VBS_J"
+NPM_J4=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+NPM_J4=$(printf '%s' "$NPM_J4" | tr -d '[:space:]')
+assert_eq "J: Stop 4 DID re-invoke npm (3) — seed_round's real writer (review-record) landed three NEW files under docs/reviews/, which is a genuine tree change the skip correctly refuses to ignore" \
+    "3" "$NPM_J4"
+ITER_J4=$(head -1 "$TRACK_J/iteration-count.$(san "$TID_J")" 2>/dev/null || echo "0")
+assert_eq "J: Stop 4 charged a third verification iteration (a genuine run happened, for the same reason)" "3" "$ITER_J4"
+assert_eq "J: Stop 4 escalates on ITER ALONE (the third genuine run reaches MAX_ITERATIONS=3 regardless of ROUNDS)" \
+    "1" "$(has_label_ct "$TID_J" "qa-escalated")"
+
+# --- Stop 5: the escalation label now persists from Stop 4, so a
+# tree-unchanged replay correctly reads QA_ESCALATED=true at DISPATCH TIME
+# and takes the ORIGINAL escalation-replay branch — a regression check that
+# the pre-existing "per the escalation contract" reading still fires
+# correctly once a real prior escalation exists, unaffected by the new
+# skip-when-unchanged branch sitting beside it.
+printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+fire "$VBS_J"
+NPM_J5=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+NPM_J5=$(printf '%s' "$NPM_J5" | tr -d '[:space:]')
+assert_eq "J: Stop 5 did NOT re-invoke npm (still 3) — the escalation contract replay fires, same as it always has" \
+    "3" "$NPM_J5"
+assert_contains "J: Stop 5's reason IS the escalation banner, correctly attributed to the PRIOR (Stop 4) escalation" \
+    "per the escalation contract" "$STOP_REASON"
+
+# ===========================================================================
+# META J — narrow the skip predicate to change_set_hash alone, the SAME
+# mutation gate-claim-honesty.test.sh's 6M pins in isolation, applied here to
+# the real, unmodified verify-before-stop.sh. Stop 3's content-only edit must
+# then be WRONGLY skipped.
+# ===========================================================================
+REAL_VBS_J=$(readlink "$FIX_J/.claude/scripts/verify-before-stop.sh" \
+    || printf '%s' "$FIX_J/.claude/scripts/verify-before-stop.sh")
+VBS_JM="$FIX_J/.claude/scripts/vbs-hash-only-skip.sh"
+sed 's/if \[ "\$fp" = "\$cur_fp" \] && \[ "\$hash" = "\$cur_hash" \]; then/if [ "$hash" = "$cur_hash" ]; then/' \
+    "$REAL_VBS_J" > "$VBS_JM"
+chmod +x "$VBS_JM"
+if assert_mutant_applied "j7kk META-J hash-only skip predicate" "$REAL_VBS_J" "$VBS_JM"; then
+    assert_eq "META J: mutated gate parses" "0" \
+        "$(bash -n "$VBS_JM" 2>/dev/null && echo 0 || echo 1)"
+
+    # Fresh task, fresh baseline, driven through the MUTANT (the mutation is
+    # in the COMPARISON, not the writer — record_verified_state is untouched).
+    TID_JM=$(cd "$FIX_J" && bd create "skip-when-unchanged under mutant" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$QG_J" enter "$TID_JM" >/dev/null
+    bd label add "$TID_JM" qa-pending >/dev/null 2>&1
+    bash "$CT_J" set "$TID_JM" >/dev/null 2>&1
+    printf 'export function handler() { return 2; }\n' > "$FIX_J/src/handler.ts"
+    (cd "$FIX_J" && git add -A && git commit -qm "JM baseline" 2>/dev/null) || true
+    printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_JM" >/dev/null 2>&1
+    NPM_JM1=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+    NPM_JM1=$(printf '%s' "$NPM_JM1" | tr -d '[:space:]')
+
+    # Content-only edit to the SAME path — identical shape to Stop 3 above.
+    printf 'export function handler() { return 3; }\n' > "$FIX_J/src/handler.ts"
+    printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_JM" >/dev/null 2>&1
+    NPM_JM2=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+    NPM_JM2=$(printf '%s' "$NPM_JM2" | tr -d '[:space:]')
+    assert_eq "META J: SPECIFIC MISBEHAVIOUR — under the hash-only mutant, npm did NOT run again over a REAL content edit (Stop 3's own assertion above would FAIL on this mutant)" \
+        "$NPM_JM1" "$NPM_JM2"
+
+    # RESTORE CONTROL: the shipped predicate, an identical scenario (fresh
+    # task, same edit shape), still catches it.
+    TID_JC=$(cd "$FIX_J" && bd create "skip-when-unchanged restore control" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$QG_J" enter "$TID_JC" >/dev/null
+    bd label add "$TID_JC" qa-pending >/dev/null 2>&1
+    bash "$CT_J" set "$TID_JC" >/dev/null 2>&1
+    printf 'export function handler() { return 4; }\n' > "$FIX_J/src/handler.ts"
+    (cd "$FIX_J" && git add -A && git commit -qm "JC baseline" 2>/dev/null) || true
+    printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+    fire "$VBS_J"
+    NPM_JC1=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+    NPM_JC1=$(printf '%s' "$NPM_JC1" | tr -d '[:space:]')
+    printf 'export function handler() { return 5; }\n' > "$FIX_J/src/handler.ts"
+    printf 'src/handler.ts\n' > "$TRACK_J/changed-files.txt"
+    fire "$VBS_J"
+    NPM_JC2=$(grep -c . "$NPM_LOG_J" 2>/dev/null || echo 0)
+    NPM_JC2=$(printf '%s' "$NPM_JC2" | tr -d '[:space:]')
+    assert_eq "META J: RESTORE CONTROL — the SHIPPED predicate, the identical content-edit shape, DOES re-invoke npm" \
+        "1" "$((NPM_JC2 - NPM_JC1))"
+fi
+
+# ===========================================================================
+# LEG K — R1-F1: A WRITE LANDING DURING THE SUITE'S OWN RUN WINDOW MUST NOT
+# BE BLESSED INTO THE SKIP BASELINE (claude-workflow-plugin-j7kk QA round 1).
+# See the file header for the property under test.
+#
+# A real concurrent writer is not needed to reproduce this deterministically:
+# the shim standing in for the test runner performs the write itself, as its
+# own side effect, before it exits — indistinguishable, from
+# verify-before-stop.sh's point of view, from an external process racing it,
+# and it gives an exact, reproducible line for WHEN the write lands relative
+# to dispatch (inside npm's own invocation, i.e. strictly between
+# VERIFY_FP_PRE/VERIFY_HASH_PRE's read and record_verified_state's post-run
+# read).
+#
+# THE MUTATED FILE IS THE ALREADY-TRACKED handler.ts (a content-only rewrite),
+# NOT A NEW FILE — measured, not assumed, after a first draft of this leg used
+# a new untracked path (src/midrun.ts) and RED-taught the reason not to, the
+# same way Leg J's own Stop 4 RED-taught seed_round's tree movement above:
+# a new git-visible untracked path is exactly what reconcile_tracker (Leg I's
+# subject — it runs on every Stop and folds any not-yet-tracked git-visible
+# path into changed-files.txt) exists to fold in, so it ALSO moves
+# current_change_set_hash at the NEXT Stop, independently of anything
+# record_verified_state does. That gave META K's mutant a SECOND, unrelated
+# reason for Stop 2 to correctly re-run (a genuinely new tracked path), which
+# masked the specific misbehaviour this leg exists to catch — measured
+# directly: the mutant's Stop 2 re-ran npm regardless of the R1-F1 fix being
+# reverted or not, so the leg could not tell the two apart. A content-only
+# edit to a path ALREADY in changed-files.txt moves tree_fingerprint's diff
+# hash (the content changed) without moving current_change_set_hash's path
+# list (the path was already there) and without ever creating a new
+# git-visible path for reconcile_tracker to react to — the SAME isolation
+# Leg J's Stop 3 already uses, for the same reason: an unambiguous read on
+# which comparison caught the mismatch, with no second mechanism able to
+# produce the same observable.
+# ---------------------------------------------------------------------------
+
+mk_fixture
+FIX_K="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_K="$FIX_K/.claude/scripts/verify-before-stop.sh"
+QG_K="$FIX_K/.claude/scripts/qa-gate.sh"
+CT_K="$FIX_K/.claude/scripts/current-task.sh"
+TRACK_K="$FIX_K/.claude/.qa-tracking"
+stack_stub "$FIX_K" "$NPM_RUNNER_JSON"
+
+printf 'bin/\n.claude/scripts/\n.claude/.qa-tracking/\n' > "$FIX_K/.gitignore"
+mkdir -p "$FIX_K/src"
+printf 'export function handler() {}\n' > "$FIX_K/src/handler.ts"
+(cd "$FIX_K" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+
+# The "npm" shim under test for this leg: logs its invocation (the same
+# convention every other leg's NPM_LOG counts against — mk_shim's own
+# generator produces an identical logging line, reused verbatim below), THEN
+# mutates the ALREADY-TRACKED src/handler.ts in place (a fresh random suffix
+# each invocation, so consecutive runs are never a no-op rewrite) as its own
+# side effect, before it exits 0. mk_shim (shim.sh) has no hook for a side
+# effect beyond logging + a fixed exit code, so this shim is hand-authored
+# the same way stack_stub's detector stub is (above).
+NPM_BIN_K=$(mk_shim_dir "$FIX_K")
+NPM_LOG_K="$NPM_BIN_K/npm.log"
+: > "$NPM_LOG_K"
+NPM_MUTATE_FILE_K="$FIX_K/src/handler.ts"
+{
+    printf '#!/bin/bash\n'
+    printf '# Test-time npm shim (escalation-basis LEG K, claude-workflow-plugin-j7kk\n'
+    printf '# R1-F1): logs its invocation, THEN rewrites the ALREADY-TRACKED\n'
+    printf '# src/handler.ts in place as a side effect, simulating a write landing\n'
+    printf '# DURING the suite dispatch window.\n'
+    printf 'printf "%%s\\n" "$*" >> %q\n' "$NPM_LOG_K"
+    printf 'printf "export function handler() { return %%d; }\\n" "$RANDOM" > %q\n' "$NPM_MUTATE_FILE_K"
+    printf 'printf "%%s\\n" %q\n' "PASS  12 tests passed"
+    printf 'exit 0\n'
+} > "$NPM_BIN_K/npm"
+chmod +x "$NPM_BIN_K/npm"
+
+TID_K=$(cd "$FIX_K" && bd create "skip-when-unchanged mid-run write" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_K" enter "$TID_K" >/dev/null
+bd label add "$TID_K" qa-pending >/dev/null 2>&1
+bash "$CT_K" set "$TID_K" >/dev/null 2>&1
+printf 'src/handler.ts\n' > "$TRACK_K/changed-files.txt"
+
+HANDLER_BASELINE_K=$(cat "$NPM_MUTATE_FILE_K")
+fire "$VBS_K"
+assert_decision "K: Stop 1 (genuine run; npm rewrites the already-tracked handler.ts as a side effect) blocks — no approval yet" "$STOP_OUT" "block"
+NPM_K1=$(grep -c . "$NPM_LOG_K" 2>/dev/null || echo 0)
+NPM_K1=$(printf '%s' "$NPM_K1" | tr -d '[:space:]')
+assert_eq "K: Stop 1 really ran npm once" "1" "$NPM_K1"
+assert_eq "K: precondition — the shim's mid-run write really changed handler.ts's content" \
+    "yes" "$([ "$(cat "$NPM_MUTATE_FILE_K")" != "$HANDLER_BASELINE_K" ] && echo yes || echo no)"
+assert_eq "K: precondition — and it is STILL the same path (a content-only edit, the k0mc shape, not a new file)" \
+    "yes" "$([ -e "$NPM_MUTATE_FILE_K" ] && echo yes || echo no)"
+
+# R1-F1's OWN CLAIM, MEASURED: the write happened DURING npm's invocation,
+# which happened DURING the dispatch this Stop just performed, so it landed
+# strictly between VERIFY_FP_PRE/VERIFY_HASH_PRE's read and
+# record_verified_state's own post-run read. Nothing else touches $FIX_K
+# between Stop 1 and Stop 2 below.
+STATE_GLOB_K=$(cd "$FIX_K" && ls .claude/.qa-tracking/last-verified-state.* 2>/dev/null | head -1)
+assert_eq "K: FIXED BEHAVIOUR — Stop 1 persisted NO skip-state record: record_verified_state's post-run reading disagreed with the pre-dispatch reading (the mid-run write moved tree_fingerprint) and it refused to persist rather than blessing content the suite did not measure end-to-end" \
+    "no" "$([ -n "$STATE_GLOB_K" ] && [ -s "$FIX_K/$STATE_GLOB_K" ] && echo yes || echo no)"
+
+# --- Stop 2: nothing further has touched the tree since Stop 1 ended. If
+# R1-F1 were still live, Stop 1's post-mutation tree would have been
+# persisted as "verified", Stop 2 would read the identical (still
+# post-mutation) tree and skip — replaying a result the suite never measured
+# end-to-end. The fix means there is no record to match against, so Stop 2
+# must run for real. This IS "the following Stop re-runs for real" — QA's own
+# specified acceptance for R1-F1.
+printf 'src/handler.ts\n' > "$TRACK_K/changed-files.txt"
+fire "$VBS_K"
+assert_decision "K: Stop 2 (nothing touched since Stop 1) still blocks" "$STOP_OUT" "block"
+NPM_K2=$(grep -c . "$NPM_LOG_K" 2>/dev/null || echo 0)
+NPM_K2=$(printf '%s' "$NPM_K2" | tr -d '[:space:]')
+assert_eq "K: Stop 2 DID re-invoke npm (2) — a false skip here would leave NPM_K2 at 1" \
+    "2" "$NPM_K2"
+assert_eq "K: ...and never claims the tree/change-set-unchanged skip reason" \
+    "0" "$(count_in "$STOP_REASON" 'tree and change-set unchanged')"
+
+# ===========================================================================
+# META K — restore the PRE-FIX record_verified_state (the pre/post comparison
+# this round added is neutralised to `if false; then`, so the function always
+# persists its own post-run reading regardless of what the caller measured
+# before dispatch — exactly R1-F1's shape) in a copy of the REAL, unmodified
+# verify-before-stop.sh. Driven through the IDENTICAL mid-run-mutating shim,
+# Stop 1 must now persist a record despite the mid-run write, and Stop 2 must
+# WRONGLY skip — reproducing R1-F1 exactly, and proving Leg K's Stop 2
+# assertion above is the one QA's finding depended on, not an artifact of
+# fixture shape.
+# ===========================================================================
+REAL_VBS_K=$(readlink "$FIX_K/.claude/scripts/verify-before-stop.sh" \
+    || printf '%s' "$FIX_K/.claude/scripts/verify-before-stop.sh")
+VBS_KM="$FIX_K/.claude/scripts/vbs-r1f1-unconditional-persist.sh"
+sed 's/if \[ "\$fp_pre" != "\$fp_post" \] || \[ "\$hash_pre" != "\$hash_post" \]; then/if false; then/' \
+    "$REAL_VBS_K" > "$VBS_KM"
+chmod +x "$VBS_KM"
+if assert_mutant_applied "j7kk META-K R1-F1 unconditional-persist mutant" "$REAL_VBS_K" "$VBS_KM"; then
+    assert_eq "META K: mutated gate parses" "0" \
+        "$(bash -n "$VBS_KM" 2>/dev/null && echo 0 || echo 1)"
+    # WHICH mutation landed, the same discriminator style 0in1's META-I and
+    # this file's own 6M/META-J use: the specific comparison is gone and the
+    # unconditional-persist replacement stands in its place.
+    # shellcheck disable=SC2016  # matching literal source text, not expanding.
+    assert_eq "META K: non-vacuity — the specific pre/post comparison is gone from the mutant" \
+        "0" "$(grep -c 'if \[ "\$fp_pre" != "\$fp_post" \]' "$VBS_KM" | tr -d '[:space:]')"
+    assert_eq "META K: ...and the unconditional-persist replacement landed" \
+        "1" "$(grep -c 'if false; then' "$VBS_KM" | tr -d '[:space:]')"
+
+    TID_KM=$(cd "$FIX_K" && bd create "skip-when-unchanged mid-run write under R1-F1 mutant" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$QG_K" enter "$TID_KM" >/dev/null
+    bd label add "$TID_KM" qa-pending >/dev/null 2>&1
+    bash "$CT_K" set "$TID_KM" >/dev/null 2>&1
+    printf 'export function handler() { return 9; }\n' > "$FIX_K/src/handler.ts"
+    (cd "$FIX_K" && git add -A && git commit -qm "META K baseline" 2>/dev/null) || true
+    printf 'src/handler.ts\n' > "$TRACK_K/changed-files.txt"
+
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_KM" >/dev/null 2>&1
+    NPM_KM1=$(grep -c . "$NPM_LOG_K" 2>/dev/null || echo 0)
+    NPM_KM1=$(printf '%s' "$NPM_KM1" | tr -d '[:space:]')
+    STATE_GLOB_KM=$(cd "$FIX_K" && ls ".claude/.qa-tracking/last-verified-state.$(san "$TID_KM")" 2>/dev/null)
+    assert_eq "META K: SPECIFIC MISBEHAVIOUR — under the R1-F1 mutant, Stop 1 DID persist a skip-state record despite the mid-run write (Leg K's own 'FIXED BEHAVIOUR' assertion above would FAIL on this mutant)" \
+        "yes" "$([ -n "$STATE_GLOB_KM" ] && [ -s "$FIX_K/$STATE_GLOB_KM" ] && echo yes || echo no)"
+
+    printf 'src/handler.ts\n' > "$TRACK_K/changed-files.txt"
+    printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_KM" >/dev/null 2>&1
+    NPM_KM2=$(grep -c . "$NPM_LOG_K" 2>/dev/null || echo 0)
+    NPM_KM2=$(printf '%s' "$NPM_KM2" | tr -d '[:space:]')
+    assert_eq "META K: SPECIFIC MISBEHAVIOUR — Stop 2 under the mutant WRONGLY skips (npm did not run again): the exact R1-F1 defect, replaying a green the suite never measured end-to-end over the mutated tree" \
+        "$NPM_KM1" "$NPM_KM2"
+
+    # RESTORE CONTROL: the shipped predicate, an identical mid-run-mutating
+    # shim, fresh task — does NOT reproduce the misbehaviour.
+    TID_KC=$(cd "$FIX_K" && bd create "skip-when-unchanged mid-run write restore control" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$QG_K" enter "$TID_KC" >/dev/null
+    bd label add "$TID_KC" qa-pending >/dev/null 2>&1
+    bash "$CT_K" set "$TID_KC" >/dev/null 2>&1
+    printf 'export function handler() { return 10; }\n' > "$FIX_K/src/handler.ts"
+    (cd "$FIX_K" && git add -A && git commit -qm "KC baseline" 2>/dev/null) || true
+    printf 'src/handler.ts\n' > "$TRACK_K/changed-files.txt"
+    fire "$VBS_K"
+    NPM_KC1=$(grep -c . "$NPM_LOG_K" 2>/dev/null || echo 0)
+    NPM_KC1=$(printf '%s' "$NPM_KC1" | tr -d '[:space:]')
+
+    printf 'src/handler.ts\n' > "$TRACK_K/changed-files.txt"
+    fire "$VBS_K"
+    NPM_KC2=$(grep -c . "$NPM_LOG_K" 2>/dev/null || echo 0)
+    NPM_KC2=$(printf '%s' "$NPM_KC2" | tr -d '[:space:]')
+    assert_eq "META K: RESTORE CONTROL — the SHIPPED predicate, the identical mid-run-mutating shim, DOES re-invoke npm at the following Stop" \
+        "1" "$((NPM_KC2 - NPM_KC1))"
 fi
 
 [ "$FAIL" -eq 0 ]
