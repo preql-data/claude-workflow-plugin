@@ -28,8 +28,9 @@ misconfiguration, a crash, a hang, or a server that speaks MCP but exposes no `c
 resolve to `reviewer_lane=claude`, and the review happens on the Claude lane instead. The plugin
 proves this rather than asserting it — `.claude/tests/component/specs/reviewer-lane-degradation.sh`
 runs the identical record/gate sequence with and without a Codex registration and diffs the outputs
-byte-for-byte, and greps `qa-gate.sh`, `verify-before-stop.sh`, and `review-check.sh` for zero
-references to Codex or to the lane.
+byte-for-byte, and (as of claude-workflow-plugin-icn4, hoisted to L1 for cadence)
+`.claude/scripts/tests/reviewer-lane-structural.test.sh` greps `qa-gate.sh`, `verify-before-stop.sh`,
+and `review-check.sh` for zero references to Codex or to the lane, in any spelling.
 
 **Sol is advisory, always.** Its artifact is grading-packet item 8. It writes no labels, records no
 approval, and the Stop hook does not consider it. The change-set-hash-bound `qa-approved` record

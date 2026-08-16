@@ -196,8 +196,13 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # '*.sh' ! -name 'run-tests.sh'`, not a `*.test.sh` glob, so
 # phase5-synthetic-tests.sh (no `.test.sh` suffix) counts here but not there.
 # Verify a bump against a clean `make test` run, never against a file count.
+#
+# 39 -> 40 (claude-workflow-plugin-icn4 item 1): added
+# reviewer-lane-structural.test.sh, the correction-10 structural guard hoisted
+# out of the L2 component tier so a violation is caught at every `make test`
+# rather than only at that tier's reserved ~65-minute cadence.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=39
+EXPECTED_SPECS=40
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

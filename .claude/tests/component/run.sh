@@ -99,10 +99,14 @@
 #   0  every executed spec passed (skips are reported, and reported loudly;
 #      a partial pass is a pass with a named qualification, exactly as L1)
 #   1  one or more specs failed or timed out
-#   2  invocation error (no specs found, jq missing, or a --filter that
-#      matched no spec files — a9hh R4-F3/R5-F2: nothing ran, so nothing
-#      passed, and green-in-0.16s is exactly what a reader takes as "that
-#      spec passes")
+#   2  invocation error (no specs found, jq missing, a --filter that matched
+#      no spec files — a9hh R4-F3/R5-F2: nothing ran, so nothing passed, and
+#      green-in-0.16s is exactly what a reader takes as "that spec passes" —
+#      OR an unrecognised argument shape: a bare positional, `--filter` with
+#      no pattern, or trailing junk after a pattern. claude-workflow-plugin-
+#      icn4 item 3: these used to fall through to FILTER="" and a silent
+#      FULL run; QA lost two 45-spec tier runs to exactly that before this
+#      refusal existed)
 
 set -u
 # Job control ON: each spec (and watchdog) becomes its own process group.
@@ -128,10 +132,56 @@ COMPONENT_DIR="$PROJECT_DIR/.claude/tests/component"
 LIB_DIR="$COMPONENT_DIR/lib"
 SPECS_DIR="$COMPONENT_DIR/specs"
 
+# ARG PARSING (claude-workflow-plugin-icn4 item 3). MUST REFUSE, never
+# silently ignore: QA lost two full 45-spec tier runs to a bare positional
+# spec name (e.g. `run.sh reviewer-lane-degradation` instead of `run.sh
+# --filter reviewer-lane-degradation`) being silently swallowed by the old
+# `[ "${1:-}" = "--filter" ] && [ -n "${2:-}" ]` guard, which left FILTER=""
+# on ANY unrecognised shape (a bad positional, or `--filter` with no pattern)
+# and let the runner fall through to a full, unfiltered run — turning a
+# 7-second targeted intent into an hour of self-contention against a
+# concurrent run and its own bd writes. Every unrecognised shape below is an
+# invocation error (exit 2), matching this file's own documented "2 —
+# invocation error" contract; none of them fall through to FILTER="".
+#
+# PAIRED at runner-completeness.test.sh section 14: reverting the sentinel
+# region below to the old one-liner quoted above (byte-for-byte) reproduces
+# the silent-full-run swallow against a fixture spec tree; the shipped
+# region here refuses both shapes QA actually hit, before any spec executes.
+# --- ARG-PARSING-BEGIN (claude-workflow-plugin-icn4 item 3) ------------------
 FILTER=""
-if [ "${1:-}" = "--filter" ] && [ -n "${2:-}" ]; then
-    FILTER="$2"
-fi
+case "${1:-}" in
+    '')
+        # No arguments: full, unfiltered run — the documented default, not a
+        # silent fallback. Also matches an explicit empty-string positional
+        # (`run.sh ''`): vanishingly rare, and named here rather than left as
+        # an unaddressed gap (icn4 R1-F3) — a caller's quoted variable that
+        # expands to '' lands in this same arm, same full-run scope as no
+        # args at all.
+        ;;
+    --filter)
+        if [ -z "${2:-}" ]; then
+            printf 'run.sh: --filter requires a <pattern> argument\n' >&2
+            printf '  Usage: bash .claude/tests/component/run.sh [--filter <pattern>]\n' >&2
+            exit 2
+        fi
+        FILTER="$2"
+        if [ "$#" -gt 2 ]; then
+            printf 'run.sh: unexpected extra argument(s) after --filter %s: %s\n' \
+                "$FILTER" "${*:3}" >&2
+            printf '  Usage: bash .claude/tests/component/run.sh [--filter <pattern>]\n' >&2
+            exit 2
+        fi
+        ;;
+    *)
+        printf 'run.sh: unknown argument: %s\n' "$1" >&2
+        printf '  A bare spec name is not a filter and is silently ignored by NOTHING here —\n' >&2
+        printf '  did you mean: bash .claude/tests/component/run.sh --filter %s ?\n' "$1" >&2
+        printf '  Usage: bash .claude/tests/component/run.sh [--filter <pattern>]\n' >&2
+        exit 2
+        ;;
+esac
+# --- ARG-PARSING-END (claude-workflow-plugin-icn4 item 3) --------------------
 
 SPEC_TIMEOUT_S="${SPEC_TIMEOUT_S:-3600}"
 case "$SPEC_TIMEOUT_S" in

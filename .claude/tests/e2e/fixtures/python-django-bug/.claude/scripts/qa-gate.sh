@@ -4877,8 +4877,8 @@ cmd_grade_record() {
 # ---------------------------------------------------------------------------
 # REVIEW-ARTIFACT CANONICAL PATH (v5 D2 / claude-workflow-plugin-rqer).
 #
-# WHY THIS EXISTS. Before this, the external reviewer driver and the Claude
-# reviewer lane both wrote the review artifact into .claude/.qa-tracking/, which
+# WHY THIS EXISTS. Before this, the external reviewer driver and Claude's own
+# in-session review both wrote the review artifact into .claude/.qa-tracking/, which
 # wipe_review_artifacts (above) deletes on every COMPLETED approve — by
 # design, per its own header — and which workflow_self_written
 # (workflow-denylist.sh:265) excludes from the change set. So the artifact

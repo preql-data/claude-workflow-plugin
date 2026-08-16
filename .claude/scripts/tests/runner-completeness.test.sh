@@ -2225,6 +2225,122 @@ EOF
 fi
 
 # ===========================================================================
+printf -- '\n--- 14. run.sh (L2) REFUSES stray positional/malformed args instead of silently running the FULL tier (claude-workflow-plugin-icn4 item 3, R1-F1) ---\n'
+# ===========================================================================
+# Pair for the ARG-PARSING region .claude/tests/component/run.sh grew for
+# icn4 item 3. QA lost two full 45-spec tier runs to exactly this: a bare
+# positional spec name, or `--filter` with no pattern, used to leave
+# FILTER="" and fall through to a full, unfiltered run — each invocation
+# silently contending with the other and with its own bd writes for an hour
+# where a targeted 7-second run was intended. Review round 1 (R1-F1) found
+# this shipped with neither a pairing nor an UNPAIRED declaration; this is
+# the pairing, in the natural home the review itself pointed at. The four
+# legs:
+#   1 NON-VACUITY   the ARG-PARSING sentinel is found exactly once and
+#                   REPLACED with the historical one-liner guard (quoted
+#                   verbatim in run.sh's own header comment) — proven found,
+#                   proven to differ from the shipped bytes, proven to still
+#                   parse, and proven to CONTAIN the old shape while the new
+#                   refusal messages are gone (not merely "differs" for some
+#                   unrelated reason).
+#   2 MISBEHAVIOUR  the mutant, given a bare positional OR a pattern-less
+#                   --filter, silently runs the FULL fixture set (exit 0,
+#                   every spec executed) — the exact contention QA hit.
+#   3 RESTORE       the shipped run.sh, same two invocations, same fixture:
+#                   exit 2, naming the bad argument, NOTHING executed; and,
+#                   full circle, a VALID invocation against the same fixture
+#                   still runs clean (the refusal is not a blanket
+#                   regression against legitimate calls).
+#   4 EXECUTION     leg 3 drives run.sh itself — real path, real bytes.
+FX_ARGS="$WORK/l2-argparse"
+mk_l2_fixture "$FX_ARGS"
+cat > "$FX_ARGS/.claude/tests/component/specs/l2-argtest-a.sh" <<'EOF'
+assert_eq "l2-argtest-a ran" "x" "x"
+EOF
+cat > "$FX_ARGS/.claude/tests/component/specs/l2-argtest-b.sh" <<'EOF'
+assert_eq "l2-argtest-b ran" "x" "x"
+EOF
+cat > "$FX_ARGS/.claude/tests/component/specs/l2-argtest-c.sh" <<'EOF'
+assert_eq "l2-argtest-c ran" "x" "x"
+EOF
+
+# -----------------------------------------------------------------
+printf -- '\n--- 14a. NON-VACUITY: the ARG-PARSING region is found exactly once and replaced with the historical swallow shape ---\n'
+# -----------------------------------------------------------------
+assert_eq "14a.1 the ARG-PARSING sentinel pair is present exactly once in the shipped runner" \
+    "1 1" "$(grep -c 'ARG-PARSING-BEGIN' "$L2_RUNNER") $(grep -c 'ARG-PARSING-END' "$L2_RUNNER")"
+
+MUT_ARGS="$WORK/run.old-arg-swallow.sh"
+awk '
+/ARG-PARSING-BEGIN/ {
+    found = 1
+    skip = 1
+    print "FILTER=\"\""
+    print "if [ \"${1:-}\" = \"--filter\" ] && [ -n \"${2:-}\" ]; then"
+    print "    FILTER=\"$2\""
+    print "fi"
+    next
+}
+/ARG-PARSING-END/ { skip = 0; next }
+!skip { print }
+END { if (!found) exit 7 }
+' "$L2_RUNNER" > "$MUT_ARGS"
+AWK_ARGS_RC=$?
+assert_eq "14a.2 MUTANT: the ARG-PARSING region was FOUND and replaced (awk found-check)" "0" "$AWK_ARGS_RC"
+assert_eq "14a.3 MUTANT: the mutant differs from the shipped runner (the replacement landed)" \
+    "differs" "$(cmp -s "$L2_RUNNER" "$MUT_ARGS" && echo identical || echo differs)"
+assert_eq "14a.4 MUTANT: the mutant still parses (bash -n)" \
+    "0" "$(bash -n "$MUT_ARGS" 2>/dev/null; echo $?)"
+# Prove the hit landed WHERE aimed, not merely "differs": the mutant carries
+# the historical guard text verbatim, and the new refusal messages are gone.
+# shellcheck disable=SC2016  # single-quoted on purpose: matching literal
+# source text in $MUT_ARGS, not expanding a variable.
+assert_eq "14a.5 MUTANT: carries the OLD one-liner guard verbatim (byte-for-byte, incl. 'if'/'then')" \
+    "1" "$(grep -cF 'if [ "${1:-}" = "--filter" ] && [ -n "${2:-}" ]; then' "$MUT_ARGS")"
+assert_eq "14a.6 MUTANT: none of the new refusal messages remain (the swallow, not a rewording, is under test)" \
+    "0" "$(grep -cE 'unknown argument:|requires a <pattern> argument|unexpected extra argument' "$MUT_ARGS")"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 14b. SPECIFIC MISBEHAVIOUR: the mutant silently runs the FULL fixture set over both swallow shapes QA hit ---\n'
+# -----------------------------------------------------------------
+RUN_OUT=$(CLAUDE_PROJECT_DIR="$FX_ARGS" bash "$MUT_ARGS" reviewer-lane-degradation 2>&1)
+RUN_RC=$?
+assert_eq "14b.1 SPECIFIC: a bare positional (a spec name, not --filter) exits 0 under the mutant — the swallow" "0" "$RUN_RC"
+assert_contains "14b.2 ...over the FULL fixture set, not a filtered one (all 3 specs, not a subset)" \
+    "Specs:      Total: 3  Passed: 3  Failed: 0" "$RUN_OUT"
+
+RUN_OUT=$(CLAUDE_PROJECT_DIR="$FX_ARGS" bash "$MUT_ARGS" --filter 2>&1)
+RUN_RC=$?
+assert_eq "14b.3 SPECIFIC: --filter with NO pattern also exits 0 under the mutant — the other swallow shape" "0" "$RUN_RC"
+assert_contains "14b.4 ...also silently over the FULL fixture set" \
+    "Specs:      Total: 3  Passed: 3  Failed: 0" "$RUN_OUT"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 14c. RESTORE CONTROL + EXECUTION (leg 4, shared): the SHIPPED run.sh refuses both shapes before any spec executes ---\n'
+# -----------------------------------------------------------------
+RUN_OUT=$(CLAUDE_PROJECT_DIR="$FX_ARGS" bash "$L2_RUNNER" reviewer-lane-degradation 2>&1)
+RUN_RC=$?
+assert_eq "14c.1 EXECUTION: the shipped runner refuses the SAME bare positional the mutant swallowed at 14b.1 (rc=2)" "2" "$RUN_RC"
+assert_contains "14c.2 ...naming the offending argument" "unknown argument: reviewer-lane-degradation" "$RUN_OUT"
+assert_eq "14c.3 ...and NOTHING executed (no spec banner anywhere in the output)" \
+    "0" "$(printf '%s' "$RUN_OUT" | grep -cE '^=== l2-argtest-')"
+
+RUN_OUT=$(CLAUDE_PROJECT_DIR="$FX_ARGS" bash "$L2_RUNNER" --filter 2>&1)
+RUN_RC=$?
+assert_eq "14c.4 EXECUTION: the shipped runner refuses --filter with no pattern (rc=2)" "2" "$RUN_RC"
+assert_contains "14c.5 ...naming what's missing" "--filter requires a <pattern> argument" "$RUN_OUT"
+assert_eq "14c.6 ...and NOTHING executed here either" \
+    "0" "$(printf '%s' "$RUN_OUT" | grep -cE '^=== l2-argtest-')"
+
+# RESTORE CONTROL, full circle: the SAME shipped runner, a VALID invocation
+# (no args) against the SAME fixture, still runs cleanly — the refusal
+# above is not a blanket regression against legitimate calls.
+run_l2 "$FX_ARGS"
+assert_eq "14c.7 RESTORE CONTROL: the shipped runner, called validly (no args), still runs the full set green" "0" "$RUN_RC"
+assert_contains "14c.8 ...all three fixture specs executed" \
+    "Specs:      Total: 3  Passed: 3  Failed: 0" "$RUN_OUT"
+
+# ===========================================================================
 printf '\nTotal: %d assertion(s)\n' "$((PASS + FAIL))"
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"

@@ -1336,9 +1336,14 @@ cmd_apply() {
 # "the unit ran on Opus."
 #
 # WHY IT IS NOT WIRED INTO qa-gate.sh. The gate stays free of model concerns.
-# `reviewer-lane-degradation.sh` already asserts zero `codex|reviewer[._]lane`
-# matches in the three gate scripts for the same reason: a gate that reasons
-# about model selection acquires a second, invisible way to refuse.
+# `.claude/scripts/tests/reviewer-lane-structural.test.sh` (hoisted from
+# `reviewer-lane-degradation.sh`'s structural half, claude-workflow-plugin-icn4
+# item 1 — that L2 file still carries the behavioural half) already asserts
+# zero codex/reviewer-lane references — ANY spelling, not just the historical
+# dot/underscore-only reading a prior version of this pattern used
+# (claude-workflow-plugin-mruw) — in the three gate scripts for the same
+# reason: a gate that reasons about model selection acquires a second,
+# invisible way to refuse.
 #
 # CRASH SELF-HEALS THREE WAYS: session-end.sh calls `restore` best-effort, the
 # next SessionStart `cmd_apply` rewrites the implementer lane from the resolved
