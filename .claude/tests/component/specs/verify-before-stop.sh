@@ -2079,6 +2079,33 @@ assert_eq "vbs-qzv.3-11: ...and nothing was approved" "0" "$(qzv_record_count "$
 # artifact is unavailable, which was itself unusable in that exact situation
 # (rc=1, empty output, 0 records). It must now succeed and say the binding is
 # missing rather than dying.
+#
+# fkm.4 (v5 D2, R1-F1 fix round): also carries --no-design now. This leg's own
+# task has no design phase — it exists to test the impact-report axis, not the
+# design one — but DESIGN-SATISFIED-REFUSAL is unconditional and sits AFTER
+# impact-report in the ladder, so once --no-impact-report clears the axis this
+# leg is actually testing, the design refusal was the next thing reached and
+# this call started failing on it (`no_design_attempted`, exit 2, 0 records)
+# instead of reaching the success this leg asserts. Same fix, same reasoning,
+# as the shipped F1 call site this component spec exercises.
+#
+# THE CLAIM THAT USED TO BE HERE — "this was simply the one other hand-built
+# F1-shaped approve call the migration missed" — WAS FALSE, measured by R2-F1
+# (fkm.4 round 2): the R1-F1 fix round found this one HAND-BUILT F1-shaped
+# call site by an existential search (look for other places shaped like the
+# one just fixed) rather than an enumerated one, and an existential search
+# stops at the first hit it is satisfied by. It never asked whether any
+# SPEC-LOCAL SEED HELPER (a world away from a hand-built F1-shaped call —
+# this is a single assertion, those are shared setup functions every approve
+# call in a whole spec file routes through) had the same gap. Five did:
+# verify-review-discipline.sh, arbitration-acceptance.sh,
+# review-artifact-durability.sh, worktree-approval-resolution.sh, and
+# qa-gate.sh's own P7 family, together accounting for 91 failing assertions
+# when finally measured by running every spec rather than searching by eye.
+# The corrected discipline, stated once so it does not need restating at
+# every site like this one: a completeness claim about a migration needs an
+# enumerated denominator — every call site, listed and classified — not an
+# existential search that stops at the first (or second) hit.
 TID_Q11B=$(cd "$FIXTURE_QZV" && bd create "qzv.3: the impact bypass works when the script is gone" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
 (cd "$FIXTURE_QZV" && bd update "$TID_Q11B" --status in_progress >/dev/null 2>&1) || true
 ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
@@ -2089,6 +2116,7 @@ Q11B_OUT=$(bash "$QG_QZV" approve "$TID_Q11B" \
     --no-impact-report "spec: the artifact cannot be recomputed here" \
     --no-review "F1 doc-only fast path: no reviewable source changed" \
     --no-completion "F1 doc-only fast path: no specialist, no completion payload" \
+    --no-design "spec: no design phase for this synthetic task" \
     "spec: the audited bypass" 2>&1) || Q11B_RC=$?
 assert_eq "vbs-qzv.3-11B: the --no-impact-report bypass SUCCEEDS with the script absent (was: rc=1, empty)" \
     "0" "$Q11B_RC"
@@ -2211,6 +2239,24 @@ if assert_mutant_applied "vbs-qzv.3 META" "$QZV3_REAL_VBS" "$VBS_QZV3_MUT"; then
         "block" "$(qzv_decision)"
     assert_eq "vbs-qzv.3 META: ...and keeps the change set" "1" \
         "$(grep -c . "$TRACK_QZV/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+    # fkm.4 R2-F2: this restore-control state is exactly where the
+    # F1-APPROVE-REFUSAL block's step-3 recovery recipe ("run the same
+    # approval by hand") gets printed for real — so assert on it HERE,
+    # against the shipped hook genuinely reaching the block, rather than a
+    # byte-equality snapshot of the source (a document check per
+    # .claude/tests/README.md "The pairing requirement" P7). The recipe must
+    # reconstruct the SAME call the F1 auto-drive actually makes: three
+    # bypasses, not two — R2-F2 found this recipe still printing only
+    # --no-review/--no-completion after --no-design became a required third
+    # flag on the real call, so "run this by hand" could no longer reproduce
+    # the F1 approval it names.
+    QWC_REASON=$(printf '%s' "$(qzv_json)" | jq -r '.reason // empty' 2>/dev/null)
+    assert_contains "vbs-qzv.3 R2-F2: the recovery recipe carries --no-review" \
+        "--no-review 'F1 " "$QWC_REASON"
+    assert_contains "vbs-qzv.3 R2-F2: ...--no-completion" \
+        "--no-completion 'F1 " "$QWC_REASON"
+    assert_contains "vbs-qzv.3 R2-F2: ...and --no-design (the flag this recipe was missing)" \
+        "--no-design 'F1 " "$QWC_REASON"
     ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
 fi
 

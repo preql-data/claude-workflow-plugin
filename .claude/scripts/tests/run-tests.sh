@@ -201,8 +201,23 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # reviewer-lane-structural.test.sh, the correction-10 structural guard hoisted
 # out of the L2 component tier so a violation is caught at every `make test`
 # rather than only at that tier's reserved ~65-minute cadence.
+#
+# 40 -> 41 (claude-workflow-plugin-fkm.4, Phase D2 Part A): added
+# design-rubric.test.sh, covering the design-reviewer prompt's D0-placeholder
+# removal and the automatic workflow-manifest.sh classification of the new
+# .claude/rubrics/design.md file. design.md's own frontmatter/DS1-DS8 shape
+# checks did NOT add a spec — they extended the existing per-rubric sweep in
+# qa-gate-grade-record.test.sh's Section 8 instead.
+#
+# 41 -> 42 (claude-workflow-plugin-fkm.4, Phase D2 Part B): added
+# design-review-record.test.sh, covering the new design-verdict recording
+# subcommand (B1: grammar, validation, independence at record time),
+# amendments (B2: iteration-advance + `[amends: <prev-hash>]`), the
+# design-satisfied refusal cmd_approve now enforces (B3, with its own
+# META-TEST), the cap_terminated predicate wired into REVIEW-SEPARATION (B4),
+# and design-gate-precheck (B5).
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=40
+EXPECTED_SPECS=42
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

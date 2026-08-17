@@ -2149,6 +2149,17 @@ Options:
   4. defer — \`bash .claude/scripts/qa-gate.sh choose defer $tid '<note>'\`
              stops iteration; sets qa-deferred so the next Stop is allowed.
 
+NOTE (v5 D2, fkm.4 R1-F4): option 1 delegates to \`cmd_approve\`, so on a task
+with no recorded design phase it refuses first-try (\`no_design_attempted\`) —
+the ordinary case for most tasks today, not a special one. \`choose\` has no
+flag slot to forward a bypass reason through, so drop to the direct form:
+  bash .claude/scripts/qa-gate.sh approve $tid --no-design '<reason>' '<summary>'
+The \`QA-GATE CHOICE approve\` comment is written BEFORE that delegation runs,
+so a refusal here — design or otherwise — still leaves it on the task with
+nothing actually approved. Read an unexplained \`QA-GATE CHOICE approve\` with
+no matching \`QA-GATE APPROVED\` record as exactly that, not as a forged
+approval.
+
 If no choice is recorded by the NEXT Stop, the gate auto-selects option 4
 (defer) and surfaces the task on the next SessionStart.
 EOF
@@ -3269,6 +3280,32 @@ Diagnose the two records this compared:
                 # specialist DID post a contract still gets it recorded; the
                 # flag only stops the absence from blocking.
                 #
+                # v5 D2 (claude-workflow-plugin-fkm.4): --no-design is REQUIRED
+                # on this path too, for the identical reason --no-completion is
+                # above. DESIGN-SATISFIED-REFUSAL in `qa-gate.sh approve` is
+                # UNCONDITIONAL — it does not except a doc-only / Beads-state /
+                # empty change set, the same way COMPLETION-CONTRACT-REFUSAL
+                # does not — so without this flag every F1 fast-path Stop would
+                # deadlock on a design verdict this change set was never going
+                # to have. The reason lands in the approval comment as
+                # `[design bypass: ...]`, so the audited decision is made once,
+                # here, and DESIGN-DISCIPLINE's marker arm (below, at Stop
+                # re-check time) honours it exactly like REVIEW-DISCIPLINE
+                # honours `[review bypass:`.
+                #
+                # fkm.4 R1-F1: this call originally carried --no-review and
+                # --no-completion only. DESIGN-SATISFIED-REFUSAL shipped in the
+                # same change set as this comment and was missed here — the
+                # exact failure the D2 plan's own correction 5 predicted ("a
+                # refusal there deadlocks every doc-only Stop"), and the
+                # identical argument the --no-completion comment above already
+                # makes for its own flag. Reproduced end-to-end before this fix
+                # (isolated fixture, shipped scripts): the F1-shaped approve
+                # exited 2 `no_design_attempted`, and the full Stop drive
+                # returned `block` ("doc-only fast path REFUSED"). The two L2
+                # assertions this broke (`vbs: F1 doc-only auto-approve`,
+                # `vbs-qzv-2`) are the regression guard.
+                #
                 # qzv.3: approve's OUTPUT is captured rather than discarded, and
                 # its exit status is kept. Both are declared here, OUTSIDE the
                 # F1-APPROVE-REFUSAL region below, carrying the PRE-FIX
@@ -3288,6 +3325,7 @@ Diagnose the two records this compared:
                 F1_APPROVE_OUT=$("$QA_GATE" approve "$CURRENT_TASK" \
                     --no-review "F1 $FASTPATH_CLASS fast path: no reviewable source changed" \
                     --no-completion "F1 $FASTPATH_CLASS fast path: no specialist, no completion payload" \
+                    --no-design "F1 $FASTPATH_CLASS fast path: no design phase, no design verdict to bind" \
                     ${F1_EXPECT_ARGS[@]+"${F1_EXPECT_ARGS[@]}"} \
                     "$FASTPATH_REASON" 2>&1) || F1_APPROVE_RC=$?
                 if [ "$F1_APPROVE_RC" -ne 0 ]; then
@@ -3416,6 +3454,7 @@ Fix, in the order these actually occur:
        bash .claude/scripts/qa-gate.sh approve $CURRENT_TASK \\
          --no-review 'F1 $FASTPATH_CLASS fast path: no reviewable source changed' \\
          --no-completion 'F1 $FASTPATH_CLASS fast path: no specialist, no completion payload' \\
+         --no-design 'F1 $FASTPATH_CLASS fast path: no design phase, no design verdict to bind' \\
          'manual re-run of the F1 approval'
 
 The full history is in .claude/.qa-tracking/sync-errors.log."
@@ -4394,6 +4433,13 @@ APPROVAL_RECORD_DETAIL=""
 REVIEW_DISCIPLINE_BLOCKED=false
 REVIEW_DISCIPLINE_DETAIL=""
 
+# v5 D2 (claude-workflow-plugin-fkm.4): design-discipline outcome, mirroring
+# REVIEW_DISCIPLINE_BLOCKED byte for byte — same RELEASING default, declared
+# OUTSIDE the sentinel-wrapped DESIGN-DISCIPLINE block below for the identical
+# reason.
+DESIGN_DISCIPLINE_BLOCKED=false
+DESIGN_DISCIPLINE_DETAIL=""
+
 if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
     if [ -n "$CURRENT_TASK" ] && [ -x "$QA_GATE" ]; then
         GATE_STATUS=$("$QA_GATE" status "$CURRENT_TASK" 2>/dev/null | jq -r '.status // "error"' 2>/dev/null || echo "error")
@@ -4504,6 +4550,100 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
                     fi
                 fi
                 # REVIEW-DISCIPLINE END (v4 V3 / claude-workflow-plugin-jio.1)
+
+                # DESIGN-DISCIPLINE BEGIN (v5 D2 / claude-workflow-plugin-fkm.4)
+                #
+                # Mirrors REVIEW-DISCIPLINE immediately above, for the
+                # design-satisfied axis instead of the code-review one: an
+                # approval is only as good as the design verdict behind it,
+                # and a design can be amended, or re-reviewed to
+                # needs_revision, AFTER approval — a state `qa-gate.sh
+                # approve` had no way to see when it ran. So the gate
+                # re-arms at Stop as well, exactly as REVIEW-DISCIPLINE's own
+                # header argues for the code review.
+                #
+                # WHY THIS CLOSES THE "STATE LIVES ONLY IN BD" HOLE (fkm.4's
+                # own spec, section B3). verified_state_unchanged()'s skip
+                # predicate — the block guarding SKIP-UNCHANGED, far above
+                # this one (compare its line range, 3797-3956, against this
+                # one) — is FILE-based only: tree_fingerprint() minus
+                # WORKFLOW_SELF_WRITTEN_REGEX. A design verdict recorded ONLY
+                # as a Beads comment moves neither instrument, so a stale
+                # tech-check suite result can legitimately replay on a Stop
+                # where the design state changed underneath it. This block is
+                # placed ENTIRELY OUTSIDE that skip region — it lives inside
+                # the unconditional `if command -v bd ... ; then` gate block
+                # that opens above CURRENT_CS_HASH, which evaluates on EVERY
+                # Stop regardless of whether the suite replayed — and it
+                # reads bd state FRESH every time: `qa-gate.sh
+                # design-gate-precheck` calls compute_design_satisfied, which
+                # makes no reference to tree_fingerprint, VERIFY_SKIP_UNCHANGED
+                # or any cached file. Whether the SUITE replayed has no
+                # bearing on whether THIS check is current, so a design
+                # verdict posted as a bare Beads comment between two Stops is
+                # visible to the very next one, full stop.
+                #
+                # REUSES design-gate-precheck (B5) RATHER THAN A FOURTH COPY
+                # of the predicate. Its own header documents why its
+                # `no_design_attempted` leniency (silent on a task that never
+                # had a design phase) is safe to reuse here — but the arm is
+                # NOT inert on this branch, and an earlier version of this
+                # comment claimed it could never fire here; that claim was
+                # wrong (fkm.4 R1-F6). A task approved by a PRE-D2
+                # `qa-gate.sh` — this release's own migration window — carries
+                # a `QA-GATE APPROVED` record with neither a `design_hash=`
+                # token nor a `[design bypass:` marker, because neither
+                # existed yet, and no DESIGN-ARTIFACT record either, because
+                # design review was not a concept when it was approved. That
+                # task reaches THIS branch (GATE_STATUS=approved, a matching
+                # change-set-bound record) on every Stop from here on, and
+                # `design-gate-precheck` genuinely reads `no_design_attempted`
+                # and returns ready — the lenient arm FIRING, not sitting
+                # inert. THAT IS THE CORRECT OUTCOME, not a hole this block
+                # should close: retroactively demanding a design verdict for
+                # work that was already reviewed and approved before this
+                # phase existed would penalise legacy tasks for lacking a
+                # precondition that did not exist at their approval time —
+                # exactly the false positive design-gate-precheck's own
+                # leniency is built to avoid for the ordinary no-design case
+                # generally. The arm DOES become inert, exactly as the
+                # original claim described, once a task acquires a
+                # DESIGN-ARTIFACT record: Beads comments are append-only from
+                # that point on, so an approval lacking `--no-design` could
+                # then only have succeeded because design-satisfied held at
+                # approve time. That is the steady state this migration
+                # window gives way to — not the only state this branch can
+                # reach today.
+                #
+                # SAME AUDITED ESCAPE AS REVIEW-DISCIPLINE: a record carrying
+                # the literal `[design bypass:` marker was approved with
+                # --no-design, whose reason is already in the audit trail —
+                # re-litigating it here would make the bypass useless.
+                #
+                # The sentinel comments are load-bearing: an L2 META-TEST
+                # strips this block and asserts a task whose design verdict
+                # regressed AFTER approval (or was amended to needs_revision)
+                # then releases anyway. Do not rename them.
+                if printf '%s' "$MATCHED_APPROVAL_TEXT" | grep -qF '[design bypass:'; then
+                    log_sync_error "Stop release: design-discipline SKIPPED for $CURRENT_TASK — the matching approval record carries an audited [design bypass:] marker (fkm.4)"
+                elif [ ! -f "$QA_GATE" ]; then
+                    QA_APPROVED=false
+                    DESIGN_DISCIPLINE_BLOCKED=true
+                    DESIGN_DISCIPLINE_DETAIL="the design predicate is missing ($QA_GATE), so design-satisfied cannot be verified"
+                    log_sync_error "Stop blocked: qa-gate.sh missing; design-discipline fails closed for $CURRENT_TASK"
+                else
+                    DESIGN_GATE_RC=0
+                    DESIGN_GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$QA_GATE" design-gate-precheck "$CURRENT_TASK" 2>&1) || DESIGN_GATE_RC=$?
+                    if [ "$DESIGN_GATE_RC" -ne 0 ]; then
+                        DESIGN_GATE_KEY=$(printf '%s' "$DESIGN_GATE_OUT" | jq -r '.error_key // ""' 2>/dev/null || echo "")
+                        [ -z "$DESIGN_GATE_KEY" ] && DESIGN_GATE_KEY="design_gate_unavailable"
+                        QA_APPROVED=false
+                        DESIGN_DISCIPLINE_BLOCKED=true
+                        DESIGN_DISCIPLINE_DETAIL="qa-gate.sh design-gate-precheck exited $DESIGN_GATE_RC with error_key=$DESIGN_GATE_KEY"
+                        log_sync_error "Stop blocked: design-discipline violation on $CURRENT_TASK ($DESIGN_DISCIPLINE_DETAIL)"
+                    fi
+                fi
+                # DESIGN-DISCIPLINE END (v5 D2 / claude-workflow-plugin-fkm.4)
             else
                 # qa-approved present, but no matching record. This is the
                 # forged bare label (no record at all), the decoy redirect
@@ -5100,6 +5240,57 @@ The audited escape is \`approve --no-review '<reason>'\`, which stamps
 \`[review bypass: <reason>]\` on the approval record and skips this check. Use
 it only when there is genuinely nothing to review (the doc-only fast path uses
 it automatically); the reason is permanent in the audit trail."
+fi
+
+# v5 D2 (claude-workflow-plugin-fkm.4): the design-discipline block. Same
+# placement logic as REVIEW-DISCIPLINE's own block immediately above (named
+# BEFORE the generic QA-required messaging, so the reason names the design
+# state rather than the generic "QA approval required" — the change IS
+# approved; what regressed is the design behind it). The flags default to
+# the releasing values and are only set inside the sentinel-wrapped check
+# above, so stripping that check makes this branch unreachable (which is
+# what the META-TEST proves).
+if [ "$DESIGN_DISCIPLINE_BLOCKED" = "true" ]; then
+    emit_block "Approved change-set, but DESIGN-SATISFIED no longer holds — release refused.
+
+The design behind this approval is no longer satisfied: either the design
+artifact was revised after the satisfied verdict was recorded, a fresh review
+came back needs_revision, or the verdict/artifact record cannot be read at
+all. The check runs at Stop as well as at approve because either of those can
+happen AFTER an approval (the approval record — written once — cannot know
+about it), so the gate re-arms.
+
+Why this blocks:
+  $DESIGN_DISCIPLINE_DETAIL
+
+Run the predicate directly for the full envelope:
+  bash .claude/scripts/qa-gate.sh design-gate-precheck $CURRENT_TASK
+
+Then clear it, by error_key:
+  design_verdict_missing     record a satisfied, independent design verdict:
+                               bash .claude/scripts/qa-gate.sh design-review-record $CURRENT_TASK --design-hash <h> --file <verdict.json>
+  design_not_satisfied       the latest verdict is needs_revision — revise the
+                             design and record a fresh, satisfied verdict.
+  design_hash_unreadable     re-record a verdict with a valid 64-hex
+                             --design-hash.
+  design_artifact_unreadable restore docs/specs/$CURRENT_TASK.md where the
+                             recorded design_hash expects it.
+  design_verdict_stale       the design artifact changed since the satisfied
+                             verdict — record a fresh review of the current
+                             revision.
+  design_gate_unavailable    the predicate itself could not run. This fails
+                             CLOSED on purpose — restore
+                             .claude/scripts/qa-gate.sh.
+
+Once design-satisfied holds again, re-approve so the record carries the fresh
+design_verdict_hash:
+  bash .claude/scripts/qa-gate.sh approve $CURRENT_TASK '<approval summary>'
+
+The audited escape is \`approve --no-design '<reason>'\`, which stamps
+\`[design bypass: <reason>]\` on the approval record and skips this check. Use
+it only when this task genuinely has no design phase (--no-design is also
+the default path for the overwhelming majority of tasks, which never have
+one); the reason is permanent in the audit trail."
 fi
 
 if [ "$QA_APPROVED" = false ]; then

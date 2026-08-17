@@ -323,7 +323,7 @@ record_implementer "$TID_LOW" "backend"
 record_artifact "$TID_LOW" "qa-claude" \
     '[{"id":"R1-F1","severity":"low","location":"src/four.ts:2","evidence":"nit","description":"naming"}]'
 RC=0
-OUT=$(bash "$QG" approve "$TID_LOW" "one low nit, below threshold" 2>/dev/null) || RC=$?
+OUT=$(bash "$QG" approve "$TID_LOW" --no-design "fkm.4: testing review-separation, not design-satisfied" "one low nit, below threshold" 2>/dev/null) || RC=$?
 assert_eq "1.5 below-threshold finding: approve succeeds (exit 0)" "0" "$RC"
 assert_eq "1.5 below-threshold finding: status=approved" \
     "approved" "$(printf '%s' "$OUT" | jq -r '.status')"
@@ -345,7 +345,7 @@ bash "$QG" resolve-finding "$TID_OPEN" R1-F1 \
 printf 'src/three.ts\ntests/sqli.test.sh\n' > "$TRACK/changed-files.txt"
 CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" "$TID_OPEN" >/dev/null 2>&1 || true
 RC=0
-OUT=$(bash "$QG" approve "$TID_OPEN" "finding resolved with evidence" 2>/dev/null) || RC=$?
+OUT=$(bash "$QG" approve "$TID_OPEN" --no-design "fkm.4: testing review-separation, not design-satisfied" "finding resolved with evidence" 2>/dev/null) || RC=$?
 assert_eq "2.1 after resolve-finding: approve succeeds (exit 0)" "0" "$RC"
 assert_eq "2.1 after resolve-finding: status=approved" \
     "approved" "$(printf '%s' "$OUT" | jq -r '.status')"
@@ -368,7 +368,7 @@ bash "$QG" arbitrate "$TID_ARB" R1-F1 overrule \
     "accepted: the loop runs over a bounded 3-element config list; tracked as tech-debt" \
     >/dev/null 2>&1
 RC=0
-OUT=$(bash "$QG" approve "$TID_ARB" "finding overruled with rationale" 2>/dev/null) || RC=$?
+OUT=$(bash "$QG" approve "$TID_ARB" --no-design "fkm.4: testing review-separation, not design-satisfied" "finding overruled with rationale" 2>/dev/null) || RC=$?
 assert_eq "2.2 after arbitrate overrule: approve succeeds (exit 0)" "0" "$RC"
 assert_eq "2.2 after arbitrate overrule: status=approved" \
     "approved" "$(printf '%s' "$OUT" | jq -r '.status')"
@@ -382,6 +382,7 @@ record_implementer "$TID_BYP" "backend"
 RC=0
 OUT=$(bash "$QG" approve "$TID_BYP" \
     --no-review "docs-only follow-up; nothing reviewable changed" \
+    --no-design "fkm.4: testing the review bypass, not design-satisfied" \
     "bypassed approval" 2>/dev/null) || RC=$?
 assert_eq "3.1 bypass: approve succeeds (exit 0)" "0" "$RC"
 assert_eq "3.1 bypass: status=approved" "approved" "$(printf '%s' "$OUT" | jq -r '.status')"
@@ -415,7 +416,7 @@ record_artifact "$TID_REC" "qa-claude" "[]"
 # Capture the hash BEFORE approve (approve truncates the tracker, after which
 # --hash-only would return the empty-set hash).
 REC_EXPECTED_HASH=$(current_hash)
-bash "$QG" approve "$TID_REC" "clean independent review" >/dev/null 2>&1
+bash "$QG" approve "$TID_REC" --no-design "fkm.4: testing the approval-record grammar, not design-satisfied" "clean independent review" >/dev/null 2>&1
 REC_CMT=$(comments_of "$TID_REC" | grep 'QA-GATE APPROVED' | tail -1)
 
 # The two READER expressions, verbatim. Every compat assertion below runs these
@@ -436,13 +437,14 @@ assert_contains "4.1 approval comment carries reviewed_by=qa-claude" \
 # Full grammar, byte-anchored: hash token, THEN reviewed_by, THEN worktree
 # (3mg.2), THEN `at <ts>:`. Token order is the compatibility contract — every
 # addition goes AFTER the hash, space-separated.
-# claude-workflow-plugin-rqer (v5 D2): the token order is change_set_hash,
-# reviewed_by, worktree, [design_hash], artifact_hash, at <ts> — verbatim
-# from cmd_approve's add_comment interpolation (qa-gate.sh:3843,
-# "${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}at $ts: ").
-# No design binding is established in this scenario, so design_hash is
-# absent, but the review-artifact binding IS established (record_artifact
-# ran above), so artifact_hash= is present and sits directly before `at`.
+# claude-workflow-plugin-rqer / fkm.4 (v5 D2): the token order is
+# change_set_hash, reviewed_by, worktree, [design_hash], artifact_hash,
+# [design_verdict_hash], at <ts> — verbatim from cmd_approve's add_comment
+# interpolation ("${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}${design_verdict_field}at $ts: ").
+# No design binding is established in this scenario (--no-design was passed
+# above), so BOTH design_hash and design_verdict_hash are absent, but the
+# review-artifact binding IS established (record_artifact ran above), so
+# artifact_hash= is present and sits directly before `at`.
 assert_match "4.1 approval record grammar (hash, reviewed_by, worktree, timestamp)" \
     "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ artifact_hash=[0-9a-f]{64} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: " \
     "$REC_CMT"
@@ -506,7 +508,7 @@ if [ "$TOKSTRIP_RC" -eq 0 ]; then
     record_implementer "$TID_NOTOK" "backend"
     record_artifact "$TID_NOTOK" "qa-claude" "[]"
     NOTOK_EXPECTED_HASH=$(current_hash)
-    bash "$QG_NOTOKEN" approve "$TID_NOTOK" "clean independent review" >/dev/null 2>&1
+    bash "$QG_NOTOKEN" approve "$TID_NOTOK" --no-design "fkm.4: testing the worktree-token region, not design-satisfied" "clean independent review" >/dev/null 2>&1
     NOTOK_CMT=$(comments_of "$TID_NOTOK" | grep 'QA-GATE APPROVED' | tail -1)
 
     assert_not_contains "4.2b META: the stripped writer emits NO worktree token" \
@@ -601,7 +603,7 @@ if [ "$STRIP_RC" -eq 0 ]; then
     record_implementer "$TID_META" "backend"
     # Deliberately NO artifact — section 1.1's exact precondition.
     RC=0
-    OUT=$(bash "$QG_STRIPPED" approve "$TID_META" "stripped copy must NOT refuse" 2>/dev/null) || RC=$?
+    OUT=$(bash "$QG_STRIPPED" approve "$TID_META" --no-design "fkm.4: testing REVIEW-SEPARATION, not design-satisfied" "stripped copy must NOT refuse" 2>/dev/null) || RC=$?
     assert_eq "6 META: WITHOUT the block, approve succeeds with no artifact (1.1 WOULD fail)" \
         "0" "$RC"
     assert_eq "6 META: stripped copy status=approved" \

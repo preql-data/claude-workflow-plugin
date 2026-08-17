@@ -12,7 +12,7 @@ The plugin includes 9 agents:
 |-------|------|------|
 | **Orchestrator** | Central coordinator | `agents/orchestrator.md` |
 | **Designer** | Produces the design artifact — problem framing, testable acceptance criteria, and the decomposition into independently buildable units. Writes no implementation code (v5.0.0; prompt body lands in Phase D1) | `agents/designer.md` |
-| **Design reviewer** | Separate-context reviewer of the design artifact, scored against `.claude/rubrics/design.md`. Spawned by the root orchestrator — the designer cannot spawn its own reviewer — and must resolve to an identity distinct from the designer (v5.0.0; prompt body lands in Phase D2) | `agents/design-reviewer.md` |
+| **Design reviewer** | Separate-context reviewer of the design artifact, scored against `.claude/rubrics/design.md`. Spawned by the root orchestrator — the designer cannot spawn its own reviewer — and must resolve to an identity distinct from the designer (v5.0.0; prompt body shipped in Phase D2 Part A — the record grammar, subcommand, and gate enforcement that bind its verdict are Part B) | `agents/design-reviewer.md` |
 | **Backend** | API/DB specialist | `agents/backend.md` |
 | **Frontend** | UI/UX specialist | `agents/frontend.md` |
 | **DevOps** | CI/CD specialist | `agents/devops.md` |

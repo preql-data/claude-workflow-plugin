@@ -391,7 +391,17 @@ assert_eq "rubric-bind-C0: precondition — and closed the cycle" \
 # so leaving it out here would make this restoration NOT byte-identical to
 # what HASH_C actually named, for a reason having nothing to do with the
 # cycle invariant this section tests.
-seed_tracker "$FC" "src/c.ts" "$FC/docs/reviews/$TID_C-r1.json"
+# claude-workflow-plugin-fkm.4 (v5 D2): the SAME reasoning names a second,
+# newer path — docs/specs/$TID_C.md, the design doc armed_cycle's
+# seed_review_records ALSO reconciled in (via seed_design_verdict) before
+# HASH_C was captured. Unlike denylist-shared.sh's C4/C5/C6 (a LATER
+# restore on a task already carrying a design doc from an EARLIER approve,
+# where the doc is correctly excluded as already-baselined, unchanged
+# dirt), this is TID_C's only cycle to date: HASH_C was captured before
+# ANY approve ran, so no baseline yet exists to have subtracted it, and
+# both docs/reviews' and docs/specs' first appearance are genuine
+# reconcile survivors either way.
+seed_tracker "$FC" "src/c.ts" "$FC/docs/reviews/$TID_C-r1.json" "$FC/docs/specs/$TID_C.md"
 HASH_C_NOW=$(ir "$FC" --hash-only 2>/dev/null || echo "")
 assert_eq "rubric-bind-C1: precondition — the change set is byte-identical to the graded one" \
     "same" "$([ "$HASH_C" = "$HASH_C_NOW" ] && echo same || echo differs)"

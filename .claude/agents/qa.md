@@ -55,6 +55,8 @@ Block-reason shapes you may see and what to do with each:
 
    `choose approve` is **not** an unconditional escape. It delegates to the same `cmd_approve` a direct approve uses, so it still refuses (exit 4) while the task has no independent review artifact or an unresolved finding at/above `risk_threshold`. Escalation does not dissolve a dispute: the finding must be resolved with evidence (`qa-gate.sh resolve-finding`) or overruled by the orchestrator (`qa-gate.sh arbitrate … overrule`) first — see `orchestrator.md` section 5d.
 
+   Since v5 D2 it ALSO refuses (exit 2, one of the `design_*` error keys) while the task's design-satisfied precondition is unmet — and `choose` has no flag slot to forward a bypass reason through to `cmd_approve`, so on the ordinary task (no design phase at all: `no_design_attempted`) `choose approve` fails first-try with no way to clear it as written. Drop to the direct form instead: `bash .claude/scripts/qa-gate.sh approve <task> --no-design '<reason>' '<summary>'`. Note the `QA-GATE CHOICE approve` comment is written BEFORE the delegated `cmd_approve` call, so a refusal here — design or otherwise — leaves that comment on the task with nothing actually approved; read an unexplained `QA-GATE CHOICE approve` with no matching `QA-GATE APPROVED` record as exactly that, not as a forged approval.
+
 4. **QA approval required (technical checks passed, J18 intent payload)** — the gate ran tests/lint/type successfully and is now waiting on QA. The block-reason includes a JSON block:
    ```json
    {

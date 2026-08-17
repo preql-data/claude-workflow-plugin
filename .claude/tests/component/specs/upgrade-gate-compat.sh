@@ -432,6 +432,25 @@ new_task() {
         ( cd "$T" && git add -- docs/reviews \
             && git commit -qm "checkpoint: commit prior review artifact(s)" ) >/dev/null 2>&1 || true
     fi
+    # claude-workflow-plugin-fkm.4 (v5 D2): the IDENTICAL collision, for the
+    # IDENTICAL reason, now exists for docs/specs/<other-tid>.md — every
+    # gate_cycle/seed_review_records call also writes one (seed_design_verdict),
+    # it is real and git-visible, and a successful approve leaves it in place
+    # too (the same AC-5 exemption: only .claude/.qa-tracking scratch copies get
+    # wiped). Confirmed empirically, not just by symmetry with the block above:
+    # with only the docs/reviews commit, `arm_stop` restoring the design doc
+    # (the fkm.4 companion fix on that function) turned upgrade-gate 4b and 7
+    # META red — section 4b's OWN design doc collapsed onto section 4's
+    # identical `?? docs/specs/` porcelain line (baselined by section 4's
+    # approve), so reconcile_tracker silently dropped it from the hash 4b's
+    # approval actually binds while `arm_stop` (correctly) restored it anyway,
+    # a mismatch neither existed before this fix nor should exist after it.
+    # Same fix, same reasoning, same narrow scope (commit, never rm -rf, for
+    # the same DELETION-vs-collision reason given above) closes it.
+    if [ -d "$T/docs/specs" ] && [ -n "$(ls -A "$T/docs/specs" 2>/dev/null)" ]; then
+        ( cd "$T" && git add -- docs/specs \
+            && git commit -qm "checkpoint: commit prior design artifact(s)" ) >/dev/null 2>&1 || true
+    fi
     bdt create "$1" -t task -p 1 -l devops,qa-pending --json 2>/dev/null \
         | jq -r '.id // empty' 2>/dev/null
 }
@@ -502,8 +521,18 @@ arm_stop() {
     # current-hash recompute no longer matches the approval it is checking
     # against for a reason unrelated to whatever this call is testing.
     local art="$T/docs/reviews/$1-r1.json"
-    if [ -f "$art" ]; then
+    # claude-workflow-plugin-fkm.4 (v5 D2): the SAME reasoning applies to the
+    # design doc seed_review_records also writes for every caller here
+    # (docs/specs/$1.md, via seed_design_verdict) — it is real, uncommitted,
+    # and reconciled into the tracker before the preceding approve runs, so a
+    # restore that omits it is not "the same change set" that approve bound.
+    local design="$T/docs/specs/$1.md"
+    if [ -f "$art" ] && [ -f "$design" ]; then
+        printf '%s\n%s\n%s\n' "$2" "$art" "$design" > "$TRACKER"
+    elif [ -f "$art" ]; then
         printf '%s\n%s\n' "$2" "$art" > "$TRACKER"
+    elif [ -f "$design" ]; then
+        printf '%s\n%s\n' "$2" "$design" > "$TRACKER"
     else
         printf '%s\n' "$2" > "$TRACKER"
     fi
@@ -728,8 +757,8 @@ V4_RECORD=$(approval_records "$TID_OPEN")
 # (gate_cycle's seed_review_records writes a real, reconciled canonical
 # artifact, so it always does here) — the shape is pinned, not the value;
 # review-artifact-durability.sh pins the value.
-assert_match "upgrade-gate 4: the NEW record is in the v4 grammar (hash, reviewed_by, worktree, then the timestamp)" \
-    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ artifact_hash=[0-9a-f]{64} at $ISO: " \
+assert_match "upgrade-gate 4: the NEW record is in the v4 grammar (hash, reviewed_by, worktree, design, artifact, design-verdict, then the timestamp)" \
+    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ design_hash=[0-9a-fA-F]{64} artifact_hash=[0-9a-f]{64} design_verdict_hash=[0-9a-fA-F]{64} at $ISO: " \
     "$V4_RECORD"
 assert_eq "upgrade-gate 4: ...whose change_set_hash is the hash of the reviewed change set" \
     "$CUR_HASH" \
@@ -831,7 +860,11 @@ git -C "$T" checkout -- . >/dev/null 2>&1 || true
 # TRACKED, and rm -rf would delete that too, reporting a DELETION — a
 # different kind of dirt this section does not expect either. `-fd` removes
 # only what git still considers untracked.
-(cd "$T" && git clean -fdq -- docs/reviews 2>/dev/null) || true
+# claude-workflow-plugin-fkm.4 (v5 D2): docs/specs/ carries the SAME kind of
+# leftover as docs/reviews/ — the design doc each preceding gate_cycle wrote
+# via seed_review_records, real and untracked, and this section's whole
+# premise is a tree containing EXACTLY the one pre-upgrade file.
+(cd "$T" && git clean -fdq -- docs/reviews docs/specs 2>/dev/null) || true
 assert_eq "upgrade-gate 5: precondition - no v2 gate-baseline exists" \
     "no" "$(yesno test -e "$BASE_V2")"
 assert_eq "upgrade-gate 5: precondition - no v1 approved-baseline exists yet" \

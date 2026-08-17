@@ -1979,6 +1979,151 @@ METAs that revert each half of the preservation fix, the version validation, and
 the sentinel refusals, and a reader differential that attributes R2-F3 to the
 selector rather than to the writer check).
 
+### Design verdicts are bound to the design they reviewed (`design-record` / `design-review-record`)
+
+v5 Phase D1 (`claude-workflow-plugin-fkm.3`) added a design phase ahead of
+implementation: a designer writes `docs/specs/<task-id>.md` — prose sections
+plus one machine `<!-- DESIGN-UNITS BEGIN/END -->` block — and records it with
+`qa-gate.sh design-record <task-id>`:
+
+```
+DESIGN-ARTIFACT v1 task=<tid> designer=<id> design_hash=<h> units=<n> at <ts>: <summary>
+```
+
+`--file` on this command is an **assertion, not an input** — the artifact path
+is always derived from the task id (`docs/specs/<task-id>.md`), so the flag can
+only confirm that derivation or be omitted; anything else is
+`artifact_path_not_derived`. The record binds a live `workflow-manifest.sh
+hash-file` digest of the artifact's raw bytes (bracketed across
+`review-check.sh validate-design`'s own read, so a concurrent edit cannot bind
+bytes the validator never saw), and it is a second layer of the designer's
+edit ban: `designer_touched_source` refuses to record while the change set
+holds a path that is not this one artifact and no `IMPLEMENTER` record has
+posted yet (the check disarms at implementer *spawn*, not completion).
+
+Phase D2 (`claude-workflow-plugin-fkm.4`) added the reviewer's half —
+deliberately a **separate** record with its own grammar, author and lifetime,
+because the independence check below needs a durable statement of who the
+designer was that only a distinct record can carry:
+
+```
+DESIGN-REVIEW v1 task=<tid> reviewer=<id> verdict=<satisfied|needs_revision>
+  design_hash=<h> iteration=<n> rubric_version=<v> at <ts>: <summary>[ [amends: <prev-h>]]
+```
+
+`qa-gate.sh design-review-record <task-id> --design-hash <sha256> [--file
+<path>]` reads a strict-JSON verdict from `--file` or stdin — the shape the
+design-reviewer agent emits (`.claude/rubrics/design.md`'s DS1-DS8), validated
+inline the same way `grade-record` validates the code rubric's verdict (no
+second schema: there is no file-based artifact to validate here, unlike
+`design-record`'s artifact). `--design-hash` is **required** and is a *claim*,
+not a live recompute — the same reasoning `grade-record`'s `--graded-hash`
+documents: recomputing at record time would bind whatever the artifact happens
+to be *then*, not necessarily the revision the reviewer actually read.
+
+**Independence is enforced at record time, not at approve time.** A verdict
+whose `reviewer_identity` equals the `designer=` on the task's latest
+`DESIGN-ARTIFACT` record is refused (`design_reviewer_not_independent`) before
+it is ever written; recording against a task with no `DESIGN-ARTIFACT` record
+at all is also refused (`design_artifact_record_missing` — there is no
+designer identity to check against). The comparison is **string equality**,
+not a role-membership test: `design-reviewer.md` fixes `reviewer_identity` to
+the literal `"design-claude"`, and `design-record`'s own default designer
+identity is the literal `"designer"` — textually distinct by construction.
+`review-check.sh`'s own independence computation (used for the *code* review)
+is not reusable here: it is a membership test against implementer *role*
+tokens, and both of these identities are plain strings, not roles.
+
+**Amendments.** The same subcommand records again at a later `iteration`
+against an artifact revised in place (its `Revision log` gains a row, so
+`design_hash` moves — never a second `DESIGN-UNITS` block, which
+`validate-design` refuses structurally). Two rules enforce this: a new
+record's `iteration` must be **greater** than the latest recorded one for the
+task (a repeat at the same or an earlier number is refused,
+`design_review_iteration_not_advancing`), and when the prior record's
+`design_hash` differs from this one, the comment carries `[amends:
+<prev-design-hash>]` — free-text audit prose, never a value a program parses.
+
+**`qa-gate.sh approve` refuses without design-satisfied — unconditionally,
+mirroring the completion-contract's own shape.** A task with no satisfied,
+independent, fresh `DESIGN-REVIEW` verdict is refused (exit 2, one of
+`no_design_attempted` / `design_verdict_missing` / `design_not_satisfied` /
+`design_hash_unreadable` / `design_artifact_unreadable` /
+`design_verdict_stale`), leaving the task untouched — the same "no record, no
+release" shape `completion_record_missing` already established. `--no-design
+'<reason>'` is the audited bypass, ordinary for the overwhelming majority of
+tasks that never have a design phase at all; the reason lands in the approval
+comment as `[design bypass: <reason>]`.
+
+This is a **new, sibling block** (`DESIGN-SATISFIED-REFUSAL`), not a
+conversion of the existing `DESIGN-BINDING-TOKEN` ladder's "no record" arm —
+that ladder answers a narrower question ("does a design artifact exist, and
+does it still hash to what was recorded"), orthogonal to whether anyone ever
+reviewed it, and it still computes the `design_hash=` audit token on every
+path. `claude-workflow-plugin-rqer` set the precedent for this split when it
+added `REVIEW-ARTIFACT-BINDING-TOKEN` alongside `REVIEW-SEPARATION` rather
+than folding the review artifact's own file-hash question into the refusal
+that already existed for independence.
+
+Once design-satisfied holds, the approval record carries a fifth machine
+token, `design_verdict_hash=<h>` — last among the machine tokens, immediately
+before `at <ts>`:
+
+```
+QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
+  design_hash=<h> artifact_hash=<h> design_verdict_hash=<h> at <ts>: <summary>
+```
+
+**A capped code review cannot certify the change set on its own
+(`cap_terminated`).** `review-check.sh gate`'s envelope has exposed
+`.artifact.cap_terminated` (derived from the latest `REVIEW-ARTIFACT`'s
+`stopped_by`) since `claude-workflow-plugin-nq5f`, with no consumer until D2.
+A review that stopped at a CAP (`max_findings` / `max_review_iterations` /
+`timeout`) ran out of turns or budget, not out of things to find — the same
+principle `.claude/rubrics/design.md`'s DS8 states for the design-review
+loop, applied here to its sibling. `qa-gate.sh approve` now refuses
+(`review_cap_terminated`) inside `REVIEW-SEPARATION` when this is true,
+sharing that block's own `--no-review` bypass — a **new arm of an existing
+refusal**, not a new block, since the question ("is the code review
+complete") is exactly REVIEW-SEPARATION's own. The read is
+`has("cap_terminated")`-guarded rather than `// false`: the alternative
+treats a literal JSON `false` as "absent" and falls through to its
+right-hand side, which would misreport every ordinary non-cap review the
+moment that fallback was anything but `"false"` itself.
+
+**The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`),**
+mirroring `REVIEW-DISCIPLINE` above for the design axis: a design can be
+amended, or re-reviewed to `needs_revision`, *after* approval — a fact the
+approval record, written once, cannot know about — so the gate re-arms at
+Stop by calling `qa-gate.sh design-gate-precheck <task-id>` (the same
+predicate `compute_design_satisfied` backs). It shares REVIEW-DISCIPLINE's
+audited escape: an approval record carrying `[design bypass:` skips the
+re-check. This block lives entirely **outside** `SKIP-UNCHANGED`'s file-based
+skip region (`tree_fingerprint()` minus the tracked-path denylist) —
+deliberately, because a design verdict recorded only as a Beads comment moves
+neither instrument the skip predicate reads, so a design regression with no
+matching file change could otherwise replay a stale, already-green tech-check
+result right past it. Reading bd state fresh on every Stop, regardless of
+whether the suite itself replayed, is what closes that hole.
+
+**`design-gate-precheck <task-id>`** is a pre-delegation convenience the
+orchestrator may run before its first `Task()` spawn on a task — never
+enforced from there (nothing can force a prompt to run a script before
+delegating; `approve`'s own refusal is the real backstop). It is
+**deliberately more lenient** than `approve`: a task with no design phase at
+all (`no_design_attempted`) reads as ready to proceed, because the
+overwhelming majority of tasks never have one, and treating "nothing
+started" as a precheck failure would fire on nearly every ordinary task. What
+it *does* flag is a design that was **started** (a `DESIGN-ARTIFACT` record
+exists) but is not yet satisfied — the case worth stopping to fix before
+paying for an implementer spawn.
+
+Pinned by `.claude/scripts/tests/design-review-record.test.sh` (shape
+validation, independence, amendments, the approve refusal with its own
+METatest, cap_terminated with its own METatest, and the bjx scalar-class
+discipline) and `.claude/tests/component/specs/verify-design-discipline.sh`
+(the Stop-hook re-check).
+
 ### The vanished-change-set release (`VANISHED-CHANGE-SET`)
 
 The Stop hook reads the change set **twice**: once at its detection stage, and

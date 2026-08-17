@@ -192,7 +192,14 @@ RESTAGE_ART_LINES="$TID_ART_LINES"
 # validated COMPLETION v1 record. D1 is the CONTROL for this whole spec — "a
 # clean independent review releases" — so it has to reach a real approve.
 seed_completion_record "$TID" "backend" "$FIXTURE"
-APPROVE_OUT=$(bash "$QG" approve "$TID" "reviewed by qa-claude; ships safely" 2>&1)
+# v5 D2 (claude-workflow-plugin-fkm.4) MIGRATION, R2-F1: approve additionally
+# refuses (exit 2, no_design_attempted) without a satisfied design verdict.
+# This spec's subject is REVIEW discipline, not design — no task here has a
+# design phase — so --no-design is the spec-true choice (seeding a real
+# design-record would add docs/specs/<tid>.md as a new tracked path, which
+# this spec's own restage()/RESTAGE_ART_LINES bookkeeping does not account
+# for and has no need to). Same reasoning applies to D6 META's approve below.
+APPROVE_OUT=$(bash "$QG" approve "$TID" --no-design "verify-review-discipline spec: no design phase, testing review discipline only" "reviewed by qa-claude; ships safely" 2>&1)
 assert_json_field "D1: approve succeeds with an independent clean review" \
     "$APPROVE_OUT" '.status' "approved"
 restage "$TID" "src/handler.ts"
@@ -349,7 +356,9 @@ if [ "$STRIP_RC" -eq 0 ]; then
     # P7 MIGRATION (see D1): the META rebuilds D2's approved state, which needs
     # a real approve to exist at all.
     seed_completion_record "$TID_META" "backend" "$FIXTURE"
-    bash "$QG" approve "$TID_META" "clean at approve time" >/dev/null 2>&1
+    # fkm.4 R2-F1 (see D1's approve above for the reasoning): --no-design, same
+    # spec-true reason.
+    bash "$QG" approve "$TID_META" --no-design "verify-review-discipline spec: no design phase, testing review discipline only" "clean at approve time" >/dev/null 2>&1
     record_artifact "$TID_META" 2 "qa-claude" \
         '[{"id":"R2-F1","severity":"critical","location":"src/meta-handler.ts:7","evidence":"synthetic","description":"post-approval finding"}]'
     # Control: the REAL hook blocks this state (same assertion as D2).

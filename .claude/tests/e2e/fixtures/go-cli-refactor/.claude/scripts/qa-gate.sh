@@ -139,10 +139,11 @@
 #   3   atomic operation rolled back
 #   4   approve REFUSED by the V3 review-separation gate: no independent
 #       review artifact, the reviewer is also an implementer, findings at or
-#       above the risk_threshold are still open, or the review predicate
-#       itself is unavailable (fail-closed). error_key names which; the
-#       remediation names the resolve-finding / arbitrate / review-record
-#       command that clears it.
+#       above the risk_threshold are still open, the latest review stopped at
+#       a CAP rather than concluding on its own terms (v5 D2 / fkm.4:
+#       review_cap_terminated), or the review predicate itself is unavailable
+#       (fail-closed). error_key names which; the remediation names the
+#       resolve-finding / arbitrate / review-record command that clears it.
 #
 # The P7 completion-contract refusal exits 2, not 5, deliberately: exit 2 is
 # already this file's "refused because a mechanical artifact is missing, stale or
@@ -2083,6 +2084,7 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               from a task that was simply never entered).
   approve <task-id> [--expect-hash <hash>] [--accept-reconstructed '<reason>']
           [--no-impact-report '<reason>'] [--no-review '<reason>']
+          [--no-completion '<reason>'] [--no-design '<reason>']
           <approval-summary>
               --expect-hash <hash> is the change set the CALLER classified.
               REFUSES (exit 2, error_key expected_hash_mismatch) when that is
@@ -2131,6 +2133,13 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                                           `arbitrate <id> overrule` each one
                 review_check_unavailable  the predicate could not run — this
                                           FAILS CLOSED on purpose
+                review_cap_terminated    (v5 D2 / fkm.4) the latest review
+                                          stopped at a CAP (max_findings /
+                                          max_review_iterations / timeout)
+                                          rather than at a verdict or a
+                                          stated stop_condition — incomplete
+                                          by construction, cannot certify the
+                                          change set on its own
               --no-review '<reason>' bypasses it; the reason lands in the
               approval comment as `[review bypass: <reason>]` (which the Stop
               hook's review-discipline check honours) and in the gate JSON.
@@ -2160,21 +2169,48 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               The verdict is recorded in the approval comment as
               `[completion cross-check: ...]` whenever it is not clean.
 
+              ALSO REFUSES (exit 2, error_key names which — v5 D2 / fkm.4)
+              unless design-satisfied holds: a DESIGN-REVIEW v1 verdict exists
+              for the task, its verdict is `satisfied`, and a live re-hash of
+              docs/specs/<task-id>.md still agrees with the design_hash that
+              verdict names:
+                no_design_attempted        no DESIGN-ARTIFACT record at all
+                design_verdict_missing      an artifact exists, no verdict yet
+                design_not_satisfied        latest verdict is needs_revision
+                design_hash_unreadable      the verdict's design_hash is not
+                                            64 hex characters
+                design_artifact_unreadable  docs/specs/<task-id>.md is
+                                            missing, escaped its directory,
+                                            or could not be hashed
+                design_verdict_stale        the artifact changed since the
+                                            satisfied verdict was recorded
+              --no-design '<reason>' is the audited bypass — the ordinary exit
+              for a task with no design phase at all. Record one with:
+                bash .claude/scripts/qa-gate.sh design-review-record <task-id> \
+                    --design-hash <sha256> --file <verdict.json>
+              The reason lands in the approval comment as
+              `[design bypass: <reason>]` and in the gate JSON.
+
               The approval comment records the reviewer, the approving
               checkout (3mg.2 — `worktree=` is the %20-encoded git toplevel,
               or `none`; the Stop hook resolves cross-worktree approvals
               through it) AND, since v5 D1, the design artifact's content hash
               when a DESIGN-ARTIFACT record exists AND a live re-hash of
               docs/specs/<task-id>.md still agrees with it (otherwise the token
-              is omitted and the envelope names why):
+              is omitted and the envelope names why), AND (since rqer) the
+              REVIEW-ARTIFACT file's own content hash under the same rule, AND
+              (since v5 D2) the design VERDICT's design_hash once
+              design-satisfied verifies:
                 QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id>
-                worktree=<tok> design_hash=<h> at <ts>: <summary>
+                worktree=<tok> design_hash=<h> artifact_hash=<h>
+                design_verdict_hash=<h> at <ts>: <summary>
               Every optional MACHINE field carries its own trailing space and
               defaults to empty. The bracketed suffixes are free-text audit
-              prose appended AFTER the summary, all six of them:
+              prose appended AFTER the summary, all seven of them:
                 [ [impact-report bypass: ...]][ [review bypass: ...]]
                 [ [rubric mismatch: ...]][ [reconstructed change set accepted: ...]]
                 [ [completion bypass: ...]][ [completion cross-check: ...]]
+                [ [design bypass: ...]]
   block   <task-id> <reason>
   baseline-capture [--by <who>] [--if-missing] [--exclude-tracked]
               Write .claude/.qa-tracking/gate-baseline — the snapshot of
@@ -2307,6 +2343,58 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               moves between the validator's read and the hash — in CONTENT or
               in CONTAINMENT — rather than binding bytes no validator saw, or
               bytes never shown to be the declared directory's.
+  design-review-record <task-id> --design-hash <sha256> [--file <path>]
+              v5 D2 (fkm.4): record the design REVIEWER's verdict — the split
+              D1's design-record documents ("that is D2's own record, with its
+              own grammar, its own author and its own lifetime"). Reads a
+              strict-JSON verdict from --file <path> or, if omitted, stdin.
+              Required JSON keys (mirrors grade-record's shape, plus the one
+              key the code rubric has no analogue for):
+                verdict            "satisfied" | "needs_revision"
+                criterion_results  array of {criterion, pass, justification}
+                required_fixes     array
+                iteration          non-negative integer, GREATER than the
+                                   task's latest recorded DESIGN-REVIEW
+                                   iteration (a repeat at the same or an
+                                   earlier number is refused)
+                rubric_version     string matching ^[A-Za-z0-9._+-]+$
+                reviewer_identity  string matching ^[A-Za-z0-9._+-]+$
+              --design-hash <sha256> is REQUIRED — a CLAIM about which bytes
+              were reviewed, not a live recompute (same reasoning as
+              grade-record's --graded-hash: recomputing here would bind
+              whatever docs/specs/<task-id>.md happens to be AT RECORD TIME,
+              not necessarily what the reviewer actually read). Ordinarily
+              latest_design_artifact_hash's value, read right before the
+              reviewer spawns.
+              REFUSES `design_reviewer_not_independent` when reviewer_identity
+              equals the designer= on the task's latest DESIGN-ARTIFACT
+              record — nobody reviews their own work — and
+              `design_artifact_record_missing` when no DESIGN-ARTIFACT record
+              exists at all (nothing to check independence against).
+              A repeat recording against an artifact revised in place (its
+              Revision log gains a row, so design_hash moves) is an
+              AMENDMENT: the record carries `[amends: <prev-design-hash>]`.
+              Appends:
+                DESIGN-REVIEW v1 task=<tid> reviewer=<id>
+                verdict=<satisfied|needs_revision> design_hash=<h>
+                iteration=<n> rubric_version=<v> at <ts>: <summary>[ [amends: <h>]]
+              `approve` REFUSES without a satisfied, fresh one of these (see
+              approve's own help above) unless `--no-design '<reason>'`.
+  design-gate-precheck <task-id>
+              v5 D2 (fkm.4), B5: a PRE-DELEGATION convenience the orchestrator
+              MAY run before its first Task() spawn on a task — never
+              enforced from here (nothing can force a prompt to run a script
+              before deciding to delegate; `approve`'s own design-satisfied
+              refusal is the real, unavoidable backstop). Exits 0 when either
+              design-satisfied holds OR no design has been started at all
+              (`no_design_attempted` — deliberately NOT a failure here, unlike
+              at `approve`: the overwhelming majority of tasks never have a
+              design phase, and treating "nothing started" as a precheck
+              failure would fire on nearly every ordinary task). Exits 4 with
+              a structured error_key (see approve's design-satisfied list
+              above) when a design WAS started but is not yet satisfied — the
+              case worth stopping to fix before paying for an implementer
+              spawn.
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -2873,6 +2961,11 @@ cmd_approve() {
     # stripped copy has to stay syntactically coherent.
     local bypass_completion=0
     local completion_bypass_reason=""
+    # DESIGN-SATISFIED-REFUSAL (v5 D2 / claude-workflow-plugin-fkm.4): same
+    # discipline as the four bypass pairs above — declared OUTSIDE the
+    # sentinel-wrapped block further down, for the same two reasons.
+    local bypass_design=0
+    local design_bypass_reason=""
     while [ $# -gt 0 ]; do
         case "$1" in
             # EXPECTED-HASH-REFUSAL BEGIN (qzv)
@@ -2978,6 +3071,29 @@ cmd_approve() {
                     emit_error_json "approve" "$tid" "bypass_reason_required" \
                         "--no-completion requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the completion-contract requirement is indistinguishable from approving work nobody described" \
                         "qa-gate.sh approve $tid --no-completion '<reason>' '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --no-design)
+                # v5 D2 (claude-workflow-plugin-fkm.4): the audited bypass for
+                # the design-satisfied refusal below. Mirrors --no-completion /
+                # --no-review / --no-impact-report exactly, including the
+                # empty-reason refusal — an unexplained bypass is
+                # indistinguishable from gate evasion.
+                #
+                # THE INTENDED PRODUCERS are (a) a task that never had a
+                # design phase — the ordinary case for most tasks — and (b) an
+                # operator override when a design-satisfied refusal is judged
+                # wrong for this task. Neither is assumed; both require the
+                # reason, recorded in the approval comment as
+                # `[design bypass: <reason>]` and in the gate JSON.
+                bypass_design=1
+                design_bypass_reason="${2:-}"
+                if [ -z "$design_bypass_reason" ]; then
+                    emit_error_json "approve" "$tid" "bypass_reason_required" \
+                        "--no-design requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the design-satisfied requirement is indistinguishable from approving unreviewed design work" \
+                        "qa-gate.sh approve $tid --no-design '<reason>' '<summary>'"
                     exit 1
                 fi
                 shift 2 || true
@@ -3339,7 +3455,11 @@ cmd_approve() {
     # `914ceeff`. `--expect-hash` makes the caller state the set it judged and
     # refuses when that is not the set being bound.
     #
-    # WHERE IT SITS, AND WHY — cmd_approve now carries four refusals, and the
+    # WHERE IT SITS, AND WHY — cmd_approve now carries SEVEN post-argparse
+    # refusal families (this comment previously said "four" and had drifted
+    # to under-count even that — rqer added completion-contract without
+    # updating the enumeration below; v5 D2 / claude-workflow-plugin-fkm.4
+    # both fixes that gap and adds design-satisfied, per AC 4.12), and the
     # order is a claim about what each one can PROVE:
     #   1. tracker_unreconcilable / 2. change_set_reconstructed — what the change
     #      set IS. Nothing can be reasoned about a set nobody has established, so
@@ -3357,6 +3477,15 @@ cmd_approve() {
     #      impact-report refusal: a pure string compare over two values already in
     #      hand should not queue behind a review round, and a caller whose
     #      classification is stale has nothing to review yet anyway.
+    #   5. COMPLETION-CONTRACT-REFUSAL — a claim about the WHOLE task rather
+    #      than about one artifact; its own header states why it goes after
+    #      REVIEW-SEPARATION rather than before it.
+    #   6. DESIGN-SATISFIED-REFUSAL (v5 D2) — placed last among the refusals
+    #      for the identical reason completion-contract is: cheap to
+    #      remediate, but a whole-task claim, so firing it while a more basic
+    #      precondition is missing would send the operator to fix the wrong
+    #      thing first. Its own header explains why it is a NEW block rather
+    #      than a converted DESIGN-BINDING-TOKEN arm.
     #
     # ONE BOUNDARY, NAMED RATHER THAN LEFT LATENT. The hash-aware idempotency
     # no-op higher up in this function returns BEFORE this refusal. On that path
@@ -3482,6 +3611,53 @@ cmd_approve() {
         review_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$tid" 2>&1) || review_rc=$?
         case "$review_rc" in
             0)
+                # REVIEW-CAP-TERMINATED-REFUSAL BEGIN (v5 D2 / claude-workflow-plugin-fkm.4)
+                #
+                # nq5f/fkm.4 B4: "cap_terminated becomes a predicate." The
+                # primitive has existed since nq5f (review-check.sh:1228-1231,
+                # exposed on this exact envelope) with ZERO consumers in this
+                # file before this line (`grep -c cap_terminated
+                # .claude/scripts/qa-gate.sh` was 0 at fkm.4 start). A review
+                # that stopped at a CAP (max_findings / max_review_iterations /
+                # timeout) ran out of turns or budget, not out of things to
+                # find — it is incomplete by construction, the same principle
+                # `.claude/rubrics/design.md`'s DS8 states for the
+                # design-review loop, applied here to its sibling: the code
+                # review that gates THIS approval.
+                #
+                # Checked BEFORE the observation strings below are composed:
+                # rc=0 from review-check.sh gate means "no open findings,
+                # reviewer independent", which is necessary but, for a capped
+                # review, not sufficient — `verdict` and `stop_condition` are
+                # the only two ways a review concludes on its own terms, and
+                # every `cap:*` value is the other case.
+                #
+                # `has("cap_terminated")` rather than `// false`, deliberately
+                # (the pairing plan's own caution): `//` treats a literal JSON
+                # `false` as "absent" and falls through to its right-hand
+                # side, which would silently misreport every ordinary non-cap
+                # review if that fallback were ever anything but "false"
+                # itself — review-count.test.sh already carries the regression
+                # leg for exactly this shape. Absence (an envelope from a
+                # review-check.sh predating this field) reads as "false" — not
+                # cap-terminated — on purpose: this must not newly block an
+                # approve whose review-check.sh copy is merely older, only one
+                # that is actually capped.
+                #
+                # Same audited bypass as the rest of REVIEW-SEPARATION
+                # (--no-review): this whole case arm runs only when
+                # bypass_review != 1, so no second bypass flag is needed.
+                local review_cap_terminated review_stopped_by
+                review_cap_terminated=$(printf '%s' "$review_out" | jq -r '.artifact | if has("cap_terminated") then (.cap_terminated | tostring) else "false" end' 2>/dev/null || echo "false")
+                if [ "$review_cap_terminated" = "true" ]; then
+                    review_stopped_by=$(printf '%s' "$review_out" | jq -r '.artifact.stopped_by // "?"' 2>/dev/null || echo "?")
+                    emit_error_json "approve" "$tid" "review_cap_terminated" \
+                        "approve refused: the latest independent review for $tid stopped at a CAP (stopped_by=$review_stopped_by) rather than at a verdict or a stated stop_condition. A capped review ran out of iterations, findings budget or time — not out of things to find — and is incomplete by construction; it cannot certify the change set on its own merits (the same principle .claude/rubrics/design.md's DS8 states for the design-review loop). Record a fresh review that concludes on its own terms, or bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --no-review '<reason>' '<summary>'" \
+                        "qa-gate.sh approve <task-id> [--no-review '<reason>'] <summary>"
+                    exit 4
+                fi
+                # REVIEW-CAP-TERMINATED-REFUSAL END (v5 D2 / claude-workflow-plugin-fkm.4)
+
                 reviewed_by=$(printf '%s' "$review_out" | jq -r '.reviewer_identity // "unknown"' 2>/dev/null || echo "unknown")
                 [ -z "$reviewed_by" ] && reviewed_by="unknown"
                 review_artifact_hash=$(printf '%s' "$review_out" | jq -r '.artifact.reviewed_hash // ""' 2>/dev/null || echo "")
@@ -3657,6 +3833,102 @@ cmd_approve() {
     fi
     # COMPLETION-CONTRACT-REFUSAL END (P7 / claude-workflow-plugin-qbhw)
 
+    # Declared OUTSIDE the sentinel-wrapped block below — same discipline as
+    # design_field/design_binding_obs and worktree_field above: a build with
+    # the DESIGN-SATISFIED-REFUSAL region stripped must still leave these
+    # bound to their empty defaults, so the write and the final envelope
+    # further down stay syntactically and semantically coherent (no dangling
+    # token, no unset-variable surprise) even with the whole block gone.
+    local design_verdict_field="" design_satisfied_obs=""
+
+    # DESIGN-SATISFIED-REFUSAL BEGIN (v5 D2 / claude-workflow-plugin-fkm.4)
+    #
+    # DID AN INDEPENDENT DESIGN REVIEW ACTUALLY PASS THIS TASK'S DESIGN?
+    #
+    # A GENUINE CHOICE, MADE DELIBERATELY: ADD A NEW BLOCK, DO NOT CONVERT
+    # DESIGN-BINDING-TOKEN. The scope this task was audited against — and the
+    # comment on DESIGN-BINDING-TOKEN's arm 4, below — both invite converting
+    # that ladder's "no record" arm into a refusal. This does something else,
+    # and here is why. DESIGN-BINDING-TOKEN answers "does a design ARTIFACT
+    # exist, and does it still hash to what was recorded" — a fact about
+    # PROVENANCE, orthogonal to whether anyone ever reviewed it, and it ALSO
+    # computes the `design_field` token the write below still needs on every
+    # path (including a task with no review at all, once --no-design is
+    # given). Converting its arm 4 would make one block answer two unrelated
+    # questions — "what are these bytes" and "were they reviewed" — and would
+    # entangle its token-computation duty with a refusal duty the rest of
+    # this file keeps separate (REVIEW-SEPARATION refuses; the two
+    # *-BINDING-TOKEN ladders only observe). rqer faced the identical decision
+    # for the review artifact's OWN file-hash-provenance question and chose
+    # to ADD a sibling ladder (REVIEW-ARTIFACT-BINDING-TOKEN) rather than fold
+    # it into REVIEW-SEPARATION, which is the refusal that already existed
+    # for that axis. This block is the design axis's REVIEW-SEPARATION — the
+    # refusal — and DESIGN-BINDING-TOKEN keeps doing exactly what it did
+    # before: reporting the artifact's own provenance, nothing more.
+    #
+    # THE PREDICATE IS NOT REIMPLEMENTED HERE. compute_design_satisfied (see
+    # the DESIGN-REVIEW block near the end of this file) is the ONE place
+    # that reads the DESIGN-ARTIFACT/DESIGN-REVIEW record grammars and
+    # decides — exactly like review-check.sh `gate` is the one place for the
+    # code review, and compute_change_set_hash defers to impact-report.sh
+    # --hash-only. Reused by cmd_design_gate_precheck (B5) and by nothing
+    # else, so there is exactly one place to change this logic.
+    #
+    # UNCONDITIONAL, LIKE COMPLETION-CONTRACT-REFUSAL ABOVE — NOT CONDITIONED
+    # ON "did this task ever start a design". D1's own comment on
+    # DESIGN-BINDING-TOKEN's arm 4 (below) states the direction explicitly:
+    # "D2 turns this arm into a refusal". A task that never had (or needed) a
+    # design phase clears this the same way a doc-only Stop clears
+    # completion_record_missing — with an explicit, audited, reasoned
+    # `--no-design '<reason>'`, never silently. The alternative (refuse only
+    # when a DESIGN-ARTIFACT record already exists) would make the refusal
+    # invisible on every ordinary task, which is not what "D2 turns this arm
+    # into a refusal" says, and would leave `--no-design` an unused flag.
+    #
+    # ORDERING. Placed AFTER every other refusal (tracker / change-set /
+    # impact-report / expect-hash / review-separation / completion-contract),
+    # for the same reason COMPLETION-CONTRACT-REFUSAL itself goes last among
+    # the refusals that preceded this phase: it is a claim about the WHOLE
+    # task, its remediation is comparatively cheap, and firing it while a
+    # more basic precondition is still missing would send the operator to
+    # fix the wrong thing first. It is placed BEFORE the two *-BINDING-TOKEN
+    # observation ladders that follow (DESIGN-BINDING-TOKEN,
+    # REVIEW-ARTIFACT-BINDING-TOKEN) — matching this file's existing
+    # convention of refusals-before-audit-tokens — and is, consequently, the
+    # LAST refusal before the write at the end of this function.
+    # COMPLETION-CONTRACT-REFUSAL's own header no longer claims the last
+    # refusal SLOT for itself (see the note on its own placement above); it
+    # still correctly claims it must precede every write, which every
+    # refusal in this function does, this one included.
+    #
+    # EXIT 2, NOT 4 (OQ 6.2, resolved by measurement, AC 4.9's "no new exit
+    # code" honoured): this is the SAME shape as completion_record_missing —
+    # "is a required, non-stale record present" — not the shape exit 4
+    # documents ("no independent review artifact / reviewer also implementer
+    # / open findings / predicate unavailable"). Independence is ALREADY
+    # guaranteed by the time this runs: a non-independent verdict is refused
+    # at design-review-record's OWN record time (AC 4.4), so cmd_approve
+    # never has an identity question left to ask here — only "does a
+    # satisfied, fresh record exist", which is exit 2's family.
+    #
+    # The sentinel comments are load-bearing: an L1/L2 META strips everything
+    # between them and asserts approve then succeeds on a task with no
+    # DESIGN-REVIEW record at all. Do not rename them.
+    if [ "$bypass_design" = "1" ]; then
+        design_satisfied_obs="; design-bypass: $design_bypass_reason (design-satisfied refusal bypassed via --no-design; reason recorded per fkm.4)"
+    else
+        compute_design_satisfied "$tid"
+        if [ "$DESIGN_SATISFIED" != "true" ]; then
+            emit_error_json "approve" "$tid" "$DESIGN_SATISFIED_KEY" \
+                "approve refused: $DESIGN_SATISFIED_OBS. Record a satisfied, independent design verdict — qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json> — or, when this task has no design phase, bypass with a recorded reason: qa-gate.sh approve $tid --no-design '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--no-design '<reason>'] <summary>"
+            exit 2
+        fi
+        design_verdict_field="design_verdict_hash=$DESIGN_VERDICT_HASH "
+        design_satisfied_obs="; $DESIGN_SATISFIED_OBS"
+    fi
+    # DESIGN-SATISFIED-REFUSAL END (v5 D2 / claude-workflow-plugin-fkm.4)
+
     # ---- APPROVE-COMMIT ORDER (gz3 / v4.1 U1) -----------------------------
     #
     # The steps below are ordered so that a Stop hook firing CONCURRENTLY never
@@ -3749,15 +4021,22 @@ cmd_approve() {
     # Prepending a token, or joining two with anything in [A-Za-z0-9-], would
     # silently corrupt every hash comparison. Regression: the L1
     # review-separation.test.sh section 4 compat + META assertions run the
-    # readers' EXACT expressions against a freshly written record. Final shape:
+    # readers' EXACT expressions against a freshly written record. Final shape
+    # (v5 D2 / claude-workflow-plugin-fkm.4 adds `design_verdict_hash=`, last
+    # among the machine tokens per the placement rule rqer established for
+    # `artifact_hash=`; fkm.4 also corrects this example, which had drifted —
+    # `artifact_hash=` was already shipping at :3944 without ever being added
+    # here):
     #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
-    #     design_hash=<h> at <ts>: <summary>
+    #     design_hash=<h> artifact_hash=<h> design_verdict_hash=<h> at <ts>: <summary>
     #     [ [impact-report bypass: <reason>]][ [review bypass: <reason>]]
     #     [ [rubric mismatch: …]][ [reconstructed change set accepted: …]]
     #     [ [completion bypass: …]][ [completion cross-check: …]]
-    # Six suffix spellings from five sites; the two `completion cross-check`
+    #     [ [design bypass: <reason>]]
+    # Seven suffix spellings from six sites; the two `completion cross-check`
     # bodies differ in text and share the marker. Keep this list and the `approve`
-    # usage text in step — both had drifted by two releases before D1.
+    # usage text in step — both had drifted by two releases before D1, and the
+    # `artifact_hash=` omission just fixed above shows it can drift again in one.
     # Every optional MACHINE field carries its own trailing space and defaults to
     # empty, so a build with any one of their sentinel regions stripped writes a
     # record with no dangling token and no double space. Every optional SUFFIX is
@@ -3805,6 +4084,25 @@ cmd_approve() {
     # always did. Expanded with :- so a stripped sentinel region leaves the
     # record coherent.
     comment_suffix="$comment_suffix${completion_suffix:-}"
+    # v5 D2 (claude-workflow-plugin-fkm.4): the design-satisfied bypass token —
+    # same reasoning as every bracketed suffix above: the audit question ("was
+    # this task's design phase waived, and why") is asked LATER, by someone
+    # reading the task, and an envelope read once by whoever typed the command
+    # is not where it survives.
+    #
+    # fkm.4 R1-F1 fix round (R1-F5): appended AFTER the completion suffix
+    # (this block originally sat BEFORE it, immediately after the
+    # CHANGE-SET-RECONSTRUCTED arm above) so it lands LAST among the seven
+    # bracketed suffixes — matching the order both `usage()`'s approve grammar
+    # and this function's OWN "final shape" comment above already document.
+    # Those two comments warn IN SO MANY WORDS that they can drift apart from
+    # each other ("Keep this list and the `approve` usage text in step — both
+    # had drifted by two releases before D1"); this was the same drift one
+    # level down, between the documented order and the code that was supposed
+    # to produce it, caught before it shipped a third divergence.
+    if [ "$bypass_design" = "1" ]; then
+        comment_suffix="$comment_suffix [design bypass: $design_bypass_reason]"
+    fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local hash_field=""
     if [ -n "$approved_hash" ]; then
@@ -3871,7 +4169,11 @@ cmd_approve() {
     #      zero bytes digest to a constant that would compare equal to itself
     #      forever.
     #   4. No record -> NO token, reason named. Ordinary today: nothing has a
-    #      design yet. D2 turns this arm into a refusal; D1 records the fact.
+    #      design yet. D1 records the fact; D2 did NOT convert THIS arm — see
+    #      DESIGN-SATISFIED-REFUSAL above (before this ladder runs) for where
+    #      the refusal D1 anticipated actually landed, and why it is a new
+    #      block rather than this arm converted in place. This ladder still
+    #      answers only "what are these bytes", exactly as it did before D2.
     #
     # ARM 1a IS THE CONTAINMENT ONE, and it uses the SAME predicate design-record
     # uses (fkm.3 QA round 2, R2-F2). This is the THIRD caller of that question,
@@ -3948,7 +4250,7 @@ cmd_approve() {
     fi
     # REVIEW-ARTIFACT-BINDING-TOKEN END (v5 D2 / claude-workflow-plugin-rqer)
 
-    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}at $ts: $summary$comment_suffix"
+    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}${design_verdict_field}at $ts: $summary$comment_suffix"
 
     # Step 2 (gz3: after the record): THE terminal-label transition. One call
     # replaces what were four separate steps — add qa-approved, remove
@@ -4102,7 +4404,7 @@ cmd_approve() {
     # because keeping them is free and an operator may well be greping them from
     # memory; they are NOT kept because a test pins them. $sweep_obs is the token
     # that reports the FULL cleared set, which is what the counters cannot.
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}$binding_obs${design_binding_obs:-}${review_file_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
+    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}${design_satisfied_obs:-}$binding_obs${design_binding_obs:-}${review_file_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -6154,6 +6456,589 @@ latest_design_artifact_hash() {
 }
 # DESIGN-ARTIFACT END (v5 Phase D1 / claude-workflow-plugin-fkm.3)
 
+# ---------------------------------------------------------------------------
+# DESIGN-REVIEW BEGIN (v5 D2 / claude-workflow-plugin-fkm.4)
+#
+# design-review-record <tid> --design-hash <sha256> [--file <path>]
+#
+# THE DESIGN REVIEWER'S RECORD: D1's own split made good on. D1's comment at
+# the top of the DESIGN-ARTIFACT block above says the verdict "is D2's own
+# record, with its own grammar, its own author and its own lifetime" —
+# `design-record` states WHO the designer was and WHAT bytes they produced;
+# this states WHO reviewed it and WHETHER it passed.
+#
+#   DESIGN-REVIEW v1 task=<tid> reviewer=<id> verdict=<satisfied|needs_revision>
+#     design_hash=<h> iteration=<n> rubric_version=<v> at <ts>: <summary>[ [amends: <prev-h>]]
+#
+# Same house shape as DESIGN-ARTIFACT / REVIEW-ARTIFACT / COMPLETION: machine
+# prefix first, ` at <ISO-8601-UTC>` last before the colon, free text after.
+# The new token this phase ALSO adds — `design_verdict_hash=` — goes on the
+# APPROVAL record, not here; see cmd_approve's DESIGN-SATISFIED-REFUSAL.
+#
+# INPUT SHAPE MIRRORS cmd_grade_record's required-key loop and record grammar
+# almost exactly (the code rubric's verdict has no notion of "who reviewed",
+# because the grader's own identity is never independence-checked against
+# anything — the design reviewer's IS, against `designer=`, so this record
+# carries one more required key: `reviewer_identity`). No second parser: this
+# validates the VERDICT's shape inline, the same way grade-record does for
+# the code rubric's verdict — there is no "review-check.sh validate-X" for
+# either, because neither is a document with its own file-based schema the
+# way the design ARTIFACT is (that one already has validate-design, and nor
+# does the design artifact get re-validated here — see the --design-hash note
+# just below for why this record does not re-open the artifact at all).
+#
+# --design-hash IS REQUIRED AND IS A CLAIM, NOT A RECOMPUTE — deliberately the
+# SAME choice grade-record made for --graded-hash, and for the same reason
+# stated on that flag above: "the change set the grader ACTUALLY saw ... a
+# recompute at record time is not the same thing". Recomputing
+# docs/specs/<tid>.md's live hash HERE would bind whatever the artifact
+# happens to be AT RECORD TIME, which is not necessarily what the reviewer
+# actually read — a designer edit landing between the reviewer's spawn and
+# this call would silently rebind the verdict to bytes nobody reviewed. The
+# caller (the root-orchestrated relay) supplies the hash it handed the
+# reviewer in the packet — ordinarily `latest_design_artifact_hash <tid>`,
+# read right before the reviewer spawns. Validated for SHAPE only
+# (is_sha256_hex): a claim about which bytes were reviewed is not verified
+# against anything at record time, exactly as --graded-hash is not; the
+# STALENESS check (does this still match what is on disk NOW) is
+# compute_design_satisfied's job, at approve/precheck time, the same split
+# DESIGN-BINDING-TOKEN already draws for design-record's own artifact.
+#
+# --design-hash IS REQUIRED, UNLIKE --graded-hash, and that divergence is
+# deliberate rather than an oversight: an unbound rubric verdict is a legal,
+# audited state (qa.md 6f: "the rubric is a QA INPUT", never a hard gate,
+# so grade-record may record one unbound and let `enter` treat it as stale).
+# This record IS meant to gate — AC 4.5/4.6 ask cmd_approve to REFUSE without
+# a fresh, bound one — so "recorded but unbound" is not an acceptable state
+# to write here at all; refusing at record time is the fail-closed choice.
+#
+# INDEPENDENCE IS ENFORCED HERE, AT RECORD TIME, NOT AT APPROVE TIME (AC 4.4).
+# A verdict whose reviewer_identity equals the designer= on the task's latest
+# DESIGN-ARTIFACT record is refused before it is ever written — the record
+# never exists for cmd_approve to have to reason about, and
+# compute_design_satisfied therefore never re-checks independence at all.
+# This mirrors D1's own choice to phase-scope designer_touched_source at
+# RECORD time rather than at approve time: catch the defect where it
+# originates. Fails closed on an UNESTABLISHED designer identity too — no
+# DESIGN-ARTIFACT record at all means there is nothing to check independence
+# against, so recording a verdict would certify independence nobody
+# verified (the same "unestablished is not permissive" rule
+# designer_touched_source states for its own phase gate, above).
+#
+# STRING EQUALITY, NOT A ROLE-MEMBERSHIP TEST (OQ 6.1, resolved by
+# measurement at fkm.4 Part A): `reviewer_identity` is fixed to the literal
+# "design-claude" (design-reviewer.md) and `designer=` defaults to the
+# literal "designer" (cmd_design_record above) — textually distinct,
+# confirmed by Part A's own diff. review-check.sh's cmd_gate independence
+# computation is NOT reusable here (the audited scope's own measurement: it
+# is a membership test against IMPLEMENTER ROLE TOKENS and returns
+# `independent:true` vacuously for any non-role identity) — what is reusable
+# is the SHAPE (build the comparator, test it, refuse and name it), not the
+# computation itself.
+#
+# AMENDMENTS (B2): the SAME subcommand records again at `iteration=n+1`
+# against an artifact revised in place — design_hash moves because the
+# Revision log gained a row, never because a second `<!-- DESIGN-UNITS -->`
+# block was merged in (review-check.sh's validate-design refuses that
+# structurally; see its own header, and D1's design-record, which re-runs
+# it on every record). Two structural facts enforced here, not options:
+#   * a NEW record's iteration must be GREATER than the latest recorded one
+#     for this task, or the record is refused — "a second record at the same
+#     iteration" is exactly the misbehaviour the pairing plan (P6) names.
+#   * when a PRIOR record exists and its design_hash differs from this one,
+#     the bracketed suffix carries `[amends: <prev-design-hash>]` — free-text
+#     audit prose, the same shape design-record's own `record_suffix` is,
+#     never a value a program compares (the trust boundary is the colon,
+#     same as every other record in this file).
+# `--file` on D1's design-record is an ASSERTION, not an input (the path is
+# always derived) — this subcommand needs no analogous flag at all: it binds
+# a HASH, supplied by the caller, never a path, so there is no "artifact
+# path" question here to assert or derive.
+
+# latest_design_artifact_designer <tid> — the designer= of the LAST
+# `DESIGN-ARTIFACT v1 ` record on the task, or empty. Byte-identical shape to
+# latest_design_artifact_hash above (same startswith() filter, same single
+# anchored capture — first and last cannot diverge because there is only one
+# regex), differing only in which named group it returns. Never fails the
+# caller: no bd, no task, unparseable JSON -> empty, rc 0.
+latest_design_artifact_designer() {
+    local tid="$1"
+    [ -n "$tid" ] || return 0
+    command -v bd >/dev/null 2>&1 || return 0
+    bd_show_with_comments "$tid" \
+        | jq -r '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("DESIGN-ARTIFACT v1 "))
+              | ( [ capture("^DESIGN-ARTIFACT v1 task=[A-Za-z0-9._+-]+ designer=(?<d>[A-Za-z0-9._+-]+) design_hash=[A-Za-z0-9-]+ ") ]
+                  | first | .d? // "" )
+              | select(. != "")
+            ]
+            | last // ""
+        ' 2>/dev/null || true
+    return 0
+}
+
+# latest_design_review <tid> — JSON {reviewer, verdict, design_hash,
+# iteration, rubric_version} from the LAST `DESIGN-REVIEW v1 ` comment on the
+# task, or `{}` when none exists. ONE anchored capture over every field the
+# two callers below need (cmd_design_review_record's own amendment check, and
+# compute_design_satisfied's staleness ladder) — not five separate greps —
+# so no caller can read one field from a different underlying match than
+# another. Never fails the caller: no bd, no task, unparseable JSON -> `{}`,
+# rc 0.
+latest_design_review() {
+    local tid="$1"
+    [ -n "$tid" ] || { printf '{}'; return 0; }
+    command -v bd >/dev/null 2>&1 || { printf '{}'; return 0; }
+    bd_show_with_comments "$tid" \
+        | jq -c '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("DESIGN-REVIEW v1 "))
+              | capture("^DESIGN-REVIEW v1 task=[A-Za-z0-9._+-]+ reviewer=(?<reviewer>[A-Za-z0-9._+-]+) verdict=(?<verdict>[A-Za-z_]+) design_hash=(?<design_hash>[A-Za-z0-9-]+) iteration=(?<iteration>[0-9]+) rubric_version=(?<rubric_version>[A-Za-z0-9._+-]+) ")
+            ]
+            | last // {}
+        ' 2>/dev/null || printf '{}'
+    return 0
+}
+
+# compute_design_satisfied <tid> — THE ONE PREDICATE, consulted by
+# cmd_approve's DESIGN-SATISFIED-REFUSAL AND by cmd_design_gate_precheck (B5):
+# whichever asks, the answer is computed once, here. Sets globals (never
+# prints): DESIGN_SATISFIED (true|false), DESIGN_SATISFIED_KEY (empty when
+# true), DESIGN_SATISFIED_OBS (a full sentence, never empty; names the
+# reviewer inline — neither current caller needs it as a separate field, so
+# there is no DESIGN_VERDICT_REVIEWER global to drift out of sync with it),
+# DESIGN_VERDICT_HASH. Never fails the caller.
+#
+# STATUS VOCABULARY (DESIGN_SATISFIED_KEY when DESIGN_SATISFIED=false):
+#   no_design_attempted        no DESIGN-ARTIFACT record at all exists for
+#                              this task. cmd_approve treats this the SAME as
+#                              every other non-satisfied key — it still
+#                              refuses, and --no-design is the audited exit,
+#                              mirroring completion_record_missing's own
+#                              unconditional-plus-bypass shape. Precheck (B5)
+#                              treats it specially: see that function's own
+#                              header for why that split is deliberate.
+#   design_verdict_missing     a DESIGN-ARTIFACT record exists (so a designer
+#                              identity is known) but no DESIGN-REVIEW v1
+#                              record has ever been written for this task.
+#   design_not_satisfied       the latest DESIGN-REVIEW verdict is
+#                              needs_revision (or unreadable).
+#   design_hash_unreadable     the latest satisfied verdict's design_hash is
+#                              not 64 hex characters — the writer refuses
+#                              that shape, so this names a record this tool
+#                              did not write.
+#   design_artifact_unreadable docs/specs/<tid>.md is missing, resolves
+#                              outside the declared directory, or could not
+#                              be hashed right now.
+#   design_verdict_stale       the artifact's LIVE hash differs from the
+#                              satisfied verdict's design_hash — the design
+#                              moved after the review that approved it.
+compute_design_satisfied() {
+    local tid="$1"
+    DESIGN_SATISFIED="false"
+    DESIGN_SATISFIED_KEY=""
+    DESIGN_SATISFIED_OBS=""
+    DESIGN_VERDICT_HASH=""
+
+    local designer_identity
+    designer_identity=$(latest_design_artifact_designer "$tid") || designer_identity=""
+    if [ -z "$designer_identity" ]; then
+        DESIGN_SATISFIED_KEY="no_design_attempted"
+        DESIGN_SATISFIED_OBS="no DESIGN-ARTIFACT record exists for $tid; no design has been recorded for this task"
+        return 0
+    fi
+
+    local review_json reviewer verdict design_hash
+    review_json=$(latest_design_review "$tid") || review_json="{}"
+    reviewer=$(printf '%s' "$review_json" | jq -r '.reviewer // ""' 2>/dev/null || echo "")
+    verdict=$(printf '%s' "$review_json" | jq -r '.verdict // ""' 2>/dev/null || echo "")
+    design_hash=$(printf '%s' "$review_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
+    if [ -z "$reviewer" ]; then
+        DESIGN_SATISFIED_KEY="design_verdict_missing"
+        DESIGN_SATISFIED_OBS="a DESIGN-ARTIFACT record exists on $tid (designer=$designer_identity) but no DESIGN-REVIEW v1 verdict has been recorded"
+        return 0
+    fi
+    if [ "$verdict" != "satisfied" ]; then
+        DESIGN_SATISFIED_KEY="design_not_satisfied"
+        DESIGN_SATISFIED_OBS="the latest DESIGN-REVIEW verdict for $tid is verdict=${verdict:-<unreadable>} (reviewer=$reviewer), not satisfied"
+        return 0
+    fi
+    if [ -z "$design_hash" ] || ! is_sha256_hex "$design_hash"; then
+        DESIGN_SATISFIED_KEY="design_hash_unreadable"
+        DESIGN_SATISFIED_OBS="the latest satisfied DESIGN-REVIEW verdict for $tid carries no readable 64-hex design_hash ('${design_hash:-<empty>}')"
+        return 0
+    fi
+
+    local artifact_path live_hash hash_rc=0
+    artifact_path=$(design_artifact_path_for "$tid")
+    if [ ! -f "$artifact_path" ] || ! design_path_is_contained "$artifact_path"; then
+        DESIGN_SATISFIED_KEY="design_artifact_unreadable"
+        DESIGN_SATISFIED_OBS="the design artifact for $tid is not currently readable at $artifact_path (missing, or resolves outside $DESIGN_SPEC_SUBDIR/), so the satisfied verdict's design_hash=$design_hash cannot be corroborated"
+        return 0
+    fi
+    live_hash=$(bash "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" hash-file "$artifact_path" 2>/dev/null) || hash_rc=$?
+    if [ "$hash_rc" -ne 0 ] || ! is_sha256_hex "$live_hash"; then
+        DESIGN_SATISFIED_KEY="design_artifact_unreadable"
+        DESIGN_SATISFIED_OBS="$artifact_path could not be hashed now (rc=$hash_rc), so the satisfied verdict's design_hash=$design_hash cannot be corroborated against the bytes on disk"
+        return 0
+    fi
+    if [ "$live_hash" != "$design_hash" ]; then
+        DESIGN_SATISFIED_KEY="design_verdict_stale"
+        DESIGN_SATISFIED_OBS="the design artifact has CHANGED since the satisfied verdict was recorded (verdict design_hash=$design_hash, on disk now=$live_hash); it needs a fresh review of the current revision"
+        return 0
+    fi
+
+    DESIGN_SATISFIED="true"
+    DESIGN_VERDICT_HASH="$design_hash"
+    DESIGN_SATISFIED_OBS="design-satisfied verified (reviewer=$reviewer; verdict=satisfied; design_hash=$design_hash matches $artifact_path on disk)"
+    return 0
+}
+
+cmd_design_review_record() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-review-record" "" "missing_task_id" \
+            "design-review-record requires <task-id> as first positional argument" \
+            "qa-gate.sh design-review-record <task-id> --design-hash <sha256> [--file <path>]"
+        exit 1
+    fi
+    shift || true
+
+    local input_path="" design_hash_arg=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                input_path="${2:-}"
+                if [ -z "$input_path" ]; then
+                    emit_error_json "design-review-record" "$tid" "missing_file_path" \
+                        "--file requires a path argument" \
+                        "qa-gate.sh design-review-record $tid --design-hash <sha256> --file <path>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --design-hash)
+                design_hash_arg="${2:-}"
+                if [ -z "$design_hash_arg" ]; then
+                    emit_error_json "design-review-record" "$tid" "missing_design_hash" \
+                        "--design-hash requires a value" \
+                        "qa-gate.sh design-review-record $tid --design-hash <sha256> [--file <path>]"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                emit_error_json "design-review-record" "$tid" "unknown_flag" \
+                    "unknown argument: $1 (expected --design-hash <sha256>, --file <path>, or stdin)" \
+                    "qa-gate.sh design-review-record $tid --design-hash <sha256> [--file <path>]"
+                exit 1
+                ;;
+        esac
+    done
+
+    require_bd "design-review-record" "$tid"
+
+    # --design-hash IS REQUIRED — see the block header for why this diverges
+    # from grade-record's OPTIONAL --graded-hash: an unbound design verdict
+    # cannot support the hard refusal AC 4.5/4.6 ask cmd_approve to enforce,
+    # so "recorded but unbound" is not an acceptable state to write here the
+    # way it is for the rubric (qa.md 6f: the rubric is a QA INPUT, never a
+    # hard gate — this record IS meant to gate).
+    if [ -z "$design_hash_arg" ]; then
+        emit_error_json "design-review-record" "$tid" "missing_design_hash" \
+            "--design-hash requires the sha256 hash of the design artifact this verdict reviewed — ordinarily latest_design_artifact_hash's value at the moment the reviewer was spawned, or a fresh workflow-manifest.sh hash-file docs/specs/$tid.md. A verdict recorded with no hash binding could never be checked for staleness later, so it is refused rather than recorded unbound" \
+            "qa-gate.sh design-review-record $tid --design-hash <sha256> --file <path>"
+        exit 1
+    fi
+    if ! is_sha256_hex "$design_hash_arg"; then
+        emit_error_json "design-review-record" "$tid" "design_hash_invalid" \
+            "--design-hash='$design_hash_arg' is not 64 hex characters, so it names no reproducible bytes. Never a placeholder — pass the value workflow-manifest.sh hash-file printed" \
+            "qa-gate.sh design-review-record $tid --design-hash <sha256> --file <path>"
+        exit 1
+    fi
+
+    local raw=""
+    if [ -n "$input_path" ]; then
+        if [ ! -f "$input_path" ]; then
+            emit_error_json "design-review-record" "$tid" "file_not_found" \
+                "verdict file does not exist: $input_path" \
+                "qa-gate.sh design-review-record $tid --design-hash <sha256> --file <existing-path>"
+            exit 1
+        fi
+        if ! raw=$(cat -- "$input_path" 2>/dev/null); then
+            emit_error_json "design-review-record" "$tid" "file_unreadable" \
+                "could not read verdict file: $input_path" \
+                "qa-gate.sh design-review-record $tid --design-hash <sha256> --file <readable-path>"
+            exit 1
+        fi
+    else
+        if [ -t 0 ]; then
+            emit_error_json "design-review-record" "$tid" "no_input" \
+                "no --file given and stdin is a terminal; pipe the design reviewer's JSON or pass --file <path>" \
+                "qa-gate.sh design-review-record $tid --design-hash <sha256> --file <path>  OR  printf '%s' \"\$JSON\" | qa-gate.sh design-review-record $tid --design-hash <sha256>"
+            exit 1
+        fi
+        raw=$(cat)
+    fi
+
+    if [ -z "$raw" ]; then
+        emit_error_json "design-review-record" "$tid" "empty_input" \
+            "verdict input is empty" \
+            "qa-gate.sh design-review-record $tid --design-hash <sha256> --file <path>  OR  stdin pipe"
+        exit 1
+    fi
+
+    if ! printf '%s' "$raw" | jq -e 'type' >/dev/null 2>&1; then
+        emit_error_json "design-review-record" "$tid" "invalid_json" \
+            "verdict input is not valid JSON" \
+            "expected a JSON object with keys verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity"
+        exit 1
+    fi
+    local top_type
+    top_type=$(printf '%s' "$raw" | jq -r 'type' 2>/dev/null || echo "unknown")
+    if [ "$top_type" != "object" ]; then
+        emit_error_json "design-review-record" "$tid" "not_an_object" \
+            "verdict input top-level is $top_type, expected object" \
+            "expected a JSON object with keys verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity"
+        exit 1
+    fi
+
+    # Required-key loop mirrors cmd_grade_record's exactly, plus
+    # reviewer_identity — the one key the code rubric's verdict has no
+    # analogue for, because the grader's own identity is never
+    # independence-checked against anything.
+    local has_key
+    for key in verdict criterion_results required_fixes iteration rubric_version reviewer_identity; do
+        has_key=$(printf '%s' "$raw" | jq -r --arg k "$key" 'has($k)' 2>/dev/null || echo "false")
+        if [ "$has_key" != "true" ]; then
+            emit_error_json "design-review-record" "$tid" "missing_key:$key" \
+                "verdict input missing required key: $key" \
+                "required keys: verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity"
+            exit 1
+        fi
+    done
+
+    local verdict
+    verdict=$(printf '%s' "$raw" | jq -r '.verdict' 2>/dev/null || echo "")
+    case "$verdict" in
+        satisfied|needs_revision) ;;
+        *)
+            emit_error_json "design-review-record" "$tid" "verdict_invalid_enum" \
+                "verdict='$verdict' is not in the allowed enum {satisfied, needs_revision}" \
+                "set .verdict to either \"satisfied\" or \"needs_revision\""
+            exit 1
+            ;;
+    esac
+
+    local cr_type
+    cr_type=$(printf '%s' "$raw" | jq -r '.criterion_results | type' 2>/dev/null || echo "unknown")
+    if [ "$cr_type" != "array" ]; then
+        emit_error_json "design-review-record" "$tid" "criterion_results_not_array" \
+            "criterion_results is type=$cr_type, expected array" \
+            "criterion_results must be an array of {criterion, pass, justification} objects"
+        exit 1
+    fi
+    local cr_invalid
+    cr_invalid=$(printf '%s' "$raw" | jq -r '
+        .criterion_results
+        | map(
+            if type != "object" then "item_not_object"
+            elif (has("criterion") and (.criterion | type == "string")) | not then "missing_or_bad_criterion"
+            elif (has("pass") and (.pass | type == "boolean")) | not then "missing_or_bad_pass"
+            elif (has("justification") and (.justification | type == "string")) | not then "missing_or_bad_justification"
+            else "ok"
+            end
+        )
+        | map(select(. != "ok"))
+        | .[0] // ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$cr_invalid" ]; then
+        emit_error_json "design-review-record" "$tid" "criterion_results_item_invalid:$cr_invalid" \
+            "criterion_results contains an invalid item: $cr_invalid" \
+            "every criterion_results item must be {criterion: string, pass: boolean, justification: string}"
+        exit 1
+    fi
+
+    local rf_type
+    rf_type=$(printf '%s' "$raw" | jq -r '.required_fixes | type' 2>/dev/null || echo "unknown")
+    if [ "$rf_type" != "array" ]; then
+        emit_error_json "design-review-record" "$tid" "required_fixes_not_array" \
+            "required_fixes is type=$rf_type, expected array" \
+            "required_fixes must be an array (empty array allowed for satisfied)"
+        exit 1
+    fi
+
+    local it_type it_val
+    it_type=$(printf '%s' "$raw" | jq -r '.iteration | type' 2>/dev/null || echo "unknown")
+    if [ "$it_type" != "number" ]; then
+        emit_error_json "design-review-record" "$tid" "iteration_not_number" \
+            "iteration is type=$it_type, expected number" \
+            "iteration must be a JSON number (1, 2, 3, ...)"
+        exit 1
+    fi
+    it_val=$(printf '%s' "$raw" | jq -r '.iteration' 2>/dev/null || echo "?")
+    case "$it_val" in
+        ''|*[!0-9]*)
+            emit_error_json "design-review-record" "$tid" "iteration_not_integer" \
+                "iteration=$it_val is not a non-negative integer; it is interpolated into the DESIGN-REVIEW record's machine prefix, which the reader parses as [0-9]+ — a value like 1.5 or 1e3 writes a record that cannot be read back" \
+                "iteration must be a non-negative integer (1, 2, 3, ...)"
+            exit 1
+            ;;
+    esac
+
+    local rv_type rv_val
+    rv_type=$(printf '%s' "$raw" | jq -r '.rubric_version | type' 2>/dev/null || echo "unknown")
+    if [ "$rv_type" != "string" ]; then
+        emit_error_json "design-review-record" "$tid" "rubric_version_not_string" \
+            "rubric_version is type=$rv_type, expected string" \
+            "rubric_version must be a string (e.g. \"1\")"
+        exit 1
+    fi
+    rv_val=$(printf '%s' "$raw" | jq -r '.rubric_version' 2>/dev/null || echo "")
+    if [ -z "$rv_val" ]; then
+        emit_error_json "design-review-record" "$tid" "rubric_version_empty" \
+            "rubric_version is the empty string" \
+            "rubric_version must be a non-empty string (e.g. \"1\")"
+        exit 1
+    fi
+
+    local reviewer_identity
+    reviewer_identity=$(printf '%s' "$raw" | jq -r '.reviewer_identity' 2>/dev/null || echo "")
+    if [ -z "$reviewer_identity" ]; then
+        emit_error_json "design-review-record" "$tid" "reviewer_identity_empty" \
+            "reviewer_identity is the empty string" \
+            "reviewer_identity must be a non-empty string (design-reviewer.md's own contract: the fixed literal \"design-claude\")"
+        exit 1
+    fi
+
+    # THE INDEPENDENCE CHECK (AC 4.4). Read at record time, refused before
+    # anything is written — see the block header for why this cannot be
+    # deferred to approve time.
+    local designer_identity
+    designer_identity=$(latest_design_artifact_designer "$tid") || designer_identity=""
+    if [ -z "$designer_identity" ]; then
+        emit_error_json "design-review-record" "$tid" "design_artifact_record_missing" \
+            "no DESIGN-ARTIFACT v1 record exists for $tid, so there is no established designer identity to check this verdict's independence against. Record the design first" \
+            "qa-gate.sh design-record $tid"
+        exit 1
+    fi
+    if [ "$reviewer_identity" = "$designer_identity" ]; then
+        emit_error_json "design-review-record" "$tid" "design_reviewer_not_independent" \
+            "reviewer_identity='$reviewer_identity' equals designer='$designer_identity' on $tid's latest DESIGN-ARTIFACT record — nobody reviews their own work. Have a genuinely independent identity review this design and record a fresh verdict" \
+            "qa-gate.sh design-review-record $tid --design-hash <h> --file <a verdict from a different reviewer>"
+        exit 1
+    fi
+
+    # THE AMENDMENT / DUPLICATE-ITERATION CHECK (B2 / P6). Read the LATEST
+    # DESIGN-REVIEW record (if any) through the ONE reader above, never a
+    # second parser.
+    local prior_json prior_iter prior_hash amends_field=""
+    prior_json=$(latest_design_review "$tid") || prior_json="{}"
+    prior_iter=$(printf '%s' "$prior_json" | jq -r '.iteration // ""' 2>/dev/null || echo "")
+    prior_hash=$(printf '%s' "$prior_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
+    if [ -n "$prior_iter" ]; then
+        if [ "$it_val" -le "$prior_iter" ]; then
+            emit_error_json "design-review-record" "$tid" "design_review_iteration_not_advancing" \
+                "iteration=$it_val is not greater than the latest recorded DESIGN-REVIEW's iteration=$prior_iter for $tid. Each recorded verdict must advance the iteration count — a second record at the same (or an earlier) number is refused rather than silently accepted as a fresh round" \
+                "qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict with iteration=$((prior_iter + 1))>"
+            exit 1
+        fi
+        if [ -n "$prior_hash" ] && [ "$prior_hash" != "$design_hash_arg" ]; then
+            amends_field=" [amends: $prior_hash]"
+        fi
+    fi
+
+    # --- write ---------------------------------------------------------------
+    assert_record_scalar "design-review-record" "$tid" "reviewer" "$reviewer_identity"
+    assert_record_scalar "design-review-record" "$tid" "rubric_version" "$rv_val"
+
+    local summary
+    if [ "$verdict" = "satisfied" ]; then
+        summary="all criteria pass"
+    else
+        local failed_names
+        failed_names=$(printf '%s' "$raw" | jq -r '[.criterion_results[] | select(.pass == false) | .criterion] | join(", ")' 2>/dev/null || echo "")
+        if [ -n "$failed_names" ]; then
+            summary="failed: $failed_names"
+        else
+            local rf_count
+            rf_count=$(printf '%s' "$raw" | jq -r '.required_fixes | length' 2>/dev/null || echo "0")
+            summary="needs_revision (no failing criteria listed; required_fixes count=$rf_count)"
+        fi
+    fi
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="DESIGN-REVIEW v1 task=$tid reviewer=$reviewer_identity verdict=$verdict design_hash=$design_hash_arg iteration=$it_val rubric_version=$rv_val at $ts: $summary$amends_field"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "design-review-record" "$tid" "recorded" "comment posted at $ts: $comment_text"
+}
+
+# design-gate-precheck <tid> (v5 D2 / claude-workflow-plugin-fkm.4, B5)
+#
+# A PRE-DELEGATION CONVENIENCE, run by the orchestrator BEFORE its first
+# Task() spawn on a task — never enforced from here, because nothing can
+# force an orchestrator prompt to run a script before deciding to delegate.
+# The real, unavoidable backstop is cmd_approve's own DESIGN-SATISFIED-REFUSAL
+# above; this exists so the orchestrator can find out it is about to spawn an
+# implementer on an unreviewed design BEFORE paying for that spawn, rather
+# than discovering it only when approve refuses at the end.
+#
+# DELIBERATELY LENIENT ON `no_design_attempted`, UNLIKE cmd_approve. approve's
+# own refusal is unconditional (matching completion_record_missing's own
+# shape: every task needs a bypass or a record) because approve is the LAST
+# word — a silently design-optional task must still say so explicitly. This
+# precheck runs FIRST, before any work exists, and the overwhelming majority
+# of tasks never have (or need) a design phase at all; treating "nothing
+# started" as a precheck failure would make it fire on almost every ordinary
+# task, which trains an operator to ignore its output rather than act on it.
+# What this check exists to catch is narrower and more useful: a design that
+# WAS started (a DESIGN-ARTIFACT record exists) but is not yet REVIEWED —
+# don't spawn the implementer on that. compute_design_satisfied's other keys
+# (design_verdict_missing, design_not_satisfied, design_hash_unreadable,
+# design_artifact_unreadable, design_verdict_stale) all mean exactly that, so
+# this is a targeted read of ONE key from the shared predicate, not a second
+# implementation of it.
+cmd_design_gate_precheck() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-gate-precheck" "" "missing_task_id" \
+            "design-gate-precheck requires <task-id> as first positional argument" \
+            "qa-gate.sh design-gate-precheck <task-id>"
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_error_json "design-gate-precheck" "$tid" "unknown_flag" \
+            "unknown argument '$1'; design-gate-precheck takes only <task-id>" \
+            "qa-gate.sh design-gate-precheck <task-id>"
+        exit 1
+    fi
+
+    require_bd "design-gate-precheck" "$tid"
+
+    compute_design_satisfied "$tid"
+    if [ "$DESIGN_SATISFIED" = "true" ]; then
+        emit_json 1 "design-gate-precheck" "$tid" "ready" "$DESIGN_SATISFIED_OBS"
+        return 0
+    fi
+    if [ "$DESIGN_SATISFIED_KEY" = "no_design_attempted" ]; then
+        emit_json 1 "design-gate-precheck" "$tid" "ready" "${DESIGN_SATISFIED_OBS} — proceeding is fine; this precheck only blocks a design that was STARTED but is not yet reviewed"
+        return 0
+    fi
+    emit_error_json "design-gate-precheck" "$tid" "$DESIGN_SATISFIED_KEY" \
+        "design-gate-precheck: not ready to delegate implementation — $DESIGN_SATISFIED_OBS. Record a satisfied, independent design verdict first: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>" \
+        "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
+    exit 4
+}
+# DESIGN-REVIEW END (v5 D2 / claude-workflow-plugin-fkm.4)
+
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
     local tid="${1:-}" fid="${2:-}"
@@ -6334,6 +7219,8 @@ case "$SUB" in
     review-record)   cmd_review_record "$@" ;;
     completion-record) cmd_completion_record "$@" ;;
     design-record)   cmd_design_record "$@" ;;
+    design-review-record) cmd_design_review_record "$@" ;;
+    design-gate-precheck) cmd_design_gate_precheck "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     ""|-h|--help|help)

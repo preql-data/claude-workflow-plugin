@@ -1286,6 +1286,20 @@ assert_eq "8zi-5 CONTROL: ...and the sweep still cleared qa-blocked" \
 # arbitration-acceptance.sh and review-separation.test.sh do when they need
 # per-record control. Using the real writers rather than hand-built comments is
 # what makes a grammar change break these legs loudly.
+#
+# v5 D2 (claude-workflow-plugin-fkm.4) MIGRATION, R2-F1: p7_seed_review below
+# is this family's OWN completion-focused seed helper (deliberately NOT
+# lib/fixture.sh's seed_review_records, for the reason above), so it never
+# acquired seed_review_records' folded-in design precondition either. Every
+# approve call in this family that expects SUCCESS now carries `--no-design
+# '<reason>'`: the P7 family's subject is the COMPLETION-CONTRACT-REFUSAL
+# axis, not design, and DESIGN-SATISFIED-REFUSAL sits strictly AFTER it in
+# cmd_approve's ladder, so the bypass cannot mask anything this family tests.
+# Seeding a real design-record instead would add docs/specs/<tid>.md to every
+# task's change set, and P7-7/P7-7b's own point is EXACT arithmetic over
+# declared-vs-bound file counts (`declared=8 bound=2 matched=2 missing=6`) —
+# an uninvolved extra tracked path is exactly the kind of incidental
+# complication that arithmetic has no reason to absorb.
 # ===========================================================================
 mk_fixture
 FIXTURE_P7="$COMPONENT_FIXTURE_PATH"
@@ -1359,7 +1373,7 @@ assert_eq "P7-1: payload_sha is the digest of the persisted artifact (recomputed
     "$P7A_DISKSHA" "$P7A_RECSHA"
 p7_settle "$TID_P7A"
 P7A_ARC=0
-P7A_AOUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7A" "contract recorded" 2>/dev/null) || P7A_ARC=$?
+P7A_AOUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7A" --no-design "P7 completion-contract spec: no design phase for this task" "contract recorded" 2>/dev/null) || P7A_ARC=$?
 assert_eq "P7-1: approve SUCCEEDS once the contract is recorded (rc=0)" "0" "$P7A_ARC"
 assert_json_field "P7-1: ...status=approved" "$P7A_AOUT" '.status' "approved"
 assert_contains "P7-1: ...and the envelope names the verified contract" \
@@ -1614,6 +1628,7 @@ assert_json_field "P7-6: ...error_key=bypass_reason_required" \
 P7G_RC=0
 P7G_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7E" \
     --no-completion "F1 doc-only fast path: no specialist, no completion payload" \
+    --no-design "P7 completion-contract spec: no design phase for this task" \
     "bypassed approval" 2>/dev/null) || P7G_RC=$?
 assert_eq "P7-6: ...with a reason, the SAME task approves (rc=0)" "0" "$P7G_RC"
 assert_contains "P7-6: ...the reason lands in the envelope" \
@@ -1635,7 +1650,7 @@ P7H_PAY=$(p7_payload "$TID_P7H" '["src/p7h-one.ts","src/p7h-two.ts","src/p7h-thr
 CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7H" --file "$P7H_PAY" >/dev/null 2>&1
 p7_settle "$TID_P7H"
 P7H_RC=0
-P7H_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7H" "approve over a short set" 2>/dev/null) || P7H_RC=$?
+P7H_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7H" --no-design "P7 completion-contract spec: no design phase for this task" "approve over a short set" 2>/dev/null) || P7H_RC=$?
 # REPORTS, does not refuse — see completion_files_crosscheck's header for the
 # four reasons. The value is the visibility, which is what 94d.1 lacked.
 assert_eq "P7-7: a provably short change set still APPROVES (the check reports)" "0" "$P7H_RC"
@@ -1672,7 +1687,7 @@ assert_eq "P7-7b: ...and QA's is a SEPARATE artifact, not an overwrite" "0" \
     "$([ -f "$TRACK_P7/completion-$(printf '%s' "$TID_P7I" | tr -c 'A-Za-z0-9._-' '_')-qa.json" ] && echo 0 || echo 1)"
 p7_settle "$TID_P7I"
 P7I_RC=0
-P7I_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7I" "QA recorded after the implementer" 2>/dev/null) || P7I_RC=$?
+P7I_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7I" --no-design "P7 completion-contract spec: no design phase for this task" "QA recorded after the implementer" 2>/dev/null) || P7I_RC=$?
 assert_eq "P7-7b: approve still succeeds" "0" "$P7I_RC"
 # THE ASSERTION: the arithmetic is the IMPLEMENTER's, not QA's empty list.
 assert_contains "P7-7b: the cross-check reads the IMPLEMENTER's declaration (pre-fix: 'every one of the 0 declared file(s)')" \
@@ -1699,7 +1714,7 @@ printf '{"task_id":"%s","role":"qa","model":"m","pin":"m","files_changed":[],"te
 CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_P7J" --file "$P7J_QA" >/dev/null 2>&1
 p7_settle "$TID_P7J"
 P7J_RC=0
-P7J_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7J" "reviewer contract only" 2>/dev/null) || P7J_RC=$?
+P7J_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7J" --no-design "P7 completion-contract spec: no design phase for this task" "reviewer contract only" 2>/dev/null) || P7J_RC=$?
 assert_eq "P7-7c: the reviewer's contract still satisfies the REFUSAL (approve proceeds)" "0" "$P7J_RC"
 assert_contains "P7-7c: ...but the cross-check reports UNESTABLISHED, not PASSED" \
     "completeness cross-check UNESTABLISHED" "$P7J_OUT"
@@ -1738,8 +1753,19 @@ if assert_mutant_applied "P7-META" "$QG_P7_REAL" "$QG_P7_STRIPPED"; then
     CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_P7M" "control" >/dev/null 2>&1 || P7M_SRC_RC=$?
     assert_eq "P7-META CONTROL: the shipped copy refuses this task (rc=2)" "2" "$P7M_SRC_RC"
     # THE MUTANT: without the region, the same task approves.
+    #
+    # fkm.4 R2-F1: --no-design is REQUIRED here too, or this leg fails for the
+    # wrong reason. The strip only removes COMPLETION-CONTRACT-REFUSAL's
+    # sentinel block; DESIGN-SATISFIED-REFUSAL (which sits AFTER it in
+    # cmd_approve) is still fully present in the mutant, so without the
+    # bypass this call would still refuse — just with error_key
+    # no_design_attempted instead of completion_record_missing, which would
+    # make this META's own "P7-5 WOULD fail" claim false: the mutant would
+    # never reach a success state to demonstrate what the stripped region
+    # alone controls.
     P7M_RC=0
     P7M_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7_STRIPPED" approve "$TID_P7M" \
+        --no-design "P7 completion-contract spec: no design phase for this task" \
         "stripped copy must NOT refuse" 2>/dev/null) || P7M_RC=$?
     assert_eq "P7-META: the stripped copy approves with NO completion record (P7-5 WOULD fail)" \
         "0" "$P7M_RC"

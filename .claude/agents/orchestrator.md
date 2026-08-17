@@ -362,6 +362,23 @@ Task("@backend", "Hotfix: race in session-renew handler.")
 
 Mechanism reference: `code.claude.com/docs/en/sub-agents` documents `isolation: "worktree"` as a Task-tool parameter; `code.claude.com/docs/en/worktrees` documents `.worktreeinclude` (`.gitignore` syntax, only matching gitignored files are copied, applies to subagent worktrees). Worktrees with no changes are auto-removed when the subagent finishes.
 
+#### 4c. Design-gate precheck before delegating implementation (v5 D2)
+
+Before your FIRST `Task()` spawn to an implementation specialist (`@backend`, `@frontend`, `@devops`) on a given task, run the precheck:
+
+```bash
+bash .claude/scripts/qa-gate.sh design-gate-precheck <task-id>
+```
+
+This is a **pre-delegation convenience, never an enforcement point** — nothing can force this prompt to run a script before you decide to delegate; the real, unavoidable backstop is `qa-gate.sh approve`'s own design-satisfied refusal, which fires later regardless of whether you ran this. Running it first means you discover you are about to spawn an implementer on an unreviewed design BEFORE paying for that spawn, rather than only when approve refuses at the end.
+
+**Read the exit code.** `design-gate-precheck` reads `compute_design_satisfied` — the ONE predicate `qa-gate.sh approve`'s design-satisfied refusal also defers to — and is DELIBERATELY MORE LENIENT than that refusal:
+
+- **Exit 0, `"ready"`.** Either the design is genuinely satisfied, or the task never had a design phase at all (`no_design_attempted`) — the ordinary case for most tasks today. Delegate normally.
+- **Exit 4**, error_key one of `design_verdict_missing` / `design_not_satisfied` / `design_hash_unreadable` / `design_artifact_unreadable` / `design_verdict_stale` — a design was STARTED (a `DESIGN-ARTIFACT` record exists on the task) but is not yet satisfied. Do NOT spawn the implementer. Clear it through the design-review relay (section 5e) before your next `Task()` to that specialist.
+
+This check answers exactly one question — is there an unreviewed design in flight on THIS task — and nothing more. It is not the grilling-record precondition (D3, not yet built) and not the decomposition-conformance check (D4, not yet built); those are separate, later phases. Full behavioral spec: `docs/HOOKS.md` under "The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`)".
+
 ### 5. QA review (mandatory)
 
 After specialists complete work:
@@ -731,6 +748,78 @@ bash .claude/scripts/qa-gate.sh arbitrate "$TASK_ID" <finding-id> <overrule|sust
 
 **Trace-level proof.** The `approval-cites-independent-review` invariant (`.claude/tests/e2e/lib/invariants.ts`) replays this whole chain over a recorded run: every `QA-GATE APPROVED` record must cite an independent reviewer and leave zero at-threshold findings open, counting a `RESOLVED … fix= test=` or a latest `ARBITRATION … decision=overrule` as clearing and a `sustain` as not. If you arbitrate honestly, it stays green for free.
 
+#### 5e. Design-review relay (DESIGN-RELAY: design-review)
+
+Phase D2 reuses the rubric-grader relay's shape (section 5a) for the design axis. The designer and the design reviewer are both subagents, and a review loop between them — revise, re-review, revise again — has to be driven from THIS conversation level exactly like the rubric-grader loop is: `code.claude.com/docs/en/sub-agents` states `Agent(agent_type)` has no effect inside a subagent definition, so neither the designer nor the reviewer can spawn the other (`design-reviewer.md`'s own "Identity and scope" section states this from its side). This subsection is the canonical DESIGN-RELAY: design-review procedure.
+
+**Trigger.** Either:
+- `@designer` returns having written or revised the design artifact at `docs/specs/<task-id>.md`, with a fresh `design_hash` from `qa-gate.sh design-record` in its completion contract.
+- An amendment forces a re-review: an implementer's `design_conflict` blocker (D5), a material deviation you need to make (D4), or a `design-gate-precheck` refusal you are clearing (section 4c) — in each case the designer revises the artifact in place first, and this relay runs on the result.
+
+Unlike the rubric loop, the iteration counter is not tracked in a Beads label — read it from the latest `DESIGN-REVIEW` comment's `iteration=` field (`bd show` on the task), defaulting to 1 for a fresh artifact's first review.
+
+**Step A — read the iteration cap.** Same file, same key, same default as the rubric relay (section 5a):
+
+```bash
+ITERATION_CAP=$(grep -E '^iteration_cap=' "$CLAUDE_PROJECT_DIR/.claude/rubric-config" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '[:space:]')
+ITERATION_CAP="${ITERATION_CAP:-3}"
+```
+
+If `ITERATION` > `ITERATION_CAP`, do NOT spawn the reviewer; jump to Step E (cap escalation).
+
+**Step B — spawn the design reviewer at root.**
+
+```
+Task(
+    subagent_type="design-reviewer",
+    description="Review design for $TASK_ID (iteration $ITERATION)",
+    prompt="""
+        ## Design review packet — iteration $ITERATION
+        1. The design artifact — docs/specs/$TASK_ID.md (paste verbatim, or the path; the reviewer Reads it directly)
+        2. The grilling record — Beads comment prose on the task/epic, pasted verbatim (today informal; D3 formalises it)
+        3. impact_of output for the units' declared files (paste it, or state the degradation plainly if the server is unavailable)
+        4. LESSONS.md — the whole ledger, never a filtered slice
+    """,
+)
+```
+
+The reviewer returns a single JSON object as its final message — capture it verbatim per `design-reviewer.md`'s output contract (`{verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity}`). Do NOT re-narrate it; do NOT edit it. A non-JSON response or a missing key is a malformed handoff — `design-review-record` in Step C rejects it with a structured error naming the offending key; re-spawn with the corrective hint inlined rather than patching the JSON yourself.
+
+**Step C — record the verdict, then branch.**
+
+```bash
+# --design-hash is REQUIRED here (unlike the rubric relay's --graded-hash):
+# an unbound design verdict cannot support cmd_approve's hard design-satisfied
+# refusal. Use the hash the designer's own completion contract named, or a
+# fresh one: bash .claude/scripts/workflow-manifest.sh hash-file docs/specs/$TASK_ID.md
+DESIGN_HASH="<the artifact's design_hash>"
+
+printf '%s' "$REVIEWER_JSON" \
+    | bash .claude/scripts/qa-gate.sh design-review-record "$TASK_ID" --design-hash "$DESIGN_HASH"
+```
+
+`design-review-record` refuses (`design_reviewer_not_independent`) when `reviewer_identity` equals the task's recorded designer — checked here, at record time, not deferred to approve. On success it appends a `DESIGN-REVIEW v1` comment and moves NO Beads label: the design-satisfied state is read live by `compute_design_satisfied` (section 4c's precheck and `qa-gate.sh approve` both defer to it), so there is no label to keep in sync.
+
+- `satisfied` — `design-gate-precheck` (section 4c) now reads ready for this task. Proceed with your next `Task()` to the implementation specialist(s).
+- `needs_revision` — re-spawn `@designer` with the reviewer's `required_fixes` verbatim; it revises the artifact IN PLACE (a `Revision log` row, a moved `design_hash` — never a second `<!-- DESIGN-UNITS BEGIN/END -->` block, which is refused as an amendment rather than merged with the first) and returns. Run Steps A-C again at `iteration + 1`.
+
+**Step D — re-engage whichever side needs the result.** Unlike the rubric relay (which always re-engages QA), here the next actor depends on Step C's branch: `@designer` on `needs_revision` (with the required fixes), or the waiting implementation specialist on `satisfied` (a fresh `Task()`, not a re-engagement — it never saw the design-gate refusal that paused it).
+
+**Step E — cap-hit escalation.** When `ITERATION` > `ITERATION_CAP` (or the reviewer returns `needs_revision` AT iteration == cap), stop relaying. Same J21 escalation every loop in this file uses:
+
+```bash
+bash .claude/scripts/qa-gate.sh choose <approve|continue|tech-debt|defer> "$TASK_ID" '<note>'
+```
+
+`choose approve` is not an unconditional escape here either — it delegates to `cmd_approve`, so it still needs a satisfied design verdict or an explicit `--no-design '<reason>'`, and `choose` has no flag slot to forward that reason through (qa.md documents the identical gap from QA's side). Prefer the direct form — `qa-gate.sh approve "$TASK_ID" --no-design '<reason>' '<summary>'` — when the cap-hit resolution is "accept this design as-is."
+
+**Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
+
+- Reviewer's `reviewer_identity` matches the designer's own → `design-review-record` refuses `design_reviewer_not_independent`; re-spawn with a genuinely separate identity (`design-claude` is the only wired lane as of this writing — `design-reviewer.md`'s own "Identity and scope" section states why).
+- `design-review-record` refuses `design_review_iteration_not_advancing` → the `iteration` you passed is at or below the latest recorded one; increment and retry.
+- Two consecutive cap-hits on the same artifact → the design itself is likely the problem, not the reviewer's patience. Surface to the operator via `AskUserQuestion` rather than raising the cap or re-spawning blind.
+
 ## Self-check
 
 Before responding, verify:
@@ -739,6 +828,7 @@ Before responding, verify:
 - [ ] Did I create Beads task(s)?
 - [ ] Did I persist the active task id via `current-task.sh set` (or did `qa-gate.sh enter` do it)?
 - [ ] For non-trivial work, did I write a `spec` (and `context` if needed) doc via `bd_doc_write` BEFORE spawning the specialist?
+- [ ] Did I run `qa-gate.sh design-gate-precheck` before my first `Task()` to an implementation specialist (section 4c), and route through the design-review relay (section 5e) rather than delegate if it refused?
 - [ ] Did I delegate to specialists with `Task()`?
 - [ ] Am I writing code myself? (If yes, delegate instead.)
 

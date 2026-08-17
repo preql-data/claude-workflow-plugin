@@ -127,6 +127,81 @@ seed_review_records() {
     bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || return 1
+
+    # v5 D2 Part B (claude-workflow-plugin-fkm.4) MIGRATION: approve now ALSO
+    # refuses (exit 2, no_design_attempted) without a satisfied, independent
+    # DESIGN-REVIEW verdict, unless --no-design. Section 1.6's subject is the
+    # STATUSLINE's approved shape, which only exists once approve has
+    # actually flipped the label, so this precondition has to be satisfied
+    # too — seeded through the real writers, same reasoning as the review
+    # artifact and completion contract above. Placed BEFORE the review
+    # artifact so the reconcile a few lines down would fold in
+    # docs/specs/<tid>.md too, if this fixture reconciled (it does not stage
+    # a git repo at all — see the `rm -rf "$FIXTURE/.git"` above — so there
+    # is no tracker reconcile step here to worry about ordering against).
+    local design_sanitized design_art design_hash
+    design_sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    mkdir -p "$FIXTURE/docs/specs" 2>/dev/null || true
+    design_art="$FIXTURE/docs/specs/$design_sanitized.md"
+    cat > "$design_art" <<DESIGNDOC
+# Design — $tid
+
+## Problem
+Seeded fixture design (phase5 synthetic harness only).
+
+## Approaches considered
+1. A second seed convention — rejected: no reuse to justify one.
+2. This minimal artifact — chosen: matches every other seed helper here.
+
+## Chosen approach
+Seed a schema-valid design so approve's design-satisfied refusal does not
+block a spec that is not testing it.
+
+## Units
+See the machine block.
+
+## Global constraints
+None.
+
+## Out of scope
+Everything this fixture does not seed.
+
+## Verification plan
+make test
+
+## Revision log
+- v1 seeded by the phase5 synthetic fixture.
+
+<!-- DESIGN-UNITS BEGIN -->
+\`\`\`json
+{
+  "contract_version": "1",
+  "task_id": "$tid",
+  "designer_identity": "designer",
+  "units": [
+    {
+      "unit_id": "U1",
+      "role": "$role",
+      "goal": "seeded unit",
+      "acceptance": [ { "id": "AC1", "text": "seeded fixture: nothing asserted" } ],
+      "files": [ ".claude/scripts/qa-gate.sh" ],
+      "verification": "make test",
+      "depends_on": []
+    }
+  ]
+}
+\`\`\`
+<!-- DESIGN-UNITS END -->
+DESIGNDOC
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-record "$tid" >/dev/null 2>&1 || return 1
+    design_hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/workflow-manifest.sh" hash-file "$design_art" 2>/dev/null) || design_hash=""
+    if [ -z "$design_hash" ]; then return 1; fi
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-review-record "$tid" --design-hash "$design_hash" \
+        <<< '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"seeded fixture"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
+        >/dev/null 2>&1 || return 1
+
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     [ -z "$hash" ] && hash="unverified"
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"

@@ -233,6 +233,20 @@ seed_tracker() {
 # reset that omits it no longer reproduces the approved hash. The ONE
 # seed_tracker call BEFORE the first review/approve (immediately below) is
 # deliberately NOT touched: the artifact does not exist yet at that point.
+#
+# claude-workflow-plugin-fkm.4 (v5 D2): docs/specs/$TID_MIG.md (the design
+# doc seed_review_records also writes, via seed_design_verdict) gets the
+# SAME treatment ONLY at the FIRST post-approve restore (C1) — NOT at every
+# later one. Reasoning, verified by reading reconcile_tracker and
+# write_gate_baseline: approve does a FULL, unconditional gate-baseline
+# refresh, so after C1's approve the baseline already carries the collapsed
+# `?? docs/specs/` porcelain line. The doc's bytes never change again for
+# this task, so every LATER reconcile (C4, C5, C6) sees the identical
+# collapsed line, subtracts it as already-baselined, and does not re-add it
+# — correctly: nothing about it is new. Adding docs/specs to those LATER
+# restores would therefore make them stop matching what those approvals
+# actually bind. Only C1's (and, in section D5 below, D5's own first
+# restore) genuinely needs it.
 
 # fast_stack_stub <fixture> — a detect-stack.sh that reports no test/lint/type
 # commands, so the technical-check pass is a no-op and the specs below measure
@@ -464,13 +478,31 @@ bash "$QG_C" enter "$TID_MIG" >/dev/null 2>&1
 bash "$CT_C" set "$TID_MIG"
 seed_review_records "$TID_MIG" "qa-claude" "backend" "$FC"
 bash "$QG_C" approve "$TID_MIG" "reviewed both files; ships" >/dev/null 2>&1
-seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json"
+seed_tracker "$FC" "src/a.ts" "$MIGRATE_PATH" "$FC/docs/reviews/$TID_MIG-r1.json" "$FC/docs/specs/$TID_MIG.md"
 bash "$CT_C" set "$TID_MIG"
 assert_eq "denylist-C1: a matching approval record RELEASES (pre-migration control)" \
     "ALLOW" "$(stop_decision "$FC")"
 
 # C2/C3. The denylist landing re-hashes the change set -> the recorded hash no
 # longer matches -> fail closed.
+#
+# claude-workflow-plugin-fkm.4 (v5 D2): the two seed_tracker calls below are
+# DELIBERATELY NOT given docs/specs/$TID_MIG.md, unlike C1's restoration
+# above. Measured, not assumed: this file's `seed_tracker` is a full
+# OVERWRITE of changed-files.txt, not a discovery walk — reconcile_tracker's
+# "already baselined, correctly excluded" reasoning (which lets a LATER
+# cycle on the SAME task skip a re-review of an unchanged file) never gets
+# a chance to apply here, because whatever a `seed_tracker` call places in
+# the tracker persists VERBATIM into whichever `enter`/`approve` call reads
+# it next — including C4's recipe below, which does not re-seed anything.
+# Adding docs/specs here changes what THAT enter+approve cycle binds, not
+# just what this section's own "block" check compares against (block is
+# unaffected either way, since the denylist mutation alone already forces
+# a mismatch) — and a staged, isolated re-run caught exactly that: with
+# docs/specs added here, denylist-C4 (and D5's analogous step) flipped from
+# passing to failing, block-for-block identical inputs otherwise. Reverted
+# to the pre-fkm.4 two-item form; only C1's restoration (the one assertion
+# actually proven broken) changed.
 DL_REAL_C=$(mutate_denylist_lib "$FC" '(^|/)harness3mg1/')
 assert_eq "denylist-C2 safety: the REAL plugin lib is untouched" "0" \
     "$(grep -c 'harness3mg1' "$DL_REAL_C" | tr -d '[:space:]')"
@@ -923,7 +955,13 @@ bash "$QG_D" enter "$TID_D5" >/dev/null 2>&1
 bash "$CT_D" set "$TID_D5"
 seed_review_records "$TID_D5" "qa-claude" "backend" "$FD5"
 bash "$QG_D" approve "$TID_D5" "reviewed under the pre-landing denylist" >/dev/null 2>&1
-seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS" "$FD5/docs/reviews/$TID_D5-r1.json"
+# claude-workflow-plugin-fkm.4 (v5 D2): docs/specs/$TID_D5.md gets the SAME
+# treatment as docs/reviews' own canonical artifact, and for the SAME
+# fixture-lifetime reason denylist-C1's header comment gives — this is the
+# FIRST post-approve restore for $TID_D5, so its design doc is still a
+# genuine survivor of reconcile_tracker's baseline subtraction. Do not add
+# it to a LATER restore in this section by symmetry; see that header.
+seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS" "$FD5/docs/reviews/$TID_D5-r1.json" "$FD5/docs/specs/$TID_D5.md"
 bash "$CT_D" set "$TID_D5"
 assert_eq "denylist-D5: the pre-landing approval RELEASES (control)" \
     "ALLOW" "$(stop_decision "$FD5")"
@@ -931,6 +969,15 @@ assert_eq "denylist-D5: the pre-landing approval RELEASES (control)" \
 # --- THE LANDING -----------------------------------------------------------
 restore_denylist_lib "$FD5" "$D5_REAL"
 
+# claude-workflow-plugin-fkm.4 (v5 D2): the two seed_tracker calls below are
+# deliberately NOT given docs/specs/$TID_D5.md — same reasoning as
+# denylist-shared.sh's C2/C3 header a few hundred lines up: this is a full
+# tracker OVERWRITE, not a discovery walk, so whatever it places here
+# persists verbatim into the printed-remediation approve a few lines below,
+# which does not re-seed anything. Confirmed by a staged re-run: adding it
+# here left the block check (unaffected, since the landing alone forces the
+# mismatch) but flipped the LATER "printed recovery RELEASES" assertion from
+# passing to failing.
 seed_tracker "$FD5" "src/a.ts" "$D_PLAN_ABS" "$FD5/docs/reviews/$TID_D5-r1.json"
 bash "$CT_D" set "$TID_D5"
 D5_DECISION=$(stop_decision "$FD5")

@@ -155,7 +155,16 @@ run_cycle_approve() {
         "$tid" "$srcfile" > "$pay"
     CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
 
-    RC_APPROVE_OUT=$(CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" "reviewed and approved (review-artifact-durability.sh)" 2>&1)
+    # v5 D2 (claude-workflow-plugin-fkm.4) MIGRATION, R2-F1: approve
+    # additionally refuses (exit 2, no_design_attempted) without a satisfied
+    # design verdict. --no-design here, deliberately NOT a seeded
+    # design-record: this whole spec is precision hash arithmetic over
+    # changed-files.txt (RC_PRE_HASH / RC_WITHOUT_HASH / the membership proofs
+    # in AC-6/Leg C) — a real design-record would add docs/specs/<tid>.md as
+    # ANOTHER real tracked path on top of the review artifact this spec is
+    # already isolating, multiplying the paths every hash-subtraction leg has
+    # to account for, for a phenomenon (design review) this spec is not about.
+    RC_APPROVE_OUT=$(CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" --no-design "review-artifact-durability spec: no design phase; isolating review-artifact hash mechanics" "reviewed and approved (review-artifact-durability.sh)" 2>&1)
     RC_APPROVE_RC=$?
 }
 
@@ -260,9 +269,15 @@ rm -f "$ESCAPE_PATH" "$OUTSIDE" "$BAD_FILE"
 # NEXT approve's own re-verification ladder withholds the token.
 printf 'x' >> "$RC_CANONICAL"
 CORRUPT_TID="$TID_A"
+# fkm.4 R2-F1: same --no-design reasoning as run_cycle_approve above. This is
+# a SECOND approve on an already-approved task; the idempotency short-circuit
+# (gz3) only fires when an existing record already binds the CURRENT change
+# set, and the corruption changes what reconcile/impact-report see, so this
+# does not take that path — it re-verifies every precondition, design
+# included, exactly like the first approve does.
 CORRUPT_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" reconcile-tracker 2>&1
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" "$CORRUPT_TID" >/dev/null 2>&1
-    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$CORRUPT_TID" "second approve after corrupting the artifact" 2>&1)
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$CORRUPT_TID" --no-design "review-artifact-durability spec: no design phase; isolating review-artifact hash mechanics" "second approve after corrupting the artifact" 2>&1)
 assert_not_contains "Leg A / AC-3: a one-byte post-record edit means the NEXT approve claims no verified binding" \
     "review-artifact binding VERIFIED" "$CORRUPT_OUT"
 assert_contains "Leg A / AC-3: ...and says so by name" \

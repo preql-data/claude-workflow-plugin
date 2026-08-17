@@ -30,8 +30,12 @@
 #   5. status output exposes rubric state.
 #   6. Every rubric file under .claude/rubrics/ declares the version the
 #      per-file expectation table names (default=2 since v4.1's C8; the four
-#      overlays stay at 1), plus a META-TEST that a stale-version fixture is
-#      flagged by the same extractor.
+#      overlays stay at 1; the standalone design.md rubric — v5.0.0 Phase D2
+#      Part A, claude-workflow-plugin-fkm.4, no extends: — is 1 too), plus a
+#      META-TEST that a stale-version fixture is flagged by the same
+#      extractor, plus design.md's own structural checks: no extends:,
+#      name: design, and exactly the eight DS1-DS8 criterion headings (with
+#      its own META-TEST proving a 7-heading fixture is caught).
 #   7. META-TEST: a stubbed qa-gate.sh with the satisfied-branch label
 #      calls removed asserts the rubric-satisfied test FAILS — proving
 #      the assertion is sensitive to the script's label-flip behaviour,
@@ -182,6 +186,77 @@ seed_review_records() {
     bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || return 1
+
+    # v5 D2 Part B (claude-workflow-plugin-fkm.4) MIGRATION: approve now ALSO
+    # refuses (exit 2, no_design_attempted) without a satisfied, independent
+    # DESIGN-REVIEW verdict, unless --no-design. Section 6's subject is the
+    # RUBRIC warning approve emits, which is only observable on an approve
+    # that SUCCEEDS — same reasoning the P7 completion-record migration
+    # states just below — so the design precondition has to be satisfied
+    # here too, seeded through the real writers.
+    local design_sanitized design_art design_hash
+    design_sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    mkdir -p "$FIXTURE/docs/specs" 2>/dev/null || true
+    design_art="$FIXTURE/docs/specs/$design_sanitized.md"
+    cat > "$design_art" <<DESIGNDOC
+# Design — $tid
+
+## Problem
+Seeded fixture design (qa-gate-grade-record harness only).
+
+## Approaches considered
+1. A second seed convention — rejected: no reuse to justify one.
+2. This minimal artifact — chosen: matches every other seed helper here.
+
+## Chosen approach
+Seed a schema-valid design so approve's design-satisfied refusal does not
+block a spec that is not testing it.
+
+## Units
+See the machine block.
+
+## Global constraints
+None.
+
+## Out of scope
+Everything this fixture does not seed.
+
+## Verification plan
+make test
+
+## Revision log
+- v1 seeded by the qa-gate-grade-record fixture.
+
+<!-- DESIGN-UNITS BEGIN -->
+\`\`\`json
+{
+  "contract_version": "1",
+  "task_id": "$tid",
+  "designer_identity": "designer",
+  "units": [
+    {
+      "unit_id": "U1",
+      "role": "$role",
+      "goal": "seeded unit",
+      "acceptance": [ { "id": "AC1", "text": "seeded fixture: nothing asserted" } ],
+      "files": [ ".claude/scripts/qa-gate.sh" ],
+      "verification": "make test",
+      "depends_on": []
+    }
+  ]
+}
+\`\`\`
+<!-- DESIGN-UNITS END -->
+DESIGNDOC
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-record "$tid" >/dev/null 2>&1 || return 1
+    design_hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/workflow-manifest.sh" hash-file "$design_art" 2>/dev/null) || design_hash=""
+    if [ -z "$design_hash" ]; then return 1; fi
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-review-record "$tid" --design-hash "$design_hash" \
+        <<< '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"seeded fixture"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
+        >/dev/null 2>&1 || return 1
+
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     [ -z "$hash" ] && hash="unverified"
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
@@ -633,7 +708,7 @@ echo ""
 echo "=== Section 8: structural sanity of .claude/rubrics/ files ==="
 
 RUBRICS_DIR="$PLUGIN_DIR/.claude/rubrics"
-EXPECTED_RUBRICS=(default backend frontend devops bugfix)
+EXPECTED_RUBRICS=(default backend frontend devops bugfix design)
 
 # Per-file EXPECTED version. Through v4.0 this loop grepped one hardcoded
 # literal for all five files, which quietly asserted "every rubric is on the
@@ -642,8 +717,10 @@ EXPECTED_RUBRICS=(default backend frontend devops bugfix)
 # `context_coverage` to default.md and bumped it to 2; the four overlays were
 # untouched and stay at 1). A table makes each rubric's version a deliberate,
 # independently-editable fact, and a NEW rubric file that nobody adds here
-# fails rather than inheriting someone else's number.
-RUBRIC_VERSIONS="default=2 backend=1 frontend=1 devops=1 bugfix=1"
+# fails rather than inheriting someone else's number. `design=1` (v5.0.0
+# Phase D2 Part A) joined the same way: standalone, not an overlay, but its
+# version is exactly as deliberate a fact as any of the other five.
+RUBRIC_VERSIONS="default=2 backend=1 frontend=1 devops=1 bugfix=1 design=1"
 
 # expected_rubric_version <name> — the table's value; exit 1 (empty output)
 # when the rubric is absent from the table.
@@ -734,6 +811,63 @@ else
     FAILED_TESTS+=("rubric bugfix.md: missing applies_to: bug")
     printf '  FAIL: rubric bugfix.md: missing "applies_to: bug"\n'
 fi
+
+# design.md (v5.0.0 Phase D2 Part A, claude-workflow-plugin-fkm.4) is
+# STANDALONE — the opposite assertion from the extends: loop above. Pulling
+# code-review criteria into a design review is a category error, so this
+# rubric must NOT declare extends: default the way backend/frontend/devops
+# do.
+DESIGN_RUBRIC="$RUBRICS_DIR/design.md"
+if [ -f "$DESIGN_RUBRIC" ] && ! head -10 "$DESIGN_RUBRIC" | grep -qE '^extends:'; then
+    PASS=$((PASS + 1))
+    printf '  PASS: rubric design.md: does NOT declare extends: (standalone)\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("rubric design.md: unexpectedly declares extends: (should be standalone)")
+    printf '  FAIL: rubric design.md: unexpectedly declares extends: (should be standalone)\n'
+fi
+
+# design.md declares name: design (no other rubric's name: is asserted here
+# individually — filename and `name:` never drifted apart for the other
+# five, but design.md is new enough that nothing else in the tree checks it
+# yet, so it is worth asserting explicitly rather than trusting the loop
+# above, which only checks version).
+if head -10 "$DESIGN_RUBRIC" | grep -qE '^name:[[:space:]]*design[[:space:]]*$'; then
+    PASS=$((PASS + 1))
+    printf '  PASS: rubric design.md: name: design declared\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("rubric design.md: missing name: design")
+    printf '  FAIL: rubric design.md: missing "name: design"\n'
+fi
+
+# design.md declares exactly the eight DS1-DS8 criteria (AC 4.2 of
+# claude-workflow-plugin-fkm.4). Anchored on the heading grammar
+# ("### DS<n>."), never on a line count, the same anchoring convention this
+# section already uses for `version:`/`extends:`/`applies_to:`.
+ds_heading_count=$(grep -cE '^### DS[1-8]\.' "$DESIGN_RUBRIC")
+assert_eq "rubric design.md: exactly 8 DS1-DS8 criterion headings" "8" "$ds_heading_count"
+
+# META-TEST: the DS-count check is only worth having if a design.md with one
+# criterion missing is flagged. Built the same way the version META-TEST
+# above builds its stale fixture — a throwaway file, never the shipped one.
+META_DS_RUBRIC=$(mktemp -t design-rubric-ds-meta.XXXXXX)
+{
+    printf -- '---\nversion: 1\nname: design\n---\n\n# Design rubric (deliberately incomplete fixture, not shipped)\n\n'
+    for n in 1 2 3 4 5 6 7; do
+        printf '### DS%d. Placeholder criterion %d.\n\nBody text.\n\n' "$n" "$n"
+    done
+} > "$META_DS_RUBRIC"
+meta_ds_count=$(grep -cE '^### DS[1-8]\.' "$META_DS_RUBRIC")
+# 1. the mutation landed: the fixture really declares 7, not 8.
+assert_eq "META: 7-criterion fixture really declares 7 DS headings" "7" "$meta_ds_count"
+# 2. the check disagrees with the fixture (the assertion above WOULD fail).
+assert_eq "META: the count check would flag the 7-criterion fixture" "no" \
+    "$([ "$meta_ds_count" = "8" ] && echo yes || echo no)"
+# 3. control: the SHIPPED design.md still declares all 8.
+assert_eq "META: control — shipped design.md still declares all 8" "yes" \
+    "$([ "$(grep -cE '^### DS[1-8]\.' "$DESIGN_RUBRIC")" = "8" ] && echo yes || echo no)"
+rm -f "$META_DS_RUBRIC"
 
 # Rubric-config has the iteration_cap key.
 RUBRIC_CONFIG="$PLUGIN_DIR/.claude/rubric-config"

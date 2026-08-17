@@ -545,6 +545,20 @@ rm -f "$EMPTY_ART"
 printf '\n=== Section 4: the approval record binds the design (fourth machine token) ===\n'
 # ===========================================================================
 
+# v5 D2 Part B (claude-workflow-plugin-fkm.4) MIGRATION: every approve() call
+# in this section (and further down, at ENTRY POINT 4 and section 7) now
+# ALSO passes --no-design '<reason>' — approve REFUSES (exit 2,
+# no_design_attempted / design_verdict_missing) unless a satisfied,
+# independent DESIGN-REVIEW verdict exists, and every task in THIS file has,
+# at most, a DESIGN-ARTIFACT record (D1's own, which predates D2's reviewer
+# half). Section 4 and ENTRY POINT 4/section 7 are testing DESIGN-BINDING-
+# TOKEN and the anchored-reader discipline specifically — an orthogonal axis
+# from design-satisfied — so the bypass isolates what each assertion is
+# actually about, the same migration seed_completion_record's own header
+# documents for the identical shape of acquired precondition (P7).
+# --no-design does not skip DESIGN-BINDING-TOKEN: that block runs
+# unconditionally, after design-satisfied is resolved either way.
+#
 # An approvable task, seeded through the REAL writers so a grammar change breaks
 # this loudly rather than drifting silently.
 seed_approvable() {
@@ -575,7 +589,7 @@ bash "$QG" design-record "$APPR_TID" >/dev/null 2>&1
 APPR_DESIGN_HASH=$(printf '%s' "$(latest_design_record "$APPR_TID")" \
     | grep -oE 'design_hash=[A-Za-z0-9-]+' | head -1 | cut -d= -f2-)
 seed_approvable "$APPR_TID"
-APPROVE_OUT=$(bash "$QG" approve "$APPR_TID" "D1 binding leg" 2>&1)
+APPROVE_OUT=$(bash "$QG" approve "$APPR_TID" --no-design "fkm.4: testing DESIGN-BINDING-TOKEN, not design-satisfied" "D1 binding leg" 2>&1)
 
 latest_approval() {
     { bd show "$1" --json --include-comments 2>/dev/null || bd show "$1" --json 2>/dev/null; } \
@@ -663,7 +677,7 @@ bash "$QG" enter "$DRIFT_TID" >/dev/null 2>&1
 bash "$QG" design-record "$DRIFT_TID" >/dev/null 2>&1
 printf '\n<!-- one byte later -->\n' >> "$DRIFT_ART"     # the design moved
 seed_approvable "$DRIFT_TID"
-DRIFT_OUT=$(bash "$QG" approve "$DRIFT_TID" "D1 drift leg" 2>&1)
+DRIFT_OUT=$(bash "$QG" approve "$DRIFT_TID" --no-design "fkm.4: testing DESIGN-BINDING-TOKEN, not design-satisfied" "D1 drift leg" 2>&1)
 DRIFT_APPROVAL=$(latest_approval "$DRIFT_TID")
 assert_eq "4.4 an approve after a post-record artifact edit still succeeds (D1 records, D2 refuses)" \
     "approved" "$(json_field '.status' "$DRIFT_OUT")"
@@ -677,7 +691,7 @@ NODES_TID=$(bd create "D1 no-design subject" -t task -p 1 --json 2>/dev/null | j
 printf '%s\n' "$FIXTURE/docs/specs/valid-design.md" > "$TRACKING"
 bash "$QG" enter "$NODES_TID" >/dev/null 2>&1
 seed_approvable "$NODES_TID"
-NODES_OUT=$(bash "$QG" approve "$NODES_TID" "D1 no-design leg" 2>&1)
+NODES_OUT=$(bash "$QG" approve "$NODES_TID" --no-design "fkm.4: this IS the no-design-at-all case under test" "D1 no-design leg" 2>&1)
 assert_eq "4.5 a task with no DESIGN-ARTIFACT record approves with no token" "" \
     "$(read_design_binding "$(latest_approval "$NODES_TID")")"
 assert_contains "4.5b ...and the absence is NAMED rather than silent" \
@@ -707,7 +721,7 @@ printf '%s\n' "$STRIP_ART" > "$TRACKING"
 bash "$QG" enter "$STRIP_TID" >/dev/null 2>&1
 bash "$QG" design-record "$STRIP_TID" >/dev/null 2>&1
 seed_approvable "$STRIP_TID"
-STRIP_OUT=$(bash "$FIXTURE/.claude/scripts/qa-gate-stripped.sh" approve "$STRIP_TID" "META strip leg" 2>&1)
+STRIP_OUT=$(bash "$FIXTURE/.claude/scripts/qa-gate-stripped.sh" approve "$STRIP_TID" --no-design "fkm.4: testing DESIGN-BINDING-TOKEN, not design-satisfied" "META strip leg" 2>&1)
 STRIP_APPROVAL=$(latest_approval "$STRIP_TID")
 assert_eq "4.7 META: the stripped build still approves" "approved" "$(json_field '.status' "$STRIP_OUT")"
 assert_eq "4.7b META: ...and writes NO design token (4.1 WOULD fail against this build)" "" \
@@ -1058,7 +1072,7 @@ assert_eq "6.7b precondition: the swap kept the digest IDENTICAL, so no drift ar
     "$SWAP_SHA" "$(bash "$WM" hash-file "$SWAP_ART" 2>/dev/null)"
 bash "$QG" enter "$SWAP_TID" >/dev/null 2>&1
 seed_approvable "$SWAP_TID"
-SWAP_OUT=$(bash "$QG" approve "$SWAP_TID" "D1 approve-containment leg" 2>&1)
+SWAP_OUT=$(bash "$QG" approve "$SWAP_TID" --no-design "fkm.4: testing DESIGN-BINDING-TOKEN containment, not design-satisfied" "D1 approve-containment leg" 2>&1)
 assert_eq "6.7c precondition: the approve under test SUCCEEDED (or 6.7d reads an absent record)" \
     "approved" "$(json_field '.status' "$SWAP_OUT")"
 assert_eq "6.7d approve WITHHOLDS the binding when the artifact resolves outside the declared dir" "" \
@@ -1334,7 +1348,7 @@ assert_eq "7.0 precondition: the design record with a forged token in its SUMMAR
 FORGE_REAL=$(sha256_of_file "$FORGE_ART")
 bash "$QG" enter "$FORGE_TID" >/dev/null 2>&1
 seed_approvable "$FORGE_TID"
-bash "$QG" approve "$FORGE_TID" "D1 anchored-reader leg" >/dev/null 2>&1
+bash "$QG" approve "$FORGE_TID" --no-design "fkm.4: testing the anchored reader, not design-satisfied" "D1 anchored-reader leg" >/dev/null 2>&1
 FORGE_APPROVAL=$(latest_approval "$FORGE_TID")
 assert_contains "7.1 precondition: the forged token really is in the record's free text" \
     "design_hash=$FORGED" "$(latest_design_record "$FORGE_TID")"
@@ -1353,7 +1367,7 @@ PROSE_MENTION="for reference we wrote DESIGN-ARTIFACT v1 task=$NOBIND_TID design
 bd comments add "$NOBIND_TID" "$PROSE_MENTION" >/dev/null 2>&1 \
     || bd comment add "$NOBIND_TID" "$PROSE_MENTION" >/dev/null 2>&1 || true
 seed_approvable "$NOBIND_TID"
-NOBIND_OUT=$(bash "$QG" approve "$NOBIND_TID" "D1 forged summary design_hash=$FORGED" 2>&1)
+NOBIND_OUT=$(bash "$QG" approve "$NOBIND_TID" --no-design "fkm.4: testing the anchored reader, not design-satisfied" "D1 forged summary design_hash=$FORGED" 2>&1)
 NOBIND_APPROVAL=$(latest_approval "$NOBIND_TID")
 assert_contains "7.2 precondition: the approval line really does carry the forged token in its summary" \
     "design_hash=$FORGED" "$NOBIND_APPROVAL"

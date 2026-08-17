@@ -39,7 +39,19 @@
 #   seed_review_records <task-id> [reviewer] [implementer-role] [root]
 #       V3 (jio.1): seed the IMPLEMENTER + REVIEW-ARTIFACT records a task
 #       needs before `qa-gate.sh approve` will succeed. See the function's
-#       own header for the contract.
+#       own header for the contract. Since v5 D2 (claude-workflow-plugin-
+#       fkm.4) this ALSO seeds a satisfied, independent DESIGN-REVIEW verdict
+#       via seed_design_verdict — approve's design-satisfied refusal is the
+#       same kind of acquired precondition completion-record was, and this is
+#       the one place a spec already says "make this task approvable".
+#
+#   seed_design_verdict <task-id> [root]
+#       v5 D2 (fkm.4): a minimal valid design artifact, a real design-record,
+#       and a satisfied design-review-record from a genuinely different
+#       identity ("design-claude") — the design-satisfied precondition
+#       `qa-gate.sh approve` now REFUSES without (unless --no-design). Folded
+#       into seed_review_records above; specs testing the design refusal
+#       itself simply do not call it.
 #
 #   bd_show_with_comments <task-id>
 #       `bd show --json` that always carries comment BODIES, across the
@@ -403,6 +415,17 @@ seed_review_records() {
             || { printf 'seed_review_records: could not add IMPLEMENTER comment on %s\n' "$tid" >&2; return 1; }
     fi
 
+    # v5 D2 (claude-workflow-plugin-fkm.4): seed the design-satisfied
+    # precondition BEFORE the review artifact below, deliberately — it writes
+    # a NEW tracked path (docs/specs/<tid>.md) exactly as review-record's own
+    # canonical artifact does, and the reconcile + impact-report refresh a
+    # few lines down (already here for review-record's sake) must see BOTH
+    # new paths in one pass rather than staling itself against this one.
+    # design-record's own edit-ban (designer_touched_source) is already
+    # disarmed by the IMPLEMENTER comment just posted, so it does not matter
+    # what else a caller has staged in the tracker before this call.
+    seed_design_verdict "$tid" "$root" || return 1
+
     local hash=""
     if [ -f "$root/.claude/scripts/impact-report.sh" ]; then
         hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
@@ -493,6 +516,133 @@ JSON
     if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
             completion-record "$tid" --file "$pay" >/dev/null 2>&1; then
         printf 'seed_completion_record: qa-gate.sh completion-record failed for %s\n' "$tid" >&2
+        return 1
+    fi
+    return 0
+}
+
+# seed_design_verdict <tid> [root] — the design-satisfied precondition (v5 D2
+# / claude-workflow-plugin-fkm.4): a minimal schema-valid design artifact, a
+# real `design-record`, and a satisfied `design-review-record` from a
+# genuinely DIFFERENT identity ("design-claude" — the fixed literal
+# design-reviewer.md emits, distinct from design-record's own "designer"
+# default, so this never trips the independence refusal it is seeding
+# AROUND). Folded into seed_review_records for the identical reason
+# seed_completion_record is (see that function's own header): approve now
+# REFUSES (exit 2, error_key names which) unless design-satisfied holds,
+# UNLESS --no-design.
+#
+# THE COMPLETENESS CLAIM THAT USED TO BE HERE WAS FALSE, MEASURED (fkm.4
+# R2-F1). This function folding into seed_review_records means every spec
+# that SEEDS THROUGH THIS SHARED HELPER acquired the precondition for free —
+# it does NOT mean "every spec driving approve to SUCCESS acquired this
+# precondition too", which is what an earlier revision of this comment
+# claimed. A spec with its OWN spec-local seed helper (one that composes the
+# real writers directly instead of calling seed_review_records — the pattern
+# this file's own seed_completion_record header recommends for specs needing
+# per-record control) does NOT pick this up automatically, and five specs
+# doing exactly that were measured red by execution: 91 assertions across
+# verify-review-discipline.sh, arbitration-acceptance.sh,
+# review-artifact-durability.sh, worktree-approval-resolution.sh, and
+# qa-gate.sh's P7 family, every one seeding through a spec-local helper that
+# predates this function and was never told to call it. Each of those five
+# was fixed individually — all 13 call sites via `--no-design '<reason>'`
+# at the approve call site; NONE via a seeded design-review-record (an
+# earlier revision of this paragraph claimed some were, which was also
+# false, measured — fkm.4 R3-F1) — see that task's fix history for the
+# enumerated per-spec reasoning. Specs testing the design refusal itself
+# simply do not call this function (or call approve with --no-design
+# directly), which is the one part of the original claim that was already
+# correct.
+#
+# SEEDED THROUGH THE REAL WRITERS, like every other record this file seeds: a
+# change to either grammar must break these specs loudly instead of leaving
+# them asserting against a shape nothing produces.
+#
+# WRITES A REAL TRACKED FILE (docs/specs/<tid>.md) — unlike the review
+# artifact's scratch hand-off copy above, design-record's OWN containment
+# rule means there is no denylisted-scratch-copy option here; the artifact
+# IS the file `qa-gate.sh design-record` binds. Callers must reconcile +
+# refresh the impact report AFTER this returns (seed_review_records already
+# does, for review-record's own new path, and this function is called before
+# that refresh specifically so one pass covers both).
+seed_design_verdict() {
+    local tid="$1"
+    local root="${2:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+    if [ -z "$tid" ]; then
+        printf 'seed_design_verdict: <task-id> is required\n' >&2
+        return 1
+    fi
+    local sanitized art design_hash
+    sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    mkdir -p "$root/docs/specs" 2>/dev/null || true
+    art="$root/docs/specs/$sanitized.md"
+    cat > "$art" <<DESIGNDOC
+# Design — $tid
+
+## Problem
+Seeded fixture design (component-tier harness only).
+
+## Approaches considered
+1. A second, richer seed convention — rejected: no reuse to justify one.
+2. This minimal artifact — chosen: matches every other seed helper's "just
+   enough to validate" shape.
+
+## Chosen approach
+Seed a schema-valid design so approve's design-satisfied refusal does not
+block specs that are not testing it.
+
+## Units
+See the machine block.
+
+## Global constraints
+None.
+
+## Out of scope
+Everything this fixture does not seed.
+
+## Verification plan
+make test-component
+
+## Revision log
+- v1 seeded by the component fixture harness.
+
+<!-- DESIGN-UNITS BEGIN -->
+\`\`\`json
+{
+  "contract_version": "1",
+  "task_id": "$tid",
+  "designer_identity": "designer",
+  "units": [
+    {
+      "unit_id": "U1",
+      "role": "devops",
+      "goal": "seeded unit",
+      "acceptance": [ { "id": "AC1", "text": "seeded fixture: nothing asserted" } ],
+      "files": [ ".claude/scripts/qa-gate.sh" ],
+      "verification": "make test-component",
+      "depends_on": []
+    }
+  ]
+}
+\`\`\`
+<!-- DESIGN-UNITS END -->
+DESIGNDOC
+    if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
+            design-record "$tid" >/dev/null 2>&1; then
+        printf 'seed_design_verdict: qa-gate.sh design-record failed for %s\n' "$tid" >&2
+        return 1
+    fi
+    design_hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/workflow-manifest.sh" hash-file "$art" 2>/dev/null) || design_hash=""
+    if [ -z "$design_hash" ]; then
+        printf 'seed_design_verdict: could not hash the seeded design artifact for %s\n' "$tid" >&2
+        return 1
+    fi
+    if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
+            design-review-record "$tid" --design-hash "$design_hash" \
+            <<< '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"seeded fixture"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
+            >/dev/null 2>&1; then
+        printf 'seed_design_verdict: qa-gate.sh design-review-record failed for %s\n' "$tid" >&2
         return 1
     fi
     return 0

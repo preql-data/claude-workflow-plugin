@@ -232,7 +232,16 @@ OVERRULE_RATIONALE="reviewer position: possible double-charge on gateway timeout
 ARB_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" arbitrate "$TID" R1-F1 overrule "$OVERRULE_RATIONALE" 2>/dev/null)
 assert_json_field "A4: arbitrate overrule is recorded" "$ARB_OUT" '.status' "arbitrated"
 RC=0
-OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$TID" "finding overruled with a rationale citing both positions" 2>/dev/null) || RC=$?
+# v5 D2 (claude-workflow-plugin-fkm.4) MIGRATION, R2-F1: approve additionally
+# refuses (exit 2, no_design_attempted) without a satisfied design verdict.
+# --no-design, not a seeded design-record: DESIGN-SATISFIED-REFUSAL sits
+# strictly AFTER review-separation in cmd_approve's ladder, so bypassing it
+# here cannot mask anything about the arbitration mechanism this spec is
+# actually proving (A1-A3 already prove review-separation refuses BEFORE
+# design is ever consulted). Seeding a real design-record instead would add
+# docs/specs/<tid>.md to the change set, which new_task()'s reconcile/impact
+# flow does not model and this spec has no reason to introduce.
+OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$TID" --no-design "arbitration-acceptance spec: no design phase for this task; testing review arbitration only" "finding overruled with a rationale citing both positions" 2>/dev/null) || RC=$?
 assert_eq "A4: after OVERRULE approve succeeds (exit 0)" "0" "$RC"
 assert_json_field "A4: status=approved" "$OUT" '.status' "approved"
 assert_contains "A4: approval observations name the independent reviewer" \
@@ -296,7 +305,9 @@ printf 'src/refund.ts\ntests/refund.test.sh\n' > "$TRACK/changed-files.txt"
 CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
 CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" "$TID_FIX" >/dev/null 2>&1 || true
 RC=0
-OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$TID_FIX" "finding resolved with fix + covering test" 2>/dev/null) || RC=$?
+# fkm.4 R2-F1 (see A4's approve above for the reasoning): --no-design, same
+# spec-true reason — the resolve-finding path is orthogonal to design too.
+OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$TID_FIX" --no-design "arbitration-acceptance spec: no design phase for this task; testing review arbitration only" "finding resolved with fix + covering test" 2>/dev/null) || RC=$?
 assert_eq "A6: after resolve-finding approve succeeds (exit 0)" "0" "$RC"
 assert_json_field "A6: status=approved" "$OUT" '.status' "approved"
 FIX_TRAIL=$(comments_of "$TID_FIX")

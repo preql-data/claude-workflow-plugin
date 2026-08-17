@@ -346,7 +346,17 @@ JSON
 {"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
-    CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" "$summary" 2>&1 | tail -1
+    # v5 D2 (claude-workflow-plugin-fkm.4) MIGRATION, R2-F1: approve
+    # additionally refuses (exit 2, no_design_attempted) without a satisfied
+    # design verdict. --no-design here, deliberately NOT a seeded
+    # design-record: wtres-1.2 (below) anchors the FULL grammar of the
+    # approval record with `assert_match` — `worktree=... artifact_hash=...
+    # at <ts>`, no token in between. A real DESIGN-ARTIFACT record would make
+    # DESIGN-BINDING-TOKEN bind a `design_hash=` token BETWEEN worktree= and
+    # artifact_hash=, breaking that anchored regex; the bypass leaves both
+    # design_field and design_verdict_field empty (arm 4: no record -> no
+    # token), so the grammar is unchanged from what wtres-1.2 already expects.
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" --no-design "worktree-approval-resolution spec: no design phase modeled" "$summary" 2>&1 | tail -1
 }
 
 # record_artifact <tid> <iteration> <findings-json> — a further review round,
