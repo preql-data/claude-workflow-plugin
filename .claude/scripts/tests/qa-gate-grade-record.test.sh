@@ -248,8 +248,16 @@ make test
 \`\`\`
 <!-- DESIGN-UNITS END -->
 DESIGNDOC
+    # v5 D3 (claude-workflow-plugin-fkm.5): design-record now refuses
+    # grilling_record_missing without a GRILLING v1 record. This spec-local
+    # helper seeds a minimal design ONLY so approve's design-satisfied
+    # refusal does not block a spec that is not testing it (its own comment
+    # above) — bypass rather than seed a real grilling record, since this
+    # fixture never copies the vendor tree grilling-record would need to
+    # hash.
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
-        design-record "$tid" >/dev/null 2>&1 || return 1
+        design-record "$tid" --no-grilling "qa-gate-grade-record.test.sh: seeding design-satisfied, not testing grilling" \
+        >/dev/null 2>&1 || return 1
     design_hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/workflow-manifest.sh" hash-file "$design_art" 2>/dev/null) || design_hash=""
     if [ -z "$design_hash" ]; then return 1; fi
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \

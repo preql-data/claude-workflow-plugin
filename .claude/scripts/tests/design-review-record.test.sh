@@ -132,6 +132,14 @@ mkdir -p "$FIXTURE/.claude/scripts" "$FIXTURE/.claude/.qa-tracking" \
 cp "$PLUGIN_DIR/.claude/scripts/"*.sh "$FIXTURE/.claude/scripts/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
+# v5 D3 (claude-workflow-plugin-fkm.5): design-record's grilling precondition
+# is seeded below via a REAL `qa-gate.sh grilling-record` call (seed_grilling),
+# which hashes the vendored brainstorming SKILL.md — without it, every
+# seed_grilling call refuses vendor_hash_unavailable.
+mkdir -p "$FIXTURE/.claude/vendor/superpowers/brainstorming"
+cp "$PLUGIN_DIR/.claude/vendor/superpowers/brainstorming/SKILL.md" \
+    "$FIXTURE/.claude/vendor/superpowers/brainstorming/SKILL.md"
+
 if ! command -v bd >/dev/null 2>&1; then
     echo "bd CLI not on PATH — design-review-record tests require Beads."
     exit 2
@@ -160,6 +168,19 @@ IR="$FIXTURE/.claude/scripts/impact-report.sh"
 TRACKING="$FIXTURE/.claude/.qa-tracking/changed-files.txt"
 
 json_field() { printf '%s' "$2" | jq -r "$1" 2>/dev/null || printf ''; }
+
+# seed_grilling <tid> — v5 D3 (claude-workflow-plugin-fkm.5): design-record
+# now refuses (grilling_record_missing) without a GRILLING v1 record on the
+# task or its parent epic. THIS FILE exercises design-review-record and the
+# design-satisfied refusal — orthogonal to whether a grilling happened — so
+# every task that calls design-record below gets one real, minimal grilling
+# record here. The precondition itself has its own dedicated spec:
+# grilling-record.test.sh.
+seed_grilling() {
+    local tid="$1"
+    bash "$QG" grilling-record "$tid" --rounds 3 --questions 5 --approaches 2 --unresolved 0 \
+        "design-review-record.test.sh: exercising the design-satisfied axis" >/dev/null 2>&1
+}
 
 bd_show_with_comments() {
     bd show "$1" --json --include-comments 2>/dev/null \
@@ -281,6 +302,7 @@ printf '\n=== Section 1: design-review-record — shape validation ===\n'
 # ===========================================================================
 
 TID1=$(bd create "D2 verdict shape subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID1"
 ART1="$FIXTURE/docs/specs/$TID1.md"
 write_artifact "$ART1" "$TID1"
 printf '%s\n' "$ART1" > "$TRACKING"
@@ -410,6 +432,7 @@ printf '\n=== Section 4: compute_design_satisfied via design-gate-precheck (B5) 
 # ===========================================================================
 
 TID4=$(bd create "D2 precheck subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID4"
 OUT=$(bash "$QG" design-gate-precheck "$TID4" 2>&1); EXIT_RC=$?
 assert_eq "4.1 no design attempted at all: exit 0" "0" "$EXIT_RC"
 assert_eq "4.1b ...status=ready (deliberately lenient — see B5's own header)" "ready" "$(json_field '.status' "$OUT")"
@@ -464,6 +487,7 @@ assert_contains "5.2b ...[design bypass: <reason>] recorded" "[design bypass: th
 assert_not_contains "5.2c ...no design_verdict_hash= token (nothing was bound)" "design_verdict_hash=" "$APPROVAL"
 
 TID6=$(bd create "D2 approve, satisfied design" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID6"
 ART6="$FIXTURE/docs/specs/$TID6.md"
 write_artifact "$ART6" "$TID6"
 printf '%s\n' "$ART6" > "$TRACKING"
@@ -480,6 +504,7 @@ assert_eq "5.3c ...positioned LAST among machine tokens, immediately before ' at
     "$(printf '%s' "$APPROVAL" | grep -qE 'design_verdict_hash=[0-9a-fA-F]{64} at [0-9]{4}-' && echo yes || echo no)"
 
 TID7=$(bd create "D2 approve, stale design" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID7"
 ART7="$FIXTURE/docs/specs/$TID7.md"
 write_artifact "$ART7" "$TID7"
 printf '%s\n' "$ART7" > "$TRACKING"
@@ -628,6 +653,7 @@ printf '\n=== Section 7: the bjx scalar-class discipline (P5) ===\n'
 # ===========================================================================
 
 TID14=$(bd create "D2 scalar class subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID14"
 ART14="$FIXTURE/docs/specs/$TID14.md"
 write_artifact "$ART14" "$TID14"
 printf '%s\n' "$ART14" > "$TRACKING"
@@ -671,6 +697,7 @@ else
 fi
 
 TID15=$(bd create "D2 no-guard mutant subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID15"
 ART15="$FIXTURE/docs/specs/$TID15.md"
 write_artifact "$ART15" "$TID15"
 printf '%s\n' "$ART15" > "$TRACKING"

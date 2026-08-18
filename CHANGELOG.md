@@ -341,6 +341,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     iterates the roles PRESENT in the artifact, so a leftover three-role v4
     artifact still renders with no upgrade step.
 
+- **The design phase gets a starting precondition: a grilling record**
+  (`fkm.5`, v5.0.0 Phase D3). `qa-gate.sh design-record` now refuses
+  (`grilling_record_missing`) unless a `GRILLING v1` record exists on the
+  task or its parent epic.
+
+  - **`qa-gate.sh grilling-record <task-id> --rounds <n> --questions <n>
+    --approaches <n> --unresolved <n> ['<summary>']`** — written by the
+    orchestrator, at root (it ran the dialogue; the designer's own tool list
+    omits `Bash`, so it structurally cannot invoke this). `--approaches`
+    must be at least 2 (`insufficient_approaches` otherwise) — the vendored
+    brainstorming method's own bar. Appends:
+    `GRILLING v1 rounds=<n> questions=<n> approaches=<n> unresolved=<n>
+    vendor_hash=<h> at <ts>: <summary>`. `vendor_hash` is not a flag: it is a
+    live `workflow-manifest.sh hash-file` recompute over the vendored
+    `brainstorming/SKILL.md`, so the record names which method text was in
+    force — later drift in the vendored file cannot retroactively validate a
+    dialogue that never followed it.
+
+  - **The precondition is mechanical, inside `design-record`, not at Stop** —
+    the same reasoning the v4.1 closure gives for the brainstorming ceremony
+    generally: a Stop-time change-set classifier fires after the work it
+    would gate. `--no-grilling '<reason>'` is the audited bypass, for the F1
+    doc-only class and the single-line-typo path.
+
+  - **The precondition reader requires the FULL record grammar, not a bare
+    prefix** (QA R1-F1). The first version checked only `startswith("GRILLING
+    v1 ")`, which a hand-posted comment with none of the real fields
+    satisfied — a lower forgery bar than every sibling reader in this file.
+    The reader now requires the anchored shape the one real writer always
+    produces (four `[0-9]+` counters and a 64-hex `vendor_hash=`), closing
+    that gap without narrowing what a legitimate `grilling-record` call
+    produces.
+
+  - **`.claude/vendor/superpowers/MANIFEST.md` gains a recorded content
+    hash** of `brainstorming/SKILL.md`, asserted against a live recompute by
+    `vendored-skills.test.sh` (94 -> 100 assertions) — a drift detector for
+    the MANIFEST's own claim, separate from the ten surgical modifications'
+    bans.
+
 ### Changed
 
 - **`docs/specs/*.md` is now a GOVERNING ARTIFACT, so a design document no

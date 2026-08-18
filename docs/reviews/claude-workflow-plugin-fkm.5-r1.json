@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.5",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "1a0c9f53cf42ac3dca58179c797aeb5dc71fce0679224823fc0f307f41f8cc83",
+  "risk_threshold": "high",
+  "stop_condition": "Every D3 deliverable (grilling-record subcommand incl. validation ladder and live vendor_hash recompute; MANIFEST.md recorded hash + vendored-skills section 13 with META-10; design-record GRILLING-PRECONDITION incl. parent-epic path and --no-grilling bypass) is traced to a running assertion with a paired negative control, the 27/24/3 denominator is independently verified against the tree, both flagged judgment calls (existence-only semantics; forgery-disclosure framing) are ruled on with evidence, and no critical/high finding remains in qa-gate.sh new code paths.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:6304 (and docs/HOOKS.md GRILLING-PRECONDITION section)",
+      "evidence": "Measured in an isolated fixture (cd fixture && bd init, CLAUDE_PROJECT_DIR set): a hand-posted comment reading exactly GRILLING v1 totally informal, no counters, no vendor_hash SATISFIES the precondition — design-record returned status=recorded. The shipped reader (_grilling_comment_on, qa-gate.sh:6152) validates nothing beyond startswith(GRILLING v1 ). Yet the rounds_not_integer error text claims the counters land in a machine prefix which the precondition reader parses as [0-9]+ and that a malformed value writes a record no reader can tell from absent; docs/HOOKS.md repeats the [0-9]+ claim. Both statements are false of the shipped reader: no reader parses the counters, and a malformed/counter-less record reads as PRESENT, not absent. Anchoring itself verified sound: a prose comment merely CONTAINING GRILLING v1 mid-text still refused grilling_record_missing (measured, same fixture).",
+      "description": "Prose describes an enforcement that does not exist — the class this repo treats as a defect (e2j is the standing example). Writer-side validation is real and correct, so the failure direction stays closed at the writer; but the effective forgery bar for GRILLING v1 is 12 prefix characters, lower than every sibling reader (design-satisfied re-derives the artifact hash and matches design_hash; approve binds change_set_hash; completion binds payload_sha). Cheap fix does both jobs at once: tighten _grilling_comment_on to match the full writer grammar (rounds=[0-9]+ ... vendor_hash=[0-9a-f]{64}) — backward-compatible since the only real writer already guarantees it — or correct the two prose sites."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh gate_baseline_exclude_tracked / gate-baseline (PRE-EXISTING mechanism, untouched by this diff)",
+      "evidence": "gate-baseline captured 2026-08-17T16:37:37Z at head=238d26b lists the 7 e2e fixture qa-gate.sh copies as pre-existing dirt (D2 cycle). d8f75ab then COMMITTED that dirt; D3 make sync-fixtures re-dirtied the same 7 paths with NEW content. Reconcile subtracts by path and never consults the recorded head= (written at qa-gate.sh:342, read nowhere), so the 7 shipped copies are invisible to changed-files.txt and outside the change set this approval binds (16 bound vs 23 declared in the implementer completion record). Verified all 7 are byte-identical to the reviewed canonical qa-gate.sh (cmp -s, this session), so zero unreviewed content ships.",
+      "description": "Not a D3 defect — the baseline machinery is prior work and this diff does not touch it — but D3 is the first cycle where the stale-baseline path measurably shortened a bound change set. A baselined path whose dirt has since been committed should not keep absorbing NEW dirt. Filed as a follow-up Beads task (discovered-from this review)."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "info",
+      "location": ".claude/scripts/tests/grilling-record.test.sh:12-15 (header)",
+      "evidence": "Header says the designer.md-omits-Bash structural guarantee is asserted directly rather than assumed; no assertion in THIS file checks designer.md. The assertion exists in design-artifact.test.sh:781-783 (5.1/5.2).",
+      "description": "System-level claim is true; local phrasing could send a reader hunting in the wrong file. One-line pointer would fix it."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "info",
+      "location": ".claude/tests/component/lib/fixture.sh:742 (mk_fixture vendor symlink)",
+      "evidence": "Measured on this macOS host: ln -sf <dir> <existing-symlink-to-dir> dereferences and creates a stray link INSIDE the real target (reproduced in scratch). Unreachable today: mk_fixture mints a fresh mktemp -d root per call and takes no root parameter, so the destination never pre-exists; grep found zero component-tier writes under any vendor path; cleanup rm -rf does not traverse symlinks.",
+      "description": "ln -sfn (portable across BSD/GNU) would close the latent hazard if anyone later adds a root parameter or re-init path. The symlink-into-repo shape otherwise matches the tier established convention (every .claude/scripts/*.sh is already symlinked to the real repo)."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "info",
+      "location": ".claude/scripts/qa-gate.sh:6327-6340 (vendor_hash_unavailable / hash_tool_unavailable arms)",
+      "evidence": "No spec exercises either refusal arm (the grilling-record.test.sh fixture always provides the vendored file and tool). The arms fired during development per the implementer notes (mk_fixture discovery) but carry no pinned assertion.",
+      "description": "Failure-injection legs (delete the vendored file in a copy fixture, expect vendor_hash_unavailable exit 2) would pin the fail-closed contract the code comments promise."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "info",
+      "location": ".claude/scripts/qa-gate.sh:6169-6183 (grilling_record_exists, one-level parent walk)",
+      "evidence": "get_parent_epic returns the DIRECT parent only. This repo mints grandchild ids (e.g. claude-workflow-plugin-fkm.1.11): a grilling recorded on the top epic is invisible to a grandchild task whose direct parent is the intermediate task.",
+      "description": "Matches the documented contract (task OR ITS PARENT EPIC) and the spec tests exactly that; worth one sentence in docs/HOOKS.md if deep hierarchies ever carry design phases, since the remediation message will correctly name the two usable targets."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

@@ -198,6 +198,12 @@ ART="$(design_artifact_path "$TID")"
 write_artifact "$ART" "$TID"
 printf '%s\n' "$ART" > "$TRACK/changed-files.txt"
 bash "$QG" enter "$TID" >/dev/null 2>&1
+# v5 D3 (claude-workflow-plugin-fkm.5): design-record now refuses
+# grilling_record_missing without one; seed it first, through the real
+# writer. This file exercises the DESIGN-DISCIPLINE Stop-hook re-check, not
+# the grilling precondition — seed_grilling_record is the shared fixture
+# helper every other seeding path in this tier now goes through for free.
+seed_grilling_record "$TID" "$FIXTURE" >/dev/null 2>&1
 CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" design-record "$TID" >/dev/null 2>&1
 HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$WM" hash-file "$ART")
 printf '%s' "$VALID_VERDICT" | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" design-review-record "$TID" --design-hash "$HASH" >/dev/null 2>&1
@@ -372,6 +378,7 @@ if [ "$STRIP_RC" -eq 0 ]; then
     write_artifact "$ART_META" "$TID_META"
     printf '%s\n' "$ART_META" > "$TRACK/changed-files.txt"
     bash "$QG" enter "$TID_META" >/dev/null 2>&1
+    seed_grilling_record "$TID_META" "$FIXTURE" >/dev/null 2>&1
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" design-record "$TID_META" >/dev/null 2>&1
     HASH_META=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$WM" hash-file "$ART_META")
     printf '%s' "$VALID_VERDICT" | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" design-review-record "$TID_META" --design-hash "$HASH_META" >/dev/null 2>&1

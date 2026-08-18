@@ -51,7 +51,15 @@
 #       identity ("design-claude") — the design-satisfied precondition
 #       `qa-gate.sh approve` now REFUSES without (unless --no-design). Folded
 #       into seed_review_records above; specs testing the design refusal
-#       itself simply do not call it.
+#       itself simply do not call it. Since v5 D3 (fkm.5) this ALSO seeds a
+#       GRILLING v1 record first, via seed_grilling_record below — design-
+#       record now refuses grilling_record_missing without one.
+#
+#   seed_grilling_record <task-id> [root]
+#       v5 D3 (fkm.5): a real `qa-gate.sh grilling-record` — the precondition
+#       `design-record` now REFUSES without (unless --no-grilling). Folded
+#       into seed_design_verdict above; specs testing the grilling
+#       precondition itself do not call it (see grilling-record.test.sh).
 #
 #   bd_show_with_comments <task-id>
 #       `bd show --json` that always carries comment BODIES, across the
@@ -566,6 +574,41 @@ JSON
 # refresh the impact report AFTER this returns (seed_review_records already
 # does, for review-record's own new path, and this function is called before
 # that refresh specifically so one pass covers both).
+# seed_grilling_record <tid> [root] — the grilling-record precondition (v5 D3
+# / claude-workflow-plugin-fkm.5): design-record now REFUSES
+# (grilling_record_missing) unless a `GRILLING v1` record exists on the task
+# or its parent epic. Folded into seed_design_verdict for the identical
+# reason seed_completion_record and seed_design_verdict are folded into
+# seed_review_records (see their own headers): every spec seeding through the
+# shared helper acquires the precondition for free. Specs testing the
+# grilling precondition itself, or the design refusal in isolation
+# (verify-design-discipline.sh, which calls design-record directly and does
+# NOT go through this shared helper), call this directly or pass
+# --no-grilling themselves — see grilling-record.test.sh for the dedicated
+# spec.
+#
+# SEEDED THROUGH THE REAL WRITER, like every other record this file seeds: a
+# change to the record grammar must break these specs loudly instead of
+# leaving them asserting against a shape nothing produces. This is also why
+# mk_fixture symlinks .claude/vendor now — this writer hashes the vendored
+# brainstorming SKILL.md, and without it this call refuses
+# vendor_hash_unavailable.
+seed_grilling_record() {
+    local tid="$1"
+    local root="${2:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+    if [ -z "$tid" ]; then
+        printf 'seed_grilling_record: <task-id> is required\n' >&2
+        return 1
+    fi
+    if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
+            grilling-record "$tid" --rounds 3 --questions 5 --approaches 2 --unresolved 0 \
+            "seeded fixture: component-tier harness only" >/dev/null 2>&1; then
+        printf 'seed_grilling_record: qa-gate.sh grilling-record failed for %s\n' "$tid" >&2
+        return 1
+    fi
+    return 0
+}
+
 seed_design_verdict() {
     local tid="$1"
     local root="${2:-${CLAUDE_PROJECT_DIR:-$PWD}}"
@@ -573,6 +616,11 @@ seed_design_verdict() {
         printf 'seed_design_verdict: <task-id> is required\n' >&2
         return 1
     fi
+    # v5 D3 (claude-workflow-plugin-fkm.5): design-record now refuses
+    # `grilling_record_missing` without a GRILLING v1 record on the task or
+    # its parent epic — seed one FIRST, through the real writer, exactly as
+    # this function already does for every other precondition it acquires.
+    seed_grilling_record "$tid" "$root" || return 1
     local sanitized art design_hash
     sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
     mkdir -p "$root/docs/specs" 2>/dev/null || true
@@ -681,6 +729,29 @@ mk_fixture() {
     if [ -f "$plugin/.claude/skills/workflow-engine/SKILL.md" ]; then
         ln -sf "$plugin/.claude/skills/workflow-engine/SKILL.md" \
             "$root/.claude/skills/workflow-engine/SKILL.md"
+    fi
+
+    # v5 D3 (claude-workflow-plugin-fkm.5): the vendor tree, needed by
+    # `qa-gate.sh grilling-record` — it hashes
+    # .claude/vendor/superpowers/brainstorming/SKILL.md via
+    # workflow-manifest.sh hash-file, and without it every call refuses
+    # `vendor_hash_unavailable`. ONE symlink of the whole directory (like the
+    # workflow-engine skill above), not a per-file copy: the vendor tree is
+    # read-only reference material nothing in this tier writes to.
+    #
+    # `-n` (QA R1-F4): `mk_fixture` mints a fresh `mktemp -d` root per call
+    # and takes no root parameter, so `$root/.claude/vendor` never pre-exists
+    # today — the hazard `-n` closes is UNREACHABLE at present. It is real
+    # though, measured directly: `ln -sf <dir> <existing-symlink-to-dir>`
+    # DEREFERENCES the existing link and creates a stray same-named link
+    # INSIDE the real target instead of re-pointing the original — reproduced
+    # in a scratch dir before this line was written. `-n` (POSIX `-h`'s
+    # cross-implementation alias; present on this BSD `ln` per its own man
+    # page, and standard GNU coreutils) treats the destination as an ordinary
+    # entry rather than following it, so a future caller that adds a `root`
+    # parameter or a re-init path cannot reopen this latently.
+    if [ -d "$plugin/.claude/vendor" ]; then
+        ln -sfn "$plugin/.claude/vendor" "$root/.claude/vendor"
     fi
 
     # Minimal settings.json so the manifest is well-formed in case the

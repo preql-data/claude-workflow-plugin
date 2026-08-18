@@ -2309,8 +2309,27 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               truncated by the stricter class) — both REJECTED, never
               sanitised (the claude-workflow-plugin-bjx class).
               `approve` REFUSES without this record.
+  grilling-record <task-id> --rounds <n> --questions <n> --approaches <n>
+                  --unresolved <n> ['<summary>']
+              v5 D3 (fkm.5): record that a grilling dialogue happened before
+              the design phase (.claude/vendor/superpowers/brainstorming/
+              SKILL.md). Written by the ORCHESTRATOR, AT ROOT — it ran the
+              dialogue; the designer's own tool list omits Bash, so it
+              cannot invoke this. Every counter must be a non-negative
+              integer; `--approaches` additionally REFUSES below 2
+              (insufficient_approaches — the vendored method's own bar:
+              "Propose 2-3 different approaches with trade-offs"). Appends:
+                GRILLING v1 rounds=<n> questions=<n> approaches=<n>
+                unresolved=<n> vendor_hash=<h> at <ts>: <summary>
+              `vendor_hash` is NOT a flag — it is a live workflow-manifest.sh
+              `hash-file` recompute over the vendored SKILL.md, taken at
+              record time, so the record names WHICH METHOD TEXT was in
+              force. `design-record` REFUSES (grilling_record_missing)
+              without at least one of these on the task or its parent epic,
+              unless `--no-grilling '<reason>'`.
   design-record <task-id> [--file <artifact>] [--designer <id>]
-                [--accept-foreign-paths '<reason>'] ['<summary>']
+                [--accept-foreign-paths '<reason>'] [--no-grilling '<reason>']
+                ['<summary>']
               v5 D1: record the DESIGNER's artifact and bind its bytes.
               Validates via review-check.sh `validate-design` (the ONE
               validator), hashes the artifact's RAW BYTES through
@@ -2343,6 +2362,12 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               moves between the validator's read and the hash — in CONTENT or
               in CONTAINMENT — rather than binding bytes no validator saw, or
               bytes never shown to be the declared directory's.
+              REFUSES `grilling_record_missing` (v5 D3) unless a `GRILLING v1`
+              record exists on this task or its parent epic — see
+              grilling-record above. `--no-grilling '<reason>'` is the audited
+              bypass (the F1 doc-only class, or a genuinely single-line-typo
+              design); the reason lands in the record as
+              `[grilling bypass: <reason>]`.
   design-review-record <task-id> --design-hash <sha256> [--file <path>]
               v5 D2 (fkm.4): record the design REVIEWER's verdict — the split
               D1's design-record documents ("that is D2's own record, with its
@@ -6088,6 +6113,267 @@ is_sha256_hex() {
     [ "${#v}" -eq 64 ]
 }
 
+# get_parent_epic <tid> — <tid>'s parent id, or empty (no parent, or bd could
+# not be read). Same "exit status is the signal, not a global" shape as
+# get_labels: `p="$(get_parent_epic "$tid")"; rc=$?` lets a caller that needs
+# to distinguish "confirmed no parent" from "could not check at all" do so.
+#
+# `bd show <id> --json` inlines `.parent` as a top-level scalar — measured
+# directly (bd 1.2.2): the key is ABSENT (not null) on a parentless task, and
+# a plain string on one with a parent. Same array-or-object shape ambiguity
+# get_labels already handles across the bd version range, so the same
+# ternary; `// ""` collapses "absent key" and "present but empty" to the one
+# answer a caller actually needs (falsy either way).
+get_parent_epic() {
+    local raw rc
+    raw=$(bd show "$1" --json 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        return "$rc"
+    fi
+    printf '%s' "$raw" \
+        | jq -r 'if type == "array" then .[0].parent else .parent end // ""' 2>/dev/null
+}
+
+# _grilling_comment_on <tid> — 0 when <tid> ITSELF (never a relative) carries a
+# comment matching the FULL GRILLING v1 machine prefix; 1 otherwise, including
+# on any read failure.
+#
+# QA R1-F1 (claude-workflow-plugin-fkm.5, reviewed_hash 1a0c9f53): the first
+# version of this check was `startswith("GRILLING v1 ")` alone, MEASURED to
+# accept a hand-posted comment reading exactly
+# `GRILLING v1 totally informal, no counters, no vendor_hash` — design-record
+# recorded over it. That is a lower forgery bar than every sibling reader:
+# latest_design_artifact_hash captures a real `design_hash=` value,
+# `approve` binds `change_set_hash=`, completion binds `payload_sha=` — each
+# requires the forger to approximate a SHAPED field, not just twelve literal
+# prefix characters. The anchored `test(...)` below requires the reader to
+# see the SAME grammar the one real writer (cmd_grilling_record) always
+# produces — four `[0-9]+` counters and a 64-hex `vendor_hash=`, in order,
+# immediately before ` at ` — which is backward-compatible with every record
+# the shipped writer has ever produced (it cannot emit anything else) and
+# closes the forgery gap to the same bar the siblings already hold. This is
+# also what makes the ERROR TEXT on `rounds_not_integer` et al. true: those
+# messages say "the precondition reader parses [each counter] as [0-9]+" —
+# before this fix that was false of THIS reader (which parsed nothing), and
+# is genuinely true of it now.
+#
+# Still anchored at the START only (`^`, no trailing `$`) and never a
+# substring test — the same reasoning latest_design_artifact_hash documents
+# at length: agents quote record grammars in prose constantly (this very
+# file's --help text is a standing example), and a quotation must not
+# satisfy a precondition a real dialogue is supposed to gate. The free-text
+# `<summary>` after `at <ts>: ` is deliberately UNconstrained here, same as
+# every sibling reader leaves its own trailing prose unparsed.
+_grilling_comment_on() {
+    local tid="${1:-}" raw
+    [ -n "$tid" ] || return 1
+    raw=$(bd_show_with_comments "$tid") || return 1
+    [ -n "$raw" ] || return 1
+    printf '%s' "$raw" | jq -e '
+        (if type == "array" then .[0].comments else .comments end) // []
+# GRILLING-READER-GRAMMAR BEGIN (R1-F1)
+        | any(.[]; .text | test(
+            "^GRILLING v1 rounds=[0-9]+ questions=[0-9]+ approaches=[0-9]+ unresolved=[0-9]+ vendor_hash=[0-9a-f]{64} at "
+          ))
+# GRILLING-READER-GRAMMAR END (R1-F1)
+    ' >/dev/null 2>&1
+}
+
+# grilling_record_exists <tid> — 0 when a `GRILLING v1 ` record exists on <tid>
+# OR ON ITS PARENT EPIC; 1 otherwise, INCLUDING when bd or the task cannot be
+# reached at all. FAIL-CLOSED, matching designer_touched_source's own choice
+# for the identical reason (this function's own header, and the block below
+# that calls it): an unestablished answer is not proof a grilling happened.
+#
+# The record carries no `iteration=` field and this reader does not ask
+# "is the LATEST one still fresh" — unlike DESIGN-REVIEW's amendment
+# discipline, a grilling is not re-validated against a later artifact hash by
+# this check. It answers one question only: did AT LEAST ONE grilling happen
+# on this task or its epic, ever. The vendor_hash each record carries is for a
+# HUMAN auditor asking "was the method text current when this happened" —
+# this precondition does not read it.
+grilling_record_exists() {
+    local tid="${1:-}"
+    [ -n "$tid" ] || return 1
+    command -v bd >/dev/null 2>&1 || return 1
+    if _grilling_comment_on "$tid"; then
+        return 0
+    fi
+    local parent
+    parent=$(get_parent_epic "$tid") || parent=""
+    [ -n "$parent" ] || return 1
+    _grilling_comment_on "$parent"
+}
+
+# cmd_grilling_record — v5 D3 (claude-workflow-plugin-fkm.5).
+#
+#   grilling-record <task-id> --rounds <n> --questions <n> --approaches <n>
+#                   --unresolved <n> '<summary>'
+#
+#   GRILLING v1 rounds=<n> questions=<n> approaches=<n> unresolved=<n>
+#     vendor_hash=<h> at <ts>: <summary>
+#
+# Same validation-ladder shape as grade-record / design-review-record.
+#
+# WRITTEN BY THE ORCHESTRATOR, AT ROOT — it ran the dialogue this records.
+# Nothing HERE checks that identity, and that is a considered choice rather
+# than an omission: the record carries no `who=` field for a check to compare
+# against, because there is no second identity in this picture the way
+# designer/reviewer is a pair — only the orchestrator conducted the actual
+# dialogue with the human, so only it can honestly state rounds/questions/
+# approaches/unresolved. The structural guarantee is upstream of this script:
+# designer.md's tool list omits Bash entirely, so the designer cannot invoke
+# this subcommand at all, and no specialist prompt ever instructs one to.
+#
+# approaches >= 2 IS THE VENDORED METHOD'S OWN BAR (else insufficient_
+# approaches) — .claude/vendor/superpowers/brainstorming/SKILL.md: "Propose
+# 2-3 different approaches with trade-offs".
+#
+# vendor_hash IS NOT A FLAG — a caller cannot assert it, only this script can
+# measure it. It is a live workflow-manifest.sh `hash-file` recompute over the
+# vendored brainstorming SKILL.md, taken at record time: the SAME instrument
+# design-record uses for the design artifact, under the SAME "continuous
+# enforcement is the live recompute, not a label" doctrine. The point is
+# naming WHICH METHOD TEXT was in force when the dialogue happened, so later
+# drift in the vendored file cannot retroactively validate a dialogue that
+# never followed it. This is a SEPARATE, orthogonal integrity claim from
+# MANIFEST.md's own recorded hash (vendored-skills.test.sh section 13): that
+# one asserts the MANIFEST is honest about the file's CURRENT bytes; this one
+# asserts what a PAST dialogue's record saw. Neither reads the other.
+cmd_grilling_record() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "grilling-record" "" "missing_task_id" \
+            "grilling-record requires <task-id> as first positional argument" \
+            "qa-gate.sh grilling-record <task-id> --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'"
+        exit 1
+    fi
+    shift || true
+
+    local rounds="" questions="" approaches="" unresolved="" summary=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --rounds)
+                rounds="${2:-}"
+                if [ -z "$rounds" ]; then
+                    emit_error_json "grilling-record" "$tid" "missing_rounds" \
+                        "--rounds requires a value" \
+                        "qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --questions)
+                questions="${2:-}"
+                if [ -z "$questions" ]; then
+                    emit_error_json "grilling-record" "$tid" "missing_questions" \
+                        "--questions requires a value" \
+                        "qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --approaches)
+                approaches="${2:-}"
+                if [ -z "$approaches" ]; then
+                    emit_error_json "grilling-record" "$tid" "missing_approaches" \
+                        "--approaches requires a value" \
+                        "qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --unresolved)
+                unresolved="${2:-}"
+                if [ -z "$unresolved" ]; then
+                    emit_error_json "grilling-record" "$tid" "missing_unresolved" \
+                        "--unresolved requires a value" \
+                        "qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                if [ -z "$summary" ]; then summary="$1"; else summary="$summary $1"; fi
+                shift || true
+                ;;
+        esac
+    done
+
+    require_bd "grilling-record" "$tid"
+
+    # --- each counter: required, and a non-negative integer -----------------
+    # This is a CLI argument — already a string, so there is no JSON "type" to
+    # check first, unlike grade-record's iteration. Go straight to the shape
+    # the machine prefix needs: [0-9]+, matching iteration_not_integer's own
+    # reasoning (interpolated unguarded, a negative or fractional value would
+    # write a record this file's own readers could not parse back).
+    local field val
+    for field in rounds questions approaches unresolved; do
+        case "$field" in
+            rounds) val="$rounds" ;;
+            questions) val="$questions" ;;
+            approaches) val="$approaches" ;;
+            unresolved) val="$unresolved" ;;
+        esac
+        if [ -z "$val" ]; then
+            emit_error_json "grilling-record" "$tid" "missing_$field" \
+                "--$field is required" \
+                "qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'"
+            exit 1
+        fi
+        case "$val" in
+            ''|*[!0-9]*)
+                emit_error_json "grilling-record" "$tid" "${field}_not_integer" \
+                    "--$field='$val' is not a non-negative integer; it is interpolated into the GRILLING record's machine prefix, which the precondition reader parses as [0-9]+ — a negative or fractional value writes a record no reader can tell from absent" \
+                    "qa-gate.sh grilling-record $tid --$field <non-negative integer>"
+                exit 1
+                ;;
+        esac
+    done
+
+    # --- the vendored method's own bar --------------------------------------
+    if [ "$approaches" -lt 2 ]; then
+        emit_error_json "grilling-record" "$tid" "insufficient_approaches" \
+            "approaches=$approaches is below the vendored brainstorming method's own bar of at least 2 (.claude/vendor/superpowers/brainstorming/SKILL.md: \"Propose 2-3 different approaches with trade-offs\"). Grill again — a genuine second approach, not a restatement of the first — before recording" \
+            "qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches 2 --unresolved <n> '<summary>'"
+        exit 1
+    fi
+
+    [ -n "$summary" ] || summary="grilling recorded"
+
+    # --- vendor_hash: a live recompute, never a caller-supplied value -------
+    local vendored_skill manifest_tool vendor_hash vh_rc=0
+    vendored_skill="$PROJECT_DIR/.claude/vendor/superpowers/brainstorming/SKILL.md"
+    manifest_tool="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+    if [ ! -f "$manifest_tool" ]; then
+        emit_error_json "grilling-record" "$tid" "hash_tool_unavailable" \
+            "cannot hash the vendored brainstorming method: workflow-manifest.sh is missing at $manifest_tool. FAILS CLOSED — a record that cannot name which method text was in force is a record the gate would trust for nothing" \
+            "restore .claude/scripts/workflow-manifest.sh"
+        exit 2
+    fi
+    vendor_hash=$(bash "$manifest_tool" hash-file "$vendored_skill" 2>/dev/null) || vh_rc=$?
+    if [ "$vh_rc" -ne 0 ] || ! is_sha256_hex "$vendor_hash"; then
+        emit_error_json "grilling-record" "$tid" "vendor_hash_unavailable" \
+            "the vendored brainstorming method ($vendored_skill) could not be hashed into 64 hex characters (workflow-manifest.sh hash-file exited $vh_rc, produced '${vendor_hash:-<empty>}'). Refused rather than recorded with a placeholder, for the same reason design-record refuses an unhashable artifact: a degradation sentinel is CONSTANT and would compare equal to itself forever" \
+            "bash .claude/scripts/workflow-manifest.sh hash-file $vendored_skill"
+        exit 2
+    fi
+
+    # --- write ---------------------------------------------------------------
+    assert_record_scalar "grilling-record" "$tid" "task" "$tid"
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="GRILLING v1 rounds=$rounds questions=$questions approaches=$approaches unresolved=$unresolved vendor_hash=$vendor_hash at $ts: $summary"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "grilling-record" "$tid" "recorded" \
+        "comment posted at $ts: $comment_text"
+}
+
 cmd_design_record() {
     local tid="${1:-}"
     if [ -z "$tid" ]; then
@@ -6100,8 +6386,20 @@ cmd_design_record() {
     shift || true
 
     local artifact="" designer="designer" summary="" accept_foreign=0 foreign_reason=""
+    local no_grilling=0 grilling_bypass_reason=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            --no-grilling)
+                grilling_bypass_reason="${2:-}"
+                if [ -z "$grilling_bypass_reason" ]; then
+                    emit_error_json "design-record" "$tid" "missing_grilling_bypass_reason" \
+                        "--no-grilling requires a reason; it is recorded in the audit trail" \
+                        "qa-gate.sh design-record $tid --no-grilling '<reason>'"
+                    exit 1
+                fi
+                no_grilling=1
+                shift 2 || true
+                ;;
             --file)
                 artifact="${2:-}"
                 if [ -z "$artifact" ]; then
@@ -6143,6 +6441,33 @@ cmd_design_record() {
     [ -n "$summary" ] || summary="design artifact recorded"
 
     require_bd "design-record" "$tid"
+
+    # --- GRILLING-PRECONDITION -------------------------------------------
+    # v5 D3 (claude-workflow-plugin-fkm.5). The design phase begins with a
+    # grilling dialogue (.claude/vendor/superpowers/brainstorming/SKILL.md);
+    # design-record refuses to bind an artifact for a task nobody grilled for.
+    # THIS IS THE PRE-DELEGATION PATH AND IT IS A SCRIPT, so the check is
+    # mechanical rather than living at Stop — the same reasoning the v4.1
+    # closure gives for the brainstorming ceremony generally: a Stop-time
+    # change-set classifier fires AFTER the work it would gate, and by the
+    # time an implementer's Stop hook runs, the moment to have grilled is long
+    # past. Checked here, first, before any of the containment/hash work below
+    # — a task with no grilling record should fail fast on that, not on an
+    # unrelated path or hash detail three checks later.
+    #
+    # Carve-out `--no-grilling '<reason>'` for the F1 doc-only class and the
+    # single-line-typo path — the SAME two exemptions orchestrator.md already
+    # names for skipping the brainstorming read (and therefore the whole
+    # design phase) entirely, reused here for the rarer case where a design
+    # record is still produced for work that fell under them.
+# GRILLING-PRECONDITION BEGIN
+    if [ "$no_grilling" != "1" ] && ! grilling_record_exists "$tid"; then
+        emit_error_json "design-record" "$tid" "grilling_record_missing" \
+            "no GRILLING v1 record exists on $tid or its parent epic. The design phase begins with a grilling dialogue (.claude/vendor/superpowers/brainstorming/SKILL.md); design-record refuses to bind an artifact nobody grilled for. Record it (run by the orchestrator, at root — it is the one that ran the dialogue): qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'. For the F1 doc-only class or a genuinely single-line-typo-fix design, bypass instead: qa-gate.sh design-record $tid --no-grilling '<reason>'" \
+            "qa-gate.sh grilling-record $tid --rounds <n> --questions <n> --approaches <n> --unresolved <n> '<summary>'"
+        exit 1
+    fi
+# GRILLING-PRECONDITION END
 
     # --- the artifact is DERIVED; --file only ASSERTS that derivation --------
     #
@@ -6402,7 +6727,8 @@ cmd_design_record() {
     # must TRUST cannot live in that space; `design_hash` is a machine token
     # before the timestamp for precisely that reason.
     local record_suffix=""
-    [ "$accept_foreign" = "1" ] && record_suffix=" [foreign paths accepted: $foreign_reason]"
+    [ "$accept_foreign" = "1" ] && record_suffix="$record_suffix [foreign paths accepted: $foreign_reason]"
+    [ "$no_grilling" = "1" ] && record_suffix="$record_suffix [grilling bypass: $grilling_bypass_reason]"
 
     local ts comment_text
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -7218,6 +7544,7 @@ case "$SUB" in
     grade-record) cmd_grade_record "$@" ;;
     review-record)   cmd_review_record "$@" ;;
     completion-record) cmd_completion_record "$@" ;;
+    grilling-record) cmd_grilling_record "$@" ;;
     design-record)   cmd_design_record "$@" ;;
     design-review-record) cmd_design_review_record "$@" ;;
     design-gate-precheck) cmd_design_gate_precheck "$@" ;;

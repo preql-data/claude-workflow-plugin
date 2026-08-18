@@ -2124,6 +2124,101 @@ METatest, cap_terminated with its own METatest, and the bjx scalar-class
 discipline) and `.claude/tests/component/specs/verify-design-discipline.sh`
 (the Stop-hook re-check).
 
+### A design cannot be recorded without having been grilled first (`GRILLING-PRECONDITION`)
+
+v5 Phase D3 (`claude-workflow-plugin-fkm.5`) adds the design phase's own
+starting precondition: `qa-gate.sh design-record` refuses
+(`grilling_record_missing`) unless a `GRILLING v1` record exists on the task
+**or its parent epic**. The design phase begins with a grilling dialogue
+(`.claude/vendor/superpowers/brainstorming/SKILL.md`'s question-at-a-time
+method); this check is what makes skipping it observable rather than merely
+discouraged.
+
+```
+qa-gate.sh grilling-record <task-id> --rounds <n> --questions <n> \
+    --approaches <n> --unresolved <n> ['<summary>']
+
+GRILLING v1 rounds=<n> questions=<n> approaches=<n> unresolved=<n>
+  vendor_hash=<h> at <ts>: <summary>
+```
+
+**Written by the orchestrator, at root — it ran the dialogue.** Nothing in
+the script checks that identity, and that is a considered choice rather than
+a gap: the record carries no `who=` field for a check to compare against,
+because there is no second identity in this picture (unlike designer/
+reviewer). The structural guarantee sits one layer up — `designer.md`'s tool
+list omits `Bash` entirely, so the designer cannot invoke this subcommand at
+all, and no specialist prompt ever instructs one to.
+
+**`approaches` must be at least 2** (else `insufficient_approaches`) — the
+vendored brainstorming method's own bar ("Propose 2-3 different approaches
+with trade-offs"), not an arbitrary threshold. `rounds`/`questions`/
+`unresolved` are each required and must be non-negative integers
+(`<field>_not_integer` otherwise) — every counter is interpolated into the
+record's machine prefix, which the precondition reader parses as `[0-9]+`.
+
+**`vendor_hash` is not a flag.** It is a *live* `workflow-manifest.sh
+hash-file` recompute over the vendored `brainstorming/SKILL.md`, taken at
+record time — the same instrument `design-record` uses for the design
+artifact, under the same "continuous enforcement is the live recompute, not
+a label" doctrine. The point is naming *which method text was in force* when
+the dialogue happened, so later drift in the vendored file cannot
+retroactively validate a dialogue that never followed it. This is a
+*separate*, orthogonal integrity claim from `.claude/vendor/superpowers/
+MANIFEST.md`'s own recorded hash (below): that one asserts the MANIFEST is
+honest about the file's *current* bytes; a `GRILLING v1` record asserts what
+a *past* dialogue's record saw. Neither reads the other.
+
+**The precondition itself** (`design-record`'s `# GRILLING-PRECONDITION
+BEGIN/END` block) reads `grilling_record_exists`: it checks the task's own
+comments first, then — only if absent — its **direct** parent's, via `bd show
+<id> --json`'s inlined `.parent` field (one level only — a grilling recorded
+on a grandparent epic is invisible to a grandchild task; this matches the
+documented contract of "the task or its parent epic" exactly, so a deeper
+hierarchy that wants a design phase records the grilling on the immediate
+parent, not a more distant ancestor). Anchored on the FULL machine-prefix
+grammar — `^GRILLING v1 rounds=[0-9]+ questions=[0-9]+ approaches=[0-9]+
+unresolved=[0-9]+ vendor_hash=[0-9a-f]{64} at ` — never a bare prefix test and
+never a substring search (QA R1-F1: an earlier version checked only
+`startswith("GRILLING v1 ")`, MEASURED to accept a hand-posted comment
+carrying none of the real fields; the tightened grammar requires the SAME
+shape the one real writer always produces, closing that forgery gap to the
+bar every other record reader in this file already holds). FAIL-CLOSED — bd
+unreachable, the task
+unreadable, or no record on either task or epic all refuse.
+
+**This is the pre-delegation path, and it is a script — not Stop.** Same
+reasoning the v4.1 closure gives for the brainstorming ceremony generally: a
+Stop-time change-set classifier fires *after* the work it would gate, and by
+the time an implementer's Stop hook runs, the moment to have grilled is long
+past. Checked first inside `cmd_design_record`, before any of the
+containment/hashing work, so an ungrilled task fails fast on that rather
+than on an unrelated path or hash detail three checks later.
+
+**`--no-grilling '<reason>'`** is the audited bypass — the F1 doc-only class
+and the single-line-typo path (`orchestrator.md`'s own existing carve-out
+for skipping the brainstorming read, and therefore the whole design phase,
+entirely), reused here for the rarer case where a design record is still
+produced for work that fell under them. The reason lands in the
+`DESIGN-ARTIFACT` record as `[grilling bypass: <reason>]`.
+
+**`.claude/vendor/superpowers/MANIFEST.md` records its own, separate hash**
+of `brainstorming/SKILL.md`'s current bytes, and
+`.claude/scripts/tests/vendored-skills.test.sh` (section 13) asserts it
+against a live recompute on every run — a drift detector for the MANIFEST's
+own claim, not a content check (the ten surgical modifications and their
+bans, documented above that file's own provenance table, are what police
+content).
+
+Pinned by `.claude/scripts/tests/grilling-record.test.sh` (the validation
+ladder, the record grammar and vendor_hash, the precondition on the task, on
+the parent epic, the `--no-grilling` bypass, a METatest proving the
+precondition block is load-bearing, a forged-comment regression with its own
+METatest proving the tightened grammar — not the bare prefix it replaced —
+is what refuses it, and failure-injection for both hash-availability
+refusals) and `.claude/scripts/tests/vendored-skills.test.sh` (the
+MANIFEST.md hash claim).
+
 ### The vanished-change-set release (`VANISHED-CHANGE-SET`)
 
 The Stop hook reads the change set **twice**: once at its detection stage, and

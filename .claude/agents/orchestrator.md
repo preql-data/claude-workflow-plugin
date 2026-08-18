@@ -158,6 +158,18 @@ bd_doc_write(task_id="<id>", name="spec", content="""
 
 The QA agent runs a complementary `impact_of` pass during regression assessment (extending J19 — see `.claude/agents/qa.md` section 3a). Doing it on the orchestrator side too is not redundant: the orchestrator's pass shapes the SPEC and the delegation; QA's pass scores the diff that actually landed.
 
+### 1b. Record the grilling before spawning `@designer` (v5 D3)
+
+When the dialogue above concludes and a design phase follows (i.e. you are about to spawn `@designer`, not for ordinary single-domain work), record it — **you are the one that ran it; no subagent can, and `qa-gate.sh design-record` will refuse without this**:
+
+```bash
+bash .claude/scripts/qa-gate.sh grilling-record <task-or-epic-id> \
+    --rounds <n> --questions <n> --approaches <n> --unresolved <n> \
+    '<one-line summary of what was explored and left open>'
+```
+
+Record it on the task if there is one yet, or on the parent epic if you are grilling before any child task exists — `design-record`'s precondition reads either. `--approaches` must be at least 2 (the method's own bar: "Propose 2-3 different approaches with trade-offs"); a lower count refuses `insufficient_approaches` rather than recording a dialogue that skipped it. For the same trivial-work carve-out above, or a design record produced under it, `design-record --no-grilling '<reason>'` is the audited bypass — do not reach for it merely because the dialogue felt short; a short but genuine grilling still records normally. Full behavioral spec: `docs/HOOKS.md` under "A design cannot be recorded without having been grilled first (`GRILLING-PRECONDITION`)".
+
 ### 2. Create Beads task(s)
 
 ```bash
@@ -377,7 +389,7 @@ This is a **pre-delegation convenience, never an enforcement point** — nothing
 - **Exit 0, `"ready"`.** Either the design is genuinely satisfied, or the task never had a design phase at all (`no_design_attempted`) — the ordinary case for most tasks today. Delegate normally.
 - **Exit 4**, error_key one of `design_verdict_missing` / `design_not_satisfied` / `design_hash_unreadable` / `design_artifact_unreadable` / `design_verdict_stale` — a design was STARTED (a `DESIGN-ARTIFACT` record exists on the task) but is not yet satisfied. Do NOT spawn the implementer. Clear it through the design-review relay (section 5e) before your next `Task()` to that specialist.
 
-This check answers exactly one question — is there an unreviewed design in flight on THIS task — and nothing more. It is not the grilling-record precondition (D3, not yet built) and not the decomposition-conformance check (D4, not yet built); those are separate, later phases. Full behavioral spec: `docs/HOOKS.md` under "The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`)".
+This check answers exactly one question — is there an unreviewed design in flight on THIS task — and nothing more. It is not the grilling-record precondition (a separate, mechanical check inside `qa-gate.sh design-record` itself — see section 1b above) and not the decomposition-conformance check (D4, not yet built); those are separate phases and separate call sites. Full behavioral spec: `docs/HOOKS.md` under "The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`)".
 
 ### 5. QA review (mandatory)
 
@@ -777,7 +789,7 @@ Task(
     prompt="""
         ## Design review packet — iteration $ITERATION
         1. The design artifact — docs/specs/$TASK_ID.md (paste verbatim, or the path; the reviewer Reads it directly)
-        2. The grilling record — Beads comment prose on the task/epic, pasted verbatim (today informal; D3 formalises it)
+        2. The grilling record — the `GRILLING v1` comment on the task or its parent epic (v5 D3), pasted verbatim; the reviewer has no Beads-tool grant of its own to pull it
         3. impact_of output for the units' declared files (paste it, or state the degradation plainly if the server is unavailable)
         4. LESSONS.md — the whole ledger, never a filtered slice
     """,

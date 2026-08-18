@@ -105,6 +105,16 @@ mkdir -p "$FIXTURE/.claude/scripts" "$FIXTURE/.claude/.qa-tracking" \
 cp "$PLUGIN_DIR/.claude/scripts/"*.sh "$FIXTURE/.claude/scripts/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
+# v5 D3 (claude-workflow-plugin-fkm.5): design-record's new grilling
+# precondition is seeded via a REAL `qa-gate.sh grilling-record` call below
+# (seed_grilling), which hashes the vendored brainstorming SKILL.md through
+# workflow-manifest.sh hash-file — without it, every seed_grilling call
+# refuses vendor_hash_unavailable and the precondition it exists to satisfy
+# stays unmet.
+mkdir -p "$FIXTURE/.claude/vendor/superpowers/brainstorming"
+cp "$PLUGIN_DIR/.claude/vendor/superpowers/brainstorming/SKILL.md" \
+    "$FIXTURE/.claude/vendor/superpowers/brainstorming/SKILL.md"
+
 if ! command -v bd >/dev/null 2>&1; then
     echo "bd CLI not on PATH — design-artifact tests require Beads."
     exit 2
@@ -242,6 +252,20 @@ ARTIFACT
 }
 
 json_field() { printf '%s' "$2" | jq -r "$1" 2>/dev/null || printf ''; }
+
+# seed_grilling <tid> — v5 D3 (claude-workflow-plugin-fkm.5): design-record
+# now refuses (grilling_record_missing) without a GRILLING v1 record on the
+# task or its parent epic. THIS FILE exercises design-record's OWN mechanics
+# (path derivation, hashing, containment, symlinks, foreign paths, decoys) —
+# every one of those is orthogonal to whether a grilling happened, so every
+# test task below gets one real, minimal grilling-record here rather than
+# re-proving the precondition in fifty places. The precondition itself has
+# its own dedicated spec: grilling-record.test.sh.
+seed_grilling() {
+    local tid="$1"
+    bash "$QG" grilling-record "$tid" --rounds 3 --questions 5 --approaches 2 --unresolved 0 \
+        "design-artifact.test.sh: exercising design-record's own mechanics" >/dev/null 2>&1
+}
 
 # ===========================================================================
 printf '\n=== Section 1: workflow-manifest.sh hash-file — the binding digest ===\n'
@@ -411,6 +435,7 @@ printf '\n=== Section 3: qa-gate.sh design-record — LAYER 2 OF THE EDIT BAN, R
 # ===========================================================================
 
 TID=$(bd create "D1 design subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID"
 if [ -z "$TID" ] || [ "$TID" = "null" ]; then
     echo "harness error: could not create a Beads task"
     exit 2
@@ -509,6 +534,7 @@ assert_contains "3.10b ...and says the check switched off, naming the record tha
 
 # A decoy artifact: its own task_id names a different task.
 DECOY_TID=$(bd create "D1 decoy" -t task -p 2 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$DECOY_TID"
 DECOY_ART="$FIXTURE/docs/specs/$DECOY_TID.md"
 write_artifact "$DECOY_ART" "$TID"        # deliberately the WRONG task id inside
 printf '%s\n' "$DECOY_ART" > "$TRACKING"
@@ -519,6 +545,7 @@ rm -f "$DECOY_ART"
 
 # A malformed artifact: the validator's key is propagated, not flattened.
 BROKEN_TID=$(bd create "D1 broken" -t task -p 2 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$BROKEN_TID"
 BROKEN_ART="$FIXTURE/docs/specs/$BROKEN_TID.md"
 write_artifact "$BROKEN_ART" "$BROKEN_TID"
 sed -i.bak 's|"files": \[ ".claude/scripts/workflow-manifest.sh" \]|"files": []|' "$BROKEN_ART"
@@ -531,6 +558,7 @@ assert_eq "3.12 a schema failure propagates the validator's OWN key, not a gener
 # An EMPTY artifact must never be recorded — this is the leg that makes the
 # "strip the hash and the binding breaks" meta-test non-vacuous.
 EMPTY_TID=$(bd create "D1 empty" -t task -p 2 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$EMPTY_TID"
 EMPTY_ART="$FIXTURE/docs/specs/$EMPTY_TID.md"
 : > "$EMPTY_ART"
 printf '%s\n' "$EMPTY_ART" > "$TRACKING"
@@ -581,6 +609,7 @@ seed_approvable() {
 }
 
 APPR_TID=$(bd create "D1 approve subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$APPR_TID"
 APPR_ART="$FIXTURE/docs/specs/$APPR_TID.md"
 write_artifact "$APPR_ART" "$APPR_TID"
 printf '%s\n' "$APPR_ART" > "$TRACKING"
@@ -670,6 +699,7 @@ assert_eq "4.3d META: the stripped record is still otherwise coherent (no double
 # approval and say why. This is what makes "silent deviation is illegitimate"
 # true rather than aspirational.
 DRIFT_TID=$(bd create "D1 drift subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$DRIFT_TID"
 DRIFT_ART="$FIXTURE/docs/specs/$DRIFT_TID.md"
 write_artifact "$DRIFT_ART" "$DRIFT_TID"
 printf '%s\n' "$DRIFT_ART" > "$TRACKING"
@@ -715,6 +745,7 @@ fi
 cp "$STRIP_DIR/qa-gate.sh" "$FIXTURE/.claude/scripts/qa-gate-stripped.sh"
 chmod +x "$FIXTURE/.claude/scripts/qa-gate-stripped.sh"
 STRIP_TID=$(bd create "D1 strip META subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$STRIP_TID"
 STRIP_ART="$FIXTURE/docs/specs/$STRIP_TID.md"
 write_artifact "$STRIP_ART" "$STRIP_TID"
 printf '%s\n' "$STRIP_ART" > "$TRACKING"
@@ -833,6 +864,7 @@ printf '\n=== Section 6: hostile path spellings, at EVERY entry point ===\n'
 # refusals and none of the controls.
 
 HOSTILE_TID=$(bd create "D1 hostile spellings" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$HOSTILE_TID"
 H_ART="$FIXTURE/docs/specs/$HOSTILE_TID.md"
 write_artifact "$H_ART" "$HOSTILE_TID"
 H_SRC="$FIXTURE/.claude/scripts/pwn.sh"
@@ -924,6 +956,7 @@ assert_eq "6.2d ...while a SOURCE path through that same alias is still FOREIGN"
 # before this fixture was corrected. Containment must be the only thing standing
 # between the link and a record, or these legs measure the decoy check.
 SYMLINK_TID=$(bd create "D1 symlinked artifact" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$SYMLINK_TID"
 SYM_ART="$FIXTURE/docs/specs/$SYMLINK_TID.md"
 SYM_TARGET="$FIXTURE/outside/design-$SYMLINK_TID.md"
 write_artifact "$SYM_TARGET" "$SYMLINK_TID"
@@ -1009,6 +1042,7 @@ assert_eq "6.5d ANTI-OVERREACH: a symlink in an UNDECLARED sibling directory is 
 # validator, then rewrites the artifact before returning. qa-gate.sh is
 # UNMODIFIED, and the write lands exactly in the window the finding names.
 TOCTOU_TID=$(bd create "D1 read-window subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TOCTOU_TID"
 TOC_ART="$FIXTURE/docs/specs/$TOCTOU_TID.md"
 write_artifact "$TOC_ART" "$TOCTOU_TID"
 printf '%s\n' "$TOC_ART" > "$TRACKING"
@@ -1059,6 +1093,7 @@ assert_eq "6.6g CONTROL: the real validator is restored (later sections use it)"
 # test of the containment arm rather than of the drift arm 4.4 already covers.
 # Its positive control is 4.1c, where the same ladder DOES report VERIFIED.
 SWAP_TID=$(bd create "D1 post-record symlink swap" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$SWAP_TID"
 SWAP_ART="$FIXTURE/docs/specs/$SWAP_TID.md"
 write_artifact "$SWAP_ART" "$SWAP_TID"
 printf '%s\n' "$SWAP_ART" > "$TRACKING"
@@ -1099,6 +1134,7 @@ assert_contains "6.7e ...naming containment as the reason, not a hash mismatch �
 # unfixed bytes before `-P` was added. A leg written after a fix that passes
 # proves only that it was written after the fix.
 ESC_TID=$(bd create "D1 dir-symlink escape" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$ESC_TID"
 mkdir -p "$FIXTURE/outside/child"
 ln -sfn "../../outside/child" "$FIXTURE/docs/specs/esc-dir"
 ESC_SRC="$FIXTURE/outside/pwn-escape.sh"
@@ -1177,6 +1213,7 @@ assert_eq "6.9f CONTROL: ...while the SAME spelling in the TRACKER still records
 # content bracket from being what refuses this, which is what makes these legs
 # a test of containment rather than a second test of 6.6.
 CSWAP_TID=$(bd create "D1 containment-window swap" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$CSWAP_TID"
 CSWAP_ART="$FIXTURE/docs/specs/$CSWAP_TID.md"
 write_artifact "$CSWAP_ART" "$CSWAP_TID"
 CSWAP_OUTSIDE="$FIXTURE/outside/cswap-$CSWAP_TID.md"
@@ -1331,6 +1368,7 @@ read_design_binding_unanchored() {
 # real writers: design-record's summary is free text, which is precisely the
 # space the finding is about.
 FORGE_TID=$(bd create "D1 forged-summary subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$FORGE_TID"
 FORGE_ART="$FIXTURE/docs/specs/$FORGE_TID.md"
 write_artifact "$FORGE_ART" "$FORGE_TID"
 # ORDER MATTERS AND IT COST A DEBUGGING ROUND: `enter` RECONCILES the tracker,
@@ -1569,6 +1607,7 @@ assert_eq "9.0 precondition: the harness can spell a trailing newline at all" "1
 # walk resolved THAT, reported the declared directory, and hash-file — following
 # the real chain — bound the OUTSIDE decoy's bytes.
 NLT_TID=$(bd create "D1 newline-named symlink target" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$NLT_TID"
 NLT_ART="$FIXTURE/docs/specs/$NLT_TID.md"
 NLT_DECOY="$FIXTURE/outside/decoy-$NLT_TID.md"
 write_artifact "$NLT_DECOY" "$NLT_TID"
@@ -1593,6 +1632,7 @@ assert_eq "9.1e ...so the task carries no DESIGN-ARTIFACT record at all" "" \
 # CONTROL: an HONEST relative link, same shape, target inside the directory. The
 # -ef check must not refuse a link merely for being one.
 HL_TID=$(bd create "D1 honest relative link" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$HL_TID"
 write_artifact "$FIXTURE/docs/specs/real-$HL_TID.md" "$HL_TID"
 ln -sfn "real-$HL_TID.md" "$FIXTURE/docs/specs/$HL_TID.md"
 printf '%s\n' "$FIXTURE/docs/specs/$HL_TID.md" > "$TRACKING"
@@ -1617,6 +1657,7 @@ assert_eq "9.1g a DANGLING link inside the declared directory is foreign at the 
     "designer_touched_source" \
     "$(json_field '.error_key' "$(hostile_tracker "$FIXTURE/docs/specs/dangling-$HOSTILE_TID.md")")"
 DNG_TID=$(bd create "D1 dangling derived path" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$DNG_TID"
 ln -sfn "gone-$DNG_TID.md" "$FIXTURE/docs/specs/$DNG_TID.md"
 printf '%s\n' "$FIXTURE/docs/specs/$DNG_TID.md" > "$TRACKING"
 assert_eq "9.1h ...while a dangling DERIVED path is refused at the RECORD side, and by absence rather than by containment" \
@@ -1629,6 +1670,7 @@ assert_eq "9.1h ...while a dangling DERIVED path is refused at the RECORD side, 
 # `…/docs/specs` because command substitution ate the pathname's own last byte,
 # both containment checks agreed, and the record bound the outside decoy.
 NLP_TID=$(bd create "D1 newline-named path component" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$NLP_TID"
 ln -sfn "$FIXTURE/outside" "$FIXTURE/docs/specs$NL"
 NLP_DECOY="$FIXTURE/outside/$NLP_TID.md"
 write_artifact "$NLP_DECOY" "$NLP_TID"
@@ -1663,6 +1705,7 @@ assert_eq "9.2f ...binding the real artifact's digest, never the decoy's" "$NLP_
 # stated two lines below the check: "the record carries the HASH and no path,
 # which is only sound while the path is derivable from the task id".
 IMP_TID=$(bd create "D1 impostor named for the task" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$IMP_TID"
 IMP_REAL="$FIXTURE/docs/specs/$IMP_TID.md"
 IMP_FAKE="$FIXTURE/docs/specs/$IMP_TID.md$NL"
 write_artifact "$IMP_REAL" "$IMP_TID"
@@ -1705,6 +1748,7 @@ assert_eq "9.3d CONTROL: the file the task DOES derive records, binding its own 
 #       crosses a command substitution survives (b), which is why the predicates
 #       return an exit status.
 NLD_TID=$(bd create "D1 newline sibling as a symlink" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$NLD_TID"
 NLD_ART="$FIXTURE/docs/specs/$NLD_TID.md"
 rm -rf "$FIXTURE/docs/specs$NL"
 ln -sfn "$FIXTURE/outside" "$FIXTURE/docs/specs$NL"
@@ -1725,6 +1769,7 @@ assert_eq "9.4b RECORD: a link through a newline-named sibling SYMLINK is refuse
 assert_not_contains "9.4b2 ...and the outside decoy's digest reaches NO record" \
     "$NLD_DECOY_SHA" "$(latest_design_record "$NLD_TID")"
 NLD2_TID=$(bd create "D1 newline sibling as a real directory" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$NLD2_TID"
 NLD2_ART="$FIXTURE/docs/specs/$NLD2_TID.md"
 rm -f "$FIXTURE/docs/specs$NL"
 mkdir -p "$FIXTURE/docs/specs$NL"
@@ -1747,6 +1792,7 @@ assert_not_contains "9.4d2 ...and that decoy's digest reaches NO record either" 
 # record side that refused every link with a `..` in its target would pass
 # 9.4b/9.4d and fail this.
 INS_TID=$(bd create "D1 dotdot hop landing inside" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$INS_TID"
 write_artifact "$FIXTURE/docs/specs/ins-real-$INS_TID.md" "$INS_TID"
 ln -sfn "../specs/ins-real-$INS_TID.md" "$FIXTURE/docs/specs/$INS_TID.md"
 printf '%s\n' "$FIXTURE/docs/specs/$INS_TID.md" > "$TRACKING"
@@ -1776,6 +1822,7 @@ rm -rf "$FIXTURE/docs/specs$NL" "$FIXTURE/docs/specs/inside-link.md"
 # observable rather than only the spelling, which is the difference between
 # knowing a rule is enforced and knowing what it is worth.
 HLK_TID=$(bd create "D1 hardlink defeats -ef" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$HLK_TID"
 rm -rf "$FIXTURE/docs/specs$NL"
 mkdir -p "$FIXTURE/docs/specs$NL"
 write_artifact "$FIXTURE/docs/specs/hlk-$HLK_TID.md" "$HLK_TID"
@@ -1793,6 +1840,7 @@ assert_eq "9.5b RECORD: the walk lands in the newline-named directory and the re
 # CONTROL: the identical two-hop chain with no newline anywhere, landing in the
 # declared directory. A walk that refused every two-hop chain would pass 9.5b.
 HLK2_TID=$(bd create "D1 hardlink control" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$HLK2_TID"
 write_artifact "$FIXTURE/docs/specs/hlk2-$HLK2_TID.md" "$HLK2_TID"
 ln -sfn "hlk2-$HLK2_TID.md" "$FIXTURE/docs/specs/hlk2-link-$HLK2_TID.md"
 ln -sfn "../specs/hlk2-link-$HLK2_TID.md" "$FIXTURE/docs/specs/$HLK2_TID.md"

@@ -216,8 +216,16 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # design-satisfied refusal cmd_approve now enforces (B3, with its own
 # META-TEST), the cap_terminated predicate wired into REVIEW-SEPARATION (B4),
 # and design-gate-precheck (B5).
+#
+# 42 -> 43 (claude-workflow-plugin-fkm.5, Phase D3): added
+# grilling-record.test.sh, covering the new `qa-gate.sh grilling-record`
+# subcommand (validation ladder, the vendored method's own approaches>=2
+# bar, and the live vendor_hash recompute), and design-record's new
+# GRILLING-PRECONDITION (refusal with no GRILLING v1 record on the task or
+# its parent epic, success on either, the audited --no-grilling bypass, and
+# a METatest proving the precondition block is load-bearing).
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=42
+EXPECTED_SPECS=43
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

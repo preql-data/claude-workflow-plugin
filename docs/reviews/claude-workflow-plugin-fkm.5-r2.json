@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.5",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "1a0c9f53cf42ac3dca58179c797aeb5dc71fce0679224823fc0f307f41f8cc83",
+  "risk_threshold": "high",
+  "stop_condition": "The r1-to-r2 fix-round delta (five files) is fully enumerated and re-verified: the tightened GRILLING reader refuses the measured prefix-only forgery while the real writer path still records, every retrofitted spec touched by the reader change passes under my own execution on the final tree, and no critical/high finding remains.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh gate-baseline machinery (pre-existing; NOT touched by this change set)",
+      "evidence": "Carried from r1 (R1-F2): the 2026-08-17T16:37:37Z baseline (head=238d26b, a field no reader consults) still subtracts the 7 e2e fixture qa-gate.sh copies from the reconcile even though d8f75ab committed the dirt those entries described, so this cycle re-dirtied them invisibly (make sync-fixtures via Bash cp). Bound change set 16 paths vs 23 declared in the implementer completion record. All 7 copies re-verified byte-identical to the reviewed canonical qa-gate.sh after the fix round (cmp -s) — zero unreviewed content ships.",
+      "description": "Routed to claude-workflow-plugin-b14k (bug, discovered-from fkm.5). Not blocking this change set: the escaped paths are generated duplicates of a reviewed file, and the mechanism at fault is prior work this diff does not touch."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}
