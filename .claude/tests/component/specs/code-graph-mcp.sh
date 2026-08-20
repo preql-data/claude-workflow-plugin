@@ -145,7 +145,7 @@ mcp_call() {
             sleep 0.05
         done
         sleep 1
-    } | CLAUDE_PROJECT_DIR="$SAMPLE" node "$MCP_BIN" > "$out_file" 2>/tmp/code-graph-mcp-stderr.log
+    } | CLAUDE_PROJECT_DIR="$SAMPLE" node "$MCP_BIN" > "$out_file" 2>"$FIXTURE/code-graph-mcp-stderr.log"
 }
 
 # --------------------------------------------------------------------------
@@ -321,8 +321,8 @@ if ! wait_for_index "$INDEX_DB"; then
     FAILED_TESTS+=("code-graph-mcp-2: the lazy build did not persist an index within ${INDEX_WAIT_BUDGET}s (no $INDEX_DB after code_search) — a BUILD FAILURE, not a flake; do not re-run past this")
     printf '  FAIL: code-graph-mcp-2: the lazy build did not persist an index within %ss — expected %s\n' \
         "$INDEX_WAIT_BUDGET" "$INDEX_DB"
-    printf '    (code_search returned ok=%s; check /tmp/code-graph-mcp-stderr.log for indexer errors)\n' \
-        "${SEARCH_OK:-<none>}"
+    printf '    (code_search returned ok=%s; check %s for indexer errors)\n' \
+        "${SEARCH_OK:-<none>}" "$FIXTURE/code-graph-mcp-stderr.log"
 else
     # Round 3b — ask health in a FRESH process. One tool call after the
     # handshake means nothing can interleave, so `healthy` here is a
@@ -476,7 +476,7 @@ else
                 sleep 0.05
             done
             sleep 1
-        } | CLAUDE_PROJECT_DIR="$STUB_SAMPLE" node "$STUB_BIN" > "$out_file" 2>/tmp/code-graph-mcp-stub-stderr.log
+        } | CLAUDE_PROJECT_DIR="$STUB_SAMPLE" node "$STUB_BIN" > "$out_file" 2>"$FIXTURE/code-graph-mcp-stub-stderr.log"
     }
 
     # Build the index against the stubbed server.

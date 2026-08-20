@@ -130,20 +130,46 @@
 #             narrow the predicate to the path-list hash alone (dropping the
 #             tree_fingerprint half) and a real content-only edit to an
 #             already-tracked file is WRONGLY read as "unchanged"
+#   7  claude-workflow-plugin-j7kk R1-F3 — the F1-declined NOTE composition arm
+#      must cover EVERY status F1 was eligible or unreadable on, including
+#      GATE_STATUS=unavailable (message-only: nothing here changes whether
+#      the Stop blocks, only whether it explains why)
+#   META 7 — drop `unavailable` from the case pattern (the pre-fix shape);
+#            the SAME inputs that composed a note at 7.3 must then compose
+#            nothing
+#   8  claude-workflow-plugin-gsfd R6-F1 — TIMEOUT_NOT_ENFORCED must describe
+#      EVERY stage a run's sequential run_with_timeout calls actually ran,
+#      never a subset: an earlier unbounded call must not be hidden by a
+#      later bounded one (8a), and a later unbounded call must not be
+#      falsely attributed to an earlier bounded one too (8b) — driven
+#      against the real, awk-extracted run_with_timeout AND the real
+#      checks_scope_note together, in one shell, matching the actual
+#      three-call dispatch shape
+#   8M META — revert run_with_timeout to reprobing PATH on every call (the
+#             pre-fix shape) and prove both directions of the SAME
+#             misattribution reproduce
 #
 # THE COUNT, spelled out because it has been wrong once in this paragraph
-# (R1-F2) and once in the headline (R8-F4): ELEVEN guards and SIX numbered
-# sections, and the two numbers are not meant to agree. Section 1 is a
-# MEASUREMENT and is no guard; section 4 carries SEVEN — the fingerprint's
-# content sensitivity (paired by 4M), the readout's provenance claim (paired by
-# 4N), the fingerprint's INVARIANT (paired by 4P), the per-path fallback over the
-# untracked set (paired by 4Q), the diff flags that keep drivers out of input 2
-# (paired by 4R), the fallback's QUOTING CONVENTION (paired by 4S), and the
-# untracked hashes' FILTER BYPASS (paired by 4T). Section 6 carries ONE — the
-# two-instrument requirement, paired by 6M; 6.11's checks_scope_claim/note
-# reassertion is coverage of an existing guard (3, paired by 3M) extended to a
-# new parameter, not a second guard of its own. The check is mechanical, one
-# META per guard: 2M, 3M, 4M, 4N, 4P, 4Q, 4R, 4S, 4T, 5M, 6M.
+# (R1-F2), once in the headline (R8-F4), and once by omission (section 7 and
+# its META shipped in claude-workflow-plugin-j7kk R1-F3 and went unlisted
+# here until the gsfd R6-F1 pass that added section 8 noticed): THIRTEEN
+# guards and EIGHT numbered sections, and the two numbers are not meant to
+# agree. Section 1 is a MEASUREMENT and is no guard; section 4 carries
+# SEVEN — the fingerprint's content sensitivity (paired by 4M), the
+# readout's provenance claim (paired by 4N), the fingerprint's INVARIANT
+# (paired by 4P), the per-path fallback over the untracked set (paired by
+# 4Q), the diff flags that keep drivers out of input 2 (paired by 4R), the
+# fallback's QUOTING CONVENTION (paired by 4S), and the untracked hashes'
+# FILTER BYPASS (paired by 4T). Section 6 carries ONE — the two-instrument
+# requirement, paired by 6M; 6.11's checks_scope_claim/note reassertion is
+# coverage of an existing guard (3, paired by 3M) extended to a new
+# parameter, not a second guard of its own. Section 7 carries ONE — the
+# GATE_STATUS=unavailable composition arm, paired by META 7. Section 8
+# carries ONE — the multi-call TIMEOUT_NOT_ENFORCED consistency guard,
+# paired by 8M; its own two directions (8a/8b in the section body) are one
+# guard exercised two ways, not two guards, the same reasoning 4P's own
+# two-mutations-under-one-banner note gives below. The check is mechanical,
+# one META per guard: 2M, 3M, 4M, 4N, 4P, 4Q, 4R, 4S, 4T, 5M, 6M, META 7, 8M.
 #
 # 4P CARRIES TWO MUTATIONS UNDER ONE BANNER, and that is deliberate rather than
 # a miscount. The invariant has two halves — an input must CARRY CONTENT wherever
@@ -2581,6 +2607,174 @@ assert_eq "META 7.1 SPECIFIC MISBEHAVIOUR: the SAME inputs that composed a note 
     "" "$(drive_f1note "$F1NOTE_MUT" unestablished unavailable)"
 assert_eq "META 7.2 RESTORE CONTROL: the mutant still covers the pre-existing not-entered status (only unavailable was removed)" \
     "yes" "$([ -n "$(drive_f1note "$F1NOTE_MUT" unestablished not-entered)" ] && echo yes || echo no)"
+
+# ===========================================================================
+# 8. claude-workflow-plugin-gsfd R6-F1 — TIMEOUT_NOT_ENFORCED must describe
+# ALL of a run's dispatch calls consistently, not just the LAST one.
+#
+# run_with_timeout used to reset TIMEOUT_NOT_ENFORCED at the top of EVERY
+# call and decide its own branch by re-probing `command -v` each time. The
+# real dispatch in verify-before-stop.sh calls it up to three times in ONE
+# shell (test, then lint, then type — see the three call sites cited in
+# this task's own header), and checks_scope_note reads the flag only ONCE,
+# after all three have run, then lists EVERY stage that ran under it. Two
+# ways for that combination to lie, both driven here against the REAL,
+# awk-extracted run_with_timeout and the REAL checks_scope_note — not a
+# re-typed copy of either:
+#   8a  an EARLIER call is genuinely unbounded, a LATER one would (if
+#       re-probed) resolve a timeout binary — the pre-fix design CLEARS the
+#       flag, hiding the earlier call entirely. Named in review as the
+#       direction that matters more.
+#   8b  an EARLIER call is genuinely bounded, a LATER one would (if
+#       re-probed) find no binary — the pre-fix design's note then claims
+#       BOTH stages ran unbounded, which is false for the first.
+# The fix caches the dispatch decision on the FIRST call of a run
+# (TIMEOUT_DISPATCH) so every later call in the SAME shell is governed by
+# it rather than by its own PATH at call time. 8b's shipped-code leg
+# therefore does not silently go unbounded either — the cached "timeout"
+# branch is attempted against a PATH that no longer has the binary, so it
+# fails LOUD (nonzero, "command not found") instead of silently
+# misattributing. That trade is intentional and asserted directly below;
+# see run_with_timeout's own header for the same reasoning.
+# ===========================================================================
+printf '\n--- 8. gsfd R6-F1: TIMEOUT_NOT_ENFORCED is coherent across a multi-call run ---\n'
+
+RWT_REGION="$WORK/rwt.sh"
+awk '/^run_with_timeout\(\) \{/,/^\}/' "$VBS" > "$RWT_REGION"
+assert_eq "8.0a non-vacuity: the run_with_timeout extraction defines the function" "1" \
+    "$(grep -c '^run_with_timeout() {$' "$RWT_REGION" | tr -d '[:space:]')"
+assert_eq "8.0b the extracted region is valid bash on its own" \
+    "0" "$(bash -n "$RWT_REGION" 2>/dev/null; echo $?)"
+
+mkdir -p "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout"
+RWT_REAL_BASH=$(command -v bash 2>/dev/null || true)
+[ -n "$RWT_REAL_BASH" ] && ln -sf "$RWT_REAL_BASH" "$WORK/rwt-notimeout/bash"
+[ -n "$RWT_REAL_BASH" ] && ln -sf "$RWT_REAL_BASH" "$WORK/rwt-faketimeout/bash"
+cat > "$WORK/rwt-faketimeout/timeout" <<'SHIM'
+#!/bin/bash
+# Same restore-control double as run-with-timeout.test.sh 2b: drops the
+# duration argument and execs the rest, so ENFORCED here means "a timeout
+# binary resolved", not "this stub bounds anything".
+shift
+exec "$@"
+SHIM
+chmod +x "$WORK/rwt-faketimeout/timeout"
+assert_eq "8.0c precondition: rwt-notimeout resolves neither timeout nor gtimeout (non-vacuity of the PATH fixture)" "yes" \
+    "$(PATH="$WORK/rwt-notimeout" command -v timeout >/dev/null 2>&1 && echo no || echo yes)"
+assert_eq "8.0d precondition: rwt-faketimeout DOES resolve timeout" "yes" \
+    "$(PATH="$WORK/rwt-faketimeout" command -v timeout >/dev/null 2>&1 && echo yes || echo no)"
+
+# drive_multi_dispatch <rwt-region> <path1> <path2> <field> — sources the
+# ledger + scope regions (checks_scope_note needs broader_verification_note
+# from the former) plus the given run_with_timeout region, ALL in ONE
+# subshell — the same shell-scope requirement the real dispatch has, since
+# the whole defect is about state a LATER call in the SAME shell reads.
+# Calls run_with_timeout twice, under path1 then path2 (labelled "tests"
+# then "lint" to checks_scope_note via TEST_CMD/LINT_CMD, TYPE_CMD left
+# empty), then prints whichever of flag/note/rc1/rc2 <field> asks for.
+drive_multi_dispatch() {
+    local rwt="$1" path1="$2" path2="$3" field="$4"
+    (
+        set -u
+        PROJECT_DIR="$WORK/noproj8"; QA_TRACKING_DIR="$WORK/noproj8/.claude/.qa-tracking"
+        mkdir -p "$QA_TRACKING_DIR"
+        # shellcheck disable=SC1090
+        . "$LEDGER_REGION"
+        # shellcheck disable=SC1090
+        . "$SCOPE_REGION"
+        # shellcheck disable=SC1090
+        . "$rwt"
+        rc1=0
+        PATH="$path1" run_with_timeout 5 "$WORK/md-a.log" "echo stage-a; exit 0" || rc1=$?
+        rc2=0
+        PATH="$path2" run_with_timeout 5 "$WORK/md-b.log" "echo stage-b; exit 0" || rc2=$?
+        # checks_scope_note's TIMEOUT_NOT_ENFORCED branch reads these three
+        # (the same values verify-before-stop.sh itself sets: TEST_TIMEOUT_S=
+        # 1200, LINT_TIMEOUT_S=300, TYPE_TIMEOUT_S=600) -- under this
+        # harness's own `set -u`, leaving them unset does not skip that
+        # branch, it aborts the command substitution below with "unbound
+        # variable" and silently truncates NOTE_TEXT before the disclosure
+        # paragraph is ever reached, which reads as a false pass for 8a/8M's
+        # "note carries no disclosure" assertions rather than a real one.
+        # shellcheck disable=SC2030,SC2031  # deliberately subshell-scoped,
+        # same reasoning as drive_scope's identical directive above: this
+        # function's own ( ) subshell is the only reader, so nothing leaks
+        # into (or is expected from) the shared top-level scope.
+        export RUNNER="make" TEST_CMD='echo test' LINT_CMD='echo lint' TYPE_CMD=""
+        export TEST_TIMEOUT_S=1200 LINT_TIMEOUT_S=300 TYPE_TIMEOUT_S=600
+        NOTE_TEXT=$(checks_scope_note)
+        case "$field" in
+            flag) printf '%s' "${TIMEOUT_NOT_ENFORCED:-<unset>}" ;;
+            note) printf '%s' "$NOTE_TEXT" ;;
+            rc1)  printf '%s' "$rc1" ;;
+            rc2)  printf '%s' "$rc2" ;;
+        esac
+    )
+}
+
+# 8a: unbounded first (rwt-notimeout), then a PATH that WOULD resolve a
+# timeout binary if re-probed (rwt-faketimeout) — the "hides an earlier
+# unbounded stage" direction.
+FLAG_8A_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout" flag)
+NOTE_8A_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout" note)
+assert_eq "8a SHIPPED: TIMEOUT_NOT_ENFORCED is still set after the SECOND call, even though its own PATH would resolve a timeout binary (the cached decision from call 1 governs)" \
+    "1" "$FLAG_8A_FIXED"
+assert_contains "8a SHIPPED: the note discloses TIMEOUT NOT ENFORCED (the earlier unbounded call is NOT hidden)" \
+    "TIMEOUT NOT ENFORCED" "$NOTE_8A_FIXED"
+
+# 8b: bounded first (rwt-faketimeout), then a PATH that has NEITHER binary
+# (rwt-notimeout) — the "false attribution to all" direction.
+FLAG_8B_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" flag)
+NOTE_8B_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" note)
+RC2_8B_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" rc2)
+assert_eq "8b SHIPPED: TIMEOUT_NOT_ENFORCED is NOT set (the cached 'timeout' decision from call 1 is attempted again, it does not silently fall back to unbounded)" \
+    "<unset>" "$FLAG_8B_FIXED"
+assert_absent "8b SHIPPED: the note does NOT falsely attribute unboundedness to the first (genuinely bounded) call" \
+    "TIMEOUT NOT ENFORCED" "$NOTE_8B_FIXED"
+assert_eq "8b SHIPPED: the documented trade — the second call fails LOUD (nonzero) rather than silently misattributing, because the cached branch has no timeout binary to find" \
+    "yes" "$([ "$RC2_8B_FIXED" != "0" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 8M. META — revert run_with_timeout to the pre-fix shape (reprobe PATH on
+# EVERY call, i.e. force the caching check to always miss) and prove BOTH
+# directions above reproduce the exact misattribution the fix closes.
+# ---------------------------------------------------------------------------
+printf '\n--- 8M. META: reverting the multi-call cache must reproduce both misattribution directions ---\n'
+
+RWT_MUT="$WORK/rwt-mut.sh"
+# shellcheck disable=SC2016  # single quotes are intentional: this is a sed
+# script matching a LITERAL bash conditional in the target file, not an
+# expression for THIS shell to expand (same reasoning as tree-lease.test.sh
+# META 2's identical directive).
+sed 's/if \[ -z "\${TIMEOUT_DISPATCH:-}" \]; then/if true; then/' "$RWT_REGION" > "$RWT_MUT"
+assert_eq "8M.0a non-vacuity: the mutant differs from the shipped extraction" \
+    "yes" "$([ "$(shasum -a 256 "$RWT_MUT" | awk '{print $1}')" != "$(shasum -a 256 "$RWT_REGION" | awk '{print $1}')" ] && echo yes || echo no)"
+assert_contains "8M.0b non-vacuity: the mutant's caching check now reads 'if true' (always reprobes)" \
+    "if true; then" "$(cat "$RWT_MUT")"
+assert_eq "8M.0c the mutant is still valid bash" \
+    "0" "$(bash -n "$RWT_MUT" 2>/dev/null; echo $?)"
+
+FLAG_8A_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout" flag)
+NOTE_8A_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout" note)
+assert_eq "8M SPECIFIC (8a direction): without the cache, the SAME unbounded-then-bounded sequence clears the flag (<unset>) — the earlier unbounded call is HIDDEN" \
+    "<unset>" "$FLAG_8A_MUT"
+assert_absent "8M SPECIFIC (8a direction): ...so the mutant's note carries NO disclosure at all, despite stage-a having genuinely run unbounded" \
+    "TIMEOUT NOT ENFORCED" "$NOTE_8A_MUT"
+
+FLAG_8B_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" flag)
+NOTE_8B_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" note)
+RC2_8B_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" rc2)
+assert_eq "8M SPECIFIC (8b direction): without the cache, the SAME bounded-then-unbounded sequence sets the flag (the mutant genuinely reprobes and finds nothing the second time)" \
+    "1" "$FLAG_8B_MUT"
+assert_contains "8M SPECIFIC (8b direction): ...so the mutant's note claims BOTH stages ran unbounded — FALSE for stage-a, which ran bounded" \
+    "TIMEOUT NOT ENFORCED" "$NOTE_8B_MUT"
+assert_eq "8M SPECIFIC (8b direction): ...and unlike the shipped code, the mutant's second call exits 0 (it took the graceful unbounded branch, not a failed exec) — confirming the misattribution is silent, not loud" \
+    "0" "$RC2_8B_MUT"
+
+assert_eq "8M RESTORE CONTROL: the SHIPPED code, identical 8a inputs, does not hide the earlier unbounded call" \
+    "1" "$FLAG_8A_FIXED"
+assert_eq "8M RESTORE CONTROL: the SHIPPED code, identical 8b inputs, does not falsely attribute unboundedness to stage-a" \
+    "<unset>" "$FLAG_8B_FIXED"
 
 # ===========================================================================
 printf '\n=== gate-claim-honesty.test.sh ===\n'

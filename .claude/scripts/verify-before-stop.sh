@@ -6,9 +6,22 @@
 #
 #   F3   Single source of truth for current task id (current-task.sh).
 #   B2   Epic-level e2e gate (epic-gate.sh) on task completion.
-#   B3   Test/lint/type timeouts: 1200s tests, 300s lint, 600s type;
-#        configurable outer wrapper timeout (default 60s wraps just the
-#        non-test post-processing; the long ops are timed individually).
+#   B3   Test/lint/type timeouts: 1200s tests, 300s lint, 600s type,
+#        each enforced by run_with_timeout's own `timeout`/`gtimeout` call
+#        WHEN one of those two binaries is present on PATH (see that
+#        function's own header). This line used to say "each enforced"
+#        unconditionally (claude-workflow-plugin-gsfd R6-F2 fix) — that is
+#        false on a host with neither binary (this repo's own authoring box
+#        is one): there the run is UNBOUNDED, disclosed via
+#        TIMEOUT_NOT_ENFORCED / checks_scope_note rather than silently
+#        capped anyway. claude-workflow-plugin-gsfd R5-F6: this line used to
+#        also promise a configurable 60s "outer
+#        wrapper" timeout (STOP_TIMEOUT_FILE / read_stop_timeout) — that
+#        knob had no caller anywhere in this file, and was deleted along
+#        with the in-process run_with_timeout rewrite it belonged to
+#        (round 6 DESIGN COLLAPSE); there is no outer wrapper any more, and
+#        the hook's own wall-clock ceiling is settings.json's fixed Stop
+#        hook timeout (1320000ms).
 #   F8/J17 Polyglot test/lint command via detect-stack.sh.
 #   F1   Doc-only fast path: auto-approve when changes are documentation
 #        or comment-only.
@@ -37,9 +50,35 @@ CURRENT_TASK_HELPER="$PROJECT_DIR/.claude/scripts/current-task.sh"
 # switching to task B does NOT make B start at iter=4. Resolved later via
 # iteration_file_for() once we know the current task id.
 ITERATION_FILE_LEGACY="$QA_TRACKING_DIR/iteration-count"
-TEST_LOG="$QA_TRACKING_DIR/last-test-output.log"
-LINT_LOG="$QA_TRACKING_DIR/last-lint-output.log"
-TYPE_LOG="$QA_TRACKING_DIR/last-type-output.log"
+
+# claude-workflow-plugin-gsfd (member 1): TEST_LOG/LINT_LOG/TYPE_LOG used to be
+# these three FIXED paths for both the write (run_with_timeout) and the
+# immediate tail-read (log_tail) in the SAME execution. FOUR measured
+# occurrences this arc of the gate asserting "Tests failing (exit 2)" while
+# citing a log that did not exist, every time with a concurrent suite live —
+# two independent writers share these exact three names: (a) another
+# verify-before-stop.sh's own `run_with_timeout` truncating (`: > "$log"`) the
+# SAME path out from under an in-flight capture, and (b) qa-gate.sh's
+# wipe_iteration_state (`enter`/`approve`/`choose`, for ANY task) doing
+# `rm -f` on these exact three names regardless of who is mid-write. Below,
+# TEST_LOG/LINT_LOG/TYPE_LOG are reassigned to a per-run scratch directory
+# (run_scoped_log_dir) immediately before the real (non-replay) run, so
+# nothing else on the machine is ever given that exact path — the collision
+# is removed at the root rather than mitigated. The *_STABLE names here stay
+# fixed on purpose: they are the human/agent-facing "go look at the last run"
+# convenience copy referenced in FAILED_CHECKS bullets, written AFTER capture
+# completes and never read back by this script's own logic, so a race on
+# THEM (another run's copy landing a moment later, qa-gate.sh's existing
+# wipe on enter/approve/choose) is cosmetic, never a correctness bug.
+TEST_LOG_STABLE="$QA_TRACKING_DIR/last-test-output.log"
+LINT_LOG_STABLE="$QA_TRACKING_DIR/last-lint-output.log"
+TYPE_LOG_STABLE="$QA_TRACKING_DIR/last-type-output.log"
+# Safe defaults (used only if the real-run branch's own reassignment is
+# somehow never reached before a reference — should not happen, but a sane
+# same-as-before default beats an empty path).
+TEST_LOG="$TEST_LOG_STABLE"
+LINT_LOG="$LINT_LOG_STABLE"
+TYPE_LOG="$TYPE_LOG_STABLE"
 
 # Sanitize a task id into a filesystem-safe suffix. Beads ids are normally
 # already safe (alpha-num + dot + dash) but we belt-and-brace.
@@ -59,9 +98,12 @@ iteration_file_for() {
     fi
 }
 
-# Tunable timeouts. The outer wrapper is for post-processing only — the
-# long-running test/lint/type subprocesses use their own GNU `timeout`.
-STOP_TIMEOUT_FILE="$QA_TRACKING_DIR/stop-timeout"
+# Tunable timeouts. The long-running test/lint/type subprocesses are capped
+# by run_with_timeout's own `timeout`/`gtimeout` call WHEN one of those two
+# binaries is on PATH (see that function's own header for why it looks like
+# this rather than an in-process poll loop, and for what happens on a host
+# with neither — claude-workflow-plugin-gsfd R6-F2: "capped" here used to be
+# unconditional, which this file's own authoring box already falsifies).
 TEST_TIMEOUT_S=1200
 LINT_TIMEOUT_S=300
 TYPE_TIMEOUT_S=600
@@ -128,6 +170,17 @@ if [ -n "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
 else
     WORKFLOW_DENYLIST_MISSING=1
     DENYLIST_REGEX=""
+fi
+
+# claude-workflow-plugin-gsfd (member 5, the lease + member 2's hedge): same
+# fail-open-on-absence convention as the denylist above — a missing library
+# degrades to "run without ownership visibility", never to blocking the gate.
+# _WFDL_DIR already resolved to this script's own directory, the same one
+# tree-lease.sh lives in.
+TREE_LEASE_AVAILABLE=0
+if [ -n "$_WFDL_DIR" ] && [ -f "$_WFDL_DIR/tree-lease.sh" ]; then
+    # shellcheck source=.claude/scripts/tree-lease.sh
+    . "$_WFDL_DIR/tree-lease.sh" && TREE_LEASE_AVAILABLE=1
 fi
 
 is_tracked_change() {
@@ -2055,38 +2108,274 @@ reviewable_changes() {
     return 0
 }
 
-# Run a command with optional `timeout` if available. Returns the
-# command's exit code. Streams combined stdout+stderr to the given log file.
+# claude-workflow-plugin-gsfd (member 1): a per-run directory for
+# TEST_LOG/LINT_LOG/TYPE_LOG so nothing else on the machine is ever handed
+# the same path — see TEST_LOG_STABLE's header for the collision this
+# replaces. `mktemp` is preferred; the pid+epoch+RANDOM fallback exists only
+# for a mktemp-less environment (some minimal containers ship without it).
+#
+# R1-F1 FIX (claude-workflow-plugin-gsfd fix round 1, independent cross-family
+# review): this function used to degrade, on total directory-creation failure, to
+# `dir="$QA_TRACKING_DIR"` — the SAME fixed, shared directory every other
+# concurrent run in that state would ALSO be handed, which is exactly the
+# collision this member exists to remove. Reachable with nothing more exotic
+# than a plain FILE sitting at `.claude/.qa-tracking/runs`: that defeats
+# `mkdir -p "$base"`, and everything nested under it (`mktemp -d "$base/..."`,
+# the RANDOM fallback's own `mkdir -p "$dir"`) fails for the same reason, so
+# every one of TWO branches above fell through to the collapse. The code
+# documented the collision at :2100-2102 in the fix-round's own review
+# while the CHANGELOG denied it ("nothing else on the machine is ever
+# handed") — both were true statements about DIFFERENT branches of this
+# function, and only the degrade one was reachable in that state.
+#
+# The fix has two tiers, never a third that hands out a shared name:
+#   1. Retry ONE level up: a uniquely-named directory ("qa-run.<rand>")
+#      created DIRECTLY under $QA_TRACKING_DIR, bypassing the blocked
+#      `runs/` subdirectory entirely (a different name cannot collide with
+#      whatever is occupying `runs`). $QA_TRACKING_DIR itself is depended on
+#      elsewhere in this script for ordinary file writes (iteration
+#      counters, escalation markers) — if IT cannot hold a new directory
+#      either, the gate is already broken far beyond this function's remit.
+#   2. If even that fails (mktemp -d AND a plain mkdir -p both fail — a
+#      genuinely exhausted or read-only tracking dir), there is no directory
+#      left to hand out uniquely, so uniqueness moves from the DIRECTORY to
+#      the FILENAME: this function returns EMPTY, and the caller (see the
+#      LEASE-ACQUIRE block) builds TEST_LOG/LINT_LOG/TYPE_LOG as per-pid/
+#      nonce-suffixed FILES directly in $QA_TRACKING_DIR instead of a
+#      directory + three fixed names inside it. Two concurrent runs BOTH in
+#      this degenerate state still get DISTINCT filenames (different pid,
+#      or different $RANDOM draw), so no two runs are ever handed the same
+#      path, regardless of which tier they land on.
+run_scoped_log_dir() {
+    local base="$QA_TRACKING_DIR/runs" dir=""
+    mkdir -p "$base" 2>/dev/null || true
+    if command -v mktemp >/dev/null 2>&1; then
+        dir=$(mktemp -d "$base/run.XXXXXX" 2>/dev/null) || dir=""
+    fi
+    if [ -z "$dir" ]; then
+        dir="$base/run.pid$$.$(date +%s 2>/dev/null || echo 0).${RANDOM:-0}"
+        mkdir -p "$dir" 2>/dev/null || dir=""
+    fi
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+        dir=""
+        if command -v mktemp >/dev/null 2>&1; then
+            dir=$(mktemp -d "$QA_TRACKING_DIR/qa-run.XXXXXX" 2>/dev/null) || dir=""
+        fi
+        if [ -z "$dir" ]; then
+            dir="$QA_TRACKING_DIR/qa-run.pid$$.$(date +%s 2>/dev/null || echo 0).${RANDOM:-0}"
+            mkdir -p "$dir" 2>/dev/null || dir=""
+        fi
+    fi
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+        printf ''
+        return 0
+    fi
+    printf '%s' "$dir"
+}
+
+# scoped_log_nonce -- the per-pid/nonce suffix run_scoped_log_dir's own
+# LAST-RESORT (empty-return) case asks its caller to use instead of a
+# directory (R1-F1 fix). Kept as its own function, not inlined at the call
+# site, so the SAME nonce can be reused for all three log filenames in one
+# call rather than risking three independent $RANDOM draws disagreeing.
+scoped_log_nonce() {
+    printf 'pid%s.%s.%s' "$$" "$(date +%s 2>/dev/null || echo 0)" "${RANDOM:-0}"
+}
+
+# Opportunistic, best-effort reap of run-scoped log dirs AND flat-file
+# fallback logs older than a day. Guards the one pathological leak left (a
+# Stop hook killed or aborted before reaching its own cleanup below, e.g.
+# `set -e` on an unexpected error, or a hook-timeout SIGKILL) — bounded,
+# never blocking, silent on failure. Called once, unconditionally, near the
+# top of every invocation.
+reap_stale_run_log_dirs() {
+    if [ -d "$QA_TRACKING_DIR/runs" ]; then
+        find "$QA_TRACKING_DIR/runs" -mindepth 1 -maxdepth 1 -type d -mtime +1 \
+            -exec rm -rf {} + 2>/dev/null || true
+    fi
+    # R1-F1 fix: the tier-1 retry directory (qa-run.XXXXXX) and the
+    # degenerate flat-file fallback (last-*-output.pid*.log) both need the
+    # same reap — neither lives under runs/, so the find above never sees
+    # them.
+    find "$QA_TRACKING_DIR" -mindepth 1 -maxdepth 1 -type d -name 'qa-run.*' -mtime +1 \
+        -exec rm -rf {} + 2>/dev/null || true
+    find "$QA_TRACKING_DIR" -mindepth 1 -maxdepth 1 -type f -name 'last-*-output.pid*.log' -mtime +1 \
+        -exec rm -f {} + 2>/dev/null || true
+    return 0
+}
+
+# Run a command with optional `timeout` if available. Returns the command's
+# exit code (124 if the cap fires, matching GNU/BSD `timeout`'s own
+# convention — see classify_test_failure and the three FAILED_CHECKS
+# branches below that check for it verbatim). Streams combined stdout+stderr
+# to the given log file.
+#
+# DESIGN COLLAPSE (claude-workflow-plugin-gsfd, operator-directed, round 6):
+# this is the ORIGINAL, shipped-and-reviewed shape, restored verbatim after
+# three fix rounds (R3-F3 FOLLOW-UP through R5-F1) rewrote it in-process to
+# add a heartbeat and then chased that rewrite's own defects (an orphaned
+# daemon child, a per-spec-reset counter, a setsid escape from process-group
+# supervision, unbounded heartbeat accumulation). Each fix was legitimate
+# work against a real defect the PREVIOUS fix had introduced; the operator's
+# decision was to stop patching the chain rather than fix the next link in
+# it. The heartbeat this rewrite existed to carry is gone too — the lease is
+# now report-only (see tree-lease.sh's own DESIGN COLLAPSE header) and has
+# nothing left for a heartbeat to protect. Full causal account and every
+# measured number from the intervening rounds: CHANGELOG.md. This reverts
+# ONLY this function's own timeout mechanism — the per-run log paths (R1-F1,
+# in LEASE-ACQUIRE below) and log_tail's absent-log hedge are unrelated
+# fixes from an earlier round and are unaffected by this reversion.
+#
+# The one accepted trade, restored along with the rest: a host with neither
+# `timeout` nor `gtimeout` on PATH runs the command UNBOUNDED (the final
+# `else` branch), same as it did before this whole fix arc began. macOS
+# ships neither by default; `brew install coreutils` provides `gtimeout`.
+#
+# DISCLOSURE FIX (claude-workflow-plugin-gsfd): the unbounded branch's own
+# inline comment used to claim "log indicates this" while nothing ever
+# wrote an indication — `: > "$log"` above and the command's own `>"$log"`
+# redirect both TRUNCATE, so a marker written before either point is
+# destroyed before anyone reads it, and the pre-fix branch wrote nothing
+# after either. Nor was the fact ever surfaced to the operator-facing "WHAT
+# THIS GATE RAN" summary (checks_scope_note below), which already names
+# every OTHER unmeasured check ("NOT RUN tests ...") but stayed silent
+# about an advertised cap that quietly did not apply. Now, only on the
+# unbounded branch:
+#   - a marker line is appended to the log AFTER the command's own output
+#     (appended, not prepended — prepending would itself be destroyed by
+#     the command's own `>"$log"` redirect, which truncates on open);
+#   - TIMEOUT_NOT_ENFORCED is set (plain global, main-shell scope — this
+#     function is never invoked inside a subshell in this file, so a
+#     caller reading it later, including one running inside a
+#     checks_scope_note command substitution, sees the value THIS call
+#     set) so the gate summary can disclose it too, in the same voice as
+#     its existing "NOT RUN" lines. Reset at the top of every call so a
+#     stale value from an earlier check in the same run can never survive
+#     onto a later one that took a different branch.
+# A run that genuinely hangs forever still reaches neither write — see
+# claude-workflow-plugin-v4jn for that tracked, platform-dependent gap (a
+# host lacking both binaries cannot even reach the hang-vs-cap question
+# without a PATH shim in the test harness, since it never had a cap to
+# race against). This fix is about every run that DOES return: it now says
+# honestly whether the advertised figure meant anything, instead of
+# reading identical to a run that was genuinely bounded.
+#
+# MULTI-CALL CONSISTENCY FIX (claude-workflow-plugin-gsfd R6-F1). The
+# dispatch below runs up to THREE times in the same shell per Stop hook
+# invocation — test, then lint, then type-check (see the three call sites
+# below this function) — and TIMEOUT_NOT_ENFORCED is read exactly ONCE,
+# after all three, by checks_scope_note, which then names EVERY stage that
+# ran under that one flag. Re-probing `command -v` on every call (the
+# pre-R6-F1 shape) let those three calls disagree with each other: a bounded
+# call followed by an unbounded one made the summary claim ALL ran stages
+# went unbounded (false for the bounded one), and — the direction review
+# named as the one that matters more — an unbounded call followed by a
+# bounded one CLEARED the flag, hiding the unbounded call entirely from the
+# summary that runs after both. Fixed by deciding ONCE per shell: the FIRST
+# call to probe (whichever stage happens to run first) caches its answer in
+# TIMEOUT_DISPATCH ("timeout" / "gtimeout" / "none"), and every later call
+# in the SAME shell reuses that cached answer instead of re-probing PATH.
+# WHY FREEZING (a single decision per run) IS THE LEGITIMATE CHOICE HERE,
+# rather than tracking per-stage state separately: whether `timeout` or
+# `gtimeout` is installed is a fact about the HOST, not about which of
+# test/lint/type happens to be running — it is not supposed to change
+# between one dispatch call and the next three seconds later in the same
+# process. Freezing it is strictly less state than three independent
+# per-stage flags would need, and it makes checks_scope_note's existing
+# "list every RAN stage under one flag" wording actually true, rather than
+# needing to be rewritten to enumerate stages individually.
+# TIMEOUT_NOT_ENFORCED is still reset and possibly re-set on every call (so
+# a stale value from an earlier RUN of this whole script, a fresh process
+# every time, can never survive), but because every call within ONE run now
+# takes the SAME branch, its final value after the last call accurately
+# describes ALL of them — never a subset, never the wrong subset. Traded
+# deliberately: a capability that genuinely regresses mid-run (a `timeout`
+# binary removed from PATH between two calls) now fails LOUD instead of
+# silently sliding into the unbounded branch — the cached branch is
+# attempted regardless, and a binary that is no longer where the cache
+# expects it produces a real "command not found" exit rather than a quiet
+# re-probe. Nothing else changes: a host that always has (or never has)
+# the binary behaves exactly as before, byte for byte.
 run_with_timeout() {
     local secs="$1" log="$2"; shift 2
     : > "$log"
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "${secs}s" bash -c "$*" >"$log" 2>&1
-    elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "${secs}s" bash -c "$*" >"$log" 2>&1
-    else
-        # No timeout available - run unbounded; log indicates this.
-        bash -c "$*" >"$log" 2>&1
+    TIMEOUT_NOT_ENFORCED=""
+    # claude-workflow-plugin-gsfd R6-F1: decide ONCE per shell. TIMEOUT_DISPATCH
+    # is a plain global (main-shell scope, same convention as
+    # TIMEOUT_NOT_ENFORCED above) — unset on the first call of a run, so this
+    # probes exactly once and every later call in the SAME shell falls
+    # straight to the case statement below on the cached answer.
+    if [ -z "${TIMEOUT_DISPATCH:-}" ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_DISPATCH="timeout"
+        elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_DISPATCH="gtimeout"
+        else
+            TIMEOUT_DISPATCH="none"
+        fi
     fi
+    case "$TIMEOUT_DISPATCH" in
+        timeout)
+            timeout "${secs}s" bash -c "$*" >"$log" 2>&1
+            ;;
+        gtimeout)
+            gtimeout "${secs}s" bash -c "$*" >"$log" 2>&1
+            ;;
+        *)
+            # Neither `timeout` nor `gtimeout` was on PATH when this run's
+            # dispatch decision was made: run UNBOUNDED. Capture the real
+            # exit code BEFORE writing anything else below, or this function
+            # would return the trailing printf's exit status instead of the
+            # command's own — silently breaking the 124-means-timeout
+            # convention every caller of this function depends on
+            # (classify_test_failure and the three FAILED_CHECKS branches
+            # above).
+            local rc=0
+            bash -c "$*" >"$log" 2>&1 || rc=$?
+            printf '\n[run_with_timeout] NOTE: neither timeout nor gtimeout is on PATH -- the advertised %ss cap was NOT ENFORCED; this command ran UNBOUNDED. claude-workflow-plugin-gsfd.\n' \
+                "$secs" >> "$log"
+            TIMEOUT_NOT_ENFORCED=1
+            return "$rc"
+            ;;
+    esac
 }
 
-# Tail a log to the last N lines (default 50). Used to surface failures
-# in block-reason text without overwhelming Claude's context window.
+# Tail a log to the last N lines (default 50). Used to surface failures in
+# block-reason text without overwhelming Claude's context window.
+#
+# claude-workflow-plugin-gsfd (member 2): an ABSENT file must read as
+# "absent", never as a silently-empty one presented as though it were
+# measured content. Before this fix, an absent log printed the bare literal
+# "(no log)" — indistinguishable from "the command legitimately produced no
+# output" — over what was MEASURED, four separate times in this arc, to
+# actually be a log that HAD been written and was then removed out from
+# under this read (see TEST_LOG_STABLE's header above for the two writers
+# that could do it: a concurrent verify-before-stop.sh's own truncate, or
+# qa-gate.sh's enter/approve/choose wipe). Mirror the honesty already shipped
+# for the IDENTICAL ambiguity in run-tests.sh's own STORE-CANARY — "either
+# this spec wrote, or another process wrote concurrently — both mean L1 ran
+# against a live production store," a hedge QA ruled load-bearing — rather
+# than the Stop hook's own prior behaviour of asserting a red it could not
+# substantiate. Same system, same ambiguity, now the same honesty. Names a
+# concurrently-active lease when one was observed at capture time
+# (LEASE_CONFLICT_HEDGE, set once before the real run — see LEASE-ACQUIRE
+# below); otherwise says plainly that "never wrote" and "wrote, then
+# removed" cannot be told apart from here. The exit code the caller already
+# has is unaffected either way — this hedge is about the TAIL's evidentiary
+# weight, not about whether the command failed.
 log_tail() {
     local file="$1" n="${2:-50}"
-    [ -f "$file" ] || { echo "(no log)"; return; }
-    tail -n "$n" "$file"
-}
-
-# Read the configurable outer timeout (default 60s).
-read_stop_timeout() {
-    local v=60
-    if [ -s "$STOP_TIMEOUT_FILE" ]; then
-        local raw
-        raw=$(head -1 "$STOP_TIMEOUT_FILE" | tr -dc '0-9' || echo "")
-        [ -n "$raw" ] && v="$raw"
+    if [ ! -f "$file" ]; then
+        if [ -n "${LEASE_CONFLICT_HEDGE:-}" ]; then
+            printf '(log absent at %s -- cannot confirm failure content. A concurrent claim on this tree was observed at capture time (%s), which may be why. claude-workflow-plugin-gsfd)\n' \
+                "$file" "$LEASE_CONFLICT_HEDGE"
+        else
+            printf '(log absent at %s -- cannot confirm failure content. Either the command produced no output, or something removed the file between the write and this read; the exit code above is still real, but this tail is not evidence of WHY. claude-workflow-plugin-gsfd)\n' \
+                "$file"
+        fi
+        return
     fi
-    printf '%s' "$v"
+    tail -n "$n" "$file"
 }
 
 # Increment the iteration counter at $1 (a per-task path); print the new
@@ -2195,6 +2484,66 @@ last_runner_file_for() {
     [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-runner"; return; }
     printf '%s/last-runner.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
 }
+# claude-workflow-plugin-gsfd R1-F6 fix (independent cross-family review): the
+# three tails CAPTURED by this run (TEST_FAIL_TAIL/LINT_FAIL_TAIL/TYPE_FAIL_TAIL), not
+# just the rendered FAILED_CHECKS bullet text that CITES a path to them.
+# Before this fix, a cached replay (QA_ESCALATED or VERIFY_SKIP_UNCHANGED)
+# only ever had the bullet text, whose "see $TEST_LOG_STABLE" phrase points
+# at a SHARED, mutable, fixed-name file — by the time a replay's message is
+# actually read, that file may hold another run's capture (a concurrent
+# Stop's own overwrite) or nothing (qa-gate.sh's enter/approve/choose wipe).
+# Persisting the ACTUAL captured text here, separately, per task, means a
+# later replay shows the SAME evidence this run's own verdict was based on,
+# independent of whatever the STABLE name currently resolves to.
+last_test_tail_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-test-tail"; return; }
+    printf '%s/last-test-tail.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+last_lint_tail_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-lint-tail"; return; }
+    printf '%s/last-lint-tail.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+last_type_tail_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-type-tail"; return; }
+    printf '%s/last-type-tail.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+# --- TAIL-CACHE-REPLAY-BEGIN (claude-workflow-plugin-gsfd R1-F6) -----------
+# replay_cached_tails_for <tid> -- populates TEST_FAIL_TAIL/LINT_FAIL_TAIL/
+# TYPE_FAIL_TAIL from the persisted, point-in-time captures above, called
+# identically from BOTH cached-replay branches (QA_ESCALATED and
+# VERIFY_SKIP_UNCHANGED) so the "--- last 50 lines of ... output ---"
+# sections in the composed REASON are populated on a replay exactly the way
+# they are on a genuine run, rather than staying empty (the R1-F6 defect).
+# Absence of a persisted file is not an error — an older cycle's cache
+# predates this fix, or the corresponding stage never failed — the
+# variable simply stays at its pre-set default ("").
+replay_cached_tails_for() {
+    local tid="$1" f
+    # --- TAIL-CACHE-REPLAY-BODY-BEGIN (claude-workflow-plugin-gsfd R1-F6) --
+    # A META-TEST strips ONLY this inner region, not the whole function: this
+    # script runs under `set -e` (see the top-of-file `set -e`), so a mutant
+    # that removed the FUNCTION ITSELF would leave its two call sites in the
+    # QA_ESCALATED / VERIFY_SKIP_UNCHANGED branches calling an undefined
+    # name — "command not found", exit 127, and `set -e` aborts the WHOLE
+    # hook right there, before REASON is ever composed. That would test a
+    # crash, not the R1-F6 defect (tail vars silently staying empty). This
+    # inner region can be stripped alone, leaving a syntactically valid
+    # no-op function (still returns 0, call sites resolve fine) that
+    # reproduces the actual defect: TEST_FAIL_TAIL/LINT_FAIL_TAIL/
+    # TYPE_FAIL_TAIL never get restored.
+    f=$(last_test_tail_file_for "$tid")
+    [ -s "$f" ] && TEST_FAIL_TAIL=$(cat "$f" 2>/dev/null || echo "")
+    f=$(last_lint_tail_file_for "$tid")
+    [ -s "$f" ] && LINT_FAIL_TAIL=$(cat "$f" 2>/dev/null || echo "")
+    f=$(last_type_tail_file_for "$tid")
+    [ -s "$f" ] && TYPE_FAIL_TAIL=$(cat "$f" 2>/dev/null || echo "")
+    # --- TAIL-CACHE-REPLAY-BODY-END (claude-workflow-plugin-gsfd R1-F6) ----
+    return 0
+}
+# --- TAIL-CACHE-REPLAY-END (claude-workflow-plugin-gsfd R1-F6) -------------
 escalation_posted_file_for() {
     local tid="$1"
     [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/escalation-posted"; return; }
@@ -2347,6 +2696,64 @@ last_verified_state_file_for() {
     [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-verified-state"; return; }
     printf '%s/last-verified-state.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
 }
+
+# --- CYCLE-GEN-BEGIN (claude-workflow-plugin-gsfd R2-F4) -------------------
+# claude-workflow-plugin-gsfd fix round 2 (R2-F4, independent cross-family
+# review): the per-task CYCLE GENERATION qa-gate.sh's wipe_iteration_state bumps every
+# time it runs (enter, choose continue, choose tech-debt, approve all call
+# it). Read here at the START of a genuine run (alongside VERIFY_FP_PRE /
+# VERIFY_HASH_PRE, same call site) and again immediately before persisting
+# that run's results — the SAME "take an independent reading, refuse if it
+# moved" shape record_verified_state already uses for the tree fingerprint,
+# applied to cycle identity instead of tree content.
+#
+# THE DEFECT THIS CLOSES: sequential replay across ONE cycle was already
+# fixed (R1-F6) — a later Stop within the SAME cycle correctly shows the
+# tail THIS cycle's own genuine run captured. What R1-F6 did not cover:
+# qa-gate.sh enter/choose can wipe a task's per-cycle state (including this
+# generation counter and the tail-cache files) while an OLDER Stop hook
+# invocation from the PREVIOUS cycle is still mid-run (a slow suite, a
+# stale process nobody killed). That older run, unaware anything changed,
+# would go on to overwrite the just-wiped tail-cache/verdict files with ITS
+# OWN (now-stale, belonging to the PREVIOUS cycle) results — a LATER cycle
+# replaying an EARLIER cycle's evidence, the R1-F6 defect pointing the other
+# direction. Comparing the generation at persist-time against the one
+# captured at this run's own start closes it: a run whose cycle moved
+# underneath it writes NOTHING, exactly like record_verified_state's own
+# refusal on a mismatched tree reading — the cost is one redundant re-run
+# next Stop, never a stale write trusted as fresh.
+#
+# RESIDUAL, stated rather than silently shipped: this closes the CROSS-CYCLE
+# case (the one actually named above and the one qa-gate.sh enter/choose can
+# trigger). It does not give the six per-task cache files (rc, runner,
+# failed-checks, three tails) a single atomic write as one unit — two
+# Stop hooks truly concurrent within the SAME cycle (no enter/choose
+# between them) can still interleave individual field writes, since each
+# remains its own file for backward compatibility with every existing
+# reader and test that asserts on them by name. Closing that fully needs a
+# bundled, atomically-renamed snapshot format — larger, deferred work; this
+# fix is scoped to the hazard the finding actually named and demonstrated.
+cycle_gen_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/qa-cycle-gen"; return; }
+    printf '%s/qa-cycle-gen.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
+# current_cycle_gen <task-id> -- prints the CURRENT generation number for
+# <task-id>; 0 if absent/corrupt (a task whose gate has never been entered
+# or wiped is generation 0 by construction, not an error). Exit status
+# always 0 — an unreadable/missing counter degrades to "assume unchanged"
+# at the CAPTURE site and "assume unchanged" at the CHECK site alike, so a
+# host that cannot read this file at all behaves exactly as it did before
+# this fix existed (persist proceeds), never as a NEW failure mode.
+current_cycle_gen() {
+    local tid="$1" f g
+    f=$(cycle_gen_file_for "$tid")
+    g=$(cat "$f" 2>/dev/null)
+    case "$g" in ''|*[!0-9]*) g=0 ;; esac
+    printf '%s' "$g"
+    return 0
+}
+# --- CYCLE-GEN-END (claude-workflow-plugin-gsfd R2-F4) ---------------------
 
 # record_verified_state <task-id> <fp-pre> <hash-pre> — call ONLY from the
 # branch that just ran the suite for real (never from a replay of any kind).
@@ -3850,6 +4257,13 @@ if [ "$QA_ESCALATED" = "true" ]; then
         FAILED_CHECKS=$(cat "$LFC_FILE" 2>/dev/null || echo "")
     fi
     [ -s "$LRN_FILE" ] && RUNNER=$(head -1 "$LRN_FILE" | tr -d '\r\n')
+    # R1-F6 fix: FAILED_CHECKS's rendered wording still only carries a
+    # POINTER ("see $TEST_LOG_STABLE") — that shared, mutable path can hold
+    # a different run's content (or nothing) by the time this replay's
+    # message is read. Restore the ACTUAL captured tails from this task's
+    # own point-in-time cache so the "--- last 50 lines of ... output ---"
+    # sections below are populated the same way a genuine run's would be.
+    replay_cached_tails_for "$CURRENT_TASK"
     SUITE_REUSED=true
     SUITE_REUSE_REASON="escalation contract"
 elif [ "$VERIFY_SKIP_UNCHANGED" = "true" ]; then
@@ -3865,6 +4279,10 @@ elif [ "$VERIFY_SKIP_UNCHANGED" = "true" ]; then
         FAILED_CHECKS=$(cat "$LFC_FILE" 2>/dev/null || echo "")
     fi
     [ -s "$LRN_FILE" ] && RUNNER=$(head -1 "$LRN_FILE" | tr -d '\r\n')
+    # R1-F6 fix: same reasoning as the escalation branch above — restore the
+    # point-in-time captured tails rather than leaving this replay's message
+    # citing a pointer only.
+    replay_cached_tails_for "$CURRENT_TASK"
     SUITE_REUSED=true
     SUITE_REUSE_REASON="tree and change-set unchanged since the last full run"
     SUITE_REUSE_DETAIL=$(verified_state_unchanged_detail "$CURRENT_TASK")
@@ -3894,9 +4312,10 @@ else
     #   runs. We must capture rc in the same statement as the call
     #   itself, e.g.:
     #       rc=0; cmd || rc=$?
-    #   This preserves the real exit code (124 for GNU `timeout`, anything
-    #   else for genuine failures) so downstream branches can distinguish
-    #   timeout from failure.
+    #   This preserves the real exit code (124 when run_with_timeout's own
+    #   `timeout`/`gtimeout` call fires the cap, per that binary's own
+    #   convention; anything else is a genuine failure) so downstream
+    #   branches can distinguish timeout from failure.
 
     # claude-workflow-plugin-j7kk (R1-F1 fix): read BOTH skip instruments HERE,
     # immediately before any suite command runs — this IS "before dispatch".
@@ -3913,6 +4332,63 @@ else
     # reads instead of throwing both away.
     VERIFY_FP_PRE=$(tree_fingerprint)
     VERIFY_HASH_PRE=$(current_change_set_hash) || VERIFY_HASH_PRE=""
+    # claude-workflow-plugin-gsfd R2-F4 fix: same "read now, compare at
+    # persist time" shape as the two lines above, for cycle identity rather
+    # than tree content — see CYCLE-GEN's own header for the full defect.
+    RUN_CYCLE_GEN_PRE=$(current_cycle_gen "$CURRENT_TASK")
+
+    # --- LEASE-ACQUIRE-BEGIN (claude-workflow-plugin-gsfd, members 1/2/5) ---
+    # Two independent things, both gated on actually running the suite (the
+    # replay branches above run nothing new, so neither applies there):
+    #   1. Per-run log paths (member 1) — TEST_LOG/LINT_LOG/TYPE_LOG move from
+    #      the fixed QA_TRACKING_DIR paths to either a scratch directory, or
+    #      — only when run_scoped_log_dir reports even that could not be
+    #      created (R1-F1 fix; see that function's own header) — per-pid/
+    #      nonce-suffixed FILENAMES in the flat tracking dir. Either way, no
+    #      two concurrent runs are ever handed the same path: this no longer
+    #      collapses to the fixed, shared QA_TRACKING_DIR name unqualified.
+    #      See TEST_LOG_STABLE's header up top for the collision this
+    #      removes.
+    #   2. A lease for this run (member 5), so any conflict is a NAME rather
+    #      than a guess, and member 2's log_tail hedge can cite it directly
+    #      when a log turns out absent anyway.
+    reap_stale_run_log_dirs
+    RUN_LOG_DIR=$(run_scoped_log_dir)
+    if [ -n "$RUN_LOG_DIR" ]; then
+        TEST_LOG="$RUN_LOG_DIR/last-test-output.log"
+        LINT_LOG="$RUN_LOG_DIR/last-lint-output.log"
+        TYPE_LOG="$RUN_LOG_DIR/last-type-output.log"
+    else
+        SCOPED_LOG_NONCE=$(scoped_log_nonce)
+        TEST_LOG="$QA_TRACKING_DIR/last-test-output.${SCOPED_LOG_NONCE}.log"
+        LINT_LOG="$QA_TRACKING_DIR/last-lint-output.${SCOPED_LOG_NONCE}.log"
+        TYPE_LOG="$QA_TRACKING_DIR/last-type-output.${SCOPED_LOG_NONCE}.log"
+    fi
+
+    STOP_LEASE_FILE=""
+    LEASE_CONFLICT_HEDGE=""
+    if [ "${TREE_LEASE_AVAILABLE:-0}" = "1" ]; then
+        STOP_LEASE_FILE=$(lease_acquire "$QA_TRACKING_DIR" "stop-hook" \
+            "verify-before-stop.sh task=${CURRENT_TASK:-<none>} pid=$$") || STOP_LEASE_FILE=""
+        if [ -n "$STOP_LEASE_FILE" ]; then
+            LEASE_CONFLICT_HEDGE=$(lease_conflict_summary "$QA_TRACKING_DIR" "$STOP_LEASE_FILE") || LEASE_CONFLICT_HEDGE=""
+        fi
+    fi
+    # --- LEASE-ACQUIRE-END (claude-workflow-plugin-gsfd) ---------------------
+    #
+    # DESIGN COLLAPSE (round 6): no heartbeat here or anywhere else in this
+    # codebase any more. Three rounds (R3-F3 FOLLOW-UP through R5-F4) built,
+    # then chased the cost of, a heartbeat meant to keep this lease's mtime
+    # fresh while the test/lint/type dispatch below runs (up to
+    # TEST_TIMEOUT_S, 1200s default) — a daemon that orphaned a child, then
+    # an in-process replacement that reset per spec, then accumulated
+    # unbounded background processes. The lease is now report-only (see
+    # tree-lease.sh's own DESIGN COLLAPSE header): nothing ever auto-removes
+    # a lease on the strength of its age, so there is nothing left for a
+    # heartbeat to protect. A Stop hook killed mid-dispatch simply leaves
+    # this lease sitting in <dir>/leases/, read STALE by the next checker,
+    # until something explicitly reclaims it. Full causal account:
+    # CHANGELOG.md.
 
     test_rc=0
     if [ -n "$TEST_CMD" ]; then
@@ -3923,13 +4399,13 @@ else
             # the failure header so we lead with the right wording.
             TEST_FAIL_CLASS=$(classify_test_failure "$test_rc" "$TEST_FAIL_TAIL")
             if [ "$test_rc" = "124" ]; then
-                FAILED_CHECKS+="- Tests timed out after ${TEST_TIMEOUT_S}s — see $TEST_LOG\n"
+                FAILED_CHECKS+="- Tests timed out after ${TEST_TIMEOUT_S}s — see $TEST_LOG_STABLE\n"
             elif [ "$TEST_FAIL_CLASS" = "runner" ]; then
                 # Lead with the environment/runner hint per spec 0.2 so
                 # the next iteration targets the environment first.
-                FAILED_CHECKS+="- Test suite failed to run (environment/runner issue — fix the environment before changing code): exit $test_rc — see $TEST_LOG\n"
+                FAILED_CHECKS+="- Test suite failed to run (environment/runner issue — fix the environment before changing code): exit $test_rc — see $TEST_LOG_STABLE\n"
             else
-                FAILED_CHECKS+="- Tests failing (exit $test_rc) — see $TEST_LOG\n"
+                FAILED_CHECKS+="- Tests failing (exit $test_rc) — see $TEST_LOG_STABLE\n"
             fi
         fi
     fi
@@ -3939,9 +4415,9 @@ else
         run_with_timeout "$LINT_TIMEOUT_S" "$LINT_LOG" "$LINT_CMD" || lint_rc=$?
         if [ "$lint_rc" -ne 0 ]; then
             if [ "$lint_rc" = "124" ]; then
-                FAILED_CHECKS+="- Lint timed out after ${LINT_TIMEOUT_S}s — see $LINT_LOG\n"
+                FAILED_CHECKS+="- Lint timed out after ${LINT_TIMEOUT_S}s — see $LINT_LOG_STABLE\n"
             else
-                FAILED_CHECKS+="- Lint errors (exit $lint_rc) — see $LINT_LOG\n"
+                FAILED_CHECKS+="- Lint errors (exit $lint_rc) — see $LINT_LOG_STABLE\n"
             fi
             LINT_FAIL_TAIL=$(log_tail "$LINT_LOG" 50)
         fi
@@ -3952,13 +4428,58 @@ else
         run_with_timeout "$TYPE_TIMEOUT_S" "$TYPE_LOG" "$TYPE_CMD" || type_rc=$?
         if [ "$type_rc" -ne 0 ]; then
             if [ "$type_rc" = "124" ]; then
-                FAILED_CHECKS+="- Type-check timed out after ${TYPE_TIMEOUT_S}s — see $TYPE_LOG\n"
+                FAILED_CHECKS+="- Type-check timed out after ${TYPE_TIMEOUT_S}s — see $TYPE_LOG_STABLE\n"
             else
-                FAILED_CHECKS+="- Type-check failing (exit $type_rc) — see $TYPE_LOG\n"
+                FAILED_CHECKS+="- Type-check failing (exit $type_rc) — see $TYPE_LOG_STABLE\n"
             fi
             TYPE_FAIL_TAIL=$(log_tail "$TYPE_LOG" 50)
         fi
     fi
+
+    # --- LEASE-ACQUIRE-BEGIN (claude-workflow-plugin-gsfd, member 1 cleanup) -
+    # Copy each per-run log to its STABLE, human/agent-facing name (best
+    # effort, pass-or-fail, same "persist regardless" convention the cache
+    # writes below use) BEFORE removing the per-run directory — nothing later
+    # in this script reads $TEST_LOG/$LINT_LOG/$TYPE_LOG again (TEST_FAIL_TAIL
+    # etc. already hold whatever content mattered), so the scratch dir's job
+    # is done. Absence of a per-run file (the log_tail hedge's own case) is
+    # not an error here — cp simply has nothing to copy, and rm -f on the
+    # stable path prevents a STALE previous-run copy from being mistaken for
+    # this one.
+    for _pair in "$TEST_LOG:$TEST_LOG_STABLE" "$LINT_LOG:$LINT_LOG_STABLE" "$TYPE_LOG:$TYPE_LOG_STABLE"; do
+        _src="${_pair%%:*}"
+        _dst="${_pair#*:}"
+        if [ -f "$_src" ]; then
+            cp -f "$_src" "$_dst" 2>/dev/null || true
+        else
+            rm -f "$_dst" 2>/dev/null || true
+        fi
+    done
+    if [ -n "${RUN_LOG_DIR:-}" ] && [ "$RUN_LOG_DIR" != "$QA_TRACKING_DIR" ]; then
+        rm -rf "$RUN_LOG_DIR" 2>/dev/null || true
+    elif [ -z "${RUN_LOG_DIR:-}" ]; then
+        # R1-F1 fix: the degenerate flat-file fallback (no scratch directory
+        # could be created at all) leaves three loose, uniquely-named files
+        # directly in $QA_TRACKING_DIR instead of one directory — clean them
+        # up individually now that their content has been copied to the
+        # STABLE names above and captured into TEST_FAIL_TAIL etc. This is
+        # belt-and-braces: reap_stale_run_log_dirs also sweeps any of these
+        # left behind by a Stop that never reached this line (killed mid-run).
+        rm -f "$TEST_LOG" "$LINT_LOG" "$TYPE_LOG" 2>/dev/null || true
+    fi
+    if [ "${TREE_LEASE_AVAILABLE:-0}" = "1" ]; then
+        # DESIGN COLLAPSE (round 6): no heartbeat to stop here, or anywhere
+        # — see the note above LEASE-ACQUIRE-END. This call is unchanged:
+        # release still runs the happy path, exactly as it always has.
+        # R2-F3 fix round 2 (independent cross-family review): `|| true` here is
+        # belt-and-braces on top of tree-lease.sh's own fix (lease_release
+        # now genuinely always returns 0) -- this call site is the one the
+        # finding named specifically, since it runs under this script's own
+        # `set -e` with more work (cache persistence, the JSON envelope)
+        # still to come after it.
+        lease_release "${STOP_LEASE_FILE:-}" || true
+    fi
+    # --- LEASE-ACQUIRE-END (claude-workflow-plugin-gsfd) ---------------------
 
     # Spec 0.2: persist what we just observed so the next Stop, if it
     # arrives while qa-escalated, can replay without re-running the
@@ -3966,12 +4487,47 @@ else
     # files on approve/enter/choose so a stale cache can't follow a
     # task across cycles.
     if [ -n "$CURRENT_TASK" ]; then
+        # claude-workflow-plugin-gsfd R2-F4 / R3-F1 / R3-F2 fix (independent
+        # cross-family review, rounds 2 and 3). Sweep-state convention
+        # (mirrors run.sh's SURVIVOR-SWEEP / escalate_kill's RESNAPSHOT):
+        # initialised OUTSIDE both sentinel regions below so an excised
+        # mutant still runs correctly and behaves like the historical
+        # PRE-R2-F4 shape (unconditional persist, no refusal, no rollback)
+        # rather than crashing or inverting into "never persist".
+        CYCLE_STILL_CURRENT="yes"
+        # --- CYCLE-GEN-PRECHECK-BEGIN (claude-workflow-plugin-gsfd R2-F4) ---
+        # Re-read the cycle generation NOW, right before writing anything,
+        # and compare against RUN_CYCLE_GEN_PRE (captured before dispatch,
+        # above). A mismatch means qa-gate.sh enter/choose wiped this
+        # task's per-cycle state WHILE this run was executing — this run's
+        # results belong to the cycle that just ended, and persisting them
+        # now would write a LATER cycle's cache with an EARLIER cycle's
+        # evidence (see CYCLE-GEN's own header for the full defect). Same
+        # refuse-not-persist direction record_verified_state already takes
+        # on a mismatched tree reading, applied to cycle identity instead.
+        #
+        # R3-F2 (independent cross-family review): this check ALONE is still
+        # time-of-check-to-time-of-use — qa-gate.sh can bump the generation
+        # again in the gap between THIS read and the LAST of the six writes
+        # below finishing. Round 2 disclosed that gap as an open residual;
+        # it is narrowed here, not eliminated, by a SECOND re-check once
+        # every write below has actually landed (CYCLE-GEN-POSTCHECK), which
+        # rolls back if the generation moved during the writes themselves.
+        # The window left after BOTH checks is the much smaller gap between
+        # the post-check's own read and the rollback finishing — closing
+        # that fully needs a real lock or an atomically-renamed bundle
+        # (larger, deferred; see CYCLE-GEN's own header).
+        RUN_CYCLE_GEN_POST=$(current_cycle_gen "$CURRENT_TASK")
+        if [ "$RUN_CYCLE_GEN_POST" != "${RUN_CYCLE_GEN_PRE:-0}" ]; then
+            CYCLE_STILL_CURRENT="no"
+            log_sync_error "Stop: cycle generation moved during this run for $CURRENT_TASK (${RUN_CYCLE_GEN_PRE:-0} -> $RUN_CYCLE_GEN_POST) -- discarding this run's cache write rather than persisting stale-cycle evidence into the new cycle"
+        fi
+        # --- CYCLE-GEN-PRECHECK-END (claude-workflow-plugin-gsfd R2-F4) -----
+        if [ "$CYCLE_STILL_CURRENT" = "yes" ]; then
         printf '%s' "$test_rc" > "$(last_test_rc_file_for "$CURRENT_TASK")" 2>/dev/null || true
         printf '%s' "$RUNNER" > "$(last_runner_file_for "$CURRENT_TASK")" 2>/dev/null || true
         # We persist the rendered failure body (already includes the
-        # leading "- " bullets and the trailing newline). Including the
-        # tails would bloat the cache — they get re-derived from the
-        # log files which we leave on disk in the same dir.
+        # leading "- " bullets and the trailing newline).
         if [ -n "$FAILED_CHECKS" ]; then
             printf '%s' "$FAILED_CHECKS" > "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
         else
@@ -3979,6 +4535,35 @@ else
             # cap-hit while passing tech checks doesn't replay an old
             # failure summary.
             rm -f "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        fi
+        # claude-workflow-plugin-gsfd R1-F6 fix (independent cross-family
+        # review): also persist the ACTUAL captured tail content, per task, so a LATER
+        # cached replay (QA_ESCALATED / VERIFY_SKIP_UNCHANGED, both call
+        # replay_cached_tails_for) can show the evidence THIS run captured,
+        # rather than "re-deriving" it from the STABLE log files as the
+        # previous version of this comment assumed — those are shared,
+        # mutable, fixed names (TEST_LOG_STABLE etc.), so by the time a
+        # replay's message is read they may hold a DIFFERENT run's output or
+        # nothing (a concurrent Stop's own capture, or qa-gate.sh's
+        # enter/approve/choose wipe). Bounded the same way FAILED_CHECKS
+        # already is (log_tail caps every tail at 50 lines), so this adds no
+        # unbounded growth; cleared (not just left stale) when a stage's own
+        # tail is empty, same "persist regardless, clear the absent case"
+        # shape as FAILED_CHECKS above.
+        if [ -n "$TEST_FAIL_TAIL" ]; then
+            printf '%s' "$TEST_FAIL_TAIL" > "$(last_test_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        else
+            rm -f "$(last_test_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        fi
+        if [ -n "$LINT_FAIL_TAIL" ]; then
+            printf '%s' "$LINT_FAIL_TAIL" > "$(last_lint_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        else
+            rm -f "$(last_lint_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        fi
+        if [ -n "$TYPE_FAIL_TAIL" ]; then
+            printf '%s' "$TYPE_FAIL_TAIL" > "$(last_type_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        else
+            rm -f "$(last_type_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
         fi
         # claude-workflow-plugin-j7kk: this branch just ran the suite for
         # real (never a replay), which is the ONLY state record_verified_state
@@ -3991,6 +4576,29 @@ else
         # passed through so record_verified_state can refuse to persist if
         # its own post-run reading disagrees — see that function's header.
         record_verified_state "$CURRENT_TASK" "$VERIFY_FP_PRE" "$VERIFY_HASH_PRE"
+        # --- CYCLE-GEN-POSTCHECK-BEGIN (claude-workflow-plugin-gsfd R3-F2) ---
+        # Re-read the generation ONE more time, now that every write above
+        # has actually landed, against the SAME baseline the pre-check used.
+        # If it moved DURING the writes — a concurrent enter/choose landed
+        # in the gap the pre-check alone cannot see — the files just
+        # written ARE ALREADY the stale-cycle repopulation this whole
+        # mechanism exists to prevent. Roll back (best-effort delete)
+        # rather than leave them: a rolled-back task loses only this one
+        # run's cache (the next genuine run rebuilds it), the identical
+        # cost the pre-check's own refusal already accepts, not a new one.
+        RUN_CYCLE_GEN_POST2=$(current_cycle_gen "$CURRENT_TASK")
+        if [ "$RUN_CYCLE_GEN_POST2" != "${RUN_CYCLE_GEN_PRE:-0}" ]; then
+            log_sync_error "Stop: cycle generation moved during persistence for $CURRENT_TASK (${RUN_CYCLE_GEN_PRE:-0} -> $RUN_CYCLE_GEN_POST2) -- rolling back this run's cache write, it landed inside a newer cycle's wipe"
+            rm -f "$(last_test_rc_file_for "$CURRENT_TASK")" 2>/dev/null || true
+            rm -f "$(last_runner_file_for "$CURRENT_TASK")" 2>/dev/null || true
+            rm -f "$(last_failed_checks_file_for "$CURRENT_TASK")" 2>/dev/null || true
+            rm -f "$(last_test_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+            rm -f "$(last_lint_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+            rm -f "$(last_type_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+            rm -f "$(last_verified_state_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        fi
+        # --- CYCLE-GEN-POSTCHECK-END (claude-workflow-plugin-gsfd R3-F2) -----
+        fi
     fi
 fi
 
@@ -4083,6 +4691,44 @@ checks_scope_note() {
             printf '  RAN      type-check  %s\n' "$TYPE_CMD"
         else
             printf '  NOT RUN  type-check  no type command detected for runner=%s\n' "${RUNNER:-none}"
+        fi
+        # claude-workflow-plugin-gsfd (disclosure fix): run_with_timeout sets
+        # this when neither `timeout` nor `gtimeout` was on PATH for the RAN
+        # check(s) above, so an advertised cap that quietly did not apply is
+        # named here rather than left indistinguishable from an enforced one.
+        # R6-F1: "the RAN check(s) above" is safe to state as a PLURAL list
+        # naming every one of them, because run_with_timeout now decides
+        # timeout/gtimeout/none exactly ONCE per shell (TIMEOUT_DISPATCH) and
+        # every dispatch call in this run took that SAME branch — the flag,
+        # read here after all of them have finished, was never a mix of
+        # some-bounded/some-not to misattribute in the first place. See that
+        # function's own header for the fix and the two failure directions it
+        # closes.
+        if [ -n "${TIMEOUT_NOT_ENFORCED:-}" ]; then
+            local ran_timeout_note=""
+            if [ -n "${TEST_CMD:-}" ]; then
+                ran_timeout_note="tests (${TEST_TIMEOUT_S}s)"
+            fi
+            if [ -n "${LINT_CMD:-}" ]; then
+                if [ -n "$ran_timeout_note" ]; then
+                    ran_timeout_note="$ran_timeout_note, lint (${LINT_TIMEOUT_S}s)"
+                else
+                    ran_timeout_note="lint (${LINT_TIMEOUT_S}s)"
+                fi
+            fi
+            if [ -n "${TYPE_CMD:-}" ]; then
+                if [ -n "$ran_timeout_note" ]; then
+                    ran_timeout_note="$ran_timeout_note, type-check (${TYPE_TIMEOUT_S}s)"
+                else
+                    ran_timeout_note="type-check (${TYPE_TIMEOUT_S}s)"
+                fi
+            fi
+            printf '
+  TIMEOUT NOT ENFORCED: neither timeout nor gtimeout is on PATH on this
+  host, so the RAN check(s) above (%s) executed UNBOUNDED just now -- their
+  advertised cap did NOT apply. A hang would not stop at that figure; only
+  the surrounding Stop hook wall-clock timeout (see .claude/settings.json)
+  still bounds it. claude-workflow-plugin-gsfd.\n' "$ran_timeout_note"
         fi
         printf '
   Those are the DEFAULT targets detect-stack.sh resolves for runner=%s. Any
@@ -5617,6 +6263,11 @@ if [ -n "$CURRENT_TASK" ]; then
     rm -f "$(escalation_posted_file_for "$CURRENT_TASK")" 2>/dev/null || true
     # 2ty: the auto-defer counter belongs to the cycle that just closed.
     rm -f "$(escalated_stops_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    # claude-workflow-plugin-gsfd R1-F6: the captured-tail cache belongs to
+    # the cycle that just closed too, same reasoning as the four lines above.
+    rm -f "$(last_test_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    rm -f "$(last_lint_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    rm -f "$(last_type_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
 fi
 
 # B2: if the epic gate had something to surface, emit it as a non-blocking

@@ -20,6 +20,1095 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Concurrency ownership: a lease answers "who owns this tree right now"
+  before D4 needs to ask** (`gsfd`, the D4 prerequisite). j7kk's
+  skip-when-unchanged removes the redundant-run case but does not resolve
+  ownership — measured twice, both occurrences of a fixed-path collision
+  below had the tree genuinely move, so the skip correctly declined to fire
+  and the collision happened anyway.
+
+  - **`.claude/scripts/tree-lease.sh`** (new) — a shared ownership primitive:
+    `lease_acquire`/`lease_release`/`lease_conflicts`/`lease_reclaim_stale`,
+    sourced by the L1 runner (`run-tests.sh`), the L2 runner
+    (`.claude/tests/component/run.sh`), and the Stop hook
+    (`verify-before-stop.sh`). **This paragraph describes the FINAL, round-6
+    shape, not an intermediate one — read the fix-round history below for
+    the full account of how it got here, including a four-value grammar
+    (LIVE/LIVE-BUT-OLD/UNCONFIRMED/STALE) and a periodic `lease_heartbeat`
+    that shipped for several rounds and are BOTH gone now.** The lease is
+    report-only: `lease_conflicts` computes one of two statuses, and
+    nothing ever auto-removes a lease on the strength of either. A
+    same-host pid that answers `kill -0` reads LIVE when EITHER its
+    recorded start time matches its own measured elapsed runtime (same
+    PROCESS, not a pid the OS recycled after the original exited) OR that
+    measurement could not be taken at all (no usable `ps` where the check
+    ran, or the pid exited between the `kill -0` and the check) — an
+    unconfirmable reading is a HEDGED live, never a new way to fail a live
+    owner, matching `_lease_pid_start_matches`'s own contract ("cannot rule
+    out a match"). (Corrected here — see gsfd R6-F4: this paragraph
+    previously listed "a liveness check that could not complete" under
+    STALE, which disagreed with both the code, which treats it as
+    confirmed-live, and with `_lease_pid_start_matches`'s own header.) LIVE
+    holds unconditionally, for as long as the process genuinely is — age
+    never demotes it. Everything else (a different host, no recorded pid, a
+    confirmed-dead pid, or a pid that now belongs to a DIFFERENT process —
+    a MEASURED elapsed-runtime mismatch, reuse) reads STALE; age is still
+    printed on both, informational only, and no threshold of any kind
+    decides the word any more.
+
+    R6-F4 also added the missing test leg: `tree-lease.test.sh` gains
+    section 4c (+ META 4c) — an unusable `ps` double placed first on PATH
+    (the rest of PATH, and so every other external command `lease_conflicts`
+    needs, is untouched) drives the real "unknown" path through
+    `_lease_pid_start_matches` and `lease_conflicts` together and proves it
+    classifies LIVE, never STALE; a mutant narrowing the conversion to
+    accept only a literal "yes" proves the identical fixture then reads
+    STALE. 7 new assertions (2 preconditions + 2 main + 3 META), all passing
+    alongside the rest of the file:
+    `bash .claude/scripts/tests/tree-lease.test.sh` — 78 assertions total,
+    this change set. Sections 4 ("yes") and 4b ("no") already existed;
+    "unknown" was the gap. Separately, R6-F5: that file's own header
+    claimed its sections were "renumbered to be contiguous" after two were
+    deleted (the old heartbeat section 9, the old dead_grace_s section 14) —
+    they were not; both the catalogue and the executable body jump straight
+    from 8 to 10, and 14 does not exist. The comment is corrected to say so
+    rather than renumbering the surviving sections, which would have touched
+    every META/assertion label from 10 through 13 for a LOW-severity
+    bookkeeping mismatch.
+
+    `lease_reclaim_stale`
+    removes every lease it reads STALE and is never called on anyone's
+    behalf — an explicit, standalone operator action only
+    (`bash -c '. tree-lease.sh; lease_reclaim_stale "$dir"'`). Not a
+    mutex — it cannot stop a non-participating writer (a human's shell, an
+    MCP host that never sourced it), and does not try to; it is the
+    extension point for when 9xl4's timed-out-Codex-host scenario becomes
+    reachable again. New L1 spec: `tree-lease.test.sh` (64 assertions as
+    shipped in fix round 1; 77 after fix round 2 adds R2-F1's
+    UNCONFIRMED-state coverage, R2-F3's set -e survival test, and R2-F6's
+    owner_host META-TEST; 86 after fix round 3 adds the heartbeat-callers
+    coverage and section 14's `dead_grace_s` boundary tests. **Not current
+    past that point: round 6's DESIGN COLLAPSE (below) deletes both of
+    those sections outright — the mechanisms they guarded, `lease_heartbeat`
+    and the `dead_grace_s` threshold, no longer exist anywhere in this
+    codebase — leaving 71 assertions, all passing, as measured by
+    `bash .claude/scripts/tests/tree-lease.test.sh` at this change set.**).
+
+    **Fix round 1** (independent cross-family review, sol-codex/gpt-5.6-sol,
+    4 HIGH + 4 MEDIUM, `gsfd` R1-F1..F8) found this initial version's own
+    tests encoded some of its bugs as "correct":
+    - R1-F2: hostname+pid is not process identity. `kill -0` succeeding only
+      proves SOME process holds that pid now, not that it is the SAME one
+      that wrote the lease — a pid the OS recycled after the original
+      exited would pass `kill -0` forever and keep a dead lease LIVE for up
+      to the 3h backstop. `started_at` (recorded, unused before this fix) is
+      now cross-checked against the current holder's actual elapsed runtime
+      (`ps -o etime=`, portable across GNU/BSD, parsed by hand since GNU's
+      simpler `etimes` is not shared); a mismatch reads STALE unconditionally.
+      Residual, documented rather than silently shipped: hostname string
+      equality is not proof of MACHINE identity, and a genuine cross-host
+      collision (two hosts/containers reporting the same hostname) is not
+      closed by this alone.
+
+      **Fix round 2 (R2-F1, sol-codex review): the ABOVE "every consumer is
+      advisory-only" claim was false, disproven by enumeration rather than
+      accepted on assertion.** `lease_conflicts`'s own output feeds
+      `lease_reclaim_stale`, called synchronously from every `lease_acquire`
+      (self-heal); a hostname collision made a local `kill -0` misread a
+      genuinely LIVE remote owner as dead, and `lease_reclaim_stale`
+      REMOVED its lease file — a real deletion, not a notice. Fixed by
+      making a same-hostname-string "dead" reading (kill -0 failing, or a
+      pid-reuse mismatch) NO LONGER sufficient on its own to reclaim
+      instantly: it now reports a new `UNCONFIRMED` status (distinct from
+      LIVE — never asserting alive what could not be confirmed) and is
+      reclaimed only once ALSO old enough to cross the same age backstop a
+      plain cross-host lease already used — never instantly from a local
+      check that was never capable of testing a remote machine's process
+      table in the first place. The bounded consequence, now actually true:
+      a hostname collision can still eventually cost a live foreign owner
+      its lease file, but only on that backstop's schedule (default 3h),
+      identical exposure to the cross-host case already accepted here
+      before either fix.
+
+      **Further correction, same review round**, caught re-checking this
+      fix against a REAL caller rather than only this file's own test
+      fixtures: `lease_acquire` originally recorded `started_at` as the
+      ACQUIRE-CALL moment. `verify-before-stop.sh` does substantial work
+      (task detection, doc-only classification, escalation checks,
+      `DETECT_STACK`) before ever reaching `lease_acquire` — and the exact
+      high-contention conditions this batch targets are the ones that
+      stretch that gap furthest — so a caller whose own preamble ran longer
+      than the 5s matching tolerance would have its OWN fresh, legitimate
+      lease misread as pid-reuse by any concurrent checker moments later.
+      Measured directly: a lease acquired after a real 7s delay read STALE
+      under the original shape and LIVE once `started_at` is back-computed
+      from the pid's own measured elapsed runtime instead (a fact about the
+      PROCESS, stable for its whole life, rather than about when
+      `lease_acquire` happened to be called). New assertions (12, META 12)
+      drive this with a real, unsimulated delay — the property is about
+      actual OS-measured elapsed time, which cannot be faked by backdating
+      an mtime the way the age-backstop tests do.
+    - R1-F3: the age backstop used to override a CONFIRMED-live pid — it ran
+      whenever `stale="no"`, including the branch where `kill -0` had just
+      succeeded, so a still-running L1 tier (44 specs × 900s cap can exceed
+      the 10800s default, and no caller heartbeats) could have its own live
+      lease reclaimed mid-run. Now the age check only fires when liveness
+      could NOT be confirmed; a confirmed-live-but-old lease reports the new
+      `LIVE-BUT-OLD` status and is never reclaimed. Separately,
+      `_lease_mtime_epoch` emitted literal `'0'` on a `stat` failure, which
+      the sanitiser's `''|*[!0-9]*` pattern does not catch (it emits empty
+      now, closing the gap).
+    - R1-F4: the mktemp-template META-TEST hardcoded BSD's un-substituted-
+      placeholder outcome as "correct" — measured FAILING on GNU coreutils
+      9.7 (the CI platform), where the identical template IS substituted.
+      Fixed by probing this platform's OWN mktemp behaviour for the exact
+      template shape and asserting the mutant matches the probe, so both
+      platforms get a real, non-skipped assertion.
+    - R1-F5: `set -u` sat at file scope and leaked into every sourcing
+      caller (reproduced: `bash -c 'set +u; . tree-lease.sh; echo "$-"'`
+      gained a `u`), contradicting the file's own "nothing here mutates the
+      caller's shell state" promise. Scoped to the direct-execution CLI
+      block only. **Rationale corrected (R2-F8, round 2 review): the fix is
+      sound, the original explanation here was not.** A function's BODY is
+      not evaluated under nounset merely by being DEFINED — defining a
+      function only parses it, never executes it — but every CALL to one
+      of this file's functions, made from the same shell that sourced it,
+      ran under whatever `set -u` state that sourcing left behind, which
+      before this fix was "on" (that IS the leak R1-F5 measured and fixed).
+      Definitions were never affected; calls were.
+    - R1-F8: `lease_heartbeat` and `lease_release`'s own defining effects,
+      and the `started_at` field R1-F2 turns on, had no discriminating
+      assertion; all three now have a dedicated META-TEST. `owner_host`'s
+      own write was claimed covered too but was not (R2-F6, round 2
+      review) — fixed with a dedicated META-TEST of its own.
+
+    **Fix round 2** (`gsfd` R2-F3, sol-codex review):
+    `lease_release`'s own "best-effort; always returns 0" promise was false
+    under a failing `rm -f` (a permissions change, a read-only remount): the
+    bare `[ -n "$f" ] && rm -f "$f" 2>/dev/null` statement's exit status was
+    `rm`'s, and `verify-before-stop.sh` calls it under its own `set -e`
+    without a guard — a Stop hook that produces no output releases rather
+    than blocks, the worst failure direction, and silently. Fixed with
+    `|| true` on the `rm` itself (a trailing `return 0` is not enough, same
+    reasoning `lease_conflict_summary`'s own ERREXIT SAFETY note already
+    gives), plus belt-and-braces `|| true` at all three call sites
+    (`verify-before-stop.sh`, both L1/L2 runners). Reproduced directly:
+    `rm -f` against a DIRECTORY reliably fails "Is a directory" on both
+    BSD and GNU rm, independent of privilege level, and a bare
+    `set -e` caller genuinely aborted before this fix, survived after.
+
+    **Fix round 3** (`gsfd` R3-F3, sol-codex review, independently measured
+    rather than merely reasoned through): round 2's UNCONFIRMED status
+    (above) closed the cross-host hostname-collision risk by applying the
+    SAME long `stale_s` clock (default 3h) to every non-confirmed-live
+    reading — which also, as a direct consequence, applied it to the
+    ordinary same-host crash case, by far the more common one. Every
+    restart after ANY local crash rendered a live-seeming "concurrent
+    (unconfirmed...)" notice for a full three hours, for a process the
+    host itself could confirm dead via a single `kill -0`. A notice that
+    is usually wrong is one operators learn to ignore, which is worse than
+    no notice — the reviewer flagged this independently, before it was
+    confirmed. Fixed by splitting the one age threshold into two: `stale_s`
+    still governs the confirmed-live and true-cross-host buckets
+    unchanged, but a same-host reading that failed liveness confirmation
+    (`kill -0` failing, or a `started_at` mismatch) now clears on the much
+    shorter `dead_grace_s` (default 90s — roughly three missed heartbeats
+    at the runners' own 30s cadence, sized the same way
+    `_lease_pid_start_matches`'s existing 5s tolerance was, to absorb
+    ordinary scheduling jitter, not to widen a timeout). Splitting the
+    threshold without reopening R2-F1's own collision risk required making
+    `dead_grace_s` trustworthy in BOTH directions, which needed active
+    evidence rather than passive inference: every participating runner
+    (L1 `run-tests.sh`, L2 `.claude/tests/component/run.sh`, the Stop hook)
+    now refreshes its own lease's mtime every 30s while genuinely alive,
+    via `lease_heartbeat` — which previously had no production caller at
+    all, an observation from round 1 closed here. **Superseded, not
+    current (R4-F5, round 4 review): this paragraph originally shipped as
+    "a bounded, self-terminating (6h ceiling) heartbeat daemon" — a
+    background subshell per runner. That daemon design was RETIRED two
+    fix rounds later (see "the heartbeat daemon retired" entry below,
+    same fix arc) after producing two further defects of its own; there
+    is no daemon, no 6h ceiling, and no fd-redirect control left in the
+    shipped code. This paragraph is corrected in place because the
+    MECHANISM it describes (mtime-refresh cadence, the two-population
+    threshold split) is still exactly what ships; only ITS OWN
+    "daemon" framing was overtaken by later rounds and is named here
+    rather than left to mislead a reader who stops at this paragraph.**
+    A same-host process that crashes stops heartbeating and clears
+    `dead_grace_s` within two minutes; a genuinely-alive FOREIGN owner
+    sharing this host's hostname string keeps refreshing ITS OWN lease and
+    never approaches `dead_grace_s` either — one mechanism resolving both
+    directions at once, rather than trading one off against the other.
+    Considered and rejected, reasoned through by hand rather than assumed:
+    Linux boot-id + pid-namespace identity, the reviewer's own alternative
+    suggestion — it gives zero benefit on macOS (this repo's own authoring
+    platform) and, worked through against this file's own "cloned
+    container image" concern, still cannot discriminate that specific case
+    either, since containers sharing a base image commonly share both
+    machine-id and boot-id. KNOWN LIMITATION, documented rather than fixed
+    this round (inferred by the reviewer but not independently measured):
+    a hostname-colliding foreign lease whose pid AND recorded start time
+    happen to coincide with an unrelated local process still reads
+    CONFIRMED-live and can persist as LIVE-BUT-OLD indefinitely — heartbeat
+    evidence does not help here, because the coincidence already satisfies
+    `confirmed_live`'s own check before heartbeating is ever consulted.
+    Separately (R3-F4, documentation only): this file's own header
+    previously claimed the cross-host/no-pid bucket could read
+    `UNCONFIRMED` or `STALE`; the shipped code has only ever produced
+    `LIVE` or `STALE` there (it has no local evidence to withhold
+    confirmation FOR), and the header now says so.
+
+    **SELF-FOUND regression, same round, before reporting it** (not from the
+    independent review — found verifying the heartbeat daemon above against
+    a minimal byte-for-byte reproduction of its own spawn shape, rather than
+    only against this repo's own fixtures): the heartbeat subshell added to
+    all three participating runners (`run-tests.sh`, `component/run.sh`,
+    `verify-before-stop.sh`) did not redirect its own stdin/stdout/stderr
+    away from its parent's. `kill "$LEASE_HEARTBEAT_PID"` (or
+    `$STOP_LEASE_HEARTBEAT_PID`) at each runner's own cleanup point signals
+    the SUBSHELL WRAPPER only; the `sleep 30` it is blocked in at that
+    instant is a SEPARATE child process, gets re-parented to pid 1 rather
+    than terminated when its parent dies, and — measured directly against
+    the shipped shape — keeps holding whatever fds it inherited for up to
+    its remaining ~30s. In `verify-before-stop.sh` specifically, this
+    script's own stdout IS the JSON envelope Claude Code reads back, and a
+    caller reading a child's stdout as a STREAM (the same constraint bash's
+    own `$(...)` command substitution has, and the shape any hook-invocation
+    harness must use to capture that JSON) cannot see EOF until every
+    process holding the pipe's write end has closed it. Left unfixed, EVERY
+    Stop hook invocation that reached this heartbeat would have appeared to
+    hang for up to 30s after its real decision was already written, for as
+    long as this repo's lease mechanism was in use — measured directly with
+    a minimal reproduction of the identical spawn shape: an unfixed capture
+    took the full orphaned tail of the sleep to return; the same capture
+    against the fixed shape returned immediately. Fixed by redirecting the
+    subshell's own fds at the moment it is spawned
+    (`</dev/null >/dev/null 2>&1`) in all three runners, which closes the
+    gap regardless of whether the later `kill` can reach the in-flight
+    `sleep` (it cannot, and still does not after this fix — the orphaned
+    sleep still lingers doing nothing observable, but no longer holds a copy
+    of the parent's stdout for anyone to wait on). New component-spec
+    coverage (`vbs-r3fix` in `verify-before-stop.sh`'s own spec) drives the
+    ACTUAL shipped hook through a real dispatch, times a stdout-pipe capture
+    of it directly, and — the same non-negotiable pairing requirement as
+    every other control in this changeset — proves a copy with the redirect
+    stripped measurably hangs the identical capture, so this check would
+    catch its own regression rather than merely observe the fix once.
+    **Not current (round 6 DESIGN COLLAPSE, below): `vbs-r3fix` covered a
+    background heartbeat daemon that itself no longer exists in ANY form —
+    not as a daemon, not as the in-process replacement round 4 gave it. The
+    section was deleted with the mechanism, not left to pass vacuously; see
+    the DESIGN COLLAPSE entry for why.**
+
+    **The heartbeat daemon retired** (independent cross-family review,
+    same fix arc, one round later): the fd-redirect fix above closed the
+    stdout-inheritance hang, but the SAME orphaned `sleep 30` — surviving
+    a `kill` to its now-dead subshell wrapper for up to its remaining
+    ~30s — then tripped `run-tests.sh`'s own per-spec survivor-hygiene
+    check in any spec invoking this hook (`phase5-synthetic-tests.sh`:
+    "exited 0 with 1 background process(es) still running"). Both
+    defects trace to one assumption: that a background daemon is the
+    right shape for a heartbeat inside code that must terminate cleanly.
+    Shrinking the daemon's sleep interval was considered and rejected —
+    it would only trade a reliable failure for an intermittent one, which
+    this repo already treats as a defect in its own right (the store-
+    canary/97-minute-L2-run history this same task's own description
+    cites). The daemon was retired instead, in favour of an IN-PROCESS
+    heartbeat: `run-tests.sh`/`component/run.sh` fold it into the
+    per-spec WATCHDOG's own already-necessary 1-second poll loop (no new
+    process — that loop exists regardless, for `SPEC_TIMEOUT_S`
+    enforcement); `verify-before-stop.sh`'s `run_with_timeout` was
+    rewritten from a single blocking `timeout`/`gtimeout` call (absent by
+    default on BSD/macOS, degrading to unbounded when missing) into a
+    genuine in-process poll loop of its own. Both fd-redirect mutant
+    suites (`vbs-r3fix`; `runner-completeness.test.sh` section 18) were
+    retired rather than left passing vacuously against a design with no
+    fd left to guard, and replaced with assertions that the lease file's
+    mtime genuinely advances during a real >30s dispatch/spec through the
+    REAL, unstubbed code, each paired with a mutant that disables the
+    heartbeat call specifically. **Not current (round 6 DESIGN COLLAPSE,
+    below): the in-process heartbeat this paragraph describes is ALSO
+    gone — deleted outright, not replaced again — and their REPLACEMENT
+    mtime-advances assertions went with it for the same reason: there is
+    no lease-mtime-advances-during-dispatch property left to prove once
+    nothing heartbeats. `run_with_timeout` is back to the plain
+    `timeout`/`gtimeout` call this paragraph says it was rewritten FROM.**
+
+    **Fix round 4** (independent cross-family review): the daemon
+    retirement itself introduced four further findings, all in the new
+    code that retirement added.
+    - R4-F1 (HIGH): `run_with_timeout`'s supervision loop tested
+      `kill -0 "$child_pid"` — is the WRAPPER still alive — and only
+      killed the process group once the deadline fired. A test_cmd
+      shaped as `real_work &` (backgrounding its own work) let the
+      `bash -c` wrapper reach the end of its command string and exit in
+      well under a second while `real_work` kept running, reparented,
+      inside the SAME isolated group `set -m` created — the function
+      returned 0 (success) while the thing it was timing was still
+      running, completely unsupervised, indefinitely. Third occurrence
+      in this same fix arc of "the wrapper exited" being mistaken for
+      "the work finished" (the stdout-fd orphan, the phase5 survivor, now
+      this) — the fix applies this repo's own `run-tests.sh`
+      SURVIVOR-SWEEP philosophy here too: completion means the process
+      GROUP is empty, not that one pid exited. The loop condition is now
+      `kill -0 -- "-$child_pid"` (the identical negative-pid group target
+      the timeout-kill path already used) — verified directly: a
+      `bash -c 'sleep N & exit 0'` reproduction shows the wrapper dead
+      within a second while the group-signal check still reports the
+      group alive until the orphaned sleep actually finishes, and 5
+      repeated forced-timeout runs of the exact exploit shape all
+      correctly returned 124 (never 0), each independently confirmed
+      leak-free by exact-PID descendant tracking.
+    - R4-F2 (MEDIUM): the deadline was a COUNT of completed one-second
+      polls, not a clock reading, so per-iteration overhead (including
+      the heartbeat's own work) could stretch 1200 counted ticks
+      materially past 1200 real seconds under load — exactly when a
+      timeout matters most. More seriously, the heartbeat ran
+      SYNCHRONOUSLY inside the same loop, so a stalled `lease_heartbeat`/
+      `touch` blocked the loop from ever reaching its next deadline check
+      at all, coupling the deadline's own liveness to the filesystem
+      operation it supervises. Fixed by reading a real timestamp
+      (`date +%s`) once and comparing elapsed wall-clock time each
+      iteration instead of counting passes, and by firing the heartbeat
+      as a bounded, redirected, fire-and-forget background call
+      (`</dev/null >/dev/null 2>&1 &`, never waited on) rather than
+      synchronously — in the common case it completes in a fraction of a
+      second and leaves nothing behind; in the pathological hung case
+      this loop's own deadline enforcement is no longer blocked by it,
+      and the orphan (a zombie once it does exit) is excluded from
+      `run-tests.sh`'s own survivor check on principle, so this does not
+      reintroduce the daemon shape just retired. Verified directly: with
+      `lease_heartbeat` replaced by a 120-second hang, the SAME
+      `run_with_timeout` call still returned 124 at ~36s (a 35s cap plus
+      grace) rather than 120+s.
+    - R4-F3 (MEDIUM): the per-spec watchdog's heartbeat counter was LOCAL
+      to that one watchdog subshell, reset to 0 every time a fresh spec
+      started, so a tier lasting many minutes but composed of
+      sub-30-second specs never let any single watchdog's own counter
+      reach 30 — the lease was never refreshed for the tier's real,
+      cumulative duration, and after `dead_grace_s` (90s) a host sharing
+      this one's hostname could misread the still-running tier as
+      locally dead and reclaim its lease, reopening the exact collision
+      the heartbeat exists to prevent. R3-F3 was PARTIALLY FIXED: a
+      single long command genuinely heartbeats throughout (the case it
+      was built for); the ordinary many-short-specs tier shape did not.
+      Fixed by keying the decision off the lease FILE's own mtime
+      (`_lease_mtime_epoch`, already in `tree-lease.sh`) instead of a
+      per-watchdog counter — the mtime is the one piece of state that
+      genuinely persists across every spec/watchdog boundary a tier
+      crosses. Verified directly against the REAL runner (not a
+      simulation): a 4-spec, 8-seconds-each fixture (32s cumulative, no
+      single spec anywhere near 30s) showed the lease file's mtime
+      advance at precisely t+31s into the run, mid-way through the
+      fourth spec — 30 seconds after the initial acquire, exactly the
+      documented cadence, despite three prior spec/watchdog boundaries
+      that individually never got close.
+    - R4-F4 (MEDIUM): the generation `mkdir` lock in `qa-gate.sh`'s
+      `wipe_iteration_state` had no owner record and no stale-lock
+      recovery — if a holder died (a crash, a SIGKILL) between acquiring
+      and releasing it, the lock directory was left behind forever
+      (`mkdir` locks have no built-in expiry), so every LATER call spent
+      its own ~1s budget failing to acquire it and then proceeded
+      read-modify-write UNLOCKED, silently, permanently, from that
+      point on — broader than the shipped comment's "extreme contention"
+      framing: one interrupted holder was enough, not sustained
+      contention. Fixed with stale-lock recovery: the winning `mkdir` now
+      records its own pid inside the lock directory; a waiter whose
+      `mkdir` fails reads that pid and, if it is no longer alive
+      (`kill -0`), removes the stale lock and retries within the SAME
+      bounded loop rather than exhausting the budget and degrading. This
+      does not need the pid-reuse-proof certainty `tree-lease.sh`'s own
+      lease identity does (R1-F2/R2-F1) — a false "still held" reading
+      here only ever repeats the pre-fix behaviour for that one call,
+      never worse, while the common case (a genuinely dead holder) now
+      self-heals instead of wedging permanently. Verified directly: a
+      simulated crashed holder (a lock directory with a recorded, verified-
+      dead pid) was reclaimed within the same bounded retry loop (0s
+      wasted), and five consecutive calls after repeated simulated
+      crashes each correctly reacquired the lock with the generation
+      counter incrementing sequentially throughout, with zero lost bumps.
+    - R4-F5 (LOW, documentation): the CHANGELOG passage above this entry,
+      `tree-lease.test.sh`'s own header prose, and two comments in
+      `verify-before-stop.sh` still described the retired daemon and its
+      GNU-`timeout`-based predecessor as the shipped mechanism. Corrected
+      in place rather than silently rewritten, naming what changed and
+      why, matching this file's own "Rationale corrected" convention.
+    - **Permanent test coverage for this round**, added after the fix and
+      verified by running each new spec against both the shipped code and
+      a purpose-built mutant. `run-with-timeout.test.sh` (NEW, 22
+      assertions) drives `run_with_timeout` extracted verbatim from the
+      shipped script: R4-F1 (5 repeated forced-timeout runs of the
+      backgrounding-exploit shape, each independently confirmed leak-free
+      by exact-PID matching on a distinct sleep duration per run, plus a
+      mutant reverting the group check that reproduces rc=0-with-leak on
+      demand) and R4-F2 (a 131s-hung heartbeat override proving the
+      deadline still fires at ~cap+grace, plus a mutant reverting the
+      heartbeat to synchronous that proves the identical scenario now
+      genuinely blocks past the cap). `runner-completeness.test.sh` gained
+      sections 18.3/18.4 (L1 and L2) for the R4-F3 gap specifically: 5 stub
+      specs at 8s each (40s cumulative, no single spec anywhere near 30s)
+      confirmed the lease's mtime advances mid-tier against the REAL
+      runner, with a purpose-built mutant (a per-spec-reset tick counter,
+      deliberately distinct from the "disabled outright" mutant sections
+      18.1/18.2 use) proving the property specifically fails for the
+      CUMULATIVE case when absent — the earlier single-long-spec mutant
+      would still (correctly) fail to heartbeat here too, but for the
+      wrong reason, and would not have distinguished this property from
+      "heartbeating is broken entirely". That same edit surfaced and fixed
+      a second, self-inflicted regression: the R4-F3 shipped-code change
+      had removed the exact `$((waited % 30)) -eq 0` text sections
+      18.1/18.2's own pre-existing mutant construction searched for,
+      silently turning that mutant into a byte-identical copy of the
+      shipped file (`diff` producing 0 lines, not the expected 2) — caught
+      by re-running the section after the shipped-code edit rather than
+      assuming a prior-round control still applied, and fixed by
+      re-targeting the mutant's sed pattern at the new threshold
+      (`-ge 30` -> `-ge 999999`, disabling the heartbeat outright, which is
+      the property those two sections actually need) rather than
+      reintroducing the retired tick-counter shape, which is what the new
+      18.3/18.4 mutant is for instead. `qa-gate-lock-recovery.test.sh`
+      (NEW, 12 assertions) drives `wipe_iteration_state` extracted from the
+      shipped script for R4-F4: a genuinely-dead pid (spawned and reaped by
+      the spec itself, not guessed or hardcoded) planted inside a
+      hand-built stale lock is shown to self-heal within one retry
+      iteration across 5 consecutive simulated crashes, with a mutant
+      reverting to the pre-fix plain-`mkdir`-retry shape (no pid recorded,
+      no recovery) shown to leave the lock directory behind permanently —
+      the bug's own exact symptom, reproduced on demand.
+
+      **Not current for two of these three files (round 6 DESIGN COLLAPSE,
+      below) — corrected in place rather than left to mislead:**
+      `run-with-timeout.test.sh`'s R4-F1/R4-F2 sections (2-4 and their
+      METAs) tested the in-process rewrite directly; that rewrite is gone,
+      their own target literals (`kill -0 -- "-$child_pid"`, the in-loop
+      `lease_heartbeat` call) no longer exist in the shipped function, and
+      every mutant built against them would have been byte-identical to
+      the original — deleted along with the mechanism. What remains is
+      sections 0-1 (extraction validity, exit-code/log-capture passthrough
+      for a quick command — still true of the restored dispatch), measured
+      at 6 assertions, all passing
+      (`bash .claude/scripts/tests/run-with-timeout.test.sh`, this change
+      set). `runner-completeness.test.sh` section 18 (18.1-18.4 and their
+      METAs) is deleted in full for the identical reason — neither runner
+      heartbeats at all now, so there is no "lease mtime advances during
+      dispatch" property left for either the real legs or their mutants to
+      exercise. `qa-gate-lock-recovery.test.sh` is the one file in this
+      list that GAINED coverage rather than lost it: see R5-F3 below.
+
+    **Fix round 5** (independent cross-family review): the daemon-to-
+    in-process rewrite (round 4, above) had its own defects.
+    - R5-F1 (HIGH): "normal completion" in `run_with_timeout` meant "the
+      original supervised process group has no signalable members", not
+      "the descendant tree is empty". The ordinary R4-F1 attack stayed
+      fixed — a `sleep 1800 &` child stays in the wrapper's own group, so
+      the loop keeps timing it and the group kill still reaches it — but a
+      child that calls `setsid`/`setpgid` (a daemonising helper that then
+      runs long work) LEAVES that group; once the wrapper exits 0 the
+      original group reads empty and the function returns 0 while the
+      detached work keeps running, unsupervised. The timeout branch was
+      weaker still: it signalled the group and waited only for the
+      wrapper, never confirming the group had actually emptied. This is
+      the same "wrapper exited" mistaken for "work finished" shape as
+      R4-F1 and the earlier fd-orphan/phase5-survivor pair — a fourth
+      occurrence, in the function every verification in this plugin flows
+      through.
+    - R5-F2 (MEDIUM): `.claude/tests/component/specs/verify-before-stop.sh`'s
+      `vbs-r3fix` heartbeat mutant targeted the retired literal
+      `[ "$hb_tick" -ge 30 ]`, which by this point occurred zero times in
+      the shipped hook (the condition had already become
+      `"$((now - hb_last))" -ge 30` in an earlier round) — the "mutant" was
+      byte-identical to the original, its own non-vacuity guard required 2
+      changed lines and got 0, and the section was failing RED, unnoticed
+      because it had not been re-run since the shipped-code edit that broke
+      it. Sixth instance in this batch's own controls of a check that does
+      not exercise the mechanism it names.
+    - R5-F3 (MEDIUM): `qa-gate.sh`'s stale-lock recovery (R4-F4, round 4)
+      only covered a holder that recorded a NUMERIC pid before dying. A
+      crash — or a failed write — between the winning `mkdir` and its very
+      next line left a lock directory with no valid pid file, and the
+      pre-fix handling of that state was a bare no-op: an ownerless lock
+      persisted FOREVER, and every later call proceeded UNLOCKED,
+      permanently, from that point on — the exact defect R4-F4 believed it
+      had already closed, just reached a different way.
+    - R5-F4 (MEDIUM): the round-4 in-process heartbeat was correctly
+      decoupled from a stalled deadline, but it was still a background
+      process that could outlive the call it was fired from — the round-4
+      spec explicitly acknowledged and killed that orphan. A persistently
+      blocked heartbeat accumulated roughly one process per 30s in the Stop
+      hook; the runner watchdogs could launch a new one every second while
+      the lease mtime stayed old, and their own mtime lookup could itself
+      block on a stalled mount. The daemon was retired to remove exactly
+      this class of defect; the fire-and-forget heartbeat reintroduced a
+      narrower version of it.
+    - R5-F5 (LOW): `runner-completeness.test.sh`'s dolt-flusher spawn probe
+      (`poll_for_dolt_flusher`, section 15.9/15.10) set its `hit` result
+      only inside a fixed ~3-second sampling loop; a flusher visible only
+      during `wait "$bgpid"` or only to the post-drain loop that already
+      ran afterward anyway (to confirm the tree was clear) left `hit`
+      unset regardless of what the post-drain had just spent up to 5
+      seconds watching. The 15.10 NEGATIVE CONTROL could therefore pass
+      for the wrong reason: a real spawn the config failed to suppress,
+      observed only outside the original window, still read "not-seen".
+    - R5-F6 (LOW): `verify-before-stop.sh`'s `STOP_TIMEOUT_FILE` /
+      `read_stop_timeout` had no caller anywhere in the file, and the
+      header still promised a configurable 60s "outer wrapper" timeout
+      that knob was supposed to provide, while `settings.json` supplies a
+      fixed 1320000ms Stop-hook timeout regardless. A dead knob plus a
+      stale contract.
+
+    **Fix round 6: DESIGN COLLAPSE** (operator-directed). Five independent
+    review rounds on this task's own lease and heartbeat machinery produced
+    one causal chain: a lease could read a live cross-host owner as
+    reclaimable -> fixed with an UNCONFIRMED state -> that made the
+    ordinary same-host crash path routinely false for up to three hours ->
+    fixed with a heartbeat -> the heartbeat's own daemon orphaned a child
+    and held the Stop hook's stdout -> fixed by retiring the daemon and
+    rewriting `run_with_timeout` in-process -> that rewrite could
+    under-report a finished command via `setsid` (R5-F1), in the function
+    every verification in this plugin flows through, and its own heartbeat
+    still accumulated background processes (R5-F4). Each fix was a
+    legitimate correction of a real defect the PREVIOUS fix had introduced;
+    five rounds in, the pattern itself was the finding.
+
+    **The operator's decision: the lease becomes report-only.** It reports
+    who claims to own a tree; it never auto-reclaims anything, ever again.
+    `lease_acquire` no longer calls `lease_reclaim_stale`. Once nothing is
+    ever deleted on the strength of a liveness guess, the precision every
+    round above was fighting for stops mattering for CORRECTNESS and only
+    affects message quality — so the heartbeat this whole chain was built
+    to keep fresh is unnecessary, full stop, and is deleted from every
+    caller and from `tree-lease.sh` itself (not disabled, not hardened
+    further — removed): `lease_heartbeat` no longer exists anywhere in the
+    shipped code, and neither does any caller of it. `run_with_timeout`
+    reverts to the ORIGINAL, pre-fix-arc `timeout`/`gtimeout` dispatch this
+    same entry describes it being rewritten FROM, four fix rounds ago —
+    the one accepted trade restored along with it, unchanged from before
+    this whole arc began: a host with neither `timeout` nor `gtimeout` on
+    PATH runs the command UNBOUNDED (macOS ships neither by default;
+    `brew install coreutils` provides `gtimeout`).
+
+    **The trade, stated rather than left for a reader to wonder about:** a
+    lease whose owner crashed now lingers in `<dir>/leases/` until
+    something else removes it — there is no accumulation problem in
+    practice (a handful of small text files), and `lease_reclaim_stale`
+    remains defined and directly callable by an operator who wants to
+    sweep them (`bash -c '. tree-lease.sh; lease_reclaim_stale "$dir"'`),
+    just never invoked on anyone's behalf. This is the deliberate price of
+    never again deleting a lease that might be live: the R2-F1 risk (a
+    cross-host collision reclaiming a genuinely live owner) and the R3-F3
+    risk (an ordinary crash reading falsely live for hours) both required
+    machinery to arbitrate correctly; removing the arbitration removes
+    both risks by removing the thing they were both about. The four-way
+    STALE/LIVE/LIVE-BUT-OLD/UNCONFIRMED split and its two independent age
+    thresholds (`stale_s`, `dead_grace_s`) existed only to feed that
+    arbitration; with nothing left to decide, the grammar collapses to two
+    values with no threshold behind either: LIVE (this host, a recorded
+    pid that answers `kill -0`, whose measured elapsed runtime is
+    consistent with the lease's own recorded `started_at` — same PROCESS,
+    not a reused pid) and STALE (everything else). Age is still printed
+    for both, as information a human deciding whether to go look might
+    want, but nothing treats any age as a threshold to cross any more.
+    `tree-lease.sh`: 40,493 -> 27,307 bytes measured at this change set
+    (`wc -c .claude/scripts/tree-lease.sh`); `tree-lease.test.sh`: 71
+    assertions, all passing (`bash .claude/scripts/tests/tree-lease.test.sh`,
+    this change set) — its own former heartbeat section (old section 9)
+    and the `dead_grace_s`-specific section (old section 14) are deleted
+    outright, because the mechanisms they guarded no longer exist anywhere
+    in this codebase, not repaired to match a design that is gone.
+
+    **The three round-5 findings independent of the collapse, resolved on
+    their own terms:**
+    - R5-F3: fixed by treating "no confirmable numeric owner" — whether
+      reached via an absent pid file or a present-but-empty/garbage one —
+      as ONE recoverable state, reclaimed after exactly one retry's grace
+      (this loop's own 0.1s sleep) rather than on first sighting. The
+      grace matters: for a few microseconds after a genuinely live
+      winner's `mkdir` succeeds and before its own printf lands, this
+      state is indistinguishable from the crashed case, and reclaiming on
+      the very first sighting would let a waiter steal a lock its live
+      holder is a moment from legitimately owning; by the second sighting,
+      at least one full 0.1s sleep has elapsed, orders of magnitude longer
+      than a single local `printf` to a small file ever takes to land.
+      `qa-gate-lock-recovery.test.sh` gained sections 4-6 (the no-pid-file
+      and empty-pid-file cases, single and 5x repeated) plus a surgical
+      META that reverts only this branch — not the whole R4-F4 mechanism —
+      located by two independently-unique line anchors rather than a
+      hand-written multi-line pattern; 24 assertions total, all passing
+      (`bash .claude/scripts/tests/qa-gate-lock-recovery.test.sh`, this
+      change set). **Verifying that META surfaced a SEPARATE, pre-existing
+      regression this same fix caused as a side effect**: the ORIGINAL
+      R4-F4 META (which reverts the whole retry loop via a hardcoded
+      "skip the next 14 lines" awk transform) assumed a loop body length
+      that this fix's own additions grew from 14 lines to 19 — the
+      transform then consumed only part of the original loop, leaking its
+      tail into the "mutant" and producing a diff of 17 lines where 13 was
+      expected, and a mutant that failed `bash -n` outright. Fixed by
+      re-anchoring that transform on the loop's own matching `done` line
+      instead of a hardcoded count, so a future change inside the loop
+      cannot silently re-break it the same way. Caught by re-running the
+      file after the fix, not assumed correct because the change set
+      looked self-contained.
+    - R5-F5: fixed by running the identical new-pid check the sampling
+      loop already used inside the post-drain loop too, so any attributed
+      pid `poll_for_dolt_flusher` observes anywhere in its own lifetime —
+      sampling window or post-drain window, whichever — sets `hit`; the
+      drain-to-completion behaviour is unchanged, this only adds an
+      observation to a loop that was already running. Proved with a new
+      META-TEST built on a deterministic, call-counted stub of the
+      pid-attribution primitive (empty for the 62 calls the shipped loops
+      make before post-drain begins, a fake never-baseline pid from call
+      63 onward) rather than a real timing race against actual dolt/ps
+      latency, which would have made the scenario itself flaky to
+      construct: the shipped function reports "seen", a mutant with just
+      this check removed (via `declare -f`, i.e. from what bash itself
+      already parsed out of the shipped definition, not a hand-retyped
+      copy) reports "not-seen" for the identical scripted scenario — the
+      bug's own exact symptom, reproduced on demand. Known residual,
+      disclosed rather than silently accepted, and LARGER than polling
+      granularity alone would suggest (corrected here — see gsfd R6-F3:
+      this paragraph previously named only the smaller of the two blind
+      spots below and so understated the gap). Two distinct blind spots,
+      not one: a flusher that spawns and fully exits inside the ~50ms gap
+      BETWEEN two polls, in either loop — small, bounded by the poll
+      interval itself; and a flusher that spawns and fully exits ENTIRELY
+      inside `wait "$bgpid"` above, where NOTHING polls at all — bounded
+      only by how long the launched `dolt sql` itself takes, which can be
+      far longer than 50ms under a slow store. Closing either needs an
+      event-based mechanism (strace/dtrace/an audit hook), not a tighter
+      poll interval or a poll wedged into the wait — the latter is the same
+      background-supervision shape this task's own operator-directed
+      collapse removed elsewhere (the lease heartbeat), reappearing here.
+    - R5-F6: `STOP_TIMEOUT_FILE`/`read_stop_timeout` were already dead code
+      with no caller (deleted as part of the round-6 `run_with_timeout`
+      revert above); the remaining gap was the header's own stale claim of
+      a "configurable outer wrapper timeout" that knob used to provide.
+      Corrected in place: the header now states the three fixed timeouts
+      (1200s/300s/600s) are each enforced by `run_with_timeout`'s own
+      `timeout`/`gtimeout` call, names what was deleted and why, and points
+      at `settings.json`'s fixed 1320000ms Stop-hook timeout as the actual
+      wall-clock ceiling.
+
+    **A seventh instance, found by the sweep this round's own instructions
+    asked for rather than by an independent reviewer**: `runner-
+    completeness.test.sh` section 16 (the CONCURRENT-RUN NOTICE integration
+    coverage) asserted the OLD four-value grammar directly — a stale lease
+    "reclaimed" (16.6, expecting the file gone afterward) and a
+    fresh-mtime dead pid read UNCONFIRMED and surfaced as a distinctly-
+    worded notice (16.6b-d) — both properties the round-6 collapse removed.
+    Re-running the full file after the collapse (not assumed unaffected
+    because the change looked confined to `tree-lease.sh` and `qa-gate.sh`)
+    showed 16.6 and 16.6b failing exactly as the collapse predicts: the
+    stale lease file survives (report-only, correctly) where the pre-
+    collapse assertion expected it gone, and the fresh-mtime scenario
+    prints no notice (STALE now, unconditionally) where the pre-collapse
+    assertion expected one. Fixed by asserting the CURRENT invariant
+    directly — a dead-pid lease is never surfaced as a conflict and always
+    survives, IDENTICALLY regardless of its mtime — rather than deleting
+    the age-comparison coverage outright; proving age no longer changes the
+    outcome is a real, meaningful property of the collapse, not a
+    redundant restatement of 16.5. 338 assertions, all passing
+    (`bash .claude/scripts/tests/runner-completeness.test.sh`, this change
+    set; two runs, one after the section-16 fix, both fully green).
+
+    Filed rather than fixed in this round, per its own "delete substantially
+    more than you add" instruction: nothing in this suite proves
+    `run_with_timeout` returns 124 for a GENUINE (non-backgrounding-trick)
+    hang past its deadline via the restored plain dispatch — the single
+    most safety-critical property of the function, and currently
+    unverified anywhere, tracked separately (`claude-workflow-plugin-v4jn`).
+
+    **Fix round 7** (a further defect found continuing the round-6 sweep,
+    after the collapse above had already shipped): the collapse's own "one
+    accepted trade" two paragraphs up — a host with neither `timeout` nor
+    `gtimeout` on PATH runs the restored dispatch UNBOUNDED — was correctly
+    stated, but nothing downstream disclosed it happening at runtime. The
+    unbounded branch's own inline comment claimed "log indicates this";
+    nothing did — `: > "$log"` at the top of `run_with_timeout` and the
+    command's own `>"$log"` redirect both TRUNCATE, so a marker written
+    before either point is destroyed before anyone reads it, and the
+    pre-fix branch wrote nothing after either. Nor did the operator-facing
+    "WHAT THIS GATE RAN, EXACTLY." block (`checks_scope_note`) say
+    anything: it already names every OTHER unmeasured stage ("NOT RUN
+    tests ...") but stayed silent about an advertised cap that quietly did
+    not apply on the RAN ones. Consequence: the gate named a
+    `${TEST_TIMEOUT_S}s`/`${LINT_TIMEOUT_S}s`/`${TYPE_TIMEOUT_S}s` bound it
+    never enforced on such a host, and a genuinely hung command would be
+    stopped only by the surrounding Stop hook's own wall-clock timeout
+    (`.claude/settings.json`, 1320000ms) — killed with no output at all,
+    which this plugin's own hook contract already treats as advisory
+    rather than blocking (no JSON envelope means nothing instructs Claude
+    to stay). A hang, on such a host, read as "nothing happened," not as a
+    timeout — and a hook that emits nothing is non-blocking.
+
+    **Disclosure, not enforcement — the two should not be confused.** On a
+    host lacking both binaries the command still runs unbounded after this
+    round, identically to before it; what changed is that the gate now
+    says so, in the same voice as its other "NOT RUN" lines. The
+    in-process supervisor round 6 removed (the causal chain two
+    paragraphs above) WAS providing genuine enforcement on such a host —
+    it carried R5-F1 (HIGH, a `setsid` escape from the process-group
+    supervision the rewrite depended on, in the one function every
+    verification in this plugin flows through), one of the round-5
+    findings the round-6 collapse cites as why patching this chain
+    further was the wrong move — and removing it was still the right
+    call. This round does not reopen that decision or restore any
+    enforcement on the affected hosts; it closes the honesty gap the
+    reversion reopened alongside a trade the collapse always intended to
+    accept.
+
+    Fixed: the unbounded branch now captures the command's real exit code
+    before writing anything else (so the trailing marker write can never
+    overwrite the return status the 124-means-timeout convention depends
+    on), appends a marker line to the log AFTER the command's own output —
+    appended, never prepended, since prepending would itself be destroyed
+    by the command's own truncating `>"$log"` open — and sets a
+    `TIMEOUT_NOT_ENFORCED` flag, reset at the top of EVERY call (including
+    the two branches that never take it) so a stale value from an earlier
+    check in the same run can never survive onto a later one that took a
+    different branch. **This reset-on-every-call design is superseded by
+    Fix round 8 below (`gsfd` R6-F1): resetting the FLAG on every call does
+    not stop three SEQUENTIAL calls from disagreeing with each other, which
+    is a different property than the one this paragraph verified — see that
+    round for the two ways it went wrong and the fix.** `checks_scope_note`
+    reads that flag and prints a
+    `TIMEOUT NOT ENFORCED:` paragraph naming which RAN check(s) and their
+    advertised cap went unbounded; it reaches every operator-facing
+    `REASON` string — the FAILED_CHECKS path and both the escalated and
+    non-escalated QA-approval-required paths — because all three already
+    call `checks_scope_note` for the "WHAT THIS GATE RAN" block. The
+    disclosure points at `.claude/settings.json` rather than hardcoding
+    the Stop hook's own outer-timeout figure, deliberately, so the string
+    cannot go stale against a number that lives in a different file.
+
+    New/updated coverage: `run-with-timeout.test.sh` gains section 2 — 2a
+    mutates PATH to resolve neither `timeout` nor `gtimeout` (two
+    preconditions assert the mutation actually landed) and checks the
+    log, the passed-through exit code, and the flag all land correctly;
+    2b is the restore control, a working `timeout` stub prepended to
+    PATH, proving the marker does NOT fire once a `timeout` binary resolves
+    on PATH (corrected here — see gsfd R6-F2: this sentence previously said
+    the stub proves a cap "genuinely is enforced", which the stub's own
+    header already disclaimed — it drops the duration argument and execs
+    the rest, enforcing nothing; what 2b actually proves is marker
+    SUPPRESSION on binary resolution, not that a bound is genuinely held).
+    13 new assertions (2a: 2 preconditions + 6; 2b: 1
+    precondition + 4), bringing the file to 19 total, up from the 6 that
+    survived round 6's own deletion of sections 2-4 — counted directly
+    against the shipped file, this change set:
+    `grep -c '^assert_eq\|^assert_contains' .claude/scripts/tests/run-with-timeout.test.sh`
+    returns 21, less the two function definitions (`assert_eq()` and
+    `assert_contains()`) the same anchor matches at the top of the file.
+    (This entry reports that count, not a fresh pass/fail run — this
+    documentation task's own brief excluded running any test tier.) A new
+    `vbs-tmo` section in
+    `.claude/tests/component/specs/verify-before-stop.sh` drives the
+    identical property end-to-end, through the real Stop hook dispatch
+    against a not-yet-approved task: `tmo-a` (the absent-binaries leg,
+    conditional on the ambient host genuinely lacking both binaries —
+    honestly named `SKIPPED:` otherwise, matching this tier's established
+    idiom for an environment the harness cannot force) and `tmo-b` (the
+    restore control, forced on any host by prepending a working `timeout`
+    shim to PATH for that one dispatch).
+
+    Two gaps remain in this area, both filed rather than folded into this
+    round. `claude-workflow-plugin-v4jn` (pre-existing, unchanged by this
+    round): a different property from this round's own disclosure work —
+    does an unbounded run SAY so, never does a cap actually fire — needing
+    the OPPOSITE PATH setup (a working `timeout` shim present, not
+    absent). `claude-workflow-plugin-cdmp` (new, filed this round):
+    `tmo-a` above is conditional on the ambient host already lacking both
+    binaries, so it is honestly SKIPPED rather than exercised on Linux CI
+    runners, which ship `timeout` in coreutils — the disclosure's
+    end-to-end gate-block path is therefore verified on a macOS-like host
+    only, never in CI; the function-level behaviour in
+    `run-with-timeout.test.sh` section 2 is unconditional and covers every
+    host, including CI.
+
+    **Fix round 8** (`gsfd` R6-F1, review round 6): the disclosure fixed in
+    round 7 above reset `TIMEOUT_NOT_ENFORCED` at the top of EVERY
+    `run_with_timeout` call and decided the branch by re-probing `command -v`
+    each time — correct for a single call, but the real dispatch in
+    `verify-before-stop.sh` calls it up to THREE times in one shell (test,
+    then lint, then type-check), and `checks_scope_note` reads the flag only
+    ONCE, after all three, then names EVERY stage that ran under it. Two
+    ways for that combination to lie, and review named the second as the
+    one that matters more: a bounded call followed by an unbounded one made
+    the summary claim ALL ran stages went unbounded (false for the bounded
+    one); an unbounded call followed by a bounded one CLEARED the flag,
+    hiding the unbounded call entirely from the summary that runs after
+    both. Fixed by deciding ONCE per shell rather than per call: the first
+    `run_with_timeout` invocation in a run caches its `command -v` answer in
+    a new global, `TIMEOUT_DISPATCH` (`timeout` / `gtimeout` / `none`), and
+    every later call in the SAME shell reuses that cached answer instead of
+    re-probing PATH — so every dispatch call in a run takes the identical
+    branch, and the flag's value after the last one accurately describes all
+    of them, never a subset. The trade, disclosed rather than hidden: a
+    capability that genuinely regresses mid-run (a `timeout` binary removed
+    from PATH between two calls) now fails LOUD — the cached branch is
+    attempted regardless, and a binary no longer where the cache expects it
+    produces a real "command not found" exit — instead of silently sliding
+    into the unbounded branch a second time. A host that always has, or
+    never has, the binary behaves byte-for-byte as before.
+
+    Also corrected this round, both named directly in the review, neither a
+    design change: the file header's B3 line and the tunable-timeouts
+    comment both said the three caps are "each enforced" / commands are
+    "capped" unconditionally, which this repo's own authoring box (neither
+    `timeout` nor `gtimeout` on PATH) already falsifies — reworded to name
+    the condition. And this CHANGELOG's own round-7 entry above claimed the
+    `run-with-timeout.test.sh` 2b restore-control stub proves a cap
+    "genuinely is enforced" — the stub itself (its own header already says
+    so) enforces nothing, so that sentence is corrected in place to describe
+    what 2b actually proves: marker suppression once a `timeout` binary
+    resolves on PATH.
+
+    New coverage: `gate-claim-honesty.test.sh` gains section 8 (+ 8M META),
+    driving the REAL awk-extracted `run_with_timeout` and the REAL
+    `checks_scope_note` together in one shell — two sequential calls with
+    deliberately differing PATH environments, in both orderings (8a:
+    unbounded then would-resolve; 8b: bounded then would-not-resolve) — and
+    proving the shipped code no longer exhibits either misattribution while
+    a mutant reverting the cache (the pre-fix per-call reprobe, forced via
+    `if true; then` in place of the cache check) reproduces both exactly.
+    19 new assertions — measured directly against section 8's own line range
+    in this change set (`sed -n '2640,2780p' .claude/scripts/tests/gate-claim-honesty.test.sh | grep -c '^assert_eq\|^assert_contains\|^assert_absent'`),
+    not the whole-file anchor count the round-7 entry above used: that count
+    is a less precise proxy here, since it also matches the three
+    `assert_eq()`/`assert_contains()`/`assert_absent()` function DEFINITIONS
+    as false positives while separately missing three pre-existing INDENTED
+    calls elsewhere in the file the same `^`-anchor cannot see (two of them
+    mutually-exclusive if/else alternates) — the whole-file static count and
+    the runtime PASSED count already disagreed by one for reasons that
+    predate this change, which is why this entry measures its OWN new
+    section directly instead of repeating that proxy. Unlike round 7's own
+    entry above, this one IS a fresh run, not a static count:
+    `bash .claude/scripts/tests/gate-claim-honesty.test.sh` on this change
+    set passes 297 assertions total (0 failed); re-running
+    `bash .claude/scripts/tests/run-with-timeout.test.sh` confirms that
+    file's own 19 assertions are unaffected — its sections 0-2 each call
+    `run_with_timeout` once per subshell, so the caching this fix adds is
+    never exercised across two calls there; that cross-call property is
+    what section 8 above is for.
+
+  - **Fixed shared paths removed at the root, not mitigated.**
+    `verify-before-stop.sh`'s `TEST_LOG`/`LINT_LOG`/`TYPE_LOG` move from
+    three names fixed across every concurrent Stop hook invocation to a
+    per-run scratch directory — FOUR measured occurrences of the gate
+    asserting "Tests failing (exit 2)" while citing a log that had been
+    deleted out from under it (by a concurrent Stop hook's own truncate, or
+    by `qa-gate.sh`'s `enter`/`approve`/`choose` wipe, which runs for ANY
+    task regardless of who is mid-write). A stable, fixed-name convenience
+    copy is still written for human/agent debugging after capture completes
+    — advisory only, never read back by the gate's own logic, so a race on
+    it is cosmetic. `.claude/tests/component/specs/model-select.sh` (19
+    occurrences) and `code-graph-mcp.sh` (2 more, found by enumerating every
+    fixed `/tmp/` redirect across the whole L2 specs population rather than
+    trusting the one file a prior review named) move the same way, onto
+    `mk_fixture`'s own per-spec directory. A new structural census
+    (`runner-completeness.test.sh` section 17) reds if a fixed `/tmp/` path
+    is reintroduced anywhere in that population.
+
+    **Fix round 1** (`gsfd` R1-F1, R1-F7):
+    - R1-F1: the ABOVE claim was false on its own final fallback branch.
+      `run_scoped_log_dir`'s own header at the time documented "if even THAT
+      mkdir fails, this degrades to the historical shared QA_TRACKING_DIR
+      itself" in the SAME breath this changelog entry denied it — both were
+      true statements about different branches, and the degrade one was
+      reachable with nothing more than a plain FILE sitting at
+      `.claude/.qa-tracking/runs` (defeats `mkdir -p`, `mktemp -d`, and the
+      `$RANDOM` fallback all at once, since none can create anything nested
+      under a path that is not a directory). Fixed with a second retry tier
+      directly under `$QA_TRACKING_DIR` (bypassing the blocked `runs/`
+      entirely), and — only if even that fails — an EMPTY return that moves
+      uniqueness from the directory to a per-pid/nonce-suffixed FILENAME the
+      caller builds instead; the shared, unqualified `QA_TRACKING_DIR` path
+      is no longer reachable at all. This mechanism had zero direct test
+      coverage before this fix; new L1 spec `scoped-log-dir.test.sh` (24
+      assertions as measured by
+      `bash .claude/scripts/tests/scoped-log-dir.test.sh` at this change
+      set) drives the shipped functions via awk extraction and replays the
+      historical pre-fix body (captured verbatim) to prove the exact
+      collision it used to produce.
+    - R1-F7: the census itself missed a QUOTED fixed redirect
+      (`2>"/tmp/x"`) twice over — the detection regex required no quote
+      between the operator and `/tmp/`, and the JSON-false-positive filter
+      would ALSO have excluded a quoted target even if the first stage had
+      caught it. A separate pass now catches quoted targets specifically
+      (an opening quote immediately adjacent to the operator can only be a
+      real "quote this redirect" idiom; the JSON shape's own opening quote
+      never sits there). Separately, the census silently read an
+      unreadable population (missing directory, zero `.sh` files) as
+      CLEAN — the glob-over-grep shape left the glob unexpanded, grep's
+      "No such file" went to a suppressed stderr, and the function's own
+      `return 0` swallowed the rest. It now enumerates explicitly and
+      returns a distinct, non-zero, stderr-diagnosed failure when the
+      population cannot be read at all.
+
+    **Fix round 2** (`gsfd` R2-F5, sol-codex review): two more census gaps.
+    A SINGLE-quoted fixed redirect (`2>'/tmp/x'`) missed BOTH R1-F7 passes
+    (the double-quoted pass needs a literal `"`; the bare pass needs no
+    quote at all) — closed with a fourth pass mirroring the double-quoted
+    one, quote character swapped, same non-vacuity reasoning (this tree's
+    one JSON false-positive shape can never produce a single quote sitting
+    immediately after a redirect operator, since JSON's own delimiter is
+    `"`). Separately, a population that DID enumerate (non-empty file list)
+    could still scan clean past an UNREADABLE `.sh` file inside it — `find`
+    can list an unreadable file by name via its parent directory's own
+    permissions, and every grep pass suppressed its own stderr while the
+    function's `return 0` ignored every grep exit code, so an open failure
+    on ONE file was indistinguishable from a genuinely clean scan of ALL of
+    them. Fixed by checking each grep pass's own exit code in isolation (2
+    means a read/open error occurred, independent of whether it ALSO found
+    matches in files it could read — measured on both GNU and BSD grep) and
+    by routing `find` through a captured file rather than a process
+    substitution, the only way to observe `find`'s OWN exit status at all
+    (a nonzero exit there — an unreadable top-level directory, or a
+    partial listing — now reports distinctly from "enumerated fine, found
+    nothing").
+
+  - **The unevidenced-failure tail read now hedges instead of asserting.**
+    `log_tail()` used to print the bare literal `(no log)` for an absent
+    file — indistinguishable from "produced no output" — over what was
+    measured, four times, to actually be a log that had been written and
+    then removed. It now says so, naming a concurrently-active lease when
+    tree-lease.sh observed one at capture time, mirroring the honesty
+    `run-tests.sh`'s own STORE-CANARY already gives the identical ambiguity
+    ("either this spec wrote, or another process wrote concurrently").
+
+    **Fix round 1** (`gsfd` R1-F6): a cached Stop replay (escalation, or
+    tree-and-change-set-unchanged) used to carry only the RENDERED bullet
+    text, whose "see `<stable log>`" phrase points at a shared, mutable,
+    fixed-name file — by the time a replay's message is actually read, that
+    file can hold a different run's capture (a concurrent Stop's own
+    overwrite) or nothing (`qa-gate.sh`'s wipe). The actual captured tail
+    text is now ALSO persisted per task and restored on replay
+    (`replay_cached_tails_for`), so a replayed verdict shows the same
+    evidence the original run's own verdict was based on, independent of
+    whatever the shared name currently resolves to.
+
+    **Fix round 2** (`gsfd` R2-F2, R2-F4, sol-codex review + orchestrator
+    acceptance measurement):
+    - R2-F2: the component spec's own META-TEST for R1-F6 (a stripped copy
+      of `replay_cached_tails_for` re-running the identical escalated
+      replay) measured `.decision` EMPTY instead of `block` — read at
+      first as a crash-shaped defect, but MEASURED to be neither a crash
+      nor an R1-F6 regression: firing the mutant's call as a SECOND
+      escalated Stop against the SAME task, with no `qa-gate.sh choose` in
+      between, trips `verify-before-stop.sh`'s own, unrelated auto-defer
+      counter (`AUTO_DEFER_AFTER_ESCALATED_STOPS=2`) regardless of any code
+      change — reproduced with the completely UNMUTATED shipped hook fired
+      twice in a row, identical `{}` outcome. Fixed in the TEST, not the
+      hook: the per-task auto-defer counter is reset directly (the same
+      tracking-file-poke idiom this spec already uses for
+      `changed-files.txt`) immediately before the mutant's own call, so it
+      runs as this task's escalated Stop #1 again — every OTHER piece of
+      state the META-TEST actually exercises (the escalation label, the
+      corrupted STABLE log, the persisted tail cache) is left untouched.
+    - R2-F4: R1-F6 fixed replay WITHIN one cycle; it left open a cross-CYCLE
+      case — `qa-gate.sh enter`/`choose continue` can wipe a task's
+      per-cycle state (including the R1-F6 tail cache) while an OLDER Stop
+      hook invocation from the PREVIOUS cycle is still mid-run (a slow
+      suite, a stale process). That older run, unaware anything moved on,
+      would go on to persist its OWN now-stale results over the just-wiped
+      files — a LATER cycle replaying an EARLIER cycle's evidence, the
+      R1-F6 defect pointing the other direction. Fixed with a per-task
+      CYCLE GENERATION counter (`qa-gate.sh`'s `wipe_iteration_state` bumps
+      it on every enter/choose-continue/choose-tech-debt/approve);
+      `verify-before-stop.sh` reads it before dispatch and again right
+      before persisting, refusing every write (rc/runner/failed-checks/all
+      three tails) if the two disagree — the same refuse-not-persist
+      direction `record_verified_state` already takes on a mismatched tree
+      reading, applied to cycle identity instead. **Claimed here as
+      "driven with a REAL concurrent `qa-gate.sh enter` against a
+      genuinely slow (`sleep 12`) test command, not a simulated race" —
+      corrected, not true (R3-F1, round 3 review): the control's stub JSON
+      used `sleep 12 \&\& exit 1`; `\&` is not a valid JSON escape, `jq -e`
+      on that exact payload returns rc 5 (measured directly), `TEST_CMD`
+      resolved empty, and the hook finished and persisted before the
+      concurrent `enter` ever fired — nothing was actually racing, and
+      every assertion in this control passed vacuously. See fix round 3,
+      below, for the corrected control and its own mutant-based
+      negative-control proof.** Residual, stated rather than
+      silently shipped: this closes the CROSS-CYCLE case; it does not give
+      the six per-task cache files one atomic write as a unit, so two Stop
+      hooks truly concurrent WITHIN the same cycle can still interleave
+      individual field writes — closing that fully needs a bundled,
+      atomically-renamed snapshot format, larger deferred work.
+
+    **Fix round 3** (`gsfd` R3-F1, R3-F2, sol-codex review): two more
+    issues in this same area, the second a direct continuation of R2-F4's
+    own disclosed residual above.
+    - R3-F1: see the in-place correction above — the round-2 fix was
+      verified against a control that never actually held the hook inside
+      its post-capture window, the same "a control that passes tells you
+      nothing until you know which branch it exercised" defect class as
+      R2-F2 and R2-F7 elsewhere in this changeset. Fixed by replacing the
+      sleep-and-hope stub with one that touches a marker file before
+      sleeping, so the test POLLS (bounded, up to 30s) for genuine entry
+      into the post-capture window instead of guessing a fixed duration
+      from a value that, it turned out, was never even reaching the shell
+      it was meant to run in — and asserts the marker's arrival directly,
+      rather than assuming it. A mutant-based negative control was
+      added alongside it — the two CYCLE-GEN sentinel regions stripped via
+      the same `awk_mutate` pattern this spec already uses elsewhere — that
+      fires the IDENTICAL marker-synchronized race against the mutant hook
+      and asserts the write now SUCCEEDS, proving the fixed control
+      actually discriminates fixed-from-unfixed rather than passing
+      regardless of which branch ran.
+    - R3-F2: the TOCTOU window R2-F4 disclosed above as still open (a Stop
+      reading generation before a concurrent `enter` wipes and bumps it,
+      then persisting its six stale files after) is narrowed here, not
+      newly closed. `wipe_iteration_state` now bumps the generation FIRST,
+      before any per-task deletion, under a bounded `mkdir`-based lock
+      around the read-modify-write itself — the increment was not atomic
+      either, so two overlapping wipes could previously lose a bump
+      independent of the ordering issue. `verify-before-stop.sh` adds a
+      SECOND generation read immediately after persisting and rolls its own
+      just-written six files back out if it no longer matches, on top of
+      the existing pre-write check. The bundled-atomic-snapshot rewrite
+      R2-F4 already named as the actual fix for a fully-concurrent-within-
+      one-cycle interleave remains deferred, larger work — this shrinks the
+      window the round-2 fix left open, it does not close it.
+
+  - **The embedded Dolt engine's own telemetry flusher is disarmed, not just
+    bd's.** `BD_DISABLE_METRICS=1` stops `bd send-metrics`; bd embeds dolt,
+    and the embedded engine spawns its own `dolt send-metrics` that variable
+    cannot reach — the leaked survivor `runner-completeness.test.sh` was
+    measured killing itself for. Both runners now also call
+    `dolt config --local --add metrics.disabled true` against the repo's
+    embedded store at startup, writing to an untracked, repo-scoped path
+    (`.beads/embeddeddolt/beads/.dolt/config.json`, excluded by
+    `.beads/.gitignore`) rather than the user's global dolt config. Measured
+    by driving it: 4/4 trials spawned the flusher with no local config, 0/4
+    once the config was set.
+
+    **Fix round 2** (`gsfd` R2-F7, sol-codex review): the spawn-detection
+    probe itself (`runner-completeness.test.sh`'s 15.9/15.10) matched ANY
+    `dolt send-metrics` process HOST-WIDE, with no attribution to the store
+    a given call actually exercised — MEASURED both ways: 15.10 failed
+    under a contended acceptance run (foreign Dolt activity elsewhere
+    misread as this store's own), and passed clean idle. The disarm
+    mechanism itself was never in question, only the probe's ability to
+    tell "this store" from "some other Dolt activity" apart. Fixed by
+    attributing on two signals together: cwd (a genuine flusher launched
+    from `cd "$store" && dolt sql` inherits that cwd — read via
+    `/proc/<pid>/cwd` on Linux or `lsof -a -p <pid> -d cwd` on macOS, no
+    `/proc` there) AND "newly observed" (15.9 and 15.10 share one fixture
+    store, so cwd alone cannot tell a slow-to-exit flusher one call spawned
+    from one the OTHER call spawns — a pre-call snapshot of every
+    already-attributed pid is the baseline a hit must be absent from).
+    Degrades to a distinct `unattributable` outcome, never silently
+    treated as `not-seen`, when neither `/proc` nor `lsof` is available.
+
+  - **A concurrent tier's lease is named, not guessed.** Both runners print
+    a `CONCURRENT-RUN NOTICE` at startup when a live lease from the other
+    tier is found, so a red spec downstream of contention
+    (`review-separation.test.sh` reading real bd records perturbed by a
+    concurrent L2 run) is attributable in one read. This does not eliminate
+    the contention — a genuine lock, or fixture-local bd workspaces for
+    record-touching specs, remain open, larger work — it makes the
+    contention nameable.
+
 - **The design phase gets an artifact, a schema, a hash binding, and an edit
   ban** (`fkm.3`, v5.0.0 Phase D1). The designer's prompt body ships, the design
   artifact at `docs/specs/<task-id>.md` gets a machine-checkable contract, and

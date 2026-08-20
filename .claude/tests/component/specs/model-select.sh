@@ -63,6 +63,19 @@ set -u
 mk_fixture
 FIXTURE="$COMPONENT_FIXTURE_PATH"
 
+# claude-workflow-plugin-gsfd/jjen: every stderr/stdout capture below lives
+# under $FIXTURE (mk_fixture's own `mktemp -d`, already unique per spec
+# invocation) rather than a fixed /tmp/ms-*.err|out literal. Two concurrent
+# L2 runs used to clobber each other's error capture on the shared, literal
+# path — measured twice in one session (QA's pristine-HEAD baseline
+# overlapping the orchestrator's own component-tier drive, and a Stop hook
+# launching a second `make test` 53s after a pgrep busy-guard had already
+# fired) — because the only interlock anywhere in the tree was the
+# orchestrator's own pgrep guard, which stops a second run IT starts and
+# nothing else. $FIXTURE removes the collision at the root: nothing else on
+# the machine is ever given this exact path. Paired at
+# runner-completeness.test.sh (the fixed-path census).
+
 # This spec exercises the full apply path including a bd comment on the
 # meta-task. Skip cleanly on BD_SHIM_ONLY CI.
 bd_required_or_skip
@@ -257,9 +270,9 @@ rm -f "$CACHE"
 ms_set_curl_failure
 # Snapshot current pin before the attempt.
 PIN_BEFORE_E=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
-bash "$MS" apply 2>/tmp/ms-e.err >/tmp/ms-e.out
+bash "$MS" apply 2>$FIXTURE/ms-e.err >$FIXTURE/ms-e.out
 RC_E=$?
-WARN_E=$(grep '^model-select:' /tmp/ms-e.err | head -1)
+WARN_E=$(grep '^model-select:' $FIXTURE/ms-e.err | head -1)
 PIN_AFTER_E=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
 assert_eq "ms-E: fail-open exit code 0" "0" "$RC_E"
 assert_contains "ms-E: fail-open warning emitted" "model-select:" "$WARN_E"
@@ -283,7 +296,7 @@ for agent in orchestrator qa backend frontend devops; do
         && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
 done
 
-bash "$MS" apply 2>/tmp/ms-f.err >/tmp/ms-f.out
+bash "$MS" apply 2>$FIXTURE/ms-f.err >$FIXTURE/ms-f.out
 RC_F=$?
 PIN_F=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
 assert_eq "ms-F: apply exit 0" "0" "$RC_F"
@@ -307,12 +320,12 @@ assert_contains "ms-F: comment carries the role-tagged rollback line" \
 # Spec G: idempotent — apply when pin already matches is a no-op.
 # ---------------------------------------------------------------------------
 PIN_G_BEFORE=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
-bash "$MS" apply 2>/tmp/ms-g.err >/dev/null
+bash "$MS" apply 2>$FIXTURE/ms-g.err >/dev/null
 RC_G=$?
 PIN_G_AFTER=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
 assert_eq "ms-G: apply exit 0 on no-op" "0" "$RC_G"
 assert_eq "ms-G: pin unchanged on no-op" "$PIN_G_BEFORE" "$PIN_G_AFTER"
-RESULT_G=$(grep '^model-select:' /tmp/ms-g.err | tail -1)
+RESULT_G=$(grep '^model-select:' $FIXTURE/ms-g.err | tail -1)
 # V1 (bi3.1): the role-aware apply summarises with "(N switched)"; a no-op
 # run reports "(0 switched)".
 assert_contains "ms-G: no-op result line reports zero switches" "(0 switched)" "$RESULT_G"
@@ -529,12 +542,12 @@ PRE_M_HASH_BACK=$(shasum -a 256 "$AGENTS_DIR/backend.md" | awk '{print $1}')
 PRE_M_HASH_FRONT=$(shasum -a 256 "$AGENTS_DIR/frontend.md" | awk '{print $1}')
 PRE_M_HASH_DEVOPS=$(shasum -a 256 "$AGENTS_DIR/devops.md" | awk '{print $1}')
 
-bash "$MS" apply 2>/tmp/ms-m.err >/tmp/ms-m.out
+bash "$MS" apply 2>$FIXTURE/ms-m.err >$FIXTURE/ms-m.out
 RC_M=$?
-RESULT_M=$(grep '^model-select:' /tmp/ms-m.err | tail -1)
+RESULT_M=$(grep '^model-select:' $FIXTURE/ms-m.err | tail -1)
 
 # (a) LOUD adopt notice fired with the /workflow-model <id> command.
-NOTICE_M=$(grep '^model-select:' /tmp/ms-m.err | grep 'manual adopt' | head -1)
+NOTICE_M=$(grep '^model-select:' $FIXTURE/ms-m.err | grep 'manual adopt' | head -1)
 assert_contains "ms-M (a): LOUD manual-adopt notice surfaces winner id" \
     "claude-fable-5" "$NOTICE_M"
 assert_contains "ms-M (a): notice carries /workflow-model adopt command" \
@@ -586,11 +599,11 @@ assert_contains "ms-M (c): result line names the manual-adopt outcome" \
 # picked"; the manual-adopt gate only refuses the AUTO-REWRITE.
 rm -f "$CACHE"
 ms_set_curl_payload "$LISTING_MANUAL_ADOPT"
-OUT_M_RESOLVE=$(bash "$MS" resolve 2>/tmp/ms-m-resolve.err)
+OUT_M_RESOLVE=$(bash "$MS" resolve 2>$FIXTURE/ms-m-resolve.err)
 ID_M_RESOLVE=$(ms_extract_id "$OUT_M_RESOLVE")
 assert_eq "ms-M (d): resolve still prints the candidate id on stdout" \
     "claude-fable-5" "$ID_M_RESOLVE"
-NOTICE_M_RESOLVE=$(grep 'manual adopt' /tmp/ms-m-resolve.err | head -1)
+NOTICE_M_RESOLVE=$(grep 'manual adopt' $FIXTURE/ms-m-resolve.err | head -1)
 assert_contains "ms-M (d): resolve emits the LOUD notice on stderr" \
     "/workflow-model claude-fable-5" "$NOTICE_M_RESOLVE"
 
@@ -599,7 +612,7 @@ assert_contains "ms-M (d): resolve emits the LOUD notice on stderr" \
 # pick_best against it.
 ms_set_curl_payload "$LISTING_MANUAL_ADOPT"
 bash "$MS" resolve >/dev/null 2>&1  # seed cache with the bogus listing
-OUT_M_STATUS=$(bash "$MS" status 2>/tmp/ms-m-status.err)
+OUT_M_STATUS=$(bash "$MS" status 2>$FIXTURE/ms-m-status.err)
 assert_contains "ms-M (e): status surfaces manual-adopt id in cached-best line" \
     "claude-fable-5" "$OUT_M_STATUS"
 # The status path is allowed to either include the qualifier inline or
@@ -607,7 +620,7 @@ assert_contains "ms-M (e): status surfaces manual-adopt id in cached-best line" 
 STATUS_SAW_NOTICE=0
 if printf '%s' "$OUT_M_STATUS" | grep -q "manual adopt"; then
     STATUS_SAW_NOTICE=1
-elif grep -q "manual adopt" /tmp/ms-m-status.err 2>/dev/null; then
+elif grep -q "manual adopt" $FIXTURE/ms-m-status.err 2>/dev/null; then
     STATUS_SAW_NOTICE=1
 fi
 assert_eq "ms-M (e): status surfaces manual-adopt qualifier (stdout or stderr)" \
@@ -715,7 +728,7 @@ esac
 WRAP
 chmod +x "$STRIPPED"
 
-bash "$STRIPPED" apply 2>/tmp/ms-me.err >/tmp/ms-me.out || true
+bash "$STRIPPED" apply 2>$FIXTURE/ms-me.err >$FIXTURE/ms-me.out || true
 PIN_ME=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
 # The stripped variant MUST land claude-fable-5 (the silent rewrite the
 # bug enables). If it doesn't, ms-M's sensitivity is not proven.
@@ -781,10 +794,10 @@ for agent in orchestrator qa backend frontend devops; do
         "$AGENTS_DIR/$agent.md" > "$AGENTS_DIR/$agent.md.tmp" \
         && mv "$AGENTS_DIR/$agent.md.tmp" "$AGENTS_DIR/$agent.md"
 done
-bash "$MS" apply 2>/tmp/ms-mx.err >/tmp/ms-mx.out
+bash "$MS" apply 2>$FIXTURE/ms-mx.err >$FIXTURE/ms-mx.out
 RC_MX=$?
 PIN_MX=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
-RESULT_MX=$(grep '^model-select:' /tmp/ms-mx.err | tail -1)
+RESULT_MX=$(grep '^model-select:' $FIXTURE/ms-mx.err | tail -1)
 assert_eq "ms-MX: all-excluded fail-open exit 0" "0" "$RC_MX"
 assert_eq "ms-MX: pin unchanged when no candidate survives exclusion" \
     "claude-opus-4-7" "$PIN_MX"
@@ -968,7 +981,7 @@ RANKING
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_OPUS_PRESENT"
 ms_reset_pins
-bash "$MS" apply --quiet 2>/tmp/ms-r1.err >/dev/null
+bash "$MS" apply --quiet 2>$FIXTURE/ms-r1.err >/dev/null
 PIN_R1_ORCH=$(grep -E '^model:' "$AGENTS_DIR/orchestrator.md" | head -1 | awk '{print $2}')
 PIN_R1_IMPL=$(grep -E '^model:' "$AGENTS_DIR/backend.md" | head -1 | awk '{print $2}')
 PIN_R1_REV=$(grep -E '^model:' "$AGENTS_DIR/qa.md" | head -1 | awk '{print $2}')
@@ -995,7 +1008,7 @@ assert_json_field "ms-R1: artifact reviewer_lane defaults to claude" \
 seed_role_map
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_NO_OPUS"
-bash "$MS" apply --quiet 2>/tmp/ms-r2.err >/dev/null
+bash "$MS" apply --quiet 2>$FIXTURE/ms-r2.err >/dev/null
 assert_eq "ms-R2: implementer falls back to the top pick (fable-9)" "claude-fable-9" \
     "$(grep -E '^model:' "$AGENTS_DIR/backend.md" | head -1 | awk '{print $2}')"
 assert_json_field "ms-R2: artifact flags implementer_fallback true" \
@@ -1016,7 +1029,7 @@ claude-opus
 RANKING
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_OPUS_PRESENT"
-bash "$MS" apply --quiet 2>/tmp/ms-r3.err >/dev/null
+bash "$MS" apply --quiet 2>$FIXTURE/ms-r3.err >/dev/null
 assert_eq "ms-R3: exclusion inside subset -> implementer gets surviving opus (opus-4-8)" \
     "claude-opus-4-8" "$(grep -E '^model:' "$AGENTS_DIR/backend.md" | head -1 | awk '{print $2}')"
 assert_eq "ms-R3: orchestrator still gets the top pick (fable-9)" \
@@ -1050,7 +1063,7 @@ for agent in $MS_ALL_AGENTS; do
     printf '%s\t%s\n' "$agent" \
         "$(shasum -a 256 "$AGENTS_DIR/$agent.md" | awk '{print $1}')" >> "$R4_SNAP"
 done
-bash "$MS" apply --quiet 2>/tmp/ms-r4.err >/dev/null
+bash "$MS" apply --quiet 2>$FIXTURE/ms-r4.err >/dev/null
 RC_R4=$?
 while IFS="$(printf '\t')" read -r agent pre; do
     [ -n "$agent" ] || continue
@@ -1069,7 +1082,7 @@ assert_eq "ms-R4: the byte-unchanged check covered every discovered agent" \
     "$(printf '%s\n' "$MS_ALL_AGENTS" | grep -c .)" "$R4_CHECKED"
 assert_eq "ms-R4: NO artifact written on the manual-adopt path" "1" \
     "$([ ! -f "$ARTIFACT" ] && echo 1 || echo 0)"
-RESULT_R4=$(grep '^model-select:' /tmp/ms-r4.err | tail -1)
+RESULT_R4=$(grep '^model-select:' $FIXTURE/ms-r4.err | tail -1)
 assert_contains "ms-R4: result line names the manual-adopt outcome" \
     "manual adoption required" "$RESULT_R4"
 
@@ -1089,7 +1102,7 @@ assert_json_field "ms-R4b: stale-beats-none — prior artifact preserved on fail
 seed_role_map
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_OPUS_PRESENT"
-WORKFLOW_REVIEWER_LANE=codex bash "$MS" apply --quiet 2>/tmp/ms-r5.err >/dev/null
+WORKFLOW_REVIEWER_LANE=codex bash "$MS" apply --quiet 2>$FIXTURE/ms-r5.err >/dev/null
 assert_json_field "ms-R5: env seam flips artifact reviewer_lane to codex" \
     "$(cat "$ARTIFACT")" ".reviewer_lane" "codex"
 STATUS_R5=$(echo '{}' | bash "$FIXTURE/.claude/scripts/statusline.sh" 2>/dev/null)
@@ -1221,7 +1234,7 @@ seed_tier_ranking
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_TIER_VS_RECENCY"
 ms_reset_pins
-bash "$MS" apply --quiet 2>/tmp/ms-t2.err >/dev/null
+bash "$MS" apply --quiet 2>$FIXTURE/ms-t2.err >/dev/null
 RC_T2=$?
 assert_eq "ms-T2: apply exit 0" "0" "$RC_T2"
 for agent in orchestrator qa grader judge; do
@@ -1249,11 +1262,11 @@ assert_json_field "ms-T2: implementer did NOT fall back to top" \
 seed_tier_ranking
 rm -f "$CACHE"
 ms_set_curl_payload "$LISTING_UNKNOWN_ABOVE_TOP"
-OUT_T3=$(bash "$MS" resolve 2>/tmp/ms-t3.err)
+OUT_T3=$(bash "$MS" resolve 2>$FIXTURE/ms-t3.err)
 ID_T3=$(ms_extract_id "$OUT_T3")
 assert_eq "ms-T3: unknown family newer than the top tier wins (day-zero adoption preserved)" \
     "claude-zenith-6" "$ID_T3"
-WARN_T3=$(grep '^model-select:' /tmp/ms-t3.err | grep 'new family/families' | head -1)
+WARN_T3=$(grep '^model-select:' $FIXTURE/ms-t3.err | grep 'new family/families' | head -1)
 assert_contains "ms-T3: unknown-family warning names the new family (the class-0 residual affordance)" \
     "claude-zenith" "$WARN_T3"
 
@@ -1280,16 +1293,16 @@ seed_tier_ranking
 rm -f "$CACHE" "$ARTIFACT"
 ms_set_curl_payload "$LISTING_TOPCLASS_BOGUS_DATE"
 ms_reset_pins
-OUT_T5=$(bash "$MS" resolve 2>/tmp/ms-t5.err)
+OUT_T5=$(bash "$MS" resolve 2>$FIXTURE/ms-t5.err)
 ID_T5=$(ms_extract_id "$OUT_T5")
 assert_eq "ms-T5: bogus-dated TOP-class entry still wins its class (no silent downgrade to opus-5)" \
     "claude-fable-9" "$ID_T5"
-NOTICE_T5=$(grep 'manual adopt' /tmp/ms-t5.err | head -1)
+NOTICE_T5=$(grep 'manual adopt' $FIXTURE/ms-t5.err | head -1)
 assert_contains "ms-T5: LOUD manual-adopt notice carries the adopt command" \
     "/workflow-model claude-fable-9" "$NOTICE_T5"
 rm -f "$CACHE"
 ms_set_curl_payload "$LISTING_TOPCLASS_BOGUS_DATE"
-bash "$MS" apply --quiet 2>/tmp/ms-t5-apply.err >/dev/null
+bash "$MS" apply --quiet 2>$FIXTURE/ms-t5-apply.err >/dev/null
 RC_T5=$?
 assert_eq "ms-T5: apply exit 0 (fail-open)" "0" "$RC_T5"
 T5_UNCHANGED=1

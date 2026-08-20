@@ -2341,6 +2341,1059 @@ assert_contains "14c.8 ...all three fixture specs executed" \
     "Specs:      Total: 3  Passed: 3  Failed: 0" "$RUN_OUT"
 
 # ===========================================================================
+printf -- '\n--- 15. DOLT TELEMETRY DISARM: the embedded engine'"'"'s OWN flusher, not just bd'"'"'s (claude-workflow-plugin-gsfd/7tfe) ---\n'
+# ===========================================================================
+# bd EMBEDS dolt; the embedded engine spawns ITS OWN telemetry flusher
+# ("dolt send-metrics") that section 10's BD_DISABLE_METRICS=1 cannot reach —
+# icn4's fix round measured the leaked survivor by name (ppid=1,
+# /opt/homebrew/bin/dolt send-metrics) inside THIS FILE's own nested
+# bd-calling fixtures. MEASURED DIRECTLY (gsfd, not inferred from `dolt
+# config --help`): `dolt sql -r csv -q "SELECT hashof('HEAD')"` against a
+# fresh fixture store spawned the flusher 4/4 trials with no local config,
+# 0/4 once `dolt config --local --add metrics.disabled true` was set inside
+# that store — see run-tests.sh's TELEMETRY-DISARM region for the full
+# measurement. This section verifies the WIRING (does the shipped runner
+# actually call the disarm against a real embedded-Dolt fixture store) and,
+# separately, that the INSTALLED dolt genuinely honours the config key — the
+# same split section 10.11/10.12 already uses for bd's own variable.
+if ! command -v bd >/dev/null 2>&1 || ! command -v dolt >/dev/null 2>&1; then
+    printf '  SKIPPED: bd and/or dolt not on PATH — the dolt-disarm legs (15.1-15.10) need both\n'
+else
+    dolt_cfg() {
+        # dolt_cfg <fixture-root> -- prints metrics.disabled, or "unset"
+        ( cd "$1/.beads/embeddeddolt/beads" 2>/dev/null \
+            && dolt config --local --get metrics.disabled 2>/dev/null ) || printf 'unset'
+    }
+
+    FX_DOLT="$WORK/dolt-disarm"
+    mkdir -p "$FX_DOLT"
+    ( cd "$FX_DOLT" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+    if [ ! -d "$FX_DOLT/.beads/embeddeddolt/beads/.dolt" ]; then
+        printf '  SKIPPED: could not initialise a fixture Dolt store for the dolt-disarm legs\n'
+    else
+        mk_l1_fixture "$FX_DOLT" "$((EXPECTED - 1))"
+        printf '#!/bin/bash\nprintf "  PASS: dolt-disarm probe ran\\n"\nexit 0\n' \
+            > "$FX_DOLT/.claude/scripts/tests/zz-dolt-probe.sh"
+        assert_eq "15.1 fresh fixture store starts with no local metrics.disabled config" \
+            "unset" "$(dolt_cfg "$FX_DOLT")"
+
+        run_l1 "$FX_DOLT"
+        assert_eq "15.2 the shipped L1 runner sets metrics.disabled=true on a real embedded-Dolt fixture store (rc=0)" \
+            "0" "$RUN_RC"
+        assert_eq "15.3 ...and the config landed exactly there, local-scoped" \
+            "true" "$(dolt_cfg "$FX_DOLT")"
+        assert_eq "15.3a ...never in the user's OWN global dolt config (unaffected by this run)" \
+            "" "$(dolt config --global --get metrics.disabled 2>/dev/null)"
+
+        # META-TEST: excise the SAME TELEMETRY-DISARM region section 10
+        # mutates (the dolt-disarm addition lives inside it, beside bd's own
+        # disarm per 7tfe's own recommendation) and prove a fresh fixture
+        # store is left untouched.
+        FX_DOLT2="$WORK/dolt-disarm-mut"
+        mkdir -p "$FX_DOLT2"
+        ( cd "$FX_DOLT2" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        mk_l1_fixture "$FX_DOLT2" "$((EXPECTED - 1))"
+        printf '#!/bin/bash\nprintf "  PASS: dolt-disarm probe ran\\n"\nexit 0\n' \
+            > "$FX_DOLT2/.claude/scripts/tests/zz-dolt-probe.sh"
+        MUT_DOLT="$WORK/run-tests.no-dolt-disarm.sh"
+        awk '
+            /TELEMETRY-DISARM-BEGIN/ { skipping=1; found=1; next }
+            /TELEMETRY-DISARM-END/   { skipping=0; next }
+            !skipping { print }
+            END { if (!found) exit 7 }
+        ' "$L1_RUNNER" > "$MUT_DOLT"
+        assert_eq "15.4 MUTANT: the telemetry-disarm region was FOUND and excised (non-vacuity, shares the region with 10.2)" \
+            "0-differs-0" "$?-$(cmp -s "$L1_RUNNER" "$MUT_DOLT" && echo identical || echo differs)-$(bash -n "$MUT_DOLT" 2>/dev/null; echo $?)"
+        RUN_OUT=$(CLAUDE_PROJECT_DIR="$FX_DOLT2" STRICT_SECTIONS=0 bash "$MUT_DOLT" 2>&1)
+        RUN_RC=$?
+        assert_eq "15.5 SPECIFIC: with the disarm excised, a fresh fixture store's config is left at unset" \
+            "unset" "$(dolt_cfg "$FX_DOLT2")"
+
+        # The L2 runner: same exemption, same pair.
+        FX_L2DOLT="$WORK/l2-dolt-disarm"
+        mkdir -p "$FX_L2DOLT"
+        ( cd "$FX_L2DOLT" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        mk_l2_fixture "$FX_L2DOLT"
+        run_l2 "$FX_L2DOLT"
+        assert_eq "15.6 the shipped L2 runner ALSO sets metrics.disabled=true on a real embedded-Dolt fixture store" \
+            "true" "$(dolt_cfg "$FX_L2DOLT")"
+        MUT_L2DOLT="$WORK/run.no-dolt-disarm.sh"
+        awk '
+            /TELEMETRY-DISARM-BEGIN/ { skipping=1; found=1; next }
+            /TELEMETRY-DISARM-END/   { skipping=0; next }
+            !skipping { print }
+            END { if (!found) exit 7 }
+        ' "$L2_RUNNER" > "$MUT_L2DOLT"
+        assert_eq "15.7 L2 MUTANT: the region was found, excised, differs, parses" \
+            "0-differs-0" "$?-$(cmp -s "$L2_RUNNER" "$MUT_L2DOLT" && echo identical || echo differs)-$(bash -n "$MUT_L2DOLT" 2>/dev/null; echo $?)"
+        FX_L2DOLT2="$WORK/l2-dolt-disarm-mut"
+        mkdir -p "$FX_L2DOLT2"
+        ( cd "$FX_L2DOLT2" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        mk_l2_fixture "$FX_L2DOLT2"
+        CLAUDE_PROJECT_DIR="$FX_L2DOLT2" bash "$MUT_L2DOLT" >/dev/null 2>&1
+        assert_eq "15.8 L2 SPECIFIC: with the disarm excised, a fresh fixture store's config is left at unset" \
+            "unset" "$(dolt_cfg "$FX_L2DOLT2")"
+    fi
+
+    # The variable itself, verified against the INSTALLED dolt — mirrors
+    # 10.11/10.12's split exactly, for the same reason: this turns a future
+    # dolt renaming/removing metrics.disabled into a deterministic red HERE
+    # instead of a re-litigated manual investigation. Spawn-detection over a
+    # real fixture store, same methodology as the hand measurement this
+    # section's header cites (ps polled every 50ms for up to 3s after a real
+    # `dolt sql` call, filtered to the genuine `dolt send-metrics` argv so
+    # this polling harness's OWN argv cannot self-match).
+    # claude-workflow-plugin-gsfd fix round 2 (R2-F7, sol-codex review):
+    # MEASURED both ways by the orchestrator — this spec's 15.10 FAILED
+    # under a contended acceptance run (a Stop-hook `make test` overlapping),
+    # and the identical spec passed 5/5 idle. Sol confirmed the mechanism by
+    # reading: every scan below matched ANY `dolt send-metrics` process
+    # host-wide via `ps -axo args=`, with no attribution to the STORE this
+    # call actually exercised — foreign Dolt activity elsewhere on a shared
+    # box can make 15.10 falsely red (an unrelated flusher observed, misread
+    # as this store's) and, symmetrically, could make 15.9 falsely green (an
+    # unrelated flusher observed while THIS store's own spawn silently
+    # regressed). The disarm mechanism itself is NOT in question — 15.1-15.8
+    # already establish that — only this probe's ability to tell "this
+    # store" apart from "some other Dolt activity" on the same host.
+    #
+    # Fix: attribute by TWO independent signals together, because neither
+    # alone is enough --
+    #   (1) cwd: a genuine flusher launched from `cd "$store" && dolt sql`
+    #       inherits that cwd. Read via /proc/<pid>/cwd on Linux (the
+    #       kernel's own resolved path) or `lsof -a -p <pid> -d cwd` on
+    #       macOS (no /proc there at all) — measured directly on this
+    #       (macOS) box: /proc absent, `lsof -a -p <pid> -d cwd -Fn` prints
+    #       an `n`-prefixed absolute path line matching `cd store && pwd -P`
+    #       exactly, and a DIFFERENT directory is correctly excluded.
+    #   (2) newly observed: 15.9 and 15.10 exercise the IDENTICAL fixture
+    #       store, so cwd ALONE cannot tell a slow-to-exit flusher 15.9's
+    #       own call spawned apart from one 15.10's call spawns — both
+    #       report the same cwd. A snapshot of every already-attributed pid
+    #       is taken before THIS call's own `dolt sql` ever runs (after the
+    #       pre-drain confirms none is left over); only a pid ABSENT from
+    #       that snapshot can be this call's own.
+    # A pid failing EITHER check is not this call's flusher and is ignored,
+    # in both directions symmetrically (neither 15.9 nor 15.10 can be
+    # fooled by it). String-membership via padded-space + `index()` mirrors
+    # this repo's own established idiom for pid-set tests (run.sh's
+    # escalate_kill), not a bash ARRAY — an EMPTY bash array under `set -u`
+    # is itself a portability landmine on this box's bash 3.2 (measured:
+    # `"${arr[@]}"` on a zero-element array raises "unbound variable" here,
+    # even with the array declared; `"${arr[@]:-}"` avoids the error but
+    # then iterates ONE spurious empty-string element instead of zero).
+    #
+    # DEGRADE HONESTLY when neither attribution tool is available (no
+    # /proc, no lsof): rather than falling back to the unattributed
+    # host-wide guess this fix removes, the probe returns a THIRD outcome,
+    # "unattributable" — callers must not read that as "not-seen" (a silent
+    # pass over a check that could not run is exactly the failure mode the
+    # pairing convention in .claude/tests/README.md exists to catch).
+    _dolt_send_metrics_argv_pids() {
+        # Every live pid host-wide whose argv matches the flusher's own
+        # invocation shape, one per line — unattributed by construction;
+        # callers filter by cwd below. `rest` strips the leading pid+
+        # whitespace `ps -axo pid=,args=` prepends before applying the
+        # IDENTICAL pattern the pre-fix, unattributed scan used, so this
+        # helper is a strict refinement (adds attribution) rather than a
+        # different detector.
+        # shellcheck disable=SC2009  # ps|grep, not pgrep -f: needs the same
+        # explicit self-exclusion as the pre-fix scan above (our OWN grep's
+        # argv otherwise contains the literal pattern text it searches for).
+        ps -axo pid=,args= 2>/dev/null \
+            | grep -vE 'grep|poll_for_dolt_flusher|_dolt_send_metrics' \
+            | awk '{
+                pid = $1
+                rest = $0
+                sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", rest)
+                if (rest ~ /(^|\/)dolt send-metrics/) print pid
+            }'
+    }
+    _dolt_pid_cwd() {
+        local p="$1" out=""
+        if [ -e "/proc/$p/cwd" ] 2>/dev/null; then
+            out=$(readlink "/proc/$p/cwd" 2>/dev/null) || out=""
+        fi
+        if [ -z "$out" ] && command -v lsof >/dev/null 2>&1; then
+            out=$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | tail -1)
+        fi
+        printf '%s' "$out"
+    }
+    _dolt_attribution_available() {
+        [ -n "$(readlink "/proc/$$/cwd" 2>/dev/null)" ] && { printf 'yes'; return 0; }
+        command -v lsof >/dev/null 2>&1 && { printf 'yes'; return 0; }
+        printf 'no'
+    }
+    _dolt_send_metrics_pids_at() {
+        local want="$1" p cwd
+        while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            cwd=$(_dolt_pid_cwd "$p")
+            [ -n "$cwd" ] && [ "$cwd" = "$want" ] && printf '%s\n' "$p"
+        done < <(_dolt_send_metrics_argv_pids)
+    }
+    poll_for_dolt_flusher() {
+        # poll_for_dolt_flusher <store-dir> -- prints "seen", "not-seen", or
+        # "unattributable". PRE-DRAINS and POST-DRAINS on THIS store's own
+        # attributed pids (waits until none is visible, bounded ~5s each),
+        # so this call's own detection window has a confirmed-clear start
+        # AND end for the SAME store two consecutive calls (15.9, 15.10)
+        # both exercise. Measured directly while pairing this section: a
+        # post-drain ALONE was not enough — 1 of 3 trials still
+        # false-positived the negative control (15.10) on a lingering
+        # flusher from the PRECEDING call — but pre-drain + post-drain
+        # together read clean 5/5.
+        #
+        # R5-F5 fix (independent cross-family review, round 5): the SAMPLING
+        # LOOP below (the one that sets hit="seen" and breaks) used to be the
+        # ONLY place this function ever set `hit` — a fixed 3-second window
+        # right after launching `dolt sql`. The post-drain loop already ran
+        # the IDENTICAL `_dolt_send_metrics_pids_at` query on every iteration
+        # (it has to, to know when to stop draining) but only ever asked "is
+        # this list empty yet", never "is what I'm looking at actually a NEW,
+        # non-baseline pid" -- so a flusher that spawned after the 3s window
+        # closed, or during `wait "$bgpid"`, or that was ONLY ever visible
+        # during the post-drain's own polling, was drained away in total
+        # silence: the result stayed "not-seen" regardless of what the
+        # post-drain had just spent up to 5 seconds watching. That made the
+        # NEGATIVE CONTROL (15.10, which asserts "not-seen") able to pass
+        # for the wrong reason -- a real spawn the config failed to suppress,
+        # observed only outside the original 3s window, would still read
+        # "not-seen". Fixed by running the SAME new-pid check the sampling
+        # loop uses inside the post-drain loop too, so any attributed pid
+        # this function observes ANYWHERE in its own lifetime -- sampling
+        # window, post-drain window, doesn't matter which -- sets `hit`.
+        # The drain-to-completion behaviour (bounded ~5s, breaks once the
+        # list reads empty) is unchanged; this only adds an observation, not
+        # a new wait.
+        #
+        # KNOWN RESIDUAL, disclosed rather than silently accepted -- and
+        # LARGER than the polling granularity alone would suggest
+        # (claude-workflow-plugin-gsfd R6-F3: the previous wording here named
+        # only the smaller of the two blind spots below and so understated
+        # the gap). Two distinct blind spots, not one:
+        #   - a flusher that spawns AND fully exits inside the ~50ms gap
+        #     BETWEEN two polls, in EITHER loop -- small, bounded by the
+        #     poll interval itself;
+        #   - a flusher that spawns AND fully exits ENTIRELY inside
+        #     `wait "$bgpid"` below, where NOTHING polls at all -- bounded
+        #     only by how long the launched `dolt sql` itself takes, which
+        #     can be far longer than 50ms under a slow store.
+        # Closing either needs an event-based mechanism (strace/dtrace/an
+        # audit hook), not a tighter poll interval or a poll wedged into the
+        # wait -- the latter is the same background-supervision shape this
+        # task's own operator-directed collapse removed elsewhere (the lease
+        # heartbeat), reappearing here, and is out of scope for this fix.
+        local store="$1" i hit="" store_real p
+        local baseline_ids new_ids
+
+        if [ "$(_dolt_attribution_available)" != "yes" ]; then
+            printf 'unattributable'
+            return 0
+        fi
+        store_real=$(cd "$store" 2>/dev/null && pwd -P) || store_real="$store"
+
+        for i in $(seq 1 100); do
+            [ -z "$(_dolt_send_metrics_pids_at "$store_real")" ] && break
+            sleep 0.05
+        done
+        baseline_ids=" $(_dolt_send_metrics_pids_at "$store_real" | tr '\n' ' ') "
+
+        ( cd "$store" && dolt sql -r csv -q "SELECT hashof('HEAD')" >/dev/null 2>&1 ) &
+        local bgpid=$!
+        for i in $(seq 1 60); do
+            p=$(_dolt_send_metrics_pids_at "$store_real")
+            if [ -n "$p" ]; then
+                new_ids=$(printf '%s\n' "$p" | awk -v base="$baseline_ids" 'index(base, " " $1 " ") == 0 { print; exit }')
+                if [ -n "$new_ids" ]; then
+                    hit="seen"
+                    break
+                fi
+            fi
+            sleep 0.05
+        done
+        wait "$bgpid" 2>/dev/null
+        for i in $(seq 1 100); do
+            p=$(_dolt_send_metrics_pids_at "$store_real")
+            if [ -n "$p" ]; then
+                new_ids=$(printf '%s\n' "$p" | awk -v base="$baseline_ids" 'index(base, " " $1 " ") == 0 { print; exit }')
+                [ -n "$new_ids" ] && hit="seen"
+            fi
+            [ -z "$p" ] && break
+            sleep 0.05
+        done
+        printf '%s' "${hit:-not-seen}"
+    }
+    FX_SPAWN="$WORK/dolt-spawn-probe"
+    mkdir -p "$FX_SPAWN"
+    ( cd "$FX_SPAWN" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+    if [ -d "$FX_SPAWN/.beads/embeddeddolt/beads/.dolt" ]; then
+        if [ "$(_dolt_attribution_available)" != "yes" ]; then
+            printf '  SKIPPED: neither /proc nor lsof is available on this host to attribute a dolt send-metrics pid to the fixture store -- 15.9/15.10 cannot run without falling back to the unattributed host-wide guess this fix removes (claude-workflow-plugin-gsfd R2-F7)\n'
+        else
+            WITHOUT_CFG=$(poll_for_dolt_flusher "$FX_SPAWN/.beads/embeddeddolt/beads")
+            assert_eq "15.9 the installed dolt spawns its flusher against a fresh store with no local config" \
+                "seen" "$WITHOUT_CFG"
+            ( cd "$FX_SPAWN/.beads/embeddeddolt/beads" && dolt config --local --add metrics.disabled true >/dev/null 2>&1 )
+            WITH_CFG=$(poll_for_dolt_flusher "$FX_SPAWN/.beads/embeddeddolt/beads")
+            assert_eq "15.10 NEGATIVE CONTROL: with metrics.disabled=true set, the SAME call spawns nothing (the config key is load-bearing, not decoration)" \
+                "not-seen" "$WITH_CFG"
+
+            # META-TEST: the attribution primitive itself discriminates by
+            # cwd — a REAL process whose argv matches the flusher's shape
+            # but whose cwd is a DIFFERENT directory must be invisible to a
+            # query for THIS store, proving 15.9/15.10 are not vacuously
+            # trusting "any dolt send-metrics anywhere" the way the
+            # pre-fix scan did. `exec -a` sets argv[0] directly (measured:
+            # `ps -axo args=` then shows the literal spoofed command,
+            # portable on bash 3.2+).
+            FX_DOLT_FOREIGN_A="$WORK/dolt-attrib-a"
+            FX_DOLT_FOREIGN_B="$WORK/dolt-attrib-b"
+            mkdir -p "$FX_DOLT_FOREIGN_A" "$FX_DOLT_FOREIGN_B"
+            ( cd "$FX_DOLT_FOREIGN_A" && exec -a "dolt send-metrics" sleep 4 ) &
+            FAKE_PID=$!
+            sleep 0.3
+            REAL_A=$(cd "$FX_DOLT_FOREIGN_A" && pwd -P)
+            REAL_B=$(cd "$FX_DOLT_FOREIGN_B" && pwd -P)
+            assert_contains "META 15.9/15.10: the attributed-pid query DOES find a real argv-matching process at ITS OWN cwd (non-vacuity: the primitive can find something)" \
+                "$FAKE_PID" "$(_dolt_send_metrics_pids_at "$REAL_A")"
+            assert_eq "META 15.9/15.10: ...and does NOT attribute that SAME process to a DIFFERENT directory (specific misbehaviour the pre-fix host-wide scan could not avoid)" \
+                "" "$(_dolt_send_metrics_pids_at "$REAL_B")"
+            wait "$FAKE_PID" 2>/dev/null
+        fi
+    else
+        printf '  SKIPPED: could not initialise a second fixture Dolt store for the spawn-detection legs (15.9/15.10)\n'
+    fi
+
+    # -----------------------------------------------------------------------
+    # R5-F5 META-TEST (independent cross-family review, round 5): 15.10 above
+    # is a NEGATIVE CONTROL (asserts "not-seen"), and poll_for_dolt_flusher's
+    # own hit="seen" assignment lived ONLY inside its fixed ~3-second
+    # sampling loop right after launching `dolt sql` — a flusher that became
+    # attributable only AFTER that window (during `wait "$bgpid"`, or only
+    # ever visible to the POST-DRAIN loop that already runs afterward anyway
+    # to confirm the tree is clear) left `hit` unset, so the function
+    # returned "not-seen" regardless of what the post-drain loop had just
+    # spent up to 5 seconds watching. That let 15.10 pass for the wrong
+    # reason: a real spawn the config failed to suppress, observed only
+    # outside the original window, would STILL read "not-seen". Fixed by
+    # running the identical new-pid check inside the post-drain loop too
+    # (see poll_for_dolt_flusher's own header for the full account).
+    #
+    # Proven here WITHOUT depending on real dolt/process timing (which
+    # would make the scenario itself racy to construct): a DETERMINISTIC,
+    # call-counted stub replaces the pid-attribution primitive for the
+    # DURATION of this test only, returning empty for exactly the number of
+    # calls the shipped loops make before the post-drain phase begins (1
+    # pre-drain + 1 baseline + 60 sampling-loop iterations = 62 — the
+    # shipped constants this counts against, confirmed by reading the
+    # function above), then a fake never-baseline pid from call 63 onward —
+    # i.e. a signal that is by construction invisible to the sampling loop
+    # and visible only from the post-drain loop's own first iteration.
+    if [ "$(_dolt_attribution_available)" = "yes" ]; then
+        R5F5_DBGFILE="$WORK/r5f5-stub-calls.count"
+        R5F5_STUB_TRIGGER=62
+        # Captures the REAL _dolt_send_metrics_pids_at (as bash itself
+        # already parsed it, not a hand-retyped reproduction free to drift)
+        # so it can be put back after this test overrides it below —
+        # nothing later in this file calls any of these dolt-disarm
+        # helpers (confirmed: section 16 onward never references them), so
+        # restoration is not needed for correctness here, only as hygiene
+        # against a future section being added to this same block.
+        R5F5_REAL_PIDS_AT_SRC=$(declare -f _dolt_send_metrics_pids_at)
+        _dolt_send_metrics_pids_at() {
+            printf 'x' >> "$R5F5_DBGFILE"
+            local n
+            n=$(wc -c < "$R5F5_DBGFILE" | tr -d '[:space:]')
+            if [ "$n" -gt "$R5F5_STUB_TRIGGER" ]; then
+                printf '999999\n'
+            fi
+        }
+
+        # Build the mutant: the SAME post-drain if-block that checks for a
+        # new pid, removed wholesale (not just its inner two lines -- an
+        # empty then-body between `if ... then` and `fi` is itself a
+        # syntax error, caught while pairing this section), leaving the
+        # drain-until-empty behaviour and everything else -- including the
+        # SAMPLING loop's own, untouched, new-pid check -- byte-identical.
+        # Derived from `declare -f`, i.e. from what bash itself already
+        # parsed out of the shipped definition above, not a hand-retyped
+        # copy; comments are not preserved by `declare -f` (a property of
+        # that builtin, not a fidelity gap in this extraction), so
+        # non-vacuity below is checked by CONTENT rather than a line-count
+        # diff against the commented source.
+        R5F5_MUT_SRC=$(declare -f poll_for_dolt_flusher | awk '
+            NR==1 { sub(/poll_for_dolt_flusher/, "poll_for_dolt_flusher_pre_r5f5"); print; next }
+            /wait "\$bgpid"/ { after=1; print; next }
+            after && /^[[:space:]]*if \[ -n "\$p" \]; then$/ { inblock=1; next }
+            inblock && /^[[:space:]]*fi;?$/ { inblock=0; next }
+            inblock { next }
+            { print }
+        ')
+        eval "$R5F5_MUT_SRC"
+        R5F5_MUT_EVAL_RC=$?
+        assert_eq "R5-F5 META precondition: the mutant evaluates without a syntax error (non-vacuity of the transform itself)" \
+            "0" "$R5F5_MUT_EVAL_RC"
+        assert_eq "R5-F5 META: the mutation landed (mutant keeps only the SAMPLING loop's new-pid check, not the post-drain one -- 1 occurrence, not 2)" \
+            "1" "$(declare -f poll_for_dolt_flusher_pre_r5f5 | grep -c 'new_ids=.*index(base' | tr -d '[:space:]')"
+        assert_eq "R5-F5 META precondition: the shipped function itself still carries BOTH occurrences (sanity on the pattern, not just the mutant)" \
+            "2" "$(declare -f poll_for_dolt_flusher | grep -c 'new_ids=.*index(base' | tr -d '[:space:]')"
+
+        R5F5_FAKE_STORE="$WORK/r5f5-nonexistent-store"
+        : > "$R5F5_DBGFILE"
+        R5F5_RESULT_FIXED=$(poll_for_dolt_flusher "$R5F5_FAKE_STORE" 2>/dev/null)
+        assert_eq "R5-F5 META: the SHIPPED function reports 'seen' for a pid visible only from the post-drain phase onward (restore control -- this is the fix's own job)" \
+            "seen" "$R5F5_RESULT_FIXED"
+
+        : > "$R5F5_DBGFILE"
+        R5F5_RESULT_MUT=$(poll_for_dolt_flusher_pre_r5f5 "$R5F5_FAKE_STORE" 2>/dev/null)
+        assert_eq "R5-F5 META: WITHOUT the post-drain check, the IDENTICAL scenario reports 'not-seen' (the bug's own exact symptom -- a real spawn the config failed to suppress would silently pass the 15.10 negative control)" \
+            "not-seen" "$R5F5_RESULT_MUT"
+
+        # Restore the real implementation captured above (hygiene; see the
+        # note above -- correctness of THIS test does not depend on it).
+        eval "$R5F5_REAL_PIDS_AT_SRC"
+        unset -f poll_for_dolt_flusher_pre_r5f5 2>/dev/null || true
+        rm -f "$R5F5_DBGFILE"
+    else
+        printf '  SKIPPED: R5-F5 META needs pid attribution (/proc or lsof), neither available on this host\n'
+    fi
+fi
+
+# ===========================================================================
+printf -- '\n--- 16. LEASE CONFLICT NOTICE: a concurrent tier'"'"'s lease is named, not guessed (claude-workflow-plugin-gsfd/mrd2) ---\n'
+# ===========================================================================
+# "who owns this tree right now" as a READ (claude-workflow-plugin-9xl4/gsfd
+# member 5): the shipped runners acquire a lease via tree-lease.sh and print
+# a CONCURRENT-RUN NOTICE naming any other LIVE lease found at startup, so a
+# red spec downstream of contention (mrd2: review-separation.test.sh reading
+# real bd records perturbed by a concurrent L2 run) is attributable in one
+# read instead of a re-run habit that eventually waves a real regression
+# through. This does NOT eliminate the contention (mrd2's fuller fix —
+# fixture-local bd workspaces for record-touching specs — remains open,
+# larger work); it makes the contention NAMEABLE.
+#
+# _rct_accurate_started_at -- claude-workflow-plugin-gsfd fix round 1
+# (R1-F2): tree-lease.sh's lease_conflicts now cross-checks a same-host
+# ALIVE pid's recorded started_at against that pid's own MEASURED elapsed
+# runtime (ps -o etime=), and treats a mismatch as pid reuse -> STALE (see
+# tree-lease.sh's own header). This section's own fixtures fabricate a
+# lease claiming owner_pid=$$ (THIS spec's own pid) with a bare
+# `$(date +%s)` for started_at -- the FABRICATION MOMENT, not $$'s true OS
+# start time. By the time section 16 runs, deep into this ~2700-line spec,
+# $$ has been alive for minutes, comfortably exceeding the 5s matching
+# tolerance, so the fabricated lease reads as pid-reuse (STALE) instead of
+# LIVE and the CONCURRENT-RUN NOTICE this section exists to test stops
+# firing -- not a defect in the notice mechanism, a stale fixture assumption
+# the fix's own test file (tree-lease.test.sh) hit and fixed the identical
+# way (self_started_at). Self-contained here (this file does not source
+# tree-lease.sh) rather than re-sourcing a whole second library into an
+# already-large, timing-sensitive spec for one helper.
+_rct_accurate_started_at() {
+    local now elapsed raw days=0 hh=0 mm ss
+    now=$(date +%s)
+    raw=$(ps -o etime= -p "$$" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$raw" ]; then
+        printf '%s' "$now"
+        return 0
+    fi
+    case "$raw" in
+        *-*) days="${raw%%-*}"; raw="${raw#*-}" ;;
+    esac
+    case "$raw" in
+        *:*:*) hh="${raw%%:*}"; raw="${raw#*:}" ;;
+    esac
+    mm="${raw%%:*}"
+    ss="${raw#*:}"
+    case "${days}${hh}${mm}${ss}" in
+        ''|*[!0-9]*) printf '%s' "$now"; return 0 ;;
+    esac
+    elapsed=$((10#$days * 86400 + 10#$hh * 3600 + 10#$mm * 60 + 10#$ss))
+    printf '%s' "$((now - elapsed))"
+}
+FX_LEASE="$WORK/lease-notice"
+mk_l1_fixture "$FX_LEASE" "$((EXPECTED - 1))"
+printf '#!/bin/bash\nprintf "  PASS: lease-notice probe ran\\n"\nexit 0\n' \
+    > "$FX_LEASE/.claude/scripts/tests/zz-lease-probe.sh"
+mkdir -p "$FX_LEASE/.claude/.qa-tracking/leases"
+printf 'tier=L2\nlabel=a concurrent component run\nowner_pid=%s\nowner_host=%s\nstarted_at=%s\n' \
+    "$$" "$(hostname 2>/dev/null || echo h)" "$(_rct_accurate_started_at)" \
+    > "$FX_LEASE/.claude/.qa-tracking/leases/lease.L2.preexisting"
+run_l1 "$FX_LEASE"
+assert_eq "16.1 the shipped L1 runner prints a CONCURRENT-RUN NOTICE when a live L2 lease already exists (rc=0)" \
+    "0" "$RUN_RC"
+assert_contains "16.2 ...naming the notice" "CONCURRENT-RUN NOTICE" "$RUN_OUT"
+assert_contains "16.3 ...naming the OTHER tier and label" "tier=L2" "$RUN_OUT"
+
+# RESTORE CONTROL: an otherwise-identical fixture with NO pre-existing lease
+# prints no notice at all — the notice is conditioned on a genuine conflict,
+# not printed unconditionally.
+FX_LEASE_CLEAN="$WORK/lease-notice-clean"
+mk_l1_fixture "$FX_LEASE_CLEAN" "$((EXPECTED - 1))"
+printf '#!/bin/bash\nprintf "  PASS: lease-notice probe ran\\n"\nexit 0\n' \
+    > "$FX_LEASE_CLEAN/.claude/scripts/tests/zz-lease-probe.sh"
+run_l1 "$FX_LEASE_CLEAN"
+assert_eq "16.4 RESTORE CONTROL: with no pre-existing lease, the shipped runner prints no notice" \
+    "0" "$(printf '%s' "$RUN_OUT" | grep -c 'CONCURRENT-RUN NOTICE')"
+
+# The notice must also correctly IGNORE a STALE lease (a dead pid) — it is
+# not a conflict.
+#
+# ROUND 6 DESIGN COLLAPSE (claude-workflow-plugin-gsfd, operator-directed):
+# this whole sub-section used to test R2-F1's UNCONFIRMED status — a dead
+# pid read UNCONFIRMED on a FRESH mtime (surfaced as a distinctly-worded
+# notice, never reclaimed) and only became STALE (never surfaced, and WAS
+# auto-reclaimed by `lease_reclaim_stale` inside `lease_acquire`) once old
+# enough. Both halves of that behaviour are gone: the lease is report-only
+# now, `lease_acquire` no longer self-heals via `lease_reclaim_stale` at
+# all, and the grammar collapsed to two values with no age threshold
+# deciding either (see tree-lease.sh's own DESIGN COLLAPSE header). A dead
+# pid reads STALE regardless of its lease file's mtime — fresh or ancient,
+# identically — is never surfaced as a notice, and its file is left exactly
+# where it was (nothing here ever deletes it automatically any more). The
+# two legs below prove BOTH halves of that collapse directly rather than
+# assume them: same dead-pid scenario at two different mtimes, proving age
+# no longer changes the outcome, and proving neither one is auto-reclaimed
+# — a real, measured regression from the pre-collapse version of this
+# section (16.6 asserted the file WOULD be gone; it is not, by design) that
+# re-running this file after the collapse caught, not assumed unaffected
+# because the change looked confined to tree-lease.sh and qa-gate.sh.
+FX_LEASE_DEAD="$WORK/lease-notice-stale"
+mk_l1_fixture "$FX_LEASE_DEAD" "$((EXPECTED - 1))"
+printf '#!/bin/bash\nprintf "  PASS: lease-notice probe ran\\n"\nexit 0\n' \
+    > "$FX_LEASE_DEAD/.claude/scripts/tests/zz-lease-probe.sh"
+mkdir -p "$FX_LEASE_DEAD/.claude/.qa-tracking/leases"
+DEADPID=99999
+while kill -0 "$DEADPID" 2>/dev/null; do DEADPID=$((DEADPID + 1)); done
+LEASE_DEAD_FILE="$FX_LEASE_DEAD/.claude/.qa-tracking/leases/lease.L2.stale"
+printf 'tier=L2\nlabel=a crashed component run\nowner_pid=%s\nowner_host=%s\nstarted_at=%s\n' \
+    "$DEADPID" "$(hostname 2>/dev/null || echo h)" "$(date +%s)" \
+    > "$LEASE_DEAD_FILE"
+touch -t 202001010000 "$LEASE_DEAD_FILE" 2>/dev/null || touch -d '2020-01-01' "$LEASE_DEAD_FILE" 2>/dev/null
+run_l1 "$FX_LEASE_DEAD"
+assert_eq "16.5 an ANCIENT-mtime dead-pid lease (STALE) is not reported as a conflict" \
+    "0" "$(printf '%s' "$RUN_OUT" | grep -c 'CONCURRENT-RUN NOTICE')"
+assert_eq "16.6 ...and the STALE lease file SURVIVES (report-only: nothing here auto-reclaims it any more, even when ancient)" \
+    "yes" "$([ -f "$LEASE_DEAD_FILE" ] && echo yes || echo no)"
+
+# Age-independence, proven rather than assumed: the IDENTICAL scenario at a
+# FRESH mtime must behave EXACTLY the same as the ancient one above — no
+# notice, file survives — because nothing left in this design treats age as
+# a threshold for a dead-pid reading. This is the integration-level
+# companion to tree-lease.test.sh's own unit-level coverage of the same
+# invariant (round 6, section 3/4 there).
+FX_LEASE_FRESH_DEAD="$WORK/lease-notice-fresh-dead"
+mk_l1_fixture "$FX_LEASE_FRESH_DEAD" "$((EXPECTED - 1))"
+printf '#!/bin/bash\nprintf "  PASS: lease-notice probe ran\\n"\nexit 0\n' \
+    > "$FX_LEASE_FRESH_DEAD/.claude/scripts/tests/zz-lease-probe.sh"
+mkdir -p "$FX_LEASE_FRESH_DEAD/.claude/.qa-tracking/leases"
+DEADPID2=99999
+while kill -0 "$DEADPID2" 2>/dev/null; do DEADPID2=$((DEADPID2 + 1)); done
+LEASE_FRESH_DEAD_FILE="$FX_LEASE_FRESH_DEAD/.claude/.qa-tracking/leases/lease.L2.fresh-dead"
+printf 'tier=L2\nlabel=a fresh dead-pid reading\nowner_pid=%s\nowner_host=%s\nstarted_at=%s\n' \
+    "$DEADPID2" "$(hostname 2>/dev/null || echo h)" "$(date +%s)" \
+    > "$LEASE_FRESH_DEAD_FILE"
+run_l1 "$FX_LEASE_FRESH_DEAD"
+assert_eq "16.6b a FRESH-mtime dead-pid lease is ALSO not reported as a conflict (age never changes a dead-pid reading any more)" \
+    "0" "$(printf '%s' "$RUN_OUT" | grep -c 'CONCURRENT-RUN NOTICE')"
+assert_eq "16.6c ...and its lease file ALSO survives, identically to the ancient one above" \
+    "yes" "$([ -f "$LEASE_FRESH_DEAD_FILE" ] && echo yes || echo no)"
+
+# META-TEST: excise the LEASE-ACQUIRE region and prove the notice never
+# fires even with a live conflicting lease present — the SPECIFIC
+# misbehaviour this section exists to catch (silence over a real conflict).
+MUT_LEASE="$WORK/run-tests.no-lease.sh"
+awk '
+    /LEASE-ACQUIRE-BEGIN/ { skipping=1; found=1; next }
+    /LEASE-ACQUIRE-END/   { skipping=0; next }
+    !skipping { print }
+    END { if (!found) exit 7 }
+' "$L1_RUNNER" > "$MUT_LEASE"
+assert_eq "16.7 MUTANT: the lease-acquire region was FOUND and excised, differs, parses" \
+    "0-differs-0" "$?-$(cmp -s "$L1_RUNNER" "$MUT_LEASE" && echo identical || echo differs)-$(bash -n "$MUT_LEASE" 2>/dev/null; echo $?)"
+RUN_OUT=$(CLAUDE_PROJECT_DIR="$FX_LEASE" STRICT_SECTIONS=0 bash "$MUT_LEASE" 2>&1)
+RUN_RC=$?
+assert_eq "16.8 SPECIFIC: with lease-acquire excised, the SAME live-conflict fixture prints no notice at all" \
+    "0" "$(printf '%s' "$RUN_OUT" | grep -c 'CONCURRENT-RUN NOTICE')"
+
+# The L2 runner: same pair, other direction (an L1 lease already present).
+FX_L2LEASE="$WORK/l2-lease-notice"
+mk_l2_fixture "$FX_L2LEASE"
+cat > "$FX_L2LEASE/.claude/tests/component/specs/l2-lease-stub.sh" <<'EOF'
+assert_eq "l2-lease-stub ran" "x" "x"
+EOF
+mkdir -p "$FX_L2LEASE/.claude/.qa-tracking/leases"
+printf 'tier=L1\nlabel=a concurrent unit run\nowner_pid=%s\nowner_host=%s\nstarted_at=%s\n' \
+    "$$" "$(hostname 2>/dev/null || echo h)" "$(_rct_accurate_started_at)" \
+    > "$FX_L2LEASE/.claude/.qa-tracking/leases/lease.L1.preexisting"
+run_l2 "$FX_L2LEASE"
+assert_eq "16.9 the shipped L2 runner ALSO prints a CONCURRENT-RUN NOTICE when a live L1 lease exists" \
+    "yes" "$(printf '%s' "$RUN_OUT" | grep -q 'CONCURRENT-RUN NOTICE' && echo yes || echo no)"
+MUT_L2LEASE="$WORK/run.no-lease.sh"
+awk '
+    /LEASE-ACQUIRE-BEGIN/ { skipping=1; found=1; next }
+    /LEASE-ACQUIRE-END/   { skipping=0; next }
+    !skipping { print }
+    END { if (!found) exit 7 }
+' "$L2_RUNNER" > "$MUT_L2LEASE"
+assert_eq "16.10 L2 MUTANT: the region was found, excised, differs, parses" \
+    "0-differs-0" "$?-$(cmp -s "$L2_RUNNER" "$MUT_L2LEASE" && echo identical || echo differs)-$(bash -n "$MUT_L2LEASE" 2>/dev/null; echo $?)"
+RUN_OUT=$(CLAUDE_PROJECT_DIR="$FX_L2LEASE" bash "$MUT_L2LEASE" 2>&1)
+assert_eq "16.11 L2 SPECIFIC: with lease-acquire excised, the same live-conflict fixture prints no notice" \
+    "0" "$(printf '%s' "$RUN_OUT" | grep -c 'CONCURRENT-RUN NOTICE')"
+
+# ===========================================================================
+printf -- '\n--- 17. FIXED /tmp PATH CENSUS: no L2 spec redirects to a literal /tmp/<name> shared across concurrent runs (claude-workflow-plugin-gsfd/jjen) ---\n'
+# ===========================================================================
+# jjen: specs/model-select.sh wrote FIXED /tmp/ms-*.err|out paths that two
+# concurrent L2 runs clobbered — the only interlock anywhere in the tree was
+# the orchestrator's own pgrep busy-guard, which stops a second run IT
+# starts and nothing else. Fixed alongside code-graph-mcp.sh (two more
+# occurrences of the identical shape, found by ENUMERATING every literal
+# /tmp/ redirect across the WHOLE specs population rather than trusting the
+# one file named in the task — the "denominator" convention LESSONS.md
+# records after three consecutive completeness claims in this arc were
+# falsified by the next sweep). This census is the STRUCTURAL guard against
+# reintroduction jjen itself asked for: it does not fix a spec, it fails the
+# tier when one writes a fixed shared /tmp path again.
+#
+# THE PREDICATE, and why it needs two stages. A REDIRECTION OPERATOR (>, >>,
+# or 2>) immediately followed by a literal /tmp/<word> catches the genuine
+# shape — but the specs population ALSO contains /tmp/<word> as plain TEST
+# DATA: post-edit.sh feeds a JSON payload whose "command" field CONTAINS the
+# text `printf x > /tmp/written-by-bash.ts` as a STRING, never executed,
+# which the naive one-stage regex flags as a false positive (measured while
+# building this census — the exact "do not count text to prove a claim
+# about code" failure mode .claude/tests/README.md warns about). The second
+# stage excludes any hit whose /tmp/path is followed by a literal `"` —
+# every JSON-embedded false positive in this tree closes its string there,
+# and no genuine UNQUOTED shell redirect target in this codebase's style is
+# ever written with a trailing quote. denylist-shared.sh and
+# failure-cross-repo.sh's OWN /tmp/... literals (classifier test DATA, never
+# opened as real files) are excluded the same way the full-population run at
+# 17.1 already demonstrates, without needing a per-file carve-out.
+#
+# claude-workflow-plugin-gsfd fix round 1 (R1-F7, sol-codex review) fixed two
+# things here:
+#   1. A QUOTED redirect target (`2>"/tmp/x"`) was missed TWICE OVER. Stage 1
+#      required /tmp/ immediately after the operator+whitespace with no
+#      quote in between, so `2>"/tmp/x"` never matched at all; even if it
+#      had, stage 2's trailing-bare-quote filter (built for the JSON case)
+#      would ALSO have excluded it, since a quoted target's closing quote
+#      sits right after the path too. Fixed with a THIRD, separate pass
+#      (below) for quoted targets specifically: an opening quote immediately
+#      adjacent to the operator can only be produced by a real "quote this
+#      one redirect target" idiom — the JSON false-positive shape in this
+#      tree encodes the WHOLE shell command as one JSON string value, so its
+#      one opening quote sits well BEFORE the operator, never adjacent to
+#      it — so a quoted hit is always genuine, no further filter needed.
+#   2. Enumeration failure read as clean. The original one-liner passed the
+#      glob `"$1"/*.sh` straight to grep; a missing directory or a directory
+#      with zero .sh files leaves that glob UNEXPANDED (nullglob is not on),
+#      so grep received the literal, nonexistent pattern string as a
+#      filename, failed on stderr (suppressed by 2>/dev/null), and this
+#      function's own `return 0` swallowed grep's nonzero exit — a caller
+#      checking only the (empty) OUTPUT saw something structurally
+#      IDENTICAL to a genuinely clean population. Fixed by enumerating the
+#      population explicitly and refusing (rc 3, stderr diagnostic) when it
+#      is empty, rather than silently returning "".
+#
+# claude-workflow-plugin-gsfd fix round 2 (R2-F5, sol-codex review) fixed two
+# more:
+#   3. A SINGLE-quoted redirect target (`2>'/tmp/x'`) missed BOTH stage-1
+#      passes — stage 1 (double-quoted) requires a literal `"`, stage 2
+#      (bare) requires `/tmp/` with no quote character at all between it and
+#      the operator, and a single quote satisfies neither. A FOURTH pass,
+#      below, mirrors stage 1 exactly with the quote character swapped — the
+#      identical R1-F7 reasoning applies unchanged (a single quote sitting
+#      immediately after the operator is just as deliberate an idiom as a
+#      double one, and this tree's one JSON false-positive shape can never
+#      produce it, because JSON's own string delimiter is `"`, never `'`).
+#   4. Enumeration succeeding with a NON-EMPTY population could still miss
+#      real content silently: `find`'s own exit status was discarded by the
+#      `< <(find ...)` process substitution (only the resulting file COUNT
+#      was checked), so a `find` that errored partway through this
+#      directory's listing after already emitting some names read as a
+#      complete, clean enumeration. Separately, each grep pass suppressed
+#      its own stderr and this function's unconditional `return 0` ignored
+#      every grep's exit code — a population containing an UNREADABLE .sh
+#      file (grep can list it via the directory's own permissions but
+#      cannot open its content) silently scanned every OTHER file and
+#      reported clean, never surfacing the one it could not read. Fixed by
+#      routing `find` through a captured file instead of a process
+#      substitution (the only way to observe its own exit status at all) and
+#      by checking grep's own exit code isolated to each individual
+#      invocation — 2 means "grep hit a read/open error", REGARDLESS of
+#      whether it also found genuine matches in files it could read (0 = at
+#      least one match, 1 = no match, 2 = error; documented behaviour on both
+#      GNU and BSD grep, measured directly on this box's BSD grep with an
+#      unreadable file mixed among matching and non-matching readable ones —
+#      rc=2 in every combination). `find`'s own error is checked BEFORE the
+#      zero-files check below, not after: an unreadable top-level directory
+#      makes `find` fail AND return zero names, and the more specific
+#      diagnosis ("find itself errored") is more informative than the
+#      generic "nothing found" one when both are true simultaneously.
+census_fixed_tmp_redirects() {
+    local dir="$1"
+    local -a files=()
+    local find_rc=0 find_list=""
+    if [ -d "$dir" ]; then
+        find_list=$(mktemp -t census-find-list.XXXXXX 2>/dev/null) || find_list=""
+        if [ -n "$find_list" ]; then
+            find "$dir" -maxdepth 1 -type f -name '*.sh' -print0 > "$find_list" 2>/dev/null
+            find_rc=$?
+            while IFS= read -r -d '' f; do
+                files+=("$f")
+            done < "$find_list"
+            rm -f "$find_list" 2>/dev/null
+        else
+            find_rc=1
+        fi
+    fi
+    if [ "$find_rc" -ne 0 ]; then
+        printf 'census_fixed_tmp_redirects: ENUMERATION FAILED -- find exited %s while listing %s (population may be partial or entirely unlisted, not scanned in full)\n' \
+            "$find_rc" "$dir" >&2
+        return 4
+    fi
+    if [ "${#files[@]}" -eq 0 ]; then
+        printf 'census_fixed_tmp_redirects: ENUMERATION FAILED -- no .sh files found under %s\n' "$dir" >&2
+        return 3
+    fi
+    # `-H` is load-bearing, not decoration: grep omits the filename prefix
+    # by default when the argument list happens to expand to exactly ONE
+    # file (a single-spec test fixture, as opposed to the real specs
+    # population with dozens) — caught by 17.4 asserting the offending FILE
+    # is named, not just the line.
+    local hits="" out grep_rc
+    out=$(grep -nHE '(>{1,2}|2>{1,2})[[:space:]]*"/tmp/[A-Za-z][A-Za-z0-9_.-]*"' "${files[@]}" 2>/dev/null)
+    grep_rc=$?
+    if [ "$grep_rc" -eq 2 ]; then
+        printf 'census_fixed_tmp_redirects: a file under %s could not be read (grep error, double-quoted pass) -- population not fully scanned\n' "$dir" >&2
+        return 5
+    fi
+    [ -n "$out" ] && hits="${hits}${out}
+"
+    out=$(grep -nHE "(>{1,2}|2>{1,2})[[:space:]]*'/tmp/[A-Za-z][A-Za-z0-9_.-]*'" "${files[@]}" 2>/dev/null)
+    grep_rc=$?
+    if [ "$grep_rc" -eq 2 ]; then
+        printf 'census_fixed_tmp_redirects: a file under %s could not be read (grep error, single-quoted pass) -- population not fully scanned\n' "$dir" >&2
+        return 5
+    fi
+    [ -n "$out" ] && hits="${hits}${out}
+"
+    out=$(grep -nHE '(>{1,2}|2>{1,2})[[:space:]]*/tmp/[A-Za-z]' "${files[@]}" 2>/dev/null)
+    grep_rc=$?
+    if [ "$grep_rc" -eq 2 ]; then
+        printf 'census_fixed_tmp_redirects: a file under %s could not be read (grep error, bare pass) -- population not fully scanned\n' "$dir" >&2
+        return 5
+    fi
+    if [ -n "$out" ]; then
+        out=$(printf '%s\n' "$out" | grep -vE '/tmp/[A-Za-z0-9_.-]*"')
+        [ -n "$out" ] && hits="${hits}${out}
+"
+    fi
+    printf '%s' "$hits" | sed '/^$/d'
+    return 0
+}
+
+SPECS_DIR_CENSUS="$PLUGIN_DIR/.claude/tests/component/specs"
+CENSUS_17_1_OUT=$(census_fixed_tmp_redirects "$SPECS_DIR_CENSUS")
+CENSUS_17_1_RC=$?
+assert_eq "17.1 the shipped specs population has ZERO fixed /tmp redirects" \
+    "" "$CENSUS_17_1_OUT"
+assert_eq "17.1b ...and enumeration itself succeeded (loud distinguishing signal, not a coincidental empty result)" \
+    "0" "$CENSUS_17_1_RC"
+
+# Non-vacuity + specific misbehaviour: copy a KNOWN-CLEAN spec, reintroduce
+# the exact historical shape, and prove the census catches it BY NAME.
+FX_CENSUS="$WORK/tmp-census"
+mkdir -p "$FX_CENSUS"
+cp "$SPECS_DIR_CENSUS/model-select.sh" "$FX_CENSUS/model-select.sh"
+# shellcheck disable=SC2016  # single quotes intentional: $MS must stay
+# literal text appended to the fixture file, not expand in THIS shell.
+printf '\nbash "$MS" apply 2>/tmp/reintroduced-probe.err >/dev/null\n' >> "$FX_CENSUS/model-select.sh"
+bash -n "$FX_CENSUS/model-select.sh"
+assert_eq "17.2 non-vacuity: the mutated copy still parses" "0" "$?"
+CENSUS_HIT=$(census_fixed_tmp_redirects "$FX_CENSUS")
+assert_contains "17.3 SPECIFIC: the census catches the reintroduced fixed path, by name" \
+    "/tmp/reintroduced-probe.err" "$CENSUS_HIT"
+assert_contains "17.4 ...and names the file it found it in" \
+    "model-select.sh" "$CENSUS_HIT"
+
+# RESTORE CONTROL: the SAME file, unmutated, in the SAME throwaway
+# directory, is clean — the positive result at 17.3 is about the mutation,
+# not an artefact of running the census over a copy rather than the original.
+FX_CENSUS_CLEAN="$WORK/tmp-census-clean"
+mkdir -p "$FX_CENSUS_CLEAN"
+cp "$SPECS_DIR_CENSUS/model-select.sh" "$FX_CENSUS_CLEAN/model-select.sh"
+assert_eq "17.5 RESTORE CONTROL: the unmutated copy is clean" \
+    "" "$(census_fixed_tmp_redirects "$FX_CENSUS_CLEAN")"
+
+# NEGATIVE CONTROL, the false-positive class this predicate exists to avoid:
+# a copy of post-edit.sh (its JSON payload carries the "printf x > /tmp/..."
+# STRING) must stay clean — proving the second grep stage is load-bearing,
+# not decoration.
+FX_CENSUS_JSON="$WORK/tmp-census-json"
+mkdir -p "$FX_CENSUS_JSON"
+cp "$SPECS_DIR_CENSUS/post-edit.sh" "$FX_CENSUS_JSON/post-edit.sh"
+assert_eq "17.6 NEGATIVE CONTROL: post-edit.sh's JSON-payload /tmp/ STRING is not flagged" \
+    "" "$(census_fixed_tmp_redirects "$FX_CENSUS_JSON")"
+ONE_STAGE_HIT=$(grep -nE '(>{1,2}|2>{1,2})[[:space:]]*/tmp/[A-Za-z]' "$FX_CENSUS_JSON/post-edit.sh" 2>/dev/null)
+assert_contains "17.7 ...confirming the ONE-STAGE regex alone WOULD have flagged it (the second stage is doing real work)" \
+    "written-by-bash" "$ONE_STAGE_HIT"
+
+# claude-workflow-plugin-gsfd R1-F7 fix (sol-codex review), leg 1: a QUOTED
+# fixed /tmp redirect (`2>"/tmp/x"`) is the exact shape that was missed
+# twice over before this fix (see census_fixed_tmp_redirects's own header).
+# Non-vacuity + specific misbehaviour, same shape as 17.2-17.4 above.
+FX_CENSUS_Q="$WORK/tmp-census-quoted"
+mkdir -p "$FX_CENSUS_Q"
+cp "$SPECS_DIR_CENSUS/model-select.sh" "$FX_CENSUS_Q/model-select.sh"
+# shellcheck disable=SC2016  # single quotes intentional: $MS must stay
+# literal text appended to the fixture file, not expand in THIS shell.
+printf '\nbash "$MS" apply 2>"/tmp/quoted-reintroduced-probe.err" >/dev/null\n' >> "$FX_CENSUS_Q/model-select.sh"
+bash -n "$FX_CENSUS_Q/model-select.sh"
+assert_eq "17.8 non-vacuity: the quoted-redirect mutated copy still parses" "0" "$?"
+CENSUS_Q_HIT=$(census_fixed_tmp_redirects "$FX_CENSUS_Q")
+assert_contains "17.9 SPECIFIC: the census catches the reintroduced QUOTED fixed path, by name" \
+    "/tmp/quoted-reintroduced-probe.err" "$CENSUS_Q_HIT"
+assert_contains "17.10 ...and names the file it found it in" \
+    "model-select.sh" "$CENSUS_Q_HIT"
+
+# RESTORE CONTROL: the SAME file, unmutated, in the SAME throwaway
+# directory, is clean — the positive result at 17.9 is about the quoted
+# mutation, not an artefact of this new fixture directory.
+FX_CENSUS_Q_CLEAN="$WORK/tmp-census-quoted-clean"
+mkdir -p "$FX_CENSUS_Q_CLEAN"
+cp "$SPECS_DIR_CENSUS/model-select.sh" "$FX_CENSUS_Q_CLEAN/model-select.sh"
+assert_eq "17.11 RESTORE CONTROL: the unmutated copy (quoted-redirect fixture dir) is clean" \
+    "" "$(census_fixed_tmp_redirects "$FX_CENSUS_Q_CLEAN")"
+
+# NEGATIVE CONTROL for the quoted pass: post-edit.sh's JSON test data must
+# still not be flagged even though its /tmp/ occurrence is followed
+# (eventually) by other quoted text elsewhere on the line — the quoted-pass
+# regex only fires when the OPENING quote is immediately adjacent to the
+# operator, which the JSON shape never is (its one opening quote sits well
+# before the operator, as part of the JSON value's own delimiter).
+assert_eq "17.12 NEGATIVE CONTROL: post-edit.sh's JSON payload is not flagged by the quoted pass either" \
+    "" "$(census_fixed_tmp_redirects "$FX_CENSUS_JSON")"
+
+# ===========================================================================
+# claude-workflow-plugin-gsfd R1-F7 fix, leg 2: an UNREADABLE population
+# (missing directory, or a directory with zero .sh files) must be LOUDLY
+# distinguishable from a genuinely CLEAN one — both used to print empty
+# output with rc 0 under the original one-liner.
+FX_CENSUS_MISSING="$WORK/tmp-census-does-not-exist"
+CENSUS_MISSING_OUT=$(census_fixed_tmp_redirects "$FX_CENSUS_MISSING" 2>"$WORK/census-missing.stderr")
+CENSUS_MISSING_RC=$?
+assert_eq "17.13 a MISSING directory: output is empty (same shape a clean population would show)" \
+    "" "$CENSUS_MISSING_OUT"
+assert_eq "17.14 ...but the return code says ENUMERATION FAILED, not clean (the loud distinguishing signal)" \
+    "3" "$CENSUS_MISSING_RC"
+assert_contains "17.15 ...and stderr names what failed" \
+    "ENUMERATION FAILED" "$(cat "$WORK/census-missing.stderr")"
+
+FX_CENSUS_EMPTY="$WORK/tmp-census-empty-dir"
+mkdir -p "$FX_CENSUS_EMPTY"
+CENSUS_EMPTY_OUT=$(census_fixed_tmp_redirects "$FX_CENSUS_EMPTY" 2>"$WORK/census-empty.stderr")
+CENSUS_EMPTY_RC=$?
+assert_eq "17.16 an EXISTING but EMPTY (zero .sh files) directory: output is also empty" \
+    "" "$CENSUS_EMPTY_OUT"
+assert_eq "17.17 ...and ALSO reports ENUMERATION FAILED, not clean" \
+    "3" "$CENSUS_EMPTY_RC"
+
+# META-TEST: the historical, PRE-FIX predicate — a single grep piped over
+# the UNEXPANDED glob, exactly as it shipped before this fix round — proves
+# the specific misbehaviour: run against the IDENTICAL empty-directory
+# fixture above, it returns EMPTY OUTPUT AND rc 0, indistinguishable from a
+# genuinely clean population. The shipped predicate (17.16/17.17 above,
+# same fixture) does not.
+census_fixed_tmp_redirects_pre_fix() {
+    grep -nHE '(>{1,2}|2>{1,2})[[:space:]]*/tmp/[A-Za-z]' "$1"/*.sh 2>/dev/null \
+        | grep -vE '/tmp/[A-Za-z0-9_.-]*"'
+    return 0
+}
+PRE_FIX_OUT=$(census_fixed_tmp_redirects_pre_fix "$FX_CENSUS_EMPTY")
+PRE_FIX_RC=$?
+assert_eq "META 17: the historical predicate, same empty-dir fixture, ALSO prints empty output" \
+    "" "$PRE_FIX_OUT"
+assert_eq "META 17: ...but reports rc 0 (clean) instead of enumeration failure — the specific misbehaviour this fix removes" \
+    "0" "$PRE_FIX_RC"
+
+# ===========================================================================
+# claude-workflow-plugin-gsfd fix round 2 (R2-F5, sol-codex review), leg 1: a
+# SINGLE-quoted fixed /tmp redirect (`2>'/tmp/x'`) — the shape the R1-F7 fix
+# still missed, since neither its double-quoted pass nor its bare pass
+# matches a single quote sitting between the operator and the path. Same
+# non-vacuity + specific-misbehaviour + restore-control shape as legs 17.2-
+# 17.4 (bare) and 17.8-17.11 (double-quoted) above.
+FX_CENSUS_SQ="$WORK/tmp-census-single-quoted"
+mkdir -p "$FX_CENSUS_SQ"
+cp "$SPECS_DIR_CENSUS/model-select.sh" "$FX_CENSUS_SQ/model-select.sh"
+# shellcheck disable=SC2016  # single quotes intentional: $MS must stay
+# literal text appended to the fixture file, not expand in THIS shell.
+printf '\nbash "$MS" apply 2>'"'"'/tmp/single-quoted-reintroduced-probe.err'"'"' >/dev/null\n' \
+    >> "$FX_CENSUS_SQ/model-select.sh"
+bash -n "$FX_CENSUS_SQ/model-select.sh"
+assert_eq "17.18 non-vacuity: the single-quoted-redirect mutated copy still parses" "0" "$?"
+assert_contains "17.18b non-vacuity: the mutation actually landed as a single-quoted target (not double)" \
+    "2>'/tmp/single-quoted-reintroduced-probe.err'" "$(cat "$FX_CENSUS_SQ/model-select.sh")"
+CENSUS_SQ_HIT=$(census_fixed_tmp_redirects "$FX_CENSUS_SQ")
+assert_contains "17.19 SPECIFIC: the census catches the reintroduced SINGLE-quoted fixed path, by name (R1-F7's own fix could not)" \
+    "/tmp/single-quoted-reintroduced-probe.err" "$CENSUS_SQ_HIT"
+assert_contains "17.20 ...and names the file it found it in" \
+    "model-select.sh" "$CENSUS_SQ_HIT"
+
+# RESTORE CONTROL: the SAME file, unmutated, in the SAME throwaway
+# directory, is clean.
+FX_CENSUS_SQ_CLEAN="$WORK/tmp-census-single-quoted-clean"
+mkdir -p "$FX_CENSUS_SQ_CLEAN"
+cp "$SPECS_DIR_CENSUS/model-select.sh" "$FX_CENSUS_SQ_CLEAN/model-select.sh"
+assert_eq "17.21 RESTORE CONTROL: the unmutated copy (single-quoted-redirect fixture dir) is clean" \
+    "" "$(census_fixed_tmp_redirects "$FX_CENSUS_SQ_CLEAN")"
+
+# NEGATIVE CONTROL: post-edit.sh's JSON test data still must not be flagged
+# by the new single-quoted pass either — its one /tmp/ occurrence has no
+# single quote adjacent to an operator at all.
+assert_eq "17.22 NEGATIVE CONTROL: post-edit.sh's JSON payload is not flagged by the single-quoted pass either" \
+    "" "$(census_fixed_tmp_redirects "$FX_CENSUS_JSON")"
+
+# META-TEST: the R1-F7-fixed (but still R2-F5-broken) predicate — double-
+# quoted + bare passes only, no single-quoted pass — run against the
+# IDENTICAL single-quoted fixture above, reads clean. Proves 17.19 is
+# genuinely about the fourth pass added in this round, not an artefact of
+# the fixture.
+census_fixed_tmp_redirects_pre_r2f5() {
+    local dir="$1"
+    grep -nHE '(>{1,2}|2>{1,2})[[:space:]]*"/tmp/[A-Za-z][A-Za-z0-9_.-]*"' "$dir"/*.sh 2>/dev/null
+    grep -nHE '(>{1,2}|2>{1,2})[[:space:]]*/tmp/[A-Za-z]' "$dir"/*.sh 2>/dev/null \
+        | grep -vE '/tmp/[A-Za-z0-9_.-]*"'
+    return 0
+}
+assert_eq "META 17b: the pre-R2-F5 (R1-F7-only) predicate misses the single-quoted reintroduction entirely (specific misbehaviour)" \
+    "" "$(census_fixed_tmp_redirects_pre_r2f5 "$FX_CENSUS_SQ")"
+
+# ===========================================================================
+# claude-workflow-plugin-gsfd fix round 2 (R2-F5, sol-codex review), leg 2:
+# a population that ENUMERATES successfully (non-empty file list) but
+# contains a file grep cannot READ must not report clean — the gap the
+# original leg-2 fix (rc 3 on zero .sh files) did not close, because this
+# population has files; the census just never looked at what reading one of
+# them actually returned. `chmod 000` on the FILE (not the directory) is
+# what forces this: `find` can still list an unreadable file by name via the
+# PARENT directory's own permissions (measured directly, this box), so this
+# is a population-content failure, not an enumeration one — the FILE-count
+# check earlier in the function is not what catches it.
+FX_CENSUS_UNREADABLE="$WORK/tmp-census-unreadable"
+mkdir -p "$FX_CENSUS_UNREADABLE"
+cp "$SPECS_DIR_CENSUS/model-select.sh" "$FX_CENSUS_UNREADABLE/model-select.sh"
+printf '#!/bin/bash\n# unreadable by construction\n' > "$FX_CENSUS_UNREADABLE/unreadable-spec.sh"
+chmod 000 "$FX_CENSUS_UNREADABLE/unreadable-spec.sh"
+CENSUS_UNREADABLE_OUT=$(census_fixed_tmp_redirects "$FX_CENSUS_UNREADABLE" 2>"$WORK/census-unreadable.stderr")
+CENSUS_UNREADABLE_RC=$?
+chmod 644 "$FX_CENSUS_UNREADABLE/unreadable-spec.sh"
+assert_eq "17.23 a population with an UNREADABLE .sh file does NOT report clean (rc, not 0)" \
+    "nonzero" "$([ "$CENSUS_UNREADABLE_RC" -ne 0 ] && echo nonzero || echo zero)"
+assert_eq "17.24 ...specifically rc 5 (grep read error), distinct from rc 3 (nothing enumerated) and rc 4 (find itself errored)" \
+    "5" "$CENSUS_UNREADABLE_RC"
+assert_contains "17.25 ...and stderr names the failure as an unreadable file, not a silent clean" \
+    "could not be read" "$(cat "$WORK/census-unreadable.stderr")"
+assert_eq "17.26 ...and no partial output leaked despite the OTHER (readable, clean) file in the same population" \
+    "" "$CENSUS_UNREADABLE_OUT"
+
+# META-TEST: the pre-R2-F5 predicate (rc 3 on empty population only, no
+# per-pass grep-exit-code check) run against the IDENTICAL unreadable-file
+# population reads clean at rc 0 — the specific misbehaviour this leg fixes.
+census_fixed_tmp_redirects_pre_r2f5_unreadable_check() {
+    local dir="$1"
+    local -a files=()
+    if [ -d "$dir" ]; then
+        while IFS= read -r -d '' f; do
+            files+=("$f")
+        done < <(find "$dir" -maxdepth 1 -type f -name '*.sh' -print0 2>/dev/null)
+    fi
+    if [ "${#files[@]}" -eq 0 ]; then
+        return 3
+    fi
+    {
+        grep -nHE '(>{1,2}|2>{1,2})[[:space:]]*"/tmp/[A-Za-z][A-Za-z0-9_.-]*"' "${files[@]}" 2>/dev/null
+        grep -nHE '(>{1,2}|2>{1,2})[[:space:]]*/tmp/[A-Za-z]' "${files[@]}" 2>/dev/null \
+            | grep -vE '/tmp/[A-Za-z0-9_.-]*"'
+    }
+    return 0
+}
+chmod 000 "$FX_CENSUS_UNREADABLE/unreadable-spec.sh"
+PRE_R2F5_UNREAD_OUT=$(census_fixed_tmp_redirects_pre_r2f5_unreadable_check "$FX_CENSUS_UNREADABLE")
+PRE_R2F5_UNREAD_RC=$?
+chmod 644 "$FX_CENSUS_UNREADABLE/unreadable-spec.sh"
+assert_eq "META 17c: the pre-R2-F5 predicate reports the SAME unreadable population as rc 0 clean (specific misbehaviour)" \
+    "0" "$PRE_R2F5_UNREAD_RC"
+assert_eq "META 17c: ...with empty output too — indistinguishable from a genuinely clean population" \
+    "" "$PRE_R2F5_UNREAD_OUT"
+
+# ===========================================================================
+# claude-workflow-plugin-gsfd fix round 2 (R2-F5, sol-codex review), leg 3:
+# `find` itself failing is now observable and acted on, not silently
+# discarded by the process-substitution shape this function used to read it
+# through. Forced here by removing the TOP-LEVEL directory's own execute
+# bit, so `find` cannot even open it (measured directly, this box: rc=1,
+# "Permission denied", zero names printed) — the most reliably portable way
+# to make `find` itself fail, as opposed to a per-file permission which
+# `find` can still list by name via the parent directory (leg 2 above).
+# This exercises the SAME code path leg 2's own header names for a genuinely
+# PARTIAL listing (some names emitted, then a failure) — that exact shape
+# needs `find` to fail mid-traversal, which this repo's filesystem semantics
+# do not reproduce deterministically at `-maxdepth 1` (a per-file permission
+# never stops `find` from listing the file's own name; only the CONTAINING
+# directory's own permissions do, and removing those empties the listing
+# entirely rather than truncating it) — so this leg proves the MECHANISM
+# (find's own exit status is captured and acted on at all, ahead of and
+# distinctly from the empty-population check) rather than the exact
+# partial-listing shape, which is the part of R2-F5's finding this fix
+# closes structurally without a fully deterministic repro for the
+# partial-vs-total distinction.
+FX_CENSUS_NOEXEC="$WORK/tmp-census-noexec"
+mkdir -p "$FX_CENSUS_NOEXEC"
+printf '#!/bin/bash\n' > "$FX_CENSUS_NOEXEC/spec.sh"
+chmod 000 "$FX_CENSUS_NOEXEC"
+CENSUS_NOEXEC_OUT=$(census_fixed_tmp_redirects "$FX_CENSUS_NOEXEC" 2>"$WORK/census-noexec.stderr")
+CENSUS_NOEXEC_RC=$?
+chmod 755 "$FX_CENSUS_NOEXEC"
+assert_eq "17.27 a directory find itself cannot open reports rc 4 (find errored), NOT rc 3 (find ran clean, found nothing)" \
+    "4" "$CENSUS_NOEXEC_RC"
+assert_contains "17.28 ...and stderr says find itself failed, not a bare 'no files found'" \
+    "find exited" "$(cat "$WORK/census-noexec.stderr")"
+assert_eq "17.29 ...with no output leaked" \
+    "" "$CENSUS_NOEXEC_OUT"
+
+# ===========================================================================
+# 18. LEASE-HEARTBEAT IN-PROCESS: DELETED (claude-workflow-plugin-gsfd,
+# operator-directed, round 6 DESIGN COLLAPSE). This section covered the
+# per-runner in-process heartbeat (18.1/18.2: does the lease's mtime advance
+# during one long spec; 18.3/18.4: does it persist across many short specs'
+# cumulative tier time) that both run-tests.sh and component/run.sh have
+# since had removed entirely — neither runner touches a lease file's mtime
+# mid-tier anymore, full stop, matching tree-lease.sh's own DESIGN COLLAPSE
+# header ("nothing ever auto-removes a lease on the strength of its age, so
+# there is nothing left for a heartbeat to protect"). Every mutant this
+# section built targeted a literal that no longer exists in either shipped
+# runner: mk_hb_mut_l1/l2's `sed` over `"$((_hb_now - _hb_mtime))" -ge 30`
+# and mk_hb_persist_mut's awk transform over the heartbeat's own
+# `if [ -n "$LEASE_FILE" ]; then` block both match nothing post-removal, so
+# every "mutant" they built was byte-identical to the shipped file (the
+# non-vacuity landing guards, e.g. "META 18.1: ... EXACTLY one line
+# changed", would read 0 where 2 or 9 was required). Worse, the PRIMARY legs
+# (18.1/18.2/18.3/18.4 proper, not just their METAs) asserted the shipped
+# runners' lease mtime DOES advance mid-tier — that is no longer true of
+# EITHER runner by design, so those legs would now fail red against
+# genuinely correct, intended, current behaviour. Both failure shapes are
+# the "guards absent code" defect this round exists to catch (R5-F2, same
+# family), the second one specifically named in this task's own R5-F5-
+# adjacent sweep instruction. Deleted with the mechanism rather than
+# repaired, matching tree-lease.test.sh's own precedent for the identical
+# situation elsewhere in this batch.
+
+# ===========================================================================
 printf '\nTotal: %d assertion(s)\n' "$((PASS + FAIL))"
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"

@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-gsfd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "4bf36a7c7b21312fd3fc53cc960c34090ae8c4652292760ed470f02b5d8a2e99",
+  "risk_threshold": "high",
+  "stop_condition": "the collapsed report-only design and the round-7 disclosure fix reviewed as a whole; R5-F1..F6 adjudicated; the orchestrator-requested vacuity sweep re-run over every active mutation anchor after a large deletion",
+  "verdict": "findings",
+  "iterations": 6,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R6-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh:2257 (TIMEOUT_NOT_ENFORCED) vs :4635-4659 (checks_scope_note) and the three dispatch calls at :4331, :4351, :4364",
+      "evidence": "The flag records only the LAST check, while checks_scope_note() describes EVERY check that RAN. Verified by reading the three sequential dispatch calls. If PATH begins with a writable tools directory, a bounded test stage can remove its `timeout` shim before lint; lint then runs unbounded, sets the flag, and the summary falsely reports that tests, lint AND type-check all ran unbounded. Reversing the transition is worse: a later BOUNDED call clears the flag and hides an earlier UNBOUNDED test. Transition outcome inferred from the verified control flow. The existing controls each run only one configured stage and structurally cannot detect this.",
+      "description": "The disclosure can misattribute which stage was unbounded, and in one direction it conceals an unbounded run entirely — the same defect family the disclosure was added to close, one level in. Fix by tracking per-stage state, or by freezing the capability probe once before dispatch so every stage is described by the same reading."
+    },
+    {
+      "id": "R6-F2",
+      "severity": "low",
+      "location": ".claude/scripts/verify-before-stop.sh:9 and :95-98; CHANGELOG.md:743-745; .claude/scripts/tests/run-with-timeout.test.sh:224-233",
+      "evidence": "The header still says the three caps are 'each enforced' and :95-98 say commands are 'capped', while :2263 explicitly runs unbounded and this host verifiably has neither binary (independent `command -v` checks). CHANGELOG.md:743-745 additionally claims the timeout stub proves a cap 'genuinely is enforced', but the stub at run-with-timeout.test.sh:224-233 merely drops the duration argument and executes the command, enforcing nothing. Verified by reading.",
+      "description": "The coverage ledger and the file header both overclaim enforcement that the code does not provide on a host without the binary. The restore control genuinely proves marker SUPPRESSION when a command named `timeout` resolves — nothing more — and should be described as exactly that."
+    },
+    {
+      "id": "R6-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2604, disclosure at :2570-2575, CHANGELOG.md:636-640",
+      "evidence": "No sampling occurs while blocked in `wait \"$bgpid\"`, so a flusher that starts AND exits wholly within that interval stays invisible to the post-drain. Under a slow `dolt sql` this window can be far longer than the 'single ~50ms gap between polls' the code and CHANGELOG disclose. The new META is non-vacuous, but its stub makes the pid appear on call 63 — the first post-drain query — so it proves post-drain visibility only, not coverage of the wait interval. Verified by reading; timing consequence inferred.",
+      "description": "R5-F5 is PARTIALLY FIXED. The remaining false-green window is real and is understated by both the code comment and the CHANGELOG, which describe a much smaller gap than the one that exists."
+    },
+    {
+      "id": "R6-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tree-lease.sh:274 (_lease_pid_start_matches) and :417 (classification) vs header :76-84 and CHANGELOG.md:41-48",
+      "evidence": "`_lease_pid_start_matches` returns `unknown` when `ps` is unusable, requiring callers to fall back to kill-only trust; :417 converts every result other than `no` into confirmed-live and emits LIVE. But the final header at :76-84 and CHANGELOG.md:41-48 both state that an unverifiable check reads STALE and that LIVE requires elapsed-runtime consistency. Concrete scenario: same-host `kill -0` succeeds in a minimal environment whose `ps` lacks the required format — the code prints LIVE while both documentation surfaces promise STALE. The assertion catalogue has no unknown-path leg at all. Verified by reading.",
+      "description": "The documentation/implementation disagreement on the status grammar has now recurred a third time (it was R3-F4, and again in section 16). Whichever answer is correct for a report-only lease, all three surfaces must say it, and the unknown path needs a leg."
+    },
+    {
+      "id": "R6-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/tree-lease.test.sh:21 (header) vs :86 and :662",
+      "evidence": "The header states that sections were renumbered contiguously after the deletions, but both the catalogue at :86 and the executable sections at :662 jump from 8 directly to 10. Established by static reading.",
+      "description": "A stranded removal comment: it makes historical and current section references ambiguous for the next reader, and asserts a tidiness the file does not have."
+    }
+  ]
+}

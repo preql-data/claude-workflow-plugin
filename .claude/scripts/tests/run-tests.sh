@@ -141,7 +141,12 @@ set -u
 # load-bearing (a9hh R2-F2/R2-F3) and what it costs.
 set -m
 
-# --- TELEMETRY-DISARM-BEGIN (a9hh R3-F1) ------------------------------------
+# Hoisted above TELEMETRY-DISARM (claude-workflow-plugin-gsfd): the dolt-side
+# half of that region needs $PROJECT_DIR to name the embedded store, and nothing
+# between here and its old position depended on THIS being defined later.
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+
+# --- TELEMETRY-DISARM-BEGIN (a9hh R3-F1; extended claude-workflow-plugin-gsfd/7tfe) ---
 # bd spawns a telemetry flusher (`bd send-metrics`) from ANY bd command when
 # metrics are enabled, detached to ppid=1 WITHOUT setsid — it stays in the
 # spec's process group, and when the metrics endpoint is slow it outlives the
@@ -159,9 +164,55 @@ set -m
 # bd still honors the variable (so a bd that renames it goes red here, not
 # in a 1-in-6 CI flake).
 export BD_DISABLE_METRICS=1
-# --- TELEMETRY-DISARM-END (a9hh R3-F1) ---------------------------------------
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+# claude-workflow-plugin-gsfd (7tfe): bd EMBEDS dolt, and the embedded engine
+# spawns ITS OWN telemetry flusher ("dolt send-metrics") that the export above
+# cannot reach — icn4's fix round measured the leaked survivor BY NAME (ppid=1,
+# /opt/homebrew/bin/dolt send-metrics) inside this very runner's own
+# runner-completeness.test.sh, coming from a nested bd-calling fixture.
+# MEASURED DIRECTLY, not inferred from `dolt config --help`: `dolt sql -r csv
+# -q "SELECT hashof('HEAD')"` against .beads/embeddeddolt/beads with no local
+# config spawned the flusher 4/4 trials (`ps -axo pid,ppid,args` polled every
+# 50ms for 5s after each call, filtered to the genuine `dolt send-metrics`
+# argv — grep noise from the polling harness's own argv excluded); the
+# identical command spawned it 0/4 trials once `dolt config --local --add
+# metrics.disabled true` was set inside that same directory. `--local` writes
+# to .beads/embeddeddolt/beads/.dolt/config.json, which .beads/.gitignore
+# already excludes (`embeddeddolt/`) — confirmed via `git check-ignore -v` —
+# so this never touches the user's global dolt config
+# (~/.dolt/config_global.json, confirmed empty on both sides of the
+# experiment) and never enters a change-set hash. Idempotent: `--add` on an
+# already-true key overwrites cleanly rather than growing a multivar
+# (verified via `dolt config --local --list` after 4 repeated applications).
+# Guarded exactly like STORE-CANARY's own existence checks further down: a
+# checkout with no embedded-Dolt store (store-less CI, or a pre-1.1.x bd
+# install) has nothing to disarm, and a host with no `dolt` binary on PATH is
+# a no-op rather than an error.
+disarm_dolt_telemetry() {
+    local store="$1"
+    [ -d "$store/.dolt" ] || return 0
+    command -v dolt >/dev/null 2>&1 || return 0
+    ( cd "$store" && dolt config --local --add metrics.disabled true ) >/dev/null 2>&1 || true
+    return 0
+}
+disarm_dolt_telemetry "$PROJECT_DIR/.beads/embeddeddolt/beads"
+# --- TELEMETRY-DISARM-END (a9hh R3-F1 / claude-workflow-plugin-gsfd) ---------
+
+# claude-workflow-plugin-gsfd (member 5, the lease): sourced early so the
+# runner can answer "who else is active" and report itself the same way, no
+# matter how far along argument parsing gets before something exits. Missing
+# lib degrades to "run without lease visibility" — never a hard failure: an
+# ownership signal that cannot be recorded is not grounds to refuse running
+# the tier it is meant to inform (same fail-open-on-absence shape as
+# workflow-denylist.sh's own missing-lib guard below in verify-before-stop.sh,
+# stated once so it does not need restating at every call site).
+TREE_LEASE_AVAILABLE=0
+_TL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || _TL_DIR=""
+if [ -n "$_TL_DIR" ] && [ -f "$_TL_DIR/../tree-lease.sh" ]; then
+    # shellcheck source=.claude/scripts/tree-lease.sh
+    . "$_TL_DIR/../tree-lease.sh" && TREE_LEASE_AVAILABLE=1
+fi
+
 TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 
 # ---------------------------------------------------------------------------
@@ -224,8 +275,26 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # GRILLING-PRECONDITION (refusal with no GRILLING v1 record on the task or
 # its parent epic, success on either, the audited --no-grilling bypass, and
 # a METatest proving the precondition block is load-bearing).
+#
+# 43 -> 44 (claude-workflow-plugin-gsfd, the D4 concurrency-ownership
+# prerequisite): added tree-lease.test.sh, covering the new
+# .claude/scripts/tree-lease.sh library (acquire/release/conflicts/
+# reclaim-stale, the mktemp-suffix bug its own build caught, and the
+# pipefail/errexit safety fix lease_conflict_summary needed). The heartbeat
+# this line originally listed alongside those was cut in round 6's DESIGN
+# COLLAPSE together with the mechanism it tested — see tree-lease.test.sh's
+# own header (its old section 9) for the full account.
+#
+# 44 -> 45 (claude-workflow-plugin-gsfd fix round 1, independent review by
+# sol-codex): added scoped-log-dir.test.sh, covering verify-before-stop.sh's
+# run_scoped_log_dir / scoped_log_nonce / reap_stale_run_log_dirs — the
+# per-run log-path mechanism (member 1) that had ZERO direct test coverage
+# before R1-F1 found its own central claim was false (a plain FILE at
+# `.claude/.qa-tracking/runs` made the pre-fix function collapse to the
+# SAME shared QA_TRACKING_DIR every other concurrent run in that state was
+# ALSO handed — the exact collision the batch exists to remove).
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=43
+EXPECTED_SPECS=47
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)
@@ -419,12 +488,53 @@ fi
 # itself.
 RUN_SCRATCH=$(mktemp -d -t l1-runner.XXXXXX)
 
-# finish <code> — the ONLY place the scratch dir is removed, and the ONLY
-# way this runner exits once the scratch exists. Never called from an EXIT
-# trap (see the R5-F1 note above); on_interrupt calls it LAST, after its
-# guard, so the interrupt path cleans up exactly once.
+# --- LEASE-ACQUIRE-BEGIN (claude-workflow-plugin-gsfd, member 5) -----------
+# "Who else owns this tree right now" as a READ, not an inference from
+# ppid/start-time by hand (9xl4: three near-misses in one session, each
+# caught only because an agent happened to check). A missing library or a
+# lease-directory failure degrades to "run without visibility", never to
+# refusing the tier: this signal informs a reader, it is not a precondition
+# for the suite to run.
+#
+# DESIGN COLLAPSE (claude-workflow-plugin-gsfd, operator-directed, round 6):
+# this runner does NOT heartbeat its own lease, and nothing else in this
+# codebase does either. Two rounds (R3-F3, R4-F3) built and hardened a
+# heartbeat here; a third (R5-F2/R5-F4) found the hardened version still
+# cost a background process per tick. The lease is now report-only (see
+# tree-lease.sh's own DESIGN COLLAPSE header): nothing ever auto-removes a
+# lease on the strength of its age, so there is nothing left for a
+# heartbeat to protect — a crash mid-tier simply leaves this lease sitting,
+# read STALE by the next checker. Full causal account: CHANGELOG.md.
+LEASE_FILE=""
+if [ "$TREE_LEASE_AVAILABLE" = "1" ]; then
+    LEASE_FILE=$(lease_acquire "$PROJECT_DIR/.claude/.qa-tracking" "L1" \
+        "run-tests.sh${FILTER:+ --filter $FILTER} pid=$$") || LEASE_FILE=""
+    if [ -n "$LEASE_FILE" ]; then
+        CONFLICT_NOTE=$(lease_conflict_summary "$PROJECT_DIR/.claude/.qa-tracking" "$LEASE_FILE") || CONFLICT_NOTE=""
+        if [ -n "$CONFLICT_NOTE" ]; then
+            printf 'CONCURRENT-RUN NOTICE: another tier claims to be active right now —\n'
+            printf '  a failure below may be contention, not regression (claude-workflow-plugin-gsfd):\n'
+            printf '%s\n' "$CONFLICT_NOTE" | sed 's/^/  /'
+        fi
+    fi
+fi
+# --- LEASE-ACQUIRE-END (claude-workflow-plugin-gsfd) -------------------------
+
+# finish <code> — the ONLY place the scratch dir (and this run's lease, if
+# one was acquired) is removed, and the ONLY way this runner exits once the
+# scratch exists. Never called from an EXIT trap (see the R5-F1 note above);
+# on_interrupt calls it LAST, after its guard, so the interrupt path cleans
+# up exactly once.
 finish() {
     [ -n "$RUN_SCRATCH" ] && rm -rf "$RUN_SCRATCH"
+    if [ "${TREE_LEASE_AVAILABLE:-0}" = "1" ]; then
+        # R2-F3 fix round 2 (sol-codex review): belt-and-braces, matching
+        # tree-lease.sh's own convention -- this runner is not under `set -e`
+        # today so it was not exposed to the exact failure the review named
+        # (verify-before-stop.sh, which is), but the fix costs nothing and a
+        # future `set -e` here should not have to rediscover it.
+        lease_release "${LEASE_FILE:-}" || true
+    fi
     exit "$1"
 }
 
@@ -725,6 +835,16 @@ for test_file in "${TESTS[@]}"; do
     # NAME survivors — full story at the function). Survivor lines land in
     # a per-spec file the TIMEOUT verdict below surfaces. The group KILL is
     # what unblocks `wait` below when the spec ITSELF traps TERM.
+    #
+    # DESIGN COLLAPSE (claude-workflow-plugin-gsfd, operator-directed, round
+    # 6): no heartbeat here, or anywhere else in this codebase. Two rounds
+    # (R3-F3 FOLLOW-UP, R4-F3) built and then chased the correctness cost of
+    # touching this lease's mtime from inside this watchdog; a third
+    # (R5-F2/R5-F4) found the replacement still accumulated background
+    # processes. The lease is now report-only (see tree-lease.sh's own
+    # DESIGN COLLAPSE header): nothing ever auto-removes a lease on the
+    # strength of its age, so there is nothing left for a heartbeat to
+    # protect. Full causal account: CHANGELOG.md.
     WD_SURVIVORS="$RUN_SCRATCH/wd-survivors.$TOTAL"
     (
         waited=0

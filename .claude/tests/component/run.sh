@@ -114,7 +114,11 @@ set -u
 # PROCESS GROUPS header note and the L1 runner it mirrors.
 set -m
 
-# --- TELEMETRY-DISARM-BEGIN (a9hh R3-F1) ------------------------------------
+# Hoisted above TELEMETRY-DISARM (claude-workflow-plugin-gsfd), mirroring the
+# same hoist in the L1 runner: the dolt-side disarm below needs $PROJECT_DIR.
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+
+# --- TELEMETRY-DISARM-BEGIN (a9hh R3-F1; extended claude-workflow-plugin-gsfd/7tfe) ---
 # bd's telemetry flusher (`bd send-metrics`) detaches to ppid=1 WITHOUT
 # setsid, so it stays in the spec's process group and — when the endpoint is
 # slow — outlives the survivor sweep's grace, failing the spec for a process
@@ -125,9 +129,39 @@ set -m
 # rationale; runner-completeness.test.sh section 10 fails a fixture spec
 # through THIS runner when this export is excised.
 export BD_DISABLE_METRICS=1
-# --- TELEMETRY-DISARM-END (a9hh R3-F1) ---------------------------------------
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+# claude-workflow-plugin-gsfd (7tfe): bd EMBEDS dolt, and the embedded engine
+# spawns ITS OWN telemetry flusher that the export above cannot reach.
+# Byte-identical to the L1 runner's copy of this function as of this change
+# (verified by hand via `diff` at authoring time) — see run-tests.sh's
+# TELEMETRY-DISARM region for the driven measurement (4/4 spawns with no
+# local config, 0/4 with `dolt config --local --add metrics.disabled true`
+# set) and why this writes to an untracked, repo-scoped path rather than the
+# user's global dolt config. KNOWN GAP: nothing structurally enforces the two
+# copies staying identical if one is edited later without the other — unlike
+# BD_DISABLE_METRICS=1 (a one-line export, cheap to eyeball), this is a
+# multi-line function, and runner-completeness.test.sh does not currently
+# assert byte-equality between them the way linux-tier-driver.test.sh does
+# for ITS mirrored logic. Filed as a documented gap, not fixed here.
+disarm_dolt_telemetry() {
+    local store="$1"
+    [ -d "$store/.dolt" ] || return 0
+    command -v dolt >/dev/null 2>&1 || return 0
+    ( cd "$store" && dolt config --local --add metrics.disabled true ) >/dev/null 2>&1 || true
+    return 0
+}
+disarm_dolt_telemetry "$PROJECT_DIR/.beads/embeddeddolt/beads"
+# --- TELEMETRY-DISARM-END (a9hh R3-F1 / claude-workflow-plugin-gsfd) ---------
+
+# claude-workflow-plugin-gsfd (member 5, the lease): see the L1 runner's own
+# comment for the full rationale (mirrored verbatim in spirit, not repeated).
+TREE_LEASE_AVAILABLE=0
+_TL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || _TL_DIR=""
+if [ -n "$_TL_DIR" ] && [ -f "$_TL_DIR/../../scripts/tree-lease.sh" ]; then
+    # shellcheck source=.claude/scripts/tree-lease.sh
+    . "$_TL_DIR/../../scripts/tree-lease.sh" && TREE_LEASE_AVAILABLE=1
+fi
+
 COMPONENT_DIR="$PROJECT_DIR/.claude/tests/component"
 LIB_DIR="$COMPONENT_DIR/lib"
 SPECS_DIR="$COMPONENT_DIR/specs"
@@ -240,10 +274,50 @@ fi
 # itself.
 RUN_SCRATCH=$(mktemp -d -t l2-runner.XXXXXX)
 
-# finish <code> — the ONLY place the scratch is removed and the ONLY exit
-# once the scratch exists. Never runs from a trap (see above).
+# --- LEASE-ACQUIRE-BEGIN (claude-workflow-plugin-gsfd, member 5) -----------
+# Mirrors the L1 runner's own lease region — see run-tests.sh for the full
+# rationale. mrd2's own finding (review-separation.test.sh reading real bd
+# records perturbed by a concurrent L2 run) is exactly the case this notice
+# is for: it does not stop the contention, but a red that names a live L1
+# lease is attributable in one read instead of a re-run habit that eventually
+# waves a real regression through.
+LEASE_FILE=""
+if [ "$TREE_LEASE_AVAILABLE" = "1" ]; then
+    LEASE_FILE=$(lease_acquire "$PROJECT_DIR/.claude/.qa-tracking" "L2" \
+        "run.sh${FILTER:+ --filter $FILTER} pid=$$") || LEASE_FILE=""
+    if [ -n "$LEASE_FILE" ]; then
+        CONFLICT_NOTE=$(lease_conflict_summary "$PROJECT_DIR/.claude/.qa-tracking" "$LEASE_FILE") || CONFLICT_NOTE=""
+        if [ -n "$CONFLICT_NOTE" ]; then
+            printf 'CONCURRENT-RUN NOTICE: another tier claims to be active right now —\n'
+            printf '  a failure below may be contention, not regression (claude-workflow-plugin-gsfd):\n'
+            printf '%s\n' "$CONFLICT_NOTE" | sed 's/^/  /'
+        fi
+    fi
+fi
+# --- LEASE-ACQUIRE-END (claude-workflow-plugin-gsfd) -------------------------
+# DESIGN COLLAPSE (claude-workflow-plugin-gsfd, operator-directed, round 6):
+# this runner does NOT heartbeat its own lease, and nothing else in this
+# codebase does either. Two rounds (R3-F3 FOLLOW-UP, R4-F3) built and then
+# chased the correctness cost of touching this lease's mtime from inside the
+# WATCHDOG below; a third (R5-F2/R5-F4) found the hardened version still cost
+# a background process per tick. The lease is now report-only (see
+# tree-lease.sh's own DESIGN COLLAPSE header): nothing ever auto-removes a
+# lease on the strength of its age, so there is nothing left for a heartbeat
+# to protect. Full causal account: CHANGELOG.md.
+
+# finish <code> — the ONLY place the scratch (and this run's lease, if one
+# was acquired) is removed and the ONLY exit once the scratch exists. Never
+# runs from a trap (see above).
 finish() {
     [ -n "$RUN_SCRATCH" ] && rm -rf "$RUN_SCRATCH"
+    if [ "${TREE_LEASE_AVAILABLE:-0}" = "1" ]; then
+        # R2-F3 fix round 2 (sol-codex review): belt-and-braces, matching
+        # tree-lease.sh's own convention -- this runner is not under `set -e`
+        # today so it was not exposed to the exact failure the review named
+        # (verify-before-stop.sh, which is), but the fix costs nothing and a
+        # future `set -e` here should not have to rediscover it.
+        lease_release "${LEASE_FILE:-}" || true
+    fi
     exit "$1"
 }
 
@@ -464,6 +538,16 @@ for spec_file in "${SPECS[@]}"; do
     # the marker FIRST (a kill racing spec exit still classifies), then run
     # escalate_kill (a9hh R2-F3/R4-F4/R6-F1 — mirrors L1). Survivor lines
     # land in a per-spec file the TIMEOUT verdict surfaces.
+    #
+    # DESIGN COLLAPSE (claude-workflow-plugin-gsfd, operator-directed, round
+    # 6): no heartbeat here, or anywhere else in this codebase. Two rounds
+    # (R3-F3 FOLLOW-UP, R4-F3) built and then chased the correctness cost of
+    # touching this lease's mtime from inside this watchdog; a third
+    # (R5-F2/R5-F4) found the replacement still accumulated background
+    # processes. The lease is now report-only (see tree-lease.sh's own
+    # DESIGN COLLAPSE header): nothing ever auto-removes a lease on the
+    # strength of its age, so there is nothing left for a heartbeat to
+    # protect. Full causal account: CHANGELOG.md.
     WD_SURVIVORS="$RUN_SCRATCH/wd-survivors.$TOTAL"
     (
         waited=0

@@ -328,6 +328,280 @@ NPM_LOG_F="$FIXTURE/bin/npm.log"
 assert_eq "vbs: npm shim invoked (suite ran, NOT replayed)" \
     "yes" "$([ -s "$NPM_LOG_F" ] && echo yes || echo no)"
 
+# 10b. claude-workflow-plugin-gsfd R1-F6 fix (independent cross-family
+# review): a CACHED REPLAY (qa-escalated) must show the ACTUAL tail this run's own npm shim
+# produced ("npm test failed: 1 test failing"), not go silent on it once the
+# shared STABLE log file has been overwritten by something else -- the
+# defect was that the replay's FAILED_CHECKS bullet carried only a "see
+# <stable log>" pointer, and that shared, mutable path can hold ANY OTHER
+# run's content (or nothing) by the time a reader looks at it. Reuse
+# TID_FAIL's already-captured genuine failure from case 9/10 above (same
+# fixture, same npm shim, same last-test-output.log).
+TEST_LOG_STABLE_F="$TRACK/last-test-output.log"
+assert_eq "vbs-10b precondition: the STABLE log currently holds THIS run's own npm shim tail" \
+    "yes" "$(grep -q 'npm test failed: 1 test failing' "$TEST_LOG_STABLE_F" 2>/dev/null && echo yes || echo no)"
+# Simulate "another run's own truncate/overwrite" landing on the SHARED,
+# fixed-name STABLE file between this Stop and the next one that replays it.
+printf 'STALE CONTENT FROM A DIFFERENT, LATER RUN -- SHOULD NEVER APPEAR IN A REPLAY\n' > "$TEST_LOG_STABLE_F"
+# Escalate the task directly (bypassing the natural iteration-cap-crossing
+# path -- QA_ESCALATED is driven purely by this label per verify-before-
+# stop.sh's own read of it) and re-fire the Stop hook.
+(cd "$FIXTURE" && bd label add "$TID_FAIL" qa-escalated >/dev/null 2>&1)
+bash "$CT" set "$TID_FAIL"
+RAW_10B=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" 2>&1)
+OUT_10B=$(printf '%s' "$RAW_10B" | tail -1)
+REASON_10B=$(printf '%s' "$OUT_10B" | jq -r '.reason // empty')
+assert_decision "vbs-10b: the escalated replay still blocks" "$OUT_10B" "block"
+assert_contains "vbs-10b: the replay's REASON carries the ACTUAL captured tail (persisted per-task, not just the pointer)" \
+    "npm test failed: 1 test failing" "$REASON_10B"
+assert_not_contains "vbs-10b: ...and does NOT show the OTHER run's content the shared STABLE path now holds" \
+    "STALE CONTENT FROM A DIFFERENT, LATER RUN" "$REASON_10B"
+
+# META-TEST 10b: strip ONLY the TAIL-CACHE-REPLAY-BODY region inside
+# replay_cached_tails_for (not the whole function) from a COPY of the hook,
+# and re-run the IDENTICAL escalated-replay scenario (same task, same
+# still-corrupted STABLE file) to prove 10b's positive result is about the
+# fix, not an artefact of this fixture. Body-only, deliberately: this script
+# runs under `set -e` (verify-before-stop.sh:25), so a mutant that removed
+# the FUNCTION ENTIRELY would leave its two call sites calling an undefined
+# name — exit 127, and `set -e` would abort the WHOLE hook before REASON is
+# ever composed, testing a crash rather than the R1-F6 defect. Stripping
+# just the body leaves a syntactically valid no-op (still `return 0`, call
+# sites resolve fine) that reproduces the actual defect: the tail variables
+# never get restored. The copy lives in `.claude/scripts/` (not $WORK or
+# /tmp) for the same reason approve-idempotency.sh's own META copy does: a
+# hook parked elsewhere cannot find its workflow-denylist.sh sibling and
+# would block on THAT instead, which would make this META pass for the
+# wrong reason.
+VBS_REAL=$(readlink "$FIXTURE/.claude/scripts/verify-before-stop.sh" 2>/dev/null || printf '%s' "$FIXTURE/.claude/scripts/verify-before-stop.sh")
+VBS_MUT_10B="$FIXTURE/.claude/scripts/vbs-notailcache.sh"
+STRIP_RC=0
+awk '
+    /TAIL-CACHE-REPLAY-BODY-BEGIN/ { skipping=1; found=1; next }
+    /TAIL-CACHE-REPLAY-BODY-END/   { skipping=0; next }
+    skipping { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$VBS_REAL" > "$VBS_MUT_10B" || STRIP_RC=$?
+chmod +x "$VBS_MUT_10B"
+assert_eq "META 10b: TAIL-CACHE-REPLAY sentinels present in verify-before-stop.sh" "0" "$STRIP_RC"
+VBS_MUT_10B_PARSE=0
+bash -n "$VBS_MUT_10B" 2>/dev/null || VBS_MUT_10B_PARSE=$?
+assert_eq "META 10b: the stripped copy still parses" "0" "$VBS_MUT_10B_PARSE"
+assert_eq "META 10b: the stripped copy still sources the shared denylist (discriminator: a block from it is not the missing-lib arm)" \
+    "yes" "$(grep -q 'workflow-denylist.sh' "$VBS_MUT_10B" && echo yes || echo no)"
+
+# R2-F2 fix (fix round 2, sol-codex review): MEASURED root cause of the
+# mutant's escalated replay reading EMPTY instead of `block` — not a crash,
+# and not the R1-F6 defect either. verify-before-stop.sh's own auto-defer
+# counter (AUTO_DEFER_AFTER_ESCALATED_STOPS=2) counts every Stop that fires
+# while qa-escalated is already set, PER TASK, with no `qa-gate.sh choose`
+# recorded in between; the SAME shipped, UNMUTATED script reproduces the
+# identical `{}` outcome on the second call (isolated directly: two
+# back-to-back unmutated escalated Stops against one task, zero code
+# changes, second one auto-defers to qa-deferred and ALLOWS). vbs-10b's own
+# call above was already escalated Stop #1 for $TID_FAIL; this META-TEST's
+# call is #2 against the SAME task with nothing in between, so it tripped
+# the SAME counter regardless of whether replay_cached_tails_for's body
+# was stripped — the control and the mutant were never actually being
+# compared on the property this META-TEST names. Reset ONLY the per-task
+# auto-defer counter file directly (the same tracking-file-poke idiom this
+# whole spec already uses elsewhere for changed-files.txt /
+# current-task.repo) so the mutant's call is this task's escalated Stop #1
+# again — every OTHER piece of state this META-TEST actually cares about
+# (qa-escalated, the corrupted STABLE log, the persisted tail-cache files)
+# is left untouched, unlike `qa-gate.sh choose continue`, which would also
+# wipe last-test-tail/last-failed-checks and defeat the scenario entirely.
+SAN_FAIL_META10B=$(printf '%s' "$TID_FAIL" | tr -c 'A-Za-z0-9._-' '_')
+rm -f "$TRACK/escalated-stops.$SAN_FAIL_META10B"
+
+RAW_META10B=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_MUT_10B" 2>&1)
+OUT_META10B=$(printf '%s' "$RAW_META10B" | tail -1)
+REASON_META10B=$(printf '%s' "$OUT_META10B" | jq -r '.reason // empty')
+assert_decision "META 10b: the mutant's escalated replay still blocks (same shape, not a different failure path)" \
+    "$OUT_META10B" "block"
+assert_not_contains "META 10b: WITHOUT replay_cached_tails_for, the mutant's replay does NOT recover the actual tail (specific misbehaviour)" \
+    "npm test failed: 1 test failing" "$REASON_META10B"
+
+# Clear escalation state so later cases in this fixture are unaffected.
+(cd "$FIXTURE" && bd label remove "$TID_FAIL" qa-escalated >/dev/null 2>&1)
+
+# ===========================================================================
+# claude-workflow-plugin-gsfd fix round 2 (R2-F4, sol-codex review): a
+# genuine run whose CYCLE GENERATION moves DURING execution (a concurrent
+# `qa-gate.sh enter`) must refuse to persist its results into the new
+# cycle — a later cycle replaying an earlier cycle's evidence, the R1-F6
+# defect pointing the other direction.
+#
+# claude-workflow-plugin-gsfd fix round 3 (R3-F1, sol-codex review): THIS
+# CONTROL PROVED NOTHING. The original test_cmd was
+# `sleep 12 \&\& exit 1` — `\&` is not a valid JSON escape, so `jq`
+# (measured directly: `jq -e` on that exact payload returns rc 5) never
+# parsed a TEST_CMD at all. The background hook therefore dispatched
+# NOTHING, finished, and persisted almost instantly — WAY before the
+# 6-second sleep below ever fired the concurrent `enter`. Every "absent"
+# assertion was passing because `enter`'s OWN wipe removed files a NORMAL,
+# unraced persist had already written, not because the generation-refusal
+# branch ever ran — which is also, precisely, why sync-errors.log carried
+# no refusal line: there was no refusal. Same defect class as META 10b
+# (R2-F2, an auto-defer counter, not a crash) and the dolt-flusher probe
+# (R2-F7, a foreign process, not the disarm) — a control that PASSES tells
+# you nothing until you know WHICH BRANCH it exercised.
+#
+# Fixed two ways. (1) The escaping bug itself is gone — no backslashes at
+# all; this exact JSON round-trips through `jq` cleanly (verified directly
+# while building this fix). (2) Replaced "sleep N and hope the timing
+# lines up" with a MARKER FILE the test command touches the INSTANT it
+# starts running, polled for (bounded, never a blind sleep) before firing
+# the concurrent `enter` — the property under test is "did the concurrent
+# enter land inside the hook's post-dispatch window", and a marker file
+# makes that a MEASURED FACT, not a timing guess. Once the marker exists,
+# the test command still SLEEPS for a real, unsimulated 15s before
+# exiting — the same "real delay, not a backdated mtime" idiom
+# tree-lease.test.sh section 12 uses, and for the identical reason: this
+# property is about actual OS-measured timing, which cannot be faked after
+# the fact.
+RACE_MARKER="$FIXTURE/.race-marker"
+rm -f "$RACE_MARKER"
+TID_RACE=$(cd "$FIXTURE" && bd create "R2-F4 cycle-race task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" enter "$TID_RACE" >/dev/null
+printf 'src/race-handler.ts\n' > "$TRACK/changed-files.txt"
+SAN_RACE=$(printf '%s' "$TID_RACE" | tr -c 'A-Za-z0-9._-' '_')
+GEN_FILE_RACE="$TRACK/qa-cycle-gen.$SAN_RACE"
+assert_eq "vbs-r2f4 precondition: the cycle generation is 1 right after the first enter" \
+    "1" "$(cat "$GEN_FILE_RACE" 2>/dev/null || echo '?')"
+
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE/.claude/scripts/detect-stack.sh" <<STUBEOF
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"touch $RACE_MARKER; sleep 15; exit 1","lint_cmd":"","type_cmd":""}\n'
+STUBEOF
+chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+# Non-vacuity + validity, checked directly rather than assumed: the exact
+# JSON this stub emits must (a) actually contain the marker path and (b)
+# parse cleanly, so a future edit cannot silently reintroduce the R3-F1
+# escaping bug this section exists to close.
+STUB_JSON=$(bash "$FIXTURE/.claude/scripts/detect-stack.sh")
+assert_contains "vbs-r2f4 precondition: the stub's test_cmd names the marker path" \
+    "$RACE_MARKER" "$STUB_JSON"
+STUB_JSON_TEST_CMD=$(printf '%s' "$STUB_JSON" | jq -r '.test_cmd // ""' 2>/dev/null)
+assert_eq "vbs-r2f4 precondition (R3-F1 non-recurrence): the stub's JSON parses cleanly and test_cmd is non-empty — the exact property the invalid \\& escape broke" \
+    "no" "$([ -z "$STUB_JSON_TEST_CMD" ] && echo yes || echo no)"
+
+bash "$CT" set "$TID_RACE"
+printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" > "$FIXTURE/vbs-race-out.json" 2>&1 &
+VBS_RACE_PID=$!
+
+MARKER_WAIT=0
+while [ ! -f "$RACE_MARKER" ] && [ "$MARKER_WAIT" -lt 300 ]; do
+    sleep 0.1
+    MARKER_WAIT=$((MARKER_WAIT + 1))
+done
+assert_eq "vbs-r2f4: the background hook's test command GENUINELY started (marker file appeared) before the concurrent enter fires — the R3-F1 fix's own non-vacuity check" \
+    "yes" "$([ -f "$RACE_MARKER" ] && echo yes || echo no)"
+
+bash "$QG" enter "$TID_RACE" >/dev/null
+assert_eq "vbs-r2f4: a CONCURRENT enter mid-run bumps the generation to 2 while the older Stop is still executing" \
+    "2" "$(cat "$GEN_FILE_RACE" 2>/dev/null || echo '?')"
+assert_eq "vbs-r2f4: ...and (as enter always did) wipes this task's rc cache immediately" \
+    "" "$(cat "$TRACK/last-test-rc.$SAN_RACE" 2>/dev/null || echo '')"
+
+wait "$VBS_RACE_PID" 2>/dev/null
+RACE_OUT=$(tail -1 "$FIXTURE/vbs-race-out.json")
+assert_decision "vbs-r2f4: the STALE run itself still completes cleanly (never crashes, never hangs)" \
+    "$RACE_OUT" "block"
+assert_eq "vbs-r2f4: the stale run's OWN rc is NOT persisted into the new cycle (R2-F4 refusal)" \
+    "yes" "$([ ! -s "$TRACK/last-test-rc.$SAN_RACE" ] && echo yes || echo no)"
+assert_eq "vbs-r2f4: ...nor its runner" \
+    "yes" "$([ ! -s "$TRACK/last-runner.$SAN_RACE" ] && echo yes || echo no)"
+assert_eq "vbs-r2f4: ...nor its rendered failed-checks body" \
+    "yes" "$([ ! -s "$TRACK/last-failed-checks.$SAN_RACE" ] && echo yes || echo no)"
+assert_contains "vbs-r2f4: sync-errors.log names the refusal (generation moved, not silent)" \
+    "cycle generation moved during this run" "$(cat "$TRACK/sync-errors.log" 2>/dev/null)"
+
+# RESTORE CONTROL: the IDENTICAL scenario with NO concurrent enter — the
+# generation never moves, and the run's results DO persist normally.
+# Proves vbs-r2f4's refusal above is about the race, not a general
+# breakage of persistence.
+TID_NORACE=$(cd "$FIXTURE" && bd create "R2-F4 no-race control task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" enter "$TID_NORACE" >/dev/null
+printf 'src/norace-handler.ts\n' > "$TRACK/changed-files.txt"
+SAN_NORACE=$(printf '%s' "$TID_NORACE" | tr -c 'A-Za-z0-9._-' '_')
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE/.claude/scripts/detect-stack.sh" <<'STUB2'
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"exit 1","lint_cmd":"","type_cmd":""}\n'
+STUB2
+chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+bash "$CT" set "$TID_NORACE"
+printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" >/dev/null 2>&1
+assert_eq "vbs-r2f4 RESTORE CONTROL: with no concurrent enter, the run's own rc DOES persist" \
+    "1" "$(cat "$TRACK/last-test-rc.$SAN_NORACE" 2>/dev/null || echo '?')"
+assert_eq "vbs-r2f4 RESTORE CONTROL: ...and its runner too" \
+    "npm" "$(cat "$TRACK/last-runner.$SAN_NORACE" 2>/dev/null || echo '?')"
+
+# META-TEST vbs-r2f4: strip BOTH the CYCLE-GEN-PRECHECK and
+# CYCLE-GEN-POSTCHECK sentinel regions from a copy of the shipped hook —
+# the sweep-state convention (CYCLE_STILL_CURRENT="yes" set OUTSIDE both
+# regions — see verify-before-stop.sh's own header) means the excised
+# mutant persists UNCONDITIONALLY, exactly the pre-R2-F4 defect shape, a
+# syntactically valid no-op rather than a crash (same "strip the body, not
+# the whole function" reasoning META 10b uses). Re-runs the IDENTICAL
+# marker-synchronised race against the mutant and proves the "absent"
+# assertions above FLIP: this is the leg R3-F1 named specifically — "the
+# leg must fail if the generation refusal is removed, not merely pass
+# when it's present."
+rm -f "$RACE_MARKER"
+VBS_REAL_R2F4=$(readlink "$FIXTURE/.claude/scripts/verify-before-stop.sh" 2>/dev/null || printf '%s' "$FIXTURE/.claude/scripts/verify-before-stop.sh")
+VBS_MUT_R2F4="$FIXTURE/.claude/scripts/vbs-nogenrefusal.sh"
+STRIP_RC_R2F4=0
+awk '
+    /CYCLE-GEN-PRECHECK-BEGIN|CYCLE-GEN-POSTCHECK-BEGIN/ { skipping=1; found++; next }
+    /CYCLE-GEN-PRECHECK-END|CYCLE-GEN-POSTCHECK-END/     { skipping=0; next }
+    skipping { next }
+    { print }
+    END { if (found < 2) exit 7 }
+' "$VBS_REAL_R2F4" > "$VBS_MUT_R2F4" || STRIP_RC_R2F4=$?
+chmod +x "$VBS_MUT_R2F4"
+assert_eq "META vbs-r2f4: both sentinel regions were found and excised (non-vacuity)" "0" "$STRIP_RC_R2F4"
+VBS_MUT_R2F4_PARSE=0
+bash -n "$VBS_MUT_R2F4" 2>/dev/null || VBS_MUT_R2F4_PARSE=$?
+assert_eq "META vbs-r2f4: the stripped copy still parses" "0" "$VBS_MUT_R2F4_PARSE"
+assert_eq "META vbs-r2f4: the stripped copy still sources the shared denylist (discriminator: a block from it is not the missing-lib arm)" \
+    "yes" "$(grep -q 'workflow-denylist.sh' "$VBS_MUT_R2F4" && echo yes || echo no)"
+
+TID_MUT_RACE=$(cd "$FIXTURE" && bd create "R3-F1 mutant cycle-race task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" enter "$TID_MUT_RACE" >/dev/null
+printf 'src/mutant-race-handler.ts\n' > "$TRACK/changed-files.txt"
+SAN_MUT_RACE=$(printf '%s' "$TID_MUT_RACE" | tr -c 'A-Za-z0-9._-' '_')
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE/.claude/scripts/detect-stack.sh" <<STUBEOF2
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"touch $RACE_MARKER; sleep 15; exit 1","lint_cmd":"","type_cmd":""}\n'
+STUBEOF2
+chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+bash "$CT" set "$TID_MUT_RACE"
+printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_MUT_R2F4" > "$FIXTURE/vbs-mut-race-out.json" 2>&1 &
+VBS_MUT_RACE_PID=$!
+
+MUT_MARKER_WAIT=0
+while [ ! -f "$RACE_MARKER" ] && [ "$MUT_MARKER_WAIT" -lt 300 ]; do
+    sleep 0.1
+    MUT_MARKER_WAIT=$((MUT_MARKER_WAIT + 1))
+done
+assert_eq "META vbs-r2f4: the mutant's test command also genuinely started before the concurrent enter fires (identical synchronisation, mutant side)" \
+    "yes" "$([ -f "$RACE_MARKER" ] && echo yes || echo no)"
+bash "$QG" enter "$TID_MUT_RACE" >/dev/null
+wait "$VBS_MUT_RACE_PID" 2>/dev/null
+assert_eq "META vbs-r2f4: WITHOUT the generation refusal, the SAME race now DOES persist the stale run's rc (leg fails when the fix is absent — R3-F1's own requirement)" \
+    "yes" "$([ -s "$TRACK/last-test-rc.$SAN_MUT_RACE" ] && echo yes || echo no)"
+assert_eq "META vbs-r2f4: ...and its runner too" \
+    "npm" "$(cat "$TRACK/last-runner.$SAN_MUT_RACE" 2>/dev/null || echo '?')"
+
+rm -f "$RACE_MARKER" "$VBS_MUT_R2F4"
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+ln -sf "$DS_REAL" "$FIXTURE/.claude/scripts/detect-stack.sh" 2>/dev/null || true
+
 # ===========================================================================
 # claude-workflow-plugin-llh.3 (G2.gate-friction) — false-block repros.
 #
@@ -2259,5 +2533,150 @@ if assert_mutant_applied "vbs-qzv.3 META" "$QZV3_REAL_VBS" "$VBS_QZV3_MUT"; then
         "--no-design 'F1 " "$QWC_REASON"
     ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
 fi
+
+# ---------------------------------------------------------------------------
+# vbs-tmo: TIMEOUT NOT ENFORCED disclosure in the operator-facing gate
+# summary (claude-workflow-plugin-gsfd, disclosure fix). run_with_timeout's
+# own function-level behaviour (does the LOG carry the marker, does the exit
+# code still pass through) is covered directly, awk-extracted, in
+# .claude/scripts/tests/run-with-timeout.test.sh sections 2a/2b — that
+# function needs nothing but `bash` on PATH, so a full PATH reconstruction is
+# cheap and safe there. This section is the END-TO-END half: does
+# checks_scope_note's paragraph actually reach the Stop hook's JSON
+# `.reason`, through the real detect-stack -> npm -> run_with_timeout
+# dispatch, for a task that is not yet qa-approved?
+#
+# tmo-b (restore control) is forced on ANY host: PATH is searched in order,
+# so PREPENDING a working `timeout` stub always wins regardless of what the
+# ambient PATH holds further down.
+#
+# tmo-a (absent leg) is NOT forced the same way. Forcing "neither binary
+# resolves" for the FULL hook — which shells out to jq/git/bd/sed/awk and to
+# its sibling scripts (qa-gate.sh, detect-stack.sh, current-task.sh,
+# workflow-denylist.sh, tree-lease.sh) — would need a curated PATH covering
+# every tool ALL of those touch, unlike run_with_timeout's own single-binary
+# surface. Building that blind is a worse trade than an honest, named skip:
+# this L2 tier cannot be run from inside the session that wrote this section
+# (make test-component is explicitly the operator's own call, kept separate
+# from L1), so a fragile reconstruction would ship unverified by execution.
+# Instead: assert the PRECONDITION this dev box (and, per the shipped
+# function's own header, stock macOS generally) already satisfies, and skip
+# the leg honestly, by name, when a host does not (Linux ships `timeout` in
+# coreutils, so CI is the expected skip site) — matching this tier's own
+# established idiom for an environment the harness cannot force (see e.g.
+# failure-cross-repo.sh section 5, gate-baseline-v2.sh section 6: "SKIPPED:
+# <section> (<reason>)"). A skip here does not fail the tier: per
+# .claude/tests/README.md, L2 "reports skips honestly ... but still exits 0
+# on skips" and has no section-level strict mode, unlike L1.
+#
+# Both legs fire against the SAME git-less fixture and the SAME task, back to
+# back. This is safe from cache-replay: mk_fixture's fixtures carry no .git
+# (removed by contract), so tree_fingerprint() always returns FP_NO_GIT for
+# them, record_verified_state refuses to persist against that sentinel (see
+# that function's own header), verified_state_unchanged therefore always
+# reads "false", and VERIFY_SKIP_UNCHANGED never fires here — both Stop-hook
+# calls below genuinely re-dispatch through run_with_timeout rather than one
+# of them replaying the other's cached tail.
+mk_fixture
+FIXTURE_TMO="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_TMO="$FIXTURE_TMO/.claude/scripts/verify-before-stop.sh"
+QG_TMO="$FIXTURE_TMO/.claude/scripts/qa-gate.sh"
+CT_TMO="$FIXTURE_TMO/.claude/scripts/current-task.sh"
+TRACK_TMO="$FIXTURE_TMO/.claude/.qa-tracking"
+
+rm -f "$FIXTURE_TMO/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE_TMO/.claude/scripts/detect-stack.sh" <<'STUB'
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"npm test","lint_cmd":"","type_cmd":""}\n'
+STUB
+chmod +x "$FIXTURE_TMO/.claude/scripts/detect-stack.sh"
+
+# A PASSING test, unlike sections 9/10's failing one above: the disclosure is
+# a property of the ENVIRONMENT, not of pass/fail, and a clean-pass scenario
+# is otherwise uncovered by this file (every existing run_with_timeout
+# dispatch elsewhere here drives a FAILING command).
+mk_shim "npm" "$FIXTURE_TMO" 0 "npm test passed: 3 tests" >/dev/null
+
+TID_TMO=$(cd "$FIXTURE_TMO" && bd create "tmo: disclosure end-to-end" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_TMO" enter "$TID_TMO" >/dev/null
+bd label add "$TID_TMO" qa-pending >/dev/null 2>&1
+bash "$CT_TMO" set "$TID_TMO" >/dev/null
+printf 'src/handler.ts\n' > "$TRACK_TMO/changed-files.txt"
+
+# --- tmo-a: absent leg, conditional on the ambient host (see header above) -
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    printf 'SKIPPED: vbs-tmo-a (this host already resolves timeout or gtimeout on PATH -- the absent-leg precondition does not hold here; see the vbs-tmo section header above for why it is not force-shimmed)\n'
+else
+    OUT_TMOA=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_TMO")
+    REASON_TMOA=$(printf '%s' "$OUT_TMOA" | jq -r '.reason // empty')
+    assert_decision "vbs-tmo-a: not-yet-approved task still blocks (unrelated to the disclosure itself)" \
+        "$OUT_TMOA" "block"
+    assert_contains "vbs-tmo-a: RAN tests line present (a real dispatch happened, not a replay)" \
+        "RAN      tests       npm test" "$REASON_TMOA"
+    assert_contains "vbs-tmo-a: gate summary discloses the cap was NOT enforced" \
+        "TIMEOUT NOT ENFORCED" "$REASON_TMOA"
+    assert_contains "vbs-tmo-a: ...names why (neither binary on PATH)" \
+        "neither timeout nor gtimeout is on PATH" "$REASON_TMOA"
+    # 1200s is TEST_TIMEOUT_S's shipped literal (verify-before-stop.sh); if
+    # that constant ever changes, update this literal alongside it.
+    assert_contains "vbs-tmo-a: ...names which RAN check(s) and their advertised cap" \
+        "tests (1200s)" "$REASON_TMOA"
+    STABLE_LOG_TMOA="$TRACK_TMO/last-test-output.log"
+    assert_eq "vbs-tmo-a precondition: the persisted STABLE log exists" "yes" \
+        "$([ -s "$STABLE_LOG_TMOA" ] && echo yes || echo no)"
+    assert_contains "vbs-tmo-a: the persisted STABLE log ALSO carries the disclosure (not just the in-memory summary)" \
+        "NOT ENFORCED" "$(cat "$STABLE_LOG_TMOA" 2>/dev/null)"
+fi
+
+# --- tmo-b: restore control, forced on ANY host (see header above) --------
+mkdir -p "$FIXTURE_TMO/faketimeout-bin"
+cat > "$FIXTURE_TMO/faketimeout-bin/timeout" <<'SHIM'
+#!/bin/bash
+# Minimal test double for GNU/BSD `timeout`: drop the duration argument and
+# exec the rest, preserving its exit code exactly. Restore-control purposes
+# only -- it does not itself enforce any bound (claude-workflow-plugin-v4jn
+# tracks the separate, still-open genuine-hang-returns-124 gap).
+shift
+exec "$@"
+SHIM
+chmod +x "$FIXTURE_TMO/faketimeout-bin/timeout"
+assert_eq "vbs-tmo-b precondition: prepending faketimeout-bin resolves timeout to the stub" \
+    "$FIXTURE_TMO/faketimeout-bin/timeout" \
+    "$(PATH="$FIXTURE_TMO/faketimeout-bin:$PATH" command -v timeout)"
+
+bash "$CT_TMO" set "$TID_TMO" >/dev/null
+printf 'src/handler.ts\n' > "$TRACK_TMO/changed-files.txt"
+# PATH is prefixed on this ONE pipeline stage only (verified in isolation
+# before this section was written: a prefix assignment on the second stage
+# of a pipe scopes to that command and everything it execs, then reverts —
+# the fixture's own exported PATH, and every other assertion in this file,
+# is unaffected after this line).
+OUT_TMOB=$(printf '%s' '{"stop_reason":"end_turn"}' \
+    | PATH="$FIXTURE_TMO/faketimeout-bin:$PATH" bash "$VBS_TMO")
+REASON_TMOB=$(printf '%s' "$OUT_TMOB" | jq -r '.reason // empty')
+assert_decision "vbs-tmo-b: not-yet-approved task still blocks" "$OUT_TMOB" "block"
+assert_contains "vbs-tmo-b: RAN tests line still present (a real dispatch happened)" \
+    "RAN      tests       npm test" "$REASON_TMOB"
+assert_not_contains "vbs-tmo-b: gate summary does NOT disclose (a working timeout suppresses it)" \
+    "TIMEOUT NOT ENFORCED" "$REASON_TMOB"
+
+# ---------------------------------------------------------------------------
+# vbs-r3fix: DELETED (claude-workflow-plugin-gsfd, operator-directed, round 6
+# DESIGN COLLAPSE). This section covered the in-process heartbeat inside
+# run_with_timeout — the one this comment used to describe as the successor
+# to the original background-daemon heartbeat. Both are gone now:
+# run_with_timeout is back to the shipped, pre-fix-arc `timeout`/`gtimeout`
+# dispatch (see that function's own header), and nothing touches a lease
+# file's mtime mid-dispatch anymore. There is no "lease mtime advances during
+# a long dispatch" property left to prove, and this section's own META mutant
+# — a `sed` over the retired `[ "$hb_tick" -ge 30 ]` literal — no longer
+# matches anything in the shipped file: DIFF_LINES_HB reads 0 where the
+# landing guard requires 2, so the mutant is byte-identical to the original
+# and the section was failing RED (R5-F2). A control invalidated by the
+# removal it should have been deleted alongside, exactly the "guards absent
+# code" defect this round exists to catch. Deleted with the mechanism rather
+# than repaired, matching tree-lease.test.sh's own precedent (its old section
+# 9) for the identical situation.
 
 [ "$FAIL" -eq 0 ]

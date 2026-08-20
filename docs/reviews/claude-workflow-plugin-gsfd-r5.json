@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-gsfd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "15a8f2d5b98168f6eb87d5654c512e5a851a14a43192493595b3017da2509f8b",
+  "risk_threshold": "high",
+  "stop_condition": "R4 findings adjudicated, plus the orchestrator-requested systematic vacuity sweep over every mutation anchor in the changed specs",
+  "verdict": "findings",
+  "iterations": 5,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R5-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:2309 (run_with_timeout completion test), comments at :2249-2252",
+      "evidence": "Normal completion means 'the original supervised process group has no signalable members', not 'the descendant tree is empty'. The ordinary attack IS fixed — a `sleep 1800 &` child stays in the wrapper's group, so the loop stays active, kills the group at the deadline and returns 124 (verified by reading). But a child that calls setsid()/setpgid() — a daemonising helper that then runs long work — leaves that group; once the wrapper exits 0 the original group is empty and the function returns 0 while detached work continues. The timeout branch is weaker still: it sends TERM/KILL and waits only for the wrapper, never confirming the group emptied. Comments at :2249-2252 claim nothing legitimate can outlive the call, so the boundary is neither named nor permitted. Detached-child behaviour inferred from process-group semantics; the code path was read.",
+      "description": "R4-F1 is PARTIALLY FIXED. Arbitrary configured verification commands can still be under-reported — the gate returning success over work that is still running — in the function every verification in this plugin flows through. Either supervise the descendant tree, or name and defend the escape explicitly instead of denying it in a comment."
+    },
+    {
+      "id": "R5-F2",
+      "severity": "medium",
+      "location": ".claude/tests/component/specs/verify-before-stop.sh:2663 (heartbeat mutant) vs shipped .claude/scripts/verify-before-stop.sh:2330",
+      "evidence": "The mutant targets the retired literal `[ \"$hb_tick\" -ge 30 ]`, which occurs ZERO times in the current shipped hook — the condition is now `\"$((now - hb_last))\" -ge 30`. The mutant copy is therefore byte-identical to the original, DIFF_LINES_HB is 0, and :2667 requires 2. Found by the systematic sweep the orchestrator requested precisely because the implementer had already hit this class once (18.1/18.2).",
+      "description": "A control invalidated by the batch's own shipped-code edit. The landing guard means it fails loudly rather than passing green — so this L2 spec should currently be RED, and it has not been re-run since the R4 changes, which is why the reported green suites do not establish this control against these bytes. Sixth instance in this batch of a control that does not exercise the mechanism it names."
+    },
+    {
+      "id": "R5-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:1079 (stale-lock recovery)",
+      "evidence": "Recovery does not cover the acquisition-to-owner-record window: a crash or SIGKILL between `mkdir` and the pid write, or a failed pid write, leaves a lock directory with no valid `pid` file. Waiters only recover locks carrying a numeric dead pid, so an ownerless lock persists forever and every later call eventually proceeds UNLOCKED. Two unlocked wipes can then both read generation N and publish N+1; a Stop starting after the first N+1 but before the second sees no generation change across the second wipe and repopulates evidence that wipe intended to invalidate. Verified by reading.",
+      "description": "R4-F4 is PARTIALLY FIXED and the self-healing claim is too broad: owner-bearing stale locks recover, ownerless or invalid-owner locks retain the original permanent degradation. The accompanying new spec covers only the valid-dead-pid case, so it cannot close this."
+    },
+    {
+      "id": "R5-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh:2332; .claude/scripts/tests/run-tests.sh:931-933; .claude/tests/component/run.sh:591-593; comments at verify-before-stop.sh:2214-2223 and 4416-4422, run-tests.sh:524-540, component/run.sh:298-316",
+      "evidence": "The deadline is correctly decoupled from a stalled heartbeat, but the replacement is still a background process that can outlive the call — the new spec explicitly acknowledges and kills that orphan at :316-326. A persistently blocked heartbeat accumulates roughly one process per 30s in the hook. The runner watchdogs are worse: they can launch another heartbeat every second while the lease mtime stays old, and their synchronous mtime lookup can itself block on a stalled mount. The cited comments state that no process is forked and nothing can orphan, which is incorrect.",
+      "description": "R4-F2's correctness half holds; what is wrong is the documentation and the unbounded accumulation. The daemon was retired to remove exactly this class, and a fire-and-forget heartbeat reintroduces a narrower version of it while the comments deny its existence."
+    },
+    {
+      "id": "R5-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2563 (15.10 probe)",
+      "evidence": "`hit` is set only during the fixed three-second sampling loop. A `dolt send-metrics` process spawned after that window, or during `wait \"$bgpid\"`, or seen only by the post-drain, is deliberately drained but never changes the result from `not-seen`. A sufficiently short-lived process can also fall between the 50ms samples.",
+      "description": "The implementer's choice to report rather than guess at a timing patch was reasonable, but its stated residual is understated: the probe can false-GREEN, not merely false-red. A negative control that can silently pass is the failure direction that matters."
+    },
+    {
+      "id": "R5-F6",
+      "severity": "low",
+      "location": ".claude/scripts/verify-before-stop.sh:92 (STOP_TIMEOUT_FILE) and :2380 (read_stop_timeout), vs .claude/settings.json:79",
+      "evidence": "Repository-wide static search finds definitions but no caller for either; the header still promises a configurable 60-second outer timeout while settings.json:79 supplies a fixed 1320000ms hook timeout. Predates this diff but is in R4-F5's scope.",
+      "description": "A dead knob plus a stale contract: the file documents configurability that no code reads and a default that the shipped settings contradict."
+    }
+  ]
+}

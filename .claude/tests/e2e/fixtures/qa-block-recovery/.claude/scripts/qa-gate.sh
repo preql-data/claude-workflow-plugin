@@ -1024,6 +1024,123 @@ wipe_iteration_state() {
     if [ -n "$tid" ]; then
         local sanitized
         sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+        # claude-workflow-plugin-gsfd fix round 3 (R3-F2, independent
+        # cross-family review): bump the per-task CYCLE GENERATION counter
+        # FIRST, before any of the deletions below, not last. Round 2 bumped
+        # last, on the theory that a
+        # concurrent Stop's generation re-check would see the state AFTER this
+        # whole function finished. MEASURED wrong by the reviewer: a Stop's own
+        # pre-write generation re-check can land in the WINDOW BETWEEN this
+        # function's deletions (which have already run) and its bump (which
+        # has not yet run) — at that exact instant the counter still reads the
+        # OLD generation, so the Stop's re-check sees "unchanged" and proceeds
+        # to REPOPULATE the files this call JUST deleted, with stale-cycle
+        # data, under what is now the NEW cycle. Bumping FIRST closes that
+        # specific ordering gap: by the time ANY deletion below can run, a
+        # concurrent re-reader already sees the new generation and refuses.
+        #
+        # The read-modify-write itself (read current, add 1, write back) is
+        # NOT atomic on its own — two overlapping wipe_iteration_state calls
+        # could both read the same starting value and each publish the SAME
+        # "+1" result, losing one bump (also R3-F2). Guarded with a `mkdir`
+        # lock: `mkdir` is a single atomic test-and-set on every POSIX
+        # filesystem this repo runs on, so at most one call at a time can hold
+        # it. Best-effort and bounded (up to ~1s), matching this whole
+        # function's own "a degradation, never a reason to block the gate"
+        # convention elsewhere — proceeding without the lock after the bound
+        # is a rare, disclosed residual (a lost bump under EXTREME concurrent
+        # enter/choose contention), not a hang.
+        #
+        # R4-F4 fix (independent cross-family review, round 4): `mkdir` locks
+        # have no built-in expiry, and this one previously recorded no
+        # holder identity — if a holder died (SIGKILL, a crash) between
+        # acquiring here and releasing below, the lock directory was left
+        # behind FOREVER, and every LATER call would spend its own ~1s
+        # budget failing to acquire it and then proceed unlocked, silently,
+        # permanently, from that point on — broader than this comment's own
+        # "extreme contention" framing: ONE interrupted holder was enough,
+        # not sustained contention. Fixed with stale-lock recovery: the
+        # winning `mkdir` now records its own pid inside the lock directory;
+        # a waiter whose `mkdir` fails reads that pid and, if it is no
+        # longer alive (`kill -0`), removes the stale lock and retries
+        # within the SAME bounded loop rather than waiting out the full
+        # budget and degrading. This does not need pid-reuse-proof
+        # certainty the way tree-lease.sh's own lease identity does (R1-F2/
+        # R2-F1) — the failure mode of a false "still held" reading here is
+        # only ever a repeat of the PRE-fix behaviour (one more bounded,
+        # disclosed unlocked degradation for THIS call), never worse, while
+        # the common case (a genuinely dead holder) now self-heals instead
+        # of wedging permanently.
+        #
+        # R5-F3 fix (independent cross-family review, round 5): R4-F4 only
+        # covers a holder that got as far as recording a NUMERIC pid before
+        # dying. It missed the ACQUISITION-TO-OWNER-RECORD WINDOW itself —
+        # a crash or SIGKILL between the winning `mkdir` succeeding and its
+        # very next line (the pid printf) landing, or a printf that fails
+        # outright (a full disk, a permissions change mid-run) — which
+        # leaves a lock directory with NO valid pid file: either absent
+        # entirely, or present but empty/garbage from an interrupted write.
+        # The pre-fix code's handling of that state was a bare no-op
+        # (`''|*[!0-9]*) : ;;`) — it neither recovered the lock nor even
+        # LOOKED again differently on a later iteration, so an ownerless
+        # lock persisted FOREVER, wider than R4-F4's own fix: every later
+        # call spent its ~1s budget, found nothing to recover, and proceeded
+        # UNLOCKED, permanently, from that point on — the exact defect R4-F4
+        # believed it had already closed. Two unlocked callers can then both
+        # read the same starting generation and each publish the identical
+        # "+1", losing a bump (the read-modify-write race this whole lock
+        # exists to prevent in the first place).
+        #
+        # Fixed by treating "no confirmable numeric owner" as ONE recoverable
+        # state regardless of whether it got there via an absent file or an
+        # empty/garbage one, reclaimed after giving it exactly one retry's
+        # grace (this loop's own 0.1s sleep) rather than on first sighting.
+        # The grace matters: for a FEW MICROSECONDS after a genuinely live
+        # winner's `mkdir` succeeds and before its own printf lands, this
+        # exact state (lock dir exists, pid file not yet readable as
+        # numeric) is indistinguishable from the crashed case — reclaiming
+        # on the very first sighting would let a waiter steal a lock its
+        # live holder is a moment from legitimately owning. By the SECOND
+        # sighting, at least one full 0.1s sleep has elapsed since the first
+        # — orders of magnitude longer than a single local `printf` to a
+        # small file ever takes to land — so persistence past that point is
+        # strong evidence the original writer will never complete it.
+        local gen_file gen_lock gen_cur gen_tmp gen_lock_held _gli _gl_holder
+        gen_file="$QA_TRACKING_DIR/qa-cycle-gen.$sanitized"
+        gen_lock="$QA_TRACKING_DIR/qa-cycle-gen.$sanitized.lock"
+        gen_lock_held="no"
+        for _gli in 1 2 3 4 5 6 7 8 9 10; do
+            if mkdir "$gen_lock" 2>/dev/null; then
+                printf '%s' "$$" > "$gen_lock/pid" 2>/dev/null || true
+                gen_lock_held="yes"
+                break
+            fi
+            _gl_holder=""
+            if [ -f "$gen_lock/pid" ]; then
+                _gl_holder=$(cat "$gen_lock/pid" 2>/dev/null) || _gl_holder=""
+            fi
+            case "$_gl_holder" in
+                ''|*[!0-9]*)
+                    # R5-F3: no confirmable numeric owner (missing or
+                    # empty/garbage pid file). Give it exactly one retry's
+                    # grace (see the header note above for why) before
+                    # reclaiming — never on the very first sighting.
+                    [ "$_gli" != "1" ] && { rm -rf "$gen_lock" 2>/dev/null || true; }
+                    ;;
+                *) kill -0 "$_gl_holder" 2>/dev/null || rm -rf "$gen_lock" 2>/dev/null || true ;;
+            esac
+            sleep 0.1
+        done
+        gen_cur=0
+        if [ -f "$gen_file" ]; then
+            gen_cur=$(cat "$gen_file" 2>/dev/null) || gen_cur=""
+            case "$gen_cur" in ''|*[!0-9]*) gen_cur=0 ;; esac
+        fi
+        gen_tmp="$gen_file.tmp.$$"
+        if printf '%s' "$((gen_cur + 1))" > "$gen_tmp" 2>/dev/null; then
+            mv -f "$gen_tmp" "$gen_file" 2>/dev/null || rm -f "$gen_tmp" 2>/dev/null || true
+        fi
+        [ "$gen_lock_held" = "yes" ] && rm -rf "$gen_lock" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/iteration-count.$sanitized" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/last-test-rc.$sanitized" 2>/dev/null || true
         rm -f "$QA_TRACKING_DIR/last-failed-checks.$sanitized" 2>/dev/null || true
@@ -1045,7 +1162,28 @@ wipe_iteration_state() {
         # escalated Stop of the next cycle auto-defer immediately, and
         # auto-defer's consequence is that the following Stop is ALLOWED.
         rm -f "$QA_TRACKING_DIR/escalated-stops.$sanitized" 2>/dev/null || true
+        # claude-workflow-plugin-gsfd R1-F6: the captured-tail cache (the
+        # ACTUAL point-in-time TEST_FAIL_TAIL/LINT_FAIL_TAIL/TYPE_FAIL_TAIL
+        # text a cached replay shows instead of only the "see <stable log>"
+        # pointer) is per-cycle state on the same footing as last-failed-
+        # checks above — it MUST NOT survive to a NEW cycle, or a stale
+        # tail from a previous cycle's failure could be shown under a
+        # DIFFERENT cycle's replayed verdict.
+        rm -f "$QA_TRACKING_DIR/last-test-tail.$sanitized" 2>/dev/null || true
+        rm -f "$QA_TRACKING_DIR/last-lint-tail.$sanitized" 2>/dev/null || true
+        rm -f "$QA_TRACKING_DIR/last-type-tail.$sanitized" 2>/dev/null || true
     fi
+    # claude-workflow-plugin-gsfd: these three are now an ADVISORY
+    # human/agent-facing convenience copy of the last run's output
+    # (verify-before-stop.sh's TEST_LOG_STABLE/LINT_LOG_STABLE/TYPE_LOG_STABLE),
+    # not the load-bearing capture path — that moved to a per-run scratch
+    # directory precisely so a wipe landing here mid-capture (this function
+    # running concurrently with another session's Stop hook) can no longer
+    # delete a log a live run is still writing. Four measured occurrences of
+    # exactly that collision (this rm racing a concurrent verify-before-stop.sh)
+    # are what gsfd's member 1 fixes; this wipe stays because a stale
+    # convenience copy from a previous cycle is still worth clearing, and a
+    # race on it now costs nothing but a stale display for one cycle.
     rm -f "$QA_TRACKING_DIR/last-test-output.log" 2>/dev/null || true
     rm -f "$QA_TRACKING_DIR/last-lint-output.log" 2>/dev/null || true
     rm -f "$QA_TRACKING_DIR/last-type-output.log" 2>/dev/null || true

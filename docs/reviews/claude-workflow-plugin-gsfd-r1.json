@@ -1,0 +1,71 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-gsfd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "c8ffee6014cb74f131ea7983ecdafd2c6b9d448ea969d344c14e34b47d84f984",
+  "risk_threshold": "high",
+  "stop_condition": "all six assigned review priorities covered; verdict reached without hitting any cap",
+  "verdict": "findings",
+  "iterations": 1,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:2113 (run_scoped_log_dir) and :4030-4049 (LEASE-ACQUIRE block)",
+      "evidence": "run_scoped_log_dir()'s final fallback is `dir=\"$QA_TRACKING_DIR\"`, and its own header comment at :2100-2102 states it: 'if even THAT mkdir fails, this degrades to the historical shared QA_TRACKING_DIR itself — a known collision risk'. The LEASE-ACQUIRE comment at :4025 asserts the opposite: 'a scratch dir nothing else on the machine is ever given'. Reachable: a plain FILE at .claude/.qa-tracking/runs makes mkdir -p, mktemp -d and the RANDOM fallback all fail, so TEST_LOG/LINT_LOG/TYPE_LOG resolve to the historical shared paths. lease_acquire failing in the same window leaves no name to attribute the collision to.",
+      "description": "The batch's central claim is that a failed acquire degrades to visibility loss and never back to the original collision. It degrades all the way back to the shared evidence paths. Verified by orchestrator independently by reading both regions; the code documents the defect and the CHANGELOG denies it."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": ".claude/scripts/tree-lease.sh:240 (lease_conflicts, owner identity)",
+      "evidence": "Ownership is `[ \"$host\" = \"$my_host\" ] && [ -n \"$pid\" ]` then `kill -0 \"$pid\"`. started_at is read into a variable and used only in the printf. Two hosts sharing the tree and reporting the same hostname: B's kill -0 on A's live pid fails locally, so A's LIVE lease is classified STALE and reclaimed. Inverse: a recycled pid keeps a dead lease LIVE for up to the 3h backstop.",
+      "description": "hostname+pid does not identify a process. The lease records started_at, which would discriminate against process start time, but never compares it. A lease that wrongly declares itself stale is worse than no lease: the second runner proceeds believing it holds it."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "high",
+      "location": ".claude/scripts/tree-lease.sh:245 (age backstop) and :236 (mtime sanitiser)",
+      "evidence": "The age test runs whenever stale=\"no\", which includes the branch where kill -0 SUCCEEDED, so age >= stale_s overrides a confirmed-live owner. No caller heartbeats: `rg -n 'lease_heartbeat' .claude/scripts/` shows no production call site. L1 has no whole-tier cap (44 specs x 900s per-spec cap exceeds 10800s). Separately, `_lease_mtime_epoch` emits literal '0' on stat failure, and the sanitiser `case \"$mtime\" in ''|*[!0-9]*)` catches empty and non-numeric but NOT '0' — verified by orchestrator: age becomes now-0, forcing STALE.",
+      "description": "The 3h backstop can reclaim a demonstrably alive run, and the mtime sanitiser misses the exact sentinel value its own helper produces on failure, converting a stat failure into a forced reclaim."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "high",
+      "location": ".claude/scripts/tests/tree-lease.test.sh:168 (META 2)",
+      "evidence": "META 2 asserts unconditionally that the mutant's first acquire filename contains literal XXXXXX ('yes'). No platform guard exists in the spec (grep for uname/Darwin/skip returns only comments). CI runs L1 on ubuntu-latest (.github/workflows/test.yml:133,263). MEASURED by orchestrator in debian:stable-slim, GNU coreutils 9.7: `mktemp lease.L1.XXXXXX.lease` returns rc=0 and `lease.L1.SATf8R.lease` — substituted, no literal placeholder. The assertion therefore reads 'no' and FAILS on Linux CI.",
+      "description": "The negative control for the mktemp template fix only passes on the BSD authoring box. The shipped fix is correct; its regression test is not portable, so the guard is green where the bug cannot occur and red where it can. Sol raised this as source-level inference; the orchestrator converted it to a container measurement."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "medium",
+      "location": ".claude/scripts/tree-lease.sh:138",
+      "evidence": "`set -u` sits at file scope, so sourcing leaks it into the caller. Reproduced by orchestrator: `bash -c 'set +u; printf \"before=%s\\n\" \"$-\"; . .claude/scripts/tree-lease.sh; printf \"after=%s\\n\" \"$-\"'` prints before=hBc, after=huBc. The Stop hook goes from set -e to set -eu. Sol notes shellcheck flags no currently-reachable unset expansion, so this is an established state mutation with an established failure mode, not a demonstrated live abort.",
+      "description": "The library promises not to mutate caller shell state and does. A Stop hook that aborts on an unbound variable produces no output, and absent output is non-blocking — the failure is silent by construction."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh:4132 (cached failure replay)",
+      "evidence": "Sol's reader census of the *_STABLE paths: production writer at :4103-4110; production deleter at qa-gate.sh:1060-1062; gate decision readers NONE; executable reader at component spec :295-304; operator-facing readers are every FAILED_CHECKS 'see ...' string. On a cached replay the tail variables initialise empty and the message emits only the pointer, whose target may by then hold another run's output or nothing.",
+      "description": "The narrow claim ('never read by gate logic') is TRUE and survives the census. The broader claim that a race on these paths is cosmetic is false: the cached-replay path retains a pointer and not the captured tail, so an operator is shown another run's evidence under this run's verdict."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2635 (census_fixed_tmp_redirects)",
+      "evidence": "The regex `(>{1,2}|2>{1,2})[[:space:]]*/tmp/[A-Za-z]` requires /tmp immediately after optional whitespace, so `2>\"/tmp/x\"` misses. The second stage `grep -vE '/tmp/[A-Za-z0-9_.-]*\"'`, added to drop JSON false positives, additionally EXCLUDES any genuine quoted redirect. Enumeration failure is silent: stderr suppressed, return 0, empty output reads as clean.",
+      "description": "The 21 redirects fixed in this batch are genuinely per-fixture, so the current population is clean. What fails is the structural no-reintroduction guarantee: an ordinary quoted redirect is missed twice over, and an unreadable population is indistinguishable from a clean one."
+    },
+    {
+      "id": "R1-F8",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/tree-lease.test.sh:9 (spec-wide mutant coverage)",
+      "evidence": "A mutant making both lease_heartbeat and lease_release no-ops passes all 30 assertions: heartbeat has no call site in the spec, and every release is performed without a post-release assertion. Acquisition claims five fields but asserts only pid, tier and label — not owner_host or started_at, the two fields F1-F2/F1-F3 turn on.",
+      "description": "Two of the five public lease operations ship with no discriminating mutant, and the two identity fields that carry the stale rule are written but never asserted. This is the house four-part pairing standard unmet on the members that matter most."
+    }
+  ]
+}
