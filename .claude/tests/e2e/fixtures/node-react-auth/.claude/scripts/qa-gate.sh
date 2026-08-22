@@ -1995,6 +1995,39 @@ assert_record_model_scalar() {
     return 0
 }
 
+# assert_unit_id_scalar <subcommand> <tid> <field> <value> — v5 D4
+# (claude-workflow-plugin-fkm.6). The SAME bjx discipline as
+# assert_record_scalar (reject, never sanitise — a space or colon would move
+# a field boundary the same way), but held to the STRICTER class
+# review-check.sh's OWN schema enforces for a unit_id
+# (`^[A-Za-z0-9._-]+$`, review-check.sh:733 — no `+`), not the wider
+# default [A-Za-z0-9._+-] assert_record_scalar uses for task/designer/hash
+# fields. A unit_id the schema could never have produced can never match ANY
+# unit a real design declares, so refusing it HERE, at the writer, gives a
+# precise "wrong shape" answer — the alternative (accepting it through the
+# wider class and letting the artifact-membership check fail later) would
+# report `unit_not_in_artifact` for a value that was never going to match
+# regardless of what the artifact says, a confusing "refused, for the wrong
+# reason" a caller would have to think past.
+assert_unit_id_scalar() {
+    local sub="$1" tid="$2" field="$3" value="$4"
+    if [ -z "$value" ]; then
+        emit_error_json "$sub" "$tid" "${field}_empty" \
+            "$field is empty; it is interpolated into the DESIGN-UNIT record's machine prefix, where an empty value collapses two tokens into one" \
+            "qa-gate.sh $sub <task-id> --design-task <id> --unit-id <U-n>"
+        exit 1
+    fi
+    case "$value" in
+        *[!A-Za-z0-9._-]*)
+            emit_error_json "$sub" "$tid" "${field}_invalid_chars" \
+                "$field='$value' contains characters outside [A-Za-z0-9._-] — the SAME class review-check.sh's schema enforces for a unit_id. A value outside it could never match any unit a design declares, so this is refused HERE rather than failing later with a confusing unit_not_in_artifact/unit_not_in_design. Rejected, not sanitised (the claude-workflow-plugin-bjx class)" \
+                "qa-gate.sh $sub <task-id> --design-task <id> --unit-id <U-n>"
+            exit 1
+            ;;
+    esac
+    return 0
+}
+
 # completion_files_crosscheck <tid> <recorded-payload-sha> — THE INDEPENDENT
 # COMPLETENESS WITNESS (claude-workflow-plugin-fkm.1.20).
 #
@@ -2558,6 +2591,44 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               above) when a design WAS started but is not yet satisfied — the
               case worth stopping to fix before paying for an implementer
               spawn.
+  design-unit-bind <task-id> --design-task <design-tid> --unit-id <U-n>
+                   [--rebind '<reason>'] ['<summary>']
+              v5 D4 (fkm.6): bind <task-id> (the IMPLEMENTING task) to a
+              specific unit in <design-tid>'s design artifact — the carrier
+              task-per-unit needs since review-check.sh's schema has no
+              per-unit `task_id`. Hashes the artifact (workflow-manifest.sh
+              `hash-file`), validates it via review-check.sh `validate-design`,
+              and REFUSES `unit_not_in_artifact` unless --unit-id is among
+              its CURRENT unit_ids — a binding to a nonexistent unit is worse
+              than none. Bracketed hash-then-validate-then-rehash, same
+              TOCTOU discipline as design-record's own window. Appends (ON
+              <task-id>, never on <design-tid>):
+                DESIGN-UNIT v1 task=<tid> design_task=<design-tid>
+                unit_id=<U-n> design_hash=<h> at <ts>: <summary>[ [rebind: <r>]]
+              An EXISTING binding on <task-id> — to ANY unit, even the same
+              one — refuses a second write with `design_binding_exists`
+              unless `--rebind '<reason>'`: silent re-binding is dangerous
+              (an injected spec, an in-flight implementer, or a prior
+              design-conform result would all silently disagree), a
+              permanent refusal would deadlock a legitimate re-plan.
+  design-conform <task-id>
+              v5 D4 (fkm.6): deterministic, no LLM, NO BYPASS FLAG. Resolves
+              <task-id>'s DESIGN-UNIT binding, requires the governing design
+              to be design-satisfied (propagates compute_design_satisfied's
+              own key verbatim otherwise), confirms the bound unit_id is
+              STILL declared (`unit_not_in_design` if an amendment dropped
+              it), then computes undeclared = actual - declared and
+              unbuilt = declared - actual over the SAME canonical,
+              denylist-filtered change set `approve` hashes
+              (impact-report.sh --relativized-changed-files, so an
+              absolute-vs-relative spelling of the same file never shows up
+              as both). `undeclared_files` non-empty is the ONLY failure —
+              an extra file is scope the design never reviewed; a missing
+              file (`unbuilt`) is reported but never gates. Exactly two
+              remedies for undeclared_files: drop the file, or land an
+              amendment and re-bind (design-unit-bind ... --rebind). NOT
+              wired into `approve` in this slice — built and tested
+              standalone.
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -7503,6 +7574,877 @@ cmd_design_gate_precheck() {
 }
 # DESIGN-REVIEW END (v5 D2 / claude-workflow-plugin-fkm.4)
 
+# ---------------------------------------------------------------------------
+# DESIGN-UNIT BEGIN (fkm.6)
+#
+# design-unit-bind <task-id> --design-task <design-owning-task-id>
+#                  --unit-id <U-n> [--rebind '<reason>'] ['<summary>']
+#
+# THE UNIT<->TASK BINDING RECORD — the carrier task-per-unit needs and does
+# not yet have. D1/D2 (fkm.3/fkm.4) gave the design ARTIFACT and its REVIEW
+# their own records, both keyed by the task that OWNS the design (typically
+# an epic). Neither carries a per-unit `task_id`: review-check.sh's schema
+# (review-check.sh:719-764) has no such field, and adding one would touch
+# `validate-design` and its parity tests for a fact that is about
+# ORCHESTRATION (which Beads task implements which unit), not about the
+# design document itself. This record is that fact, kept separate on
+# purpose — the same reasoning D1's own header gives for splitting
+# DESIGN-ARTIFACT from DESIGN-REVIEW rather than folding both into one
+# grammar.
+#
+#   DESIGN-UNIT v1 task=<tid> design_task=<design-tid> unit_id=<U-n>
+#     design_hash=<h> at <ts>: <summary>[ [rebind: <reason>]]
+#
+# Posted ON THE IMPLEMENTING TASK (<tid>), never on the design-owning task —
+# unlike GRILLING (which deliberately checks "task OR its parent epic",
+# because one grilling dialogue legitimately covers every unit under an
+# epic), a unit binding names WHICH task implements WHICH unit, and that is
+# a fact about <tid> specifically. There is no "epic-level" binding to fall
+# back to: every unit-task needs its OWN distinct unit_id.
+#
+# `design_task` IS A REQUIRED MACHINE TOKEN, NOT PROSE. `design-conform`
+# needs to programmatically resolve which artifact governs <tid>, and this
+# file's own convention (cmd_design_record's `record_suffix` comment, just
+# above) is explicit that the bracketed suffix carries free text a program
+# never compares — a value a reader depends on belongs in the machine
+# prefix. Nothing here assumes <design-tid> is <tid>'s Beads PARENT: the
+# caller (the orchestrator, which just created the tasks from the artifact
+# and therefore knows both ids) states it explicitly, rather than this
+# script inferring it through a parent-child walk that may not hold for
+# every re-plan or restructuring.
+#
+# `design_hash` IS A LIVE RECOMPUTE, NEVER A CALLER-SUPPLIED CLAIM — the
+# SAME "continuous enforcement is the live recompute, not a label" doctrine
+# grilling-record's vendor_hash and design-record's own hash both follow.
+# It is bracketed exactly like design-record's hash-vs-validate window
+# (fkm.3 R2-F3/R3-F4: hash BEFORE validating, re-hash AND re-check
+# containment AFTER, refuse on any disagreement) because this record's
+# whole claim — "unit_id was declared in the artifact at these bytes" — is
+# only sound when the membership check below and the hash were taken from
+# the SAME read.
+#
+# REFUSES `unit_not_in_artifact` when --unit-id is not among the artifact's
+# CURRENT unit_ids — a binding to a nonexistent unit is worse than none,
+# per this phase's own non-negotiable.
+#
+# RE-BINDING (the question this phase asks to be decided explicitly): an
+# EXISTING `DESIGN-UNIT` record on <tid> — to ANY unit_id, even the same one
+# — refuses a second write without `--rebind '<reason>'`. Silent
+# overwriting is dangerous (a spec already injected at spawn, an in-flight
+# implementer, or an earlier `design-conform` result would all silently
+# disagree with a changed binding and nobody would know); a permanent
+# refusal would deadlock a legitimate re-plan (units get split, merged, or
+# renumbered through the D2 amendment loop same as the artifact itself). The
+# audited bypass is the same shape as grilling's `--no-grilling` and
+# design-record's `--accept-foreign-paths`: always available, always
+# recorded, never silent. Unlike DESIGN-REVIEW's iteration-must-ADVANCE
+# discipline, there is no natural counter to advance here (a binding is a
+# static fact, not an iterative verdict), so the flag is required on ANY
+# repeat write rather than only on a DIFFERING one — simpler to reason
+# about, and it costs nothing on the common path (a task is normally bound
+# exactly once).
+
+# _design_unit_lock_root — the directory design-unit-bind's rebind lock
+# file lives under (R2-F2, review round 2). Prefers git's own COMMON
+# directory, symlink-resolved exactly like verify-before-stop.sh's
+# repo_identity (never a --show-toplevel string compare, which is
+# per-checkout and would reintroduce the exact gap this closes): every
+# worktree of ONE repo resolves to the SAME common directory, and D4/D5
+# runs each unit in its own worktree against one SHARED Beads database
+# (docs/HOOKS.md, "Cross-worktree approval resolution"), so a lock keyed
+# off it is genuinely shared across the callers that matter. Falls back to
+# $QA_TRACKING_DIR — the ORIGINAL, per-checkout location — when git is
+# unavailable or $PROJECT_DIR is not a git checkout at all; the cross-
+# worktree window is NOT closed in that fallback, only same-checkout
+# callers are mutually excluded, same as before this fix. Never fails the
+# caller: always prints a non-empty path.
+_design_unit_lock_root() {
+    local raw candidate resolved
+# CROSS-WORKTREE-LOCK-ROOT BEGIN (fkm.6, R2-F2)
+    if command -v git >/dev/null 2>&1; then
+        raw=$(git -C "$PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null) || raw=""
+        if [ -n "$raw" ]; then
+            case "$raw" in
+                /*) candidate="$raw" ;;
+                *)  candidate="$PROJECT_DIR/$raw" ;;
+            esac
+            resolved=$(cd "$candidate" 2>/dev/null && pwd -P) || resolved=""
+            if [ -n "$resolved" ]; then
+                printf '%s/claude-workflow-design-unit-locks' "$resolved"
+                return 0
+            fi
+        fi
+    fi
+# CROSS-WORKTREE-LOCK-ROOT END (fkm.6, R2-F2)
+    printf '%s' "$QA_TRACKING_DIR"
+    return 0
+}
+
+cmd_design_unit_bind() {
+    # jq AVAILABILITY IS CHECKED FIRST (R1-F5, review round 1) —
+    # the SAME property design-conform's own first line has, and for the
+    # identical reason: every other path through this function reaches
+    # emit_error_json, which builds its JSON THROUGH jq. Missing that check
+    # here reproduced exactly the defect the design-conform fix was written
+    # to close. The hand-built literal below keeps the SAME safety property
+    # the reviewer confirmed on design-conform's own jq-free message: it
+    # emits `task_id:null` and interpolates NO caller-supplied text (not the
+    # task id, not any flag value), so it is valid JSON for every input,
+    # never needing jq to escape anything a hostile or malformed argument
+    # might contain.
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-unit-bind","task_id":null,"status":"error","error_key":"jq_unavailable","observations":"jq is required to validate and hash the design artifact and is not on PATH; refusing rather than reporting a binding that was never actually checked","usage":"qa-gate.sh design-unit-bind <task-id> --design-task <design-tid> --unit-id <U-n>"}\n'
+        exit 2
+    fi
+
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-unit-bind" "" "missing_task_id" \
+            "design-unit-bind requires <task-id> as first positional argument" \
+            "qa-gate.sh design-unit-bind <task-id> --design-task <design-tid> --unit-id <U-n>"
+        exit 1
+    fi
+    shift || true
+
+    local design_task="" unit_id="" summary="" rebind=0 rebind_reason=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --design-task)
+                design_task="${2:-}"
+                if [ -z "$design_task" ]; then
+                    emit_error_json "design-unit-bind" "$tid" "missing_design_task" \
+                        "--design-task requires a task-id argument — the task whose docs/specs/<id>.md artifact governs this binding" \
+                        "qa-gate.sh design-unit-bind $tid --design-task <design-tid> --unit-id <U-n>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --unit-id)
+                unit_id="${2:-}"
+                if [ -z "$unit_id" ]; then
+                    emit_error_json "design-unit-bind" "$tid" "missing_unit_id" \
+                        "--unit-id requires a value — the unit_id $tid implements, as declared in the design artifact" \
+                        "qa-gate.sh design-unit-bind $tid --design-task <design-tid> --unit-id <U-n>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --rebind)
+                rebind_reason="${2:-}"
+                if [ -z "$rebind_reason" ]; then
+                    emit_error_json "design-unit-bind" "$tid" "missing_rebind_reason" \
+                        "--rebind requires a reason; it is recorded in the audit trail" \
+                        "qa-gate.sh design-unit-bind $tid --design-task <design-tid> --unit-id <U-n> --rebind '<reason>'"
+                    exit 1
+                fi
+                rebind=1
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                if [ -z "$summary" ]; then summary="$1"; else summary="$summary $1"; fi
+                shift || true
+                ;;
+        esac
+    done
+    [ -n "$summary" ] || summary="unit bound"
+
+    require_bd "design-unit-bind" "$tid"
+
+    if [ -z "$design_task" ]; then
+        emit_error_json "design-unit-bind" "$tid" "missing_design_task" \
+            "--design-task is required — the task whose docs/specs/<id>.md artifact $tid's unit belongs to" \
+            "qa-gate.sh design-unit-bind $tid --design-task <design-tid> --unit-id <U-n>"
+        exit 1
+    fi
+    if [ -z "$unit_id" ]; then
+        emit_error_json "design-unit-bind" "$tid" "missing_unit_id" \
+            "--unit-id is required — which unit in $design_task's design $tid implements" \
+            "qa-gate.sh design-unit-bind $tid --design-task <design-tid> --unit-id <U-n>"
+        exit 1
+    fi
+    # THIS EARLY CALL IS DELIBERATE, not an oversight duplicating the
+    # write-section one below. Without it, a malformed --unit-id (a typo
+    # carrying a space or colon) would run the full artifact
+    # resolve/hash/validate sequence only to be refused by
+    # `unit_not_in_artifact` — TRUE (a malformed value can never be a real
+    # declared unit) but less specific than naming the actual defect, and
+    # not free (the artifact work already happened for a request that could
+    # never have succeeded). Refusing here is a cheap, specific fail-fast.
+    # The write-section call is NOT redundant-to-delete, either: schema
+    # validation guarantees every REAL unit_id already matches this class,
+    # so by the time a value reaches the write section here it is
+    # (currently) unreachable in practice — it is defense in depth against a
+    # future bug in review-check.sh's own validator, the SAME shape
+    # design-record's redundant is_sha256_hex + assert_record_scalar check
+    # on design_hash already is.
+    assert_unit_id_scalar "design-unit-bind" "$tid" "unit_id" "$unit_id"
+
+    # --- resolve the GOVERNING artifact, same derivation design-record uses
+    local artifact
+    artifact=$(design_artifact_path_for "$design_task")
+    if [ ! -f "$artifact" ]; then
+        emit_error_json "design-unit-bind" "$tid" "design_artifact_not_found" \
+            "no design artifact at $artifact for --design-task=$design_task; nothing to bind against" \
+            "qa-gate.sh design-record $design_task --file $artifact"
+        exit 1
+    fi
+    if ! design_path_is_contained "$artifact"; then
+        emit_error_json "design-unit-bind" "$tid" "design_artifact_outside_spec_dir" \
+            "$artifact does not resolve inside $PROJECT_DIR/$DESIGN_SPEC_SUBDIR/; refusing to bind against it" \
+            "qa-gate.sh design-record $design_task --file $artifact"
+        exit 1
+    fi
+
+    # --- OPENING bracket: hash before validating (fkm.3 R2-F3's discipline,
+    # reused rather than re-derived) --------------------------------------
+    local manifest_tool pre_hash="" pre_rc=0
+    manifest_tool="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+    if [ ! -f "$manifest_tool" ]; then
+        emit_error_json "design-unit-bind" "$tid" "hash_tool_unavailable" \
+            "cannot hash the design artifact: workflow-manifest.sh is missing at $manifest_tool" \
+            "restore .claude/scripts/workflow-manifest.sh"
+        exit 2
+    fi
+    pre_hash=$(bash "$manifest_tool" hash-file "$artifact" 2>/dev/null) || pre_rc=$?
+    if [ "$pre_rc" -ne 0 ] || ! is_sha256_hex "$pre_hash"; then
+        emit_error_json "design-unit-bind" "$tid" "design_hash_unavailable" \
+            "the design artifact at $artifact could not be hashed into 64 hex characters (workflow-manifest.sh hash-file exited $pre_rc, produced '${pre_hash:-<empty>}')" \
+            "bash .claude/scripts/workflow-manifest.sh hash-file $artifact"
+        exit 2
+    fi
+
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        emit_error_json "design-unit-bind" "$tid" "validator_unavailable" \
+            "cannot bind: the ONE validator is missing at $REVIEW_CHECK_SCRIPT" \
+            "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
+        exit 2
+    fi
+    local vout vok vkey vobs
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null || true)
+    vok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
+    if [ "$vok" != "true" ]; then
+        vkey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_design_artifact"' 2>/dev/null || echo "invalid_design_artifact")
+        [ -z "$vkey" ] && vkey="invalid_design_artifact"
+        vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null || echo "")
+        emit_error_json "design-unit-bind" "$tid" "$vkey" \
+            "the design artifact governing $design_task failed validation: $vkey${vobs:+ — $vobs}" \
+            "see review-check.sh validate-design $artifact"
+        exit 1
+    fi
+
+    # --- REFUSE a binding to a unit_id the artifact does not declare -------
+# UNIT-MEMBERSHIP-GATE BEGIN (fkm.6)
+    local has_unit known
+    has_unit=$(printf '%s' "$vout" | jq -r --arg u "$unit_id" '(.unit_ids // []) | index($u) != null' 2>/dev/null || echo "false")
+    if [ "$has_unit" != "true" ]; then
+        known=$(printf '%s' "$vout" | jq -r '(.unit_ids // []) | join(", ")' 2>/dev/null || echo "")
+        emit_error_json "design-unit-bind" "$tid" "unit_not_in_artifact" \
+            "unit_id='$unit_id' is not declared in $artifact (design_hash=$pre_hash). Declared unit(s): ${known:-<none>}. A binding to a nonexistent unit is worse than none — refusing" \
+            "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id <one of: ${known:-<none>}>"
+        exit 1
+    fi
+# UNIT-MEMBERSHIP-GATE END (fkm.6)
+
+    # --- CLOSING bracket: re-hash + re-contain (fkm.3 R3-F4's discipline) --
+    # the membership check just ran against $vout, which read the artifact
+    # ONCE; if it moved (content OR containment) since, the membership
+    # answer is not provably about the bytes design_hash names below.
+    local post_hash="" post_rc=0
+    post_hash=$(bash "$manifest_tool" hash-file "$artifact" 2>/dev/null) || post_rc=$?
+    if [ "$post_rc" -ne 0 ] || ! is_sha256_hex "$post_hash" || [ "$post_hash" != "$pre_hash" ]; then
+        emit_error_json "design-unit-bind" "$tid" "design_artifact_changed_during_bind" \
+            "the design artifact at $artifact changed while this command was reading it (before=$pre_hash, after=${post_hash:-<unreadable>}, rc=$post_rc); nothing is bound. Re-run once the artifact has stopped moving" \
+            "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
+        exit 1
+    fi
+    if ! design_path_is_contained "$artifact"; then
+        emit_error_json "design-unit-bind" "$tid" "design_artifact_changed_during_bind" \
+            "the design artifact at $artifact MOVED out of $DESIGN_SPEC_SUBDIR/ while this command was reading it; nothing is bound" \
+            "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
+        exit 1
+    fi
+    local design_hash="$pre_hash"
+
+    # --- assemble the record BEFORE the rebind check, not after -------------
+    # (moved up from its original position, R1-F6, review round 1):
+    # the flock-guarded critical section below needs $comment_text ready to
+    # write atomically with the check, not built afterward outside the lock.
+    assert_record_scalar "design-unit-bind" "$tid" "task" "$tid"
+    assert_record_scalar "design-unit-bind" "$tid" "design_task" "$design_task"
+    assert_unit_id_scalar "design-unit-bind" "$tid" "unit_id" "$unit_id"
+    assert_record_scalar "design-unit-bind" "$tid" "design_hash" "$design_hash"
+
+    local record_suffix=""
+    [ "$rebind" = "1" ] && record_suffix=" [rebind: $rebind_reason]"
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="DESIGN-UNIT v1 task=$tid design_task=$design_task unit_id=$unit_id design_hash=$design_hash at $ts: $summary$record_suffix"
+
+    # --- an EXISTING binding requires the audited --rebind, made
+    # concurrency-safe with flock where available (R1-F6, review round 1).
+    # "Any repeat write requires --rebind" held only SEQUENTIALLY:
+    # two design-unit-bind processes could both read no existing binding
+    # before either wrote, then both proceed without --rebind — the exact
+    # ambiguity ("which binding is authoritative") the refusal exists to
+    # prevent, left unenforced against a real concurrent caller.
+    #
+    # R2-F2 (review round 2): the lock used to be keyed off $QA_TRACKING_DIR
+    # ($PROJECT_DIR/.claude/.qa-tracking), which is per-CHECKOUT by
+    # documented design (docs/HOOKS.md, "Everything here is per-checkout").
+    # D4/D5's own topology runs each unit in its own worktree (v5-design-
+    # phase.md: "implement each unit in its own worktree"), and one Beads
+    # database is shared across every worktree of a repo (docs/HOOKS.md,
+    # "Cross-worktree approval resolution" — the same fact
+    # worktree-approval-resolution.sh drives against a real `git worktree
+    # add`) — so two binds for the SAME task from two DIFFERENT worktrees
+    # used to take two DIFFERENT lock files while reading and writing the
+    # SAME store: both see "no binding", both append, unlocked against each
+    # other. _design_unit_lock_root below prefers a location every worktree
+    # of one repo resolves to identically — git's own common directory,
+    # symlink-resolved the SAME way verify-before-stop.sh's repo_identity
+    # already does for the analogous "is W a worktree of this repo" question
+    # (never a --show-toplevel string compare, which is per-checkout too).
+    # Verified against a REAL `git worktree add`, not reasoned about: a
+    # linked worktree and its main checkout resolve to the byte-identical
+    # lock root; two unrelated repos do not.
+    #
+    # What this does NOT close: bd could be configured to point at a store
+    # unrelated to this repo's own git structure (an exotic BEADS_DIR
+    # override) — this fix assumes the store-sharing topology matches the
+    # git-worktree topology, which is the documented, tested arrangement,
+    # not a guess. And when git itself is unavailable, or PROJECT_DIR is not
+    # a git checkout at all, _design_unit_lock_root falls back to
+    # $QA_TRACKING_DIR — the ORIGINAL per-checkout behaviour, unchanged —
+    # and the cross-worktree window this fix closes reopens in that
+    # degraded case. Stated, not hidden.
+    local rebind_lock rebind_rc=0 rebind_lock_root
+    rebind_lock_root=$(_design_unit_lock_root)
+    rebind_lock="$rebind_lock_root/.design-unit-bind-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').lock"
+    mkdir -p "$rebind_lock_root" "$QA_TRACKING_DIR" 2>/dev/null || true
+    if command -v flock >/dev/null 2>&1; then
+        # The read (latest_design_unit_binding), the decision, and the write
+        # (add_comment) all run inside ONE flock -x critical section keyed
+        # per-task-id, so a second design-unit-bind on the SAME tid blocks
+        # until the first has either written or refused — closing the
+        # check-then-act race rather than merely documenting it. A DIFFERENT
+        # tid uses a DIFFERENT lock file, so unrelated bindings never
+        # serialize against each other. The subshell calls emit_error_json
+        # itself (its stdout is the same fd as the parent's, so the envelope
+        # still reaches the real caller) because bash variables assigned
+        # inside a `(...)` subshell do not survive it — only its EXIT STATUS
+        # does, which the parent below re-raises.
+        #
+        # The refusal itself is sentinel-wrapped SEPARATELY from the write
+        # (REBIND-GATE-FLOCKED, not REBIND-GATE — the no-flock branch below
+        # owns that name): add_comment stays OUTSIDE either sentinel region
+        # in BOTH branches on purpose, so a META test that excises just the
+        # refusal still observes a REAL write landing unconditionally,
+        # rather than excising the write along with the check and getting a
+        # "recorded" verdict from the unconditional success emit at the
+        # bottom of this function that never actually wrote anything.
+        #
+        # The subshell is joined with `|| rebind_rc=$?`, not a bare
+        # statement followed by a separate `rebind_rc=$?` line: under `set
+        # -e` (line 156) a FAILING bare compound command — subshell or
+        # assignment alike — exits the WHOLE SCRIPT right there, before any
+        # later line runs. Harmless on the refusal path today (the subshell
+        # already printed the envelope and called `exit 1`, so an errexit-
+        # forced exit 1 one line early looks identical) and on the success
+        # path (add_comment's own trailing `|| log_sync_error` always
+        # returns 0, so the subshell never fails there) — but a bare flock
+        # -x 9 failure ahead of either branch would otherwise die silently
+        # with no envelope at all, the exact failure mode R1-F1 named next
+        # door. Do not "simplify" this back to a two-line form.
+        (
+            flock -x 9
+            _rb_existing=$(latest_design_unit_binding "$tid") || _rb_existing="{}"
+            _rb_eu=$(printf '%s' "$_rb_existing" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+            _rb_et=$(printf '%s' "$_rb_existing" | jq -r '.design_task // ""' 2>/dev/null || echo "")
+# REBIND-GATE-FLOCKED BEGIN (fkm.6)
+            if [ -n "$_rb_eu" ] && [ "$rebind" != "1" ]; then
+                emit_error_json "design-unit-bind" "$tid" "design_binding_exists" \
+                    "$tid is already bound to unit_id=$_rb_eu under design_task=$_rb_et. Re-binding a task to a different unit silently is dangerous (an already-injected spec, an in-flight implementer, or a prior design-conform result would all disagree with the change and nobody would know); refusing outright would deadlock a legitimate re-plan. Pass --rebind '<reason>' to record a new binding with the reason in the audit trail" \
+                    "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id --rebind '<reason>'"
+                exit 1
+            fi
+# REBIND-GATE-FLOCKED END (fkm.6)
+            add_comment "$tid" "$comment_text"
+        ) 9>"$rebind_lock" || rebind_rc=$?
+    else
+        # NO FLOCK ON THIS HOST — documented, not theoretical: post-editable
+        # .sh's own TRACKING_FILE append carries the IDENTICAL gap for the
+        # IDENTICAL reason (macOS ships no flock by default; this is the
+        # live path on a dev box, not a hypothetical one). The check-then-
+        # write below is NOT atomic against a second concurrent design-
+        # unit-bind on the SAME task id here. What remains guaranteed:
+        # sequential correctness — the property design-conform.test.sh
+        # Sections 3 and 9.2 actually exercise.
+        local existing existing_unit existing_task
+        existing=$(latest_design_unit_binding "$tid") || existing="{}"
+        existing_unit=$(printf '%s' "$existing" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+        existing_task=$(printf '%s' "$existing" | jq -r '.design_task // ""' 2>/dev/null || echo "")
+# REBIND-GATE BEGIN (fkm.6)
+        if [ -n "$existing_unit" ] && [ "$rebind" != "1" ]; then
+            emit_error_json "design-unit-bind" "$tid" "design_binding_exists" \
+                "$tid is already bound to unit_id=$existing_unit under design_task=$existing_task. Re-binding a task to a different unit silently is dangerous (an already-injected spec, an in-flight implementer, or a prior design-conform result would all disagree with the change and nobody would know); refusing outright would deadlock a legitimate re-plan. Pass --rebind '<reason>' to record a new binding with the reason in the audit trail" \
+                "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id --rebind '<reason>'"
+            exit 1
+        fi
+# REBIND-GATE END (fkm.6)
+        add_comment "$tid" "$comment_text"
+    fi
+    [ "$rebind_rc" -ne 0 ] && exit "$rebind_rc"
+
+    # R2-F3 (review round 2): add_comment() ends in `|| log_sync_error ...`
+    # (itself ending in `|| true`), so it ALWAYS returns success — a
+    # transient store failure, a wedged daemon, schema skew, or a deleted
+    # task could all make the actual write silently not happen while this
+    # function still reached "recorded" below. add_comment has 17 call
+    # sites and is fail-open by DOCUMENTED design ("comments are non-
+    # authoritative, labels are the source of truth") — a premise v5 broke
+    # by adding comment-ONLY record subcommands, where the comment IS the
+    # authority. Fixing the shared helper is wider than this slice (filed
+    # separately: claude-workflow-plugin-nod4). The LOCAL fix: re-read the
+    # EXACT predicate design-conform will later evaluate — this function
+    # itself, not a weaker proxy — and refuse if what comes back does not
+    # show what was just written as the latest record. This proves the
+    # write actually landed rather than trusting add_comment's exit status,
+    # which proves nothing.
+    local confirm_json confirm_unit confirm_hash retry_rebind_hint=""
+    [ "$rebind" = "1" ] && retry_rebind_hint=" --rebind '<reason>'"
+    confirm_json=$(latest_design_unit_binding "$tid") || confirm_json="{}"
+    confirm_unit=$(printf '%s' "$confirm_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+    confirm_hash=$(printf '%s' "$confirm_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
+# WRITE-CONFIRMATION-GATE BEGIN (fkm.6, R2-F3)
+    if [ "$confirm_unit" != "$unit_id" ] || [ "$confirm_hash" != "$design_hash" ]; then
+        emit_error_json "design-unit-bind" "$tid" "design_binding_write_unconfirmed" \
+            "the write appeared to complete but a fresh read of $tid's own comments does not show unit_id=$unit_id design_hash=$design_hash as the latest DESIGN-UNIT record (found unit_id=${confirm_unit:-<none>} instead). add_comment() cannot distinguish a transient store failure from success (claude-workflow-plugin-nod4), so this is refused rather than reported recorded on unconfirmed evidence. Re-run: qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id$retry_rebind_hint; if this persists, check bd connectivity and $SYNC_ERRORS_LOG" \
+            "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
+        exit 5
+    fi
+# WRITE-CONFIRMATION-GATE END (fkm.6, R2-F3)
+
+    emit_json 1 "design-unit-bind" "$tid" "recorded" \
+        "comment posted at $ts: $comment_text"
+}
+
+# latest_design_unit_binding <tid> — JSON {design_task, unit_id, design_hash}
+# from the LAST `DESIGN-UNIT v1 ` comment ON <tid> itself, or `{}` when none
+# exists. Deliberately NEVER falls back to a parent epic (contrast
+# grilling_record_exists): a binding names WHICH task implements WHICH unit,
+# a fact about <tid> specifically, and there is no "one binding covers every
+# unit under this epic" analogue the way one grilling dialogue can cover
+# every unit's design.
+#
+# Byte-identical shape to latest_design_review: ONE anchored capture over
+# every field a caller needs, so first/last cannot diverge — `startswith
+# ("DESIGN-UNIT v1 ")` plus a single `capture(...)` carrying the SAME
+# classes the writer above validated: design_task [A-Za-z0-9._+-]+ (the bjx
+# default task-id class), unit_id [A-Za-z0-9._-]+ (the STRICTER schema
+# class), design_hash EXACTLY [0-9a-fA-F]{64} — not the looser
+# [A-Za-z0-9-]+ this reader shipped with (R1-F4, review round 1):
+# the writer only ever emits a value that ALREADY passed is_sha256_hex
+# (exactly 64 hex, either case), so a reader accepting anything shorter, or
+# carrying non-hex letters, or of the wrong length, accepts a hand-written
+# or corrupted record the writer could never have produced. The capture
+# additionally requires the literal ` at ` boundary immediately after the
+# hash — the writer's own next token is always `at <ts>: <summary>` — so
+# `design_hash=<h> anything-that-is-not-at` is refused rather than silently
+# matched on a bare trailing space. Never fails the caller: no bd, no task,
+# unparseable JSON -> {}, rc 0.
+#
+# R2-F1 (review round 2): R1-F4 tightened hash width/class and the ` at `
+# boundary, but two gaps remained. FIRST, `task=` was matched but never
+# named or checked against <tid> — bd_show_with_comments already scopes to
+# comments ON <tid>, but nothing stopped a comment carrying a FOREIGN
+# `task=` value (copied, mis-posted, or hand-forged) from reading as a valid
+# binding on the task it happens to sit on. `task` is now a named capture,
+# compared against $tid via a jq --arg (never interpolated into the regex
+# source — the same capture-then-compare shape used everywhere else in this
+# file, so a task id containing a regex metacharacter cannot alter the
+# pattern). A non-matching task drops the record the same way a malformed
+# hash already does (jq's capture() produces NO output on a failed match —
+# it does not throw here, verified directly against this exact pipeline
+# shape before shipping it — so this select is a plain, safe filter, not a
+# new failure mode). SECOND, nothing after the ` at ` boundary was
+# validated at all, so `at garbage` (no timestamp) still matched. The
+# writer's $ts is always `date -u +%Y-%m-%dT%H:%M:%SZ`; the anchor now
+# requires that exact shape plus the literal `: ` the writer's own
+# `at $ts: $summary` template always emits next. Not captured/returned
+# (no caller reads a timestamp) — validated inline only, so a forged or
+# corrupted timestamp is refused the same way a forged hash already is.
+# The returned object is reshaped back to the documented {design_task,
+# unit_id, design_hash} above — `task` is consumed by the filter, not
+# exposed, so this function's return CONTRACT is unchanged.
+latest_design_unit_binding() {
+    local tid="$1"
+    [ -n "$tid" ] || { printf '{}'; return 0; }
+    command -v bd >/dev/null 2>&1 || { printf '{}'; return 0; }
+    bd_show_with_comments "$tid" \
+        | jq -c --arg tid "$tid" '
+            [ (if type == "array" then .[0].comments else .comments end) // []
+              | .[].text
+              | select(startswith("DESIGN-UNIT v1 "))
+              | capture("^DESIGN-UNIT v1 task=(?<task>[A-Za-z0-9._+-]+) design_task=(?<design_task>[A-Za-z0-9._+-]+) unit_id=(?<unit_id>[A-Za-z0-9._-]+) design_hash=(?<design_hash>[0-9a-fA-F]{64}) at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: ")
+              | select(.task == $tid)
+              | {design_task, unit_id, design_hash}
+            ]
+            | last // {}
+        ' 2>/dev/null || printf '{}'
+    return 0
+}
+# DESIGN-UNIT END (fkm.6)
+
+# ---------------------------------------------------------------------------
+# DESIGN-CONFORM BEGIN (fkm.6)
+#
+# design-conform <task-id> — deterministic, no LLM, no bypass flag.
+#
+# Answers one question: did <task-id> — bound (via DESIGN-UNIT above) to a
+# unit in a SATISFIED design — touch any file its unit did not declare?
+# `undeclared` (actual - declared) is the ONLY failure; `unbuilt` (declared -
+# actual) is reported but never gates — an extra file is scope the design
+# never reviewed, while a missing file is under-delivery the acceptance
+# criteria already catch. Exactly two remedies for `undeclared_files`: drop
+# the file from the change set, or land a design amendment (through D2's
+# review loop) and re-bind. NO OVERRULE PATH — deliberately no flag exists
+# to pass one.
+#
+# NOT WIRED INTO `approve` IN THIS SLICE. Built and tested standalone; the
+# enforcement decision (where, and under what bypass if any) is deferred.
+#
+# RESOLUTION ORDER, each step reusing an existing predicate rather than
+# re-deriving it:
+#   1. Resolve the binding (latest_design_unit_binding). Absent -> the SAME
+#      `unit_not_in_design` key step 2 below also uses — from the caller's
+#      side, "never bound" and "bound to a unit that no longer exists" are
+#      the same actionable fact: this task is not currently mapped into any
+#      unit design-conform can check.
+#   2. compute_design_satisfied on the RESOLVED design_task. This IS the
+#      "recompute the live hash; a mismatch is design_hash_stale" step —
+#      not reimplemented here, because compute_design_satisfied's own
+#      staleness ladder already ends in exactly that comparison, and a
+#      second hash-vs-hash check beside it would be a second implementation
+#      of one predicate, free to disagree with the first the way this
+#      file's own history warns against. Every one of compute_design_
+#      satisfied's non-satisfied keys (no_design_attempted,
+#      design_verdict_missing, design_not_satisfied, design_hash_unreadable,
+#      design_artifact_unreadable, design_verdict_stale) propagates
+#      VERBATIM as design-conform's own error_key.
+#   3. Re-validate via review-check.sh validate-design (the ONE validator)
+#      and confirm the bound unit_id is STILL declared — an amendment can
+#      rename or drop units between binding and conform time — else
+#      `unit_not_in_design`, naming the stale bound hash so a human can see
+#      whether a re-bind is warranted.
+#   4. declared = unit_files[unit_id] from validate-design's envelope (v5
+#      D4 addition, review-check.sh emit_validate_design) — no second
+#      parser for the DESIGN-UNITS grammar.
+#   5. actual = impact-report.sh --relativized-changed-files — the SAME
+#      canonical, denylist-filtered change set `approve`/`--hash-only`
+#      hash, relativized so a Write/Edit-tracked absolute path and a
+#      reconcile_tracker-appended git-relative path compare equal to the
+#      design's always-relative `files[]` declarations. Deliberately NOT
+#      re-derived from $QA_TRACKING_DIR/changed-files.txt directly here:
+#      the tracker mixes absolute (post-edit.sh writes tool_input.file_path
+#      VERBATIM) and repo-relative (reconcile_tracker's git-status backfill)
+#      spellings for the SAME file, and a naive string-set diff would show
+#      the identical file as BOTH undeclared (its absolute spelling) AND
+#      unbuilt (its declared relative spelling) — reusing
+#      relativize_for_impact's git-aware, sibling-worktree-safe
+#      normalisation (impact-report.sh's own "Path relativisation for
+#      impact_of" header) is what closes that, and reusing it is cheaper
+#      and safer than a second, naive implementation.
+#   6. undeclared = actual - declared, unbuilt = declared - actual. Gate on
+#      undeclared only.
+#
+# DEGRADE HONESTLY, PER STEP: jq missing, the validator missing, the design
+# artifact unreadable, the fence unparseable, or the change-set read itself
+# failing (impact-report.sh's own FATAL guard, e.g. workflow-denylist.sh
+# missing) all refuse with a DISTINCT error_key and a non-zero exit. None of
+# them fall through to an empty actual/declared set that would silently read
+# as "conforms" — the ONE thing this subcommand's own spec forbids.
+#
+# EXIT CODES: 1 usage/argument error; 2 infrastructure unavailable (bd, jq,
+# the validator, the hash tool, impact-report.sh itself); 4 a substantive
+# gate failure (no/unmatched binding, an unsatisfied or stale governing
+# design, or undeclared_files itself) — matching design-gate-precheck's own
+# use of 4 for "not ready", the closest existing precedent for this family.
+
+# emit_design_conform <ok> <error_key> <observations> <undeclared-json>
+#                     <unbuilt-json> [unit_id] [design_task] [task_id]
+# Same custom-envelope shape emit_validate_design uses for the SAME reason:
+# the generic emit_json/emit_error_json envelopes have no room for the
+# structured undeclared_files/unbuilt_files arrays a caller needs to act on
+# without re-parsing free text.
+emit_design_conform() {
+    local ok="$1" ekey="$2" obs="$3" undeclared="$4" unbuilt="$5" \
+          unit_id="${6:-}" design_task="${7:-}" tid="${8:-}"
+    # shellcheck disable=SC2016
+    printf '{"ok":%s,"subcommand":"design-conform","task_id":%s,"error_key":%s,"observations":%s,"unit_id":%s,"design_task":%s,"undeclared_files":%s,"unbuilt_files":%s}\n' \
+        "$ok" \
+        "$(printf '%s' "$tid" | jq -Rs .)" \
+        "$(printf '%s' "$ekey" | jq -Rs .)" \
+        "$(printf '%s' "$obs" | jq -Rs .)" \
+        "$(printf '%s' "$unit_id" | jq -Rs .)" \
+        "$(printf '%s' "$design_task" | jq -Rs .)" \
+        "$undeclared" \
+        "$unbuilt"
+}
+
+cmd_design_conform() {
+    # jq AVAILABILITY IS CHECKED FIRST, before anything else in this
+    # function, and reported WITHOUT emit_design_conform — deliberately.
+    # Every emit_design_conform call (like every emit_error_json/emit_json
+    # call in this whole file) builds its JSON THROUGH jq (`jq -Rs .` per
+    # interpolated field). A check that discovers jq is missing and then
+    # tries to REPORT that fact via the SAME jq-dependent emitter produces
+    # exactly the bug this guards against: `jq: command not found` on
+    # stderr (once per interpolated field) and a SYNTACTICALLY INVALID JSON
+    # object on stdout — bare commas where string values belong
+    # (`"task_id":,"error_key":,...`) — that no downstream reader, including
+    # this repo's own `json_field` test helper, can parse. Measured directly
+    # building this rather than assumed. This is the ONE message in the
+    # subcommand that is hand-built without jq: every field is either a
+    # fixed literal or JSON `null`/`[]`, so there is nothing here for a
+    # missing jq to have to escape.
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-conform","task_id":null,"error_key":"jq_unavailable","observations":"jq is required to compute the declared/actual file-set difference and is not on PATH; refusing rather than silently reporting an empty (vacuously conforming) set","unit_id":null,"design_task":null,"undeclared_files":[],"unbuilt_files":[]}\n'
+        exit 2
+    fi
+
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_design_conform "false" "missing_task_id" \
+            "design-conform requires <task-id> as first positional argument" \
+            "[]" "[]" "" "" ""
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_design_conform "false" "unknown_flag" \
+            "unknown argument '$1'; design-conform takes only <task-id> — there is no bypass flag by design (undeclared_files has exactly two remedies: drop the file, or land a design amendment and re-bind)" \
+            "[]" "[]" "" "" "$tid"
+        exit 1
+    fi
+
+    require_bd "design-conform" "$tid"
+
+    # --- 1: resolve the binding ---------------------------------------------
+    local binding_json design_task unit_id
+    binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"
+    design_task=$(printf '%s' "$binding_json" | jq -r '.design_task // ""' 2>/dev/null || echo "")
+    unit_id=$(printf '%s' "$binding_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+    if [ -z "$design_task" ] || [ -z "$unit_id" ]; then
+        emit_design_conform "false" "unit_not_in_design" \
+            "no DESIGN-UNIT binding record exists for $tid; nothing to conform against. Bind it first: qa-gate.sh design-unit-bind $tid --design-task <design-tid> --unit-id <U-n>" \
+            "[]" "[]" "" "" "$tid"
+        exit 4
+    fi
+
+    # --- 2: the governing design must be satisfied AND fresh ----------------
+    compute_design_satisfied "$design_task"
+    if [ "$DESIGN_SATISFIED" != "true" ]; then
+        emit_design_conform "false" "$DESIGN_SATISFIED_KEY" \
+            "$DESIGN_SATISFIED_OBS (governing design task: $design_task)" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 4
+    fi
+    # Snapshot the confirmed-fresh hash into a LOCAL right away (R1-F2,
+    # review round 1): the global DESIGN_VERDICT_HASH is compute_design
+    # _satisfied's own output variable, and pinning it to a local here means
+    # nothing later in this function can observe a value some other call
+    # changed out from under it — the same discipline the bracket below needs
+    # to be meaningful at all.
+    local expected_design_hash="$DESIGN_VERDICT_HASH"
+
+    # --- 3: the bound unit_id must still be declared in the CURRENT artifact
+    local artifact vout vok vkey vobs unit_files declared_json
+    artifact=$(design_artifact_path_for "$design_task")
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        emit_design_conform "false" "validator_unavailable" \
+            "cannot conform: the ONE validator is missing at $REVIEW_CHECK_SCRIPT" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null || true)
+    vok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
+    if [ "$vok" != "true" ]; then
+        vkey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_design_artifact"' 2>/dev/null || echo "invalid_design_artifact")
+        [ -z "$vkey" ] && vkey="invalid_design_artifact"
+        vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null || echo "")
+        emit_design_conform "false" "$vkey" \
+            "design-conform could not re-validate the artifact governing $design_task: $vkey${vobs:+ — $vobs}" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 4
+    fi
+
+    # --- CLOSING BRACKET (R1-F2, review round 1) ------------------
+    # compute_design_satisfied (step 2) confirmed the artifact matched the
+    # reviewed hash at ITS OWN read. validate-design, just above, is a
+    # SEPARATE, LATER read of the same path — unbracketed, a schema-valid
+    # artifact B swapped in between the two drives the set difference below
+    # with declarations no reviewer ever confirmed, and could still reach
+    # ok:true. Re-hash NOW, before trusting anything validate-design just
+    # read, and refuse if the artifact moved. Same TOCTOU discipline as
+    # design-record's and design-unit-bind's own pre/post brackets — reused
+    # (the same workflow-manifest.sh instrument, the same is_sha256_hex
+    # shape check), not invented.
+    # `x=$(cmd); rc=$?` is NOT errexit-safe here either: under `set -e`
+    # (line 156), if hash-file itself fails (not just returns a mismatched
+    # hash — e.g. the artifact was DELETED rather than merely edited between
+    # validate-design and this re-hash), the bare assignment's own exit
+    # status IS the failing status, and the whole script exits right there,
+    # before `post_conform_rc=$?` or the mismatch check below ever run —
+    # crashing with no envelope instead of reaching design_verdict_stale.
+    # `cmd || rc=$?` avoids this the same way the R1-F1 checkpoints below
+    # do: see the comment on actual_json further down for the full
+    # explanation. Do not "simplify" this back to a two-line form.
+    local post_conform_hash="" post_conform_rc=0
+    post_conform_hash=$(bash "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" hash-file "$artifact" 2>/dev/null) || post_conform_rc=$?
+    if [ "$post_conform_rc" -ne 0 ] || ! is_sha256_hex "$post_conform_hash" \
+        || [ "$post_conform_hash" != "$expected_design_hash" ]; then
+        emit_design_conform "false" "design_verdict_stale" \
+            "the design artifact governing $design_task changed between the satisfaction check and the declarations read (expected design_hash=$expected_design_hash, now ${post_conform_hash:-<unreadable, rc=$post_conform_rc>}); refusing rather than computing undeclared/unbuilt against declarations no reviewer confirmed. Re-run once the artifact has stopped moving, or re-review it if the change was deliberate" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 4
+    fi
+
+    unit_files=$(printf '%s' "$vout" | jq -c '.unit_files // {}' 2>/dev/null || echo "{}")
+    declared_json=$(printf '%s' "$unit_files" | jq -c --arg u "$unit_id" '.[$u] // null' 2>/dev/null || echo "null")
+    if [ "$declared_json" = "null" ]; then
+        local bound_hash
+        bound_hash=$(printf '%s' "$binding_json" | jq -r '.design_hash // "?"' 2>/dev/null || echo "?")
+        emit_design_conform "false" "unit_not_in_design" \
+            "unit_id=$unit_id (bound at design_hash=$bound_hash) is no longer declared in $artifact's CURRENT DESIGN-UNITS block — the design was likely amended without re-binding this task. Amend and re-bind: qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id <current-unit-id> --rebind '<reason>'" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 4
+    fi
+
+    # --- 4/5: actual — the SAME canonical, denylist-filtered, relativized ---
+    # change set the gate hashes.
+    local impact_tool actual_raw actual_rc=0
+    impact_tool="$PROJECT_DIR/.claude/scripts/impact-report.sh"
+    if [ ! -f "$impact_tool" ]; then
+        emit_design_conform "false" "impact_tool_unavailable" \
+            "cannot compute the actual change set: impact-report.sh is missing at $impact_tool" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+    # stderr is captured to a file (not discarded) so an UNNORMALIZABLE
+    # refusal below can name the specific path(s) rather than just the fact
+    # (R1-F3, review round 1).
+    local actual_stderr_file
+    actual_stderr_file=$(mktemp -t design-conform-stderr.XXXXXX 2>/dev/null) || actual_stderr_file="$QA_TRACKING_DIR/.design-conform-stderr-$$.txt"
+    actual_raw=$(bash "$impact_tool" --relativized-changed-files 2>"$actual_stderr_file") || actual_rc=$?
+    # R1-F3 (review round 1): exit 4 from --relativized-changed-
+    # files is a SPECIFIC, distinct signal — one or more tracked paths could
+    # not be normalised to a project-relative spelling at all (not merely
+    # "the whole computation failed", which is what a GENERIC nonzero exit
+    # below still means). undeclared_files means "the design didn't declare
+    # this file"; this means "this file's path could not even be compared" —
+    # two different claims that used to be conflated into one.
+    if [ "$actual_rc" -eq 4 ]; then
+        local unnorm_detail=""
+        unnorm_detail=$(head -5 "$actual_stderr_file" 2>/dev/null)
+        rm -f "$actual_stderr_file"
+        emit_design_conform "false" "change_set_path_unnormalizable" \
+            "one or more tracked paths could not be normalised to a project-relative spelling (neither a sibling-worktree match nor an unambiguous \$PROJECT_DIR-prefixed path — most commonly a path whose containing directory no longer exists on disk in a way this could not resolve). This is NOT the same claim as undeclared_files: the design may have declared exactly this file. Remedy: restore the directory if the deletion was accidental, or if the tracked entry is stale, reconcile/trim it from the tracker (qa-gate.sh reconcile-tracker) before re-running conform.${unnorm_detail:+ Detail: $unnorm_detail}" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 4
+    fi
+    rm -f "$actual_stderr_file"
+    if [ "$actual_rc" -ne 0 ]; then
+        emit_design_conform "false" "change_set_unreadable" \
+            "impact-report.sh --relativized-changed-files exited $actual_rc; refusing to compute undeclared/unbuilt over a change set that could not be read (never reporting \"conforms\" on evidence that was never actually read)" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+
+    # --- 6: the difference ---------------------------------------------------
+    # R1-F1 (review round 1): every step here used to be `cmd ||
+    # var="[]"`/`"0"`, so a jq EXECUTION failure (present, but crashing mid
+    # -computation — not the "jq missing" case cmd_design_conform's own first
+    # line already refuses) fell through to an EMPTY difference and reached
+    # the ok:true emitter below. undeclared_files has deliberately no
+    # overrule path, so THIS is the one direction that must never fail open:
+    # a set difference that did not compute must never read as an empty one.
+    # Every jq call below is now checked on ITS OWN exit status AND the shape
+    # of what it produced (never trusted from a bare rc==0 alone), and ANY
+    # failure refuses with a dedicated, fail-closed error_key rather than
+    # silently defaulting toward "conforms".
+    local actual_json diff_json undeclared_json unbuilt_json undeclared_n unbuilt_n
+    local aj_rc=0 diff_rc=0
+    # `x=$(cmd); rc=$?` is NOT errexit-safe: under `set -e` (line 156) a bare
+    # assignment statement's exit status IS the substitution's, so a failing
+    # cmd exits the WHOLE SCRIPT at the assignment itself — `rc=$?` on the
+    # next line never runs. This is what design-conform.test.sh Section 10
+    # (R1-F1 regression coverage) originally caught: the process died with
+    # the jq shim's own raw exit code and no envelope at all, instead of
+    # reaching the fail-closed check below. `cmd || rc=$?` is the fix: the
+    # `||` makes the compound command's own status 0 whichever side ran, so
+    # errexit never fires, and rc still gets the real failing status (the
+    # right-hand assignment only runs, and only overwrites rc, on failure).
+    actual_json=$(printf '%s' "$actual_raw" | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null) || aj_rc=$?
+    if [ "$aj_rc" -ne 0 ] || ! printf '%s' "${actual_json:-}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        emit_design_conform "false" "set_computation_failed" \
+            "could not parse the actual (relativized) change set as a JSON array — jq exited $aj_rc turning impact-report.sh's output into JSON. Refusing rather than computing undeclared/unbuilt over a set that did not actually compute" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+
+    # Same errexit hazard, same `cmd || rc=$?` fix — see the comment on
+    # actual_json above; do not "simplify" this back to a two-line `x=$(...);
+    # rc=$?` form.
+    diff_json=$(jq -nc --argjson a "$actual_json" --argjson d "$declared_json" '
+        ($a - $d) as $undeclared | ($d - $a) as $unbuilt
+        | { undeclared: ($undeclared | sort), unbuilt: ($unbuilt | sort),
+            undeclared_n: ($undeclared | length), unbuilt_n: ($unbuilt | length) }
+    ' 2>/dev/null) || diff_rc=$?
+    if [ "$diff_rc" -ne 0 ] || ! printf '%s' "${diff_json:-}" | jq -e '
+            (.undeclared | type) == "array" and (.unbuilt | type) == "array"
+            and (.undeclared_n | type) == "number" and (.unbuilt_n | type) == "number"
+        ' >/dev/null 2>&1; then
+        emit_design_conform "false" "set_computation_failed" \
+            "could not compute the undeclared/unbuilt set difference — jq exited $diff_rc. Refusing rather than computing an assumed-empty difference" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+    undeclared_json=$(printf '%s' "$diff_json" | jq -c '.undeclared' 2>/dev/null) || undeclared_json=""
+    unbuilt_json=$(printf '%s' "$diff_json" | jq -c '.unbuilt' 2>/dev/null) || unbuilt_json=""
+    undeclared_n=$(printf '%s' "$diff_json" | jq -r '.undeclared_n' 2>/dev/null) || undeclared_n=""
+    unbuilt_n=$(printf '%s' "$diff_json" | jq -r '.unbuilt_n' 2>/dev/null) || unbuilt_n=""
+    if [ -z "$undeclared_json" ] || [ -z "$unbuilt_json" ] \
+        || ! [[ "$undeclared_n" =~ ^[0-9]+$ ]] || ! [[ "$unbuilt_n" =~ ^[0-9]+$ ]]; then
+        emit_design_conform "false" "set_computation_failed" \
+            "could not extract the already-validated undeclared/unbuilt result. Refusing rather than guessing at a set that did not extract cleanly" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+
+# UNDECLARED-FILES-GATE BEGIN (fkm.6)
+    # THE ONLY FAILURE THIS SUBCOMMAND HAS. Sentinel-wrapped on its own
+    # (narrower than the DESIGN-CONFORM block around it) so a META test can
+    # excise exactly the enforcement point without also deleting the
+    # subcommand it lives in — the difference between "the gate is
+    # load-bearing" and "the subcommand doesn't exist".
+    if [ "${undeclared_n:-0}" != "0" ]; then
+        emit_design_conform "false" "undeclared_files" \
+            "$undeclared_n file(s) touched for $tid (unit_id=$unit_id, design_task=$design_task) are outside its declared file set — scope the design never reviewed. Exactly two remedies: drop the file(s) from the change set, or land a design amendment (qa-gate.sh design-review-record) declaring them and re-bind (qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id --rebind '<reason>'). No overrule path" \
+            "$undeclared_json" "$unbuilt_json" "$unit_id" "$design_task" "$tid"
+        exit 4
+    fi
+# UNDECLARED-FILES-GATE END (fkm.6)
+
+    local obs="conforms: $tid (unit_id=$unit_id, design_task=$design_task) touched no files outside its declared set"
+    [ "${unbuilt_n:-0}" != "0" ] && obs="$obs; $unbuilt_n declared file(s) not yet touched (informational — unbuilt never gates)"
+    emit_design_conform "true" "" "$obs" "[]" "$unbuilt_json" "$unit_id" "$design_task" "$tid"
+}
+# DESIGN-CONFORM END (fkm.6)
+
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
     local tid="${1:-}" fid="${2:-}"
@@ -7686,6 +8628,8 @@ case "$SUB" in
     design-record)   cmd_design_record "$@" ;;
     design-review-record) cmd_design_review_record "$@" ;;
     design-gate-precheck) cmd_design_gate_precheck "$@" ;;
+    design-unit-bind) cmd_design_unit_bind "$@" ;;
+    design-conform) cmd_design_conform "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     ""|-h|--help|help)

@@ -293,8 +293,29 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # `.claude/.qa-tracking/runs` made the pre-fix function collapse to the
 # SAME shared QA_TRACKING_DIR every other concurrent run in that state was
 # ALSO handed — the exact collision the batch exists to remove).
+#
+# NOTE: this comment's own trail was already 45 while EXPECTED_SPECS read 47
+# before this entry — two intermediate bumps (45->46, 46->47) landed
+# undocumented here, most likely elsewhere in the same gsfd batch. Not
+# reconstructed retroactively; flagging rather than guessing at them.
+#
+# 47 -> 48 (claude-workflow-plugin-fkm.6, Phase D4 first slice): added
+# design-conform.test.sh, covering the new `qa-gate.sh design-unit-bind`
+# subcommand (argument validation, artifact/unit-membership resolution, the
+# bjx unit_id scalar class with its own METatest, and the re-binding
+# decision — an existing binding refuses a second write unless
+# `--rebind '<reason>'`), the new DESIGN-UNIT v1 record + its reader
+# (latest_design_unit_binding), and the new `qa-gate.sh design-conform`
+# subcommand (the resolution ladder propagating compute_design_satisfied's
+# own keys verbatim, the undeclared/unbuilt computation including the
+# absolute-vs-relative path-spelling normalisation this build's own
+# development surfaced as a real risk, the denylist exclusion, honest
+# degradation on every dependency including a jq-free jq_unavailable
+# message, the TOCTOU bracket shared with design-record's own hardening,
+# and a METatest proving the undeclared_files gate itself is load-bearing).
+# `epic-gate.sh plan-batches` is a separate, later slice and is not covered.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=47
+EXPECTED_SPECS=48
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

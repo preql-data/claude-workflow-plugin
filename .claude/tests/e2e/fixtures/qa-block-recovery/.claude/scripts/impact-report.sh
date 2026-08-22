@@ -298,6 +298,101 @@ case "${1:-}" in
         printf '%s\n' "$(change_set_hash)"
         exit 0
         ;;
+    --relativized-changed-files)
+        # v5 D4 (claude-workflow-plugin-fkm.6): the SAME canonical,
+        # denylist-filtered change set --hash-only hashes, PROJECT-RELATIVE —
+        # so a caller comparing it against a design artifact's always-relative
+        # `files[]` declarations (qa-gate.sh design-conform) does not have to
+        # reinvent relativize_for_impact's own git-aware, sibling-worktree-safe
+        # normalisation. A naive "strip $PROJECT_DIR/" prefix mishandles
+        # exactly the sibling-worktree-absolute spellings
+        # specs/worktree-approval-resolution.sh already proves
+        # changed-files.txt can carry (see the "Path relativisation for
+        # impact_of" header above) — reusing the hardened function rather
+        # than a second, naive one is the point.
+        #
+        # One line per non-empty entry of canonical_changed_files: the
+        # project-relative spelling when relativize_for_impact resolves it,
+        # else the ORIGINAL line UNCHANGED. Never dropped — a path this
+        # cannot relativize is exactly the kind of unexplained entry
+        # design-conform's "undeclared" check exists to flag, and silently
+        # vanishing it would be the fail-OPEN direction (a real interloper
+        # reading as "no change" rather than as "unexplained").
+        #
+        # A SHARP EDGE (R1-F3, review round 1 against the D4
+        # slice) — relativize_for_impact's git-aware branch requires the
+        # file's CONTAINING DIRECTORY TO STILL EXIST ON DISK (_git_lookup_
+        # dir's own `[ -d "$dir" ] || return 0` guard), which is reasonable
+        # for impact_of's original use (a file just Written/Edited has an
+        # existing parent by construction) but fails a tracked file that was
+        # later DELETED — and in a git checkout the "not a git repo"
+        # fallback never fires either, since that only fires when
+        # PROJECT_COMMON_DIR is empty, the opposite condition. Left as a
+        # documented pin, this became `undeclared_files` with no remedy: a
+        # legitimate directory deletion was unshippable, because
+        # undeclared_files deliberately has no overrule path.
+        #
+        # RESOLUTION, not just a rename. Most instances of this case are a
+        # file unambiguously under $PROJECT_DIR itself — the git machinery
+        # in relativize_for_impact exists to disambiguate SIBLING
+        # WORKTREES, which a literal "$PROJECT_DIR/..." spelling can never
+        # be. So when relativize_for_impact declines, try a direct
+        # $PROJECT_DIR prefix strip first: no git call and no filesystem
+        # check needed, and it is correct regardless of whether the
+        # directory still exists. That closes the common case (this
+        # project's own deleted-directory files) outright rather than
+        # merely naming it.
+        #
+        # What remains genuinely unnormalisable — not a sibling-worktree
+        # match (relativize_for_impact already tried), not a direct
+        # $PROJECT_DIR path either — gets its OWN signal instead of being
+        # silently passed through under its original spelling: named on
+        # stderr, counted, and turned into a DISTINCT, nonzero exit (4) so a
+        # caller (qa-gate.sh design-conform) can refuse with a specific,
+        # actionable error_key rather than folding an "I could not
+        # normalise this path" failure into "the design didn't declare
+        # this file" — two different claims that used to look identical.
+        _RCF_UNNORMALIZABLE_COUNT=0
+        while IFS= read -r _rcf_line; do
+            [ -z "$_rcf_line" ] && continue
+            if _rcf_rel=$(relativize_for_impact "$_rcf_line"); then
+                printf '%s\n' "$_rcf_rel"
+            else
+                case "$_rcf_line" in
+                    "$PROJECT_DIR"/?*)
+                        printf '%s\n' "${_rcf_line#"$PROJECT_DIR"/}"
+                        ;;
+                    /*)
+                        # Absolute, but NOT under $PROJECT_DIR either, and
+                        # relativize_for_impact already tried and failed
+                        # (foreign repo, or a sibling worktree whose
+                        # directory is ALSO gone — git cannot disambiguate a
+                        # directory that no longer exists). Genuinely
+                        # unnormalisable.
+                        printf '[impact-report] UNNORMALIZABLE: %s (not a sibling-worktree match and not a direct %s/ path; its containing directory likely no longer exists on disk)\n' \
+                            "$_rcf_line" "$PROJECT_DIR" >&2
+                        _RCF_UNNORMALIZABLE_COUNT=$((_RCF_UNNORMALIZABLE_COUNT + 1))
+                        ;;
+                    *)
+                        # NOT absolute at all: reconcile_tracker's git-
+                        # status backfill already emits repo-relative
+                        # spellings, so an entry with no leading "/" is
+                        # already in the form design-conform needs — there
+                        # is nothing to normalise. relativize_for_impact
+                        # still declines it (dirname/git-common-dir
+                        # resolves relative to THIS PROCESS'S cwd, which is
+                        # not guaranteed to be $PROJECT_DIR, and the same
+                        # removed-directory guard can fire either way), but
+                        # that is a reason to trust the ALREADY-relative
+                        # spelling, not to discard it.
+                        printf '%s\n' "$_rcf_line"
+                        ;;
+                esac
+            fi
+        done < <(canonical_changed_files)
+        [ "$_RCF_UNNORMALIZABLE_COUNT" -gt 0 ] && exit 4
+        exit 0
+        ;;
     ""|-h|--help)
         sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2
         exit 1

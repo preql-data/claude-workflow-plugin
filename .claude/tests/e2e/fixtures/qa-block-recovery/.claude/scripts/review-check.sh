@@ -84,7 +84,24 @@ set -u
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 if ! command -v jq >/dev/null 2>&1; then
-    printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH"}\n' "${1:-}"
+    # R1-F7 (review round 1, claude-workflow-plugin-fkm.6): this
+    # generic pre-dispatch guard runs before subcommand dispatch and so
+    # bypasses emit_validate_design entirely — every OTHER error path for
+    # validate-design carries unit_files:{} (added for D4's design-conform
+    # consumer), but this one, unqualified, did not. Not currently
+    # exploitable (design-conform checks jq itself, first, and checks .ok
+    # before ever reading .unit_files) but the "every error path defaults
+    # to {}" claim was not universally true, so make it true rather than
+    # merely disclaim it: when the subcommand IS validate-design, emit the
+    # full envelope shape (with the same defaults emit_validate_design's own
+    # error paths use — task_id "", not null, matching what `printf '%s' ""
+    # | jq -Rs .` actually produces there) instead of the terse 4-key one
+    # every OTHER subcommand still gets unchanged.
+    if [ "${1:-}" = "validate-design" ]; then
+        printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH","units":0,"unit_ids":[],"task_id":"","unit_files":{}}\n' "${1:-}"
+    else
+        printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH"}\n' "${1:-}"
+    fi
     exit 2
 fi
 
@@ -591,24 +608,36 @@ DESIGN_UNITS_END_RE='^[[:space:]]*<!-- DESIGN-UNITS END -->[[:space:]]*$'
 # case-insensitively on the heading text and nothing else.
 DESIGN_REQUIRED_SECTIONS="Problem|Approaches considered|Chosen approach|Units|Global constraints|Out of scope|Verification plan|Revision log"
 
-# emit_validate_design <ok> <error_key> <observations> <unit-count> <unit-ids-json> [task-id]
-# emit_validate's four keys plus the three a caller needs in order to write a
-# record without re-parsing the block: how many units were declared, which, and
-# the task the artifact says it designs. That last one is on the envelope
-# DELIBERATELY — qa-gate.sh's design-record needs it for its decoy check, and
-# extracting it there with its own awk/jq would be a SECOND parser for one
-# grammar, which is the thing this script exists to prevent (see the header, and
-# the way compute_change_set_hash defers to impact-report.sh --hash-only).
+# emit_validate_design <ok> <error_key> <observations> <unit-count> <unit-ids-json> [task-id] [unit-files-json]
+# emit_validate's four keys plus the FOUR a caller needs in order to write a
+# record or compute a per-unit conformance check without re-parsing the
+# block: how many units were declared, which, the task the artifact says it
+# designs, and (v5 D4, claude-workflow-plugin-fkm.6) each unit's OWN declared
+# `files` array, keyed by unit_id — `{"U1":["a.sh"],"U2":[...]}`, `{}` on
+# every error path (the 14 error call sites below all omit the 7th argument
+# and get the default). `task_id` was already on the envelope DELIBERATELY —
+# qa-gate.sh's design-record needs it for its decoy check — for the reason
+# `unit_files` now joins it for: extracting either there with a second
+# awk/jq pass would be a SECOND parser for one grammar, which is the thing
+# this script exists to prevent (see the header, and the way
+# compute_change_set_hash defers to impact-report.sh --hash-only).
+# qa-gate.sh design-conform is the new consumer: it needs one resolved
+# unit's declared file set to compute undeclared/unbuilt, and this is that
+# set, read from the SAME validated `$block` `cmd_validate_design` already
+# holds at the one point it is known schema-valid — never a re-read of the
+# artifact from disk.
 emit_validate_design() {
-    local ok="$1" ekey="$2" obs="$3" n="$4" ids="$5" tid="${6:-}"
+    local ok="$1" ekey="$2" obs="$3" n="$4" ids="$5" tid="${6:-}" ufiles="${7:-}"
+    [ -n "$ufiles" ] || ufiles="{}"
     # shellcheck disable=SC2016
-    printf '{"ok":%s,"subcommand":"validate-design","error_key":%s,"observations":%s,"units":%s,"unit_ids":%s,"task_id":%s}\n' \
+    printf '{"ok":%s,"subcommand":"validate-design","error_key":%s,"observations":%s,"units":%s,"unit_ids":%s,"task_id":%s,"unit_files":%s}\n' \
         "$ok" \
         "$(printf '%s' "$ekey" | jq -Rs .)" \
         "$(printf '%s' "$obs" | jq -Rs .)" \
         "$n" \
         "$ids" \
-        "$(printf '%s' "$tid" | jq -Rs .)"
+        "$(printf '%s' "$tid" | jq -Rs .)" \
+        "$ufiles"
 }
 
 cmd_validate_design() {
@@ -825,11 +854,16 @@ cmd_validate_design() {
         exit 4
     fi
 
-    local n ids art_tid
+    local n ids art_tid ufiles
     n=$(printf '%s' "$block" | jq -r '.units | length' 2>/dev/null) || n=0
     ids=$(printf '%s' "$block" | jq -c '[.units[].unit_id]' 2>/dev/null) || ids="[]"
     art_tid=$(printf '%s' "$block" | jq -r '.task_id // ""' 2>/dev/null) || art_tid=""
-    emit_validate_design "true" "" "design contract valid: $n unit(s)" "$n" "$ids" "$art_tid"
+    # unit_id uniqueness is already enforced by the schema pass above
+    # (unit_id_duplicate), so `from_entries` here never silently drops a
+    # unit behind a repeated key — by the time this line runs, the keys are
+    # already known distinct.
+    ufiles=$(printf '%s' "$block" | jq -c '[.units[] | {key: .unit_id, value: (.files // [])}] | from_entries' 2>/dev/null) || ufiles="{}"
+    emit_validate_design "true" "" "design contract valid: $n unit(s)" "$n" "$ids" "$art_tid" "$ufiles"
     exit 0
 }
 
