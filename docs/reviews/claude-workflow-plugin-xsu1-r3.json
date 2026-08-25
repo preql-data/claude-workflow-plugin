@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-xsu1",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "cd47e6604ac2f06b11dbc946ff6ff6bacff447f809660b6ba16e8820288d097e",
+  "risk_threshold": "high",
+  "stop_condition": "the round-2 fixes reviewed as new code on the safety path; every parallel_safe:true path re-enumerated from scratch; the disclosed residual judged for correct bounding; vacuity sweep re-run after substantial source movement",
+  "verdict": "findings",
+  "iterations": 3,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": ".claude/scripts/epic-gate.sh:1277 (.u / .f extraction), :1318 (.abs extraction), emission at :1599",
+      "evidence": "The NEW alias safety pass fails open when its own jq field extraction fails. Both `.u` and `.f` use `|| \"\"`, so a `.u` failure causes :1279 to silently DISCARD that declaration; likewise an `.abs` failure at :1318 silently removes entries from the -ef pass. Using the existing-directory-symlink fixture from section 9g, a jq shim failing only the exact `.u` argument erases BOTH alias entries; no later guard catches the byte-distinct paths and the sole true emission at :1599 remains reachable. `rg` confirmed exact `.u` occurs only at this site; an in-memory probe produced `flat_pairs=2 alias_entries_after_exact-.u-failure=0`.",
+      "description": "The fix for R2-F1 reintroduced, inside itself, the exact fail-open shape R1-F2 was raised to remove — a failed extraction reading as 'nothing to check' rather than 'could not check'. FOURTH instance of this class in this slice. Every extraction on this path needs the same rc-AND-shape discipline already applied elsewhere in the fold, refusing rather than defaulting to empty."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "high",
+      "location": ".claude/scripts/epic-gate.sh:679 (_pb_canonical_key); residual text at :1261-1267",
+      "evidence": "Dangling symlinks remain an unreported same-file alias. For `alias.sh -> real.sh` where `real.sh` does not yet exist, `_pb_canonical_key(\"alias.sh\")` treats the symlink leaf as a literal suffix because `-d` is false, so the target spelling yields a DIFFERENT key. Both paths also fail `-e`, so neither enters the `-ef` pass. Two units declaring `alias.sh` and `real.sh` therefore co-batch, even though creating a file through the dangling link writes `real.sh`. The same applies to a dangling symlinked ANCESTOR. Established statically.",
+      "description": "Also means the documented residual at :1261-1267 is NOT correctly bounded: it bundles this case — which the reviewer notes is closeable WITHOUT any Unicode support, by resolving existing symlink components — together with the genuinely hard case (normalisation-equivalent spellings where neither target exists). It additionally omits non-ASCII case-equivalent spellings where neither target exists. A residual that is drawn wider than the real limit hides a fixable defect behind an unfixable one."
+    },
+    {
+      "id": "R3-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/epic-gate.sh:1386, with the _pb_degrade call at :1392 and the population at :1408",
+      "evidence": "The R2-F3 topological fix is bypassed for a reachable partial-binding degradation. When T-Z-PREREQ and T-A-DEPENDENT bind cleanly but a third child is unbound, `bound_entries` already holds the prerequisite/dependent mapping — but `_pb_degrade` is called at :1392 BEFORE `_PB_DEGRADE_BINDINGS_JSON` is populated at :1408. It therefore sees `bindings=[]` and retains lexical order, emitting T-A-DEPENDENT before T-Z-PREREQ. Verified by source ordering plus an exact jq probe: empty bindings returned [\"T-A-DEPENDENT\",\"T-Z-PREREQ\"], populated bindings returned the reverse. The bounded-wave reducer and its cycle fallback are themselves correct.",
+      "description": "R2-F3 is PARTIALLY FIXED — the reducer works once bindings are published, but the call site that most needs it does not have them yet. This is the partial-dependency-picture risk in its most concrete form: the ordering data exists in the process and simply has not been handed to the function that would use it."
+    },
+    {
+      "id": "R3-F4",
+      "severity": "low",
+      "location": ".claude/scripts/epic-gate.sh:411",
+      "evidence": "The production header still describes the graph qualifier as 'different from the other thirteen', despite the guard list now holding more than thirteen distinct conditions.",
+      "description": "R2-F6 removed exactly this brittle cardinality from docs/HOOKS.md, deliberately and for this reason, and left the same claim in the script's own header. One of two places fixed, so the drift the fix was meant to prevent is still live in the copy a reader of the code sees first."
+    }
+  ]
+}

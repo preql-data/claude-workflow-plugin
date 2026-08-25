@@ -245,6 +245,63 @@ When the specialist returns, step 2 → `completed`, step 3 → `in_progress`.
 For trivial single-step tasks, `TaskCreate` is optional. For anything
 multi-step or multi-domain, always emit both.
 
+#### 2b. Bind each task to its design unit (v5 D4b, claude-workflow-plugin-6im2)
+
+Conditional step — applies only when the task(s) you just created implement
+units enumerated in a design artifact whose review relay (section 5e) reached
+`satisfied`. Ordinary decomposition with no design phase skips this entirely.
+
+`qa-gate.sh design-conform` (fkm.6) checks a task's changed files against the
+unit it implements, but it can only do that once a per-task binding exists —
+and nothing writes that binding except this step. You are the only actor that
+opens one task per design unit (neither `@designer` nor `@design-reviewer`
+carries a `Bash` tool grant, so neither can invoke `qa-gate.sh` at all), so
+this is the only call site there can be. Skip it and every unit's task stays
+unbound, and `design-conform` on it takes the fail-closed `unit_not_in_design`
+path forever — not because the task violated its unit, but because nothing
+ever said which unit it was.
+
+For each task you create against one unit, bind it right after `bd create` /
+`bd_create_task` and before your first `Task()` to the implementing
+specialist:
+
+```bash
+bash .claude/scripts/qa-gate.sh design-unit-bind <child-task-id> \
+    --design-task <design-task-id> --unit-id <unit-id>
+```
+
+- `<child-task-id>` — the Beads id you just created for this unit.
+- `<design-task-id>` — the id carrying the `DESIGN-ARTIFACT`/`DESIGN-REVIEW`
+  records: the same id section 1b's `grilling-record` and section 5e's
+  `design-review-record` ran against. Usually the epic (grilling commonly runs
+  before any child task exists), but state whatever id it actually is — this
+  script never infers it through a parent-child walk, because a re-plan or
+  restructuring can make that inference wrong. (`design-gate-precheck`,
+  section 4c, is a separate mechanism entirely: it reads records directly off
+  the single task id you pass it, with no parent-epic walk of its own either,
+  which is why it cannot substitute for this step.)
+- `<unit-id>` — that unit's own `unit_id` from the design artifact's
+  `<!-- DESIGN-UNITS -->` block (`@designer` writes values like `U1`, `U2`;
+  read the real one back, never invent one).
+
+Refuses `unit_not_in_artifact` if `<unit-id>` is not currently declared — a
+binding to a nonexistent unit is worse than none — and refuses a second write
+to the same task (`design_binding_exists`) unless you pass
+`--rebind '<reason>'`, which you need whenever a design amendment (section 5e)
+splits, merges or renumbers units after tasks already exist against the old
+numbering.
+
+**This is currently advisory, not enforced — say so rather than treating it as
+closed.** `design-conform` is deterministic and has no bypass flag, but
+nothing calls it automatically today, and it is not wired into `approve`
+(deliberately deferred; see `qa-gate.sh`'s own `DESIGN-CONFORM` header).
+Binding every task is still mandatory practice: it is the only way a future
+`design-conform` call — by you, by QA, or by a later automated wiring — has
+anything to check. Per `LESSONS.md` entry 6 (prose cues do not reliably drive
+subagent tool use), treat this paragraph as necessary and not sufficient — the
+mechanical backstop this step is missing is a live e2e invariant over a real
+trace, which does not exist yet either.
+
 ### 3. Persist the active task id (F3)
 
 The plugin's hooks (`verify-before-stop.sh`, `post-edit.sh`, `intent-router.sh`) read the active task id from `.claude/.qa-tracking/current-task` first; they fall back to `bd list --status in_progress` only when that file is empty. When you (or a specialist) claim a task, write the id via the helper:
@@ -389,7 +446,7 @@ This is a **pre-delegation convenience, never an enforcement point** — nothing
 - **Exit 0, `"ready"`.** Either the design is genuinely satisfied, or the task never had a design phase at all (`no_design_attempted`) — the ordinary case for most tasks today. Delegate normally.
 - **Exit 4**, error_key one of `design_verdict_missing` / `design_not_satisfied` / `design_hash_unreadable` / `design_artifact_unreadable` / `design_verdict_stale` — a design was STARTED (a `DESIGN-ARTIFACT` record exists on the task) but is not yet satisfied. Do NOT spawn the implementer. Clear it through the design-review relay (section 5e) before your next `Task()` to that specialist.
 
-This check answers exactly one question — is there an unreviewed design in flight on THIS task — and nothing more. It is not the grilling-record precondition (a separate, mechanical check inside `qa-gate.sh design-record` itself — see section 1b above) and not the decomposition-conformance check (D4, not yet built); those are separate phases and separate call sites. Full behavioral spec: `docs/HOOKS.md` under "The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`)".
+This check answers exactly one question — is there an unreviewed design in flight on THIS task — and nothing more. It is not the grilling-record precondition (a separate, mechanical check inside `qa-gate.sh design-record` itself — see section 1b above) and not the decomposition-conformance check (`design-unit-bind` / `design-conform`, v5 D4 — see section 2b for the binding step this precheck does not perform); those are separate phases and separate call sites, and this precheck never consults a unit binding at all — `compute_design_satisfied` reads records directly off the task id you pass it, with no parent-epic walk and no binding lookup. Full behavioral spec: `docs/HOOKS.md` under "The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`)".
 
 ### 5. QA review (mandatory)
 
@@ -816,7 +873,7 @@ printf '%s' "$REVIEWER_JSON" \
 - `satisfied` — `design-gate-precheck` (section 4c) now reads ready for this task. Proceed with your next `Task()` to the implementation specialist(s).
 - `needs_revision` — re-spawn `@designer` with the reviewer's `required_fixes` verbatim; it revises the artifact IN PLACE (a `Revision log` row, a moved `design_hash` — never a second `<!-- DESIGN-UNITS BEGIN/END -->` block, which is refused as an amendment rather than merged with the first) and returns. Run Steps A-C again at `iteration + 1`.
 
-**Step D — re-engage whichever side needs the result.** Unlike the rubric relay (which always re-engages QA), here the next actor depends on Step C's branch: `@designer` on `needs_revision` (with the required fixes), or the waiting implementation specialist on `satisfied` (a fresh `Task()`, not a re-engagement — it never saw the design-gate refusal that paused it).
+**Step D — re-engage whichever side needs the result.** Unlike the rubric relay (which always re-engages QA), here the next actor depends on Step C's branch: `@designer` on `needs_revision` (with the required fixes), or the waiting implementation specialist on `satisfied` (a fresh `Task()`, not a re-engagement — it never saw the design-gate refusal that paused it). On `satisfied`, if the per-unit child tasks do not exist yet, create them now (section 2) and bind each one to its unit (section 2b) before that `Task()` — binding after the fact works too, but binding before delegating means the implementer's very first changed file is already covered by a task `design-conform` can check.
 
 **Step E — cap-hit escalation.** When `ITERATION` > `ITERATION_CAP` (or the reviewer returns `needs_revision` AT iteration == cap), stop relaying. Same J21 escalation every loop in this file uses:
 
@@ -841,6 +898,7 @@ Before responding, verify:
 - [ ] Did I persist the active task id via `current-task.sh set` (or did `qa-gate.sh enter` do it)?
 - [ ] For non-trivial work, did I write a `spec` (and `context` if needed) doc via `bd_doc_write` BEFORE spawning the specialist?
 - [ ] Did I run `qa-gate.sh design-gate-precheck` before my first `Task()` to an implementation specialist (section 4c), and route through the design-review relay (section 5e) rather than delegate if it refused?
+- [ ] If this decomposition came from a reviewed design, did I bind each per-unit task with `qa-gate.sh design-unit-bind` (section 2b) before delegating to it?
 - [ ] Did I delegate to specialists with `Task()`?
 - [ ] Am I writing code myself? (If yes, delegate instead.)
 

@@ -90,6 +90,22 @@ After creation, persist the active id:
 bash .claude/scripts/current-task.sh set <task-id>
 ```
 
+**Design-derived decomposition (v5 D4b).** When the tasks you just created
+implement units from a reviewed design artifact (Phase D: grilling ->
+`@designer` -> the design-review relay; `orchestrator.md` section 5e reaching
+`satisfied`), bind each child task to its unit before delegating:
+
+```bash
+bash .claude/scripts/qa-gate.sh design-unit-bind <child-task-id> \
+    --design-task <design-task-id> --unit-id <unit-id>
+```
+
+`qa-gate.sh design-conform <task-id>` later reads this binding to check that
+task's changed files against its unit's declared `files[]` — a task with no
+binding cannot be conformance-checked, and nothing else writes the binding.
+`orchestrator.md` section 2b carries the full procedure, including what this
+does and does not enforce today.
+
 ## Task documents (J4)
 
 Long-form context attaches to a Beads task via the bd-mcp doc tools. The

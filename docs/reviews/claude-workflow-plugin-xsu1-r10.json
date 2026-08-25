@@ -1,0 +1,69 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-xsu1",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "f8487049953265131c13371864de5b76c64af34dcf42db0f63acf91454540db6",
+  "reviewed_hash_basis": "canonical change-set path-list hash (impact-report.sh --hash-only) over the 24-path reconciled tracker at review time (12 source/prose files, 11 review artifacts, 1 inert vanished-path residue). Reviewed CONTENT additionally verified byte-identical to the tree under the 2026-08-26 four-tier acceptance: concatenating epic-gate.sh, qa-gate.sh, review-check.sh, plan-batches.test.sh, design-accessors.test.sh, design-artifact.test.sh, design-unit-bind-parity.test.sh, run-tests.sh, docs/HOOKS.md in r9 stated order reproduces r9 reviewed_hash e6680249b88f02931cb0d4a7f9ca9c42881f9fca9ab2ea97d629d0969bffca6e exactly.",
+  "risk_threshold": "high",
+  "stop_condition": "every changed file carrying logic independently re-read end to end by this reviewer; the nine-round finding chain traced to termination (fixed, renamed successor, or filed residual); the recurring failed-computation-reads-as-empty family swept once more over every decision path in the new code; the three new specs executed live against the real tree; fixture parity established byte-for-byte",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R10-F1",
+      "severity": "medium",
+      "location": "docs/reviews/claude-workflow-plugin-xsu1-r9.json (verdict enum), -r8.json (missing stop_condition), -h2r1/-h2r2.json and claude-workflow-plugin-6im2-r1.json (finding-id grammar)",
+      "evidence": "review-check.sh validate-artifact refuses r9 (verdict_invalid_enum: verdict is approved, the schema enum is approve), r8 (missing_key:stop_condition), h2r1/h2r2/6im2-r1 (finding_id_malformed: H2-*/H2R2-*/S6-* ids vs the R<n>-F<n> grammar). Rounds r4 onward were never recorded as REVIEW-ARTIFACT comments at all; the last recorded round before this one was r3, whose two HIGHs the record left open while the files show them fixed by r4.",
+      "description": "Process, not shipped code: the review RECORD pipeline decayed mid-slice. Sol artifacts written to disk without passing through qa-gate.sh review-record drift from the record grammar, so the terminal approving verdict was mechanically unrecordable, and the comment-gate would have refused this approval against r3 open findings that are in fact fixed. This qa-claude round exists because of exactly this. Same family the slice fixes in code: an evidence-layer record produced outside its validator. Filed as a follow-up bd task; below risk_threshold, non-blocking."
+    },
+    {
+      "id": "R10-F2",
+      "severity": "medium",
+      "location": "orchestrator handoff, session scratchpad completion/{xsu1-epic-gate,xsu1-accessors,6im2}.json",
+      "evidence": "review-check.sh validate-completion refuses all three staged implementer payloads: missing_key:blockers, missing_key:llm_observations, and decisions is a string where the F7 contract requires an array. Substance (verification with commands, decisions, context_coverage, residual_risk) is present under nonconforming keys.",
+      "description": "Process, not shipped code: the F7 completion payloads produced by the final implementer spawns cannot enter the COMPLETION v1 record. QA preserved all three verbatim as task comments and did not author or repair any field; the xsu1 approval uses the audited --no-completion bypass with this as the stated reason. Below risk_threshold, non-blocking."
+    }
+  ],
+  "iterations": 10,
+  "stopped_by": "verdict",
+  "scope_files": [
+    ".claude/scripts/epic-gate.sh",
+    ".claude/scripts/qa-gate.sh",
+    ".claude/scripts/review-check.sh",
+    ".claude/scripts/tests/plan-batches.test.sh",
+    ".claude/scripts/tests/design-accessors.test.sh",
+    ".claude/scripts/tests/design-artifact.test.sh",
+    ".claude/scripts/tests/design-unit-bind-parity.test.sh",
+    ".claude/scripts/tests/run-tests.sh",
+    ".claude/agents/orchestrator.md",
+    ".claude/skills/workflow-engine/SKILL.md",
+    "docs/HOOKS.md",
+    "LESSONS.md"
+  ],
+  "prior_rounds_adjudication": "r1-r5, r7, r8 (sol-codex, verdict findings each) and r9 (sol-codex, approved, zero findings) plus h2r1/h2r2 (the initially unreviewed accessor half): every finding traced to a terminal disposition. r4 adjudicates r3 (R3-F1/F2 fixed with line evidence), r5 adjudicates r4, r7 adjudicates round 6 (R5-* and H2R2-*), r8 adjudicates r7 and the 6im2 S6 set, r9 adjudicates r8 (all five fixed, line-precise). The five findings the evidence audit found vanished without adjudication (R1-F6, R1-F8, R2-F2, R2-F4, R2-F5) were audit-verified fixed in tree; this reviewer independently spot-verified claude-501 leak count 0, graph_degradation_reason at exactly 8 epic-gate.sh sites, the 2.6b R1-F6 anchor at plan-batches.test.sh:572, and the jq-free envelope_construction_failed literal carrying both graph fields.",
+  "verification_run": "live this session, uncontended: plan-batches.test.sh 309/309 rc 0; design-accessors.test.sh 130/130 rc 0; design-unit-bind-parity.test.sh 55/55 rc 0; cmp of all 21 fixture copies of epic-gate.sh, qa-gate.sh, review-check.sh against canonical: byte-identical; LESSONS.md verified pure +2 append with valid tags; qa-gate.sh design-status probed live on two tasks with correct no_design_attempted envelopes. The 2026-08-26 four-tier acceptance record (l1 51/51 specs 4853 assertions rc 0; lint rc 0; e2e_unit rc 0; l2 46/46 with the single pre-existing installer-v3-upgrade 8e B failure, proven at clean HEAD 6d0011f in a detached worktree, filed claude-workflow-plugin-udms) accepted on record and cross-checked where cheap: assertion arithmetic 4836+15+2=4853 verified, per-spec counts reproduced live.",
+  "accepted_residuals": [
+    {
+      "id": "claude-workflow-plugin-uopo",
+      "what": "no guarded json_emit/json_read primitives, ~250 sites; an rc-0 jq lying with an internally consistent valid shape remains undetectable"
+    },
+    {
+      "id": "claude-workflow-plugin-i8cx",
+      "what": "no file-wide pipefail; 338 pipelines + 7 process substitutions; this slice scoped pipefail at the two decision-path sites reviews found and cardinality-backstopped the flattening pipeline"
+    },
+    {
+      "id": "claude-workflow-plugin-ig9r",
+      "what": "batching output not independently re-validated against file-conflict/dependency-order invariants (would be a second implementation of the algorithm under guard)"
+    },
+    {
+      "id": "claude-workflow-plugin-udms",
+      "what": "pre-existing L2 red: installer-v3-upgrade 8e B frozen-table drift at HEAD"
+    },
+    {
+      "id": "claude-workflow-plugin-fcq3",
+      "what": "design-conform spec runtime vs the 900s per-spec watchdog"
+    }
+  ],
+  "notes": "Independent QA terminal round, claude lane. The nine-round trajectory alone would not establish soundness (two fix rounds introduced fresh instances of the same failed-computation-reads-as-empty family, and four rounds reviewed 3 of 8 changed files without the record showing the gap); what establishes it is the terminal state: extraction sites consolidated and shape/cardinality-validated, polarity inverted at the field level (parallel_safe true only when positively established), the degrade path made smaller than what it protects, r9 sweep-style verification with an independently computed content hash, and this reviewer finding zero new instances of the family on any decision path in a fresh end-to-end read. The process findings above are where the family demonstrably survives: the evidence layer itself."
+}

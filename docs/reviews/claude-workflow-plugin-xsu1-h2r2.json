@@ -1,0 +1,53 @@
+{
+  "contract_version": 1,
+  "task_id": "claude-workflow-plugin-xsu1",
+  "scope_label": "D4b half 2 - qa-gate.sh / review-check.sh accessors and validator, round 2",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "4397840ef635a339f3c3fa632ae6138792acbe41de53a58e86617652ea3590ed",
+  "reviewed_hash_basis": "sha256 over qa-gate.sh + review-check.sh + design-accessors.test.sh + design-artifact.test.sh + run-tests.sh concatenated in that order; reproduced by the reviewer (hash_reproduced=yes) and independently by the orchestrator",
+  "risk_threshold": "high",
+  "stop_condition": "each h2r1 fix re-verified as new code; every consumer of the NEW design_source_unreadable key enumerated and checked fail-closed; the fail-open class hunted one layer deeper than the findings",
+  "verdict": "findings",
+  "iterations": 2,
+  "stopped_by": "verdict",
+  "h2r1_fix_assessment": [
+    {"id": "H2-F1", "status": "partially_fixed", "basis": "The primary extraction is now one guarded, internally shape-validated jq pass and nonzero exits reach the refusal. BUT the residual task_id split at review-check.sh:915 is the only split lacking a successful-but-empty check, and emit_validate_design still builds the final SUCCESS envelope from unchecked inline jq substitutions."},
+    {"id": "H2-F2", "status": "partially_fixed", "basis": "design-unit-show captures rc 3 and distinguishes it from confirmed absence. But the reader still treats a parsed response with no explicit comments array as confirmed absence via `// []`, and the four disclosed legacy call sites remain (design-unit-bind :8040/:8063/:8095, design-conform :8334); the first two can silently swallow rc 3 BEFORE writing."},
+    {"id": "H2-F3", "status": "fixed", "basis": "The classifier at :8680 accepts only exactly {} or exactly the three required keys with writer-compatible classes and a 64-hex hash; residual field splits are checked before bound:true is emitted."},
+    {"id": "H2-F4", "status": "fixed", "basis": "All determined and accessor-specific refusal envelopes are built with guarded jq assignments and pass through print_envelope_checked, which checks rc, non-emptiness and parseability, else emits a caller-data-free literal at exit 2. The original exit-0 accessor paths are closed."},
+    {"id": "H2-F5", "status": "partially_fixed", "basis": "A nonzero latest_design_artifact_designer now yields design_source_unreadable and design-status maps it to ok:false/exit 2. But a SUCCESSFUL JSON response lacking an explicit comments array is still converted to an empty stream and reported as no_design_attempted, preserving a deeper route to the original permissive precheck result."}
+  ],
+  "findings": [
+    {"id": "H2R2-F1", "severity": "high", "location": ".claude/scripts/qa-gate.sh:1490",
+     "description": "The new unreadable-source channels never establish that comments were actually RETRIEVED. bd_show_with_comments suppresses failure of the --include-comments form and accepts a plain `bd show`, which on modern bd may carry task metadata but omit comment bodies. Both readers then use `comments // []`, converting a missing stream into confirmed absence - yielding design-unit-show bound:false and design-status no_design_attempted, which design-gate-precheck maps to ready.",
+     "evidence": "Static read of :1490-1493, :7154-7165, :8178-8188 shows no comments-array validation. An inline jq probe using the same accessor returned {} with rc 0 for {}, [] and null - identical to a genuine {\"comments\":[]}.",
+     "suggested_fix": "Make the helper/readers prove the task object and comment stream have a supported shape: require an explicit comments array, or preserve which bd form succeeded and accept a zero-comment representation only when that form's contract proves it. Missing comments after a fallback must return rc 3."},
+    {"id": "H2R2-F2", "severity": "high", "location": ".claude/scripts/qa-gate.sh:8040",
+     "description": "design-unit-bind's two pre-write existing-binding checks explicitly convert reader rc 3 to {}. A transient unreadable read therefore reads as 'no existing binding', permitting an unaudited repeat binding without --rebind; if the write and confirmation read then succeed, the command reports 'recorded' and the earlier authoritative binding has been silently superseded despite the repeat-write guard.",
+     "evidence": "Guards at :8040, :8063, :8095 (design-unit-bind) and :8334 (design-conform). Lines :8040-8052 and :8063-8075 place the defaults BEFORE add_comment; the post-write confirmation cannot undo an already-written duplicate and can succeed after a transient read failure.",
+     "suggested_fix": "Capture and test the reader rc in both locked and unlocked pre-write branches; refuse design_binding_unreadable before add_comment on rc 3. Capture confirmation rc separately, and make design-conform report an unreadable binding source rather than rewriting it as unit_not_in_design."},
+    {"id": "H2R2-F3", "severity": "high", "location": ".claude/scripts/qa-gate.sh:7178",
+     "description": "latest_design_review retains an unconditional fail-open {} contract. In compute_design_satisfied this misreports a failed second read as design_verdict_missing/ok:true rather than source-unreadable. More seriously, cmd_design_review_record uses the same result for its iteration-advance guard, so a failed read erases prior_iter and can permit a duplicate or non-advancing DESIGN-REVIEW write.",
+     "evidence": ":7180-7191 collapse missing bd, failed bd output and jq failure to {}/rc 0. Consumers at :7267-7274 and :7553-7566 default the missing fields and respectively report a determined missing verdict or skip the iteration comparison.",
+     "suggested_fix": "Give latest_design_review the same explicit rc-3 unreadable channel and full union-shape validation; make both consumers refuse on rc 3. compute_design_satisfied should return design_source_unreadable; design-review-record must refuse before its amendment/iteration decision."},
+    {"id": "H2R2-F4", "severity": "medium", "location": ".claude/scripts/review-check.sh:640",
+     "description": "validate-design can still emit malformed JSON at exit 0 if one of emit_validate_design's inline jq encoders fails. Additionally the residual task_id extraction at :915 lacks the successful-but-empty check applied to n, ids, unit_files and unit_deps, so an exit-0/no-output jq malfunction can emit ok:true with an empty task_id.",
+     "evidence": ":640-648 splice three unchecked jq command substitutions into printf; :913-926 check every residual split except art_tid. An in-memory probe reproduced a failed inner substitution printing malformed JSON while the outer printf returned rc 0.",
+     "suggested_fix": "Build the entire validate-design envelope in one guarded jq -nc assignment, validate, then print. At minimum require non-empty art_tid and guard the emitter's build rc, non-emptiness and parseability with a literal construction-failure envelope."},
+    {"id": "H2R2-F5", "severity": "low", "location": ".claude/scripts/qa-gate.sh:2230",
+     "description": "The accessors' early error paths still reach generic emit_json / emit_error_json, both of which use the same unchecked inline jq/printf construction that H2-F4 fixed on determined paths. A present-but-failing jq can make missing-bd, usage, unknown-flag, approve, precheck and conform refusals print malformed JSON, though these paths retain nonzero exits.",
+     "evidence": "Unchecked substitutions in emit_json :2230-2235 and emit_error_json :2687-2692. New accessor and new-key paths invoke these at :8642-8651, :8770-8779, :4192, :7647 and related refusal sites. Orchestrator-verified the construction shape at all three emitters.",
+     "suggested_fix": "Replace both shared emitters with guarded single-pass jq construction plus a caller-data-free literal fallback, and return failure so callers cannot continue after an encoder malfunction. NOTE: deferred to the dedicated JSON-primitive phase per operator decision - emit_error_json alone has 169 call sites."}
+  ],
+  "new_key_consumer_audit": [
+    {"consumer": ".claude/scripts/qa-gate.sh:4190", "handles_design_source_unreadable": "fail-closed", "basis": "cmd_approve refuses every DESIGN_SATISFIED=false result and emits the predicate's key; only the audited --no-design bypass skips the predicate."},
+    {"consumer": ".claude/scripts/qa-gate.sh:7638", "handles_design_source_unreadable": "fail-closed", "basis": "design-gate-precheck permits only satisfied=true or the exact key no_design_attempted; the new key reaches the exit-4 refusal."},
+    {"consumer": ".claude/scripts/qa-gate.sh:8345", "handles_design_source_unreadable": "fail-closed", "basis": "design-conform refuses every unsatisfied result, propagates DESIGN_SATISFIED_KEY verbatim and exits 4."},
+    {"consumer": ".claude/scripts/qa-gate.sh:8785", "handles_design_source_unreadable": "fail-closed", "basis": "design-status explicitly flips ok to false for the new key, retains satisfied:false and exits 2."},
+    {"consumer": ".claude/scripts/epic-gate.sh:1170", "handles_design_source_unreadable": "fail-closed", "basis": "The accessor's exit 2 is checked before fields are consumed and degrades to design_status_unavailable; the envelope-construction fallback also lacks required fields and fails the shape check."}
+  ],
+  "vacuity_sweep": {"legs_examined": 8, "non_discriminating": []},
+  "notes": "Hash reproduced exactly. bash -n passed for all five scoped files. No specs run. EXPECTED_SPECS=51 CONFIRMED correct by static discovery: 50 *.test.sh files plus exactly one phase5-synthetic-tests.sh, excluding run-tests.sh. design-accessors Section 0 genuinely checks all three injection-marker counts and rg independently found each marker once. All eight mutation legs proved landing, asserted specific misbehaviour or refusal, and had a shipped-byte control; none would remain green with its named guard removed - the vacuity sweep is CLEAN. The DESIGN-UNIT writer rejects task/design_task/unit_id against reader-compatible classes; a probe confirmed forged DESIGN-UNIT text in summary prose does not alter the anchored first prefix, and all readers select the last valid record with the same parser. Every normal validate-design error route supplies unit_files/unit_deps via emitter defaults and the pre-dispatch jq-missing literal carries both."
+}

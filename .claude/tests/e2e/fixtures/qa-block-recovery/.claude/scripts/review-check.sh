@@ -98,7 +98,7 @@ if ! command -v jq >/dev/null 2>&1; then
     # | jq -Rs .` actually produces there) instead of the terse 4-key one
     # every OTHER subcommand still gets unchanged.
     if [ "${1:-}" = "validate-design" ]; then
-        printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH","units":0,"unit_ids":[],"task_id":"","unit_files":{}}\n' "${1:-}"
+        printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH","units":0,"unit_ids":[],"task_id":"","unit_files":{},"unit_deps":{}}\n' "${1:-}"
     else
         printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH"}\n' "${1:-}"
     fi
@@ -608,36 +608,90 @@ DESIGN_UNITS_END_RE='^[[:space:]]*<!-- DESIGN-UNITS END -->[[:space:]]*$'
 # case-insensitively on the heading text and nothing else.
 DESIGN_REQUIRED_SECTIONS="Problem|Approaches considered|Chosen approach|Units|Global constraints|Out of scope|Verification plan|Revision log"
 
-# emit_validate_design <ok> <error_key> <observations> <unit-count> <unit-ids-json> [task-id] [unit-files-json]
-# emit_validate's four keys plus the FOUR a caller needs in order to write a
-# record or compute a per-unit conformance check without re-parsing the
-# block: how many units were declared, which, the task the artifact says it
-# designs, and (v5 D4, claude-workflow-plugin-fkm.6) each unit's OWN declared
-# `files` array, keyed by unit_id — `{"U1":["a.sh"],"U2":[...]}`, `{}` on
-# every error path (the 14 error call sites below all omit the 7th argument
-# and get the default). `task_id` was already on the envelope DELIBERATELY —
-# qa-gate.sh's design-record needs it for its decoy check — for the reason
-# `unit_files` now joins it for: extracting either there with a second
-# awk/jq pass would be a SECOND parser for one grammar, which is the thing
-# this script exists to prevent (see the header, and the way
-# compute_change_set_hash defers to impact-report.sh --hash-only).
-# qa-gate.sh design-conform is the new consumer: it needs one resolved
-# unit's declared file set to compute undeclared/unbuilt, and this is that
-# set, read from the SAME validated `$block` `cmd_validate_design` already
-# holds at the one point it is known schema-valid — never a re-read of the
-# artifact from disk.
+# emit_validate_design <ok> <error_key> <observations> <unit-count> <unit-ids-json> [task-id] [unit-files-json] [unit-deps-json]
+# emit_validate's four keys plus the FIVE a caller needs in order to write a
+# record or compute a per-unit conformance/batching check without
+# re-parsing the block: how many units were declared, which, the task the
+# artifact says it designs, each unit's OWN declared `files` array (v5 D4,
+# claude-workflow-plugin-fkm.6), and (v5 D4b, claude-workflow-plugin-fkm.6,
+# plan-batches) each unit's OWN declared `depends_on` array, BOTH keyed by
+# unit_id — `{"U1":["a.sh"],"U2":[...]}` / `{"U1":[],"U2":["U1"]}` — `{}` on
+# every error path (the 14 error call sites below all omit the 7th/8th
+# argument and get the default). `task_id` was already on the envelope
+# DELIBERATELY — qa-gate.sh's design-record needs it for its decoy check —
+# for the reason `unit_files` joined it for and `unit_deps` joins it for
+# too: extracting any of these there with a second awk/jq pass would be a
+# SECOND parser for one grammar, which is the thing this script exists to
+# prevent (see the header, and the way compute_change_set_hash defers to
+# impact-report.sh --hash-only).
+# qa-gate.sh design-conform is `unit_files`'s consumer: it needs one
+# resolved unit's declared file set to compute undeclared/unbuilt.
+# epic-gate.sh plan-batches is `unit_deps`'s consumer: dependency order
+# (docs/plans/v5-design-phase.md:158, ":159" tests) cannot be computed from
+# `depends_on` without ALSO reparsing the block, so it gets the same
+# treatment. Both are read from the SAME validated `$block`
+# `cmd_validate_design` already holds at the one point it is known
+# schema-valid — never a re-read of the artifact from disk.
+# (xsu1 H2R2-F4) Built as ONE guarded `jq -nc` assignment, validated, THEN
+# printed — never as jq substitutions spliced into a printf argument list. A
+# failing inner substitution does NOT abort the outer printf even under
+# `set -e` (`printf '{"x":%s}\n' "$(false)"` prints `{"x":}` and continues,
+# rc 0 — the same reproduction print_envelope_checked in qa-gate.sh cites),
+# so the old shape could emit malformed JSON at exit 0 from the SUCCESS call
+# site. On any construction failure this prints a CALLER-DATA-FREE literal
+# carrying the full field set (units 0, empty ids, {} maps — the error-path
+# defaults consumers already handle) and returns 1; the success call site
+# checks that status (`|| exit 2`), and every error call site already exits
+# nonzero on its own next line. jq presence is guaranteed here by the
+# pre-dispatch jq-missing literal (this file's own R1-F7 fix), so a failure
+# in this build is a jq MALFUNCTION, not absence. (R7-F5) Validation is
+# rc + non-emptiness + the EXACT envelope shape — parseability alone lets a
+# parseable-but-wrong build ([] at rc 0) through, since `jq -e` only fails
+# on false/null.
 emit_validate_design() {
-    local ok="$1" ekey="$2" obs="$3" n="$4" ids="$5" tid="${6:-}" ufiles="${7:-}"
+    local ok="$1" ekey="$2" obs="$3" n="$4" ids="$5" tid="${6:-}" ufiles="${7:-}" udeps="${8:-}"
     [ -n "$ufiles" ] || ufiles="{}"
-    # shellcheck disable=SC2016
-    printf '{"ok":%s,"subcommand":"validate-design","error_key":%s,"observations":%s,"units":%s,"unit_ids":%s,"task_id":%s,"unit_files":%s}\n' \
-        "$ok" \
-        "$(printf '%s' "$ekey" | jq -Rs .)" \
-        "$(printf '%s' "$obs" | jq -Rs .)" \
-        "$n" \
-        "$ids" \
-        "$(printf '%s' "$tid" | jq -Rs .)" \
-        "$ufiles"
+    [ -n "$udeps" ] || udeps="{}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" \
+        --argjson n "$n" --argjson ids "$ids" --arg tid "$tid" \
+        --argjson ufiles "$ufiles" --argjson udeps "$udeps" '
+        # validate-design envelope construction (xsu1 H2R2-F4)
+        {ok: $ok, subcommand: "validate-design", error_key: $ekey,
+         observations: $obs, units: $n, unit_ids: $ids, task_id: $tid,
+         unit_files: $ufiles, unit_deps: $udeps}
+    ' 2>/dev/null) || env_rc=$?
+    # (xsu1 R7-F5) SHAPE, not just parseability: `jq -n -e '[]'` is rc 0
+    # (-e fails only on false/null), so a build that "succeeded" into [] /
+    # {} / a wrong object would print under a success status if this only
+    # asked "does it parse?". Stripping the sentinel region leaves the
+    # historical parseability-only `.` — the L1 META does exactly that and
+    # watches a parseable-but-wrong build print at exit 0.
+    local shape_prog='.'
+# VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE BEGIN (xsu1 R7-F5)
+    shape_prog='
+        # validate-design envelope shape (xsu1 R7-F5)
+        type == "object"
+        and (keys | sort) == ["error_key", "observations", "ok", "subcommand", "task_id", "unit_deps", "unit_files", "unit_ids", "units"]
+        and (.ok | type) == "boolean"
+        and .subcommand == "validate-design"
+        and (.error_key | type) == "string"
+        and (.observations | type) == "string"
+        and (.units | type) == "number"
+        and (.unit_ids | type) == "array"
+        and (.task_id | type) == "string"
+        and (.unit_files | type) == "object"
+        and (.unit_deps | type) == "object"
+    '
+# VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE END (xsu1 R7-F5)
+    if [ "$env_rc" -eq 0 ] && [ -n "$envelope" ] \
+       && printf '%s' "$envelope" | jq -e "$shape_prog" >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"validate-design","error_key":"envelope_construction_failed","observations":"the validate-design envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","units":0,"unit_ids":[],"task_id":"","unit_files":{},"unit_deps":{}}\n'
+    return 1
 }
 
 cmd_validate_design() {
@@ -854,16 +908,96 @@ cmd_validate_design() {
         exit 4
     fi
 
-    local n ids art_tid ufiles
-    n=$(printf '%s' "$block" | jq -r '.units | length' 2>/dev/null) || n=0
-    ids=$(printf '%s' "$block" | jq -c '[.units[].unit_id]' 2>/dev/null) || ids="[]"
-    art_tid=$(printf '%s' "$block" | jq -r '.task_id // ""' 2>/dev/null) || art_tid=""
+    # --- final extraction — ONE guarded jq pass (xsu1 H2-F1) ----------------
+    # The previous shape here was FIVE consecutive `$(...) || <default>`
+    # extractions (defaults 0 / [] / "" / {} / {}) followed by an
+    # unconditional ok:true — the sixth instance of the fail-open class this
+    # slice kept reintroducing. A failed `.units | length` read as "zero
+    # units"; a failed `depends_on` read as "no dependencies", which lets
+    # plan-batches co-batch units that genuinely depend on each other. Rule 3
+    # of this subcommand's own header ("unparseable is never zero") applies
+    # to the SUCCESS path too: everything a consumer will read is now
+    # computed in one jq invocation whose rc is checked, and whose output is
+    # shape-validated INSIDE the same program — both maps must be objects
+    # keyed exactly by the declared unit_ids with array values — before
+    # anything is emitted. `{}` on the success envelope is therefore
+    # unreachable for these maps (the schema pass refuses units_empty), and
+    # on an error envelope it is emit_validate_design's default, never the
+    # residue of a computation that silently failed.
+    #
     # unit_id uniqueness is already enforced by the schema pass above
     # (unit_id_duplicate), so `from_entries` here never silently drops a
-    # unit behind a repeated key — by the time this line runs, the keys are
-    # already known distinct.
-    ufiles=$(printf '%s' "$block" | jq -c '[.units[] | {key: .unit_id, value: (.files // [])}] | from_entries' 2>/dev/null) || ufiles="{}"
-    emit_validate_design "true" "" "design contract valid: $n unit(s)" "$n" "$ids" "$art_tid" "$ufiles"
+    # unit behind a repeated key — by the time this runs, the keys are
+    # already known distinct. task_id is already known to be a non-empty
+    # string (task_id_missing), so the string-type check below can only fire
+    # on a jq malfunction, never on a schema-valid artifact.
+    local n="0" ids="[]" art_tid="" ufiles="{}" udeps="{}"
+    local extracted="" ext_rc=0
+    extracted=$(printf '%s' "$block" | jq -ce '
+        # validate-design-final-extraction (xsu1 H2-F1) — fault-injection
+        # marker: the L1 shim matches THIS comment to fail exactly this call.
+        (.units // []) as $u
+        | ($u | map(.unit_id)) as $ids
+        | { n: ($u | length),
+            ids: $ids,
+            task_id: (.task_id // ""),
+            unit_files: ([ $u[] | {key: .unit_id, value: (.files // [])} ] | from_entries),
+            unit_deps:  ([ $u[] | {key: .unit_id, value: (.depends_on // [])} ] | from_entries) }
+        | if ( (.task_id | type) == "string"
+               and (.unit_files | type) == "object"
+               and (.unit_deps  | type) == "object"
+               and ((.unit_files | keys | sort) == ($ids | sort))
+               and ((.unit_deps  | keys | sort) == ($ids | sort))
+               and ([ .unit_files[] | type ] | all(. == "array"))
+               and ([ .unit_deps[]  | type ] | all(. == "array"))
+               and (.n == ($ids | length)) )
+          then .
+          else error("extraction shape mismatch")
+          end
+    ' 2>/dev/null) || ext_rc=$?
+    if [ "$ext_rc" -eq 0 ] && [ -n "$extracted" ]; then
+        n=$(printf '%s' "$extracted" | jq -r '.n' 2>/dev/null) || ext_rc=$?
+        ids=$(printf '%s' "$extracted" | jq -c '.ids' 2>/dev/null) || ext_rc=$?
+        art_tid=$(printf '%s' "$extracted" | jq -r '.task_id # validate-design task_id split (xsu1 H2R2-F4)' 2>/dev/null) || ext_rc=$?
+        ufiles=$(printf '%s' "$extracted" | jq -c '.unit_files' 2>/dev/null) || ext_rc=$?
+        udeps=$(printf '%s' "$extracted" | jq -c '.unit_deps' 2>/dev/null) || ext_rc=$?
+        # These splits re-read the ALREADY-VALIDATED single-pass output, so a
+        # failure here means jq itself broke mid-run — refuse on that too,
+        # and re-check the spliced shapes (a jq that exits 0 while printing
+        # nothing would otherwise splice empty strings into the envelope,
+        # which is malformed JSON emitted under ok:true).
+        case "$n" in (''|*[!0-9]*) ext_rc=5 ;; esac
+        case "$ids" in ('['*) : ;; (*) ext_rc=5 ;; esac
+        case "$ufiles" in ('{'*) : ;; (*) ext_rc=5 ;; esac
+        case "$udeps" in ('{'*) : ;; (*) ext_rc=5 ;; esac
+        # (xsu1 H2R2-F4) task_id was the ONE residual split without a
+        # successful-but-empty check. The schema pass already refused an
+        # empty task_id (task_id_missing) and the single-pass extraction
+        # re-validated it as a string, so an empty value HERE can only be a
+        # jq that exited 0 while printing nothing — a malfunction, refused
+        # like the four above rather than emitted as ok:true with task_id "".
+        [ -n "$art_tid" ] || ext_rc=5
+    else
+        [ "$ext_rc" -ne 0 ] || ext_rc=5
+    fi
+    # VALIDATE-DESIGN-EXTRACTION-REFUSAL BEGIN (xsu1 H2-F1)
+    # A failed computation is not "zero units / no ids / no dependencies".
+    # This refusal is what stands between an extraction failure and an
+    # ok:true envelope carrying the fail-open defaults declared above; the
+    # L1 META (design-artifact.test.sh section 2b) strips this region and
+    # watches exactly that envelope come back under an induced jq failure.
+    # Do not rename the sentinels.
+    if [ "$ext_rc" -ne 0 ]; then
+        emit_validate_design "false" "design_units_extraction_failed" \
+            "the final unit_ids/unit_files/unit_deps extraction could not be computed from the validated block (jq exited $ext_rc, or produced an unexpected shape); refusing rather than reporting a design whose declarations were never actually read" "0" "[]"
+        exit 4
+    fi
+    # VALIDATE-DESIGN-EXTRACTION-REFUSAL END (xsu1 H2-F1)
+    # (xsu1 H2R2-F4) the ONE call site whose fall-through exit is 0: a
+    # construction failure here must not report success. Exit 2 matches the
+    # pre-dispatch jq-missing literal's own code (infrastructure, not a
+    # judgement about the artifact).
+    emit_validate_design "true" "" "design contract valid: $n unit(s)" "$n" "$ids" "$art_tid" "$ufiles" "$udeps" || exit 2
     exit 0
 }
 
@@ -1391,8 +1525,11 @@ Usage: review-check.sh <subcommand> [args]
                                               escalation_reason whenever
                                               implementer_class is high; the
                                               dependency graph must be acyclic.
-                                              Reports units / unit_ids on the
-                                              envelope. Never reads an
+                                              Reports units / unit_ids /
+                                              task_id / unit_files (files[]
+                                              keyed by unit_id) / unit_deps
+                                              (depends_on[] keyed by unit_id)
+                                              on the envelope. Never reads an
                                               unparseable block as zero units
   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
                                               independence + open-finding count,

@@ -136,8 +136,22 @@ cd "$FIXTURE" && bd init >/dev/null 2>&1
 export CLAUDE_PROJECT_DIR="$FIXTURE"
 export HOME="$TEST_HOME"
 
-QG="$FIXTURE/.claude/scripts/qa-gate.sh"
-RC="$FIXTURE/.claude/scripts/review-check.sh"
+# (xsu1 R7-F7) QG and RC name the CANONICAL repository artifacts — the
+# things this spec exists to test — never fixture copies. Before this fix
+# every behaviour leg ran the copies made by the `cp` above, so leg 4 of the
+# four-part pairing standard (at least one leg observes the SHIPPED artifact
+# RUNNING) was absent while the leg labels asserted otherwise — the
+# identical defect plan-batches.test.sh's R4-F6 comment records and fixes.
+# The fixture copies remain, as the SUPPORT scripts qa-gate.sh resolves from
+# CLAUDE_PROJECT_DIR at runtime. RC_FIX names the fixture copy this spec
+# swaps validator shims into (sections 6.6/6.10): the swap target must be
+# the file qa-gate RESOLVES — and must NEVER be the canonical file, which no
+# test may write to (a mid-run death would leave the live tree clobbered).
+# Mutant sections generate FROM the canonical bytes into fixture-local
+# copies; that is the point of a mutant.
+QG="$PLUGIN_DIR/.claude/scripts/qa-gate.sh"
+RC="$PLUGIN_DIR/.claude/scripts/review-check.sh"
+RC_FIX="$FIXTURE/.claude/scripts/review-check.sh"
 WM="$FIXTURE/.claude/scripts/workflow-manifest.sh"
 TRACKING="$FIXTURE/.claude/.qa-tracking/changed-files.txt"
 
@@ -429,6 +443,281 @@ awk '/^```json$/{print; print "```"; next} {print}' "$VALID" > "$M"; check_refus
 V_ABSENT=$(bash "$RC" validate-design "$FIXTURE/docs/specs/nope.md" 2>/dev/null)
 assert_eq "2.6 a missing file is a usage error, not a design with zero units" "usage" \
     "$(json_field '.error_key' "$V_ABSENT")"
+
+# ===========================================================================
+printf '\n=== Section 2b: the final success-path extraction is GUARDED (xsu1 H2-F1) ===\n'
+# ===========================================================================
+# Until this round the success path of validate-design was FIVE consecutive
+# `$(...) || <default>` extractions (defaults 0 / [] / "" / {} / {}) followed
+# by an unconditional ok:true — so a failed `.units | length` read as "zero
+# units" and a failed `depends_on` read as "no dependencies", which lets
+# plan-batches co-batch units that genuinely depend on each other. And no
+# test anywhere read `.unit_deps` off a validate-design envelope at all (the
+# only occurrence of the string in this tier was a comment). This section is
+# the four-part pair for the new refusal: positive arm, induced-failure arm
+# against the SHIPPED script, the sentinel-strip META, and the error-envelope
+# `{}` reservation including the pre-dispatch jq-missing literal.
+
+# --- 2b.1 POSITIVE ARM (shipped artifact, running): the envelope's
+# unit_files/unit_deps carry the DECLARED maps, byte-exact. First direct
+# assertion on unit_deps in the tier.
+assert_eq "2b.1 unit_files is the declared per-unit file map, byte-exact" \
+    '{"U1":[".claude/scripts/workflow-manifest.sh"],"U2":[".claude/scripts/tests/workflow-manifest.test.sh"]}' \
+    "$(json_field '.unit_files | tojson' "$V_OUT")"
+assert_eq "2b.1b unit_deps is the declared per-unit dependency map (U2 depends on U1)" \
+    '{"U1":[],"U2":["U1"]}' \
+    "$(json_field '.unit_deps | tojson' "$V_OUT")"
+
+# --- 2b.2 INDUCED EXTRACTION FAILURE against the SHIPPED script. The shim
+# fails ONLY the jq invocation carrying the H2-F1 marker comment (verbatim,
+# unique to that one program — every other jq call in the same run reaches
+# the real jq) and records that it fired: an injection that never landed
+# proves nothing (non-vacuity leg).
+REAL_JQ_BIN=$(command -v jq)
+mkdir -p "$FIXTURE/h2f1-shim-bin"
+cat > "$FIXTURE/h2f1-shim-bin/jq" <<SHIMEOF
+#!/bin/bash
+case "\$*" in
+  *"validate-design-final-extraction (xsu1 H2-F1)"*)
+    echo fired >> "$FIXTURE/h2f1-shim.fired"
+    exit 5 ;;
+esac
+exec "$REAL_JQ_BIN" "\$@"
+SHIMEOF
+chmod +x "$FIXTURE/h2f1-shim-bin/jq"
+
+rm -f "$FIXTURE/h2f1-shim.fired"
+F1_OUT=$(PATH="$FIXTURE/h2f1-shim-bin:$PATH" bash "$RC" validate-design "$VALID" 2>/dev/null); F1_RC=$?
+assert_eq "2b.2 NON-VACUITY: the injected failure landed on the marked call site" "yes" \
+    "$( [ -f "$FIXTURE/h2f1-shim.fired" ] && echo yes || echo no )"
+assert_eq "2b.2b shipped validate-design REFUSES an extraction it could not compute: exit 4" "4" "$F1_RC"
+assert_eq "2b.2c ...error_key=design_units_extraction_failed" "design_units_extraction_failed" \
+    "$(json_field '.error_key' "$F1_OUT")"
+assert_eq "2b.2d ...ok=false — never ok:true over fail-open defaults" "false" "$(json_field '.ok' "$F1_OUT")"
+assert_eq "2b.2e ...and the ERROR envelope carries unit_files:{} / unit_deps:{} (the reserved use of {})" \
+    "true" "$(json_field '(.unit_files == {}) and (.unit_deps == {})' "$F1_OUT")"
+
+# --- 2b.3 RESTORE CONTROL: same artifact, real jq, shipped script.
+F1_CTRL=$(bash "$RC" validate-design "$VALID" 2>/dev/null); F1_CTRL_RC=$?
+assert_eq "2b.3 RESTORE CONTROL: ok:true, 2 units, exit 0 with the injection absent" "true|2|0" \
+    "$(json_field '.ok' "$F1_CTRL")|$(json_field '.units' "$F1_CTRL")|$F1_CTRL_RC"
+
+# --- 2b.4 THE META: strip the VALIDATE-DESIGN-EXTRACTION-REFUSAL region from
+# a COPY and watch the HISTORICAL fail-open envelope come back under the same
+# induced failure. The mutant lives at its own path (later sections keep
+# using $RC) and review-check.sh sources nothing, so the copy is
+# self-contained.
+RC_MUT2B="$FIXTURE/.claude/scripts/review-check.mutant-2b.sh"
+awk_rc=0
+awk '/# VALIDATE-DESIGN-EXTRACTION-REFUSAL BEGIN \(xsu1 H2-F1\)/{skip=1; found=1; next}
+     /# VALIDATE-DESIGN-EXTRACTION-REFUSAL END \(xsu1 H2-F1\)/{skip=0; next}
+     !skip{print}
+     END{if(!found) exit 7}' "$RC" > "$RC_MUT2B" || awk_rc=$?
+assert_eq "2b.4 NON-VACUITY: the sentinel strip found its region (awk would exit 7 otherwise)" "0" "$awk_rc"
+assert_eq "2b.4b ...and the mutant differs from the shipped bytes" "differs" \
+    "$(cmp -s "$RC" "$RC_MUT2B" && echo same || echo differs)"
+bashn_rc=0; bash -n "$RC_MUT2B" 2>/dev/null || bashn_rc=$?
+assert_eq "2b.4c ...and still parses" "0" "$bashn_rc"
+chmod +x "$RC_MUT2B"
+rm -f "$FIXTURE/h2f1-shim.fired"
+M2B_OUT=$(PATH="$FIXTURE/h2f1-shim-bin:$PATH" bash "$RC_MUT2B" validate-design "$VALID" 2>/dev/null); M2B_RC=$?
+assert_eq "2b.4d SPECIFIC MISBEHAVIOUR: the mutant emits ok:true over a FAILED extraction" "true" \
+    "$(json_field '.ok' "$M2B_OUT")"
+assert_eq "2b.4e ...with the fail-open defaults — 0 units, [] ids, {} maps — on an artifact declaring 2 units with a real dependency (the envelope a consumer co-batches dependent units from)" \
+    "0|[]|{}|{}" \
+    "$(json_field '.units' "$M2B_OUT")|$(json_field '.unit_ids | tojson' "$M2B_OUT")|$(json_field '.unit_files | tojson' "$M2B_OUT")|$(json_field '.unit_deps | tojson' "$M2B_OUT")"
+assert_eq "2b.4f ...at exit 0 — invisible to an rc-checking consumer too" "0" "$M2B_RC"
+assert_eq "2b.4g ...and the injection genuinely fired during the mutant run" "yes" \
+    "$( [ -f "$FIXTURE/h2f1-shim.fired" ] && echo yes || echo no )"
+rm -f "$RC_MUT2B"
+
+# --- 2b.5 EVERY validate-design ERROR envelope reserves {} for the maps —
+# including the PRE-DISPATCH jq-missing literal (review-check.sh's own
+# R1-F7 fix), which bypasses emit_validate_design entirely and is therefore
+# the one emission a change to the emitter cannot fix. The jq-less PATH is a
+# curated symlink farm (worktree-sweep A16 / design-conform 8.5 precedent:
+# PATH=/usr/bin:/bin is NOT jq-less on a modern runner).
+NOJQ2B_BIN="$FIXTURE/nojq2b-bin"
+mkdir -p "$NOJQ2B_BIN"
+for b in bash sed awk grep cut head tail tr cat cmp date mkdir cp mv rm \
+         dirname basename sort wc; do
+    bp=$(command -v "$b" 2>/dev/null) && ln -sf "$bp" "$NOJQ2B_BIN/$b"
+done
+assert_eq "2b.5 precondition: the restricted PATH really has no jq" "yes" \
+    "$(PATH="$NOJQ2B_BIN" command -v jq >/dev/null 2>&1 && echo no || echo yes)"
+NOJQ2B_RC=0
+NOJQ2B_OUT=$(PATH="$NOJQ2B_BIN" "$NOJQ2B_BIN/bash" "$RC" validate-design "$VALID" 2>/dev/null) || NOJQ2B_RC=$?
+assert_eq "2b.5b the pre-dispatch jq-missing literal carries unit_files:{}/unit_deps:{}" "true" \
+    "$(printf '%s' "$NOJQ2B_OUT" | "$REAL_JQ_BIN" -r '(.unit_files == {}) and (.unit_deps == {})' 2>/dev/null)"
+assert_eq "2b.5c ...with error_key=jq_missing at exit 2" "jq_missing|2" \
+    "$(printf '%s' "$NOJQ2B_OUT" | "$REAL_JQ_BIN" -r '.error_key' 2>/dev/null)|$NOJQ2B_RC"
+U2B_OUT=$(bash "$RC" validate-design "$FIXTURE/docs/specs/nope.md" 2>/dev/null)
+assert_eq "2b.5d a usage-error envelope carries the {} maps" "true" \
+    "$(json_field '(.unit_files == {}) and (.unit_deps == {})' "$U2B_OUT")"
+mutate 's|"contract_version": "1",|"contract_version": "1",,|' "$M"
+S2B_OUT=$(bash "$RC" validate-design "$M" 2>/dev/null)
+assert_eq "2b.5e a parse-refusal envelope carries the {} maps" "true" \
+    "$(json_field '(.unit_files == {}) and (.unit_deps == {})' "$S2B_OUT")"
+
+# NEGATIVE CONTROL for 2b.5b's own check (the pairing requirement applies to
+# new test assertions too): a mutant literal with unit_deps stripped is
+# caught by exactly that check. 2b.5b above doubles as the restore control.
+assert_eq "2b.5f NON-VACUITY precondition: both literals carry the maps tail — the pre-dispatch jq-missing one AND (xsu1 H2R2-F4) emit_validate_design's construction-failure fallback" "2" \
+    "$(grep -cF '"unit_files":{},"unit_deps":{}}' "$RC")"
+RC_MUT2B5="$FIXTURE/.claude/scripts/review-check.mutant-2b5.sh"
+sed 's|,"unit_deps":{}}|}|' "$RC" > "$RC_MUT2B5"
+assert_eq "2b.5g ...the strip landed" "differs" \
+    "$(cmp -s "$RC" "$RC_MUT2B5" && echo same || echo differs)"
+chmod +x "$RC_MUT2B5"
+M2B5_OUT=$(PATH="$NOJQ2B_BIN" "$NOJQ2B_BIN/bash" "$RC_MUT2B5" validate-design "$VALID" 2>/dev/null) || true
+assert_eq "2b.5h SPECIFIC MISBEHAVIOUR: the mutant's jq-missing envelope lacks unit_deps — 2b.5b's check catches exactly this" "false" \
+    "$(printf '%s' "$M2B5_OUT" | "$REAL_JQ_BIN" -r 'has("unit_deps")' 2>/dev/null)"
+rm -f "$RC_MUT2B5"
+
+# ===========================================================================
+printf '\n=== Section 2c: the envelope EMITTER cannot exit 0 over malformed output (xsu1 H2R2-F4) ===\n'
+# ===========================================================================
+# Round 2's residue of H2-F1: the EXTRACTION became one guarded pass (2b),
+# but emit_validate_design itself still spliced three unchecked `jq -Rs`
+# substitutions into printf — and a failing inner substitution does NOT
+# abort the outer printf even under set -e (the review reproduced malformed
+# JSON at exit 0). The emitter is now ONE guarded `jq -nc` build, validated
+# (rc + non-empty + parseable) before printing, with a caller-data-free
+# literal fallback that returns 1 — and the success call site checks that
+# status (`|| exit 2`). Separately, the residual task_id split was the ONE
+# split without a successful-but-empty check, so an exit-0/no-output jq
+# malfunction could emit ok:true with an empty task_id.
+
+assert_eq "2c.0 the emitter-construction marker is a unique call site" "1" \
+    "$(grep -cF 'validate-design envelope construction (xsu1 H2R2-F4)' "$RC")"
+assert_eq "2c.0b the task_id-split marker is a unique call site" "1" \
+    "$(grep -cF 'validate-design task_id split (xsu1 H2R2-F4)' "$RC")"
+
+# --- 2c.1 induced CONSTRUCTION failure on the SUCCESS path ------------------
+mkdir -p "$FIXTURE/h2r2f4-emitshim-bin"
+cat > "$FIXTURE/h2r2f4-emitshim-bin/jq" <<SHIMEOF
+#!/bin/bash
+case "\$*" in
+  *"validate-design envelope construction (xsu1 H2R2-F4)"*)
+    echo fired >> "$FIXTURE/h2r2f4-emit.fired"
+    exit 5 ;;
+esac
+exec "$REAL_JQ_BIN" "\$@"
+SHIMEOF
+chmod +x "$FIXTURE/h2r2f4-emitshim-bin/jq"
+rm -f "$FIXTURE/h2r2f4-emit.fired"
+C1_OUT=$(PATH="$FIXTURE/h2r2f4-emitshim-bin:$PATH" bash "$RC" validate-design "$VALID" 2>/dev/null); C1_RC=$?
+assert_eq "2c.1 NON-VACUITY: the injection landed on the envelope build" "yes" \
+    "$( [ -f "$FIXTURE/h2r2f4-emit.fired" ] && echo yes || echo no )"
+assert_eq "2c.1b a failed build on the SUCCESS path exits 2, never 0" "2" "$C1_RC"
+assert_eq "2c.1c ...the output is the still-parseable caller-data-free literal" \
+    "true|false|envelope_construction_failed" \
+    "$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -e . >/dev/null 2>&1 && echo true || echo false)|$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -r '.ok' 2>/dev/null)|$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -r '.error_key' 2>/dev/null)"
+assert_eq "2c.1d ...carrying the FULL field set with the reserved defaults (a consumer degrades on data, not on a parse error)" "true" \
+    "$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -r '(.units == 0) and (.unit_ids == []) and (.task_id == "") and (.unit_files == {}) and (.unit_deps == {})' 2>/dev/null)"
+
+# --- 2c.2 the same failure on an ERROR path keeps its nonzero exit ---------
+C2_OUT=$(PATH="$FIXTURE/h2r2f4-emitshim-bin:$PATH" bash "$RC" validate-design "$FIXTURE/docs/specs/nope.md" 2>/dev/null); C2_RC=$?
+assert_eq "2c.2 error-path construction failure: the literal replaces the envelope and the exit stays nonzero" \
+    "1|envelope_construction_failed|true" \
+    "$C2_RC|$(printf '%s' "$C2_OUT" | "$REAL_JQ_BIN" -r '.error_key' 2>/dev/null)|$(printf '%s' "$C2_OUT" | "$REAL_JQ_BIN" -e . >/dev/null 2>&1 && echo true || echo false)"
+
+# --- 2c.3 RESTORE CONTROL ---------------------------------------------------
+C3_OUT=$(bash "$RC" validate-design "$VALID" 2>/dev/null); C3_RC=$?
+assert_eq "2c.3 RESTORE CONTROL: uninjected, the same artifact validates at exit 0 with its real envelope" \
+    "0|true|2|seed-task" \
+    "$C3_RC|$(json_field '.ok' "$C3_OUT")|$(json_field '.units' "$C3_OUT")|$(json_field '.task_id' "$C3_OUT")"
+
+# --- 2c.4 the task_id split: an exit-0/no-output jq malfunction is refused -
+mkdir -p "$FIXTURE/h2r2f4-tidshim-bin"
+cat > "$FIXTURE/h2r2f4-tidshim-bin/jq" <<SHIMEOF
+#!/bin/bash
+case "\$*" in
+  *"validate-design task_id split (xsu1 H2R2-F4)"*)
+    echo fired >> "$FIXTURE/h2r2f4-tid.fired"
+    exit 0 ;;
+esac
+exec "$REAL_JQ_BIN" "\$@"
+SHIMEOF
+chmod +x "$FIXTURE/h2r2f4-tidshim-bin/jq"
+rm -f "$FIXTURE/h2r2f4-tid.fired"
+C4_OUT=$(PATH="$FIXTURE/h2r2f4-tidshim-bin:$PATH" bash "$RC" validate-design "$VALID" 2>/dev/null); C4_RC=$?
+assert_eq "2c.4 NON-VACUITY: the empty-success malfunction landed on the task_id split" "yes" \
+    "$( [ -f "$FIXTURE/h2r2f4-tid.fired" ] && echo yes || echo no )"
+assert_eq "2c.4b the shipped script REFUSES it (the split produced nothing from a validated extraction)" \
+    "4|design_units_extraction_failed|false" \
+    "$C4_RC|$(json_field '.error_key' "$C4_OUT")|$(json_field '.ok' "$C4_OUT")"
+
+# --- 2c.5 META: delete the non-empty check, watch ok:true/task_id:"" -------
+RC_MUT2C="$FIXTURE/.claude/scripts/review-check.mutant-2c.sh"
+# shellcheck disable=SC2016  # the sed pattern quotes SHELL SOURCE verbatim.
+sed '/\[ -n "\$art_tid" \] || ext_rc=5/d' "$RC" > "$RC_MUT2C"
+# shellcheck disable=SC2016  # grep -cF needle is literal shell source.
+assert_eq "2c.5 NON-VACUITY: check-line count shipped/mutant = 1/0" "1|0" \
+    "$(grep -cF '[ -n "$art_tid" ] || ext_rc=5' "$RC")|$(grep -cF '[ -n "$art_tid" ] || ext_rc=5' "$RC_MUT2C")"
+assert_eq "2c.5b ...and the mutant differs from the shipped bytes" "differs" \
+    "$(cmp -s "$RC" "$RC_MUT2C" && echo same || echo differs)"
+bashn2c_rc=0; bash -n "$RC_MUT2C" 2>/dev/null || bashn2c_rc=$?
+assert_eq "2c.5c ...and still parses" "0" "$bashn2c_rc"
+chmod +x "$RC_MUT2C"
+rm -f "$FIXTURE/h2r2f4-tid.fired"
+M2C_OUT=$(PATH="$FIXTURE/h2r2f4-tidshim-bin:$PATH" bash "$RC_MUT2C" validate-design "$VALID" 2>/dev/null); M2C_RC=$?
+assert_eq "2c.5d ...the injection genuinely fired during the mutant run" "yes" \
+    "$( [ -f "$FIXTURE/h2r2f4-tid.fired" ] && echo yes || echo no )"
+assert_eq "2c.5e SPECIFIC MISBEHAVIOUR: the mutant emits ok:true with an EMPTY task_id at exit 0 (the envelope design-record's decoy check consumes)" \
+    "0|true||2" \
+    "$M2C_RC|$(printf '%s' "$M2C_OUT" | "$REAL_JQ_BIN" -r '.ok' 2>/dev/null)|$(printf '%s' "$M2C_OUT" | "$REAL_JQ_BIN" -r '.task_id' 2>/dev/null)|$(printf '%s' "$M2C_OUT" | "$REAL_JQ_BIN" -r '.units' 2>/dev/null)"
+rm -f "$RC_MUT2C"
+# 2c.3 above is the uninjected restore control for this pair as well: same
+# artifact, real jq, task_id=seed-task.
+
+# --- 2c.6 (xsu1 R7-F5): a PARSEABLE-BUT-WRONG build must not print ---------
+# `jq -n -e '[]'` is rc 0 (-e fails only on false/null), so the round-6
+# guard's parseability arm alone lets a build that "succeeded" into [] print
+# under a success status. The shim below makes exactly that malfunction:
+# rc 0, output `[]`, on the marked envelope-construction call only.
+assert_eq "2c.6 marker precondition: the shape-gate sentinels are in the shipped emitter" "1|1" \
+    "$(grep -cF '# VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE BEGIN (xsu1 R7-F5)' "$RC")|$(grep -cF '# VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE END (xsu1 R7-F5)' "$RC")"
+mkdir -p "$FIXTURE/r7f5-wrongshim-bin"
+cat > "$FIXTURE/r7f5-wrongshim-bin/jq" <<SHIMEOF
+#!/bin/bash
+case "\$*" in
+  *"validate-design envelope construction (xsu1 H2R2-F4)"*)
+    echo fired >> "$FIXTURE/r7f5-wrong.fired"
+    printf '[]\n'
+    exit 0 ;;
+esac
+exec "$REAL_JQ_BIN" "\$@"
+SHIMEOF
+chmod +x "$FIXTURE/r7f5-wrongshim-bin/jq"
+rm -f "$FIXTURE/r7f5-wrong.fired"
+C6_OUT=$(PATH="$FIXTURE/r7f5-wrongshim-bin:$PATH" bash "$RC" validate-design "$VALID" 2>/dev/null); C6_RC=$?
+assert_eq "2c.6b NON-VACUITY: the rc-0/[] malfunction landed on the envelope build" "yes" \
+    "$( [ -f "$FIXTURE/r7f5-wrong.fired" ] && echo yes || echo no )"
+assert_eq "2c.6c the shipped emitter refuses a parseable-but-wrong build: exit 2, the literal, never []" \
+    "2|envelope_construction_failed" \
+    "$C6_RC|$(printf '%s' "$C6_OUT" | "$REAL_JQ_BIN" -r '.error_key' 2>/dev/null)"
+
+# --- 2c.7 META: strip the shape gate, watch [] print at exit 0 -------------
+RC_MUT2C7="$FIXTURE/.claude/scripts/review-check.mutant-2c7.sh"
+awk_rc7=0
+awk '/# VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE BEGIN \(xsu1 R7-F5\)/{skip=1; found=1; next}
+     /# VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE END \(xsu1 R7-F5\)/{skip=0; next}
+     !skip{print}
+     END{if(!found) exit 7}' "$RC" > "$RC_MUT2C7" || awk_rc7=$?
+assert_eq "2c.7 NON-VACUITY: the shape-gate strip found its region" "0" "$awk_rc7"
+assert_eq "2c.7b ...and the mutant differs from the shipped bytes" "differs" \
+    "$(cmp -s "$RC" "$RC_MUT2C7" && echo same || echo differs)"
+bashn2c7_rc=0; bash -n "$RC_MUT2C7" 2>/dev/null || bashn2c7_rc=$?
+assert_eq "2c.7c ...and still parses" "0" "$bashn2c7_rc"
+chmod +x "$RC_MUT2C7"
+rm -f "$FIXTURE/r7f5-wrong.fired"
+M2C7_OUT=$(PATH="$FIXTURE/r7f5-wrongshim-bin:$PATH" bash "$RC_MUT2C7" validate-design "$VALID" 2>/dev/null); M2C7_RC=$?
+assert_eq "2c.7d SPECIFIC MISBEHAVIOUR: parseability-only prints the [] build at exit 0 (the R7-F5 defect: a consumer reads a non-envelope under a success status)" \
+    "0|[]|yes" \
+    "$M2C7_RC|$M2C7_OUT|$( [ -f "$FIXTURE/r7f5-wrong.fired" ] && echo yes || echo no )"
+rm -f "$RC_MUT2C7"
+# 2c.6c above is the shipped-bytes restore control for this pair.
 
 # ===========================================================================
 printf '\n=== Section 3: qa-gate.sh design-record — LAYER 2 OF THE EDIT BAN, RUNNING ===\n'
@@ -1047,9 +1336,9 @@ TOC_ART="$FIXTURE/docs/specs/$TOCTOU_TID.md"
 write_artifact "$TOC_ART" "$TOCTOU_TID"
 printf '%s\n' "$TOC_ART" > "$TRACKING"
 TOC_VALID_SHA=$(sha256_of_file "$TOC_ART")
-cp "$RC" "$FIXTURE/.claude/scripts/review-check.real.sh"
+cp "$RC_FIX" "$FIXTURE/.claude/scripts/review-check.real.sh"
 install_swap_shim() {          # $1 = 1 to swap the artifact, 0 for the control
-    cat > "$RC" <<SHIM
+    cat > "$RC_FIX" <<SHIM
 #!/bin/bash
 out=\$(bash "$FIXTURE/.claude/scripts/review-check.real.sh" "\$@"); rc=\$?
 if [ "\${1:-}" = "validate-design" ] && [ "$1" = "1" ]; then
@@ -1058,7 +1347,7 @@ fi
 printf '%s\n' "\$out"
 exit \$rc
 SHIM
-    chmod +x "$RC"
+    chmod +x "$RC_FIX"
 }
 install_swap_shim 1
 OUT_TOC=$(bash "$QG" design-record "$TOCTOU_TID" 2>&1)
@@ -1080,10 +1369,10 @@ write_artifact "$TOC_ART" "$TOCTOU_TID"
 install_swap_shim 0
 assert_eq "6.6f CONTROL: the same shim with no write records normally" "recorded" \
     "$(json_field '.status' "$(bash "$QG" design-record "$TOCTOU_TID" 2>&1)")"
-cp "$FIXTURE/.claude/scripts/review-check.real.sh" "$RC"
+cp "$FIXTURE/.claude/scripts/review-check.real.sh" "$RC_FIX"
 rm -f "$FIXTURE/.claude/scripts/review-check.real.sh"
-assert_eq "6.6g CONTROL: the real validator is restored (later sections use it)" "true" \
-    "$(json_field '.ok' "$(bash "$RC" validate-design "$TOC_ART" 2>/dev/null)")"
+assert_eq "6.6g CONTROL: the fixture validator qa-gate resolves is restored (later sections use it)" "true" \
+    "$(json_field '.ok' "$(bash "$RC_FIX" validate-design "$TOC_ART" 2>/dev/null)")"
 
 # --- ENTRY POINT 4: approve's LIVE RE-HASH ---------------------------------
 # The THIRD caller of the containment question, and the one that would say
@@ -1221,9 +1510,9 @@ cp "$CSWAP_ART" "$CSWAP_OUTSIDE"
 cp "$CSWAP_ART" "$FIXTURE/docs/specs/cswap-inside-$CSWAP_TID.md"
 CSWAP_SHA=$(sha256_of_file "$CSWAP_ART")
 printf '%s\n' "$CSWAP_ART" > "$TRACKING"
-cp "$RC" "$FIXTURE/.claude/scripts/review-check.real.sh"
+cp "$RC_FIX" "$FIXTURE/.claude/scripts/review-check.real.sh"
 install_relink_shim() {        # $1 = link target for the leaf, empty = control
-    cat > "$RC" <<SHIM
+    cat > "$RC_FIX" <<SHIM
 #!/bin/bash
 out=\$(bash "$FIXTURE/.claude/scripts/review-check.real.sh" "\$@"); rc=\$?
 if [ "\${1:-}" = "validate-design" ] && [ -n "$1" ]; then
@@ -1233,7 +1522,7 @@ fi
 printf '%s\n' "\$out"
 exit \$rc
 SHIM
-    chmod +x "$RC"
+    chmod +x "$RC_FIX"
 }
 install_relink_shim "../../outside/cswap-$CSWAP_TID.md"
 OUT_CSWAP=$(bash "$QG" design-record "$CSWAP_TID" 2>&1)
@@ -1260,10 +1549,10 @@ write_artifact "$CSWAP_ART" "$CSWAP_TID"
 install_relink_shim ""
 assert_eq "6.10e CONTROL: the same shim with no swap at all records normally" "recorded" \
     "$(json_field '.status' "$(bash "$QG" design-record "$CSWAP_TID" 2>&1)")"
-cp "$FIXTURE/.claude/scripts/review-check.real.sh" "$RC"
+cp "$FIXTURE/.claude/scripts/review-check.real.sh" "$RC_FIX"
 rm -f "$FIXTURE/.claude/scripts/review-check.real.sh"
-assert_eq "6.10f CONTROL: the real validator is restored (section 7 uses it)" "true" \
-    "$(json_field '.ok' "$(bash "$RC" validate-design "$CSWAP_ART" 2>/dev/null)")"
+assert_eq "6.10f CONTROL: the fixture validator qa-gate resolves is restored (section 7 uses it)" "true" \
+    "$(json_field '.ok' "$(bash "$RC_FIX" validate-design "$CSWAP_ART" 2>/dev/null)")"
 
 # --- THE ENTRY IS CLASSIFIED AS AN ENTRY, NOT AS ITS TARGET (R6-F1) --------
 # Round 5 replaced two containment predicates with one, and it was right to:

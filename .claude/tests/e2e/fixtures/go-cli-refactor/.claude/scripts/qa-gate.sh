@@ -1493,6 +1493,71 @@ bd_show_with_comments() {
         || true
 }
 
+# design_comments_json <tid> — the comment stream for <tid> as a compact JSON
+# array on stdout, rc 0 — but ONLY when retrieval can be PROVEN. rc 3 with no
+# stdout otherwise. THE STRICT SIBLING of bd_show_with_comments above, and the
+# one every DESIGN reader uses (xsu1 H2R2-F1).
+#
+# WHY THE LEGACY HELPER IS WRONG FOR DESIGN READERS. bd_show_with_comments
+# never fails its caller, and its callers all read `.comments // []` — which
+# converts a response that OMITS the comment stream into a confirmed-empty
+# one. Measured on bd 1.2.2 (this repo's own store, 2026-08-25): a plain
+# `bd show --json` on a task carrying 13 comments returns comment_count=13
+# and NO comments key at all. So the moment the --include-comments leg fails
+# (old bd, transient failure), the fallback leg "succeeds" while silently
+# dropping every record — and for the design readers a dropped stream used to
+# read as no-DESIGN-ARTIFACT / no-binding / no-verdict, each of which maps to
+# a PERMISSIVE downstream answer (design-gate-precheck "ready",
+# design-unit-bind "no existing binding", design-status
+# "no_design_attempted"). The legacy readers keep the legacy helper by
+# documented design: their empty answers are either fail-closed downstream
+# (completion/grilling readers) or deliberately fail-open with the reason
+# stated at their own definition (recorded_approval_hashes, whose empty
+# answer makes approve write a FRESH record rather than claim idempotency).
+#
+# THE PROOF RULE, form-independent (measured, not assumed — BOTH bd 1.2.2
+# show forms omit `comments` on a zero-comment task, so requiring the
+# explicit array alone would refuse every pristine task):
+#   - an EXPLICIT `comments` array proves the stream was retrieved (modern
+#     --include-comments, or old bd inlining), OR
+#   - `comment_count == 0` proves there was nothing to retrieve.
+# Anything else — comment_count > 0 with no array (the masquerade above), no
+# count and no array, a non-object task, unparseable output — is rc 3: the
+# stream was NOT retrieved, which is not the same claim as "retrieved and
+# empty". A malformed individual RECORD is still each reader's own business
+# (its anchored capture drops it — a determined answer); this rule is only
+# about whether the STREAM those captures run over was actually obtained.
+#
+# A FAILING first leg's partial stdout is DISCARDED before the fallback runs
+# — unlike a bare `a || b` chain inside one command substitution, where both
+# legs' output concatenates.
+design_comments_json() {
+    local tid="$1"
+    [ -n "$tid" ] || return 3
+    command -v bd >/dev/null 2>&1 || return 3
+    local raw=""
+    raw=$(bd show "$tid" --json --include-comments 2>/dev/null) || raw=""
+    if [ -z "$raw" ]; then
+        raw=$(bd show "$tid" --json 2>/dev/null) || raw=""
+    fi
+    [ -n "$raw" ] || return 3
+    local out="" out_rc=0
+    out=$(printf '%s' "$raw" | jq -ce '
+        # design-comments proven-retrieval read (xsu1 H2R2-F1)
+        (if type == "array" then .[0] else . end) as $t
+        | if ($t | type) != "object" then error("task-not-an-object")
+          elif (($t.comments? // null) | type) == "array" then $t.comments
+          elif (($t.comment_count? // null) == 0) then []
+          else error("comment-stream-not-retrieved")
+          end
+    ' 2>/dev/null) || out_rc=$?
+    if [ "$out_rc" -ne 0 ] || [ -z "$out" ]; then
+        return 3
+    fi
+    printf '%s' "$out"
+    return 0
+}
+
 # gz3 (v4.1 U1): the approval records THIS task already carries — one
 # change_set_hash per `QA-GATE APPROVED ... change_set_hash=<h> ...` comment.
 #
@@ -2629,6 +2694,42 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               amendment and re-bind (design-unit-bind ... --rebind). NOT
               wired into `approve` in this slice — built and tested
               standalone.
+  design-unit-show <task-id>
+              v5 D4b (fkm.6): READ-ONLY accessor over
+              latest_design_unit_binding — the ONE authoritative reader,
+              exposed so a SEPARATE process (epic-gate.sh plan-batches)
+              never needs its own copy of the DESIGN-UNIT grammar or a
+              second `bd_show_with_comments` (the doctrine review-check.sh's
+              own header and design-unit-bind's UNIT-MEMBERSHIP-GATE both
+              state: one parser per grammar). Exits 0 ONLY on a DETERMINED
+              read: `bound:true` with a fully-validated design_task/
+              unit_id/design_hash triple, or `bound:false` read from a
+              successfully-parsed comment stream. Since xsu1 H2-F2/F3 an
+              UNREADABLE source (bd show failing, unparseable comments) is
+              ok:false/design_binding_unreadable/exit 2, and a partial or
+              malformed binding object is ok:false/
+              design_binding_malformed/exit 2 — never reported as either
+              determined answer.
+  design-status <task-id>
+              v5 D4b (fkm.6): READ-ONLY, UNFILTERED accessor over
+              compute_design_satisfied — deliberately NOT design-gate-
+              precheck, whose `no_design_attempted` leniency (mapped to
+              "ready", B5's own documented, correct choice for a pre-
+              delegation convenience) would be indistinguishable here from
+              a genuinely satisfied design: both read `ok:true` with no
+              way to tell them apart. A caller that needs the RAW verdict
+              (plan-batches: no design means no units to batch, which must
+              degrade, not silently pass) gets every one of
+              compute_design_satisfied's keys verbatim, including
+              `no_design_attempted`, plus the derived artifact_path
+              (design_artifact_path_for, always defined even when the file
+              itself does not exist yet). Exits 0 on a determined read:
+              `satisfied:true` with design_hash, or `satisfied:false` with
+              error_key naming why. Since xsu1 H2-F5 an UNREADABLE Beads
+              source is its own key (design_source_unreadable) with
+              ok:false and exit 2, no longer conflated with
+              no_design_attempted — "could not look" is not "looked, and
+              found no design".
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -6583,6 +6684,54 @@ cmd_grilling_record() {
         "comment posted at $ts: $comment_text"
 }
 
+# validate_design_envelope_ok <rc> <envelope> — did `review-check.sh
+# validate-design` SUCCEED, judged by its WHOLE contract? True iff the
+# validator exited 0 AND printed exactly the ok:true envelope, type-checked
+# field by field.
+#
+# (xsu1 R7-F4) The three consumers below (design-record, design-unit-bind,
+# design-conform step 3) all used to run the validator with `|| true` and
+# compare `jq -r '.ok // false'` textually — which trusted (a) a shape-valid
+# ok:true body from a validator that EXITED NONZERO (a command reporting its
+# own failure out-of-band; epic-gate.sh's R4-F2/R5-F1 consumer ladder names
+# why the parsed body cannot outrank the exit status), and (b) `"ok":"true"`
+# — a JSON STRING — because `jq -r` renders it identically to the boolean.
+# This helper is the ONE pattern for all three sites, mirroring epic-gate's
+# ladder: rc first, then exact types for every field a consumer reads
+# downstream (units number, unit_ids array, task_id string,
+# unit_files/unit_deps objects), with `.ok == true` type-strict in jq.
+#
+# A refusal envelope (ok:false + nonzero exit — the validator's NORMAL
+# refusal shape) returns 1 here and each site's own refusal arm still reads
+# error_key/observations out of the body for its message, exactly as
+# before: this gate only decides SUCCESS, it never rewrites failure text.
+validate_design_envelope_ok() {
+    local rc="$1" envelope="$2"
+# VALIDATE-DESIGN-CONSUMER-RC-GATE BEGIN (xsu1 R7-F4)
+    # A validator that prints ok:true and exits nonzero said it failed;
+    # believing the body over the status is the R7-F4 defect. Stripping
+    # this region resurrects exactly that (the L1 META in
+    # design-accessors.test.sh does, and watches a stub validator that
+    # exits 3 get its binding recorded anyway).
+    [ "$rc" -eq 0 ] || return 1
+# VALIDATE-DESIGN-CONSUMER-RC-GATE END (xsu1 R7-F4)
+    [ -n "$envelope" ] || return 1
+    printf '%s' "$envelope" | jq -e '
+        # validate-design consumer success-shape check (xsu1 R7-F4)
+        type == "object"
+        and (keys | sort) == ["error_key", "observations", "ok", "subcommand", "task_id", "unit_deps", "unit_files", "unit_ids", "units"]
+        and .ok == true  # type-strict: the STRING "true" must not pass (R7-F4)
+        and .subcommand == "validate-design"
+        and (.error_key | type) == "string"
+        and (.observations | type) == "string"
+        and (.units | type) == "number"
+        and (.unit_ids | type) == "array"
+        and (.task_id | type) == "string"
+        and (.unit_files | type) == "object"
+        and (.unit_deps | type) == "object"
+    ' >/dev/null 2>&1
+}
+
 cmd_design_record() {
     local tid="${1:-}"
     if [ -z "$tid" ]; then
@@ -6840,15 +6989,14 @@ cmd_design_record() {
             "qa-gate.sh design-record $tid --file $artifact"
         exit 2
     fi
-    local vout vok vkey vobs units
-    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null || true)
-    vok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
-    if [ "$vok" != "true" ]; then
+    local vout="" vout_rc=0 vkey vobs units
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null) || vout_rc=$?
+    if ! validate_design_envelope_ok "$vout_rc" "$vout"; then
         vkey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_design_artifact"' 2>/dev/null || echo "invalid_design_artifact")
         [ -z "$vkey" ] && vkey="invalid_design_artifact"
         vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null || echo "")
         emit_error_json "design-record" "$tid" "$vkey" \
-            "the design artifact failed validation via review-check.sh: $vkey${vobs:+ — $vobs}" \
+            "the design artifact failed validation via review-check.sh (validator exit rc=$vout_rc): $vkey${vobs:+ — $vobs}" \
             "see review-check.sh validate-design $artifact"
         exit 1
     fi
@@ -7094,23 +7242,39 @@ latest_design_artifact_hash() {
 # `DESIGN-ARTIFACT v1 ` record on the task, or empty. Byte-identical shape to
 # latest_design_artifact_hash above (same startswith() filter, same single
 # anchored capture — first and last cannot diverge because there is only one
-# regex), differing only in which named group it returns. Never fails the
-# caller: no bd, no task, unparseable JSON -> empty, rc 0.
+# regex), differing only in which named group it returns.
+#
+# FAILURE CHANNEL (xsu1 H2-F5): empty output + rc 0 means "the comment stream
+# was READ AND PARSED and carries no DESIGN-ARTIFACT record" — a determined
+# absence. rc 3 (no stdout) means the source could not be read at all: bd is
+# not on PATH, both `bd show` forms failed (task unreadable or nonexistent),
+# the returned JSON did not parse, or (xsu1 H2R2-F1) the response did not
+# PROVABLY carry the comment stream — design_comments_json owns that proof
+# rule. The two used to be conflated (rc 0,
+# empty, always), which let compute_design_satisfied report a broken bd as
+# `no_design_attempted` — and design-gate-precheck maps THAT key to "ready".
+# Callers that keep the old fail-open semantics do so explicitly at their own
+# call site (`|| designer_identity=""` — design-review-record's independence
+# check, where empty already REFUSES with design_artifact_record_missing, so
+# the conflation there is fail-closed either way).
 latest_design_artifact_designer() {
     local tid="$1"
-    [ -n "$tid" ] || return 0
-    command -v bd >/dev/null 2>&1 || return 0
-    bd_show_with_comments "$tid" \
+    local comments="" c_rc=0
+    comments=$(design_comments_json "$tid") || c_rc=$?
+    [ "$c_rc" -eq 0 ] || return 3
+    local out="" out_rc=0
+    out=$(printf '%s' "$comments" \
         | jq -r '
-            [ (if type == "array" then .[0].comments else .comments end) // []
-              | .[].text
+            [ .[].text
               | select(startswith("DESIGN-ARTIFACT v1 "))
               | ( [ capture("^DESIGN-ARTIFACT v1 task=[A-Za-z0-9._+-]+ designer=(?<d>[A-Za-z0-9._+-]+) design_hash=[A-Za-z0-9-]+ ") ]
                   | first | .d? // "" )
               | select(. != "")
             ]
             | last // ""
-        ' 2>/dev/null || true
+        ' 2>/dev/null) || out_rc=$?
+    [ "$out_rc" -eq 0 ] || return 3
+    printf '%s' "$out"
     return 0
 }
 
@@ -7120,21 +7284,61 @@ latest_design_artifact_designer() {
 # two callers below need (cmd_design_review_record's own amendment check, and
 # compute_design_satisfied's staleness ladder) — not five separate greps —
 # so no caller can read one field from a different underlying match than
-# another. Never fails the caller: no bd, no task, unparseable JSON -> `{}`,
-# rc 0.
+# another.
+#
+# FAILURE CHANNEL (xsu1 H2R2-F3): `{}` + rc 0 means the comment stream was
+# retrieved (design_comments_json's proof rule) and carries no matching
+# DESIGN-REVIEW record — a determined "never reviewed". rc 3 with NO stdout
+# means the answer is NOT determined: bd absent, both `bd show` forms failed,
+# the comment stream not provably retrieved, the selector's own jq failed, or
+# the selected record read back as neither `{}` nor a complete five-field
+# object in the writer's own classes (the union-shape check below — a
+# selective jq failure must not hand a consumer a partial record it then
+# splits into empty fields). The old contract ("never fails the caller:
+# ... -> `{}`, rc 0") let compute_design_satisfied report a failed read as
+# design_verdict_missing, and — worse — let cmd_design_review_record skip its
+# iteration-advance comparison over an erased prior_iter and write a
+# duplicate or non-advancing verdict. Both consumers now refuse on rc 3 at
+# their own call sites. A malformed COMMENT is still a determined answer (the
+# anchored capture drops it, exactly as before — design-review-record.test.sh
+# 7.3f depends on that); rc 3 is only for a read that did not happen.
 latest_design_review() {
     local tid="$1"
-    [ -n "$tid" ] || { printf '{}'; return 0; }
-    command -v bd >/dev/null 2>&1 || { printf '{}'; return 0; }
-    bd_show_with_comments "$tid" \
+    local comments="" c_rc=0
+    comments=$(design_comments_json "$tid") || c_rc=$?
+    [ "$c_rc" -eq 0 ] || return 3
+    local out="" out_rc=0
+    out=$(printf '%s' "$comments" \
         | jq -c '
-            [ (if type == "array" then .[0].comments else .comments end) // []
-              | .[].text
+            # latest-design-review record selector (xsu1 H2R2-F3)
+            [ .[].text
               | select(startswith("DESIGN-REVIEW v1 "))
               | capture("^DESIGN-REVIEW v1 task=[A-Za-z0-9._+-]+ reviewer=(?<reviewer>[A-Za-z0-9._+-]+) verdict=(?<verdict>[A-Za-z_]+) design_hash=(?<design_hash>[A-Za-z0-9-]+) iteration=(?<iteration>[0-9]+) rubric_version=(?<rubric_version>[A-Za-z0-9._+-]+) ")
             ]
             | last // {}
-        ' 2>/dev/null || printf '{}'
+        ' 2>/dev/null) || out_rc=$?
+    if [ "$out_rc" -ne 0 ] || [ -z "$out" ]; then
+        return 3
+    fi
+    # THE UNION-SHAPE CHECK: exactly `{}`, or exactly the five captured
+    # fields with writer-compatible classes. capture() already guarantees
+    # this for any well-formed stream, so a failure here can only be a jq
+    # malfunction mid-run — an UNREADABLE read, never a determined answer.
+    # iteration is a digit STRING (capture yields strings); both consumers
+    # already treat it as one.
+    printf '%s' "$out" | jq -e '
+        # latest-design-review union-shape check (xsu1 H2R2-F3)
+        if type != "object" then false
+        elif . == {} then true
+        else ( (keys | sort) == ["design_hash", "iteration", "reviewer", "rubric_version", "verdict"]
+               and (.reviewer       | type == "string" and test("^[A-Za-z0-9._+-]+$"))
+               and (.verdict        | type == "string" and test("^[A-Za-z_]+$"))
+               and (.design_hash    | type == "string" and test("^[A-Za-z0-9-]+$"))
+               and (.iteration      | type == "string" and test("^[0-9]+$"))
+               and (.rubric_version | type == "string" and test("^[A-Za-z0-9._+-]+$")) )
+        end
+    ' >/dev/null 2>&1 || return 3
+    printf '%s' "$out"
     return 0
 }
 
@@ -7171,6 +7375,26 @@ latest_design_review() {
 #   design_verdict_stale       the artifact's LIVE hash differs from the
 #                              satisfied verdict's design_hash — the design
 #                              moved after the review that approved it.
+#   design_source_unreadable   (xsu1 H2-F5) the Beads comment stream for
+#                              this task could not be read AT ALL right now
+#                              (bd absent, both `bd show` forms failed,
+#                              unparseable JSON, or — H2R2-F1 — a response
+#                              that did not provably carry the comment
+#                              stream), so whether a design was ever
+#                              attempted is UNKNOWN, not "no". Since
+#                              H2R2-F3 the same key also covers the
+#                              DESIGN-REVIEW history read failing after a
+#                              successful designer read (the second guard
+#                              inside compute_design_satisfied) — a failed
+#                              verdict read is not design_verdict_missing.
+#                              Every
+#                              caller stays fail-closed on this key exactly
+#                              as on the others (approve refuses, precheck's
+#                              no_design_attempted leniency does NOT apply,
+#                              design-conform propagates it verbatim), and
+#                              design-status additionally maps it to
+#                              ok:false + exit 2 so a consumer can tell an
+#                              unreadable source from a determined answer.
 compute_design_satisfied() {
     local tid="$1"
     DESIGN_SATISFIED="false"
@@ -7178,16 +7402,45 @@ compute_design_satisfied() {
     DESIGN_SATISFIED_OBS=""
     DESIGN_VERDICT_HASH=""
 
-    local designer_identity
-    designer_identity=$(latest_design_artifact_designer "$tid") || designer_identity=""
+    local designer_identity="" designer_rc=0
+    designer_identity=$(latest_design_artifact_designer "$tid") || designer_rc=$?
+    # DESIGN-SOURCE-UNREADABLE GUARD BEGIN (xsu1 H2-F5)
+    # Without this arm, a bd that cannot be read collapses into the empty
+    # string below and reports `no_design_attempted` — ordinary absence —
+    # which design-gate-precheck then maps to "ready". The L1 META
+    # (design-accessors.test.sh) strips this region and watches exactly that
+    # masquerade come back. Do not rename the sentinels.
+    if [ "$designer_rc" -ne 0 ]; then
+        DESIGN_SATISFIED_KEY="design_source_unreadable"
+        DESIGN_SATISFIED_OBS="the Beads comment stream for $tid could not be read right now (bd unavailable, task unreadable, or unparseable comments), so whether a design was ever recorded is unknown; refusing to report this as ordinary no-design absence"
+        return 0
+    fi
+    # DESIGN-SOURCE-UNREADABLE GUARD END (xsu1 H2-F5)
     if [ -z "$designer_identity" ]; then
         DESIGN_SATISFIED_KEY="no_design_attempted"
         DESIGN_SATISFIED_OBS="no DESIGN-ARTIFACT record exists for $tid; no design has been recorded for this task"
         return 0
     fi
 
-    local review_json reviewer verdict design_hash
-    review_json=$(latest_design_review "$tid") || review_json="{}"
+    local review_json="" review_rc=0 reviewer verdict design_hash
+    review_json=$(latest_design_review "$tid") || review_rc=$?
+    # DESIGN-REVIEW-SOURCE-UNREADABLE GUARD BEGIN (xsu1 H2R2-F3)
+    # The designer read above succeeded, so a failure HERE is a second,
+    # independent read failing (bd dying between the two calls, or a fault
+    # confined to this reader's own jq). Without this arm the old
+    # `|| review_json="{}"` fell through to reviewer="" and reported
+    # design_verdict_missing — a DETERMINED verdict-absence claim about a
+    # history that was never actually read. Same key as the designer arm
+    # (both mean "the Beads comment stream could not be read right now"),
+    # distinct observation so an operator can see WHICH read failed. The L1
+    # META (design-accessors.test.sh) strips this region and watches exactly
+    # that masquerade come back. Do not rename the sentinels.
+    if [ "$review_rc" -ne 0 ]; then
+        DESIGN_SATISFIED_KEY="design_source_unreadable"
+        DESIGN_SATISFIED_OBS="the DESIGN-REVIEW history for $tid could not be read right now (the DESIGN-ARTIFACT read succeeded but the verdict read did not: bd became unreachable, the comment stream was not retrievable, or the latest record read back malformed), so whether a satisfied verdict exists is unknown; refusing to report this as design_verdict_missing"
+        return 0
+    fi
+    # DESIGN-REVIEW-SOURCE-UNREADABLE GUARD END (xsu1 H2R2-F3)
     reviewer=$(printf '%s' "$review_json" | jq -r '.reviewer // ""' 2>/dev/null || echo "")
     verdict=$(printf '%s' "$review_json" | jq -r '.verdict // ""' 2>/dev/null || echo "")
     design_hash=$(printf '%s' "$review_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
@@ -7472,8 +7725,24 @@ cmd_design_review_record() {
     # THE AMENDMENT / DUPLICATE-ITERATION CHECK (B2 / P6). Read the LATEST
     # DESIGN-REVIEW record (if any) through the ONE reader above, never a
     # second parser.
-    local prior_json prior_iter prior_hash amends_field=""
-    prior_json=$(latest_design_review "$tid") || prior_json="{}"
+    local prior_json="" prior_rc=0 prior_iter prior_hash amends_field=""
+    prior_json=$(latest_design_review "$tid") || prior_rc=$?
+# DESIGN-REVIEW-HISTORY-GUARD BEGIN (xsu1 H2R2-F3)
+    # An UNREADABLE history is not an EMPTY history. The old
+    # `|| prior_json="{}"` erased prior_iter on a failed read, which skipped
+    # the iteration-advance comparison entirely and let a duplicate or
+    # non-advancing DESIGN-REVIEW record be written — the exact misbehaviour
+    # the B2/P6 check exists to refuse — and also erased prior_hash, so a
+    # genuine amendment lost its [amends: <hash>] audit suffix. Refused HERE,
+    # before anything is written. Exit 2 = infrastructure, matching
+    # require_bd's own convention for "the store cannot be consulted".
+    if [ "$prior_rc" -ne 0 ]; then
+        emit_error_json "design-review-record" "$tid" "design_review_history_unreadable" \
+            "the existing DESIGN-REVIEW history for $tid could not be read right now (bd unreachable, the comment stream not retrievable, or the latest record read back malformed), so the iteration-advance and amendment checks cannot run. A verdict written over an unread history could silently duplicate or fail to advance an existing iteration — refusing before anything is written" \
+            "re-run once bd is reachable: qa-gate.sh design-review-record $tid --design-hash <sha256> --file <verdict>"
+        exit 2
+    fi
+# DESIGN-REVIEW-HISTORY-GUARD END (xsu1 H2R2-F3)
     prior_iter=$(printf '%s' "$prior_json" | jq -r '.iteration // ""' 2>/dev/null || echo "")
     prior_hash=$(printf '%s' "$prior_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
     if [ -n "$prior_iter" ]; then
@@ -7821,15 +8090,14 @@ cmd_design_unit_bind() {
             "qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
         exit 2
     fi
-    local vout vok vkey vobs
-    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null || true)
-    vok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
-    if [ "$vok" != "true" ]; then
+    local vout="" vout_rc=0 vkey vobs
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null) || vout_rc=$?
+    if ! validate_design_envelope_ok "$vout_rc" "$vout"; then
         vkey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_design_artifact"' 2>/dev/null || echo "invalid_design_artifact")
         [ -z "$vkey" ] && vkey="invalid_design_artifact"
         vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null || echo "")
         emit_error_json "design-unit-bind" "$tid" "$vkey" \
-            "the design artifact governing $design_task failed validation: $vkey${vobs:+ — $vobs}" \
+            "the design artifact governing $design_task failed validation (validator exit rc=$vout_rc): $vkey${vobs:+ — $vobs}" \
             "see review-check.sh validate-design $artifact"
         exit 1
     fi
@@ -7959,8 +8227,46 @@ cmd_design_unit_bind() {
         # with no envelope at all, the exact failure mode R1-F1 named next
         # door. Do not "simplify" this back to a two-line form.
         (
-            flock -x 9
-            _rb_existing=$(latest_design_unit_binding "$tid") || _rb_existing="{}"
+            _rb_lock_rc=0
+            flock -x 9 || _rb_lock_rc=$?
+# REBIND-LOCK-GUARD BEGIN (xsu1 R7-F6)
+            # A failed flock must NOT fall through into the critical
+            # section. Errexit is DISABLED inside this subshell — the whole
+            # `( ... )` is the left side of `|| rebind_rc=$?`, and bash
+            # ignores set -e in any context whose result is tested
+            # (`set -e; ( false; echo continued ) || rc=$?` prints
+            # "continued" and ends rc 0) — so a bare `flock -x 9` failure
+            # used to continue through the read and add_comment WITHOUT the
+            # lock: the exact race this section exists to close, run
+            # silently unlocked. Refused as infrastructure instead; nothing
+            # has been read or written yet. The || capture above makes the
+            # already-disarmed errexit explicit rather than accidental.
+            if [ "$_rb_lock_rc" -ne 0 ]; then
+                emit_error_json "design-unit-bind" "$tid" "design_binding_lock_unavailable" \
+                    "flock -x failed (rc=$_rb_lock_rc) on $rebind_lock, so the existing-binding check cannot run under the lock that makes check-then-write atomic. Proceeding unlocked would reopen the concurrent-rebind race — refusing before anything is read or written" \
+                    "re-run: qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
+                exit 2
+            fi
+# REBIND-LOCK-GUARD END (xsu1 R7-F6)
+            _rb_rc=0
+            _rb_existing=$(latest_design_unit_binding "$tid") || _rb_rc=$?
+# REBIND-READ-GUARD-FLOCKED BEGIN (xsu1 H2R2-F2)
+            # rc 3 here means the existing-binding read FAILED — not that no
+            # binding exists. The old `|| _rb_existing="{}"` converted that
+            # failure into "no existing binding" BEFORE add_comment ran, so
+            # a transient outage permitted an unaudited repeat binding
+            # without --rebind; if the write and confirmation then
+            # succeeded, the earlier authoritative binding was silently
+            # superseded and the command still reported "recorded". Refused
+            # before the write. Exit 2 = infrastructure, re-raised by the
+            # parent's rebind_rc check below.
+            if [ "$_rb_rc" -ne 0 ]; then
+                emit_error_json "design-unit-bind" "$tid" "design_binding_unreadable" \
+                    "the existing-binding read for $tid failed before the write (bd unreachable, the comment stream not retrievable, or unparseable), so whether $tid is already bound is unknown. Proceeding could silently supersede an authoritative binding without --rebind — refusing before anything is written" \
+                    "re-run once bd is reachable: qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
+                exit 2
+            fi
+# REBIND-READ-GUARD-FLOCKED END (xsu1 H2R2-F2)
             _rb_eu=$(printf '%s' "$_rb_existing" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
             _rb_et=$(printf '%s' "$_rb_existing" | jq -r '.design_task // ""' 2>/dev/null || echo "")
 # REBIND-GATE-FLOCKED BEGIN (fkm.6)
@@ -7982,8 +8288,19 @@ cmd_design_unit_bind() {
         # unit-bind on the SAME task id here. What remains guaranteed:
         # sequential correctness — the property design-conform.test.sh
         # Sections 3 and 9.2 actually exercise.
-        local existing existing_unit existing_task
-        existing=$(latest_design_unit_binding "$tid") || existing="{}"
+        local existing="" existing_rc=0 existing_unit existing_task
+        existing=$(latest_design_unit_binding "$tid") || existing_rc=$?
+# REBIND-READ-GUARD BEGIN (xsu1 H2R2-F2)
+        # Same guard as REBIND-READ-GUARD-FLOCKED above, same reason: a
+        # failed read is not "no existing binding". Sequential-only on this
+        # host (no flock), but the fail-open conversion was identical.
+        if [ "$existing_rc" -ne 0 ]; then
+            emit_error_json "design-unit-bind" "$tid" "design_binding_unreadable" \
+                "the existing-binding read for $tid failed before the write (bd unreachable, the comment stream not retrievable, or unparseable), so whether $tid is already bound is unknown. Proceeding could silently supersede an authoritative binding without --rebind — refusing before anything is written" \
+                "re-run once bd is reachable: qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id"
+            exit 2
+        fi
+# REBIND-READ-GUARD END (xsu1 H2R2-F2)
         existing_unit=$(printf '%s' "$existing" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
         existing_task=$(printf '%s' "$existing" | jq -r '.design_task // ""' 2>/dev/null || echo "")
 # REBIND-GATE BEGIN (fkm.6)
@@ -8013,9 +8330,21 @@ cmd_design_unit_bind() {
     # show what was just written as the latest record. This proves the
     # write actually landed rather than trusting add_comment's exit status,
     # which proves nothing.
-    local confirm_json confirm_unit confirm_hash retry_rebind_hint=""
+    local confirm_json="" confirm_rc=0 confirm_unit confirm_hash retry_rebind_hint=""
     [ "$rebind" = "1" ] && retry_rebind_hint=" --rebind '<reason>'"
-    confirm_json=$(latest_design_unit_binding "$tid") || confirm_json="{}"
+    confirm_json=$(latest_design_unit_binding "$tid") || confirm_rc=$?
+    # (xsu1 H2R2-F2) A FAILED confirmation read is reported as exactly that —
+    # never converted to {} and then described as "found unit_id=<none>
+    # instead", which is a determined claim about a stream that was never
+    # read. The write above may or may not have landed. Exit 5, same class as
+    # the unconfirmed-write refusal below, because the caller's remedy is
+    # identical: check the store, then design-unit-show $tid.
+    if [ "$confirm_rc" -ne 0 ]; then
+        emit_error_json "design-unit-bind" "$tid" "design_binding_confirm_unreadable" \
+            "the write was submitted but the confirmation re-read of $tid's own comment stream failed (bd unreachable, the stream not retrievable, or unparseable) — whether the binding landed is unknown, and no claim is made about which record is latest. Once bd is reachable, verify with: qa-gate.sh design-unit-show $tid; re-run if absent: qa-gate.sh design-unit-bind $tid --design-task $design_task --unit-id $unit_id$retry_rebind_hint" \
+            "qa-gate.sh design-unit-show $tid"
+        exit 5
+    fi
     confirm_unit=$(printf '%s' "$confirm_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
     confirm_hash=$(printf '%s' "$confirm_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
 # WRITE-CONFIRMATION-GATE BEGIN (fkm.6, R2-F3)
@@ -8053,8 +8382,22 @@ cmd_design_unit_bind() {
 # additionally requires the literal ` at ` boundary immediately after the
 # hash — the writer's own next token is always `at <ts>: <summary>` — so
 # `design_hash=<h> anything-that-is-not-at` is refused rather than silently
-# matched on a bare trailing space. Never fails the caller: no bd, no task,
-# unparseable JSON -> {}, rc 0.
+# matched on a bare trailing space.
+#
+# FAILURE CHANNEL (xsu1 H2-F2): `{}` + rc 0 now means exactly one thing — the
+# comment stream was RETRIEVED (design_comments_json's proof rule, xsu1
+# H2R2-F1) and carries no matching DESIGN-UNIT record (a determined "never
+# bound"). rc 3 with NO stdout means the source could not be read: bd absent,
+# both `bd show` forms failed (task unreadable or nonexistent), unparseable
+# JSON, or a response that did not provably carry the comment stream. The old
+# contract ("never fails the caller: no bd, no task, unparseable JSON -> {},
+# rc 0") conflated the two, which made design-unit-show report an unreadable
+# source as the legitimate determined result bound:false. As of H2R2-F2 there
+# are NO fail-open call sites left: design-unit-bind's two pre-write checks
+# and its post-write confirmation, design-conform's resolution step, and
+# design-unit-show all capture rc 3 and refuse with their own named key
+# (design_binding_unreadable / design_binding_confirm_unreadable) instead of
+# reading the failure as an absent binding.
 #
 # R2-F1 (review round 2): R1-F4 tightened hash width/class and the ` at `
 # boundary, but two gaps remained. FIRST, `task=` was matched but never
@@ -8081,19 +8424,24 @@ cmd_design_unit_bind() {
 # exposed, so this function's return CONTRACT is unchanged.
 latest_design_unit_binding() {
     local tid="$1"
-    [ -n "$tid" ] || { printf '{}'; return 0; }
-    command -v bd >/dev/null 2>&1 || { printf '{}'; return 0; }
-    bd_show_with_comments "$tid" \
+    local comments="" c_rc=0
+    comments=$(design_comments_json "$tid") || c_rc=$?
+    [ "$c_rc" -eq 0 ] || return 3
+    local out="" out_rc=0
+    out=$(printf '%s' "$comments" \
         | jq -c --arg tid "$tid" '
-            [ (if type == "array" then .[0].comments else .comments end) // []
-              | .[].text
+            [ .[].text
               | select(startswith("DESIGN-UNIT v1 "))
               | capture("^DESIGN-UNIT v1 task=(?<task>[A-Za-z0-9._+-]+) design_task=(?<design_task>[A-Za-z0-9._+-]+) unit_id=(?<unit_id>[A-Za-z0-9._-]+) design_hash=(?<design_hash>[0-9a-fA-F]{64}) at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: ")
               | select(.task == $tid)
               | {design_task, unit_id, design_hash}
             ]
             | last // {}
-        ' 2>/dev/null || printf '{}'
+        ' 2>/dev/null) || out_rc=$?
+    if [ "$out_rc" -ne 0 ] || [ -z "$out" ]; then
+        return 3
+    fi
+    printf '%s' "$out"
     return 0
 }
 # DESIGN-UNIT END (fkm.6)
@@ -8122,7 +8470,11 @@ latest_design_unit_binding() {
 #      `unit_not_in_design` key step 2 below also uses — from the caller's
 #      side, "never bound" and "bound to a unit that no longer exists" are
 #      the same actionable fact: this task is not currently mapped into any
-#      unit design-conform can check.
+#      unit design-conform can check. UNREADABLE (reader rc 3) is a
+#      DIFFERENT fact with a different key (xsu1 H2R2-F2):
+#      `design_binding_unreadable`, exit 2 — the source was never read, so
+#      neither "bind it first" nor any conformance verdict can honestly be
+#      offered.
 #   2. compute_design_satisfied on the RESOLVED design_task. This IS the
 #      "recompute the live hash; a mismatch is design_hash_stale" step —
 #      not reimplemented here, because compute_design_satisfied's own
@@ -8168,7 +8520,8 @@ latest_design_unit_binding() {
 # as "conforms" — the ONE thing this subcommand's own spec forbids.
 #
 # EXIT CODES: 1 usage/argument error; 2 infrastructure unavailable (bd, jq,
-# the validator, the hash tool, impact-report.sh itself); 4 a substantive
+# the validator, the hash tool, impact-report.sh itself, or — xsu1 H2R2-F2 —
+# a binding source that could not be read at all); 4 a substantive
 # gate failure (no/unmatched binding, an unsatisfied or stale governing
 # design, or undeclared_files itself) — matching design-gate-precheck's own
 # use of 4 for "not ready", the closest existing precedent for this family.
@@ -8234,8 +8587,21 @@ cmd_design_conform() {
     require_bd "design-conform" "$tid"
 
     # --- 1: resolve the binding ---------------------------------------------
-    local binding_json design_task unit_id
-    binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"
+    local binding_json="" binding_rc=0 design_task unit_id
+    binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?
+    # (xsu1 H2R2-F2) An UNREADABLE binding source is not "never bound". The
+    # old `|| binding_json="{}"` rewrote a failed read as unit_not_in_design
+    # — a determined claim whose remedy ("bind it first") is wrong when the
+    # source was simply not readable. The rc-capture line above is spelled
+    # BYTE-IDENTICALLY to design-unit-show's own so design-accessors.test.sh
+    # Section 3's mutant restores the historical fail-open shape at both
+    # call sites in one substitution.
+    if [ "$binding_rc" -ne 0 ]; then
+        emit_design_conform "false" "design_binding_unreadable" \
+            "the DESIGN-UNIT binding source for $tid could not be read (both bd show forms failed, the comment stream was not retrievable, or it did not parse); whether a binding exists is unknown — refusing rather than rewriting an unread source as unit_not_in_design" \
+            "[]" "[]" "" "" "$tid"
+        exit 2
+    fi
     design_task=$(printf '%s' "$binding_json" | jq -r '.design_task // ""' 2>/dev/null || echo "")
     unit_id=$(printf '%s' "$binding_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
     if [ -z "$design_task" ] || [ -z "$unit_id" ]; then
@@ -8262,7 +8628,7 @@ cmd_design_conform() {
     local expected_design_hash="$DESIGN_VERDICT_HASH"
 
     # --- 3: the bound unit_id must still be declared in the CURRENT artifact
-    local artifact vout vok vkey vobs unit_files declared_json
+    local artifact vout vout_rc=0 vkey vobs unit_files declared_json
     artifact=$(design_artifact_path_for "$design_task")
     if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
         emit_design_conform "false" "validator_unavailable" \
@@ -8270,14 +8636,13 @@ cmd_design_conform() {
             "[]" "[]" "$unit_id" "$design_task" "$tid"
         exit 2
     fi
-    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null || true)
-    vok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
-    if [ "$vok" != "true" ]; then
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null) || vout_rc=$?
+    if ! validate_design_envelope_ok "$vout_rc" "$vout"; then
         vkey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_design_artifact"' 2>/dev/null || echo "invalid_design_artifact")
         [ -z "$vkey" ] && vkey="invalid_design_artifact"
         vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null || echo "")
         emit_design_conform "false" "$vkey" \
-            "design-conform could not re-validate the artifact governing $design_task: $vkey${vobs:+ — $vobs}" \
+            "design-conform could not re-validate the artifact governing $design_task (validator exit rc=$vout_rc): $vkey${vobs:+ — $vobs}" \
             "[]" "[]" "$unit_id" "$design_task" "$tid"
         exit 4
     fi
@@ -8444,6 +8809,327 @@ cmd_design_conform() {
     emit_design_conform "true" "" "$obs" "[]" "$unbuilt_json" "$unit_id" "$design_task" "$tid"
 }
 # DESIGN-CONFORM END (fkm.6)
+
+# ---------------------------------------------------------------------------
+# DESIGN-UNIT-SHOW / DESIGN-STATUS BEGIN (v5 D4b, fkm.6)
+#
+# Two thin, read-only accessors built for exactly one caller:
+# epic-gate.sh plan-batches, which runs as a SEPARATE PROCESS and therefore
+# cannot call latest_design_unit_binding / compute_design_satisfied
+# directly. Both predicates are ALREADY the one authoritative implementation
+# of their question (review-check.sh's own header states the doctrine:
+# extracting data with a second parser "is the thing this script exists to
+# prevent"; qa-gate.sh:8142-8144 restates it for DESIGN-UNITS specifically).
+# These two functions add ZERO new logic — they format an EXISTING global-
+# setting function's result as a JSON envelope and nothing else. Neither
+# writes anything (no add_comment, no lock, no record).
+#
+# WHY TWO, NOT ONE. design-unit-show answers "what unit is <tid> bound to"
+# (a fact about an IMPLEMENTING task). design-status answers "is <tid>'s
+# OWN design satisfied" (a fact about a DESIGN-OWNING task — typically an
+# epic). plan-batches needs BOTH, about DIFFERENT tasks (each child, and the
+# epic itself) — folding them into one accessor would conflate two
+# questions that happen to share a return-JSON-about-a-task shape but not a
+# subject.
+#
+# WHY NOT design-gate-precheck FOR THE SECOND ONE. design-gate-precheck
+# (B5, v5 D2) is a correct, DELIBERATE UI simplification for its own one
+# caller: it maps `no_design_attempted` to "ready" because the overwhelming
+# majority of tasks never have a design phase, and firing on all of them
+# "trains an operator to ignore its output" (qa-gate.sh:7527-7534). That
+# same leniency, reused here, would make plan-batches indistinguishable
+# between "this epic's design is satisfied — compute real batches" and
+# "this epic never had a design — there is nothing to batch" — both would
+# read ok:true/status:"ready" with no way to tell them apart. Guard
+# condition 4 (docs/plans/v5-design-phase.md:158-159, the D4b delegation
+# brief) is explicit that BOTH must degrade, just with a different tone in
+# the prose (quiet for "never started", loud for "started but not
+# reviewed") — a distinction design-gate-precheck's own envelope cannot
+# carry. So this is a SEPARATE, UNFILTERED reader of the SAME predicate,
+# not a second implementation of it and not a reuse of the filtered one.
+
+# print_envelope_checked <subcommand> <envelope-json> <build-rc>
+# (xsu1 H2-F4) The accessors below build every envelope that carries
+# caller-derived data with ONE guarded `jq -nc` assignment at the call site
+# (`envelope=$(jq -nc ...) || env_rc=$?`) — never with jq substitutions
+# inlined into printf arguments, because under `set -e` a failed inner
+# substitution does NOT abort when the outer printf succeeds
+# (`printf '{"x":%s}\n' "$(false)"` prints `{"x":}` and continues, rc 0 —
+# reproduced before this fix). This helper is the second half of that
+# discipline: it checks the build rc, non-emptiness AND (R7-F5) the exact
+# per-subcommand envelope SHAPE — parseability alone accepts [] / {} / a
+# wrong object, because `jq -n -e '[]'` is rc 0 — prints
+# the envelope on success, and on ANY failure prints a CALLER-DATA-FREE
+# literal error envelope instead — <subcommand> is a fixed literal at every
+# call site, never caller input — and returns 1 so the caller exits nonzero
+# rather than reporting malformed output with a success status. The literal
+# carries the full accessor field set (bound/satisfied and their siblings
+# are deliberately ABSENT here: a consumer must not read a determined answer
+# out of a construction failure; epic-gate.sh's well-formedness checks
+# require those keys via has(), so their absence degrades the consumer
+# loudly, which is the point).
+print_envelope_checked() {
+    local sub="$1" envelope="$2" build_rc="$3"
+    # (xsu1 R7-F5) The expected shape is selected per subcommand; an
+    # UNREGISTERED subcommand gets jq `false` (always the literal fallback),
+    # so a future accessor cannot inherit the weaker check by forgetting to
+    # add its shape here. Stripping the sentinel region leaves the
+    # historical parseability-only `.` — the L1 META does exactly that and
+    # watches a parseable-but-wrong build ([] at rc 0) print under a
+    # success status.
+    local shape_prog='.'
+# ENVELOPE-SHAPE-GATE BEGIN (xsu1 R7-F5)
+    case "$sub" in
+        design-unit-show)
+            shape_prog='
+                # design-unit-show envelope shape (xsu1 R7-F5)
+                type == "object"
+                and (keys | sort) == ["bound", "design_hash", "design_task", "error_key", "observations", "ok", "subcommand", "task_id", "unit_id"]
+                and (.ok | type) == "boolean"
+                and .subcommand == "design-unit-show"
+                and (.task_id | type) == "string"
+                and (.error_key | type) == "string"
+                and (.bound | type) == "boolean"
+                and (.design_task | type) == "string"
+                and (.unit_id | type) == "string"
+                and (.design_hash | type) == "string"
+                and (.observations | type) == "string"
+            ' ;;
+        design-status)
+            shape_prog='
+                # design-status envelope shape (xsu1 R7-F5)
+                type == "object"
+                and (keys | sort) == ["artifact_path", "design_hash", "error_key", "observations", "ok", "satisfied", "subcommand", "task_id"]
+                and (.ok | type) == "boolean"
+                and .subcommand == "design-status"
+                and (.task_id | type) == "string"
+                and (.satisfied | type) == "boolean"
+                and (.error_key | type) == "string"
+                and (.observations | type) == "string"
+                and (.design_hash | type) == "string"
+                and (.artifact_path | type) == "string"
+            ' ;;
+        *) shape_prog='false' ;;
+    esac
+# ENVELOPE-SHAPE-GATE END (xsu1 R7-F5)
+    if [ "$build_rc" -eq 0 ] && [ -n "$envelope" ] \
+       && printf '%s' "$envelope" | jq -e "$shape_prog" >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"%s","task_id":null,"error_key":"envelope_construction_failed","observations":"the response envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message"}\n' "$sub"
+    return 1
+}
+
+# design-unit-show <task-id>
+# Envelope: {ok, subcommand, task_id, error_key, bound, design_task,
+#            unit_id, design_hash, observations}. `bound` is the
+# caller-facing signal; design_task/unit_id/design_hash are "" (not null —
+# matching this file's OWN convention for an absent string field, e.g.
+# emit_design_conform's unit_id/design_task on every error path) when
+# bound=false, and error_key is "" on every ok:true envelope (the same
+# convention design-status has always used).
+# Exit 0 ONLY for a DETERMINED answer — bound:true with the full validated
+# triple, or bound:false read from a successfully-parsed comment stream.
+# Exit 1 usage. Exit 2 infra: jq/bd unavailable, AND (xsu1 H2-F2/F3/F4)
+#   design_binding_unreadable    the binding source could not be read (both
+#                                `bd show` forms failed, unparseable comment
+#                                JSON, or — xsu1 H2R2-F1 — a response that
+#                                did not provably carry the comment stream)
+#                                — previously misreported as
+#                                the determined answer bound:false;
+#   design_binding_malformed     the reader returned something that is
+#                                neither {} nor a complete, valid
+#                                {design_task, unit_id, design_hash} triple
+#                                (64-hex hash, non-empty class-checked ids)
+#                                — refused rather than emitted partially;
+#   envelope_construction_failed the final JSON encode itself failed (see
+#                                print_envelope_checked above).
+cmd_design_unit_show() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-unit-show","task_id":null,"error_key":"jq_unavailable","observations":"jq is required to read the DESIGN-UNIT binding and is not on PATH","bound":false,"design_task":"","unit_id":"","design_hash":""}\n'
+        exit 2
+    fi
+
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-unit-show" "" "missing_task_id" \
+            "design-unit-show requires <task-id> as first positional argument" \
+            "qa-gate.sh design-unit-show <task-id>"
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_error_json "design-unit-show" "$tid" "unknown_flag" \
+            "unknown argument '$1'; design-unit-show takes only <task-id>" \
+            "qa-gate.sh design-unit-show <task-id>"
+        exit 1
+    fi
+
+    require_bd "design-unit-show" "$tid"
+
+    local envelope="" env_rc=0
+    local binding_json="" binding_rc=0
+    binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?
+    if [ "$binding_rc" -ne 0 ]; then
+        # (xsu1 H2-F2) The source could not be read — this is NOT the
+        # determined answer bound:false, and is no longer reported as one.
+        envelope=$(jq -nc --arg tid "$tid" '
+            # design-unit-show refusal envelope (xsu1 H2-F2/F3)
+            {ok: false, subcommand: "design-unit-show", task_id: $tid,
+             error_key: "design_binding_unreadable",
+             bound: false, design_task: "", unit_id: "", design_hash: "",
+             observations: "the DESIGN-UNIT binding source for \($tid) could not be read (both bd show forms failed, or the comment stream did not parse); whether a binding exists is unknown, which is not the same answer as bound:false"}
+        ' 2>/dev/null) || env_rc=$?
+        print_envelope_checked "design-unit-show" "$envelope" "$env_rc" || true
+        exit 2
+    fi
+
+    # (xsu1 H2-F3) ONE validation of the whole union shape — either {} for a
+    # confirmed absence, or a complete triple whose fields all satisfy the
+    # writer's own classes — instead of three independent extractions of
+    # which only unit_id was ever tested (a selective jq failure could emit
+    # bound:true with required fields empty).
+    local bshape="" bshape_rc=0
+    bshape=$(printf '%s' "$binding_json" | jq -er '
+        # design-unit-show binding-shape classifier (xsu1 H2-F3)
+        if type != "object" then "malformed"
+        elif . == {} then "absent"
+        elif ( (keys | sort) == ["design_hash", "design_task", "unit_id"]
+               and (.design_task | type == "string" and test("^[A-Za-z0-9._+-]+$"))
+               and (.unit_id     | type == "string" and test("^[A-Za-z0-9._-]+$"))
+               and (.design_hash | type == "string" and test("^[0-9a-fA-F]{64}$")) )
+          then "bound"
+        else "malformed" end
+    ' 2>/dev/null) || bshape_rc=$?
+
+    if [ "$bshape_rc" -ne 0 ] || { [ "$bshape" != "absent" ] && [ "$bshape" != "bound" ]; }; then
+        envelope=$(jq -nc --arg tid "$tid" '
+            # design-unit-show refusal envelope (xsu1 H2-F2/F3)
+            {ok: false, subcommand: "design-unit-show", task_id: $tid,
+             error_key: "design_binding_malformed",
+             bound: false, design_task: "", unit_id: "", design_hash: "",
+             observations: "the DESIGN-UNIT binding read for \($tid) produced neither a confirmed absence ({}) nor a complete valid {design_task, unit_id, design_hash} triple; refusing to report a partial or malformed binding as a determined answer"}
+        ' 2>/dev/null) || env_rc=$?
+        print_envelope_checked "design-unit-show" "$envelope" "$env_rc" || true
+        exit 2
+    fi
+
+    local bound_bool="false" design_task="" unit_id="" design_hash="" obs=""
+    if [ "$bshape" = "bound" ]; then
+        # The triple was validated as a whole above; these splits re-read the
+        # validated object, and any failure here (jq breaking mid-run) is
+        # refused rather than emitted as bound:true with empty fields.
+        local trip_rc=0
+        design_task=$(printf '%s' "$binding_json" | jq -re '.design_task' 2>/dev/null) || trip_rc=$?
+        unit_id=$(printf '%s' "$binding_json" | jq -re '.unit_id' 2>/dev/null) || trip_rc=$?
+        design_hash=$(printf '%s' "$binding_json" | jq -re '.design_hash' 2>/dev/null) || trip_rc=$?
+        if [ "$trip_rc" -ne 0 ] || [ -z "$design_task" ] || [ -z "$unit_id" ] || [ -z "$design_hash" ]; then
+            envelope=$(jq -nc --arg tid "$tid" '
+                # design-unit-show refusal envelope (xsu1 H2-F2/F3)
+                {ok: false, subcommand: "design-unit-show", task_id: $tid,
+                 error_key: "design_binding_malformed",
+                 bound: false, design_task: "", unit_id: "", design_hash: "",
+                 observations: "the validated DESIGN-UNIT binding for \($tid) could not be split into its three fields (jq failed mid-run); refusing to report bound:true with required fields missing"}
+            ' 2>/dev/null) || env_rc=$?
+            print_envelope_checked "design-unit-show" "$envelope" "$env_rc" || true
+            exit 2
+        fi
+        bound_bool="true"
+        obs="$tid bound to unit_id=$unit_id under design_task=$design_task"
+    else
+        obs="no DESIGN-UNIT v1 binding record exists for $tid (the comment stream was read and parsed — this is a determined absence, distinguishable since xsu1 H2-F2 from an unreadable source, which reports ok:false/design_binding_unreadable instead)"
+    fi
+
+    envelope=$(jq -nc --arg tid "$tid" --argjson bound "$bound_bool" \
+        --arg dt "$design_task" --arg uid "$unit_id" --arg dh "$design_hash" \
+        --arg obs "$obs" '
+        # design-unit-show success envelope (xsu1 H2-F4)
+        {ok: true, subcommand: "design-unit-show", task_id: $tid,
+         error_key: "", bound: $bound, design_task: $dt, unit_id: $uid,
+         design_hash: $dh, observations: $obs}
+    ' 2>/dev/null) || env_rc=$?
+    print_envelope_checked "design-unit-show" "$envelope" "$env_rc" || exit 2
+    return 0
+}
+
+# design-status <task-id>
+# Envelope: {ok, subcommand, task_id, satisfied, error_key, observations,
+#            design_hash, artifact_path}. error_key is "" when
+#            satisfied=true, else compute_design_satisfied's OWN key
+#            VERBATIM (including no_design_attempted — no leniency).
+#            design_hash is "" unless satisfied=true. artifact_path is
+#            ALWAYS populated (design_artifact_path_for is a pure string
+#            derivation with no filesystem access, defined even when the
+#            file does not exist). Exit 0 for EITHER determined answer.
+#            Exit 1 usage, exit 2 infra (jq/bd unavailable) — and, since
+#            xsu1 H2-F5, exit 2 with ok:false (satisfied:false RETAINED,
+#            error_key=design_source_unreadable verbatim) when the Beads
+#            comment stream could not be read at all: an unreadable source
+#            used to be indistinguishable from a task that genuinely has no
+#            design (both read ok:true/no_design_attempted), which violates
+#            "a failed computation degrades loudly rather than masquerading
+#            as ordinary absence". envelope_construction_failed (exit 2) is
+#            the H2-F4 final-encoder guard, shared with design-unit-show —
+#            see print_envelope_checked above.
+cmd_design_status() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-status","task_id":null,"error_key":"jq_unavailable","observations":"jq is required to check design satisfaction and is not on PATH","satisfied":false,"design_hash":"","artifact_path":""}\n'
+        exit 2
+    fi
+
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-status" "" "missing_task_id" \
+            "design-status requires <task-id> as first positional argument" \
+            "qa-gate.sh design-status <task-id>"
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_error_json "design-status" "$tid" "unknown_flag" \
+            "unknown argument '$1'; design-status takes only <task-id>" \
+            "qa-gate.sh design-status <task-id>"
+        exit 1
+    fi
+
+    require_bd "design-status" "$tid"
+
+    compute_design_satisfied "$tid"
+    local artifact_path sat_str="false" ok_str="true"
+    artifact_path=$(design_artifact_path_for "$tid")
+    [ "$DESIGN_SATISFIED" = "true" ] && sat_str="true"
+
+    # DESIGN-STATUS UNREADABLE-SOURCE MAPPING BEGIN (xsu1 H2-F5)
+    # design_source_unreadable is the one key that is NOT a determined
+    # answer about the design — it means the predicate could not read its
+    # source. It keeps satisfied:false (fail-safe for any consumer that only
+    # reads that field) but flips ok to false and the exit to 2, so a
+    # consumer that checks rc or .ok (epic-gate.sh's design-status ladder
+    # checks BOTH) degrades as design_status_unavailable instead of
+    # treating "could not look" as "looked, and found no design".
+    if [ "$DESIGN_SATISFIED_KEY" = "design_source_unreadable" ]; then
+        ok_str="false"
+    fi
+    # DESIGN-STATUS UNREADABLE-SOURCE MAPPING END (xsu1 H2-F5)
+
+    local envelope="" env_rc=0
+    envelope=$(jq -nc --arg tid "$tid" \
+        --argjson ok "$ok_str" --argjson sat "$sat_str" \
+        --arg ekey "$DESIGN_SATISFIED_KEY" --arg obs "$DESIGN_SATISFIED_OBS" \
+        --arg dh "$DESIGN_VERDICT_HASH" --arg ap "$artifact_path" '
+        # design-status envelope (xsu1 H2-F4)
+        {ok: $ok, subcommand: "design-status", task_id: $tid,
+         satisfied: $sat, error_key: $ekey, observations: $obs,
+         design_hash: $dh, artifact_path: $ap}
+    ' 2>/dev/null) || env_rc=$?
+    print_envelope_checked "design-status" "$envelope" "$env_rc" || exit 2
+    [ "$ok_str" = "true" ] || exit 2
+    return 0
+}
+# DESIGN-UNIT-SHOW / DESIGN-STATUS END (v5 D4b, fkm.6)
 
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
@@ -8630,6 +9316,8 @@ case "$SUB" in
     design-gate-precheck) cmd_design_gate_precheck "$@" ;;
     design-unit-bind) cmd_design_unit_bind "$@" ;;
     design-conform) cmd_design_conform "$@" ;;
+    design-unit-show) cmd_design_unit_show "$@" ;;
+    design-status)    cmd_design_status "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     ""|-h|--help|help)

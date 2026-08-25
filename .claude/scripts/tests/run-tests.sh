@@ -313,9 +313,102 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # degradation on every dependency including a jq-free jq_unavailable
 # message, the TOCTOU bracket shared with design-record's own hardening,
 # and a METatest proving the undeclared_files gate itself is load-bearing).
-# `epic-gate.sh plan-batches` is a separate, later slice and is not covered.
+# `epic-gate.sh plan-batches` was a separate, later slice as of this entry —
+# see the 49 -> 50 bump below, which is that slice landing.
+#
+# 48 -> 49 (claude-workflow-plugin-6im2): added
+# design-unit-bind-parity.test.sh. D4a shipped `design-unit-bind` (the
+# writer) with no caller anywhere in .claude/agents/, docs/ or skills/ — the
+# reader (design-conform) was fully tested but resolved a binding nothing
+# wrote, so every real call took the fail-closed unit_not_in_design path.
+# This spec is NOT a behavioural test of design-unit-bind itself
+# (design-conform.test.sh already owns that); it is a carrier-parity census
+# over `.claude/agents/orchestrator.md` and
+# `.claude/skills/workflow-engine/SKILL.md` (the two prompt surfaces this
+# task's fix added the invocation to), grounded in one live,
+# APPLICATION-STATE read-only call to the shipped script for the flag names
+# it asserts on — read-only toward bd/repo/tracking state (it exits before
+# require_bd), but NOT file-creation-free: the no-args branch prints
+# usage()'s here-document, which bash materialises via a temp file, so the
+# call fails closed where file creation is denied (wording corrected in the
+# 6im2 round-8 review, R8-F5, to match the spec's own header, which had
+# already corrected the same claim under S6-F2) —
+# plus a four-leg META-TEST per carrier (strip, prove the strip landed,
+# confirm the census names exactly that carrier as missing, restore control).
+# Measured at the time of this bump: this specific reconciliation is racing
+# `epic-gate.sh plan-batches`'s own new spec (still absent from disk as of
+# this edit — see the note in the entry immediately above); whichever of the
+# two lands second owns the next bump, 49 -> 50.
+#
+# 49 -> 50 (claude-workflow-plugin-fkm.6, Phase D4b): added
+# plan-batches.test.sh, landing second in the race the entry above names.
+# Covers the new `epic-gate.sh plan-batches <epic-id> [--design <path>]`
+# (docs/plans/v5-design-phase.md:158-159): the positive arm (a real
+# multi-unit batch, built FIRST per this tier's own pairing convention,
+# since degradation collapses to one-unit-per-batch and would otherwise make
+# every mutant below vacuous); the determinism leg (byte-identical repeat
+# runs, and a reorder of the SAME units changing the plan, proving artifact
+# order — never `unit_files | keys`, which sorts — is genuinely read); all
+# five mutants the release directive specifies, each four-part paired
+# (non-vacuity, specific misbehaviour, restore control, execution) —
+# Mutant 1 (union accumulation: compare a candidate against a batch's FULL
+# file union, never just its most recent member), Mutant 2 (THE META-TEST
+# docs/plans/v5-design-phase.md:159 pre-specifies verbatim: a fail-open
+# wrapper around the batching computation reads an INDUCED jq failure,
+# forced via a marker-matching jq shim, as "everything parallel" instead of
+# degrading), Mutant 3 (the one guard with no redundant downstream backup —
+# an unbound child's danger is silently invisible, not merely re-caught by
+# another check, when its sentinel is stripped; verified during this build
+# that the WIDER outer sentinel is NOT a clean strip target: every other
+# guard is independently fail-closed, so removing any one still degrades via
+# another, and stripping the whole outer region breaks the function's own
+# brace matching and does not even parse), Mutant 4 (jq absence: a curated
+# PATH with everything but jq confirms the hand-built literal is reached,
+# not merely that the process fails to start), and Mutant 5 (dependency
+# order: two units with disjoint files, one depending on the other, must
+# not co-batch even though file-set intersection alone would allow it) —
+# plus seven direct probes of the remaining guard conditions (no design
+# attempted propagated WITHOUT design-gate-precheck's own leniency; zero
+# children; a binding to a unit an amendment dropped; a stale binding
+# design_hash; two tasks bound to one unit; a non-canonical declared path;
+# and the --design flag as an ASSERTION in both directions, never a second
+# source for the artifact). BD-FREE by design (a hand-authored `bd` shim
+# behind canned per-task JSON, plus a directly-written design artifact —
+# review-check.sh validate-design needs no bd at all): the unit<->task
+# mapping path (design-unit-show, and therefore every Category-C guard) has
+# no live caller anywhere in this tree as of this entry (claude-workflow-
+# plugin-6im2 wired the PROMPT surfaces, not a live run), so this spec's
+# coverage of that path is fixture-only, built explicitly rather than
+# implied. `cmd_shared_files` and its own L2 spec are untouched.
+#
+# 50 -> 51 (claude-workflow-plugin-xsu1 fix round, review artifact h2r1 —
+# the previously-UNREVIEWED half of the D4b slice): added
+# design-accessors.test.sh, the first DIRECT coverage of the two read-only
+# qa-gate.sh accessors plan-batches shells out to (`design-unit-show`,
+# `design-status`) — until this round no test anywhere invoked
+# design-unit-show at all, and plan-batches.test.sh reaches both only
+# through epic-gate.sh over well-formed canned fixtures, a path that cannot
+# present a FAILING source. Covers, four-part paired per the tier
+# convention: H2-F2 (an unreadable binding source — bd failing, unparseable
+# comments — is ok:false/design_binding_unreadable/exit 2, never the
+# determined answer bound:false; sed-mutant restoring the pre-fix call-site
+# guard misbehaves in exactly the pre-fix way), H2-F3 (the binding is
+# validated ONCE against the full union shape; an induced failure of exactly
+# that classifier call — marker-matched jq shim, fired-file non-vacuity —
+# refuses rather than emitting bound:true with empty required fields),
+# H2-F5 (design-status distinguishes design_source_unreadable, ok:false/
+# exit 2 with satisfied:false retained, from no_design_attempted, ok:true/
+# exit 0; sentinel-strip META brings back the masquerade the guard exists to
+# prevent — the key design-gate-precheck maps to "ready"), and H2-F4 (an
+# induced failure of each accessor's final `jq -nc` envelope build yields
+# the caller-data-free envelope_construction_failed literal, parseable, at
+# exit 2 — never malformed output under exit 0). Same fake-bd/canned-JSON
+# harness shape as plan-batches.test.sh, so the whole spec runs in seconds.
+# H2-F1 (the validate-design final-extraction guard in review-check.sh) did
+# NOT add a spec: it extended design-artifact.test.sh's existing Section 2
+# with a Section 2b, per this tier's put-it-with-its-subject convention.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=48
+EXPECTED_SPECS=51
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)
