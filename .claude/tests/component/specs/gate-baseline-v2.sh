@@ -711,17 +711,53 @@ assert_eq "gbv2-7M META: the strip removed lines from verify-before-stop.sh (non
 # a `$#` — parsing shell with a regex, in a checker whose whole job is to be more
 # trustworthy than the thing it checks.
 #
-# The two legs immediately after this pair prove the anchor is SENSITIVE to a
-# real call and INSENSITIVE to prose; without them this would be a guard that was
-# loosened and never seen to fire.
+# THE SAME DRIFT HAS A SECOND DOOR: STRINGS (claude-workflow-plugin-i8cx). The
+# comment test classifies a LINE, and a line inside a multi-line double-quoted
+# string — an emit_block message — cannot be classified per line at all: it
+# carries no quote of its own and no `#`, so it reads as code. i8cx added
+# operator-facing prose to the Stop hook's undeterminable-change-set refusal
+# ("...the same rule the reconcile-tracker and denylist blocks apply") and this
+# leg went red on a MESSAGE — the exact P7 failure, one lexical level down.
+# String-stripping is rejected for the same reason comment-stripping was: a
+# multi-line quote state machine IS parsing shell with a regex.
+#
+# The honest sharpening is a better KIND question, available only for the
+# SUBCOMMAND spelling: `reconcile-tracker` is not executable by itself — an
+# invocation structurally requires the gate carrier on the same line
+# (`"$QA_GATE" reconcile-tracker` / `qa-gate.sh reconcile-tracker`), so that
+# leg anchors on the carrier+subcommand shape (META7_VBS_INVOKE_RE below). The
+# FUNCTION spelling (`reconcile_tracker`) keeps the bare-token anchor: for a
+# function, the bare word IS the invocation shape. Two residuals, stated: a
+# line QUOTING a full runnable recipe (`bash .../qa-gate.sh reconcile-tracker`
+# inside a message) still counts — over-strict, the safe direction, and today
+# every such recipe lives inside the reconcile sentinel anyway (measured: the
+# shipped hook's 4 non-comment carrier lines all strip away); and a dispatch
+# through a variable (cmd=reconcile-tracker; "$QA_GATE" "$cmd") is invisible —
+# the same residual the bare-token anchor always had.
+#
+# The THREE legs immediately after this pair prove the anchors are SENSITIVE
+# to a real call and INSENSITIVE to prose — comment prose AND string prose;
+# without them this would be a guard that was loosened and never seen to fire.
+# The third leg's call-line is EXTRACTED from the shipped hook rather than
+# re-typed, so if the shipped invocation spelling ever drifts off the pattern,
+# the extraction comes back empty and that leg fails LOUDLY instead of the
+# anchor rotting into match-nothing.
 executable_refs() {
-    grep "$2" "$1" 2>/dev/null | grep -vc '^[[:space:]]*#' | tr -d '[:space:]'
+    # -E so a caller can pass the carrier+subcommand alternation; the bare
+    # function-name patterns are metacharacter-free and mean the same in ERE.
+    grep -E "$2" "$1" 2>/dev/null | grep -vc '^[[:space:]]*#' | tr -d '[:space:]'
 }
+
+# The invocation shape for the SUBCOMMAND spelling (see the header above):
+# the gate carrier and the subcommand on one line.
+# shellcheck disable=SC2016  # single quotes intentional: $QA_GATE is a
+# literal to find in the AUDITED file, not an expansion for this shell.
+META7_VBS_INVOKE_RE='(\$\{?QA_GATE\}?"? +|qa-gate\.sh"? +)reconcile-tracker'
 
 assert_eq "gbv2-7M META: no reconcile_tracker call survives in the stripped qa-gate.sh" "0" \
     "$(executable_refs "$META7_DIR/qa-gate.stripped.sh" 'reconcile_tracker')"
 assert_eq "gbv2-7M META: no reconcile-tracker invocation survives in the stripped Stop hook" "0" \
-    "$(executable_refs "$META7_DIR/verify-before-stop.stripped.sh" 'reconcile-tracker')"
+    "$(executable_refs "$META7_DIR/verify-before-stop.stripped.sh" "$META7_VBS_INVOKE_RE")"
 
 # THE ANCHOR'S OWN SENSITIVITY PROOF. A check that was just relaxed and has never
 # been seen to fire is indistinguishable from a check that no longer works, so
@@ -736,6 +772,23 @@ cp "$META7_DIR/qa-gate.stripped.sh" "$META7_PROSE"
 printf '    # a comment naming reconcile_tracker, which cannot be a call\n' >> "$META7_PROSE"
 assert_eq "gbv2-7M META: ...and does NOT fire on a comment naming it (the P7 false positive)" "0" \
     "$(executable_refs "$META7_PROSE" 'reconcile_tracker')"
+# THE THIRD LEG (i8cx): the sharpened SUBCOMMAND anchor, both polarities.
+# Non-vacuity first: the anchor must see the real invocation in the SHIPPED
+# hook, and the fire-leg's line is extracted from there, never re-typed.
+META7_VBS_CALL_LINE=$(grep -E "$META7_VBS_INVOKE_RE" "$VBS7_REAL" | grep -v '^[[:space:]]*#' | head -1)
+assert_eq "gbv2-7M META: the SHIPPED hook carries a real reconcile-tracker invocation the sharpened anchor sees (extraction non-vacuity)" "yes" \
+    "$([ -n "$META7_VBS_CALL_LINE" ] && echo yes || echo no)"
+META7_VBS_PROSE="$META7_DIR/verify-before-stop.prosesurvives.sh"
+cp "$META7_DIR/verify-before-stop.stripped.sh" "$META7_VBS_PROSE"
+printf 'so the gate refuses instead, the same rule the reconcile-tracker and denylist blocks apply.\n' \
+    >> "$META7_VBS_PROSE"
+assert_eq "gbv2-7M META: ...and does NOT fire on operator-facing STRING prose naming the subcommand (the i8cx false positive)" "0" \
+    "$(executable_refs "$META7_VBS_PROSE" "$META7_VBS_INVOKE_RE")"
+META7_VBS_CALL="$META7_DIR/verify-before-stop.callsurvives.sh"
+cp "$META7_DIR/verify-before-stop.stripped.sh" "$META7_VBS_CALL"
+printf '%s\n' "$META7_VBS_CALL_LINE" >> "$META7_VBS_CALL"
+assert_eq "gbv2-7M META: ...while still FIRING when the real invocation line survives the strip" "1" \
+    "$(executable_refs "$META7_VBS_CALL" "$META7_VBS_INVOKE_RE")"
 # CONTROL: the old bare-text anchor would have failed BOTH of the above the same
 # way, which is the imprecision being removed — stated as an assertion so the
 # claim is measured rather than narrated.

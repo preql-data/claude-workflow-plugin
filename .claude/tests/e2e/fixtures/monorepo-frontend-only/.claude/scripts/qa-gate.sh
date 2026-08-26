@@ -324,7 +324,15 @@ write_gate_baseline() {
     mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
 
     local status_out head ts
-    status_out=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort) || {
+    # Scoped pipefail (i8cx): `sort` is the pipeline's LAST command, so without
+    # it git's own failure never reached the handler below — the handler the
+    # author wrote was dead code, and a failed `git status` captured an EMPTY
+    # snapshot at rc 0 (a baseline that subtracts nothing, or worse: an
+    # --exclude-tracked capture built over nothing). Subshell-scoped, never
+    # file-wide, for the measured epic-gate.sh:1992 reasons: `grep -c` exits 1
+    # on the healthy zero-match case and `head` SIGPIPEs its producer, so a
+    # global pipefail manufactures failures on this file's common paths.
+    status_out=$( set -o pipefail; git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort ) || {
         log_sync_error "write_gate_baseline: git status failed (captured_by=$captured_by)"
         return 1
     }
@@ -333,7 +341,16 @@ write_gate_baseline() {
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
 
     if [ "$exclude_tracked" = "1" ]; then
-        status_out=$(gate_baseline_exclude_tracked "$status_out")
+        # A failed exclude-tracked build is a REFUSAL TO CAPTURE (i8cx), never
+        # a fall-through to the unfiltered snapshot: baselining paths the
+        # session already edited marks its own work "pre-existing" and hands it
+        # a free pass — the quiet inverse of the loud failure above, and the
+        # worse one, because nothing downstream can tell a wrongly-baselined
+        # path from genuine arrival dirt.
+        status_out=$(gate_baseline_exclude_tracked "$status_out") || {
+            log_sync_error "write_gate_baseline: exclude-tracked filter could not be built from changed-files.txt (captured_by=$captured_by) — REFUSING to capture a baseline that would mark the session's own edits pre-existing"
+            return 1
+        }
     fi
 
     local tmp="$GATE_BASELINE_FILE.tmp.$$"
@@ -389,17 +406,33 @@ gate_baseline_exclude_tracked() {
     [ -s "$tracking" ] || { printf '%s' "$status_out"; return 0; }
 
     local tmp_tracked
-    tmp_tracked=$(mktemp -t gate-baseline-tracked.XXXXXX 2>/dev/null) || {
-        printf '%s' "$status_out"; return 0
-    }
+    # No fall-through to the unfiltered snapshot on ANY failure below (i8cx):
+    # printing $status_out unfiltered baselines the session's own edits, which
+    # is the exact free pass --exclude-tracked exists to prevent. rc 1 is the
+    # signal; the caller (write_gate_baseline) turns it into a refusal to
+    # capture. The `[ -s ]` early return above stays rc 0 — an EMPTY tracker
+    # legitimately excludes nothing, which is a different answer from "the
+    # exclusion set could not be built".
+    tmp_tracked=$(mktemp -t gate-baseline-tracked.XXXXXX 2>/dev/null) || return 1
     local t
-    while IFS= read -r t; do
-        [ -z "$t" ] && continue
-        printf '%s\n' "$t"
-        case "$t" in
-            "$PROJECT_DIR"/*) printf '%s\n' "${t#"$PROJECT_DIR"/}" ;;
-        esac
-    done < "$tracking" | LC_ALL=C sort -u > "$tmp_tracked"
+    # Scoped pipefail (i8cx): the while-loop is the pipeline's FIRST stage, so
+    # before this an unopenable $tracking (the redirect fails, the loop runs
+    # zero times) or a failing `sort` still left the pipeline at rc 0 with an
+    # EMPTY $tmp_tracked — and an empty exclusion set excludes nothing, so the
+    # membership probe below kept every porcelain line and the session's own
+    # edits were baselined as pre-existing.
+    if ! ( set -o pipefail
+        while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            printf '%s\n' "$t"
+            case "$t" in
+                "$PROJECT_DIR"/*) printf '%s\n' "${t#"$PROJECT_DIR"/}" ;;
+            esac
+        done < "$tracking" | LC_ALL=C sort -u > "$tmp_tracked"
+    ); then
+        rm -f "$tmp_tracked" 2>/dev/null || true
+        return 1
+    fi
 
     local line p kept=""
     while IFS= read -r line; do
@@ -434,11 +467,17 @@ gate_baseline_exclude_tracked() {
 # rather than repeating it.
 gate_baseline_entries() {
     if [ -f "$GATE_BASELINE_FILE" ]; then
-        awk 'body { print; next } /^--$/ { body = 1 }' "$GATE_BASELINE_FILE" 2>/dev/null || true
+        # No `|| true` (i8cx): a failed or PARTIAL read must be reportable, so
+        # awk's non-zero propagates as this function's rc and reconcile_tracker
+        # refuses rather than treating "could not read the baseline" as "the
+        # baseline subtracts nothing". A MISSING baseline (both -f tests false)
+        # is still the legitimate empty answer at rc 0 — absent and unreadable
+        # are different states and now return differently.
+        awk 'body { print; next } /^--$/ { body = 1 }' "$GATE_BASELINE_FILE" 2>/dev/null || return 1
         return 0
     fi
     if [ -f "$LEGACY_APPROVED_BASELINE" ]; then
-        cat "$LEGACY_APPROVED_BASELINE" 2>/dev/null || true
+        cat "$LEGACY_APPROVED_BASELINE" 2>/dev/null || return 1
     fi
     return 0
 }
@@ -741,9 +780,43 @@ reconcile_tracker() {
 
     # Subtract the baseline. LC_ALL=C on BOTH sides: comm -23 needs one
     # collation, and the writer pins C too (see write_gate_baseline).
+    #
+    # EVERY read below is rc-guarded (i8cx): these assignments are the
+    # change-set evidence chain, and before this a failed `sort` or `comm`
+    # fell through as an EMPTY set at rc 0 — which reads as "working tree
+    # clean" / "nothing new" and silently disarms BOTH approve refusals
+    # downstream (tracker_unreconcilable never fires because nothing failed,
+    # and change_set_reconstructed never fires because subtracted reads 0).
+    # The trailing `grep -v '^$'` stages are gone rather than guarded: on
+    # empty input `grep -v` exits 1 — the healthy clean-tree case, the same
+    # measured trap that forbids file-wide pipefail — and no producer here
+    # can emit a blank line ($status_out is non-empty porcelain when its sort
+    # runs; both comm inputs are the already-guarded non-empty sets). The
+    # downstream walks skip blank lines regardless. rc is captured with
+    # `|| rc=$?`, never read after a bare assignment: under `set -e` the
+    # assignment itself would abort before a separate `rc=$?` line ran.
     local baseline current survivors subtracted=""
-    baseline=$(gate_baseline_entries | LC_ALL=C sort)
-    current=$(printf '%s\n' "$status_out" | LC_ALL=C sort | grep -v '^$' || true)
+    local baseline_rc=0 current_rc=0 comm_rc=0
+    baseline=$( set -o pipefail; gate_baseline_entries | LC_ALL=C sort ) || baseline_rc=$?
+    # RECONCILE-READ-GUARD BEGIN (i8cx)
+    if [ "$baseline_rc" -ne 0 ]; then
+        log_sync_error "reconcile_tracker: the gate baseline could not be read (gate_baseline_entries|sort rc=$baseline_rc) — what the baseline subtracts is unknown, so the tracker cannot be proven complete"
+        RECONCILE_OBS="tracker reconcile FAILED: the gate baseline at $GATE_BASELINE_FILE could not be read (rc=$baseline_rc), so what it subtracts from the git-visible change set is unknown"
+        return 1
+    fi
+    # RECONCILE-READ-GUARD END (i8cx)
+    if [ -n "$status_out" ]; then
+        current=$( set -o pipefail; printf '%s\n' "$status_out" | LC_ALL=C sort ) || current_rc=$?
+    else
+        current=""
+    fi
+    # RECONCILE-READ-GUARD BEGIN (i8cx)
+    if [ "$current_rc" -ne 0 ]; then
+        log_sync_error "reconcile_tracker: could not sort the git status snapshot (rc=$current_rc) — the current git-visible change set is unknown, so the tracker cannot be proven complete"
+        RECONCILE_OBS="tracker reconcile FAILED: the git-visible change set could not be sorted (rc=$current_rc), so what is currently dirty is unknown"
+        return 1
+    fi
+    # RECONCILE-READ-GUARD END (i8cx)
     if [ -z "$current" ]; then
         RECONCILE_OBS="tracker reconcile: working tree clean relative to HEAD; nothing to add (subtracted=0)"
         return 0
@@ -751,15 +824,22 @@ reconcile_tracker() {
     if [ -z "$baseline" ]; then
         survivors="$current"
     else
-        survivors=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
+        survivors=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline")) || comm_rc=$?
         # SUBTRACTION-ACCOUNTING BEGIN (94d.1)
         # The COMPLEMENT of the line above, and the whole point of 94d.1's
         # visibility half: `comm -12` is the set `comm -23` threw away. Before
         # this it was computed, discarded, and never mentioned — so a call that
         # dropped 16 git-visible paths and a call that dropped none produced
         # indistinguishable output.
-        subtracted=$(comm -12 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
+        subtracted=$(comm -12 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline")) || comm_rc=$?
         # SUBTRACTION-ACCOUNTING END (94d.1)
+        # RECONCILE-READ-GUARD BEGIN (i8cx)
+        if [ "$comm_rc" -ne 0 ]; then
+            log_sync_error "reconcile_tracker: comm failed while subtracting the gate baseline (rc=$comm_rc) — the survivor and subtracted sets are unknown, so the tracker cannot be proven complete"
+            RECONCILE_OBS="tracker reconcile FAILED: comm could not subtract the gate baseline from the git-visible change set (rc=$comm_rc), so the survivor set is unknown"
+            return 1
+        fi
+        # RECONCILE-READ-GUARD END (i8cx)
     fi
 
     # The accounting clause, appended to every RECONCILE_OBS from here down.
@@ -1871,13 +1951,23 @@ COMPLETION_IMPLEMENTER_ROLES_JSON='["backend","frontend","devops","implementer"]
 # sets, and two literals for one condition is the drift this file avoids
 # elsewhere.
 sha256_file() {
+    # Returns NON-ZERO on a failed digest instead of printing an empty string
+    # (i8cx): `awk` was the pipeline's last command, so an unreadable or
+    # vanished file digested to "" at rc 0, and the consumer's `[ -n ]` guard
+    # silently SKIPPED the digest binding it exists to feed. The no-tool
+    # sentinel arm is unchanged: "this host cannot hash" is a condition the
+    # callers handle by NAME, not a failed read of this one file.
+    local out=""
     if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 -- "$1" 2>/dev/null | awk '{print $1}'
+        out=$( set -o pipefail; shasum -a 256 -- "$1" 2>/dev/null | awk '{print $1}' ) || return 1
     elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum -- "$1" 2>/dev/null | awk '{print $1}'
+        out=$( set -o pipefail; sha256sum -- "$1" 2>/dev/null | awk '{print $1}' ) || return 1
     else
         printf '%s' "$CHANGE_SET_HASH_UNAVAILABLE"
+        return 0
     fi
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
 }
 
 # latest_completion_record <tid> — the text of the LAST `COMPLETION v1 `
@@ -2208,8 +2298,14 @@ completion_files_crosscheck() {
     # The record's digest is what binds the artifact to the record. A mismatch
     # means the file on disk is not the one that was recorded, so reading a file
     # list out of it would be reading an unrecorded claim.
-    local disk_sha
-    disk_sha=$(sha256_file "$payload_file")
+    local disk_sha="" disk_sha_rc=0
+    disk_sha=$(sha256_file "$payload_file") || disk_sha_rc=$?
+    # COMPLETION-XCHECK-DIGEST-GUARD BEGIN (i8cx)
+    if [ "$disk_sha_rc" -ne 0 ] || [ -z "$disk_sha" ]; then
+        COMPLETION_XCHECK_DETAIL="the persisted payload at $payload_file exists but could NOT be digested (sha256_file rc=$disk_sha_rc), so whether it is the artifact the COMPLETION record bound is unestablished and no file list is read from it. Before i8cx a failed digest read as an empty string, which skipped this binding check and let the cross-check report as if verified"
+        return 0
+    fi
+    # COMPLETION-XCHECK-DIGEST-GUARD END (i8cx)
     if [ -n "$recorded_sha" ] && [ -n "$disk_sha" ] && [ "$recorded_sha" != "$disk_sha" ]; then
         COMPLETION_XCHECK_DETAIL="the persisted payload at $payload_file digests to $disk_sha, but the COMPLETION record binds payload_sha=$recorded_sha — the artifact on disk is NOT the one that was recorded, so no file list is read from it"
         return 0
@@ -6095,7 +6191,11 @@ cmd_completion_record() {
             "qa-gate.sh completion-record $tid --file <path>"
         exit 2
     fi
-    payload_sha=$(sha256_file "$payload_file")
+    # sha256_file returns non-zero on a failed digest since i8cx. This WRITE
+    # side keeps its documented degradation — the sentinel — rather than
+    # refusing; the `|| payload_sha=""` is what routes the new rc into that
+    # fallback instead of letting errexit kill the record write mid-flight.
+    payload_sha=$(sha256_file "$payload_file") || payload_sha=""
     [ -z "$payload_sha" ] && payload_sha="$CHANGE_SET_HASH_UNAVAILABLE"
     # Ours, not the caller's — but checked anyway, because "this value is ours"
     # is exactly the assumption bjx's rubric_version was shipped on.
@@ -6396,8 +6496,15 @@ design_entry_is_artifact() {
 # can carry the byte `$( )` eats.
 design_foreign_paths() {
     local want="${1:-}"
-    local tracking="$QA_TRACKING_DIR/changed-files.txt" line
+    local tracking="$QA_TRACKING_DIR/changed-files.txt" line _sorted
     [ -s "$tracking" ] || return 0
+    # rc 2 = COULD NOT READ, distinct from rc 0 with no output (= read fine,
+    # nothing foreign). The `[ -s ]` guard above has already proven the file
+    # non-empty, which is what makes the failure decidable at all. Before i8cx
+    # this was a process substitution whose rc was unobservable: the loop
+    # simply ran zero times, a tracker full of source paths counted as
+    # foreign_n=0, and the designer_touched_source refusal was skipped.
+    _sorted=$(LC_ALL=C sort -u "$tracking" 2>/dev/null) || return 2
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         if [ -n "${WORKFLOW_DENYLIST_REGEX:-}" ] && [[ "$line" =~ $WORKFLOW_DENYLIST_REGEX ]]; then
@@ -6406,7 +6513,7 @@ design_foreign_paths() {
         if ! design_entry_is_artifact "$line" "$want"; then
             printf '%s\n' "$line"
         fi
-    done < <(LC_ALL=C sort -u "$tracking" 2>/dev/null)
+    done <<< "$_sorted"
 }
 
 # is_sha256_hex <value> — A SHAPE TEST, NEVER AN IDENTITY TEST, borrowed
@@ -6910,7 +7017,16 @@ cmd_design_record() {
         # tracker's question answerable without following a target (R6-F1). It is
         # taken from the DERIVED path by parameter expansion — never `basename`,
         # which is the class round 5 deleted from this region.
-        foreign=$(design_foreign_paths "${derived##*/}")
+        local dfp_rc=0
+        foreign=$(design_foreign_paths "${derived##*/}") || dfp_rc=$?
+        # DESIGN-FOREIGN-READ-GUARD BEGIN (i8cx)
+        if [ "$dfp_rc" -ne 0 ]; then
+            emit_error_json "design-record" "$tid" "change_set_unreadable" \
+                "the change-set tracker at $QA_TRACKING_DIR/changed-files.txt is non-empty but could NOT be read (design_foreign_paths rc=$dfp_rc), so whether the designer touched source paths is unknowable. Refusing to record: before i8cx this read failed to an empty set, which counted as foreign_n=0 and skipped the designer_touched_source refusal entirely. Fix the read (is sort on PATH and healthy? is the file readable?) and re-run" \
+                "qa-gate.sh design-record $tid --file $derived"
+            exit 2
+        fi
+        # DESIGN-FOREIGN-READ-GUARD END (i8cx)
         foreign_n=$(printf '%s' "$foreign" | grep -c . | tr -d ' \n')
         [ -n "$foreign_n" ] || foreign_n=0
         if [ "$foreign_n" -gt 0 ] && [ "$accept_foreign" != "1" ]; then
@@ -9249,9 +9365,19 @@ cmd_baseline_capture() {
     if write_gate_baseline "$by" ${passthru[@]+"${passthru[@]}"}; then
         # Counted through the ONE header-skip reader in this file
         # (gate_baseline_entries), not a second copy of its awk.
-        local n="0"
-        n=$(gate_baseline_entries | grep -c . | tr -d ' ')
-        n="${n:-0}"
+        # Do NOT wrap the count in pipefail: `grep -c` exits 1 at count zero,
+        # which is the healthy clean-checkout case (entries=0, ok:true). The
+        # reader's own rc is checked FIRST instead (i8cx), so a count-back
+        # failure says "unreadable" rather than reporting the same 0 a clean
+        # checkout reports — 0 and "could not read" are different answers.
+        local n="0" entries="" entries_rc=0
+        entries=$(gate_baseline_entries) || entries_rc=$?
+        if [ "$entries_rc" -eq 0 ]; then
+            n=$(printf '%s' "$entries" | grep -c . | tr -d ' ') || true
+            n="${n:-0}"
+        else
+            n="unreadable"
+        fi
         emit_json 1 "baseline-capture" "" "captured" \
             "gate-baseline captured_by=$by entries=$n at $GATE_BASELINE_FILE"
         return 0

@@ -1855,12 +1855,32 @@ is_fastpath_only_change() {
 # happens we record an entry in sync-errors.log so SessionStart can surface
 # it - the most common cause is a previous `qa-gate enter` whose
 # best-effort `write_current_task` failed silently.
+#
+# i8cx U7: a marker that EXISTS but cannot be read is a THIRD state, distinct
+# from both of the above. current-task.sh exits non-zero for it (measured:
+# rc 1 today, a dedicated rc once U7's helper half lands — this branch takes
+# any non-zero), and the old `|| echo ""` here laundered that into "no
+# task" with a log line claiming the file was "empty or missing". The value
+# still degrades to empty — every consumer must keep treating an
+# unresolvable task as "never auto-approve" — but the trail now names the
+# read failure instead of misreporting it.
 get_current_task() {
-    local tid=""
+    local tid="" tid_rc=0
     if [ -x "$CURRENT_TASK_HELPER" ]; then
-        tid=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null || echo "")
+        tid=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null) || tid_rc=$?
     elif [ -s "$QA_TRACKING_DIR/current-task" ]; then
-        tid=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' || echo "")
+        # Producer captured on its own line (i8cx U7): `head | tr` reported
+        # tr's rc, so an unreadable marker read as "no task" silently.
+        local raw_tid=""
+        raw_tid=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null) || tid_rc=$?
+        if [ "$tid_rc" -eq 0 ]; then
+            tid=$(printf '%s' "$raw_tid" | tr -d '\r\n[:space:]') || { tid=""; tid_rc=1; }
+        fi
+    fi
+    if [ "$tid_rc" -ne 0 ]; then
+        log_sync_error "current-task read FAILED (exit $tid_rc): the active-task marker exists but could not be read — active task UNKNOWN, treated as 'no active task' for gating (never auto-approve) (i8cx U7)"
+        printf '%s' ""
+        return 0
     fi
     if [ -z "$tid" ]; then
         # No fallback: previous bd-list fallback was the F3 anti-pattern.
@@ -1873,12 +1893,27 @@ get_current_task() {
 # I8 (Phase 6b): repo-aware helpers. The current-task helper records the
 # repo fingerprint at `set` time; here we read it back and compare to the
 # running cwd's repo toplevel.
+#
+# rc contract (i8cx U7): 0 = read fine (stdout is the recorded repo, or empty
+# when none was ever recorded); 2 = the marker EXISTS but could not be read.
+# The old `|| echo ""` laundered that failure into "nothing recorded", which
+# detect_cross_repo's `[ -z ]` arm reads as "no mismatch claim" — i.e. an
+# unreadable marker silently DISARMED the I8 cross-repo guard. Callers must
+# branch on the rc.
 get_recorded_repo() {
+    local out="" rr=0
     if [ -x "$CURRENT_TASK_HELPER" ]; then
-        bash "$CURRENT_TASK_HELPER" get-repo 2>/dev/null || echo ""
+        out=$(bash "$CURRENT_TASK_HELPER" get-repo 2>/dev/null) || rr=$?
+        [ "$rr" -eq 0 ] || return 2
+        printf '%s' "$out"
     elif [ -s "$QA_TRACKING_DIR/current-task.repo" ]; then
-        head -1 "$QA_TRACKING_DIR/current-task.repo" 2>/dev/null | tr -d '\r\n[:space:]' || echo ""
+        # Producer captured on its own line (i8cx U7), same shape as
+        # get_current_task's fallback arm above.
+        out=$(head -1 "$QA_TRACKING_DIR/current-task.repo" 2>/dev/null) || rr=$?
+        [ "$rr" -eq 0 ] || return 2
+        printf '%s' "$out" | tr -d '\r\n[:space:]' || return 2
     fi
+    return 0
 }
 
 # Returns the current cwd's git toplevel. Empty if not a git repo.
@@ -1934,9 +1969,18 @@ repo_identity() {
 #   - recorded path deleted/unresolvable -> MISMATCH, fail closed. We cannot
 #     prove the recorded repo is this one, and the whole point of I8 is to
 #     refuse to auto-close a task whose home repo we cannot identify.
+#   - recorded repo UNREADABLE (i8cx U7: the marker exists, the read failed,
+#     get_recorded_repo rc 2) -> MISMATCH, fail closed, same reasoning as the
+#     deleted/unresolvable arm: an unknown home repo must arm I8, never
+#     silently disarm it. The printed value is a self-describing placeholder
+#     so the block reason names the real problem instead of a path.
 detect_cross_repo() {
-    local recorded recorded_id current_id
-    recorded=$(get_recorded_repo)
+    local recorded recorded_id current_id rr_rc=0
+    recorded=$(get_recorded_repo) || rr_rc=$?
+    if [ "$rr_rc" -ne 0 ]; then
+        printf '%s' "(unknown: current-task.repo exists but could not be read — fix its permissions, or reset via 'bash .claude/scripts/current-task.sh clear' then 'qa-gate.sh enter <task>')"
+        return 1
+    fi
     [ -z "$recorded" ] && return 0   # no recorded repo -> no mismatch claim
     recorded="${recorded%/}"
 
@@ -2030,84 +2074,174 @@ gate_baseline_entries() {
 # (A locale difference between write and read would surface phantom "new"
 # entries.) Bash 3.2 supports the process substitution used here (verified on
 # macOS bash 3.2.57).
+# UNDETERMINABLE IS NOT EMPTY (claude-workflow-plugin-i8cx U1). Every read
+# below — the tracker sort, `git status`, the baseline/status sorts, the comm —
+# used to sit in a pipeline or process substitution whose exit status was
+# structurally unobservable: a failed read produced the SAME empty output as a
+# genuinely clean session, and both callers RELEASED on it (measured live
+# against the shipped hook before this fix: `chmod 000` on a non-empty
+# changed-files.txt released the Stop with `{}`; so did a failing `sort`; so
+# did a failing `git status` wherever qa-gate's reconcile was not already in
+# front of it — and nothing sits in front of the vanished-change-set probe).
+#
+# The failure channel is this OUT-OF-BAND SENTINEL LINE (the constant below +
+# a reason), emitted INSTEAD of the change set and never alongside a partial
+# one: output is buffered, so a fault discovered after the tracker half was
+# computed still yields sentinel-only output, not a silently truncated set.
+#
+# A sentinel LINE rather than a return code because neither caller can see an
+# rc: `done < <(reviewable_changes)` discards it structurally, and the
+# vanished-change-set probe wraps the call in `$( ... || true)` — both by
+# design (an aborted hook emits nothing, which the hooks contract reads as
+# NON-blocking, i.e. rc propagation under `set -e` would fail OPEN). For the
+# same reason the function returns 0 even on the undeterminable path.
+#
+# NOT `set -o pipefail`, measured before rejecting it: with `set -e` in force,
+# a mid-function pipeline failure aborts AFTER earlier lines were already
+# emitted, handing the caller a silently TRUNCATED change set — strictly worse
+# than the empty one it replaces. Per-step rc capture (the shape
+# wtres_no_drift_in already uses) plus buffering is the fix; the four existing
+# scoped-pipefail sites elsewhere in this file are a different, safe pattern
+# (subshell-scoped, rc observed at the substitution) and stay as they are.
+#
+# \001 cannot collide with a real entry: git porcelain C-quotes control
+# characters (a path containing \001 is emitted as a quoted escape, never the
+# raw byte), and a forged \001 line seeded into changed-files.txt can only
+# BLOCK a release, never grant one — the fail-closed direction.
+RC_UNDETERMINABLE_SENTINEL=$'\001CHANGE-SET-UNDETERMINABLE\001'
+
 reviewable_changes() {
     local line path emitted="" skip
+    local rc_out="" undeterminable=""
     if [ -f "$TRACKING_FILE" ] && [ -s "$TRACKING_FILE" ]; then
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            if is_tracked_change "$line"; then
-                printf '%s\n' "$line"
-                emitted="$emitted$line
+        local tracker_lines=""
+        # Producer on its own line with an explicit rc: `sort` reads the
+        # tracker file directly (no pipe, no process substitution), so an
+        # unreadable file or a failed sort is OBSERVED instead of running the
+        # loop zero times. LC_ALL=C pins the emitted order across locales,
+        # matching every other sort in this walk.
+        tracker_lines=$(LC_ALL=C sort -u "$TRACKING_FILE" 2>/dev/null) \
+            || undeterminable="changed-files.txt exists and is non-empty but could not be read/sorted"
+        if [ -z "$undeterminable" ]; then
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                if is_tracked_change "$line"; then
+                    rc_out="$rc_out$line
 "
-            fi
-        done < <(sort -u "$TRACKING_FILE" 2>/dev/null)
+                    emitted="$emitted$line
+"
+                fi
+            done <<< "$tracker_lines"
+        fi
     fi
-    has_git_repo || return 0
 
-    local baseline current new_entries abs_root
-    baseline=$(gate_baseline_entries | LC_ALL=C sort)
-    current=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | LC_ALL=C sort)
-    if [ -z "$baseline" ]; then
-        # No baseline — any git-detected change is "new". Preserves the
-        # pre-0wk.2 behaviour for users who have not approved anything yet.
-        new_entries=$(printf '%s\n' "$current" | grep -v '^$' || true)
-    else
-        new_entries=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") | grep -v '^$' || true)
-    fi
-    [ -n "$new_entries" ] || return 0
-    # The working-tree root, for comparing a repo-relative porcelain path against
-    # an absolute tracker entry. Empty is tolerated: we then compare only the
-    # relative spelling, which over-reports rather than under-reports.
-    abs_root=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || abs_root=""
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        path="${line#???}"
-        case "$path" in *" -> "*) path="${path##* -> }" ;; esac
-        [ -n "$path" ] || continue
-        # Explicit `if` rather than `grep ... && continue`: an AND-OR list whose
-        # left side fails is exactly the shape that makes `set -e` behaviour
-        # version-dependent, and this function runs inside a hook where an
-        # aborted process emits nothing — which the hooks contract reads as
-        # NON-blocking, i.e. it would fail OPEN.
-        skip=0
-        if [ -n "$emitted" ]; then
-            if printf '%s' "$emitted" | grep -qxF -- "$path"; then
-                skip=1
-            elif printf '%s' "$emitted" | grep -qxF -- "$PROJECT_DIR/$path"; then
-                skip=1
-            elif [ -n "$abs_root" ] && printf '%s' "$emitted" | grep -qxF -- "$abs_root/$path"; then
-                skip=1
+    if [ -z "$undeterminable" ] && has_git_repo; then
+        local baseline current raw_status new_entries="" abs_root cmp_out cmp_rc=0
+        # gate_baseline_entries masks its own read internally (a failed awk
+        # yields an empty baseline, which OVER-reports new entries — the
+        # fail-closed direction), but the sort here is a real step with a
+        # real rc: unguarded under `set -e`, its failure aborts this function
+        # mid-call, which the process-substitution caller reads as an
+        # empty-so-far set. Guarded like every other step.
+        baseline=$(gate_baseline_entries | LC_ALL=C sort) \
+            || undeterminable="the gate baseline could not be read/sorted"
+        if [ -z "$undeterminable" ]; then
+            # `git status` captured on its OWN, never piped into sort: a
+            # pipeline's rc is the LAST command's, so `git ... | sort`
+            # reported success for a failed git and handed this walk an empty
+            # status — "nothing dirty", i.e. it failed OPEN on exactly the
+            # error case (same rationale as wtres_no_drift_in).
+            raw_status=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null) \
+                || undeterminable="'git status --porcelain' failed in $PROJECT_DIR"
+        fi
+        if [ -z "$undeterminable" ]; then
+            current=$(printf '%s' "$raw_status" | LC_ALL=C sort) \
+                || undeterminable="the git status snapshot could not be sorted"
+        fi
+        if [ -z "$undeterminable" ]; then
+            if [ -z "$baseline" ]; then
+                # No baseline — any git-detected change is "new". Preserves the
+                # pre-0wk.2 behaviour for users who have not approved anything
+                # yet. (`grep -v '^$'` exiting 1 on a clean tree is the
+                # ordinary empty case, not a failure — the `|| true` stays.)
+                new_entries=$(printf '%s\n' "$current" | grep -v '^$' || true)
+            else
+                # comm's own failure must REFUSE, not read as an empty
+                # difference — the same fail-open trap as the pipeline above.
+                # The blank-line grep is a separate step so its legitimate
+                # rc 1 (nothing left) cannot mask comm's rc.
+                cmp_out=$(comm -23 <(printf '%s\n' "$current") <(printf '%s\n' "$baseline") 2>/dev/null) || cmp_rc=$?
+                if [ "$cmp_rc" -ne 0 ]; then
+                    undeterminable="comm -23 over the status/baseline snapshots failed (rc $cmp_rc)"
+                else
+                    new_entries=$(printf '%s\n' "$cmp_out" | grep -v '^$') || new_entries=""
+                fi
             fi
         fi
-        if [ "$skip" = "1" ]; then
-            continue
+        if [ -z "$undeterminable" ] && [ -n "$new_entries" ]; then
+            # The working-tree root, for comparing a repo-relative porcelain path against
+            # an absolute tracker entry. Empty is tolerated: we then compare only the
+            # relative spelling, which over-reports rather than under-reports.
+            abs_root=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || abs_root=""
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                path="${line#???}"
+                case "$path" in *" -> "*) path="${path##* -> }" ;; esac
+                [ -n "$path" ] || continue
+                # Explicit `if` rather than `grep ... && continue`: an AND-OR list whose
+                # left side fails is exactly the shape that makes `set -e` behaviour
+                # version-dependent, and this function runs inside a hook where an
+                # aborted process emits nothing — which the hooks contract reads as
+                # NON-blocking, i.e. it would fail OPEN.
+                skip=0
+                if [ -n "$emitted" ]; then
+                    if printf '%s' "$emitted" | grep -qxF -- "$path"; then
+                        skip=1
+                    elif printf '%s' "$emitted" | grep -qxF -- "$PROJECT_DIR/$path"; then
+                        skip=1
+                    elif [ -n "$abs_root" ] && printf '%s' "$emitted" | grep -qxF -- "$abs_root/$path"; then
+                        skip=1
+                    fi
+                fi
+                if [ "$skip" = "1" ]; then
+                    continue
+                fi
+                # PATHS THE WORKFLOW ITSELF REWRITES must be skipped here too, or this
+                # half contradicts the hash (94d). reconcile_tracker refuses to APPEND
+                # them, so without this the tracker excluded `.beads/interactions.jsonl`
+                # while THIS walk included it — and since bd rewrites that file on every
+                # single call, including the gate's own add_comment and `label add`,
+                # DOC_ONLY went false on every doc-only change set as soon as any bd call
+                # had run. The F1 fast path was dead in production: every documentation
+                # Stop demanded a full QA round. Measured at
+                # specs/verify-review-discipline.sh D4, where the tracker held exactly
+                # `docs/notes.md` and the gate still blocked.
+                #
+                # This is NOT the denylist (see workflow_self_written's header for why the
+                # two rules are separate): a change set consisting solely of beads/gate
+                # state still reaches the `beads-state` fast path and still gets a gate
+                # record. It only stops the gate's own bookkeeping from making somebody
+                # else's change set look mixed.
+                if [ -n "${WORKFLOW_SELF_WRITTEN_REGEX:-}" ] && workflow_self_written "$path"; then
+                    continue
+                fi
+                if is_tracked_change "$path"; then
+                    rc_out="$rc_out$path
+"
+                fi
+            done <<< "$new_entries"
         fi
-        # PATHS THE WORKFLOW ITSELF REWRITES must be skipped here too, or this
-        # half contradicts the hash (94d). reconcile_tracker refuses to APPEND
-        # them, so without this the tracker excluded `.beads/interactions.jsonl`
-        # while THIS walk included it — and since bd rewrites that file on every
-        # single call, including the gate's own add_comment and `label add`,
-        # DOC_ONLY went false on every doc-only change set as soon as any bd call
-        # had run. The F1 fast path was dead in production: every documentation
-        # Stop demanded a full QA round. Measured at
-        # specs/verify-review-discipline.sh D4, where the tracker held exactly
-        # `docs/notes.md` and the gate still blocked.
-        #
-        # This is NOT the denylist (see workflow_self_written's header for why the
-        # two rules are separate): a change set consisting solely of beads/gate
-        # state still reaches the `beads-state` fast path and still gets a gate
-        # record. It only stops the gate's own bookkeeping from making somebody
-        # else's change set look mixed.
-        if [ -n "${WORKFLOW_SELF_WRITTEN_REGEX:-}" ] && workflow_self_written "$path"; then
-            continue
-        fi
-        if is_tracked_change "$path"; then
-            printf '%s\n' "$path"
-        fi
-    done <<< "$new_entries"
+    fi
+
+    if [ -n "$undeterminable" ]; then
+        # The sentinel REPLACES the set: nothing else is printed, so a reader
+        # can never mistake a partial emission for a complete one.
+        printf '%s%s\n' "$RC_UNDETERMINABLE_SENTINEL" "$undeterminable"
+        return 0
+    fi
+    [ -z "$rc_out" ] || printf '%s' "$rc_out"
     return 0
 }
-
 # claude-workflow-plugin-gsfd (member 1): a per-run directory for
 # TEST_LOG/LINT_LOG/TYPE_LOG so nothing else on the machine is ever handed
 # the same path — see TEST_LOG_STABLE's header for the collision this
@@ -3186,15 +3320,67 @@ fi
 CODE_CHANGES_DETECTED=false
 ALL_CHANGED_FILES=()
 DOC_ONLY=true   # F1: stays true only if every changed file is doc-only.
+CHANGE_SET_UNDETERMINABLE=""
 
 while IFS= read -r line; do
     [ -z "$line" ] && continue
+    case "$line" in
+        "$RC_UNDETERMINABLE_SENTINEL"*)
+            # i8cx U1: reviewable_changes could not establish the set. The
+            # sentinel is the ONLY line emitted in that state (see its
+            # header); remember the reason and refuse after the loop — an rc
+            # cannot cross this process substitution, so this in-band line is
+            # the one channel the failure has.
+            CHANGE_SET_UNDETERMINABLE="${line#"$RC_UNDETERMINABLE_SENTINEL"}"
+            continue
+            ;;
+    esac
     CODE_CHANGES_DETECTED=true
     ALL_CHANGED_FILES+=("$line")
     if ! is_doc_only_path "$line"; then
         DOC_ONLY=false
     fi
 done < <(reviewable_changes)
+
+# CHANGE-SET-UNDETERMINABLE BEGIN (claude-workflow-plugin-i8cx U1)
+#
+# A failed read is not an empty change set. Before this block, every fault in
+# reviewable_changes' machinery — an unreadable changed-files.txt, a failed
+# `git status`, a failed sort or comm — produced the SAME empty stream as a
+# genuinely clean session, CODE_CHANGES_DETECTED stayed false, and the release
+# right below this comment printed `{}`. Measured live against the shipped
+# hook before the fix: `chmod 000` on a non-empty tracker RELEASED an
+# unreviewed change set; a tracker-scoped failing `sort` RELEASED; a failing
+# `git status` RELEASED wherever the reconcile stage was not already in front
+# of it. This arm converts the sentinel into the same refusal shape as the
+# reconcile-tracker and denylist blocks above: when the gate cannot say what
+# the change set IS, it does not release.
+#
+# Placed BEFORE the empty-set release below — which is exactly the release a
+# masked failure used to reach — and AFTER the stop_hook_active circuit
+# breaker far above, so it cannot loop the Stop hook (AgentLint H3).
+if [ -n "$CHANGE_SET_UNDETERMINABLE" ]; then
+    log_sync_error "Stop blocked: the reviewable change set is UNDETERMINABLE ($CHANGE_SET_UNDETERMINABLE) — refusing to read a failed collection as an empty change set (i8cx U1)"
+    emit_block "QA gate cannot run: the reviewable change set could not be established.
+
+reviewable_changes() failed while collecting the current change set:
+  $CHANGE_SET_UNDETERMINABLE
+
+An empty change set and a failed read are different things. Releasing here
+would certify \"nothing to review\" from evidence that was never collected —
+so the gate refuses instead, the same rule the reconcile-tracker and
+denylist blocks apply.
+
+Fix (usual causes, in order):
+  1. Can .claude/.qa-tracking/changed-files.txt be read in this checkout?
+     (The tracker exists but its read failed — check permissions/disk.)
+  2. Is \`git status\` working here? An interrupted rebase, a stale
+     index.lock, or a permissions problem all surface this way.
+  3. Are \`sort\` and \`comm\` on PATH and healthy?
+  4. Re-run the Stop after fixing; this block clears once the change set is
+     readable again."
+fi
+# CHANGE-SET-UNDETERMINABLE END (claude-workflow-plugin-i8cx U1)
 
 # If no changes at all, allow.
 if [ "$CODE_CHANGES_DETECTED" = false ]; then
@@ -5360,11 +5546,26 @@ if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     # `set -e` (an aborted hook emits nothing, which the hooks contract reads as
     # NON-blocking — i.e. it would fail OPEN).
     VANISHED_PROBE=$(reviewable_changes 2>/dev/null || true)
-    if [ -z "$VANISHED_PROBE" ]; then
-        log_sync_error "Stop released: the change set VANISHED between this hook's detection stage and its gate evaluation on $CURRENT_TASK (approve landed concurrently — it truncates changed-files.txt and refreshes the gate baseline), so the recomputed hash was the empty-set hash and no record could match it. Nothing is left to review; releasing instead of emitting a transient LABEL_WITHOUT_RECORD block (gz3)"
-        echo "{}"
-        exit 0
-    fi
+    case "$VANISHED_PROBE" in
+        "$RC_UNDETERMINABLE_SENTINEL"*)
+            # i8cx U1: the probe FAILED — "cannot tell" is not "vanished".
+            # Before the sentinel existed, a fault here (git dying mid-hook,
+            # the tracker turning unreadable between the detection stage and
+            # this re-read) produced an EMPTY probe and RELEASED the very
+            # Stop whose approval record could not be matched — and nothing
+            # sits in front of this read the way reconcile-tracker sits in
+            # front of the detection stage. Fall through WITHOUT releasing:
+            # the LABEL_WITHOUT_RECORD state stays blocking (or resolves via
+            # the worktree bridge below on its own positive proof), and the
+            # log names the real reason.
+            log_sync_error "vanished-change-set probe UNDETERMINABLE on $CURRENT_TASK (${VANISHED_PROBE#"$RC_UNDETERMINABLE_SENTINEL"}) — keeping the LABEL_WITHOUT_RECORD path instead of releasing on a failed read (i8cx U1)"
+            ;;
+        "")
+            log_sync_error "Stop released: the change set VANISHED between this hook's detection stage and its gate evaluation on $CURRENT_TASK (approve landed concurrently — it truncates changed-files.txt and refreshes the gate baseline), so the recomputed hash was the empty-set hash and no record could match it. Nothing is left to review; releasing instead of emitting a transient LABEL_WITHOUT_RECORD block (gz3)"
+            echo "{}"
+            exit 0
+            ;;
+    esac
 fi
 # VANISHED-CHANGE-SET END (gz3 / v4.1 U1)
 

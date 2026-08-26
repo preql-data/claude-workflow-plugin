@@ -407,8 +407,42 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # H2-F1 (the validate-design final-extraction guard in review-check.sh) did
 # NOT add a spec: it extended design-artifact.test.sh's existing Section 2
 # with a Section 2b, per this tier's put-it-with-its-subject convention.
+#
+# 51 -> 52 (claude-workflow-plugin-i8cx, units U3+U4): added
+# qa-gate-pipefail.test.sh, covering qa-gate.sh's change-set evidence chain
+# under FAILED reads — the masked-pipeline class where an upstream failure
+# returned an empty set at rc 0 (write_gate_baseline's dead :327 handler, the
+# :402 exclusion build, gate_baseline_entries, reconcile_tracker's
+# sort/comm reads, design_foreign_paths, sha256_file). Each guard is paired
+# with a PATH-shim fault injection against the SHIPPED script, a mutant that
+# restores the pre-fix mask and demonstrates the named masquerade, and the
+# two restore controls an over-eager refusal would break first (clean tree
+# reconciles rc 0; clean checkout captures entries=0 ok:true).
+#
+# 52 -> 53 (claude-workflow-plugin-i8cx, unit U1 + the verify-before-stop
+# half of U7): added change-set-undeterminable.test.sh — the paired guard
+# for the Stop hook's new "a failed read is not an empty change set"
+# refusal. reviewable_changes() used to read the tracker through a process
+# substitution and git through a `git | sort` pipeline, so an unreadable
+# changed-files.txt, a failing tracker sort/comm, or a failing `git status`
+# produced the SAME empty stream as a clean session and the hook RELEASED
+# (`{}`) — measured live at ee7ce328 with nothing more exotic than
+# `chmod 000` on a non-empty tracker, full shipped stack, no shims. The spec
+# drives the extracted-from-shipped function (sentinel-only output on each
+# induced failure, including the anti-truncation discriminator a
+# pipefail-shaped fix would fail: a git-half fault must suppress the
+# already-computed tracker half), the SHIPPED hook end-to-end (the guard's
+# specific block on each fault; `{}` + no sentinel byte on a clean sandbox;
+# restore controls), the VANISHED-CHANGE-SET probe at the W3 detect-stack
+# seam (fault -> the LABEL_WITHOUT_RECORD block stands with an honest
+# "probe UNDETERMINABLE" log; genuine vanish -> still releases, the gz3
+# anti-overreach control), the U7 current-task reads (an unreadable
+# current-task.repo ARMS the I8 cross-repo block instead of disarming it;
+# an unreadable current-task marker logs "read FAILED" instead of the false
+# "empty or missing"), and a sentinel-strip META reproducing the exact
+# pre-fix `{}` release on a mutated copy.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=51
+EXPECTED_SPECS=53
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

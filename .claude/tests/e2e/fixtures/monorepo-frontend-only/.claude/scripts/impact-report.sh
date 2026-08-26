@@ -25,7 +25,9 @@
 #                                  changed-files list and exit. qa-gate.sh
 #                                  approve uses this to detect stale reports;
 #                                  keeping the canonicalisation in ONE place
-#                                  prevents generator/checker drift.
+#                                  prevents generator/checker drift. Prints
+#                                  NOTHING and exits 3 when the tracker
+#                                  exists but cannot be read (i8cx U2).
 #
 # Artifact shape (the per-file `impact` value is the code-graph server's
 # structuredContent envelope — {ok, headline, data, llm_observations} on
@@ -74,8 +76,10 @@
 # Exit codes:
 #   0  artifact written (possibly degraded)
 #   1  usage error (missing task id)
-#   3  environment cannot produce the artifact at all (jq missing, or
-#      .qa-tracking unwritable) — qa-gate.sh enter logs this loudly.
+#   3  environment cannot produce the artifact at all (jq missing,
+#      .qa-tracking unwritable, or changed-files.txt present but
+#      UNREADABLE — an unread change set refuses rather than hashing
+#      as empty; i8cx U2) — qa-gate.sh enter logs this loudly.
 #
 # Progress is logged to stderr so an interactive caller can watch the
 # index build; qa-gate.sh enter captures it into a per-task log.
@@ -255,19 +259,45 @@ relativize_for_impact() {
 # generator below and `qa-gate.sh approve` (via --hash-only).
 
 canonical_changed_files() {
+    # rc contract (claude-workflow-plugin-i8cx U2): rc 0 = the set
+    # (possibly EMPTY) was actually READ; rc 1 = the set could NOT be
+    # established (tracker present but unreadable, or no temp file to
+    # materialise it into). An ABSENT tracker stays rc 0 with no output —
+    # "no tracker yet" is the ordinary no-edits state, not a read failure.
     [ -f "$TRACKING_FILE" ] || return 0
-    local line
+    local line _ccf_sorted
     # LC_ALL=C pins the sort order: the report may be generated from an
     # interactive shell and freshness-checked from a hook with a
     # different locale; a locale-dependent sort would make the same list
     # hash differently (false-stale refusals).
+    #
+    # Materialised into a temp file with an EXPLICIT rc, not consumed via
+    # `done < <(sort ...)`: a process substitution's exit status is
+    # unobservable, so a failed read made this loop run ZERO times and the
+    # function return 0 — byte-identical to a legitimately empty tracker,
+    # which change_set_hash then hashed to the empty-set digest e3b0c442…
+    # on BOTH the generator and the checker side, so approve's freshness
+    # comparison MATCHED over a change set that was never read (i8cx U2).
+    _ccf_sorted=$(mktemp -t impact-canon.XXXXXX) || return 1
+    # UNREADABLE-TRACKER-GUARD BEGIN (claude-workflow-plugin-i8cx U2).
+    # The L1 META leg (impact-report.test.sh section 7M1) rewrites this
+    # region on a COPY into the unguarded pre-i8cx shape and asserts the
+    # mutant prints the empty-set digest at rc 0. Anchors are these
+    # sentinel TEXTS, not line numbers (LESSONS llh.20) — do not rename.
+    if ! LC_ALL=C sort -u "$TRACKING_FILE" > "$_ccf_sorted" 2>/dev/null; then
+        rm -f "$_ccf_sorted" 2>/dev/null
+        return 1
+    fi
+    # UNREADABLE-TRACKER-GUARD END (claude-workflow-plugin-i8cx U2)
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         if [[ "$line" =~ $DENYLIST_REGEX ]]; then
             continue
         fi
         printf '%s\n' "$line"
-    done < <(LC_ALL=C sort -u "$TRACKING_FILE" 2>/dev/null)
+    done < "$_ccf_sorted"
+    rm -f "$_ccf_sorted" 2>/dev/null
+    return 0
 }
 
 sha256_stdin() {
@@ -285,7 +315,18 @@ sha256_stdin() {
 }
 
 change_set_hash() {
-    canonical_changed_files | sha256_stdin
+    # Subshell-scoped pipefail (i8cx U2): canonical_changed_files' rc 1
+    # (unreadable tracker) must propagate through the pipe — without it,
+    # sha256_stdin's rc 0 masks the failure and a set that was never read
+    # hashes as the empty set. Scoped to the subshell so the option never
+    # leaks to callers (file-wide pipefail is unsafe in this repo — it
+    # inverts healthy `grep -c`/`head -1` sites; see the i8cx audit's
+    # do_not_change list). sha256_stdin's inner `shasum | awk` inherits
+    # the option, so a mid-stream hash-tool death surfaces too. The L1
+    # META leg (impact-report.test.sh section 7M2) strips this pipefail
+    # on a COPY and asserts the silence returns — the two halves ship
+    # together or not at all.
+    ( set -o pipefail; canonical_changed_files | sha256_stdin )
 }
 
 # ---------------------------------------------------------------------------
@@ -293,9 +334,23 @@ change_set_hash() {
 
 case "${1:-}" in
     --hash-only)
+        # REFUSE — print NOTHING on stdout, exit 3 — when the change set
+        # cannot be read (i8cx U2). The digest of a failed read is the
+        # empty-set hash e3b0c442…, the same bytes a legitimately empty
+        # tracker produces, and BOTH sides of approve's freshness check
+        # run through this arm — so a failed read used to make generator
+        # and checker AGREE on a hash of a change set nobody ever read.
+        # Empty stdout + rc 3 lands in the existing fail-closed arms
+        # upstream: qa-gate.sh compute_change_set_hash (`|| printf ''`)
+        # -> approve's impact_report_unverifiable refusal, and
+        # verify-before-stop.sh current_change_set_hash likewise.
+        if ! _HASH_ONLY_OUT=$(change_set_hash); then
+            log "FATAL: $TRACKING_FILE exists but could not be read (sort failed); refusing to print a hash for a change set that was never read"
+            exit 3
+        fi
         # Normalize: exactly one trailing newline regardless of which
         # hash tool ran (awk emits one, the no-tool fallback does not).
-        printf '%s\n' "$(change_set_hash)"
+        printf '%s\n' "$_HASH_ONLY_OUT"
         exit 0
         ;;
     --relativized-changed-files)
@@ -352,6 +407,16 @@ case "${1:-}" in
         # actionable error_key rather than folding an "I could not
         # normalise this path" failure into "the design didn't declare
         # this file" — two different claims that used to look identical.
+        # i8cx U2: materialise the canonical set FIRST with an explicit
+        # rc. The previous `done < <(canonical_changed_files)` discarded
+        # the function's status, so an unreadable tracker emitted an
+        # EMPTY relativized set at rc 0 — which qa-gate.sh design-conform
+        # (whose actual_rc guard refuses on any non-zero exit) would have
+        # read as "no changed files" rather than "could not read".
+        _RCF_CANON=$(canonical_changed_files) || {
+            log "FATAL: $TRACKING_FILE exists but could not be read (sort failed); refusing to emit a relativized change set that could be a silent subset"
+            exit 3
+        }
         _RCF_UNNORMALIZABLE_COUNT=0
         while IFS= read -r _rcf_line; do
             [ -z "$_rcf_line" ] && continue
@@ -389,7 +454,7 @@ case "${1:-}" in
                         ;;
                 esac
             fi
-        done < <(canonical_changed_files)
+        done <<< "$_RCF_CANON"
         [ "$_RCF_UNNORMALIZABLE_COUNT" -gt 0 ] && exit 4
         exit 0
         ;;
@@ -415,12 +480,30 @@ fi
 # ---------------------------------------------------------------------------
 # Collect the change set once (array; bash 3.2 safe).
 
+# i8cx U2: this collection loop used to read canonical_changed_files via
+# a process substitution, which discards its rc — a failed read collected
+# ZERO files and the report was assembled as if the change set were
+# empty. Materialise with an explicit rc and REFUSE (exit 3, the
+# documented "environment cannot produce the artifact" code; qa-gate.sh
+# enter's generate_impact_report captures the rc and warns loudly).
+_CHANGED_RAW=$(canonical_changed_files) || {
+    log "FATAL: $TRACKING_FILE exists but could not be read (sort failed); refusing to generate an impact report over a change set that was never read"
+    exit 3
+}
 CHANGED=()
 while IFS= read -r line; do
+    [ -z "$line" ] && continue   # <<< on an empty capture yields one empty line
     CHANGED+=("$line")
-done < <(canonical_changed_files)
+done <<< "$_CHANGED_RAW"
 
-HASH=$(change_set_hash)
+# Second read of the same function — canonicalisation stays single-sourced
+# in change_set_hash (re-hashing $_CHANGED_RAW here would diverge on the
+# empty set: printf '%s\n' "" emits one newline where canonical emits
+# none). Guarded for the same reason as above (i8cx U2).
+HASH=$(change_set_hash) || {
+    log "FATAL: change-set hash could not be computed ($TRACKING_FILE unreadable); refusing to bind a report to a change set that was never read"
+    exit 3
+}
 GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
 
 WORK_DIR=$(mktemp -d -t impact-report.XXXXXX)
