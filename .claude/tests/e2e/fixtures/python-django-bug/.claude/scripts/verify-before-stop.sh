@@ -8,13 +8,17 @@
 #   B2   Epic-level e2e gate (epic-gate.sh) on task completion.
 #   B3   Test/lint/type timeouts: 1200s tests, 300s lint, 600s type,
 #        each enforced by run_with_timeout's own `timeout`/`gtimeout` call
-#        WHEN one of those two binaries is present on PATH (see that
-#        function's own header). This line used to say "each enforced"
-#        unconditionally (claude-workflow-plugin-gsfd R6-F2 fix) — that is
-#        false on a host with neither binary (this repo's own authoring box
-#        is one): there the run is UNBOUNDED, disclosed via
-#        TIMEOUT_NOT_ENFORCED / checks_scope_note rather than silently
-#        capped anyway. claude-workflow-plugin-gsfd R5-F6: this line used to
+#        WHEN one of those two binaries is present on PATH, and by an
+#        in-process poll+tree-kill watchdog otherwise (claude-workflow-
+#        plugin-03tf; see that function's own header). This line used to
+#        say "each enforced" unconditionally (claude-workflow-plugin-gsfd
+#        R6-F2 fix) — that was false on a host with neither binary (this
+#        repo's own authoring box is one) until 03tf: before it, the run
+#        was genuinely UNBOUNDED there, disclosed via TIMEOUT_NOT_ENFORCED
+#        / checks_scope_note rather than capped — measured cost of that
+#        trade, twice, by the operator: a 1200s advertised cap, a 55-65
+#        minute actual `make test` run. claude-workflow-plugin-gsfd R5-F6:
+#        this line used to
 #        also promise a configurable 60s "outer
 #        wrapper" timeout (STOP_TIMEOUT_FILE / read_stop_timeout) — that
 #        knob had no caller anywhere in this file, and was deleted along
@@ -100,12 +104,63 @@ iteration_file_for() {
 
 # Tunable timeouts. The long-running test/lint/type subprocesses are capped
 # by run_with_timeout's own `timeout`/`gtimeout` call WHEN one of those two
-# binaries is on PATH (see that function's own header for why it looks like
-# this rather than an in-process poll loop, and for what happens on a host
-# with neither — claude-workflow-plugin-gsfd R6-F2: "capped" here used to be
-# unconditional, which this file's own authoring box already falsifies).
+# binaries is on PATH, and by an in-process poll+tree-kill watchdog
+# otherwise (claude-workflow-plugin-03tf — see that function's own header
+# for the full mechanism, why it looks like this rather than a heartbeat,
+# and for what happened on a host with neither binary BEFORE 03tf —
+# claude-workflow-plugin-gsfd R6-F2: "capped" here used to be unconditional,
+# which this file's own authoring box already falsified, genuinely
+# unbounded until 03tf closed that gap).
+#
+# TEST_TIMEOUT_S=1200 IS NOT SIZED TO LET `make test` FINISH. It cannot:
+# this repo's own suite measures 1731s and 1777s UNCONTENDED (`make test`,
+# HEAD 7b803ad + 03tf, operator-measured) and 3336-3913s under contention
+# -- every one of those numbers exceeds this file's own Stop hook's
+# EXTERNAL wall-clock ceiling (.claude/settings.json, Stop hook
+# timeout=1320000ms=1320s) on its own, before this constant even enters
+# the picture. No internal value here can make the full suite complete
+# inside that external window.
+#
+# What 1200 IS sized for: staying safely UNDER 1320s so THIS SCRIPT's own
+# watchdog (03tf: snapshot the tree, TERM it, re-walk survivors, KILL the
+# union) fires and finishes FIRST, before Claude Code's external kill of
+# the whole hook process does. That external kill may be PID-only (not
+# confirmed either way from here) and would leave `make test`'s process
+# tree orphaned rather than cleanly torn down -- the exact worse failure
+# mode 03tf's watchdog exists to prevent. Margin, checked: internal
+# 1200s + watchdog overhead (~2.2s TERM grace + KILL pass) + this file's
+# own lint dispatch afterward (measured 24.6s, see LINT_TIMEOUT_S below)
+# leaves ~93s before the 1320s external cap for JSON composition and the
+# rest of the script's own bookkeeping -- comfortable, not tight.
+#
+# claude-workflow-plugin-03tf.1 HISTORY, recorded so this is not
+# rediscovered the hard way twice: this value was briefly raised to 6000
+# (reasoning: "size the internal cap to cover the suite, with headroom
+# over contention") -- a real, well-measured fix to the WRONG layer. At
+# any internal value above ~1300s the external 1320s kill always fires
+# first regardless, so the internal watchdog above becomes unreachable
+# code and the worse (possibly-orphaning) failure mode always wins
+# instead of the clean one. Reverted same day. Raising the EXTERNAL cap
+# in .claude/settings.json instead -- which would let a full run actually
+# finish -- is a workflow-design decision (it trades a much slower Stop
+# hook against the gate's full-suite guarantee) for the operator to make,
+# not a mechanical constant to bump here.
 TEST_TIMEOUT_S=1200
+# LINT_TIMEOUT_S: confirmed, not assumed. `make lint` measured 24.6s and
+# 24.6s (two independent runs, this session, HEAD 7b803ad + 03tf) — 300s
+# is ~12x that. No change.
 LINT_TIMEOUT_S=300
+# TYPE_TIMEOUT_S: confirmed UNREACHABLE in this repo's own self-test, not
+# assumed reachable. `bash .claude/scripts/detect-stack.sh`, run directly
+# in this repo, emits observations="runner=make manifest=Makefile" with
+# type_cmd="" — detect-stack.sh's own `make`-runner branch never sets
+# TYPE_CMD, so the `if [ -n "$TYPE_CMD" ]` guard around this budget's only
+# call site never opens here. Left at its existing default: no measurement
+# exists to justify any other value, and changing an unreachable constant
+# on a guess is exactly the un-evidenced habit this task is about
+# removing. A project whose detect-stack runner DOES set TYPE_CMD (npm,
+# python, go, ...) would need its own measurement before this default
+# should be trusted there either.
 TYPE_TIMEOUT_S=600
 
 # Maximum iterations before escalating via the decision gate.
@@ -2429,7 +2484,61 @@ reap_stale_run_log_dirs() {
 # attempted regardless, and a binary that is no longer where the cache
 # expects it produces a real "command not found" exit rather than a quiet
 # re-probe. Nothing else changes: a host that always has (or never has)
-# the binary behaves exactly as before, byte for byte.
+# the binary behaves exactly as before, byte for byte. (This paragraph
+# predates 03tf below — still true for the `timeout`/`gtimeout` branches,
+# no longer true for `*)`: that branch's own behaviour is the one thing
+# 03tf deliberately changes.)
+#
+# WATCHDOG FALLBACK (claude-workflow-plugin-03tf). The trade two paragraphs
+# up — a host with neither binary runs the command genuinely UNBOUNDED — is
+# the one piece of the round-6 DESIGN COLLAPSE this task revises. Operator-
+# measured, twice, on exactly this kind of host: a Stop hook that
+# advertises TEST_TIMEOUT_S=1200 and then runs `make test` for 55-65
+# minutes, because the cap was disclosed (TIMEOUT_NOT_ENFORCED, above)
+# rather than enforced. Disclosing an unenforced cap after the run finishes
+# does not give back the hour it cost.
+#
+# This is explicitly NOT a revival of the reverted heartbeat rewrite — read
+# the four defects the DESIGN COLLAPSE paragraph above cites again: an
+# orphaned daemon child, a per-spec-reset counter, a setsid escape from
+# process-group supervision, unbounded heartbeat accumulation. Every one of
+# those was a property of a background process that ran for the FULL
+# duration of a check, heartbeating an external lease's mtime on every
+# tick. The `*)` branch below has none of that shape: no lease, no
+# heartbeat, no per-tick write, nothing that survives past this one
+# function call. It is a port of the OTHER poll-and-kill pattern already
+# shipped, reviewed, and in production use elsewhere in this exact repo —
+# .claude/scripts/tests/run-tests.sh's tree_pids()/escalate_kill()
+# (mirrored at .claude/tests/component/run.sh) — which round 6 never
+# touched, because a per-spec wall-clock cap with a tree-kill on expiry was
+# never the mechanism that collapsed. Same shape, one command instead of a
+# loop over many: background the command under a briefly-scoped `set -m`
+# (own process group, load-bearing for the group-kill calls — see the
+# branch's own comment for why bracketing rather than a file-wide `set -m`
+# matters here), poll its liveness on a bounded 1s tick, and on expiry
+# escalate-kill the WHOLE process tree, not just the direct child — `make`
+# spawns run-tests.sh which spawns a per-spec `bash`, and a direct-child
+# kill orphans the rest. No new dependency: POSIX shell + `ps`, same as
+# both references.
+#
+# The 124-means-timeout convention (this function's own opening comment,
+# and classify_test_failure / the three FAILED_CHECKS branches that depend
+# on it) is preserved exactly: a killed process makes `wait` report a
+# 128+signal status (143 if only TERM lands, 137 if KILL is needed), never
+# 124 on its own — rc is forced to 124 by the caller, and ONLY via the
+# marker-file check the branch below adds, the same indirection
+# run-tests.sh's own TIMEOUT_MARKER uses for the identical reason (a kill
+# racing the command's own near-boundary exit must still classify as a
+# timeout — see the branch's own near-budget race note).
+#
+# This also closes the platform-dependent gap claude-workflow-plugin-v4jn
+# tracked ("no leg anywhere proves run_with_timeout returns 124 for a
+# genuine hang") for the no-native-binary case specifically: this host has
+# neither `timeout` nor `gtimeout`, so the no-timeout path is no longer
+# something .claude/scripts/tests/run-with-timeout.test.sh has to skip or
+# simulate here — it is the default. v4jn's OTHER half (a genuine hang
+# under a REAL `timeout`/`gtimeout` binary) is untouched by this change and
+# remains open.
 run_with_timeout() {
     local secs="$1" log="$2"; shift 2
     : > "$log"
@@ -2457,16 +2566,158 @@ run_with_timeout() {
             ;;
         *)
             # Neither `timeout` nor `gtimeout` was on PATH when this run's
-            # dispatch decision was made: run UNBOUNDED. Capture the real
-            # exit code BEFORE writing anything else below, or this function
-            # would return the trailing printf's exit status instead of the
-            # command's own — silently breaking the 124-means-timeout
-            # convention every caller of this function depends on
-            # (classify_test_failure and the three FAILED_CHECKS branches
-            # above).
-            local rc=0
-            bash -c "$*" >"$log" 2>&1 || rc=$?
-            printf '\n[run_with_timeout] NOTE: neither timeout nor gtimeout is on PATH -- the advertised %ss cap was NOT ENFORCED; this command ran UNBOUNDED. claude-workflow-plugin-gsfd.\n' \
+            # dispatch decision was made. claude-workflow-plugin-03tf: see
+            # the WATCHDOG FALLBACK paragraph in this function's own header
+            # for why this branch now enforces the cap itself (a bounded
+            # poll+tree-kill watchdog) instead of running the command
+            # genuinely unbounded, and why that is a port of run-tests.sh's
+            # tree_pids()/escalate_kill() rather than a revival of the
+            # reverted heartbeat rewrite the DESIGN COLLAPSE note above
+            # describes.
+            #
+            # rc is still captured the SAME way the pre-03tf code captured
+            # it — before anything else below can overwrite `$?` — so this
+            # function never accidentally returns a log-write's exit status
+            # instead of the command's own. The marker-file check further
+            # down is the ONLY place rc is overridden afterward, and only to
+            # 124, matching the 124-means-timeout convention every caller
+            # depends on (classify_test_failure and the three FAILED_CHECKS
+            # branches above).
+            # WATCHDOG-BEGIN (03tf) -----------------------------------------
+            local rc=0 wd_marker wd_pid child_pid wd_grace
+            wd_grace=2
+            wd_marker="${log}.wd-timeout"
+            rm -f "$wd_marker" 2>/dev/null || true
+
+            # _wd_tree_pids <pid> — print <pid> and every live descendant,
+            # depth-first (children before parent), via a ppid walk. Direct
+            # port of run-tests.sh's tree_pids() (see that function's own
+            # header for the full rationale — portable across macOS/Linux
+            # `ps`, and why the snapshot below is taken BEFORE any signal is
+            # sent). Defined fresh each time this branch runs — cheap, and
+            # it keeps the branch fully self-contained so the awk
+            # extraction .claude/scripts/tests/run-with-timeout.test.sh and
+            # gate-claim-honesty.test.sh both use
+            # (`/^run_with_timeout\(\) \{/,/^\}/`) keeps capturing the whole
+            # mechanism without needing its range widened.
+            _wd_tree_pids() {
+                local wpid="$1" wkids wk
+                wkids=$(ps -axo pid,ppid 2>/dev/null | awk -v p="$wpid" '$2 == p { print $1 }')
+                for wk in $wkids; do
+                    _wd_tree_pids "$wk"
+                done
+                printf '%s\n' "$wpid"
+            }
+
+            # `set -m` bracketed as tightly as possible around this ONE
+            # launch: on just long enough for the backgrounded command to
+            # get its own process group (pgid == its own pid — verified
+            # empirically on this host, bash 3.2.57 / macOS, non-interactive
+            # script: monitor mode still calls setpgid() for a job started
+            # while it is on), off again before the poll loop so nothing
+            # else in this file inherits job-control side effects (async
+            # "[N]+ Done" notices on this script's own stderr, altered
+            # wait/SIGCHLD semantics) for the rest of the run. The isolated
+            # group is load-bearing for the group-kill calls below
+            # (`kill ... -- "-$child_pid"`) — without it those would target
+            # THIS SCRIPT's own process group, not the command's. Bracketing
+            # (never a file-wide `set -m`) also preserves the pre-03tf
+            # stdin behaviour byte for byte: a background job started under
+            # monitor mode INHERITS the runner's stdin (measured, both
+            # directions, on this host), and the pre-03tf code ran this
+            # command in the FOREGROUND, which also inherits stdin — so
+            # this still matches. Backgrounding WITHOUT the bracket would
+            # silently redirect the command's stdin to /dev/null instead
+            # (bash's own documented behaviour, and the same fact
+            # run-tests.sh's a9hh R3-F2 fix had to work around in the
+            # opposite direction — there, job control is ON file-wide, so
+            # EVERY spec needed an explicit `< /dev/null` to get what
+            # backgrounding gives for free when job control is off).
+            set -m
+            bash -c "$*" >"$log" 2>&1 &
+            child_pid=$!
+            set +m
+
+            # Watchdog: poll once a second so it exits promptly when the
+            # command does. At the cap, write the marker FIRST — so a kill
+            # that races the command's own near-boundary exit is still
+            # classified as a timeout (the advertised cap is a boundary
+            # this watchdog samples once a second; once a sample at the
+            # boundary finds the command still alive, that verdict is
+            # final regardless of how the race with the command's own
+            # near-simultaneous exit resolves a moment later — the same
+            # resolution run-tests.sh's own TIMEOUT_MARKER uses) — then
+            # escalate: TERM the tree, TERM the group, a short grace,
+            # re-walk from whatever is still alive (a TERM handler can
+            # spawn a new child during the grace — the a9hh R6-F1 defect
+            # run-tests.sh's escalate_kill also guards against), KILL the
+            # union and the group, then name anything still alive after
+            # that in the log — an honest boundary beats a claimed-clean
+            # tree that is not.
+            (
+                waited=0
+                while [ "$waited" -lt "$secs" ]; do
+                    sleep 1 || true
+                    waited=$((waited + 1))
+                    kill -0 "$child_pid" 2>/dev/null || exit 0
+                done
+                : > "$wd_marker" 2>/dev/null || true
+                doomed=$(_wd_tree_pids "$child_pid")
+                for p in $doomed; do
+                    kill -TERM "$p" 2>/dev/null || true
+                done
+                kill -TERM -- "-$child_pid" 2>/dev/null || true
+                sleep "$wd_grace" || true
+                rewalk=""
+                for p in $doomed; do
+                    if kill -0 "$p" 2>/dev/null; then
+                        rewalk="$rewalk
+$(_wd_tree_pids "$p")"
+                    fi
+                done
+                for p in $doomed $rewalk; do
+                    kill -KILL "$p" 2>/dev/null || true
+                done
+                kill -KILL -- "-$child_pid" 2>/dev/null || true
+                sleep 0.2 || true
+                survivors=""
+                for p in $doomed $rewalk; do
+                    if kill -0 "$p" 2>/dev/null; then
+                        survivors="$survivors $p"
+                    fi
+                done
+                if [ -n "$survivors" ]; then
+                    printf '[run_with_timeout] WATCHDOG SURVIVORS after the KILL pass (still alive, not a zombie):%s\n' \
+                        "$survivors" >> "$log" 2>/dev/null || true
+                fi
+            ) &
+            wd_pid=$!
+
+            wait "$child_pid" 2>/dev/null || rc=$?
+
+            if [ -f "$wd_marker" ]; then
+                # The cap fired: let the watchdog finish its OWN escalation
+                # (grace + KILL pass + survivor sweep) before this function
+                # returns, so nothing from this run is still alive and
+                # contending for the store/lease when the caller moves on to
+                # the next dispatch (lint, then type). An unconditional TERM
+                # here would cut the watchdog down mid-escalation — the same
+                # a9hh R6-F1 hazard run-tests.sh's own runner avoids at its
+                # identical decision point.
+                wait "$wd_pid" 2>/dev/null || true
+                rc=124
+            else
+                # No timeout: the watchdog is either still asleep inside its
+                # poll loop, or about to notice on its own (up to 1s later)
+                # that $child_pid is gone — stop it now rather than let it
+                # idle out the rest of the budget for nothing.
+                kill -TERM "$wd_pid" 2>/dev/null || true
+                wait "$wd_pid" 2>/dev/null || true
+            fi
+            rm -f "$wd_marker" 2>/dev/null || true
+            # WATCHDOG-END (03tf) -------------------------------------------
+
+            printf '\n[run_with_timeout] NOTE: neither timeout nor gtimeout is on PATH -- WATCHDOG FALLBACK ENFORCED: the advertised %ss cap is bounded by an in-process poll+tree-kill watchdog instead. claude-workflow-plugin-03tf.\n' \
                 "$secs" >> "$log"
             TIMEOUT_NOT_ENFORCED=1
             return "$rc"
@@ -4890,6 +5141,21 @@ checks_scope_note() {
         # some-bounded/some-not to misattribute in the first place. See that
         # function's own header for the fix and the two failure directions it
         # closes.
+        #
+        # claude-workflow-plugin-03tf: the paragraph below used to say
+        # "TIMEOUT NOT ENFORCED ... executed UNBOUNDED ... A hang would not
+        # stop at that figure" — true when this was written, false now that
+        # run_with_timeout's `*)` branch enforces the cap itself (an
+        # in-process watchdog) instead of running genuinely unbounded.
+        # Shipping the old wording next to real enforcement would print a
+        # NEW dishonesty in the opposite direction the moment this watchdog
+        # actually fires: "TIMED OUT after Ns" from FAILED_CHECKS sitting
+        # right next to "the cap did NOT apply" in the same block-reason
+        # text. TIMEOUT_NOT_ENFORCED (the flag name) still fires on exactly
+        # the same condition — neither binary on PATH — it now means "not
+        # enforced by the NATIVE binary", not "not enforced at all"; kept
+        # unrenamed to avoid disturbing the R6-F1 multi-call-consistency
+        # mechanics described above, which are unchanged by this fix.
         if [ -n "${TIMEOUT_NOT_ENFORCED:-}" ]; then
             local ran_timeout_note=""
             if [ -n "${TEST_CMD:-}" ]; then
@@ -4910,11 +5176,15 @@ checks_scope_note() {
                 fi
             fi
             printf '
-  TIMEOUT NOT ENFORCED: neither timeout nor gtimeout is on PATH on this
-  host, so the RAN check(s) above (%s) executed UNBOUNDED just now -- their
-  advertised cap did NOT apply. A hang would not stop at that figure; only
-  the surrounding Stop hook wall-clock timeout (see .claude/settings.json)
-  still bounds it. claude-workflow-plugin-gsfd.\n' "$ran_timeout_note"
+  TIMEOUT WATCHDOG FALLBACK ENFORCED: neither timeout nor gtimeout is on PATH
+  on this host, so the RAN check(s) above (%s) were bounded by an in-process
+  watchdog (poll every 1s; escalate-kill the process tree on expiry) instead
+  of by timeout(1)/gtimeout(1) directly. Expect the bound to land within a
+  couple of seconds of the advertised figure, not exactly at it, and note it
+  cannot force out a process that ignores both SIGTERM and SIGKILL (an
+  uninterruptible/D-state hang) -- only the surrounding Stop hook wall-clock
+  timeout (see .claude/settings.json) still bounds that.
+  claude-workflow-plugin-03tf.\n' "$ran_timeout_note"
         fi
         printf '
   Those are the DEFAULT targets detect-stack.sh resolves for runner=%s. Any

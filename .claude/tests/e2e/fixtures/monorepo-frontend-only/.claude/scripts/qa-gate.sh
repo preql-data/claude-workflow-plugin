@@ -292,6 +292,17 @@ has_git_repo() {
 # Tolerances (unchanged from 0wk.2): no git repo -> remove stale baselines and
 # succeed; git missing -> log + return 1 (no baseline means the reader treats
 # everything as new, which is the fail-closed direction).
+#
+# HEAD-BOUND READS (claude-workflow-plugin-bbes). `head=` above has been
+# written since 3mg.1 and, until bbes, never read back: the reader
+# (gate_baseline_entries) compared porcelain LINES only, so a path committed
+# and then re-dirtied within one baseline's lifetime matched its own stale
+# entry byte-for-byte and was subtracted as pre-existing — silently, because
+# 94d.1's `change_set_reconstructed` refusal only fires on an EMPTY tracker
+# and this leaves a NON-empty one merely incomplete. gate_baseline_entries now
+# compares the header's `head=` against the current HEAD and, when they
+# differ, drops any entry whose path was touched by a commit in between —
+# see gate_baseline_bind_to_head's header for the full four-case breakdown.
 GATE_BASELINE_FILE="$QA_TRACKING_DIR/gate-baseline"
 LEGACY_APPROVED_BASELINE="$QA_TRACKING_DIR/approved-baseline"
 
@@ -452,19 +463,185 @@ gate_baseline_exclude_tracked() {
     printf '%s' "${kept%$'\n'}"
 }
 
-# gate_baseline_entries — the porcelain lines of the current gate baseline, or
-# empty when there is none.
+# Ordinary code, NOT sentinel-wrapped: gate_baseline_entries below wraps only
+# its own CALL to this function (the GATE-BASELINE-HEAD-BIND region there), so
+# a strip of that region is the surgical, single-variable mutation — "what if
+# the reader never consulted head-binding" — rather than also deleting this
+# definition. A stripped copy that keeps this function merely unused is still
+# valid, coherent bash, the same reasoning SUBTRACTION-ACCOUNTING's
+# `account_obs` declaration applies one level up.
+#
+# gate_baseline_bind_to_head <body> — claude-workflow-plugin-bbes. <body> is
+# the baseline's raw porcelain lines (gate_baseline_entries' own read, before
+# this narrows it); prints the SUBSET of those lines still safe to treat as
+# pre-existing dirt given the CURRENT HEAD, one per line.
+#
+# THE DEFECT THIS CLOSES. A porcelain line carries a status code and a path,
+# never the commit it was diffed against. reconcile_tracker's own `comm`-based
+# baseline comparisons below (survivor split and accounting complement alike),
+# and verify-before-stop.sh's separate copy, both compared
+# TEXT: ` M path` recorded at head A and ` M path` seen at head B matched
+# byte-for-byte and were treated as the same fact, even when `path` was
+# COMMITTED at A and re-dirtied only afterward — different content, same
+# line, silently subtracted either way. write_gate_baseline has recorded
+# `head=<sha|none>` in the baseline's own header since 3mg.1; nothing read it
+# back until now.
+#
+# THE FOUR CASES (claude-workflow-plugin-bbes's own framing; every branch
+# below is one of these, in the order asked):
+#
+#   1. baseline captured at current HEAD, HEAD unmoved. `recorded_head =
+#      current_head` (including BOTH being "none" — a repo with zero commits
+#      at capture time that still has zero commits now). EXACTLY today's
+#      behaviour: <body> is returned unfiltered, with no git call beyond the
+#      one `rev-parse HEAD` already needed to learn current_head. This is the
+#      overwhelmingly common call — every gate cycle that opens and closes
+#      without a commit landing in between — so it has to cost nothing and
+#      change nothing.
+#
+#   2. baseline captured at an OLDER head. `recorded_head != current_head`
+#      and both resolve. `git diff --name-only <recorded_head> <current_head>`
+#      names every path whose committed content differs between the two —
+#      i.e. every path "committed in between", the literal wording of the
+#      task this closes. An entry whose path is in that set is DROPPED (not
+#      printed): the dirt the baseline recorded for it belonged to a version
+#      of the file that no longer exists in the same form, so the SAME
+#      porcelain line seen now describes different content and must not be
+#      trusted merely because the text matches. An entry whose path is NOT in
+#      that set is untouched by every commit in the range — the same
+#      un-committed dirt sitting through unrelated history elsewhere in the
+#      tree — and stays, exactly as case 1 would have kept it.
+#      "none" on either side of the diff (a baseline captured before the first
+#      commit, or — pathologically — HEAD regressing to unborn) is spelled as
+#      the well-known empty-tree object
+#      (4b825dc642cb6eb9a060e54bf8d69288fbee4904, $GATE_EMPTY_TREE_SHA) rather
+#      than a special code path: diffing against "no commits" and diffing
+#      against the empty tree answer the same question — "what did this
+#      range commit" — for both orientations.
+#
+#   3. no baseline at all. Never reaches this function: gate_baseline_entries
+#      only calls it when $GATE_BASELINE_FILE exists AND has a non-empty
+#      body. Unchanged by construction, not by a branch here.
+#
+#   4. HEAD unreadable, or git otherwise cannot answer. Two distinct ways this
+#      happens, both FAIL CLOSED — nothing is printed, so every entry the
+#      baseline can no longer vouch for reads as reviewable, the same
+#      experience as case 3. Never a hard refusal: reconcile_tracker's rc
+#      contract is reserved for "the change set is unknown", and a baseline
+#      that cannot be verified is a narrower, survivable fact — the change
+#      set is still knowable, it is just larger than the baseline can trim.
+#        4a. $GATE_BASELINE_FILE has no `head=` line at all (hand-built,
+#            corrupted, or a fixture predating 3mg.1's header). Nothing to
+#            bind to, so nothing is trusted.
+#        4b. `has_git_repo` is false, or `git diff` itself fails (most often:
+#            recorded_head is no longer a reachable object — history was
+#            rewritten or pruned since capture). Cannot prove EITHER
+#            direction, so nothing is trusted, logged via log_sync_error so
+#            the degrade is visible rather than silently narrower coverage.
+#      Both are logged; neither aborts the caller. A caller checking rc alone
+#      cannot tell 4 from "the diff legitimately touched nothing" (case 2's
+#      empty-touched arm) — that is fine, because both outcomes choose the
+#      same direction: trust fewer entries, never more.
+#
+# Reassignment, not return-on-filter: the caller (gate_baseline_entries) prints
+# whatever this returns unconditionally, so this function's ONLY job is to
+# decide what <body> narrows to. Always returns 0 — see the caller's own
+# defensive `||` for why that is not load-bearing on its own.
+GATE_EMPTY_TREE_SHA="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+gate_baseline_bind_to_head() {
+    local body="$1"
+    local recorded_head
+    # `|| recorded_head=""`, not a bare substitution (set -e): a failed read
+    # here (the file vanishing between the caller's `[ -f ]` and this awk is
+    # the only realistic trigger) must fall into the SAME fail-closed branch
+    # as "no head= line found", not abort the whole script mid-reconcile.
+    recorded_head=$(awk '/^--$/ { exit } /^head=/ { print substr($0, 6); exit }' "$GATE_BASELINE_FILE" 2>/dev/null) || recorded_head=""
+    if [ -z "$recorded_head" ]; then
+        log_sync_error "gate_baseline_entries: $GATE_BASELINE_FILE has no parseable head= line — cannot verify its entries are still bound to un-committed content; treating it as providing no subtraction for this read (fail-closed, bbes)"
+        return 0
+    fi
+
+    if ! has_git_repo; then
+        log_sync_error "gate_baseline_entries: $PROJECT_DIR is not a git checkout we can query right now, so the baseline recorded at head=$recorded_head cannot be verified against the current HEAD; treating it as providing no subtraction for this read (fail-closed, bbes)"
+        return 0
+    fi
+
+    local current_head
+    current_head=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null) || current_head=""
+    [ -n "$current_head" ] || current_head="none"
+
+    if [ "$recorded_head" = "$current_head" ]; then
+        printf '%s\n' "$body"
+        return 0
+    fi
+
+    local old_ref="$recorded_head" new_ref="$current_head"
+    [ "$old_ref" = "none" ] && old_ref="$GATE_EMPTY_TREE_SHA"
+    [ "$new_ref" = "none" ] && new_ref="$GATE_EMPTY_TREE_SHA"
+
+    # Scoped pipefail (matching write_gate_baseline's own status_out capture):
+    # `sort` is the pipeline's last stage, so without this a failed `git diff`
+    # (most commonly: recorded_head is no longer a reachable object) would
+    # report `sort`'s own success and hand this function an EMPTY "touched"
+    # set — which reads as case 2's legitimate "nothing committed in the
+    # range" arm and keeps every entry, the wrong direction for an unprovable
+    # diff.
+    local touched touched_rc=0
+    touched=$( set -o pipefail; git -C "$PROJECT_DIR" diff --name-only "$old_ref" "$new_ref" -- 2>/dev/null | LC_ALL=C sort ) || touched_rc=$?
+    if [ "$touched_rc" -ne 0 ]; then
+        log_sync_error "gate_baseline_entries: could not diff the baseline's recorded head ($recorded_head) against the current HEAD ($current_head) (git diff rc=$touched_rc) — cannot verify which entries are still bound to un-committed content; treating the baseline as providing no subtraction for this read (fail-closed, bbes)"
+        return 0
+    fi
+    if [ -z "$touched" ]; then
+        printf '%s\n' "$body"
+        return 0
+    fi
+
+    local line p
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        p="${line#???}"
+        # Rename/copy entries are "R  old -> new"; the destination is the path
+        # a tracker entry — and this function's own caller — would name.
+        case "$p" in *" -> "*) p="${p##* -> }" ;; esac
+        if printf '%s\n' "$touched" | grep -qxF -- "$p"; then
+            continue
+        fi
+        printf '%s\n' "$line"
+    done <<< "$body"
+    return 0
+}
+
+# gate_baseline_entries — the porcelain lines of the current gate baseline
+# that are still bound to the commit they were captured at (see
+# gate_baseline_bind_to_head above), or empty when there is none.
 #
 # The v2 file carries a provenance header terminated by a lone `--`; everything
 # after it is the snapshot. The v1 file (`approved-baseline`, 0wk.2) was a bare
 # line list and is read as a fallback for ONE release — any v2 write deletes it,
-# so that arm only ever serves an install that upgraded mid-cycle.
+# so that arm only ever serves an install that upgraded mid-cycle. It predates
+# `head=` entirely and is untouched by the binding above: there is nothing in
+# it to bind to.
 #
-# The IDENTICAL reader lives in verify-before-stop.sh (which cannot source this
-# file: qa-gate.sh is a dispatching script, not a lib). Keep them in sync, the
-# same standing pairing has_git_repo carries. Within THIS file there is exactly
-# one copy of the header-skip awk — cmd_baseline_capture counts through here
-# rather than repeating it.
+# The IDENTICAL reader USED TO live in verify-before-stop.sh too (which cannot
+# source this file: qa-gate.sh is a dispatching script, not a lib), kept
+# byte-for-byte in sync with this one. THAT IS NO LONGER TRUE as of
+# claude-workflow-plugin-bbes: the head-binding above is qa-gate.sh-only (its
+# stated scope). It is safe today because reconcile_tracker below — via the
+# Stop hook's own `qa-gate.sh reconcile-tracker` shellout, and via approve's
+# in-process call — always runs BEFORE verify-before-stop.sh's git-fallback
+# walk, which is a UNION over the tracker rather than a fallback: whatever
+# this file's reconcile recovers into changed-files.txt is picked up there
+# regardless of what the Stop hook's own (still unfixed) copy of this
+# function decides. The one path NOT covered by that ordering is
+# verify-before-stop.sh's standalone LABEL_WITHOUT_RECORD / VANISHED_PROBE
+# re-read (`reviewable_changes` called with nothing reconciling ahead of it)
+# — that copy carries the identical staleness risk this closes, unaddressed.
+# Filed as a follow-up rather than fixed here (task scope: this file only).
+#
+# Within THIS file there is exactly one copy of the header-skip awk —
+# cmd_baseline_capture counts through here rather than repeating it.
 gate_baseline_entries() {
     if [ -f "$GATE_BASELINE_FILE" ]; then
         # No `|| true` (i8cx): a failed or PARTIAL read must be reportable, so
@@ -473,7 +650,30 @@ gate_baseline_entries() {
         # baseline subtracts nothing". A MISSING baseline (both -f tests false)
         # is still the legitimate empty answer at rc 0 — absent and unreadable
         # are different states and now return differently.
-        awk 'body { print; next } /^--$/ { body = 1 }' "$GATE_BASELINE_FILE" 2>/dev/null || return 1
+        local _gbe_body _gbe_rc=0
+        _gbe_body=$(awk 'body { print; next } /^--$/ { body = 1 }' "$GATE_BASELINE_FILE" 2>/dev/null) || _gbe_rc=$?
+        if [ "$_gbe_rc" -ne 0 ]; then
+            return 1
+        fi
+        # GATE-BASELINE-HEAD-BIND BEGIN (bbes)
+        # Only worth checking when there is something to filter — an empty
+        # snapshot has nothing a head comparison could change, and skipping it
+        # here is what keeps a clean-baseline call (the common case on a
+        # freshly-captured or never-dirtied tree) from paying for a `git
+        # rev-parse` it does not need. Reassigns _gbe_body rather than
+        # returning, so a STRIP of this region leaves the unconditional printf
+        # below exactly as it always was — the same discipline
+        # SUBTRACTION-ACCOUNTING's `account_obs` uses (declared OUTSIDE its own
+        # sentinels so a stripped copy stays coherent), applied here to keep
+        # the fallback path byte-for-byte the pre-bbes function.
+        if [ -n "$_gbe_body" ]; then
+            _gbe_body=$(gate_baseline_bind_to_head "$_gbe_body") || {
+                log_sync_error "gate_baseline_entries: gate_baseline_bind_to_head failed unexpectedly (rc=$?) for $GATE_BASELINE_FILE — treating the baseline as providing no subtraction for this read (fail-closed, bbes)"
+                _gbe_body=""
+            }
+        fi
+        # GATE-BASELINE-HEAD-BIND END (bbes)
+        printf '%s\n' "$_gbe_body"
         return 0
     fi
     if [ -f "$LEGACY_APPROVED_BASELINE" ]; then

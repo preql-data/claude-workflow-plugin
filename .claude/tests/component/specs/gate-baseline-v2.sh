@@ -1275,4 +1275,243 @@ assert_eq "gbv2-8.3: an EMPTY baseline still satisfies --if-missing (byte-identi
 assert_eq "gbv2-8.3: ...so the later dirt is NOT baselined and still gates" "0" \
     "$(baseline_body "$BASE8" | grep -c 'later8\.ts' | tr -d '[:space:]')"
 
+# ===========================================================================
+# SECTION 9 — THE BASELINE IS BOUND TO THE HEAD IT WAS CAPTURED AT
+# (claude-workflow-plugin-bbes).
+#
+# THE DEFECT. Sections 7.6/7.7 (claude-workflow-plugin-dpe) already pin that a
+# SECOND WRITE to an already-baselined path is invisible to the reconcile —
+# `comm -23`/`comm -12` compare raw porcelain LINES, and a line is not
+# content-addressed. dpe's own limit is explicitly WIDER than this one (no
+# commit needed at all — a second write in the SAME session already triggers
+# it) and stays exactly as it was; bbes does not touch it. bbes is the
+# narrower, separately-discovered shape: a path is baselined dirty, gets
+# COMMITTED (the dirt is genuinely gone), and is later re-dirtied — ordinary,
+# because one review wave's hot files are usually the next wave's hot files
+# too. The porcelain LINE for "modified relative to HEAD" is identical text
+# regardless of which HEAD it is relative to, so the stale baseline entry
+# matches the fresh dirt byte-for-byte and subtracts it, even though the two
+# are different facts about different content at different commits.
+#
+# FOUND LIVE at the i8cx wave-1 gate (2026-08-26): a baseline captured while
+# .claude/scripts/qa-gate.sh and 8 other paths were dirty; those paths were
+# committed; the next wave re-dirtied the SAME paths. 9 reviewable paths,
+# including that wave's own principal file, would have been silently
+# subtracted from the bound change set had QA not hand-repaired the tracker
+# before `enter`. 94d.1's `change_set_reconstructed` refusal does not catch
+# this shape: it fires on an EMPTY tracker, and here the tracker was
+# non-empty — merely incomplete.
+#
+# THE FIX under test: gate_baseline_entries now compares the baseline
+# header's `head=` (recorded by write_gate_baseline since 3mg.1, never read
+# back until now) against the CURRENT head and, only when they differ, drops
+# any entry whose path a commit touched in between
+# (gate_baseline_bind_to_head above carries the full four-case contract this
+# section pins one at a time).
+#
+# THE CORE PAIR (9.0-9.3): two files, ONE reconcile call, opposite answers —
+# the same shape 7.6/7.7 already use for the no-commit residual:
+#   g.ts  baselined dirty, COMMITTED, re-dirtied  -> must SURVIVE (the fix)
+#   h.ts  baselined dirty, NEVER committed         -> must stay OUT (dpe's
+#         residual, unchanged — the negative control the task itself asks
+#         for: "otherwise the fix has simply disabled baselining")
+# 9.4/9.5 pin the two FAIL-CLOSED sub-cases of "HEAD unreadable, or git
+# otherwise cannot answer" (gate_baseline_bind_to_head's case 4). 9M is the
+# mutation pairing: a mutant with only the head-bind CALL removed reproduces
+# the ORIGINAL bug on the exact 9.3 scenario, and a restore control against
+# the shipped script closes it again.
+#
+# No bd_required_or_skip: both `reconcile-tracker` and `baseline-capture` are
+# explicitly bd-independent (see their own subcommand docs), and this section
+# calls neither `enter` nor `bd` — so, unlike most of this file, section 9
+# runs unchanged under BD_SHIM_ONLY=1 CI.
+# ===========================================================================
+mk_fixture
+F9="$COMPONENT_FIXTURE_PATH"
+TRACK9="$F9/.claude/.qa-tracking/changed-files.txt"
+BASE9="$F9/.claude/.qa-tracking/gate-baseline"
+SUBFILE9="$F9/.claude/.qa-tracking/reconcile-subtracted.txt"
+LOG9="$F9/.claude/.qa-tracking/sync-errors.log"
+QG9="$F9/.claude/scripts/qa-gate.sh"
+CT9="$F9/.claude/scripts/current-task.sh"
+
+mkdir -p "$F9/src"
+printf 'export const g = 0;\n' > "$F9/src/g.ts"
+printf 'export const h = 0;\n' > "$F9/src/h.ts"
+git_fixture_init "$F9"
+H0=$(git -C "$F9" rev-parse HEAD 2>/dev/null)
+assert_match "gbv2-9.0: precondition — git_fixture_init produced a real HEAD (H0)" \
+    '^[0-9a-f]{7,40}$' "$H0"
+
+# 9.0 Dirty BOTH paths identically and capture the baseline while both are
+# dirty — the ordinary "review cycle opens on a dirty tree" moment.
+printf 'export const g = 1; // wave 1\n' > "$F9/src/g.ts"
+printf 'export const h = 1; // wave 1\n' > "$F9/src/h.ts"
+assert_eq "gbv2-9.0: precondition — exactly g.ts and h.ts are dirty before baseline capture" "2" \
+    "$(dirt_lines "$F9" | grep -c . | tr -d '[:space:]')"
+: > "$TRACK9"
+bash "$CT9" clear
+rm -f "$BASE9"
+CLAUDE_PROJECT_DIR="$F9" bash "$QG9" baseline-capture --by test-harness >/dev/null 2>&1
+assert_eq "gbv2-9.0: the baseline was captured at H0 (head= is bound, not just written)" \
+    "$H0" "$(baseline_header_field "$BASE9" head)"
+assert_eq "gbv2-9.0: both g.ts and h.ts are in the baseline body" "2" \
+    "$(baseline_body "$BASE9" | grep -c -E 'src/[gh]\.ts' | tr -d '[:space:]')"
+
+# 9.1 Land g.ts (the "dirt is gone" step) — h.ts stays dirty, uncommitted, so
+# it remains the negative control's own genuinely-unresolved old dirt.
+(cd "$F9" && git add src/g.ts && git commit -qm "wave 1: land g") >/dev/null 2>&1
+H1=$(git -C "$F9" rev-parse HEAD 2>/dev/null)
+assert_match "gbv2-9.1: precondition — the commit produced a real sha (H1)" \
+    '^[0-9a-f]{7,40}$' "$H1"
+assert_eq "gbv2-9.1: precondition — HEAD actually moved (H1 != H0)" "moved" \
+    "$([ -n "$H1" ] && [ "$H1" != "$H0" ] && echo moved || echo unchanged)"
+assert_eq "gbv2-9.1: precondition — g.ts is now CLEAN (the commit captured it exactly)" "0" \
+    "$(dirt_lines "$F9" | grep -c 'src/g\.ts' | tr -d '[:space:]')"
+assert_eq "gbv2-9.1: precondition — h.ts is STILL dirty, never committed" "1" \
+    "$(dirt_lines "$F9" | grep -c 'src/h\.ts' | tr -d '[:space:]')"
+assert_eq "gbv2-9.1: precondition — the baseline FILE itself is untouched, still names H0" \
+    "$H0" "$(baseline_header_field "$BASE9" head)"
+
+# 9.2 Re-dirty g.ts — wave 2 touching the same file wave 1 did. SAME status
+# code as the original baseline entry, now relative to H1 instead of H0: the
+# exact enabling mechanism 7.6 names for the no-commit residual, here with a
+# real commit in between.
+printf 'export const g = 2; // wave 2, re-dirtied after landing\n' > "$F9/src/g.ts"
+G_LINE=$(dirt_lines "$F9" | grep 'src/g\.ts')
+H_LINE=$(dirt_lines "$F9" | grep 'src/h\.ts')
+assert_eq "gbv2-9.2: precondition — g's wave-2 porcelain line is BYTE-IDENTICAL to its baseline entry (the enabling mechanism)" \
+    "yes" "$(baseline_body "$BASE9" | grep -qxF "$G_LINE" && echo yes || echo no)"
+assert_eq "gbv2-9.2: precondition — h's still-dirty porcelain line is ALSO byte-identical to its own baseline entry" \
+    "yes" "$(baseline_body "$BASE9" | grep -qxF "$H_LINE" && echo yes || echo no)"
+
+# 9.3 ONE reconcile call, both files, opposite answers.
+: > "$TRACK9"
+RECON9=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+assert_json_field "gbv2-9.3: reconcile-tracker succeeds (a narrower baseline is a soft degrade, never a hard refusal)" \
+    "$RECON9" '.ok' "true"
+
+# THE FIX, pinned: g.ts (committed since baseline capture, then re-dirtied)
+# IS folded into the tracker.
+assert_eq "gbv2-9.3: POSITIVE LEG — g.ts (committed, then re-dirtied) IS reconciled into the tracker" "1" \
+    "$(grep -c -x -F "$F9/src/g.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.3: ...and the reconcile's own readout counts it (added=1)" \
+    "(added=1)" "$RECON9"
+
+# THE NEGATIVE CONTROL, same call: h.ts was NEVER committed, so the very same
+# baseline entry still legitimately describes it — it must stay excluded, or
+# the fix has simply disabled baselining altogether (the task's own framing).
+assert_eq "gbv2-9.3: NEGATIVE CONTROL — h.ts (never committed, same old dirt) stays OUT of the tracker" "0" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.3: ...and IS named in the subtraction accounting (94d.1's visibility; not a silent drop)" \
+    "$F9/src/h.ts" "$RECON9"
+assert_eq "gbv2-9.3: ...durably, in the sidecar too" "1" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$SUBFILE9" 2>/dev/null | tr -d '[:space:]')"
+assert_not_contains "gbv2-9.3: ANTI-OVERREACH — g.ts is NOT reported as subtracted (it was added, not dropped)" \
+    "$F9/src/g.ts" "$(cat "$SUBFILE9" 2>/dev/null || echo '')"
+
+# Snapshot the H0-recorded, both-entries baseline now, before 9.4/9.5 mutate
+# it — 9M replays the exact 9.3 scenario against a mutant and needs it back.
+cp "$BASE9" "$F9/.claude/.qa-tracking/gate-baseline.9-snapshot"
+
+# ---------------------------------------------------------------------------
+# 9.4 CASE 4b — git CANNOT verify the recorded head (history rewritten or
+# pruned since capture: the baseline names a commit that no longer resolves).
+# FAIL CLOSED: h.ts's entry — which 9.3 just proved is correctly subtracted
+# when the recorded head IS resolvable — must NOT be trusted when it is not.
+BOGUS_SHA="0123456789abcdef0123456789abcdef01234567"
+assert_eq "gbv2-9.4: precondition — the bogus sha does not resolve in this repo" "no" \
+    "$(git -C "$F9" cat-file -e "$BOGUS_SHA" 2>/dev/null && echo yes || echo no)"
+sed -i.bak "s/^head=.*/head=$BOGUS_SHA/" "$BASE9" && rm -f "$BASE9.bak"
+assert_eq "gbv2-9.4: precondition — the baseline now names an unresolvable head" \
+    "$BOGUS_SHA" "$(baseline_header_field "$BASE9" head)"
+: > "$LOG9"
+: > "$TRACK9"
+RECON94=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+assert_json_field "gbv2-9.4: reconcile-tracker still SUCCEEDS (fail-closed narrows the baseline; it does not refuse the gate)" \
+    "$RECON94" '.ok' "true"
+assert_eq "gbv2-9.4: FAIL CLOSED — h.ts is no longer trusted as pre-existing and enters the tracker" "1" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.4: ...and the degrade is LOGGED, not silent" \
+    "could not diff the baseline's recorded head" "$(cat "$LOG9" 2>/dev/null || echo '')"
+
+# ---------------------------------------------------------------------------
+# 9.5 CASE 4a — the baseline file has NO head= line at all (hand-built,
+# corrupted, or a fixture predating 3mg.1's header). FAIL CLOSED the same way:
+# nothing in it is trusted, without needing git at all to make that call.
+printf '# gate-baseline v1\ncaptured_at=2020-01-01T00:00:00Z\ncaptured_by=test-harness\n--\n%s\n' \
+    "$H_LINE" > "$BASE9"
+assert_eq "gbv2-9.5: precondition — the hand-built baseline carries no head= line" "0" \
+    "$(grep -c '^head=' "$BASE9" | tr -d '[:space:]')"
+assert_eq "gbv2-9.5: precondition — ...but DOES carry h.ts's entry" "1" \
+    "$(baseline_body "$BASE9" | grep -c 'src/h\.ts' | tr -d '[:space:]')"
+: > "$LOG9"
+: > "$TRACK9"
+RECON95=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+assert_json_field "gbv2-9.5: reconcile-tracker still succeeds" "$RECON95" '.ok' "true"
+assert_eq "gbv2-9.5: FAIL CLOSED — h.ts is not trusted without a head= binding and enters the tracker" "1" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.5: ...and the degrade is logged" \
+    "no parseable head= line" "$(cat "$LOG9" 2>/dev/null || echo '')"
+
+# ---------------------------------------------------------------------------
+# 9M META: strip the GATE-BASELINE-HEAD-BIND region — the CALL SITE only, per
+# the sentinel's own header note, so this is the surgical "what if the reader
+# never consulted head-binding" mutation rather than also deleting
+# gate_baseline_bind_to_head's definition.
+#
+# THE GUARD FIRST (QA finding R4-F4, the same discipline §7M/§7R/§7SM already
+# apply): a strip that matched nothing leaves the copy byte-identical, and
+# every leg below would then measure the SHIPPED script while reporting on a
+# "mutant" — a green run that proves nothing.
+strip_head_bind_region() {
+    # strip_head_bind_region <src> <dst>. Anchored `^ *#` for the same reason
+    # every other strip in this file is: unanchored, a future prose line
+    # naming the sentinel mid-sentence would start the excision early.
+    awk '
+        /^ *# GATE-BASELINE-HEAD-BIND BEGIN/ { skip = 1; next }
+        /^ *# GATE-BASELINE-HEAD-BIND END/   { skip = 0; next }
+        !skip { print }
+    ' "$1" > "$2"
+}
+QG9_REAL=$(readlink "$QG9" || printf '%s' "$QG9")
+QG9_NOBIND="$F9/.claude/scripts/qa-gate-nobind.sh"
+strip_head_bind_region "$QG9_REAL" "$QG9_NOBIND"
+chmod +x "$QG9_NOBIND"
+if assert_mutant_applied "gbv2-9M META" "$QG9_REAL" "$QG9_NOBIND"; then
+    assert_eq "gbv2-9M META: the strip removed lines (non-vacuous)" "smaller" \
+        "$([ "$(grep -c . "$QG9_NOBIND")" -lt "$(grep -c . "$QG9_REAL")" ] && echo smaller || echo same)"
+    assert_eq "gbv2-9M META: gate_baseline_bind_to_head's CALL is gone from the copy" "0" \
+        "$(grep -c -F 'gate_baseline_bind_to_head "$_gbe_body"' "$QG9_NOBIND" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: ...while its DEFINITION survives (only the call site was targeted)" "1" \
+        "$(grep -c -F 'gate_baseline_bind_to_head() {' "$QG9_NOBIND" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: the copy still parses as bash" "0" \
+        "$(bash -n "$QG9_NOBIND" 2>/dev/null && echo 0 || echo 1)"
+
+    # Reset to EXACTLY the 9.3 preconditions: baseline at H0 (both g and h),
+    # current HEAD at H1, g.ts wave-2-dirty, h.ts still wave-1-dirty.
+    cp "$F9/.claude/.qa-tracking/gate-baseline.9-snapshot" "$BASE9"
+    : > "$TRACK9"
+    assert_eq "gbv2-9M META: precondition — g.ts is still dirty going into the mutant run" "1" \
+        "$(dirt_lines "$F9" | grep -c 'src/g\.ts' | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: precondition — the baseline is back to naming H0" \
+        "$H0" "$(baseline_header_field "$BASE9" head)"
+
+    RECON9M=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9_NOBIND" reconcile-tracker 2>&1 | tail -1)
+    assert_json_field "gbv2-9M META: the mutant still reconciles successfully" "$RECON9M" '.ok' "true"
+    assert_eq "gbv2-9M META: THE BUG REPRODUCES — without head-binding, g.ts (committed, re-dirtied) is WRONGLY subtracted again (9.3 WOULD fail)" "0" \
+        "$(grep -c -x -F "$F9/src/g.ts" "$TRACK9" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: ...and h.ts stays out too (the mutant is still a faithful reconciler otherwise)" "0" \
+        "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+
+    # RESTORE CONTROL: identical state, shipped script, g.ts comes back.
+    : > "$TRACK9"
+    RECON9C=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+    assert_eq "gbv2-9M META: restore control — the shipped script reconciles g.ts back in" "1" \
+        "$(grep -c -x -F "$F9/src/g.ts" "$TRACK9" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: restore control — and h.ts is still correctly excluded" "0" \
+        "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+fi
+rm -f "$F9/.claude/.qa-tracking/gate-baseline.9-snapshot"
+
 [ "$FAIL" -eq 0 ]

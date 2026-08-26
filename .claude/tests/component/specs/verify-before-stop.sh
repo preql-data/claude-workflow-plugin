@@ -2535,16 +2535,23 @@ if assert_mutant_applied "vbs-qzv.3 META" "$QZV3_REAL_VBS" "$VBS_QZV3_MUT"; then
 fi
 
 # ---------------------------------------------------------------------------
-# vbs-tmo: TIMEOUT NOT ENFORCED disclosure in the operator-facing gate
-# summary (claude-workflow-plugin-gsfd, disclosure fix). run_with_timeout's
-# own function-level behaviour (does the LOG carry the marker, does the exit
-# code still pass through) is covered directly, awk-extracted, in
-# .claude/scripts/tests/run-with-timeout.test.sh sections 2a/2b — that
-# function needs nothing but `bash` on PATH, so a full PATH reconstruction is
-# cheap and safe there. This section is the END-TO-END half: does
-# checks_scope_note's paragraph actually reach the Stop hook's JSON
-# `.reason`, through the real detect-stack -> npm -> run_with_timeout
-# dispatch, for a task that is not yet qa-approved?
+# vbs-tmo: watchdog-fallback disclosure in the operator-facing gate summary
+# (claude-workflow-plugin-gsfd, disclosure fix; wording updated by
+# claude-workflow-plugin-03tf when the `*)` branch stopped running genuinely
+# unbounded and started enforcing the cap itself via an in-process watchdog
+# — see run_with_timeout's own header). run_with_timeout's own
+# function-level behaviour (does the LOG carry the marker, does the exit
+# code still pass through, does a genuine hang actually return 124) is
+# covered directly, awk-extracted, in
+# .claude/scripts/tests/run-with-timeout.test.sh sections 2a/2b/3 — as of
+# 03tf that function's `*)` branch also needs `sleep`/`ps`/`awk` on PATH
+# (not just `bash`) for the watchdog itself, which is why THAT file's PATH
+# fixtures were widened rather than left at bash-only; this section forces
+# nothing (see tmo-a below) and relies on the ambient host instead, so it is
+# unaffected. This section is the END-TO-END half: does checks_scope_note's
+# paragraph actually reach the Stop hook's JSON `.reason`, through the real
+# detect-stack -> npm -> run_with_timeout dispatch, for a task that is not
+# yet qa-approved?
 #
 # tmo-b (restore control) is forced on ANY host: PATH is searched in order,
 # so PREPENDING a working `timeout` stub always wins regardless of what the
@@ -2614,19 +2621,26 @@ else
         "$OUT_TMOA" "block"
     assert_contains "vbs-tmo-a: RAN tests line present (a real dispatch happened, not a replay)" \
         "RAN      tests       npm test" "$REASON_TMOA"
-    assert_contains "vbs-tmo-a: gate summary discloses the cap was NOT enforced" \
-        "TIMEOUT NOT ENFORCED" "$REASON_TMOA"
+    assert_contains "vbs-tmo-a: gate summary discloses the watchdog fallback (claude-workflow-plugin-03tf: neither binary present, but the cap IS enforced -- by the in-process watchdog)" \
+        "WATCHDOG FALLBACK ENFORCED" "$REASON_TMOA"
     assert_contains "vbs-tmo-a: ...names why (neither binary on PATH)" \
         "neither timeout nor gtimeout is on PATH" "$REASON_TMOA"
     # 1200s is TEST_TIMEOUT_S's shipped literal (verify-before-stop.sh); if
     # that constant ever changes, update this literal alongside it.
+    # claude-workflow-plugin-03tf.1: this needle round-tripped to 6000s and
+    # back to 1200s the same day -- 1200 is bounded ABOVE by the Stop
+    # hook's external timeout (settings.json, 1320s), not by how long
+    # `make test` takes; see TEST_TIMEOUT_S's own comment in
+    # verify-before-stop.sh for why raising this past ~1300s makes the
+    # external kill (which may orphan `make`) win instead of this file's
+    # own clean tree-kill.
     assert_contains "vbs-tmo-a: ...names which RAN check(s) and their advertised cap" \
         "tests (1200s)" "$REASON_TMOA"
     STABLE_LOG_TMOA="$TRACK_TMO/last-test-output.log"
     assert_eq "vbs-tmo-a precondition: the persisted STABLE log exists" "yes" \
         "$([ -s "$STABLE_LOG_TMOA" ] && echo yes || echo no)"
     assert_contains "vbs-tmo-a: the persisted STABLE log ALSO carries the disclosure (not just the in-memory summary)" \
-        "NOT ENFORCED" "$(cat "$STABLE_LOG_TMOA" 2>/dev/null)"
+        "WATCHDOG FALLBACK ENFORCED" "$(cat "$STABLE_LOG_TMOA" 2>/dev/null)"
 fi
 
 # --- tmo-b: restore control, forced on ANY host (see header above) --------
@@ -2658,8 +2672,8 @@ REASON_TMOB=$(printf '%s' "$OUT_TMOB" | jq -r '.reason // empty')
 assert_decision "vbs-tmo-b: not-yet-approved task still blocks" "$OUT_TMOB" "block"
 assert_contains "vbs-tmo-b: RAN tests line still present (a real dispatch happened)" \
     "RAN      tests       npm test" "$REASON_TMOB"
-assert_not_contains "vbs-tmo-b: gate summary does NOT disclose (a working timeout suppresses it)" \
-    "TIMEOUT NOT ENFORCED" "$REASON_TMOB"
+assert_not_contains "vbs-tmo-b: gate summary does NOT disclose the watchdog fallback (a working timeout suppresses it)" \
+    "WATCHDOG FALLBACK ENFORCED" "$REASON_TMOB"
 
 # ---------------------------------------------------------------------------
 # vbs-r3fix: DELETED (claude-workflow-plugin-gsfd, operator-directed, round 6

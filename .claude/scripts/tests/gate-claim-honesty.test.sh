@@ -2650,6 +2650,29 @@ mkdir -p "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout"
 RWT_REAL_BASH=$(command -v bash 2>/dev/null || true)
 [ -n "$RWT_REAL_BASH" ] && ln -sf "$RWT_REAL_BASH" "$WORK/rwt-notimeout/bash"
 [ -n "$RWT_REAL_BASH" ] && ln -sf "$RWT_REAL_BASH" "$WORK/rwt-faketimeout/bash"
+# claude-workflow-plugin-03tf: BOTH fixtures need sleep/ps/awk, not just
+# rwt-notimeout. Reason is specific to what THIS section tests: 8a/8b's
+# whole point is that TIMEOUT_DISPATCH is cached on the FIRST call and
+# governs the SECOND regardless of what the second call's OWN PATH would
+# resolve — so in 8a (path1=rwt-notimeout probed first) the SECOND call
+# ALSO takes the `*)` branch even though it runs under PATH=rwt-faketimeout,
+# and in 8b the second call attempts the CACHED `timeout` dispatch under
+# PATH=rwt-notimeout (a different, already-covered case: it is SUPPOSED to
+# fail loud there, see the 8b assertion below). Measured directly: leaving
+# rwt-faketimeout at bash+timeout only reproduced the exact "sleep: command
+# not found" noise this comment warns about, on the SECOND call of 8a,
+# because the cached "none" branch's watchdog ran under rwt-faketimeout's
+# PATH. A bash-only PATH is not a realistic "no timeout/gtimeout" host
+# anyway (every real one still ships sleep/ps/awk); `*)`'s watchdog always
+# attempts `sleep 1` at least once regardless of how fast the wrapped
+# command finishes, and calls `ps`/`awk` if a cap ever fires.
+for _rwt_dir in rwt-notimeout rwt-faketimeout; do
+    for _rwt_bin in sleep ps awk; do
+        _rwt_bin_real=$(command -v "$_rwt_bin" 2>/dev/null || true)
+        [ -n "$_rwt_bin_real" ] && ln -sf "$_rwt_bin_real" "$WORK/$_rwt_dir/$_rwt_bin"
+    done
+done
+unset _rwt_dir _rwt_bin _rwt_bin_real
 cat > "$WORK/rwt-faketimeout/timeout" <<'SHIM'
 #!/bin/bash
 # Same restore-control double as run-with-timeout.test.sh 2b: drops the
@@ -2719,8 +2742,8 @@ FLAG_8A_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-notimeout" "$WORK/
 NOTE_8A_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout" note)
 assert_eq "8a SHIPPED: TIMEOUT_NOT_ENFORCED is still set after the SECOND call, even though its own PATH would resolve a timeout binary (the cached decision from call 1 governs)" \
     "1" "$FLAG_8A_FIXED"
-assert_contains "8a SHIPPED: the note discloses TIMEOUT NOT ENFORCED (the earlier unbounded call is NOT hidden)" \
-    "TIMEOUT NOT ENFORCED" "$NOTE_8A_FIXED"
+assert_contains "8a SHIPPED: the note discloses the watchdog fallback (claude-workflow-plugin-03tf: the earlier neither-binary call is NOT hidden)" \
+    "WATCHDOG FALLBACK ENFORCED" "$NOTE_8A_FIXED"
 
 # 8b: bounded first (rwt-faketimeout), then a PATH that has NEITHER binary
 # (rwt-notimeout) — the "false attribution to all" direction.
@@ -2729,8 +2752,8 @@ NOTE_8B_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-faketimeout" "$WOR
 RC2_8B_FIXED=$(drive_multi_dispatch "$RWT_REGION" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" rc2)
 assert_eq "8b SHIPPED: TIMEOUT_NOT_ENFORCED is NOT set (the cached 'timeout' decision from call 1 is attempted again, it does not silently fall back to unbounded)" \
     "<unset>" "$FLAG_8B_FIXED"
-assert_absent "8b SHIPPED: the note does NOT falsely attribute unboundedness to the first (genuinely bounded) call" \
-    "TIMEOUT NOT ENFORCED" "$NOTE_8B_FIXED"
+assert_absent "8b SHIPPED: the note does NOT falsely attribute the watchdog fallback to the first (genuinely native-binary-bounded) call" \
+    "WATCHDOG FALLBACK ENFORCED" "$NOTE_8B_FIXED"
 assert_eq "8b SHIPPED: the documented trade — the second call fails LOUD (nonzero) rather than silently misattributing, because the cached branch has no timeout binary to find" \
     "yes" "$([ "$RC2_8B_FIXED" != "0" ] && echo yes || echo no)"
 
@@ -2758,16 +2781,16 @@ FLAG_8A_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-notimeout" "$WORK/rwt-f
 NOTE_8A_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-notimeout" "$WORK/rwt-faketimeout" note)
 assert_eq "8M SPECIFIC (8a direction): without the cache, the SAME unbounded-then-bounded sequence clears the flag (<unset>) — the earlier unbounded call is HIDDEN" \
     "<unset>" "$FLAG_8A_MUT"
-assert_absent "8M SPECIFIC (8a direction): ...so the mutant's note carries NO disclosure at all, despite stage-a having genuinely run unbounded" \
-    "TIMEOUT NOT ENFORCED" "$NOTE_8A_MUT"
+assert_absent "8M SPECIFIC (8a direction): ...so the mutant's note carries NO disclosure at all, despite stage-a having genuinely run under the watchdog fallback" \
+    "WATCHDOG FALLBACK ENFORCED" "$NOTE_8A_MUT"
 
 FLAG_8B_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" flag)
 NOTE_8B_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" note)
 RC2_8B_MUT=$(drive_multi_dispatch "$RWT_MUT" "$WORK/rwt-faketimeout" "$WORK/rwt-notimeout" rc2)
 assert_eq "8M SPECIFIC (8b direction): without the cache, the SAME bounded-then-unbounded sequence sets the flag (the mutant genuinely reprobes and finds nothing the second time)" \
     "1" "$FLAG_8B_MUT"
-assert_contains "8M SPECIFIC (8b direction): ...so the mutant's note claims BOTH stages ran unbounded — FALSE for stage-a, which ran bounded" \
-    "TIMEOUT NOT ENFORCED" "$NOTE_8B_MUT"
+assert_contains "8M SPECIFIC (8b direction): ...so the mutant's note claims BOTH stages ran under the watchdog fallback — FALSE for stage-a, which ran under the native binary" \
+    "WATCHDOG FALLBACK ENFORCED" "$NOTE_8B_MUT"
 assert_eq "8M SPECIFIC (8b direction): ...and unlike the shipped code, the mutant's second call exits 0 (it took the graceful unbounded branch, not a failed exec) — confirming the misattribution is silent, not loud" \
     "0" "$RC2_8B_MUT"
 

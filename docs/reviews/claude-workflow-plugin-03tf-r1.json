@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-03tf",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "risk_threshold": "high",
+  "stop_condition": "All three arms of the task's own pairing are traced to observed-green tests on the natural fixture host (over-budget returns 124 with the whole tree dead and elapsed bounded near budget; under-budget returns the real exit code promptly and unkilled; a native timeout binary restores pre-03tf behaviour byte-for-byte), the 124-means-timeout convention is preserved via marker-only override, and no critical/high finding remains in run_with_timeout or its three dispatch sites.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "info",
+      "location": ".claude/scripts/verify-before-stop.sh:157 (TEST_TIMEOUT_S=1200) + .claude/settings.json Stop timeout=1320000ms",
+      "evidence": "make test measures 1731s/1777s uncontended (recorded; the acceptance run: 1707s) - larger than the 1320s external cap, so the full suite can NEVER complete inside the Stop hook at ANY internal budget. The watchdog fired in production exactly as designed (03tf comment, 2026-08-26T16:03: iteration 4 of 3, tests timed out after 1200s, WATCHDOG FALLBACK ENFORCED).",
+      "description": "Deliberate, disclosed, and correctly layered: 1200 is sized so the clean tree-kill beats the possibly-orphaning external kill (~93s verified margin: 1320 - 1200 - ~2.2s escalation - 24.6s lint), not to fit the suite - which no internal value can. The gate fails CLOSED and honestly on this repo; approval flows through QA out-of-band. The suite-vs-cap decision (raise the external cap or narrow the Stop tier) is the operator workflow-design question filed as claude-workflow-plugin-yzo9. The brief 6000s experiment is documented in-code as the wrong-layer fix and why."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "info",
+      "location": ".claude/scripts/verify-before-stop.sh run_with_timeout *) watchdog poll loop (sleep 1 || true)",
+      "evidence": "If sleep(1) itself is unavailable or broken at runtime the poll loop spins and the cap can fire far earlier than advertised - measured 5/5 while building the test fixture against a bash-only PATH (documented in mk_notimeout_path's header in run-with-timeout.test.sh).",
+      "description": "Not fixed in the watchdog and does not need to be: sleep is POSIX-mandated, the test fixtures now model realistic hosts (bash+sleep+ps+awk), and run-tests.sh's shipped reference watchdog carries the identical dependency. Recorded so the next reader of a mysterious instant-timeout knows the one exotic vector."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "info",
+      "location": "docs/reviews/impact-report-approve_XXXXXX_*-r1.json + this task's own empty bound set",
+      "evidence": "This approval binds the EMPTY set (reviewed_hash above is the empty-set digest): the shared physical change set for both units - 6 real files + 4 leaked test artifacts (leak filed as claude-workflow-plugin-kyj5) - was bound minutes earlier by claude-workflow-plugin-bbes approval at change_set_hash=c29ac98a83672bc9e9d455f2700fd1d02fdf4808204e3a62c33f5814e6524f10, and the single-tracker gate design makes the second task of a shared tree bind the residual (the 6im2/xsu1 precedent).",
+      "description": "Recorded so a future audit reading this task alone does not mistake an empty bound set for a no-work approval: the substantive diff review, spot-check runs, and acceptance evidence for the 03tf unit are in this artifact's stop_condition, the bbes-side artifact, and the approval comments on both tasks."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}
