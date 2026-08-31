@@ -2690,6 +2690,113 @@ assert_contains "9u.3 R8-F1: the observation names the refusal's reason -- unrea
     "could not be re-extracted" "$(json_field '.observations' "$R9U_INJ_OUT")"
 
 # ===========================================================================
+printf '\n=== Section 9 continued: wave 2 group C (claude-workflow-plugin-i8cx) ===\n'
+# ===========================================================================
+
+# --- 9v: the DEGRADE-PATH sort's process substitution masked its own
+# producer's exit status (a THIRD masking channel, one level under
+# pipefail: rc cannot cross `< <(...)` at all, so no pipefail scope could
+# ever have closed this one). Before this fix, `_pb_degrade`'s
+# `done < <(printf ... | LC_ALL=C sort)` discarded `sort`'s exit status
+# structurally. A `sort` that copies stdin through UNSORTED and exits
+# nonzero (the same shim shape 9t's R8-F2 reproduction uses, applied to a
+# PLAIN sort rather than `sort -u`) preserves CARDINALITY -- so the
+# pre-existing `${#sorted_ids[@]} -eq "$#"` safety net, which R8-F2's OWN
+# multiply-bound decision relies on for ITS protection, does NOT catch this
+# shape: same count in, same count out, just never actually sorted. The
+# consequence is silent: `parallel_safe` still reads false (from the
+# unrelated no-design degrade reason), but `batches` emits a schedule in
+# bd's own row order instead of the deterministic LC_ALL=C order the file's
+# own DETERMINISM section requires -- exactly the "never bd's own row
+# order" property R1-F4 exists to guarantee, and in a fixture WITH real
+# dependency edges (not exercised here, for cost) a wrong order can place a
+# dependent before its own prerequisite. The fix converts the process
+# substitution to a command substitution + heredoc (this file's own stated
+# "heredoc-fed bash arrays, never a pipe" convention for every OTHER
+# accumulating loop), so the failure is now directly observable via
+# `sort_rc` and gates the read loop outright. -----------------------------
+new_fixture_root "r9v"
+bd_fixture_write "$BDFIX" "EPIC-R9V" \
+    '[{"id":"T-R9V-C","dependency_type":"parent-child"},{"id":"T-R9V-A","dependency_type":"parent-child"},{"id":"T-R9V-B","dependency_type":"parent-child"}]' '[]'
+bd_fixture_write "$BDFIX" "T-R9V-A" '[]' '[]'
+bd_fixture_write "$BDFIX" "T-R9V-B" '[]' '[]'
+bd_fixture_write "$BDFIX" "T-R9V-C" '[]' '[]'
+
+mkdir -p "$FIXTURE/r9v-sort-shim-bin"
+cat > "$FIXTURE/r9v-sort-shim-bin/sort" <<SHIMEOF
+#!/bin/bash
+# Armed: copy stdin through UNSORTED and exit 9 -- preserves cardinality,
+# which is what makes this shape invisible to the pre-existing safety net.
+if [ -n "\${R9V_SORT_SABOTAGE:-}" ]; then
+    cat
+    exit 9
+fi
+exec "$REAL_SORT" "\$@"
+SHIMEOF
+chmod +x "$FIXTURE/r9v-sort-shim-bin/sort"
+
+R9V_CTRL_OUT=$(CLAUDE_PROJECT_DIR="$ROOT" BD_FIXTURE_DIR="$BDFIX" bash "$EG" plan-batches "EPIC-R9V")
+assert_eq "9v.0 RESTORE CONTROL: uninjected, 3 undesigned children degrade with a full serial schedule in DETERMINISTIC (LC_ALL=C) order, never bd's C,A,B row order" \
+    "no_design_attempted|T-R9V-A T-R9V-B T-R9V-C" \
+    "$(json_field '.degradation_reason' "$R9V_CTRL_OUT")|$(printf '%s' "$R9V_CTRL_OUT" | jq -r '[.batches[][].task_id] | join(" ")' 2>/dev/null)"
+
+R9V_SAB_OUT=$(CLAUDE_PROJECT_DIR="$ROOT" BD_FIXTURE_DIR="$BDFIX" R9V_SORT_SABOTAGE=1 PATH="$FIXTURE/r9v-sort-shim-bin:$PATH" bash "$EG" plan-batches "EPIC-R9V" 2>&1)
+assert_eq "9v.1 THE FIX: a sort that copies stdin unsorted and exits 9 now surfaces -- batches refused ([]), never a silently mis-ordered schedule" \
+    "0" "$(json_field '.batches | length' "$R9V_SAB_OUT")"
+assert_contains "9v.2 ...naming the schedule-computation failure explicitly" \
+    "could not be computed" "$(json_field '.observations' "$R9V_SAB_OUT")"
+
+# MUTANT: revert the command-substitution+heredoc fix to the pre-fix process
+# substitution (wholesale block replacement, keyed on the fix's own unique
+# declaration line through its closing `fi` -- the qa-gate-pipefail.test.sh
+# MUTANT B technique, needed here because the fix replaced a control-flow
+# shape rather than adding a strippable guard).
+EG_M_R9V="$FIXTURE/mutants/epic-gate-r9v.sh"
+mkdir -p "$FIXTURE/mutants"
+R9V_START='        local cid sorted_ids=() sort_out="" sort_rc=0'
+R9V_COUNT_BEFORE=$(grep -cF "$R9V_START" "$EG")
+assert_eq "9v.3 NON-VACUITY: the fixed declaration line exists exactly once in the shipped script before mutation" "1" "$R9V_COUNT_BEFORE"
+awk -v start="$R9V_START" '
+    BEGIN { skip = 0 }
+    $0 == start {
+        print "        local cid sorted_ids=()"
+        print "        while IFS= read -r cid; do"
+        print "            [ -n \"$cid\" ] && sorted_ids+=(\"$cid\")"
+        print "        done < <(printf '"'"'%s\\n'"'"' \"$@\" | LC_ALL=C sort)"
+        skip = 1
+        next
+    }
+    skip && $0 == "        fi" { skip = 0; next }
+    skip { next }
+    { print }
+' "$EG" > "$EG_M_R9V"
+chmod +x "$EG_M_R9V"
+bash -n "$EG_M_R9V"
+assert_eq "9v.4 NON-VACUITY: mutant parses" "0" "$?"
+# Exact executable line, not the substring "done < <(printf" -- that
+# substring also appears in this very fix's OWN region comment ("this used
+# to be `done < <(printf ... | sort)`"), which the README's pairing section
+# names explicitly: verifying a removal by grepping for the removed pattern
+# is unsound because the region header documenting the change contains it.
+# shellcheck disable=SC2016  # intentional non-interpolating literal
+R9V_REVERTED_LINE='        done < <(printf '"'"'%s\n'"'"' "$@" | LC_ALL=C sort)'
+# shellcheck disable=SC2016  # intentional non-interpolating literal
+assert_eq "9v.5 NON-VACUITY: the mutant's degrade block lost the fix's rc capture AND regained the exact pre-fix executable line" \
+    "0|1" "$(grep -cF 'sort_out=$( set -o pipefail' "$EG_M_R9V")|$(grep -cF "$R9V_REVERTED_LINE" "$EG_M_R9V")"
+
+R9V_MUT_OUT=$(CLAUDE_PROJECT_DIR="$ROOT" BD_FIXTURE_DIR="$BDFIX" R9V_SORT_SABOTAGE=1 PATH="$FIXTURE/r9v-sort-shim-bin:$PATH" bash "$EG_M_R9V" plan-batches "EPIC-R9V" 2>&1)
+assert_eq "9v.6 SPECIFIC MISBEHAVIOUR: the mutant + the SAME sabotage hides the failure completely -- a full 3-entry schedule, not an empty refusal" \
+    "3" "$(json_field '.batches | length' "$R9V_MUT_OUT")"
+assert_eq "9v.7 ...and observations say NOTHING about a schedule-computation failure (the rc never crossed the process substitution)" \
+    "0" "$(printf '%s' "$(json_field '.observations' "$R9V_MUT_OUT")" | grep -cF 'could not be computed')"
+assert_eq "9v.8 SPECIFIC MISBEHAVIOUR, precisely: the emitted order is bd's own C,A,B row order -- the exact 'never bd's own row order' property R1-F4 exists to guarantee, silently violated" \
+    "T-R9V-C T-R9V-A T-R9V-B" "$(printf '%s' "$R9V_MUT_OUT" | jq -r '[.batches[][].task_id] | join(" ")' 2>/dev/null)"
+
+R9V_MUT_CTRL_OUT=$(CLAUDE_PROJECT_DIR="$ROOT" BD_FIXTURE_DIR="$BDFIX" bash "$EG_M_R9V" plan-batches "EPIC-R9V" 2>&1)
+assert_eq "9v.9 RESTORE CONTROL: even the mutant, unshimmed, computes the correct sorted order -- the mutation only bites under the injected fault" \
+    "T-R9V-A T-R9V-B T-R9V-C" "$(printf '%s' "$R9V_MUT_CTRL_OUT" | jq -r '[.batches[][].task_id] | join(" ")' 2>/dev/null)"
+
+# ===========================================================================
 # Summary — the completeness line names every counter, including sections
 # that could not run (R4 vacuity sweep: a skipped section is visible in
 # the spec's own accounting, not just in the runner's transcript regex).

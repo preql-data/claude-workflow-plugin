@@ -604,6 +604,432 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 9: i8cx wave 2 — a failed read of the implementer/cycle record set must never look independent or safe ==="
+# review-check.sh:1417 (the audit's fourth must-fix): the old body piped
+# `grep -oE ... "$firstlines" | sed ... | sort -u`, closed with a blanket
+# `|| true`. sort is always last and succeeds trivially on the empty stdin a
+# failed grep leaves behind, so a genuine grep READ FAILURE on $firstlines
+# (permission, ENOENT, a vanished mktemp dir) was byte-identical to grep
+# cleanly finding ZERO IMPLEMENTER records — and `[ -n "$impl_lines" ] && ...`
+# short-circuits on either, so INDEPENDENT kept its "true" default. A failed
+# read made a non-independent reviewer look independent.
+#
+# max_record_ts (feeding cycle_opened_ts / latest_implementer_ts, :1079-ish)
+# has the identical shape one function up, with a further-reaching consumer:
+# verify-before-stop.sh's F1 fast path reads latest_implementer_ts off this
+# envelope and treats an EMPTY value as "no implementer in flight, safe to
+# auto-approve a doc-only change set" — so a masked read failure there could
+# have fed a RELEASE decision in a different script entirely.
+#
+# Neither fix needs pipefail: grep is the first stage of its pipe in both
+# cases, captured on its own statement before sed/sort ever run.
+
+REAL_GREP=$(command -v grep)
+SHIM_IMPLREAD="$WORK/shim-implread"
+SHIM_IMPLTS="$WORK/shim-implts"
+mkdir -p "$SHIM_IMPLREAD" "$SHIM_IMPLTS"
+
+# Fails ONLY the exact impl_lines extraction review-check.sh:1417 makes
+# (grep -oE '^IMPLEMENTER: role=[a-z]+' <firstlines>, no trailing space) —
+# every OTHER grep call cmd_gate makes (art extraction, both max_record_ts
+# calls, RESOLVED/ARBITRATION lookups) stays on the real binary. Matches this
+# tree's established shim-scoping convention (qa-gate-pipefail.test.sh's
+# shim-sortu, "fail ONLY <x>"; argv match via `[ "$a" = ... ]`, never a glob
+# `case`, because the pattern text itself contains glob metacharacters
+# (`[a-z]`) that a case arm would reinterpret rather than match literally).
+# rc 2: what this platform's grep reports for "could not read the file"
+# (measured; rc 1 is grep's own clean no-match and must never trip this).
+cat > "$SHIM_IMPLREAD/grep" <<SHIMEOF
+#!/bin/bash
+for a in "\$@"; do
+    if [ "\$a" = '^IMPLEMENTER: role=[a-z]+' ]; then
+        exit 2
+    fi
+done
+exec ${REAL_GREP} "\$@"
+SHIMEOF
+chmod +x "$SHIM_IMPLREAD/grep"
+
+# Fails ONLY the LATEST_IMPLEMENTER_TS read inside max_record_ts (note the
+# TRAILING SPACE — distinct from the impl_lines pattern above, so this shim
+# cannot accidentally also intercept :1417's own extraction and conflate the
+# two fixes' evidence).
+cat > "$SHIM_IMPLTS/grep" <<SHIMEOF
+#!/bin/bash
+for a in "\$@"; do
+    if [ "\$a" = '^IMPLEMENTER: role=[a-z]+ ' ]; then
+        exit 2
+    fi
+done
+exec ${REAL_GREP} "\$@"
+SHIMEOF
+chmod +x "$SHIM_IMPLTS/grep"
+
+# run_gate_shim <dir> <comments-json> — run_gate with a shim dir prepended to
+# PATH for exactly this one invocation (env-prefixed, never leaked to later
+# sections/assertions).
+run_gate_shim() {
+    local shimdir="$1" comments="$2"
+    printf '%s' "$comments" > "$WORK/i8cx-comments.json"
+    GATE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" PATH="$shimdir:$PATH" \
+        bash "$RCHECK" gate t-1 --comments-json "$WORK/i8cx-comments.json" 2>/dev/null)
+    GATE_EXIT=$?
+}
+
+# 9.1 THE POSITIVE LEG, shipped script: backend both implemented AND is named
+# as the reviewer — if the read had worked, this is section 4's exact
+# self-review shape (reviewer==implementer -> reviewer_not_independent). With
+# the read shimmed to fail, the OLD code silently defaulted to
+# independent=true (reproduced by the 9.4 mutant below); the FIXED code must
+# refuse instead, and refuse for the HONEST reason (the set could not be
+# read), not by asserting a fact — "reviewer IS an implementer" — the failed
+# read never actually established.
+SELF_REVIEW_COMMENTS=$(mk_comments "IMPLEMENTER: role=backend implemented the feature" "$(art_line backend high '')")
+run_gate_shim "$SHIM_IMPLREAD" "$SELF_REVIEW_COMMENTS"
+assert_eq "9.1 shimmed read failure on a self-review shape: exit 4 (never a silent pass)" "4" "$GATE_EXIT"
+assert_eq "9.1b ...ok=false" "false" "$(printf '%s' "$GATE_OUT" | jq -r '.ok')"
+assert_eq "9.1c ...error_key names the read failure, not a false independence claim" \
+    "implementer_set_unreadable" "$(ekey_of "$GATE_OUT")"
+
+# 9.2 RESTORE CONTROL: identical self-review comments, shim removed (real
+# grep) — the REAL detection still fires, matching section 4's coverage
+# (repeated here so this section is self-contained and does not depend on
+# section 4 having run first).
+run_gate "$SELF_REVIEW_COMMENTS"
+assert_eq "9.2 restore control (no shim): self-review still exit 4" "4" "$GATE_EXIT"
+assert_eq "9.2b ...error_key=reviewer_not_independent (the real, established violation)" \
+    "reviewer_not_independent" "$(ekey_of "$GATE_OUT")"
+assert_eq "9.2c ...independent=false (the real predicate, not the read-failure refusal)" \
+    "false" "$(printf '%s' "$GATE_OUT" | jq -r '.independent')"
+
+# 9.3 NEGATIVE CONTROL: a genuinely doc-only task (no IMPLEMENTER records at
+# all), shim removed — must NOT be refused. This is the exact case the i8cx
+# audit named: "doc-only work is orchestrator-authored and legitimately has
+# none; refusing that would deadlock every documentation commit."
+DOC_ONLY_COMMENTS=$(mk_comments "$(art_line qa-claude high '')")
+run_gate "$DOC_ONLY_COMMENTS"
+assert_eq "9.3 doc-only task (genuinely no IMPLEMENTER records), unshimmed: exit 0" "0" "$GATE_EXIT"
+assert_eq "9.3b ...independent=true (vacuously, correctly)" "true" \
+    "$(printf '%s' "$GATE_OUT" | jq -r '.independent')"
+
+# 9.3c A SECOND negative-shaped control, but SHIMMED: the shim fires on the
+# ARGUMENT (the grep pattern), not on the file's content, so it also
+# intercepts this genuinely-empty case. It must STILL refuse — proving the
+# fix's guard is keyed on "did the read succeed", not "does the content look
+# like a self-review", which is what makes 9.1 trustworthy rather than a
+# fixture-specific coincidence.
+run_gate_shim "$SHIM_IMPLREAD" "$DOC_ONLY_COMMENTS"
+assert_eq "9.3c doc-only task, shimmed: STILL refuses (the guard is read-outcome-keyed, not content-keyed)" \
+    "4" "$GATE_EXIT"
+assert_eq "9.3d ...same error_key as 9.1" "implementer_set_unreadable" "$(ekey_of "$GATE_OUT")"
+
+# 9.4 META (load-bearing): revert review-check.sh:1417's fix on a checker
+# copy — splice the exact pre-fix one-liner back into the sentinel-bounded
+# region — and re-run 9.1's SAME shimmed scenario against it. The mutant must
+# reproduce the ORIGINAL defect: a silent independent=true pass.
+MUTANT_1417="$WORK/review-check-preimpl1417.sh"
+{
+    sed -n '1,/# IMPLEMENTER-SET-READ-GUARD BEGIN/p' "$RCHECK"
+    cat <<'OLDCODE'
+    local impl_lines
+    impl_lines=$(grep -oE '^IMPLEMENTER: role=[a-z]+' "$firstlines" | sed -E 's/^IMPLEMENTER: role=//' | sort -u || true)
+OLDCODE
+    sed -n '/# IMPLEMENTER-SET-READ-GUARD END/,$p' "$RCHECK"
+} > "$MUTANT_1417"
+chmod +x "$MUTANT_1417"
+assert_eq "9.4 META: the mutant differs from the shipped script (non-vacuous splice)" "differs" \
+    "$(cmp -s "$RCHECK" "$MUTANT_1417" && echo identical || echo differs)"
+assert_eq "9.4b META: the mutant parses" "0" \
+    "$(bash -n "$MUTANT_1417" 2>/dev/null && echo 0 || echo 1)"
+
+printf '%s' "$SELF_REVIEW_COMMENTS" > "$WORK/i8cx-comments.json"
+META_1417_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" PATH="$SHIM_IMPLREAD:$PATH" \
+    bash "$MUTANT_1417" gate t-1 --comments-json "$WORK/i8cx-comments.json" 2>/dev/null)
+META_1417_RC=$?
+assert_eq "9.4c META: WITHOUT the read guard, the shimmed self-review WRONGLY passes (exit 0) — the i8cx:1417 defect" \
+    "0" "$META_1417_RC"
+assert_eq "9.4d META: ...ok=true" "true" "$(printf '%s' "$META_1417_OUT" | jq -r '.ok')"
+assert_eq "9.4e META: ...independent=true (the silent pass)" "true" \
+    "$(printf '%s' "$META_1417_OUT" | jq -r '.independent')"
+
+# 9.4f Discriminator: the mutant still correctly detects the UNSHIMMED
+# self-review — proving the splice only affects read-failure handling, not
+# the underlying independence comparison itself.
+META_1417_UNSHIMMED=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$MUTANT_1417" gate t-1 \
+    --comments-json "$WORK/i8cx-comments.json" 2>/dev/null)
+assert_eq "9.4f discriminator: the mutant, UNSHIMMED, still catches the real self-review (ran the real predicate)" \
+    "reviewer_not_independent" "$(ekey_of "$META_1417_UNSHIMMED")"
+
+# 9.5 max_record_ts (the LATEST_IMPLEMENTER_TS half): a real implementer
+# record + an independent reviewer + clean findings — the gate itself PASSES
+# either way (exit 0); what a shimmed read failure must change is the
+# latest_implementer_ts FIELD, from "" (the old, dangerous-downstream shape)
+# to "unparseable" (what verify-before-stop.sh's F1 fast path already reads
+# as "unestablished, fail closed" — see review-check.sh's own comment on
+# max_record_ts for the full chain).
+IMPLTS_COMMENTS=$(mk_comments \
+    "IMPLEMENTER: role=backend task=t-1 at 2026-07-25T00:00:00Z" \
+    "$(art_line qa-claude high '')")
+run_gate "$IMPLTS_COMMENTS"
+assert_eq "9.5 baseline (unshimmed): gate passes" "0" "$GATE_EXIT"
+assert_eq "9.5b ...latest_implementer_ts is the real timestamp" "2026-07-25T00:00:00Z" \
+    "$(printf '%s' "$GATE_OUT" | jq -r '.latest_implementer_ts')"
+
+run_gate_shim "$SHIM_IMPLTS" "$IMPLTS_COMMENTS"
+assert_eq "9.5c shimmed: the gate itself still passes (this fix does not change cmd_gate's own verdict)" \
+    "0" "$GATE_EXIT"
+assert_eq "9.5d ...but latest_implementer_ts is now 'unparseable', never the dangerous ''" \
+    "unparseable" "$(printf '%s' "$GATE_OUT" | jq -r '.latest_implementer_ts')"
+
+# 9.6 META: revert max_record_ts's fix the same way, and show the identical
+# shimmed input reports the OLD, dangerous empty string instead.
+MUTANT_MAXTS="$WORK/review-check-premaxts.sh"
+{
+    sed -n '1,/# MAX-RECORD-TS-READ-GUARD BEGIN/p' "$RCHECK"
+    cat <<'OLDCODE2'
+    lines=$(grep -E "$prefix" "$file" 2>/dev/null) || lines=""
+    if [ -z "$lines" ]; then
+        printf ''
+        return 0
+    fi
+OLDCODE2
+    sed -n '/# MAX-RECORD-TS-READ-GUARD END/,$p' "$RCHECK"
+} > "$MUTANT_MAXTS"
+chmod +x "$MUTANT_MAXTS"
+assert_eq "9.6 META: the mutant differs from the shipped script" "differs" \
+    "$(cmp -s "$RCHECK" "$MUTANT_MAXTS" && echo identical || echo differs)"
+assert_eq "9.6b META: the mutant parses" "0" \
+    "$(bash -n "$MUTANT_MAXTS" 2>/dev/null && echo 0 || echo 1)"
+
+printf '%s' "$IMPLTS_COMMENTS" > "$WORK/i8cx-comments.json"
+META_MAXTS_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" PATH="$SHIM_IMPLTS:$PATH" \
+    bash "$MUTANT_MAXTS" gate t-1 --comments-json "$WORK/i8cx-comments.json" 2>/dev/null)
+assert_eq "9.6c META: WITHOUT the read guard, the shimmed read reports the empty string — the i8cx defect (an F1 'safe' verdict downstream)" \
+    "" "$(printf '%s' "$META_MAXTS_OUT" | jq -r '.latest_implementer_ts')"
+
+META_MAXTS_UNSHIMMED=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$MUTANT_MAXTS" gate t-1 \
+    --comments-json "$WORK/i8cx-comments.json" 2>/dev/null)
+assert_eq "9.6d discriminator: the mutant, UNSHIMMED, still reports the real timestamp (ran the real predicate)" \
+    "2026-07-25T00:00:00Z" "$(printf '%s' "$META_MAXTS_UNSHIMMED" | jq -r '.latest_implementer_ts')"
+
+# 9.7 THE ADJACENT GAP (reported alongside :1417, judged reachable): nothing
+# between the artifact-missing check and the independence check required
+# reviewer= to actually be present on the record. A hand-written or corrupted
+# `bd comments add` (never validated by validate-artifact, which DOES make
+# reviewer_identity mandatory for the proper writer) could carry a
+# REVIEW-ARTIFACT line with a well-formed findings=[] token but no reviewer=
+# token at all — REVIEWER="" then never equals any IMPLEMENTER role
+# (`grep -qxF` requires a whole-line match; no role is ever the empty
+# string), so it always read as "independent".
+NOREVIEWER_COMMENTS=$(mk_comments "$IMPL_BACKEND" \
+    "REVIEW-ARTIFACT v1 iteration=1 model=m reviewed_hash=h risk_threshold=high verdict=approve stopped_by=verdict findings=[] at 2026-07-25T01:00:00Z: no reviewer token")
+run_gate "$NOREVIEWER_COMMENTS"
+assert_eq "9.7 a REVIEW-ARTIFACT with no reviewer= token: exit 4 (never a silent pass)" "4" "$GATE_EXIT"
+assert_eq "9.7b ...error_key=reviewer_identity_missing" "reviewer_identity_missing" "$(ekey_of "$GATE_OUT")"
+
+# 9.8 META: strip the REVIEWER-NONEMPTY-GUARD from a checker copy and re-run
+# 9.7's SAME input — the mutant must wrongly pass.
+MUTANT_REVIEWER="$WORK/review-check-noreviewerguard.sh"
+STRIP_9_8_RC=0
+awk '
+    /# REVIEWER-NONEMPTY-GUARD BEGIN/ { skip=1; found=1; next }
+    /# REVIEWER-NONEMPTY-GUARD END/   { skip=0; next }
+    skip { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$RCHECK" > "$MUTANT_REVIEWER" || STRIP_9_8_RC=$?
+chmod +x "$MUTANT_REVIEWER"
+assert_eq "9.8 META: the REVIEWER-NONEMPTY-GUARD sentinels are present (non-vacuous strip)" "0" "$STRIP_9_8_RC"
+assert_eq "9.8b META: the stripped copy parses" "0" \
+    "$(bash -n "$MUTANT_REVIEWER" 2>/dev/null && echo 0 || echo 1)"
+
+printf '%s' "$NOREVIEWER_COMMENTS" > "$WORK/i8cx-comments.json"
+META_REVIEWER_RC=0
+META_REVIEWER_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$MUTANT_REVIEWER" gate t-1 \
+    --comments-json "$WORK/i8cx-comments.json" 2>/dev/null) || META_REVIEWER_RC=$?
+assert_eq "9.8c META: WITHOUT the guard, the no-reviewer record WRONGLY passes (exit 0) — the adjacent gap" \
+    "0" "$META_REVIEWER_RC"
+assert_eq "9.8d META: ...ok=true" "true" "$(printf '%s' "$META_REVIEWER_OUT" | jq -r '.ok')"
+assert_eq "9.8e META: ...independent=true (the silent pass over an unnamed reviewer)" "true" \
+    "$(printf '%s' "$META_REVIEWER_OUT" | jq -r '.independent')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 10: i8cx R2-F1 (Sol review round 2) — a failed TRANSFORM (sed/sort) of the implementer role list must not read as an empty, vacuously-independent set ==="
+# review-check.sh's IMPLEMENTER-SET-TRANSFORM-GUARD. Sibling gap to Section 9
+# above, found IN wave 2's own fix by the round-2 independent review: the read
+# guard stops a failed GREP from being read as "zero implementer records", but
+# the very next statement piped that clean grep output through
+# `sed | sort -u` and threw the pipe's own exit status away. sort is always
+# the LAST stage, and (without pipefail) a pipeline's "$?" is only the last
+# stage's — so a sed failure was invisible whenever the sort after it still
+# exited 0 on the empty/partial stdin the failed sed left behind, and a sort
+# failure exits nonzero but that "$?" was never even looked at. Either way,
+# `[ -n "$impl_lines" ] && ...` short-circuits on the resulting impl_lines="",
+# so INDEPENDENT keeps its "true" default: a reviewer who IS an implementer
+# reads as vacuously independent — Section 9's exact defect, reopened one
+# statement later.
+#
+# Neither shim needs pipefail to expose: in the fixed code, sed and sort each
+# run as the LAST stage of their own two-command pipeline (printf | sed, then
+# printf | sort -u), and printf cannot fail — so each command's own "$?" is
+# already the pipeline's "$?", pipefail or not.
+
+REAL_SED=$(command -v sed)
+REAL_SORT=$(command -v sort)
+SHIM_SORTXFORM="$WORK/shim-sortxform"
+SHIM_SEDXFORM="$WORK/shim-sedxform"
+mkdir -p "$SHIM_SORTXFORM" "$SHIM_SEDXFORM"
+
+# Fails ONLY `sort -u` (the exact call review-check.sh's transform guard
+# makes), empty stdout, rc 2. rc 2 is not a measured platform value the way
+# grep's rc>1 is in Section 9 — sort has no "clean nonzero" case in this call
+# shape (an empty or single-line stdin still sorts with rc 0), so the guard
+# checks bare nonzero and the specific value here is not load-bearing; it
+# only has to be nonzero to simulate a genuine failure (OOM, full temp disk,
+# killed by a signal). Argv match via `[ "$a" = ... ]`, matching this tree's
+# established shim-scoping convention.
+cat > "$SHIM_SORTXFORM/sort" <<SHIMEOF
+#!/bin/bash
+for a in "\$@"; do
+    if [ "\$a" = '-u' ]; then
+        exit 2
+    fi
+done
+exec ${REAL_SORT} "\$@"
+SHIMEOF
+chmod +x "$SHIM_SORTXFORM/sort"
+
+# Fails ONLY the exact substitution review-check.sh's transform guard makes
+# (`sed -E 's/^IMPLEMENTER: role=//'`) — every OTHER sed call in the script
+# (line ~808's `1d;$d`, line ~1156's `s/^ at //`, line ~1446's findings
+# extraction) stays on the real binary. Same "nonzero is not load-bearing"
+# reasoning as the sort shim above: `s///` does not fail merely for finding
+# nothing to substitute, only for an actual failure to run.
+cat > "$SHIM_SEDXFORM/sed" <<SHIMEOF
+#!/bin/bash
+for a in "\$@"; do
+    if [ "\$a" = 's/^IMPLEMENTER: role=//' ]; then
+        exit 2
+    fi
+done
+exec ${REAL_SED} "\$@"
+SHIMEOF
+chmod +x "$SHIM_SEDXFORM/sed"
+
+# Fresh, section-local fixtures (Section 9's own convention: self-contained,
+# does not reach into an earlier section's variables) built from the shared
+# IMPL_BACKEND/art_line helpers defined at the top of this file.
+R2F1_SELF_REVIEW=$(mk_comments "$IMPL_BACKEND" "$(art_line backend high '')")
+R2F1_DOC_ONLY=$(mk_comments "$(art_line qa-claude high '')")
+R2F1_INDEP=$(mk_comments "$IMPL_BACKEND" "$(art_line qa-claude high '')")
+
+# 10.1 THE POSITIVE LEG, shipped script, SORT shimmed: a self-review shape
+# (backend both implemented and reviews) whose read succeeds (impl_rc=0) but
+# whose sort -u transform fails empty. The old body would have collapsed this
+# to impl_lines="" and passed; the fixed code must refuse, honestly, for the
+# transform failure — not by asserting the reviewer IS an implementer, which
+# the failed transform never established.
+run_gate_shim "$SHIM_SORTXFORM" "$R2F1_SELF_REVIEW"
+assert_eq "10.1 sort-shimmed transform failure on a self-review shape: exit 4 (never a silent pass)" "4" "$GATE_EXIT"
+assert_eq "10.1b ...ok=false" "false" "$(printf '%s' "$GATE_OUT" | jq -r '.ok')"
+assert_eq "10.1c ...error_key names the transform failure, not a false independence claim" \
+    "implementer_set_unreadable" "$(ekey_of "$GATE_OUT")"
+
+# 10.2 THE POSITIVE LEG, shipped script, SED shimmed: identical shape, the
+# OTHER fallible stage of the same pipeline.
+run_gate_shim "$SHIM_SEDXFORM" "$R2F1_SELF_REVIEW"
+assert_eq "10.2 sed-shimmed transform failure on a self-review shape: exit 4 (never a silent pass)" "4" "$GATE_EXIT"
+assert_eq "10.2b ...ok=false" "false" "$(printf '%s' "$GATE_OUT" | jq -r '.ok')"
+assert_eq "10.2c ...error_key names the transform failure, not a false independence claim" \
+    "implementer_set_unreadable" "$(ekey_of "$GATE_OUT")"
+
+# 10.3 RESTORE CONTROL: identical self-review comments, no shim — the real
+# detection still fires.
+run_gate "$R2F1_SELF_REVIEW"
+assert_eq "10.3 restore control (no shim): self-review still exit 4" "4" "$GATE_EXIT"
+assert_eq "10.3b ...error_key=reviewer_not_independent (the real, established violation)" \
+    "reviewer_not_independent" "$(ekey_of "$GATE_OUT")"
+
+# 10.4/10.5/10.6 ANTI-OVERREACH: a genuinely doc-only task (no IMPLEMENTER
+# records at all, grep rc 1) never reaches the transform block — guarded by
+# `if [ "$impl_rc" -eq 0 ]`. Must pass unshimmed AND with either transform
+# shim active: the shim fires on the ARGUMENT, not on whether it is ever
+# invoked, so this proves the new guard is unreachable on doc-only work
+# rather than merely untriggered by these particular fixtures.
+run_gate "$R2F1_DOC_ONLY"
+assert_eq "10.4 doc-only task, unshimmed: exit 0" "0" "$GATE_EXIT"
+assert_eq "10.4b ...independent=true (vacuously, correctly)" "true" "$(printf '%s' "$GATE_OUT" | jq -r '.independent')"
+
+run_gate_shim "$SHIM_SORTXFORM" "$R2F1_DOC_ONLY"
+assert_eq "10.5 doc-only task, sort-shimmed: STILL exit 0 (transform block never reached)" "0" "$GATE_EXIT"
+assert_eq "10.5b ...independent=true" "true" "$(printf '%s' "$GATE_OUT" | jq -r '.independent')"
+
+run_gate_shim "$SHIM_SEDXFORM" "$R2F1_DOC_ONLY"
+assert_eq "10.6 doc-only task, sed-shimmed: STILL exit 0 (transform block never reached)" "0" "$GATE_EXIT"
+assert_eq "10.6b ...independent=true" "true" "$(printf '%s' "$GATE_OUT" | jq -r '.independent')"
+
+# 10.7 ANTI-OVERREACH: a genuinely independent reviewer, unshimmed — the
+# transform runs for real (impl_rc=0, backend implemented), succeeds
+# normally, and the independence comparison behaves exactly as before this
+# fix. Proves the new guard does not misfire on ordinary, healthy operation.
+run_gate "$R2F1_INDEP"
+assert_eq "10.7 genuinely independent reviewer, unshimmed: exit 0" "0" "$GATE_EXIT"
+assert_eq "10.7b ...independent=true" "true" "$(printf '%s' "$GATE_OUT" | jq -r '.independent')"
+assert_eq "10.7c ...implementers correctly resolved (not masked)" '["backend"]' \
+    "$(printf '%s' "$GATE_OUT" | jq -c '.implementers')"
+
+# 10.8 META (load-bearing): revert review-check.sh's TRANSFORM-GUARD fix on a
+# checker copy — splice the exact pre-fix one-liner back into the
+# sentinel-bounded region — and re-run 10.1/10.2's shimmed scenarios against
+# it. The mutant must reproduce the ORIGINAL R2-F1 defect: a silent
+# independent=true pass.
+MUTANT_R2F1="$WORK/review-check-pre-r2f1.sh"
+{
+    sed -n '1,/# IMPLEMENTER-SET-TRANSFORM-GUARD BEGIN/p' "$RCHECK"
+    cat <<'OLDCODE_R2F1'
+    if [ "$impl_rc" -eq 0 ]; then
+        impl_lines=$(printf '%s\n' "$impl_raw" | sed -E 's/^IMPLEMENTER: role=//' | sort -u)
+    fi
+OLDCODE_R2F1
+    sed -n '/# IMPLEMENTER-SET-TRANSFORM-GUARD END/,$p' "$RCHECK"
+} > "$MUTANT_R2F1"
+chmod +x "$MUTANT_R2F1"
+assert_eq "10.8 META: the mutant differs from the shipped script (non-vacuous splice)" "differs" \
+    "$(cmp -s "$RCHECK" "$MUTANT_R2F1" && echo identical || echo differs)"
+assert_eq "10.8b META: the mutant parses" "0" \
+    "$(bash -n "$MUTANT_R2F1" 2>/dev/null && echo 0 || echo 1)"
+
+printf '%s' "$R2F1_SELF_REVIEW" > "$WORK/i8cx-r2f1-comments.json"
+META_R2F1_SORT_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" PATH="$SHIM_SORTXFORM:$PATH" \
+    bash "$MUTANT_R2F1" gate t-1 --comments-json "$WORK/i8cx-r2f1-comments.json" 2>/dev/null)
+META_R2F1_SORT_RC=$?
+assert_eq "10.9 META: WITHOUT the transform guard, sort-shimmed self-review WRONGLY passes (exit 0) — the R2-F1 defect" \
+    "0" "$META_R2F1_SORT_RC"
+assert_eq "10.9b META: ...ok=true" "true" "$(printf '%s' "$META_R2F1_SORT_OUT" | jq -r '.ok')"
+assert_eq "10.9c META: ...independent=true (the silent pass)" "true" \
+    "$(printf '%s' "$META_R2F1_SORT_OUT" | jq -r '.independent')"
+
+# 10.10 META, the OTHER shimmed stage against the SAME mutant.
+META_R2F1_SED_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" PATH="$SHIM_SEDXFORM:$PATH" \
+    bash "$MUTANT_R2F1" gate t-1 --comments-json "$WORK/i8cx-r2f1-comments.json" 2>/dev/null)
+META_R2F1_SED_RC=$?
+assert_eq "10.10 META: WITHOUT the transform guard, sed-shimmed self-review WRONGLY passes (exit 0) — the R2-F1 defect" \
+    "0" "$META_R2F1_SED_RC"
+assert_eq "10.10b META: ...ok=true" "true" "$(printf '%s' "$META_R2F1_SED_OUT" | jq -r '.ok')"
+assert_eq "10.10c META: ...independent=true (the silent pass)" "true" \
+    "$(printf '%s' "$META_R2F1_SED_OUT" | jq -r '.independent')"
+
+# 10.11 Discriminator: the mutant still correctly detects the UNSHIMMED
+# self-review — proving the splice only affects transform-failure handling,
+# not the underlying independence comparison itself.
+META_R2F1_UNSHIMMED=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$MUTANT_R2F1" gate t-1 \
+    --comments-json "$WORK/i8cx-r2f1-comments.json" 2>/dev/null)
+assert_eq "10.11 discriminator: the mutant, UNSHIMMED, still catches the real self-review (ran the real predicate)" \
+    "reviewer_not_independent" "$(ekey_of "$META_R2F1_UNSHIMMED")"
+
+# ---------------------------------------------------------------------------
+echo ""
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"
     for t in "${FAILED_TESTS[@]}"; do printf '  - %s\n' "$t"; done

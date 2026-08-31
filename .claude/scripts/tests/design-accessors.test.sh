@@ -1039,7 +1039,7 @@ cp "$RC_FIXTURE" "$SCRIPTS/review-check.real.sh"
 mk_stub_validator_a() {
     cat > "$RC_FIXTURE" <<'STUB'
 #!/bin/bash
-printf '{"ok":true,"subcommand":"validate-design","error_key":"","observations":"stub-a","units":2,"unit_ids":["U1","U2"],"task_id":"%TASKID%","unit_files":{"U1":["src/a.sh"],"U2":["src/b.sh"]},"unit_deps":{"U1":[],"U2":[]}}\n'
+printf '{"ok":true,"subcommand":"validate-design","error_key":"","observations":"stub-a","units":2,"unit_ids":["U1","U2"],"task_id":"%TASKID%","unit_files":{"U1":["src/a.sh"],"U2":["src/b.sh"]},"unit_deps":{"U1":[],"U2":[]},"unit_content":{"U1":"{\\"unit_id\\":\\"U1\\"}","U2":"{\\"unit_id\\":\\"U2\\"}"}}\n'
 exit 3
 STUB
     sed -i.bak "s/%TASKID%/$1/" "$RC_FIXTURE" && rm -f "$RC_FIXTURE.bak"
@@ -1049,7 +1049,7 @@ STUB
 mk_stub_validator_b() {
     cat > "$RC_FIXTURE" <<'STUB'
 #!/bin/bash
-printf '{"ok":"true","subcommand":"validate-design","error_key":"","observations":"stub-b","units":2,"unit_ids":["U1","U2"],"task_id":"%TASKID%","unit_files":{"U1":["src/a.sh"],"U2":["src/b.sh"]},"unit_deps":{"U1":[],"U2":[]}}\n'
+printf '{"ok":"true","subcommand":"validate-design","error_key":"","observations":"stub-b","units":2,"unit_ids":["U1","U2"],"task_id":"%TASKID%","unit_files":{"U1":["src/a.sh"],"U2":["src/b.sh"]},"unit_deps":{"U1":[],"U2":[]},"unit_content":{"U1":"{\\"unit_id\\":\\"U1\\"}","U2":"{\\"unit_id\\":\\"U2\\"}"}}\n'
 exit 0
 STUB
     sed -i.bak "s/%TASKID%/$1/" "$RC_FIXTURE" && rm -f "$RC_FIXTURE.bak"

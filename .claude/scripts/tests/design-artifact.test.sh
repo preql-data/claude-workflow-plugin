@@ -34,6 +34,18 @@
 #   5. Layer 1, with the negative control the frontmatter assertion needs: the
 #      same checker must FLAG a fixture whose tools line still carries Bash.
 #
+#   6. R4-F1 (independent review round 4, claude-workflow-plugin-i8cx): does
+#      design-unit-json preserve the single-parser guarantee, or is it a
+#      second extraction behind a validate call? Section 10 reproduces the
+#      concrete exploit (swap the artifact for one with a lone sentinel pair
+#      and parseable JSON naming the same unit_id but missing required
+#      sections/schema fields, in the gap between validate-design's read and
+#      a second one) against a mutant carrying the OLD re-read behaviour,
+#      proves it succeeds there (mixed provenance: an authentic task_id
+#      combined with unvalidated content), then proves the SAME timing
+#      against the SHIPPED script does not, because the shipped script never
+#      performs a second read to race against.
+#
 # Exit codes: 0 all assertions passed | 1 one or more failed | 2 harness error.
 
 set -u
@@ -444,6 +456,99 @@ V_ABSENT=$(bash "$RC" validate-design "$FIXTURE/docs/specs/nope.md" 2>/dev/null)
 assert_eq "2.6 a missing file is a usage error, not a design with zero units" "usage" \
     "$(json_field '.error_key' "$V_ABSENT")"
 
+# --- 2.7 i8cx wave 2: a read failure BETWEEN the sentinel COUNT check and the
+# sentinel LINE-NUMBER extraction must refuse cleanly, not crash into a
+# malformed numeric comparison. `grep -nE ... | head -1 | cut -d: -f1`
+# reports cut's rc (always 0 on the empty stdin an upstream grep failure
+# leaves behind), and the pre-fix code fed that straight into
+# `[ "$ln_end" -le "$ln_begin" ]` — bash's `[` treats an EMPTY operand as a
+# syntax error ("integer expression expected"), not as 0, so the comparison
+# printed a shell-level error to stderr and its own non-zero, UNCHECKED
+# status fell through to the block-extraction below, which eventually
+# refused via design_block_empty for the WRONG stated reason. The count check
+# a few lines above this one (grep -cE, "2.5 ... design_units_sentinels")
+# was already proven readable moments earlier (exactly one BEGIN, exactly
+# one END), so this models a read failure arising BETWEEN the two checks —
+# a race or a transient fault, not a genuine absence.
+#
+# The induced fault here is an argv-scoped grep shim (fails ONLY `-nE`
+# invocations, the line-number form; the earlier `-cE` count form is
+# untouched), not a chmod-000 file — unlike Section 1's hash-file
+# unreadable-path leg, this needs no `[ -r ]` root-bypass skip, since the
+# shim fires regardless of who owns the file or what UID is running the
+# test.
+REAL_GREP_BIN=$(command -v grep)
+mkdir -p "$FIXTURE/i8cx-nE-shim-bin"
+cat > "$FIXTURE/i8cx-nE-shim-bin/grep" <<SHIMEOF
+#!/bin/bash
+for a in "\$@"; do
+    if [ "\$a" = "-nE" ]; then
+        echo fired >> "$FIXTURE/i8cx-nE-shim.fired"
+        exit 2
+    fi
+done
+exec "$REAL_GREP_BIN" "\$@"
+SHIMEOF
+chmod +x "$FIXTURE/i8cx-nE-shim-bin/grep"
+
+rm -f "$FIXTURE/i8cx-nE-shim.fired"
+V27_OUT=$(PATH="$FIXTURE/i8cx-nE-shim-bin:$PATH" bash "$RC" validate-design "$VALID" 2>"$FIXTURE/i8cx-nE.stderr")
+V27_RC=$?
+assert_eq "2.7 NON-VACUITY: the injected -nE failure actually fired" "yes" \
+    "$( [ -f "$FIXTURE/i8cx-nE-shim.fired" ] && echo yes || echo no )"
+assert_eq "2.7b shipped validate-design REFUSES cleanly (exit 4)" "4" "$V27_RC"
+assert_eq "2.7c ...error_key names the read failure honestly" \
+    "design_units_sentinels_unreadable" "$(json_field '.error_key' "$V27_OUT")"
+assert_eq "2.7d ...ok=false" "false" "$(json_field '.ok' "$V27_OUT")"
+assert_eq "2.7e ...units reported as 0, never a count" "0" "$(json_field '.units' "$V27_OUT")"
+assert_eq "2.7f ...and no shell-level 'integer expression expected' noise on stderr" "clean" \
+    "$(grep -qF 'integer expression expected' "$FIXTURE/i8cx-nE.stderr" && echo noisy || echo clean)"
+
+# --- 2.7g RESTORE CONTROL: same artifact, real grep, shipped script — the
+# ordinary success path (already covered by 2.1 above) is unaffected by the
+# shim's mere existence on disk when it is not on PATH.
+V27_CTRL=$(bash "$RC" validate-design "$VALID" 2>/dev/null); V27_CTRL_RC=$?
+assert_eq "2.7g RESTORE CONTROL: ok:true, exit 0, with the shim off PATH" "true|0" \
+    "$(json_field '.ok' "$V27_CTRL")|$V27_CTRL_RC"
+
+# --- 2.7h THE META: splice the pre-fix one-liner back into the
+# SENTINEL-LINE-READ-GUARD region on a copy (a plain sentinel STRIP is wrong
+# here — it would delete the `local ln_begin ln_end` declaration too, and the
+# untouched `[ "$ln_end" -le "$ln_begin" ]` check a few lines below the
+# region would then read an UNSET variable under this script's `set -u`,
+# aborting with a different, unrelated crash rather than reproducing the
+# actual pre-fix shape). review-check.sh sources nothing (grep -c '^\. \|
+# ^source ' review-check.sh is 0), so the copy is self-contained.
+RC_MUT27="$FIXTURE/.claude/scripts/review-check.mutant-2-7.sh"
+{
+    sed -n '1,/# SENTINEL-LINE-READ-GUARD BEGIN/p' "$RC"
+    cat <<'OLDCODE27'
+    local ln_begin ln_end
+    ln_begin=$(grep -nE "$DESIGN_UNITS_BEGIN_RE" "$file" | head -1 | cut -d: -f1)
+    ln_end=$(grep -nE "$DESIGN_UNITS_END_RE" "$file" | head -1 | cut -d: -f1)
+OLDCODE27
+    sed -n '/# SENTINEL-LINE-READ-GUARD END/,$p' "$RC"
+} > "$RC_MUT27"
+assert_eq "2.7h NON-VACUITY: the mutant differs from the shipped bytes" "differs" \
+    "$(cmp -s "$RC" "$RC_MUT27" && echo same || echo differs)"
+bashn27_rc=0; bash -n "$RC_MUT27" 2>/dev/null || bashn27_rc=$?
+assert_eq "2.7i ...and still parses" "0" "$bashn27_rc"
+chmod +x "$RC_MUT27"
+rm -f "$FIXTURE/i8cx-nE-shim.fired"
+M27_OUT=$(PATH="$FIXTURE/i8cx-nE-shim-bin:$PATH" bash "$RC_MUT27" validate-design "$VALID" 2>"$FIXTURE/i8cx-nE-mutant.stderr")
+M27_RC=$?
+assert_eq "2.7j SPECIFIC MISBEHAVIOUR: the mutant still refuses (exit 4) — this fix was never about the outcome flipping" \
+    "4" "$M27_RC"
+assert_eq "2.7k ...but with the WRONG, misleading error_key (design_block_empty, not the honest read-failure key)" \
+    "design_block_empty" "$(json_field '.error_key' "$M27_OUT")"
+assert_eq "2.7l ...and the shell-level crash noise the fix exists to remove IS present on the mutant" "noisy" \
+    "$(grep -qF 'integer expression expected' "$FIXTURE/i8cx-nE-mutant.stderr" && echo noisy || echo clean)"
+# Discriminator: unshimmed, the mutant still validates the clean fixture —
+# proving the splice only affects the read-failure path, not the ordinary one.
+M27_CTRL_OUT=$(bash "$RC_MUT27" validate-design "$VALID" 2>/dev/null); M27_CTRL_RC=$?
+assert_eq "2.7m discriminator: the mutant, unshimmed, still validates cleanly (ran the real predicate otherwise)" \
+    "true|0" "$(json_field '.ok' "$M27_CTRL_OUT")|$M27_CTRL_RC"
+
 # ===========================================================================
 printf '\n=== Section 2b: the final success-path extraction is GUARDED (xsu1 H2-F1) ===\n'
 # ===========================================================================
@@ -467,6 +572,26 @@ assert_eq "2b.1 unit_files is the declared per-unit file map, byte-exact" \
 assert_eq "2b.1b unit_deps is the declared per-unit dependency map (U2 depends on U1)" \
     '{"U1":[],"U2":["U1"]}' \
     "$(json_field '.unit_deps | tojson' "$V_OUT")"
+
+# --- 2b.1c (v5 D5 R4-F1 remediation, independent review round 4): unit_content
+# is the THIRD projection map — each unit's OWN full canonical (compact, keys
+# sorted) body, keyed by unit_id, produced in the SAME single guarded jq pass
+# as unit_files/unit_deps above. Byte-exact against the artifact's own
+# hand-written fields, in the SAME pretty-printed/nested-object shape 2b.1
+# already exercises.
+assert_eq "2b.1c unit_content.U1 is U1's OWN full canonical body, byte-exact" \
+    '{"acceptance":[{"id":"AC1","text":"governing lists docs/specs/<id>.md with origin design-artifact"}],"depends_on":[],"files":[".claude/scripts/workflow-manifest.sh"],"goal":"declare the directory","role":"devops","unit_id":"U1","verification":"make test"}' \
+    "$(json_field '.unit_content.U1' "$V_OUT")"
+assert_eq "2b.1d unit_content.U2 is U2's OWN full canonical body, byte-exact (depends_on and acceptance included, not just the files/deps projections)" \
+    '{"acceptance":[{"id":"AC2","text":"both shipped tripwire legs assert the new verdict"}],"depends_on":["U1"],"files":[".claude/scripts/tests/workflow-manifest.test.sh"],"goal":"flip the tripwires","role":"devops","unit_id":"U2","verification":"make test"}' \
+    "$(json_field '.unit_content.U2' "$V_OUT")"
+# --- 2b.1e: design-unit-json's OWN output for U1 is the SAME bytes as
+# validate-design's unit_content.U1 — the single-pass property this fix
+# exists to establish, checked directly rather than assumed from the source.
+DUJ_U1_OUT=$(bash "$RC" design-unit-json "$VALID" U1 2>/dev/null)
+assert_eq "2b.1e design-unit-json U1 == validate-design's unit_content.U1 (one parse, two callers)" \
+    "$(json_field '.unit_content.U1' "$V_OUT")" \
+    "$(json_field '.unit_json' "$DUJ_U1_OUT")"
 
 # --- 2b.2 INDUCED EXTRACTION FAILURE against the SHIPPED script. The shim
 # fails ONLY the jq invocation carrying the H2-F1 marker comment (verbatim,
@@ -495,7 +620,7 @@ assert_eq "2b.2c ...error_key=design_units_extraction_failed" "design_units_extr
     "$(json_field '.error_key' "$F1_OUT")"
 assert_eq "2b.2d ...ok=false — never ok:true over fail-open defaults" "false" "$(json_field '.ok' "$F1_OUT")"
 assert_eq "2b.2e ...and the ERROR envelope carries unit_files:{} / unit_deps:{} (the reserved use of {})" \
-    "true" "$(json_field '(.unit_files == {}) and (.unit_deps == {})' "$F1_OUT")"
+    "true" "$(json_field '(.unit_files == {}) and (.unit_deps == {}) and (.unit_content == {})' "$F1_OUT")"
 
 # --- 2b.3 RESTORE CONTROL: same artifact, real jq, shipped script.
 F1_CTRL=$(bash "$RC" validate-design "$VALID" 2>/dev/null); F1_CTRL_RC=$?
@@ -547,31 +672,38 @@ assert_eq "2b.5 precondition: the restricted PATH really has no jq" "yes" \
     "$(PATH="$NOJQ2B_BIN" command -v jq >/dev/null 2>&1 && echo no || echo yes)"
 NOJQ2B_RC=0
 NOJQ2B_OUT=$(PATH="$NOJQ2B_BIN" "$NOJQ2B_BIN/bash" "$RC" validate-design "$VALID" 2>/dev/null) || NOJQ2B_RC=$?
-assert_eq "2b.5b the pre-dispatch jq-missing literal carries unit_files:{}/unit_deps:{}" "true" \
-    "$(printf '%s' "$NOJQ2B_OUT" | "$REAL_JQ_BIN" -r '(.unit_files == {}) and (.unit_deps == {})' 2>/dev/null)"
+assert_eq "2b.5b the pre-dispatch jq-missing literal carries unit_files:{}/unit_deps:{}/unit_content:{}" "true" \
+    "$(printf '%s' "$NOJQ2B_OUT" | "$REAL_JQ_BIN" -r '(.unit_files == {}) and (.unit_deps == {}) and (.unit_content == {})' 2>/dev/null)"
 assert_eq "2b.5c ...with error_key=jq_missing at exit 2" "jq_missing|2" \
     "$(printf '%s' "$NOJQ2B_OUT" | "$REAL_JQ_BIN" -r '.error_key' 2>/dev/null)|$NOJQ2B_RC"
 U2B_OUT=$(bash "$RC" validate-design "$FIXTURE/docs/specs/nope.md" 2>/dev/null)
 assert_eq "2b.5d a usage-error envelope carries the {} maps" "true" \
-    "$(json_field '(.unit_files == {}) and (.unit_deps == {})' "$U2B_OUT")"
+    "$(json_field '(.unit_files == {}) and (.unit_deps == {}) and (.unit_content == {})' "$U2B_OUT")"
 mutate 's|"contract_version": "1",|"contract_version": "1",,|' "$M"
 S2B_OUT=$(bash "$RC" validate-design "$M" 2>/dev/null)
 assert_eq "2b.5e a parse-refusal envelope carries the {} maps" "true" \
-    "$(json_field '(.unit_files == {}) and (.unit_deps == {})' "$S2B_OUT")"
+    "$(json_field '(.unit_files == {}) and (.unit_deps == {}) and (.unit_content == {})' "$S2B_OUT")"
 
 # NEGATIVE CONTROL for 2b.5b's own check (the pairing requirement applies to
-# new test assertions too): a mutant literal with unit_deps stripped is
+# new test assertions too): a mutant literal with unit_content stripped is
 # caught by exactly that check. 2b.5b above doubles as the restore control.
+# unit_content (v5 D5 R4-F1 remediation, independent review round 4) is the
+# NEWEST of the three reserved map fields and the LAST key in both literals'
+# tail, so it is the one this negative control targets; unit_files/unit_deps
+# stripping is unchanged coverage carried by 2b.5b/2b.5d/2b.5e's own ANDed
+# clauses, which never stopped checking those two.
 assert_eq "2b.5f NON-VACUITY precondition: both literals carry the maps tail — the pre-dispatch jq-missing one AND (xsu1 H2R2-F4) emit_validate_design's construction-failure fallback" "2" \
-    "$(grep -cF '"unit_files":{},"unit_deps":{}}' "$RC")"
+    "$(grep -cF '"unit_files":{},"unit_deps":{},"unit_content":{}}' "$RC")"
 RC_MUT2B5="$FIXTURE/.claude/scripts/review-check.mutant-2b5.sh"
-sed 's|,"unit_deps":{}}|}|' "$RC" > "$RC_MUT2B5"
+sed 's|,"unit_content":{}}|}|' "$RC" > "$RC_MUT2B5"
 assert_eq "2b.5g ...the strip landed" "differs" \
     "$(cmp -s "$RC" "$RC_MUT2B5" && echo same || echo differs)"
 chmod +x "$RC_MUT2B5"
 M2B5_OUT=$(PATH="$NOJQ2B_BIN" "$NOJQ2B_BIN/bash" "$RC_MUT2B5" validate-design "$VALID" 2>/dev/null) || true
-assert_eq "2b.5h SPECIFIC MISBEHAVIOUR: the mutant's jq-missing envelope lacks unit_deps — 2b.5b's check catches exactly this" "false" \
-    "$(printf '%s' "$M2B5_OUT" | "$REAL_JQ_BIN" -r 'has("unit_deps")' 2>/dev/null)"
+assert_eq "2b.5h SPECIFIC MISBEHAVIOUR: the mutant's jq-missing envelope lacks unit_content — 2b.5b's check catches exactly this" "false" \
+    "$(printf '%s' "$M2B5_OUT" | "$REAL_JQ_BIN" -r 'has("unit_content")' 2>/dev/null)"
+assert_eq "2b.5i ...and it STILL has unit_files/unit_deps (the strip is surgical, not a wholesale corruption that would pass 2b.5h vacuously)" "true" \
+    "$(printf '%s' "$M2B5_OUT" | "$REAL_JQ_BIN" -r '(.unit_files == {}) and (.unit_deps == {})' 2>/dev/null)"
 rm -f "$RC_MUT2B5"
 
 # ===========================================================================
@@ -614,7 +746,7 @@ assert_eq "2c.1c ...the output is the still-parseable caller-data-free literal" 
     "true|false|envelope_construction_failed" \
     "$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -e . >/dev/null 2>&1 && echo true || echo false)|$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -r '.ok' 2>/dev/null)|$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -r '.error_key' 2>/dev/null)"
 assert_eq "2c.1d ...carrying the FULL field set with the reserved defaults (a consumer degrades on data, not on a parse error)" "true" \
-    "$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -r '(.units == 0) and (.unit_ids == []) and (.task_id == "") and (.unit_files == {}) and (.unit_deps == {})' 2>/dev/null)"
+    "$(printf '%s' "$C1_OUT" | "$REAL_JQ_BIN" -r '(.units == 0) and (.unit_ids == []) and (.task_id == "") and (.unit_files == {}) and (.unit_deps == {}) and (.unit_content == {})' 2>/dev/null)"
 
 # --- 2c.2 the same failure on an ERROR path keeps its nonzero exit ---------
 C2_OUT=$(PATH="$FIXTURE/h2r2f4-emitshim-bin:$PATH" bash "$RC" validate-design "$FIXTURE/docs/specs/nope.md" 2>/dev/null); C2_RC=$?
@@ -2137,6 +2269,242 @@ printf '%s\n' "$FIXTURE/docs/specs/$HLK2_TID.md" > "$TRACKING"
 assert_eq "9.5c CONTROL: the same two-hop chain inside the declared directory still records" "recorded" \
     "$(json_field '.status' "$(bash "$QG" design-record "$HLK2_TID" 2>&1)")"
 rm -rf "$FIXTURE/docs/specs$NL"
+
+# ===========================================================================
+printf '\n=== Section 10: R4-F1 — design-unit-json comes from the authoritative parse, never a re-read ===\n'
+# ===========================================================================
+# independent review round 4 (docs/reviews/claude-workflow-plugin-i8cx-r4.json,
+# R4-F1, HIGH): design-unit-json validated ONE read via validate-design, then
+# INDEPENDENTLY re-counted sentinels, re-located the block, re-handled fences,
+# and re-parsed/selected the unit — a second extraction behind a validate
+# call, not the validator's own single-pass result. The concrete exploit:
+# after validate-design (called internally, above) returns, swap the file for
+# one with a lone sentinel pair and parseable JSON naming the SAME unit_id but
+# missing required sections/schema fields, in the gap before the second read.
+# The rereader checked neither schema nor task identity a second time, so it
+# emitted ok:true with task_id from the ORIGINAL validated artifact and
+# unit_json from the UNVALIDATED replacement — an authentic identity riding
+# out combined with content nobody validated.
+#
+# THE FIX (this round): validate-design's own envelope now carries
+# unit_content (unit_id -> that unit's own canonical JSON, built in the SAME
+# guarded jq pass that already produces unit_files/unit_deps from the SAME
+# in-memory $block). design-unit-json performs ZERO reads of the artifact any
+# more — it projects a field out of its OWN validate-design call's result.
+#
+# THE INJECTION POINT, and why it needs no new marker in shipped code: both
+# the pre-fix and the fixed cmd_design_unit_json compute has_unit via a jq
+# call whose program text (`index($u)) != null`) is UNIQUE in this file (verified
+# below) and runs immediately before the code this fix replaces. A jq shim on
+# PATH matches exactly that call, swaps the artifact on disk as a side
+# effect, then still answers the real question via the real jq — so the swap
+# lands at the SAME point in BOTH the OLD-behaviour mutant and the shipped
+# script, and the comparison is fair: whichever behaves differently does so
+# because of what happens AFTER the swap, not because the swap landed at a
+# different moment for one of them.
+
+# shellcheck disable=SC2016  # the grep -cF needle is literal jq source, not a shell expansion.
+R4F1_UNIQUE_JQ_CALL='index($u)) != null'
+assert_eq "10.0 precondition: the has_unit jq call text is UNIQUE in review-check.sh (the injection point cannot be ambiguous)" "1" \
+    "$(grep -cF "$R4F1_UNIQUE_JQ_CALL" "$RC")"
+
+R4F1_TID="EXPLOIT-R4F1"
+R4F1_FILE="$FIXTURE/docs/specs/r4f1-exploit.md"
+write_artifact "$R4F1_FILE" "$R4F1_TID"
+R4F1_GOOD_BAK="$FIXTURE/r4f1-good.md.bak"
+cp "$R4F1_FILE" "$R4F1_GOOD_BAK"
+
+R4F1_GOOD_VOUT=$(bash "$RC" validate-design "$R4F1_FILE" 2>/dev/null); R4F1_GOOD_RC=$?
+assert_eq "10.0b precondition: the untouched artifact validates, U1 declared, task_id honest" \
+    "0|true|$R4F1_TID|U1" \
+    "$R4F1_GOOD_RC|$(json_field '.ok' "$R4F1_GOOD_VOUT")|$(json_field '.task_id' "$R4F1_GOOD_VOUT")|$(json_field '(.unit_ids | index("U1")) != null' "$R4F1_GOOD_VOUT" | grep -qx true && echo U1 || echo MISSING)"
+
+# --- the swap payload: one sentinel pair, parseable, names U1, but is
+# schema-invalid AND section-free standalone — so a re-validation would
+# refuse it, and only a check that skips re-validation could be fooled.
+R4F1_BAD="$FIXTURE/r4f1-bad-replacement.md"
+cat > "$R4F1_BAD" <<'BADEOF'
+<!-- DESIGN-UNITS BEGIN -->
+```json
+{
+  "contract_version": "1",
+  "task_id": "ATTACKER-INJECTED",
+  "designer_identity": "attacker",
+  "units": [
+    { "unit_id": "U1", "_swapped_marker": "exploit-r4f1" }
+  ]
+}
+```
+<!-- DESIGN-UNITS END -->
+BADEOF
+assert_eq "10.0c precondition: the swap payload has exactly one sentinel pair" "1|1" \
+    "$(grep -cF '<!-- DESIGN-UNITS BEGIN -->' "$R4F1_BAD")|$(grep -cF '<!-- DESIGN-UNITS END -->' "$R4F1_BAD")"
+R4F1_BAD_STANDALONE_RC=0
+bash "$RC" validate-design "$R4F1_BAD" >/dev/null 2>&1 || R4F1_BAD_STANDALONE_RC=$?
+assert_eq "10.0d precondition: the swap payload, validated ON ITS OWN, is REFUSED — proves it is not just a differently-valid artifact, so only skipped re-validation lets it through" \
+    "refused" "$([ "$R4F1_BAD_STANDALONE_RC" -ne 0 ] && echo refused || echo accepted)"
+
+# --- the injection: a jq shim that answers the has_unit call honestly (via
+# the real jq, execed after) but ALSO swaps the artifact on disk as a side
+# effect the first time it sees that call's own program text.
+R4F1_SWAP_BIN="$FIXTURE/r4f1-swap-bin"
+mkdir -p "$R4F1_SWAP_BIN"
+cat > "$R4F1_SWAP_BIN/jq" <<SHIMEOF
+#!/bin/bash
+case "\$*" in
+  *'index(\$u)) != null'*)
+    echo fired >> "$FIXTURE/r4f1-swap.fired"
+    cp "$R4F1_BAD" "$R4F1_FILE"
+    ;;
+esac
+exec "$REAL_JQ_BIN" "\$@"
+SHIMEOF
+chmod +x "$R4F1_SWAP_BIN/jq"
+
+# --- the OLD-behaviour mutant: the shipped script's own bytes, with ONLY the
+# DESIGN-UNIT-JSON-AUTHORITATIVE-FETCH region swapped back to the pre-fix
+# re-read logic (reproduced verbatim from before this fix landed). Every
+# other line — argument parsing, the validate-design call, the design_invalid
+# and unit_not_in_design refusals, the has_unit injection point itself — is
+# the REAL shipped code, unmutated.
+R4F1_OLDTEXT="$FIXTURE/r4f1-oldtext.txt"
+cat > "$R4F1_OLDTEXT" <<'OLDTEXTEOF'
+    local n_begin n_end
+    n_begin=$(grep -cE "$DESIGN_UNITS_BEGIN_RE" "$file" 2>/dev/null) || n_begin=0
+    n_end=$(grep -cE "$DESIGN_UNITS_END_RE" "$file" 2>/dev/null) || n_end=0
+    n_begin=$(printf '%s' "$n_begin" | tr -d ' \n')
+    n_end=$(printf '%s' "$n_end" | tr -d ' \n')
+    if [ "$n_begin" != "1" ] || [ "$n_end" != "1" ]; then
+        emit_design_unit_json "false" "design_units_reread_failed" \
+            "the sentinel pair could not be re-confirmed on a second read of $file, immediately after validate-design proved it exactly once; refusing rather than guessing (a race against a concurrent edit, never a genuine absence)" \
+            "$v_tid" "$unit_id" ""
+        exit 4
+    fi
+    local ln_begin ln_end
+    ln_begin=$(grep -nE "$DESIGN_UNITS_BEGIN_RE" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+    ln_end=$(grep -nE "$DESIGN_UNITS_END_RE" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+    if [ -z "$ln_begin" ] || [ -z "$ln_end" ]; then
+        emit_design_unit_json "false" "design_units_reread_failed" \
+            "could not re-establish the sentinel line numbers for $file on this second read; refusing rather than comparing line numbers that might be empty" \
+            "$v_tid" "$unit_id" ""
+        exit 4
+    fi
+    if [ "$ln_end" -le "$ln_begin" ]; then
+        emit_design_unit_json "false" "design_units_reread_failed" \
+            "the closing sentinel (line $ln_end) precedes or equals the opening one (line $ln_begin) on this second read of $file" \
+            "$v_tid" "$unit_id" ""
+        exit 4
+    fi
+    local block
+    block=$(awk -v b="$ln_begin" -v e="$ln_end" 'NR > b && NR < e' "$file" 2>/dev/null)
+    block=$(printf '%s\n' "$block" | awk 'NF {p = 1} p' | awk '{a[NR] = $0} END {last = 0; for (i = 1; i <= NR; i++) if (a[i] ~ /[^ \t]/) last = i; for (i = 1; i <= last; i++) print a[i]}')
+    local n_fence
+    n_fence=$(printf '%s\n' "$block" | grep -cE '^[[:space:]]*```' 2>/dev/null) || n_fence=0
+    n_fence=$(printf '%s' "$n_fence" | tr -d ' \n')
+    case "$n_fence" in
+        0) : ;;
+        2)
+            block=$(printf '%s\n' "$block" | sed '1d;$d')
+            ;;
+        *)
+            emit_design_unit_json "false" "design_units_reread_failed" \
+                "the re-read block has an unexpected fence count ($n_fence) immediately after validate-design proved it well-formed; refusing rather than guessing" \
+                "$v_tid" "$unit_id" ""
+            exit 4
+            ;;
+    esac
+
+    local unit_json=""
+    unit_json=$(printf '%s' "$block" | jq -cS --arg u "$unit_id" \
+        '[.units[]? | select(type == "object" and .unit_id == $u)] | .[0] // empty' 2>/dev/null)
+    if [ -z "$unit_json" ]; then
+        emit_design_unit_json "false" "design_units_reread_failed" \
+            "the re-read block no longer carries unit_id=$unit_id, immediately after validate-design proved it declared; refusing rather than guessing" \
+            "$v_tid" "$unit_id" ""
+        exit 4
+    fi
+OLDTEXTEOF
+
+R4F1_BEGIN_LN=$(grep -nF '# DESIGN-UNIT-JSON-AUTHORITATIVE-FETCH BEGIN (i8cx R4-F1)' "$RC" | head -1 | cut -d: -f1)
+R4F1_END_LN=$(grep -nF '# DESIGN-UNIT-JSON-AUTHORITATIVE-FETCH END (i8cx R4-F1)' "$RC" | head -1 | cut -d: -f1)
+assert_eq "10.1 NON-VACUITY: the fetch-region sentinels are found, exactly once each, in the shipped script" "1|1" \
+    "$(grep -cF '# DESIGN-UNIT-JSON-AUTHORITATIVE-FETCH BEGIN (i8cx R4-F1)' "$RC")|$(grep -cF '# DESIGN-UNIT-JSON-AUTHORITATIVE-FETCH END (i8cx R4-F1)' "$RC")"
+RC_MUT_R4F1="$FIXTURE/.claude/scripts/review-check.mutant-r4f1.sh"
+{
+    head -n "$R4F1_BEGIN_LN" "$RC"
+    cat "$R4F1_OLDTEXT"
+    tail -n "+$R4F1_END_LN" "$RC"
+} > "$RC_MUT_R4F1"
+assert_eq "10.1b ...and the mutant differs from the shipped bytes" "differs" \
+    "$(cmp -s "$RC" "$RC_MUT_R4F1" && echo same || echo differs)"
+BASHN_R4F1_RC=0; bash -n "$RC_MUT_R4F1" 2>/dev/null || BASHN_R4F1_RC=$?
+assert_eq "10.1c ...and the mutant still parses" "0" "$BASHN_R4F1_RC"
+chmod +x "$RC_MUT_R4F1"
+
+# --- 10.2 THE EXPLOIT, against the OLD-behaviour mutant ---------------------
+rm -f "$FIXTURE/r4f1-swap.fired"
+cp "$R4F1_GOOD_BAK" "$R4F1_FILE"
+M_R4F1_OUT=$(PATH="$R4F1_SWAP_BIN:$PATH" bash "$RC_MUT_R4F1" design-unit-json "$R4F1_FILE" U1 2>/dev/null); M_R4F1_RC=$?
+assert_eq "10.2 NON-VACUITY: the swap fired during the mutant's run" "yes" \
+    "$( [ -f "$FIXTURE/r4f1-swap.fired" ] && echo yes || echo no )"
+assert_eq "10.2b SPECIFIC MISBEHAVIOUR: this MUST fail against the pre-fix mechanism, or the finding is not reproduced — ok:true with the AUTHENTIC task_id from the honest validate-design call" \
+    "true|$R4F1_TID" \
+    "$(json_field '.ok' "$M_R4F1_OUT")|$(json_field '.task_id' "$M_R4F1_OUT")"
+assert_eq "10.2a ...at exit 0 — invisible to an rc-checking consumer too, not just a body-parsing one" \
+    "0" "$M_R4F1_RC"
+assert_eq "10.2c ...combined with the UNVALIDATED replacement's own content — mixed provenance, the exact defect named in R4-F1" \
+    "exploit-r4f1" \
+    "$(json_field '.unit_json | fromjson | ._swapped_marker' "$M_R4F1_OUT")"
+
+# --- 10.3 RESTORE CONTROL, same exploit timing, against the SHIPPED script -
+rm -f "$FIXTURE/r4f1-swap.fired"
+cp "$R4F1_GOOD_BAK" "$R4F1_FILE"
+S_R4F1_OUT=$(PATH="$R4F1_SWAP_BIN:$PATH" bash "$RC" design-unit-json "$R4F1_FILE" U1 2>/dev/null); S_R4F1_RC=$?
+assert_eq "10.3 NON-VACUITY: the SAME swap STILL fires against the shipped script — the has_unit call is unchanged code, present in both, so this is a fair comparison rather than a hook that silently didn't run" \
+    "yes" "$( [ -f "$FIXTURE/r4f1-swap.fired" ] && echo yes || echo no )"
+assert_eq "10.3b THE FIX HOLDS under adversarial timing: exit 0, ok:true, the same authentic task_id" \
+    "0|true|$R4F1_TID" \
+    "$S_R4F1_RC|$(json_field '.ok' "$S_R4F1_OUT")|$(json_field '.task_id' "$S_R4F1_OUT")"
+assert_eq "10.3c ...unit_json is U1's GOOD body, byte-exact against validate-design's own unit_content.U1 — the swap had NO EFFECT, because the shipped script never reads the file a second time to race against" \
+    "$(json_field '.unit_content.U1' "$R4F1_GOOD_VOUT")" \
+    "$(json_field '.unit_json' "$S_R4F1_OUT")"
+assert_eq "10.3d ...and specifically does NOT carry the attacker's marker" \
+    "" "$(json_field '.unit_json | fromjson | ._swapped_marker // empty' "$S_R4F1_OUT")"
+
+# --- 10.4 ANTI-OVERREACH: a legitimate, untouched artifact still works -----
+cp "$R4F1_GOOD_BAK" "$R4F1_FILE"
+LEGIT_R4F1_OUT=$(bash "$RC" design-unit-json "$R4F1_FILE" U1 2>/dev/null); LEGIT_R4F1_RC=$?
+assert_eq "10.4 ANTI-OVERREACH: no swap, no shim — the shipped script still yields U1's JSON" \
+    "0|true" "$LEGIT_R4F1_RC|$(json_field '.ok' "$LEGIT_R4F1_OUT")"
+assert_eq "10.4b ...byte-exact against validate-design's own unit_content.U1" \
+    "$(json_field '.unit_content.U1' "$R4F1_GOOD_VOUT")" \
+    "$(json_field '.unit_json' "$LEGIT_R4F1_OUT")"
+
+# RESIDUAL, stated rather than implied gone: cmd_validate_design's OWN body
+# still opens $file NINE separate times at the source level before $block is
+# fixed in memory — one per required-section heading check (a loop over
+# DESIGN_REQUIRED_SECTIONS, currently 8 iterations, so 8 process-level grep
+# reads at runtime) plus one for the sentinel-count grep pair collapsed to
+# two source lines (n_begin/n_end), two more for the sentinel-line grep pair
+# (ln_begin/ln_end), and one awk for the block itself — 13 process-level
+# reads of $file total in one subprocess call (verified: `awk
+# '/^cmd_validate_design\(\) \{/{f=1} f{print} f && /^\}/{exit}'
+# review-check.sh | grep -c '"\$file"'` names 9 source lines, of which the
+# section-heading one iterates 8 times at runtime). Everything downstream —
+# including unit_content — is computed from the resulting in-memory $block
+# only once all of those have already run. A file changed between those
+# reads could in principle still produce an inconsistent $block — but that
+# window is
+# pre-existing (identical for every validate-design consumer: design-record,
+# design-unit-bind, design-conform, plan-batches, all trust ONE subprocess
+# call the same way), orthogonal to R4-F1 (which was about a SEPARATE,
+# subsequent subcommand invocation with an attacker-realistic delay in
+# between — this fix collapses THAT window to zero by removing the second
+# invocation's read entirely), and fails CLOSED rather than silently
+# misbehaving on the rare occasions it is hit (SENTINEL-LINE-READ-GUARD,
+# above, refuses rather than guesses). Narrower than "reopen and reparse", not
+# absent.
+rm -f "$RC_MUT_R4F1" "$R4F1_OLDTEXT"
 
 # ===========================================================================
 printf '\n=== Summary ===\n'

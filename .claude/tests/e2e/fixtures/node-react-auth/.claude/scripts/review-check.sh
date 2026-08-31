@@ -21,6 +21,18 @@
 #   validate-design   <file>                    schema-check a v5 design artifact
 #                                               (prose sections + the one
 #                                               DESIGN-UNITS machine block)
+#   design-unit-json  <file> <unit-id>          ONE declared unit's own
+#                                               canonical JSON (v5 D5 R2-F3
+#                                               remediation round 2,
+#                                               claude-workflow-plugin-i8cx):
+#                                               calls validate-design first
+#                                               and refuses unless it
+#                                               answers ok:true with the
+#                                               unit declared, then projects
+#                                               the unit's body off THAT
+#                                               call's own unit_content map
+#                                               — never a second read of
+#                                               <file> (i8cx R4-F1)
 #   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
 #                                               independence + open-finding count
 #                                               + the ROUNDS count (see below)
@@ -96,9 +108,13 @@ if ! command -v jq >/dev/null 2>&1; then
     # full envelope shape (with the same defaults emit_validate_design's own
     # error paths use — task_id "", not null, matching what `printf '%s' ""
     # | jq -Rs .` actually produces there) instead of the terse 4-key one
-    # every OTHER subcommand still gets unchanged.
+    # every OTHER subcommand still gets unchanged. unit_content (v5 D5
+    # R4-F1 remediation, independent review round 4) joined the reserved-{}
+    # set the same way unit_files did here: this literal predates and
+    # bypasses emit_validate_design, so a field added there must be added
+    # here too or "every error path defaults to {}" stops being true again.
     if [ "${1:-}" = "validate-design" ]; then
-        printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH","units":0,"unit_ids":[],"task_id":"","unit_files":{},"unit_deps":{}}\n' "${1:-}"
+        printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH","units":0,"unit_ids":[],"task_id":"","unit_files":{},"unit_deps":{},"unit_content":{}}\n' "${1:-}"
     else
         printf '{"ok":false,"subcommand":"%s","error_key":"jq_missing","observations":"jq is required and not on PATH"}\n' "${1:-}"
     fi
@@ -608,30 +624,41 @@ DESIGN_UNITS_END_RE='^[[:space:]]*<!-- DESIGN-UNITS END -->[[:space:]]*$'
 # case-insensitively on the heading text and nothing else.
 DESIGN_REQUIRED_SECTIONS="Problem|Approaches considered|Chosen approach|Units|Global constraints|Out of scope|Verification plan|Revision log"
 
-# emit_validate_design <ok> <error_key> <observations> <unit-count> <unit-ids-json> [task-id] [unit-files-json] [unit-deps-json]
-# emit_validate's four keys plus the FIVE a caller needs in order to write a
+# emit_validate_design <ok> <error_key> <observations> <unit-count> <unit-ids-json> [task-id] [unit-files-json] [unit-deps-json] [unit-content-json]
+# emit_validate's four keys plus the SIX a caller needs in order to write a
 # record or compute a per-unit conformance/batching check without
 # re-parsing the block: how many units were declared, which, the task the
 # artifact says it designs, each unit's OWN declared `files` array (v5 D4,
-# claude-workflow-plugin-fkm.6), and (v5 D4b, claude-workflow-plugin-fkm.6,
-# plan-batches) each unit's OWN declared `depends_on` array, BOTH keyed by
-# unit_id — `{"U1":["a.sh"],"U2":[...]}` / `{"U1":[],"U2":["U1"]}` — `{}` on
-# every error path (the 14 error call sites below all omit the 7th/8th
-# argument and get the default). `task_id` was already on the envelope
-# DELIBERATELY — qa-gate.sh's design-record needs it for its decoy check —
-# for the reason `unit_files` joined it for and `unit_deps` joins it for
-# too: extracting any of these there with a second awk/jq pass would be a
-# SECOND parser for one grammar, which is the thing this script exists to
-# prevent (see the header, and the way compute_change_set_hash defers to
-# impact-report.sh --hash-only).
+# claude-workflow-plugin-fkm.6), (v5 D4b, claude-workflow-plugin-fkm.6,
+# plan-batches) each unit's OWN declared `depends_on` array, and (v5 D5
+# R4-F1 remediation, independent review round 4) each unit's OWN FULL
+# canonical (compact, keys sorted) JSON body as a STRING, ALL THREE keyed by
+# unit_id — `{"U1":["a.sh"],"U2":[...]}` / `{"U1":[],"U2":["U1"]}` /
+# `{"U1":"{\"unit_id\":\"U1\",...}"}` — `{}` on every error path (the 14
+# error call sites below all omit the 7th/8th/9th argument and get the
+# default). `task_id` was already on the envelope DELIBERATELY — qa-gate.sh's
+# design-record needs it for its decoy check — for the reason `unit_files`
+# joined it for and `unit_deps` joins it for too: extracting any of these
+# there with a second awk/jq pass would be a SECOND parser for one grammar,
+# which is the thing this script exists to prevent (see the header, and the
+# way compute_change_set_hash defers to impact-report.sh --hash-only).
 # qa-gate.sh design-conform is `unit_files`'s consumer: it needs one
 # resolved unit's declared file set to compute undeclared/unbuilt.
 # epic-gate.sh plan-batches is `unit_deps`'s consumer: dependency order
 # (docs/plans/v5-design-phase.md:158, ":159" tests) cannot be computed from
 # `depends_on` without ALSO reparsing the block, so it gets the same
-# treatment. Both are read from the SAME validated `$block`
-# `cmd_validate_design` already holds at the one point it is known
-# schema-valid — never a re-read of the artifact from disk.
+# treatment. `unit_content`'s consumer is THIS FILE'S OWN design-unit-json
+# subcommand (below): independent review round 4 found that subcommand
+# re-deriving a unit's full body from a SECOND read of the artifact — after
+# already calling this validator once — did not preserve the single-parser
+# guarantee, and named the concrete cost: a file swapped in the gap between
+# the validator's read and the second one lets an authentic task_id ride
+# out combined with content nobody validated. `unit_content` closes that gap
+# structurally rather than narrowing its timing: design-unit-json now reads
+# ONLY this envelope, never the file a second time, so there is no second
+# read left to race. ALL THREE projection fields are read from the SAME
+# validated `$block` `cmd_validate_design` already holds at the one point it
+# is known schema-valid — never a re-read of the artifact from disk.
 # (xsu1 H2R2-F4) Built as ONE guarded `jq -nc` assignment, validated, THEN
 # printed — never as jq substitutions spliced into a printf argument list. A
 # failing inner substitution does NOT abort the outer printf even under
@@ -649,18 +676,19 @@ DESIGN_REQUIRED_SECTIONS="Problem|Approaches considered|Chosen approach|Units|Gl
 # parseable-but-wrong build ([] at rc 0) through, since `jq -e` only fails
 # on false/null.
 emit_validate_design() {
-    local ok="$1" ekey="$2" obs="$3" n="$4" ids="$5" tid="${6:-}" ufiles="${7:-}" udeps="${8:-}"
+    local ok="$1" ekey="$2" obs="$3" n="$4" ids="$5" tid="${6:-}" ufiles="${7:-}" udeps="${8:-}" ubodies="${9:-}"
     [ -n "$ufiles" ] || ufiles="{}"
     [ -n "$udeps" ] || udeps="{}"
+    [ -n "$ubodies" ] || ubodies="{}"
     local envelope="" env_rc=0
     envelope=$(jq -nc \
         --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" \
         --argjson n "$n" --argjson ids "$ids" --arg tid "$tid" \
-        --argjson ufiles "$ufiles" --argjson udeps "$udeps" '
+        --argjson ufiles "$ufiles" --argjson udeps "$udeps" --argjson ubodies "$ubodies" '
         # validate-design envelope construction (xsu1 H2R2-F4)
         {ok: $ok, subcommand: "validate-design", error_key: $ekey,
          observations: $obs, units: $n, unit_ids: $ids, task_id: $tid,
-         unit_files: $ufiles, unit_deps: $udeps}
+         unit_files: $ufiles, unit_deps: $udeps, unit_content: $ubodies}
     ' 2>/dev/null) || env_rc=$?
     # (xsu1 R7-F5) SHAPE, not just parseability: `jq -n -e '[]'` is rc 0
     # (-e fails only on false/null), so a build that "succeeded" into [] /
@@ -673,7 +701,7 @@ emit_validate_design() {
     shape_prog='
         # validate-design envelope shape (xsu1 R7-F5)
         type == "object"
-        and (keys | sort) == ["error_key", "observations", "ok", "subcommand", "task_id", "unit_deps", "unit_files", "unit_ids", "units"]
+        and (keys | sort) == ["error_key", "observations", "ok", "subcommand", "task_id", "unit_content", "unit_deps", "unit_files", "unit_ids", "units"]
         and (.ok | type) == "boolean"
         and .subcommand == "validate-design"
         and (.error_key | type) == "string"
@@ -683,6 +711,7 @@ emit_validate_design() {
         and (.task_id | type) == "string"
         and (.unit_files | type) == "object"
         and (.unit_deps | type) == "object"
+        and (.unit_content | type) == "object"
     '
 # VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE END (xsu1 R7-F5)
     if [ "$env_rc" -eq 0 ] && [ -n "$envelope" ] \
@@ -690,7 +719,7 @@ emit_validate_design() {
         printf '%s\n' "$envelope"
         return 0
     fi
-    printf '{"ok":false,"subcommand":"validate-design","error_key":"envelope_construction_failed","observations":"the validate-design envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","units":0,"unit_ids":[],"task_id":"","unit_files":{},"unit_deps":{}}\n'
+    printf '{"ok":false,"subcommand":"validate-design","error_key":"envelope_construction_failed","observations":"the validate-design envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","units":0,"unit_ids":[],"task_id":"","unit_files":{},"unit_deps":{},"unit_content":{}}\n'
     return 1
 }
 
@@ -744,9 +773,35 @@ cmd_validate_design() {
             "the artifact must carry EXACTLY ONE '<!-- DESIGN-UNITS BEGIN -->' / '<!-- DESIGN-UNITS END -->' pair, each alone on its own line; found begin=$n_begin end=$n_end. Two blocks (an in-place amendment that appended rather than revised) or none are both refused rather than guessed at" "0" "[]"
         exit 4
     fi
+    # i8cx wave 2. `grep -nE ... | head -1 | cut -d: -f1` reports cut's rc
+    # (always 0 on the empty stdin an upstream failure leaves behind), same
+    # masking shape as the count above -- but by itself that would only be
+    # cosmetically wrong here (see this fix's devops report for why the
+    # count check above is classified benign: it still refuses either way).
+    # What makes THIS site worse than cosmetic is what a masked failure hands
+    # to the next line: `[ "$ln_end" -le "$ln_begin" ]` is a numeric test, and
+    # bash's `[` treats an EMPTY operand as a syntax error ("integer
+    # expression expected"), not as 0 -- so a masked read failure here does
+    # not cleanly refuse, it prints a shell-level error to stderr and the
+    # malformed comparison's own non-zero status happens to fall through
+    # (unasserted) to the block-extraction below, which eventually refuses
+    # via design_block_empty several lines down for the wrong stated reason.
+    # Guarding on emptiness directly avoids the crash-shaped comparison and
+    # names the real problem instead of a misleading one. rc is not checked
+    # here (unlike max_record_ts/impl_lines above): by this point n_begin/
+    # n_end are ALREADY known to be exactly 1 each, so a `grep -n` on the very
+    # same pattern coming back with nothing is itself the anomaly worth
+    # naming, whichever of grep or cut produced it.
+    # SENTINEL-LINE-READ-GUARD BEGIN (i8cx wave 2)
     local ln_begin ln_end
-    ln_begin=$(grep -nE "$DESIGN_UNITS_BEGIN_RE" "$file" | head -1 | cut -d: -f1)
-    ln_end=$(grep -nE "$DESIGN_UNITS_END_RE" "$file" | head -1 | cut -d: -f1)
+    ln_begin=$(grep -nE "$DESIGN_UNITS_BEGIN_RE" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+    ln_end=$(grep -nE "$DESIGN_UNITS_END_RE" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+    if [ -z "$ln_begin" ] || [ -z "$ln_end" ]; then
+        emit_validate_design "false" "design_units_sentinels_unreadable" \
+            "could not establish the DESIGN-UNITS sentinel line numbers for $file even though the count above found exactly one of each — a read failure or a race between the two checks, not a genuine absence; refusing rather than comparing line numbers that might be empty" "0" "[]"
+        exit 4
+    fi
+    # SENTINEL-LINE-READ-GUARD END (i8cx wave 2)
     if [ "$ln_end" -le "$ln_begin" ]; then
         emit_validate_design "false" "design_units_sentinels_disordered" \
             "the DESIGN-UNITS END sentinel (line $ln_end) precedes or equals BEGIN (line $ln_begin)" "0" "[]"
@@ -931,7 +986,7 @@ cmd_validate_design() {
     # already known distinct. task_id is already known to be a non-empty
     # string (task_id_missing), so the string-type check below can only fire
     # on a jq malfunction, never on a schema-valid artifact.
-    local n="0" ids="[]" art_tid="" ufiles="{}" udeps="{}"
+    local n="0" ids="[]" art_tid="" ufiles="{}" udeps="{}" ubodies="{}"
     local extracted="" ext_rc=0
     extracted=$(printf '%s' "$block" | jq -ce '
         # validate-design-final-extraction (xsu1 H2-F1) — fault-injection
@@ -942,14 +997,29 @@ cmd_validate_design() {
             ids: $ids,
             task_id: (.task_id // ""),
             unit_files: ([ $u[] | {key: .unit_id, value: (.files // [])} ] | from_entries),
-            unit_deps:  ([ $u[] | {key: .unit_id, value: (.depends_on // [])} ] | from_entries) }
+            unit_deps:  ([ $u[] | {key: .unit_id, value: (.depends_on // [])} ] | from_entries),
+            unit_content: ([ $u[] | {key: .unit_id,
+                value: (walk(if type == "object" then to_entries | sort_by(.key) | from_entries else . end) | tojson)}
+              ] | from_entries) }
         | if ( (.task_id | type) == "string"
                and (.unit_files | type) == "object"
                and (.unit_deps  | type) == "object"
+               and (.unit_content | type) == "object"
                and ((.unit_files | keys | sort) == ($ids | sort))
                and ((.unit_deps  | keys | sort) == ($ids | sort))
+               and ((.unit_content | keys | sort) == ($ids | sort))
                and ([ .unit_files[] | type ] | all(. == "array"))
                and ([ .unit_deps[]  | type ] | all(. == "array"))
+               and ([ .unit_content[] | type ] | all(. == "string"))
+               # (v5 D5 R4-F1) round-trip each unit_content string back to an
+               # object naming ITS OWN map key — this is the ONE place the
+               # walk/tojson serialisation above is checked, so a jq that
+               # produced garbled text (not just a wrong TYPE) is caught here
+               # rather than trusted because it merely typechecks as a string.
+               and ([ .unit_content | to_entries[]
+                      | (.value | fromjson) as $b
+                      | ($b | type) == "object" and ($b.unit_id == .key) ]
+                    | all(.))
                and (.n == ($ids | length)) )
           then .
           else error("extraction shape mismatch")
@@ -961,6 +1031,7 @@ cmd_validate_design() {
         art_tid=$(printf '%s' "$extracted" | jq -r '.task_id # validate-design task_id split (xsu1 H2R2-F4)' 2>/dev/null) || ext_rc=$?
         ufiles=$(printf '%s' "$extracted" | jq -c '.unit_files' 2>/dev/null) || ext_rc=$?
         udeps=$(printf '%s' "$extracted" | jq -c '.unit_deps' 2>/dev/null) || ext_rc=$?
+        ubodies=$(printf '%s' "$extracted" | jq -c '.unit_content' 2>/dev/null) || ext_rc=$?
         # These splits re-read the ALREADY-VALIDATED single-pass output, so a
         # failure here means jq itself broke mid-run — refuse on that too,
         # and re-check the spliced shapes (a jq that exits 0 while printing
@@ -970,6 +1041,7 @@ cmd_validate_design() {
         case "$ids" in ('['*) : ;; (*) ext_rc=5 ;; esac
         case "$ufiles" in ('{'*) : ;; (*) ext_rc=5 ;; esac
         case "$udeps" in ('{'*) : ;; (*) ext_rc=5 ;; esac
+        case "$ubodies" in ('{'*) : ;; (*) ext_rc=5 ;; esac
         # (xsu1 H2R2-F4) task_id was the ONE residual split without a
         # successful-but-empty check. The schema pass already refused an
         # empty task_id (task_id_missing) and the single-pass extraction
@@ -989,7 +1061,7 @@ cmd_validate_design() {
     # Do not rename the sentinels.
     if [ "$ext_rc" -ne 0 ]; then
         emit_validate_design "false" "design_units_extraction_failed" \
-            "the final unit_ids/unit_files/unit_deps extraction could not be computed from the validated block (jq exited $ext_rc, or produced an unexpected shape); refusing rather than reporting a design whose declarations were never actually read" "0" "[]"
+            "the final unit_ids/unit_files/unit_deps/unit_content extraction could not be computed from the validated block (jq exited $ext_rc, or produced an unexpected shape); refusing rather than reporting a design whose declarations were never actually read" "0" "[]"
         exit 4
     fi
     # VALIDATE-DESIGN-EXTRACTION-REFUSAL END (xsu1 H2-F1)
@@ -997,7 +1069,176 @@ cmd_validate_design() {
     # construction failure here must not report success. Exit 2 matches the
     # pre-dispatch jq-missing literal's own code (infrastructure, not a
     # judgement about the artifact).
-    emit_validate_design "true" "" "design contract valid: $n unit(s)" "$n" "$ids" "$art_tid" "$ufiles" "$udeps" || exit 2
+    emit_validate_design "true" "" "design contract valid: $n unit(s)" "$n" "$ids" "$art_tid" "$ufiles" "$udeps" "$ubodies" || exit 2
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# design-unit-json (v5 D5 R2-F3 remediation round 2, claude-workflow-plugin-
+# i8cx independent review round 2; re-founded on validate-design's OWN
+# envelope in independent review round 4 — see the R4-F1 note below)
+# ---------------------------------------------------------------------------
+#
+# design-unit-json <file> <unit-id> -> the ONE declared unit's own canonical
+# (compact, keys sorted — matching historical `jq -cS` output byte for byte,
+# so incidental reformatting or key reordering elsewhere in the unit's own
+# object never changes what a caller derives from it) JSON, returned as a
+# STRING field (unit_json) rather than a nested value, so a caller that
+# writes it straight to a file for hashing (qa-gate.sh design-conflict /
+# compute_design_conflict_open, the consumer this was added for) gets back
+# the EXACT bytes, never jq's own re-serialization of an already-serialized
+# value. R2-F3's own finding: a WHOLE-ARTIFACT hash comparison let an
+# amendment to an UNRELATED unit silently clear a DIFFERENT unit's open
+# conflict — this exists so that predicate can key on ONE unit's own content
+# instead.
+#
+# NOT A SECOND PARSER. This subcommand makes no independent judgement about
+# whether the artifact is schema-valid, well-fenced, acyclic, or anything
+# else validate-design above already decides — it calls the REAL validator
+# FIRST (as a subprocess: cmd_validate_design exits directly on every path,
+# the same CLI-dispatch convention every subcommand in this file follows, so
+# it cannot be called in-process without ending THIS subcommand's own run
+# too — re-invoking this same script from inside its own process is no less
+# safe than qa-gate.sh's existing callers already doing exactly that from a
+# different process) and refuses immediately, propagating that verdict,
+# unless it answers ok:true AND the requested unit_id is among ITS OWN
+# unit_ids — membership is judged using validate-design's authoritative
+# list, never re-derived here.
+#
+# R4-F1 (independent review round 4, docs/reviews/claude-workflow-plugin-
+# i8cx-r4.json): the previous shape here, once membership was confirmed,
+# RE-READ $file — re-counting sentinels, re-locating the block, re-handling
+# fences, and re-parsing/selecting the unit, reusing validate-design's own
+# regex constants but never its parse. That second extraction did not
+# preserve the single-parser guarantee: "reusing regex constants does not
+# make those operations the validator's original parse" (the finding,
+# quoted). The concrete cost was a TOCTOU with a well-formed success shape —
+# swap $file for one with a lone sentinel pair and parseable JSON naming the
+# SAME unit_id but missing required sections or unit schema fields, in the
+# gap between validate-design's read (above) and the second one, and the
+# rereader — checking neither schema nor task identity a second time —
+# would emit ok:true with task_id from the ORIGINAL validated artifact and
+# unit_json from the UNVALIDATED replacement: an authentic identity riding
+# out combined with content nobody validated, which reads as MORE
+# trustworthy than a plain parse failure, not less.
+#
+# THE FIX: validate-design's envelope (emit_validate_design, above) now
+# carries unit_content — a map, unit_id -> that unit's own canonical JSON
+# body as a string, computed in the SAME guarded single jq pass that already
+# produces unit_files/unit_deps from the SAME in-memory, already-proven-
+# valid $block. This subcommand no longer reads $file a second time at all:
+# once validate-design (below) answers ok:true with the unit declared, the
+# unit's own bytes are a straight projection out of THAT call's own result
+# ($vout), never a fresh read of the path. There is no second parse left for
+# a concurrent edit to land in between, because there is no second read.
+#
+# emit_design_unit_json <ok> <error_key> <observations> <task_id> <unit_id> <unit_json>
+# Same guarded-build discipline as emit_validate_design: ONE jq -nc
+# construction, shape-validated before printing, with a caller-data-free
+# literal fallback on construction failure. unit_json is passed through
+# UNCHANGED (already a compact, sorted-keys JSON string, or empty) — never
+# re-parsed or re-serialized here.
+emit_design_unit_json() {
+    local ok="$1" ekey="$2" obs="$3" tid="${4:-}" uid="${5:-}" ujson="${6:-}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" \
+        --arg tid "$tid" --arg uid "$uid" --arg ujson "$ujson" '
+        {ok: $ok, subcommand: "design-unit-json", error_key: $ekey,
+         observations: $obs, task_id: $tid, unit_id: $uid, unit_json: $ujson}
+    ' 2>/dev/null) || env_rc=$?
+    if [ "$env_rc" -eq 0 ] && [ -n "$envelope" ] \
+       && printf '%s' "$envelope" | jq -e '
+            type == "object"
+            and (keys | sort) == ["error_key", "observations", "ok", "subcommand", "task_id", "unit_id", "unit_json"]
+            and (.ok | type) == "boolean"
+            and .subcommand == "design-unit-json"
+            and (.error_key | type) == "string"
+            and (.observations | type) == "string"
+            and (.task_id | type) == "string"
+            and (.unit_id | type) == "string"
+            and (.unit_json | type) == "string"
+          ' >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"design-unit-json","error_key":"envelope_construction_failed","observations":"the design-unit-json envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","task_id":"","unit_id":"","unit_json":""}\n'
+    return 1
+}
+
+cmd_design_unit_json() {
+    local file="${1:-}" unit_id="${2:-}"
+    if [ -z "$file" ] || [ -z "$unit_id" ]; then
+        emit_design_unit_json "false" "usage" "design-unit-json requires <file> <unit-id>" "" "${unit_id:-}" ""
+        exit 1
+    fi
+
+    local self_dir="" self_script=""
+    self_dir=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || self_dir=""
+    if [ -n "$self_dir" ]; then
+        self_script="$self_dir/$(basename "${BASH_SOURCE[0]:-$0}")"
+    else
+        self_script="${BASH_SOURCE[0]:-$0}"
+    fi
+
+    local vout="" vout_rc=0
+    vout=$(bash "$self_script" validate-design "$file" 2>/dev/null) || vout_rc=$?
+    local v_ok="false"
+    if [ "$vout_rc" -eq 0 ] && [ -n "$vout" ]; then
+        v_ok=$(printf '%s' "$vout" | jq -r '(.ok == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || v_ok="false"
+    fi
+    if [ "$v_ok" != "true" ]; then
+        local v_ekey="" v_obs=""
+        v_ekey=$(printf '%s' "$vout" | jq -r '.error_key // "unknown"' 2>/dev/null) || v_ekey="unknown"
+        v_obs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null) || v_obs=""
+        emit_design_unit_json "false" "design_invalid" \
+            "the design artifact at $file did not validate (validate-design error_key=$v_ekey: $v_obs); a unit's content cannot be extracted from an artifact that is not itself known-valid" \
+            "" "$unit_id" ""
+        exit 4
+    fi
+
+    local v_tid="" has_unit="false"
+    v_tid=$(printf '%s' "$vout" | jq -r '.task_id // ""' 2>/dev/null) || v_tid=""
+    has_unit=$(printf '%s' "$vout" | jq -r --arg u "$unit_id" '((.unit_ids // []) | index($u)) != null' 2>/dev/null) || has_unit="false"
+    if [ "$has_unit" != "true" ]; then
+        local known=""
+        known=$(printf '%s' "$vout" | jq -r '(.unit_ids // []) | join(", ")' 2>/dev/null) || known=""
+        emit_design_unit_json "false" "unit_not_in_design" \
+            "unit_id=$unit_id is not among $file's declared unit_ids per the just-validated artifact. Declared unit(s): ${known:-<none>}" \
+            "$v_tid" "$unit_id" ""
+        exit 1
+    fi
+
+    # DESIGN-UNIT-JSON-AUTHORITATIVE-FETCH BEGIN (i8cx R4-F1)
+    # THE FIX (independent review round 4): no read of $file happens below
+    # this line. The unit's own canonical JSON comes straight out of
+    # validate-design's OWN envelope ($vout, already in memory above) —
+    # unit_content, a map keyed by unit_id, built inside the SAME single
+    # guarded jq pass that already produces unit_files/unit_deps from the
+    # SAME in-memory $block validate-design proved schema-valid. The file is
+    # read exactly once — inside the validate-design call above — and every
+    # field this subcommand emits, including the unit's full body, is a
+    # projection of THAT ONE call's result. There is no second parse left
+    # for a concurrent edit to land in between.
+    local unit_json=""
+    unit_json=$(printf '%s' "$vout" | jq -r --arg u "$unit_id" '.unit_content[$u] // empty' 2>/dev/null)
+    if [ -z "$unit_json" ]; then
+        # has_unit was true a moment ago, off unit_ids on this SAME $vout.
+        # validate-design's own envelope-shape gate (VALIDATE-DESIGN-
+        # ENVELOPE-SHAPE-GATE, above) already proves unit_content is keyed
+        # by EXACTLY unit_ids, so has_unit true with an empty lookup here can
+        # only be a jq malfunction reading an in-memory string, never a
+        # genuine absence. "Unparseable is never zero" (validate-design's
+        # own header, rule 3) applies to this projection too — refuse rather
+        # than report a state the envelope's own shape gate should make
+        # unreachable.
+        emit_design_unit_json "false" "design_unit_content_missing" \
+            "unit_id=$unit_id is declared per validate-design's unit_ids but carries no entry in the SAME envelope's unit_content map; refusing rather than guessing at a state the envelope's own shape gate should make unreachable" \
+            "$v_tid" "$unit_id" ""
+        exit 4
+    fi
+    # DESIGN-UNIT-JSON-AUTHORITATIVE-FETCH END (i8cx R4-F1)
+    emit_design_unit_json "true" "" "unit $unit_id extracted" "$v_tid" "$unit_id" "$unit_json" || exit 2
     exit 0
 }
 
@@ -1075,12 +1316,50 @@ QZV_ISO_UTC_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
 
 # max_record_ts <firstlines-file> <record-prefix-ERE>
 max_record_ts() {
-    local file="$1" prefix="$2" lines ts
-    lines=$(grep -E "$prefix" "$file" 2>/dev/null) || lines=""
+    local file="$1" prefix="$2" lines lines_rc=0 ts
+    # i8cx wave 2. `grep -E ... "$file" 2>/dev/null || lines=""` collapsed TWO
+    # different outcomes into the same empty string: grep's own rc 1 ("no
+    # record of this class exists" -- a clean no-match) and rc >1 ("the file
+    # could not even be read" -- permission, ENOENT, a vanished temp dir).
+    # This function's header, three paragraphs up, already states why that
+    # distinction has to survive: "a caller must be able to tell 'there is no
+    # such record' from 'there is one and I could not read it' ... a record
+    # that exists but carries no well-formed timestamp prints the literal
+    # 'unparseable' rather than the empty string" -- but the implementation
+    # only delivered that promise for the "found records, bad timestamp" case,
+    # never for "could not even look".
+    #
+    # THE CONSEQUENCE reaches further than this function's own callers. This
+    # script's `gate` envelope publishes LATEST_IMPLEMENTER_TS verbatim (see
+    # emit_gate), and verify-before-stop.sh's F1 fast path reads it back:
+    # `if [ -z "$impl" ]; then F1_BINDING_VERDICT="safe" ...`. A masked read
+    # failure here would have reported latest_implementer_ts="" -- exactly
+    # the shape F1 treats as "no implementer in flight, safe to auto-approve
+    # a doc-only change set" -- over a task whose implementer status could
+    # not actually be established. Reusing the EXISTING 'unparseable' sentinel
+    # (rather than inventing a new one) is deliberate: F1's own comparison
+    # already treats "unparseable" as "unestablished, fail closed"
+    # (`[ "$cycle" = "unparseable" ] || [ "$impl" = "unparseable" ]`), and so
+    # does this function's OWN CYCLE_ESTABLISHED / IMPL_TS_FOR_CMP logic just
+    # below -- so this fix needs no change anywhere else. A brand-new sentinel
+    # value would reach that `oldest=$(printf ... | sort | head -1)` timestamp
+    # comparison as an uninterpreted string with no defined ordering, which is
+    # a worse, unproven failure mode this fix has no reason to introduce.
+    #
+    # Only rc 1 (a clean no-match) is safe to treat as "no evidence"; rc 0
+    # falls through to the extraction below as before.
+    # MAX-RECORD-TS-READ-GUARD BEGIN (i8cx wave 2)
+    lines=$(grep -E "$prefix" "$file" 2>/dev/null)
+    lines_rc=$?
+    if [ "$lines_rc" -gt 1 ]; then
+        printf 'unparseable'
+        return 0
+    fi
     if [ -z "$lines" ]; then
         printf ''
         return 0
     fi
+    # MAX-RECORD-TS-READ-GUARD END (i8cx wave 2)
     # Anchored at END OF LINE on purpose: both grammars put the timestamp last,
     # so a hex-or-date-looking token inside a free-text summary cannot be
     # mistaken for one. LC_ALL=C because the compare must be byte order; the
@@ -1412,9 +1691,123 @@ cmd_gate() {
     fi
     # MALFORMED-ARTIFACT-GUARD-END
 
+    # REVIEWER-NONEMPTY-GUARD BEGIN (i8cx wave 2, adjacent gap noted alongside
+    # the impl_lines fix below). Not a pipefail defect -- REVIEWER is
+    # extracted from an in-memory string a few lines up (`printf '%s' "$art"
+    # | grep -oE 'reviewer=...' | head -1 | cut ...`), which cannot mask a
+    # read failure the way a FILE read can. The gap is a missing VALIDATION:
+    # nothing between the artifact-missing check above and the independence
+    # check below required `reviewer=` to actually be present on the record.
+    # `validate-artifact` (this script's OWN schema, `cmd_validate_artifact`)
+    # makes reviewer_identity mandatory for anything written through the
+    # proper writer (`qa-gate.sh review-record`) -- but a `bd comments add`
+    # typed by hand, or a record from a source that bypasses that writer,
+    # is not re-validated here, and the MALFORMED-ARTIFACT-GUARD above only
+    # checks for a well-formed findings=[...] token, not for reviewer=. An
+    # empty REVIEWER then reaches `grep -qxF "$REVIEWER"` below: `-x` requires
+    # a whole-line match, no IMPLEMENTER role is ever the empty string, so an
+    # empty REVIEWER can NEVER equal a line in impl_lines and always reads as
+    # "independent" -- a record that never named its reviewer would pass the
+    # gate that exists specifically to check who the reviewer was.
+    if [ -z "$REVIEWER" ]; then
+        emit_gate 4 "false" "reviewer_identity_missing" \
+            "the latest review record carries no reviewer=<identity> token (malformed or hand-written, not written through qa-gate.sh review-record); refusing rather than reading an unnamed reviewer as independent"
+    fi
+    # REVIEWER-NONEMPTY-GUARD END (i8cx wave 2)
+
     # impl = unique captures /^IMPLEMENTER: role=([a-z]+) / over comments.
-    local impl_lines
-    impl_lines=$(grep -oE '^IMPLEMENTER: role=[a-z]+' "$firstlines" | sed -E 's/^IMPLEMENTER: role=//' | sort -u || true)
+    #
+    # i8cx wave 2 (the audit's fourth must-fix, THE highest-value item in the
+    # phase). The old body piped `grep -oE ... "$firstlines" | sed ... |
+    # sort -u`, closed with a blanket `|| true`: sort is always last and
+    # succeeds trivially on the empty stdin a failed grep leaves behind, so
+    # grep genuinely failing to READ "$firstlines" (permission, ENOENT, a
+    # vanished mktemp dir -- e.g. from a failed `mktemp -d` upstream making
+    # $firstlines resolve to something unwritable) was byte-identical to grep
+    # cleanly finding ZERO IMPLEMENTER records. Both landed on impl_lines="",
+    # and the trailing `|| true` doubly guaranteed the assignment could never
+    # itself signal the difference either.
+    #
+    # THE CONSEQUENCE: `[ -n "$impl_lines" ] && ... grep -qxF "$REVIEWER"`
+    # short-circuits on empty impl_lines, so INDEPENDENT keeps its "true"
+    # default and the reviewer_not_independent refusal three lines down never
+    # fires. A failed read makes a NON-independent reviewer look independent
+    # -- the review-separation gate's whole job is to catch exactly a
+    # implementer reviewing their own work, and a masked read failure is a
+    # silent, content-independent way past it.
+    #
+    # THE FIX does not need pipefail to see this: grep is the FIRST stage,
+    # captured on its own statement before sed/sort ever run, and POSIX grep's
+    # own exit code already distinguishes the two cases (measured against
+    # this repo's BSD grep): 0 = match, 1 = a CLEAN no-match, >1 = a real
+    # error (unreadable/missing file). Only rc 1 means "no implementer
+    # records" and is safe to treat as doc-only work (an orchestrator-authored
+    # documentation commit legitimately has no IMPLEMENTER record, and must
+    # not be refused for lacking one -- that would deadlock every doc-only
+    # task). rc >1 refuses with a NEW, dedicated error_key rather than
+    # reusing reviewer_not_independent: a read failure does not establish
+    # that the reviewer IS an implementer -- it establishes that whether they
+    # are could not be checked, which is a different, honest claim, and
+    # qa-gate.sh's `case "$review_key"` already has a generic remedy arm for
+    # any key it does not special-case (`review-check.sh gate $tid reported:
+    # $review_key`), so a new key needs no change there to refuse correctly.
+    # IMPLEMENTER-SET-READ-GUARD BEGIN (i8cx wave 2). Sentinel-anchored (not
+    # line-numbered) so the L1 spec's mutant can swap this region for the
+    # pre-fix one-liner without drifting off target as the file is edited
+    # around it — same convention as MALFORMED-ARTIFACT-GUARD above.
+    local impl_raw impl_rc=0
+    impl_raw=$(grep -oE '^IMPLEMENTER: role=[a-z]+' "$firstlines" 2>/dev/null)
+    impl_rc=$?
+    if [ "$impl_rc" -gt 1 ]; then
+        emit_gate 4 "false" "implementer_set_unreadable" \
+            "could not read the implementer record set for $tid (grep exit $impl_rc reading the comment firstlines); refusing rather than treating an unestablished set as vacuously independent"
+    fi
+    local impl_lines=""
+    # IMPLEMENTER-SET-TRANSFORM-GUARD BEGIN (i8cx R2-F1, independent review round 2).
+    # The read guard above stops a FAILED GREP from being read as "zero
+    # implementer records", but the very next statement piped that clean
+    # grep output through `sed | sort -u` and threw the pipe's own exit
+    # status away. printf cannot fail, but sed and sort can — and without
+    # pipefail, a pipeline's "$?" is only the LAST stage's, so a sed failure
+    # is invisible whenever the sort after it still exits 0 on the
+    # empty/partial stdin the failed sed left behind. Either stage failing
+    # collapsed to the exact same impl_lines="" the read guard above exists
+    # to prevent one statement earlier: a reviewer who IS an implementer
+    # read as vacuously independent (measured directly: shimming EITHER sed
+    # or sort to exit nonzero with empty output reproduced independent=true
+    # against a self-review comment set, pre-fix).
+    #
+    # Split into two single-fallible-command pipelines rather than reaching
+    # for `set -o pipefail`. printf cannot fail, so in each pipeline below
+    # exactly one command can fail and it is always the LAST stage — its own
+    # "$?" IS the pipeline's "$?", pipefail or not, with none of the
+    # "pipefail cannot tell a real failure from a downstream filter's
+    # ordinary nonzero" ambiguity a bare `(set -o pipefail; ...)` wrap would
+    # have for something like `grep -v` (measured while building this fix:
+    # `false | grep -v x` and `printf 'a\n' | grep -v x` both exit 1 under
+    # pipefail). Neither `sed 's///'` nor `sort -u` shares that ambiguity:
+    # neither exits nonzero merely for finding nothing to change/order, only
+    # for an actual failure to run.
+    #
+    # SAME KEY AS THE READ GUARD ABOVE, not a new one: a failed transform is
+    # the same honest claim a failed read is — "the implementer set could
+    # not be established" — never "the reviewer IS an implementer" (that
+    # would smuggle back the exact inference the read guard exists to
+    # refuse). qa-gate.sh's generic per-key remedy arm already handles this
+    # key with no change needed there.
+    if [ "$impl_rc" -eq 0 ]; then
+        local impl_sed impl_sed_rc impl_sort_rc
+        impl_sed=$(printf '%s\n' "$impl_raw" | sed -E 's/^IMPLEMENTER: role=//')
+        impl_sed_rc=$?
+        impl_lines=$(printf '%s\n' "$impl_sed" | sort -u)
+        impl_sort_rc=$?
+        if [ "$impl_sed_rc" -ne 0 ] || [ "$impl_sort_rc" -ne 0 ]; then
+            emit_gate 4 "false" "implementer_set_unreadable" \
+                "could not read the implementer record set for $tid (sed exit $impl_sed_rc, sort exit $impl_sort_rc transforming the grep match set); refusing rather than treating an unestablished set as vacuously independent"
+        fi
+    fi
+    # IMPLEMENTER-SET-TRANSFORM-GUARD END (i8cx R2-F1, independent review round 2)
+    # IMPLEMENTER-SET-READ-GUARD END (i8cx wave 2)
     if [ -n "$impl_lines" ]; then
         IMPL_JSON=$(printf '%s\n' "$impl_lines" | jq -R . | jq -sc .)
     else
@@ -1488,6 +1881,7 @@ case "$SUB" in
     validate-artifact) cmd_validate_artifact "$@" ;;
     validate-completion) cmd_validate_completion "$@" ;;
     validate-design)   cmd_validate_design "$@" ;;
+    design-unit-json)  cmd_design_unit_json "$@" ;;
     gate)              cmd_gate "$@" ;;
     ""|-h|--help)
         cat >&2 <<'USAGE'
@@ -1529,8 +1923,25 @@ Usage: review-check.sh <subcommand> [args]
                                               task_id / unit_files (files[]
                                               keyed by unit_id) / unit_deps
                                               (depends_on[] keyed by unit_id)
-                                              on the envelope. Never reads an
+                                              / unit_content (each unit's OWN
+                                              full canonical JSON body, as a
+                                              string, keyed by unit_id) on
+                                              the envelope. Never reads an
                                               unparseable block as zero units
+  design-unit-json <file> <unit-id>           ONE declared unit's own
+                                              canonical JSON (compact, keys
+                                              sorted), as a string field
+                                              unit_json. Calls validate-design
+                                              first and refuses
+                                              (design_invalid /
+                                              unit_not_in_design) unless it
+                                              answers ok:true with the unit
+                                              declared, then projects
+                                              unit_content[<unit-id>] straight
+                                              off THAT call's own envelope —
+                                              never a second read of <file>
+                                              (i8cx R4-F1). Hashing stays the
+                                              caller's job.
   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
                                               independence + open-finding count,
                                               plus rounds/rounds_hash: how many

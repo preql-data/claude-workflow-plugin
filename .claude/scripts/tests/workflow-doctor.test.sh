@@ -137,6 +137,22 @@ assert_contains() {
     fi
 }
 
+# assert_not_contains (i8cx wave 2) — the negation assert_contains never
+# needed until Section 8's "the two failure causes must not be conflated"
+# checks. Same predicate, inverted; same style as this repo's other spec
+# files (model-roles.test.sh carries the identical implementation).
+assert_not_contains() {
+    local name="$1" needle="$2" haystack="$3"
+    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        printf '  FAIL: %s\n    forbidden substring present: %s\n' "$name" "$needle"
+    else
+        PASS=$((PASS + 1))
+        printf '  PASS: %s\n' "$name"
+    fi
+}
+
 WORK=$(mktemp -d -t workflow-doctor-test.XXXXXX) || {
     printf 'workflow-doctor.test: mktemp failed\n' >&2
     exit 2
@@ -1536,6 +1552,151 @@ assert_eq "META-TEST 6D: the mutant really dropped the name" "0" \
 assert_contains "META-TEST 6D: the enumeration guard names the dropped check" \
     ":beads_ledger" "$(enum_gaps "$MUT6D")"
 assert_eq "META-TEST 6D control: the shipped row has no gaps" "" "$(enum_gaps "$MUT6D_SRC")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 8: agents — a masked tools_line read must not exempt a core agent from the bd-grant check (claude-workflow-plugin-i8cx wave 2, META-TEST 9) ==="
+#
+# THE HAZARD. tools_line used to be a bare `sed -n '...p' | head -1` capture.
+# Without pipefail the pipe's exit status is head's — and head exits 0 on any
+# input, including none, so a masked sed failure produced the SAME empty
+# tools_line as a genuinely-absent `tools:` line. Both paths silently
+# `continue`d past the bd-grant verification for that agent. For a CORE
+# agent (orchestrator/qa/backend/frontend/devops) that is a check reporting
+# PASS — "every MCP-granting agent carries both bd tool namespaces" — on
+# evidence it never actually read, inside the one tool whose job is to catch
+# exactly that. Section 8 drives the SHIPPED doctor with a `sed` on PATH that
+# fails like a real read failure (no stdout, non-zero exit); META-TEST 9
+# reverts the fix on a mutant copy and shows the false PASS return.
+
+AGENTS_TARGET="$WORK/target-agents-8"
+mk_target "$AGENTS_TARGET"
+ONLY_AGENTS=$(all_but agents)
+
+# 8.1 CONTROL — the real, shipped agent files, no fault injection: PASS.
+# Establishes the fixture is sound before any fault is injected.
+CTRL8A_JSON="$WORK/section8-control.json"
+doctor_run "$DOCTOR" "$AGENTS_TARGET" "$CTRL8A_JSON" --quiet --skip "$ONLY_AGENTS"
+assert_eq "8.1 control: agents PASSES against the real, unmutated agent files" \
+    "PASS" "$(status_of "$CTRL8A_JSON" agents)"
+
+if [ "$(status_of "$CTRL8A_JSON" agents)" != "PASS" ]; then
+    printf '  note: Section 8 mutant/fault legs skipped — the control did not pass, so a\n'
+    printf '        FAIL under fault injection would not be attributable to this guard.\n'
+else
+    # 8.2 MUTATION — fault injection against the SHIPPED doctor (not a source
+    # mutation: the guard is a runtime rc check, only a runtime failure trips
+    # it). A `sed` ahead of the real one on PATH that behaves like a genuine
+    # read failure: nothing on stdout, non-zero exit.
+    FAULT_BIN_8=$(mktemp -d "$WORK/fault-sed-8.XXXXXX")
+    FAULT_LOG_8="$WORK/fault-sed-8.log"
+    : > "$FAULT_LOG_8"
+    cat > "$FAULT_BIN_8/sed" <<STUB
+#!/bin/bash
+printf 'invoked\n' >> "$FAULT_LOG_8"
+exit 9
+STUB
+    chmod +x "$FAULT_BIN_8/sed"
+
+    MUT8A_JSON="$WORK/section8-fault.json"
+    MUT8A_RC=0
+    MUT8A_OUT=$(PATH="$FAULT_BIN_8:$PATH" bash "$DOCTOR" --target "$AGENTS_TARGET" \
+        --json-out "$MUT8A_JSON" --quiet --skip "$ONLY_AGENTS" 2>&1) || MUT8A_RC=$?
+    assert_eq "8.2 non-vacuity: the fault-injected sed was actually invoked" \
+        "yes" "$([ -s "$FAULT_LOG_8" ] && echo yes || echo no)"
+    # --quiet's own contract (--help) is "FAIL lines... still print" — the
+    # human-readable renderer must show this failure too, not just the JSON.
+    assert_contains "8.2 SPECIFIC: the --quiet human renderer still prints the FAIL line" \
+        "FAIL agents" "$MUT8A_OUT"
+    assert_eq "8.2 SPECIFIC: agents flips to FAIL under the read fault (not a silent PASS)" \
+        "FAIL" "$(status_of "$MUT8A_JSON" agents)"
+    assert_eq "8.2 SPECIFIC: the doctor's own exit code reflects the failure" \
+        "1" "$MUT8A_RC"
+    MUT8A_DETAIL=$(jq -r '.checks[] | select(.name == "agents") | .detail' "$MUT8A_JSON" 2>/dev/null || echo "")
+    # Every CORE agent is named, not just one — the fault hits every
+    # extraction attempt, and the message must say WHY (read failure) rather
+    # than something that reads like a config problem.
+    for core in orchestrator qa backend frontend devops; do
+        assert_contains "8.2 SPECIFIC: names $core.md's read failure by the guard's own problem tag" \
+            ".claude/agents/$core.md:tools-line-present-but-unreadable" "$MUT8A_DETAIL"
+    done
+
+    # 8.3 RESTORE CONTROL — same target, fault-injected sed removed: PASS again.
+    CTRL8B_JSON="$WORK/section8-restore.json"
+    doctor_run "$DOCTOR" "$AGENTS_TARGET" "$CTRL8B_JSON" --quiet --skip "$ONLY_AGENTS"
+    assert_eq "8.3 RESTORE CONTROL: shim removed, same target, agents PASSES again" \
+        "PASS" "$(status_of "$CTRL8B_JSON" agents)"
+
+    # 8.4 A GENUINELY-ABSENT tools: line must still `continue` quietly (via
+    # the pre-existing no-tools key check) and must NOT pick up the NEW
+    # tools-line-present-but-unreadable tag, even with the SAME fault
+    # injected — the two causes of "no tools_line" must not be conflated in
+    # either direction.
+    NOTOOLS_TARGET="$WORK/target-agents-8-notools"
+    mkdir -p "$NOTOOLS_TARGET/.claude/agents" "$NOTOOLS_TARGET/.claude-plugin"
+    printf -- '---\nname: orchestrator\ndescription: stub\nmodel: claude-base-0\n---\nbody\n' \
+        > "$NOTOOLS_TARGET/.claude/agents/orchestrator.md"
+    printf '{"agents": [".claude/agents/orchestrator.md"]}' \
+        > "$NOTOOLS_TARGET/.claude-plugin/plugin.json"
+    NOTOOLS_JSON="$WORK/section8-notools.json"
+    # Only the --json-out artifact is inspected here (8.2 already covers the
+    # human-readable renderer); stdout+stderr are discarded rather than
+    # captured unused.
+    PATH="$FAULT_BIN_8:$PATH" bash "$DOCTOR" --target "$NOTOOLS_TARGET" \
+        --json-out "$NOTOOLS_JSON" --quiet --skip "$ONLY_AGENTS" >/dev/null 2>&1 || true
+    NOTOOLS_DETAIL=$(jq -r '.checks[] | select(.name == "agents") | .detail' "$NOTOOLS_JSON" 2>/dev/null || echo "")
+    assert_contains "8.4 a genuinely-absent tools: line is still reported as no-tools (pre-existing check, unaffected)" \
+        "orchestrator.md:no-tools" "$NOTOOLS_DETAIL"
+    assert_not_contains "8.4 ...and is NEVER tagged tools-line-present-but-unreadable (the two causes must not be conflated)" \
+        "tools-line-present-but-unreadable" "$NOTOOLS_DETAIL"
+fi
+
+echo ""
+echo "--- META-TEST 9: reverting the tools_line guard on a mutant copy reproduces the ORIGINAL false PASS ---"
+# Anchored on the sentinel BEGIN/END comment pair (i8cx house rule for new
+# guards), found by text and spliced by line number — never a hardcoded line
+# number in this file, so the anchor stays valid across unrelated edits.
+BEGIN_LN9=$(grep -n '^        # tools_line extraction BEGIN (i8cx wave 2)$' "$DOCTOR" | head -1 | cut -d: -f1)
+END_LN9=$(grep -n '^        # tools_line extraction END (i8cx wave 2)$' "$DOCTOR" | head -1 | cut -d: -f1)
+if [ -z "$BEGIN_LN9" ] || [ -z "$END_LN9" ]; then
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("META-TEST 9: the i8cx wave 2 sentinel pair was not found — the guard's anchor moved or was renamed")
+    printf '  FAIL: META-TEST 9: sentinel pair not found; cannot build the mutant\n'
+else
+    PASS=$((PASS + 1))
+    printf '  PASS: META-TEST 9 non-vacuity: the sentinel pair was found (BEGIN line %s, END line %s)\n' \
+        "$BEGIN_LN9" "$END_LN9"
+    MUT9_REPL="$WORK/mut9-replacement.txt"
+    cat > "$MUT9_REPL" <<'REPL'
+        tools_line=$(printf '%s\n' "$fm" | sed -n 's/^tools:[[:space:]]*//p' | head -1)
+REPL
+    MUT9="$WORK/doctor-mut9.sh"
+    {
+        sed -n "1,$((BEGIN_LN9 - 1))p" "$DOCTOR"
+        cat "$MUT9_REPL"
+        sed -n "$((END_LN9 + 1)),\$p" "$DOCTOR"
+    } > "$MUT9"
+    assert_eq "META-TEST 9: the mutant really differs from the shipped doctor" \
+        "differs" "$(cmp -s "$MUT9" "$DOCTOR" && echo same || echo differs)"
+    assert_eq "META-TEST 9: the mutant is still valid bash" "0" \
+        "$(bash -n "$MUT9" 2>/dev/null && echo 0 || echo 1)"
+    assert_not_contains "META-TEST 9: the mutant lost the guard's problem tag entirely" \
+        "tools-line-present-but-unreadable" "$(cat "$MUT9")"
+    chmod +x "$MUT9"
+
+    if [ -d "${AGENTS_TARGET:-/nonexistent}" ] && [ -d "${FAULT_BIN_8:-/nonexistent}" ]; then
+        MUT9_JSON="$WORK/section8-meta9.json"
+        MUT9_RC=0
+        PATH="$FAULT_BIN_8:$PATH" bash "$MUT9" --target "$AGENTS_TARGET" \
+            --json-out "$MUT9_JSON" --quiet --skip "$ONLY_AGENTS" >/dev/null 2>&1 || MUT9_RC=$?
+        assert_eq "META-TEST 9: WITHOUT the guard, the identical fault injection is masked -- agents falsely PASSES (the original bug)" \
+            "PASS" "$(status_of "$MUT9_JSON" agents)"
+        assert_eq "META-TEST 9: ...and the doctor's own exit code says the same (0, healthy)" \
+            "0" "$MUT9_RC"
+    else
+        printf '  note: META-TEST 9 fault-injection leg skipped -- Section 8 fixtures were not built (see the note above).\n'
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

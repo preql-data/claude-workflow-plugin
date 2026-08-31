@@ -61,12 +61,58 @@ log_sync_error() {
 }
 
 # F3 single-source-of-truth read. Empty stdout = no active task.
+#
+# i8cx wave 2: mirrors verify-before-stop.sh's own get_current_task fix
+# (i8cx wave 1 / U7) as closely as this file's shape allows -- see that
+# function's header comment for the full defect writeup. Short version: the
+# helper call's `|| echo ""` and the fallback's `head | tr ... || echo ""`
+# both threw away whatever nonzero rc meant "the marker exists but I could
+# not read it" and folded it into the SAME tid="" that "no active task"
+# already produces.
+#
+# Unlike verify-before-stop.sh's F1 fast path (where an unestablished read
+# has to fail closed on a RELEASE decision), an empty CURRENT_TASK here was
+# ALREADY safe in the narrow sense that it never fabricates a task id or
+# crashes the spawn -- it takes the same `emit_empty` exit as a genuinely
+# idle session, both before and after this fix. What changes is that a read
+# failure is no longer INDISTINGUISHABLE from an idle session in the audit
+# trail: pre-fix, that branch was 100% silent, so a spawn whose
+# `record_implementer` call got silently skipped (see the call site below --
+# emit_empty returns before is_implementer_role/record_implementer ever run)
+# left no trace it happened. That matters here specifically because
+# `record_implementer`'s output is what review-check.sh:1417's independence
+# check reads: a gap in the implementer set left by an unlogged read failure
+# is invisible to the very check that is supposed to catch a missing
+# implementer record. `log_sync_error` (defined above) is this file's
+# existing best-effort trail mechanism -- same one `record_implementer`'s own
+# failure path already uses two screens down.
+#
+# `|| tid_rc=$?` (not `tid=$(cmd); tid_rc=$?`) is required under this file's
+# `set -e` (line 42): a bare assignment that fails aborts the WHOLE script at
+# that line, before this function ever gets to decide how to degrade -- which
+# the hooks contract reads as non-blocking (an aborted hook emits nothing),
+# i.e. it would fail OPEN on the read itself. Measured directly while fixing
+# the sibling site in current-task.sh: a split `raw=$(head ...); rc=$?` never
+# reached its own second line.
 get_current_task() {
-    local tid=""
+    local tid="" tid_rc=0
     if [ -x "$CURRENT_TASK_HELPER" ]; then
-        tid=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null || echo "")
+        tid=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null) || tid_rc=$?
     elif [ -s "$QA_TRACKING_DIR/current-task" ]; then
-        tid=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' || echo "")
+        # Producer captured on its own line, same shape as current-task.sh's
+        # own cmd_get after i8cx wave 2: the strip pipe below only ever sees
+        # an in-memory string (`printf | tr`), so it cannot mask anything the
+        # `head` capture above it didn't already surface.
+        local raw_tid=""
+        raw_tid=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null) || tid_rc=$?
+        if [ "$tid_rc" -eq 0 ]; then
+            tid=$(printf '%s' "$raw_tid" | tr -d '\r\n[:space:]') || { tid=""; tid_rc=1; }
+        fi
+    fi
+    if [ "$tid_rc" -ne 0 ]; then
+        log_sync_error "current-task read FAILED (exit $tid_rc): the active-task marker exists but could not be read for this spawn (agent_type=${AGENT_TYPE:-<unknown>}) — treated as 'no active task' (no assignment, no IMPLEMENTER record posted) (i8cx wave 2)"
+        printf '%s' ""
+        return 0
     fi
     printf '%s' "$tid"
 }

@@ -2869,6 +2869,25 @@ last_runner_file_for() {
     [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-runner"; return; }
     printf '%s/last-runner.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
 }
+# claude-workflow-plugin-i8cx R2-F5 fix: the per-task cache of what the last
+# GENUINE run's OVERRIDE_TEST/OVERRIDE_LINT/OVERRIDE_TYPE were, so a later
+# SUITE_REUSED replay (or the release path, if IT is the replay) can disclose
+# whether the run it is reusing was narrowed — see replay_cached_override_for
+# and override_release_note's own headers for the read side and why an
+# absent file means UNKNOWN rather than "false". Same per-task naming
+# convention as its siblings above; qa-gate.sh's wipe_iteration_state does not
+# yet remove this specific name (it is out of scope for this fix — see the
+# comment beside this file's own cleanup at the release path below), but a
+# stale copy cannot be read without an intervening fresh run overwriting it
+# first, because both gating instruments that permit a replay at all
+# (verified_state_unchanged's file, and the qa-escalated label) ARE wiped
+# there, and neither can become true again without a fresh run rewriting
+# this file in the same breath (see the persistence block below).
+last_override_state_file_for() {
+    local tid="$1"
+    [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/last-override-state"; return; }
+    printf '%s/last-override-state.%s' "$QA_TRACKING_DIR" "$(sanitize_task_id "$tid")"
+}
 # claude-workflow-plugin-gsfd R1-F6 fix (independent cross-family review): the
 # three tails CAPTURED by this run (TEST_FAIL_TAIL/LINT_FAIL_TAIL/TYPE_FAIL_TAIL), not
 # just the rendered FAILED_CHECKS bullet text that CITES a path to them.
@@ -2929,6 +2948,92 @@ replay_cached_tails_for() {
     return 0
 }
 # --- TAIL-CACHE-REPLAY-END (claude-workflow-plugin-gsfd R1-F6) -------------
+
+# --- OVERRIDE-CACHE-REPLAY-BEGIN (claude-workflow-plugin-i8cx R2-F5) -------
+# replay_cached_override_for <tid> — restores OVERRIDE_TEST/OVERRIDE_LINT/
+# OVERRIDE_TYPE (the SAME globals override_active/override_scope_names read
+# on a fresh run — see the OVERRIDE-DISCLOSURE region far below) from the
+# per-task cache a genuine run persists, and sets SUITE_REUSE_OVERRIDE_KNOWN
+# so checks_scope_claim/checks_scope_note/override_release_note can tell
+# "the replayed run definitely carried no active override" apart from "we do
+# not know" — Sol's R2-F5 finding on claude-workflow-plugin-i8cx: "override
+# flags and commands were never persisted, parsed, or disclosed" on this
+# branch. Called identically from both cached-replay branches (QA_ESCALATED
+# and VERIFY_SKIP_UNCHANGED), immediately after each one's existing
+# replay_cached_tails_for call, mirroring that function's own placement.
+#
+# UNKNOWN IS THE SAFE DEFAULT, NOT "false". Absence of the cache file (a
+# cycle cached before this fix shipped, or a failed write) is NOT read as "no
+# override was active" — that would be exactly the "unestablished input
+# quietly presents as the reassuring case" defect R2-F5 names. It leaves
+# SUITE_REUSE_OVERRIDE_KNOWN at its safe default (false, via every caller's
+# own `${SUITE_REUSE_OVERRIDE_KNOWN:-false}` read) and leaves OVERRIDE_TEST/
+# LINT/TYPE unset, so override_active's `${OVERRIDE_TEST:-false}` default is
+# never asked to stand in for a real answer — every caller gates on
+# SUITE_REUSE_OVERRIDE_KNOWN first and never calls override_scope_names in
+# the unknown case at all.
+#
+# A cache file that EXISTS but reads back incomplete (fewer than three
+# tokens — truncated write, corruption, a future format change) is treated
+# the same way as absent: `read`'s own exit status is checked, and so is
+# every field's non-emptiness, rather than trusting "the file was non-empty"
+# alone. A three-token line ending in a newline is exactly what the write
+# side (below, beside the RUNNER persist) always produces, so a healthy
+# cache never takes this branch.
+replay_cached_override_for() {
+    local tid="$1" f rc
+    # --- OVERRIDE-CACHE-REPLAY-BODY-BEGIN (claude-workflow-plugin-i8cx R2-F5) --
+    f=$(last_override_state_file_for "$tid")
+    SUITE_REUSE_OVERRIDE_KNOWN=false
+    if [ -s "$f" ]; then
+        rc=0
+        read -r OVERRIDE_TEST OVERRIDE_LINT OVERRIDE_TYPE < "$f" 2>/dev/null || rc=$?
+        # claude-workflow-plugin-i8cx R5-F3 (independent review round 5):
+        # "nonempty" is not "established". `false false t` used to pass the
+        # old three-way `-n` guard (all fields merely nonempty) and mark the
+        # cache KNOWN, and then override_active's own `= "true"` compare read
+        # the corrupt third field as "false" -- an UNKNOWN/corrupt cache
+        # presenting as the reassuring not-narrowed case, the same failure
+        # shape one field down from R2-F5's own root cause. `read`'s 3-variable
+        # split also folds any 4th+ token into OVERRIDE_TYPE (space-joined,
+        # since IFS splitting on whitespace never produces an empty field), so
+        # a line carrying extra fields fails this exact-match test too -- one
+        # guard, not two, because a joined 4th token can never happen to equal
+        # "true" or "false" on its own. Each field must be EXACTLY "true" or
+        # "false" -- the only two values the write side (below, beside the
+        # RUNNER persist) ever produces -- or the whole record is untrusted,
+        # same as if the file were empty or unreadable.
+        #
+        # A META-TEST replaces ONLY the sentinel-wrapped span below with the
+        # pre-R5-F3 nonempty-only condition (override-disclosure.test.sh
+        # Section E1's mutant), so a regression back to "merely nonempty" is
+        # caught even though the two conditions are the same shape ([ rc -eq
+        # 0 ] guarding an assignment to SUITE_REUSE_OVERRIDE_KNOWN) and a
+        # strip-only test could not tell one from the other.
+        # --- OVERRIDE-CACHE-FIELD-VALIDATION-BEGIN (claude-workflow-plugin-i8cx R5-F3) --
+        if [ "$rc" -eq 0 ]; then
+            case "$OVERRIDE_TEST" in true|false) : ;; *) rc=1 ;; esac
+        fi
+        if [ "$rc" -eq 0 ]; then
+            case "$OVERRIDE_LINT" in true|false) : ;; *) rc=1 ;; esac
+        fi
+        if [ "$rc" -eq 0 ]; then
+            case "$OVERRIDE_TYPE" in true|false) : ;; *) rc=1 ;; esac
+        fi
+        # --- OVERRIDE-CACHE-FIELD-VALIDATION-END (claude-workflow-plugin-i8cx R5-F3) --
+        if [ "$rc" -eq 0 ]; then
+            SUITE_REUSE_OVERRIDE_KNOWN=true
+        else
+            OVERRIDE_TEST=""
+            OVERRIDE_LINT=""
+            OVERRIDE_TYPE=""
+        fi
+    fi
+    # --- OVERRIDE-CACHE-REPLAY-BODY-END (claude-workflow-plugin-i8cx R2-F5) ----
+    return 0
+}
+# --- OVERRIDE-CACHE-REPLAY-END (claude-workflow-plugin-i8cx R2-F5) ---------
+
 escalation_posted_file_for() {
     local tid="$1"
     [ -z "$tid" ] && { printf '%s' "$QA_TRACKING_DIR/escalation-posted"; return; }
@@ -3255,7 +3360,13 @@ verified_state_unchanged_detail() {
     ts=$(printf '%s' "$line" | cut -f1) || ts=""
     fp=$(printf '%s' "$line" | cut -f2) || fp=""
     hash=$(printf '%s' "$line" | cut -f3) || hash=""
-    printf 'the tree (fingerprint %s) and the reviewable change set (hash %s) have not moved since the full run recorded at %s' \
+    # claude-workflow-plugin-i8cx R2-F5 fix: was "...since the full run
+    # recorded at %s" — the same false-fullness claim SUITE_REUSE_REASON's
+    # own header fix (above, in the VERIFY_SKIP_UNCHANGED branch) removes,
+    # in this function's own words. Whether that recorded run was narrowed
+    # by an operator override is disclosed separately; this sentence must
+    # not pre-empt that answer by calling the run "full".
+    printf 'the tree (fingerprint %s) and the reviewable change set (hash %s) have not moved since the run recorded at %s' \
         "${fp:-?}" "${hash:-?}" "${ts:-?}"
 }
 # SKIP-UNCHANGED END (claude-workflow-plugin-j7kk)
@@ -4676,6 +4787,16 @@ SUITE_REUSE_DETAIL=""     # OPTIONAL longer evidence sentence (concrete
                           # fingerprint/hash/timestamp); empty when the short
                           # reason needs no further evidence (escalation),
                           # appended only by checks_scope_note
+SUITE_REUSE_OVERRIDE_KNOWN=false  # claude-workflow-plugin-i8cx R2-F5: true
+                          # only once replay_cached_override_for has
+                          # successfully restored OVERRIDE_TEST/LINT/TYPE
+                          # from the persisted cache for THIS replay. Stays
+                          # false (never silently "true") on every path that
+                          # is not itself a cached replay of a run whose
+                          # override state was actually written — see that
+                          # function's own header for why unknown is the
+                          # safe default rather than false-meaning-"no
+                          # override".
 
 if [ "$QA_ESCALATED" = "true" ]; then
     # Replay the cached state. If anything is missing we fall back to
@@ -4701,6 +4822,11 @@ if [ "$QA_ESCALATED" = "true" ]; then
     # own point-in-time cache so the "--- last 50 lines of ... output ---"
     # sections below are populated the same way a genuine run's would be.
     replay_cached_tails_for "$CURRENT_TASK"
+    # claude-workflow-plugin-i8cx R2-F5 fix: restore the cached run's own
+    # override state the same way the tails above are restored — see
+    # replay_cached_override_for's header for what "known" vs "unknown"
+    # means here.
+    replay_cached_override_for "$CURRENT_TASK"
     SUITE_REUSED=true
     SUITE_REUSE_REASON="escalation contract"
 elif [ "$VERIFY_SKIP_UNCHANGED" = "true" ]; then
@@ -4720,8 +4846,19 @@ elif [ "$VERIFY_SKIP_UNCHANGED" = "true" ]; then
     # point-in-time captured tails rather than leaving this replay's message
     # citing a pointer only.
     replay_cached_tails_for "$CURRENT_TASK"
+    # claude-workflow-plugin-i8cx R2-F5 fix: same restoration as the
+    # escalation branch above, for the same reason.
+    replay_cached_override_for "$CURRENT_TASK"
     SUITE_REUSED=true
-    SUITE_REUSE_REASON="tree and change-set unchanged since the last full run"
+    # claude-workflow-plugin-i8cx R2-F5 fix: was "...since the last full
+    # run" — false whenever the recorded run was itself narrowed by an
+    # operator override, which this reason string has no way to know at the
+    # point it is written (that fact is disclosed separately, by
+    # checks_scope_note/checks_scope_claim/override_release_note reading
+    # SUITE_REUSE_OVERRIDE_KNOWN once it has been established, above). This
+    # string must never itself assert fullness it did not verify — "the last
+    # recorded run" is true regardless of whether that run was narrowed.
+    SUITE_REUSE_REASON="tree and change-set unchanged since the last recorded run"
     SUITE_REUSE_DETAIL=$(verified_state_unchanged_detail "$CURRENT_TASK")
 else
     # 2ty: DETECT_JSON was captured ONCE, above the iteration-bump decision (the
@@ -4734,6 +4871,19 @@ else
         TEST_CMD=$(echo "$DETECT_JSON" | jq -r '.test_cmd // ""' 2>/dev/null || echo "")
         LINT_CMD=$(echo "$DETECT_JSON" | jq -r '.lint_cmd // ""' 2>/dev/null || echo "")
         TYPE_CMD=$(echo "$DETECT_JSON" | jq -r '.type_cmd // ""' 2>/dev/null || echo "")
+        # claude-workflow-plugin-yzo9: read alongside the four fields above so
+        # checks_scope_claim/checks_scope_note (far below, CHECK-SCOPE region)
+        # can name an active override instead of silently running a narrower
+        # command under the SAME text a normal auto-detected run would print.
+        # detect-stack.sh has emitted this field since F8/J17 and said, in its
+        # own header comment, that it was "tracked so the Stop hook can
+        # surface 'you are using an override' in the block reason" -- nothing
+        # here ever read it until this line. `// false` matches detect-stack.
+        # sh's own JSON default and degrades safely for a pre-yzo9 detector
+        # copy that has never emitted an `overrides` object at all.
+        OVERRIDE_TEST=$(echo "$DETECT_JSON" | jq -r '.overrides.test // false' 2>/dev/null || echo "false")
+        OVERRIDE_LINT=$(echo "$DETECT_JSON" | jq -r '.overrides.lint // false' 2>/dev/null || echo "false")
+        OVERRIDE_TYPE=$(echo "$DETECT_JSON" | jq -r '.overrides.type // false' 2>/dev/null || echo "false")
     fi
 
     # J19: regression-coverage framing. We always run the FULL test suite
@@ -4963,6 +5113,19 @@ else
         if [ "$CYCLE_STILL_CURRENT" = "yes" ]; then
         printf '%s' "$test_rc" > "$(last_test_rc_file_for "$CURRENT_TASK")" 2>/dev/null || true
         printf '%s' "$RUNNER" > "$(last_runner_file_for "$CURRENT_TASK")" 2>/dev/null || true
+        # claude-workflow-plugin-i8cx R2-F5 fix: persist THIS run's own
+        # override determination beside RUNNER, so a later SUITE_REUSED
+        # replay of this exact result can disclose it (replay_cached_
+        # override_for, above, is the read side). Defaults to "false" per
+        # field when OVERRIDE_TEST/LINT/TYPE were never set at all (no
+        # executable detector this run) — the SAME default override_active's
+        # own `${OVERRIDE_TEST:-false}` uses, so what gets persisted is
+        # exactly this run's own effective determination, never a new
+        # assumption layered on top of it. Always three space-separated
+        # tokens plus a trailing newline (never omitted) so the read side's
+        # `read -r a b c` always terminates on the newline rather than EOF.
+        printf '%s %s %s\n' "${OVERRIDE_TEST:-false}" "${OVERRIDE_LINT:-false}" "${OVERRIDE_TYPE:-false}" \
+            > "$(last_override_state_file_for "$CURRENT_TASK")" 2>/dev/null || true
         # We persist the rendered failure body (already includes the
         # leading "- " bullets and the trailing newline).
         if [ -n "$FAILED_CHECKS" ]; then
@@ -5033,6 +5196,10 @@ else
             rm -f "$(last_lint_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
             rm -f "$(last_type_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
             rm -f "$(last_verified_state_file_for "$CURRENT_TASK")" 2>/dev/null || true
+            # claude-workflow-plugin-i8cx R2-F5: this run's override-state
+            # cache is written in the same breath as RUNNER above, so it
+            # rolls back with the same siblings for the same reason.
+            rm -f "$(last_override_state_file_for "$CURRENT_TASK")" 2>/dev/null || true
         fi
         # --- CYCLE-GEN-POSTCHECK-END (claude-workflow-plugin-gsfd R3-F2) -----
         fi
@@ -5073,14 +5240,103 @@ fi
 # Deliberately avoids the literal `technical checks passed` in every branch:
 # component specs assert its ABSENCE on the failing path, and re-introducing
 # the phrase anywhere is the regression this region exists to prevent.
+
+# OVERRIDE-DISCLOSURE BEGIN (claude-workflow-plugin-yzo9)
+#
+# detect-stack.sh:177-178 has said, since F8/J17, that its per-stage override
+# booleans are "tracked so the Stop hook can surface 'you are using an
+# override' in the block reason." Nothing here ever read them --
+# `grep -c override verify-before-stop.sh` returned 0 before this task, on
+# every prior commit. An override silently swapped TEST_CMD/LINT_CMD/
+# TYPE_CMD and the gate reported its verdict with no indication it had run
+# anything other than the project's own detected default: the same "claims
+# more than the mechanism delivers" defect family fkm.1.11 (CHECK-SCOPE,
+# below) already exists to prevent, sitting unbuilt in the one seam
+# claude-workflow-plugin-yzo9 now depends on for real -- that task narrows
+# THIS repo's own Stop tier via .claude/test-cmd, so this gate runs an
+# override on every Stop from here on, not never.
+#
+# override_active <stage> -- is exactly ONE stage's override flag true
+# (stage is test|lint|type)? THE single place that knows what
+# OVERRIDE_TEST/OVERRIDE_LINT/OVERRIDE_TYPE mean, so that override_scope_names
+# below and checks_scope_note's per-stage RAN-line tag (further down, the
+# `[OVERRIDE: .claude/test-cmd ...]` suffix) read ONE predicate rather than
+# two independent copies of "== \"true\"" that could drift apart under a
+# future edit to one and not the other -- a real risk this file's own build
+# surfaced: an earlier draft mutated only override_scope_names's printf and
+# found the per-stage tag kept firing regardless, because it re-tested
+# ${OVERRIDE_TEST:-false} directly. Not a live defect (both compared the same
+# global, so they could never actually disagree yet) but exactly the
+# duplicated-idea shape CHECK-SCOPE's own header warns about, caught by
+# override-disclosure.test.sh's own mutation leg before it could become one.
+override_active() {
+    case "$1" in
+        test) [ "${OVERRIDE_TEST:-false}" = "true" ] ;;
+        lint) [ "${OVERRIDE_LINT:-false}" = "true" ] ;;
+        type) [ "${OVERRIDE_TYPE:-false}" = "true" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# ONE function, called from both checks_scope_claim (the short parenthetical
+# below) and checks_scope_note (the RAN block, further down) -- the same
+# split-not-duplicate discipline CHECK-SCOPE's own header gives for claim vs.
+# note ("WHY FUNCTIONS RATHER THAN INLINE STRINGS... the 2ty incident in this
+# same file is what happens when one idea is written three times"). Reads
+# OVERRIDE_TEST/OVERRIDE_LINT/OVERRIDE_TYPE (via override_active, above), set
+# once above (2ty's DETECT_JSON parse, the non-replay dispatch branch) from
+# detect-stack.sh's `overrides` object; unset (hence empty, under this file's
+# `set -e`-only, no `set -u` discipline) on every replay path, which is
+# correct -- neither checks_scope_claim's nor checks_scope_note's
+# SUITE_REUSED branch calls this, because a replayed result names no command
+# of its own to mark.
+override_scope_names() {
+    local names=""
+    override_active test && names="test"
+    if override_active lint; then
+        [ -n "$names" ] && names="$names, lint" || names="lint"
+    fi
+    if override_active type; then
+        [ -n "$names" ] && names="$names, type" || names="type"
+    fi
+    printf '%s' "$names"
+}
+# OVERRIDE-DISCLOSURE END (claude-workflow-plugin-yzo9)
+
 checks_scope_claim() {
     if [ "${SUITE_REUSED:-false}" = "true" ]; then
         # claude-workflow-plugin-j7kk: SUITE_REUSE_REASON names WHY, generalised
         # from the escalation-only phrasing this line used to hardcode — see
         # SKIP-UNCHANGED's header for why this is one flag with two causes
         # rather than a second claim function.
-        printf 'checks NOT re-run this loop — cached result replayed (%s)' \
-            "${SUITE_REUSE_REASON:-escalation contract}"
+        #
+        # claude-workflow-plugin-i8cx R2-F5 fix: this parenthetical used to
+        # stop here, never naming whether the run it is replaying was itself
+        # narrowed by an operator override — the exact gap Sol's finding
+        # reproduced ("checks NOT re-run this loop — cached result replayed"
+        # with no override mention). Reads SUITE_REUSE_OVERRIDE_KNOWN (set by
+        # replay_cached_override_for, called above in both cached-replay
+        # branches) and, when known, the SAME override_scope_names predicate
+        # the fresh branch below uses — never a second reader.
+        if [ "${SUITE_REUSE_OVERRIDE_KNOWN:-false}" = "true" ]; then
+            local replayed_claim_names
+            replayed_claim_names=$(override_scope_names)
+            if [ -n "$replayed_claim_names" ]; then
+                printf 'checks NOT re-run this loop — cached result replayed (%s; the REPLAYED run was NARROWED via override: %s — see .claude/*-cmd)' \
+                    "${SUITE_REUSE_REASON:-escalation contract}" "$replayed_claim_names"
+            else
+                printf 'checks NOT re-run this loop — cached result replayed (%s)' \
+                    "${SUITE_REUSE_REASON:-escalation contract}"
+            fi
+        else
+            # UNKNOWN, not "false": the persisted override state could not be
+            # established (a cache predating this fix, or a failed read/
+            # write). Silence here would read exactly like the "known, not
+            # narrowed" case above — the reassuring one — which is the R2-F5
+            # defect restated. Say it is unknown instead.
+            printf 'checks NOT re-run this loop — cached result replayed (%s; override state on the REPLAYED run is UNKNOWN — not confirmed full default coverage)' \
+                "${SUITE_REUSE_REASON:-escalation contract}"
+        fi
         return 0
     fi
     local ran=""
@@ -5091,11 +5347,31 @@ checks_scope_claim() {
     if [ -n "${TYPE_CMD:-}" ]; then
         [ -n "$ran" ] && ran="$ran + type-check" || ran="type-check"
     fi
+    # claude-workflow-plugin-yzo9: computed once, used by both branches below
+    # -- the empty-command branch can still have an override "active" in the
+    # sense that OVERRIDE_TEST=true resolved an EMPTY command (a blank or
+    # whitespace-only .claude/test-cmd; read_override's own contract trims
+    # and returns whatever is left, including nothing), and that is a
+    # DIFFERENT fact than "detect-stack.sh found no runner" -- conflating them
+    # would be exactly the overclaim this region exists to prevent, just
+    # relocated to the branch that used to have no override awareness at all.
+    local override_names
+    override_names=$(override_scope_names)
     if [ -z "$ran" ]; then
-        printf 'NO technical check ran — detect-stack.sh resolved no test, lint or type command'
+        if [ -n "$override_names" ]; then
+            printf 'NO technical check ran — override(s) active for %s resolved to an empty command (see .claude/*-cmd)' \
+                "$override_names"
+        else
+            printf 'NO technical check ran — detect-stack.sh resolved no test, lint or type command'
+        fi
         return 0
     fi
-    printf '%s passed — and nothing else ran' "$ran"
+    if [ -n "$override_names" ]; then
+        printf '%s passed — and nothing else ran (NARROWED via override: %s — see .claude/*-cmd)' \
+            "$ran" "$override_names"
+    else
+        printf '%s passed — and nothing else ran' "$ran"
+    fi
     return 0
 }
 
@@ -5113,21 +5389,96 @@ checks_scope_note() {
         if [ -n "${SUITE_REUSE_DETAIL:-}" ]; then
             printf '  Reused because %s.\n' "$SUITE_REUSE_DETAIL"
         fi
+        # OVERRIDE-DISCLOSURE-REPLAY (claude-workflow-plugin-i8cx R2-F5 fix):
+        # this branch used to end here, printing nothing about whether the
+        # run it is replaying was narrowed by an operator override — Sol's
+        # reproduction on this exact task ("with no [OVERRIDE] tag and no
+        # narrowing paragraph at all"). Reads SUITE_REUSE_OVERRIDE_KNOWN (set
+        # above by replay_cached_override_for in both cached-replay
+        # branches) and, when known, the SAME override_active/
+        # override_scope_names predicate the fresh branch below uses for its
+        # own RAN-line tags and summary paragraph — never a second reader;
+        # that is precisely the gap R2-F5 names.
+        if [ "${SUITE_REUSE_OVERRIDE_KNOWN:-false}" = "true" ]; then
+            local replayed_note_names
+            replayed_note_names=$(override_scope_names)
+            if [ -n "$replayed_note_names" ]; then
+                printf '
+  OPERATOR OVERRIDE WAS IN EFFECT on the run being replayed, for: %s. Its
+  command(s) came from .claude/*-cmd (see detect-stack.sh header), not the
+  auto-detected default for this runner — a SUBSET of what this project runs
+  without the override, never a wider or equal-coverage substitute for it.
+  This loop ran no command of its own; this paragraph describes what the
+  REPLAYED run executed, not this Stop.\n' "$replayed_note_names"
+            fi
+            # else: known, and no stage was overridden — nothing further to
+            # disclose, matching the fresh branch's own silence in the same
+            # case (the negative control this fix is paired against: an
+            # unnarrowed run, replayed or not, must add zero "OVERRIDE" text).
+        else
+            # UNKNOWN, not "false" — see checks_scope_claim's identical
+            # branch for why. The absence of an override notice above must
+            # never be misread as proof this replayed run used the full
+            # default command; it is simply not established from the cache.
+            printf '
+  OVERRIDE STATE UNDETERMINED for the run being replayed: whether it used an
+  operator override (.claude/*-cmd) was not persisted alongside the cached
+  result (a cache written before this disclosure existed, or a failed
+  write), so it cannot be established from here. Do NOT read the absence of
+  an override notice above as proof the replayed run used this runner'"'"'s
+  full default command — that is UNKNOWN, and unknown must never be read as
+  the reassuring case.\n'
+        fi
     else
+        # claude-workflow-plugin-yzo9: the [OVERRIDE] tag on a RAN line is the
+        # per-stage half of the disclosure; the paragraph after the three
+        # stanzas below is the summary half. Both go through override_active
+        # (defined beside override_scope_names, above) -- no second source of
+        # truth for "was this stage overridden".
         if [ -n "${TEST_CMD:-}" ]; then
-            printf '  RAN      tests       %s\n' "$TEST_CMD"
+            if override_active test; then
+                printf '  RAN      tests       %s  [OVERRIDE: .claude/test-cmd — not the auto-detected default]\n' "$TEST_CMD"
+            else
+                printf '  RAN      tests       %s\n' "$TEST_CMD"
+            fi
         else
             printf '  NOT RUN  tests       no test command detected for runner=%s\n' "${RUNNER:-none}"
         fi
         if [ -n "${LINT_CMD:-}" ]; then
-            printf '  RAN      lint        %s\n' "$LINT_CMD"
+            if override_active lint; then
+                printf '  RAN      lint        %s  [OVERRIDE: .claude/lint-cmd — not the auto-detected default]\n' "$LINT_CMD"
+            else
+                printf '  RAN      lint        %s\n' "$LINT_CMD"
+            fi
         else
             printf '  NOT RUN  lint        no lint command detected for runner=%s\n' "${RUNNER:-none}"
         fi
         if [ -n "${TYPE_CMD:-}" ]; then
-            printf '  RAN      type-check  %s\n' "$TYPE_CMD"
+            if override_active type; then
+                printf '  RAN      type-check  %s  [OVERRIDE: .claude/type-cmd — not the auto-detected default]\n' "$TYPE_CMD"
+            else
+                printf '  RAN      type-check  %s\n' "$TYPE_CMD"
+            fi
         else
             printf '  NOT RUN  type-check  no type command detected for runner=%s\n' "${RUNNER:-none}"
+        fi
+        # claude-workflow-plugin-yzo9: the summary half of the same
+        # disclosure -- printed only when at least one stage above carried an
+        # [OVERRIDE] tag, so an ordinary auto-detected run emits not one new
+        # byte (the negative control this task's pairing requirement asks
+        # for). This is the sentence the operator's acceptance criterion
+        # names directly: the Stop output must SAY it ran a subset rather
+        # than implying full coverage, not merely tag the line a careful
+        # reader might skim past.
+        local note_override_names
+        note_override_names=$(override_scope_names)
+        if [ -n "$note_override_names" ]; then
+            printf '
+  OPERATOR OVERRIDE IN EFFECT for: %s. The command(s) marked [OVERRIDE] above
+  came from .claude/*-cmd (see detect-stack.sh header), not the auto-detected
+  default for this runner. This Stop ran a DELIBERATELY NARROWED command in
+  place of the default -- a SUBSET of what this project runs without the
+  override, never a wider or equal-coverage substitute for it.\n' "$note_override_names"
         fi
         # claude-workflow-plugin-gsfd (disclosure fix): run_with_timeout sets
         # this when neither `timeout` nor `gtimeout` was on PATH for the RAN
@@ -5196,6 +5547,116 @@ checks_scope_note() {
     return 0
 }
 # CHECK-SCOPE END (claude-workflow-plugin-fkm.1.11)
+
+# --- OVERRIDE-RELEASE-NOTE BEGIN (claude-workflow-plugin-i8cx R2-F5) -------
+# override_release_note — the override disclosure for the ONE consequential
+# path that used to build its output without ever calling checks_scope_claim
+# or checks_scope_note: the successful release at the very bottom of this
+# script. Sol's finding, verbatim: "the successful release path... constructs
+# its output without calling either scope-disclosure function." A narrowed
+# override run that passes with an already-matching approval used to release
+# silently.
+#
+# Called from the release path, near the bottom of this file, AFTER the
+# suite-dispatch section above has run (fresh or replayed) so SUITE_REUSED,
+# SUITE_REUSE_OVERRIDE_KNOWN and OVERRIDE_TEST/LINT/TYPE already hold this
+# Stop's real answer — nothing here re-reads any cache file; it reads the
+# SAME in-memory state checks_scope_note read moments earlier for the same
+# Stop, through the SAME override_active/override_scope_names predicate
+# (never a third reader, per this task's own instruction: R2-F5's root cause
+# WAS a third reader that consulted neither).
+#
+# Prints an empty string when there is nothing to disclose — a fresh,
+# unnarrowed run, or a replay KNOWN not to have been narrowed — which is
+# exactly the override-disclosure.test.sh negative control this function is
+# paired against (zero "OVERRIDE" bytes on an unnarrowed release). Every
+# non-empty return starts with a blank line so the caller can concatenate it
+# directly onto NOTE_TEXT without composing its own separator.
+override_release_note() {
+    if [ "${SUITE_REUSED:-false}" = "true" ] && [ "${SUITE_REUSE_OVERRIDE_KNOWN:-false}" != "true" ]; then
+        printf '
+
+Override state on the REPLAYED run this release reused is UNKNOWN: it was
+not persisted alongside the cached result (a cache written before this
+disclosure existed, or a failed write). Do NOT read this release as
+confirmation that the full default command ran — that is unknown, and
+unknown must never be read as the reassuring case.'
+        return 0
+    fi
+    local release_names
+    release_names=$(override_scope_names)
+    if [ -z "$release_names" ]; then
+        return 0
+    fi
+    if [ "${SUITE_REUSED:-false}" = "true" ]; then
+        printf '
+
+OPERATOR OVERRIDE WAS IN EFFECT on the replayed run this release reused, for
+stage(s): %s (.claude/*-cmd, see detect-stack.sh header) — a SUBSET of what
+this project runs without the override, never a wider or equal-coverage
+substitute for it.' "$release_names"
+    else
+        printf '
+
+OPERATOR OVERRIDE IN EFFECT for: %s (.claude/*-cmd, see detect-stack.sh
+header). This release ran a DELIBERATELY NARROWED command in place of the
+default — a SUBSET of what this project runs without the override, never a
+wider or equal-coverage substitute for it.' "$release_names"
+    fi
+    return 0
+}
+# --- OVERRIDE-RELEASE-NOTE END (claude-workflow-plugin-i8cx R2-F5) --------
+
+# --- EMIT-RELEASE BEGIN (claude-workflow-plugin-i8cx R5-F1) ----------------
+# emit_release <headline> — a choke point for the release exits reachable
+# AFTER suite dispatch (fresh or replayed) has already run this Stop: the two
+# early-exit releases further down (VANISHED-CHANGE-SET, WORKTREE-RESOLUTION).
+#
+# Sol's R5-F1 finding, verbatim: "neither release can disclose a fresh
+# narrowed run, a replayed narrowed run, or unknown cached override state." A
+# passing narrowed run released silently through either early exit because
+# neither ever called override_release_note — the SAME function the bottom
+# release already uses (R2-F5), never a second reader. This wraps that one
+# call plus the JSON-shape decision it drives, so both new call sites share
+# one definition instead of two more inline copies of the same few lines.
+#
+# SAFE TO CALL BEFORE SUITE DISPATCH TOO, though nothing does today. Before
+# dispatch, SUITE_REUSED/OVERRIDE_TEST/OVERRIDE_LINT/OVERRIDE_TYPE are all
+# unset; override_active's own `${OVERRIDE_TEST:-false}` default reads every
+# stage as inactive, override_scope_names returns empty, and
+# override_release_note returns empty right after — so this degrades to the
+# bare `{}` branch below, identical to every pre-dispatch release site this
+# fix leaves untouched (stop_hook_active, user_interrupt/max_turns, the
+# empty-change-set allow, both F1 fast-path releases, qa-deferred, and
+# auto-defer). None of those are miswired; they are inert for this defect
+# because there is nothing yet to disclose, and this function's degrade path
+# proves that rather than asserting it.
+#
+# NOT used by the bottom release (the very end of this file): that call site
+# also folds in EPIC_DEFER_NOTE and CLOSE_HINT_NOTE, two notes this function
+# does not know about, and it was already reviewed and verified live under
+# R2-F5. Left as its own inline block rather than rehomed onto a helper that
+# would need a wider signature to carry all three notes, so a passing,
+# previously-verified path stays byte-for-byte unchanged by this fix.
+#
+# <headline> is the caller's own sentence for WHY this Stop is releasing —
+# deliberately NOT the bottom release's "QA gate cleared..." wording, which
+# would misstate what actually happened here (a vanished change set or a
+# cross-worktree resolution is not an ordinary approval).
+emit_release() {
+    local headline="$1" note
+    note=$(override_release_note)
+    if [ -n "$note" ]; then
+        local text="${headline}${note}"
+        cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":$(printf '%s' "$text" | jq -Rs .)}}
+EOF
+        exit 0
+    fi
+    echo "{}"
+    exit 0
+}
+# --- EMIT-RELEASE END (claude-workflow-plugin-i8cx R5-F1) ------------------
 
 # ESCALATION READOUT (claude-workflow-plugin-2ty, QA round 1) -----------------
 #
@@ -5427,7 +5888,20 @@ $FAILED_CHECKS"
             # takes the branch above. Saying "this gate runs the FULL test
             # suite... on every iteration" below would be the exact overclaim
             # fkm.1.11 exists to prevent, just relocated to this branch.
-            REASON="Verification failed (iteration $ITER of $MAX_ITERATIONS; checks NOT re-run this loop — ${SUITE_REUSE_REASON:-tree and change-set unchanged since the last full run}).
+            #
+            # claude-workflow-plugin-i8cx R2-F5: this fallback's wording is
+            # kept byte-identical to the skip-when-unchanged setter above
+            # ("...since the last recorded run", not "...full run") for the
+            # same reason that setter was reworded — this string has no way to
+            # know whether the run it names was itself narrowed by an
+            # operator override, so it must not assert fullness. The setter
+            # always runs first on the one path that reaches here (SUITE_
+            # REUSE_REASON is unconditionally assigned before SUITE_REUSED is
+            # set true), so this default is not reachable today; it is kept in
+            # sync anyway rather than left to drift a second time the way it
+            # did here (escalation-basis.sh's L2 leg pinned the pre-R2-F5
+            # wording and was not updated in the same pass).
+            REASON="Verification failed (iteration $ITER of $MAX_ITERATIONS; checks NOT re-run this loop — ${SUITE_REUSE_REASON:-tree and change-set unchanged since the last recorded run}).
 
 Cached failure summary:
 
@@ -5717,18 +6191,40 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
                 # window gives way to — not the only state this branch can
                 # reach today.
                 #
-                # SAME AUDITED ESCAPE AS REVIEW-DISCIPLINE: a record carrying
-                # the literal `[design bypass:` marker was approved with
-                # --no-design, whose reason is already in the audit trail —
-                # re-litigating it here would make the bypass useless.
+                # R3-F2b WIRING (independent review round 3; AUTHORIZED WORK
+                # ITEM recorded on claude-workflow-plugin-i8cx): the
+                # `[design bypass:` marker used to gate a BLIND SKIP of the
+                # call below in its entirety — every `--no-design` approval
+                # writes that marker unconditionally, so the skip could not
+                # distinguish "no design phase, permanently exempt" from "a
+                # conflict was disclosed and waived for NAMED units only,
+                # re-check the others." The grep never parsed the marker's
+                # suffix; it only asked whether the byte sequence occurred
+                # anywhere in the approval text, so no change on
+                # qa-gate.sh's side could ever have reached it.
+                #
+                # qa-gate.sh's design-gate-precheck is now unit-scope aware
+                # (DESIGN-GATE-PRECHECK-UNIT-SCOPE) and subtracts exactly the
+                # units the latest approval's own waiver bracket discloses
+                # (`[design conflict waived: units=<ids>]`), refusing only on
+                # what remains open. The call below is therefore
+                # UNCONDITIONAL now — never gated on the marker's presence —
+                # and design-gate-precheck's own no_design_attempted leniency
+                # (B5) is what correctly, safely reimplements "don't
+                # re-litigate a genuine bypass" at the unit grain instead of
+                # the whole-task grain the old blanket skip could only offer.
+                # See that subcommand's own DESIGN-GATE-PRECHECK-UNIT-SCOPE
+                # comment for the full mechanism and its one named residual
+                # (a conflict re-filed on the SAME unit a waiver already
+                # covered is still subtracted, because the disclosure
+                # carries no per-record identity — out of this fix's scope,
+                # named there, not solved here).
                 #
                 # The sentinel comments are load-bearing: an L2 META-TEST
                 # strips this block and asserts a task whose design verdict
                 # regressed AFTER approval (or was amended to needs_revision)
                 # then releases anyway. Do not rename them.
-                if printf '%s' "$MATCHED_APPROVAL_TEXT" | grep -qF '[design bypass:'; then
-                    log_sync_error "Stop release: design-discipline SKIPPED for $CURRENT_TASK — the matching approval record carries an audited [design bypass:] marker (fkm.4)"
-                elif [ ! -f "$QA_GATE" ]; then
+                if [ ! -f "$QA_GATE" ]; then
                     QA_APPROVED=false
                     DESIGN_DISCIPLINE_BLOCKED=true
                     DESIGN_DISCIPLINE_DETAIL="the design predicate is missing ($QA_GATE), so design-satisfied cannot be verified"
@@ -5743,6 +6239,8 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
                         DESIGN_DISCIPLINE_BLOCKED=true
                         DESIGN_DISCIPLINE_DETAIL="qa-gate.sh design-gate-precheck exited $DESIGN_GATE_RC with error_key=$DESIGN_GATE_KEY"
                         log_sync_error "Stop blocked: design-discipline violation on $CURRENT_TASK ($DESIGN_DISCIPLINE_DETAIL)"
+                    elif printf '%s' "$MATCHED_APPROVAL_TEXT" | grep -qF '[design bypass:'; then
+                        log_sync_error "Stop release: design-discipline for $CURRENT_TASK — matching approval carries an audited [design bypass:] marker (fkm.4); design-gate-precheck was consulted fresh (not skipped, R3-F2b) and reports ready"
                     fi
                 fi
                 # DESIGN-DISCIPLINE END (v5 D2 / claude-workflow-plugin-fkm.4)
@@ -5832,8 +6330,12 @@ if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
             ;;
         "")
             log_sync_error "Stop released: the change set VANISHED between this hook's detection stage and its gate evaluation on $CURRENT_TASK (approve landed concurrently — it truncates changed-files.txt and refreshes the gate baseline), so the recomputed hash was the empty-set hash and no record could match it. Nothing is left to review; releasing instead of emitting a transient LABEL_WITHOUT_RECORD block (gz3)"
-            echo "{}"
-            exit 0
+            # claude-workflow-plugin-i8cx R5-F1: this release used to be a
+            # bare `echo "{}"; exit 0` — the exact gap Sol's finding named,
+            # since a passing narrowed run reaching here released with no
+            # override notice at all. emit_release degrades to the identical
+            # bare `{}` when there is nothing to disclose (see its own header).
+            emit_release "QA gate cleared for ${CURRENT_TASK:-this task} — the change set vanished concurrently with a matching approval (gz3); nothing is left to review."
             ;;
     esac
 fi
@@ -6172,8 +6674,15 @@ if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     if try_worktree_resolution; then
         if wtres_review_is_clean; then
             log_sync_error "Stop released via worktree resolution: the approval on $CURRENT_TASK is bound in $WTRES_WORKTREE (change_set_hash=$WTRES_HASH); that worktree has no post-approval drift and this checkout's change set is inside its approved file set (3mg.2)"
-            echo "{}"
-            exit 0
+            # claude-workflow-plugin-i8cx R5-F1: same gap as VANISHED-CHANGE-
+            # SET above, same fix — this release used to be a bare `echo
+            # "{}"; exit 0` with no override disclosure. emit_release reads
+            # THIS Stop's own in-memory suite state (this checkout ran or
+            # replayed its own checks; the resolution only bridges the
+            # APPROVAL, never the suite), so it discloses whatever this
+            # checkout's run actually was, exactly like the other two
+            # post-dispatch release/block paths.
+            emit_release "QA gate cleared for ${CURRENT_TASK:-this task} — the approval is bound in worktree $WTRES_WORKTREE via cross-worktree resolution (3mg.2)."
         fi
         log_sync_error "Stop blocked: worktree resolution matched $WTRES_WORKTREE for $CURRENT_TASK but the independent review is not clean ($WTRES_REVIEW_DETAIL) — refusing to release (3mg.2)"
     fi
@@ -6284,6 +6793,24 @@ approval_binding_attests() {
 }
 # APPROVAL-BINDING-TEXT END (claude-workflow-plugin-ko82)
 
+# claude-workflow-plugin-i8cx R5-F2 (independent review round 5): this block
+# and its two siblings below (REVIEW-DISCIPLINE, DESIGN-DISCIPLINE) are
+# reached AFTER suite dispatch has already run (fresh or replayed) this Stop,
+# same as the FAILED_CHECKS block and the main QA-required block further
+# down — but unlike those two, none of the three ever called checks_scope_note,
+# so a Stop that replayed a NARROWED cached run (SUITE_REUSED=true after
+# either cached-replay branch) disclosed nothing about it here. Sol's finding,
+# verbatim: "these replay paths disclose neither an active cached override
+# nor an unknown cached override state." That is sharpest exactly here,
+# because each of these three blocks already reports ONE problem (a forged
+# label, a dirty review, a stale design verdict); silently sitting on a SECOND
+# one — that the evidence behind it is a narrowed or unknown-narrowed replay —
+# is the reassuring-silence shape this whole task targets, one layer up from
+# R5-F3's cache-validation fix. Each `emit_block` below now ends with
+# `$(checks_scope_note)`, the SAME already-tested function the two compliant
+# blocks use — never a second reader — which is a no-op (adds zero bytes) on
+# an unnarrowed, non-replayed Stop: see that function's own SUITE_REUSED
+# branching for why.
 if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     emit_block "qa-approved label present but no change-set-bound approval record matches the current changes — approve via qa-gate.sh approve, not a bare label add.
 
@@ -6306,7 +6833,9 @@ record binding the current change set, it re-verifies every precondition
 bound record rather than reporting an idempotent no-op. Re-review the change set
 before you run it; nothing here waives that.
 
-$(approval_binding_attests)"
+$(approval_binding_attests)
+
+$(checks_scope_note)"
 fi
 
 # V3 (jio.1): the review-discipline block. Emitted BEFORE the generic
@@ -6356,7 +6885,9 @@ Once the review is clean, re-approve so the record carries the reviewer:
 The audited escape is \`approve --no-review '<reason>'\`, which stamps
 \`[review bypass: <reason>]\` on the approval record and skips this check. Use
 it only when there is genuinely nothing to review (the doc-only fast path uses
-it automatically); the reason is permanent in the audit trail."
+it automatically); the reason is permanent in the audit trail.
+
+$(checks_scope_note)"
 fi
 
 # v5 D2 (claude-workflow-plugin-fkm.4): the design-discipline block. Same
@@ -6407,7 +6938,9 @@ The audited escape is \`approve --no-design '<reason>'\`, which stamps
 \`[design bypass: <reason>]\` on the approval record and skips this check. Use
 it only when this task genuinely has no design phase (--no-design is also
 the default path for the overwhelming majority of tasks, which never have
-one); the reason is permanent in the audit trail."
+one); the reason is permanent in the audit trail.
+
+$(checks_scope_note)"
 fi
 
 if [ "$QA_APPROVED" = false ]; then
@@ -6713,6 +7246,15 @@ If more work remains, leave it open and re-enter the gate for the next change
 set."
 fi
 
+# claude-workflow-plugin-i8cx R2-F5 fix: the override disclosure for THIS
+# release — see override_release_note's own header for why it is computed
+# here (before the cache cleanup below, and reading only this Stop's
+# in-memory state — nothing here re-reads a file) rather than inline at the
+# `if` below. Never depends on $CURRENT_TASK being set: an override can be
+# active on a no-Beads repo too, and this is the ONE release note in this
+# block that is not gated on having an active task.
+OVERRIDE_RELEASE_NOTE=$(override_release_note)
+
 # Clean up tracking. Note: the legacy .qa-tracking/approved marker is no
 # longer authoritative (B1/D1/J2). We still rm it to clean up stale files
 # from older installs. Iteration counter cleanup covers both the per-task
@@ -6739,15 +7281,32 @@ if [ -n "$CURRENT_TASK" ]; then
     rm -f "$(last_test_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
     rm -f "$(last_lint_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
     rm -f "$(last_type_tail_file_for "$CURRENT_TASK")" 2>/dev/null || true
+    # claude-workflow-plugin-i8cx R2-F5: this run's override-state cache
+    # belongs to the cycle that just closed, same reasoning as the tail
+    # caches immediately above. qa-gate.sh's wipe_iteration_state does not
+    # yet know this filename (out of scope for this fix — see this file's
+    # own persisted-cache comment beside last_override_state_file_for), so
+    # this release-path copy is the only place it is ever explicitly wiped;
+    # harmless either way, since a stale copy cannot be read without an
+    # intervening fresh run overwriting it first (see that same comment).
+    rm -f "$(last_override_state_file_for "$CURRENT_TASK")" 2>/dev/null || true
 fi
 
 # B2: if the epic gate had something to surface, emit it as a non-blocking
 # note via additionalContext. qzv: the close hint rides the SAME envelope rather
 # than a second mechanism — one note path, so nothing has to decide which of two
 # non-blocking envelopes wins. `{}` is still emitted whenever there is nothing to
-# say (no task, or no bd), which is what keeps a no-Beads user's release silent.
-if [ -n "$EPIC_DEFER_NOTE" ] || [ -n "$CLOSE_HINT_NOTE" ]; then
-    NOTE_TEXT="QA gate cleared for $CURRENT_TASK.$EPIC_DEFER_NOTE$CLOSE_HINT_NOTE"
+# say (no task, no bd, and no active override), which is what keeps a
+# no-Beads, unnarrowed user's release silent.
+#
+# claude-workflow-plugin-i8cx R2-F5: OVERRIDE_RELEASE_NOTE joins this gate so
+# a narrowed release is never silent even when neither of the other two notes
+# has anything to say — the exact gap Sol's finding named ("a narrowed
+# override run that passes with an already matching approval releases with
+# no override notice"). ${CURRENT_TASK:+ for $CURRENT_TASK} keeps the header
+# grammatical when there is no active task and only the override note fires.
+if [ -n "$EPIC_DEFER_NOTE" ] || [ -n "$CLOSE_HINT_NOTE" ] || [ -n "$OVERRIDE_RELEASE_NOTE" ]; then
+    NOTE_TEXT="QA gate cleared${CURRENT_TASK:+ for $CURRENT_TASK}.$EPIC_DEFER_NOTE$CLOSE_HINT_NOTE$OVERRIDE_RELEASE_NOTE"
     cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":$(printf '%s' "$NOTE_TEXT" | jq -Rs .)}}
 EOF

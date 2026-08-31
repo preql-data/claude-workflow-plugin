@@ -441,8 +441,98 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # an unreadable current-task marker logs "read FAILED" instead of the false
 # "empty or missing"), and a sentinel-strip META reproducing the exact
 # pre-fix `{}` release on a mutated copy.
+#
+# 53 -> 54 (claude-workflow-plugin-i8cx, wave 2 group C): added
+# beads-ledger.test.sh — no prior L1 spec exercised this script's internal
+# logic at all. classify()'s record-comparison chain (record_meta,
+# parse_failures, and the comm/join legs it feeds) ran five unguarded
+# pipelines; a crashing jq inside record_meta made $lm/$fm silently EMPTY,
+# which compares as "every ledger record is accounted for" — the verdict
+# `export`'s own dry-run reads to decide whether its data-loss warning is
+# needed. The spec drives the SHIPPED script end-to-end against an isolated
+# fixture-local bd database (never the live project's): mutants revert
+# record_meta/parse_failures to their pre-fix single-pipe shapes and
+# reproduce the false reassurance; the shipped script, same fault, refuses
+# instead. workflow-manifest.sh's scan_flat/scan_tree (a process
+# substitution masking a failed `find`, so a manifest install.sh --verify
+# compares against could silently miss rows) and epic-gate.sh's ONE process
+# substitution (_pb_degrade's sort, which could silently emit a
+# non-deterministic batch order rather than refuse) did not add specs —
+# their coverage was folded into the existing workflow-manifest.test.sh
+# (Section 8) and plan-batches.test.sh (9v) respectively, since both already
+# drive the right shipped artifact. worktree-sweep.test.sh (Sections C/D)
+# likewise gained coverage in place rather than a new file.
+#
+# 54 -> 55 (claude-workflow-plugin-yzo9): added override-disclosure.test.sh.
+# No prior spec covered detect-stack.sh's read_override at all (i8cx shape 1:
+# a bare pipeline as a function's return value — a `head` that fails to read
+# an existing, non-empty override file returned rc=0 with an EMPTY value,
+# INDISTINGUISHABLE from a healthy empty read, and the caller silently
+# blanked an already auto-detected TEST_CMD), nor verify-before-stop.sh's
+# override_active/override_scope_names/checks_scope_claim/checks_scope_note
+# disclosure of an active .claude/*-cmd override (detect-stack.sh had emitted
+# the `overrides` object since F8/J17 and said in its own header comment that
+# it was tracked for exactly this; nothing ever read it — `grep -c override
+# verify-before-stop.sh` returned 0 on every commit before this task). Both
+# matter together because this same task ARMS an override for real
+# (.claude/test-cmd -> `make test-fast`, the narrowed Stop tier this task
+# adds), so the Stop hook depends on both being correct on every Stop from
+# here on. The spec drives four extracted functions directly (read_override;
+# override_active, whose mutation — override_active always reporting no
+# stage overridden — is the one that silences override_scope_names AND the
+# checks_scope_note per-stage tag TOGETHER, catching a two-sources-of-truth
+# shape this build's own mutation testing surfaced before it could become a
+# live drift; checks_scope_claim; checks_scope_note) AND drives the REAL,
+# unmodified verify-before-stop.sh end to end against a sandboxed project
+# tree (Section C — narrowed and unnarrowed, the pairing convention's own
+# negative control), reproducing the mk_sb/run_hook sandbox shape
+# change-set-undeterminable.test.sh already uses, self-contained rather than
+# coupled to that file (under concurrent edit elsewhere in this change set).
+#
+# 55 -> 56 (claude-workflow-plugin-i8cx, R3-F2b WIRING): added
+# design-gate-precheck-wiring.test.sh. verify-before-stop.sh's
+# DESIGN-DISCIPLINE block used to skip calling `qa-gate.sh
+# design-gate-precheck` ENTIRELY whenever the matching approval record
+# carried the literal `[design bypass:` marker — a blind substring match
+# that could not distinguish "no design phase, permanently skip" from "a
+# design that was satisfied and unconflicted a moment ago, re-check it still
+# is," so a conflict filed after a bypassed approval never re-armed the Stop
+# hook. Fixed by making the call unconditional. This spec drives the REAL,
+# unstubbed verify-before-stop.sh + qa-gate.sh + bd end to end (Section 1: an
+# ordinary --no-design approval on a satisfied, unconflicted design, confirm
+# release; file a conflict afterward, confirm the SAME task now blocks
+# citing it; a sibling task with NO design phase at all, confirm --no-design
+# still releases — the anti-overreach control without which the fix would
+# deadlock every doc-only commit) plus a stubbed qa-gate.sh discriminator
+# (Section 2: a stub that always refuses design-gate-precheck only blocks
+# the marker-present case AFTER this fix, proving the unconditional call is
+# genuinely consulted and not a dead call whose result is discarded; a stub
+# that always reports ready is the restore control, proving no spurious
+# blocking). override-disclosure.test.sh and gate-claim-honesty.test.sh (the
+# R5 override-disclosure work landing in the same file concurrently) were
+# re-run, unmodified, and confirmed at their existing counts (130 and 297
+# assertions respectively) to show no regression.
+#
+# claude-workflow-plugin-i8cx, independent review rounds 6-8 (operator
+# ruling): Section 1's own mechanism changed AGAIN, after this note was
+# written. It originally exercised R3-F2b via qa-gate.sh's unit-scoped
+# waiver subtraction (waive unit U1 via --no-design, file a conflict on a
+# never-waived unit U2, confirm the SAME task now blocks citing U2 and not
+# U1). That waiver mechanism — DESIGN-GATE-PRECHECK-UNIT-SCOPE, the
+# `[design conflict waived: units=<ids>]` disclosure, and
+# DESIGN-BYPASS-UNNEEDED-REFUSAL — was REMOVED after four independent HIGH
+# findings (forgeable text, wrong-hash-bound, blanket-not-per-record
+# subtraction, a clearing predicate that accepted a content edit with no
+# accompanying review). Section 1 now proves the identical R3-F2b property
+# (the unconditional call survives and drives the Stop decision) without a
+# waiver: an ordinary --no-design approval on a satisfied, unconflicted
+# design, followed by a conflict filed afterward — see that spec's own
+# header for the full history and design-review-record.test.sh's Section 8h
+# for the dedicated negative control (text/label/flag forgery, all proven to
+# authorize nothing). EXPECTED_SPECS stays 56 — no spec was added or
+# removed, only Section 1's own scenario changed shape.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=53
+EXPECTED_SPECS=56
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

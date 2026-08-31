@@ -536,8 +536,14 @@ assert_contains "denylist-C3: the block names the change-set binding, not a gene
 # pinned in C5; the guard's own contract (matching-hash re-approve is still a
 # no-op) and the approve/Stop race live in
 # .claude/tests/component/specs/approve-idempotency.sh.
+# Bounded to BEFORE the checks_scope_note disclosure tail (i8cx R5-F2): see
+# approve-idempotency.sh's identical A2 extraction for the full rationale —
+# broader_verification_note()'s "record one" suggestion (ledger empty in this
+# fixture) also matches this grep but is not part of the recipe closed above
+# it by "That is the WHOLE recipe".
 C4_REMEDY="$FC/.claude/.qa-tracking/c4-printed-remediation.txt"
-printf '%s\n' "$C3_REASON" | grep -E '^[[:space:]]*bash \.claude/scripts/' \
+printf '%s\n' "$C3_REASON" | sed '/^WHAT THIS GATE RAN, EXACTLY\.$/,$d' \
+    | grep -E '^[[:space:]]*bash \.claude/scripts/' \
     | sed 's/^[[:space:]]*//' > "$C4_REMEDY"
 assert_eq "denylist-C4: the migration block prints a 3-command remediation" \
     "3" "$(grep -c . "$C4_REMEDY" | tr -d '[:space:]')"
@@ -993,8 +999,11 @@ assert_not_contains "denylist-D5: ...and the plan file has already left the revi
 
 # The printed recovery, extracted from the block reason and run VERBATIM — the
 # assertion is about the recipe the operator is handed, not a paraphrase.
+# Bounded to BEFORE the checks_scope_note disclosure tail (i8cx R5-F2); same
+# rationale as C4's identical extraction above and approve-idempotency.sh's A2.
 D5_REMEDY="$FD5/.claude/.qa-tracking/d5-printed-remediation.txt"
-printf '%s\n' "$D5_REASON" | grep -E '^[[:space:]]*bash \.claude/scripts/' \
+printf '%s\n' "$D5_REASON" | sed '/^WHAT THIS GATE RAN, EXACTLY\.$/,$d' \
+    | grep -E '^[[:space:]]*bash \.claude/scripts/' \
     | sed 's/^[[:space:]]*//' > "$D5_REMEDY"
 assert_eq "denylist-D5: the migration block prints a 3-command remediation" \
     "3" "$(grep -c . "$D5_REMEDY" | tr -d '[:space:]')"

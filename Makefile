@@ -2,12 +2,13 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help session test test-component test-all test-linux test-linux-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test clean
+.PHONY: help session test test-fast test-component test-all test-linux test-linux-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test clean
 
 help:
 	@echo "Targets:"
 	@echo "  session           — launch Claude at the recorded effort verdict (.claude/effort-verdict; see docs/EFFORT-AB-TEST.md)"
 	@echo "  test              — run the plugin's bash test suite (L1 unit)"
+	@echo "  test-fast         — run a CONSEQUENCE-selected subset of L1 (Stop-hook budget; claude-workflow-plugin-yzo9; NOT a substitute for 'test')"
 	@echo "  test-component    — run hook-pipeline component tests (L2; Phase B)"
 	@echo "  test-all          — run L1 unit + L2 component tiers (offline; CI-friendly)"
 	@echo "  test-linux        — run the L1 tier inside a Linux container (GNU tooling; needs docker)"
@@ -41,6 +42,96 @@ session:
 
 test:
 	bash .claude/scripts/tests/run-tests.sh
+
+# test-fast (claude-workflow-plugin-yzo9) — a SUBSET of the L1 tier, chosen by
+# CONSEQUENCE, not by speed, and it is this repo's own Stop-hook TEST_CMD
+# override (.claude/test-cmd) from here on, not merely an offered convenience.
+#
+# WHY THIS EXISTS. `make test` measures 1731s/1777s uncontended (two
+# independent runs, this session) against settings.json's Stop-hook wall-clock
+# ceiling of 1320s (.claude/settings.json, hooks.Stop[0].hooks[0].timeout) --
+# 1731 > 1320, so the full suite CANNOT complete inside a Stop no matter how
+# verify-before-stop.sh's own internal TEST_TIMEOUT_S is tuned (see that
+# constant's own header for why it must stay below the external cap rather
+# than be raised to try to cover the suite). The operator's decision: narrow
+# the Stop tier rather than raise the external cap (which would turn every
+# Stop-with-unapproved-changes into a 30-40 minute wait -- worse than the
+# problem) or leave both (a permanently-red, ignored gate).
+#
+# THE SELECTION, justified file by file, not just by budget:
+#   review-check.test.sh, impact-report.test.sh, qa-gate-choose.test.sh,
+#     qa-gate-lock-recovery.test.sh, qa-gate-pipefail.test.sh --
+#     review-check.sh, impact-report.sh and qa-gate.sh's own core commands
+#     (choose/enter/approve's lock recovery, the i8cx pipefail-in-the-
+#     evidence-chain defect class) are three of the four "gate scripts" this
+#     task names directly; a defect in any of them changes whether a release
+#     is actually safe, which is exactly what a NARROWED Stop tier most needs
+#     to keep catching.
+#   gate-claim-honesty.test.sh, run-with-timeout.test.sh, scoped-log-dir.test.sh,
+#     tree-lease.test.sh -- the fourth "gate script" (verify-before-stop.sh
+#     itself) and the machinery THIS task's own change touches or depends on:
+#     gate-claim-honesty pins the checks_scope_claim/checks_scope_note
+#     disclosure this task extends with override-awareness; run-with-timeout
+#     pins the dispatch mechanism that will run whatever TEST_CMD this file
+#     resolves to, override or not; scoped-log-dir and tree-lease cover the
+#     per-run log/lease bookkeeping in the same dispatch region.
+#   override-disclosure.test.sh -- direct coverage of yzo9's own two fixes
+#     (the override disclosure this comment describes, and detect-stack.sh's
+#     read_override fail-open correction this narrowing now depends on for
+#     real, every Stop, not hypothetically).
+#   denylist-source.test.sh, review-count.test.sh, reviewer-lane-structural.test.sh,
+#     qa-impact-of-cue.test.sh -- cheap (each well under two seconds
+#     uncontended) structural guards on the change-set membership rule, the
+#     review-resolution predicate, and two prompt-surface regressions that
+#     previously survived multiple green verification passes specifically
+#     because their only guard ran at a wider cadence than the violation --
+#     the exact failure mode a NARROWED tier risks reintroducing if it is not
+#     careful about what "cheap but load-bearing" means.
+# Deliberately EXCLUDED: the design-workflow specs (design-*, plan-batches,
+# grilling-record), packaging/installer/mcp-deps parity, and the remaining
+# qa-gate-grade-record.test.sh / review-separation.test.sh (each independently
+# measured over 200s under contention elsewhere in this repo's own test
+# history) -- real coverage, but peripheral to "did this Stop's release
+# decision stay safe", and expensive enough to defeat the point of a fast
+# tier if included.
+#
+# MEASURED 2026-08-27, HEAD 2eced52 + claude-workflow-plugin-yzo9 (uncommitted;
+# other specialists' wave-2 work concurrently active in the same tree AND a
+# separate verify-before-stop.sh + run-tests.sh pair observed still running
+# from an earlier lease age_s=617 during one of these runs -- so none of these
+# are clean-machine numbers). THREE full `make test-fast` runs, in order:
+#   1. 13 of these 14 files (override-disclosure.test.sh did not exist yet):
+#      ~240s, rc=1 -- run-tests.sh's own STORE-CANARY guard fired on
+#      qa-gate-choose.test.sh ("contaminated the protected Beads store:
+#      advanced by 4 commit(s)"). Consistent with the guard's own documented
+#      inability to distinguish a spec's own write from a concurrent writer
+#      landing in the same window (run-tests.sh's STORE-CANARY-BEGIN
+#      comment) -- this ran while another Stop hook's own verify-before-
+#      stop.sh was independently active (see the lease note above).
+#   2. Same 13 files, immediate re-run: 235s, rc=0, clean -- the contamination
+#      did not reproduce, consistent with a one-off concurrent write rather
+#      than a defect in the spec.
+#   3. All 14 files (override-disclosure.test.sh added): 212s, rc=0, clean --
+#      the number this file's own header cites.
+# Budget was <=300s target / 600s hard ceiling: met on all three (even run 1's
+# ~240s), but with less margin than the individual per-spec sum (~207s, timed
+# spec-by-spec outside this harness) suggested -- run-tests.sh's own per-spec
+# overhead (STORE-CANARY hashing, lease bookkeeping) and general contention
+# account for the rest. qa-gate-choose.test.sh's STORE-CANARY exposure is a
+# property of run-tests.sh watching the live .beads store for ANY spec, not
+# of this selection -- but narrowing the tier means it now runs on EVERY
+# Stop instead of inside a `make test` that rarely finished at all, which
+# raises the ABSOLUTE number of windows it can land in. A hit blocks (fails
+# closed), never passes silently; the recovery is re-running the Stop.
+#
+# `--filter` DISARMS the L1 completeness floor and this recipe inherits that
+# disclosure unmodified (run-tests.sh:236-250: "the runner says the floor is
+# disarmed rather than pretending the subset describes the tier"). This
+# target is NOT a substitute for `make test` -- it is what the Stop hook can
+# afford to run on every iteration; the full tier remains the pre-commit and
+# CI gate.
+test-fast:
+	bash .claude/scripts/tests/run-tests.sh --filter 'review-check\.test\.sh\|impact-report\.test\.sh\|run-with-timeout\.test\.sh\|gate-claim-honesty\.test\.sh\|qa-gate-choose\.test\.sh\|qa-gate-lock-recovery\.test\.sh\|qa-gate-pipefail\.test\.sh\|scoped-log-dir\.test\.sh\|denylist-source\.test\.sh\|review-count\.test\.sh\|tree-lease\.test\.sh\|reviewer-lane-structural\.test\.sh\|qa-impact-of-cue\.test\.sh\|override-disclosure\.test\.sh'
 
 # Component tier (Phase B). The runner discovers specs under
 # .claude/tests/component/specs/ and pre-sources the lib/ helpers. Specs

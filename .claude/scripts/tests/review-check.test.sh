@@ -271,7 +271,21 @@ assert_eq "qzv.1 coupling: subagent-start.sh anchors it identically" "1" \
 # Both carriers must also keep the THREE-answer contract, because collapsing
 # 'unparseable' into '' is the one drift that flips a refusal into an approval:
 # "no record" is safe, "a record I cannot read" is not.
-assert_eq "qzv.1 coupling: review-check.sh still distinguishes unparseable from absent" "1" \
+#
+# i8cx wave 2: review-check.sh's count moved from 1 to 2 (a SECOND, legitimate
+# `printf 'unparseable'` site, guarding a file-read failure in the grep that
+# materialises `lines` -- see max_record_ts's header). subagent-start.sh's
+# sibling extraction, max_record_ts_in, stays at 1 and is NOT expected to grow
+# a matching branch: it reads an already-in-memory string via
+# `printf '%s\n' "$1" | grep -E "$2"`, never a file, so it structurally cannot
+# hit the failure mode the new review-check.sh branch guards against (same
+# "printf-producer, cannot meaningfully fail" reasoning the i8cx audit applies
+# throughout). The counts diverging is the expected shape now, not a drift the
+# coupling this section pins should paper over — what both files still share,
+# and what this pair of assertions actually verifies, is that EACH can still
+# reach 'unparseable' at least once (>= 1), the property the comment above
+# names.
+assert_eq "qzv.1 coupling: review-check.sh still distinguishes unparseable from absent (2 sites since i8cx wave 2 — see comment above)" "2" \
     "$(grep -c "printf 'unparseable'" "$RCHECK" | tr -d '[:space:]')"
 assert_eq "qzv.1 coupling: subagent-start.sh still distinguishes unparseable from absent" "1" \
     "$(grep -c "printf 'unparseable'" "$SUBAGENT_START" | tr -d '[:space:]')"

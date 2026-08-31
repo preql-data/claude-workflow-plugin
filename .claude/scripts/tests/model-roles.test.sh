@@ -1702,6 +1702,172 @@ assert_eq "12M.6 RESTORE CONTROL: ...nor to settings.json" \
 
 # ===========================================================================
 echo ""
+echo "=== Section 13: a ranking-file READ FAILURE must not masquerade as \"no ranking file\" (claude-workflow-plugin-i8cx wave 2) ==="
+#
+# THE HAZARD. load_ranking_raw's sed stage used to be the LEFT side of a raw
+# pipe (`sed ... | grep -v '^$'`), and load_exclusions/load_tiers piped THAT
+# straight into another filter (`awk` / `grep -v '^!'`). Without pipefail the
+# pipe's exit status is whichever of those LAST stages happened to exit —
+# both routinely exit 0 (or a 1 that already means "legitimately no lines",
+# not "upstream broke") regardless of whether sed actually ran. pick_best
+# then fed the result into `jq -R -s`, which succeeds on EMPTY input too
+# (`[]`), so a masked sed failure on an EXISTING ranking file was silently
+# indistinguishable from "no ranking file configured": class_for() puts
+# every candidate in the top class and excluded() drops nothing — the en9
+# defect (recency-only ordering) reachable through a masked pipeline instead
+# of a masked jq. MEASURED, and the reason scoped pipefail alone would not
+# have been enough for load_tiers's `grep -v` tail:
+#   ( set -o pipefail; false | grep -v x ); echo $?      # -> 1
+#   ( set -o pipefail; printf 'a\n' | grep -v x ); echo $?  # -> 1 (from the a
+#                                                              line NOT matching)
+# both a real upstream failure and a legitimate zero-survivors read report the
+# SAME code once the last stage has its own no-match convention — so the fix
+# captures load_ranking_raw's own rc directly (an unpiped, solo `sed`) instead
+# of inferring it from a downstream filter.
+
+# rank_sandbox — a real two-tier exclusion+tier ranking file (haiku excluded,
+# fable > mythos) and a fresh cache with one candidate per family, dated so
+# recency ALONE would pick the WRONG one (the newest is the excluded haiku) —
+# that is what proves the ranking file is actually being read, not merely
+# present on disk.
+rank_sandbox() {
+    local d
+    d=$(new_sandbox)
+    printf '!claude-haiku\nclaude-fable\nclaude-mythos\n' > "$d/.claude/model-ranking"
+    cat > "$d/.claude/.qa-tracking/model-select-cache.json" <<JSON
+{"timestamp": $(date +%s), "models": [
+  {"id":"claude-fable-2","max_input_tokens":200000,"created_at":"2026-06-01T00:00:00Z"},
+  {"id":"claude-mythos-3","max_input_tokens":200000,"created_at":"2026-07-01T00:00:00Z"},
+  {"id":"claude-haiku-9","max_input_tokens":200000,"created_at":"2026-08-01T00:00:00Z"}]}
+JSON
+    printf '%s' "$d"
+}
+
+# resolve_id <sandbox> [path-prefix] — the picked id from `resolve`.
+resolve_id() {
+    CLAUDE_PROJECT_DIR="$1" PATH="${2:-}${2:+:}$PATH" bash "$MS" resolve 2>/dev/null \
+        | awk -F'\t' '{print $1}'
+}
+# resolve_warn <sandbox> [path-prefix] — resolve's stderr only.
+#
+# shellcheck disable=SC2069  # intentional: send stderr to THIS function's own
+# stdout (its caller's $(...) capture) and discard resolve's real stdout to
+# /dev/null. shellcheck's "2>&1 must be last" heuristic assumes the goal is
+# combining both streams into one FILE; here the goal is routing them to two
+# DIFFERENT places, which is what this order does correctly. The identical
+# order is used inline (not behind a function) at every other `2>&1
+# >/dev/null` call site in this file and shellcheck does not flag those,
+# because it can see straight through to their enclosing $(...) — it cannot
+# see through a function-call boundary, which is the only difference here.
+resolve_warn() {
+    CLAUDE_PROJECT_DIR="$1" PATH="${2:-}${2:+:}$PATH" bash "$MS" resolve 2>&1 >/dev/null
+}
+
+# 13.1 CONTROL — healthy ranking file, no fault injection: tier beats
+# recency (fable, not the newer-but-lower-tier mythos) and the excluded
+# family (haiku, the newest of all three) never wins. Establishes the
+# fixture is sound before any fault is injected.
+SB_131=$(rank_sandbox)
+assert_eq "13.1 control: tier + exclusion respected, fable wins over newer mythos/haiku" \
+    "claude-fable-2" "$(resolve_id "$SB_131")"
+
+# 13.2 MUTATION — fault injection against the SHIPPED script (not a source
+# mutation: the guard under test is a runtime rc check, so only a runtime
+# failure can trip it). A `sed` on PATH ahead of the real one that behaves
+# like a genuine read failure: nothing on stdout, non-zero exit — the SAME
+# ranking file and cache are left untouched underneath it.
+FAULT_BIN_13=$(mktemp -d "$TESTROOT/fault-sed-13.XXXXXX")
+FAULT_LOG_13="$TESTROOT/fault-sed-13.log"
+: > "$FAULT_LOG_13"
+cat > "$FAULT_BIN_13/sed" <<STUB
+#!/bin/bash
+printf 'invoked\n' >> "$FAULT_LOG_13"
+exit 9
+STUB
+chmod +x "$FAULT_BIN_13/sed"
+
+SB_132=$(rank_sandbox)
+PICK_132=$(resolve_id "$SB_132" "$FAULT_BIN_13")
+WARN_132=$(resolve_warn "$SB_132" "$FAULT_BIN_13")
+assert_eq "13.2 non-vacuity: the fault-injected sed was actually invoked" \
+    "yes" "$([ -s "$FAULT_LOG_13" ] && echo yes || echo no)"
+# SPECIFIC misbehaviour: the masked read is not merely cosmetic. It reverts
+# to recency-only ordering, so the EXCLUDED, newest-of-three haiku model
+# wins over the correctly-ranked fable — same as if no ranking file existed.
+assert_eq "13.2 SPECIFIC: read failure degrades to recency-only (excluded/newest haiku wins, matching \"no ranking file\")" \
+    "claude-haiku-9" "$PICK_132"
+# ...but is fail-open, per spec 0.3 principle 1 (never block selection): a
+# candidate IS still resolved, not an empty string or a crash.
+assert_eq "13.2 fail-open: a candidate is still resolved (not blocked)" \
+    "yes" "$([ -n "$PICK_132" ] && echo yes || echo no)"
+# THE FIX ITSELF: unlike the pre-i8cx-wave-2 shape, the failure is now named
+# on stderr rather than silent — twice, once per read (exclusions, tiers).
+assert_contains "13.2 THE FIX: names the exclusions read failure" \
+    "could not read" "$WARN_132"
+assert_contains "13.2 THE FIX: ...and specifically calls out exclusions" \
+    "for exclusions" "$WARN_132"
+assert_contains "13.2 THE FIX: ...and specifically calls out capability tiers" \
+    "for capability tiers" "$WARN_132"
+# The warning must say this is a READ FAILURE, not "no ranking file" — an
+# operator debugging a wrong pin needs to know these are different problems.
+assert_contains "13.2 THE FIX: distinguishes read-failed from missing/empty" \
+    "not a missing/empty file" "$WARN_132"
+
+# 13.3 RESTORE CONTROL — same sandbox, fault-injected sed removed: tier
+# ranking resumes and the warning is gone.
+PICK_133=$(resolve_id "$SB_132")
+WARN_133=$(resolve_warn "$SB_132")
+assert_eq "13.3 RESTORE CONTROL: shim removed, same sandbox, fable wins again" \
+    "claude-fable-2" "$PICK_133"
+assert_not_contains "13.3 RESTORE CONTROL: no 'could not read' warning on the healthy path" \
+    "could not read" "$WARN_133"
+
+# 13.4 A LEGITIMATE empty ranking file (comments/blank only — an operator who
+# has not configured anything yet) must NOT be conflated with a read
+# failure: no warning, matching pre-i8cx behaviour exactly.
+SB_134=$(new_sandbox)
+printf '# nothing configured yet\n\n' > "$SB_134/.claude/model-ranking"
+cat > "$SB_134/.claude/.qa-tracking/model-select-cache.json" <<JSON
+{"timestamp": $(date +%s), "models": [
+  {"id":"claude-fable-2","max_input_tokens":200000,"created_at":"2026-06-01T00:00:00Z"}]}
+JSON
+WARN_134=$(resolve_warn "$SB_134")
+assert_not_contains "13.4 legitimate-empty (comments-only) ranking file does not warn 'could not read'" \
+    "could not read" "$WARN_134"
+assert_eq "13.4 legitimate-empty ranking file still resolves the sole candidate" \
+    "claude-fable-2" "$(resolve_id "$SB_134")"
+
+# 13.5-META — strip the rc-guard from a COPY of the shipped script and prove
+# the ORIGINAL bug returns: the same fault injection is masked SILENTLY
+# again. A permanent regression guard against the fix being reverted or
+# "simplified" back into a bare pipe.
+#
+# NON-VACUITY: awk exits 7 unless EXACTLY one copy of the guard line is
+# found — a strip that matched zero or several lines would produce a mutant
+# that is not the intended one, or not one at all.
+MUT13_DIR=$(mktemp -d "$TESTROOT/rankmut.XXXXXX")
+MUT13="$MUT13_DIR/model-select.sh"
+awk '/^    \[ "\$rc" -eq 0 \] \|\| return 2$/ { found++; next } { print }
+     END { if (found != 1) exit 7 }' "$MS" > "$MUT13"
+AWK_RC_135=$?
+assert_eq "13.5-META non-vacuity: exactly one rc-guard line stripped from load_ranking_raw" "0" "$AWK_RC_135"
+assert_eq "13.5-META non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT13" "$MS" && echo same || echo differs)"
+assert_eq "13.5-META non-vacuity: the mutant still parses (fails for its own reason, not a syntax error)" \
+    "0" "$(bash -n "$MUT13" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT13"
+
+SB_135=$(rank_sandbox)
+MUT_PICK_135=$(CLAUDE_PROJECT_DIR="$SB_135" PATH="$FAULT_BIN_13:$PATH" bash "$MUT13" resolve 2>/dev/null \
+    | awk -F'\t' '{print $1}')
+MUT_WARN_135=$(CLAUDE_PROJECT_DIR="$SB_135" PATH="$FAULT_BIN_13:$PATH" bash "$MUT13" resolve 2>&1 >/dev/null)
+assert_eq "13.5-META SPECIFIC: with the guard stripped, the same fault injection is masked again (haiku wins, the original bug)" \
+    "claude-haiku-9" "$MUT_PICK_135"
+assert_not_contains "13.5-META SPECIFIC: ...with NO warning at all -- the exact silent failure this section exists to close" \
+    "could not read" "$MUT_WARN_135"
+
+# ===========================================================================
+echo ""
 echo "=== Section 11: bd isolation holds for the file that used to be CAN-REACH(WRITE) (claude-workflow-plugin-j7kk) ==="
 #
 # Non-vacuity FIRST: the stub log must be non-empty, or "isolation held"

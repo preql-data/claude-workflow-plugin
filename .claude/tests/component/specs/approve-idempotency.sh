@@ -234,9 +234,25 @@ assert_contains "approve-idem-A1: ...on the LABEL_WITHOUT_RECORD branch" \
     "no change-set-bound approval record matches" "$A_REASON"
 
 # Extract every `bash .claude/scripts/...` line from the reason, in order, and
-# run exactly those.
+# run exactly those. Bounded to BEFORE the disclosure tail checks_scope_note
+# appends (claude-workflow-plugin-i8cx R5-F2): that function's own
+# broader_verification_note() prints a separate, generic "record a broader
+# verification run" suggestion whenever the ledger is empty (the case in this
+# fixture, which never calls record-verification), and its example line
+# (`... record-verification '<command>' <exit-code>`) also matches this grep
+# even though it is advisory boilerplate about an unrelated axis, not a step
+# in "the WHOLE recipe" the block text closes above it. Verified live: A4
+# below still releases the gate having run only the 3 lines this bound
+# extracts, and the unbounded 4th line would misparse if actually eval'd —
+# `<exit-code>` is unquoted, unlike the two placeholders this spec DOES
+# substitute ($CURRENT_TASK, '<approval summary>'), so bash reads it as an
+# input redirection from a file named exit-code rather than a placeholder.
+# "WHAT THIS GATE RAN, EXACTLY." is checks_scope_note's own first line, shared
+# by all three emit_block sites it was added to, so this bound is not
+# specific to the LABEL_WITHOUT_RECORD wording tested here.
 REMEDY_FILE="$FA/.claude/.qa-tracking/printed-remediation.txt"
-printf '%s\n' "$A_REASON" | grep -E '^[[:space:]]*bash \.claude/scripts/' \
+printf '%s\n' "$A_REASON" | sed '/^WHAT THIS GATE RAN, EXACTLY\.$/,$d' \
+    | grep -E '^[[:space:]]*bash \.claude/scripts/' \
     | sed 's/^[[:space:]]*//' > "$REMEDY_FILE"
 assert_eq "approve-idem-A2: the block prints a 3-command remediation" \
     "3" "$(grep -c . "$REMEDY_FILE" | tr -d '[:space:]')"
@@ -887,8 +903,12 @@ ct "$FR" set "$TID_R" >/dev/null 2>&1
 assert_eq "approve-idem-H2: ...and the gate still blocks (nothing was released on a stale binding)" \
     "block" "$(stop_decision "$FR")"
 # H3. The printed remediation — all three lines — still recovers this state.
+# Bounded before the checks_scope_note disclosure tail, same reasoning as A2's
+# extraction above (i8cx R5-F2's broader_verification_note "record one"
+# suggestion is not part of this recipe).
 H3_REMEDY="$FR/.claude/.qa-tracking/printed-remediation.txt"
 printf '%s\n' "$(json_field "$(stop_json "$FR")" '.reason')" \
+    | sed '/^WHAT THIS GATE RAN, EXACTLY\.$/,$d' \
     | grep -E '^[[:space:]]*bash \.claude/scripts/' | sed 's/^[[:space:]]*//' > "$H3_REMEDY"
 assert_eq "approve-idem-H3: the still-blocking Stop prints the same 3-command remediation" \
     "3" "$(grep -c . "$H3_REMEDY" | tr -d '[:space:]')"

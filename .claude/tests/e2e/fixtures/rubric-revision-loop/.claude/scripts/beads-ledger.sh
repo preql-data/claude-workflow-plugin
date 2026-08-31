@@ -136,16 +136,33 @@ SUBCOMMAND=""
 
 # sha256 of a file, portable across macOS (shasum) and Linux (sha256sum).
 # Same two-branch idiom impact-report.sh uses; empty output on failure.
+#
+# i8cx: scoped pipefail on both branches. `awk '{print $1}'` is LAST in each
+# pipe and virtually never fails on its own, so without this a failing
+# shasum/sha256sum (present on PATH but erroring on THIS file — a transient
+# read error, not "tool absent") was masked: awk got empty or partial input
+# and printed whatever field 1 of whatever partial line survived, which could
+# look like a plausible-but-wrong hash rather than the honest empty string
+# `cmd_check`'s `[ -z "$fresh_sha" ]` guard is built to catch. Neither awk
+# invocation has an "expected nonzero" shape, so wrapping the whole pipe is
+# safe — no spurious trip.
 sha256_file() {
     local f="$1"
     [ -f "$f" ] || { printf ''; return 0; }
+    local out="" rc=0
     if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$f" 2>/dev/null | awk '{print $1}'
+        out=$( set -o pipefail; shasum -a 256 "$f" 2>/dev/null | awk '{print $1}' ) || rc=$?
     elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$f" 2>/dev/null | awk '{print $1}'
+        out=$( set -o pipefail; sha256sum "$f" 2>/dev/null | awk '{print $1}' ) || rc=$?
     else
         printf ''
+        return 0
     fi
+    if [ "$rc" -ne 0 ]; then
+        printf ''
+        return 0
+    fi
+    printf '%s' "$out"
 }
 
 # Record count of a file, or 0 when it does not exist. A bare
@@ -153,10 +170,23 @@ sha256_file() {
 # directory" to stderr, which no `2>/dev/null` on the command can suppress —
 # and a hook that leaks that line looks broken on the one path where the ledger
 # is most legitimately absent.
+#
+# i8cx: scoped pipefail — `wc -l < file` is a single redirected command (not
+# itself piped), but its OWN output still passes through `tr -d ' '`, so a
+# `wc` that fails after opening the file (an I/O error, not "file missing" —
+# already handled above) was masked into an empty display value by `tr`'s
+# trivial success. Callers only ever interpolate this for DISPLAY
+# (`${dn:-?}`) or compare against the literal string "0" in a branch that
+# already resolves the failure-shaped case toward the safe "stale" verdict
+# (see cmd_check), so this tightens the contract without changing any
+# decision polarity.
 count_lines() {
     local f="$1"
     [ -f "$f" ] || { printf '0'; return 0; }
-    wc -l < "$f" 2>/dev/null | tr -d ' '
+    local out="" rc=0
+    out=$( set -o pipefail; wc -l < "$f" 2>/dev/null | tr -d ' ' ) || rc=$?
+    [ "$rc" -eq 0 ] || { printf ''; return 0; }
+    printf '%s' "$out"
 }
 
 # The ledger path. bd's own default is .beads/issues.jsonl and both a fresh
@@ -267,11 +297,27 @@ export_to() {
 # code never performed; sorting keys recursively would remove a false-refusal
 # that has never been observed, at the cost of real complexity in the one
 # function whose correctness the whole refusal contract rests on.
+# i8cx: scoped pipefail — `sort` is LAST, so a failing `jq` (present on PATH
+# but crashing on THIS file: OOM, a corrupted binary, a pathological input)
+# was previously masked into an empty-but-successful record set, which is
+# indistinguishable from "this file genuinely has zero records". classify()
+# below now checks THIS function's own exit status before trusting `$lm`/
+# `$fm` — an empty result from a genuine jq/sort failure on one side used to
+# fall through to "every ledger record is accounted for" (db-ahead), which is
+# the exact verdict that authorises `export --apply` to DISCARD the ledger.
+# Neither jq nor sort has an "expected nonzero" shape here (jq's own
+# `fromjson?`/`select` never signal via exit code; sort with no `-c` doesn't
+# either), so wrapping the whole pipe is safe. The subshell IS the function
+# body (last statement), so its exit code becomes record_meta's own — no
+# `local -`/manual pipefail restore needed on bash 3.2.
 record_meta() {
     [ -f "$1" ] || return 0
-    jq -rR 'fromjson? | select(.id != null)
-            | [ .id, ((.comments // []) | length), (.updated_at // ""), (. | tojson) ]
-            | @tsv' "$1" 2>/dev/null | sort -k1,1
+    local file="$1"
+    ( set -o pipefail
+      jq -rR 'fromjson? | select(.id != null)
+              | [ .id, ((.comments // []) | length), (.updated_at // ""), (. | tojson) ]
+              | @tsv' "$file" 2>/dev/null | sort -k1,1
+    )
 }
 
 # parse_failures <jsonl> — count of NON-BLANK lines that do not yield a JSON
@@ -280,11 +326,28 @@ record_meta() {
 # conflict marker, a truncated write, a half-flushed export. Classifying on a
 # partial view is exactly the "cannot classify" case, so this forces a refusal
 # instead of a confident wrong answer.
+# i8cx: jq is a FALLIBLE PRODUCER here, but the tail is `grep -c .`, whose
+# INTENTIONAL nonzero (rc 1 on zero matches) is the common, healthy case —
+# most files have zero bad lines. Blanket `set -o pipefail` over the whole
+# pipe would make classify() misread every clean file as a jq failure, so the
+# fallible stage is split into its own guarded step first (never combined
+# with the intentional-nonzero counter under one pipefail scope), matching
+# the "scope or restructure, never blanket" rule. On a genuine jq failure —
+# not "zero bad lines" (rc 0, empty output, handled below) — this reports the
+# file as (at least) one problem rather than let the caller's `-gt 0` test
+# silently read an unmeasured file as clean.
 parse_failures() {
-    [ -f "$1" ] || { printf '0'; return 0; }
-    jq -rR 'select((. | gsub("^[[:space:]]+|[[:space:]]+$"; "")) != "")
+    local f="$1"
+    [ -f "$f" ] || { printf '0'; return 0; }
+    local out="" rc=0
+    out=$(jq -rR 'select((. | gsub("^[[:space:]]+|[[:space:]]+$"; "")) != "")
             | if ((fromjson? | objects | .id?) // null) == null then "bad" else empty end' \
-        "$1" 2>/dev/null | grep -c . | tr -d ' '
+        "$f" 2>/dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf '1'
+        return 0
+    fi
+    printf '%s' "$out" | grep -c . | tr -d ' '
 }
 
 # classify <ledger> <fresh-db-export> — prints "<verdict><TAB><detail>" where
@@ -338,12 +401,44 @@ classify() {
     local lm fm
     lm=$(mktemp -t bd-ledger-lm.XXXXXX 2>/dev/null) || { printf 'indeterminate\t%s' "could not create a temp file for the comparison"; return 0; }
     fm=$(mktemp -t bd-ledger-fm.XXXXXX 2>/dev/null) || { rm -f "$lm"; printf 'indeterminate\t%s' "could not create a temp file for the comparison"; return 0; }
-    record_meta "$ledger" > "$lm"
-    record_meta "$fresh"  > "$fm"
+    # i8cx: record_meta's own exit status is now checked (it propagates
+    # jq/sort's rc via a scoped-pipefail subshell — see its definition). An
+    # unchecked failure here used to leave $lm/$fm silently EMPTY, and an
+    # empty $lm compares as "every ledger record is accounted for" below —
+    # the exact verdict that authorises `export --apply` to discard the
+    # ledger. Refusing here is what closes that path.
+    if ! record_meta "$ledger" > "$lm"; then
+        rm -f "$lm" "$fm"
+        printf 'indeterminate\t%s' "could not read/parse the ledger's own records for comparison (jq or sort failed over $ledger)"
+        return 0
+    fi
+    if ! record_meta "$fresh" > "$fm"; then
+        rm -f "$lm" "$fm"
+        printf 'indeterminate\t%s' "could not read/parse the database export's records for comparison (jq or sort failed over $fresh)"
+        return 0
+    fi
 
     # Records the database has never seen. Unambiguous, and the loudest case.
+    #
+    # i8cx: `comm` is the fallible producer; `head -5` is a LIMITER, not an
+    # intentional-nonzero stage (head exits 0 whether it reads all input or
+    # stops early) — but `comm`'s own SIGPIPE risk when `head` closes early on
+    # a large diff is exactly the measured trap ("seq | head -1" -> rc 141,
+    # nondeterministic by data size). So `comm`'s full output is captured and
+    # rc-checked FIRST, on its own, and `head -5` is applied AFTERWARDS to the
+    # already-materialised in-memory string — which can never SIGPIPE a
+    # process that has already exited. (The two `cut`s ride inside process
+    # substitutions reading files this function just wrote seconds ago; a
+    # residual — see the completion report.)
+    local comm_out="" lo_rc=0
+    comm_out=$(comm -23 <(cut -f1 "$lm") <(cut -f1 "$fm") 2>/dev/null) || lo_rc=$?
+    if [ "$lo_rc" -ne 0 ]; then
+        rm -f "$lm" "$fm"
+        printf 'indeterminate\t%s' "comm -23 over the ledger/database record-id lists failed (rc $lo_rc), so ledger-only records could not be enumerated"
+        return 0
+    fi
     local ledger_only
-    ledger_only=$(comm -23 <(cut -f1 "$lm") <(cut -f1 "$fm") 2>/dev/null | head -5 | tr '\n' ' ')
+    ledger_only=$(printf '%s' "$comm_out" | head -5 | tr '\n' ' ')
     if [ -n "$(printf '%s' "$ledger_only" | tr -d '[:space:]')" ]; then
         printf 'ledger-ahead\t%s' "record(s) present in the ledger and MISSING from the database: ${ledger_only}"
         rm -f "$lm" "$fm"; return 0
@@ -366,15 +461,30 @@ classify() {
     #
     # So: more comments in the ledger than in the database is, on its own,
     # disqualifying. No later leg may overturn it.
-    local unproven
-    unproven=$(join -t "$(printf '\t')" -j 1 "$lm" "$fm" 2>/dev/null \
+    #
+    # i8cx: same restructuring as ledger_only above. `join` is the fallible
+    # producer and has NO intentional-nonzero shape here (both $lm/$fm are
+    # already sorted by record_meta, so this is never an unsorted-input
+    # warning path); `awk`'s next/print rules never affect its own exit
+    # status either, so `join | awk` is safe to wrap in one pipefail scope.
+    # `head -5` is again deferred to the already-materialised string so it
+    # can never SIGPIPE the real producer on a large diff.
+    local ja_out="" ja_rc=0
+    ja_out=$( set -o pipefail; join -t "$(printf '\t')" -j 1 "$lm" "$fm" 2>/dev/null \
         | awk -F'\t' '
             $4 == $7            { next }               # canonically identical
             ($2 + 0) > ($5 + 0) { print $1; next }     # GUARD: ledger holds comments the DB lacks
             ($6 != "" && $3 != "" && $6 > $3) { next } # database strictly newer
             ($5 + 0) > ($2 + 0) { next }               # database has more comments
             { print $1 }
-          ' | head -5 | tr '\n' ' ')
+          ' ) || ja_rc=$?
+    if [ "$ja_rc" -ne 0 ]; then
+        rm -f "$lm" "$fm"
+        printf 'indeterminate\t%s' "join/awk over the shared ledger/database records failed (rc $ja_rc), so per-record evidence could not be evaluated"
+        return 0
+    fi
+    local unproven
+    unproven=$(printf '%s' "$ja_out" | head -5 | tr '\n' ' ')
     if [ -n "$(printf '%s' "$unproven" | tr -d '[:space:]')" ]; then
         printf 'indeterminate\t%s' "record(s) differ with no proof the database loses nothing — either the LEDGER holds comments the database lacks (a pulled gate record), or the two differ with no evidence of direction at all (a label, a dependency, edited comment text): ${unproven}"
         rm -f "$lm" "$fm"; return 0

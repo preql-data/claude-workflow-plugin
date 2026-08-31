@@ -848,7 +848,26 @@ makes every agent invisible to the SDK with no error surfaced."
                 || problems="$problems ${rel}:no-${key};"
         done
 
-        tools_line=$(printf '%s\n' "$fm" | sed -n 's/^tools:[[:space:]]*//p' | head -1)
+        # tools_line extraction BEGIN (i8cx wave 2)
+        #
+        # Reuse the SAME reliable predicate the key-presence loop above just
+        # ran for key=tools (printf | grep -q, grep last, in-memory producer —
+        # not masking-vulnerable) rather than inferring "tools: absent" from
+        # an empty tools_line. Without this, a masked sed/head failure on the
+        # THREE-stage extraction pipeline below is indistinguishable from a
+        # genuinely-absent tools: line, and both silently `continue` past the
+        # bd-grant check on a CORE agent — a failed read reading as a clean
+        # exemption, the exact defect class this phase exists to close, sitting
+        # inside the one check whose whole job is to verify bd MCP grants.
+        tools_line=""
+        if printf '%s\n' "$fm" | grep -q '^tools:'; then
+            if ! tools_line=$( (set -o pipefail
+                    printf '%s\n' "$fm" | sed -n 's/^tools:[[:space:]]*//p' | head -1) ); then
+                problems="$problems ${rel}:tools-line-present-but-unreadable;"
+                continue
+            fi
+        fi
+        # tools_line extraction END (i8cx wave 2)
         # An absent `tools:` line inherits every tool (per the sub-agents doc),
         # so there is no allowlist to audit; the missing-key problem above
         # already reported it.

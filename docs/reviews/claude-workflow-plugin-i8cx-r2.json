@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "0991bac2392964a95628c048e95cb5bfde683b64b05bb0f0f7434d5ef64f25fe",
+  "risk_threshold": "high",
+  "stop_condition": "Stop when each of the six numbered claims has been adjudicated against the diff as confirmed or refuted with a concrete failure path, and no unadjudicated high-or-critical finding remains in the reviewer-independence check, the DESIGN-CONFLICT reader, or the Stop-hook override disclosure. Scope is the three gate-critical scripts only; the remaining 35 reviewable paths are explicitly out of this round and their absence is not coverage.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:1552",
+      "evidence": "The initial grep status is checked, but the subsequent `printf | sed | sort -u` assignment ignores its exit status. With `sort` returning 9 and no output, the observed state is `impl_lines=''` and `INDEPENDENT=true`; an upstream sed failure is likewise maskable by a successful empty sort.",
+      "description": "Reviewer independence still fails open when construction of the implementer set fails after the file read. A reviewer who is also an implementer can pass because the failed transformation is interpreted as an empty implementer set. The clean grep rc=1 documentation case does pass correctly, and direct consumers reject the new `implementer_set_unreadable` key, but those facts do not cover this remaining failure path."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:4585",
+      "evidence": "The new conflict check is deliberately restricted to `cmd_approve`; it is not part of `compute_design_satisfied`. The Stop release recheck invokes `design-gate-precheck`, which only calls `compute_design_satisfied` at verify-before-stop.sh:5869.",
+      "description": "An approval can be recorded while no conflict exists, followed by an implementer posting `DESIGN-CONFLICT U1 design_hash=<current-hash>`. Because that Beads-only change does not move the change-set hash and the Stop recheck never invokes the conflict reader, the matching approval remains releasable despite the newly open conflict."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:9903",
+      "evidence": "The reader keeps only records whose whole-artifact `design_hash` equals the current verdict hash; every unequal record is treated as cleared. The writer also accepts any caller-supplied `[A-Za-z0-9-]+` hash without verifying it was current when the conflict was filed.",
+      "description": "Hash inequality does not prove a superseding review changed the affected unit or even occurred after the conflict. Editing and approving unrelated unit U2 changes the whole-artifact hash and silently clears U1. Likewise, a conflict filed with a stale or mistyped explicit hash is immediately treated as cleared by an already-existing current review. This reproduces retirement without the claimed unit-specific clearing event."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:4568",
+      "evidence": "Any nonempty `--no-design` reason takes the outer bypass branch, so neither design satisfaction nor `compute_design_conflict_open` runs. The resulting approval carries only the same generic `[design bypass: ...]` marker used for a task with no design phase, and verify-before-stop.sh:5860 permanently skips its design recheck on that marker.",
+      "description": "A known substantive design conflict can be released without being read, independently reviewed, or structurally identified as an overridden conflict. There is no enforced operator identity, and the durable record cannot distinguish 'no design phase' from 'open conflict deliberately waived'; this defeats the conflict blocker rather than providing an auditable conflict-specific disposition."
+    },
+    {
+      "id": "R2-F5",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:5200",
+      "evidence": "The `SUITE_REUSED` branch returns before all override tags and summaries, while override flags are parsed only in the fresh-run branch. In addition, the successful release path at line 6880 constructs its output without calling either scope-disclosure function.",
+      "description": "Override disclosure is absent on consequential paths. A narrowed override run that passes with an already matching approval releases with no override notice. On a later unchanged-tree replay, the cached narrowed result is described as coming from the 'last full run' while the override flags and commands were never persisted, parsed, or disclosed."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "stop_condition"
+}

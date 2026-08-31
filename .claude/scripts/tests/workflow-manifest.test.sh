@@ -1392,6 +1392,127 @@ assert_eq "META: with hashing forced on, rows carry 3 fields (the 1g grammar leg
 assert_eq "META: restore control — the SHIPPED copy emits 2-field rows" "0" \
     "$(awk -F'\t' 'NF != 2' "$WORK/governing-restore.tsv" | grep -c . | tr -d '[:space:]')"
 
+# -----------------------------------------------------------------------
+# Section 8: pipefail/process-substitution hardening (claude-workflow-
+# plugin-i8cx, wave 2 group C). scan_flat/scan_tree used to feed a `while
+# ... done < <(find ... -print0)` loop — a process substitution, so find's
+# own exit status was structurally unobservable (no pipefail scope reaches
+# a `< <(...)` boundary at all). A find that fails partway through (a
+# permission-denied subdirectory) used to look EXACTLY like "this directory
+# legitimately has fewer files" — install.sh --verify and the upgrade path
+# both compare against this table, so a missing row verifies as "unchanged"
+# forever. The fix matches this file's OWN in-tree template
+# (scan_declared_dir, added earlier for the declared-directory scan): write
+# find's output to a listing file, capture its rc directly, and die() on
+# failure rather than silently emitting whatever arrived before the error.
+# -----------------------------------------------------------------------
+printf '\n--- Section 8: scan_flat/scan_tree die on a failed find, never emit a truncated manifest ---\n'
+
+PERM_ROOT="$WORK/perm-source"
+rm -rf "$PERM_ROOT"
+mkdir -p "$PERM_ROOT/.claude/agents" "$PERM_ROOT/.claude/skills/blocked-skill"
+printf '# a\n' > "$PERM_ROOT/.claude/agents/qa.md"
+printf '# b\n' > "$PERM_ROOT/.claude/skills/blocked-skill/SKILL.md"
+
+# --- 8a: scan_flat (.claude/agents), unreadable at maxdepth 1 --------------
+assert_eq "8a.0 CONTROL: readable .claude/agents/ generates cleanly (exit 0), qa.md present" \
+    "0|1" "$(bash "$SCRIPT" generate "$PERM_ROOT" > "$WORK/8a-control.tsv" 2>/dev/null; echo "$?")|$(grep -c '^\.claude/agents/qa\.md' "$WORK/8a-control.tsv")"
+
+chmod 000 "$PERM_ROOT/.claude/agents"
+bash "$SCRIPT" generate "$PERM_ROOT" > "$WORK/8a-broken.tsv" 2> "$WORK/8a-broken.err"
+A8_RC=$?
+chmod 755 "$PERM_ROOT/.claude/agents"
+assert_eq "8a.1 THE FIX: an unreadable .claude/agents/ makes generate DIE (nonzero), never a silently truncated manifest" \
+    "1" "$([ "$A8_RC" -ne 0 ] && echo 1 || echo 0)"
+assert_eq "8a.2 ...with nothing printed to stdout (buffered failure, not a partial table)" \
+    "0" "$(wc -c < "$WORK/8a-broken.tsv" | tr -d '[:space:]')"
+assert_eq "8a.3 ...and the stated reason distinguishes a FAILED enumeration from a legitimately EMPTY one" \
+    "1" "$(grep -c 'must not look like an empty' "$WORK/8a-broken.err")"
+
+# --- 8b: scan_tree (.claude/skills), unreadable at depth 2 (recursive) -----
+chmod 000 "$PERM_ROOT/.claude/skills/blocked-skill"
+bash "$SCRIPT" generate "$PERM_ROOT" > "$WORK/8b-broken.tsv" 2> "$WORK/8b-broken.err"
+B8_RC=$?
+chmod 755 "$PERM_ROOT/.claude/skills/blocked-skill"
+assert_eq "8b.1 THE FIX: an unreadable subdirectory deep in the RECURSIVE skills scan also dies loudly" \
+    "1" "$([ "$B8_RC" -ne 0 ] && echo 1 || echo 0)"
+assert_eq "8b.2 ...naming scan_tree specifically" \
+    "1" "$(grep -c 'scan_tree:' "$WORK/8b-broken.err")"
+
+# --- 8c: MUTANT — revert scan_flat to the pre-fix process-substitution
+# shape (wholesale function replacement, qa-gate-pipefail.test.sh's MUTANT
+# B technique — the fix replaced the loop's own producer, not merely added
+# a strippable guard). ------------------------------------------------------
+cat > "$WORK/8c-orig-scan-flat.txt" <<'ORIGEOF'
+scan_flat() {
+    local class="$1"
+    local dir="$2"
+    local glob="$3"
+    local f
+    [ -d "$dir" ] || return 0
+    while IFS= read -r -d '' f; do
+        emit_row "$class" "$f"
+    done < <(find "$dir" -maxdepth 1 -type f -name "$glob" -print0 2>/dev/null)
+}
+ORIGEOF
+MUT_SF="$WORK/8c-mutant.sh"
+awk -v bodyfile="$WORK/8c-orig-scan-flat.txt" '
+    $0 == "scan_flat() {" {
+        skipping = 1
+        while ((getline line < bodyfile) > 0) print line
+        next
+    }
+    skipping && /^}/ { skipping = 0; next }
+    skipping { next }
+    { print }
+' "$SCRIPT" > "$MUT_SF"
+chmod +x "$MUT_SF"
+bash -n "$MUT_SF"
+assert_eq "8c.0 NON-VACUITY: the mutant parses" "0" "$?"
+MUT_SF_BODY=$(sed -n '/^scan_flat() {/,/^}/p' "$MUT_SF")
+MUT_SF_DIE_COUNT=$(printf '%s' "$MUT_SF_BODY" | grep -c 'scan_flat: could not ENUMERATE')
+MUT_SF_PROCSUB_COUNT=$(printf '%s' "$MUT_SF_BODY" | grep -c 'done < <(find')
+assert_eq "8c.1 NON-VACUITY: the mutant's scan_flat lost the listing-file/die guard (reverted to the pre-fix procsub, byte for byte)" \
+    "0|1" "${MUT_SF_DIE_COUNT}|${MUT_SF_PROCSUB_COUNT}"
+
+chmod 000 "$PERM_ROOT/.claude/agents"
+bash "$MUT_SF" generate "$PERM_ROOT" > "$WORK/8c-mutant-out.tsv" 2> "$WORK/8c-mutant-out.err"
+MUT_RC=$?
+chmod 755 "$PERM_ROOT/.claude/agents"
+assert_eq "8c.2 SPECIFIC MISBEHAVIOUR: the mutant + the SAME unreadable directory exits 0 — the failure is completely invisible" \
+    "0" "$MUT_RC"
+assert_eq "8c.3 ...and silently emits a manifest simply MISSING the qa.md row, indistinguishable from 'this tree never shipped it'" \
+    "0" "$(grep -c '^\.claude/agents/qa\.md' "$WORK/8c-mutant-out.tsv")"
+
+MUT_CTRL_OUT="$WORK/8c-mutant-restore.tsv"
+bash "$MUT_SF" generate "$PERM_ROOT" > "$MUT_CTRL_OUT" 2>/dev/null
+assert_eq "8c.4 RESTORE CONTROL: even the mutant, unshimmed (readable directory), emits qa.md correctly — the mutation only bites under the injected fault" \
+    "1" "$(grep -c '^\.claude/agents/qa\.md' "$MUT_CTRL_OUT")"
+
+# --- 8d: cmd_classify's wc|tr row-count self-check — a garbled tail-stage
+# output (not merely empty) is now impossible: `wc` runs alone, `tr` runs on
+# an already-captured in-memory string. Function-level: extract and drive
+# the shipped body directly (leg 4: shipped bytes, not a re-typed copy);
+# cmd_classify's OWN end-to-end verdict is unaffected on a matching pair of
+# counts (already exercised by Sections 4/5 above), so this proves the
+# NARROWER function-level contract the fix actually changes. --------------
+printf '\n--- Section 8d: the row-count self-check never reads a garbled wc/tr tail as a real number ---\n'
+mkdir -p "$WORK/8d-wc-shim-bin"
+cat > "$WORK/8d-wc-shim-bin/wc" <<'SHIMEOF'
+#!/bin/bash
+# Prints a plausible-looking-but-WRONG count, then fails — simulating wc
+# dying mid-write rather than failing before printing anything.
+printf '99\n'
+exit 9
+SHIMEOF
+chmod +x "$WORK/8d-wc-shim-bin/wc"
+D8_OUT=$(PATH="$WORK/8d-wc-shim-bin:$PATH" bash "$SCRIPT" classify --target "$SYN" --source "$SYN" --old-table "$OLD_TABLE" 2>&1)
+D8_RC=$?
+assert_eq "8d.1 THE FIX: a wc that prints a plausible WRONG count then fails makes classify DIE (nonzero), never silently trust the garbled '99'" \
+    "1" "$([ "$D8_RC" -ne 0 ] && echo 1 || echo 0)"
+assert_eq "8d.2 ...and names wc's own exit status, not a fabricated row-count mismatch" \
+    "1" "$(printf '%s' "$D8_OUT" | grep -c 'wc exited')"
+
 # --- Summary ---------------------------------------------------------------
 
 if [ "$FAIL" -gt 0 ]; then

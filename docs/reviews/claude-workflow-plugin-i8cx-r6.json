@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "30440a68a175edd406e757c910d534b832a715ee448e3fd03dd15c43da338ba8",
+  "risk_threshold": "high",
+  "stop_condition": "Stop when R3-F1, R3-F2a, R3-F2b and the qa-gate half of R4-F1 are each adjudicated closed or still-open with a concrete failure path, and the unit-ID-not-record waiver residual is judged. Scope is qa-gate.sh only.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R6-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:10598",
+      "evidence": "latest_design_conflict_waiver_units captures the waiver bracket anywhere in the complete approval text. cmd_approve interpolates the unvalidated operator-supplied summary before its generated suffix at line 5217; lines 5104-5113 already document that this space is self-asserted. An ordinary approval summary containing `[design conflict waived: units=U1]` is therefore read as a real waiver, and a later open U1 conflict is subtracted at lines 8621-8624.",
+      "description": "The new load-bearing waiver is forgeable without --no-design and before any conflict exists. After a satisfied, unconflicted ordinary approval with the crafted summary, filing a Beads-only U1 conflict leaves design-gate-precheck ready, so the later objection does not re-arm the release gate."
+    },
+    {
+      "id": "R6-F2",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:10598",
+      "evidence": "The waiver reader selects the latest QA-GATE APPROVED comment overall and ignores its change_set_hash, although approval records are explicitly hash-bound. The release caller can be governed by an earlier record matching the current hash. Concrete path: approve H1 without a waiver, approve H2 with a U1 waiver, then restore the tree to H1; the H1 approval matches the release, but this reader imports H2's waiver.",
+      "description": "A conflict waiver from an approval for a different change set can authorize the current release. Latest-only is appropriate only after identifying the approval that actually governs the current hash; latest-overall conflates two distinct approvals."
+    },
+    {
+      "id": "R6-F3",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:8621",
+      "evidence": "compute_design_conflict_open deduplicates all open records to unit IDs, and the precheck subtracts an entire ID whenever it appears in the latest waiver list. After U1 is waived, posting a second DESIGN-CONFLICT for U1 adds no new open-set identity; U1 is subtracted again and the precheck returns ready. The code's own lines 8579-8590 acknowledge this behavior.",
+      "description": "The waiver silently becomes a blanket authorization for every future objection on that unit, including a new conflict filed after approval that the operator never saw. Because the new record is Beads-only, it does not move the change-set hash and cannot re-arm Stop. This residual is a high-severity hole; record identity, not only unit identity, must bound the waiver."
+    },
+    {
+      "id": "R6-F4",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:10529",
+      "evidence": "The bypass path calls compute_design_satisfied but invokes compute_design_conflict_open even when satisfaction is false, while the reader treats any positively different current unit hash as cleared without checking for a fresh satisfied review. Concrete path: file a conflict against U1=A with no satisfied verdict, edit U1 to B, record no new design review, then approve --no-design; the reader reports no open conflict and omits the conflict-waiver suffix.",
+      "description": "R3-F1 remains open for an amended-but-unreviewed unit. Removing the verdict precondition was not semantically vestigial: the per-unit inequality proves an edit, not the required superseding approved DESIGN-REVIEW, so a still-unresolved conflict again receives only the generic design-bypass record."
+    }
+  ],
+  "iterations": 6,
+  "stopped_by": "stop_condition"
+}

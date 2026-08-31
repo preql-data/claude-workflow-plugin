@@ -936,8 +936,16 @@ assert_eq "J: Stop 2 did NOT charge a second verification iteration (SUITE_REUSE
     "1" "$ITER_J2"
 assert_contains "J: Stop 2's reason says the checks were NOT re-run this loop" \
     "NOT re-run this loop" "$STOP_REASON"
+# claude-workflow-plugin-i8cx R2-F5: SUITE_REUSE_REASON's wording was
+# corrected from "...since the last full run" to "...since the last recorded
+# run" — the old wording asserted fullness this string has no way to verify
+# (the recorded run may itself have been narrowed by an operator override;
+# that fact is disclosed separately, by checks_scope_note/checks_scope_claim
+# reading SUITE_REUSE_OVERRIDE_KNOWN). Already the asserted wording in
+# .claude/scripts/tests/override-disclosure.test.sh's D3.2 negative control;
+# this leg was simply not updated in the same pass.
 assert_contains "J: ...and names the SPECIFIC reason" \
-    "tree and change-set unchanged since the last full run" "$STOP_REASON"
+    "tree and change-set unchanged since the last recorded run" "$STOP_REASON"
 assert_eq "J: ...and never claims the escalation contract (QA_ESCALATED is false throughout this leg)" \
     "0" "$(count_in "$STOP_REASON" 'escalation contract')"
 

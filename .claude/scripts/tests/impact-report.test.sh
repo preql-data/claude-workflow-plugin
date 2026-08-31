@@ -120,7 +120,7 @@ trap cleanup EXIT
 
 mk_proj() {
     local d
-    d=$(mktemp -d -t impact-report-test.XXXXXX)
+    d=$(mktemp -d "${TMPDIR:-/tmp}/impact-report-test.XXXXXX")
     FIXTURES+=("$d")
     mkdir -p "$d/.claude/.qa-tracking"
     printf '%s' "$d"
@@ -431,7 +431,7 @@ echo "=== Section 7: unreadable tracker REFUSES; empty stays empty (i8cx U2) ===
 # aimed (pairing requirement part 1, .claude/tests/README.md).
 
 REAL_SORT=$(command -v sort)
-SHIM_DIR=$(mktemp -d -t impact-report-shim.XXXXXX)
+SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/impact-report-shim.XXXXXX")
 FIXTURES+=("$SHIM_DIR")
 SHIM_HITS="$SHIM_DIR/hits.log"
 : > "$SHIM_HITS"
@@ -577,7 +577,7 @@ echo "=== Section 7M: META — both halves of the U2 guard are load-bearing ==="
 # impact_report_unverifiable in qa-gate.sh) match on both sides. Section
 # 7.1's assertions would all go green-blind against either mutant.
 
-MUT_DIR=$(mktemp -d -t impact-report-mutants.XXXXXX)
+MUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/impact-report-mutants.XXXXXX")
 FIXTURES+=("$MUT_DIR")
 # The script sources workflow-denylist.sh from ITS OWN directory (BASH_SOURCE),
 # so the mutants need the real denylist as a sibling.
@@ -642,6 +642,42 @@ if [ "$EMPTY_HASH" != "sha256-unavailable" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# CONTAINMENT (claude-workflow-plugin-kyj5): section 8 below drives qa-gate.sh
+# review-record / completion-record through the s8_artifact / s8_completion
+# helpers. Those two subcommands derive their write path from
+# PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}" (qa-gate.sh:158); inside any
+# Claude Code session CLAUDE_PROJECT_DIR is exported and names THIS repo, so a
+# call site missing an explicit CLAUDE_PROJECT_DIR="$F8" override falls
+# through to the real docs/reviews/ and .claude/.qa-tracking/ instead of the
+# fixture — the live leak kyj5 measured (5 batches, 16 files, 2026-08-26/27,
+# more than half invisible to `git status` because .qa-tracking is
+# gitignored). The decisive leg: snapshot the REAL directories before section
+# 8 runs (whether or not bd is on PATH) and assert byte-identical after
+# (Section 8C, below section 8's close). Paired mutation/misbehaviour/restore
+# legs for this check live inside section 8 itself, as 8I.
+#
+# Scoped to the `impact-report-approve` name fragment — the mktemp-derived
+# fixture-dir basename that becomes every bd task id's prefix inside section 8
+# (see F8's mktemp template just below) — rather than a full directory diff.
+# .claude/.qa-tracking is live session bookkeeping (edit-count,
+# changed-files.txt, current-task, concurrent QA-gate artifacts for OTHER real
+# tasks) that churns on a shared machine for reasons that have nothing to do
+# with this leak; an unscoped snapshot would false-positive here, on this run,
+# on this machine, right now. The pattern is specific to the defect's own
+# signature and cannot collide with a real Beads task id.
+contain_snapshot() {
+    # $1 = directory, $2 = name-glob filter (required). A missing directory
+    # or no match both print nothing — a legitimate, comparable empty state.
+    [ -d "$1" ] || return 0
+    find "$1" -maxdepth 1 -type f -name "$2" 2>/dev/null | LC_ALL=C sort
+}
+
+CONTAIN_REVIEWS_DIR="$PROJECT_DIR/docs/reviews"
+CONTAIN_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
+CONTAIN_REVIEWS_BEFORE=$(contain_snapshot "$CONTAIN_REVIEWS_DIR" '*impact-report-approve*')
+CONTAIN_TRACKING_BEFORE=$(contain_snapshot "$CONTAIN_TRACKING_DIR" '*impact-report-approve*')
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== Section 8: qa-gate approve wiring — refuses on an unreadable set (i8cx U2) ==="
 
@@ -663,7 +699,7 @@ echo "=== Section 8: qa-gate approve wiring — refuses on an unreadable set (i8
 if ! command -v bd >/dev/null 2>&1; then
     printf 'SKIPPED: section 8 (bd CLI not on PATH — the approve wiring legs need Beads)\n'
 else
-    F8=$(mktemp -d -t impact-report-approve.XXXXXX)
+    F8=$(mktemp -d "${TMPDIR:-/tmp}/impact-report-approve.XXXXXX")
     FIXTURES+=("$F8")
     mkdir -p "$F8/.claude/scripts" "$F8/.claude/.qa-tracking" "$F8/.beads"
     cp "$PROJECT_DIR/.claude/scripts/"*.sh "$F8/.claude/scripts/"
@@ -695,7 +731,7 @@ else
         cat > "$pay" <<JSON
 {"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":["$file"],"tests_added":["impact-report.test.sh::section-8"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the impact-report section-8 fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
 JSON
-        bash "$QG8" completion-record "$tid" --file "$pay" >/dev/null 2>&1
+        CLAUDE_PROJECT_DIR="$F8" bash "$QG8" completion-record "$tid" --file "$pay" >/dev/null 2>&1
     }
     s8_artifact() {
         # s8_artifact <tid> <reviewed-hash> — independent reviewer, no findings.
@@ -704,7 +740,7 @@ JSON
         cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$rh","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
 JSON
-        bash "$QG8" review-record "$tid" < "$art" >/dev/null 2>&1
+        CLAUDE_PROJECT_DIR="$F8" bash "$QG8" review-record "$tid" < "$art" >/dev/null 2>&1
     }
 
     # --- T1: SHIPPED scripts; every other precondition satisfied ---
@@ -793,8 +829,130 @@ JSON
     assert_eq "8R restored script hashes the reseeded tracker for real" \
         "$(printf 'src/three.ts\n' | test_sha256)" "$OUT8R"
 
+    # --- 8I: isolation — the SPECIFIC missing-CLAUDE_PROJECT_DIR mechanism,
+    # contained (pairing for the 8C containment check, per
+    # .claude/tests/README.md "The pairing requirement"). s8_completion and
+    # s8_artifact are extracted VERBATIM from this running file (not
+    # re-typed, so the mutant cannot silently drift from the shipped text),
+    # then mutated by removing exactly the text the kyj5 fix added. The
+    # misbehaviour leg is driven against a SENTINEL fixture standing in for
+    # "the ambient project" — never the real repo — because shipping a leg
+    # that reproduces a repo-litter bug against the real docs/reviews/ and
+    # .claude/.qa-tracking/ on every CI run would BE the defect this task
+    # exists to remove. The sentinel is a second, fully-functional qa-gate.sh
+    # install (scripts copied, bd-initialised), for the same reason F8 is
+    # one: in production the ambient CLAUDE_PROJECT_DIR always names a real,
+    # working repo, and an empty stand-in directory fails closed on a
+    # missing validator (review-check.sh) instead of reproducing the leak —
+    # a mutant that "fails" for the wrong reason is exactly what pairing
+    # part 1 (non-vacuity) rules out.
+    # NOT "$0": section 8 above already cd'd into $F8, and $0 as given on
+    # this script's invocation line is frequently relative (e.g. this exact
+    # spec is normally run as `bash .claude/scripts/tests/impact-report.test.sh`
+    # from the repo root) — resolving it here would look for the file under
+    # $F8 instead of the real repo and extract nothing. $PROJECT_DIR is
+    # captured absolute at the top of the file, before any cd, matching the
+    # same convention $IR already uses at :56.
+    SRC8I="$PROJECT_DIR/.claude/scripts/tests/impact-report.test.sh"
+    SENTINEL8=$(mktemp -d "${TMPDIR:-/tmp}/impact-report-sentinel.XXXXXX")
+    FIXTURES+=("$SENTINEL8")
+    mkdir -p "$SENTINEL8/.claude/scripts" "$SENTINEL8/.beads"
+    cp "$PROJECT_DIR/.claude/scripts/"*.sh "$SENTINEL8/.claude/scripts/"
+    chmod +x "$SENTINEL8/.claude/scripts/"*.sh
+    ( cd "$SENTINEL8" && bd init >/dev/null 2>&1 )
+    rm -rf "$SENTINEL8/.git"
+
+    LIVE_COMPLETION_BODY=$(sed -n '/^    s8_completion() {$/,/^    }$/p' "$SRC8I")
+    LIVE_ARTIFACT_BODY=$(sed -n '/^    s8_artifact() {$/,/^    }$/p' "$SRC8I")
+    assert_eq "8I extracted s8_completion from the running file (non-empty — proves the extraction anchor still matches)" \
+        "present" "$([ -n "$LIVE_COMPLETION_BODY" ] && echo present || echo absent)"
+    assert_eq "8I extracted s8_artifact from the running file (non-empty — proves the extraction anchor still matches)" \
+        "present" "$([ -n "$LIVE_ARTIFACT_BODY" ] && echo present || echo absent)"
+    # shellcheck disable=SC2016  # matching the LITERAL text $F8/$QG8 as it
+    # appears in the extracted source, not expanding the runtime path.
+    assert_match "8I extracted body carries the kyj5 fix (completion-record call is CLAUDE_PROJECT_DIR-pinned)" \
+        'CLAUDE_PROJECT_DIR="\$F8" bash "\$QG8" completion-record' "$LIVE_COMPLETION_BODY"
+    # shellcheck disable=SC2016  # same: literal source text, not expansion.
+    assert_match "8I extracted body carries the kyj5 fix (review-record call is CLAUDE_PROJECT_DIR-pinned)" \
+        'CLAUDE_PROJECT_DIR="\$F8" bash "\$QG8" review-record' "$LIVE_ARTIFACT_BODY"
+
+    # 8I.1 Mutation: rename + strip the prefix text — reconstructing the
+    # pre-fix call sites exactly (the fix's own transform, inverted).
+    # shellcheck disable=SC2016  # the sed pattern/replacement quote SHELL
+    # SOURCE (the literal $F8 text), not shell expansion.
+    MUT_COMPLETION_BODY=$(printf '%s\n' "$LIVE_COMPLETION_BODY" | sed -e 's/^    s8_completion() {$/s8_completion_mut() {/' -e 's/CLAUDE_PROJECT_DIR="\$F8" //')
+    # shellcheck disable=SC2016  # same: rewriting literal source text.
+    MUT_ARTIFACT_BODY=$(printf '%s\n' "$LIVE_ARTIFACT_BODY" | sed -e 's/^    s8_artifact() {$/s8_artifact_mut() {/' -e 's/CLAUDE_PROJECT_DIR="\$F8" //')
+    assert_eq "8I.1 mutation landed on s8_completion (prefix text removed, rest of body unchanged)" \
+        "differs" "$([ "$MUT_COMPLETION_BODY" != "$LIVE_COMPLETION_BODY" ] && echo differs || echo same)"
+    assert_eq "8I.1 mutation landed on s8_artifact (prefix text removed, rest of body unchanged)" \
+        "differs" "$([ "$MUT_ARTIFACT_BODY" != "$LIVE_ARTIFACT_BODY" ] && echo differs || echo same)"
+    # shellcheck disable=SC2016  # literal source text, not expansion.
+    assert_match "8I.1 mutant still shells out to \$QG8 completion-record (not a no-op strip)" \
+        'bash "\$QG8" completion-record' "$MUT_COMPLETION_BODY"
+    # shellcheck disable=SC2016  # literal source text, not expansion.
+    assert_match "8I.1 mutant still shells out to \$QG8 review-record (not a no-op strip)" \
+        'bash "\$QG8" review-record' "$MUT_ARTIFACT_BODY"
+    MUT_PARSE_CHECK="$SENTINEL8/.mut-parse-check.sh"
+    { printf '%s\n' "$MUT_COMPLETION_BODY"; printf '%s\n' "$MUT_ARTIFACT_BODY"; } > "$MUT_PARSE_CHECK"
+    BASHN_8I=0
+    bash -n "$MUT_PARSE_CHECK" 2>/dev/null || BASHN_8I=$?
+    assert_eq "8I.1 mutant parses as valid shell (runnable pre-fix code, not a broken fragment)" \
+        "0" "$BASHN_8I"
+    eval "$MUT_COMPLETION_BODY"
+    eval "$MUT_ARTIFACT_BODY"
+
+    # 8I.2 Specific misbehaviour: mutant calls, ambient CLAUDE_PROJECT_DIR
+    # pointed at SENTINEL8 (mirroring what an exported CLAUDE_PROJECT_DIR
+    # does to an unprefixed call in a real session) — must leak into the
+    # SENTINEL, and must NOT reach $F8 via this call (an unprefixed call has
+    # no way to know $F8 exists).
+    TIDI="kyj5-8i-mutant"
+    # shellcheck disable=SC2030,SC2031  # deliberately subshell-scoped — the
+    # ambient override must NOT leak into the rest of this script's env.
+    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_completion_mut "$TIDI" "src/isolation.ts" ) >/dev/null 2>&1
+    # shellcheck disable=SC2030,SC2031  # same: deliberately subshell-scoped.
+    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_artifact_mut "$TIDI" "deadbeef" ) >/dev/null 2>&1
+    assert_eq "8I.2 mutant completion-record leaks into the ambient SENTINEL (the specific kyj5 misbehaviour)" \
+        "present" "$([ -f "$SENTINEL8/.claude/.qa-tracking/completion-$TIDI-devops.json" ] && echo present || echo absent)"
+    assert_eq "8I.2 mutant review-record leaks into the ambient SENTINEL (the specific kyj5 misbehaviour)" \
+        "present" "$([ -f "$SENTINEL8/docs/reviews/$TIDI-r1.json" ] && echo present || echo absent)"
+    assert_eq "8I.2 mutant call did NOT reach \$F8 (no prefix, no idea \$F8 exists)" \
+        "absent" "$([ -f "$TRACK8/completion-$TIDI-devops.json" ] && echo present || echo absent)"
+
+    # 8I.3 Restore control: the ACTUAL SHIPPED s8_completion / s8_artifact
+    # (this run's real, unmutated definitions), identical ambient SENTINEL8
+    # — must NOT leak, and must still land in $F8 (proves the fix redirects
+    # rather than silently drops the write). Drives the shipped artifact
+    # (pairing part 4).
+    TIDR="kyj5-8i-restore"
+    # shellcheck disable=SC2030,SC2031  # deliberately subshell-scoped — the
+    # ambient override must NOT leak into the rest of this script's env.
+    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_completion "$TIDR" "src/isolation-restore.ts" ) >/dev/null 2>&1
+    # shellcheck disable=SC2030,SC2031  # same: deliberately subshell-scoped.
+    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_artifact "$TIDR" "deadbeef" ) >/dev/null 2>&1
+    assert_eq "8I.3 restore: shipped completion-record ignores the ambient SENTINEL" \
+        "absent" "$([ -f "$SENTINEL8/.claude/.qa-tracking/completion-$TIDR-devops.json" ] && echo present || echo absent)"
+    assert_eq "8I.3 restore: shipped review-record ignores the ambient SENTINEL" \
+        "absent" "$([ -f "$SENTINEL8/docs/reviews/$TIDR-r1.json" ] && echo present || echo absent)"
+    assert_eq "8I.3 restore: shipped completion-record still lands in \$F8 (not silently dropped)" \
+        "present" "$([ -f "$TRACK8/completion-$TIDR-devops.json" ] && echo present || echo absent)"
+    assert_eq "8I.3 restore: shipped review-record still lands in \$F8 (not silently dropped)" \
+        "present" "$([ -f "$F8/docs/reviews/$TIDR-r1.json" ] && echo present || echo absent)"
+
     cd "$S8_OLDPWD" || true
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 8C: containment — section 8 touched NO real repo file (kyj5) ==="
+
+CONTAIN_REVIEWS_AFTER=$(contain_snapshot "$CONTAIN_REVIEWS_DIR" '*impact-report-approve*')
+CONTAIN_TRACKING_AFTER=$(contain_snapshot "$CONTAIN_TRACKING_DIR" '*impact-report-approve*')
+assert_eq "8C real docs/reviews/ byte-identically unchanged after section 8 (kyj5 decisive leg)" \
+    "$CONTAIN_REVIEWS_BEFORE" "$CONTAIN_REVIEWS_AFTER"
+assert_eq "8C real .claude/.qa-tracking/ byte-identically unchanged after section 8 (kyj5 decisive leg)" \
+    "$CONTAIN_TRACKING_BEFORE" "$CONTAIN_TRACKING_AFTER"
 
 # ---------------------------------------------------------------------------
 echo ""

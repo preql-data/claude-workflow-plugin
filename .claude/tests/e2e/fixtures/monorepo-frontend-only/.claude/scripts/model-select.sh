@@ -349,16 +349,45 @@ get_models() {
 # load_ranking_raw — print every non-empty, non-comment line from the
 # ranking file in file order. Includes any leading `!` so callers can
 # split exclusions from tie-break entries.
+#
+# RETURN CODE IS A REAL CONTRACT (i8cx wave 2), not incidental plumbing:
+#   0  read cleanly — whether or not any lines survived. An absent file,
+#      or one that is all comments/blank, is a LEGITIMATE empty result.
+#   2  the file EXISTS but the read stage itself failed.
+# The distinction matters because load_tiers/load_exclusions feed
+# pick_best's class_for()/excluded() tables directly: a masked read
+# failure that LOOKS like "no ranking file" would silently rank every
+# candidate in the top class and drop every exclusion — reviving the en9
+# defect (recency-only ordering) this file's header spends three
+# paragraphs preventing. sed therefore runs as a SOLO command (never
+# piped) so its own exit status is captured directly rather than being
+# superseded by a downstream filter's unrelated "matched nothing" code —
+# measured: `( set -o pipefail; false | grep -v x )` still exits 1
+# whether the upstream failed OR legitimately produced zero lines, so
+# scoped pipefail alone cannot tell those two cases apart once the LAST
+# stage has its own no-match exit code. Explicit two-step capture can.
 load_ranking_raw() {
     [ -f "$RANKING_FILE" ] || return 0
-    sed -E -e 's/#.*$//' -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$//' \
-        "$RANKING_FILE" | grep -v '^$'
+    local raw rc=0
+    raw=$(sed -E -e 's/#.*$//' -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$//' \
+          "$RANKING_FILE" 2>/dev/null) || rc=$?
+    [ "$rc" -eq 0 ] || return 2
+    [ -n "$raw" ] || return 0
+    printf '%s\n' "$raw" | grep -v '^$'
+    return 0
 }
 
 # load_exclusions — print one family prefix per line, in file order,
-# stripped of the leading `!`. Lines without `!` are skipped.
+# stripped of the leading `!`. Lines without `!` are skipped. Propagates
+# load_ranking_raw's rc verbatim (0 clean / 2 read-failed) — see that
+# function's header for why callers must not treat the two alike.
 load_exclusions() {
-    load_ranking_raw | awk '/^!/{sub(/^!/, ""); print}'
+    local raw rc=0
+    raw=$(load_ranking_raw) || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    [ -n "$raw" ] || return 0
+    printf '%s\n' "$raw" | awk '/^!/{sub(/^!/, ""); print}'
+    return 0
 }
 
 # load_tiers — print one family prefix per line, in file order, of the
@@ -366,8 +395,14 @@ load_exclusions() {
 # first): a line's index is the class pick_best sorts on FIRST (en9).
 # They still do not restrict candidate selection — an id matching no
 # prefix is an unknown family and gets the TOP class (see pick_best).
+# Propagates load_ranking_raw's rc verbatim (0 clean / 2 read-failed).
 load_tiers() {
-    load_ranking_raw | grep -v '^!'
+    local raw rc=0
+    raw=$(load_ranking_raw) || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    [ -n "$raw" ] || return 0
+    printf '%s\n' "$raw" | grep -v '^!'
+    return 0
 }
 
 # pick_best <models-json> — print the best id on stdout, return 0 on
@@ -417,9 +452,29 @@ load_tiers() {
 pick_best() {
     local models="$1"
 
+    # Read the ranking file's two views explicitly and check EACH read's own
+    # rc (i8cx wave 2) rather than piping load_exclusions/load_tiers straight
+    # into jq: jq -R -s on malformed/empty input still succeeds (empty array),
+    # so a masked read failure here would be silently indistinguishable from
+    # "no ranking file configured" — and an empty tiers list makes class_for()
+    # put EVERY candidate in the top class (the en9 defect, recency-only
+    # ordering), while an empty exclusions list silently un-drops whatever the
+    # operator excluded. Fail-open is still correct (spec 0.3 principle 1:
+    # never block selection on this), but it must not be SILENT.
     local exclusions_json tiers_json
-    exclusions_json=$(load_exclusions | jq -R -s -c 'split("\n") | map(select(length>0))')
-    tiers_json=$(load_tiers | jq -R -s -c 'split("\n") | map(select(length>0))')
+    local excl_raw excl_rc=0 tiers_raw tiers_rc=0
+    excl_raw=$(load_exclusions) || excl_rc=$?
+    if [ "$excl_rc" -ne 0 ]; then
+        _warn "could not read $RANKING_FILE for exclusions (the read itself failed, this is not a missing/empty file); proceeding with NO exclusions applied to this pick"
+        excl_raw=""
+    fi
+    tiers_raw=$(load_tiers) || tiers_rc=$?
+    if [ "$tiers_rc" -ne 0 ]; then
+        _warn "could not read $RANKING_FILE for capability tiers (the read itself failed, this is not a missing/empty file); proceeding as if no ranking file exists — every candidate this pick is ranked in the top class, ordered by recency only"
+        tiers_raw=""
+    fi
+    exclusions_json=$(printf '%s' "$excl_raw" | jq -R -s -c 'split("\n") | map(select(length>0))')
+    tiers_json=$(printf '%s' "$tiers_raw" | jq -R -s -c 'split("\n") | map(select(length>0))')
 
     # Single-pass jq:
     #   - Filter out excluded ids (any id starting with "<excl>-").

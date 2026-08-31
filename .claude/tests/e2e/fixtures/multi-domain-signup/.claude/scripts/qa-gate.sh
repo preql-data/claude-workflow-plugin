@@ -3026,6 +3026,40 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               ok:false and exit 2, no longer conflated with
               no_design_attempted — "could not look" is not "looked, and
               found no design".
+  design-conflict <task-id> --unit <unit-id> [--design-hash <h>] '<statement>'
+              v5 D5 (fkm.7; R2-F3 fix, independent review round 2): the implementer's
+              structured way to say "the design is wrong here" without
+              silently improvising or stalling forever. --unit MUST name a
+              unit_id currently declared in docs/specs/<task-id>.md
+              (`unit_not_in_artifact` otherwise, same key design-unit-bind
+              uses). --design-hash is OPTIONAL: given, it must CONFIRM the
+              artifact's CURRENT live hash (`design_hash_not_current`
+              otherwise — no longer a trusted claim); omitted, it is the
+              same live recompute (strict 64-hex). Appends:
+                DESIGN-CONFLICT <unit-id> design_hash=<h> unit_hash=<h2> at <ts>: <statement>
+              where unit_hash is a live hash of --unit's OWN current content
+              (not the whole artifact). `approve` REFUSES (exit 2,
+              design_conflict_open) UNCONDITIONALLY while ANY filed
+              conflict's unit_hash still equals its unit's CURRENT content
+              hash, OR no current satisfied DESIGN-REVIEW covers the
+              artifact at all — every record considered, not just the
+              latest (fkm.1.19 discipline: a later record simply silent
+              about an earlier one must not retire it). The single legal
+              clearing path is a superseding, independently-reviewed,
+              SATISFIED DESIGN-REVIEW under which THAT SAME UNIT's own
+              content changed (a content edit alone, with no accompanying
+              satisfied review, does NOT clear it — claude-workflow-plugin-
+              i8cx R6-F4; an edit to a different unit still never clears
+              it either) — never `arbitrate`, which is keyed to
+              REVIEW-ARTIFACT finding ids. `design-gate-precheck` (the
+              Stop-time recheck path) ALSO refuses on an open conflict, not
+              only `approve` (R2-F2 fix). `--no-design '<reason>'` does
+              NOT cover an open conflict (claude-workflow-plugin-i8cx,
+              operator ruling on rounds 6/7/8 independent review — REMOVED
+              after four independent HIGH findings against the waiver
+              mechanism this paragraph used to describe; it bypasses only
+              the requirement for a satisfied verdict, same as when no
+              conflict was ever filed).
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -4546,7 +4580,7 @@ cmd_approve() {
     # between them and asserts approve then succeeds on a task with no
     # DESIGN-REVIEW record at all. Do not rename them.
     if [ "$bypass_design" = "1" ]; then
-        design_satisfied_obs="; design-bypass: $design_bypass_reason (design-satisfied refusal bypassed via --no-design; reason recorded per fkm.4)"
+        design_satisfied_obs="; design-bypass: $design_bypass_reason (design-satisfied refusal bypassed via --no-design; reason recorded per fkm.4 — this bypasses ONLY the satisfied-verdict requirement; an open DESIGN-CONFLICT is never bypassed by --no-design, see DESIGN-CONFLICT-REFUSAL below, which is unconditional)"
     else
         compute_design_satisfied "$tid"
         if [ "$DESIGN_SATISFIED" != "true" ]; then
@@ -4555,10 +4589,122 @@ cmd_approve() {
                 "qa-gate.sh approve <task-id> [--no-design '<reason>'] <summary>"
             exit 2
         fi
+
         design_verdict_field="design_verdict_hash=$DESIGN_VERDICT_HASH "
         design_satisfied_obs="; $DESIGN_SATISFIED_OBS"
     fi
     # DESIGN-SATISFIED-REFUSAL END (v5 D2 / claude-workflow-plugin-fkm.4)
+
+# DESIGN-CONFLICT-REFUSAL BEGIN (v5 D5 / claude-workflow-plugin-fkm.7; UNCONDITIONAL since
+# claude-workflow-plugin-i8cx, operator ruling on rounds 6/7/8 independent review)
+    #
+    # design_conflict_open joins DESIGN_SATISFIED_KEY's own vocabulary
+    # (no_design_attempted, design_verdict_missing, design_not_satisfied,
+    # ...) AS A REFUSAL, but is its OWN block — nested inside neither arm of
+    # the DESIGN-SATISFIED-REFUSAL if/else above, and NOT folded into
+    # compute_design_satisfied itself, because that predicate is ALSO
+    # consulted by design-gate-precheck (exit 4) and design-conform (a
+    # DIFFERENT failure shape, emit_design_conform), and folding a conflict
+    # check into the shared predicate would change THEIR behaviour too. This
+    # block only ever runs from cmd_approve.
+    #
+    # RUNS UNCONDITIONALLY, AFTER THE if/else ABOVE, REGARDLESS OF
+    # bypass_design — this is the load-bearing shape of the fix, not
+    # cosmetic. Formerly (through independent review round 5) this block was
+    # nested INSIDE the `else` (non-bypass) arm only, so --no-design skipped
+    # it entirely and could waive a real, evidenced, open objection with the
+    # SAME flag used for "no design phase at all". Independent review rounds
+    # 6-8 on claude-workflow-plugin-i8cx found FOUR HIGH findings against
+    # the waiver mechanism that grew out of that placement (R6-F1: the
+    # waiver was forgeable — any approval summary containing the literal
+    # bracket text `[design conflict waived: units=<ids>]` was read back as
+    # a real waiver by a later reader, because the record's own free-text
+    # summary space is self-asserted, exactly the DESIGN-BINDING-TOKEN
+    # block above already warns is true of every bracketed suffix in this
+    # file; R6-F2: the reader took the LATEST QA-GATE APPROVED comment
+    # without checking it governs the CURRENT change-set hash, so a waiver
+    # from a stale, superseded approval could authorize an unrelated
+    # release; R6-F3: subtraction was by unit ID with no per-record
+    # identity, so a waiver silently covered every FUTURE conflict filed on
+    # that unit, not only the one the operator actually saw; R6-F4: the
+    # clearing predicate the waiver's own disclosure reader depended on
+    # cleared on unit CONTENT CHANGE ALONE, without requiring the
+    # accompanying superseding review the v5 plan specifies — an edit is
+    # not an approved review). The operator's ruling: a record invented to
+    # make a bypass OBSERVABLE had been promoted into a control that
+    # AUTHORIZES releases, and disclosure and authorization carry different
+    # evidentiary requirements — remove the mechanism rather than guard it
+    # a fifth time. There is now exactly one way an open conflict stops
+    # blocking: a superseding, independently-reviewed, SATISFIED
+    # DESIGN-REVIEW under which the disputed unit's own content changed
+    # (compute_design_conflict_open's own header documents the exact
+    # predicate, including the R6-F4 fix requiring the satisfied review,
+    # not merely a content edit). No flag, marker, label, or free-text
+    # phrase clears it. --no-design bypasses ONLY the DESIGN_SATISFIED
+    # check in the if/else above; it has no effect on this block, which
+    # would run identically (and refuse identically) whether or not
+    # bypass_design is set — hence its placement AFTER, not inside, that
+    # if/else.
+    #
+    # THE fkm.1.19 DISCIPLINE, APPLIED HERE: compute_design_conflict_open
+    # reads EVERY DESIGN-CONFLICT record on $tid, never just the latest.
+    # review-check.sh's own gate reads only the latest review artifact,
+    # which is what let a later artifact silently retire an earlier open
+    # finding by never mentioning it (fkm.1.19, an OPEN P0 against that
+    # exact class of reader). A DESIGN-CONFLICT record carries no
+    # "supersedes" marker of its own, so "read the latest one" would
+    # reproduce the identical defect one record-grammar over: a second
+    # conflict on a DIFFERENT unit, filed after the first was addressed,
+    # would silently un-list the first the moment it became merely
+    # "not the latest". Every record is evaluated independently instead
+    # (see compute_design_conflict_open's own header for the exact
+    # per-record predicate). NOT arbitrate: that verb is keyed to
+    # REVIEW-ARTIFACT finding ids via finding_id_in_latest_artifact (this
+    # file, defined once, grep for it rather than trust a line number here
+    # — this exact block's own edits already moved it once); introducing a
+    # second id-space into it would break that reader, and the plan states
+    # this as a decision, not a preference.
+    #
+    # EXIT 2, MATCHING THE CONVENTION ALREADY IN FORCE FOR THIS AXIS:
+    # DESIGN_SATISFIED_KEY's own refusal, immediately above, already chose
+    # exit 2 over exit 4 for this same axis and documented why ("EXIT 2, NOT
+    # 4 (OQ 6.2 ...)" on DESIGN-SATISFIED-REFUSAL's own header — this is the
+    # identical shape, "is a required, satisfied, unconflicted state
+    # established", not REVIEW-SEPARATION's "no independent review /
+    # reviewer also implementer / open findings / predicate unavailable").
+    # Exit 5 is a DIFFERENT command's convention entirely — design-unit-
+    # bind's write-unconfirmed refusals (fkm.6; grep '^\s*exit 5$' this file
+    # rather than trust a line number) — reusing it here would put two
+    # unrelated meanings on one exit code for no reason this block's own
+    # ordering rationale would recognise.
+    #
+    # FAIL CLOSED ON AN UNREADABLE SOURCE, never as "no conflict" — the SAME
+    # xsu1 discipline design_source_unreadable/design_verdict_missing
+    # already draw a hard line for the satisfied-verdict axis above, and
+    # --no-design does not relax it here either: an unreadable conflict
+    # history is unknown, not cleared, whether or not the operator typed
+    # --no-design.
+    #
+    # The sentinel comments are load-bearing: an L1 META strips everything
+    # between them and asserts approve then succeeds on a task carrying an
+    # OPEN, un-amended design_conflict record, WITH OR WITHOUT --no-design
+    # (the negative-control legs in design-review-record.test.sh Section 8e
+    # exercise both). Do not rename them.
+    local design_conflict_rc=0
+    compute_design_conflict_open "$tid" || design_conflict_rc=$?
+    if [ "$design_conflict_rc" -ne 0 ]; then
+        emit_error_json "approve" "$tid" "design_conflict_source_unreadable" \
+            "approve refused: the DESIGN-CONFLICT history for $tid could not be read right now (bd unreachable, the comment stream not retrievable, or a record read back malformed), so whether an open design conflict exists is unknown; refusing to report this as no-conflict. This cannot be bypassed by --no-design, which covers only the satisfied-verdict requirement, never an unreadable conflict source. Re-run once bd is reachable" \
+            "qa-gate.sh approve <task-id> <summary>"
+        exit 2
+    fi
+    if [ "$DESIGN_CONFLICT_OPEN" = "true" ]; then
+        emit_error_json "approve" "$tid" "design_conflict_open" \
+            "approve refused: $DESIGN_CONFLICT_OPEN_OBS Affected unit(s): $DESIGN_CONFLICT_OPEN_UNITS. The single legal clearing path is a superseding, independently-reviewed, SATISFIED DESIGN-REVIEW whose entry for the affected unit(s) changed — amend docs/specs/$tid.md and record a fresh verdict: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>. This cannot be waived by --no-design or any other flag: an open, evidenced design objection has exactly one legal clearing path, and a content edit alone is not enough without an accompanying satisfied review" \
+            "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
+        exit 2
+    fi
+# DESIGN-CONFLICT-REFUSAL END (v5 D5 / claude-workflow-plugin-fkm.7)
 
     # ---- APPROVE-COMMIT ORDER (gz3 / v4.1 U1) -----------------------------
     #
@@ -4665,9 +4811,15 @@ cmd_approve() {
     #     [ [completion bypass: …]][ [completion cross-check: …]]
     #     [ [design bypass: <reason>]]
     # Seven suffix spellings from six sites; the two `completion cross-check`
-    # bodies differ in text and share the marker. Keep this list and the `approve`
-    # usage text in step — both had drifted by two releases before D1, and the
-    # `artifact_hash=` omission just fixed above shows it can drift again in one.
+    # bodies differ in text and share the marker. claude-workflow-plugin-i8cx
+    # (operator ruling on rounds 6/7/8 independent review) REMOVED an eighth,
+    # `[design conflict waived: units=<ids>]` — it existed only to shape the
+    # marker a reader consumed, and that reader is gone; an open DESIGN-
+    # CONFLICT now refuses `approve` unconditionally (see DESIGN-CONFLICT-
+    # REFUSAL above) instead of being disclosed as a waived bypass. Keep this
+    # list and the `approve` usage text in step — both had drifted by two
+    # releases before D1, and the `artifact_hash=` omission just fixed above
+    # shows it can drift again in one.
     # Every optional MACHINE field carries its own trailing space and defaults to
     # empty, so a build with any one of their sentinel regions stripped writes a
     # record with no dangling token and no double space. Every optional SUFFIX is
@@ -4733,6 +4885,21 @@ cmd_approve() {
     # to produce it, caught before it shipped a third divergence.
     if [ "$bypass_design" = "1" ]; then
         comment_suffix="$comment_suffix [design bypass: $design_bypass_reason]"
+        # claude-workflow-plugin-i8cx (operator ruling on rounds 6/7/8
+        # independent review): this USED to be followed by an eighth,
+        # conditional bracket — `[design conflict waived: units=<ids>]` —
+        # disclosing when --no-design had also waived an open DESIGN-
+        # CONFLICT. That waiver mechanism is REMOVED: an open conflict now
+        # refuses `approve` unconditionally (DESIGN-CONFLICT-REFUSAL above
+        # runs regardless of bypass_design), so this branch can never be
+        # reached while a conflict is open — there is nothing left to
+        # disclose. Kept as observability-only was considered and rejected:
+        # since the state it would describe (a released approval with an
+        # open conflict) can no longer occur, the code would be unreachable
+        # by construction, which is worse than absent — dead code that
+        # LOOKS load-bearing is exactly the shape that invited this
+        # mechanism's four rounds of "fix the reader" instead of "remove
+        # it". Rely on refusal alone.
     fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local hash_field=""
@@ -7006,7 +7173,17 @@ cmd_grilling_record() {
 # This helper is the ONE pattern for all three sites, mirroring epic-gate's
 # ladder: rc first, then exact types for every field a consumer reads
 # downstream (units number, unit_ids array, task_id string,
-# unit_files/unit_deps objects), with `.ok == true` type-strict in jq.
+# unit_files/unit_deps/unit_content objects), with `.ok == true` type-strict
+# in jq.
+#
+# unit_content (v5 D5 R4-F1 remediation, independent review round 4) joined
+# this exact-match list the SAME cycle review-check.sh's OWN copy
+# (emit_validate_design's shape_prog, VALIDATE-DESIGN-ENVELOPE-SHAPE-GATE)
+# gained it. The two copies MUST agree: this helper does an EXACT `keys |
+# sort` match, so a field added to the real validator's envelope without a
+# matching addition here makes design-record/design-unit-bind/design-conform
+# start refusing every otherwise-valid artifact — extending the envelope is
+# only safe when both copies move together.
 #
 # A refusal envelope (ok:false + nonzero exit — the validator's NORMAL
 # refusal shape) returns 1 here and each site's own refusal arm still reads
@@ -7026,7 +7203,7 @@ validate_design_envelope_ok() {
     printf '%s' "$envelope" | jq -e '
         # validate-design consumer success-shape check (xsu1 R7-F4)
         type == "object"
-        and (keys | sort) == ["error_key", "observations", "ok", "subcommand", "task_id", "unit_deps", "unit_files", "unit_ids", "units"]
+        and (keys | sort) == ["error_key", "observations", "ok", "subcommand", "task_id", "unit_content", "unit_deps", "unit_files", "unit_ids", "units"]
         and .ok == true  # type-strict: the STRING "true" must not pass (R7-F4)
         and .subcommand == "validate-design"
         and (.error_key | type) == "string"
@@ -7036,6 +7213,7 @@ validate_design_envelope_ok() {
         and (.task_id | type) == "string"
         and (.unit_files | type) == "object"
         and (.unit_deps | type) == "object"
+        and (.unit_content | type) == "object"
     ' >/dev/null 2>&1
 }
 
@@ -8144,16 +8322,134 @@ cmd_design_gate_precheck() {
     require_bd "design-gate-precheck" "$tid"
 
     compute_design_satisfied "$tid"
-    if [ "$DESIGN_SATISFIED" = "true" ]; then
-        emit_json 1 "design-gate-precheck" "$tid" "ready" "$DESIGN_SATISFIED_OBS"
+    # R9-F1 (independent review round 9, claude-workflow-plugin-i8cx):
+    # CAPTURE INTO LOCALS IMMEDIATELY — compute_design_conflict_open below
+    # evaluates its own R6-F4 clearing predicate by calling
+    # compute_design_satisfied AGAIN internally (see that function's own
+    # header, "THE RESIDUAL THIS CLOSES") whenever at least one
+    # DESIGN-CONFLICT record exists, which overwrites the GLOBAL
+    # DESIGN_SATISFIED / DESIGN_SATISFIED_KEY / DESIGN_SATISFIED_OBS this
+    # function still needs below. Reading the globals again after that call
+    # would silently rebind them to a second, independent read a few
+    # milliseconds later — the same TOCTOU shape this file's xsu1 discipline
+    # forecloses elsewhere. cmd_approve's own DESIGN-CONFLICT-REFUSAL avoids
+    # this the same way, one call earlier: it stashes what it needs
+    # (design_verdict_field, design_satisfied_obs) into locals before ever
+    # reaching its own unconditional conflict check.
+    local design_satisfied="$DESIGN_SATISFIED"
+    local design_satisfied_key="$DESIGN_SATISFIED_KEY"
+    local design_satisfied_obs="$DESIGN_SATISFIED_OBS"
+
+# DESIGN-GATE-PRECHECK-CONFLICT BEGIN (v5 D5 R2-F2 fix / independent review
+# round 2; made UNCONDITIONAL-BEFORE-ANY-BRANCH at R9-F1 / round 9)
+    #
+    # R2-F2's original fix (still the reason this check exists at all):
+    # design-gate-precheck IS the Stop-time recheck path, not only the
+    # pre-delegation convenience its own header above describes —
+    # verify-before-stop.sh's DESIGN-DISCIPLINE block (v5 D2 / fkm.4) shells
+    # out to exactly this subcommand and blocks the release on ANY non-zero
+    # exit, keyed on nothing but the exit status. compute_design_satisfied's
+    # own vocabulary has no conflict arm (deliberately — see
+    # compute_design_conflict_open's header and cmd_approve's own
+    # DESIGN-CONFLICT-REFUSAL comment for why that split is not being undone
+    # here), so this function has to ask both predicates itself. NOT FOLDED
+    # INTO compute_design_satisfied ITSELF — that predicate is ALSO
+    # consulted by design-conform (fkm.6), and folding a conflict check into
+    # the shared predicate would change design-conform's behaviour too:
+    # extend the CALLER that needs the new fact, never the fact-finder every
+    # caller reads.
+    #
+    # R9-F1 (independent review round 9): THE FIFTH independent HIGH against
+    # reaching this exact predicate correctly (R2-F2 itself; R3-F2a/b;
+    # R6-F1 through F4 against the since-removed waiver mechanism; this
+    # one). Every prior fix was locally correct on its own terms and still
+    # left a path in, because each one added or repaired a check WITHOUT
+    # changing the fact that the check lived inside one arm of a branch on
+    # DESIGN_SATISFIED. Historically this block was nested inside
+    # `if [ "$DESIGN_SATISFIED" = "true" ]` below — so `no_design_attempted`
+    # (and every other non-true DESIGN_SATISFIED_KEY) returned "ready"
+    # WITHOUT EVER CALLING compute_design_conflict_open. Concretely: approve
+    # a task --no-design while it is satisfied-and-unconflicted (or before
+    # any design phase exists at all), THEN file a genuine DESIGN-CONFLICT —
+    # the Stop-time recheck never re-entered the branch that would have seen
+    # it, because filing a conflict is a Beads-only change that moves
+    # neither the change-set hash nor DESIGN_SATISFIED itself.
+    #
+    # THE FIX IS STRUCTURAL, NOT ANOTHER LOCAL GUARD: this block now runs
+    # ONCE, UNCONDITIONALLY, BEFORE either `if` below ever inspects
+    # design_satisfied or design_satisfied_key. There is no longer a branch
+    # PRECEDING the conflict check for a future arm to hide behind — every
+    # existing DESIGN_SATISFIED_KEY value (true, no_design_attempted,
+    # design_verdict_missing, design_not_satisfied, design_hash_unreadable,
+    # design_artifact_unreadable, design_verdict_stale,
+    # design_source_unreadable) and any NEW key compute_design_satisfied
+    # grows in the future inherit this refusal for free, because the
+    # branching on that vocabulary happens strictly AFTER this block returns
+    # without exiting. A sixth escape would require an entirely NEW code
+    # path reaching "ready" or the not-ready emit_error_json below WITHOUT
+    # going through this function's own top-to-bottom control flow at all —
+    # not a sixth DESIGN_SATISFIED_KEY value, which is the shape every prior
+    # finding against this predicate exploited.
+    #
+    # claude-workflow-plugin-i8cx (operator ruling on rounds 6/7/8
+    # independent review, unaffected by this fix): the unit-scoped waiver
+    # subtraction this block used to perform (DESIGN-GATE-PRECHECK-UNIT-SCOPE,
+    # R3-F2b) is gone — ANY open conflict refuses here, unconditionally,
+    # exactly as it already does at `approve`; there is no unit to subtract
+    # because there is no longer a waiver that could have named one.
+    #
+    # EXIT 4, matching THIS subcommand's OWN established convention for
+    # every other "not ready" outcome — NOT exit 2, which is cmd_approve's
+    # own convention for the identical vocabulary (see cmd_approve's
+    # DESIGN-CONFLICT-REFUSAL header for the full cross-command exit-code
+    # rationale). FAIL-CLOSED ORDERING PRESERVED: an unreadable conflict
+    # source (design_conflict_rc != 0) refuses BEFORE an open conflict is
+    # even asked about, exactly as before — "unknown" must never collapse
+    # into "no conflict" any more than it may collapse into "ready" the long
+    # way around.
+    #
+    # WORDING NOTE: the source-unreadable message below no longer opens with
+    # "the design is satisfied, but" — now false on every path except the
+    # one arm it used to be nested in. The error_key, exit code, and
+    # remediation are otherwise unchanged, and design_conflict_open's own
+    # message is untouched (it never made that assumption).
+    #
+    # NO CALLER-SIDE CHANGE NEEDED (verified by reading verify-before-stop.sh,
+    # not by assumption): its DESIGN-DISCIPLINE block branches on the exit
+    # status alone, so this refusal is picked up by an UNMODIFIED caller the
+    # first time it runs after this ships — the same property R2-F2's own
+    # fix already established and this one does not disturb.
+    #
+    # The sentinel comments are load-bearing: an L1 META
+    # (design-review-record.test.sh) strips this region and watches a task
+    # carrying no_design_attempted PLUS an open, un-amended DESIGN-CONFLICT
+    # report "ready" anyway. Do not rename the sentinels.
+    local design_conflict_rc=0
+    compute_design_conflict_open "$tid" || design_conflict_rc=$?
+    if [ "$design_conflict_rc" -ne 0 ]; then
+        emit_error_json "design-gate-precheck" "$tid" "design_conflict_source_unreadable" \
+            "design-gate-precheck: the DESIGN-CONFLICT history for $tid could not be read right now (bd unreachable, the comment stream not retrievable, or a record read back malformed), so whether an open conflict exists is unknown; refusing to report this as ready, regardless of the task's own design-satisfied state. Re-run once bd is reachable" \
+            "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
+        exit 4
+    fi
+    if [ "$DESIGN_CONFLICT_OPEN" = "true" ]; then
+        emit_error_json "design-gate-precheck" "$tid" "design_conflict_open" \
+            "design-gate-precheck: not ready — $DESIGN_CONFLICT_OPEN_OBS Affected unit(s): $DESIGN_CONFLICT_OPEN_UNITS. The single legal clearing path is a superseding, independently-reviewed, SATISFIED DESIGN-REVIEW whose entry for the affected unit(s) changed — amend docs/specs/$tid.md and record a fresh, independent verdict: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>. This cannot be waived; a content edit alone is not enough without an accompanying satisfied review" \
+            "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
+        exit 4
+    fi
+# DESIGN-GATE-PRECHECK-CONFLICT END (v5 D5 R2-F2 fix; R9-F1 unconditional)
+
+    if [ "$design_satisfied" = "true" ]; then
+        emit_json 1 "design-gate-precheck" "$tid" "ready" "$design_satisfied_obs"
         return 0
     fi
-    if [ "$DESIGN_SATISFIED_KEY" = "no_design_attempted" ]; then
-        emit_json 1 "design-gate-precheck" "$tid" "ready" "${DESIGN_SATISFIED_OBS} — proceeding is fine; this precheck only blocks a design that was STARTED but is not yet reviewed"
+    if [ "$design_satisfied_key" = "no_design_attempted" ]; then
+        emit_json 1 "design-gate-precheck" "$tid" "ready" "${design_satisfied_obs} — proceeding is fine; this precheck only blocks a design that was STARTED but is not yet reviewed"
         return 0
     fi
-    emit_error_json "design-gate-precheck" "$tid" "$DESIGN_SATISFIED_KEY" \
-        "design-gate-precheck: not ready to delegate implementation — $DESIGN_SATISFIED_OBS. Record a satisfied, independent design verdict first: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>" \
+    emit_error_json "design-gate-precheck" "$tid" "$design_satisfied_key" \
+        "design-gate-precheck: not ready to delegate implementation — $design_satisfied_obs. Record a satisfied, independent design verdict first: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>" \
         "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
     exit 4
 }
@@ -9447,6 +9743,642 @@ cmd_design_status() {
 }
 # DESIGN-UNIT-SHOW / DESIGN-STATUS END (v5 D4b, fkm.6)
 
+# ---------------------------------------------------------------------------
+# DESIGN-CONFLICT BEGIN (v5 D5 / claude-workflow-plugin-fkm.7)
+#
+# design-conflict <task-id> --unit <unit-id> [--design-hash <h>] '<statement>'
+#
+# THE PROBLEM THIS RECORD SOLVES. D5's own text: "When a unit's acceptance
+# criteria cannot be satisfied as written — the design is wrong, incomplete,
+# or contradicted by the code — the implementer returns a design_conflict
+# blocker with evidence and stops. It does not reinterpret, improvise, or
+# partially satisfy." Before this command existed, an implementer facing
+# that choice had exactly two options, both wrong: silently improvise (the
+# dilution this whole release exists to stop), or stall with no structured
+# record of WHY. This gives a third: file the objection, stop, and let
+# cmd_approve's own DESIGN-CONFLICT-REFUSAL block (an unconditional sibling
+# of DESIGN-SATISFIED-REFUSAL since claude-workflow-plugin-i8cx) hold the
+# line until a design amendment, independently re-reviewed and found
+# satisfied, addresses it — there is no longer an operator override that
+# waives an open conflict; see that block's own header for the four
+# independent review findings that led to removing it. The reader half
+# (compute_design_conflict_open) and its wiring into approve are the OTHER
+# function; this comment only covers the writer.
+#
+# GRAMMAR — single line, no version tag, matching the LIGHTER-weight
+# records this file already ships (IMPLEMENTER, RESOLVED, ARBITRATION),
+# because a conflict is not a schema-versioned artifact binding the way
+# DESIGN-ARTIFACT/DESIGN-REVIEW/DESIGN-UNIT are:
+#   DESIGN-CONFLICT <unit-id> design_hash=<h> at <ts>: <statement>
+# <unit-id> is a BARE positional token (mirrors RESOLVED/ARBITRATION's own
+# `<id>` right after the record's type tag), not `unit_id=<val>` — matching
+# the exact grammar this task was specified against.
+#
+# design_hash IS OPTIONAL ON THE COMMAND LINE, NEVER OPTIONAL IN THE
+# RECORD, AND — SINCE R2-F3 (independent review round 2, claude-workflow-plugin-i8cx)
+# — NEVER MERELY TRUSTED EITHER WAY. When --design-hash is omitted, it is a
+# LIVE RECOMPUTE over docs/specs/<task-id>.md (design_artifact_path_for,
+# workflow-manifest.sh hash-file) — the SAME "design_hash is a live
+# recompute, never a placeholder" doctrine design-unit-bind's own header
+# states, checked here with the STRICT is_sha256_hex test because this file
+# controls that read end to end. When --design-hash IS given, it is now a
+# CONFIRMATION of that SAME live recompute, never an independent source of
+# truth — the identical "asserts, never a second source" contract
+# epic-gate.sh's own `--design <path>` flag already documents for a sibling
+# flag (epic-gate.sh usage(), plan-batches). A value that does not equal the
+# live hash is REFUSED (design_hash_not_current), not recorded: the
+# ORIGINAL framing here ("a CLAIM the caller makes about what was current
+# when they observed the conflict") was exactly the gap Sol's review named
+# — a stale or mistyped claim was recorded verbatim and then read back as
+# ALREADY not the current design, which is compute_design_conflict_open's
+# own CLEARED arm, so the conflict was born cleared. The CHARACTER CLASS
+# stays the LOOSER `[A-Za-z0-9-]+`, deliberately still not an is_sha256_hex
+# SHAPE check on its own (a future hashing scheme's output need not be 64
+# hex either) — but the value now ALSO has to equal whatever the live
+# recompute produces right now, whatever shape that happens to be, so the
+# looser class no longer means "unverified".
+#
+# THE bjx SCALAR-CLASS DISCIPLINE — see the DESIGN-CONFLICT-SCALAR-CLASS
+# block inside cmd_design_conflict below: unit_id reuses assert_unit_id_
+# scalar VERBATIM (D4's own [A-Za-z0-9._-]+ class, review-check.sh's
+# schema, fkm.6) rather than a second copy of the identical regex;
+# design_hash gets its own inline check for the looser class above. Reject,
+# never sanitise, for the usual reason: a silently-rewritten value would
+# make the record disagree with what the implementer actually said.
+# <statement> is deliberately NOT class-validated — free text, exactly like
+# every other record's trailing summary field (DESIGN-REVIEW's `: <summary>`,
+# GRILLING's, DESIGN-ARTIFACT's) — because it is the LAST field in the
+# grammar: nothing after it can relocate a field boundary that comes
+# before it, which is the entire threat class the scalar-class discipline
+# exists to close.
+#
+# WHAT THIS WRITER NOW CHECKS, AND WHY THAT CHANGED (R2-F3, independent review round
+# 2). It now DOES validate --unit against the artifact's OWN declared
+# unit_ids (unit_not_in_artifact, the SAME key design-unit-bind's own
+# UNIT-MEMBERSHIP-GATE already uses for the identical fact) — not a
+# re-litigation of the original "lighter, advisory-but-audited claim, not a
+# binding assertion" framing, but a STRUCTURAL CONSEQUENCE of R2-F3's fix:
+# the record now pins a per-unit content hash (unit_hash=, see
+# compute_design_conflict_open's own header for why the clearing predicate
+# had to move there), and pinning that to a unit_id nothing declares would
+# be meaningless — there would be no bytes for a future amendment to ever
+# change. Establishing the unit's current content is therefore required to
+# file a conflict against it at all, via design_unit_json (below), which —
+# as of independent review round 2's own follow-up fix — asks
+# review-check.sh's validate-design for the unit_ids and its new
+# design-unit-json subcommand for the one unit's own canonical bytes, rather
+# than reading the artifact's machine block directly. See design_unit_json's
+# own header for why that changed.
+#
+# STILL NO INDEPENDENCE CHECK, unchanged from the original design: unlike
+# design-review-record, a design_conflict's author is not compared against
+# any designer= identity. That question was never in this task's scope and
+# R2-F3 does not touch it.
+#
+# design_unit_json / design_declared_unit_ids / design_unit_content_hash —
+# R2-F3's shared machinery, used by BOTH this writer (membership + the
+# pinned unit_hash) and compute_design_conflict_open below (the live
+# re-derive the clearing predicate compares against).
+#
+# ROUND 2 OF INDEPENDENT REVIEW ON THIS SAME FINDING (claude-workflow-plugin-
+# i8cx) REVERSED HOW THESE READ THE ARTIFACT. The version this file shipped
+# first parsed the DESIGN-UNITS machine block directly — an awk sentinel
+# scan plus its own fence handling — documented at the time as "a
+# DELIBERATE, NARROW exception to 'review-check.sh is the ONE DESIGN-UNITS
+# parser'" because review-check.sh's validate-design exposed only
+# unit_ids/unit_files/unit_deps (SETS, never per-unit CONTENT), so there was
+# no envelope field this could read instead. That WAS a second parser, not
+# an exception to needing one, and design-artifact.test.sh section 5
+# (5.7b/5.7c) asserts the invariant structurally rather than leaving it to
+# review: qa-gate.sh must carry ZERO DESIGN-UNITS sentinel extraction of its
+# own; review-check.sh, the ONE parser, must.
+#
+# THE FIX: review-check.sh gained a new subcommand, design-unit-json,
+# built on top of the SAME validate-design cmd_validate_design already
+# ships — it calls validate-design first and refuses unless it answers
+# ok:true with the requested unit declared, then returns that ONE unit's own
+# canonical JSON (see that subcommand's header in review-check.sh for why
+# this is a fetch behind the real validator's verdict, never a second one).
+# design_unit_json below is now a thin wrapper over that subcommand;
+# design_declared_unit_ids is a thin wrapper over the EXISTING, unmodified
+# validate-design's own unit_ids field. Neither reads the artifact's machine
+# block directly any more. design_unit_content_hash (further below) needed
+# no changes at all: it already only ever consumed design_unit_json's
+# output and hashed it via workflow-manifest.sh, so its external contract
+# carried straight through this fix.
+#
+# UPDATE (v5 D5 R4-F1 remediation, independent review round 4):
+# design-unit-json's OWN internals changed — it no longer re-reads the
+# artifact after calling validate-design; it now projects the unit's body
+# off validate-design's own unit_content envelope field instead (see
+# review-check.sh for the mechanism and validate_design_envelope_ok, above,
+# for the matching shape-check update). design_unit_json here did NOT
+# change: its external contract (subcommand name, .ok/.error_key/.unit_json
+# fields) is identical, so this wrapper, design_declared_unit_ids, and
+# design_unit_content_hash all carry straight through UNCHANGED.
+#
+# design_unit_json <artifact-path> <unit-id> — canonical (compact, keys
+# sorted, so incidental reformatting or key reordering elsewhere in the
+# unit's own object never changes the hash a caller derives from this) JSON
+# for ONE declared unit, or empty. Empty + rc 0 = the artifact validates and
+# unit_id is simply not among its units (a DETERMINED absence — the same
+# "empty + rc 0" convention every other reader in this file uses for
+# "checked, and it is not there"). rc 3 = the artifact did not validate, or
+# review-check.sh's own read of it failed, propagated as unreadable (never
+# to be read as "not declared" — the same distinction the previous, local
+# implementation of this function already drew).
+design_unit_json() {
+    local artifact="${1:-}" unit_id="${2:-}"
+    [ -n "$artifact" ] && [ -f "$artifact" ] || return 3
+    [ -n "$unit_id" ] || return 3
+    local out="" out_rc=0
+    out=$(bash "$REVIEW_CHECK_SCRIPT" design-unit-json "$artifact" "$unit_id" 2>/dev/null) || out_rc=$?
+    local ok="false"
+    if [ "$out_rc" -eq 0 ] && [ -n "$out" ]; then
+        ok=$(printf '%s' "$out" | jq -r '(.ok == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || ok="false"
+    fi
+    if [ "$ok" = "true" ]; then
+        printf '%s' "$out" | jq -r '.unit_json // ""' 2>/dev/null
+        return 0
+    fi
+    # A DETERMINED "not declared" verdict is read from the body regardless
+    # of exit status, the same way validate_design_envelope_ok's own header
+    # says a refusal envelope is read for its error_key/observations rather
+    # than discarded just because the exit was nonzero.
+    local ekey=""
+    ekey=$(printf '%s' "$out" | jq -r '.error_key // ""' 2>/dev/null) || ekey=""
+    if [ "$ekey" = "unit_not_in_design" ]; then
+        printf ''
+        return 0
+    fi
+    return 3
+}
+
+# design_declared_unit_ids <artifact-path> — comma-space-joined unit_ids, for
+# an error message's "Declared unit(s): ..." text only (the SAME shape
+# design-unit-bind's own UNIT-MEMBERSHIP-GATE already prints) — empty on any
+# failure, since nothing gates on this, only a message reads it. Reads
+# review-check.sh's EXISTING, unmodified validate-design envelope; no new
+# surface was needed for this one, since unit_ids was already on it.
+design_declared_unit_ids() {
+    local artifact="${1:-}"
+    [ -n "$artifact" ] && [ -f "$artifact" ] || return 0
+    local out="" out_rc=0
+    out=$(bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null) || out_rc=$?
+    [ "$out_rc" -eq 0 ] || return 0
+    printf '%s' "$out" | jq -r '(.unit_ids // []) | join(", ")' 2>/dev/null || true
+    return 0
+}
+
+# design_unit_content_hash <artifact-path> <unit-id> — sha256 (lowercase
+# hex) of design_unit_json's canonical output for <unit-id>, via
+# workflow-manifest.sh hash-file — the ONE hash-tool dispatch this file
+# already trusts (sha256sum -> shasum -> openssl, whichever is on PATH),
+# never a second one. A temp file is used ONLY because hash-file takes a
+# PATH, never stdin; mktemp with the same QA_TRACKING_DIR fallback this file
+# already uses at three other call sites, removed in every exit path. Rc 0
+# + empty = unit not declared (design_unit_json's own determined absence,
+# propagated); rc 3 = could not be determined at all (unit_json's own
+# failure, a missing/unreadable hash tool, or a hash that did not come back
+# 64 lowercase hex).
+design_unit_content_hash() {
+    local artifact="${1:-}" unit_id="${2:-}"
+    local unit_json="" uj_rc=0
+    unit_json=$(design_unit_json "$artifact" "$unit_id") || uj_rc=$?
+    [ "$uj_rc" -eq 0 ] || return 3
+    [ -n "$unit_json" ] || return 0
+
+    local manifest_tool="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+    [ -f "$manifest_tool" ] || return 3
+    local tmpf
+    tmpf=$(mktemp -t design-unit-hash.XXXXXX 2>/dev/null) || tmpf="$QA_TRACKING_DIR/.design-unit-hash-$$.json"
+    if ! printf '%s\n' "$unit_json" > "$tmpf" 2>/dev/null; then
+        rm -f "$tmpf" 2>/dev/null
+        return 3
+    fi
+    local h="" h_rc=0
+    h=$(bash "$manifest_tool" hash-file "$tmpf" 2>/dev/null) || h_rc=$?
+    rm -f "$tmpf" 2>/dev/null
+    [ "$h_rc" -eq 0 ] && is_sha256_hex "$h" || return 3
+    printf '%s' "$h"
+    return 0
+}
+
+cmd_design_conflict() {
+    # jq availability is checked FIRST and reported WITHOUT emit_error_json
+    # — the same reason cmd_design_unit_bind and cmd_design_conform both do
+    # this ahead of everything else: every emit_error_json/emit_json call
+    # builds its JSON THROUGH jq, so discovering jq is missing and then
+    # trying to report that fact via the same jq-dependent emitter produces
+    # `jq: command not found` on stderr and unparseable JSON on stdout. This
+    # literal interpolates no caller-supplied text, so there is nothing here
+    # for a missing jq to have needed to escape.
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-conflict","task_id":null,"status":"error","error_key":"jq_unavailable","observations":"jq is required and not on PATH; refusing rather than writing a record nothing downstream could read back","usage":"qa-gate.sh design-conflict <task-id> --unit <unit-id> [--design-hash <h>] <statement>"}\n'
+        exit 2
+    fi
+
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-conflict" "" "missing_task_id" \
+            "design-conflict requires <task-id> as first positional argument" \
+            "qa-gate.sh design-conflict <task-id> --unit <unit-id> [--design-hash <h>] '<statement>'"
+        exit 1
+    fi
+    shift || true
+
+    # Argument-parsing shape mirrors cmd_design_unit_bind's exactly (flags
+    # plus a trailing free-text field), not design-review-record's (no
+    # trailing summary there — its payload comes from --file/stdin, so ANY
+    # bare word is an unknown_flag). Here a bare word is the statement.
+    local unit_id="" design_hash_arg="" statement=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --unit)
+                unit_id="${2:-}"
+                if [ -z "$unit_id" ]; then
+                    emit_error_json "design-conflict" "$tid" "missing_unit_id" \
+                        "--unit requires a value — the unit_id whose acceptance criteria cannot be satisfied as designed" \
+                        "qa-gate.sh design-conflict $tid --unit <U-n> [--design-hash <h>] '<statement>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --design-hash)
+                design_hash_arg="${2:-}"
+                if [ -z "$design_hash_arg" ]; then
+                    emit_error_json "design-conflict" "$tid" "missing_design_hash" \
+                        "--design-hash requires a value when the flag is given; omit it entirely to auto-derive the current artifact's live hash instead" \
+                        "qa-gate.sh design-conflict $tid --unit <U-n> [--design-hash <h>] '<statement>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                if [ -z "$statement" ]; then statement="$1"; else statement="$statement $1"; fi
+                shift || true
+                ;;
+        esac
+    done
+
+    require_bd "design-conflict" "$tid"
+
+    # Redundant-looking re-checks (unit_id was already checked non-empty
+    # inline above when --unit WAS given) cover the case it was never
+    # given at all — the same belt-and-suspenders shape design-unit-bind's
+    # own header documents as deliberate rather than an oversight.
+    if [ -z "$unit_id" ]; then
+        emit_error_json "design-conflict" "$tid" "missing_unit_id" \
+            "--unit is required — which unit's acceptance criteria cannot be satisfied as designed" \
+            "qa-gate.sh design-conflict $tid --unit <U-n> [--design-hash <h>] '<statement>'"
+        exit 1
+    fi
+    if [ -z "$statement" ]; then
+        emit_error_json "design-conflict" "$tid" "missing_statement" \
+            "a <statement> is required — the evidence for why the design cannot be satisfied as written. A conflict with no stated reason is indistinguishable from an implementer improvising instead of stopping, which is exactly what this record exists to prevent" \
+            "qa-gate.sh design-conflict $tid --unit <U-n> [--design-hash <h>] '<statement>'"
+        exit 1
+    fi
+
+# DESIGN-CONFLICT-SCALAR-CLASS BEGIN (fkm.7)
+    # bjx: reject, never sanitise. See this block's own function-header
+    # comment above for why unit_id and design_hash carry DIFFERENT classes
+    # from each other (and why design_hash's is looser than is_sha256_hex).
+    assert_unit_id_scalar "design-conflict" "$tid" "unit_id" "$unit_id"
+    if [ -n "$design_hash_arg" ]; then
+        case "$design_hash_arg" in
+            *[!A-Za-z0-9-]*)
+                emit_error_json "design-conflict" "$tid" "design_hash_invalid_chars" \
+                    "design_hash='$design_hash_arg' contains characters outside [A-Za-z0-9-]; it is interpolated into the DESIGN-CONFLICT record's machine prefix, where a space, a colon or a bracket would move a field boundary and let the record be read back as something the caller never said (the claude-workflow-plugin-bjx class). Rejected, not sanitised" \
+                    "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+                exit 1
+                ;;
+        esac
+    fi
+# DESIGN-CONFLICT-SCALAR-CLASS END (fkm.7)
+
+    # --- R2-F3: confirm --unit is a REAL, declared unit; resolve the LIVE
+    # whole-artifact hash unconditionally; an explicit --design-hash must
+    # equal it (a CONFIRMATION, never a second source); pin unit_hash to
+    # the DISPUTED unit's OWN current content, over which clearing is now
+    # decided (see compute_design_conflict_open's own header) ------------
+    local artifact
+    artifact=$(design_artifact_path_for "$tid")
+    if [ ! -f "$artifact" ]; then
+        emit_error_json "design-conflict" "$tid" "design_artifact_not_found" \
+            "no design artifact exists at $artifact; a conflict needs a design to be filed against (required even with an explicit --design-hash, so the value can be CONFIRMED rather than merely trusted). Record the design first: qa-gate.sh design-record $tid" \
+            "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+        exit 1
+    fi
+    local manifest_tool
+    manifest_tool="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+    if [ ! -f "$manifest_tool" ]; then
+        emit_error_json "design-conflict" "$tid" "hash_tool_unavailable" \
+            "cannot derive the current design_hash: workflow-manifest.sh is missing at $manifest_tool" \
+            "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+        exit 2
+    fi
+    local live_hash="" hash_rc=0
+    live_hash=$(bash "$manifest_tool" hash-file "$artifact" 2>/dev/null) || hash_rc=$?
+    # STRICT is_sha256_hex here (not the looser write class the CLI flag
+    # accepts): this is OUR OWN live computation, and hash-file can
+    # legitimately emit a non-empty degradation sentinel on failure
+    # (is_sha256_hex's own header: "refuses sha256-unavailable, any
+    # truncation of it") that the looser [A-Za-z0-9-]+ class would let
+    # through as if it were a real hash.
+    if [ "$hash_rc" -ne 0 ] || ! is_sha256_hex "$live_hash"; then
+        emit_error_json "design-conflict" "$tid" "design_hash_unavailable" \
+            "$artifact could not be hashed into 64 hex characters (workflow-manifest.sh hash-file exited $hash_rc, produced '${live_hash:-<empty>}')" \
+            "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+        exit 2
+    fi
+
+    local design_hash
+    if [ -n "$design_hash_arg" ]; then
+        # R2-F3 (independent review round 2): an explicit --design-hash is now a
+        # CONFIRMATION of the CURRENT artifact hash, never an independent
+        # claim the writer merely trusts — trusting it is exactly how a
+        # stale or mistyped value used to be recorded verbatim and then read
+        # back by compute_design_conflict_open as ALREADY not the current
+        # design (its own CLEARED arm), a conflict born cleared. Reject,
+        # don't sanitise: the same discipline every other caller-supplied
+        # value in this file gets.
+        if [ "$design_hash_arg" != "$live_hash" ]; then
+            emit_error_json "design-conflict" "$tid" "design_hash_not_current" \
+                "--design-hash='$design_hash_arg' does not match $artifact's CURRENT hash ($live_hash); a conflict must be filed against the artifact as it exists right now, never a stale or mistyped value. Omit --design-hash to auto-derive the current one, or pass exactly what 'workflow-manifest.sh hash-file $artifact' prints" \
+                "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+            exit 1
+        fi
+        design_hash="$design_hash_arg"
+    else
+        design_hash="$live_hash"
+    fi
+
+# UNIT-MEMBERSHIP-GATE BEGIN (fkm.7 R2-F3 fix / independent review round 2)
+    # A conflict pinned to a unit_id nothing declares could never be
+    # cleared or read back meaningfully (there is no content for a future
+    # amendment to ever change) — the SAME reasoning, and the SAME error
+    # key, design-unit-bind's own UNIT-MEMBERSHIP-GATE already applies to
+    # the identical fact.
+    local unit_json="" uj_rc=0
+    unit_json=$(design_unit_json "$artifact" "$unit_id") || uj_rc=$?
+    if [ "$uj_rc" -ne 0 ]; then
+        emit_error_json "design-conflict" "$tid" "design_units_block_unreadable" \
+            "$artifact did not validate via review-check.sh validate-design right now (missing sentinels, unparseable JSON, an unanchored/malformed fence, a schema violation, or a cyclic dependency graph — see that command's own error_key for which); a conflict cannot be pinned to a unit whose current content is unknown" \
+            "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+        exit 2
+    fi
+    if [ -z "$unit_json" ]; then
+        local known
+        known=$(design_declared_unit_ids "$artifact")
+        emit_error_json "design-conflict" "$tid" "unit_not_in_artifact" \
+            "unit_id='$unit_id' is not declared in $artifact (design_hash=$live_hash). Declared unit(s): ${known:-<none>}. A conflict pinned to a nonexistent unit is worse than none — refusing" \
+            "qa-gate.sh design-conflict $tid --unit <one of: ${known:-<none>}> --design-hash <h> '<statement>'"
+        exit 1
+    fi
+    local unit_hash="" uh_rc=0
+    unit_hash=$(design_unit_content_hash "$artifact" "$unit_id") || uh_rc=$?
+    if [ "$uh_rc" -ne 0 ] || [ -z "$unit_hash" ] || ! is_sha256_hex "$unit_hash"; then
+        emit_error_json "design-conflict" "$tid" "unit_hash_unavailable" \
+            "unit_id='$unit_id' is declared in $artifact but its own content could not be hashed into 64 hex characters right now — nothing is recorded" \
+            "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+        exit 2
+    fi
+# UNIT-MEMBERSHIP-GATE END (fkm.7 R2-F3 fix / independent review round 2)
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="DESIGN-CONFLICT $unit_id design_hash=$design_hash unit_hash=$unit_hash at $ts: $statement"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "design-conflict" "$tid" "recorded" "comment posted at $ts: $comment_text"
+}
+
+# compute_design_conflict_open <tid> — sets globals (never prints):
+# DESIGN_CONFLICT_OPEN (true|false), DESIGN_CONFLICT_OPEN_UNITS
+# (space-joined unit_ids carrying at least one open conflict), DESIGN_CONFLICT_
+# OPEN_OBS (a full sentence). Returns 0 on a DETERMINED read — including "no
+# DESIGN-CONFLICT record was ever filed", which is a determined answer, the
+# SAME distinction design_comments_json's own header draws for absence versus
+# unreadability — and non-zero when the comment stream could not be read or a
+# jq failure means the answer is unknown. The caller MUST NOT treat a non-zero
+# return as "no conflict"; see cmd_approve's own DESIGN-CONFLICT-REFUSAL for
+# how it fails closed on this.
+#
+# SINGLE ARGUMENT since claude-workflow-plugin-i8cx (operator ruling on
+# rounds 6/7/8 independent review). A historical second positional argument,
+# <verdict-design-hash>, was accepted-but-ignored between independent review
+# round 3 and this fix — every remaining call site has been updated to stop
+# passing it, and it is no longer part of this function's contract.
+#
+# EVERY RECORD, NOT JUST THE LATEST (claude-workflow-plugin-fkm.1.19, applied
+# rather than merely cited). fkm.1.19 is an OPEN P0 against review-check.sh's
+# own gate: it reads only the LATEST review artifact, so a later artifact
+# simply silent about an earlier open finding retires it BY OMISSION. A
+# DESIGN-CONFLICT record has no "supersedes" marker of its own, so "read the
+# latest one and call it the answer" would reproduce the identical defect one
+# record-grammar over — a second conflict filed on a DIFFERENT unit after the
+# first was addressed would silently un-list the first the moment it became
+# merely "not the latest" comment. Nothing here takes `last`: every
+# DESIGN-CONFLICT record ever filed on <tid> is collected into an array and
+# evaluated INDEPENDENTLY, below.
+#
+# THE PER-RECORD PREDICATE KEYS ON THE DISPUTED UNIT, NOT THE WHOLE ARTIFACT
+# (R2-F3, independent review round 2 — this replaces the whole-artifact-hash
+# predicate this function originally shipped with), AND REQUIRES A CURRENT
+# SATISFIED REVIEW, NOT A CONTENT CHANGE ALONE (R6-F4, independent review
+# round 6 — see "THE RESIDUAL THIS CLOSES" below). For each filed conflict
+# record (unit_id, pinned unit_hash):
+#   design_unit_content_hash(<current artifact>, unit_id) == pinned unit_hash
+#       -> OPEN, regardless of review state. Nothing about THIS unit's own
+#          declared content (its goal, acceptance, files, interfaces,
+#          depends_on, risks — the FULL per-unit object, canonicalised) has
+#          changed since the conflict was filed against it — including an
+#          amendment that changed a DIFFERENT unit, or a re-review of the
+#          SAME unchanged artifact (iteration advances, no unit's content
+#          moves). Both are exactly the retirement-by-omission shape this
+#          reader exists to refuse, one level more precise than the
+#          whole-artifact version was. This is the fkm.1.19 anti-regression
+#          case this record type's own paired test targets.
+#   design_unit_content_hash(...) != pinned unit_hash
+#     AND compute_design_satisfied reports DESIGN_SATISFIED=true for <tid>'s
+#     CURRENT artifact bytes (established ONCE per call in the function body,
+#     not once per record — it is a fact about the current artifact as a
+#     whole, never about any one conflict)
+#       -> CLEARED. THIS unit's own content demonstrably changed, AND a
+#          superseding, independently-reviewed, SATISFIED DESIGN-REVIEW
+#          currently covers the bytes that change produced — together this
+#          is the v5 plan's own clearing predicate, verbatim: "a superseding
+#          approved DESIGN-REVIEW whose unit entry changed".
+#   design_unit_content_hash(...) != pinned unit_hash, BUT
+#     compute_design_satisfied does NOT report true (verdict missing, stale,
+#     needs_revision, or the source unreadable)
+#       -> OPEN. An edit happened, but nothing independently reviewed and
+#          approved the result yet — the exact case R6-F4 found this
+#          predicate getting wrong before this fix: it cleared on the
+#          content-hash difference alone, with no review requirement at all.
+#   design_unit_content_hash(...) could not be established at all (the unit
+#   is no longer declared, or the current DESIGN-UNITS block could not be
+#   read) -> OPEN, fail-closed. Absence of positive evidence that THIS
+#          unit's own content changed is not evidence that it did; a unit
+#          vanishing from the artifact is exactly the fact design-unit-
+#          bind's own rebind requirement already treats as needing an
+#          audited operator action elsewhere in this file, not a silent
+#          pass in either direction here.
+#
+# THE RESIDUAL THIS CLOSES, named rather than silently declared fixed.
+# R2-F3's own evidence was "editing and approving unrelated unit U2 changes
+# the whole-artifact hash and silently clears U1" — a per-unit content hash
+# cannot be moved by an edit to a DIFFERENT unit's object, so that specific
+# reproduction is closed (design-review-record.test.sh section 8f pins it).
+# R6-F4 (independent review round 6, claude-workflow-plugin-i8cx) found the
+# NEXT residual, one level deeper: the R2-F3 predicate by itself clears on
+# ANY content change to the disputed unit, with no check that a satisfied
+# review ever covered the result — "the per-unit inequality proves an edit,
+# not the required superseding approved DESIGN-REVIEW" (independent review's
+# own words). Concretely: file a conflict against U1, edit U1, record NO new
+# design review at all (or one that is stale or needs_revision) — the
+# R2-F3-only predicate cleared it anyway, because DESIGN_SATISFIED=true was
+# established by the CALLER before calling in, and one caller (cmd_approve's
+# former --no-design branch, since removed) could reach this function
+# without ever establishing it. Closed by making the satisfied-review
+# requirement a property of THIS FUNCTION, established fresh inside it
+# (below) rather than trusted from whichever caller happens to invoke it —
+# deliberately, because the bug was ALWAYS a caller-ordering mistake: every
+# prior fix to this axis (R2-F3, R3-F1, R3-F2a/b) was locally reasonable on
+# its own terms and still left a way to reach this predicate with the
+# precondition unestablished. Moving the requirement here forecloses that
+# class for callers not yet written, not only the ones already reviewed.
+# What remains OUT of scope, stated rather than assumed solved: this still
+# trusts that an INDEPENDENT reviewer actually read the unit whose content
+# changed (compute_design_satisfied proves the WHOLE artifact was reviewed
+# and satisfied, not that the reviewer's attention fell on this particular
+# unit) — the same trust every OTHER whole-document review in this file
+# already extends to its own reviewer, and not a new gap this fix
+# introduces.
+#
+# ANCHOR AND CLASSES MATCH THE WRITER, and the reader shape mirrors
+# latest_design_review's ONE-anchored-capture discipline exactly:
+# startswith("DESIGN-CONFLICT ") (trailing space, so a hypothetical future
+# "DESIGN-CONFLICT-RESOLVED ..." record type could never false-match) plus
+# a SINGLE capture(...) per candidate carrying THREE named groups (unit_id,
+# design_hash, unit_hash — R2-F3 adds the third), so no caller can read one
+# field from a different match than another. Verified directly against jq
+# 1.8.1 (not assumed) that a comment which starts with the literal prefix
+# but fails the full anchored pattern contributes ZERO elements to the
+# resulting array — capture() is a generator that emits nothing on a
+# non-match, it does not error and does not emit null — so a malformed
+# record (including any record filed under the PRE-R2-F3 two-field grammar,
+# which carries no unit_hash= token at all) is silently excluded rather
+# than aborting the whole read. THAT EXCLUSION IS A DELIBERATE GRAMMAR
+# BUMP, named rather than hidden: this feature shipped hours earlier in the
+# SAME session (fkm.7) and a live-store search across the tasks this change
+# touches came back empty of any DESIGN-CONFLICT record — accepted as a
+# clean cut rather than carrying a dual-grammar reader for a record type
+# with no production history yet.
+compute_design_conflict_open() {
+    # Single argument (claude-workflow-plugin-i8cx) — see this function's
+    # own header for the history of the historical, now-removed second
+    # positional argument.
+    local tid="$1"
+    DESIGN_CONFLICT_OPEN="false"
+    DESIGN_CONFLICT_OPEN_UNITS=""
+    DESIGN_CONFLICT_OPEN_OBS="no open design_conflict record on $tid"
+
+    local comments="" c_rc=0
+    comments=$(design_comments_json "$tid") || c_rc=$?
+    [ "$c_rc" -eq 0 ] || return 3
+
+    local out="" out_rc=0
+    out=$(printf '%s' "$comments" \
+        | jq -c '
+            # every-DESIGN-CONFLICT selector (v5 D5, fkm.7; R2-F3 adds
+            # unit_hash) — an ARRAY, not `last`: the fkm.1.19 discipline is
+            # every record considered, none retired by a later record
+            # simply being silent about it.
+            [ .[].text
+              | select(startswith("DESIGN-CONFLICT "))
+              | capture("^DESIGN-CONFLICT (?<unit_id>[A-Za-z0-9._-]+) design_hash=(?<design_hash>[A-Za-z0-9-]+) unit_hash=(?<unit_hash>[A-Za-z0-9-]+) ")
+            ]
+        ' 2>/dev/null) || out_rc=$?
+    if [ "$out_rc" -ne 0 ] || [ -z "$out" ]; then
+        # jq -c on a genuinely empty selection prints "[]" (2 bytes, not
+        # empty) — the SAME distinction latest_design_review's own `last //
+        # {}` draws — so [-z "$out"] only trips on an actual jq/read failure.
+        return 3
+    fi
+    # Defense-in-depth, not a shape this file expects to ever actually see:
+    # capture()'s own named groups already guarantee this for anything that
+    # reaches the array (see the header above, verified against jq 1.8.1
+    # directly). Guards only against a jq malfunction mid-run.
+    printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 3
+
+    local n_records=0
+    n_records=$(printf '%s' "$out" | jq 'length' 2>/dev/null) || return 3
+    case "$n_records" in ''|*[!0-9]*) return 3 ;; esac
+    if [ "$n_records" -eq 0 ]; then
+        return 0
+    fi
+
+    # R6-F4 (independent review round 6, claude-workflow-plugin-i8cx):
+    # established ONCE per call, never per record — it is a fact about the
+    # CURRENT artifact as a whole ("does a superseding, independently-
+    # reviewed, satisfied DESIGN-REVIEW currently cover it"), not about any
+    # one conflict. Deliberately established HERE, inside this function,
+    # rather than trusted from the caller: see this function's own header
+    # ("THE RESIDUAL THIS CLOSES") for why every prior fix that instead
+    # relied on caller ordering left a way in. A record can now NEVER clear
+    # while $satisfied_now != "true", regardless of what any caller did or
+    # did not establish before calling in — this can only make the answer
+    # MORE conservative (more records stay OPEN), never less, so it needs no
+    # refusal of its own the way an unreadable DESIGN-CONFLICT stream does
+    # above.
+    compute_design_satisfied "$tid"
+    local satisfied_now="$DESIGN_SATISFIED"
+
+    # R2-F3: the clearing predicate keys on the DISPUTED UNIT's own current
+    # content, not the whole artifact — see this function's own header for
+    # the exact per-record predicate. Resolve the current artifact path
+    # ONCE; each record's own unit_id gets its current content hash
+    # re-derived (design_unit_content_hash), never assumed unchanged.
+    local artifact
+    artifact=$(design_artifact_path_for "$tid")
+
+    local rows="" row_rc=0
+    rows=$(printf '%s' "$out" | jq -r '.[] | [.unit_id, .unit_hash] | @tsv' 2>/dev/null) || row_rc=$?
+    [ "$row_rc" -eq 0 ] || return 3
+
+    local open_units="" seen=" " row_uid row_hash current_hash ch_rc
+    while IFS=$'\t' read -r row_uid row_hash; do
+        [ -n "$row_uid" ] || continue
+        current_hash="" ch_rc=0
+        current_hash=$(design_unit_content_hash "$artifact" "$row_uid") || ch_rc=$?
+        # Fail CLOSED on ambiguity: an unreadable source (ch_rc != 0), a
+        # unit no longer declared (rc 0, empty), a hash that still matches
+        # the pinned one, OR no current satisfied review covering the
+        # artifact (satisfied_now != "true" — R6-F4) all count as OPEN.
+        # Only a POSITIVELY established, DIFFERENT current hash for THIS
+        # unit, UNDER A CURRENT SATISFIED DESIGN-REVIEW, clears it.
+        if [ "$ch_rc" -ne 0 ] || [ -z "$current_hash" ] || [ "$current_hash" = "$row_hash" ] || [ "$satisfied_now" != "true" ]; then
+            case "$seen" in
+                *" $row_uid "*) ;;
+                *) open_units="${open_units:+$open_units }$row_uid"; seen="$seen$row_uid " ;;
+            esac
+        fi
+    done <<EOF
+$rows
+EOF
+
+    if [ -n "$open_units" ]; then
+        DESIGN_CONFLICT_OPEN="true"
+        DESIGN_CONFLICT_OPEN_UNITS="$open_units"
+        DESIGN_CONFLICT_OPEN_OBS="open design_conflict record(s) exist on $tid — for each affected unit, either ITS OWN current content in the design artifact still matches (or could not be independently re-derived from) what the conflict was filed against, or no current satisfied DESIGN-REVIEW covers the artifact at all; only a change to the DISPUTED UNIT's OWN content, under a superseding satisfied review, clears it (affected unit(s) are in DESIGN_CONFLICT_OPEN_UNITS, the caller's own field for that — not repeated here so the two never drift apart in wording)"
+    fi
+    return 0
+}
+# DESIGN-CONFLICT END (v5 D5 / claude-workflow-plugin-fkm.7)
+
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
     local tid="${1:-}" fid="${2:-}"
@@ -9644,6 +10576,7 @@ case "$SUB" in
     design-conform) cmd_design_conform "$@" ;;
     design-unit-show) cmd_design_unit_show "$@" ;;
     design-status)    cmd_design_status "$@" ;;
+    design-conflict)  cmd_design_conflict "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     ""|-h|--help|help)

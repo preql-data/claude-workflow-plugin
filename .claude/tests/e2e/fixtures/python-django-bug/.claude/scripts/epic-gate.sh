@@ -120,21 +120,38 @@ require_bd() {
 # Beads stores parent-child via dependencies; we read `bd show <task> --json`
 # and look for a parent in either `.dependencies` (newer) or by scanning
 # all epics for `dependents[].id == task` (fallback).
+#
+# i8cx: both `bd ... | jq ...` pipes below are restructured so `bd`'s own
+# failure is observed BEFORE jq ever runs, rather than letting jq's empty-
+# input non-error (jq on truly empty stdin exits 0 with no output) stand in
+# for it. jq now runs on an in-memory-captured string (printf producer,
+# cannot itself mask a pipe stage), so the only remaining fallible step is
+# `bd` itself, and its rc gates whether jq is even invoked. Fixed as a
+# judgement call: this helper is shared with cmd_shared_files (out of scope
+# per this task's constraints), but the change is failure-path-only — the
+# happy path (bd succeeds) is byte-identical — so cmd_shared_files' own
+# behaviour is unaffected on any input it is tested against; see the
+# completion report for the full reasoning.
 parent_epic_of() {
     local tid="$1"
-    local parent
+    local parent="" show_out="" rc=0
     # Newer bd: dependencies[] with dependency_type "parent-child"
-    parent=$(bd show "$tid" --json 2>/dev/null \
-        | jq -r 'if type == "array" then .[0] else . end
+    show_out=$(bd show "$tid" --json 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$show_out" ]; then
+        parent=$(printf '%s' "$show_out" | jq -r 'if type == "array" then .[0] else . end
                  | (.dependencies // [])
                  | map(select(.dependency_type == "parent-child" and .issue_type == "epic"))
-                 | .[0].id // empty' 2>/dev/null || echo "")
+                 | .[0].id // empty' 2>/dev/null) || parent=""
+    fi
     if [ -z "$parent" ]; then
         # Fallback: scan epics' dependents for tid.
-        parent=$(bd list --type epic --json 2>/dev/null \
-            | jq -r --arg t "$tid" '
+        local list_out="" lrc=0
+        list_out=$(bd list --type epic --json 2>/dev/null) || lrc=$?
+        if [ "$lrc" -eq 0 ] && [ -n "$list_out" ]; then
+            parent=$(printf '%s' "$list_out" | jq -r --arg t "$tid" '
                 map(select((.dependents // []) | map(.id) | index($t)))
-                | .[0].id // empty' 2>/dev/null || echo "")
+                | .[0].id // empty' 2>/dev/null) || parent=""
+        fi
     fi
     printf '%s' "$parent"
 }
@@ -171,11 +188,24 @@ sub_tasks_of() {
 }
 
 # Get the qa-state of a task: approved | blocked | entered | pending | none
+#
+# i8cx: `bd show` is the fallible producer; jq is last, so its own failure
+# already fell through `|| echo ""` correctly — but a FAILED `bd show`
+# (task deleted mid-scan, a transient bd hiccup) produced the SAME empty
+# `labels` as a genuinely-labelless task, because jq on truly empty stdin
+# exits 0 printing nothing (no error to trip the `||`). Restructured so bd's
+# own rc gates whether jq runs at all, making the two cases distinguishable
+# in principle. In cmd_check specifically this masked case already fell
+# through the qa_state `*) other` bucket into `decision="defer"` (never a
+# false "pass"), so this closes an information loss, not a live pass/fail
+# defect in the one caller that gates anything — see the completion report.
 qa_state_of() {
     local tid="$1"
-    local labels
-    labels=$(bd show "$tid" --json 2>/dev/null \
-        | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null || echo "")
+    local labels="" show_out="" rc=0
+    show_out=$(bd show "$tid" --json 2>/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$show_out" ]; then
+        labels=$(printf '%s' "$show_out" | jq -r 'if type == "array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null) || labels=""
+    fi
     case ",$labels," in
         *,qa-approved,*) echo "approved" ;;
         *,qa-blocked,*)  echo "blocked"  ;;
@@ -186,10 +216,22 @@ qa_state_of() {
 }
 
 # Get the bd status of a task: open | in_progress | closed | blocked | etc.
+#
+# i8cx: same shape as qa_state_of above. Previously, a FAILED `bd show`
+# produced jq-on-empty-stdin (exits 0, prints nothing) rather than the
+# documented "unknown" fallback — the `// "unknown"` default only fires for a
+# present-but-null `.status` field, never for zero bytes of input, so the
+# `|| echo "unknown"` was dead for this exact case. Restructured so a failed
+# bd read is observable and produces the documented "unknown" for real.
 status_of() {
     local tid="$1"
-    bd show "$tid" --json 2>/dev/null \
-        | jq -r 'if type == "array" then .[0].status else .status end // "unknown"' 2>/dev/null || echo "unknown"
+    local show_out="" rc=0
+    show_out=$(bd show "$tid" --json 2>/dev/null) || rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$show_out" ]; then
+        printf '%s' "unknown"
+        return 0
+    fi
+    printf '%s' "$show_out" | jq -r 'if type == "array" then .[0].status else .status end // "unknown"' 2>/dev/null || printf '%s' "unknown"
 }
 
 # Extract `files_changed` from a task's notes. Specialists ship a JSON
@@ -1122,13 +1164,32 @@ _pb_degrade() {
     if [ "$#" -gt 0 ]; then
         # R1-F4: LC_ALL=C sort first (locale-independent — the determinism
         # table's own rule) so the input to the schedule construction is a
-        # pure function of the ids themselves, never bd's own row order. A
-        # process substitution feeds the loop (never a pipe), so the
-        # accumulator is not lost to a subshell.
-        local cid sorted_ids=()
-        while IFS= read -r cid; do
-            [ -n "$cid" ] && sorted_ids+=("$cid")
-        done < <(printf '%s\n' "$@" | LC_ALL=C sort)
+        # pure function of the ids themselves, never bd's own row order.
+        #
+        # i8cx: this used to be `done < <(printf ... | sort)` — a process
+        # substitution, which discards `sort`'s exit status structurally (no
+        # pipefail scope reaches across a `< <(...)` boundary at all). This is
+        # THE reproducer this task's audit was filed against: a `sort` shim
+        # that copies stdin and exits nonzero used to be invisible here.
+        # Restructured to match this file's own DETERMINISM discipline
+        # ("heredoc-fed bash arrays, never a pipe, for every accumulating
+        # loop"): `sort`'s output is captured via command substitution (rc
+        # directly observable, `printf` producing it cannot itself fail) and
+        # the read loop only runs when sort succeeded. Belt-and-suspenders:
+        # even without this fix, a failed/truncated sort was ALREADY caught
+        # one line below by the pre-existing `${#sorted_ids[@]} -eq "$#"`
+        # cardinality check, which routes to the fail-closed `sched_rc=1`
+        # branch — this fix makes the failure observable at the SOURCE
+        # instead of relying solely on that downstream invariant holding.
+        local cid sorted_ids=() sort_out="" sort_rc=0
+        sort_out=$( set -o pipefail; printf '%s\n' "$@" | LC_ALL=C sort ) || sort_rc=$?
+        if [ "$sort_rc" -eq 0 ]; then
+            while IFS= read -r cid; do
+                [ -n "$cid" ] && sorted_ids+=("$cid")
+            done <<EOF
+$sort_out
+EOF
+        fi
 
         # The schedule construction. -Rn + [inputs]: raw id lines in, so
         # no separate jq call is needed to build the id array (the old

@@ -67,7 +67,12 @@ get_current_task() {
     if [ -x "$CURRENT_TASK_HELPER" ]; then
         tid=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null || echo "")
     elif [ -s "$QA_TRACKING_DIR/current-task" ]; then
-        tid=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' || echo "")
+        # i8cx: scoped pipefail — without it, a failing `head` (file vanishes
+        # mid-read, permission race) is masked by `tr`'s trivial success on
+        # whatever partial bytes arrived, and a truncated task id could
+        # coincidentally still look shape-valid downstream. Safe to scope
+        # here: neither head nor tr has an "expected nonzero" case.
+        tid=$( set -o pipefail; head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' ) || tid=""
     fi
     printf '%s' "$tid"
 }
@@ -441,7 +446,12 @@ fi
 # the LIVE path on a dev box, not a theoretical one — the skip is logged rather
 # than silent so an operator who ever does see a huge tracker can find out why.
 if [ -f "$TRACKING_FILE" ]; then
-    LINE_COUNT=$(wc -l < "$TRACKING_FILE" 2>/dev/null | tr -d ' ' || echo "0")
+    # i8cx: scoped pipefail on the count feeding the trim-threshold check. A
+    # masked `wc` failure here already degraded SAFE (empty -> `${LINE_COUNT:-0}`
+    # reads as 0 -> trim skipped, never triggered wrongly) but a failing `wc`
+    # whose PARTIAL bytes `tr` still transforms could in principle emit a
+    # garbled-but-numeric-looking string instead of empty; guard closes that.
+    LINE_COUNT=$( set -o pipefail; wc -l < "$TRACKING_FILE" 2>/dev/null | tr -d ' ' ) || LINE_COUNT=""
     if [ "${LINE_COUNT:-0}" -gt 1000 ]; then
         if command -v flock >/dev/null 2>&1; then
             (

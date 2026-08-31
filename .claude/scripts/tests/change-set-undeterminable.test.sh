@@ -492,6 +492,232 @@ assert_eq "4d2 ...with no read-FAILED line" "no" \
 rm -f "$SB5/.claude/.qa-tracking/current-task"
 
 # ---------------------------------------------------------------------------
+# 5. i8cx WAVE 2: current-task.sh's OWN read (the "helper half" section 4's
+# header names as the still-open work) + subagent-start.sh's own copy of the
+# same read. Both used to pipe `head -1 FILE | tr ... | sed ...` straight
+# through: sed is always last and succeeds trivially on the empty stdin a
+# failed head leaves behind, so a genuine read failure and a merely-blank
+# file both landed on the same empty tid. current-task.sh's OWN pre-fix rc
+# for the unreadable case was already measured non-zero by accident (1, from
+# the trailing `[ -n "$tid" ] && printf ...` idiom returning false on ANY
+# empty tid, for ANY reason) — never the "rc 0" some earlier notes assumed;
+# what was missing was a DEDICATED, distinguishable code (now 3) and any
+# stderr trail at all, plus a genuine bug where a merely-blank BUT READABLE
+# file also read rc 1, misreported by this file's own section 4 caller
+# (verify-before-stop.sh's get_current_task) as a "read FAILED" that never
+# happened.
+
+# 5a. current-task.sh get: a merely-blank but READABLE file now correctly
+# returns rc 0 (this function's own documented contract: "exits 0 with empty
+# stdout if the file is missing/empty") — pre-fix this returned rc 1, the
+# SAME rc a genuine read failure produced, making the two indistinguishable
+# even by rc alone.
+SB7="$WORK/sb7"
+mkdir -p "$SB7/.claude/.qa-tracking"
+printf '   \n' > "$SB7/.claude/.qa-tracking/current-task"
+CT_5A_OUT=$(CLAUDE_PROJECT_DIR="$SB7" bash "$CTH" get 2>/dev/null); CT_5A_RC=$?
+assert_eq "5a whitespace-only READABLE current-task file: rc 0" "0" "$CT_5A_RC"
+assert_eq "5a2 ...and empty stdout (not the literal whitespace)" "" "$CT_5A_OUT"
+
+# 5b. current-task.sh get: a non-empty but UNREADABLE file now returns the
+# DEDICATED rc 3 (matching impact-report.sh's own "tracked file exists but
+# could not be read" convention), plus a stderr diagnostic naming the file
+# and head's own exit code — pre-fix this was rc 1 (see 5a: the SAME value a
+# healthy blank read produced) with NO diagnostic at all.
+printf 'task-999\n' > "$SB7/.claude/.qa-tracking/current-task"
+chmod 000 "$SB7/.claude/.qa-tracking/current-task"
+CT_5B_ERR="$WORK/ct-5b.stderr"
+CT_5B_OUT=$(CLAUDE_PROJECT_DIR="$SB7" bash "$CTH" get 2>"$CT_5B_ERR"); CT_5B_RC=$?
+chmod 644 "$SB7/.claude/.qa-tracking/current-task"
+assert_eq "5b unreadable current-task file: rc 3 (dedicated, distinct from 5a's rc 0)" "3" "$CT_5B_RC"
+assert_eq "5b2 ...empty stdout (same as 5a, by design -- rc is the only distinguisher)" "" "$CT_5B_OUT"
+assert_has "5b3 ...and a stderr diagnostic naming the read failure" \
+    "failed to read" "$(cat "$CT_5B_ERR" 2>/dev/null)"
+
+# 5c. Restore control: a readable, real task id still round-trips (rc 0,
+# correct value) -- the ordinary case is unaffected by this fix.
+printf 'proj-42\n' > "$SB7/.claude/.qa-tracking/current-task"
+CT_5C_OUT=$(CLAUDE_PROJECT_DIR="$SB7" bash "$CTH" get 2>/dev/null); CT_5C_RC=$?
+assert_eq "5c restore control: readable real task id: rc 0" "0" "$CT_5C_RC"
+assert_eq "5c2 ...and the correct value" "proj-42" "$CT_5C_OUT"
+
+# 5d. current-task.sh get-repo: same rc-3 contract, mirrored for the repo-
+# fingerprint file (feeds get_recorded_repo's I8 cross-repo guard, section 4
+# above).
+printf '/some/repo\n' > "$SB7/.claude/.qa-tracking/current-task.repo"
+chmod 000 "$SB7/.claude/.qa-tracking/current-task.repo"
+CT_5D_OUT=$(CLAUDE_PROJECT_DIR="$SB7" bash "$CTH" get-repo 2>/dev/null); CT_5D_RC=$?
+chmod 644 "$SB7/.claude/.qa-tracking/current-task.repo"
+assert_eq "5d current-task.sh get-repo: unreadable file: rc 3" "3" "$CT_5D_RC"
+assert_eq "5d2 ...empty stdout" "" "$CT_5D_OUT"
+
+# 5e. META (load-bearing): revert cmd_get to its exact pre-fix one-liner on a
+# copy of current-task.sh, and re-run 5a/5b's SAME fixtures. The mutant must
+# reproduce rc 1 for BOTH cases -- proving the fix's value (a dedicated,
+# distinguishable code) is real, not merely re-labelling what was already
+# distinguishable.
+CTH_MUT="$WORK/current-task-precmdget.sh"
+{
+    sed -n '1,/^cmd_get() {$/p' "$CTH"
+    cat <<'OLDCMDGET'
+    if [ ! -s "$CURRENT_TASK_FILE" ]; then
+        return 0
+    fi
+    local tid
+    tid=$(head -1 "$CURRENT_TASK_FILE" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -n "$tid" ] && printf '%s\n' "$tid"
+}
+OLDCMDGET
+    sed -n '/^cmd_get_repo() {$/,$p' "$CTH"
+} > "$CTH_MUT"
+chmod +x "$CTH_MUT"
+assert_eq "5e META: the mutant differs from the shipped script" "differs" \
+    "$(cmp -s "$CTH" "$CTH_MUT" && echo same || echo differs)"
+assert_eq "5e2 ...and still parses" "0" \
+    "$(bash -n "$CTH_MUT" 2>/dev/null && echo 0 || echo 1)"
+
+printf '   \n' > "$SB7/.claude/.qa-tracking/current-task"
+MUT_5A2_RC=0
+MUT_5A2_OUT=$(CLAUDE_PROJECT_DIR="$SB7" bash "$CTH_MUT" get 2>/dev/null) || MUT_5A2_RC=$?
+assert_eq "5e3 SPECIFIC MISBEHAVIOUR: the mutant's whitespace-only case is rc 1, not 5a's fixed rc 0" \
+    "1" "$MUT_5A2_RC"
+assert_eq "5e3b ...stdout is still empty either way (rc is what this fix changed, not stdout)" \
+    "" "$MUT_5A2_OUT"
+
+printf 'task-999\n' > "$SB7/.claude/.qa-tracking/current-task"
+chmod 000 "$SB7/.claude/.qa-tracking/current-task"
+MUT_5B_RC=0
+MUT_5B_OUT=$(CLAUDE_PROJECT_DIR="$SB7" bash "$CTH_MUT" get 2>/dev/null) || MUT_5B_RC=$?
+chmod 644 "$SB7/.claude/.qa-tracking/current-task"
+assert_eq "5e4 SPECIFIC MISBEHAVIOUR: the mutant's unreadable case is ALSO rc 1 -- byte-identical to 5e3's healthy-blank rc, the pre-fix ambiguity" \
+    "1" "$MUT_5B_RC"
+assert_eq "5e5 ...and stdout is the same empty string either way (matches 5b2 -- the STDOUT-level ambiguity was never fixable this way; only rc was)" \
+    "" "$MUT_5B_OUT"
+
+# Discriminator: the mutant, on the ordinary readable-with-content case,
+# still round-trips correctly.
+printf 'proj-42\n' > "$SB7/.claude/.qa-tracking/current-task"
+MUT_5F_OUT=$(CLAUDE_PROJECT_DIR="$SB7" bash "$CTH_MUT" get 2>/dev/null)
+assert_eq "5f discriminator: the mutant still round-trips a real task id (ran the real predicate otherwise)" \
+    "proj-42" "$MUT_5F_OUT"
+rm -f "$SB7/.claude/.qa-tracking/current-task" "$SB7/.claude/.qa-tracking/current-task.repo"
+
+# ---------------------------------------------------------------------------
+# 5g-5j. subagent-start.sh's OWN get_current_task, mirroring the SAME fix
+# shape verify-before-stop.sh's (section 4) and current-task.sh's (5a-5f)
+# already carry. Unlike those two, a masked read failure here does NOT flip
+# any release/block decision -- subagent-start.sh already degraded to the
+# SAME `{}` output on any current-task failure, before and after this fix
+# (a SubagentStart hook must never block a spawn). What the fix adds is
+# AUDITABILITY: pre-fix, that branch was 100% silent, so a spawn whose
+# record_implementer call got silently skipped (the input half of
+# review-check.sh:1417's independence check) left no trace. The
+# discriminating property this section tests is therefore the sync-errors.log
+# TRAIL, not the JSON output, which is `{}` on both sides of the fix for the
+# unreadable-marker case.
+# shellcheck disable=SC2031  # PROJECT_DIR is set once at file scope, above
+# every subshell in this file; shellcheck's conflict detector cannot see
+# past the earlier `(cd ... )` blocks that never touch it. Same false
+# positive run_hook's own SC2031 disable (below) documents.
+SAS="$PROJECT_DIR/.claude/scripts/subagent-start.sh"
+SB8="$WORK/sb8"
+mkdir -p "$SB8/.claude/scripts" "$SB8/.claude/.qa-tracking"
+cp "$VBS" "$CTH" "$SAS" "$SB8/.claude/scripts/" 2>/dev/null
+chmod +x "$SB8/.claude/scripts/"*.sh
+
+# run_subagent_start <root> [extra-PATH-dir] — one SubagentStart fire against
+# the sandbox's hook. Output on stdout; rc via return. Same shape as
+# run_hook above, for the sibling hook.
+run_subagent_start() {
+    local root="$1" xp="${2:-}" out rc=0
+    # shellcheck disable=SC2031  # the PATH prefix is deliberately scoped to
+    # this one hook invocation (env), never the spec's own environment —
+    # same rationale as run_hook's identical disable above.
+    out=$(cd "$root" && printf '{"agent_type": "backend"}' \
+        | env ${xp:+PATH="$xp:$PATH"} CLAUDE_PROJECT_DIR="$root" \
+              bash "$root/.claude/scripts/subagent-start.sh" 2>/dev/null) || rc=$?
+    printf '%s' "$out"
+    return "$rc"
+}
+
+# 5g. Unreadable current-task marker: the hook still emits {} (never blocks
+# a spawn, unchanged), but sync-errors.log now names the read failure.
+printf 'proj-77\n' > "$SB8/.claude/.qa-tracking/current-task"
+chmod 000 "$SB8/.claude/.qa-tracking/current-task"
+rm -f "$SB8/.claude/.qa-tracking/sync-errors.log"
+SAS_5G_OUT=$(run_subagent_start "$SB8")
+chmod 644 "$SB8/.claude/.qa-tracking/current-task"
+assert_eq "5g unreadable marker: subagent-start.sh still emits {} (never blocks a spawn)" "{}" "$SAS_5G_OUT"
+assert_eq "5g2 ...but sync-errors.log now carries the honest read-FAILED trail" "yes" \
+    "$(grep -q 'current-task read FAILED' "$SB8/.claude/.qa-tracking/sync-errors.log" 2>/dev/null && echo yes || echo no)"
+
+# 5h. Restore control: a readable marker produces a real additionalContext
+# envelope (not {}), naming the task, with no log noise.
+rm -f "$SB8/.claude/.qa-tracking/sync-errors.log"
+SAS_5H_OUT=$(run_subagent_start "$SB8")
+assert_eq "5h readable marker: NOT {} (a real additionalContext is emitted)" "no" \
+    "$([ "$SAS_5H_OUT" = "{}" ] && echo yes || echo no)"
+assert_has "5h2 ...naming the actual task id" "proj-77" "$SAS_5H_OUT"
+assert_eq "5h3 ...with no read-FAILED line" "no" \
+    "$(grep -q 'current-task read FAILED' "$SB8/.claude/.qa-tracking/sync-errors.log" 2>/dev/null && echo yes || echo no)"
+
+# 5i. Negative control: NO marker at all (genuinely idle session) -- {} with
+# NO log entry, proving the fix does not confuse "no active task" with "read
+# failed".
+rm -f "$SB8/.claude/.qa-tracking/current-task" "$SB8/.claude/.qa-tracking/sync-errors.log"
+SAS_5I_OUT=$(run_subagent_start "$SB8")
+assert_eq "5i no marker at all: {}" "{}" "$SAS_5I_OUT"
+assert_eq "5i2 ...and no log entry (genuinely idle, not a read failure)" "no" \
+    "$(grep -q 'current-task read FAILED' "$SB8/.claude/.qa-tracking/sync-errors.log" 2>/dev/null && echo yes || echo no)"
+
+# 5j. META: strip subagent-start.sh's get_current_task down to the pre-fix
+# shape (splice, matching current-task.sh's 5e technique -- a plain sentinel
+# strip would remove the `local tid="" tid_rc=0` declaration this function's
+# OWN later reference to $tid_rc needs). On the SAME 5g fixture (unreadable
+# marker), the mutant must still emit {} (the JSON-level behaviour never
+# flips either side of this fix -- see this section's own header) but MUST
+# NOT log the read failure.
+SAS_MUT="$SB8/.claude/scripts/subagent-start.mutant.sh"
+{
+    sed -n '1,/^get_current_task() {$/p' "$SAS"
+    cat <<'OLDGCT'
+    local tid=""
+    if [ -x "$CURRENT_TASK_HELPER" ]; then
+        tid=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null || echo "")
+    elif [ -s "$QA_TRACKING_DIR/current-task" ]; then
+        tid=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' || echo "")
+    fi
+    printf '%s' "$tid"
+}
+OLDGCT
+    sed -n '/^normalize_agent_type() {$/,$p' "$SAS"
+} > "$SAS_MUT"
+chmod +x "$SAS_MUT"
+assert_eq "5j META: the mutant differs from the shipped script" "differs" \
+    "$(cmp -s "$SAS" "$SAS_MUT" && echo same || echo differs)"
+assert_eq "5j2 ...and still parses" "0" \
+    "$(bash -n "$SAS_MUT" 2>/dev/null && echo 0 || echo 1)"
+
+printf 'proj-77\n' > "$SB8/.claude/.qa-tracking/current-task"
+chmod 000 "$SB8/.claude/.qa-tracking/current-task"
+rm -f "$SB8/.claude/.qa-tracking/sync-errors.log"
+SAS_MUT_OUT=$(cd "$SB8" && printf '{"agent_type": "backend"}' \
+    | CLAUDE_PROJECT_DIR="$SB8" bash "$SB8/.claude/scripts/subagent-start.mutant.sh" 2>/dev/null)
+chmod 644 "$SB8/.claude/.qa-tracking/current-task"
+assert_eq "5j3 SPECIFIC MISBEHAVIOUR: the mutant, unreadable marker: still {} (the outcome does not flip -- see header)" \
+    "{}" "$SAS_MUT_OUT"
+assert_eq "5j4 ...but NO read-FAILED trail (the pre-fix silence -- the property this fix actually adds)" "no" \
+    "$(grep -q 'current-task read FAILED' "$SB8/.claude/.qa-tracking/sync-errors.log" 2>/dev/null && echo yes || echo no)"
+
+# Discriminator: the mutant, readable marker, still assigns the task normally.
+rm -f "$SB8/.claude/.qa-tracking/sync-errors.log"
+SAS_MUT_CTRL=$(cd "$SB8" && printf '{"agent_type": "backend"}' \
+    | CLAUDE_PROJECT_DIR="$SB8" bash "$SB8/.claude/scripts/subagent-start.mutant.sh" 2>/dev/null)
+assert_has "5k discriminator: the mutant, readable marker, still assigns the real task (ran the real predicate otherwise)" \
+    "proj-77" "$SAS_MUT_CTRL"
+rm -f "$SB8/.claude/.qa-tracking/current-task"
+
+# ---------------------------------------------------------------------------
 # META: strip the CHANGE-SET-UNDETERMINABLE block from a COPY of the shipped
 # hook (the BEGIN/END sentinel comments are load-bearing for exactly this),
 # prove the strip landed, and drive the IDENTICAL unreadable-tracker fixture

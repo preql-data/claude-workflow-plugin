@@ -279,15 +279,36 @@ emit_row() {
 # nullglob is a per-shell setting and an unmatched glob would otherwise be
 # emitted literally. maxdepth is also what keeps .claude/scripts/tests/ out
 # of the .claude/scripts/*.sh surface.
+#
+# i8cx: a process substitution discards `find`'s own exit status structurally
+# — no pipefail scope can fix that, because there is no pipe here to scope; a
+# `< <(...)` consumer simply never observes the producer's rc. A `find` that
+# fails partway (permission denied on an entry, a signal) used to make this
+# loop silently process however many NUL-delimited names arrived before the
+# failure — a manifest silently MISSING rows, and a missing row verifies as
+# "unchanged" forever (install.sh --verify and the upgrade path both compare
+# against this table). scan_declared_dir below already carries the fix for
+# exactly this shape (added later, for the declared-directory scan); this is
+# the same listing-file-plus-explicit-rc pattern applied to the two callers
+# that never got it. NUL-delimited output additionally CANNOT be captured
+# through a bash variable (embedded NULs truncate a `$()` capture), so a
+# temp-file listing is the only channel that preserves both the delimiter and
+# an observable rc.
 scan_flat() {
     local class="$1"
     local dir="$2"
     local glob="$3"
-    local f
+    local f listing find_err find_rc=0
     [ -d "$dir" ] || return 0
+    mk_workdir
+    listing="$WORK_DIR/flat-scan.z"
+    find_err=$( { find "$dir" -maxdepth 1 -type f -name "$glob" -print0 >"$listing"; } 2>&1 ) || find_rc=$?
+    if [ "$find_rc" -ne 0 ]; then
+        die "scan_flat: could not ENUMERATE '$dir' (find exited $find_rc; find said: ${find_err:-<no diagnostic>}). A failed enumeration must not look like an empty (legitimately absent) one: it would ship a manifest silently missing rows, and a missing row verifies as 'unchanged' forever."
+    fi
     while IFS= read -r -d '' f; do
         emit_row "$class" "$f"
-    done < <(find "$dir" -maxdepth 1 -type f -name "$glob" -print0 2>/dev/null)
+    done < "$listing"
 }
 
 # scan_tree <class> <dir> [prune-dir-name...]
@@ -317,10 +338,20 @@ scan_tree() {
         args+=( ')' -prune -o )
     fi
     args+=( -type f '!' -name '*.log' -print0 )
-    local f
+    # i8cx: same fix as scan_flat above (see its header) — a process
+    # substitution cannot surface find's rc, and this scan is RECURSIVE, so a
+    # partial failure (e.g. an unreadable subdirectory under .claude/mcp)
+    # would silently drop rows even more plausibly than the flat case.
+    local f listing find_err find_rc=0
+    mk_workdir
+    listing="$WORK_DIR/tree-scan.z"
+    find_err=$( { find "$dir" "${args[@]}" >"$listing"; } 2>&1 ) || find_rc=$?
+    if [ "$find_rc" -ne 0 ]; then
+        die "scan_tree: could not ENUMERATE '$dir' (find exited $find_rc; find said: ${find_err:-<no diagnostic>}). A failed enumeration must not look like an empty (legitimately absent) one: it would ship a manifest silently missing rows, and a missing row verifies as 'unchanged' forever."
+    fi
     while IFS= read -r -d '' f; do
         emit_row "$class" "$f"
-    done < <(find "$dir" "${args[@]}" 2>/dev/null)
+    done < "$listing"
 }
 
 # ---------------------------------------------------------------------------
@@ -840,9 +871,27 @@ cmd_classify() {
     # always. This is the guard that turns a future join regression (the
     # NR == FNR trap above was one, caught pre-ship) into a loud failure
     # instead of a silently truncated upgrade plan.
-    local src_rows joined_rows
-    src_rows=$(wc -l < "$src_tsv" | tr -d ' ')
-    joined_rows=$(wc -l < "$joined" | tr -d ' ')
+    #
+    # i8cx: `wc -l < file | tr -d ' '` masked a failing `wc` into an EMPTY
+    # count rather than a number — mostly self-correcting already (an empty
+    # string almost never equals a real row count, so the mismatch die() below
+    # still fired), EXCEPT when both wc calls failed identically (e.g. `tr`
+    # itself broken), which made "" = "" compare equal and silently skip the
+    # self-check entirely. `wc` is now called alone (no pipe) so its own rc is
+    # directly observable; `tr` runs afterward on the already-captured
+    # in-memory string, which cannot itself mask an upstream failure.
+    local src_rows joined_rows src_wc="" joined_wc="" wc_rc=0
+    src_wc=$(wc -l < "$src_tsv" 2>/dev/null) || wc_rc=$?
+    if [ "$wc_rc" -ne 0 ]; then
+        die "internal: could not count rows in $src_tsv (wc exited $wc_rc)"
+    fi
+    src_rows=$(printf '%s' "$src_wc" | tr -d ' ')
+    wc_rc=0
+    joined_wc=$(wc -l < "$joined" 2>/dev/null) || wc_rc=$?
+    if [ "$wc_rc" -ne 0 ]; then
+        die "internal: could not count rows in $joined (wc exited $wc_rc)"
+    fi
+    joined_rows=$(printf '%s' "$joined_wc" | tr -d ' ')
     if [ "$src_rows" != "$joined_rows" ]; then
         die "internal: old-table join produced $joined_rows row(s) for $src_rows source row(s)"
     fi
