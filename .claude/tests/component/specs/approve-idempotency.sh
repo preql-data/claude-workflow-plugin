@@ -379,6 +379,18 @@ assert_eq "approve-idem-C1: ...and still no second record" "1" "$(record_count "
 # expression verify-before-stop.sh RELEASES on, writer and reader could disagree
 # about what counts as an approval — the class of bug gz3 is. Compared as text,
 # extracted from the two shipped scripts.
+#
+# claude-workflow-plugin-yrij (APPROVAL-SELECTOR-ANCHOR): the selector itself
+# — `select(test("^QA-GATE APPROVED .*change_set_hash="))` — is now ANCHORED
+# at `^` in both files (it used to be unanchored: a comment whose first line
+# was prose and whose LATER line fabricated a record satisfied it with no
+# `qa-gate.sh approve` ever having run). D1's count-check below is updated to
+# the anchored string so it does not itself go stale the moment the fix
+# lands; D1b is NEW — the original section only ever compared the CAPTURE
+# expression across files (D1 proper), never the SELECTOR that gates it, so
+# a drift in `select(...)` specifically could pass D1 unnoticed. Same
+# text-extracted-and-compared discipline as D1, applied to the clause D1
+# skipped.
 # ===========================================================================
 PLUGIN_D=$(plugin_root)
 QG_CAPTURE=$(grep -o 'capture("change_set_hash=(?<h>\[A-Za-z0-9-\]+)")\.h' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | sort -u)
@@ -388,7 +400,14 @@ assert_eq "approve-idem-D1: qa-gate.sh carries the hash-capture expression at al
 assert_eq "approve-idem-D1: ...byte-identical to verify-before-stop.sh's release expression" \
     "$VBS_CAPTURE" "$QG_CAPTURE"
 assert_eq "approve-idem-D1: ...and the same record selector" "1" \
-    "$(grep -c 'select(test("QA-GATE APPROVED .\*change_set_hash="))' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | tr -d '[:space:]')"
+    "$(grep -c 'select(test("\^QA-GATE APPROVED .\*change_set_hash="))' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | tr -d '[:space:]')"
+QG_SELECTOR=$(grep -o 'select(test("\^QA-GATE APPROVED .\*change_set_hash="))' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | sort -u)
+VBS_SELECTOR_TASK_HAS=$(sed -n '/^task_has_matching_approval_record()/,/^}/p' "$PLUGIN_D/.claude/scripts/verify-before-stop.sh" \
+    | grep -o 'select(test("\^QA-GATE APPROVED .\*change_set_hash="))' | sort -u)
+assert_eq "approve-idem-D1b: qa-gate.sh's selector is ANCHORED (yrij APPROVAL-SELECTOR-ANCHOR)" \
+    "yes" "$([ -n "$QG_SELECTOR" ] && echo yes || echo no)"
+assert_eq "approve-idem-D1b: ...byte-identical to task_has_matching_approval_record's own selector" \
+    "$VBS_SELECTOR_TASK_HAS" "$QG_SELECTOR"
 
 # ===========================================================================
 # SECTION E — the approve-commit ORDER.
@@ -1063,10 +1082,31 @@ if assert_mutant_applied "approve-idem-IM META" "$QG_REAL_IM" "$QG_IM_MUT"; then
     # stripped copy advertise a flag it no longer has). A bare identifier grep
     # therefore answers 3 and this leg would fail for a reason that has nothing to
     # do with the mutation. Measured, not predicted: it did.
-    assert_eq "approve-idem-IM META: the refusal's emit site is gone (the strip landed where it was aimed)" \
-        "0" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_IM_MUT" | tr -d '[:space:]')"
-    assert_eq "approve-idem-IM META: ...and the shipped script still has exactly one such emit site" \
-        "1" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_REAL_IM" | tr -d '[:space:]')"
+    #
+    # COUNTS UPDATED for claude-workflow-plugin-k6re R6-F2 (measured red against
+    # the shipped fix before this update: expected 0/1, got 1/2). Before that fix
+    # there was exactly one `emit_error_json ... "expected_hash_mismatch"` call
+    # site in the whole script — this block's own, inside EXPECTED-HASH-REFUSAL.
+    # R6-F2 added a SECOND, independent one inside emit_approve_success
+    # (APPROVE-SUCCESS-GATE-EXPECT-HASH, above cmd_approve) — same error_key, same
+    # remediation text, on purpose (see that block's own header: "a caller or test
+    # keyed on error_key must not care which of cmd_approve's two success exits
+    # caught the mismatch" — the identical reasoning A2 already established for
+    # design_conflict_open). This mutant strips ONLY the EXPECTED-HASH-REFUSAL
+    # sentinel region, which — per this section's own header above — also removes
+    # the ARG-PARSE arm (`--expect-hash)` itself lives inside these sentinels), so
+    # $expect_hash_arg never becomes non-empty under the mutant and
+    # emit_approve_success's OWN (untouched, unrelated) check never has anything
+    # to compare — it is not "bypassed", it simply never receives an argument.
+    # The shipped script's total is therefore 2, not 1; the stripped copy's
+    # surviving count is 1 (emit_approve_success's own site), not 0 — both counts
+    # moved for the SAME reason, not because either emit site relocated.
+    assert_eq "approve-idem-IM META: THIS block's own emit site is gone (the strip landed where it was aimed)" \
+        "1" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_IM_MUT" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: ...and the shipped script now carries TWO such emit sites (k6re R6-F2's independent second one, not a strip failure)" \
+        "2" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_REAL_IM" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: ...and the ONE site surviving the strip is emit_approve_success's, not a duplicate of this block's" \
+        "1" "$(grep -c '^emit_approve_success() {' "$QG_IM_MUT" | tr -d '[:space:]')"
     assert_eq "approve-idem-IM META: ...and the --expect-hash parse arm is gone with it" \
         "0" "$(grep -c -- '--expect-hash)' "$QG_IM_MUT" | tr -d '[:space:]')"
     assert_eq "approve-idem-IM META: the stripped copy still parses" "0" \
@@ -1113,5 +1153,138 @@ if assert_mutant_applied "approve-idem-IM META" "$QG_REAL_IM" "$QG_IM_MUT"; then
     assert_eq "approve-idem-IM META: restore control — the shipped script refuses it (exit 2)" "2" "$IMC_RC"
     assert_eq "approve-idem-IM META: ...and wrote no record" "0" "$(record_count "$FIM" "$TID_IMC")"
 fi
+
+# ===========================================================================
+# SECTION J — `--expect-hash` on the IDEMPOTENT NO-OP PATH
+# (claude-workflow-plugin-k6re R6-F2, the SECOND independently-found
+# reach-around of the SAME hash-aware idempotency arm A2/i8cx already had to
+# patch once, for a DIFFERENT precondition).
+#
+# THE DEFECT. Section I proves --expect-hash refuses a moved change set on
+# the FRESH (non-idempotent) approval path. It says nothing about the
+# hash-aware IDEMPOTENCY no-op (SECTION B/G, above): that arm reports
+# status=approved and `return 0`s from a point in cmd_approve well BEFORE
+# the EXPECTED-HASH-REFUSAL check (Section I's own subject) ever runs. A
+# caller passing --expect-hash to an ALREADY-approved task whose bound
+# record covers a DIFFERENT hash than expected therefore got an unqualified
+# success envelope — the exact contract violation --expect-hash exists to
+# prevent, on the one path nobody had driven it against. Fixed in qa-gate.sh
+# by emit_approve_success (APPROVE-SUCCESS-GATE, immediately above
+# cmd_approve): both of cmd_approve's success-reporting exits now call the
+# same function, which refuses on a mismatch no matter which one is firing.
+# ===========================================================================
+gate_fixture
+FJ="$COMPONENT_FIXTURE_PATH"
+
+TID_J=$(new_task "$FJ" "k6re R6-F2: --expect-hash on the idempotent no-op path")
+armed_cycle "$FJ" "$TID_J" "src/j1.ts"
+qg "$FJ" approve "$TID_J" "first approval" >/dev/null 2>&1
+assert_eq "approve-idem-J0: precondition — one bound record after the first approve" \
+    "1" "$(record_count "$FJ" "$TID_J")"
+J_BOUND=$(record_hash "$FJ" "$TID_J")
+assert_eq "approve-idem-J0b: precondition — the bound hash is computable" \
+    "yes" "$([ -n "$J_BOUND" ] && echo yes || echo no)"
+
+# J1. A re-approve with the CORRECT --expect-hash on an already-approved,
+# unchanged task: still a genuine no-op — the essential anti-overreach
+# companion to J2 (a fix that re-verified EVERYTHING on the idempotent path
+# would also satisfy J2 while breaking this).
+J1_OUT=$(qg "$FJ" approve "$TID_J" --expect-hash "$J_BOUND" "re-approve, correct expectation" 2>&1 | tail -1)
+assert_json_field "approve-idem-J1: a MATCHING --expect-hash on the idempotent no-op path still succeeds" \
+    "$J1_OUT" '.status' "approved"
+assert_contains "approve-idem-J1: ...still reported as an idempotent no-op" "idempotent no-op" "$J1_OUT"
+assert_contains "approve-idem-J1: ...and names the verified expectation" "expected-hash verified" "$J1_OUT"
+assert_eq "approve-idem-J1: ...and writes NO second record" "1" "$(record_count "$FJ" "$TID_J")"
+
+# J2. THE HEADLINE: a MISMATCHED --expect-hash on the already-approved,
+# unchanged task must now REFUSE — not silently no-op, which was the R6-F2
+# defect. Driven exactly as A2's own repro shape: nothing about the FILES
+# changed (idem_ref is unchanged from J0), only the CALLER's stated
+# expectation is wrong.
+J2_RC=0
+J2_RAW=$(qg "$FJ" approve "$TID_J" \
+    --expect-hash "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    "re-approve, WRONG expectation" 2>&1) || J2_RC=$?
+J2_OUT=$(printf '%s\n' "$J2_RAW" | tail -1)
+assert_eq "approve-idem-J2: a MISMATCHED --expect-hash on the idempotent no-op path is REFUSED (exit 2) — THE R6-F2 FIX" \
+    "2" "$J2_RC"
+assert_json_field "approve-idem-J2: ...with error_key=expected_hash_mismatch (identical to the fresh-path refusal)" \
+    "$J2_OUT" '.error_key' "expected_hash_mismatch"
+assert_contains "approve-idem-J2: ...naming the hash it would have bound" "$J_BOUND" "$J2_OUT"
+assert_contains "approve-idem-J2: ...naming the hash the caller wrongly expected" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$J2_OUT"
+assert_eq "approve-idem-J2: ...and writes NO second record" "1" "$(record_count "$FJ" "$TID_J")"
+assert_not_contains "approve-idem-J2: ...and it is NOT reported as an idempotent no-op in disguise" \
+    "idempotent no-op" "$J2_OUT"
+
+# J3. ABSENT flag on the idempotent path: unchanged behaviour — the second
+# essential anti-overreach control. The refusal must not become a new
+# mandatory precondition: every existing caller of a repeat approve passes
+# no --expect-hash at all.
+J3_OUT=$(qg "$FJ" approve "$TID_J" "re-approve, no expectation stated" 2>&1 | tail -1)
+assert_json_field "approve-idem-J3: with NO --expect-hash, the idempotent no-op still succeeds" \
+    "$J3_OUT" '.status' "approved"
+assert_contains "approve-idem-J3: ...still an idempotent no-op" "idempotent no-op" "$J3_OUT"
+assert_not_contains "approve-idem-J3: ...and says nothing about an expectation it was not given" \
+    "expected-hash verified" "$J3_OUT"
+assert_eq "approve-idem-J3: ...and still writes NO second record" "1" "$(record_count "$FJ" "$TID_J")"
+
+# ---------------------------------------------------------------------------
+# SECTION JM — META: strip emit_approve_success's --expect-hash check from a
+# COPY and watch J2's exact scenario go green for the wrong reason (the
+# mismatched expectation silently APPROVES again) — the anchor-revert control
+# that would have caught R6-F2 itself.
+#
+# The region is sentinel-delimited inside emit_approve_success specifically
+# so this strip removes ONLY the mismatch check, not the function's own
+# success emission — a copy with the whole function gone would not parse.
+# ---------------------------------------------------------------------------
+gate_fixture
+FJM="$COMPONENT_FIXTURE_PATH"
+QG_REAL_JM=$(readlink "$FJM/.claude/scripts/qa-gate.sh" 2>/dev/null || printf '%s' "$FJM/.claude/scripts/qa-gate.sh")
+QG_JM_MUT="$FJM/.claude/scripts/qa-gate-noapprovegate.sh"
+awk '
+    /# APPROVE-SUCCESS-GATE-EXPECT-HASH BEGIN/{s=1}
+    !s{print}
+    /# APPROVE-SUCCESS-GATE-EXPECT-HASH END/{s=0}
+' "$QG_REAL_JM" > "$QG_JM_MUT"
+STRIP_DELTA_JM=$(( $(wc -l < "$QG_REAL_JM") - $(wc -l < "$QG_JM_MUT") ))
+assert_eq "approve-idem-JM META: the region strip actually removed lines" "yes" \
+    "$([ "$STRIP_DELTA_JM" -gt 3 ] && echo yes || echo no)"
+chmod +x "$QG_JM_MUT"
+if assert_mutant_applied "approve-idem-JM META" "$QG_REAL_JM" "$QG_JM_MUT"; then
+    assert_eq "approve-idem-JM META: the stripped copy still parses" "0" \
+        "$(bash -n "$QG_JM_MUT" 2>/dev/null && echo 0 || echo 1)"
+
+    TID_JM=$(new_task "$FJM" "k6re R6-F2 META: stripped gate approves a mismatched idempotent no-op")
+    armed_cycle "$FJM" "$TID_JM" "src/jm1.ts"
+    ( cd "$FJM" && CLAUDE_PROJECT_DIR="$FJM" bash "$QG_JM_MUT" approve "$TID_JM" "first approval, mutant" >/dev/null 2>&1 )
+    assert_eq "approve-idem-JM META: precondition — the mutant's first approve wrote a record" \
+        "1" "$(record_count "$FJM" "$TID_JM")"
+    JM_BOUND=$(record_hash "$FJM" "$TID_JM")
+    assert_eq "approve-idem-JM META: precondition — the mutant's bound hash is computable" \
+        "yes" "$([ -n "$JM_BOUND" ] && echo yes || echo no)"
+
+    JM_RAW=$( cd "$FJM" && CLAUDE_PROJECT_DIR="$FJM" bash "$QG_JM_MUT" approve "$TID_JM" \
+        --expect-hash "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+        "re-approve, WRONG expectation, mutant" 2>&1 ); JM_RC=$?
+    JM_OUT=$(printf '%s\n' "$JM_RAW" | tail -1)
+    assert_eq "approve-idem-JM META: with the gate's check stripped, the MISMATCHED expectation APPROVES (J2 WOULD fail) — the exact R6-F2 forgery reproduced" \
+        "0" "$JM_RC"
+    assert_json_field "approve-idem-JM META: ...with status=approved" "$JM_OUT" '.status' "approved"
+    assert_contains "approve-idem-JM META: ...silently reported as an idempotent no-op, over a hash the caller explicitly rejected" \
+        "idempotent no-op" "$JM_OUT"
+    assert_eq "approve-idem-JM META: ...and STILL writes no second record (only the caller's expectation was wrong, not the arm's no-op-ness)" \
+        "1" "$(record_count "$FJM" "$TID_JM")"
+
+    # Restore control: the SHIPPED script refuses the identical state.
+    JMC_RC=0
+    ( cd "$FJM" && CLAUDE_PROJECT_DIR="$FJM" bash "$FJM/.claude/scripts/qa-gate.sh" approve "$TID_JM" \
+        --expect-hash "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+        "re-approve, WRONG expectation, shipped" >/dev/null 2>&1 ) || JMC_RC=$?
+    assert_eq "approve-idem-JM META: restore control — the shipped script refuses the identical state (exit 2)" "2" "$JMC_RC"
+    assert_eq "approve-idem-JM META: ...and still wrote no second record" "1" "$(record_count "$FJM" "$TID_JM")"
+fi
+rm -f "$QG_JM_MUT"
 
 [ "$FAIL" -eq 0 ]

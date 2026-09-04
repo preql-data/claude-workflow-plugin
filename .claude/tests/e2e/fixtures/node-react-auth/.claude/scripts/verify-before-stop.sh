@@ -3403,6 +3403,85 @@ bd_show_with_comments() {
 # This is the tamper-evident half of the gate: it reads the approval RECORD
 # qa-gate.sh approve wrote, not the (forgeable) label. An empty expected hash
 # never matches (so an unverifiable current hash cannot accidentally pass).
+#
+# APPROVAL-SELECTOR-ANCHOR BEGIN (claude-workflow-plugin-yrij)
+#
+# THE BUG THIS CLOSES, more severe than REVIEW-BYPASS-ANCHOR above/below in
+# the same file: that fix anchors the MARKER-corroboration step, which only
+# ever runs after this function (or matching_approval_record_text /
+# try_worktree_resolution, the same shape) has already decided an approval
+# record EXISTS for the current hash. This function is what makes THAT
+# decision — it is what sets QA_APPROVED=true at all. Before this fix,
+# `select(test("QA-GATE APPROVED .*change_set_hash="))` was UNANCHORED: jq's
+# `test()` searches the WHOLE `.text` for the pattern ANYWHERE, not just at
+# position 0. An ORDINARY comment — first line genuine prose (an operator's
+# retrospective note, or an agent innocuously quoting the record grammar for
+# documentation, which review-check.sh's own ART-SELECT comment notes
+# "happens constantly") — with a fabricated `QA-GATE APPROVED
+# change_set_hash=<h> reviewed_by=none at <ts>: ...` on a LATER line
+# satisfied this selector exactly as well as a genuine record from
+# qa-gate.sh's own writer, with NO `qa-gate.sh approve` ever having run. The
+# Stop hook's own operator-facing text calls this record "tamper-evident" and
+# rejects a bare `bd label add qa-approved` specifically BECAUSE it writes no
+# such record — that claim was false while this selector stayed unanchored:
+# a plain `bd comment add` could write one instead.
+#
+# MEASURED (jq 1.8.1, Oniguruma default flags — no `m`, no `s` — this matters:
+# see the "why anchoring alone" paragraph below):
+#   text = "Earlier today I was debugging a stale approval and want to note
+#           for the record what the correct shape looks like:\nQA-GATE
+#           APPROVED change_set_hash=FORGEDHASH999 reviewed_by=none at
+#           2026-09-01T00:00:01Z: [review bypass: nothing to review, doc
+#           only] retro note"
+#   pre-fix:  select(test("QA-GATE APPROVED .*change_set_hash=")) MATCHES
+#             (the pattern is found starting mid-string, at the second
+#             line); capture(...).h returns FORGEDHASH999.
+#   post-fix: select(test("^QA-GATE APPROVED .*change_set_hash=")) does NOT
+#             match — the comment is excluded before capture() ever runs.
+#
+# WHY ANCHORING ALONE, NOT ALSO split("\n")[0] first (measured, not assumed —
+# a prior survey on this exact mechanism reported it safe on the strength of
+# a narrower test and was wrong; this task's own report carries the full
+# 4-variant matrix: baseline / anchor-only / split-only / both, run against
+# BOTH the multi-line reproduction above AND a single-line variant that needs
+# no newline at all, e.g. "Reminder: QA-GATE APPROVED change_set_hash=X
+# reviewed_by=none at ...: fake, all one line" — split-only does NOT close
+# that one, since there is nothing to split away). Anchoring alone closes
+# both: jq's `^` with no `m` flag anchors to the ABSOLUTE START of the
+# string, not to each line's start, so a comment whose own first line is not
+# itself a genuine record fails `select()` outright regardless of what a
+# later line (or a later position on the same line) contains. For a genuine
+# record, capture()'s own leftmost-first semantics already resist a decoy
+# hash appearing anywhere later in the SAME comment — this is the
+# pre-existing "same-record decoy" case that was already safe (a genuine
+# `...change_set_hash=REAL...fixed the bug where change_set_hash=FAKE
+# leaked...` correctly captures REAL) and stays safe, unmeasured-by-anchoring
+# but structurally unaffected by it. This function only ever returns the
+# CAPTURED HASH, never the raw comment text, so a first-line split would be
+# pure redundancy here once the anchor already proves line 1 is genuine —
+# see matching_approval_record_text below for the one reader in this family
+# where adding a split would instead be a REGRESSION (it would truncate the
+# text a genuine multi-line `--no-review` reason needs intact).
+#
+# SCOPE / WHAT THIS DOES NOT CLOSE: an ordinary comment with a forged record
+# EMBEDDED in it — this fix's whole subject. It does not and cannot close a
+# FULLY standalone, well-formed forged comment written as an agent's or
+# operator's ENTIRE comment text, e.g. `bd comment add <tid> "QA-GATE
+# APPROVED change_set_hash=$(impact-report.sh --hash-only) reviewed_by=none
+# at <ts>: [review bypass: ...] ..."` with nothing else in it. No anchor can
+# tell that apart from a genuine record — both start at position 0 with
+# identical bytes. That is the SAME accepted boundary the WORKTREE-RESOLUTION
+# block below already documents for try_worktree_resolution ("this block
+# does not lower that bar, and it does not raise it either"): sealing it
+# needs a record signed with a secret the gated process cannot read, which
+# the full-shell autonomy model this plugin runs under precludes. Reported,
+# not fixed, same as that block already reports it.
+#
+# Byte-identical treatment applied to the other three readers sharing this
+# exact shape: qa-gate.sh's recorded_approval_hashes (parity with THIS
+# function is load-bearing — see that function's own header), and this
+# file's matching_approval_record_text and try_worktree_resolution below.
+# APPROVAL-SELECTOR-ANCHOR END (claude-workflow-plugin-yrij)
 task_has_matching_approval_record() {
     local tid="$1" expected="$2"
     [ -z "$tid" ] && return 1
@@ -3418,7 +3497,7 @@ task_has_matching_approval_record() {
         | jq -r '
             (if type == "array" then .[0].comments else .comments end) // []
             | .[].text
-            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | select(test("^QA-GATE APPROVED .*change_set_hash="))
             | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h
         ' 2>/dev/null || echo "")
     [ -z "$recorded_hashes" ] && return 1
@@ -3440,6 +3519,66 @@ REVIEW_CHECK_SCRIPT="$PROJECT_DIR/.claude/scripts/review-check.sh"
 # Never fails the caller: every failure path (no bd, no Beads dir, jq error)
 # yields empty output with rc 0, which the caller treats as "no marker", i.e.
 # the check RUNS. Fail-closed by construction.
+#
+# APPROVAL-SELECTOR-ANCHOR (claude-workflow-plugin-yrij): the first `select`
+# is ANCHORED at `^` — same fix, same measurement, as
+# task_has_matching_approval_record above (see its APPROVAL-SELECTOR-ANCHOR
+# comment for the full rationale and the 4-variant anchor/split matrix).
+# Pre-fix, an ordinary comment whose first line was prose and whose LATER
+# line fabricated a `QA-GATE APPROVED change_set_hash=<h> ...` record could
+# be selected here as "the" matching record's text for a hash this function
+# was asked about, with no genuine approval behind it.
+#
+# DELIBERATELY NOT ALSO split("\n")[0]-ing the OUTPUT, unlike the
+# `split("\n")[0]`-then-anchor idiom used elsewhere in this codebase (e.g.
+# qa-gate.sh's finding_id_in_latest_artifact, review-check.sh's
+# $firstlines) — this is the one reader in the APPROVAL-SELECTOR-ANCHOR
+# family where that would be a REGRESSION, not just redundant. This
+# function's contract is to return the matching record's FULL text, because
+# its two callers need more than line 1:
+# approval_text_has_audited_review_bypass (REVIEW-BYPASS-ANCHOR above)
+# deliberately checks its OWN `[review bypass:` marker over the FULL,
+# un-truncated text — "a --no-review reason that itself contains an embedded
+# newline must not defeat the CONTROL case", per that function's own
+# comment. qa-gate.sh's writer puts `$comment_suffix` (which carries the
+# marker for a genuine --no-review approval) AFTER `$summary` (qa-gate.sh's
+# `add_comment "$tid" "QA-GATE APPROVED ..."` call, cmd_approve), so an
+# operator's own multi-line summary can legitimately
+# push a GENUINE marker past line 1. MEASURED: truncating this function's
+# return value to first-line-only flips a genuine `--no-review` approval
+# whose reason spans two lines from "audited bypass granted" to "not
+# exempt" — breaking the CONTROL case the anti-overreach leg of this fix
+# exists to protect. The anchor on `select()` does not have this problem:
+# it only ever governs whether a comment is a CANDIDATE at all, not what
+# text is returned once it is one, and (per the measurement above) is
+# independently sufficient to reject both forgery shapes on its own.
+#
+# RECORD-VS-LINE FIX (claude-workflow-plugin-k6re R6-F1, round 6, independent
+# review, independently reproduced before dispatch): the "print the
+# LAST matching record" selection immediately above used to be `| tail -1`
+# applied AFTER this jq filter, at the SHELL layer. `jq -r` prints each
+# selected `.text` value RAW — so ONE multi-line record (a genuine approval
+# whose summary spans lines, or a genuine --no-review reason with an
+# embedded newline, same case the split("\n")[0] discussion just above
+# already worries about) emits MULTIPLE SHELL LINES for a SINGLE jq value,
+# and `tail -1` returns the last LINE of the last such value, never the last
+# RECORD. Two directions, both measured: (1) a comment whose first line is a
+# genuine reviewed_by=<real> approval and whose LATER line fabricates a
+# `reviewed_by=none ... [review bypass:` record for the SAME
+# change_set_hash had its forged trailing line selected as "the" matching
+# text — review-discipline silently SKIPPED with no genuine `--no-review`
+# call ever made; (2) a genuine multi-line --no-review approval (the marker
+# on line 1, an operator's own note after it) had its trailing note text
+# selected instead, matching neither the machine prefix nor (in general) the
+# marker — a genuine audited bypass wrongly REFUSED. Fixed per the
+# operator's family-level ruling ("when a family survives repeated rounds
+# against one mechanism, remove the mechanism rather than guard it again"):
+# the filter below collects every matching value into an array and indexes
+# [-1] itself, where record boundaries are unambiguous, so the shell never
+# again receives an undifferentiated stream of lines to tail. This does NOT
+# reopen the DELIBERATELY-NOT-split("\n")[0] decision above: the selected
+# value is still returned WHOLE — only WHICH value gets selected changed,
+# never how much of it is returned once selected.
 matching_approval_record_text() {
     local tid="$1" expected="$2"
     [ -z "$tid" ] && return 0
@@ -3448,12 +3587,84 @@ matching_approval_record_text() {
     [ -d "$PROJECT_DIR/.beads" ] || return 0
     bd_show_with_comments "$tid" \
         | jq -r --arg h "$expected" '
-            (if type == "array" then .[0].comments else .comments end) // []
-            | .[].text
-            | select(test("QA-GATE APPROVED .*change_set_hash="))
-            | select(capture("change_set_hash=(?<rh>[A-Za-z0-9-]+)").rh == $h)
-        ' 2>/dev/null | tail -1 || true
+            [
+                (if type == "array" then .[0].comments else .comments end) // []
+                | .[].text
+                | select(test("^QA-GATE APPROVED .*change_set_hash="))
+                | select(capture("change_set_hash=(?<rh>[A-Za-z0-9-]+)").rh == $h)
+            ]
+            | if length > 0 then .[-1] else empty end
+        ' 2>/dev/null || true
 }
+
+# REVIEW-BYPASS-ANCHOR BEGIN (claude-workflow-plugin-yrij)
+#
+# approval_text_has_audited_review_bypass <record-text> — 0 when <record-text>
+# (the output of matching_approval_record_text / an equivalent single-record
+# read) carries a GENUINE audited `[review bypass:` escape — i.e. was written
+# by a real `qa-gate.sh approve --no-review` call — 1 otherwise.
+#
+# THE BUG THIS CLOSES (claude-workflow-plugin-yrij, found by the D1
+# anchor-verification workflow): both readers of this marker used to be a
+# bare `grep -qF '[review bypass:'` over the WHOLE approval comment. qa-gate.sh
+# builds that comment as `... at $ts: $summary$comment_suffix`
+# (qa-gate.sh:5051), where $summary is UNVALIDATED operator free text
+# interpolated immediately before the (possibly empty) suffix — so
+# `qa-gate.sh approve <tid> 'done [review bypass: x]'`, an ORDINARY approval
+# whose summary merely contains the marker's spelling, satisfied the same
+# grep and silently skipped the whole independent-review re-check this
+# predicate exists to run (verify-before-stop.sh's own REVIEW-DISCIPLINE
+# block above, and wtres_review_is_clean below). Every later Stop on that
+# task would then be "audited-exempt" forever, including for findings
+# recorded AFTER the approval — exactly the "approve early, discover later"
+# hole REVIEW-DISCIPLINE exists to close.
+#
+# THE ANCHOR, mirrored from qa-gate.sh's own RUBRIC reader precedent
+# (qa-gate.sh:1918, "ANCHORED at ^, walking the whole machine prefix rather
+# than grepping for the token anywhere on the line"): qa-gate.sh's writer
+# (qa-gate.sh:4235, 4268-4327) sets the machine-controlled `reviewed_by=`
+# token to the LITERAL string "none" if, and only if, `--no-review` was
+# genuinely passed (bypass_review=1 at qa-gate.sh:3713, the ONE site that
+# ever sets it — every other path that reaches add_comment overwrites it
+# with a real reviewer identity, or refuses before add_comment runs at
+# all). $summary and every bracketed suffix are interpolated STRICTLY AFTER
+# this token in the write template (qa-gate.sh:5051), so nothing
+# operator-controlled can ever appear earlier in the string than the
+# genuine token — an anchored read of THAT position cannot be satisfied by
+# free text, unlike a substring search over the whole comment.
+#
+# FIRST LINE ONLY, matching the single-line-record contract
+# .claude/tests/e2e/lib/invariants.ts's own reader already documents
+# ("Records are single-line by contract ... so like the shell we read only
+# text.split(\n)[0] of each comment"): matching_approval_record_text's own
+# jq (test()/capture() with no "s"/dotall flag) can return a MULTI-LINE
+# .text whose first line is the genuine record, so an operator whose
+# $summary embeds a literal newline could otherwise plant a second,
+# fully-forged "record" — its own fake change_set_hash, reviewed_by=none,
+# and marker — later in the same comment. Slicing to the first line before
+# anchoring closes that variant too: a forged reviewed_by=none can only ever
+# appear on a LATER line, which this predicate never reads.
+#
+# The marker-presence check that follows the anchor is deliberately NOT
+# itself position-restricted (a plain substring search over the full,
+# possibly multi-line, text): once reviewed_by=none is confirmed genuine, a
+# --no-review reason that itself contains an embedded newline must not
+# defeat the CONTROL case, and the writer always appends the marker for
+# real whenever reviewed_by is genuinely "none" — so this second check
+# is corroboration, not the load-bearing gate.
+approval_text_has_audited_review_bypass() {
+    local text="$1" first_line
+    first_line="${text%%$'\n'*}"
+    if ! printf '%s' "$first_line" \
+            | grep -qE '^QA-GATE APPROVED (change_set_hash=[A-Za-z0-9-]+ )?reviewed_by=none( |$)'; then
+        return 1
+    fi
+    if printf '%s' "$text" | grep -qF '[review bypass:'; then
+        return 0
+    fi
+    return 1
+}
+# REVIEW-BYPASS-ANCHOR END (claude-workflow-plugin-yrij)
 
 # Spec 0.2: classify a test failure as a runner/infrastructure issue vs.
 # assertion failure. Conservative heuristic — when in doubt we say
@@ -6064,6 +6275,15 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
                 # deadlock every doc commit). Re-litigating that decision here
                 # would just make the bypass useless.
                 #
+                # claude-workflow-plugin-yrij: this used to be a bare
+                # `grep -qF '[review bypass:'` over the WHOLE comment text,
+                # which an ORDINARY approval summary containing that literal
+                # substring could satisfy with no bypass ever having been
+                # authorised. approval_text_has_audited_review_bypass (above,
+                # REVIEW-BYPASS-ANCHOR) anchors on the machine-controlled
+                # reviewed_by=none token instead, which only qa-gate.sh's
+                # writer can produce.
+                #
                 # FAIL CLOSED: a missing/unrunnable predicate BLOCKS. The `||`
                 # guards are load-bearing under `set -e` (line 25) for the same
                 # reason the CURRENT_CS_HASH guard above is — a bare assignment
@@ -6075,7 +6295,7 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
                 # strips this block and asserts a task with an OPEN finding
                 # then releases. Do not rename them.
                 MATCHED_APPROVAL_TEXT=$(matching_approval_record_text "$CURRENT_TASK" "$CURRENT_CS_HASH") || true
-                if printf '%s' "$MATCHED_APPROVAL_TEXT" | grep -qF '[review bypass:'; then
+                if approval_text_has_audited_review_bypass "$MATCHED_APPROVAL_TEXT"; then
                     log_sync_error "Stop release: review-discipline SKIPPED for $CURRENT_TASK — the matching approval record carries an audited [review bypass:] marker (F1/doc-only class)"
                 elif [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
                     QA_APPROVED=false
@@ -6401,6 +6621,21 @@ fi
 # the forgery case needs a record signed with a secret the gated process cannot
 # read, which the full-shell autonomy model precludes.
 #
+# NARROWED, NOT WIDENED, since this comment was first written (claude-
+# workflow-plugin-yrij, APPROVAL-SELECTOR-ANCHOR). The standalone example
+# above — the ENTIRE comment text is a well-formed record, position 0 — is
+# still exactly this accepted boundary: no anchor can distinguish it from a
+# genuine one, both start identically. What the anchor on this function's own
+# `select(test("^QA-GATE APPROVED ..."))` DOES now close is the lower
+# adversary bar this comment used to conflate with the one above: a forged
+# record EMBEDDED in an otherwise-ordinary comment (first line prose, the
+# fabrication on a later line, or anywhere past position 0 on the same
+# line) — a weaker capability than hand-writing a whole standalone record,
+# and reachable by accident (review-check.sh's own ART-SELECT comment notes
+# agents quote record grammars in comments constantly). That narrower case is
+# fixed; the standalone-forgery boundary this paragraph names is not, and is
+# not claimed to be.
+#
 # The sentinel comments are load-bearing: an L2 META-TEST strips this whole
 # block and asserts the cross-worktree release then BLOCKS. Do not rename them.
 
@@ -6543,12 +6778,32 @@ try_worktree_resolution() {
 
     # The approval records. `gsub("\n"; " ")` flattens a multi-line summary so
     # the token scans below stay line-oriented.
+    #
+    # APPROVAL-SELECTOR-ANCHOR (claude-workflow-plugin-yrij): `select` is
+    # ANCHORED at `^` — same fix, same measurement, as
+    # task_has_matching_approval_record above (see its APPROVAL-SELECTOR-
+    # ANCHOR comment for the full rationale). Pre-fix, an ordinary comment on
+    # $CURRENT_TASK whose first line was prose and whose LATER line
+    # fabricated a `QA-GATE APPROVED change_set_hash=<h> ...` record was
+    # included in $approvals — and since `awk`'s own `match()` scan below is
+    # ALSO leftmost-first per (already-flattened) line, a hash fabricated
+    # this way that happened to equal a sibling worktree's own genuine,
+    # on-disk `impact-report-<tid>.json` hash could bind THIS checkout's
+    # release to that worktree with no `qa-gate.sh approve` ever having run
+    # anywhere. This is narrower than it sounds: the WORKTREE-RESOLUTION
+    # comment above already documents that a fully standalone, well-formed
+    # forged comment — or a hand-written impact-report.json citing a real
+    # hash — is an accepted boundary this block never claimed to close ("this
+    # block does not lower that bar, and it does not raise it either"). The
+    # anchor closes the NARROWER, lower-effort case that boundary note
+    # predates: a forged record embedded in an otherwise-ordinary comment,
+    # not written as its own deliberate, self-contained forgery.
     local approvals
     approvals=$(bd_show_with_comments "$CURRENT_TASK" \
         | jq -r '
             (if type == "array" then .[0].comments else .comments end) // []
             | .[].text
-            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | select(test("^QA-GATE APPROVED .*change_set_hash="))
             | gsub("\n"; " ")
         ' 2>/dev/null) || approvals=""
     [ -n "$approvals" ] || return 1
@@ -6649,11 +6904,20 @@ try_worktree_resolution() {
 # stop re-arming the gate — reopening the exact "approve early, discover later"
 # hole V3 closed, in precisely the worktree flow V4 exists to support. It can
 # only ever REFUSE a release, never grant one, so it cannot widen the gate.
+#
+# claude-workflow-plugin-yrij: the escape check below used to be a bare
+# `grep -qF '[review bypass:'` over the whole record text — forgeable from an
+# ORDINARY approval summary containing that literal substring, same as the
+# same-checkout reader above, and arguably worse HERE: this is the ONE release
+# path where a forged exemption would ALSO have suppressed re-arming across a
+# worktree boundary. approval_text_has_audited_review_bypass (REVIEW-BYPASS-
+# ANCHOR, defined near matching_approval_record_text) anchors on the
+# machine-controlled reviewed_by=none token instead.
 wtres_review_is_clean() {
     WTRES_REVIEW_DETAIL=""
     local text rc=0 out key open
     text=$(matching_approval_record_text "$CURRENT_TASK" "$WTRES_HASH") || text=""
-    if printf '%s' "$text" | grep -qF '[review bypass:'; then
+    if approval_text_has_audited_review_bypass "$text"; then
         return 0    # audited escape (F1 / --no-review), honoured as upstream
     fi
     if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then

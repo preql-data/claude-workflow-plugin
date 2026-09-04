@@ -192,6 +192,165 @@ assert_eq "art newline in free-form evidence: still ACCEPTED (exit 0)" "0" "$RC_
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 2c: iterations type + integer guard (claude-workflow-plugin-k6re R11-F1) ==="
+# MEASURED defect (R11-F1, independent review round 11 of claude-workflow-
+# plugin-i8cx): the has()-only check in Section 2 accepted ANY value under
+# `iterations` as long as the key was present. qa-gate.sh cmd_review_record
+# then read it back with `jq -r '.iterations'` and interpolated the result
+# VERBATIM into the REVIEW-ARTIFACT record's machine prefix as
+# `iteration=$iter` -- and the selector (review-count.test.sh section 11)
+# refuses its ENTIRE candidate set forever on one unparseable iteration=
+# token, with no recovery, because bd comments are append-only. This section
+# pins the writer-side half of the fix: reject before that record is ever
+# written. The selector-side recovery half is pinned separately in
+# review-count.test.sh section 11.9.
+
+printf '%s' "$VALID_ART" | jq '.iterations=1.5' > "$WORK/art_iter_decimal.json"
+run_rc validate-artifact "$WORK/art_iter_decimal.json"
+assert_eq "art iterations=1.5: exit 4" "4" "$RC_EXIT"
+assert_eq "art iterations=1.5: error_key=iterations_not_integer" "iterations_not_integer" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.iterations="oops"' > "$WORK/art_iter_string.json"
+run_rc validate-artifact "$WORK/art_iter_string.json"
+assert_eq "art iterations=\"oops\" (non-numeric string): exit 4" "4" "$RC_EXIT"
+assert_eq "art iterations=\"oops\": error_key=iterations_not_number (type checked before shape)" \
+    "iterations_not_number" "$(ekey_of "$RC_OUT")"
+
+# 1e3: THIS jq version renders the JSON literal back out as "1E+3", not
+# "1000" (verified directly against the installed jq, not assumed — see the
+# comment on the guard itself). Pinned here so a jq upgrade that changes this
+# normalisation is caught by a red assertion rather than silently accepted.
+printf '%s' "$VALID_ART" | jq '.iterations=1e3' > "$WORK/art_iter_exp.json"
+run_rc validate-artifact "$WORK/art_iter_exp.json"
+assert_eq "art iterations=1e3: exit 4" "4" "$RC_EXIT"
+assert_eq "art iterations=1e3: error_key=iterations_not_integer (non-normalised exponent form)" \
+    "iterations_not_integer" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.iterations=-3' > "$WORK/art_iter_neg.json"
+run_rc validate-artifact "$WORK/art_iter_neg.json"
+assert_eq "art iterations=-3: error_key=iterations_not_integer" "iterations_not_integer" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.iterations=null' > "$WORK/art_iter_null.json"
+run_rc validate-artifact "$WORK/art_iter_null.json"
+assert_eq "art iterations=null: error_key=iterations_not_number" "iterations_not_number" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.iterations=true' > "$WORK/art_iter_bool.json"
+run_rc validate-artifact "$WORK/art_iter_bool.json"
+assert_eq "art iterations=true: error_key=iterations_not_number" "iterations_not_number" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.iterations=[1,2]' > "$WORK/art_iter_array.json"
+run_rc validate-artifact "$WORK/art_iter_array.json"
+assert_eq "art iterations=[1,2] (array, jq -r would print MULTI-LINE): error_key=iterations_not_number" \
+    "iterations_not_number" "$(ekey_of "$RC_OUT")"
+
+# Boundary: 0 is a non-negative integer, same convention as the RUBRIC
+# iteration check (qa-gate.sh cmd_grade_record) this guard mirrors.
+printf '%s' "$VALID_ART" | jq '.iterations=0' > "$WORK/art_iter_zero.json"
+run_rc validate-artifact "$WORK/art_iter_zero.json"
+assert_eq "art iterations=0: exit 0 (boundary: non-negative integer)" "0" "$RC_EXIT"
+
+# ITERATIONS SAFE-MAGNITUDE GUARD (claude-workflow-plugin-k6re, R1-F1).
+# MEASURED defect (independent review round 1, reviewed_hash
+# 5a3e65de46593b76cea7c11b4717cf7888c48b50d0e84f7467bd9961b889bb1c): the
+# guard above confirms SHAPE (type=number, string form matches ^[0-9]+$) but
+# never MAGNITUDE. This host's jq (1.8.1) round-trips `.iterations` exactly
+# even past 2^53 (verified below, 2c-mag-0), so this is not about THIS jq
+# losing precision -- it is about the value being nonsense for any real
+# review round, and every OTHER consumer of this JSON not sharing this
+# host's exact jq behaviour (JavaScript, many JSON libraries, and this same
+# file's own selector -- see review-count.test.sh section 11.10 -- all read
+# JSON numbers as an IEEE-754 double). The bound is 9007199254740991
+# (2^53-1, Number.MAX_SAFE_INTEGER): the largest integer for which N and N+1
+# are both exactly representable and distinguishable as a double.
+printf '%s' "$VALID_ART" | jq '.iterations=9007199254740991' > "$WORK/art_iter_bound_ok.json"
+run_rc validate-artifact "$WORK/art_iter_bound_ok.json"
+assert_eq "art iterations=9007199254740991 (exactly 2^53-1): exit 0 (boundary is INCLUSIVE)" "0" "$RC_EXIT"
+
+printf '%s' "$VALID_ART" | jq '.iterations=9007199254740992' > "$WORK/art_iter_bound_bad.json"
+run_rc validate-artifact "$WORK/art_iter_bound_bad.json"
+assert_eq "art iterations=9007199254740992 (2^53-1 + 1): exit 4" "4" "$RC_EXIT"
+assert_eq "art iterations=9007199254740992: error_key=iterations_exceeds_safe_bound" \
+    "iterations_exceeds_safe_bound" "$(ekey_of "$RC_OUT")"
+
+# The finding's own example value (R1-F1's evidence cites this exact
+# number as the one the selector could not distinguish from the bound).
+printf '%s' "$VALID_ART" | jq '.iterations=9007199254740993' > "$WORK/art_iter_r1f1.json"
+run_rc validate-artifact "$WORK/art_iter_r1f1.json"
+assert_eq "art iterations=9007199254740993 (the R1-F1 finding's own example): exit 4" "4" "$RC_EXIT"
+assert_eq "art iterations=9007199254740993: error_key=iterations_exceeds_safe_bound" \
+    "iterations_exceeds_safe_bound" "$(ekey_of "$RC_OUT")"
+
+# A legitimately large-but-sane value (nowhere near a real review count, but
+# nowhere near the representability bound either) must still pass -- the
+# guard rejects magnitude that is UNSAFE, never magnitude that is merely
+# large relative to typical single/double-digit review round counts.
+printf '%s' "$VALID_ART" | jq '.iterations=999999999999999' > "$WORK/art_iter_large_sane.json"
+run_rc validate-artifact "$WORK/art_iter_large_sane.json"
+assert_eq "art iterations=999999999999999 (large but safely representable): exit 0" "0" "$RC_EXIT"
+
+# 2c-mag-0 PLATFORM FACT this whole guard is measured against: THIS jq
+# preserves the R1-F1 example value exactly on a bare pass-through (proving
+# the guard is not compensating for jq's own precision loss, and pinning
+# the fact so a future jq change that stops preserving it is caught by a
+# red assertion here rather than silently changing what this guard means).
+assert_eq "2c-mag-0 platform fact: this jq round-trips 9007199254740993 exactly (no precision loss at THIS layer)" \
+    "9007199254740993" "$(printf '{"iterations":9007199254740993}' | jq -r '.iterations')"
+
+# DISCRIMINATOR: the unmodified VALID_ART (iterations=1) still passes,
+# proving the assertions above fail because of the specific mutation, not
+# because Section 2c broke validate-artifact generally.
+run_rc validate-artifact "$WORK/art_ok.json"
+assert_eq "art iterations=1 (control, from Section 2): still exit 0" "0" "$RC_EXIT"
+
+# META (required by .claude/tests/README.md's pairing requirement): a
+# checker copy with the ITERATIONS-GUARD stripped must ACCEPT the exact
+# fixture Section 2c rejects above, proving the guard is load-bearing.
+ITER_STRIPPED="$WORK/review-check-noiterguard.sh"
+awk '
+    /# ITERATIONS-GUARD-START/ {skip=1; next}
+    /# ITERATIONS-GUARD-END/   {skip=0; next}
+    skip!=1 {print}
+' "$RCHECK" > "$ITER_STRIPPED"
+chmod +x "$ITER_STRIPPED"
+
+ITER_REAL_LINES=$(wc -l < "$RCHECK" | tr -d ' ')
+ITER_STRIP_LINES=$(wc -l < "$ITER_STRIPPED" | tr -d ' ')
+assert_eq "META iterations-guard: strip removed the guard block (fewer lines)" "1" \
+    "$([ "$ITER_STRIP_LINES" -lt "$ITER_REAL_LINES" ] && echo 1 || echo 0)"
+assert_eq "META iterations-guard: stripped checker parses" "0" \
+    "$(bash -n "$ITER_STRIPPED" 2>/dev/null && echo 0 || echo 1)"
+
+ITER_STRIP_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$ITER_STRIPPED" validate-artifact "$WORK/art_iter_decimal.json" 2>/dev/null)
+ITER_STRIP_EXIT=$?
+assert_eq "META iterations-guard: STRIPPED checker WRONGLY accepts iterations=1.5 (exit 0) -> guard is load-bearing" \
+    "0" "$ITER_STRIP_EXIT"
+assert_eq "META iterations-guard: stripped checker reports ok=true" "true" \
+    "$(printf '%s' "$ITER_STRIP_OUT" | jq -r '.ok')"
+# Discriminator half: the REAL (unstripped) checker still rejects the same
+# fixture, so the META result above is attributable to the strip and
+# nothing else.
+run_rc validate-artifact "$WORK/art_iter_decimal.json"
+assert_eq "META iterations-guard: REAL checker still rejects the same fixture (exit 4)" "4" "$RC_EXIT"
+
+# META, MAGNITUDE LEG (claude-workflow-plugin-k6re, R1-F1): the SAME strip
+# (ITER-GUARD-START/END brackets the magnitude check too, since it was
+# added inside that sentinel region) must ALSO wrongly accept the
+# out-of-bound fixture -- the required negative control specifically for
+# the magnitude guard, not just the pre-existing shape guard it shares a
+# sentinel region with.
+ITER_STRIP_MAG_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$ITER_STRIPPED" validate-artifact "$WORK/art_iter_r1f1.json" 2>/dev/null)
+ITER_STRIP_MAG_EXIT=$?
+assert_eq "META magnitude-guard: STRIPPED checker WRONGLY accepts iterations=9007199254740993 (exit 0) -> guard is load-bearing" \
+    "0" "$ITER_STRIP_MAG_EXIT"
+assert_eq "META magnitude-guard: stripped checker reports ok=true" "true" \
+    "$(printf '%s' "$ITER_STRIP_MAG_OUT" | jq -r '.ok')"
+# Discriminator half: the REAL (unstripped) checker still rejects the same
+# out-of-bound fixture.
+run_rc validate-artifact "$WORK/art_iter_r1f1.json"
+assert_eq "META magnitude-guard: REAL checker still rejects the same fixture (exit 4)" "4" "$RC_EXIT"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Section 3: META — the mandatory-field guard is load-bearing ==="
 # Build a checker copy with the MANDATORY-NONEMPTY guard block stripped. A
 # fixture that is otherwise valid but MISSING stop_condition (valid enum

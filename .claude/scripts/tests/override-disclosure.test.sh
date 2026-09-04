@@ -563,6 +563,17 @@ assert_contains "D3.2 ...and still carries the corrected (non-'full') wording" \
 # writes) so the review- and design-discipline re-checks — a different
 # subsystem than this fix — skip cleanly instead of needing review-check.sh
 # and a real design verdict faked too.
+#
+# claude-workflow-plugin-yrij: `reviewed_by=` on this fabricated record MUST
+# be the literal `none`, not an arbitrary placeholder identity. Before yrij,
+# verify-before-stop.sh's readers treated ANY occurrence of the `[review
+# bypass:` substring anywhere in the comment as an audited escape, so a
+# placeholder like `reviewed_by=test-fixture` worked by accident. yrij
+# anchored that check on qa-gate.sh's own writer contract instead
+# (qa-gate.sh:4235, 4268-4327, 3713): reviewed_by is the literal "none" if,
+# and only if, --no-review was genuinely passed — every other path leaves a
+# real identity. A fixture claiming an audited bypass has to say so the same
+# way the real writer does, or it is testing a shape nothing produces.
 # ---------------------------------------------------------------------------
 build_sandbox_release() {
     local root="$1" ot="$2" h
@@ -603,7 +614,7 @@ DS
     cat > "$root/bin/bd" <<BDSTUB
 #!/bin/bash
 if [ "\${1:-}" = "show" ]; then
-    printf '%s' '{"comments":[{"text":"QA-GATE APPROVED change_set_hash=$h reviewed_by=test-fixture [review bypass: test fixture, nothing to review] [design bypass: test fixture, no design phase]"}]}'
+    printf '%s' '{"comments":[{"text":"QA-GATE APPROVED change_set_hash=$h reviewed_by=none [review bypass: test fixture, nothing to review] [design bypass: test fixture, no design phase]"}]}'
     exit 0
 fi
 exit 0
@@ -919,6 +930,11 @@ assert_absent "E2N.2 NEGATIVE CONTROL: an unnarrowed vanished-change-set release
 # cites the SAME fixture hash with a `worktree=` token, so the ONLY way this
 # checkout can release is via cross-worktree resolution (root's own
 # recomputed hash is a real sha256, which will never equal the placeholder).
+#
+# claude-workflow-plugin-yrij: same reviewed_by=none requirement as
+# build_sandbox_release above — this is the fixture for :6656
+# (wtres_review_is_clean), the cross-worktree twin of the same anchored
+# predicate, so it is bound by the identical writer contract.
 # ---------------------------------------------------------------------------
 build_sandbox_worktree_release() {
     local root="$1" wt="$2" ot="$3"
@@ -948,7 +964,7 @@ DS
     cat > "$root/bin/bd" <<BDSTUB
 #!/bin/bash
 if [ "\${1:-}" = "show" ]; then
-    printf '%s' '{"comments":[{"text":"QA-GATE APPROVED change_set_hash=$h reviewed_by=test-fixture worktree=$wt [review bypass: test fixture, nothing to review] [design bypass: test fixture, no design phase]"}]}'
+    printf '%s' '{"comments":[{"text":"QA-GATE APPROVED change_set_hash=$h reviewed_by=none worktree=$wt [review bypass: test fixture, nothing to review] [design bypass: test fixture, no design phase]"}]}'
     exit 0
 fi
 exit 0
@@ -1043,13 +1059,23 @@ DS
     case "$kind" in
         review-fail)
             h=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null)
+            # No bypass marker here — this leg deliberately names a REAL
+            # reviewer identity (a placeholder is fine: nothing anchors on
+            # it when no marker is claimed) and relies on review-check.sh's
+            # own absence to force review_check_unavailable. Unaffected by
+            # claude-workflow-plugin-yrij's reviewed_by=none anchor, which
+            # only gates a CLAIMED audited bypass.
             comment_json="{\"comments\":[{\"text\":\"QA-GATE APPROVED change_set_hash=$h reviewed_by=test-fixture\"}]}"
             # review-check.sh deliberately NOT copied in: forces the
             # deterministic review_check_unavailable error_key.
             ;;
         design-fail)
             h=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null)
-            comment_json="{\"comments\":[{\"text\":\"QA-GATE APPROVED change_set_hash=$h reviewed_by=test-fixture [review bypass: test fixture, nothing to review]\"}]}"
+            # claude-workflow-plugin-yrij: reviewed_by MUST be "none" here —
+            # this leg needs review-discipline to skip cleanly via the
+            # AUDITED marker (same writer contract as build_sandbox_release
+            # above), so design-discipline is what actually gets exercised.
+            comment_json="{\"comments\":[{\"text\":\"QA-GATE APPROVED change_set_hash=$h reviewed_by=none [review bypass: test fixture, nothing to review]\"}]}"
             ;;
     esac
     cat > "$root/bin/bd" <<BDSTUB

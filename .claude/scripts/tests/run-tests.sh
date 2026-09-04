@@ -529,10 +529,65 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # design, followed by a conflict filed afterward — see that spec's own
 # header for the full history and design-review-record.test.sh's Section 8h
 # for the dedicated negative control (text/label/flag forgery, all proven to
-# authorize nothing). EXPECTED_SPECS stays 56 — no spec was added or
-# removed, only Section 1's own scenario changed shape.
+# authorize nothing). EXPECTED_SPECS stayed at 56 for that round — no spec
+# was added or removed, only Section 1's own scenario changed shape.
+#
+# 56 -> 57 (claude-workflow-plugin-k6re, R6-F1, independent review,
+# independently reproduced by the orchestrator end to end before dispatch):
+# added review-bypass-anchor.test.sh. verify-before-stop.sh's
+# matching_approval_record_text selected "the last matching QA-GATE APPROVED
+# record" via `jq -r ... | tail -1` — jq -r prints each selected .text value
+# RAW, so a multi-line record (a genuine approval whose summary spans lines,
+# or a genuine --no-review reason with an embedded newline) emitted MULTIPLE
+# SHELL LINES for a SINGLE jq value, and tail -1 returned the last LINE of
+# the last such value, never the last RECORD — broken for one matching
+# multi-line comment regardless of how many comments matched. Both
+# directions were live: a forged trailing `reviewed_by=none ... [review
+# bypass:]` line appended after a genuine approval granted an unearned
+# audited bypass; a genuine multi-line --no-review approval was wrongly
+# refused because its own trailing operator note was selected instead of
+# the record. Fixed by selecting the last matching value INSIDE jq
+# (`[ generator ] | if length > 0 then .[-1] else empty end`) rather than a
+# shell-side tail -1, per the operator's family-level ruling to remove the
+# mechanism rather than re-guard it. The spec extracts the three real
+# functions (bd_show_with_comments, matching_approval_record_text,
+# approval_text_has_audited_review_bypass) from the shipped script and
+# drives all six scenarios against a REAL bd store, plus a META section
+# with a frozen pre-fix mutant reproducing both bug directions exactly
+# while every anti-overreach case (ordinary single-line approval, ordinary
+# single-line bypass, no-match) stays byte-identical to shipped.
+#
+# 57 -> 58 (claude-workflow-plugin-k6re, R6-F2, independent review, round 6):
+# added approve-success-gate.test.sh. cmd_approve's hash-aware idempotency
+# no-op could report status=approved without ever consulting --expect-hash —
+# the SECOND independently-found reach-around of the same arm A2/i8cx already
+# fixed once (over compute_design_conflict_open). Fixed with a structural
+# gate rather than a third hand-copied inline guard: emit_approve_success
+# (APPROVE-SUCCESS-GATE, qa-gate.sh, immediately above cmd_approve) is now the
+# ONLY place the script prints a raw status=approved envelope for this
+# subcommand — both of cmd_approve's success-reporting exits (the idempotent
+# no-op, and the fresh-approval path's own tail) call it instead of printing
+# directly. This spec is the STRUCTURAL half, hoisted straight to L1 the same
+# way reviewer-lane-structural.test.sh hoisted correction 10's guard: pure
+# grep/text-injection, no fixture, no bd, seconds not minutes. It pins the
+# two counts that make the chokepoint real rather than assumed (exactly one
+# raw `emit_json 1 "approve" "$tid" "approved"` in the shipped script,
+# exactly two calls into emit_approve_success), with a non-vacuity META that
+# injects a gate-bypassing raw emission into a copy and confirms the count
+# would flip — the shape a FIFTH reach-around of this same arm would take.
+# The BEHAVIOURAL proof (a real approve, a real mismatch, a real refusal,
+# plus an anchor-revert META on the check itself) is the L2 tier's
+# approve-idempotency.sh Section J/JM, not duplicated here.
+#
+# Landed the same review round as the 56 -> 57 bump immediately above
+# (claude-workflow-plugin-k6re R6-F1, verify-before-stop.sh): two independent
+# specialists each added one spec file to fix two independent findings from
+# the same round, concurrently, neither visible to the other's diff. Both
+# bumps are individually correct; the counter itself cannot represent two
+# concurrent +1s landing in the same window — tracked as its own defect by
+# the orchestrator, not fixed here.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=56
+EXPECTED_SPECS=58
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

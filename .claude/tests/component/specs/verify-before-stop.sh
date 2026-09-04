@@ -1222,9 +1222,11 @@ printf '%s\n' "$POS_TRACKER_SNAPSHOT" > "$TRACK_CSB/changed-files.txt"
 # the RELEASE path runs vbs's QA-approved cleanup (it rm's changed-files.txt),
 # after which --hash-only would return the empty-set hash.
 POS_CUR_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_CSB" bash "$IR_CSB" --hash-only 2>/dev/null || echo "")
+# claude-workflow-plugin-yrij: anchored at `^`, matching the real hook's own
+# fix (byte-neutral here — TID_POS carries only a genuine record).
 POS_REC_HASH=$(bd_show_with_comments "$TID_POS" "$FIXTURE_CSB" \
     | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
-             | select(test("QA-GATE APPROVED .*change_set_hash="))
+             | select(test("^QA-GATE APPROVED .*change_set_hash="))
              | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | head -1)
 assert_eq "vbs-llh18: recorded change_set_hash == --hash-only of the approved change-set" \
     "$POS_CUR_HASH" "$POS_REC_HASH"

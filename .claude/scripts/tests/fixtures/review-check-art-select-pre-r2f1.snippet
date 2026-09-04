@@ -1,0 +1,370 @@
+# ===========================================================================
+# FROZEN SNIPPET -- the ART-ITERATION-SELECT body (review-check.sh cmd_gate)
+# exactly as it read immediately before claude-workflow-plugin-k6re R2-F1
+# removed the REVIEW-ARTIFACT-QUARANTINE override. Mechanically extracted
+# (never hand-transcribed) via:
+#   awk '/# ART-ITERATION-SELECT BEGIN/{f=1;next}
+#        /# ART-ITERATION-SELECT END/{f=0} f' review-check.sh
+# run against the working tree immediately before the R2-F1 edit landed.
+#
+# THIS FILE IS NOT MAINTAINED AND MUST NOT BE "UPDATED". It is not a second
+# definition of the selector -- review-count.test.sh's Section 11.9 META
+# drives it ONLY as the vulnerable-mutant half of a before/after proof:
+# spliced back between the SAME two sentinel comments in a COPY of the
+# CURRENT review-check.sh, it reintroduces exactly the quarantine mechanism
+# R2-F1 found forgeable, so the test can show a forged
+# REVIEW-ARTIFACT-QUARANTINE record (a bare hash= prefix, not the writer's
+# full `at <ts>: <reason>` grammar) clearing a malformed candidate again --
+# proving the shipped removal is what stops that, not some incidental
+# property of the fixture. Refreshing this file to match whatever ships
+# today would defeat the point: the whole proof is that the OLD, forgeable
+# shape still misbehaves when reintroduced. review-count.test.sh pins this
+# file's sha256 and fails loudly on any edit.
+#
+# NOT A STANDALONE SCRIPT. This is a bash+awk FRAGMENT -- it begins and ends
+# mid-statement and is never sourced or executed directly; it is spliced
+# between the `# ART-ITERATION-SELECT BEGIN` / `END` sentinel comments (still
+# present, unchanged, in the shipped review-check.sh) via sed, replacing
+# everything between them in a throwaway copy. `bash -n` on the resulting
+# mutant file is how the test proves the splice still parses.
+# ===========================================================================
+
+    # ART-QUARANTINE-HASH BEGIN (claude-workflow-plugin-k6re, R12-F1)
+    #
+    # WHY THIS EXISTS. ART-SELECT-RECOVER used to excuse a malformed
+    # REVIEW-ARTIFACT candidate whenever it sat strictly BEFORE an
+    # unambiguous well-formed winner in $firstlines, reasoning that bd is
+    # append-only so an earlier position could never be a corrupted LATER
+    # round in disguise. Independent review round 12 of
+    # claude-workflow-plugin-i8cx (R12-F1) falsified that premise against
+    # the actual bd 1.2.2 source, not by assertion: `bd show
+    # --include-comments` (the only read path this file uses to build
+    # $firstlines) resolves through issueops.GetIssueCommentsInTx, which
+    # reads `ORDER BY created_at ASC, id ASC` -- position in $firstlines
+    # reflects a content-supplied timestamp, never true insertion order.
+    # `bd import`, which this repository own mandatory reconciliation
+    # (beads-ledger.sh) runs unconditionally, preserves a supplied
+    # created_at verbatim (issueops.PersistComments) even onto an issue
+    # that already exists: the isNew branch there gates only the
+    # EventCreated audit record, never comment persistence. A malformed
+    # comment imported after a well-formed winner, carrying an OLDER
+    # created_at, sorts BEFORE that winner and would satisfy the retired
+    # recovery condition. Comment `id` (UUIDv7) is no better a signal:
+    # PersistComments preserves a supplied id verbatim too, and a UUIDv7
+    # embeds its own original-creation timestamp, so it carries the
+    # identical defect under a different name. No column this read path
+    # exposes reflects genuine local append order -- position cannot be
+    # made trustworthy by choosing a different derived key, because every
+    # derived key is either part of what a malformed record has corrupted,
+    # or is itself content/ledger-supplied and therefore exactly as
+    # backfillable as the axes DISAGREEMENT (below) already refuses to
+    # trust silently.
+    #
+    # THE REPLACEMENT. No automatic inference from position or content ever
+    # excuses a malformed candidate again -- the position-based shortcut is
+    # gone, not merely narrowed. The only remaining recovery path is an
+    # explicit, deliberately-invoked operator decision:
+    # `qa-gate.sh quarantine-artifact <tid> <hash> "<reason>"` posts a
+    # REVIEW-ARTIFACT-QUARANTINE v1 record naming the exact sha256 hex
+    # digest of the malformed candidate own raw comment line, after the
+    # operator has independently examined it (via `bd show <tid>
+    # --include-comments`, entirely outside this script) and judged it safe
+    # to disregard. That record is a durable, evidenced, actor-attributed
+    # decision (bd own `author` column on the comment already carries who),
+    # never an inference this script draws on its own -- the same
+    # authorization-must-be-evidenced-not-inferred discipline this release
+    # applies everywhere else. A malformed candidate with no matching
+    # quarantine record still refuses, unconditionally, regardless of
+    # position; refusing to guess is always cheaper than a wrong guess.
+    #
+    # THE HASH IS COMPUTED HERE, IN BASH, NEVER INSIDE THE AWK PROGRAM
+    # BELOW. A malformed candidate raw text is untrusted content (that is
+    # what malformed means); piping it through a shell command built by
+    # string-interpolating that content -- which is what awk `system()` or
+    # `| getline` would require -- is the shell-injection shape backend.md
+    # OWASP guidance forbids for the identical reason it forbids
+    # interpolating user input into SQL. Every candidate line below reaches
+    # the hash tool as STDIN DATA via `printf %s`, never as part of a
+    # command string.
+    #
+    # DEGRADATION. On a host with neither shasum nor sha256sum (matches
+    # sha256_file/sha256_stdin tool-detection elsewhere in this codebase),
+    # no pos->hash mapping is built at all. A malformed candidate then
+    # finds no entry in `poshash` inside the awk program below,
+    # `is_quarantined()` returns false, and the candidate refuses -- the
+    # same safe default as "no quarantine record exists for this hash".
+    # This can only ever fail toward refusal, never toward silently
+    # over-excusing a candidate, so no special-cased error path is needed
+    # for the missing-tool case.
+    local art_pos_hash_file art_quarantined_file art_hash_tool=""
+    art_pos_hash_file="$work/art_pos_hash.tsv"
+    art_quarantined_file="$work/art_quarantined.txt"
+    : > "$art_pos_hash_file"
+    : > "$art_quarantined_file"
+    if command -v shasum >/dev/null 2>&1; then
+        art_hash_tool="shasum"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        art_hash_tool="sha256sum"
+    fi
+    if [ -n "$art_hash_tool" ]; then
+        local art_pos art_line_text art_line_hash
+        while IFS= read -r art_pos; do
+            [ -z "$art_pos" ] && continue
+            art_line_text=$(LC_ALL=C awk -v n="$art_pos" 'NR==n{print; exit}' "$firstlines" 2>/dev/null)
+            if [ "$art_hash_tool" = "shasum" ]; then
+                art_line_hash=$(printf '%s' "$art_line_text" | shasum -a 256 2>/dev/null | awk '{print $1}')
+            else
+                art_line_hash=$(printf '%s' "$art_line_text" | sha256sum 2>/dev/null | awk '{print $1}')
+            fi
+            [ -n "$art_line_hash" ] && printf '%s\t%s\n' "$art_pos" "$art_line_hash" >> "$art_pos_hash_file"
+        done < <(LC_ALL=C awk '/^REVIEW-ARTIFACT v1 / { print NR }' "$firstlines" 2>/dev/null)
+        grep -oE '^REVIEW-ARTIFACT-QUARANTINE v1 hash=[0-9a-fA-F]{64}' "$firstlines" 2>/dev/null \
+            | grep -oE '[0-9a-fA-F]{64}$' | tr 'A-F' 'a-f' >> "$art_quarantined_file" || true
+    fi
+    # ART-QUARANTINE-HASH END
+
+    local art_out art_rc=0
+    art_out=$(LC_ALL=C awk -v posHashFile="$art_pos_hash_file" -v qFile="$art_quarantined_file" '
+        # safe_summary <line> -> "iteration=.. reviewed_hash=.. at=.." using
+        # ONLY strictly-numeric/hex character classes for the two fields the
+        # raw record could otherwise carry free-form text in -- structurally
+        # incapable of reproducing the forbidden token regardless of what a
+        # hand-crafted or corrupted reviewer=/model=/pin= value says, because
+        # those fields are never read here at all. See the comment above this
+        # block for why raw records are never quoted.
+        function safe_summary(line,    it, hs, ts2) {
+            it = "unparseable"
+            if (match(line, /iteration=[0-9]+/)) {
+                it = substr(line, RSTART + 10, RLENGTH - 10)
+            }
+            hs = "absent"
+            if (match(line, /reviewed_hash=[0-9a-fA-F]+/)) {
+                hs = substr(line, RSTART + 14, RLENGTH - 14)
+            }
+            ts2 = "unparseable"
+            if (match(line, / at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z:/)) {
+                ts2 = substr(line, RSTART + 4, RLENGTH - 5)
+            }
+            return "iteration=" it " reviewed_hash=" hs " at=" ts2
+        }
+        # safe_summary_malformed <line> <hash> -> safe_summary(line) plus
+        # the candidate own content hash (claude-workflow-plugin-k6re,
+        # R12-F1): always pure hex, structurally incapable of the forbidden
+        # substring for the identical reason safe_summary() own fields are
+        # (see the comment above safe_summary). This is the value an
+        # operator quotes to `qa-gate.sh quarantine-artifact`.
+        function safe_summary_malformed(line, qhash) {
+            return safe_summary(line) " hash=" (qhash == "" ? "unavailable" : qhash)
+        }
+        # is_quarantined <pos> -> 1 if $firstlines carries a
+        # REVIEW-ARTIFACT-QUARANTINE v1 record naming this exact candidate
+        # own content hash, 0 otherwise. Never true for a position this
+        # file could not hash (a poshash lookup miss) -- fails toward
+        # refusal, never toward silently excusing a candidate.
+        function is_quarantined(p) {
+            if (!(p in poshash)) return 0
+            return (poshash[p] in quarantined) ? 1 : 0
+        }
+        # ART-ITER-CMP BEGIN (claude-workflow-plugin-k6re, R1-F1)
+        #
+        # THE DEFECT. `iters[n] = itraw + 0` (a few lines below) forced an
+        # UNBOUNDED validated digit string (itraw already matched ^[0-9]+$
+        # upstream) into awk own numeric type -- a C double -- before the
+        # max/winner computation ever ran. A double mantissa is 53 bits, so
+        # two DISTINCT decimal integers above 2^53 (9007199254740992) can
+        # silently collapse to the identical double. MEASURED on this host,
+        # via awk itself: assigning "9007199254740992"+0 to one variable and
+        # "9007199254740993"+0 to another and comparing them with == reports
+        # equal; both print back as 9007199254740992. Consequence: a record
+        # at iteration=9007199254740993 (older) and one at
+        # iteration=9007199254740992 (newer timestamp) compare
+        # iteration-EQUAL, so the newer-timestamp record reads as
+        # simultaneously max-iteration AND max-timestamp and is silently
+        # SELECTED as governing -- a wrong-record selection and a regression
+        # of the refuse-on-ambiguity property this whole selector exists to
+        # provide (review_artifact_selection_disagreement never fires when
+        # it should have).
+        #
+        # THE FIX. iteration values are never converted to awk numeric type
+        # anywhere in this selector, at any length. norm_iter() strips
+        # leading zeros (so "007" and "7" compare EQUAL -- they are the same
+        # iteration number under any other reading; this also makes a bare
+        # LENGTH compare a correct magnitude test, which it is not on
+        # un-normalised digit strings: a value padded with many leading
+        # zeros is a LONGER string than an unpadded smaller number while
+        # representing a SMALLER value once those zeros are removed).
+        # iter_cmp() then compares normalised LENGTH first -- exact for
+        # arbitrary-length non-negative integers, no magic constant, no
+        # double involved -- and only falls back to a character-by-character
+        # compare when both operands have the SAME normalised length, which
+        # is exactly the case (two huge, equal-length digit strings) a
+        # numeric coercion would get wrong again. That fallback is forced
+        # into STRING semantics via a non-digit sentinel (Z) appended to
+        # both sides: awk own numeric-string (strnum) auto-coercion would
+        # otherwise silently promote an equal-length all-digit comparison
+        # back to a numeric one -- the identical failure this whole fix
+        # removes, wearing a different hat. Verified empirically, not
+        # assumed (this file own standing discipline): a bare digit-string
+        # equality test inside this awk risks exactly that auto-promotion;
+        # appending Z makes the operand string form not look like a number
+        # at all, so no implementation strnum rule can apply.
+        #
+        # Only ever called with itraw / maxit, both already validated
+        # ^[0-9]+$ upstream (a value that fails that regex is baditer, never
+        # reaches n++/iters[]) -- norm_iter() does not need to guard
+        # non-digit input.
+        function norm_iter(s) {
+            sub(/^0+/, "", s)
+            if (s == "") s = "0"
+            return s
+        }
+        function iter_cmp(a, b,    na, nb) {
+            na = norm_iter(a); nb = norm_iter(b)
+            if (length(na) != length(nb)) return (length(na) < length(nb)) ? -1 : 1
+            if ((na "Z") == (nb "Z")) return 0
+            return ((na "Z") < (nb "Z")) ? -1 : 1
+        }
+        # ART-ITER-CMP END
+        BEGIN {
+            n = 0; badfindings = 0; baditer = 0; badts = 0
+            while ((getline phline < posHashFile) > 0) {
+                split(phline, phparts, "\t")
+                if (phparts[1] != "" && phparts[2] != "") poshash[phparts[1]] = phparts[2]
+            }
+            close(posHashFile)
+            while ((getline qline < qFile) > 0) {
+                if (qline != "") quarantined[qline] = 1
+            }
+            close(qFile)
+        }
+        /^REVIEW-ARTIFACT v1 / {
+            # pos identifies this candidate for the hash lookup above --
+            # nothing downstream treats it as an ordering signal anymore
+            # (claude-workflow-plugin-k6re R12-F1; see the ART-QUARANTINE-
+            # HASH comment above this awk invocation).
+            pos = NR
+            # PRECEDENCE: a well-formed findings=[...] token is checked
+            # FIRST, ahead of iteration/timestamp, and ahead of every other
+            # candidate too (same "any bad one is excluded from ranking"
+            # rule as baditer/badts below). Reuses the EXISTING
+            # review_artifact_malformed diagnosis (vg8) rather than a new,
+            # less specific key: a record whose findings token was pushed to
+            # a second line by an embedded control character is USUALLY the
+            # same corruption that also ate its iteration=/at <ts> tokens
+            # (both live to the right of findings=[...] in the grammar), and
+            # "this record is corrupted" is the more fundamental, more
+            # actionable diagnosis than "one specific field on it would not
+            # parse". The pre-existing MALFORMED-ARTIFACT-GUARD below still
+            # runs too, unconditionally, as an INDEPENDENT second copy of
+            # this exact check on whichever record this selector ends up
+            # returning -- genuine defense in depth (review-count.test.sh
+            # 4b.5/4b.6 test each copies removal separately), not merely a
+            # duplicate to be trimmed: this copy also catches a malformed
+            # LOSING candidate that never becomes dollar-art at all, which
+            # the downstream guard structurally cannot see.
+            # ART-SELECT-FINDINGS-GUARD BEGIN (claude-workflow-plugin-k6re)
+            if ($0 !~ /findings=\[[^]]*\]/) {
+                if (is_quarantined(pos)) { next }
+                badfindings = 1; badfindingsline = $0; badfindingspos = pos
+                next
+            }
+            # ART-SELECT-FINDINGS-GUARD END
+            itraw = ""
+            if (match($0, /iteration=[A-Za-z0-9._-]+/)) {
+                itraw = substr($0, RSTART + 10, RLENGTH - 10)
+            }
+            if (itraw !~ /^[0-9]+$/) {
+                if (is_quarantined(pos)) { next }
+                baditer = 1; baditerline = $0; baditerpos = pos
+                next
+            }
+            ts = ""
+            if (match($0, / at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z:/)) {
+                ts = substr($0, RSTART + 4, RLENGTH - 5)
+            }
+            if (ts == "") {
+                if (is_quarantined(pos)) { next }
+                badts = 1; badtsline = $0; badtspos = pos
+                next
+            }
+            lines[n] = $0
+            # iters[n] stores the VALIDATED (^[0-9]+$), UNMODIFIED digit
+            # string -- never `+ 0`. See ART-ITER-CMP above: converting to
+            # awk numeric type here is exactly the R1-F1 precision-loss
+            # defect. Every comparison against iters[] below goes through
+            # iter_cmp(), never a bare </>/==.
+            iters[n] = itraw
+            tss[n] = ts
+            n++
+        }
+        END {
+            # ART-SELECT-RECOVER (claude-workflow-plugin-k6re, R12-F1): a
+            # malformed candidate is excluded from consideration ENTIRELY,
+            # upstream in the pattern-action block above, the instant its
+            # own content hash matches a REVIEW-ARTIFACT-QUARANTINE v1
+            # record -- never here, and never by virtue of its position.
+            # Reaching this END block with badfindings/baditer/badts still
+            # set therefore means an unquarantined malformed candidate
+            # exists; refuse unconditionally, regardless of where it sits
+            # relative to any well-formed winner. See the ART-QUARANTINE-
+            # HASH comment above this awk invocation for why position can
+            # never again stand in for that decision.
+            if (badfindings) { print "MALFORMED"; print safe_summary_malformed(badfindingsline, (badfindingspos in poshash) ? poshash[badfindingspos] : ""); exit }
+            if (baditer) { print "ITER_UNPARSEABLE"; print safe_summary_malformed(baditerline, (baditerpos in poshash) ? poshash[baditerpos] : ""); exit }
+            if (badts) { print "TS_UNPARSEABLE"; print safe_summary_malformed(badtsline, (badtspos in poshash) ? poshash[badtspos] : ""); exit }
+            if (n == 0) { print "NONE"; exit }
+            # maxit is computed via iter_cmp() (claude-workflow-plugin-k6re,
+            # R1-F1) -- never `iters[i] > maxit`, which would coerce both
+            # sides to awk numeric type and reintroduce the precision-loss
+            # defect this fix removes. "" is a safe not-yet-set sentinel:
+            # every iters[i] is a non-empty ^[0-9]+$ string (minimum "0"),
+            # so it can never collide with the sentinel.
+            maxit = ""
+            for (i = 0; i < n; i++) { if (maxit == "" || iter_cmp(iters[i], maxit) > 0) maxit = iters[i] }
+            maxts = ""
+            for (i = 0; i < n; i++) { if (tss[i] > maxts) maxts = tss[i] }
+            winners = 0
+            winline = ""
+            for (i = 0; i < n; i++) {
+                if (iter_cmp(iters[i], maxit) == 0 && tss[i] == maxts) { winners++; winline = lines[i] }
+            }
+            # OK below prints the WINNING RECORD ITSELF (winline), never a
+            # summary: this becomes $art, and everything downstream
+            # (REVIEWER, THRESHOLD, ART_VERDICT, reviewer_identity in the
+            # final envelope, ...) already reads real reviewer= data from it
+            # -- pre-existing, legitimate behaviour this fix does not touch.
+            # Every OTHER exit here is diagnostic-only ($art stays "" for
+            # all of them, per the case statement below this awk program)
+            # and uses safe_summary().
+            if (winners == 1) { print "OK"; print winline; exit }
+            if (winners >= 2) { print "TIE_UNRESOLVED"; print safe_summary(winline); exit }
+            iterwinline = ""
+            for (i = 0; i < n; i++) { if (iter_cmp(iters[i], maxit) == 0) { iterwinline = lines[i]; break } }
+            tswinline = ""
+            for (i = 0; i < n; i++) { if (tss[i] == maxts) { tswinline = lines[i]; break } }
+            print "DISAGREEMENT"
+            print safe_summary(iterwinline) " ||| " safe_summary(tswinline)
+        }
+    ' "$firstlines" 2>/dev/null)
+    art_rc=$?
+    if [ "$art_rc" -ne 0 ]; then
+        emit_gate 4 "false" "review_artifact_set_unreadable" \
+            "could not read the REVIEW-ARTIFACT record set for $tid (awk exit $art_rc reading the comment firstlines); refusing rather than treating an unestablished set as having no records"
+    fi
+    local art_select_status
+    art_select_status="${art_out%%$'\n'*}"
+    if [ "$art_select_status" = "$art_out" ]; then
+        ART_SELECT_DETAIL=""
+    else
+        ART_SELECT_DETAIL="${art_out#*$'\n'}"
+    fi
+    case "$art_select_status" in
+        OK)                 art="$ART_SELECT_DETAIL" ;;
+        NONE)               art="" ;;
+        MALFORMED)          art=""; ART_SELECT_ERR="review_artifact_malformed" ;;
+        ITER_UNPARSEABLE)   art=""; ART_SELECT_ERR="review_artifact_iteration_unparseable" ;;
+        TS_UNPARSEABLE)     art=""; ART_SELECT_ERR="review_artifact_timestamp_unparseable" ;;
+        TIE_UNRESOLVED)     art=""; ART_SELECT_ERR="review_artifact_selection_tie_unresolved" ;;
+        DISAGREEMENT)       art=""; ART_SELECT_ERR="review_artifact_selection_disagreement" ;;
+        *)                  art=""; ART_SELECT_ERR="review_artifact_selection_internal_error" ;;
+    esac

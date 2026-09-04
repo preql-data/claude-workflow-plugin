@@ -180,6 +180,37 @@
 #      test in that section, exercised via `approve`) are untouched and
 #      still pass unmodified.
 #
+#  12. A2 (claude-workflow-plugin-i8cx, TIER 0 — a live reach-around shipped
+#      in 18c9319 that TEN independent review rounds on this same axis did
+#      not catch). THE SIXTH independent finding against reaching
+#      compute_design_conflict_open correctly (R2-F2; R3-F2a/b; R6-F1
+#      through F4 against the since-removed waiver; R9-F1 against
+#      cmd_design_gate_precheck; this one against cmd_approve's OWN
+#      idempotency arm) — and, unlike the first five, not against a
+#      BRANCH that skipped the check but against an EARLY RETURN several
+#      hundred lines above DESIGN-CONFLICT-REFUSAL: the hash-aware
+#      idempotency no-op (IDEMPOTENCY, gz3/v4.1 U1) returns "approved" the
+#      moment change_set_hash matches a bound record, and a DESIGN-CONFLICT
+#      is a Beads comment that moves no file and no hash — so a conflict
+#      filed AFTER an approval, on a change set nobody touches again, sailed
+#      straight through. Every EXISTING leg in sections 8a-8k files its
+#      conflict BEFORE the task's first-ever approve, so had_approved=0 in
+#      every one of them and none exercises the idempotency arm at all —
+#      the exact coverage gap that let this ship. FIXED by giving the
+#      idempotency arm its OWN copy of the SAME check (same predicate, same
+#      error_key, same exit code — see qa-gate.sh's own
+#      IDEMPOTENT-APPROVE-CONFLICT-RECHECK header for why a second call site
+#      inside cmd_approve and not a restructure), leaving the other six
+#      refusal families that arm also skips UNTOUCHED (out of scope for this
+#      leaf fix; a possible follow-up, not decided here). Section 8l
+#      reproduces the defect and proves the fix (REFUSAL leg); 8m is the
+#      essential anti-overreach companion — a genuine repeat approve with NO
+#      new conflict must remain the documented no-op, proven non-vacuously
+#      by an unchanged comment_count (the fall-through re-verify-and-rewrite
+#      path would have appended a fresh record even if it too concluded
+#      approved); 8n is the METatest proving the new sentinel region, not
+#      something incidental, is what refuses.
+#
 # Exit codes: 0 all assertions passed | 1 one or more failed | 2 harness error.
 
 set -u
@@ -1569,6 +1600,123 @@ MUTANT31_OUT=$(bash "$FIXTURE/.claude/scripts/qa-gate-noprecheckconflict.sh" des
 assert_eq "8k.3 META MISBEHAVIOUR: the STRIPPED copy reports the SAME task ready — the exact R9-F1 defect shape" \
     "0|ready" "$MUTANT31_RC|$(json_field '.status' "$MUTANT31_OUT")"
 rm -f "$FIXTURE/.claude/scripts/qa-gate-noprecheckconflict.sh"
+
+# ===========================================================================
+printf '\n=== Section 8l: A2 (claude-workflow-plugin-i8cx) — the idempotency-arm reach-around ===\n'
+# ===========================================================================
+# EVERY leg in 8a-8k files its DESIGN-CONFLICT before the task's first-ever
+# approve, so had_approved=0 every time and the code under test is always
+# the MAIN block (or design-gate-precheck's own copy) — never cmd_approve's
+# hash-aware IDEMPOTENCY no-op, which returns from a completely different,
+# much earlier point in the function. That gap is exactly how A2 shipped and
+# survived ten independent review rounds: approve -> file a conflict on an
+# ALREADY-approved, unchanged change set -> approve again reported
+# status=approved, exit 0, because the idempotency arm never asked
+# compute_design_conflict_open at all.
+
+TID32=$(bd create "A2 idempotency-arm reach-around subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID32"
+ART32="$FIXTURE/docs/specs/$TID32.md"
+write_artifact "$ART32" "$TID32"
+printf '%s\n' "$ART32" > "$TRACKING"
+bash "$QG" enter "$TID32" >/dev/null 2>&1
+bash "$QG" design-record "$TID32" >/dev/null 2>&1
+HASH32=$(bash "$WM" hash-file "$ART32")
+printf '%s' "$VALID_VERDICT" | bash "$QG" design-review-record "$TID32" --design-hash "$HASH32" >/dev/null 2>&1
+seed_approvable "$TID32"
+
+OUT=$(bash "$QG" approve "$TID32" "first approval, no conflict yet" 2>&1)
+assert_eq "8l.1 precondition: the FIRST approve succeeds (fresh, non-idempotent path)" "approved" "$(json_field '.status' "$OUT")"
+assert_contains "8l.1b precondition: qa-approved is now set" "qa-approved" "$(labels_of "$TID32")"
+PRE32_APPROVALS=$(comments_of "$TID32" | grep -cE '^QA-GATE APPROVED ' 2>/dev/null | tr -d ' \n')
+assert_eq "8l.1c precondition: exactly one bound approval record exists" "1" "$PRE32_APPROVALS"
+
+# File the conflict AFTER the approval, against the SAME, still-unamended
+# artifact — no file touched, so change_set_hash does not move and a repeat
+# approve would otherwise take the idempotency arm.
+OUT=$(bash "$QG" design-conflict "$TID32" --unit U1 "filed AFTER approval, on an unchanged change set" 2>&1)
+assert_eq "8l.2 precondition: the conflict is recorded" "recorded" "$(json_field '.status' "$OUT")"
+
+# --- THE REFUSAL LEG: the reproduction from A2's own repro steps ----------
+PRE32_COUNT=$(comment_count "$TID32")
+OUT=$(bash "$QG" approve "$TID32" "second approve: should hit the idempotency arm, must still refuse" 2>&1); EXIT_RC=$?
+assert_eq "8l.3 A2 FIX: a second approve on an already-approved, unchanged change set REFUSES once a conflict exists: exit 2" \
+    "2" "$EXIT_RC"
+assert_eq "8l.3b ...error_key=design_conflict_open (identical to the main block's own key)" \
+    "design_conflict_open" "$(json_field '.error_key' "$OUT")"
+assert_contains "8l.3c ...names the affected unit in the observations" "U1" "$(json_field '.observations' "$OUT")"
+POST32_COUNT=$(comment_count "$TID32")
+assert_eq "8l.3d the task is left UNTOUCHED (the refusal writes nothing)" "$PRE32_COUNT" "$POST32_COUNT"
+POST32_APPROVALS=$(comments_of "$TID32" | grep -cE '^QA-GATE APPROVED ' 2>/dev/null | tr -d ' \n')
+assert_eq "8l.3e ...and no SECOND approval record was written" "$PRE32_APPROVALS" "$POST32_APPROVALS"
+
+# ===========================================================================
+printf '\n=== Section 8m: A2 IDEMPOTENCY-PRESERVED — anti-overreach control ===\n'
+# ===========================================================================
+# The essential companion to 8l.3: a genuine repeat approve with NO new
+# conflict must remain the documented no-op. Without this leg, 8l.3 alone
+# could be satisfied by a fix that re-verifies EVERYTHING on the idempotency
+# arm (option (c) taken literally) — which would ALSO refuse-or-rewrite this
+# control case, trading the A2 defect for a broken idempotency contract.
+
+TID33=$(bd create "A2 idempotency-preserved control subject" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+seed_grilling "$TID33"
+ART33="$FIXTURE/docs/specs/$TID33.md"
+write_artifact "$ART33" "$TID33"
+printf '%s\n' "$ART33" > "$TRACKING"
+bash "$QG" enter "$TID33" >/dev/null 2>&1
+bash "$QG" design-record "$TID33" >/dev/null 2>&1
+HASH33=$(bash "$WM" hash-file "$ART33")
+printf '%s' "$VALID_VERDICT" | bash "$QG" design-review-record "$TID33" --design-hash "$HASH33" >/dev/null 2>&1
+seed_approvable "$TID33"
+
+OUT=$(bash "$QG" approve "$TID33" "first approval, no conflict ever" 2>&1)
+assert_eq "8m.1 precondition: the FIRST approve succeeds" "approved" "$(json_field '.status' "$OUT")"
+
+PRE33_COUNT=$(comment_count "$TID33")
+PRE33_APPROVALS=$(comments_of "$TID33" | grep -cE '^QA-GATE APPROVED ' 2>/dev/null | tr -d ' \n')
+OUT=$(bash "$QG" approve "$TID33" "second approve: no new conflict, must still no-op" 2>&1); EXIT_RC=$?
+assert_eq "8m.2 IDEMPOTENCY PRESERVED: a genuine repeat approve, no conflict, is still exit 0" "0" "$EXIT_RC"
+assert_eq "8m.2b ...status=approved" "approved" "$(json_field '.status' "$OUT")"
+assert_contains "8m.2c ...and still SAYS it is an idempotent no-op (the source's own discriminator string — see the IDEMPOTENCY comment on why the OPPOSITE outcome deliberately never uses this phrase)" \
+    "idempotent no-op" "$(json_field '.observations' "$OUT")"
+POST33_COUNT=$(comment_count "$TID33")
+assert_eq "8m.3 ANTI-VACUITY: comment_count is BYTE-IDENTICAL before/after — proves the idempotency arm's TRUE no-op ran (a fall-through re-verify-and-rewrite would have appended a fresh QA-GATE APPROVED comment even if it ALSO happened to conclude approved)" \
+    "$PRE33_COUNT" "$POST33_COUNT"
+POST33_APPROVALS=$(comments_of "$TID33" | grep -cE '^QA-GATE APPROVED ' 2>/dev/null | tr -d ' \n')
+assert_eq "8m.3b ...and specifically: still exactly one QA-GATE APPROVED record (not a second one)" \
+    "$PRE33_APPROVALS" "$POST33_APPROVALS"
+
+# ===========================================================================
+printf '\n=== Section 8n: METatest — IDEMPOTENT-APPROVE-CONFLICT-RECHECK is load-bearing ===\n'
+# ===========================================================================
+# Same convention as 8d/8k: strip the new sentinel region from a copy and
+# watch the SAME task (TID32, already carrying a bound approval AND an open,
+# un-amended conflict after section 8l's own leg above) approve anyway.
+# Reusing TID32 rather than a fresh subject is deliberate: its state after
+# 8l.3 IS the exact precondition this METatest needs (already approved once,
+# conflict filed afterward, second approve currently refusing), so a third
+# repeat of the six-command setup dance would test nothing a fresh TID's
+# CONTROL leg here does not already re-confirm.
+
+awk '/# IDEMPOTENT-APPROVE-CONFLICT-RECHECK BEGIN/{s=1} !s{print} /# IDEMPOTENT-APPROVE-CONFLICT-RECHECK END/{s=0}' \
+    "$QG" > "$FIXTURE/.claude/scripts/qa-gate-noidemconflict.sh"
+STRIP_DELTA9=$(( $(wc -l < "$QG") - $(wc -l < "$FIXTURE/.claude/scripts/qa-gate-noidemconflict.sh") ))
+assert_eq "8n.1 META: the region strip actually removed lines" "yes" "$([ "$STRIP_DELTA9" -gt 10 ] && echo yes || echo no)"
+chmod +x "$FIXTURE/.claude/scripts/qa-gate-noidemconflict.sh"
+if bash -n "$FIXTURE/.claude/scripts/qa-gate-noidemconflict.sh" 2>/dev/null; then
+    assert_eq "8n.1b META: the stripped copy is still valid bash" "0" "0"
+else
+    assert_eq "8n.1b META: the stripped copy is still valid bash" "0" "1"
+fi
+
+CTRL32_OUT=$(bash "$QG" approve "$TID32" "control: shipped script, second approve, open conflict present" 2>&1); CTRL32_RC=$?
+assert_eq "8n.2 META CONTROL: the SHIPPED script still refuses TID32's second approve" \
+    "2|design_conflict_open" "$CTRL32_RC|$(json_field '.error_key' "$CTRL32_OUT")"
+MUTANT32_OUT=$(bash "$FIXTURE/.claude/scripts/qa-gate-noidemconflict.sh" approve "$TID32" "mutant: same task, idempotency-arm recheck stripped" 2>&1); MUTANT32_RC=$?
+assert_eq "8n.3 META MISBEHAVIOUR: the STRIPPED copy reports the SAME already-approved task 'approved' again — the exact A2 defect shape reproduced" \
+    "0|approved" "$MUTANT32_RC|$(json_field '.status' "$MUTANT32_OUT")"
+rm -f "$FIXTURE/.claude/scripts/qa-gate-noidemconflict.sh"
 
 # ===========================================================================
 # Summary line convention (matches design-artifact.test.sh and every other

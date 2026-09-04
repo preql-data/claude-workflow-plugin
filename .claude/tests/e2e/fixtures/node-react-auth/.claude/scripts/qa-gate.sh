@@ -126,6 +126,19 @@
 #                                           Phase V2: append an ARBITRATION <fid> comment
 #                                           (id must be in the latest REVIEW-ARTIFACT).
 #
+#   quarantine-artifact -- REMOVED (claude-workflow-plugin-k6re, R2-F1). Used
+#   to append a REVIEW-ARTIFACT-QUARANTINE v1 comment excusing a malformed
+#   REVIEW-ARTIFACT candidate (R12-F1). Found forgeable on its own first
+#   independent review (R2-F1: the comment stream carries no verifiable
+#   author, the reader matched a bare prefix rather than the writer's full
+#   grammar, and bd import/hand-typed comments reach the reader without ever
+#   calling this writer's validation) and removed rather than re-guarded. See
+#   the tombstone comment where cmd_quarantine_artifact used to be defined,
+#   below, for the full finding. A malformed REVIEW-ARTIFACT candidate now
+#   refuses review-check.sh gate / qa-gate.sh approve unconditionally and
+#   permanently; the remedy is an operator repairing the record directly in
+#   the store.
+#
 # Output: every subcommand prints structured JSON to stdout. Errors go to stderr.
 # JSON shape (per principle #9 - free-form `observations` for LLM-side context):
 #   {"ok": bool, "subcommand": "...", "task_id": "...", "status": "...", "observations": "..."}
@@ -1854,6 +1867,19 @@ design_comments_json() {
 # Never fails the caller: no bd, no task, unparseable JSON -> empty output,
 # rc 0. An empty answer means "no record found", which makes approve PROCEED
 # (write a fresh binding) rather than claim idempotency it cannot prove.
+#
+# APPROVAL-SELECTOR-ANCHOR (claude-workflow-plugin-yrij): `select(test(...))`
+# below is ANCHORED at `^` — see verify-before-stop.sh's
+# task_has_matching_approval_record for the full rationale (this expression
+# is byte-identical to that one by the parity contract above, so the fix and
+# its evidence live there once rather than being re-derived at every call
+# site). One-line summary: unanchored, a comment whose first line is ordinary
+# prose and whose LATER line fabricates a `QA-GATE APPROVED ...
+# change_set_hash=<h> ...` satisfied this exact selector with no
+# `qa-gate.sh approve` ever having run — which for THIS function meant a
+# forged hash could satisfy task_has_approval_record_for and make cmd_approve
+# treat a change set as already-covered (idempotent no-op, nothing
+# re-verified) when no genuine approval had ever bound it.
 recorded_approval_hashes() {
     local tid="$1"
     [ -n "$tid" ] || return 0
@@ -1862,7 +1888,7 @@ recorded_approval_hashes() {
         | jq -r '
             (if type == "array" then .[0].comments else .comments end) // []
             | .[].text
-            | select(test("QA-GATE APPROVED .*change_set_hash="))
+            | select(test("^QA-GATE APPROVED .*change_set_hash="))
             | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h
         ' 2>/dev/null || true
     return 0
@@ -3069,6 +3095,13 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               The id must appear in the latest REVIEW-ARTIFACT comment; empty
               rationale exits 1. Appends:
                 ARBITRATION <id> decision=<d> at <ts>: <rationale>
+  quarantine-artifact -- REMOVED (claude-workflow-plugin-k6re, R2-F1: found
+              forgeable on its own first independent review -- no verifiable
+              author, a bare-prefix match, and a write path bd import /
+              hand-typed comments could reach without validation). A
+              malformed REVIEW-ARTIFACT candidate now refuses
+              unconditionally and permanently; see the tombstone comment
+              where cmd_quarantine_artifact used to be defined.
 USAGE
 }
 
@@ -3600,6 +3633,98 @@ cmd_status() {
     emit_json 1 "status" "$tid" "not-entered" "no qa lifecycle labels present; rubric=$rubric_state ($rubric_obs)"
 }
 
+# APPROVE-SUCCESS-GATE BEGIN (claude-workflow-plugin-k6re R6-F2)
+#
+# THE SECOND REACH-AROUND OF THE SAME ARM, same shape as the first. A2
+# (claude-workflow-plugin-i8cx) found that the hash-aware idempotency no-op
+# inside cmd_approve (see IDEMPOTENCY, and IDEMPOTENT-APPROVE-CONFLICT-
+# RECHECK nested inside it, below) could report status=approved without
+# ever consulting compute_design_conflict_open — fixed by hand-adding a
+# second call site of that predicate INSIDE the arm. Independent review
+# (claude-workflow-plugin-k6re, round 6, finding R6-F2) found the SAME arm
+# skips a second, unrelated precondition the identical way: --expect-hash.
+# The documented contract (EXPECTED-HASH-REFUSAL below, and this
+# subcommand's own usage text) states it unconditionally — "REFUSES ...
+# when that is not the set this approval would bind" — but the check that
+# enforces it sat only on the path AFTER the idempotent arm's OWN
+# `return 0`, so a caller passing a stale or wrong --expect-hash to an
+# already-bound task got a success envelope naming a hash it explicitly
+# said it did not expect, never a refusal.
+#
+# WHY A GATE FUNCTION, NOT A THIRD HAND-COPIED GUARD. Two independent
+# precondition gaps found in the SAME ~100-line arm, by two SEPARATE
+# independent review passes, is the definition of a recurring family: the
+# arm's `return 0` is a success-emitting exit, and every precondition that
+# must hold before ANY exit of cmd_approve reports success has to be
+# manually remembered and re-added to it, with nothing in the language
+# stopping a third one from being forgotten the same way. This function is
+# the single funnel: a raw `status=approved` envelope for this subcommand
+# is never printed directly anywhere else in cmd_approve — both
+# of its success-reporting exits (the idempotent no-op, and the
+# fresh-approval path's own success line at the end of the function) call
+# THIS function instead, so a precondition placed here applies identically
+# at both, by construction, rather than by two authors each remembering to
+# duplicate it by hand. approve-success-gate.test.sh's structural leg fails
+# loudly if a THIRD `status=approved` emission is ever added to cmd_approve
+# outside this function (it greps the literal count, which this fix makes
+# exactly 1 for the raw emit and exactly 2 for calls into this gate), and
+# its non-vacuity leg proves that assertion would actually catch one.
+# approve-idempotency.sh's own Section J/JM proves the BEHAVIOUR end to
+# end against a real approve invocation, with an anchor-revert META that
+# strips the check below and watches the R6-F2 forgery reappear.
+#
+# WHAT THIS DELIBERATELY DOES NOT COVER. compute_design_conflict_open is
+# NOT folded in here. Its two existing call sites (A2's copy inside the
+# idempotent arm, and the main path's own DESIGN-CONFLICT-REFUSAL block)
+# are untouched — both are proven, independently reviewed across ten
+# rounds, and already documented in detail as to why they are the right
+# shape; moving them into a new function on a task scoped to a DIFFERENT
+# finding would risk a working mechanism for no evidenced gain. THE
+# RESIDUAL, stated rather than assumed: a FIFTH reach-around of this same
+# arm looks like a THIRD precondition (a rubric-hash recheck, a
+# review-separation recheck, or a later consolidation of design-conflict
+# into this same gate) added as a fourth hand-copied inline guard instead
+# of being placed here — nothing in bash stops that by construction, only
+# the structural test above (which catches a stray new success emission)
+# and this comment (which tells that future author where the existing ones
+# live). Whether compute_design_conflict_open should ALSO move here is an
+# open question this fix leaves for whoever next touches this arm, the
+# same way A2 itself left --expect-hash's gap open rather than auditing
+# every one of the arm's other skipped refusal families (see
+# IDEMPOTENT-APPROVE-CONFLICT-RECHECK's own "WHY THIS IS THE ONLY AXIS
+# RE-VERIFIED HERE" paragraph, below).
+#
+# EXPLICIT PARAMETERS, NOT AMBIENT SCOPE. bash resolves a caller's `local`
+# through the call stack — verified directly: a function called from
+# inside another function DOES see that function's locals — so this could
+# have read cmd_approve's own $expect_hash_arg without it ever being
+# passed. It takes it as a parameter instead, matching the convention every
+# other cmd_approve helper already uses (compute_design_conflict_open
+# "$tid", task_has_approval_record_for "$tid" "$hash"): a function whose
+# behaviour depends on which local variable NAME its caller happens to have
+# chosen is harder to audit in isolation than one whose inputs are all in
+# its own signature.
+#
+# error_key and remediation text are byte-similar to the main path's own
+# EXPECTED-HASH-REFUSAL below on purpose (same reasoning A2 gives for
+# design_conflict_open: a caller or test keyed on error_key must not care
+# which of cmd_approve's two success exits caught the mismatch).
+emit_approve_success() {
+    local tid="$1" bound_hash="$2" expect_hash="$3" observations="$4"
+
+    # APPROVE-SUCCESS-GATE-EXPECT-HASH BEGIN (claude-workflow-plugin-k6re R6-F2)
+    if [ -n "$expect_hash" ] && [ "$expect_hash" != "$bound_hash" ]; then
+        emit_error_json "approve" "$tid" "expected_hash_mismatch" \
+            "approve refused: the caller expected to approve change set $expect_hash but this approval would bind $bound_hash. The two reads straddle something that moved the change set — most often a path that arrived after the caller classified it (the F1 doc-only fast path passes the hash of the set it classified, so a source file landing mid-Stop lands here rather than being approved under a doc-only verdict). NOTE: this proves the bound set is the CLASSIFIED set; it does NOT prove that set is complete (claude-workflow-plugin-fkm.1.20). Re-derive the current set and decide: bash .claude/scripts/impact-report.sh --hash-only — then either re-review at the new hash and approve without --expect-hash, or pass the hash you actually reviewed." \
+            "qa-gate.sh approve <task-id> [--expect-hash <hash>] [--accept-reconstructed '<reason>'] [--no-impact-report '<reason>'] [--no-review '<reason>'] <summary>"
+        exit 2
+    fi
+    # APPROVE-SUCCESS-GATE-EXPECT-HASH END (claude-workflow-plugin-k6re R6-F2)
+
+    emit_json 1 "approve" "$tid" "approved" "$observations"
+}
+# APPROVE-SUCCESS-GATE END (claude-workflow-plugin-k6re R6-F2)
+
 cmd_approve() {
     local tid="${1:-}"
     shift || true
@@ -3840,7 +3965,122 @@ cmd_approve() {
         set_idempotency_reference "$tid"
         idem_ref="$IDEM_REF_HASH"
         if [ -n "$idem_ref" ] && task_has_approval_record_for "$tid" "$idem_ref"; then
-            emit_json 1 "approve" "$tid" "approved" "qa-approved already set and an approval record already binds this change set (change_set_hash=$idem_ref via $IDEM_REF_SOURCE); idempotent no-op — nothing rewritten. If a Stop is still blocking, the change set has moved since that record: re-run impact-report.sh (step 2 of the block's remediation) and approve again"
+# IDEMPOTENT-APPROVE-CONFLICT-RECHECK BEGIN (A2 / claude-workflow-plugin-i8cx,
+# TIER 0 — a live reach-around of the design-conflict gate that TEN
+# independent review rounds on this same axis did not catch, shipped in
+# 18c9319)
+            #
+            # WHAT THIS ARM WAS ASSERTING, UNVERIFIED. "qa-approved is set AND
+            # a record already binds change_set_hash=$idem_ref" was read as
+            # "nothing has changed since that approval, so re-approving is a
+            # safe no-op" — true for every refusal family whose truth is a
+            # function of the FILES (tracker-reconcile, change-set-
+            # reconstructed, impact-report, expect-hash all read the SAME
+            # hash this idempotency check already matched), false for the one
+            # family that is not: an open DESIGN-CONFLICT is a Beads comment
+            # filed against a design UNIT, never against a change-set hash —
+            # `design-conflict` takes no file argument and moves no tracked
+            # path. Filing one after an approval, on a task nobody touches
+            # again, produces exactly the state this arm used to read as
+            # "safe": had_approved=1, idem_ref unchanged, a bound record for
+            # it. Reproduced against the shipped script: approve -> file a
+            # design-conflict --unit U1 -> a second approve reported
+            # status=approved, exit 0 — the same open conflict
+            # `design-gate-precheck` (correctly) exits 4 on.
+            #
+            # WHY THIS IS THE ONLY AXIS RE-VERIFIED HERE, not every refusal
+            # this arm skips (tracker_unreconcilable, change_set_reconstructed,
+            # REVIEW-SEPARATION, COMPLETION-CONTRACT-REFUSAL,
+            # DESIGN-SATISFIED-REFUSAL — see this function's own
+            # EXPECTED-HASH-REFUSAL comment above for the full seven-family
+            # enumeration; --expect-hash used to belong on this list too,
+            # until claude-workflow-plugin-k6re R6-F2 found the identical
+            # reach-around shape here and closed it via emit_approve_success
+            # — APPROVE-SUCCESS-GATE, above cmd_approve — rather than a
+            # fourth hand-copied guard). Turning this arm into a full
+            # re-verification would delete the no-op this block exists to
+            # provide — pinned by approve-idempotency.sh and cited by this
+            # function's own IDEMPOTENCY comment above — for a cost none of
+            # the other five families is evidenced to justify here.
+            # DESIGN-CONFLICT is the one family the operator ruling on
+            # i8cx rounds 6-8 already made
+            # UNCONDITIONAL and UNWAIVABLE (see DESIGN-CONFLICT-REFUSAL below:
+            # "no flag, marker, label, or free-text phrase clears it") — an
+            # explicit, reviewed decision that this axis tolerates no
+            # exemption anywhere in this function, which the idempotency arm
+            # was an unaudited exemption from. Whether REVIEW-SEPARATION or
+            # DESIGN-SATISFIED have the same reach-around shape is a real,
+            # open question, deliberately NOT decided here: bundling an
+            # unaudited guess about a second axis into this leaf fix is the
+            # same locally-reasonable-step drift the i8cx operator ruling
+            # already named once (four such steps produced the waiver
+            # mechanism removed wholesale in item 10 of this file's own
+            # design-review-record.test.sh header). One evidenced
+            # reach-around, one fix; see this task's own report for the
+            # enumeration of the others.
+            #
+            # SAME PREDICATE, A THIRD CALL SITE — not a reimplementation.
+            # compute_design_conflict_open is already called from two places
+            # (cmd_approve's own DESIGN-CONFLICT-REFUSAL below, and
+            # cmd_design_gate_precheck), each owning its own refusal text and
+            # exit code because the remediation and caller differ — the same
+            # division this file already draws between review-check.sh `gate`
+            # (one predicate) and its several callers. This is a third call
+            # site of the same kind. error_key and exit code are IDENTICAL to
+            # the block below on purpose: a caller or test keyed on
+            # design_conflict_open must not care which of the two call sites
+            # inside cmd_approve caught it.
+            #
+            # NO GLOBAL-STATE HAZARD (the class cmd_design_gate_precheck had
+            # to guard against explicitly, R9-F1): compute_design_conflict_open
+            # calls compute_design_satisfied internally and overwrites its
+            # globals, but every path out of THIS check is function-terminal
+            # (return 0 just below, or exit 2 in the two refusals) — there is
+            # no later code in cmd_approve that runs after this check and
+            # still expects the pre-call globals, unlike design-gate-precheck,
+            # which had to capture into locals because it keeps running past
+            # its own conflict check.
+            #
+            # WHY NOT HOIST THE MAIN BLOCK UP HERE INSTEAD (the tempting
+            # alternative, and design-gate-precheck's own R9-F1 fix chose
+            # exactly that shape for a simpler two-arm branch): this
+            # function's refusals are ordered by what each can prove and how
+            # expensive its remediation is, cheapest/most-fundamental first
+            # (see the EXPECTED-HASH-REFUSAL comment above) — DESIGN-CONFLICT-
+            # REFUSAL is placed LAST in that ladder deliberately. Moving it to
+            # run before tracker-reconcile/impact-report/review/completion
+            # would reorder it for the ORDINARY (non-idempotent) approval path
+            # too, contradicting that documented rationale, for a diff far
+            # larger than this leaf fix needs. A second, narrowly-scoped call
+            # site costs one extra read on the no-op path and touches nothing
+            # else.
+            local idem_design_conflict_rc=0
+            compute_design_conflict_open "$tid" || idem_design_conflict_rc=$?
+            if [ "$idem_design_conflict_rc" -ne 0 ]; then
+                emit_error_json "approve" "$tid" "design_conflict_source_unreadable" \
+                    "approve refused: qa-approved is already set and change_set_hash=$idem_ref matches a prior approval record, which would ordinarily make this call an idempotent no-op — but the DESIGN-CONFLICT history for $tid could not be read right now (bd unreachable, the comment stream not retrievable, or a record read back malformed), so whether a conflict has been filed SINCE that approval is unknown. Refusing to treat unreadable as no-conflict rather than assuming the earlier approval still covers it. This cannot be bypassed by --no-design, which covers only the satisfied-verdict requirement, never an unreadable conflict source. Re-run once bd is reachable" \
+                    "qa-gate.sh approve <task-id> <summary>"
+                exit 2
+            fi
+            if [ "$DESIGN_CONFLICT_OPEN" = "true" ]; then
+                emit_error_json "approve" "$tid" "design_conflict_open" \
+                    "approve refused: qa-approved is already set and change_set_hash=$idem_ref matches a prior approval record, which would ordinarily make this call an idempotent no-op — but $DESIGN_CONFLICT_OPEN_OBS Affected unit(s): $DESIGN_CONFLICT_OPEN_UNITS. The files staying unchanged proves the REVIEWED CONTENT is the same; it does not prove the DESIGN is still undisputed — a design conflict is filed against a unit, never against a change-set hash, so it can post-date an approval that no file-level check will ever see move. The single legal clearing path is a superseding, independently-reviewed, SATISFIED DESIGN-REVIEW whose entry for the affected unit(s) changed — amend docs/specs/$tid.md and record a fresh verdict: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>. This cannot be waived by --no-design or any other flag" \
+                    "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
+                exit 2
+            fi
+# IDEMPOTENT-APPROVE-CONFLICT-RECHECK END (A2 / claude-workflow-plugin-i8cx)
+            # claude-workflow-plugin-k6re R6-F2: this arm's success emission
+            # now runs through emit_approve_success (APPROVE-SUCCESS-GATE,
+            # above cmd_approve), which refuses when --expect-hash was given
+            # and does not match $idem_ref — the hash this no-op is about to
+            # report as bound. See that function's own header for why this
+            # is a shared gate rather than a fourth hand-copied guard.
+            local idem_expect_hash_obs=""
+            if [ -n "$expect_hash_arg" ]; then
+                idem_expect_hash_obs="; expected-hash verified (the caller classified change_set_hash=$expect_hash_arg and that is what this idempotent no-op binds; NOT a completeness claim — see fkm.1.20)"
+            fi
+            emit_approve_success "$tid" "$idem_ref" "$expect_hash_arg" \
+                "qa-approved already set and an approval record already binds this change set (change_set_hash=$idem_ref via $IDEM_REF_SOURCE); idempotent no-op — nothing rewritten.${idem_expect_hash_obs} If a Stop is still blocking, the change set has moved since that record: re-run impact-report.sh (step 2 of the block's remediation) and approve again"
             return 0
         fi
         # Fall through, loudly. The label is stale relative to the change set
@@ -4152,14 +4392,23 @@ cmd_approve() {
     #      thing first. Its own header explains why it is a NEW block rather
     #      than a converted DESIGN-BINDING-TOKEN arm.
     #
-    # ONE BOUNDARY, NAMED RATHER THAN LEFT LATENT. The hash-aware idempotency
-    # no-op higher up in this function returns BEFORE this refusal. On that path
-    # nothing new is bound, so there is nothing for this check to protect — but a
-    # caller passing --expect-hash to an already-approved task whose existing
-    # record binds a different set than it expected gets a success envelope (which
-    # names the hash it matched) rather than a refusal. F1 cannot reach it: its
-    # `case` arm excludes the `approved` status, so this is a manual-caller
-    # boundary only.
+    # ONE BOUNDARY, PREVIOUSLY LEFT OPEN AS A NAMED RESIDUAL, NOW CLOSED
+    # (claude-workflow-plugin-k6re R6-F2). This paragraph used to argue that
+    # the hash-aware idempotency no-op higher up in this function returns
+    # BEFORE this refusal ever runs, and that this was safe because "nothing
+    # new is bound" on that path. Independent review found that reasoning
+    # wrong: a caller passing --expect-hash to an already-approved task
+    # whose bound record covers a DIFFERENT set than it expected got an
+    # unqualified success envelope, never the refusal --expect-hash exists
+    # to provide — "nothing new is bound" is a fact about the FILES, not
+    # about whether the CALLER's stated expectation was honoured. See
+    # emit_approve_success (APPROVE-SUCCESS-GATE, defined just above
+    # cmd_approve) for the fix: every one of this function's
+    # success-reporting exits, including the idempotent no-op, now calls
+    # the SAME check this block performs before it is allowed to report
+    # success. F1 still cannot reach it (its `case` arm excludes the
+    # `approved` status), so this remains a manual-caller-only concern —
+    # but it is no longer an unchecked one.
     #
     # WHAT THIS DOES NOT ESTABLISH. It proves the bound set is the CLASSIFIED set.
     # It does NOT prove that set is COMPLETE — both sides come from the same
@@ -4359,8 +4608,30 @@ cmd_approve() {
                     unresolved_findings)
                         review_remedy="Open finding(s) at/above the artifact's risk_threshold: ${review_open:-<none reported>}. Each must be closed with evidence — bash .claude/scripts/qa-gate.sh resolve-finding $tid <finding-id> --fix '<ref>' --test '<ref>' '<summary>' — or explicitly overruled: bash .claude/scripts/qa-gate.sh arbitrate $tid <finding-id> overrule '<rationale>'"
                         ;;
-                    review_artifact_malformed)
-                        review_remedy="The latest review record is corrupted (no well-formed findings=[...] token), so it cannot be read as a clean review. Re-record a valid artifact via: bash .claude/scripts/qa-gate.sh review-record $tid --file <artifact.json>"
+                    review_artifact_malformed|review_artifact_iteration_unparseable|review_artifact_timestamp_unparseable)
+                        # claude-workflow-plugin-k6re: relay review-check.sh's
+                        # OWN observations verbatim rather than a second,
+                        # independently-worded remedy that can drift from it
+                        # -- which is exactly what happened to the ORIGINAL
+                        # text here ("re-record a valid artifact": posting a
+                        # NEW record does nothing for an EXISTING malformed
+                        # one still blocking the selector). R12-F1 replaced
+                        # that with a relay naming an explicit
+                        # quarantine-artifact recovery command; R2-F1 found
+                        # that recovery command's own record forgeable (no
+                        # verifiable author, a bare-prefix match) and removed
+                        # it entirely rather than re-guarding it -- so
+                        # review-check.sh's own observations now says there
+                        # is NO recovery path at all, and this relay carries
+                        # that message unchanged. Still a single source of
+                        # truth, never duplicated here: nothing in this
+                        # case-arm should independently name a remedy that
+                        # could tempt a future maintainer into re-adding one.
+                        # Falls back to the generic line only if
+                        # review-check.sh's own envelope somehow carried no
+                        # observations at all.
+                        review_remedy=$(printf '%s' "$review_out" | jq -r '.observations // empty' 2>/dev/null)
+                        [ -z "$review_remedy" ] && review_remedy="review-check.sh gate $tid reported: $review_key. Re-run it directly for the full envelope."
                         ;;
                     *)
                         review_remedy="review-check.sh gate $tid reported: $review_key. Re-run it directly for the full envelope."
@@ -4610,7 +4881,32 @@ cmd_approve() {
     #
     # RUNS UNCONDITIONALLY, AFTER THE if/else ABOVE, REGARDLESS OF
     # bypass_design — this is the load-bearing shape of the fix, not
-    # cosmetic. Formerly (through independent review round 5) this block was
+    # cosmetic.
+    #
+    # "UNCONDITIONALLY" ABOVE DESCRIBES THIS BLOCK'S OWN BEHAVIOUR RELATIVE
+    # TO bypass_design — it does not by itself mean "on every call to
+    # cmd_approve", and that gap was real, not hypothetical. A2 (claude-
+    # workflow-plugin-i8cx, TIER 0, found after TEN independent review rounds
+    # on this same axis) is the fix: the hash-aware idempotency no-op far
+    # above in this function (see IDEMPOTENCY, and
+    # IDEMPOTENT-APPROVE-CONFLICT-RECHECK nested inside it) RETURNS before
+    # this block is ever reached, on every call where qa-approved is already
+    # set and the change set has not moved. Filing a DESIGN-CONFLICT touches
+    # no file and moves no change-set hash, so that early return could report
+    # "approved" over an open, evidenced conflict with THIS block never once
+    # evaluated. Closed by giving the idempotency arm its OWN copy of this
+    # exact check (same predicate, same error_key, same exit code — see that
+    # block's own header for why a second call site and not a restructure)
+    # rather than by moving this one — moving it would reorder it ahead of
+    # tracker/impact-report/review/completion for the ORDINARY approval path
+    # too, contradicting the cost-ordering rationale the rest of this
+    # function's refusals document (see the EXPECTED-HASH-REFUSAL comment
+    # above). The function-wide guarantee — no approve call can report
+    # success while an open, un-amended design conflict exists — now holds
+    # across BOTH call sites inside cmd_approve; this text alone never
+    # guaranteed it on its own, and no longer claims to.
+    #
+    # Formerly (through independent review round 5) this block was
     # nested INSIDE the `else` (non-bypass) arm only, so --no-design skipped
     # it entirely and could waive a real, evidenced, open objection with the
     # SAME flag used for "no design phase at all". Independent review rounds
@@ -5202,7 +5498,18 @@ cmd_approve() {
     # because keeping them is free and an operator may well be greping them from
     # memory; they are NOT kept because a test pins them. $sweep_obs is the token
     # that reports the FULL cleared set, which is what the counters cannot.
-    emit_json 1 "approve" "$tid" "approved" "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}${design_satisfied_obs:-}$binding_obs${design_binding_obs:-}${review_file_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
+    #
+    # claude-workflow-plugin-k6re R6-F2: routed through emit_approve_success
+    # (APPROVE-SUCCESS-GATE, above cmd_approve) rather than a direct
+    # emit_json call. On THIS path the internal --expect-hash check is
+    # necessarily a no-op — EXPECTED-HASH-REFUSAL above already verified
+    # expect_hash_arg against this same $approved_hash before any write in
+    # this function ran, and nothing reassigns approved_hash afterward — but
+    # calling the shared gate here anyway is what makes "every
+    # status=approved exit checks this" true by construction rather than by
+    # two authors each remembering to duplicate the check.
+    emit_approve_success "$tid" "$approved_hash" "$expect_hash_arg" \
+        "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}${design_satisfied_obs:-}$binding_obs${design_binding_obs:-}${review_file_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -5998,14 +6305,23 @@ cmd_grade_record() {
 # KEYED ON (task id, iteration), not task id alone: a review has MANY rounds
 # (review-artifact-<tid>-r1.json, -r2.json, ...), unlike a design's single
 # artifact. The iteration is read from the artifact's OWN `iterations` field
-# (already schema-checked for KEY PRESENCE by review-check.sh's
-# validate-artifact by the time this runs, though not for type/format) rather
-# than a second CLI argument, so there is exactly one source of truth for
-# "which round is this" — and the SAME sanitisation that makes the task id
-# safe to interpolate into a path makes an untyped `iterations` value safe
-# too: `tr -c 'A-Za-z0-9._-' '_'` cannot emit a slash, so neither input can
-# carry a `..` segment, an intermediate directory, or a newline into the
-# derived path, regardless of what `iterations` actually contains.
+# (schema-checked by review-check.sh's validate-artifact by the time this
+# runs — KEY PRESENCE always, and, as of claude-workflow-plugin-k6re R11-F1,
+# TYPE (must be a JSON number) and FORMAT (its string form must match
+# ^[0-9]+$) too, closing the exact gap this comment used to flag: an
+# unparseable `iterations` value used to be accepted here and then poison
+# the REVIEW-ARTIFACT selector in review-check.sh permanently, since bd
+# comments are append-only and no later record could ever clear the
+# resulting refusal) rather than a second CLI argument, so there is exactly
+# one source of truth for "which round is this". The path derivation below
+# does not rely on that guarantee alone, though: the SAME sanitisation that
+# makes the task id safe to interpolate into a path makes an `iterations`
+# value safe too, REGARDLESS of what validate-artifact does or does not
+# check -- `tr -c 'A-Za-z0-9._-' '_'` cannot emit a slash, so neither input
+# can carry a `..` segment, an intermediate directory, or a newline into the
+# derived path. Belt and suspenders: the type/format guard stops a bad
+# record from ever being WRITTEN; this sanitisation independently stops a
+# bad value from ever corrupting the PATH, and neither depends on the other.
 #
 # The external reviewer driver writes here directly now (no
 # .claude/.qa-tracking hand-off copy) and its own path computation MUST match
@@ -6077,14 +6393,141 @@ review_path_is_contained() {
 
 # finding_id_in_latest_artifact <tid> <finding-id> -> 0 if the id appears in the
 # findings=[...] token of the LATEST /^REVIEW-ARTIFACT v1 / comment.
+#
+# "LATEST" here is still `tail -1` (last in bd's comment order), NOT the
+# review-check.sh cmd_gate K3 selector (highest iteration AND latest
+# timestamp, refusing on disagreement — see that file's ART-ITERATION-SELECT
+# comment). That is a real, separate gap this function inherits rather than
+# closes: claude-workflow-plugin-k6re R3-F1 is a fix to the PARSE BOUNDARY
+# (which characters of a firstline are a machine token vs. free-text
+# summary), not to WHICH firstline governs when several exist. Unifying the
+# two selectors is a larger change than this fix and is out of scope here;
+# noted so a future pass does not assume this function already matches
+# cmd_gate's selection semantics.
 finding_id_in_latest_artifact() {
     local tid="$1" fid="$2"
-    local comments art token
+    local comments art token art_prefix
+    # ART-FIRSTLINE-GUARD (claude-workflow-plugin-k6re R4-F1, independent
+    # review round 4). Each comment is reduced to its FIRST LINE
+    # (`split("\n")[0]`) before anything below ever looks for a
+    # `^REVIEW-ARTIFACT v1 ` candidate -- the exact technique
+    # review-check.sh's cmd_gate uses to build $firstlines (see that
+    # file's "First line of each comment" comment, right above its own
+    # `jq -r '.[] | split("\n")[0]'` call, and normalize_comments()).
+    #
+    # THE DEFECT THIS CLOSES. The pre-R4-F1 jq filter here
+    # (`(.[]?.text // empty)`) emitted each comment's RAW text with every
+    # embedded newline intact -- `-r` only strips the JSON string's
+    # surrounding quotes, it does not collapse interior "\n" bytes. Once
+    # that raw, still-multi-line text was flattened through `printf '%s\n'
+    # "$comments" | grep -E '^REVIEW-ARTIFACT v1 '` (below), each embedded
+    # line became its OWN independent grep candidate, indistinguishable
+    # from a genuine top-level record. MEASURED: a comment whose own
+    # free-text SUMMARY continues past a literal newline into something
+    # shaped like a second, well-formed-looking REVIEW-ARTIFACT firstline
+    # -- `... findings=[R4-F1:high] ... at <ts>: real record` followed by
+    # `REVIEW-ARTIFACT v1 iteration=999 ... findings=[R9-F9:high] ... at
+    # <ts2>: injected line` on the next line -- made `tail -1` (last
+    # MATCHING LINE in the flattened stream, not last COMMENT) select the
+    # injected line over the genuine record that opened the very same
+    # comment; ART_PREFIX then sliced that already-wrong selection and
+    # reported R9-F9, never R4-F1. ART_PREFIX (R3-F1) polices which BYTES
+    # of the winning LINE are a machine token vs. free-text summary; it has
+    # no way to notice the winning line was never a top-level record to
+    # begin with, because by the time it runs the substitution has already
+    # happened.
+    #
+    # WHY MIRRORED, NOT SHARED. Shelling out to `review-check.sh gate`
+    # would additionally import its FULL K3 selector (highest well-formed
+    # iteration= AND latest well-formed timestamp, refusing on
+    # disagreement -- review-check.sh's ART-ITERATION-SELECT) in place of
+    # THIS function's deliberately different "last in comment order"
+    # selection -- a gap this function's own header comment (above)
+    # already documents as intentional and separately tracked. Importing
+    # that selector here would flip claude-workflow-plugin-fkm.1.1 from
+    # "resolve-finding reads the tail-1 record" to "refuses with
+    # review_artifact_selection_disagreement", a behaviour change well
+    # outside R4-F1's scope. So only the narrow, self-contained piece
+    # R4-F1 actually needs -- reduce each comment to its first line before
+    # pattern-matching -- is mirrored here by hand, the same discipline
+    # already used for art_prefix_len() below (see ART-PREFIX-GUARD) and
+    # for the RUBRIC / QA-GATE APPROVED capture patterns shared between
+    # qa-gate.sh and verify-before-stop.sh.
+    #
+    # SIBLING SURVEY (asked for at R4-F1): RUBRIC, COMPLETION,
+    # DESIGN-REVIEW, DESIGN-CONFLICT, DESIGN-ARTIFACT and GRILLING all
+    # already read via `select(startswith(...))` / an anchored `^`
+    # `test()`/`capture()` applied to the whole (un-split) comment text --
+    # since jq's `^`/`$` are STRING-anchored with no `m` flag, that is
+    # already equivalent to first-line-only for a per-comment `.text`
+    # stream, so none of them share this defect. IMPLEMENTER, RESOLVED and
+    # ARBITRATION have NO selector of their own in this file or
+    # verify-before-stop.sh at all (both are write-only here; the only
+    # readers are review-check.sh's, already reading through $firstlines).
+    # QA-GATE APPROVED's four readers (this file's
+    # recorded_approval_hashes; verify-before-stop.sh's
+    # task_has_matching_approval_record, matching_approval_record_text and
+    # try_worktree_resolution) USED TO BE all UNANCHORED
+    # `select(test("QA-GATE APPROVED .*change_set_hash="))` over the whole
+    # un-split text, sharing the multi-line-selection half of this shape --
+    # measured directly (a comment whose first line is prose and whose
+    # second line is a fabricated record extracted the fabricated hash) --
+    # NOT fixed in this round (different files, different call sites, the
+    # Stop-hook release gate itself and its cross-worktree bridge; reported
+    # for follow-up instead, per the evidence-before-fix discipline of one
+    # variable at a time — the full survey is on this task's own comment
+    # stream, cross-linked to claude-workflow-plugin-yrij).
+    #
+    # FIXED, same task (claude-workflow-plugin-yrij, APPROVAL-SELECTOR-
+    # ANCHOR): all four now anchor `select(test("^QA-GATE APPROVED
+    # .*change_set_hash="))` at `^` -- see task_has_matching_approval_record
+    # in verify-before-stop.sh for the full rationale, the anchor-vs-split
+    # measurement, and the accepted-boundary scope note (a fully standalone,
+    # well-formed forged comment is not and cannot be closed by an anchor).
+    # This function's OWN selector (art_prefix_len, just below) is a
+    # DIFFERENT shape -- REVIEW-ARTIFACT, not QA-GATE APPROVED -- and was
+    # already fixed at R3-F1/R4-F1; it is unaffected by and unrelated to the
+    # yrij fix, restated here only because this comment block is where the
+    # four-reader survey was first written down.
     comments=$(bd_show_with_comments "$tid" \
-        | jq -r 'if type=="array" then .[0].comments else .comments end | (.[]?.text // empty)' 2>/dev/null || echo "")
+        | jq -r 'if type=="array" then .[0].comments else .comments end | (.[]?.text // empty) | split("\n")[0]' 2>/dev/null || echo "")
     art=$(printf '%s\n' "$comments" | grep -E '^REVIEW-ARTIFACT v1 ' | tail -1 || true)
     [ -z "$art" ] && return 1
-    token=$(printf '%s' "$art" | sed -nE 's/.*findings=\[([^]]*)\].*/\1/p' || true)
+    # ART-PREFIX-GUARD (claude-workflow-plugin-k6re R3-F1). The SAME
+    # anchored, end-to-end grammar review-check.sh's cmd_gate applies to a
+    # REVIEW-ARTIFACT firstline (see that file's ART-PARSE-SHARED comment
+    # for the full defect and the two measured reproductions), mirrored
+    # here rather than shared: this function does its own independent read
+    # of the comment stream instead of shelling out to review-check.sh, so
+    # there is no single implementation to call into. Kept byte-consistent
+    # by hand with review-check.sh's art_prefix_len() -- the same
+    # discipline this codebase already uses for the RUBRIC / QA-GATE
+    # APPROVED capture patterns shared between qa-gate.sh and
+    # verify-before-stop.sh (see recorded_approval_hashes()'s own comment:
+    # "The parity is asserted textually... in approve-idempotency.sh").
+    #
+    # WHY THIS WAS NEEDED: the pre-R3-F1 line here was `sed -nE
+    # 's/.*findings=\[([^]]*)\].*/\1/p'` applied to the WHOLE $art string --
+    # byte-identical to the defect in review-check.sh's own ART_FINDINGS
+    # extraction, and vulnerable to the identical two reproductions: a
+    # malformed record whose bracket swallows a real, later token, and a
+    # perfectly well-formed record whose free-text summary merely mentions
+    # `findings=[...]`. Both would previously make `token` read back the
+    # WRONG (or empty) value here, silently letting resolve-finding /
+    # arbitrate accept a finding id that was never really open, or reject
+    # one that was.
+    art_prefix=$(LC_ALL=C awk -v ART_SOFT='( reviewer=[A-Za-z0-9._-]+)?( model=[]A-Za-z0-9._:/[-]+)?( pin=[]A-Za-z0-9._:/[-]+)?( reviewed_hash=[A-Za-z0-9._-]+)?( risk_threshold=[A-Za-z0-9_]+)?( verdict=[A-Za-z]+)?( stopped_by=[A-Za-z0-9_:]+)?' '
+        function art_prefix_len(line,    re, n) {
+            re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                 " findings=\\[[^][:space:]]*\\]( artifact_hash=[A-Za-z0-9._-]+)?" \
+                 " at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z: "
+            n = match(line, re)
+            return (n == 1) ? RLENGTH : 0
+        }
+        { n = art_prefix_len($0); if (n > 0) print substr($0, 1, n) }
+    ' <<<"$art" 2>/dev/null)
+    [ -z "$art_prefix" ] && return 1
+    token=$(printf '%s' "$art_prefix" | sed -nE 's/.*findings=\[([^]]*)\].*/\1/p' || true)
     [ -z "$token" ] && return 1
     # One id per line (strip the :severity and any intra-token spaces). Use
     # sed (line-oriented) NOT `tr -d` so the per-id newlines survive — merging
@@ -10470,6 +10913,40 @@ cmd_arbitrate() {
     emit_json 1 "arbitrate" "$tid" "arbitrated" "comment posted at $ts: $comment_text"
 }
 
+# cmd_quarantine_artifact -- REMOVED (claude-workflow-plugin-k6re, R2-F1).
+#
+# THIS USED TO BE HERE (R12-F1): the writer half of the ONLY recovery path
+# for a malformed REVIEW-ARTIFACT candidate, once review-check.sh's selector
+# stopped inferring safety from comment position (bd's own comment order
+# reflects a content-supplied created_at, not true insertion order -- `bd
+# import` preserves a supplied created_at verbatim even onto an
+# already-existing issue, so position was never trustworthy to begin with).
+# It validated a 64-hex-char hash and a non-empty reason, then posted
+# REVIEW-ARTIFACT-QUARANTINE v1 hash=<hex> at <ts>: <reason> via add_comment.
+#
+# WHY IT IS GONE, NOT MERELY RE-GUARDED. Independent review round 2 of this
+# same task (R2-F1) found the record this command produced forgeable on its
+# own first independent review: the comment stream review-check.sh reads has
+# no verifiable author (normalize_comments() keeps text only, for every
+# reader, not only this mechanism), the READER matched on a bare
+# `REVIEW-ARTIFACT-QUARANTINE v1 hash=<64 hex>` PREFIX rather than this
+# writer's full `at <ts>: <reason>` grammar, and a hand-typed comment or a
+# `bd import` reaches that reader directly without ever calling THIS
+# function's own hash/reason validation. Validating the writer's own inputs
+# carefully bought nothing when the reader never required anything to have
+# come through this writer at all -- the identical unauthenticated channel
+# that can post a malformed REVIEW-ARTIFACT candidate could equally forge an
+# excuse for one. See the tombstone in review-check.sh (where
+# ART-QUARANTINE-HASH used to sit) for the full finding and the reader-side
+# removal.
+#
+# THE RESIDUAL. A malformed REVIEW-ARTIFACT record now deadlocks its task's
+# gate permanently, with no in-band recovery -- deliberate, not an
+# oversight: see review-check.sh's tombstone for why a forgeable escape
+# hatch was worse than no escape hatch. Do not re-add this command, or any
+# equivalent, without first solving who is allowed to say so, verifiably --
+# not merely which record they are talking about.
+
 # cmd_baseline_capture — write the gate baseline outside the enter/approve
 # lifecycle (3mg.1). Exists so session-start.sh has ONE implementation to call
 # instead of a second copy of the format; deliberately does NOT require bd
@@ -10579,6 +11056,9 @@ case "$SUB" in
     design-conflict)  cmd_design_conflict "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
+    # quarantine-artifact dispatch -- REMOVED (claude-workflow-plugin-k6re,
+    # R2-F1). See the tombstone above cmd_quarantine_artifact's former
+    # definition. Falls through to the "unknown subcommand" arm below.
     ""|-h|--help|help)
         usage
         exit 1

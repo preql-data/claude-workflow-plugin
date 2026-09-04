@@ -236,6 +236,138 @@ cmd_validate_artifact() {
         fi
     done
 
+    # ITERATIONS TYPE + INTEGER GUARD (claude-workflow-plugin-k6re, R11-F1).
+    #
+    # THE DEFECT THIS CLOSES: the has() loop above only checked that
+    # `iterations` was PRESENT, never that it was a usable value. The
+    # legitimate writer (qa-gate.sh cmd_review_record) reads it back with
+    # `jq -r '.iterations'` and interpolates the result VERBATIM into the
+    # REVIEW-ARTIFACT record's machine prefix as `iteration=$iter` --
+    # `iteration=1.5`, `iteration=oops`, or (worse) a MULTI-LINE compact
+    # rendering of an array/object value, which is what `jq -r` produces for
+    # any non-scalar (verified empirically: `jq -r` on `[1,2]` prints one
+    # element per line, which would split the one-line record grammar the
+    # same way an embedded control character does elsewhere in this file).
+    # That record then reaches the REVIEW-ARTIFACT selector below
+    # (ART-ITERATION-SELECT), whose own comment documents the consequence:
+    # an unparseable `iteration=` token makes the selector refuse the WHOLE
+    # candidate set, and because bd comments are append-only, no later,
+    # well-formed record could ever clear that refusal -- a PERMANENT
+    # deadlock for whichever task carried the bad record, discovered at
+    # review round 11 of claude-workflow-plugin-i8cx.
+    #
+    # SAME TWO-STEP SHAPE as the RUBRIC record's `iteration` field
+    # (qa-gate.sh cmd_grade_record, claude-workflow-plugin-R2-F3): type ==
+    # "number" first (rejects strings, booleans, null, arrays and objects
+    # under one specific, branchable key -- `iterations_not_number` --
+    # rather than lumping them in with a bad digit shape), then the
+    # NUMBER'S OWN string form must match ^[0-9]+$ (rejects decimals like
+    # 1.5, negatives like -3, and non-normalised exponent forms -- this jq
+    # version renders the JSON literal `1e3` back out as the literal string
+    # "1E+3", not "1000"; verified directly rather than assumed, since the
+    # whole point is that the writer must not be able to mint a value its
+    # own reader cannot read back). Deliberately a DIFFERENT error-key
+    # spelling (`iterations_` plural) than the RUBRIC check's (`iteration_`
+    # singular): these are two distinct record grammars belonging to two
+    # different writers, and a caller branching on error_key must not
+    # conflate them.
+    #
+    # WHY THE MESSAGE IS SAFE TO INTERPOLATE VERBATIM (the same structural-
+    # purity discipline named above for the external review lane, and the
+    # same reasoning safe_summary() below documents for
+    # iteration=/reviewed_hash=/at=): $it_type is always one of jq's six
+    # fixed type-name strings, never influenced by the value's own content,
+    # and $it_val is only ever printed once $it_type=="number" is already
+    # established -- a JSON number's lexical grammar is limited to digits,
+    # '.', '-', 'e'/'E' and '+', which cannot spell the token that guard
+    # forbids regardless of what the reviewer supplied.
+    #
+    # THIS IS THE ONE VALIDATOR for the REVIEW-ARTIFACT schema (see
+    # cmd_review_record's own comment: "Validate via the ONE validator
+    # (subprocess). No second schema here."). The check lives HERE and
+    # ONLY here, never duplicated in qa-gate.sh, for the same reason
+    # completion-record's schema lives in validate-completion and nowhere
+    # else -- one schema, one place to change it.
+    local it_type it_val
+    it_type=$(printf '%s' "$raw" | jq -r '.iterations | type' 2>/dev/null || echo "unknown")
+    it_val=$(printf '%s' "$raw" | jq -r '.iterations' 2>/dev/null || echo "?")
+    # ITERATIONS-GUARD-START (load-bearing; review-check.test.sh Section 2c strips to END)
+    if [ "$it_type" != "number" ]; then
+        emit_validate "validate-artifact" "false" "iterations_not_number" \
+            "iterations is type=$it_type, expected number"
+        exit 4
+    fi
+    case "$it_val" in
+        ''|*[!0-9]*)
+            emit_validate "validate-artifact" "false" "iterations_not_integer" \
+                "iterations=$it_val is not a non-negative integer; it is read back verbatim by qa-gate.sh cmd_review_record and interpolated into the REVIEW-ARTIFACT record's machine prefix as iteration=\$iter, which the selector in this file parses as [0-9]+ immediately after 'iteration=' -- a value like 1.5 or 1e3 writes a record the selector can never parse, and because that selector refuses the ENTIRE candidate set on any one unparseable iteration, such a record permanently deadlocks review-record for this task (claude-workflow-plugin-k6re R11-F1)"
+            exit 4
+            ;;
+    esac
+
+    # ITERATIONS SAFE-MAGNITUDE GUARD (claude-workflow-plugin-k6re, R1-F1).
+    #
+    # THE DEFECT THIS CLOSES: everything above this point confirms $it_val is
+    # type=number and matches ^[0-9]+$ -- SHAPE only, never MAGNITUDE. The
+    # selector below (ART-ITER-CMP) is now exact for ANY non-negative-integer
+    # digit string, however long, so this guard is not the thing standing
+    # between a huge iterations value and a wrong selection -- but a value
+    # this large can never describe a real review round, and once written it
+    # is permanent (bd comments are append-only, same as every other record
+    # this file guards at write time). Rejecting it here catches the same
+    # class of upstream bug ITERATIONS-GUARD above already catches for shape:
+    # something computed a nonsense value, and the record should never be
+    # written at all rather than merely tolerated downstream. This guard is
+    # NOT a substitute for the selector fix -- a malformed or oversized value
+    # can still reach $firstlines via `bd import` or a hand-typed comment,
+    # bypassing this function entirely (the exact bypass claude-workflow-
+    # plugin-k6re R12-F1 already established as real and load-bearing for
+    # this file's threat model) -- it is a defence-in-depth addition on the
+    # one path this function DOES see.
+    #
+    # THE BOUND: 9007199254740991 = 2^53-1 = Number.MAX_SAFE_INTEGER. Not an
+    # arbitrary "no real review has this many rounds" guess: it is the
+    # largest integer for which N and N+1 are both exactly representable AND
+    # distinguishable as an IEEE-754 double -- the representation JSON
+    # numbers are conventionally read into (JavaScript, many JSON libraries,
+    # and -- the actual R1-F1 defect -- awk's own `+0` numeric coercion,
+    # MEASURED on this host: `awk 'BEGIN{a="9007199254740992"+0;
+    # b="9007199254740993"+0; print (a==b)}'` prints 1). Measured directly,
+    # not assumed: THIS host's jq (1.8.1) round-trips `.iterations` several
+    # digits past this bound exactly (9007199254740993 prints back
+    # 9007199254740993, not 9007199254740992) -- so this jq does not need the
+    # guard for its own sake. The guard exists for every OTHER consumer of
+    # this JSON that is not this exact jq version, and to catch an
+    # almost-certainly-buggy value before it becomes an unfixable append-only
+    # record, mirroring ITERATIONS-GUARD's own reasoning one level up.
+    #
+    # NEVER COMPARED AS A NUMBER for the general case (bash arithmetic is a
+    # fixed-width 64-bit integer and would only push the identical failure
+    # mode a few more digits out, not remove it, on a sufficiently long
+    # adversarial digit string) -- pure string LENGTH compare first, leading
+    # zeros stripped so a padded value ("0009007199254740991") is not
+    # rejected for a cosmetic reason. A numeric `-gt` is used only in the
+    # one branch where both operands are already known to share the SAME
+    # length as the bound literal above (16 digits, fixed at this file's own
+    # source, always far inside 64-bit range) -- never on $it_val's own
+    # unbounded length. Same normalisation technique, independently applied
+    # in awk, as the selector's own norm_iter()/iter_cmp() below.
+    local it_norm it_safe_max="9007199254740991"
+    it_norm=$(printf '%s' "$it_val" | sed 's/^0*//')
+    [ -z "$it_norm" ] && it_norm="0"
+    local it_exceeds=0
+    if [ "${#it_norm}" -gt "${#it_safe_max}" ]; then
+        it_exceeds=1
+    elif [ "${#it_norm}" -eq "${#it_safe_max}" ] && [ "$it_norm" -gt "$it_safe_max" ]; then
+        it_exceeds=1
+    fi
+    if [ "$it_exceeds" -eq 1 ]; then
+        emit_validate "validate-artifact" "false" "iterations_exceeds_safe_bound" \
+            "iterations=$it_val exceeds $it_safe_max (2^53-1, the largest integer safely representable as an IEEE-754 double / JSON number); a review round count this large cannot be genuine and is almost certainly a bug upstream of this record -- rejecting before it becomes a permanent, unfixable append-only record (claude-workflow-plugin-k6re R1-F1)"
+        exit 4
+    fi
+    # ITERATIONS-GUARD-END
+
     # Control characters in GRAMMAR-BEARING scalars (claude-workflow-plugin-vg8).
     #
     # THE DEFECT CLASS: the record writer embeds these scalars verbatim into a
@@ -1506,9 +1638,857 @@ cmd_gate() {
     CYCLE_OPENED_TS=$(max_record_ts "$firstlines" '^QA-GATE: entered at ')
     LATEST_IMPLEMENTER_TS=$(max_record_ts "$firstlines" '^IMPLEMENTER: role=[a-z]+ ')
 
-    # art = LAST comment matching /^REVIEW-ARTIFACT v1 /.
-    local art
-    art=$(grep -E '^REVIEW-ARTIFACT v1 ' "$firstlines" | tail -1 || true)
+    # art = the REVIEW-ARTIFACT v1 record that is SIMULTANEOUSLY the highest
+    # well-formed iteration= AND the latest well-formed timestamp, never the
+    # last one in comment order (claude-workflow-plugin-k6re TIER-0 K3).
+    #
+    # THE DEFECT THIS REPLACES: `grep ... | tail -1` read "latest" as "last
+    # in bd's comment order". bd is append-only, so ANY record added after
+    # the fact -- hand-typed, or a backfill of an EARLIER round's history --
+    # lands last in that order regardless of what iteration number it
+    # carries. MEASURED: the same three comments, reordered, flipped the
+    # gate between ok:false/open_findings:2 and ok:true/open_findings:0 --
+    # order alone decided which record governed a release predicate.
+    #
+    # WHY NOT ITERATION ALONE (measured against the live store, not assumed):
+    # a first draft of this fix selected by max(iteration) alone, tie-broken
+    # by timestamp. claude-workflow-plugin-fkm.1.1's REAL review history
+    # falsifies that design: one reviewer identity posted a single record at
+    # iteration=2 with the OLDEST timestamp, while another posted FIVE MORE
+    # records — against three DIFFERENT reviewed_hash values, spanning
+    # nearly a full day, ending in a genuine `verdict=approve` — every one
+    # of them still carrying iteration=1. The second identity's iteration
+    # counter never incremented at all; it is not a per-cycle reset (two of
+    # the five share one reviewed_hash and still both say 1), it is a
+    # stagnant counter. Iteration number is NOT a reliable global-across-
+    # writers recency signal — it can freeze while real, sequential review
+    # rounds keep landing. A max(iteration)-only selector would have picked
+    # the single record with the OLDEST timestamp over five newer ones, on a
+    # hash that five later rounds had already superseded.
+    #
+    # WHY NOT TIMESTAMP ALONE either: the record's `at <ts>` field is
+    # stamped at RECORD-WRITE time (qa-gate.sh review-record: `ts="$(date -u
+    # ...)"`), not at review time. A backfill that (re)posts an historical
+    # round through that same path would stamp it "now" — chronologically
+    # LATEST by construction, however old the review it describes. Pure
+    # recency is exactly as exploitable by a naive backfill as pure position
+    # was.
+    #
+    # THE RULE: a record governs only if it is the SAME record under BOTH
+    # orderings — the highest iteration AND (independently, across the
+    # WHOLE candidate set, not just the iteration-tied group) the latest
+    # timestamp. This is a strict superset of the plain "max iteration, tie
+    # broken by timestamp" rule: when the global timestamp-max already sits
+    # inside the iteration-max tied group (the ordinary case — see i8cx and
+    # the reproduction below), it degenerates to exactly that. It only
+    # DIFFERS when the two signals point at different records, and that
+    # disagreement is precisely what fkm.1.1 exhibits and a naive backfill
+    # can manufacture — in both cases neither signal is trustworthy enough
+    # to overrule the other silently, so this refuses instead
+    # (review_artifact_selection_disagreement), naming both the iteration-
+    # winning and the timestamp-winning record so an operator has the actual
+    # evidence, not just a bare "ambiguous". A backfill mechanism therefore
+    # has to preserve each round's REAL historical timestamp (not "now") for
+    # this selector to resolve automatically — a concrete, testable
+    # constraint on claude-workflow-plugin-k6re's own remaining work, not
+    # merely a comment.
+    #
+    # AN UNPARSEABLE iteration= OR timestamp (missing, non-digit for
+    # iteration; missing or not ISO-8601-UTC for timestamp) must never rank
+    # as 0 and lose silently -- the sibling shape this task was explicitly
+    # told not to reproduce (sev_rank's `*) echo 0 ;;` a few screens up drops
+    # an unrecognised severity below EVERY threshold, including info). It
+    # must not silently WIN either. So it is never ranked: a malformed
+    # candidate is EXCLUDED from the max-iteration/max-timestamp computation
+    # entirely, the same as before (review_artifact_iteration_unparseable /
+    # review_artifact_timestamp_unparseable name the specific class) -- the
+    # same "refuse rather than silently coerce" convention MALFORMED-
+    # ARTIFACT-GUARD and REVIEWER-NONEMPTY-GUARD below already use.
+    #
+    # THIS USED TO REFUSE THE WHOLE SELECTION UNCONDITIONALLY, with no way
+    # back: bd comments are append-only, so a single malformed candidate
+    # ANYWHERE in a task's history deadlocked review-record PERMANENTLY. Two
+    # recovery mechanisms were tried after that, in order, and BOTH were
+    # removed again:
+    #
+    #   claude-workflow-plugin-k6re R11-F1 (found at i8cx review round 11:
+    #   validate-artifact accepted a non-integer `iterations` value, which
+    #   the legitimate writer then recorded verbatim) excused a malformed
+    #   candidate that sat STRICTLY BEFORE an unambiguous well-formed
+    #   winner, reasoning that bd's append-only comment order means an
+    #   earlier POSITION could never be a corrupted later round in
+    #   disguise. R12-F1 falsified that premise against the actual bd 1.2.2
+    #   source: `bd show --include-comments` orders by a content-supplied
+    #   created_at, never true insertion order, and `bd import` (which this
+    #   repository's own mandatory reconciliation runs unconditionally)
+    #   preserves a supplied created_at verbatim even onto an
+    #   already-existing issue -- position was never trustworthy, not
+    #   merely in the one case that was measured.
+    #
+    #   R12-F1's replacement required an explicit, content-hash-addressed
+    #   operator decision instead. Independent review round 2 of THIS SAME
+    #   TASK (R2-F1) found that mechanism forgeable in turn -- see the
+    #   tombstone comment below, where ART-QUARANTINE-HASH used to sit, for
+    #   the full finding and why it was removed rather than patched again.
+    #
+    # THERE IS NO RECOVERY MECHANISM TODAY. A malformed candidate refuses
+    # the whole selection, unconditionally and permanently, regardless of
+    # where it sits or what is posted about it afterward. The concern this
+    # paragraph describes therefore applies to EVERY malformed candidate
+    # without exception -- "it can't have been the highest/latest" is only
+    # ever established by comment position, never by the malformed record's
+    # own unreadable content, and position is no longer consulted for
+    # anything at all.
+    #
+    # A record that is simultaneously tied for BOTH the max iteration AND
+    # the max timestamp with another record (both fields byte-identical
+    # between them) has no further principled signal to resolve it with,
+    # and refuses too (review_artifact_selection_tie_unresolved) rather than
+    # falling back to position -- which is the exact defect this rewrite
+    # exists to remove.
+    #
+    # ART-SELECT READ GUARD (i8cx discipline: every read of $firstlines gets
+    # a guard distinguishing "could not read" from "read cleanly, nothing
+    # there" -- see MAX-RECORD-TS-READ-GUARD and IMPLEMENTER-SET-READ-GUARD
+    # elsewhere in this function). awk's OWN exit-code convention differs
+    # from grep's: 0 means "ran successfully", covering BOTH "matched
+    # records" and "matched none" -- unlike grep's 0/1/>1 three-way split. A
+    # non-zero exit here can only mean awk could not even open/read
+    # $firstlines (measured on this platform: rc=2 for both a missing file
+    # and a permission failure), so ANY non-zero rc is treated as a hard
+    # read failure, never as "no records".
+    #
+    # DIAGNOSTIC DETAIL IS A SAFE SUMMARY, NEVER THE RAW RECORD
+    # (claude-workflow-plugin-icn4 correction 10): this script is one of
+    # three scripts a structural purity guard keeps free of any reference to
+    # the external review lane's own name -- and that guard scans not only
+    # these files' own bytes but their CAPTURED RUNTIME OUTPUT, because a
+    # source clean of the forbidden token can still print it at runtime. A
+    # REVIEW-ARTIFACT record's reviewer= field is operator-supplied data,
+    # and nothing stops a real one from naming that excluded lane's
+    # identity (confirmed live on two tasks in this repo's own store).
+    # Quoting a candidate record verbatim in an error message would echo
+    # that identity straight into this gate's own JSON output the moment it
+    # ever refused on real data carrying it -- reintroducing the exact
+    # reference the guard exists to keep out, from the data path rather
+    # than from static prose. safe_summary() below reports only
+    # iteration=/reviewed_hash=/at= -- fields whose OWN character classes
+    # ([0-9]+; hex; a fixed ISO-8601-UTC shape with no free-form letters at
+    # all) make them structurally incapable of spelling the forbidden
+    # token, not merely happening not to today.
+    # ART-PARSE-SHARED (claude-workflow-plugin-k6re R3-F1, independent review
+    # round 3). ONE anchored, end-to-end grammar for a REVIEW-ARTIFACT v1
+    # firstline's machine-token region. $ART_SOFT_FIELDS_RE (below) is the
+    # part actually SHARED by textual interpolation (`-v ART_SOFT=...`, awk
+    # has no cross-invocation `source`) between the per-candidate awk
+    # program right below and the post-selection re-verification further
+    # down (see ART-PREFIX-GUARD) -- each site defines its own small
+    # function(s) using that one fragment, kept byte-consistent by hand,
+    # the same discipline qa-gate.sh's RUBRIC/QA-GATE-APPROVED capture
+    # patterns already use for the WRITER reading its own records back
+    # (that comment: "The parity is asserted textually... in
+    # approve-idempotency.sh"), applied here within one file instead of
+    # across two.
+    #
+    # THE DEFECT THIS CLOSES. The pre-R3-F1 findings=[...] guard was a bare
+    # substring test (`$0 !~ /findings=\[[^]]*\]/`), matched ANYWHERE on the
+    # line, while the extraction beside it (`sed -nE
+    # 's/.*findings=\[([^]]*)\].*/\1/p'`) is GREEDY and prefers the LAST such
+    # occurrence. Two independent reproductions, both measured directly:
+    #
+    #   1. A record whose bracket does not close where the grammar says it
+    #      must (the literal R3-F1 finding, round 3) can swallow a REAL,
+    #      later artifact_hash=/at <ts> pair as bracket "content" while
+    #      simultaneously presenting a second, well-formed-looking
+    #      `findings=[]` inside that swallowed text. The substring guard
+    #      finds A match (the swallowing one) and passes; greedy sed then
+    #      prefers the fake trailing one; ART_FINDINGS reads back empty.
+    #      Nothing here needed the removed R2-F1 quarantine mechanism.
+    #
+    #   2. WORSE, and needing no malformation at all: a perfectly well-formed
+    #      record whose free-text SUMMARY merely mentions the token --
+    #      `... findings=[R3-F1:high] artifact_hash=ah at <ts>: fixed the bug
+    #      where findings=[] was mis-parsed` -- suffers the identical
+    #      suppression. Reachable non-adversarially by anyone describing this
+    #      very defect in a review summary.
+    #
+    # THE FIX. Walk the grammar ONCE, left to right, ANCHORED at ^ every
+    # time, so a token's position is never inferred from "found somewhere"
+    # but always from "immediately follows the token before it". Once the
+    # walk reaches the mandatory `at <ts>: ` that opens the free-text
+    # summary, EVERYTHING from there on is summary, and nothing below this
+    # point ever scans it again -- the anchor IS the fix, not a separate
+    # step layered on top of it (see art_prefix_len() below, and
+    # ART-PREFIX-GUARD, which is the ONE thing every extractor downstream now
+    # reads from, in place of the raw winning line).
+    #
+    # THE SEVEN SOFT FIELDS (reviewer=/model=/pin=/reviewed_hash=/
+    # risk_threshold=/verdict=/stopped_by=, between iteration= and
+    # findings=[...]) are each INDEPENDENTLY optional -- the selector has
+    # never required them for "well-formed" (only iteration=, findings=[...],
+    # and the trailing `at <ts>:` are; REVIEWER-NONEMPTY-GUARD below
+    # separately refuses an empty reviewer AFTER selection) -- and three real
+    # grammar generations coexist in the live store: pin= (46w9) and
+    # artifact_hash= (rqer) were each added AFTER earlier rounds were already
+    # written. MEASURED against the live store: claude-workflow-plugin-
+    # fkm.1.1's six real REVIEW-ARTIFACT records (review-count.test.sh
+    # section 11.8, reproduced from `dolt sql`) carry NEITHER pin= NOR
+    # artifact_hash=, and all six still parse under this grammar. None of
+    # these fields' classes admit a space, so none can smuggle a later
+    # field's keyword into an earlier position regardless of which are
+    # present.
+    #
+    # THE ONE CONTENT-CLASS CHANGE: findings=[...] used to accept ANY
+    # character except `]` inside the brackets (`[^]]*`). That is what let
+    # reproduction 1 above swallow real, later tokens as bracket "content".
+    # Every OTHER field in this grammar was already safe from that specific
+    # confusion for a simpler reason: none of their classes ever admitted a
+    # space to begin with. findings=[...] was the one exception, and a
+    # legitimate finding list (`Rn-Fn:severity[,Rn-Fn:severity]*`) never
+    # needed one either -- excluding whitespace (`[^][:space:]]*`, verified
+    # directly against this host's awk: a literal `]` immediately after `[^`
+    # is a literal member of the excluded set per POSIX, and a named class
+    # may follow it in the same bracket expression) costs nothing real and
+    # closes the swallowing class structurally: a bracket can no longer
+    # extend across a field boundary, because every field boundary in this
+    # grammar is a space.
+    #
+    # ITERATION IS CHECKED FIRST, not findings-first as the pre-R3-F1 code
+    # documented. This is not an arbitrary reordering: art_findings_ok()
+    # below can only locate findings=[...] by first walking PAST a
+    # syntactically valid iteration= token (that is what "anchored" means --
+    # you cannot validate what follows a token without knowing where the
+    # token itself ends), so "findings checked independently of iteration"
+    # and "iteration position never inferred from an unanchored scan" are the
+    # same defect from two angles; the pre-R3-F1 precedence was only
+    # achievable BECAUSE the findings check ignored position entirely. This
+    # only changes behaviour for a record with MULTIPLE simultaneous defects
+    # (no existing test pins that combination); every single-defect fixture
+    # in review-count.test.sh classifies identically under either order.
+    local ART_SOFT_FIELDS_RE
+    ART_SOFT_FIELDS_RE='( reviewer=[A-Za-z0-9._-]+)?( model=[]A-Za-z0-9._:/[-]+)?( pin=[]A-Za-z0-9._:/[-]+)?( reviewed_hash=[A-Za-z0-9._-]+)?( risk_threshold=[A-Za-z0-9_]+)?( verdict=[A-Za-z]+)?( stopped_by=[A-Za-z0-9_:]+)?'
+
+    # ART-FINDINGS-ITEM-GRAMMAR (claude-workflow-plugin-k6re, OPERATOR RULING).
+    # FIFTH recurrence of the review-artifact-parse-boundary defect family:
+    # (1) greedy sed preferring the last match; (2) a machine token sharing a
+    # line with operator free text; (3) `=` inside findings content
+    # impersonating a FIELD (R5-F1); (4) `[` inside findings content
+    # impersonating the DELIMITER (R7-F1); (5) THIS ONE -- ERE metacharacters
+    # and shell glob metacharacters inside findings content impersonating a
+    # PATTERN, reaching three separate sinks fed by the SAME value below:
+    #   (a) `IFS=','; for item in $ART_FINDINGS` is unquoted, and this file
+    #       sets no `set -f` anywhere, so a value containing `*`/`?`/a bracket
+    #       expression undergoes PATHNAME EXPANSION against whatever this
+    #       process's CWD happens to hold. MEASURED: findings=[*:high] in a
+    #       CWD containing a file named `a:b:high` rewrites $item to that
+    #       filename; the resulting $fsev is not a recognised severity,
+    #       sev_rank returns 0, and a real declared HIGH silently drops below
+    #       threshold.
+    #   (b) `grep -E "^RESOLVED ${fid} " "$firstlines"` (below) interpolates
+    #       $fid -- sourced from splitting $ART_FINDINGS -- UNESCAPED into an
+    #       ERE. MEASURED: findings=[.*:high] makes $fid literally `.*`,
+    #       which matches ANY `RESOLVED <anything> fix=... test=...` record
+    #       anywhere in the stream regardless of finding id, clearing a
+    #       declared HIGH that nothing actually resolved.
+    #   (c) `grep -E "^ARBITRATION ${fid} " "$firstlines"` (below): the
+    #       identical injection, and worse -- needs only one
+    #       decision=overrule record anywhere in the stream, with no
+    #       fix=/test= corroboration required at all.
+    #
+    # THE FIX IS INGEST-SIDE, BY OPERATOR RULING, NOT THREE LOOP-LOCAL
+    # ESCAPES. "Escape correctly at every sink" has failed five times running
+    # -- each recurrence was a new way past the same shape of denylist. Every
+    # content-class fix through R7-F1 EXCLUDED a growing set of characters
+    # (`]`, then `[`, then whitespace) while PERMITTING everything else,
+    # including every ERE metacharacter (`. * ^ $ + ? ( ) | \`) and every
+    # glob metacharacter (`* ? [...]`) -- an allowlist was never tried. This
+    # replaces the denylist with the exact ALLOWLIST validate-artifact
+    # already enforces for the JSON schema above (cmd_validate_artifact):
+    # finding id `R[0-9]+-F[0-9]+`, severity
+    # `critical|high|medium|low|info` -- REUSED, not reinvented, because two
+    # independently-maintained copies of the same grammar is how this file
+    # accumulated five duplicated copies of the findings grammar in the
+    # first place. A value in this class has no ERE metacharacter and no
+    # glob metacharacter in its alphabet at all (`R F 0-9 - : ,` and the five
+    # severity words), so sinks (a)/(b)/(c) receive nothing they can ever
+    # misparse -- structurally, not because each was individually hardened
+    # against inputs enumerated after the fact -- and a future sink fed by
+    # this SAME value inherits the guarantee for free. A findings=[...] token
+    # outside this grammar now fails art_findings_ok() exactly as a
+    # structurally-broken bracket already did: review_artifact_malformed,
+    # refused unconditionally (see ART-ITERATION-SELECT above for why there
+    # is no recovery path), before the loop below or either grep ever runs.
+    #
+    # DERIVED FROM THE REAL CORPUS, not imposed from the grammar alone. Every
+    # live REVIEW-ARTIFACT record read directly from bd already fits this
+    # class byte-for-byte: all 6 on claude-workflow-plugin-fkm.1.1, all 7 on
+    # claude-workflow-plugin-xsu1 (iterations 1-5, 7, 10), all 3 on
+    # claude-workflow-plugin-i8cx (iterations 1, 9, 10 -- including
+    # model=gpt-5.6-sol/pin=gpt-5.6-sol, a SEPARATE field from this one, its
+    # own bracket-permitting class from claude-workflow-plugin-46w9 untouched
+    # here), and the 1 on claude-workflow-plugin-6im2. Three on-disk
+    # docs/reviews/*.json artifacts use a non-`R[0-9]+-F[0-9]+` id scheme
+    # (H2-F*/H2R2-F*/S6-F*, from a "hunt"-phase sub-process with its own
+    # numbering) and were checked against their corresponding LIVE bd comment
+    # streams: absent. cmd_validate_artifact already refuses that id shape
+    # for the JSON schema, so the legitimate writer (qa-gate.sh
+    # review-record) never turned them into a REVIEW-ARTIFACT comment to
+    # begin with (the gap is named on its own task: claude-workflow-plugin-
+    # 36mk). This grammar therefore changes nothing for any record ever
+    # written through the legitimate writer, and refuses a hand-typed or
+    # bd-imported comment using that same non-conforming shape for the
+    # identical reason validate-artifact already refuses it on write --
+    # closing the gap between the two paths, not opening a new one.
+    local ART_FINDINGS_LIST_RE
+    ART_FINDINGS_LIST_RE='(R[0-9]+-F[0-9]+:(critical|high|medium|low|info)(,R[0-9]+-F[0-9]+:(critical|high|medium|low|info))*)?'
+
+    local art ART_SELECT_ERR="" ART_SELECT_DETAIL=""
+    # ART-ITERATION-SELECT BEGIN (claude-workflow-plugin-k6re)
+
+    # ART-QUARANTINE-HASH -- REMOVED (claude-workflow-plugin-k6re, R2-F1).
+    #
+    # THIS USED TO BE HERE (R12-F1): a sha256 of every REVIEW-ARTIFACT
+    # candidate's raw first line, computed in bash, never inside the awk
+    # program below (a malformed candidate's raw text is untrusted content;
+    # piping it through a shell command built by string-interpolating that
+    # content -- what awk `system()`/`| getline` would require -- is the
+    # shell-injection shape backend.md's OWASP guidance forbids for the
+    # identical reason it forbids interpolating user input into SQL). An
+    # `is_quarantined(pos)` awk function then consulted a set of hashes
+    # read from any REVIEW-ARTIFACT-QUARANTINE v1 record in $firstlines
+    # before a malformed candidate could ever set badfindings/baditer/badts.
+    #
+    # WHY IT IS GONE, NOT MERELY TIGHTENED. Independent review round 2 of
+    # this same task (R2-F1) found the mechanism forgeable on its own first
+    # independent review:
+    #
+    #   1. normalize_comments() (this file, above) reduces every comment to
+    #      its TEXT string alone before anything downstream ever sees it --
+    #      author and every other column is discarded, for every reader of
+    #      this comment stream, not only this one. A "durable,
+    #      actor-attributed operator decision" is unverifiable by
+    #      construction from data shaped this way: there was never an
+    #      author field left to check.
+    #   2. The matcher accepted any comment whose FIRST LINE merely started
+    #      with `REVIEW-ARTIFACT-QUARANTINE v1 hash=<64 hex>` -- it did not
+    #      require the writer's own `at <ts>: <reason>` grammar, so anything
+    #      sharing just that prefix matched regardless of what followed it.
+    #   3. `qa-gate.sh quarantine-artifact` validated the hash shape and
+    #      required a non-empty reason, but a hand-typed comment or a `bd
+    #      import` reaches this file's read path directly and was never
+    #      required to pass through that validation at all.
+    #
+    # Put together: the same unauthenticated write path that can post a
+    # malformed REVIEW-ARTIFACT candidate in the first place could equally
+    # post a record that excuses one -- a second guard built on an
+    # unauthenticated channel is still an unauthenticated channel. Removing
+    # it costs nothing beyond the residual below: the writer-side guards
+    # that keep the LEGITIMATE writer from producing a malformed record to
+    # begin with (R11-F1's `iterations` type+integer check; R1-F1's
+    # magnitude bound, both still in force above validate-artifact and in
+    # ART-ITER-CMP below) are unrelated to this mechanism and untouched by
+    # this removal.
+    #
+    # THE RESIDUAL, STATED EXPLICITLY. A malformed REVIEW-ARTIFACT record
+    # posted via `bd import` or a hand-typed `bd comments add` -- the same
+    # two channels that already reach this selector without ever calling
+    # validate-artifact -- now deadlocks this task's gate PERMANENTLY, with
+    # no recovery through review-check.sh or qa-gate.sh. This is deliberate,
+    # not an oversight: the actor able to plant such a record is, by
+    # construction, also able to write any OTHER record directly (including
+    # a forged quarantine, which is exactly what this removal closes), so a
+    # forgeable escape hatch bought no real defence -- only a second thing
+    # to forge. The remedy is an operator repairing the affected comment
+    # directly in the store, outside this script.
+    #
+    # DO NOT RE-ADD A QUARANTINE, ALLOWLIST, OR SIMILAR OVERRIDE HERE. Any
+    # future in-band recovery must solve authentication FIRST (an
+    # attributable, verifiable signer this file's own read path can check)
+    # -- solving only "which record" (R12-F1's content hash) without
+    # solving "who says so" reproduces this exact finding.
+
+    local art_out art_rc=0
+    art_out=$(LC_ALL=C awk -v ART_SOFT="$ART_SOFT_FIELDS_RE" -v ART_FLIST="$ART_FINDINGS_LIST_RE" '
+        # safe_summary <line> -> "iteration=.. reviewed_hash=.. at=.." using
+        # ONLY strictly-numeric/hex character classes for the two fields the
+        # raw record could otherwise carry free-form text in -- structurally
+        # incapable of reproducing the forbidden token regardless of what a
+        # hand-crafted or corrupted reviewer=/model=/pin= value says, because
+        # those fields are never read here at all. See the comment above this
+        # block for why raw records are never quoted.
+        function safe_summary(line,    it, hs, ts2) {
+            it = "unparseable"
+            if (match(line, /iteration=[0-9]+/)) {
+                it = substr(line, RSTART + 10, RLENGTH - 10)
+            }
+            hs = "absent"
+            if (match(line, /reviewed_hash=[0-9a-fA-F]+/)) {
+                hs = substr(line, RSTART + 14, RLENGTH - 14)
+            }
+            ts2 = "unparseable"
+            if (match(line, / at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z:/)) {
+                ts2 = substr(line, RSTART + 4, RLENGTH - 5)
+            }
+            return "iteration=" it " reviewed_hash=" hs " at=" ts2
+        }
+        # safe_summary_malformed() and is_quarantined() -- REMOVED
+        # (claude-workflow-plugin-k6re, R2-F1). See the tombstone comment
+        # above this awk invocation, where ART-QUARANTINE-HASH used to sit,
+        # for the finding and the full reasoning. Every call site below now
+        # uses plain safe_summary() -- no hash is computed or printed for a
+        # malformed candidate any more, because nothing reads one.
+        # ART-ITER-CMP BEGIN (claude-workflow-plugin-k6re, R1-F1)
+        #
+        # THE DEFECT. `iters[n] = itraw + 0` (a few lines below) forced an
+        # UNBOUNDED validated digit string (itraw already matched ^[0-9]+$
+        # upstream) into awk own numeric type -- a C double -- before the
+        # max/winner computation ever ran. A double mantissa is 53 bits, so
+        # two DISTINCT decimal integers above 2^53 (9007199254740992) can
+        # silently collapse to the identical double. MEASURED on this host,
+        # via awk itself: assigning "9007199254740992"+0 to one variable and
+        # "9007199254740993"+0 to another and comparing them with == reports
+        # equal; both print back as 9007199254740992. Consequence: a record
+        # at iteration=9007199254740993 (older) and one at
+        # iteration=9007199254740992 (newer timestamp) compare
+        # iteration-EQUAL, so the newer-timestamp record reads as
+        # simultaneously max-iteration AND max-timestamp and is silently
+        # SELECTED as governing -- a wrong-record selection and a regression
+        # of the refuse-on-ambiguity property this whole selector exists to
+        # provide (review_artifact_selection_disagreement never fires when
+        # it should have).
+        #
+        # THE FIX. iteration values are never converted to awk numeric type
+        # anywhere in this selector, at any length. norm_iter() strips
+        # leading zeros (so "007" and "7" compare EQUAL -- they are the same
+        # iteration number under any other reading; this also makes a bare
+        # LENGTH compare a correct magnitude test, which it is not on
+        # un-normalised digit strings: a value padded with many leading
+        # zeros is a LONGER string than an unpadded smaller number while
+        # representing a SMALLER value once those zeros are removed).
+        # iter_cmp() then compares normalised LENGTH first -- exact for
+        # arbitrary-length non-negative integers, no magic constant, no
+        # double involved -- and only falls back to a character-by-character
+        # compare when both operands have the SAME normalised length, which
+        # is exactly the case (two huge, equal-length digit strings) a
+        # numeric coercion would get wrong again. That fallback is forced
+        # into STRING semantics via a non-digit sentinel (Z) appended to
+        # both sides: awk own numeric-string (strnum) auto-coercion would
+        # otherwise silently promote an equal-length all-digit comparison
+        # back to a numeric one -- the identical failure this whole fix
+        # removes, wearing a different hat. Verified empirically, not
+        # assumed (this file own standing discipline): a bare digit-string
+        # equality test inside this awk risks exactly that auto-promotion;
+        # appending Z makes the operand string form not look like a number
+        # at all, so no implementation strnum rule can apply.
+        #
+        # Only ever called with itraw / maxit, both already validated
+        # ^[0-9]+$ upstream (a value that fails that regex is baditer, never
+        # reaches n++/iters[]) -- norm_iter() does not need to guard
+        # non-digit input.
+        function norm_iter(s) {
+            sub(/^0+/, "", s)
+            if (s == "") s = "0"
+            return s
+        }
+        function iter_cmp(a, b,    na, nb) {
+            na = norm_iter(a); nb = norm_iter(b)
+            if (length(na) != length(nb)) return (length(na) < length(nb)) ? -1 : 1
+            if ((na "Z") == (nb "Z")) return 0
+            return ((na "Z") < (nb "Z")) ? -1 : 1
+        }
+        # ART-ITER-CMP END
+        # ART-PARSE-FNS BEGIN (claude-workflow-plugin-k6re R3-F1). See the
+        # ART-PARSE-SHARED comment in the bash caller (right before this
+        # awk program is built) for the full defect, fix, and backward-
+        # compatibility reasoning -- these four functions ARE that fix.
+        # Each is a STRICT SUPERSET of the one before it (art_findings_ok
+        # itself re-requires a valid iteration=; art_ts_ok in turn
+        # re-requires a valid findings=[...]) rather than three unrelated
+        # checks -- deliberate, not incidental: that is what "anchored"
+        # means here. You cannot validate what follows a token without
+        # first knowing where that token itself ends, so each stage regex
+        # has to re-walk everything the stage before it already confirmed. One
+        # consequence, verified directly while wiring the selector below: a
+        # record with a malformed findings=[...] token is refused by BOTH
+        # art_findings_ok() (badfindings) AND, independently, by art_ts_ok()
+        # (badts) -- removing the DEDICATED findings check alone still
+        # leaves the selector refusing such a record, just under
+        # badts/review_artifact_timestamp_unparseable instead of
+        # badfindings/review_artifact_malformed. review-count.test.sh
+        # section 4b documents this precisely (see the updated comment on
+        # test 4b.6) rather than asserting a stale error_key.
+        #
+        # art_iter_ok(line): two-step -- loose capture
+        # (iteration=[A-Za-z0-9._-]+, the SAME class the pre-existing itraw
+        # capture used) then strict ^[0-9]+$ on the FULL captured token.
+        # A single-step `iteration=[0-9]+` would silently accept only the
+        # digit PREFIX of something like "iteration=1.5" (matching just
+        # "1") and let the ".5" fall through to be misclassified downstream
+        # as a findings- or timestamp-stage failure instead of the
+        # iteration failure it actually is -- verified directly while
+        # building this fix.
+        function art_iter_ok(line,    m, tok_start, tok_len, tok) {
+            m = match(line, /^REVIEW-ARTIFACT v1 iteration=[A-Za-z0-9._-]+/)
+            if (m != 1) return 0
+            tok_start = length("REVIEW-ARTIFACT v1 iteration=") + 1
+            tok_len = RLENGTH - tok_start + 1
+            tok = substr(line, tok_start, tok_len)
+            return (tok ~ /^[0-9]+$/)
+        }
+        # art_findings_ok(line): the anchored walk through the seven
+        # optional soft fields (ART_SOFT, passed in via -v) to a
+        # WELL-FORMED findings=[...] token, content excluding whitespace
+        # (the content-class fix: see ART-PARSE-SHARED for why a legitimate
+        # finding list never needed a space either, so this costs nothing
+        # real and makes a bracket structurally unable to swallow a later,
+        # space-separated field as its own "content"). claude-workflow-
+        # plugin-k6re R7-F1 (independent review round 7) widened this SAME
+        # exclusion to `[` as well: the space-only class still let a
+        # bracket swallow its OWN delimiter when a declared finding value
+        # itself contained the literal text "findings=[", closing the
+        # bracket at that nested `[...]` instead of the real one -- see the
+        # R7-F1 comment above the ART_FINDINGS extractor below for the full
+        # defect and fix. This function, art_ts_ok, and art_prefix_len
+        # (both copies) all needed the identical one-character widening, by
+        # the same ART-PARSE-SHARED hand-kept-consistency this comment
+        # already documents.
+        function art_findings_ok(line,    re) {
+            re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                 " findings=\\[" ART_FLIST "\\]"
+            return (match(line, re) == 1)
+        }
+        # art_ts_ok(line): the FULL anchored grammar, iteration= through the
+        # mandatory `at <ts>:` that opens the summary (artifact_hash=
+        # optional, same reasoning as the seven soft fields).
+        function art_ts_ok(line,    re) {
+            re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                 " findings=\\[" ART_FLIST "\\]( artifact_hash=[A-Za-z0-9._-]+)?" \
+                 " at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z:"
+            return (match(line, re) == 1)
+        }
+        # art_prefix_len(line): same grammar as art_ts_ok(), but returns the
+        # LENGTH of the machine-token prefix (through the space after the
+        # summary colon) rather than a boolean. Not used by the selector
+        # below (art_ts_ok already establishes well-formedness; extraction
+        # then reuses the plain leftmost match, see the comment in the rule
+        # below for why that is safe once well-formedness is established) --
+        # this is the function the POST-SELECTION re-verification further
+        # down calls, on the single WINNING record, to compute the actual
+        # slice every field extractor reads from. Defined here, in the ONE
+        # shared text, so both call sites see the identical grammar.
+        function art_prefix_len(line,    re, n) {
+            re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                 " findings=\\[" ART_FLIST "\\]( artifact_hash=[A-Za-z0-9._-]+)?" \
+                 " at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z: "
+            n = match(line, re)
+            return (n == 1) ? RLENGTH : 0
+        }
+        # ART-PARSE-FNS END
+        BEGIN {
+            n = 0; badfindings = 0; baditer = 0; badts = 0
+        }
+        /^REVIEW-ARTIFACT v1 / {
+            # Three sequential, ANCHORED checks -- iteration, then findings,
+            # then timestamp, in that order. This precedence is not
+            # arbitrary and, unlike the pre-R3-F1 code, is not merely a
+            # style choice either: art_findings_ok() can only locate
+            # findings=[...] by first walking PAST a syntactically valid
+            # iteration= token, so "findings checked independently of
+            # iteration" and "a token position never inferred from an
+            # unanchored scan" cannot both be true at once -- the pre-R3-F1
+            # "findings checked first" precedence was only achievable
+            # BECAUSE its findings check ignored position entirely, which is
+            # the defect this rewrite removes. This only changes observable
+            # behaviour for a record with MULTIPLE simultaneous defects (no
+            # existing fixture pins that combination); every single-defect
+            # fixture in review-count.test.sh classifies identically
+            # either way.
+            if (!art_iter_ok($0)) {
+                baditer = 1; baditerline = $0
+                next
+            }
+            # ART-SELECT-FINDINGS-GUARD BEGIN (claude-workflow-plugin-k6re, R3-F1 rewrite)
+            if (!art_findings_ok($0)) {
+                badfindings = 1; badfindingsline = $0
+                next
+            }
+            # ART-SELECT-FINDINGS-GUARD END
+            if (!art_ts_ok($0)) {
+                badts = 1; badtsline = $0
+                next
+            }
+            # Well-formed under all three anchored checks. iteration/
+            # timestamp are extracted via a PLAIN leftmost match -- safe
+            # here, and deliberately the SAME extraction the pre-R3-F1 code
+            # used, because a leftmost match can only ever find a LATER,
+            # summary-embedded lookalike AFTER the real, anchored occurrence
+            # the three checks above already proved exists first: no field
+            # before the summary can contain a space (findings=[...] now
+            # included, per the content-class fix), so nothing before the
+            # summary can smuggle a later field keyword= earlier than its
+            # own true position.
+            itraw = ""
+            if (match($0, /iteration=[A-Za-z0-9._-]+/)) {
+                itraw = substr($0, RSTART + 10, RLENGTH - 10)
+            }
+            ts = ""
+            if (match($0, / at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z:/)) {
+                ts = substr($0, RSTART + 4, RLENGTH - 5)
+            }
+            lines[n] = $0
+            # iters[n] stores the VALIDATED (^[0-9]+$), UNMODIFIED digit
+            # string -- never `+ 0`. See ART-ITER-CMP above: converting to
+            # awk numeric type here is exactly the R1-F1 precision-loss
+            # defect. Every comparison against iters[] below goes through
+            # iter_cmp(), never a bare </>/==.
+            iters[n] = itraw
+            tss[n] = ts
+            n++
+        }
+        END {
+            # ART-SELECT-RECOVER -- REMOVED (claude-workflow-plugin-k6re,
+            # R2-F1; full history in the tombstone above, where
+            # ART-QUARANTINE-HASH used to sit). Reaching this END block with
+            # badfindings/baditer/badts still set means a malformed
+            # candidate exists; refuse unconditionally, regardless of where
+            # it sits or what is posted about it afterward -- there is
+            # nothing upstream that could have excluded it any more.
+            if (badfindings) { print "MALFORMED"; print safe_summary(badfindingsline); exit }
+            if (baditer) { print "ITER_UNPARSEABLE"; print safe_summary(baditerline); exit }
+            if (badts) { print "TS_UNPARSEABLE"; print safe_summary(badtsline); exit }
+            if (n == 0) { print "NONE"; exit }
+            # maxit is computed via iter_cmp() (claude-workflow-plugin-k6re,
+            # R1-F1) -- never `iters[i] > maxit`, which would coerce both
+            # sides to awk numeric type and reintroduce the precision-loss
+            # defect this fix removes. "" is a safe not-yet-set sentinel:
+            # every iters[i] is a non-empty ^[0-9]+$ string (minimum "0"),
+            # so it can never collide with the sentinel.
+            maxit = ""
+            for (i = 0; i < n; i++) { if (maxit == "" || iter_cmp(iters[i], maxit) > 0) maxit = iters[i] }
+            maxts = ""
+            for (i = 0; i < n; i++) { if (tss[i] > maxts) maxts = tss[i] }
+            winners = 0
+            winline = ""
+            for (i = 0; i < n; i++) {
+                if (iter_cmp(iters[i], maxit) == 0 && tss[i] == maxts) { winners++; winline = lines[i] }
+            }
+            # OK below prints the WINNING RECORD ITSELF (winline), never a
+            # summary: this becomes $art, and everything downstream
+            # (REVIEWER, THRESHOLD, ART_VERDICT, reviewer_identity in the
+            # final envelope, ...) already reads real reviewer= data from it
+            # -- pre-existing, legitimate behaviour this fix does not touch.
+            # Every OTHER exit here is diagnostic-only ($art stays "" for
+            # all of them, per the case statement below this awk program)
+            # and uses safe_summary().
+            if (winners == 1) { print "OK"; print winline; exit }
+            if (winners >= 2) { print "TIE_UNRESOLVED"; print safe_summary(winline); exit }
+            iterwinline = ""
+            for (i = 0; i < n; i++) { if (iter_cmp(iters[i], maxit) == 0) { iterwinline = lines[i]; break } }
+            tswinline = ""
+            for (i = 0; i < n; i++) { if (tss[i] == maxts) { tswinline = lines[i]; break } }
+            print "DISAGREEMENT"
+            print safe_summary(iterwinline) " ||| " safe_summary(tswinline)
+        }
+    ' "$firstlines" 2>/dev/null)
+    art_rc=$?
+    if [ "$art_rc" -ne 0 ]; then
+        emit_gate 4 "false" "review_artifact_set_unreadable" \
+            "could not read the REVIEW-ARTIFACT record set for $tid (awk exit $art_rc reading the comment firstlines); refusing rather than treating an unestablished set as having no records"
+    fi
+    local art_select_status
+    art_select_status="${art_out%%$'\n'*}"
+    if [ "$art_select_status" = "$art_out" ]; then
+        ART_SELECT_DETAIL=""
+    else
+        ART_SELECT_DETAIL="${art_out#*$'\n'}"
+    fi
+    case "$art_select_status" in
+        OK)                 art="$ART_SELECT_DETAIL" ;;
+        NONE)               art="" ;;
+        MALFORMED)          art=""; ART_SELECT_ERR="review_artifact_malformed" ;;
+        ITER_UNPARSEABLE)   art=""; ART_SELECT_ERR="review_artifact_iteration_unparseable" ;;
+        TS_UNPARSEABLE)     art=""; ART_SELECT_ERR="review_artifact_timestamp_unparseable" ;;
+        TIE_UNRESOLVED)     art=""; ART_SELECT_ERR="review_artifact_selection_tie_unresolved" ;;
+        DISAGREEMENT)       art=""; ART_SELECT_ERR="review_artifact_selection_disagreement" ;;
+        *)                  art=""; ART_SELECT_ERR="review_artifact_selection_internal_error" ;;
+    esac
+    # ART-ITERATION-SELECT END
+
+    # ART-PREFIX-GUARD (claude-workflow-plugin-k6re R3-F1). The SECOND,
+    # independent invocation of the anchored grammar art_ts_ok() already
+    # applied inside the selector above -- computed here, on the single
+    # WINNING record, in a SEPARATE awk process, so a future bug in the
+    # selector's OWN wiring (e.g. an edit that forgets to gate
+    # `lines[n]=$0` behind art_ts_ok()) does not silently propagate an
+    # unverified `art` all the way to the field extractors below. This is
+    # the direct descendant of the pre-R3-F1 MALFORMED-ARTIFACT-GUARD (same
+    # defense-in-depth role: `art` must never reach the extractors as
+    # anything other than a fully anchored record) -- moved EARLIER, ahead
+    # of the extractions themselves, because $ART_PREFIX (not $art) is what
+    # every extractor below now reads FROM; computing it after the
+    # extractions had already run would defeat the point.
+    #
+    # ART_PREFIX is also what closes reproduction 2 of R3-F1: even a record
+    # that legitimately passed the selector's art_ts_ok() can carry a
+    # SUMMARY that independently mentions `findings=[...]`-shaped text --
+    # art_ts_ok() says nothing about the summary's own content, by design
+    # (it is free text, and is meant to be). Slicing here, once, is what
+    # makes that summary structurally unreachable by every extractor below,
+    # including ART_FINDINGS's sed command, whose GREEDY leading `.*` would
+    # otherwise prefer a LATER, summary-embedded occurrence over the real
+    # one -- exactly the defect measured against a perfectly well-formed
+    # record: `... findings=[R3-F1:high] artifact_hash=ah at <ts>: fixed the
+    # bug where findings=[] was mis-parsed` read back ART_FINDINGS="" before
+    # this fix, silently suppressing an open HIGH with no malformed input
+    # anywhere. The other nine fields below (REVIEWER, THRESHOLD, ...) use
+    # `grep -oE | head -1`, which is leftmost-first rather than greedy-last
+    # and so was never fooled by a LATER summary occurrence the same way --
+    # they are scoped to $ART_PREFIX here anyway, uniformly, so the
+    # invariant this file states is simply true ("every extractor reads
+    # from the prefix, never the raw winning line") rather than true for
+    # nine fields for one reason and true for a tenth for a different one.
+    ART_PREFIX=""
+    if [ -n "$art" ]; then
+        ART_PREFIX=$(LC_ALL=C awk -v ART_SOFT="$ART_SOFT_FIELDS_RE" -v ART_FLIST="$ART_FINDINGS_LIST_RE" '
+            function art_prefix_len(line,    re, n) {
+                re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                     " findings=\\[" ART_FLIST "\\]( artifact_hash=[A-Za-z0-9._-]+)?" \
+                     " at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z: "
+                n = match(line, re)
+                return (n == 1) ? RLENGTH : 0
+            }
+            { n = art_prefix_len($0); if (n > 0) print substr($0, 1, n) }
+        ' <<<"$art" 2>/dev/null)
+    fi
+    # MALFORMED-ARTIFACT-GUARD-START (load-bearing; the L1 META strips to END)
+    # Defense in depth for claude-workflow-plugin-vg8: a winning record that
+    # cannot produce a machine-token prefix is MALFORMED -- it must NEVER be
+    # read as "zero findings". Independent of the selector's own art_ts_ok()
+    # gate above (see ART-PREFIX-GUARD): if $art is non-empty but
+    # $ART_PREFIX came back empty, something reached this point without
+    # going through, or surviving, that gate.
+    if [ -n "$art" ] && [ -z "$ART_PREFIX" ]; then
+        emit_gate 4 "false" "review_artifact_malformed" \
+            "the latest review record carries no well-formed findings=[...] token (corrupted or truncated record); refusing to read it as zero findings"
+    fi
+    # MALFORMED-ARTIFACT-GUARD-END
+
+    # ART-PREFIX-PARTITION (claude-workflow-plugin-k6re R5-F1, independent
+    # review round 5). See the comment above the REVIEWER=... extractor
+    # below for how each field now reads from this partition -- this comment
+    # covers the defect and the fix itself.
+    #
+    # THE DEFECT (R5-F1). findings=[...] is the ONE span inside $ART_PREFIX
+    # whose content class (`[^][:space:]]*`, everything except `]` and
+    # whitespace) admits `=`. Every OTHER field value class in this grammar
+    # (reviewer=/model=/pin=/reviewed_hash=/risk_threshold=/verdict=/
+    # stopped_by=/artifact_hash=/iteration=) forbids `=` outright, so none of
+    # THEM can ever forge a nested `key=value` pair -- verified directly,
+    # none of those nine classes contains `=` as a member. A record that
+    # OMITS the seven soft fields (every one is independently optional; see
+    # ART_SOFT_FIELDS_RE above) and instead plants `reviewer=<forged>`,
+    # `risk_threshold=<forged>`, `verdict=<forged>`, `reviewed_hash=<forged>`
+    # INSIDE the brackets is accepted by art_ts_ok() -- an absent soft field
+    # is not a grammar violation -- and every extractor below used to scan
+    # the WHOLE of $ART_PREFIX with `grep -oE ... | head -1`, brackets
+    # included. Measured directly against:
+    #   REVIEW-ARTIFACT v1 iteration=99 findings=[R1-F1,reviewer=example-name,
+    #     risk_threshold=low,verdict=approve,reviewed_hash=deadbeefdeadbeef]
+    #     at 2026-09-02T00:00:00Z: benign looking summary
+    # this read back REVIEWER=example-name, THRESHOLD=low,
+    # ART_HASH=deadbeefdeadbeef, and ART_VERDICT=approve -- none of them
+    # ever declared -- which bypassed REVIEWER-NONEMPTY-GUARD below (an
+    # attacker-chosen "independent" identity where none was named) and fed a
+    # forged risk_threshold/verdict/reviewed_hash straight into emit_gate's
+    # reported envelope. A forged `artifact_hash=` planted the same way
+    # reaches ART_FILE_HASH identically -- verified separately, one field
+    # later in the grammar, same mechanism.
+    #
+    # THE FIX removes the mechanism ("grep the whole region for key=value")
+    # rather than guarding this one instance of it, per the operator
+    # standing ruling on this arc: a defect family that survives repeated
+    # rounds against the same mechanism gets the mechanism removed, not
+    # guarded again. This is the THIRD recurrence of "an unanchored scan
+    # reads text the grammar never assigned to that field" against this one
+    # parse (greedy findings= sed, the summary boundary, now the bracket
+    # content). $ART_PREFIX is partitioned into the two regions the anchored
+    # grammar already proves are disjoint from the bracket, using the SAME
+    # technique art_prefix_len() itself uses (an anchored match, then
+    # substr() on RLENGTH) -- not a new mechanism, pointed at the boundary on
+    # each side of the one span that needs excluding:
+    #
+    #   ART_PREFIX_HEAD -- "REVIEW-ARTIFACT v1 iteration=N" plus whichever of
+    #     the seven soft fields are present, ending at the space immediately
+    #     before "findings=[". Nowhere else in this grammar defines
+    #     iteration=, reviewer=, model=, pin=, reviewed_hash=,
+    #     risk_threshold=, verdict=, or stopped_by=, so this is the only
+    #     region that ever needs to be searched for any of them.
+    #   ART_PREFIX_TAIL -- everything from immediately after the findings
+    #     bracket close through the end of $ART_PREFIX (the optional
+    #     artifact_hash= token and the mandatory " at <ts>: "). artifact_hash=
+    #     is the only field the grammar ever places after the bracket, so
+    #     this is the only region that ever needs to be searched for it.
+    #
+    # Neither region contains one byte of the bracket content -- not "the
+    # bracket minus a denylisted substring", the bracket is simply outside
+    # both regions -- so a value planted inside findings=[...] can never
+    # again be read back as a different field declaration, regardless of
+    # what content that bracket is asked to hold in the future.
+    # ART_FINDINGS (below) is the one extractor that is SUPPOSED to read the
+    # bracket; it is unchanged and keeps reading $ART_PREFIX directly. Every
+    # OTHER extractor in this function now reads from ART_PREFIX_HEAD or
+    # ART_PREFIX_TAIL, never from $ART_PREFIX itself.
+    #
+    # MEASURED: against the crafted record above, ART_PREFIX_HEAD is exactly
+    # "REVIEW-ARTIFACT v1 iteration=99" (no soft fields present) and every
+    # one of REVIEWER/THRESHOLD/ART_HASH/ART_VERDICT/ART_FILE_HASH reads back
+    # empty -- identical to how a genuinely bare record (no soft fields
+    # declared; the live claude-workflow-plugin-fkm.1.1 shape, all six real
+    # records) has always read. Also measured against a fully-populated
+    # legitimate record (all seven soft fields plus artifact_hash=, including
+    # a model= value that legitimately contains `[`/`]` per the 46w9 bracket
+    # widening): every extracted value is byte-identical to the pre-fix
+    # extraction -- no regression on the well-formed path.
+    ART_PREFIX_HEAD=""
+    ART_PREFIX_TAIL=""
+    if [ -n "$ART_PREFIX" ]; then
+        local _art_prefix_regions
+        _art_prefix_regions=$(LC_ALL=C awk -v ART_SOFT="$ART_SOFT_FIELDS_RE" -v ART_FLIST="$ART_FINDINGS_LIST_RE" '
+            function art_head_len(line,    re, n) {
+                re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT
+                n = match(line, re)
+                return (n == 1) ? RLENGTH : 0
+            }
+            function art_bracket_end_len(line,    re, n) {
+                re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                     " findings=\\[" ART_FLIST "\\]"
+                n = match(line, re)
+                return (n == 1) ? RLENGTH : 0
+            }
+            {
+                h = art_head_len($0)
+                b = art_bracket_end_len($0)
+                print substr($0, 1, h)
+                print substr($0, b + 1)
+            }
+        ' <<<"$ART_PREFIX" 2>/dev/null)
+        ART_PREFIX_HEAD="${_art_prefix_regions%%$'\n'*}"
+        ART_PREFIX_TAIL="${_art_prefix_regions#*$'\n'}"
+    fi
+    # ART-PREFIX-PARTITION-GUARD. HEAD is never empty when ART_PREFIX is
+    # non-empty -- ART_PREFIX always contains at least "REVIEW-ARTIFACT v1
+    # iteration=N" (iteration= is mandatory, not one of the seven optional
+    # soft fields), and art_head_len()'s regex is anchored on exactly that
+    # same mandatory literal. An empty ART_PREFIX_HEAD here can only mean
+    # this awk invocation itself failed to run (rather than ran and found
+    # nothing) -- refuse rather than silently reading every extractor below
+    # as "no soft fields declared", which would misreport a well-formed
+    # record's real reviewer=/model=/... as absent.
+    if [ -n "$ART_PREFIX" ] && [ -z "$ART_PREFIX_HEAD" ]; then
+        emit_gate 4 "false" "review_artifact_partition_failed" \
+            "could not partition the REVIEW-ARTIFACT v1 record for $tid into its head/findings/tail regions (awk failed to reproduce a result that must always be non-empty here); refusing rather than reading every soft field as undeclared"
+    fi
+    # ART-PREFIX-PARTITION END
 
     # ROUNDS (claude-workflow-plugin-2ty) --------------------------------------
     #
@@ -1548,8 +2528,13 @@ cmd_gate() {
     # non-empty token, so "no hash to compare" can never be read as "everything
     # matches".
     ROUNDS_HASH="$want_hash"
-    if [ -z "$ROUNDS_HASH" ] && [ -n "$art" ]; then
-        ROUNDS_HASH=$(printf '%s' "$art" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    # reviewed_hash= is a soft field (see ART_SOFT_FIELDS_RE); it only ever
+    # legitimately appears in ART_PREFIX_HEAD (claude-workflow-plugin-k6re
+    # R5-F1 -- see ART-PREFIX-PARTITION above). The guard below still checks
+    # ART_PREFIX (not ART_PREFIX_HEAD) as the "a record exists at all"
+    # signal -- the two are non-empty/empty together by construction.
+    if [ -z "$ROUNDS_HASH" ] && [ -n "$ART_PREFIX" ]; then
+        ROUNDS_HASH=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
     fi
 
     # CYCLE-SURVIVAL BEGIN (claude-workflow-plugin-0in1)
@@ -1628,26 +2613,60 @@ cmd_gate() {
     # ROUNDS end ---------------------------------------------------------------
 
     if [ -z "$art" ]; then
+        # The three MALFORMED/ITER_UNPARSEABLE/TS_UNPARSEABLE classes share
+        # one remediation. claude-workflow-plugin-k6re R2-F1 removed the
+        # quarantine-artifact recovery path R12-F1 had put here (a forged
+        # quarantine record could clear a malformed candidate exactly as
+        # easily as the malformed record itself was posted -- see the
+        # tombstone above the awk invocation): there is no recovery command
+        # to name any more, and this message says so rather than pointing at
+        # one that no longer exists.
+        case "$ART_SELECT_ERR" in
+            review_artifact_malformed|review_artifact_iteration_unparseable|review_artifact_timestamp_unparseable)
+                emit_gate 4 "false" "$ART_SELECT_ERR" \
+                    "a REVIEW-ARTIFACT v1 candidate for $tid is malformed (record: ${ART_SELECT_DETAIL:-<none>}); refusing unconditionally and permanently, regardless of where this candidate sits in bd's comment history or what any later comment claims about it. There is no recovery path through review-check.sh or qa-gate.sh (claude-workflow-plugin-k6re R2-F1 removed the prior comment-based override that used to exist for this: the read side could not verify who posted an excusing record, and matched it too loosely, so the same unauthenticated write path able to post a malformed record could equally forge an excuse for one). An operator must repair the underlying record directly in the store; nothing posted through an ordinary bd comment can clear this"
+                ;;
+        esac
+        if [ -n "$ART_SELECT_ERR" ]; then
+            emit_gate 4 "false" "$ART_SELECT_ERR" \
+                "could not determine which REVIEW-ARTIFACT v1 record governs for $tid without relying on comment position (offending record: ${ART_SELECT_DETAIL:-<none>}); refusing rather than falling back to the last comment in bd's append order, which is the exact defect this selector replaces"
+        fi
         emit_gate 4 "false" "review_artifact_missing" "no REVIEW-ARTIFACT v1 comment found for $tid"
     fi
 
-    REVIEWER=$(printf '%s' "$art" | grep -oE 'reviewer=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
-    THRESHOLD=$(printf '%s' "$art" | grep -oE 'risk_threshold=[A-Za-z0-9_]+' | head -1 | cut -d= -f2- || true)
-    ART_ITER=$(printf '%s' "$art" | grep -oE 'iteration=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    # Every extractor below reads from $ART_PREFIX, never from $art -- see
+    # ART-PREFIX-GUARD above for why that is the whole fix, not an
+    # incidental cleanup: $ART_PREFIX ends at the space after the summary
+    # colon, so a free-text summary that mentions any of these tokens'
+    # spelling is not merely unlikely to confuse the extraction below, it is
+    # structurally absent from the string these commands ever see.
+    #
+    # AS OF claude-workflow-plugin-k6re R5-F1 (see ART-PREFIX-PARTITION
+    # above), that is necessary but no longer sufficient on its own:
+    # iteration=/reviewer=/model=/pin=/reviewed_hash=/risk_threshold=/
+    # verdict=/stopped_by= now read from ART_PREFIX_HEAD (the span before
+    # the findings bracket) and artifact_hash= reads from ART_PREFIX_TAIL
+    # (the span after it) -- neither can contain a byte of the bracket's own
+    # content, so nothing planted inside findings=[...] can be read back as
+    # one of these fields. Only ART_FINDINGS itself still reads the raw
+    # $ART_PREFIX, because it is the one extractor meant to see the bracket.
+    REVIEWER=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'reviewer=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    THRESHOLD=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'risk_threshold=[A-Za-z0-9_]+' | head -1 | cut -d= -f2- || true)
+    ART_ITER=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'iteration=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
     # bjx: widened to include brackets (claude-workflow-plugin-46w9) — a real
     # observed runtime id, `claude-opus-5[1m]`, was truncated at the `[` by
     # the pre-46w9 class and silently lost its bracket suffix on read-back.
     # `]` must be the character immediately after the opening `[` and `-` must
     # be last: POSIX ERE does not treat `\[`/`\]` as escapes INSIDE a bracket
     # expression (measured directly while building this check).
-    ART_MODEL=$(printf '%s' "$art" | grep -oE 'model=[]A-Za-z0-9._:/[-]+' | head -1 | cut -d= -f2- || true)
+    ART_MODEL=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'model=[]A-Za-z0-9._:/[-]+' | head -1 | cut -d= -f2- || true)
     # "pin=" mirrors the SAME abbreviation "model=" already uses for the JSON
     # field reviewer_model — the JSON payload key stays reviewer_pin (matching
     # validate-artifact's schema), the comment TOKEN is short, consistent with
     # this grammar's existing convention, and unambiguous (no other token name
     # in this grammar contains "pin" as a substring).
-    ART_REVIEWER_PIN=$(printf '%s' "$art" | grep -oE 'pin=[]A-Za-z0-9._:/[-]+' | head -1 | cut -d= -f2- || true)
-    ART_HASH=$(printf '%s' "$art" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    ART_REVIEWER_PIN=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'pin=[]A-Za-z0-9._:/[-]+' | head -1 | cut -d= -f2- || true)
+    ART_HASH=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'reviewed_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
     # artifact_hash= (v5 D2 / claude-workflow-plugin-rqer): the byte digest of
     # the canonical artifact FILE (docs/reviews/<tid>-r<n>.json), as opposed
     # to ART_HASH above, which is reviewed_hash — the CHANGE-SET hash the
@@ -1655,10 +2674,123 @@ cmd_gate() {
     # disk today, the other names a claim about the past. Absent on any
     # record written before this field existed — an empty string, read by
     # cmd_approve's REVIEW-ARTIFACT-BINDING-TOKEN ladder as "no binding".
-    ART_FILE_HASH=$(printf '%s' "$art" | grep -oE 'artifact_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
-    ART_VERDICT=$(printf '%s' "$art" | grep -oE 'verdict=[A-Za-z]+' | head -1 | cut -d= -f2- || true)
-    ART_STOPPED=$(printf '%s' "$art" | grep -oE 'stopped_by=[A-Za-z0-9_:]+' | head -1 | cut -d= -f2- || true)
-    ART_FINDINGS=$(printf '%s' "$art" | sed -nE 's/.*findings=\[([^]]*)\].*/\1/p' || true)
+    # Unlike the other nine fields on this page, artifact_hash= is placed
+    # AFTER the findings bracket in the grammar (see art_ts_ok()), so it
+    # reads from ART_PREFIX_TAIL, not ART_PREFIX_HEAD (claude-workflow-
+    # plugin-k6re R5-F1 — see ART-PREFIX-PARTITION above).
+    ART_FILE_HASH=$(printf '%s' "$ART_PREFIX_TAIL" | grep -oE 'artifact_hash=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2- || true)
+    ART_VERDICT=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'verdict=[A-Za-z]+' | head -1 | cut -d= -f2- || true)
+    ART_STOPPED=$(printf '%s' "$ART_PREFIX_HEAD" | grep -oE 'stopped_by=[A-Za-z0-9_:]+' | head -1 | cut -d= -f2- || true)
+    # ART-FINDINGS-EXTRACT BEGIN (claude-workflow-plugin-k6re R7-F1).
+    # Sentinel-anchored (not line-numbered) so the L1 spec's mutant can swap
+    # this region for the pre-fix one-liner without drifting off target as
+    # the file is edited around it -- same convention as
+    # MALFORMED-ARTIFACT-GUARD and IMPLEMENTER-SET-READ-GUARD elsewhere in
+    # this function.
+    # ART_FINDINGS is the field R3-F1 was filed against: sed's leading `.*`
+    # is GREEDY and prefers the LAST findings=[...] occurrence on a line, so
+    # this command was never safe to run against anything wider than the
+    # anchored prefix -- see ART-PREFIX-GUARD above for the measured
+    # reproduction.
+    #
+    # claude-workflow-plugin-k6re R7-F1 (independent review round 7,
+    # reproduced by the orchestrator before dispatch). The comment this
+    # replaces asserted: "$ART_PREFIX contains AT MOST one findings=[...]
+    # occurrence by construction (the regex used by art_prefix_len requires
+    # the WHOLE prefix to match exactly once, end to end), so greedy-vs-
+    # leftmost is no longer a live question here: there is only one
+    # occurrence left to find." MEASURED FALSE, and nothing had ever tested
+    # it:
+    #   ... findings=[R7-F1:high,findings=[] at <ts>: summary
+    # was a WELL-FORMED record under the pre-fix grammar (the content class
+    # below used to read `[^][:space:]]*`, excluding only `]` and
+    # whitespace -- it PERMITTED a literal `[`), and its $ART_PREFIX
+    # genuinely contained the literal text "findings=[" TWICE: once for the
+    # real field, and once again planted inside the declared finding value
+    # itself. The anchored grammar closes the bracket at the FIRST `]` it
+    # meets, and this record arranges for that to be the nested one rather
+    # than a real closing bracket -- so BOTH the shipped GREEDY sed
+    # (preferring the LAST occurrence) and a LEFTMOST rewrite (preferring
+    # the FIRST) read back ART_FINDINGS="" against it, verified directly in
+    # both directions. Greediness direction was never the defect: the
+    # CONTENT CLASS admitting the bracket delimiter itself as legal content
+    # was. A declared HIGH finding vanished with no malformed input
+    # anywhere -- open_findings read 0 and the gate reported a clean
+    # review.
+    #
+    # THE FIX excludes `[` from the findings content class everywhere this
+    # grammar bracket is matched: art_findings_ok / art_ts_ok /
+    # art_prefix_len above, and the ART-PREFIX-GUARD / ART-PREFIX-PARTITION
+    # duplicates of art_prefix_len / art_bracket_end_len (the ART-PARSE-
+    # SHARED hand-kept-consistent copies -- awk has no cross-invocation
+    # `source`, so each site keeps its own). A legitimate finding list
+    # (`Rn-Fn:severity[,Rn-Fn:severity]*`) never needs `[` any more than it
+    # needs a space or an `=` -- verified against every fixture in the
+    # review-count.test.sh sections covering this grammar -- so this costs
+    # nothing real, the exact R3-F1 reasoning extended one character class
+    # further. Once no candidate can carry a nested `[` inside the bracket
+    # and still satisfy art_findings_ok(), a record shaped like the one
+    # above is refused at SELECTION as review_artifact_malformed and never
+    # reaches this extractor at all.
+    #
+    # THIS EXTRACTOR NO LONGER TRUSTS THAT UPSTREAM REFUSAL ALONE (defense
+    # in depth -- the same reasoning ART-PREFIX-GUARD above already states
+    # for not trusting the wiring of the selector exclusively, and the
+    # exact discipline the predecessor of this comment skipped by
+    # declaring the remainder safe with an argument instead of a re-walk):
+    # it re-derives its own anchored open/close offsets from $ART_PREFIX
+    # under the SAME tightened grammar, rather than scanning $ART_PREFIX
+    # with sed, greedy or leftmost. ART-FINDINGS-EXTRACT-GUARD below
+    # refuses rather than reading a wiring mismatch between this and the
+    # checks above as "zero findings" -- the same failure mode this whole
+    # fix exists to close, now guarded against a second cause (a future
+    # drift between the duplicated copies) as well as the first (the
+    # permissive class).
+    ART_FINDINGS=""
+    if [ -n "$ART_PREFIX" ]; then
+        local _art_findings_out _art_findings_status _art_findings_detail
+        _art_findings_out=$(LC_ALL=C awk -v ART_SOFT="$ART_SOFT_FIELDS_RE" -v ART_FLIST="$ART_FINDINGS_LIST_RE" '
+            function art_findings_open_len(line,    re, n) {
+                re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT " findings=\\["
+                n = match(line, re)
+                return (n == 1) ? RLENGTH : 0
+            }
+            function art_bracket_end_len(line,    re, n) {
+                re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                     " findings=\\[" ART_FLIST "\\]"
+                n = match(line, re)
+                return (n == 1) ? RLENGTH : 0
+            }
+            {
+                ol = art_findings_open_len($0)
+                bl = art_bracket_end_len($0)
+                if (ol > 0 && bl > ol) { print "OK"; print substr($0, ol + 1, bl - ol - 1) }
+                else { print "FAIL" }
+            }
+        ' <<<"$ART_PREFIX" 2>/dev/null)
+        _art_findings_status="${_art_findings_out%%$'\n'*}"
+        if [ "$_art_findings_status" = "$_art_findings_out" ]; then
+            _art_findings_detail=""
+        else
+            _art_findings_detail="${_art_findings_out#*$'\n'}"
+        fi
+        # ART-FINDINGS-EXTRACT-GUARD (claude-workflow-plugin-k6re R7-F1).
+        # $ART_PREFIX is already validated well-formed above (a non-empty
+        # art_prefix_len result under this SAME tightened grammar,
+        # MALFORMED-ARTIFACT-GUARD) -- so finding no bracket here means
+        # these two functions have drifted out of sync with art_prefix_len,
+        # not that the record is legitimately bracket-less (a bracket-less
+        # record fails art_ts_ok upstream and never reaches this point at
+        # all). Refuse rather than silently reading that drift as "zero
+        # findings".
+        if [ "$_art_findings_status" = "OK" ]; then
+            ART_FINDINGS="$_art_findings_detail"
+        else
+            emit_gate 4 "false" "review_artifact_malformed" \
+                "the latest review record findings=[...] token could not be re-extracted from its already machine-token-validated prefix for $tid (internal grammar mismatch between this extractor and the checks above); refusing rather than reading it as zero findings"
+        fi
+    fi
+    # ART-FINDINGS-EXTRACT END (claude-workflow-plugin-k6re R7-F1)
 
     # ARTIFACT-COMPLETENESS (claude-workflow-plugin-nq5f). A review that stopped
     # at a CAP (max_findings / max_review_iterations / timeout) ran out of TURNS
@@ -1677,24 +2809,20 @@ cmd_gate() {
         cap:*) ART_CAP_TERMINATED="true" ;;
     esac
 
-    # MALFORMED-ARTIFACT-GUARD-START (load-bearing; the L1 META strips to END)
-    # Defense in depth for claude-workflow-plugin-vg8: a record line carrying no
-    # WELL-FORMED findings=[...] token is MALFORMED — it must NEVER be read as
-    # "zero findings". Both corruption shapes land here: a control character
-    # that split the record (the token was pushed to a later line, so this line
-    # has no token at all) and a control character inside a finding id (the
-    # token is present but its bracket never closes). Reporting malformed keeps
-    # a corrupted record from masquerading as a clean review.
-    if ! printf '%s' "$art" | grep -qE 'findings=\[[^]]*\]'; then
-        emit_gate 4 "false" "review_artifact_malformed" \
-            "the latest review record carries no well-formed findings=[...] token (corrupted or truncated record); refusing to read it as zero findings"
-    fi
-    # MALFORMED-ARTIFACT-GUARD-END
+    # MALFORMED-ARTIFACT-GUARD moved: this used to be here, re-checking
+    # `findings=\[[^]]*\]` as a bare substring test against $art. It is now
+    # ART-PREFIX-GUARD, above, ahead of the extractions rather than after
+    # them -- see that comment for why (it computes $ART_PREFIX, which
+    # every extractor below reads from, so it has to run before them, not
+    # after) and for the vg8 defense-in-depth reasoning this block used to
+    # carry. Still load-bearing, still what the L1 META strips (sentinels
+    # moved with it: MALFORMED-ARTIFACT-GUARD-START/-END now bracket the
+    # $ART_PREFIX computation above, not this now-removed second copy).
 
     # REVIEWER-NONEMPTY-GUARD BEGIN (i8cx wave 2, adjacent gap noted alongside
     # the impl_lines fix below). Not a pipefail defect -- REVIEWER is
-    # extracted from an in-memory string a few lines up (`printf '%s' "$art"
-    # | grep -oE 'reviewer=...' | head -1 | cut ...`), which cannot mask a
+    # extracted from an in-memory string a few lines up (`printf '%s'
+    # "$ART_PREFIX" | grep -oE 'reviewer=...' | head -1 | cut ...`), which cannot mask a
     # read failure the way a FILE read can. The gap is a missing VALIDATION:
     # nothing between the artifact-missing check above and the independence
     # check below required `reviewer=` to actually be present on the record.

@@ -215,9 +215,11 @@ restage "$TID" "src/handler.ts"
 record_artifact "$TID" 2 "qa-claude" \
     '[{"id":"R2-F1","severity":"critical","location":"src/handler.ts:42","evidence":"the retry loop swallows the auth error","description":"silent auth failure"}]'
 # Precondition: the record still matches (so any block is about REVIEW state).
+# claude-workflow-plugin-yrij: anchored at `^`, matching the real hook's own
+# fix (byte-neutral here — this precondition only ever sees a genuine record).
 D2_RECORD_OK=$(bd_show_with_comments "$TID" \
     | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
-             | select(test("QA-GATE APPROVED .*change_set_hash="))' 2>/dev/null | wc -l | tr -d ' ')
+             | select(test("^QA-GATE APPROVED .*change_set_hash="))' 2>/dev/null | wc -l | tr -d ' ')
 assert_eq "D2: precondition — the change-set-bound approval record is still on file" \
     "1" "$D2_RECORD_OK"
 assert_eq "D2: post-approval open finding -> BLOCK" "block" "$(stop_decision)"

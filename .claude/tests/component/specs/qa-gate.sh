@@ -537,9 +537,12 @@ QG_BIND="$FIXTURE_BIND/.claude/scripts/qa-gate.sh"
 IR_BIND="$FIXTURE_BIND/.claude/scripts/impact-report.sh"
 TRACK_BIND="$FIXTURE_BIND/.claude/.qa-tracking"
 bind_hash_of_record() {
+    # claude-workflow-plugin-yrij: anchored at `^`, matching the real
+    # writer/reader's own fix (byte-neutral here — this helper is only ever
+    # exercised against genuine, real records in this spec).
     bd_show_with_comments "$1" \
         | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
-                 | select(test("QA-GATE APPROVED .*change_set_hash="))
+                 | select(test("^QA-GATE APPROVED .*change_set_hash="))
                  | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | head -1
 }
 TID_BIND=$(cd "$FIXTURE_BIND" && bd create "approve writes bound record" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')

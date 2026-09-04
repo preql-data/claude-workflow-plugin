@@ -514,6 +514,19 @@ printf '\n=== Section 2: stubbed qa-gate.sh — proving the unconditional call i
 # build_sandbox_discipline "design-fail" shape, WITH the bypass marker this
 # file's own comment (line ~1001-1004 there) explicitly says that fixture
 # does NOT carry — the marker is exactly the one variable this section adds.
+#
+# claude-workflow-plugin-yrij: the fabricated comment's `reviewed_by=` MUST
+# be the literal "none", not an arbitrary placeholder identity. qa-gate.sh's
+# writer (qa-gate.sh:4235, 4268-4327, 3713) sets reviewed_by to "none" if,
+# and only if, --no-review was genuinely passed; every other path leaves a
+# real identity, and this stub's `[review bypass:]` marker is meant to read
+# as that genuine escape (the whole point is to skip review-discipline
+# cleanly so design-discipline is what actually gets exercised). Before
+# verify-before-stop.sh anchored that marker on reviewed_by=none, a
+# placeholder like "test-fixture" worked by accident — the old reader
+# treated ANY occurrence of the `[review bypass:` substring as sufficient.
+# Same class as override-disclosure.test.sh's build_sandbox_release /
+# build_sandbox_worktree_release / build_sandbox_discipline fixtures.
 
 build_sandbox_stub() {
     local root="$1" precheck_mode="$2"
@@ -567,7 +580,7 @@ DS
     cat > "$root/bin/bd" <<BDSTUB
 #!/bin/bash
 if [ "\${1:-}" = "show" ]; then
-    printf '%s' '{"comments":[{"text":"QA-GATE APPROVED change_set_hash=$h reviewed_by=test-fixture [review bypass: test fixture, nothing to review] [design bypass: stub fixture, exercising the wiring only]"}]}'
+    printf '%s' '{"comments":[{"text":"QA-GATE APPROVED change_set_hash=$h reviewed_by=none [review bypass: test fixture, nothing to review] [design bypass: stub fixture, exercising the wiring only]"}]}'
     exit 0
 fi
 exit 0

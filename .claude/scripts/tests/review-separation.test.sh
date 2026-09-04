@@ -375,6 +375,319 @@ assert_eq "2.2 after arbitrate overrule: status=approved" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 2.3: the quarantine-artifact override has been REMOVED (claude-workflow-plugin-k6re, R2-F1) ==="
+# HISTORY. R12-F1 introduced quarantine-artifact as the only recovery path
+# for a malformed REVIEW-ARTIFACT candidate once review-check.sh's selector
+# stopped inferring safety from comment position (R11-F1's own premise,
+# falsified against the actual bd 1.2.2 source). Independent review round 2
+# of THIS SAME TASK (R2-F1) found the RECOVERY mechanism itself forgeable:
+# the comment stream carries no verifiable author, the reader matched a
+# bare hash= prefix rather than the writer's full `at <ts>: <reason>`
+# grammar, and a hand-typed comment or a `bd import` reaches the reader
+# without ever calling this writer's own validation. Removed entirely
+# rather than re-guarded. This section now drives that removal end to end,
+# through the REAL `approve` and the now-absent `quarantine-artifact`
+# command — unlike review-count.test.sh's offline --comments-json seam,
+# which proves the SELECTOR logic in isolation.
+
+sha256_of_stdin() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 2>/dev/null | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum 2>/dev/null | awk '{print $1}'
+    fi
+}
+
+if [ -z "$(printf 'probe' | sha256_of_stdin)" ]; then
+    echo "  SKIP: Section 2.3 (malformed-record permanent-refusal proof) — neither shasum nor sha256sum on PATH"
+else
+    # A malformed record injected DIRECTLY via `bd comments add`, bypassing
+    # review-record's writer-side validation entirely — record_artifact's
+    # helper goes through that REAL writer, which (since R11-F1) REJECTS a
+    # non-integer `iterations` at write time, so it cannot produce this
+    # fixture. This is exactly the shape a pre-writer-guard hand-typed
+    # record, or a `bd import` carrying one, would leave behind.
+    TID_QUAR=$(new_task "review-sep: malformed record has no recovery" "src/seven.ts")
+    record_implementer "$TID_QUAR" "backend"
+    # reviewer=sol-codex deliberately (not qa-claude): this is the identity
+    # review-count.test.sh's own offline BAD_ITER fixture uses to prove the
+    # malformed-refusal message never leaks it; using the SAME identity
+    # here makes THIS live, end-to-end lane-purity check (below) non-vacuous
+    # on its own — a leak has something real to leak, not merely an
+    # absence of anything worth scrubbing.
+    MALFORMED_LINE="REVIEW-ARTIFACT v1 iteration=abc reviewer=sol-codex model=test-model pin=test-model reviewed_hash=$(current_hash) risk_threshold=high verdict=approve stopped_by=verdict findings=[] artifact_hash=ah at $(date -u +%Y-%m-%dT%H:%M:%SZ): summary"
+    bd comments add "$TID_QUAR" "$MALFORMED_LINE" >/dev/null 2>&1
+    MALFORMED_HASH=$(printf '%s' "$MALFORMED_LINE" | sha256_of_stdin)
+
+    # 2.3.1 CONTROL: approve refuses. No well-formed competitor exists yet
+    # (11.9c's shape in review-count.test.sh), driven here through the REAL
+    # approve path instead of the offline seam.
+    RC=0
+    OUT=$(bash "$QG" approve "$TID_QUAR" "shipping over a malformed review record" 2>/dev/null) || RC=$?
+    assert_eq "2.3.1 malformed record blocks approve (exit 4)" "4" "$RC"
+    assert_eq "2.3.1 ...error_key=review_artifact_iteration_unparseable" \
+        "review_artifact_iteration_unparseable" "$(printf '%s' "$OUT" | jq -r '.error_key')"
+    # 2.3.1b/c/d the remedy no longer names a recovery command — there is
+    # none, and it says so.
+    assert_not_contains "2.3.1b remediation no longer names quarantine-artifact (removed, R2-F1)" \
+        "quarantine-artifact" "$OUT"
+    assert_contains "2.3.1c remediation states the refusal is unconditional and permanent" \
+        "refusing unconditionally and permanently" "$OUT"
+    assert_contains "2.3.1d remediation names an operator repairing the store directly as the only remedy" \
+        "operator must repair the underlying record directly in the store" "$OUT"
+    # 2.3.1e/f LANE-PURITY, driven live through qa-gate.sh's remedy-relay,
+    # not just review-check.sh's own offline observations field.
+    # MALFORMED_LINE embeds reviewer=sol-codex, so the anti-vacuity leg
+    # below is genuine — this fixture actually carries the substring the
+    # guard forbids, somewhere for the relay to have leaked if it were not
+    # scrubbed.
+    assert_eq "2.3.1e anti-vacuity: the fixture genuinely embeds a sol-codex identity (something real to leak)" "1" \
+        "$(printf '%s' "$MALFORMED_LINE" | grep -c 'sol-codex' || true)"
+    assert_eq "2.3.1f STRUCTURAL: approve's full runtime JSON output never echoes it" "0" \
+        "$(printf '%s' "$OUT" | grep -icE 'codex|reviewer[[:space:]_.-]*lane' || true)"
+
+    # 2.3.2 THE REMOVAL ITSELF: qa-gate.sh no longer recognises
+    # quarantine-artifact as a subcommand at all — a direct regression
+    # guard on the removal, not just on its consequences.
+    RC=0
+    QOUT=$(bash "$QG" quarantine-artifact "$TID_QUAR" "$MALFORMED_HASH" "reason" 2>&1) || RC=$?
+    assert_eq "2.3.2 quarantine-artifact is no longer a recognised subcommand (exit 1)" "1" "$RC"
+    assert_contains "2.3.2b ...unknown-subcommand output" \
+        "unknown subcommand: quarantine-artifact" "$QOUT"
+    assert_eq "2.3.2c no REVIEW-ARTIFACT-QUARANTINE comment was posted (the unrecognised subcommand wrote nothing)" "0" \
+        "$(printf '%s\n' "$(comments_of "$TID_QUAR")" | grep -cE '^REVIEW-ARTIFACT-QUARANTINE v1' || true)"
+
+    # 2.3.3/2.3.3b THE NEGATIVE CONTROL (the important one, per R2-F1's own
+    # framing): plant a comment matching the FULL, well-formed writer
+    # grammar `cmd_quarantine_artifact` used to produce — not a bare
+    # prefix, the complete `at <ts>: <reason>` shape a legitimate operator
+    # invocation would have posted — naming the EXACT hash of the
+    # malformed candidate above, via `bd comments add` directly (the writer
+    # command that used to produce this exact text no longer exists to
+    # call). approve must STILL refuse, with the SAME error_key as 2.3.1 —
+    # proving the read side honours NO quarantine record, however
+    # well-formed, rather than merely that a loosely-matched prefix was
+    # tightened.
+    WELLFORMED_QUARANTINE="REVIEW-ARTIFACT-QUARANTINE v1 hash=$MALFORMED_HASH at $(date -u +%Y-%m-%dT%H:%M:%SZ): verified via bd show --include-comments -- a synthetic test fixture, not a real review round"
+    bd comments add "$TID_QUAR" "$WELLFORMED_QUARANTINE" >/dev/null 2>&1
+    RC=0
+    OUT=$(bash "$QG" approve "$TID_QUAR" "shipping over a malformed record with a well-formed quarantine posted" 2>/dev/null) || RC=$?
+    assert_eq "2.3.3 NEGATIVE CONTROL: a full, well-formed REVIEW-ARTIFACT-QUARANTINE record excuses NOTHING (still exit 4)" \
+        "4" "$RC"
+    assert_eq "2.3.3b ...SAME error_key as 2.3.1 (review_artifact_iteration_unparseable) -- the malformed record still governs the refusal" \
+        "review_artifact_iteration_unparseable" "$(printf '%s' "$OUT" | jq -r '.error_key')"
+
+    # 2.3.4 ANTI-OVERREACH: an ordinary, entirely well-formed task (no
+    # malformed record anywhere in its history) still approves cleanly —
+    # this removal only removes a forgeable escape hatch, not the ordinary
+    # path. Created via new_task AFTER every approve call above that
+    # depends on TID_QUAR's own impact report, so overwriting the ONE
+    # SHARED $TRACK/changed-files.txt here cannot stale it out from under
+    # 2.3.1/2.3.3 (the same hazard 2.3.3's predecessor in this section
+    # documented and avoided).
+    TID_QUAR_CLEAN=$(new_task "review-sep: quarantine removal does not affect a clean task" "src/eight.ts")
+    record_implementer "$TID_QUAR_CLEAN" "backend"
+    record_artifact "$TID_QUAR_CLEAN" "qa-claude" "[]"
+    RC=0
+    OUT=$(bash "$QG" approve "$TID_QUAR_CLEAN" --no-design "fkm.4: testing review-separation, not design-satisfied" \
+        "ordinary clean approval, unaffected by the quarantine removal" 2>/dev/null) || RC=$?
+    assert_eq "2.3.4 anti-overreach: an ordinary well-formed task still approves cleanly (exit 0)" "0" "$RC"
+    assert_eq "2.3.4b ...status=approved" "approved" "$(printf '%s' "$OUT" | jq -r '.status')"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 2.4: R3-F1 (Sol/Codex k6re round 3) driven end to end through the REAL approve / resolve-finding ==="
+# review-count.test.sh's Section 4c proves the FIX in isolation, against
+# review-check.sh's `gate` subcommand directly. This section proves the
+# SAME fix through the two REAL consumers this task's own family-fix
+# requirement named: qa-gate.sh's `approve` (wired to `gate`) and
+# `resolve-finding` (wired to finding_id_in_latest_artifact's OWN
+# independent anchored re-implementation). Both matter: fixing review-
+# check.sh alone would leave resolve-finding/arbitrate reading the SAME
+# vulnerable `sed -nE 's/.*findings=\[([^]]*)\].*/\1/p'` this task's family-
+# fix requirement explicitly calls out enumerating and fixing.
+#
+# A WELL-FORMED record — findings=[R1-F1:high] closes correctly,
+# artifact_hash= and at <ts>: both present and well-formed — whose free-text
+# summary merely mentions `findings=[]` as prose. No malformed input
+# anywhere; injected via `bd comments add` (the same hand-typed/bd-import
+# channel Section 2.3 above already established reaches this file's read
+# path directly, bypassing review-record's own writer-side validation).
+TID_R3F1=$(new_task "review-sep: R3-F1 prose-confusion reproduction" "src/nine.ts")
+record_implementer "$TID_R3F1" "backend"
+R3F1_LINE="REVIEW-ARTIFACT v1 iteration=1 reviewer=sol-codex model=test-model pin=test-model reviewed_hash=$(current_hash) risk_threshold=high verdict=findings stopped_by=verdict findings=[R1-F1:high] artifact_hash=ah at $(date -u +%Y-%m-%dT%H:%M:%SZ): fixed the bug where findings=[R9-F9:critical] was mis-parsed as findings=[]"
+bd comments add "$TID_R3F1" "$R3F1_LINE" >/dev/null 2>&1
+
+# 2.4.1 approve must refuse, naming the REAL open finding — not silently
+# succeed as it did pre-fix (ART_FINDINGS read back "" and open_findings=0).
+RC=0
+OUT=$(bash "$QG" approve "$TID_R3F1" --no-design "fkm.4: testing review-separation, not design-satisfied" \
+    "shipping over what should be an open HIGH" 2>/dev/null) || RC=$?
+assert_eq "2.4.1 THE REPRODUCTION, live through approve: exit 4 (NOT the pre-fix silent exit 0)" "4" "$RC"
+assert_eq "2.4.1b ...error_key=unresolved_findings" \
+    "unresolved_findings" "$(printf '%s' "$OUT" | jq -r '.error_key')"
+assert_contains "2.4.1c ...refusal names the real open finding id R1-F1" "R1-F1" "$OUT"
+
+# 2.4.2 resolve-finding on the REAL id must succeed — proving
+# finding_id_in_latest_artifact's own independent anchored re-implementation
+# (qa-gate.sh) finds R1-F1 despite the adversarial summary, not merely that
+# review-check.sh's gate does.
+RC=0
+OUT=$(bash "$QG" resolve-finding "$TID_R3F1" R1-F1 \
+    --fix "commit:deadbeef src/nine.ts:1" \
+    --test "review-separation.test.sh::section-2.4" \
+    "verified real, fixed with evidence" 2>/dev/null) || RC=$?
+assert_eq "2.4.2 resolve-finding on the real id R1-F1 succeeds (exit 0)" "0" "$RC"
+assert_eq "2.4.2b ...status=resolved" "resolved" "$(printf '%s' "$OUT" | jq -r '.status')"
+
+# 2.4.3 DISCRIMINATOR: resolve-finding on the FAKE id the summary
+# mentions (R9-F9, which never appears in the real findings=[...] token)
+# must still be refused as finding_id_not_found — proving 2.4.2 succeeded
+# because R1-F1 is genuinely in the anchored token, not because this
+# build accepts any id.
+RC=0
+OUT=$(bash "$QG" resolve-finding "$TID_R3F1" R9-F9 \
+    --fix "commit:deadbeef src/nine.ts:1" \
+    --test "review-separation.test.sh::section-2.4" \
+    "should not exist" 2>/dev/null) || RC=$?
+assert_eq "2.4.3 discriminator: an id the summary mentions but the real token never carried is refused (exit 1)" "1" "$RC"
+assert_eq "2.4.3b ...error_key=finding_id_not_found" \
+    "finding_id_not_found" "$(printf '%s' "$OUT" | jq -r '.error_key')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 2.4b: R4-F1 (Sol/Codex k6re round 4) — finding_id_in_latest_artifact must normalize each comment to its first line before selecting, exactly as review-check.sh's cmd_gate does ==="
+# Section 2.4 above proved R3-F1's PARSE-BOUNDARY anchor (ART_PREFIX) closes
+# the greedy-sed / prose-mention class. R4-F1 is the layer UNDER that one:
+# WHICH LINES are even candidates for ART_PREFIX to run over. Pre-fix,
+# finding_id_in_latest_artifact built $comments by dumping every comment's
+# RAW (embedded-newline-preserving) .text through `printf '%s\n' | grep -E
+# '^REVIEW-ARTIFACT v1 ' | tail -1` — so a comment whose own free-text
+# SUMMARY continued past a literal newline into something shaped like a
+# SECOND REVIEW-ARTIFACT firstline contributed THAT line as its own grep
+# candidate, and tail -1 (last MATCHING LINE, not last comment) preferred it
+# over the genuine record that opened the very same comment.
+#
+# ONE comment, real record first (iteration=4, findings=[R4-F1:high]), fake
+# continuation second (iteration=999, findings=[R9-F9:high]) — mirrors the
+# review artifact's own measured reproduction exactly (iteration=4/R4-F1
+# real, iteration=999/R9-F9 injected). Injected via `bd comments add`, the
+# same hand-typed/bd-import channel Section 2.3/2.4 above already
+# established reaches this file's read path directly.
+TID_R4F1=$(new_task "review-sep: R4-F1 multi-line-selection reproduction" "src/ten.ts")
+record_implementer "$TID_R4F1" "backend"
+R4F1_TS1="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+R4F1_TS2="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+R4F1_LINE="REVIEW-ARTIFACT v1 iteration=4 reviewer=sol-codex model=test-model pin=test-model reviewed_hash=$(current_hash) risk_threshold=high verdict=findings stopped_by=verdict findings=[R4-F1:high] artifact_hash=ah at $R4F1_TS1: real record
+REVIEW-ARTIFACT v1 iteration=999 reviewer=injected model=test-model pin=test-model reviewed_hash=deadbeef risk_threshold=high verdict=findings stopped_by=verdict findings=[R9-F9:high] artifact_hash=ah at $R4F1_TS2: injected line"
+bd comments add "$TID_R4F1" "$R4F1_LINE" >/dev/null 2>&1
+
+# 2.4b.1 THE REPRODUCTION: resolve-finding on the REAL id (R4-F1) must
+# succeed — pre-fix this failed with finding_id_not_found, because tail -1
+# over the flattened, un-normalized stream selected the INJECTED line's
+# findings=[R9-F9:high] token instead of the real one.
+RC=0
+OUT=$(bash "$QG" resolve-finding "$TID_R4F1" R4-F1 \
+    --fix "commit:deadbeef src/ten.ts:1" \
+    --test "review-separation.test.sh::section-2.4b" \
+    "verified real, fixed with evidence" 2>/dev/null) || RC=$?
+assert_eq "2.4b.1 THE REPRODUCTION: resolve-finding on the REAL id R4-F1 succeeds (exit 0), NOT the pre-fix finding_id_not_found" "0" "$RC"
+assert_eq "2.4b.1b ...status=resolved" "resolved" "$(printf '%s' "$OUT" | jq -r '.status')"
+
+# 2.4b.2 DISCRIMINATOR: resolve-finding on the INJECTED id (R9-F9) must be
+# refused on a FRESH task carrying the identical adversarial comment —
+# proving 2.4b.1 succeeded because R4-F1 is genuinely the first (real)
+# line's token, not because this build accepts any id it sees anywhere in
+# the comment.
+TID_R4F1B=$(new_task "review-sep: R4-F1 discriminator" "src/eleven.ts")
+record_implementer "$TID_R4F1B" "backend"
+bd comments add "$TID_R4F1B" "$R4F1_LINE" >/dev/null 2>&1
+RC=0
+OUT=$(bash "$QG" resolve-finding "$TID_R4F1B" R9-F9 \
+    --fix "commit:deadbeef src/eleven.ts:1" \
+    --test "review-separation.test.sh::section-2.4b" \
+    "should not exist" 2>/dev/null) || RC=$?
+assert_eq "2.4b.2 discriminator: the injected id R9-F9 is refused (exit 1)" "1" "$RC"
+assert_eq "2.4b.2b ...error_key=finding_id_not_found" \
+    "finding_id_not_found" "$(printf '%s' "$OUT" | jq -r '.error_key')"
+
+# 2.4b.3 ANTI-OVERREACH: an ORDINARY, single-line, well-formed record (no
+# embedded newline anywhere) still resolves correctly — the fix must not
+# regress the common case.
+TID_R4F1C=$(new_task "review-sep: R4-F1 anti-overreach (ordinary single-line record)" "src/twelve.ts")
+record_implementer "$TID_R4F1C" "backend"
+record_artifact "$TID_R4F1C" "sol-codex" \
+    '[{"id":"R1-F1","severity":"high","location":"src/twelve.ts:1","evidence":"ordinary finding, no adversarial shape","description":"plain"}]'
+RC=0
+OUT=$(bash "$QG" resolve-finding "$TID_R4F1C" R1-F1 \
+    --fix "commit:deadbeef src/twelve.ts:1" \
+    --test "review-separation.test.sh::section-2.4b" \
+    "ordinary resolution" 2>/dev/null) || RC=$?
+assert_eq "2.4b.3 ANTI-OVERREACH: an ordinary well-formed record still resolves (exit 0)" "0" "$RC"
+assert_eq "2.4b.3b ...status=resolved" "resolved" "$(printf '%s' "$OUT" | jq -r '.status')"
+
+# 2.4b.4 META: REVERT THE NORMALIZATION, WATCH THE INJECTED LINE GET
+# SELECTED AGAIN. The single textual change R4-F1 made was appending
+# `| split("\n")[0]` to finding_id_in_latest_artifact's jq filter.
+# Reverting JUST that, in a mutant copy of qa-gate.sh, must bring the
+# EXACT pre-fix behaviour back on the SAME adversarial comment: the real
+# id refused, the injected id accepted — proving the one-line addition
+# itself (not some other guard) is what is load-bearing here.
+REVERT_R4F1_SED="$FIXTURE/.claude/.qa-tracking/revert-r4f1.sed"
+cat > "$REVERT_R4F1_SED" <<'SEDEOF'
+s/ | (\.\[\]?\.text \/\/ empty) | split("\\n")\[0\]'/ | (.[]?.text \/\/ empty)'/
+SEDEOF
+MUTANT_R4F1="$FIXTURE/.claude/scripts/qa-gate-revert-r4f1.sh"
+sed -f "$REVERT_R4F1_SED" "$QG" > "$MUTANT_R4F1"
+chmod +x "$MUTANT_R4F1"
+assert_eq "2.4b.4a META: the revert mutation applied (mutant differs from the fixed source)" "differs" \
+    "$(cmp -s "$QG" "$MUTANT_R4F1" && echo identical || echo differs)"
+assert_eq "2.4b.4b META: mutated script parses" "0" \
+    "$(bash -n "$MUTANT_R4F1" 2>/dev/null && echo 0 || echo 1)"
+
+TID_R4F1_META=$(new_task "review-sep: R4-F1 META revert" "src/thirteen.ts")
+record_implementer "$TID_R4F1_META" "backend"
+bd comments add "$TID_R4F1_META" "$R4F1_LINE" >/dev/null 2>&1
+
+RC=0
+OUT=$(bash "$MUTANT_R4F1" resolve-finding "$TID_R4F1_META" R4-F1 \
+    --fix "commit:deadbeef src/thirteen.ts:1" \
+    --test "review-separation.test.sh::section-2.4b" \
+    "should now fail against the mutant" 2>/dev/null) || RC=$?
+assert_eq "2.4b.4c META: WITHOUT the normalization, the REAL id R4-F1 is wrongly refused (exit 1) — the R4-F1 defect, reproduced" \
+    "1" "$RC"
+assert_eq "2.4b.4d META: ...error_key=finding_id_not_found" \
+    "finding_id_not_found" "$(printf '%s' "$OUT" | jq -r '.error_key')"
+
+RC=0
+OUT=$(bash "$MUTANT_R4F1" resolve-finding "$TID_R4F1_META" R9-F9 \
+    --fix "commit:deadbeef src/thirteen.ts:1" \
+    --test "review-separation.test.sh::section-2.4b" \
+    "should now wrongly succeed against the mutant" 2>/dev/null) || RC=$?
+assert_eq "2.4b.4e META: WITHOUT the normalization, the INJECTED id R9-F9 is wrongly ACCEPTED (exit 0) — the forgery this fix closes" \
+    "0" "$RC"
+assert_eq "2.4b.4f META: ...status=resolved (forged finding id accepted as real)" \
+    "resolved" "$(printf '%s' "$OUT" | jq -r '.status')"
+
+# Discriminator: the mutant still runs the real predicate elsewhere (an
+# ordinary record with no adversarial second line is unaffected by this
+# one substitution), so the difference above is the normalization and
+# nothing else.
+TID_R4F1_METADISC=$(new_task "review-sep: R4-F1 META discriminator" "src/fourteen.ts")
+record_implementer "$TID_R4F1_METADISC" "backend"
+record_artifact "$TID_R4F1_METADISC" "sol-codex" \
+    '[{"id":"R1-F1","severity":"high","location":"src/fourteen.ts:1","evidence":"ordinary finding, no adversarial shape","description":"plain"}]'
+RC=0
+OUT=$(bash "$MUTANT_R4F1" resolve-finding "$TID_R4F1_METADISC" R1-F1 \
+    --fix "commit:deadbeef src/fourteen.ts:1" \
+    --test "review-separation.test.sh::section-2.4b" \
+    "ordinary resolution against the mutant" 2>/dev/null) || RC=$?
+assert_eq "2.4b.4g discriminator: the mutant still resolves an UNRELATED ordinary record correctly (exit 0) — ran the real predicate" \
+    "0" "$RC"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Section 3: the audited --no-review bypass ==="
 
 TID_BYP=$(new_task "review-sep: audited bypass" "src/six.ts")
@@ -460,10 +773,18 @@ assert_contains "4.1 non-git checkout records worktree=none (never an omitted to
 # UNCHANGED by the inserted tokens. Run the hook's exact jq, not a paraphrase.
 # (The jq below is byte-identical to the hook's; only the transport in front of
 # it gained --include-comments, in both places, for bd 1.1.2.)
+#
+# claude-workflow-plugin-yrij (APPROVAL-SELECTOR-ANCHOR): the hook's selector
+# is now anchored at `^` (a comment whose first line was prose and whose
+# LATER line fabricated a record used to satisfy the old unanchored form).
+# Updated here to stay byte-identical, per this section's own stated
+# purpose — this is the ONE assertion in the suite that explicitly claims to
+# run the hook's real expression rather than a paraphrase of it, so leaving
+# it stale would make that claim false the moment the fix landed.
 REC_CAPTURED=$(bd_show_with_comments "$TID_REC" \
     | jq -r '(if type == "array" then .[0].comments else .comments end) // []
              | .[].text
-             | select(test("QA-GATE APPROVED .*change_set_hash="))
+             | select(test("^QA-GATE APPROVED .*change_set_hash="))
              | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | tail -1)
 assert_eq "4.2 llh.18 hash capture still extracts the approved change_set_hash" \
     "$REC_EXPECTED_HASH" "$REC_CAPTURED"
