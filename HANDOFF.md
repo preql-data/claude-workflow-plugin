@@ -99,7 +99,9 @@ work on this repository.
   not a data row). **Release rule MET**: NOT-PROVEN = 0 AND the Stage-3
   red-team P0/P1 (llh.18) closed. The release-defining change is the
   **change-set-hash-bound QA approval (llh.18)** — the Stop gate now
-  requires a tamper-evident approval record whose `change_set_hash`
+  requires a change-set-bound approval record — a disclosure that
+  approve ran and bound this hash, not a cryptographic guard against
+  hand-forgery (`claude-workflow-plugin-pqnd`) — whose `change_set_hash`
   matches the current diff, not the bare `qa-approved` label, defeating
   the red team's forged-label (P0), decoy-current-task (P1), and
   post-approval-drift attacks (642 L2 assertions incl. a load-bearing

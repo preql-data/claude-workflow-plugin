@@ -525,11 +525,14 @@ assert_eq "qa-gate mut(approve-rollback L680): qa-approved rolled back" "absent"
 # ===========================================================================
 # Change-set-bound approval record (G2 red-team / claude-workflow-plugin-llh.18).
 #
-# approve must write a TAMPER-EVIDENT record carrying the change_set_hash of
-# the approved change-set — the binding that lets verify-before-stop.sh
-# distinguish a real qa-gate.sh approve from a forged bare `bd label add
-# qa-approved`. The hash MUST equal impact-report.sh --hash-only of the
-# change-set that was current at approve time.
+# approve must write a change-set-bound DISCLOSURE record carrying the
+# change_set_hash of the approved change-set — the binding that lets
+# verify-before-stop.sh distinguish a real qa-gate.sh approve (which writes
+# this record) from a forged bare `bd label add qa-approved` (which does
+# not). It is a disclosure that approve ran and bound this hash, not a
+# cryptographic guarantee against hand-forgery (claude-workflow-plugin-pqnd).
+# The hash MUST equal impact-report.sh --hash-only of the change-set that
+# was current at approve time.
 mk_fixture
 FIXTURE_BIND="$COMPONENT_FIXTURE_PATH"
 bd_required_or_skip

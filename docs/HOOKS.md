@@ -1764,7 +1764,8 @@ What the binding still catches, all four blocking:
 What it does not catch:
 
 - **Hand-forged records.** An agent with arbitrary shell can reproduce the
-  comment. Tamper-*evident*, not a cryptographic sandbox (`llh.18`).
+  comment. This is a disclosure record, not a cryptographic sandbox
+  (`llh.18`, `pqnd`).
 - **Re-editing exactly the approved set.** `approve` truncates the tracker, so
   the live hash afterwards covers the paths touched *since*. Touch precisely the
   approved set again and the hash returns to the approved value, and that new

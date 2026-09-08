@@ -2553,8 +2553,8 @@ cmd_gate() {
     # THIS IS DELIBERATELY NARROWER than "count everything in the open cycle".
     # claude-workflow-plugin-2ty made rounds reset when a change set moves for
     # GENUINE new work ("a new change set has needed no rounds yet"), and
-    # escalation-basis.sh legs C and H are the tested proof that property must
-    # survive — reconcile-only growth and genuine-new-work growth move
+    # escalation-basis.sh legs C and H are the tests proving this property
+    # must survive — reconcile-only growth and genuine-new-work growth move
     # change_set_hash identically (it hashes the path LIST, not contents), so
     # only a per-round, evidence-gated exception can tell them apart without
     # reopening either of those legs. Missing evidence (an unestablished cycle,

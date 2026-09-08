@@ -1000,6 +1000,24 @@ record_verification() {
     return 0
 }
 
+# BROADER-VERIFICATION-NOTE-FN BEGIN (claude-workflow-plugin-pqnd R2-F1)
+#
+# Reached transitively from the LABEL-WITHOUT-RECORD-BLOCK's
+# `$(checks_scope_note)` call (checks_scope_note's own body ends with
+# `$(broader_verification_note)`) — source-pinned for the same reason as
+# CHECKS-SCOPE-NOTE-FN: a claim written into this function's static printf
+# text reaches the operator two calls deep, which neither the rendered-
+# block pin nor a pin on checks_scope_note's OWN literal bytes alone would
+# see.
+#
+# WHAT THIS CLOSURE DELIBERATELY DOES NOT ALSO PIN: this function's own
+# `$(tree_fingerprint)` call. tree_fingerprint (above) returns a COMPUTED
+# git-tree digest or the FP_NO_GIT/degradation sentinels named in its own
+# header's "ONE INVARIANT" — never static prose a maintainer could edit to
+# assert a security property. A change to its BEHAVIOUR (a bad fingerprint)
+# is the correctness class rubric-binding.sh I4 and this function's own
+# invariant already refuse; it is not the false-CLAIM class pqnd is about,
+# so it is out of scope for this pin family rather than silently missed.
 broader_verification_note() {
     local line ts label rc fp head now
     if [ ! -s "$VERIFICATION_LEDGER" ]; then
@@ -1106,6 +1124,7 @@ vouch for it — re-run it to check):
     fi
     return 0
 }
+# BROADER-VERIFICATION-NOTE-FN END (claude-workflow-plugin-pqnd R2-F1)
 
 # VERIFICATION-LEDGER END (claude-workflow-plugin-fkm.1.11)
 
@@ -3071,10 +3090,13 @@ task_has_label() {
 # approved == has_label qa-approved). That label is forgeable by any agent
 # (`bd label add <task> qa-approved`, bypassing qa-gate.sh approve — P0) and
 # is never bound to the tracked changed files (approve a decoy, redirect
-# current-task — P1). We now ADDITIONALLY require a tamper-evident approval
+# current-task — P1). We now ADDITIONALLY require a change-set-bound approval
 # record on the current task whose change_set_hash matches the CURRENT
 # change-set. qa-gate.sh approve writes that record (a
-# `QA-GATE APPROVED change_set_hash=<h>` comment); a bare label-add does not.
+# `QA-GATE APPROVED change_set_hash=<h>` comment); a bare label-add does not
+# write one, so this detects OMISSION and STALENESS, never FORGERY by a party
+# who can already write to the task (task_has_matching_approval_record below;
+# claude-workflow-plugin-pqnd).
 IMPACT_REPORT_SCRIPT="$PROJECT_DIR/.claude/scripts/impact-report.sh"
 
 # current_change_set_hash — the canonical sha256 of the current,
@@ -3354,6 +3376,22 @@ verified_state_unchanged() {
 # rather than asserting currency without evidence. Only meaningful to call
 # after verified_state_unchanged printed "true"; degrades to a plain sentence
 # if the record vanished between the two reads (best-effort, never fatal).
+# VERIFIED-STATE-UNCHANGED-DETAIL-FN BEGIN (claude-workflow-plugin-pqnd R3-F1)
+#
+# R3-F1 (independent review round 3): this function's output reaches the
+# operator through a path no call-graph walk finds — it is ASSIGNED to the
+# global SUITE_REUSE_DETAIL far below (the VERIFY_SKIP_UNCHANGED branch of
+# the main dispatch), which checks_scope_note reads back as a plain
+# variable, not a function call. pqnd's earlier static closure computation
+# (is_local_fn/extract_calls, since REMOVED — see
+# .claude/scripts/tests/approval-record-disclosure-claim.test.sh's own
+# header for why) could only ever see `$(name` call syntax; a value
+# threaded through a global assignment is invisible to it by construction,
+# not by an omission a wider regex could have closed. Nested here (inside
+# SKIP-UNCHANGED) for extraction only, not for a further closure
+# computation: the operator-ruled fix is to RUN this function for real, as
+# part of a rendered-output state matrix, and pin what actually comes out —
+# see that spec's Section 4.
 verified_state_unchanged_detail() {
     local tid="$1" line ts fp hash
     line=$(cat "$(last_verified_state_file_for "$tid")" 2>/dev/null) || line=""
@@ -3369,6 +3407,7 @@ verified_state_unchanged_detail() {
     printf 'the tree (fingerprint %s) and the reviewable change set (hash %s) have not moved since the run recorded at %s' \
         "${fp:-?}" "${hash:-?}" "${ts:-?}"
 }
+# VERIFIED-STATE-UNCHANGED-DETAIL-FN END (claude-workflow-plugin-pqnd R3-F1)
 # SKIP-UNCHANGED END (claude-workflow-plugin-j7kk)
 
 # bd_show_with_comments <task-id> — `bd show --json` that always carries
@@ -3400,9 +3439,11 @@ bd_show_with_comments() {
 # task_has_matching_approval_record <task-id> <expected-hash> — 0 when the
 # task carries a `QA-GATE APPROVED change_set_hash=<h>` comment whose <h>
 # equals <expected-hash>, 1 otherwise (incl. bd unavailable / empty hash).
-# This is the tamper-evident half of the gate: it reads the approval RECORD
-# qa-gate.sh approve wrote, not the (forgeable) label. An empty expected hash
-# never matches (so an unverifiable current hash cannot accidentally pass).
+# This is the record-binding half of the gate: it reads the approval RECORD
+# qa-gate.sh approve wrote — or that anyone with `bd comment` access could
+# write by hand, just as convincingly (claude-workflow-plugin-pqnd) — not the
+# (forgeable) label. An empty expected hash never matches (so an unverifiable
+# current hash cannot accidentally pass).
 #
 # APPROVAL-SELECTOR-ANCHOR BEGIN (claude-workflow-plugin-yrij)
 #
@@ -3420,11 +3461,18 @@ bd_show_with_comments() {
 # "happens constantly") — with a fabricated `QA-GATE APPROVED
 # change_set_hash=<h> reviewed_by=none at <ts>: ...` on a LATER line
 # satisfied this selector exactly as well as a genuine record from
-# qa-gate.sh's own writer, with NO `qa-gate.sh approve` ever having run. The
-# Stop hook's own operator-facing text calls this record "tamper-evident" and
-# rejects a bare `bd label add qa-approved` specifically BECAUSE it writes no
-# such record — that claim was false while this selector stayed unanchored:
-# a plain `bd comment add` could write one instead.
+# qa-gate.sh's own writer, with NO `qa-gate.sh approve` ever having run. At
+# the time of this fix the Stop hook's own operator-facing text asserted a
+# security property for this record that the design does not provide;
+# claude-workflow-plugin-pqnd corrects that claim to the real threat model
+# (omission and staleness detection — see the LABEL_WITHOUT_RECORD block
+# reason below). That overclaim was already false here, and anchoring this
+# selector does NOT make it true: anchoring only stops a forged record from
+# hiding inside otherwise-genuine prose and being picked up by an UNANCHORED
+# selector. A FULLY standalone forged comment (see SCOPE below) defeats this
+# anchor exactly as it did before the anchor existed — no anchor, here or
+# anywhere in this family, closes that case, which is why pqnd corrects the
+# claim rather than chasing it further.
 #
 # MEASURED (jq 1.8.1, Oniguruma default flags — no `m`, no `s` — this matters:
 # see the "why anchoring alone" paragraph below):
@@ -5586,6 +5634,23 @@ checks_scope_claim() {
     return 0
 }
 
+# CHECKS-SCOPE-NOTE-FN BEGIN (claude-workflow-plugin-pqnd R2-F1)
+#
+# Nested inside the existing CHECK-SCOPE region above (fkm.1.11, which also
+# wraps checks_scope_claim — a sibling this function's own callers never
+# reach, so a change confined to that sibling should not trip THIS pin).
+# Source-pinned because `$(checks_scope_note)` is one of the three function
+# calls the LABEL-WITHOUT-RECORD-BLOCK interpolates, and — unlike
+# approval_record_causes/approval_binding_attests — this function's own
+# body calls TWO MORE local functions (override_scope_names,
+# broader_verification_note), so a claim could also be written into either
+# of THEM and still reach the operator through this call site. Both are
+# pinned too: override_scope_names by the pre-existing OVERRIDE-DISCLOSURE
+# region (yzo9, reused as-is — it already wraps exactly that function plus
+# override_active, which override_scope_names itself calls), and
+# broader_verification_note by its own new BROADER-VERIFICATION-NOTE-FN
+# sentinel below. See that sentinel's own header for the one function this
+# closure deliberately does NOT pin (tree_fingerprint) and why.
 checks_scope_note() {
     printf 'WHAT THIS GATE RAN, EXACTLY.\n'
     if [ "${SUITE_REUSED:-false}" = "true" ]; then
@@ -5757,6 +5822,7 @@ checks_scope_note() {
     printf '\n%s\n' "$(broader_verification_note)"
     return 0
 }
+# CHECKS-SCOPE-NOTE-FN END (claude-workflow-plugin-pqnd R2-F1)
 # CHECK-SCOPE END (claude-workflow-plugin-fkm.1.11)
 
 # --- OVERRIDE-RELEASE-NOTE BEGIN (claude-workflow-plugin-i8cx R2-F5) -------
@@ -6200,8 +6266,11 @@ fi
 # set was reviewed (P1). Release now requires BOTH:
 #   (1) GATE_STATUS == approved  (the qa-approved label — still necessary for
 #       status precedence + idempotency), AND
-#   (2) a tamper-evident `QA-GATE APPROVED change_set_hash=<h>` record on the
-#       current task whose <h> matches the CURRENT change-set hash.
+#   (2) a change-set-bound `QA-GATE APPROVED change_set_hash=<h>` record on
+#       the current task whose <h> matches the CURRENT change-set hash — a
+#       disclosure that approve ran and bound this hash, not a guarantee
+#       that no one could write the same bytes by hand
+#       (claude-workflow-plugin-pqnd).
 # Condition (2) is what qa-gate.sh approve writes and a bare label-add does
 # not. It also re-arms the gate after any post-approval edit (the current
 # hash drifts away from the recorded one).
@@ -6470,11 +6539,25 @@ if command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
                 # (record's hash != current change-set), or a post-approval
                 # edit (current hash drifted). Block with a precise reason.
                 LABEL_WITHOUT_RECORD=true
+                # APPROVAL-RECORD-DETAIL-INIT BEGIN (claude-workflow-plugin-pqnd R2-F1)
+                #
+                # This assigns the FIRST content of $APPROVAL_RECORD_DETAIL, which the
+                # LABEL-WITHOUT-RECORD-BLOCK below interpolates verbatim into the
+                # operator-facing "Why this blocks (...)" line. Sentinel-wrapped and
+                # source-pinned by
+                # .claude/scripts/tests/approval-record-disclosure-claim.test.sh
+                # (section 3) for exactly that reason: this is a STATIC STRING
+                # TEMPLATE a maintainer edits, not runtime-computed data, so a claim
+                # written here reaches the operator exactly as one written inside
+                # the block itself would — the rendered-block pin alone (2P) cannot
+                # see it, because that pin's driver substitutes a FIXTURE value for
+                # this variable rather than exercising this producer.
                 if [ -z "$CURRENT_CS_HASH" ]; then
                     APPROVAL_RECORD_DETAIL="the current change-set hash could not be recomputed (impact-report.sh missing/failing), so a change-set-bound approval cannot be verified"
                 else
                     APPROVAL_RECORD_DETAIL="current change-set hash is $CURRENT_CS_HASH but no QA-GATE APPROVED record on $CURRENT_TASK carries a matching change_set_hash"
                 fi
+                # APPROVAL-RECORD-DETAIL-INIT END (claude-workflow-plugin-pqnd R2-F1)
                 log_sync_error "Stop blocked: qa-approved label present on $CURRENT_TASK but no change-set-bound approval record matches ($APPROVAL_RECORD_DETAIL) — forged bare label, decoy-task redirect, or post-approval edit (llh.18)"
             fi
         fi
@@ -6950,6 +7033,13 @@ if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
         fi
         log_sync_error "Stop blocked: worktree resolution matched $WTRES_WORKTREE for $CURRENT_TASK but the independent review is not clean ($WTRES_REVIEW_DETAIL) — refusing to release (3mg.2)"
     fi
+    # APPROVAL-RECORD-DETAIL-WORKTREE-APPEND BEGIN (claude-workflow-plugin-pqnd R2-F1)
+    #
+    # A SECOND producer of the same operator-facing $APPROVAL_RECORD_DETAIL
+    # (see APPROVAL-RECORD-DETAIL-INIT above for why this is source-pinned
+    # rather than covered by the rendered-block pin alone): this APPENDS to
+    # whatever APPROVAL-RECORD-DETAIL-INIT already set, once cross-worktree
+    # resolution has run. Three static string templates, one per branch.
     if [ -n "$WTRES_REVIEW_DETAIL" ]; then
         APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL; an approval bound in worktree $WTRES_WORKTREE DOES cover this change set, but its independent review is not clean ($WTRES_REVIEW_DETAIL) — resolve-finding or arbitrate, then re-run"
     elif [ -n "$WTRES_DELETED_TOKEN" ]; then
@@ -6957,6 +7047,7 @@ if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     else
         APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL (checked $WTRES_CHECKED worktree(s))"
     fi
+    # APPROVAL-RECORD-DETAIL-WORKTREE-APPEND END (claude-workflow-plugin-pqnd R2-F1)
 fi
 # WORKTREE-RESOLUTION END (v4 V4 / claude-workflow-plugin-3mg.2)
 
@@ -7014,6 +7105,16 @@ fi
 #
 # printf with single-quoted lines throughout: the text contains backticks, and
 # a double-quoted string would run them as command substitution.
+# APPROVAL-RECORD-CAUSES-FN BEGIN (claude-workflow-plugin-pqnd R2-F1)
+#
+# Nested inside APPROVAL-BINDING-TEXT (which the ko82 test above already
+# extracts as a pair): this narrower sentinel source-pins ONLY this
+# function's own body, independently of its sibling below, so a mismatch
+# names exactly which of the two changed. Called from the LABEL-WITHOUT-
+# RECORD-BLOCK below as `$(approval_record_causes "$CURRENT_TASK")` — a
+# claim written into this function's static printf text reaches the
+# operator, and the rendered-block pin (2P) alone would not catch a change
+# here that still passed the block's other, unrelated assertions.
 approval_record_causes() {
     local tid="${1:-<task-id>}"
     # SC2016: the backticks are LITERAL — they quote a shell command inside prose
@@ -7035,7 +7136,14 @@ approval_record_causes() {
     printf '%s'   '    before it no longer matches (one migration per landing; see docs/HOOKS.md).'
     return 0
 }
+# APPROVAL-RECORD-CAUSES-FN END (claude-workflow-plugin-pqnd R2-F1)
 
+# APPROVAL-BINDING-ATTESTS-FN BEGIN (claude-workflow-plugin-pqnd R2-F1)
+#
+# See APPROVAL-RECORD-CAUSES-FN above for why this sibling gets its own
+# separate pin rather than sharing one hash with it. Called from the
+# LABEL-WITHOUT-RECORD-BLOCK below as `$(approval_binding_attests)` — no
+# arguments, so unlike its sibling every byte here is static.
 approval_binding_attests() {
     printf '%s\n' 'WHAT A CHANGE-SET-BOUND APPROVAL ATTESTS (ko82, and read this before trusting'
     printf '%s\n' 'one): MEMBERSHIP PLUS REVIEW-AT-REVIEW-TIME. These paths were the change set,'
@@ -7047,7 +7155,7 @@ approval_binding_attests() {
     printf '%s\n' 'entering or leaving the set, and a denylist re-hash — all four block. Two'
     printf '%s\n' 'residuals it does not cover:'
     printf '%s\n' '  - An adversary with arbitrary shell can reproduce the record by hand; this is'
-    printf '%s\n' '    a tamper-EVIDENT record, not a cryptographic sandbox (llh.18).'
+    printf '%s\n' '    a disclosure record, not a cryptographic sandbox (llh.18, pqnd).'
     printf '%s\n' '  - Re-editing EXACTLY the approved set of paths after approval reproduces the'
     printf '%s\n' '    approved hash, so that content is not re-reviewed. Reachable in one step'
     printf '%s\n' '    when the approved change set is a single file. Measured, filed; the repair'
@@ -7055,6 +7163,7 @@ approval_binding_attests() {
     printf '%s'   '    canonical_changed_files) or nowhere.'
     return 0
 }
+# APPROVAL-BINDING-ATTESTS-FN END (claude-workflow-plugin-pqnd R2-F1)
 # APPROVAL-BINDING-TEXT END (claude-workflow-plugin-ko82)
 
 # claude-workflow-plugin-i8cx R5-F2 (independent review round 5): this block
@@ -7075,15 +7184,29 @@ approval_binding_attests() {
 # blocks use — never a second reader — which is a no-op (adds zero bytes) on
 # an unnarrowed, non-replayed Stop: see that function's own SUITE_REUSED
 # branching for why.
+# LABEL-WITHOUT-RECORD-BLOCK BEGIN (claude-workflow-plugin-pqnd)
+#
+# Sentinel-wrapped, like APPROVAL-BINDING-TEXT above, so a test can extract
+# this exact block, stub emit_block (capture its argument instead of printing
+# + exiting) and CURRENT_TASK/APPROVAL_RECORD_DETAIL, and observe the real
+# operator-facing text this Stop hook actually emits — not a paraphrase of
+# it. .claude/scripts/tests/approval-record-disclosure-claim.test.sh is that
+# test; it is what pins the OMISSION/STALENESS/FORGERY wording below against
+# regressing back to the overclaim pqnd corrected.
 if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     emit_block "qa-approved label present but no change-set-bound approval record matches the current changes — approve via qa-gate.sh approve, not a bare label add.
 
 Why this blocks ($APPROVAL_RECORD_DETAIL):
 $(approval_record_causes "$CURRENT_TASK")
 
-The release path requires a tamper-evident record that qa-gate.sh approve
+The release path requires a change-set-bound record that qa-gate.sh approve
 writes (a \`QA-GATE APPROVED change_set_hash=<h>\` comment) AND a matching
-current change-set. Re-run the gate properly:
+current change-set. This record detects an approval that never ran
+(OMISSION) and an approval whose hash no longer matches what is shipping
+(STALENESS); it does NOT detect a well-formed record written by hand instead
+of by \`qa-gate.sh approve\` (FORGERY) — anyone who can run \`bd comment\` on
+this task can write one, and there is no secret this gate holds that such a
+party could not also read. Re-run the gate properly:
 
   bash .claude/scripts/qa-gate.sh enter $CURRENT_TASK
   # regenerate the impact report so approve's freshness check passes:
@@ -7101,6 +7224,7 @@ $(approval_binding_attests)
 
 $(checks_scope_note)"
 fi
+# LABEL-WITHOUT-RECORD-BLOCK END (claude-workflow-plugin-pqnd)
 
 # V3 (jio.1): the review-discipline block. Emitted BEFORE the generic
 # QA-required messaging so the reason names the review state (which finding is

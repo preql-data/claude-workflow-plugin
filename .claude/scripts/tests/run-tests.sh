@@ -586,8 +586,27 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # bumps are individually correct; the counter itself cannot represent two
 # concurrent +1s landing in the same window — tracked as its own defect by
 # the orchestrator, not fixed here.
+#
+# 58 -> 59 (claude-workflow-plugin-pqnd, operator-ruled correction): added
+# approval-record-disclosure-claim.test.sh. The release gate's approval
+# record cannot be tamper-evident (the writer, qa-gate.sh approve, and a
+# forger both have `bd comment` access, and no secret the gate holds is
+# unreadable to a local writer) but qa-gate.sh and verify-before-stop.sh
+# called it that in six operator-/developer-facing places, plus two more the
+# six-site audit's case-sensitive search missed (an ALL-CAPS "TAMPER-EVIDENT
+# APPROVAL RECORD" in qa-gate.sh, a mixed-case "tamper-EVIDENT record" in
+# verify-before-stop.sh's approval_binding_attests — the second co-renders
+# into the SAME emit_block call as the corrected operator-facing text, so it
+# had to move with it). Corrected the claim to the real threat model
+# (OMISSION and STALENESS detection, not FORGERY detection) at all eight
+# sites; kept the control exactly as it was — this is wording plus a test,
+# not a behaviour change. The new spec's negative control is
+# case-insensitive and markdown-emphasis-agnostic on purpose (that is what
+# the case-variant sites needed), and its runtime-observed leg drives the
+# shipped LABEL-WITHOUT-RECORD-BLOCK region (new sentinel pair, same
+# convention as APPROVAL-BINDING-TEXT) for real rather than grepping source.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=58
+EXPECTED_SPECS=59
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

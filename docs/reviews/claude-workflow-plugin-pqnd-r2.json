@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-pqnd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "2d0b9383795aa2aff3177d3dad1a66a3f820a6080076c6f10803750e631818ae",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the content pin has been checked once for an evasion path that reaches an operator outside the pinned region, once for brittleness that would cause it to be disabled in practice, and once for a weakened or vacuous assertion; then either a finding at or above high, or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. make lint must stay 0, the spec must stay 62/0, and both review-check baselines must not move.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh:363",
+      "evidence": "The pin hashes a synthetic rendering after hardcoding APPROVAL_RECORD_DETAIL and stubbing checks_scope_note to empty at lines 357 and 363. Production interpolates APPROVAL_RECORD_DETAIL and checks_scope_note into the operator block at verify-before-stop.sh:7105 and :7131, while the real values are produced outside both extracted regions (for example APPROVAL_RECORD_DETAIL at :6489-6491 and :6969-6973). Appending the round-1 evasion phrase to the production assignment at :6491 reaches the operator, but the test overwrites it with its fixture value, so SHIPPED_BLOCK and EXPECTED_BLOCK_SHA256 remain unchanged; the source denylist also intentionally returns zero for that phrase, as 2Q asserts.",
+      "description": "The content pin does not cover all content rendered by the supposedly pinned operator block. A forgery-resistance claim can enter through a production-only interpolation outside the extracted regions while all 62 assertions still pass, so the denylist evasion class remains open despite 2P being designated load-bearing."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

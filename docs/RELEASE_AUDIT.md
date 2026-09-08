@@ -763,8 +763,9 @@ duplicate-definition failure `llh.18` exists to forbid.
 **What this does not weaken.** The binding still blocks a bare `bd label add`,
 a decoy-task redirect, a path entering or leaving the set, and a denylist
 re-hash. Two residuals, both stated rather than discovered later: a hand-forged
-record is possible for an agent with arbitrary shell (tamper-*evident*, not a
-sandbox — `llh.18`), and re-editing **exactly** the approved set of paths
+record is possible for an agent with arbitrary shell (a disclosure record,
+not a cryptographic sandbox — `llh.18`, `pqnd`), and re-editing **exactly**
+the approved set of paths
 reproduces the approved hash, so that content is not re-reviewed — reachable in
 one step whenever the approved change set is a single file.
 

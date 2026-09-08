@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-pqnd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "d124613408df3d21be2132b62902d33ceb86c8d829e9226d461977d1db41b837",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the corrected wording has been checked once for accuracy (neither over- nor under-claiming), the negative control has been checked once for a reintroduction shape it would miss, and behaviour-invariance has been checked once; then either a finding at or above high, or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. The five anti-overreach outcomes must not move.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh:148",
+      "evidence": "Both source and runtime negative checks use the same finite pattern `tamper-evident|tamper evident|unforgeable|cannot be forged|proof that`. The equivalent false claim `This provenance-authenticated record can only be produced by qa-gate.sh approve.` produces zero matches. It can be appended while retaining all required OMISSION/STALENESS/FORGERY text, so every positive assertion and both negative checks still pass.",
+      "description": "The paired negative control does not reliably fail when the forgery-resistance claim returns under an unlisted synonym. This defeats the task's central regression requirement and permits the operator-facing block to become self-contradictory again."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

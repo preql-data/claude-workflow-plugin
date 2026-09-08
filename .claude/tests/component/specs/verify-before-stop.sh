@@ -1129,10 +1129,13 @@ assert_eq "vbs META: trunc mutant printed the FULL file list (ran the real gate)
 # trivial decoy, redirect current-task, ship unrelated code — P1).
 #
 # The fix: release now requires BOTH the qa-approved label AND a
-# tamper-evident `QA-GATE APPROVED change_set_hash=<h>` record (written only
-# by qa-gate.sh approve) whose <h> matches the CURRENT change-set hash. This
-# blocks the forged bare label (no record), the decoy redirect (record's hash
-# != current change-set), and post-approval edits (current hash drifted).
+# change-set-bound `QA-GATE APPROVED change_set_hash=<h>` record (written
+# only by qa-gate.sh approve) whose <h> matches the CURRENT change-set
+# hash — a disclosure that approve ran and bound this hash, not a
+# cryptographic guarantee against hand-forgery (claude-workflow-plugin-pqnd).
+# This blocks the forged bare label (no record), the decoy redirect
+# (record's hash != current change-set), and post-approval edits (current
+# hash drifted).
 #
 # Written FAILING-FIRST: against the pre-fix script the forged-label and
 # decoy-redirect cases ALLOW (red); the captured repro is on the Beads task.

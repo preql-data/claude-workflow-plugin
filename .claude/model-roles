@@ -112,42 +112,47 @@
 # after; if rounds rise materially the revert is the ONE line below
 # (`implementer=opus-class`) and the observation belongs in LESSONS.md.
 #
-# DECLARED DEVIATION: TWO ROWS DO NOT MATCH THE PLAN'S D0 TABLE
+# DECLARED DEVIATION: ONE ROW DOES NOT MATCH THE PLAN'S D0 TABLE
 # --------------------------------------------------------------
 # (v5.0.0 / claude-workflow-plugin-fkm.10, raised as QA finding R1-F3.)
 #
-#   role          plan (D0 table)                    shipped here
-#   orchestrator  latest Opus-class                  top   (Fable today)
-#   reviewer      Sol via Codex, fallback            top   (Fable today)
-#                 latest Opus-class                  + reviewer_lane — the
-#                                                    Sol-via-Codex half IS
-#                                                    implemented; the FALLBACK
-#                                                    tier is what differs
+#   role          plan (D0 table)      shipped here
+#   orchestrator  latest Opus-class    top   (Fable today)
 #
-# Correction 7 does NOT cover these two, and it is worth being exact about why:
+# Correction 7 does NOT cover this row, and it is worth being exact about why:
 # it licenses `top` for the DESIGN lanes because Fable IS the top family there,
 # so `top` resolves to precisely what the plan asked for while still adopting a
-# newer top family on day zero. Opus is not the top family. `top` on these two
-# lanes is therefore a HIGHER tier than the plan specified — a deviation, in the
-# safe direction, and named here rather than left to be inferred from the file.
+# newer top family on day zero. Opus is not the top family, so `top` here is a
+# HIGHER tier than the plan specified — a deviation, in the safe direction,
+# named here rather than left to be inferred from the file.
 #
-# Deferred, not forgotten, for three reasons: D0 ships no working designer (D1)
-# or design-review loop (D2), so the ORCHESTRATOR SEAT is still where design
-# judgment happens and demoting it now removes capability from the seat doing
-# that work; this phase already lands one tier drop (the rider above) ahead of
-# the machinery meant to absorb it, and two in one phase compounds that; and
-# `reviewer` is the gate's own seat, so dropping it while the design phases are
-# being built weakens the surface that catches everything else.
-#
-# They land in D4, where the plan itself narrows the orchestrator's job to
+# Deferred, not forgotten: D0 ships no working designer (D1) or design-review
+# loop (D2), so the ORCHESTRATOR SEAT is still where design judgment happens,
+# and demoting it now removes capability from the seat doing that work. It
+# lands in D4, where the plan itself narrows the orchestrator's job to
 # execution planning. Tracked as claude-workflow-plugin-fkm.10; the change is
-# two lines below.
+# the one line below.
+#
+# REVIEWER LANDED EARLY (2026-09-07). This section used to cover two rows.
+# `reviewer` (plan: Sol via Codex, fallback latest Opus-class) shipped `top`
+# (Fable today) + reviewer_lane the same way orchestrator still does above.
+# Its deferral rested on a third reason, dropped from the paragraph above
+# because it no longer applies: `reviewer` is the gate's own seat, so trading
+# away review capability while the design phases are still being built
+# weakens the surface that catches everything else. That reason weighs
+# Fable's capability against Opus's — and Fable is not an available seat for
+# this role at all. The operator's standing instruction is that QA and review
+# run on Sol in priority to Opus, and never on Fable (a weekly-limit
+# constraint); `top` resolving to Fable was silently violating that
+# instruction on every reviewer spawn. `reviewer` now ships `opus-class`,
+# matching the plan's fallback tier — not the capability trade the deferral
+# was written to protect, so it did not wait for D4.
 
 designer=top
 design_reviewer=top
 orchestrator=top
 implementer=sonnet-class
-reviewer=top
+reviewer=opus-class
 
 implementer_class_high=opus-class
 

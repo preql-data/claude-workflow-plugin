@@ -44,9 +44,17 @@
 # grammar for documentation) with a fabricated record on a LATER line
 # satisfied it exactly as well as a genuine record — with NO
 # `qa-gate.sh approve` ever having run anywhere. The Stop hook's own
-# operator-facing text calls this record "tamper-evident" and rejects a bare
-# `bd label add qa-approved` specifically because it writes no such record;
-# that claim was false while these four stayed unanchored.
+# operator-facing text treats this record as a DISCLOSURE that
+# `qa-gate.sh approve` ran and bound this hash — not a cryptographic guard
+# against hand-forgery (claude-workflow-plugin-pqnd) — and rejects a bare
+# `bd label add qa-approved` specifically because that command writes no
+# such record. The anchor matters even under that weaker framing: pre-fix,
+# ANY line anywhere in ANY comment carrying both tokens satisfied the
+# selector, so a forged record could hide inside innocent, unrelated prose
+# with NO deliberate act required. Post-fix it must be the FIRST bytes of
+# the comment — i.e. it must look like a deliberate forgery. Accidental and
+# incidental matches are closed; deliberate forgery by a party who can
+# already write to the task is not, and was never claimed to be.
 #
 # THE FIX: all four now anchor at `^` — see task_has_matching_approval_record
 # in verify-before-stop.sh for the full rationale, the measured anchor-vs-

@@ -2110,11 +2110,13 @@ approval_worktree_token() {
 # WHY THESE LIVE HERE. `completion-record` writes a durable record and persists
 # the validated payload; `approve` reads both back. Same split, and the same
 # reasons, as the approval record (llh.18) and the rubric verdict (bjx): the
-# Beads comment is the tamper-evident, cross-checkout-visible statement that a
-# contract was submitted, and the on-disk artifact is the content that statement
-# is a digest of. Neither is a second copy of the other — the record cannot
-# carry a file list without becoming a multi-line record, and the artifact
-# cannot survive a different checkout.
+# Beads comment is a disclosure record — a cross-checkout-visible statement
+# that a contract was submitted, forgeable by hand exactly as llh.18 documents
+# for the approval record (claude-workflow-plugin-pqnd corrects the word, not
+# the mechanism) — and the on-disk artifact is the content that statement is a
+# digest of. Neither is a second copy of the other — the record cannot carry a
+# file list without becoming a multi-line record, and the artifact cannot
+# survive a different checkout.
 #
 # NOT wiped by wipe_review_artifacts and NOT truncated by approve, deliberately:
 # it is the evidence the cross-check below was made against, so it has to
@@ -5060,7 +5062,7 @@ cmd_approve() {
     # G2.n6d: a bypass reason is appended so the audit trail names WHY the
     # mechanical impact gate was waived for this approval.
     #
-    # llh.18 (red-team P0/P1): the comment is now the TAMPER-EVIDENT APPROVAL
+    # llh.18 (red-team P0/P1): the comment is now the CHANGE-SET-BOUND APPROVAL
     # RECORD that binds this approval to the reviewed change-set. The
     # `change_set_hash=<h>` token is what verify-before-stop.sh reads back and
     # matches against the CURRENT change-set hash before releasing. The label
