@@ -2296,6 +2296,32 @@ proven:
 | nothing changed in `W` after the approval | `W`'s `git status --porcelain` minus `W`'s own `gate-baseline` is empty |
 | this checkout ships nothing extra | every reviewable path here is inside that report's `.files[].file` set, compared repo-relative |
 | the review is still clean | the same `review-check.sh gate` predicate the same-checkout path re-runs, with the same `[review bypass:` escape |
+| the design is still satisfied | `qa-gate.sh design-gate-precheck`, run with `CLAUDE_PROJECT_DIR=W` (never the primary) — `wtres_design_is_ready` (claude-workflow-plugin-3otl) |
+
+**Why the design check runs against `W`, not the primary (`wtres_design_is_ready`,
+claude-workflow-plugin-3otl).** `review-check.sh gate` is bd-comment-only, so
+running it with the primary's `cwd` already sees the one shared database
+regardless of which worktree's approval is being bridged. `design-gate-precheck`
+is not: it hashes the design artifact file on disk
+(`docs/specs/<tid>.md`), and that file is exactly the kind of uncommitted,
+worktree-local content this bridge exists to reach — the primary checkout may
+never have seen it. So this one check is pointed at `W` via
+`CLAUDE_PROJECT_DIR`, while `bd` (never `cd`-ed anywhere) still resolves the
+one shared store. It is read-only in the same sense as every other check
+here (`design-gate-precheck` shells out to `bd`, `jq` and a plain
+`sha256sum`/`shasum`/`openssl` hash — no `git worktree` writes, no code-graph
+MCP boot) and, like `wtres_review_is_clean`, it can only refuse a release,
+never grant one on its own.
+
+Before this landed, `design-gate-precheck`'s only call site in this file was
+the same-checkout branch above it — structurally unreachable from
+`LABEL_WITHOUT_RECORD` (the two are mutually exclusive arms of the same `if`)
+— so a design regression filed against a task after its cross-worktree
+approval (a `DESIGN-CONFLICT`, or an amendment invalidating the recorded
+verdict; both bd-only, touching no file the other conditions above can see
+move) shipped through this bridge with nothing to catch it. Same reach-around
+shape as claude-workflow-plugin-ehfy's idempotent-approve arm, closed the same
+way: the missing call site, added rather than a broader restructure.
 
 **Record-based, never recomputed.** `approve` truncates `changed-files.txt` in
 the approving checkout, so re-running `impact-report.sh --hash-only` in `W`

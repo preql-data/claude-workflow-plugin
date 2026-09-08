@@ -1846,7 +1846,14 @@ printf '\n--- 3.1 SOURCE PINS: each call-graph-reachable contributor pinned by i
 # Pinned at pqnd R2-F1. Each constant covers exactly ONE region so a
 # mismatch names exactly one contributor.
 EXPECTED_ARDI_SHA256="f3d41c97a25a9df7ee93520e274a6193af2ff443322c0b2df63176d5c613e082"
-EXPECTED_ARDW_SHA256="e0823a8ebda54e2c99fa52765238ed39f43ccb6f15dbef88d50bfec5360a511d"
+# claude-workflow-plugin-3otl R1-F1: re-pinned. The APPROVAL-RECORD-DETAIL-
+# WORKTREE-APPEND region legitimately grew a second axis (WTRES_DESIGN_DETAIL,
+# composed alongside WTRES_REVIEW_DETAIL — see wtres_design_is_ready and its
+# call site in verify-before-stop.sh). Confirmed load-bearing before pasting
+# the new value over the old one: reverting this one line while leaving the
+# region edit in place fails 3.1b again (measured), so this pin is still
+# doing its job rather than being a rubber stamp.
+EXPECTED_ARDW_SHA256="043d61414b54f9207fdb6ce0b897cc1e66ecbb40a484fd12fd0e02a8cb6a5ee9"
 EXPECTED_ARC_FN_SHA256="bbcd614a3e7188ef30e77431644d467fec0d6423ec590637845edda055fbeaa6"
 EXPECTED_ABA_FN_SHA256="0e448b98e62608bd51f107ef7b09bf859e4237e190890d9efbd64c72ae6a7cd1"
 EXPECTED_CSN_FN_SHA256="9836be34aaaa76388a1ab9284bd3194d6e61bd95cd225af67531d956255a7db1"
@@ -2148,6 +2155,19 @@ reset_matrix_baseline() {
     APPROVAL_RECORD_DETAIL=""
     LABEL_WITHOUT_RECORD="true"
     WTRES_REVIEW_DETAIL=""
+    # claude-workflow-plugin-3otl R1-F1: sibling of WTRES_REVIEW_DETAIL above.
+    # The shipped APPROVAL-RECORD-DETAIL-WORKTREE-APPEND region reads this
+    # variable unconditionally now that the design axis exists
+    # (wtres_design_is_ready), and render_matrix_state sources that region
+    # ALONE under `set -u` — an un-seeded read there is an unbound-variable
+    # crash, not an empty string (measured: all 7 matrix states died on
+    # "WTRES_DESIGN_DETAIL: unbound variable" before this line existed).
+    # Seeded HERE rather than inside the sourced region itself, on QA's
+    # stated preference: the region runs AFTER wtres_design_is_ready has
+    # already set the real detail on the live path, so an initialiser placed
+    # inside it would overwrite (erase) that message on every state that
+    # populates it, breaking wtres-8b.4's design-conflict disclosure text.
+    WTRES_DESIGN_DETAIL=""
     WTRES_DELETED_TOKEN=""
     WTRES_CHECKED="0"
     WTRES_WORKTREE=""
@@ -2320,8 +2340,19 @@ EXPECTED_M2_SHA256="ac43e048fe1b6673268c5d6b5264b324423b8d7739605ce32d9b2d04524f
 assert_matrix_pin "4.2c M2 HASH-UNRECOMPUTABLE" "$M2_TEXT" "$EXPECTED_M2_SHA256"
 
 assert_eq "4.3a non-vacuity: M3 WORKTREE-REVIEW-DIRTY emitted text" "yes" "$([ -n "$M3_TEXT" ] && echo yes || echo no)"
-assert_contains "4.3b sanity: M3 shows the review-dirty worktree append" "resolve-finding or arbitrate" "$M3_TEXT"
-EXPECTED_M3_SHA256="1daff187f124e45caee3742fd450d19bafa31374f22d702d824443515cfe0ca1"
+# claude-workflow-plugin-3otl R1-F1: the ARDW template's tail legitimately
+# changed from "resolve-finding or arbitrate, then re-run" to
+# "resolve-finding/arbitrate the review, or record a fresh design verdict,
+# then re-run" — the top-level "or" now separates the REVIEW remediation from
+# the (new) DESIGN remediation, so the review-internal alternative moved to a
+# "/". M3 only sets WTRES_REVIEW_DETAIL (design stays empty), so it still
+# renders the review-only half of that sentence; updated to what the shipped
+# template actually emits on this state.
+assert_contains "4.3b sanity: M3 shows the review-dirty worktree append" "resolve-finding/arbitrate the review" "$M3_TEXT"
+# Re-pinned for the same reason as EXPECTED_ARDW_SHA256 above (section 3.1):
+# confirmed load-bearing the same way — the OLD value against this NEW render
+# is exactly the R1-F1 failure this task fixed (measured before this edit).
+EXPECTED_M3_SHA256="bcc95918ac018a8d562463b6b99560df4d27044b1e5928092d7f5cc7196fedc3"
 assert_matrix_pin "4.3c M3 WORKTREE-REVIEW-DIRTY" "$M3_TEXT" "$EXPECTED_M3_SHA256"
 
 assert_eq "4.4a non-vacuity: M4 WORKTREE-DELETED emitted text" "yes" "$([ -n "$M4_TEXT" ] && echo yes || echo no)"

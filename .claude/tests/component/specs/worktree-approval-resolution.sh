@@ -625,6 +625,222 @@ else
 fi
 
 # ===========================================================================
+# SECTION 8B — claude-workflow-plugin-3otl: the DESIGN axis of the
+# cross-worktree bridge. Same shape as section 7 (a finding recorded AFTER the
+# approval must re-arm the gate), but for wtres_design_is_ready rather than
+# wtres_review_is_clean, and on a SEPARATE task (TIDD) — TID is --no-design
+# throughout this file (see approve_in's own comment on why), so it never
+# exercises a real satisfied-design cross-worktree release at all. Per the
+# task's own testing instruction: the control must drive the PATH (a resolved
+# worktree with a post-approval design regression), not just the block — a
+# sentinel-stripped META alone would never prove the CHECK is what refuses
+# unless something upstream of it (try_worktree_resolution, wtres_review_is_
+# clean) actually reaches "would otherwise release".
+#
+# restage_for <tid> <paths...> — restage() (above) is hardcoded to $TID
+# (section 1's task); this section needs a DIFFERENT task's state, so this
+# is the same three operations against an explicit id instead.
+# ===========================================================================
+restage_for() {
+    local tid="$1"; shift
+    bash "$PCT" set "$tid" >/dev/null 2>&1
+    : > "$PTRACK/changed-files.txt"
+    local f
+    for f in "$@"; do printf '%s\n' "$f" >> "$PTRACK/changed-files.txt"; done
+    local san; san=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    rm -f "$PTRACK/iteration-count" "$PTRACK/iteration-count.$san" 2>/dev/null || true
+    baseline_incidental_dirt "$PRIM"
+}
+
+# approve_in_designed <worktree> <tid> <qa-gate-path> <summary> — like
+# approve_in, but seeds a REAL, satisfied design verdict first (grilling ->
+# design-record -> design-review-record, artifact written INSIDE the
+# worktree, never committed) and calls approve WITHOUT --no-design.
+approve_in_designed() {
+    local root="$1" tid="$2" qg="$3" summary="$4" san art hash pay design_hash
+    san=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    art="$root/.claude/.qa-tracking/review-artifact-$san-r1.json"
+
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" grilling-record "$tid" --rounds 3 \
+        --questions 5 --approaches 2 --unresolved 0 \
+        "worktree-approval-resolution spec: design axis (3otl)" >/dev/null 2>&1
+
+    mkdir -p "$root/docs/specs"
+    cat > "$root/docs/specs/$tid.md" <<ARTIFACT
+# Design — $tid
+
+## Problem
+Test subject.
+
+## Approaches considered
+1. Approach A — rejected: does not match the existing pattern.
+2. Approach B — chosen: matches it.
+
+## Chosen approach
+Approach B.
+
+## Units
+See the machine block.
+
+## Global constraints
+None.
+
+## Out of scope
+Everything else.
+
+## Verification plan
+make test
+
+## Revision log
+- v1 initial.
+
+<!-- DESIGN-UNITS BEGIN -->
+\`\`\`json
+{
+  "contract_version": "1",
+  "task_id": "$tid",
+  "designer_identity": "designer",
+  "units": [
+    {
+      "unit_id": "U1",
+      "role": "devops",
+      "goal": "test unit",
+      "acceptance": [ { "id": "AC1", "text": "test fixture: nothing asserted" } ],
+      "files": [ ".claude/scripts/qa-gate.sh" ],
+      "verification": "make test",
+      "depends_on": []
+    }
+  ]
+}
+\`\`\`
+<!-- DESIGN-UNITS END -->
+ARTIFACT
+
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" enter "$tid" >/dev/null 2>&1
+
+    # IMPLEMENTER BEFORE design-record, deliberately — design-record's own
+    # designer_touched_source check refuses when the change set holds a
+    # non-artifact path (src/d.ts, seeded by the caller before this function
+    # runs) and NO IMPLEMENTER record exists yet: "someone else's session
+    # work" is exactly what src/d.ts is here, but design-record has no way to
+    # know that until the record says so. approve_in (the review-only sibling)
+    # posts this same comment AFTER enter because it never calls design-record
+    # at all (--no-design); this function must post it first.
+    bd comments add "$tid" "IMPLEMENTER: role=devops task=$tid at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
+
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" design-record "$tid" >/dev/null 2>&1
+    design_hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/workflow-manifest.sh" hash-file "$root/docs/specs/$tid.md" 2>/dev/null)
+    printf '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"ok"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
+        | CLAUDE_PROJECT_DIR="$root" bash "$qg" design-review-record "$tid" --design-hash "$design_hash" >/dev/null 2>&1
+
+    hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
+    cat > "$art" <<JSON
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}
+JSON
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" review-record "$tid" < "$art" >/dev/null 2>&1
+    if [ -f "$root/.claude/scripts/impact-report.sh" ]; then
+        CLAUDE_PROJECT_DIR="$root" bash "$qg" reconcile-tracker >/dev/null 2>&1 || true
+        CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" "$tid" >/dev/null 2>&1 || true
+    fi
+    pay="$root/.claude/.qa-tracking/completion-draft-$san.json"
+    cat > "$pay" <<JSON
+{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution design-axis fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+JSON
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
+    CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" "$summary" 2>&1 | tail -1
+}
+
+TIDD=$(cd "$PRIM" && bd create "cross-worktree design bridge" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+# TWO files approved in W, restaged in the primary with only ONE of them below
+# (matching section 1/3's own d.ts+e.ts... err, a.ts+b.ts pattern) —
+# DELIBERATELY, so the primary's own change_set_hash is a proper SUBSET
+# rather than accidentally IDENTICAL to what W approved. A single shared file
+# means both trackers hash the same one-element path list and the SAME-
+# CHECKOUT branch resolves it directly (measured: it does, R1) — never
+# reaching LABEL_WITHOUT_RECORD, so the cross-worktree bridge (and
+# wtres_design_is_ready) would never even run.
+printf 'export const d = 1; // implemented in the worktree\n' > "$W/src/d.ts"
+printf 'export const e = 1; // implemented in the worktree\n' > "$W/src/e.ts"
+printf '%s\n%s\n' "$W/src/d.ts" "$W/src/e.ts" > "$WTRACK/changed-files.txt"
+
+DAPPROVE_OUT=$(approve_in_designed "$W" "$TIDD" "$WQG" "reviewed in the worktree by qa-claude, design satisfied")
+assert_json_field "wtres-8b.1 precondition: approve INSIDE the worktree succeeds WITH a satisfied design verdict" \
+    "$DAPPROVE_OUT" '.status' "approved"
+
+# --- CONTROL: no design regression yet — the ordinary cross-worktree release
+# must still work. Without this leg, a fix that always refused (or that
+# refused on any task carrying a DESIGN-ARTIFACT record) would pass 8b.3/8b.4
+# below for the wrong reason.
+restage_for "$TIDD" "$W/src/d.ts"
+assert_eq "wtres-8b.2 CONTROL: a design-satisfied approval bound in the worktree RELEASES the primary's Stop" \
+    "ALLOW" "$(stop_decision "$PRIM")"
+
+# --- file a DESIGN-CONFLICT against the SAME task AFTER the approval, on bd
+# alone — no file in either checkout moves, so change_set_hash is unchanged
+# and every hash/drift/subset condition above stays satisfied. Filed IN W
+# (the artifact it is filed against lives only there), but bd is the one
+# shared database (see this file's own header), so it is visible from PRIM.
+CLAUDE_PROJECT_DIR="$W" bash "$WQG" design-conflict "$TIDD" --unit U1 \
+    "post-approval design conflict filed in the worktree (3otl)" >/dev/null 2>&1
+restage_for "$TIDD" "$W/src/d.ts"
+assert_eq "wtres-8b.3 THE FIX: a design-conflict filed after a cross-worktree approval BLOCKS the bridge" \
+    "block" "$(stop_decision "$PRIM")"
+restage_for "$TIDD" "$W/src/d.ts"
+REASON8B=$(stop_reason "$PRIM")
+assert_contains "wtres-8b.4 the block reason names the design axis" "design is not satisfied" "$REASON8B"
+assert_contains "wtres-8b.4b ...and the underlying error_key" "error_key=design_conflict_open" "$REASON8B"
+
+# ===========================================================================
+# SECTION 8C — META (spec-mandated): the WTRES-DESIGN-CHECK call is
+# load-bearing on its own, narrower than section 8's whole-block strip. Strip
+# ONLY that sentinel-wrapped line from a copy of the CURRENT hook and re-run
+# section 8b's exact BLOCKING state (a design-conflict on an otherwise-clean
+# cross-worktree approval): the mutant must RELEASE it — the control must
+# drive the PATH (try_worktree_resolution succeeds, review is clean, only
+# design refuses), not merely the presence of the block text, per the task's
+# own instruction that a sentinel-stripping META alone does not prove this
+# without first proving the surrounding path is actually reached.
+# ===========================================================================
+VBS_STRIPPED_DESIGN="$PRIM/.claude/scripts/verify-before-stop-nodesign.sh"
+STRIP_RC_DESIGN=0
+awk '
+    /# WTRES-DESIGN-CHECK BEGIN/ { skipping=1; found=1; next }
+    /# WTRES-DESIGN-CHECK END/   { skipping=0; next }
+    skipping { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$REAL_VBS" > "$VBS_STRIPPED_DESIGN" || STRIP_RC_DESIGN=$?
+chmod +x "$VBS_STRIPPED_DESIGN"
+assert_eq "wtres-8c.0 META non-vacuity: WTRES-DESIGN-CHECK sentinels present in verify-before-stop.sh" \
+    "0" "$STRIP_RC_DESIGN"
+
+if [ "$STRIP_RC_DESIGN" -eq 0 ]; then
+    STRIP_DELTA_DESIGN=$(( $(wc -l < "$REAL_VBS") - $(wc -l < "$VBS_STRIPPED_DESIGN") ))
+    assert_eq "wtres-8c.0b META non-vacuity: the strip actually removed a line" "yes" \
+        "$([ "$STRIP_DELTA_DESIGN" -gt 0 ] && echo yes || echo no)"
+    PARSE_RC_DESIGN=0
+    bash -n "$VBS_STRIPPED_DESIGN" 2>/dev/null || PARSE_RC_DESIGN=$?
+    assert_eq "wtres-8c.1 META non-vacuity: the stripped copy still parses" \
+        "0" "$PARSE_RC_DESIGN"
+
+    restage_for "$TIDD" "$W/src/d.ts"
+    assert_eq "wtres-8c.2 META restore-control: the SHIPPED hook still BLOCKS this exact state" \
+        "block" "$(stop_decision "$PRIM")"
+
+    restage_for "$TIDD" "$W/src/d.ts"
+    assert_eq "wtres-8c.3 META specific misbehaviour: WITHOUT the design check the SAME state RELEASES (wtres-8b.3 WOULD fail)" \
+        "ALLOW" "$(stop_decision "$PRIM" "$VBS_STRIPPED_DESIGN")"
+    restage_for "$TIDD" "$W/src/d.ts"
+    REASON8C=$(stop_reason "$PRIM" "$VBS_STRIPPED_DESIGN")
+    assert_eq "wtres-8c.3b ...confirmed by an ALLOW carrying no block reason at all" "" "$REASON8C"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("wtres-8c META: WTRES-DESIGN-CHECK sentinels missing — strip meta-test skipped")
+    printf '  FAIL: wtres-8c META: WTRES-DESIGN-CHECK sentinels missing — strip meta-test skipped\n'
+fi
+rm -f "$VBS_STRIPPED_DESIGN"
+
+# ===========================================================================
 # SECTION 9 — BACK-COMPAT: an approval record with NO worktree token still
 # resolves. Records written before 3mg.2 carry none, so the token can only be a
 # FAST PATH — losing it must cost ordering, never the resolution. Produced by

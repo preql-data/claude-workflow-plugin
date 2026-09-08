@@ -6606,6 +6606,101 @@ fi
 # pairs with a refreshed baseline and this re-read cannot see a half-finalized
 # state. Flipping those two lines re-opens the race.
 #
+# claude-workflow-plugin-3otl DISPOSITION (A1b): this release re-derives ONLY
+# "is there still a reviewable change set" — it does NOT re-run REVIEW-
+# DISCIPLINE or DESIGN-DISCIPLINE the way the WORKTREE-RESOLUTION block further
+# below explicitly does (wtres_review_is_clean / wtres_design_is_ready) before
+# granting ITS release. That asymmetry needed a stated reason rather than
+# silence, and the reason is narrower than "an empty diff means nothing to
+# check" — claude-workflow-plugin-ehfy is the proof that reasoning is FALSE in
+# general: a DESIGN-CONFLICT is a bd comment filed against a design UNIT, not
+# against a change-set hash, so it can be filed with zero file changes and an
+# empty diff proves nothing about it on its own.
+#
+# What actually holds here instead: reaching this whole GATE_STATUS /
+# LABEL_WITHOUT_RECORD section at all requires the file-level detection stage
+# near the top of this script (reviewable_changes(), "if no changes at all,
+# allow") to have found a NON-EMPTY change set — an empty set releases
+# immediately, long before any label or record is consulted. So for THIS
+# block's own re-read of reviewable_changes() to now come back EMPTY,
+# something changed BOTH halves of that function during this Stop's own
+# lifetime — it is a UNION of the tracker half (changed-files.txt, filtered
+# only by the denylist; is_tracked_change never consults git) and the git half
+# (status minus gate-baseline), and either half alone being non-empty is
+# ordinary: post-edit.sh appends re-edits of already-baselined files to the
+# tracker unfiltered, so "tracker non-empty, git-delta-empty" is the routine
+# state right after any prior approve refreshes the baseline (approve's own
+# APPROVE-COMMIT ORDER refreshes the baseline BEFORE truncating the tracker).
+# What this disposition is actually about is narrower and rarer: the TRACKER
+# ITSELF going empty.
+#
+# claude-workflow-plugin-3otl R1-F2 (QA round 1): the first version of this
+# paragraph named ONE producer of that — truncate_changed_files_tracker
+# (qa-gate.sh), whose call site IS unique (the tail of cmd_approve's SUCCESS
+# path, reached only after every refusal above has already passed) — and then
+# over-generalised "unique call site" into "only known producer", which one
+# grep in this repo's own scripts refutes:
+#   grep -rn 'changed-files.txt' --include=*.sh .claude/scripts/ | grep rm
+# finds three more sites that empty the same tracker directly, none of them
+# going through that function. Named here, with what is and is not known
+# about each, rather than assumed:
+#
+#   1. THIS FILE, :4698 — the F1 doc-only fast path's own cleanup. Reached
+#      only after ITS OWN call to `qa-gate.sh approve ... --no-design "F1
+#      doc-only fast path: no design phase, no design verdict to bind"` a few
+#      dozen lines above it exits 0 (that exact flag is on the shipped call,
+#      :4542). That is an AUDITED bypass, not a re-verified design-satisfied
+#      — F1's own classification already established the concurrent change
+#      set has no design surface to check at all. This arm also `exit`s
+#      immediately after (`echo "{}"; exit 0`), so it can never be THIS
+#      process's own route into this disposition — only a genuinely separate,
+#      concurrent Stop invocation reaches it.
+#   2. THIS FILE, further below — the ordinary same-checkout release's own
+#      terminal cleanup (search this file for CLOSE_HINT_NOTE). Reached only
+#      after THIS SCRIPT's own DESIGN-DISCIPLINE block above (:6523) has
+#      already called design-gate-precheck fresh against $CURRENT_TASK,
+#      unconditionally, and it returned success IN THE SAME PROCESS —
+#      DESIGN_DISCIPLINE_BLOCKED gates every path to this cleanup. A
+#      concurrent Stop that reaches here has genuinely re-verified design for
+#      the same task, the same way cmd_approve's own success path does.
+#   3. session-start.sh:438. Gated by that file's own TRACKER-PRESERVE region
+#      (94d.1): the tracker is wiped whenever `current-task` reads empty at
+#      SessionStart — which fires on startup, resume, clear AND compact, not
+#      only a fresh session. That predicate carries NO review or design
+#      determination of any kind; it is answered purely by whether a cycle is
+#      marked active, and TRACKER-PRESERVE's own comment warns "a future edit
+#      that loses the region defaults to DELETING, not preserving" — its
+#      safety here is contingent on that guard staying intact, not evidence
+#      of anything this block can verify about REVIEW-DISCIPLINE or
+#      DESIGN-DISCIPLINE. get_current_task (used by THIS block's own entry
+#      condition — CURRENT_TASK non-empty, gating GATE_STATUS itself, read
+#      once at :4012) and session-start.sh's own active-task read are the
+#      SAME helper-then-file read over the SAME marker, so the two are not
+#      independent: producer 3 firing for $CURRENT_TASK requires that marker
+#      to already read empty, which is exactly what a concurrent producer 1
+#      or 2 (or cmd_approve directly) leaves behind when it clears
+#      current-task on success. That does not make producer 3 safe by
+#      construction — it means its exposure to $CURRENT_TASK is bounded to
+#      the SAME race window named below, not a second, independent one.
+#
+# So the honest claim is narrower than "a concurrent approve already
+# re-verified both axes, seconds ago": producers 1 and 2 each involved a real
+# design determination for $CURRENT_TASK — a fresh, passing check (2), or an
+# audited admission that the concurrent change had nothing to check (1) —
+# while producer 3 carries no design determination of its own and stays
+# closed only for as long as TRACKER-PRESERVE's guard does.
+#
+# THE RESIDUAL, named rather than assumed away: a finding or a design-conflict
+# posted in the narrow window between a concurrent release (any of the three
+# producers above, or cmd_approve directly) and this re-read is not caught
+# here — the same CLASS of gap this block's own "WHY THIS IS NOT A HOLE"
+# paragraph above already accepts for the file axis (transient, and "the
+# decision the NEXT Stop fire makes anyway"). Unlike that file-axis case,
+# there is no guaranteed NEXT Stop if the session ends on this release: a
+# comment posted in that exact window stays uncaught until whatever process
+# next runs Stop against this task. Narrow, accepted, and now written down
+# instead of implicit.
+#
 # Placed BEFORE the cross-worktree resolution on purpose: this is cheaper (two
 # file reads and one `git status`, no worktree scan) and more fundamental — if
 # there is nothing to review, there is nothing to go looking for an approval OF.
@@ -6731,6 +6826,13 @@ WTRES_CHECKED=0
 WTRES_DELETED_TOKEN=""
 # Non-empty when a resolvable approval was refused on REVIEW state (below).
 WTRES_REVIEW_DETAIL=""
+# Non-empty when a resolvable approval was refused on DESIGN state (below,
+# wtres_design_is_ready — claude-workflow-plugin-3otl).
+WTRES_DESIGN_DETAIL=""
+# Set to 1 inside the try_worktree_resolution success arm once every
+# re-verification (review, design) has been asked; 0 if any refused. Declared
+# here (not just inside the `if`) so `set -u` never sees it unbound.
+WTRES_RELEASE_OK=""
 
 # wtres_decode <token> — the `worktree=` token's path spelling. Mirror of
 # qa-gate.sh approval_worktree_token: %20/%09 first, then %25 back to `%`, so a
@@ -7017,9 +7119,84 @@ wtres_review_is_clean() {
     return 1
 }
 
+# wtres_design_is_ready — the DESIGN-DISCIPLINE predicate (compare the
+# same-checkout DESIGN-DISCIPLINE block above), applied to the RESOLVED
+# worktree instead of this checkout. Sibling of wtres_review_is_clean
+# immediately above: same "can only refuse a release, never grant one"
+# stance, same fail-closed default on a missing predicate.
+#
+# claude-workflow-plugin-3otl: before this function existed, design-gate-
+# precheck's ONLY call site in this file was inside the SAME-CHECKOUT branch
+# above (the `if [ "$GATE_STATUS" = "approved" ]` / `task_has_matching_
+# approval_record` arm) — which this cross-worktree branch can never reach.
+# LABEL_WITHOUT_RECORD is true ONLY in that same `if`'s ELSE arm, so the two
+# are mutually exclusive by construction: a design regression filed against
+# $CURRENT_TASK after the approval that this bridge is resolving (a
+# DESIGN-CONFLICT, or an amendment that invalidates the recorded verdict —
+# both bd-only, touching no file the hash-based conditions above can see
+# move) shipped through the cross-worktree path with nothing to catch it,
+# the same reach-around shape claude-workflow-plugin-ehfy found on the
+# same-checkout idempotent-approve arm.
+#
+# WHY THIS RUNS AGAINST $WTRES_WORKTREE, NEVER $PROJECT_DIR — the one
+# difference from wtres_review_is_clean immediately above, and worth stating
+# rather than copying that function's shape blindly. review-check.sh gate is
+# bd-comment-only (bd_show_with_comments, no local file read anywhere in it),
+# so it sees the one shared database regardless of which worktree's cwd it
+# runs with — which is exactly why wtres_review_is_clean calls it with no
+# worktree-specific redirection at all. design-gate-precheck is NOT purely
+# bd-based: compute_design_satisfied hashes the design artifact FILE on disk
+# (design_artifact_path_for -> "$PROJECT_DIR/docs/specs/<tid>.md", via
+# workflow-manifest.sh hash-file — plain sha256sum/shasum/openssl over the
+# path, no git, no cwd dependence of its own), and compute_design_conflict_
+# open re-hashes each disputed unit's OWN content from that same file. That
+# file is exactly the kind of uncommitted, worktree-local content this whole
+# bridge exists to reach (docs/specs/ is not gitignored, so an uncommitted
+# artifact written in W after the worktree was created is invisible to the
+# primary checkout until it is committed) — running the precheck with
+# PROJECT_DIR left at the primary would read whatever this checkout happens
+# to have on disk (nothing, or a stale copy), never the artifact the
+# recorded design_hash= actually attests to.
+#
+# cwd IS NOT CHANGED (no `cd`, matching every other call site in this file):
+# worktree-approval-resolution.sh's own header states the invariant this
+# relies on — "bd always runs with cwd = the primary, so both checkouts read
+# ONE Beads database" (verified there against a REAL linked worktree, not a
+# simulated one). Every file-path derivation inside qa-gate.sh that matters
+# here (design_artifact_path_for, design_path_is_contained) is built from the
+# $PROJECT_DIR variable, never from an ambient cwd assumption, so passing
+# CLAUDE_PROJECT_DIR=$WTRES_WORKTREE alone — leaving the process's actual
+# working directory at the primary — re-points the FILE reads at W while
+# every `bd` call inside design-gate-precheck still resolves the one shared
+# store this file's whole cross-worktree mechanism depends on.
+#
+# The sentinel comments at this function's call site (below) are load-
+# bearing: an L2 META-TEST strips that single call and asserts a design
+# regression filed after a cross-worktree approval then releases anyway. Do
+# not rename them.
+wtres_design_is_ready() {
+    WTRES_DESIGN_DETAIL=""
+    if [ ! -f "$QA_GATE" ]; then
+        WTRES_DESIGN_DETAIL="the design predicate is missing ($QA_GATE), so design-satisfied cannot be verified"
+        return 1
+    fi
+    local rc=0 out key
+    out=$(CLAUDE_PROJECT_DIR="$WTRES_WORKTREE" bash "$QA_GATE" design-gate-precheck "$CURRENT_TASK" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    key=$(printf '%s' "$out" | jq -r '.error_key // ""' 2>/dev/null) || key=""
+    [ -n "$key" ] || key="design_gate_unavailable"
+    WTRES_DESIGN_DETAIL="qa-gate.sh design-gate-precheck (run against $WTRES_WORKTREE) exited $rc with error_key=$key"
+    return 1
+}
+
 if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
     if try_worktree_resolution; then
-        if wtres_review_is_clean; then
+        WTRES_RELEASE_OK=1
+        wtres_review_is_clean || WTRES_RELEASE_OK=0
+        # WTRES-DESIGN-CHECK BEGIN (claude-workflow-plugin-3otl)
+        wtres_design_is_ready || WTRES_RELEASE_OK=0
+        # WTRES-DESIGN-CHECK END (claude-workflow-plugin-3otl)
+        if [ "$WTRES_RELEASE_OK" = "1" ]; then
             log_sync_error "Stop released via worktree resolution: the approval on $CURRENT_TASK is bound in $WTRES_WORKTREE (change_set_hash=$WTRES_HASH); that worktree has no post-approval drift and this checkout's change set is inside its approved file set (3mg.2)"
             # claude-workflow-plugin-i8cx R5-F1: same gap as VANISHED-CHANGE-
             # SET above, same fix — this release used to be a bare `echo
@@ -7031,17 +7208,45 @@ if [ "$LABEL_WITHOUT_RECORD" = "true" ]; then
             # post-dispatch release/block paths.
             emit_release "QA gate cleared for ${CURRENT_TASK:-this task} — the approval is bound in worktree $WTRES_WORKTREE via cross-worktree resolution (3mg.2)."
         fi
-        log_sync_error "Stop blocked: worktree resolution matched $WTRES_WORKTREE for $CURRENT_TASK but the independent review is not clean ($WTRES_REVIEW_DETAIL) — refusing to release (3mg.2)"
+        # claude-workflow-plugin-3otl: names EVERY axis that refused, not just
+        # whichever wtres_review_is_clean/wtres_design_is_ready happened to
+        # run last — both checks above always run (no short-circuit), so
+        # either or both details may be populated here.
+        WTRES_BLOCK_REASON=""
+        if [ -n "$WTRES_REVIEW_DETAIL" ]; then
+            WTRES_BLOCK_REASON="the independent review is not clean ($WTRES_REVIEW_DETAIL)"
+        fi
+        if [ -n "$WTRES_DESIGN_DETAIL" ]; then
+            if [ -n "$WTRES_BLOCK_REASON" ]; then
+                WTRES_BLOCK_REASON="$WTRES_BLOCK_REASON; and design is not satisfied ($WTRES_DESIGN_DETAIL)"
+            else
+                WTRES_BLOCK_REASON="design is not satisfied ($WTRES_DESIGN_DETAIL)"
+            fi
+        fi
+        log_sync_error "Stop blocked: worktree resolution matched $WTRES_WORKTREE for $CURRENT_TASK but $WTRES_BLOCK_REASON — refusing to release (3mg.2)"
     fi
-    # APPROVAL-RECORD-DETAIL-WORKTREE-APPEND BEGIN (claude-workflow-plugin-pqnd R2-F1)
+    # APPROVAL-RECORD-DETAIL-WORKTREE-APPEND BEGIN (claude-workflow-plugin-pqnd
+    # R2-F1; extended for the design axis, claude-workflow-plugin-3otl)
     #
     # A SECOND producer of the same operator-facing $APPROVAL_RECORD_DETAIL
     # (see APPROVAL-RECORD-DETAIL-INIT above for why this is source-pinned
     # rather than covered by the rendered-block pin alone): this APPENDS to
     # whatever APPROVAL-RECORD-DETAIL-INIT already set, once cross-worktree
-    # resolution has run. Three static string templates, one per branch.
-    if [ -n "$WTRES_REVIEW_DETAIL" ]; then
-        APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL; an approval bound in worktree $WTRES_WORKTREE DOES cover this change set, but its independent review is not clean ($WTRES_REVIEW_DETAIL) — resolve-finding or arbitrate, then re-run"
+    # resolution has run. Static string templates, one per branch — the first
+    # branch now composes from whichever of WTRES_REVIEW_DETAIL /
+    # WTRES_DESIGN_DETAIL is non-empty, since either, or both, may refuse.
+    if [ -n "$WTRES_REVIEW_DETAIL" ] || [ -n "$WTRES_DESIGN_DETAIL" ]; then
+        APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL; an approval bound in worktree $WTRES_WORKTREE DOES cover this change set, but"
+        if [ -n "$WTRES_REVIEW_DETAIL" ]; then
+            APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL its independent review is not clean ($WTRES_REVIEW_DETAIL)"
+        fi
+        if [ -n "$WTRES_REVIEW_DETAIL" ] && [ -n "$WTRES_DESIGN_DETAIL" ]; then
+            APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL, and"
+        fi
+        if [ -n "$WTRES_DESIGN_DETAIL" ]; then
+            APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL its design is not satisfied ($WTRES_DESIGN_DETAIL)"
+        fi
+        APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL — resolve-finding/arbitrate the review, or record a fresh design verdict, then re-run"
     elif [ -n "$WTRES_DELETED_TOKEN" ]; then
         APPROVAL_RECORD_DETAIL="$APPROVAL_RECORD_DETAIL; the approval was bound in worktree $WTRES_DELETED_TOKEN, which no longer exists as a live worktree of this repo (removed or moved) — re-enter + re-review here"
     else
