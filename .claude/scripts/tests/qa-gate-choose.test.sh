@@ -240,6 +240,37 @@ DESIGNDOC
         <<< '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"seeded fixture"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
         >/dev/null 2>&1 || return 1
 
+    # claude-workflow-plugin-wob2 (L2): put a KNOWN, task-specific path into
+    # the tracker BEFORE computing the hash this review pins itself to, not
+    # just after (as the comment below this block already does once
+    # review-record has written a new tracked file). Without this, the
+    # tracker is still absent-or-empty at this exact point (nothing in this
+    # fixture populates changed-files.txt directly), so impact-report.sh
+    # --hash-only legitimately answers the SHA-256 empty-content digest — a
+    # well-formed 64-hex string that review-check.sh validate-artifact now
+    # refuses outright as reviewed_hash_unusable (a degradation sentinel
+    # that would compare equal to itself forever; see that check's own
+    # header).
+    #
+    # A DIRECT APPEND, NOT reconcile-tracker's git-status discovery:
+    # reconcile-tracker alone worked here when this was the fixture's only
+    # seed_review_records call (measured), but is NOT reliable in general —
+    # qa-gate-grade-record.test.sh's sibling helper calls it three times in
+    # one fixture with no commits ever made, and the FIRST call's design doc
+    # makes `docs/` an untracked DIRECTORY; `git status --porcelain` then
+    # collapses it to one opaque `?? docs/` line, and once a later baseline
+    # capture records that line, every path under docs/ — including files
+    # that do not exist yet — reads as "already-baselined, pre-existing
+    # dirt" forever after, so change_set_hash silently reverts to the
+    # empty-set digest on the second and third call. This file only ever
+    # calls seed_review_records once today, so that failure mode is not
+    # currently reachable here — but appending this task's own design_art
+    # path directly sidesteps the question rather than depending on it
+    # staying that way, and matches the direct-write shape
+    # run_cycle_pre_approve in review-artifact-durability.sh already uses
+    # for the identical reason.
+    mkdir -p "$FIXTURE/.claude/.qa-tracking" 2>/dev/null || true
+    printf '%s\n' "$design_art" >> "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     [ -z "$hash" ] && hash="unverified"
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"

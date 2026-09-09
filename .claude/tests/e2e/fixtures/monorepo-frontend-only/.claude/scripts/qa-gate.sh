@@ -2846,6 +2846,46 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               frontmatter pin) / reviewer_pin (the frontmatter reading, moved
               to its own field). Record writer only — no approve/Stop
               enforcement.
+              REFUSALS (claude-workflow-plugin-wob2), each named so an
+              operator or agent reading this first does not have to
+              rediscover them from a failed call:
+                - the artifact's own task_id must equal the task being
+                  recorded under (artifact_task_id_mismatch) — a review
+                  recorded on a task it does not describe would make
+                  approve's binding attest to the wrong task's change set.
+                - reviewed_hash must be exactly 64 lowercase hex characters
+                  and is refused when it is the SHA-256 empty-content
+                  sentinel e3b0c442... (reviewed_hash_unusable, enforced by
+                  review-check.sh validate-artifact — the sentinel is a
+                  degradation constant that would compare equal to itself
+                  and to every other unread artifact forever). The SAME
+                  sentinel is now refused earlier still, at validate-request
+                  (change_set_hash_unusable) — before any review turn is
+                  spent, not merely at the recorder. A genuinely empty
+                  change set (or one whose every entry is denylisted) is
+                  the documented case for skipping review entirely via
+                  `approve --no-review '<reason>'` rather than requesting
+                  or recording a review over nothing. "Doc-only" is a
+                  DIFFERENT concept (verify-before-stop.sh's F1 fast path,
+                  is_doc_only_path) and does not apply here: a change set
+                  whose every entry is a real document still hashes to a
+                  real, non-sentinel digest and reviews normally.
+                - risk_threshold must rank in the severity enum
+                  (risk_threshold_invalid_enum, same enum and error-key
+                  spelling as the REQUEST schema's own check, applied here to
+                  the ARTIFACT schema).
+                - iterations/reviewer_identity/risk_threshold/reviewed_hash
+                  are each REJECTED, never sanitised, outside the class
+                  ^[A-Za-z0-9._+-]+$ (the field name suffixed
+                  `_invalid_chars`, the claude-workflow-plugin-bjx class) —
+                  they are interpolated into this record's own machine
+                  prefix, where a space or bracket would move a field
+                  boundary and let the record be read back as something the
+                  artifact never said. reviewer_model/reviewer_pin,
+                  verdict/stopped_by, and findings[] are each guarded by an
+                  earlier, schema-level check instead (a model-id class, a
+                  closed enum, and an id/severity grammar respectively), so
+                  they are not re-asserted here.
   completion-record <task-id> [--file <path>]
               P7: record the F7 specialist completion contract. Validates the
               payload JSON via review-check.sh `validate-completion` (the ONE
@@ -6621,6 +6661,45 @@ cmd_review_record() {
         exit 1
     fi
 
+    # --- THE DECOY-ARTIFACT CHECK (claude-workflow-plugin-wob2 RRV) --------
+    # completion-record documents this exact shape for its own payload (see
+    # its own "THE DECOY-PAYLOAD CHECK" comment, below in this file): an
+    # artifact whose OWN task_id names a different task is cheaper to refuse
+    # here than to reason about later — the record would claim to review
+    # task A's change set while sitting on task B, and approve's binding
+    # would attest to the wrong task entirely. Both sibling recorders
+    # (completion-record, design-record) already have this check; this one
+    # was simply omitted.
+    #
+    # READ STRAIGHT OFF $raw (the validated bytes), never off $vout:
+    # validate-artifact's envelope (emit_validate) carries only {ok,
+    # subcommand, error_key, observations} — unlike validate-design's
+    # emit_validate_design, there is no echoed task_id to read back here.
+    #
+    # UNCONDITIONAL, matching completion-record's shape rather than
+    # design-record's (which only fires when its artifact's task_id is
+    # NON-EMPTY): validate-artifact's has() loop above only proves the KEY
+    # is present, never that the VALUE is a non-empty string, so an artifact
+    # carrying task_id=null or task_id="" must still be refused here rather
+    # than waved through on an emptiness exemption design-record's schema
+    # does not need (validate-design enforces task_id_missing on a
+    # non-string/empty value before that recorder ever reaches this point).
+    # `jq -r` on an absent or JSON-null task_id both print the literal
+    # string "null", which cannot equal a real task id and is refused for
+    # the same reason a mismatched one is.
+    # RRV-GUARD BEGIN (claude-workflow-plugin-wob2 R1-F1; load-bearing —
+    # review-separation-records.sh's R7 META strips to END to prove THIS
+    # block, not some other refusal, is what catches a foreign task_id)
+    local art_tid
+    art_tid=$(printf '%s' "$raw" | jq -r '.task_id' 2>/dev/null)
+    if [ "$art_tid" != "$tid" ]; then
+        emit_error_json "review-record" "$tid" "artifact_task_id_mismatch" \
+            "the artifact's own task_id='$art_tid' is not the task being recorded ('$tid'). A review recorded on a task it does not describe would make approve's binding attest to the wrong task's change set" \
+            "qa-gate.sh review-record $art_tid --file <path>  OR  printf '%s' \"\$JSON\" | qa-gate.sh review-record $art_tid"
+        exit 1
+    fi
+    # RRV-GUARD END (claude-workflow-plugin-wob2 R1-F1)
+
     # --- CANONICAL PATH (v5 D2 / claude-workflow-plugin-rqer) ---------------
     # The artifact is DERIVED, never supplied — --file only ASSERTS that
     # derivation, the same discipline design-record's --file already
@@ -6725,11 +6804,55 @@ cmd_review_record() {
     # Extract the grammar fields from the validated artifact. `pin` (46w9) is
     # reviewer_pin, abbreviated the same way reviewer_model already is to
     # `model` — see the ART_REVIEWER_PIN comment in review-check.sh's cmd_gate
-    # for why "pin=" cannot collide with any other token in this grammar. Both
-    # reviewer_model and reviewer_pin already passed validate-artifact's
-    # control-character AND model-id-class checks above (ok=true would not
-    # have been reached otherwise), so no second bjx guard is needed here —
-    # this function has never re-validated its other extracted scalars either.
+    # for why "pin=" cannot collide with any other token in this grammar.
+    #
+    # WHICH SCALARS ARE RE-GUARDED HERE, AND WHICH ARE NOT (claude-workflow-
+    # plugin-wob2 KGRAM). Of the ten scalars this function interpolates into
+    # the machine prefix (iteration, reviewer, model, pin, reviewed_hash,
+    # risk_threshold, verdict, stopped_by, findings, artifact_hash):
+    #   - model and pin already passed validate-artifact's control-character
+    #     AND model-id-class (id_ok) checks above (ok=true would not have
+    #     been reached otherwise) — that class already excludes space, so no
+    #     second bjx guard is added here.
+    #   - verdict and stopped_by are each a closed enum validate-artifact
+    #     already checks (approve|findings; verdict|stop_condition|
+    #     cap:max_findings|cap:max_review_iterations|cap:timeout) — every
+    #     member of both sets is already free of space/comma/bracket, so
+    #     re-asserting them through assert_record_scalar's [A-Za-z0-9._+-]
+    #     class would be redundant at best and WRONG at worst: stopped_by's
+    #     "cap:max_findings" shape legitimately contains a colon, which that
+    #     class forbids.
+    #   - findings_token is built exclusively from findings[].id (already
+    #     schema-anchored to ^R[0-9]+-F[0-9]+$) and findings[].severity
+    #     (already a closed 5-member enum) — safe by construction.
+    #   - iterations, reviewer_identity, risk_threshold and reviewed_hash had
+    #     NO character-class guard anywhere in the pipeline until this round.
+    #     REPRODUCED (this task's own record): an unguarded reviewer_identity
+    #     let a single crafted value embed a complete second REVIEW-ARTIFACT
+    #     head — its own reviewer=/model=/pin=/reviewed_hash=/risk_threshold=
+    #     /verdict=/stopped_by=/findings=[]/at TIMESTAMP: — ahead of every
+    #     REAL field the template appends afterward. review-check.sh's
+    #     anchored art_prefix_len matches only up to the FIRST such
+    #     " at TS: " it finds, so the fake head became the ENTIRE record as
+    #     far as every downstream reader was concerned: a real
+    #     critical finding went uncounted (open_findings 0 instead of 1), an
+    #     actual self-review read as reviewer_identity="independent-auditor"
+    #     (independent: true, when the task's only IMPLEMENTER record names
+    #     the same role), and a real stopped_by=cap:max_findings (incomplete
+    #     by construction — qa.md 6-prime) read back as stopped_by=verdict,
+    #     cap_terminated: false. One unguarded field, three simultaneous
+    #     false readings, through the shipped writer and the shipped gate
+    #     reader, no bd access beyond an isolated fixture required.
+    #     reviewed_hash and risk_threshold now also gained shape/enum checks
+    #     in validate-artifact itself (see its own comments) — but a shape
+    #     check is not a bjx grammar-injection guard, and iterations' own
+    #     digit-only check happens in a SEPARATE subprocess, over a copy of
+    #     the same bytes this function re-reads independently from $raw.
+    #     These four get assert_record_scalar below, on the same "ours, but
+    #     checked anyway" discipline completion-record's payload_sha already
+    #     documents: an assumption that a value is safe because of where it
+    #     came from is exactly the assumption bjx's rubric_version was
+    #     shipped on.
     local reviewer model pin hash rt verdict stopped findings_token fc summary ts comment_text
     reviewer=$(printf '%s' "$raw" | jq -r '.reviewer_identity' 2>/dev/null)
     model=$(printf '%s' "$raw" | jq -r '.reviewer_model' 2>/dev/null)
@@ -6740,6 +6863,16 @@ cmd_review_record() {
     stopped=$(printf '%s' "$raw" | jq -r '.stopped_by' 2>/dev/null)
     findings_token=$(printf '%s' "$raw" | jq -r 'if (.findings|length)==0 then "" else (.findings|map(.id+":"+.severity)|join(",")) end' 2>/dev/null)
     fc=$(printf '%s' "$raw" | jq -r '.findings | length' 2>/dev/null)
+    assert_record_scalar "review-record" "$tid" "iterations" "$iter"
+    # KGRAM-REVIEWER-IDENTITY-GUARD BEGIN (claude-workflow-plugin-wob2 R1-F1;
+    # load-bearing — review-separation-records.sh's R8 META strips to END to
+    # prove THIS line, not some other guard, is what stops the fake-head
+    # injection documented above (the reviewer= field is the ONLY one of the
+    # four re-guarded here with no upstream shape/enum check at all).
+    assert_record_scalar "review-record" "$tid" "reviewer_identity" "$reviewer"
+    # KGRAM-REVIEWER-IDENTITY-GUARD END (claude-workflow-plugin-wob2 R1-F1)
+    assert_record_scalar "review-record" "$tid" "risk_threshold" "$rt"
+    assert_record_scalar "review-record" "$tid" "reviewed_hash" "$hash"
     if [ "$verdict" = "approve" ]; then
         summary="approve — no findings at/above $rt"
     else
@@ -7334,6 +7467,28 @@ design_foreign_paths() {
 # digest a hash tool cut short — including whatever the next degradation
 # spelling turns out to be. An identity test can only refuse a value somebody has
 # already been surprised by.
+#
+# CASE-INSENSITIVE, DELIBERATELY (claude-workflow-plugin-wob2 R1-F4) — this is
+# a CROSS-REFERENCE, read the other side before changing either. review-check.sh's
+# REVIEWED-HASH-GUARD (cmd_validate_artifact) accepts LOWERCASE ONLY on
+# reviewed_hash, and the two are not a drift to be unified: they gate two
+# different kinds of claim. design_hash/vendor_hash (gated here) are
+# RECOMPUTED and compared for VALUE equality — case carries no information,
+# and a real cross-platform producer of one really does emit uppercase:
+# install.ps1's own Get-FileSha256 documents "Get-FileHash returns UPPERCASE
+# hex; the manifest is lowercase ... The ToLowerInvariant() is therefore
+# load-bearing" for exactly this reason, in this same repo's toolchain.
+# reviewed_hash instead asserts a COPY — verbatim, from a review request's
+# change_set_hash — so a case mismatch there IS the signal ("the reviewer did
+# not actually copy the value they were handed"); tolerating case on that
+# field would erase the one thing it exists to catch. No known producer in
+# this repo emits an uppercase design_hash/vendor_hash today (every one goes
+# through workflow-manifest.sh hash-file, always lowercase), so this is
+# currently belt-and-suspenders — kept case-insensitive anyway because the
+# Windows install-path precedent above shows the risk is real, not
+# hypothetical, and because loosening it costs nothing a live producer relies
+# on. If either class is ever tightened or loosened, update this comment and
+# review-check.sh's, together.
 is_sha256_hex() {
     local v="${1:-}"
     case "$v" in

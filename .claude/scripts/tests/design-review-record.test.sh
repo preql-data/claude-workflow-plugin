@@ -1500,6 +1500,17 @@ printf '\n=== Section 8i: anti-overreach — a genuinely no-design-phase task is
 # ===========================================================================
 
 TID30=$(bd create "D5 anti-overreach: no design phase at all" -t task -p 1 --json 2>/dev/null | jq -r '.id')
+# claude-workflow-plugin-wob2 (L2): same one-line seed every OTHER section in
+# this file writes before its own design/approve flow (see the many
+# `printf ... > "$TRACKING"` sites above — placeholder-N.md is the
+# established shape for a section with no real design artifact to point at).
+# TID30 is the one section that skipped it, because this task deliberately
+# has no design phase to hang a real path on — but seed_approvable's own
+# reviewed_hash still needs the tracker non-empty at the instant it calls
+# impact-report.sh --hash-only, or it now legitimately answers the SHA-256
+# empty-content digest, which review-check.sh validate-artifact refuses as
+# reviewed_hash_unusable (a degradation sentinel, never a usable binding).
+printf 'placeholder-30.md\n' > "$TRACKING"
 seed_approvable "$TID30"
 OUT=$(bash "$QG" approve "$TID30" --no-design "this task never had a design phase" "ordinary no-design bypass" 2>&1)
 assert_eq "8.32 ANTI-OVERREACH: a task with genuinely no design phase still approves with --no-design" \

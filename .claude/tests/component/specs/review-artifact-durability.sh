@@ -254,11 +254,11 @@ assert_json_field "Leg A / AC-1: ...naming the refusal" "$BAD_OUT" ".error_key" 
 # AC-1 (symlink escape): a symlink AT the derived path for a FRESH iteration,
 # pointing outside docs/reviews/, must not be accepted and hashed.
 OUTSIDE="$FIXTURE/outside-secret.json"
-artifact_json "$TID_A" "deadbeef" 2 > "$OUTSIDE"
+artifact_json "$TID_A" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" 2 > "$OUTSIDE"
 ESCAPE_PATH=$(derived_path "$FIXTURE" "$TID_A" 2)
 mkdir -p "$(dirname "$ESCAPE_PATH")"
 ln -sf "$OUTSIDE" "$ESCAPE_PATH"
-ESCAPE_OUT=$(artifact_json "$TID_A" "deadbeef" 2 | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$TID_A" --file "$ESCAPE_PATH" 2>/dev/null)
+ESCAPE_OUT=$(artifact_json "$TID_A" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" 2 | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$TID_A" --file "$ESCAPE_PATH" 2>/dev/null)
 assert_json_field "Leg A / AC-1: a symlink at the derived path escaping the dir is refused" \
     "$ESCAPE_OUT" ".ok|tostring" "false"
 assert_json_field "Leg A / AC-1: ...naming the escape" "$ESCAPE_OUT" ".error_key" "artifact_outside_review_dir"

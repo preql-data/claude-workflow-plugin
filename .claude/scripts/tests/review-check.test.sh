@@ -61,8 +61,8 @@ run_rc() {
 ekey_of() { printf '%s' "$1" | jq -r '.error_key // ""' 2>/dev/null || echo ""; }
 
 # A valid request + artifact used as the mutation base.
-VALID_REQ='{"contract_version":"1","task_id":"t-1","iteration":1,"risk_threshold":"high","stop_condition":"no critical/high remain","change_set_hash":"h","spec":"s","diff":"d","completion_contract":"c","impact_report":"i"}'
-VALID_ART='{"contract_version":"1","task_id":"t-1","reviewer_identity":"sol-codex","reviewer_model":"m","reviewer_pin":"m","reviewed_hash":"h","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"high","location":"a.ts:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}'
+VALID_REQ='{"contract_version":"1","task_id":"t-1","iteration":1,"risk_threshold":"high","stop_condition":"no critical/high remain","change_set_hash":"cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe","spec":"s","diff":"d","completion_contract":"c","impact_report":"i"}'
+VALID_ART='{"contract_version":"1","task_id":"t-1","reviewer_identity":"sol-codex","reviewer_model":"m","reviewer_pin":"m","reviewed_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"high","location":"a.ts:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}'
 
 # ---------------------------------------------------------------------------
 echo "=== Section 1: validate-request ==="
@@ -96,6 +96,93 @@ printf 'not json{' > "$WORK/req_badjson.json"
 run_rc validate-request "$WORK/req_badjson.json"
 assert_eq "req invalid json: exit 4" "4" "$RC_EXIT"
 assert_eq "req invalid json: error_key" "invalid_json" "$(ekey_of "$RC_OUT")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 1b: change_set_hash SHAPE guard (claude-workflow-plugin-wob2 R1-F2) ==="
+# THE GAP THIS CLOSES: independent review round 1 of wob2 (R1-F2) measured
+# that codex-review.sh's FORCED-field expression did not force reviewed_hash,
+# and that change_set_hash had NO shape check on the REQUEST schema at all —
+# VALID_REQ itself carried "change_set_hash":"h" and validated. A malformed
+# change_set_hash could therefore reach a paid Sol turn and only be refused
+# AFTER the spend, once cmd_validate_artifact's reviewed_hash_unusable check
+# saw the (now-forced) value. This closes the gap at the earliest boundary:
+# the REQUEST itself.
+REQ_HASH64=$(printf 'e%.0s' $(seq 1 64))
+REQ_HASH63=$(printf 'e%.0s' $(seq 1 63))
+assert_eq "1b setup: REQ_HASH64 (control) is exactly 64 chars" "64" "${#REQ_HASH64}"
+assert_eq "1b setup: REQ_HASH63 is exactly 63 chars" "63" "${#REQ_HASH63}"
+
+printf '%s' "$VALID_REQ" | jq --arg h "$REQ_HASH63" '.change_set_hash=$h' > "$WORK/req_csh_short.json"
+run_rc validate-request "$WORK/req_csh_short.json"
+assert_eq "1b change_set_hash 63 hex chars (too short): exit 4" "4" "$RC_EXIT"
+assert_eq "1b change_set_hash 63 hex chars: error_key" "change_set_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_REQ" | jq '.change_set_hash=""' > "$WORK/req_csh_empty.json"
+run_rc validate-request "$WORK/req_csh_empty.json"
+assert_eq "1b change_set_hash empty string: exit 4" "4" "$RC_EXIT"
+assert_eq "1b change_set_hash empty string: error_key" "change_set_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_REQ" | jq '.change_set_hash="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"' > "$WORK/req_csh_upper.json"
+run_rc validate-request "$WORK/req_csh_upper.json"
+assert_eq "1b change_set_hash UPPERCASE (64 chars, wrong case): exit 4" "4" "$RC_EXIT"
+assert_eq "1b change_set_hash uppercase: error_key" "change_set_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+# SYMMETRY WITH reviewed_hash, reversing round 1's own exemption
+# (claude-workflow-plugin-wob2 R2-F3). Round 1 shipped this arm ACCEPTING the
+# SHA-256 empty-content sentinel, reasoning that a genuinely empty change set
+# must still reach the review flow; independent review round 2 traced that
+# path end to end and found the exemption never delivered that outcome (a
+# sentinel request still spent a paid review turn and only failed one step
+# later, at the artifact recorder) — the exact pre-spend waste this guard
+# exists to prevent. The sentinel is now refused HERE too, same error_key as
+# the shape arms, so a genuinely empty (or wholly-denylisted) change set is
+# caught before any spend rather than after one.
+SENTINEL_HASH_1B="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+printf '%s' "$VALID_REQ" | jq --arg h "$SENTINEL_HASH_1B" '.change_set_hash=$h' > "$WORK/req_csh_sentinel.json"
+run_rc validate-request "$WORK/req_csh_sentinel.json"
+assert_eq "1b change_set_hash SENTINEL is now REFUSED (exit 4) -- symmetric with reviewed_hash, no more pre-artifact spend on a degenerate request" \
+    "4" "$RC_EXIT"
+assert_eq "1b change_set_hash SENTINEL: error_key" "change_set_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+# Discriminator: the unmodified VALID_REQ still passes.
+run_rc validate-request "$WORK/req_ok.json"
+assert_eq "1b discriminator: unmutated VALID_REQ still exit 0" "0" "$RC_EXIT"
+
+# META (pairing requirement): a checker copy with CHANGE-SET-HASH-GUARD
+# stripped must ACCEPT the exact shape-bad fixture above.
+CSHGUARD_STRIPPED="$WORK/review-check-nocshguard.sh"
+awk '
+    /# CHANGE-SET-HASH-GUARD-START/ {skip=1; next}
+    /# CHANGE-SET-HASH-GUARD-END/   {skip=0; next}
+    skip!=1 {print}
+' "$RCHECK" > "$CSHGUARD_STRIPPED"
+chmod +x "$CSHGUARD_STRIPPED"
+
+CSH_REAL_LINES=$(wc -l < "$RCHECK" | tr -d ' ')
+CSH_STRIP_LINES=$(wc -l < "$CSHGUARD_STRIPPED" | tr -d ' ')
+assert_eq "1b META: strip removed the guard block (fewer lines)" "1" \
+    "$([ "$CSH_STRIP_LINES" -lt "$CSH_REAL_LINES" ] && echo 1 || echo 0)"
+assert_eq "1b META: stripped checker parses" "0" \
+    "$(bash -n "$CSHGUARD_STRIPPED" 2>/dev/null && echo 0 || echo 1)"
+
+CSH_STRIP_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$CSHGUARD_STRIPPED" validate-request "$WORK/req_csh_short.json" 2>/dev/null)
+CSH_STRIP_EXIT=$?
+assert_eq "1b META: STRIPPED checker WRONGLY accepts a 63-hex change_set_hash (exit 0) -> guard is load-bearing" \
+    "0" "$CSH_STRIP_EXIT"
+assert_eq "1b META: stripped checker reports ok=true" "true" \
+    "$(printf '%s' "$CSH_STRIP_OUT" | jq -r '.ok')"
+run_rc validate-request "$WORK/req_csh_short.json"
+assert_eq "1b META: REAL checker still rejects the same fixture (exit 4)" "4" "$RC_EXIT"
+
+# Bonus confirmation: the SAME stripped copy also wrongly accepts the
+# sentinel fixture -- the whole guard was removed, sentinel arm included, not
+# merely the shape half of it.
+CSH_STRIP_SENTINEL_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$CSHGUARD_STRIPPED" validate-request "$WORK/req_csh_sentinel.json" 2>/dev/null)
+assert_eq "1b META bonus: STRIPPED checker also wrongly accepts the sentinel (whole guard removed, not half of it)" \
+    "true" "$(printf '%s' "$CSH_STRIP_SENTINEL_OUT" | jq -r '.ok')"
+run_rc validate-request "$WORK/req_csh_sentinel.json"
+assert_eq "1b META bonus: REAL checker still rejects the sentinel fixture (exit 4)" "4" "$RC_EXIT"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -348,6 +435,163 @@ assert_eq "META magnitude-guard: stripped checker reports ok=true" "true" \
 # out-of-bound fixture.
 run_rc validate-artifact "$WORK/art_iter_r1f1.json"
 assert_eq "META magnitude-guard: REAL checker still rejects the same fixture (exit 4)" "4" "$RC_EXIT"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 2d: reviewed_hash SHAPE guard (claude-workflow-plugin-wob2 R1-F1) ==="
+# THE GAP THIS CLOSES: independent review round 1 of wob2 measured that
+# exactly ONE shipped assertion anywhere in this suite names
+# reviewed_hash_unusable (impact-report.test.sh:834), and it exercises only
+# the SENTINEL arm (the SHA-256 empty-content digest). The SHAPE arm --
+# wrong length, illegal characters, a non-hex-string value, an empty
+# string, or an outright absent key -- had zero coverage. Six direct legs
+# below, one per shape failure mode, each a plain jq mutation of VALID_ART
+# matching this file's own established Section 2 style, followed by a META
+# that proves the whole REVIEWED-HASH-GUARD block in review-check.sh is
+# load-bearing (not merely that SOME unrelated check happens to reject
+# these fixtures).
+#
+# Lengths are derived programmatically, never hand-counted: a 64-character
+# literal is exactly the kind of value a human miscounts by eye, which is
+# how the original defect (L2) escaped review for as long as it did.
+HASH64=$(printf 'd%.0s' $(seq 1 64))
+HASH63=$(printf 'd%.0s' $(seq 1 63))
+HASH65=$(printf 'd%.0s' $(seq 1 65))
+assert_eq "2d setup: HASH64 (control) is exactly 64 chars" "64" "${#HASH64}"
+assert_eq "2d setup: HASH63 is exactly 63 chars" "63" "${#HASH63}"
+assert_eq "2d setup: HASH65 is exactly 65 chars" "65" "${#HASH65}"
+
+printf '%s' "$VALID_ART" | jq --arg h "$HASH63" '.reviewed_hash=$h' > "$WORK/art_hash_63.json"
+run_rc validate-artifact "$WORK/art_hash_63.json"
+assert_eq "2d reviewed_hash 63 hex chars (too short): exit 4" "4" "$RC_EXIT"
+assert_eq "2d reviewed_hash 63 hex chars: error_key" "reviewed_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq --arg h "$HASH65" '.reviewed_hash=$h' > "$WORK/art_hash_65.json"
+run_rc validate-artifact "$WORK/art_hash_65.json"
+assert_eq "2d reviewed_hash 65 hex chars (too long): exit 4" "4" "$RC_EXIT"
+assert_eq "2d reviewed_hash 65 hex chars: error_key" "reviewed_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.reviewed_hash="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"' > "$WORK/art_hash_upper.json"
+run_rc validate-artifact "$WORK/art_hash_upper.json"
+assert_eq "2d reviewed_hash UPPERCASE (64 chars, wrong case): exit 4" "4" "$RC_EXIT"
+assert_eq "2d reviewed_hash uppercase: error_key" "reviewed_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.reviewed_hash=12345' > "$WORK/art_hash_number.json"
+run_rc validate-artifact "$WORK/art_hash_number.json"
+assert_eq "2d reviewed_hash is a JSON number, not a string: exit 4" "4" "$RC_EXIT"
+assert_eq "2d reviewed_hash non-string (jq -r coerces the number 12345 to the 5-char string \"12345\", wrong length): error_key" \
+    "reviewed_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+printf '%s' "$VALID_ART" | jq '.reviewed_hash=""' > "$WORK/art_hash_empty.json"
+run_rc validate-artifact "$WORK/art_hash_empty.json"
+assert_eq "2d reviewed_hash empty string: exit 4" "4" "$RC_EXIT"
+assert_eq "2d reviewed_hash empty string: error_key" "reviewed_hash_unusable" "$(ekey_of "$RC_OUT")"
+
+# Absent key is caught by the GENERIC has() loop (pre-existing, already
+# pinned for a different field by Section 2's own "art missing key" leg
+# above) rather than by REVIEWED-HASH-GUARD itself -- a DIFFERENT error_key,
+# named explicitly here so the distinction is measured, not assumed.
+printf '%s' "$VALID_ART" | jq 'del(.reviewed_hash)' > "$WORK/art_hash_absent.json"
+run_rc validate-artifact "$WORK/art_hash_absent.json"
+assert_eq "2d reviewed_hash key absent: exit 4" "4" "$RC_EXIT"
+assert_eq "2d reviewed_hash key absent: error_key is the GENERIC missing_key, not reviewed_hash_unusable" \
+    "missing_key:reviewed_hash" "$(ekey_of "$RC_OUT")"
+
+# Discriminator: the unmodified VALID_ART (well-formed reviewed_hash) still
+# passes, proving the six assertions above fail because of their specific
+# mutation, not because Section 2d broke validate-artifact generally.
+run_rc validate-artifact "$WORK/art_ok.json"
+assert_eq "2d discriminator: unmutated VALID_ART still exit 0" "0" "$RC_EXIT"
+
+# META (claude-workflow-plugin-wob2 R1-F1 pairing requirement): a checker
+# copy with REVIEWED-HASH-GUARD stripped must ACCEPT the exact shape-bad
+# fixture Section 2d rejects above, proving the guard -- not some unrelated
+# check -- is what refuses it.
+RHGUARD_STRIPPED="$WORK/review-check-norhguard.sh"
+awk '
+    /# REVIEWED-HASH-GUARD-START/ {skip=1; next}
+    /# REVIEWED-HASH-GUARD-END/   {skip=0; next}
+    skip!=1 {print}
+' "$RCHECK" > "$RHGUARD_STRIPPED"
+chmod +x "$RHGUARD_STRIPPED"
+
+RH_REAL_LINES=$(wc -l < "$RCHECK" | tr -d ' ')
+RH_STRIP_LINES=$(wc -l < "$RHGUARD_STRIPPED" | tr -d ' ')
+assert_eq "2d META: strip removed the guard block (fewer lines)" "1" \
+    "$([ "$RH_STRIP_LINES" -lt "$RH_REAL_LINES" ] && echo 1 || echo 0)"
+assert_eq "2d META: stripped checker parses" "0" \
+    "$(bash -n "$RHGUARD_STRIPPED" 2>/dev/null && echo 0 || echo 1)"
+
+RH_STRIP_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RHGUARD_STRIPPED" validate-artifact "$WORK/art_hash_63.json" 2>/dev/null)
+RH_STRIP_EXIT=$?
+assert_eq "2d META: STRIPPED checker WRONGLY accepts a 63-hex reviewed_hash (exit 0) -> guard is load-bearing" \
+    "0" "$RH_STRIP_EXIT"
+assert_eq "2d META: stripped checker reports ok=true" "true" \
+    "$(printf '%s' "$RH_STRIP_OUT" | jq -r '.ok')"
+# Discriminator half: the REAL (unstripped) checker still rejects the same
+# fixture, so the META result above is attributable to the strip and
+# nothing else.
+run_rc validate-artifact "$WORK/art_hash_63.json"
+assert_eq "2d META: REAL checker still rejects the same fixture (exit 4)" "4" "$RC_EXIT"
+
+# Bonus confirmation (not required to close R1-F1 -- the SENTINEL arm
+# already has a shipped leg at impact-report.test.sh:834 -- but since the
+# stripped copy already exists, this costs nothing and confirms the strip
+# removed the WHOLE guard, sentinel arm included, not merely the shape half).
+SENTINEL_HASH="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+printf '%s' "$VALID_ART" | jq --arg h "$SENTINEL_HASH" '.reviewed_hash=$h' > "$WORK/art_hash_sentinel.json"
+run_rc validate-artifact "$WORK/art_hash_sentinel.json"
+assert_eq "2d sentinel arm (bonus, already covered at impact-report.test.sh:834): REAL checker rejects" \
+    "reviewed_hash_unusable" "$(ekey_of "$RC_OUT")"
+RH_STRIP_SENTINEL_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RHGUARD_STRIPPED" validate-artifact "$WORK/art_hash_sentinel.json" 2>/dev/null)
+assert_eq "2d META bonus: STRIPPED checker also wrongly accepts the sentinel (whole guard removed, not half of it)" \
+    "true" "$(printf '%s' "$RH_STRIP_SENTINEL_OUT" | jq -r '.ok')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 2e: artifact-schema risk_threshold enum (claude-workflow-plugin-wob2 R1-F1) ==="
+# THE GAP THIS CLOSES: Section 1 already pins risk_threshold_invalid_enum for
+# the REQUEST schema ("req bad enum", above). validate-artifact has its OWN,
+# separate risk_threshold_invalid_enum check (ARTIFACT-RISK-THRESHOLD-GUARD)
+# -- same error_key spelling, but a DIFFERENT schema, reached only via
+# validate-artifact -- and independent review round 1 of wob2 measured zero
+# shipped assertions naming it on THIS schema; the one existing "bad enum"
+# leg is a request-schema fixture (VALID_REQ) and cannot exercise the
+# artifact-schema branch, which lives in a different function entirely.
+printf '%s' "$VALID_ART" | jq '.risk_threshold="nonsense"' > "$WORK/art_badrt.json"
+run_rc validate-artifact "$WORK/art_badrt.json"
+assert_eq "2e artifact risk_threshold bad enum: exit 4" "4" "$RC_EXIT"
+assert_eq "2e artifact risk_threshold bad enum: error_key" "risk_threshold_invalid_enum" "$(ekey_of "$RC_OUT")"
+
+# Discriminator: the unmodified VALID_ART still passes.
+run_rc validate-artifact "$WORK/art_ok.json"
+assert_eq "2e discriminator: unmutated VALID_ART still exit 0" "0" "$RC_EXIT"
+
+# META: a checker copy with ARTIFACT-RISK-THRESHOLD-GUARD stripped must
+# ACCEPT the exact fixture above, proving the guard is load-bearing.
+RTGUARD_STRIPPED="$WORK/review-check-nortguard.sh"
+awk '
+    /# ARTIFACT-RISK-THRESHOLD-GUARD-START/ {skip=1; next}
+    /# ARTIFACT-RISK-THRESHOLD-GUARD-END/   {skip=0; next}
+    skip!=1 {print}
+' "$RCHECK" > "$RTGUARD_STRIPPED"
+chmod +x "$RTGUARD_STRIPPED"
+
+RT_REAL_LINES=$(wc -l < "$RCHECK" | tr -d ' ')
+RT_STRIP_LINES=$(wc -l < "$RTGUARD_STRIPPED" | tr -d ' ')
+assert_eq "2e META: strip removed the guard block (fewer lines)" "1" \
+    "$([ "$RT_STRIP_LINES" -lt "$RT_REAL_LINES" ] && echo 1 || echo 0)"
+assert_eq "2e META: stripped checker parses" "0" \
+    "$(bash -n "$RTGUARD_STRIPPED" 2>/dev/null && echo 0 || echo 1)"
+
+RT_STRIP_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RTGUARD_STRIPPED" validate-artifact "$WORK/art_badrt.json" 2>/dev/null)
+RT_STRIP_EXIT=$?
+assert_eq "2e META: STRIPPED checker WRONGLY accepts risk_threshold=nonsense (exit 0) -> guard is load-bearing" \
+    "0" "$RT_STRIP_EXIT"
+assert_eq "2e META: stripped checker reports ok=true" "true" \
+    "$(printf '%s' "$RT_STRIP_OUT" | jq -r '.ok')"
+run_rc validate-artifact "$WORK/art_badrt.json"
+assert_eq "2e META: REAL checker still rejects the same fixture (exit 4)" "4" "$RC_EXIT"
 
 # ---------------------------------------------------------------------------
 echo ""

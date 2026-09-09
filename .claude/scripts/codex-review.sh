@@ -175,6 +175,19 @@ fi
 # Request-authoritative fields (forced into the artifact later).
 REQ_RT=$(jq -r '.risk_threshold' "$REQUEST_FILE" 2>/dev/null || echo "")
 REQ_SC=$(jq -r '.stop_condition' "$REQUEST_FILE" 2>/dev/null || echo "")
+# claude-workflow-plugin-wob2 (R1-F2): change_set_hash is request-authoritative
+# by qa.md's own definition ("reviewed_hash": "<the change_set_hash from the
+# request>") exactly like REQ_RT/REQ_SC above, but was never forced — Sol's
+# own reviewed_hash claim passed straight through. That left two gaps: (1) a
+# well-formed-but-WRONG value from Sol would still validate (shape is all
+# cmd_validate_artifact checks) and silently bind approval to a hash nobody
+# actually reviewed; (2) validate-request's own change_set_hash shape check
+# (below in review-check.sh, added alongside this fix) refuses a malformed
+# REQUEST before any Sol call — but a valid-shaped, wrong-VALUE request could
+# still pass validate-request and then diverge from what gets forced here. As
+# with REQ_RT/REQ_SC, forcing removes the trust entirely rather than
+# validating it after the fact.
+REQ_CSH=$(jq -r '.change_set_hash' "$REQUEST_FILE" 2>/dev/null || echo "")
 REQUEST_RAW=$(cat -- "$REQUEST_FILE" 2>/dev/null)
 
 # ---------------------------------------------------------------------------
@@ -233,7 +246,7 @@ grammar R$ITER-F<n> (for example R$ITER-F1, R$ITER-F2).
 
 Your final message MUST be a single JSON object of this shape:
 {"contract_version":"1","task_id":"$TASK_ID","reviewer_identity":"sol-codex",
- "reviewer_model":"$CODEX_MODEL","reviewer_pin":"$CODEX_MODEL","reviewed_hash":"<change-set hash from the request>",
+ "reviewer_model":"$CODEX_MODEL","reviewer_pin":"$CODEX_MODEL","reviewed_hash":"$REQ_CSH",
  "risk_threshold":"$REQ_RT","stop_condition":"$REQ_SC",
  "verdict":"approve"|"findings",
  "findings":[{"id":"R$ITER-F1","severity":"critical|high|medium|low|info",
@@ -344,9 +357,31 @@ extract_thread() {
 
 # validate_candidate <text> -> 0 valid (writes $WORK/valid.json) | 1 invalid
 # (writes $WORK/error_key).
+#
+# reviewed_hash is FORCED onto a COPY before validating, never trusted from
+# Sol's own text (claude-workflow-plugin-wob2 R2-F2). It is forced again,
+# unconditionally, in the FINAL transformation below regardless of what this
+# function does — so validating Sol's own guess at it here has no upside and
+# a real, measured downside: reviewed_hash was the one forced field NOT
+# handed to Sol as a literal in the envelope (the other seven all are), so
+# any transcription slip in 64 hex characters used to fail the WHOLE
+# candidate — burning a malformed_retry corrective turn, and on exhaustion
+# discarding every real finding Sol reported — over a field about to be
+# discarded either way. Forcing it here too means only a genuinely malformed
+# candidate (bad JSON entirely, or a bad value in a field this function does
+# NOT paper over) can still refuse. If $text is not a JSON object `jq` fails
+# and $forced stays empty, so the ORIGINAL text reaches validate-artifact
+# unmodified — invalid_json is still reported correctly, never masked.
 validate_candidate() {
-    local text="$1"
-    printf '%s' "$text" > "$WORK/candidate.json"
+    local text="$1" forced=""
+    # WOB2-R2F2-FORCE-BEFORE-VALIDATE-START (claude-workflow-plugin-wob2 R2-F2;
+    # load-bearing -- the L2 codex-review.sh spec's C11 META strips to END).
+    if forced=$(printf '%s' "$text" | jq -c --arg csh "$REQ_CSH" '.reviewed_hash=$csh' 2>/dev/null) && [ -n "$forced" ]; then
+        printf '%s' "$forced" > "$WORK/candidate.json"
+    else
+        printf '%s' "$text" > "$WORK/candidate.json"
+    fi
+    # WOB2-R2F2-FORCE-BEFORE-VALIDATE-END
     local out
     out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK" validate-artifact "$WORK/candidate.json" 2>/dev/null || true)
     if [ "$(printf '%s' "$out" | jq -r '.ok // false' 2>/dev/null)" = "true" ]; then
@@ -499,8 +534,30 @@ FINAL=$(printf '%s' "$VALID_JSON" | jq \
     --argjson it "$ITER" \
     --arg rt "$REQ_RT" \
     --arg sc "$REQ_SC" \
+    --arg csh "$REQ_CSH" \
     --arg model "$CODEX_MODEL" \
-    '.task_id=$tid | .iterations=$it | .risk_threshold=$rt | .stop_condition=$sc | .reviewer_identity="sol-codex" | .reviewer_model=$model | .reviewer_pin=$model')
+    '.task_id=$tid | .iterations=$it | .risk_threshold=$rt | .stop_condition=$sc | .reviewed_hash=$csh | .reviewer_identity="sol-codex" | .reviewer_model=$model | .reviewer_pin=$model')
+
+# WOB2-R2F3-REVALIDATE-START (claude-workflow-plugin-wob2 R2-F3; load-bearing
+# -- the L2 codex-review.sh spec's C12 META strips to END).
+# RE-VALIDATE THE POST-FORCE ARTIFACT. validate_candidate above checked Sol's
+# RAW candidate; every one of the eight authoritative fields is then
+# overwritten by the FORCE just above, and an overwrite is a new fact
+# review-check.sh has not yet seen. Without this, the driver could exit 0
+# over an artifact its OWN validator refuses — measured happening for a
+# sentinel change_set_hash before this same round's earlier-boundary fix
+# closed that path at validate-request; kept here as the general defence for
+# every OTHER way the force could still produce something invalid (a
+# misconfigured $CODEX_MODEL failing the model-id character class, for one).
+# The driver must never claim success over bytes it has not itself checked.
+FINAL_CHECK="$WORK/final.json"
+printf '%s' "$FINAL" > "$FINAL_CHECK"
+FINAL_VOUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK" validate-artifact "$FINAL_CHECK" 2>/dev/null || true)
+if [ "$(printf '%s' "$FINAL_VOUT" | jq -r '.ok // false' 2>/dev/null)" != "true" ]; then
+    FINAL_EKEY=$(printf '%s' "$FINAL_VOUT" | jq -r '.error_key // "invalid_json"' 2>/dev/null)
+    fail_no_artifact "the forced, final artifact failed its own validator ($FINAL_EKEY) after every authoritative field was overwritten; refusing rather than writing bytes review-record would refuse to bind; no artifact"
+fi
+# WOB2-R2F3-REVALIDATE-END
 
 SANITIZED_TID=$(printf '%s' "$TASK_ID" | tr -c 'A-Za-z0-9._-' '_')
 # CANONICAL PATH (claude-workflow-plugin-rqer / v5 D2): the review artifact's

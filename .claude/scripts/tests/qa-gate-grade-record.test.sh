@@ -265,6 +265,35 @@ DESIGNDOC
         <<< '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"seeded fixture"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
         >/dev/null 2>&1 || return 1
 
+    # claude-workflow-plugin-wob2 (L2): put a KNOWN, task-specific path into
+    # the tracker BEFORE computing the hash this review pins itself to, not
+    # just after (as the comment below this block already does once
+    # review-record has written a new tracked file). Without this, the
+    # tracker is still absent-or-empty at this exact point (nothing in this
+    # fixture populates changed-files.txt directly), so impact-report.sh
+    # --hash-only legitimately answers the SHA-256 empty-content digest — a
+    # well-formed 64-hex string that review-check.sh validate-artifact now
+    # refuses outright as reviewed_hash_unusable (a degradation sentinel
+    # that would compare equal to itself forever; see that check's own
+    # header).
+    #
+    # A DIRECT APPEND, NOT reconcile-tracker's git-status discovery: measured
+    # (this task's own reproduction) that `reconcile-tracker` alone is not
+    # reliable across this file's MULTIPLE seed_review_records calls (three,
+    # for TID_E2/TID_AW/TID_AS in the same fixture, no commits ever made) —
+    # the FIRST call's design doc makes `docs/` an untracked DIRECTORY, `git
+    # status --porcelain` then collapses it to one opaque `?? docs/` line,
+    # and once a later baseline capture records that line, EVERY path under
+    # docs/ — including files that do not exist yet — reads as
+    # "already-baselined, pre-existing dirt" forever after: reconcile then
+    # finds nothing new to add and change_set_hash silently reverts to the
+    # empty-set digest for the SECOND and THIRD calls, exactly the input
+    # this check now refuses. Appending this task's own design_art path
+    # directly sidesteps that git/baseline granularity question entirely —
+    # it is the same direct-write shape run_cycle_pre_approve in
+    # review-artifact-durability.sh already uses for identical reasons.
+    mkdir -p "$FIXTURE/.claude/.qa-tracking" 2>/dev/null || true
+    printf '%s\n' "$design_art" >> "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     [ -z "$hash" ] && hash="unverified"
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
@@ -282,11 +311,18 @@ DESIGNDOC
     # `git status`, and 94d.1's change_set_reconstructed refusal fires
     # (measured: it names this fixture's own uncommitted `.claude/scripts/`
     # and `bin/` as dropped-as-baselined, because `bd create` auto-inits git
-    # here and nothing in this fixture ever commits it). Reconcile now, while
-    # the caller still controls exactly what's dirty, then regenerate the
-    # impact report so approve's freshness check sees the WITH-artifact set
-    # rather than refusing on staleness a moment later.
+    # here and nothing in this fixture ever commits it). Append the artifact's
+    # own path DIRECTLY (claude-workflow-plugin-wob2 — same reason and same
+    # shape as the design_art append above: reconcile-tracker's git-status
+    # discovery silently finds nothing once `docs/` has collapsed into one
+    # opaque baselined directory line, which is exactly the state review-record
+    # just created for the FIRST time on THIS task), then reconcile (for
+    # anything else genuinely git-dirty) and regenerate the impact report so
+    # approve's freshness check sees the WITH-artifact set rather than
+    # refusing on staleness a moment later.
     if [ -f "$FIXTURE/.claude/scripts/impact-report.sh" ]; then
+        printf '%s\n' "$FIXTURE/docs/reviews/$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json" \
+            >> "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
         CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
             reconcile-tracker >/dev/null 2>&1 || true
         CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" \
@@ -664,17 +700,50 @@ assert_not_contains "approve-warn: qa-gate-entered removed" \
 TID_AS=$(bd create "approve-with-satisfied audit-trail test" -t task -p 1 --json | jq -r '.id')
 bash "$QG" enter "$TID_AS" >/dev/null
 bd label add "$TID_AS" qa-pending >/dev/null 2>&1
+
+# claude-workflow-plugin-wob2 (L2): seed BEFORE grading, not after. "The happy
+# path" this scenario names means "nothing changed since grading" — that is
+# only TRUE if the change set grade-record binds to is the SAME one approve
+# later sees. seed_review_records populates changed-files.txt (design_art,
+# then the review artifact) and regenerates the persisted impact report as
+# its last step; grade-record with no --graded-hash falls back to "live
+# recompute, corroborated by the persisted impact report" (cmd_grade_record's
+# own comment) — so calling it AFTER seeding means both the live and the
+# persisted hash already reflect the fully-seeded tracker, and grade-record
+# binds to that same real hash rather than to the fixture's pre-seed empty
+# one. Calling it BEFORE (the previous order) bound the RUBRIC record to the
+# empty-set hash honestly captured at that instant, then seeding added two
+# more tracked paths afterward — a REAL "the change set moved after grading"
+# event, which is exactly what the mismatch warning below exists to catch;
+# it was firing correctly, the fixture's ordering was what made "the happy
+# path" not actually happy.
+seed_review_records "$TID_AS"   # V3 (jio.1) MIGRATION
 # Record a satisfied verdict to set rubric-satisfied.
 VERDICT=$(build_verdict "satisfied" 1 "v1")
 printf '%s' "$VERDICT" | bash "$QG" grade-record "$TID_AS" >/dev/null
 
-seed_review_records "$TID_AS"   # V3 (jio.1) MIGRATION
 OUT=$(bash "$QG" approve "$TID_AS" "All criteria passed per RUBRIC v1 iteration 1.")
 STATUS=$(printf '%s' "$OUT" | jq -r '.status')
 assert_eq "approve-sat: status=approved" "approved" "$STATUS"
 OBS=$(printf '%s' "$OUT" | jq -r '.observations')
-assert_not_contains "approve-sat: observations DO NOT contain WARNING" \
-    "WARNING" "$OBS"
+# claude-workflow-plugin-wob2 (L2): a bare "no WARNING at all" check is no
+# longer correct to ask for here. review-record's own reviewed_hash is
+# necessarily computed BEFORE its artifact file exists — the artifact
+# cannot be hashed into a change set that does not yet contain it — so once
+# that artifact's own path lands in the tracker (seed_review_records' own
+# post-write reconcile, same as production's review-record + reconcile
+# flow), approve's D6 staleness note ALWAYS fires for a genuine review:
+# "the review artifact recorded reviewed_hash=X but this approval binds
+# change_set_hash=Y" is not a defect, it is the audited-never-blocking
+# behaviour cmd_approve's own D6 comment documents. What THIS scenario
+# actually asserts — the one thing that must NOT reappear once grading and
+# seeding are correctly ordered (see the comment above seed_review_records's
+# call, this section) — is the RUBRIC mismatch warning specifically, so
+# check for its exact, distinguishing text rather than the word "WARNING"
+# in general, which the unrelated and expected review-staleness note also
+# contains.
+assert_not_contains "approve-sat: observations do not contain the RUBRIC mismatch warning" \
+    "rubric-satisfied is set, but the satisfied verdict binds a DIFFERENT change set" "$OBS"
 assert_contains "approve-sat: observations cite preserved audit trail" \
     "rubric-satisfied preserved" "$OBS"
 

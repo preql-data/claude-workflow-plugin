@@ -438,6 +438,37 @@ seed_review_records() {
     if [ -f "$root/.claude/scripts/impact-report.sh" ]; then
         hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     fi
+    # claude-workflow-plugin-wob2 (L2), FALLBACK ONLY — never a preemptive
+    # append, and applied ONLY here (not to the post-review-record reconcile
+    # a few lines down, which stays exactly as it shipped — see that block's
+    # own comment for why growing the tracker there regressed a sibling
+    # spec that resets changed-files.txt to an exact list and expects a
+    # Stop/gate check to see THAT list). review-check.sh validate-artifact
+    # now refuses reviewed_hash outright when it is not 64 lowercase hex,
+    # OR when it is the SHA-256 empty-content digest specifically (a
+    # degradation sentinel that would compare equal to itself forever; see
+    # that check's own header) — and $hash reads back as exactly that
+    # digest whenever changed-files.txt is absent-or-empty at this instant
+    # (impact-report.sh's own documented behaviour, reachable here because
+    # this is already the ONE place a spec says "make this task
+    # approvable" and not every caller stages a subject file first).
+    # MEASURED (this task's own reproduction): appending unconditionally —
+    # even when a caller had ALREADY staged its own subject file before
+    # calling this function — grows the tracker the caller's later
+    # `approve` binds to beyond what that caller controls. So: recompute is
+    # tried FIRST, unmodified, and the design doc seed_design_verdict
+    # already wrote is used to break the tie ONLY when that recompute came
+    # back degenerate — i.e., only in the exact state (qa-gate.sh's own
+    # "seed_review_records with nothing else staged" case) this fix exists
+    # to correct, never disturbing a caller whose tracker was already
+    # producing a real answer.
+    if [ -z "$hash" ] || [ "$hash" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+        mkdir -p "$root/.claude/.qa-tracking" 2>/dev/null || true
+        printf '%s\n' "$root/docs/specs/$sanitized.md" >> "$root/.claude/.qa-tracking/changed-files.txt"
+        if [ -f "$root/.claude/scripts/impact-report.sh" ]; then
+            hash=$(CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
+        fi
+    fi
     [ -z "$hash" ] && hash="unverified"
 
     # Real artifact path convention (review-artifact-<sanitized>-r<n>.json) so

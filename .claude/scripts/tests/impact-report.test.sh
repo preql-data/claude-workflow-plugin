@@ -805,19 +805,72 @@ JSON
     s8_completion "$T2" "src/two.ts"
     bd comments add "$T2" "IMPLEMENTER: role=backend task=$T2 at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
     RH2=$(PATH="$SHIM_DIR:$PATH" CLAUDE_PROJECT_DIR="$F8" bash "$IR8" --hash-only 2>/dev/null)
-    s8_artifact "$T2" "$RH2"
+    # claude-workflow-plugin-wob2 (L2), UPDATING THIS SECTION'S OWN REPRODUCTION.
+    # RH2 here is exactly the mutant's silent wrong answer — the SHA-256
+    # empty-content digest ($EMPTY_SET_HASH_CONST) — which review-check.sh
+    # validate-artifact now refuses outright as reviewed_hash_unusable (a
+    # degradation sentinel that would compare equal to itself forever; see
+    # that check's own header). s8_artifact's plain call (used for T1 above)
+    # would silently swallow this refusal, so this leg calls review-record
+    # directly instead, with its output captured, to assert ON the refusal
+    # rather than past it.
+    #
+    # THE CONSEQUENCE FOR THIS SCENARIO: the "hollow but ACCEPTED" approval
+    # this section originally reproduced end-to-end is NO LONGER reachable
+    # through review-record — the reviewer who (honestly) echoed the
+    # mutant's silent wrong answer can no longer bind a record to it, so no
+    # REVIEW-ARTIFACT v1 record ever lands on T2, and approve refuses
+    # (review_artifact_missing) rather than binding. This is a SECOND,
+    # independent defence against the same kyj5 defect class, from the
+    # review side rather than the impact-report side — the section still
+    # proves the impact-report mutant produces a silently wrong answer
+    # (8M's assertions above this point, unchanged); what changes is that
+    # the OVERALL cycle can no longer complete on that wrong answer.
+    #
+    # WHY REACHING review_artifact_missing AT EXIT 4 (not impact_report_stale
+    # AT EXIT 2) DOES NOT WEAKEN THE NEGATIVE CONTROL (wob2 R1-F1 review
+    # round). qa-gate.sh's own REVIEW-SEPARATION block states the ordering
+    # explicitly: "this runs AFTER the impact-report refusal on purpose ...
+    # it should not fire while a more basic artifact is still missing" — so
+    # impact_report_stale is STRICTLY UPSTREAM of review_artifact_missing in
+    # cmd_approve. CONFIRMED BY A SEPARATE DISCRIMINATOR (not this fixture —
+    # a standalone probe against the SHIPPED, unmutated impact-report.sh): a
+    # task with a genuinely stale report (real hash recorded at `enter`, the
+    # tracker changed afterward so the live recompute visibly disagrees) AND
+    # no review artifact at all exits 2/impact_report_stale — it never
+    # reaches the review-separation gate. This mutant's $R2 report and this
+    # scenario's OWN freshness comparison are instead BOTH computed from the
+    # same broken recompute (RH2, the empty-set digest), so they trivially
+    # AGREE with each other and the freshness check is satisfied rather than
+    # tripped, which is precisely what lets execution continue far enough to
+    # reach the review-separation gate at all. So 8M's assertions above
+    # (the report-vs-tracker mismatch just proved) still show the
+    # impact-report mutant produces a silently wrong answer, and REACHING
+    # review_artifact_missing at exit 4 is itself evidence the freshness
+    # comparison was reached and fooled by that wrong answer, not skipped.
+    # If the precondition order in cmd_approve is ever reversed, this section
+    # would keep asserting review_artifact_missing while silently losing the
+    # proof that the impact-report check was ever exercised — anchor any
+    # future edit here on the ORDER, not just the final error_key.
+    S8_RRV_RC=0
+    S8_RRV_OUT=$(printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}' "$T2" "$RH2" \
+        | CLAUDE_PROJECT_DIR="$F8" bash "$QG8" review-record "$T2" 2>&1) || S8_RRV_RC=$?
+    assert_eq "8M reviewed_hash=<empty-set digest> is now REFUSED at review-record (wob2 L2), not silently accepted" \
+        "1" "$S8_RRV_RC"
+    assert_eq "8M ...naming reviewed_hash_unusable" \
+        "reviewed_hash_unusable" "$(printf '%s' "$S8_RRV_OUT" | jq -r '.error_key // empty' 2>/dev/null)"
+    assert_eq "8M no REVIEW-ARTIFACT v1 record exists for T2 (the refused write never landed)" \
+        "0" "$(s8_comments "$T2" | grep -c '^REVIEW-ARTIFACT v1 ')"
     RC8M=0
-    OUT8M=$(PATH="$SHIM_DIR:$PATH" CLAUDE_PROJECT_DIR="$F8" bash "$QG8" approve "$T2" --no-design "i8cx U2 META: proving the mutant binds, not design-satisfied" "mutant leg: this approval binds a change set that was never read" 2>/dev/null) || RC8M=$?
-    assert_eq "8M mutant approve: exit 0 — the freshness comparison MATCHED on the silent answer (8.1 would be green-blind here)" \
-        "0" "$RC8M"
-    assert_eq "8M mutant approve: status=approved" \
-        "approved" "$(printf '%s' "$OUT8M" | jq -r '.status // empty')"
-    assert_match "8M mutant approve: qa-approved bound over the unread set" \
-        'qa-approved' "$(s8_labels "$T2")"
-    if [ "$EMPTY_HASH" != "sha256-unavailable" ]; then
-        assert_match "8M the approval record itself carries the empty-set digest" \
-            "change_set_hash=$EMPTY_SET_HASH_CONST" "$(s8_comments "$T2")"
-    fi
+    OUT8M=$(PATH="$SHIM_DIR:$PATH" CLAUDE_PROJECT_DIR="$F8" bash "$QG8" approve "$T2" --no-design "i8cx U2 META: proving the mutant can no longer bind (wob2 L2 closed this path)" "mutant leg: this approval must now refuse — no review artifact was ever recorded for the unread change set" 2>/dev/null) || RC8M=$?
+    assert_eq "8M mutant approve: NOW REFUSES (exit 4) rather than binding a hollow approval" \
+        "4" "$RC8M"
+    assert_eq "8M mutant approve: error_key=review_artifact_missing" \
+        "review_artifact_missing" "$(printf '%s' "$OUT8M" | jq -r '.error_key // empty')"
+    assert_eq "8M mutant approve: refuses cleanly — no qa-approved label added" \
+        "absent" "$(printf '%s' "$(s8_labels "$T2")" | grep -qF 'qa-approved' && echo present || echo absent)"
+    assert_eq "8M no QA-GATE APPROVED record exists for T2 either (nothing was bound)" \
+        "0" "$(s8_comments "$T2" | grep -c '^QA-GATE APPROVED ')"
 
     # 8R Restore: shipped script back in place, byte-identical, and a fresh
     # read of a reseeded tracker yields a real hash again.
@@ -912,7 +965,7 @@ JSON
     # ambient override must NOT leak into the rest of this script's env.
     ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_completion_mut "$TIDI" "src/isolation.ts" ) >/dev/null 2>&1
     # shellcheck disable=SC2030,SC2031  # same: deliberately subshell-scoped.
-    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_artifact_mut "$TIDI" "deadbeef" ) >/dev/null 2>&1
+    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_artifact_mut "$TIDI" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ) >/dev/null 2>&1
     assert_eq "8I.2 mutant completion-record leaks into the ambient SENTINEL (the specific kyj5 misbehaviour)" \
         "present" "$([ -f "$SENTINEL8/.claude/.qa-tracking/completion-$TIDI-devops.json" ] && echo present || echo absent)"
     assert_eq "8I.2 mutant review-record leaks into the ambient SENTINEL (the specific kyj5 misbehaviour)" \
@@ -930,7 +983,7 @@ JSON
     # ambient override must NOT leak into the rest of this script's env.
     ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_completion "$TIDR" "src/isolation-restore.ts" ) >/dev/null 2>&1
     # shellcheck disable=SC2030,SC2031  # same: deliberately subshell-scoped.
-    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_artifact "$TIDR" "deadbeef" ) >/dev/null 2>&1
+    ( export CLAUDE_PROJECT_DIR="$SENTINEL8"; s8_artifact "$TIDR" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ) >/dev/null 2>&1
     assert_eq "8I.3 restore: shipped completion-record ignores the ambient SENTINEL" \
         "absent" "$([ -f "$SENTINEL8/.claude/.qa-tracking/completion-$TIDR-devops.json" ] && echo present || echo absent)"
     assert_eq "8I.3 restore: shipped review-record ignores the ambient SENTINEL" \

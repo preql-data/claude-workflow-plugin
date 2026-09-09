@@ -379,7 +379,7 @@ record_artifact() {
     san=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
     art="$PTRACK/review-artifact-$san-r$iter.json"
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"h$iter","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"$verdict","findings":$findings,"iterations":$iter,"stopped_by":"verdict"}
 JSON
     # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
     # derived path; piped via stdin instead.
@@ -1054,7 +1054,7 @@ record_finding_in() {
     san=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
     art="$root/.claude/.qa-tracking/review-artifact-$san-r2.json"
     cat > "$art" <<JSON
-{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"h2","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"findings","findings":[{"id":"$fid","severity":"$sev","location":"src/a.ts:1","evidence":"yrij canary finding","description":"must still be consulted correctly"}],"iterations":2,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"findings","findings":[{"id":"$fid","severity":"$sev","location":"src/a.ts:1","evidence":"yrij canary finding","description":"must still be consulted correctly"}],"iterations":2,"stopped_by":"verdict"}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" review-record "$tid" < "$art" >/dev/null 2>&1
 }

@@ -203,6 +203,77 @@ cmd_validate_request() {
         exit 4
     fi
 
+    # CHANGE-SET-HASH-GUARD-START (claude-workflow-plugin-wob2 R1-F2/R2-F3/
+    # R2-F4; load-bearing — review-check.test.sh Section 1b strips to END).
+    #
+    # THE GAP THIS CLOSES: change_set_hash was checked for PRESENCE (the
+    # has() loop above) and NOTHING ELSE. Independent review round 1 of wob2
+    # measured that the external review driver's FORCED-field jq expression
+    # did not force reviewed_hash — it FORCES task_id/iterations/
+    # risk_threshold/stop_condition/reviewer_identity/reviewer_model/
+    # reviewer_pin, but the reviewer's own reviewed_hash claim passed through
+    # untouched — so a malformed change_set_hash on the REQUEST reached
+    # cmd_validate_artifact's reviewed_hash_unusable refusal only AFTER a
+    # paid review turn already ran (the driver's own VALID_REQ fixture
+    # carried "change_set_hash":"h" and validated as VALID before this guard
+    # existed). Shape-checking it here is the "refuse at the earliest
+    # boundary, not at each consumer" fix (the same lesson this file's own
+    # ART_SOFT_FIELDS_RE / k6re history already cites elsewhere) applied one
+    # schema earlier than the artifact that finally forces the spend to have
+    # already happened.
+    #
+    # SENTINEL REJECTED HERE TOO (claude-workflow-plugin-wob2 R2-F3, reversing
+    # round 1's own exemption). Round 1 shape-checked change_set_hash but
+    # deliberately let the SHA-256 empty-content sentinel through, reasoning
+    # that a genuinely empty change set must still be able to reach the
+    # review flow. Independent review round 2 traced that path end to end
+    # and found the exemption does not deliver the outcome it was justified
+    # by: a sentinel request still passed here, still spent a paid review
+    # turn, and only failed one step later at cmd_validate_artifact's own
+    # reviewed_hash_unusable check (once the driver forces reviewed_hash=
+    # change_set_hash) — which IS the exact pre-spend waste this guard
+    # exists to prevent, occurring for the one value it deliberately
+    # exempted. Refusing it HERE instead costs no spend and mechanically
+    # enforces what qa.md already documents: the audited path for a
+    # genuinely empty (or wholly denylisted) change set is
+    # `approve --no-review <reason>`, never a review request built over
+    # nothing.
+    #
+    # WHAT "GENUINELY EMPTY" ACTUALLY MEANS (claude-workflow-plugin-wob2
+    # R2-F4, correcting a factual error round 1 shipped here and in two other
+    # places). MEASURED directly against impact-report.sh --hash-only: an
+    # EMPTY tracker, or one whose every entry is denylisted, hashes to the
+    # sentinel; a DOC-ONLY change set does NOT — one markdown file, three
+    # markdown files, and a LICENSE+CHANGELOG.md pair each hashed to a
+    # distinct real digest in this measurement. "Doc-only" is a
+    # verify-before-stop.sh F1 auto-approval concept (is_doc_only_path) that
+    # has nothing to do with how THIS hash is computed, and impact-report.sh
+    # contains the literal string "doc-only" zero times — conflating the two
+    # concepts was the error. The sentinel is reached only by a tracker with
+    # nothing left after denylist filtering, never merely by every changed
+    # file being documentation.
+    local csh
+    csh=$(printf '%s' "$raw" | jq -r '.change_set_hash' 2>/dev/null || echo "")
+    case "$csh" in
+        ""|*[!0-9a-f]*)
+            emit_validate "validate-request" "false" "change_set_hash_unusable" \
+                "change_set_hash must be exactly 64 lowercase hex characters (got '$csh')"
+            exit 4
+            ;;
+        *)
+            if [ "${#csh}" -ne 64 ]; then
+                emit_validate "validate-request" "false" "change_set_hash_unusable" \
+                    "change_set_hash must be exactly 64 lowercase hex characters (got ${#csh})"
+                exit 4
+            elif [ "$csh" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+                emit_validate "validate-request" "false" "change_set_hash_unusable" \
+                    "change_set_hash is the SHA-256 empty-content sentinel -- there is nothing to review (an empty or wholly-denylisted change set, never merely a doc-only one). Skip review entirely via qa-gate.sh approve --no-review '<reason>' instead of requesting one over nothing"
+                exit 4
+            fi
+            ;;
+    esac
+    # CHANGE-SET-HASH-GUARD-END
+
     emit_validate "validate-request" "true" "" "request valid"
     exit 0
 }
@@ -421,6 +492,114 @@ cmd_validate_artifact() {
             "$rclass_err contains a character outside the model-id class [A-Za-z0-9._:/\\[\\]-]; if this is a genuine model id the class needs widening (test against the real id first — see bjx), never work around this by sanitising the value"
         exit 4
     fi
+
+    # REVIEWED_HASH SHAPE + SENTINEL GUARD (claude-workflow-plugin-wob2 L2).
+    #
+    # THE GAP THIS CLOSES: reviewed_hash was checked for PRESENCE (the has()
+    # loop above) and for the absence of control characters (ctrl_field,
+    # above) and NOTHING ELSE. MEASURED directly against this validator: "h",
+    # "" (empty string), the JSON literal null (jq -r renders it back as the
+    # four-byte string "null", which contains no control character either),
+    # and the SHA-256 empty-content digest
+    # e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 all
+    # passed unchanged. The last of those is the one that reaches a gate: the
+    # ROUNDS counter in cmd_gate below (see its "ROUNDS (claude-workflow-
+    # plugin-2ty)" section) counts REVIEW-ARTIFACT v1 records whose
+    # reviewed_hash= equals the CURRENT change-set hash, and
+    # verify-before-stop.sh's REVIEW_IN_FLIGHT suppression (its
+    # ESCALATION-BASIS block) fires precisely when that count stays at 0
+    # while a review cycle is open. A reviewer that always records the
+    # empty-content sentinel — a broken capture, not necessarily a hostile
+    # one — can never contribute a round, so ROUNDS is pinned at 0 and the
+    # J21 escalation that exists to force a stuck cycle to a decision never
+    # fires for as long as the cycle stays open.
+    #
+    # WHY HERE, NOT IN qa-gate.sh's WRITER: this IS the one validator for the
+    # REVIEW-ARTIFACT schema — see the ITERATIONS-GUARD comment above ("THIS
+    # IS THE ONE VALIDATOR... The check lives HERE and ONLY here, never
+    # duplicated in qa-gate.sh"). A second copy of this rule in
+    # cmd_review_record would be exactly the kind of drift that comment
+    # exists to prevent, and refusing here means any FUTURE caller of
+    # validate-artifact inherits the check for free instead of having to
+    # remember to re-add it — the same "refuse at the earliest boundary, not
+    # at each consumer" lesson this file's own ART_SOFT_FIELDS allowlist was
+    # recorded under (claude-workflow-plugin-k6re, LESSONS.md).
+    #
+    # SHAPE: exactly 64 LOWERCASE hex characters — the literal form every
+    # legitimate producer of a change-set hash in this repo emits
+    # (workflow-manifest.sh hash-file, impact-report.sh --hash-only, `shasum
+    # -a 256` / `sha256sum`). Uppercase is refused rather than lowercased:
+    # this field is copied VERBATIM from a review request's change_set_hash
+    # (qa.md: `"reviewed_hash": "<the change_set_hash from the request>"`),
+    # so a case mismatch means the reviewer did not actually copy the value
+    # they were handed — precisely the "did not review what they claim to
+    # have reviewed" case this field exists to catch. Sanitising the case
+    # would erase that signal instead of reporting it (the bjx reject-never-
+    # sanitise rule).
+    #
+    # CROSS-REFERENCE (claude-workflow-plugin-wob2 R1-F4) — read the other
+    # side before changing either. qa-gate.sh's is_sha256_hex, which gates
+    # design_hash/vendor_hash, is deliberately CASE-INSENSITIVE — the
+    # opposite of this guard, on purpose, not by drift. Those two fields are
+    # RECOMPUTED and compared for value equality (case carries no
+    # information, and this repo's own install.ps1 documents a real
+    # cross-platform producer of uppercase: "Get-FileHash returns UPPERCASE
+    # hex; the manifest is lowercase ... The ToLowerInvariant() is therefore
+    # load-bearing"). reviewed_hash asserts a COPY instead, so case IS the
+    # signal here and tolerating it would erase what this guard exists to
+    # catch. If either class is ever tightened or loosened, update this
+    # comment and is_sha256_hex's, together.
+    #
+    # SENTINEL: the one well-formed 64-lowercase-hex value refused anyway. It
+    # is not a hash of anything a reviewer read; it is what hashing NOTHING
+    # produces — the same reasoning design-record's own hash-tool-failure
+    # guard states in these words, applied to a different field: "a
+    # degradation sentinel is CONSTANT, so it compares equal to itself and to
+    # every other artifact, and the binding becomes unfailable". A
+    # change-set hash this field legitimately needs to be able to disagree
+    # with (a stale review, a moved change set) can never disagree with a
+    # constant.
+    # REVIEWED-HASH-GUARD-START (claude-workflow-plugin-wob2 R1-F1; load-bearing —
+    # review-check.test.sh Section 2d strips to END to prove this block, not
+    # some other check, is what refuses a malformed reviewed_hash)
+    local rh_val rh_reason=""
+    rh_val=$(printf '%s' "$raw" | jq -r '.reviewed_hash' 2>/dev/null || echo "")
+    case "$rh_val" in
+        "" | *[!0-9a-f]*)
+            rh_reason="must be exactly 64 lowercase hex characters (got '$rh_val')"
+            ;;
+        *)
+            if [ "${#rh_val}" -ne 64 ]; then
+                rh_reason="must be exactly 64 lowercase hex characters (got ${#rh_val})"
+            elif [ "$rh_val" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+                rh_reason="is the SHA-256 empty-content sentinel, constant across every empty or unread input — it would compare equal to itself and to every other unread artifact forever rather than binding to the change set actually reviewed"
+            fi
+            ;;
+    esac
+    if [ -n "$rh_reason" ]; then
+        emit_validate "validate-artifact" "false" "reviewed_hash_unusable" \
+            "reviewed_hash $rh_reason"
+        exit 4
+    fi
+    # REVIEWED-HASH-GUARD-END
+
+    # ARTIFACT-RISK-THRESHOLD-GUARD-START (claude-workflow-plugin-wob2 R1-F1;
+    # load-bearing — review-check.test.sh Section 2e strips to END).
+    # RISK_THRESHOLD ENUM. validate-request already refuses an unranked
+    # risk_threshold via sev_rank (see cmd_validate_request's own
+    # risk_threshold_invalid_enum check, above in this file) — this closes
+    # the identical gap in the review-ARTIFACT schema, which required the KEY
+    # (the has() loop above) but never ranked its VALUE. Same sev_rank, same
+    # error-key spelling: both name the same failure against the same enum,
+    # on two different schemas.
+    local rt_val
+    rt_val=$(printf '%s' "$raw" | jq -r '.risk_threshold // ""' 2>/dev/null || echo "")
+    if [ "$(sev_rank "$rt_val")" = "0" ]; then
+        emit_validate "validate-artifact" "false" "risk_threshold_invalid_enum" \
+            "risk_threshold '$rt_val' not in critical>high>medium>low>info"
+        exit 4
+    fi
+    # ARTIFACT-RISK-THRESHOLD-GUARD-END
 
     local verdict
     verdict=$(printf '%s' "$raw" | jq -r '.verdict // ""' 2>/dev/null || echo "")

@@ -154,6 +154,20 @@ record_finding() {
     local tid="$1" fid="$2" sev="$3" san art hash
     san=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
     art="$TRACK/review-artifact-$san-r2.json"
+    # claude-workflow-plugin-wob2 (L2): append the r2 artifact's own
+    # canonical path DIRECTLY before computing the hash it will be pinned
+    # to — the round-1 approve this function's callers already ran refreshes
+    # the gate baseline, which (measured, this task's own reproduction)
+    # silently collapses docs/ into one opaque already-baselined line the
+    # instant it becomes a bulk-untracked directory, so reconcile-tracker's
+    # git-status discovery alone can no longer see anything new under it.
+    # Without a real hash here, review-check.sh validate-artifact now
+    # refuses "unverified" outright as reviewed_hash_unusable (not 64
+    # lowercase hex), so this second round's finding would never be
+    # recorded at all — a silent, wrong-reason pass for whichever assertion
+    # expects the marker/anchor logic to have been consulted.
+    mkdir -p "$TRACK" 2>/dev/null || true
+    printf '%s\n' "$FIXTURE/docs/reviews/$san-r2.json" >> "$TRACK/changed-files.txt"
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" --hash-only 2>/dev/null || echo "unverified")
     cat > "$art" <<JSON
 {"contract_version":"1","task_id":"$tid","reviewer_identity":"qa-claude","reviewer_model":"test-model","reviewer_pin":"test-model","reviewed_hash":"$hash","risk_threshold":"high","stop_condition":"acceptance criteria traced to tests","verdict":"findings","findings":[{"id":"$fid","severity":"$sev","location":"src/canary.ts:1","evidence":"post-approval canary finding","description":"must still be consulted correctly"}],"iterations":2,"stopped_by":"verdict"}

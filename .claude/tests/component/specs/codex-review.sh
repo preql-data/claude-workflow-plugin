@@ -21,6 +21,16 @@
 #       makes the C3 cap assertion FAIL — proving that assertion is sensitive.
 #   META (fkm.1.12): excising the sentinel-delimited FRAME GUARD inverts every
 #       C7 assertion — reproducing the production hang on demand.
+#   C11 (claude-workflow-plugin-wob2 R2-F2) a MALFORMED reviewed_hash from Sol
+#       (truncated/uppercase/sentinel) no longer costs a corrective turn or
+#       loses the finding — reviewed_hash is forced onto a copy BEFORE
+#       validate_candidate ever runs, so only a genuinely malformed candidate
+#       can still trigger a retry.
+#   C12 (claude-workflow-plugin-wob2 R2-F3) the FINAL, post-force artifact is
+#       re-validated before the driver ever claims success — a misconfigured
+#       reviewer model (bad chars, reaching the artifact only via the FORCE)
+#       makes the driver refuse (exit 5) rather than write bytes review-record
+#       would itself refuse to bind.
 #
 # C6/C7 and the fkm.1.12 META need NO Codex server and NO spend: the whole defect
 # is upstream of the transport, and the stub's request log is the delivery proof.
@@ -63,18 +73,39 @@ EOF
 }
 write_config
 
+# claude-workflow-plugin-wob2 (R1-F2): review-check.sh's cmd_validate_request
+# now shape-checks change_set_hash (64 lowercase hex — the same class
+# reviewed_hash_unusable already enforces on the artifact schema), so every
+# fixture request below needs a well-formed placeholder rather than the
+# short "h"/"h123" strings that predate that guard. Generated, never
+# hand-counted (a 64-character literal is exactly what a human miscounts).
+REQ_CSH=$(printf 'f%.0s' $(seq 1 64))
+
 # A valid review request.
-cat > "$FIXTURE/req.json" <<'EOF'
+cat > "$FIXTURE/req.json" <<EOF
 {"contract_version":"1","task_id":"cr-1","iteration":1,"risk_threshold":"high",
- "stop_condition":"no critical/high remain","change_set_hash":"h123","spec":"s",
+ "stop_condition":"no critical/high remain","change_set_hash":"$REQ_CSH","spec":"s",
  "diff":"d","completion_contract":"c","impact_report":"i"}
 EOF
 
 # Artifact texts the stub will return (task_id/iterations deliberately WRONG so
 # we can prove codex-review FORCES the authoritative values).
-APPROVE_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewer_pin":"x","reviewed_hash":"h123","risk_threshold":"low","stop_condition":"x","verdict":"approve","findings":[],"iterations":99,"stopped_by":"verdict"}'
-FINDINGS_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewer_pin":"x","reviewed_hash":"h123","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a.ts:10","evidence":"unsanitized input","description":"sqli"}],"iterations":1,"stopped_by":"verdict"}'
-CAPHIT_TEXT=$(jq -nc '{contract_version:"1",task_id:"WRONG",reviewer_identity:"x",reviewer_model:"x",reviewer_pin:"x",reviewed_hash:"h123",risk_threshold:"high",stop_condition:"x",verdict:"findings",findings:[range(0;13)|{id:("R1-F"+(.+1|tostring)),severity:"high",location:"a:1",evidence:"e",description:"d"}],iterations:1,stopped_by:"verdict"}')
+# claude-workflow-plugin-wob2 (L2, R1-F1/R1-F2): reviewed_hash below is a
+# well-formed 64-lowercase-hex placeholder, DELIBERATELY DIFFERENT from
+# req.json's own $REQ_CSH — review-check.sh validate-artifact refuses
+# anything not shaped like a hash (or the SHA-256 empty-content sentinel) as
+# reviewed_hash_unusable, and this field IS now one codex-review FORCES (see
+# the C1 assertions below: task_id, iterations, reviewer_identity/model/pin,
+# risk_threshold AND reviewed_hash are all asserted FORCED — R1-F2 closed the
+# gap where reviewed_hash alone passed through untouched, which meant a
+# malformed change_set_hash on the request could spend a paid Sol turn and
+# still end in a guaranteed post-hoc refusal once the artifact was checked).
+# Keeping this placeholder deliberately WRONG (never equal to $REQ_CSH) is
+# what makes the C1 "FORCED to $REQ_CSH, not to Sol's own claim" assertion
+# below meaningful rather than a coincidental match.
+APPROVE_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewer_pin":"x","reviewed_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","risk_threshold":"low","stop_condition":"x","verdict":"approve","findings":[],"iterations":99,"stopped_by":"verdict"}'
+FINDINGS_TEXT='{"contract_version":"1","task_id":"WRONG","reviewer_identity":"x","reviewer_model":"x","reviewer_pin":"x","reviewed_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a.ts:10","evidence":"unsanitized input","description":"sqli"}],"iterations":1,"stopped_by":"verdict"}'
+CAPHIT_TEXT=$(jq -nc '{contract_version:"1",task_id:"WRONG",reviewer_identity:"x",reviewer_model:"x",reviewer_pin:"x",reviewed_hash:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",risk_threshold:"high",stop_condition:"x",verdict:"findings",findings:[range(0;13)|{id:("R1-F"+(.+1|tostring)),severity:"high",location:"a:1",evidence:"e",description:"d"}],iterations:1,stopped_by:"verdict"}')
 
 # run_review — invoke the driver with the stub. Args after the fixed ones are
 # passed through. Sets RR_OUT (stdout, the artifact path) + RR_EXIT.
@@ -107,6 +138,14 @@ assert_json_field "C1 approve: reviewer_model from -m arg" "$(cat "$RR_OUT")" ".
 # separate frontmatter-vs-self-report split to preserve).
 assert_json_field "C1 approve: reviewer_pin FORCED to the same value" "$(cat "$RR_OUT")" ".reviewer_pin" "stub-sol"
 assert_json_field "C1 approve: risk_threshold FORCED from request" "$(cat "$RR_OUT")" ".risk_threshold" "high"
+# claude-workflow-plugin-wob2 (R1-F2 pairing): reviewed_hash is FORCED to the
+# REQUEST's own change_set_hash ($REQ_CSH), never trusted from Sol's output.
+# APPROVE_TEXT's own reviewed_hash is the DIFFERENT "deadbeef" placeholder
+# (see its declaration above), so this assertion is only satisfiable if the
+# FORCE actually ran — a coincidental match would require Sol's stub output
+# to already equal $REQ_CSH, which it deliberately does not.
+assert_json_field "C1 approve: reviewed_hash FORCED to the request's change_set_hash, not Sol's own claim" \
+    "$(cat "$RR_OUT")" ".reviewed_hash" "$REQ_CSH"
 
 # The written artifact validates through the ONE validator.
 VOUT=$(bash "$RCHECK" validate-artifact "$RR_OUT" 2>/dev/null)
@@ -317,7 +356,7 @@ else
     {
         printf '%s' '{"contract_version":"1","task_id":"cr-2","iteration":1,'
         printf '%s' '"risk_threshold":"high","stop_condition":"no critical/high remain",'
-        printf '%s' '"change_set_hash":"h123","spec":"s","completion_contract":"c",'
+        printf '%s' "\"change_set_hash\":\"$REQ_CSH\",\"spec\":\"s\",\"completion_contract\":\"c\","
         printf '%s' '"impact_report":"i","diff":"'
         printf '%s' "$BIGPAD"
         printf '%s' '"}'
@@ -555,9 +594,9 @@ assert_eq "C8 the rationale prose cannot shadow the values (first match is the a
 # Behavioural bracket of the iteration cap, both sides of the boundary.
 mk_req_at() {
     # mk_req_at <n> — a valid request at iteration <n>.
-    jq -nc --argjson n "$1" '{contract_version:"1",task_id:"cr-1",iteration:$n,
+    jq -nc --argjson n "$1" --arg csh "$REQ_CSH" '{contract_version:"1",task_id:"cr-1",iteration:$n,
         risk_threshold:"high",stop_condition:"no critical/high remain",
-        change_set_hash:"h123",spec:"s",diff:"d",completion_contract:"c",
+        change_set_hash:$csh,spec:"s",diff:"d",completion_contract:"c",
         impact_report:"i"}' > "$FIXTURE/req-iter-$1.json"
 }
 run_review_at() {
@@ -684,5 +723,149 @@ assert_eq "C10 META: ...and NOT a regular file (the driver's own success claim i
     "0" "$([ -f "$GUARD_ART" ] && echo 1 || echo 0)"
 assert_eq "C10 META: ...with the assembled JSON stranded INSIDE the directory instead of at it" \
     "1" "$([ -n "$(ls -A "$GUARD_ART" 2>/dev/null)" ] && echo 1 || echo 0)"
+write_config
+
+# ---------------------------------------------------------------------------
+# C11 (claude-workflow-plugin-wob2 R2-F2): a MALFORMED reviewed_hash from Sol
+# no longer costs a corrective turn or discards a real finding. reviewed_hash
+# is the one forced field NOT handed to Sol as an interpolated literal in the
+# envelope (see req.json's own construction below is irrelevant to Sol here --
+# the point is the SCHEMA TEMPLATE codex-review.sh builds), so Sol has to
+# transcribe 64 hex characters out of the request body; before this fix, any
+# slip there failed validate_candidate over a field about to be overwritten
+# regardless (measured with the shipped stub at PRODUCTION malformed_retry=1:
+# truncated-63/uppercase-64/the empty-content sentinel each cost exit 5, TWO
+# paid turns, and NO artifact -- discarding a real CRITICAL finding in the
+# process). C11_TEXT below deliberately keeps that same shape.
+C11_HASH_TRUNCATED="ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+assert_eq "C11 setup: the truncated placeholder really is 63 chars (the exact malformed shape)" \
+    "63" "${#C11_HASH_TRUNCATED}"
+C11_TEXT=$(jq -nc --arg rh "$C11_HASH_TRUNCATED" '{contract_version:"1",task_id:"cr-1",reviewer_identity:"sol-codex",reviewer_model:"stub-sol",reviewer_pin:"stub-sol",reviewed_hash:$rh,risk_threshold:"high",stop_condition:"x",verdict:"findings",findings:[{id:"R1-F1",severity:"critical",location:"a.ts:10",evidence:"unsanitized input",description:"sqli"}],iterations:1,stopped_by:"verdict"}')
+
+rm -f "$(art_path cr-1 1)"
+C11LOG="$FIXTURE/c11-stub.log"
+RR_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB -m stub-sol" \
+    STUB_CODEX_FIRST_TEXT="$C11_TEXT" STUB_CODEX_REPLY_TEXT="$C11_TEXT" \
+    STUB_CODEX_SLEEP_MS=0 STUB_LOG="$C11LOG" \
+    bash "$CR" cr-1 --request "$FIXTURE/req.json" --iteration 1 2>/dev/null)
+RR_EXIT=$?
+assert_eq "C11 malformed reviewed_hash (truncated 63): exit 0, NOT the pre-fix exit 5" "0" "$RR_EXIT"
+C11_TURNS=$(jq -r 'select(.method=="tools/call") | .id' "$C11LOG" 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "C11: exactly ONE paid turn, not two -- no corrective retry was needed" "1" "$C11_TURNS"
+assert_eq "C11: artifact WAS written" "1" "$([ -n "$RR_OUT" ] && [ -f "$RR_OUT" ] && echo 1 || echo 0)"
+assert_json_field "C11: reviewed_hash FORCED to the request's change_set_hash, never Sol's malformed 63-char guess" \
+    "$(cat "$RR_OUT")" ".reviewed_hash" "$REQ_CSH"
+assert_json_field "C11: the CRITICAL finding Sol reported is NOT discarded" \
+    "$(cat "$RR_OUT")" ".findings[0].id" "R1-F1"
+assert_json_field "C11: artifact still passes validate-artifact" \
+    "$(bash "$RCHECK" validate-artifact "$RR_OUT" 2>/dev/null)" ".ok|tostring" "true"
+
+# META (pairing requirement): a mutant with WOB2-R2F2-FORCE-BEFORE-VALIDATE
+# stripped reproduces the pre-fix defect on the SAME malformed input.
+C11_MUT="$FIXTURE/codex-review-noforce.sh"
+awk '
+    /# WOB2-R2F2-FORCE-BEFORE-VALIDATE-START/ {skip=1; next}
+    /# WOB2-R2F2-FORCE-BEFORE-VALIDATE-END/   {skip=0; next}
+    skip!=1 {print}
+' "$(plugin_root)/.claude/scripts/codex-review.sh" > "$C11_MUT"
+chmod +x "$C11_MUT"
+if assert_mutant_applied "C11 META" "$(plugin_root)/.claude/scripts/codex-review.sh" "$C11_MUT"; then
+    assert_eq "C11 META: the mutant still parses as bash" "1" \
+        "$(bash -n "$C11_MUT" 2>/dev/null && echo 1 || echo 0)"
+    rm -f "$(art_path cr-1 1)"
+    C11MUTLOG="$FIXTURE/c11-mut-stub.log"
+    MUT_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB -m stub-sol" \
+        STUB_CODEX_FIRST_TEXT="$C11_TEXT" STUB_CODEX_REPLY_TEXT="$C11_TEXT" \
+        STUB_CODEX_SLEEP_MS=0 STUB_LOG="$C11MUTLOG" \
+        bash "$C11_MUT" cr-1 --request "$FIXTURE/req.json" --iteration 1 2>/dev/null)
+    MUT_EXIT=$?
+    assert_eq "C11 META: WITHOUT the pre-force, the SAME malformed input now fails (exit 5) -- the pre-fix defect returns" \
+        "5" "$MUT_EXIT"
+    MUT_TURNS=$(jq -r 'select(.method=="tools/call") | .id' "$C11MUTLOG" 2>/dev/null | wc -l | tr -d ' ')
+    assert_eq "C11 META: ...and it cost TWO paid turns (the corrective retry the fix removed)" "2" "$MUT_TURNS"
+    assert_eq "C11 META: ...and NO artifact was written (the CRITICAL finding would be lost)" \
+        "0" "$([ -f "$(art_path cr-1 1)" ] && echo 1 || echo 0)"
+    # Restore control: the SHIPPED driver, same malformed input, succeeds again.
+    rm -f "$(art_path cr-1 1)"
+    RESTORE_RC=0
+    RESTORE_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB -m stub-sol" \
+        STUB_CODEX_FIRST_TEXT="$C11_TEXT" STUB_CODEX_REPLY_TEXT="$C11_TEXT" \
+        STUB_CODEX_SLEEP_MS=0 STUB_LOG="" \
+        bash "$CR" cr-1 --request "$FIXTURE/req.json" --iteration 1 2>/dev/null) || RESTORE_RC=$?
+    assert_eq "C11 restore control: SHIPPED driver succeeds again on the identical malformed input" \
+        "0" "$RESTORE_RC"
+    assert_eq "C11 restore control: artifact present" "1" "$([ -n "$RESTORE_OUT" ] && [ -f "$RESTORE_OUT" ] && echo 1 || echo 0)"
+fi
+
+# ---------------------------------------------------------------------------
+# C12 (claude-workflow-plugin-wob2 R2-F3): the FINAL, post-force artifact is
+# re-validated before the driver claims success. Sol's own candidate reports
+# a VALID reviewer_model/reviewer_pin ("stub-sol"), so validate_candidate
+# accepts it -- the misconfiguration lives in the MCP REGISTRATION
+# (CODEX_MCP_MODEL), which reaches the artifact only through the FORCE,
+# strictly AFTER validate_candidate already ran. Without a post-force
+# re-check, this reaches the driver's own success exit carrying a
+# reviewer_model no validator has ever approved.
+C12_TEXT=$(jq -nc --arg rh "$REQ_CSH" '{contract_version:"1",task_id:"cr-1",reviewer_identity:"sol-codex",reviewer_model:"stub-sol",reviewer_pin:"stub-sol",reviewed_hash:$rh,risk_threshold:"high",stop_condition:"x",verdict:"approve",findings:[],iterations:1,stopped_by:"verdict"}')
+rm -f "$(art_path cr-1 1)"
+C12LOG="$FIXTURE/c12-stub.log"
+C12_RC=0
+C12_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB" CODEX_MCP_MODEL="bad model!" \
+    STUB_CODEX_FIRST_TEXT="$C12_TEXT" STUB_CODEX_REPLY_TEXT="$C12_TEXT" \
+    STUB_CODEX_SLEEP_MS=0 STUB_LOG="$C12LOG" \
+    bash "$CR" cr-1 --request "$FIXTURE/req.json" --iteration 1 2>/dev/null) || C12_RC=$?
+assert_eq "C12 misconfigured reviewer model (post-force only): driver REFUSES (exit 5), not a false success" \
+    "5" "$C12_RC"
+assert_eq "C12: NO artifact was written over the invalid model" \
+    "0" "$([ -f "$(art_path cr-1 1)" ] && echo 1 || echo 0)"
+# Precondition proof: Sol's OWN candidate (reviewer_model="stub-sol") is
+# independently valid, so this is genuinely a POST-force-only failure, not a
+# candidate-stage one. Written to a real file -- review-check.sh's own
+# usage() guard rejects a process-substitution fd with "file not found"
+# (`-f` correctly reports a FIFO as not a regular file), so this has to be
+# an actual file, matching every other validate-artifact call in this spec.
+C12_CANDIDATE_FILE="$FIXTURE/c12-candidate.json"
+printf '%s' "$C12_TEXT" > "$C12_CANDIDATE_FILE"
+assert_json_field "C12 precondition: Sol's raw candidate text has a VALID reviewer_model (isolates the defect to the force, not the candidate)" \
+    "$(bash "$RCHECK" validate-artifact "$C12_CANDIDATE_FILE" 2>/dev/null)" ".ok|tostring" "true"
+
+# META (pairing requirement): a mutant with WOB2-R2F3-REVALIDATE stripped
+# reports a FALSE success over the same misconfigured model.
+C12_MUT="$FIXTURE/codex-review-norevalidate.sh"
+awk '
+    /# WOB2-R2F3-REVALIDATE-START/ {skip=1; next}
+    /# WOB2-R2F3-REVALIDATE-END/   {skip=0; next}
+    skip!=1 {print}
+' "$(plugin_root)/.claude/scripts/codex-review.sh" > "$C12_MUT"
+chmod +x "$C12_MUT"
+if assert_mutant_applied "C12 META" "$(plugin_root)/.claude/scripts/codex-review.sh" "$C12_MUT"; then
+    assert_eq "C12 META: the mutant still parses as bash" "1" \
+        "$(bash -n "$C12_MUT" 2>/dev/null && echo 1 || echo 0)"
+    rm -f "$(art_path cr-1 1)"
+    C12MUTLOG="$FIXTURE/c12-mut-stub.log"
+    MUT12_RC=0
+    MUT12_OUT=$(CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB" CODEX_MCP_MODEL="bad model!" \
+        STUB_CODEX_FIRST_TEXT="$C12_TEXT" STUB_CODEX_REPLY_TEXT="$C12_TEXT" \
+        STUB_CODEX_SLEEP_MS=0 STUB_LOG="$C12MUTLOG" \
+        bash "$C12_MUT" cr-1 --request "$FIXTURE/req.json" --iteration 1 2>/dev/null) || MUT12_RC=$?
+    assert_eq "C12 META: WITHOUT re-validation, the driver WRONGLY reports success (exit 0) over the invalid model" \
+        "0" "$MUT12_RC"
+    assert_eq "C12 META: ...and an artifact WAS written this time (the refusal is gone)" \
+        "1" "$([ -n "$MUT12_OUT" ] && [ -f "$MUT12_OUT" ] && echo 1 || echo 0)"
+    assert_json_field "C12 META: ...carrying the invalid reviewer_model verbatim" \
+        "$(cat "$MUT12_OUT" 2>/dev/null)" ".reviewer_model" "bad model!"
+    assert_json_field "C12 META: ...and that written artifact FAILS its own validator (the false-success proof)" \
+        "$(bash "$RCHECK" validate-artifact "$MUT12_OUT" 2>/dev/null)" ".ok|tostring" "false"
+    # Restore control: the SHIPPED driver, same misconfiguration, refuses again.
+    rm -f "$(art_path cr-1 1)"
+    RESTORE12_RC=0
+    CODEX_MCP_BIN=node CODEX_MCP_ARGS="$STUB" CODEX_MCP_MODEL="bad model!" \
+        STUB_CODEX_FIRST_TEXT="$C12_TEXT" STUB_CODEX_REPLY_TEXT="$C12_TEXT" \
+        STUB_CODEX_SLEEP_MS=0 STUB_LOG="" \
+        bash "$CR" cr-1 --request "$FIXTURE/req.json" --iteration 1 >/dev/null 2>&1 || RESTORE12_RC=$?
+    assert_eq "C12 restore control: SHIPPED driver refuses again on the identical misconfiguration" \
+        "5" "$RESTORE12_RC"
+    assert_eq "C12 restore control: still no artifact" "0" "$([ -f "$(art_path cr-1 1)" ] && echo 1 || echo 0)"
+fi
 write_config
 
