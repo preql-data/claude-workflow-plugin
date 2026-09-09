@@ -605,8 +605,33 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # the case-variant sites needed), and its runtime-observed leg drives the
 # shipped LABEL-WITHOUT-RECORD-BLOCK region (new sentinel pair, same
 # convention as APPROVAL-BINDING-TEXT) for real rather than grepping source.
+#
+# 59 -> 60 (claude-workflow-plugin-268l): added design-conflict-subject-
+# resolution.test.sh. design-conflict (the writer, cmd_design_conflict) and
+# its reader (compute_design_conflict_open) used to take the task-id they
+# were invoked with as the SUBJECT unconditionally — the task whose
+# docs/specs/<id>.md and comment stream a conflict is filed against and read
+# from. Under v5 task-per-unit a unit task's own id and the design task that
+# actually owns its governing docs/specs/<id>.md differ BY CONSTRUCTION (a
+# DESIGN-UNIT binding names the real owner), so asking either function about
+# a bound unit task asked about a comment stream that structurally could
+# never hold the record — the writer hard-refused (design_artifact_not_
+# found) and the reader silently read a conflict-free stream as "no
+# conflict". Fixed via a new shared resolve_design_conflict_subject, and
+# proved via TWO sentinel-wrapped mutants (DESIGN-CONFLICT-READER-SUBJECT-
+# RESOLUTION, DESIGN-CONFLICT-WRITER-SUBJECT-RESOLUTION) that reproduce the
+# pre-fix misdirection live: a conflict filed against a bound unit task is
+# invisible to the reader mutant and unfileable under the writer mutant, and
+# visible/fileable again under the shipped script — each mutant additionally
+# discriminated against a still-correct unbound-task control, ruling out "the
+# mutant is just globally broken". Also pins the answered design question
+# (an unbound task falls back to itself, byte-identical to the pre-fix
+# behaviour — NOT a vacuous "nothing to check") and pairs the new backend.md/
+# frontend.md/devops.md producer-wiring prose (a structural census plus a
+# leg that the named subcommand is actually recognised by the CLI
+# dispatcher).
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=59
+EXPECTED_SPECS=60
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
 # "~5x" here was sized against an idle-machine figure (review-separation 183s)

@@ -62,6 +62,18 @@ bd update $TASK_ID --notes "IN PROGRESS: Starting infrastructure work"
 2. **Portability**: Any limitations on different environments?
 3. **DX**: How do we make installation seamless for other engineers?
 
+## When the design is wrong
+
+If you were bound to a unit of a design (v5 task-per-unit — `qa-gate.sh design-unit-show <task-id>` names your `unit_id` if you're unsure whether you have one) and that unit's acceptance criteria cannot be satisfied as written — the design is wrong, incomplete, or contradicted by the infrastructure you're actually provisioning against — file the objection and stop:
+
+```bash
+bash .claude/scripts/qa-gate.sh design-conflict $TASK_ID --unit <your-unit-id> '<statement citing the contradiction>'
+```
+
+Do this INSTEAD of reinterpreting, improvising, or partially satisfying the design. There is no override flag: the only way this clears is a design amendment, independently re-reviewed and found satisfied — silently working around a design you believe is wrong (a permission you widened instead of the one specified, a resource sized off-spec) ships an implementation nobody ever re-reviewed against the objection you found. Then name it in your completion contract's `blockers` array too, in prose (e.g. `"design_conflict: U3 specifies an IAM role this account cannot grant"`) — the orchestrator's design-review relay (`orchestrator.md` 5e) watches for that to re-trigger review. File both: the command above is what actually gates `approve`; the blockers-array note is what gets a human to act on it.
+
+Most tasks carry no unit binding at all — if `design-unit-show` reports `ok:true` and `bound:false`, this section doesn't apply; use the ordinary blockers-array escalation instead. (`bound:false` alone is not enough to check: it also appears on an UNREADABLE-source error envelope, where `ok:false` — check that too, not just `.bound`.)
+
 ## When completing work
 
 ```bash

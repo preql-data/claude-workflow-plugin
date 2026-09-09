@@ -10365,6 +10365,20 @@ cmd_design_status() {
 # (compute_design_conflict_open) and its wiring into approve are the OTHER
 # function; this comment only covers the writer.
 #
+# UPDATE (claude-workflow-plugin-268l): THE SUBJECT WAS WRONG. Every "$tid"
+# above described where a conflict is FILED, but under v5 task-per-unit
+# <tid> (the implementer's own task) and the task that owns docs/specs/
+# <id>.md can differ BY CONSTRUCTION — this writer used to hard-refuse
+# (design_artifact_not_found) on every such task, because it looked for its
+# design artifact at the wrong path. It now resolves the subject through
+# resolve_design_conflict_subject (above) FIRST: <tid>'s own DESIGN-UNIT
+# binding, when one exists, names the actual design_task this is filed
+# against; when none exists, <tid> remains its own subject exactly as
+# before. See that function's own header for the full rationale, including
+# the answered design question for the no-binding case. The GRAMMAR below is
+# UNCHANGED by this fix — only WHICH task's stream the record lands on
+# moved, never its shape.
+#
 # GRAMMAR — single line, no version tag, matching the LIGHTER-weight
 # records this file already ships (IMPLEMENTER, RESOLVED, ARBITRATION),
 # because a conflict is not a schema-versioned artifact binding the way
@@ -10564,6 +10578,79 @@ design_unit_content_hash() {
     return 0
 }
 
+# resolve_design_conflict_subject <tid> — claude-workflow-plugin-268l. Both
+# cmd_design_conflict (the writer) and compute_design_conflict_open (the
+# reader) used to take <tid> itself as the task whose docs/specs/<id>.md and
+# comment stream a design-conflict is filed against and read from. Under v5
+# task-per-unit that is frequently wrong BY CONSTRUCTION: <tid> may be a unit
+# task bound (via DESIGN-UNIT, see latest_design_unit_binding above — "the
+# ONE authoritative reader", :3063) to a DIFFERENT task that actually owns
+# the design. This resolves the correct subject ONCE, through that ONE
+# reader, so the writer and the reader can never disagree about which task a
+# given <tid> maps to (the class of bug design-unit-show's own header, :3065,
+# warns a second copy of the DESIGN-UNIT grammar would risk).
+#
+# Sets globals (never prints):
+#   DESIGN_CONFLICT_SUBJECT        the task-id design-conflict must read/
+#                                  write against for <tid>
+#   DESIGN_CONFLICT_SUBJECT_BOUND  "true" when resolution went through a
+#                                  DESIGN-UNIT binding; "false" when it fell
+#                                  back to <tid> itself (no binding exists).
+#                                  Kept as an EXPLICIT, separate signal —
+#                                  never inferred from DESIGN_CONFLICT_
+#                                  SUBJECT == <tid>, which would be wrong the
+#                                  rare time a task binds to ITSELF (nothing
+#                                  refuses design_task == tid at bind time) —
+#                                  so a caller, and a human reading the
+#                                  observations text this drives, can always
+#                                  tell bound apart from unbound.
+#
+# Returns 0 on a DETERMINED read: BOUND (subject = design_task from the
+# binding) or DETERMINED-ABSENT (subject = <tid> itself — see "THE ANSWERED
+# DESIGN QUESTION" below) both return 0. Returns 3 — and sets neither global
+# to anything a caller should trust past that point — when latest_design_
+# unit_binding's own source could not be read at all (its own rc 3): the
+# SAME xsu1 discipline compute_design_satisfied's DESIGN-SOURCE-UNREADABLE
+# guard established (:8500ff) applied to this predicate. Unreadable is never
+# silently folded into "no binding, fall back to self" — that would risk
+# misfiling or misreading a conflict against a task other than the one that
+# actually governs <tid>, on evidence that was never actually read.
+#
+# THE ANSWERED DESIGN QUESTION (claude-workflow-plugin-268l task notes:
+# "what is the correct behaviour when a unit task has NO DESIGN-UNIT
+# binding?"). <tid> becomes its OWN subject — byte-identical to this
+# command's pre-268l behaviour in every way an existing caller can observe.
+# This is NOT a vacuous "nothing to check, report no conflict" default: it
+# is a real, executed check of <tid>'s own docs/specs/<tid>.md and its own
+# comment stream, which happens to honestly find nothing on a task that
+# never had a design phase of its own (the common case today — most tasks
+# are not v5 units at all), and which can just as honestly find a genuine,
+# open DESIGN-CONFLICT on a task that owns its design DIRECTLY:
+# worktree-approval-resolution.sh section 8b and design-gate-precheck-
+# wiring.test.sh section 1b both file and detect a DESIGN-CONFLICT against a
+# task with NO DESIGN-UNIT binding anywhere in its history, and both must
+# keep passing unmodified. Collapsing "unbound" to "no governing design,
+# nothing to check" would silently disable that entire, currently-exercised
+# pathway — a strictly worse regression than the misdirection this fix
+# closes. Bound and unbound are not a spectrum from "more v5" to "less v5";
+# they are two ways a real design can be organised, and this predicate has
+# to serve both because today's store contains both.
+resolve_design_conflict_subject() {
+    local tid="$1"
+    DESIGN_CONFLICT_SUBJECT="$tid"
+    DESIGN_CONFLICT_SUBJECT_BOUND="false"
+    local binding_json="" binding_rc=0
+    binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?
+    [ "$binding_rc" -eq 0 ] || return 3
+    local design_task=""
+    design_task=$(printf '%s' "$binding_json" | jq -r '.design_task // ""' 2>/dev/null || echo "")
+    if [ -n "$design_task" ]; then
+        DESIGN_CONFLICT_SUBJECT="$design_task"
+        DESIGN_CONFLICT_SUBJECT_BOUND="true"
+    fi
+    return 0
+}
+
 cmd_design_conflict() {
     # jq availability is checked FIRST and reported WITHOUT emit_error_json
     # — the same reason cmd_design_unit_bind and cmd_design_conform both do
@@ -10659,16 +10746,54 @@ cmd_design_conflict() {
     fi
 # DESIGN-CONFLICT-SCALAR-CLASS END (fkm.7)
 
+    # --- claude-workflow-plugin-268l: resolve the SUBJECT before touching
+    # any artifact. <tid> may be a v5 unit task bound (via DESIGN-UNIT) to a
+    # DIFFERENT task that owns docs/specs/<id>.md — see resolve_design_
+    # conflict_subject's own header for the full rationale and the answered
+    # design question (bound / unbound / unreadable). The region below
+    # contains ONLY the resolution call and its fail-closed exit; $subject
+    # is initialised to $tid immediately above it, so stripping the region
+    # reproduces the EXACT pre-268l behaviour (always operate on <tid>
+    # directly) rather than crashing on an unset variable — see design-
+    # conflict-subject-resolution.test.sh's META for the mutant this shape
+    # is built to support.
+    local subject="$tid" subject_bound="false"
+# DESIGN-CONFLICT-WRITER-SUBJECT-RESOLUTION BEGIN (268l)
+    local subject_rc=0
+    resolve_design_conflict_subject "$tid" || subject_rc=$?
+    if [ "$subject_rc" -ne 0 ]; then
+        emit_error_json "design-conflict" "$tid" "design_binding_unreadable" \
+            "the DESIGN-UNIT binding source for $tid could not be read right now (both bd show forms failed, the comment stream was not retrievable, or a record read back malformed); whether $tid is bound to a governing design task is unknown, so there is no way to know which task's docs/specs/<id>.md this conflict would even be filed against. Refusing rather than guessing — falling back to $tid itself here could silently misfile a conflict that belongs on a different, unreadable-to-check design task. Re-run once bd is reachable" \
+            "qa-gate.sh design-conflict $tid --unit <U-n> [--design-hash <h>] '<statement>'"
+        exit 2
+    fi
+    subject="$DESIGN_CONFLICT_SUBJECT"
+    subject_bound="$DESIGN_CONFLICT_SUBJECT_BOUND"
+# DESIGN-CONFLICT-WRITER-SUBJECT-RESOLUTION END (268l)
+
     # --- R2-F3: confirm --unit is a REAL, declared unit; resolve the LIVE
     # whole-artifact hash unconditionally; an explicit --design-hash must
     # equal it (a CONFIRMATION, never a second source); pin unit_hash to
     # the DISPUTED unit's OWN current content, over which clearing is now
     # decided (see compute_design_conflict_open's own header) ------------
+    # claude-workflow-plugin-268l: every "$tid" below this point that means
+    # "the task whose docs/specs/<id>.md governs this conflict" is now
+    # "$subject" instead — $subject equals $tid unless a DESIGN-UNIT
+    # binding resolved it to something else. $tid remains the envelope's
+    # own task_id field throughout (matching design-conform's own
+    # precedent): this command was invoked ON $tid, even when it acts on
+    # $subject's artifact.
     local artifact
-    artifact=$(design_artifact_path_for "$tid")
+    artifact=$(design_artifact_path_for "$subject")
     if [ ! -f "$artifact" ]; then
+        if [ "$subject_bound" = "true" ]; then
+            emit_error_json "design-conflict" "$tid" "design_artifact_not_found" \
+                "$tid is bound (via DESIGN-UNIT) to design_task=$subject, but no design artifact exists at $artifact; a conflict needs a design to be filed against (required even with an explicit --design-hash, so the value can be CONFIRMED rather than merely trusted). Record the design first: qa-gate.sh design-record $subject" \
+                "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
+            exit 1
+        fi
         emit_error_json "design-conflict" "$tid" "design_artifact_not_found" \
-            "no design artifact exists at $artifact; a conflict needs a design to be filed against (required even with an explicit --design-hash, so the value can be CONFIRMED rather than merely trusted). Record the design first: qa-gate.sh design-record $tid" \
+            "no design artifact exists at $artifact, and $tid carries no DESIGN-UNIT binding either; a conflict needs a design to be filed against. If $tid implements a unit of ANOTHER task's design, bind it first: qa-gate.sh design-unit-bind $tid --design-task <design-tid> --unit-id <U-n>. Otherwise record a design directly on $tid: qa-gate.sh design-record $tid" \
             "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash <h> '<statement>'"
         exit 1
     fi
@@ -10751,8 +10876,93 @@ cmd_design_conflict() {
     local ts comment_text
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     comment_text="DESIGN-CONFLICT $unit_id design_hash=$design_hash unit_hash=$unit_hash at $ts: $statement"
-    add_comment "$tid" "$comment_text"
-    emit_json 1 "design-conflict" "$tid" "recorded" "comment posted at $ts: $comment_text"
+    # claude-workflow-plugin-268l: posted on $subject, never $tid directly.
+    # compute_design_conflict_open resolves the SAME binding to the SAME
+    # subject, so a record filed here is where that reader will actually
+    # look — this is the producer half of the fix, not merely a rename:
+    # posting on $tid instead (the pre-268l behaviour, when $tid even owned
+    # an artifact at all) is exactly the misdirection this task exists to
+    # close.
+    add_comment "$subject" "$comment_text"
+
+    # claude-workflow-plugin-268l R1-F1 (QA round 1, HIGH): add_comment ends
+    # in `|| log_sync_error ...`, and log_sync_error ends in `printf ... ||
+    # true`, so add_comment ALWAYS returns 0 — a transient store failure, a
+    # wedged daemon, or a deleted task all leave this function reporting
+    # "recorded" for a write that never happened, and design-gate-precheck /
+    # approve then read the resulting silence as no-conflict: the ONE
+    # comment-only record in this file whose ABSENCE is the PERMISSIVE
+    # state, so a lost write here is a false PASS, not a confusing refusal
+    # (claude-workflow-plugin-nod4's own P1-not-P0 bounding argument is
+    # exactly inverted for this record type and does not transfer). Same
+    # WRITE-CONFIRMATION-GATE doctrine cmd_design_unit_bind already applies
+    # 80 lines away (:9562-9569): re-read the exact thing that was just
+    # written and refuse rather than trust add_comment's exit status, which
+    # proves nothing. The confirmation read failing OUTRIGHT (bd unreachable,
+    # stream unretrievable) is a DIFFERENT fact from a confirmation read that
+    # SUCCEEDS but does not show the record — same distinction xsu1 draws
+    # everywhere else in this file — so it is refused with its own key
+    # BEFORE the sentinel-wrapped guard below, matching design-unit-bind's
+    # own confirm_rc-then-mismatch ordering exactly.
+    local confirm_comments="" confirm_rc=0
+    confirm_comments=$(design_comments_json "$subject") || confirm_rc=$?
+    if [ "$confirm_rc" -ne 0 ]; then
+        emit_error_json "design-conflict" "$tid" "design_conflict_confirm_unreadable" \
+            "the write was submitted but the confirmation re-read of $subject's own comment stream failed right now (bd unreachable, the stream not retrievable, or unparseable) — whether the conflict record landed is unknown, and no claim is made about it either way. Once bd is reachable, verify with: qa-gate.sh design-gate-precheck $tid; re-run if absent: qa-gate.sh design-conflict $tid --unit $unit_id --design-hash $design_hash '$statement'" \
+            "qa-gate.sh design-gate-precheck $tid"
+        exit 5
+    fi
+    # Raw exact-text presence, not a second copy of compute_design_conflict_
+    # open's anchored capture: confirmation only needs to prove the BYTES we
+    # asked to be written landed verbatim, which is a strictly stronger and
+    # simpler check than re-parsing the grammar a second time (and comment_
+    # text is unique per call — it embeds the to-the-second timestamp and
+    # the free-text statement — so an exact match cannot mean "some OTHER
+    # conflict record happens to be present").
+    local confirm_present="false"
+    confirm_present=$(printf '%s' "$confirm_comments" | jq -r --arg t "$comment_text" '([.[].text] | any(. == $t)) | tostring' 2>/dev/null || echo "false")
+# WRITE-CONFIRMATION-GATE BEGIN (268l, R1-F1)
+    if [ "$confirm_present" != "true" ]; then
+        emit_error_json "design-conflict" "$tid" "design_conflict_write_unconfirmed" \
+            "the write appeared to complete but a fresh read of $subject's own comments does not show this DESIGN-CONFLICT record (unit_id=$unit_id design_hash=$design_hash unit_hash=$unit_hash) as present. add_comment() cannot distinguish a transient store failure from success (claude-workflow-plugin-nod4), so this is refused rather than reported recorded on unconfirmed evidence. Re-run: qa-gate.sh design-conflict $tid --unit $unit_id --design-hash $design_hash '$statement'; if this persists, check bd connectivity and $SYNC_ERRORS_LOG" \
+            "qa-gate.sh design-conflict $tid --unit $unit_id --design-hash $design_hash '$statement'"
+        exit 5
+    fi
+# WRITE-CONFIRMATION-GATE END (268l, R1-F1)
+
+    local posted_obs="comment posted at $ts on $subject: $comment_text"
+    [ "$subject" != "$tid" ] && posted_obs="comment posted at $ts on $subject (resolved from $tid's DESIGN-UNIT binding): $comment_text"
+
+    # claude-workflow-plugin-268l R1-F4 (QA round 1, LOW, envelope-only):
+    # design_task now a first-class field, matching the precedent this
+    # change's own header already cites (emit_design_conform, design-unit-
+    # show both expose it structurally) — previously named only inside the
+    # free-text observations string. unit_id rides along for the same
+    # reason design-unit-show's own envelope carries both together. This is
+    # NOT a DESIGN-CONFLICT record-grammar change (the persisted bd comment
+    # is untouched, still `DESIGN-CONFLICT <unit-id> design_hash=<h>
+    # unit_hash=<h> at <ts>: <statement>`) — purely the transient CLI
+    # envelope nothing else in this file machine-reads. `envelope=$(jq -nc
+    # ...) || rc=$?` per print_envelope_checked's own xsu1 H2-F4 discipline:
+    # inlining a failed jq substitution straight into printf's arguments
+    # would print malformed JSON at ok:true (that helper's own measured
+    # `printf '{"x":%s}\n' "$(false)"` -> `{"x":}` rc 0). jq availability was
+    # already confirmed at this function's own first line, so a failure here
+    # is a runtime fault building THIS object, not a missing binary; the
+    # write is already CONFIRMED present above, so degrading to the
+    # original, unstructured envelope on that fault can never turn into a
+    # false "recorded" claim — only a less-structured true one, not worth a
+    # dedicated error path for a LOW-severity structural nicety.
+    local success_envelope="" success_rc=0
+    success_envelope=$(jq -nc \
+        --arg tid "$tid" --arg obs "$posted_obs" --arg dt "$subject" --arg u "$unit_id" \
+        '{ok:true, subcommand:"design-conflict", task_id:$tid, status:"recorded", observations:$obs, design_task:$dt, unit_id:$u}' \
+        2>/dev/null) || success_rc=$?
+    if [ "$success_rc" -eq 0 ] && [ -n "$success_envelope" ]; then
+        printf '%s\n' "$success_envelope"
+    else
+        emit_json 1 "design-conflict" "$tid" "recorded" "$posted_obs"
+    fi
 }
 
 # compute_design_conflict_open <tid> — sets globals (never prints):
@@ -10765,6 +10975,20 @@ cmd_design_conflict() {
 # jq failure means the answer is unknown. The caller MUST NOT treat a non-zero
 # return as "no conflict"; see cmd_approve's own DESIGN-CONFLICT-REFUSAL for
 # how it fails closed on this.
+#
+# UPDATE (claude-workflow-plugin-268l): THE SUBJECT WAS WRONG. This used to
+# read <tid>'s OWN comment stream unconditionally, which under v5
+# task-per-unit is frequently a task with no docs/specs/<id>.md and no
+# DESIGN-CONFLICT records of its own — a comment stream that structurally
+# cannot hold the record it was asked about, not evidence of no conflict.
+# Every read below now runs against $subject (resolve_design_conflict_
+# subject's output for <tid>: the design_task from <tid>'s DESIGN-UNIT
+# binding when one exists, else <tid> itself, unchanged from before this
+# fix), including the internal compute_design_satisfied re-check the R6-F4
+# clearing predicate needs — checking $subject's records while asking
+# compute_design_satisfied about <tid> would be a NEW self-inconsistent
+# predicate this fix does not introduce. See resolve_design_conflict_
+# subject's own header for the answered no-binding design question.
 #
 # SINGLE ARGUMENT since claude-workflow-plugin-i8cx (operator ruling on
 # rounds 6/7/8 independent review). A historical second positional argument,
@@ -10886,8 +11110,31 @@ compute_design_conflict_open() {
     DESIGN_CONFLICT_OPEN_UNITS=""
     DESIGN_CONFLICT_OPEN_OBS="no open design_conflict record on $tid"
 
+    # claude-workflow-plugin-268l: resolve the SUBJECT before reading any
+    # comment stream — see resolve_design_conflict_subject's own header. The
+    # region below contains ONLY the resolution call and its fail-closed
+    # return; $subject/$subject_bound are initialised immediately above it,
+    # so stripping the region reproduces the EXACT pre-268l behaviour
+    # (always read <tid>'s own stream) rather than crashing on an unset
+    # variable. The returned rc==3 case (binding source unreadable) is
+    # propagated exactly like the pre-fix "comment stream on <tid>
+    # unreadable" case already was: both mean "cannot determine anything
+    # about this task's design-conflict status right now", so this is not a
+    # NEW failure surface, only a more precisely named one.
+    local subject="$tid" subject_bound="false"
+# DESIGN-CONFLICT-READER-SUBJECT-RESOLUTION BEGIN (268l)
+    local subject_rc=0
+    resolve_design_conflict_subject "$tid" || subject_rc=$?
+    [ "$subject_rc" -eq 0 ] || return 3
+    subject="$DESIGN_CONFLICT_SUBJECT"
+    subject_bound="$DESIGN_CONFLICT_SUBJECT_BOUND"
+# DESIGN-CONFLICT-READER-SUBJECT-RESOLUTION END (268l)
+    if [ "$subject_bound" = "true" ]; then
+        DESIGN_CONFLICT_OPEN_OBS="no open design_conflict record on $subject (resolved from $tid's DESIGN-UNIT binding)"
+    fi
+
     local comments="" c_rc=0
-    comments=$(design_comments_json "$tid") || c_rc=$?
+    comments=$(design_comments_json "$subject") || c_rc=$?
     [ "$c_rc" -eq 0 ] || return 3
 
     local out="" out_rc=0
@@ -10934,7 +11181,16 @@ compute_design_conflict_open() {
     # MORE conservative (more records stay OPEN), never less, so it needs no
     # refusal of its own the way an unreadable DESIGN-CONFLICT stream does
     # above.
-    compute_design_satisfied "$tid"
+    #
+    # claude-workflow-plugin-268l: checked against $subject, not $tid — the
+    # SAME resolved task the DESIGN-CONFLICT records above were just read
+    # from. Checking $tid's own satisfaction here while reading $subject's
+    # records above would be a self-inconsistent predicate: whether a
+    # record clears depends on whether the design that GOVERNS the disputed
+    # unit was re-reviewed and found satisfied, not on whatever compute_
+    # design_satisfied says about a task that (under v5 task-per-unit) most
+    # likely never had a design artifact of its own at all.
+    compute_design_satisfied "$subject"
     local satisfied_now="$DESIGN_SATISFIED"
 
     # R2-F3: the clearing predicate keys on the DISPUTED UNIT's own current
@@ -10943,7 +11199,7 @@ compute_design_conflict_open() {
     # ONCE; each record's own unit_id gets its current content hash
     # re-derived (design_unit_content_hash), never assumed unchanged.
     local artifact
-    artifact=$(design_artifact_path_for "$tid")
+    artifact=$(design_artifact_path_for "$subject")
 
     local rows="" row_rc=0
     rows=$(printf '%s' "$out" | jq -r '.[] | [.unit_id, .unit_hash] | @tsv' 2>/dev/null) || row_rc=$?
@@ -10973,7 +11229,9 @@ EOF
     if [ -n "$open_units" ]; then
         DESIGN_CONFLICT_OPEN="true"
         DESIGN_CONFLICT_OPEN_UNITS="$open_units"
-        DESIGN_CONFLICT_OPEN_OBS="open design_conflict record(s) exist on $tid — for each affected unit, either ITS OWN current content in the design artifact still matches (or could not be independently re-derived from) what the conflict was filed against, or no current satisfied DESIGN-REVIEW covers the artifact at all; only a change to the DISPUTED UNIT's OWN content, under a superseding satisfied review, clears it (affected unit(s) are in DESIGN_CONFLICT_OPEN_UNITS, the caller's own field for that — not repeated here so the two never drift apart in wording)"
+        local subject_note=""
+        [ "$subject_bound" = "true" ] && subject_note=" (resolved from $tid's DESIGN-UNIT binding)"
+        DESIGN_CONFLICT_OPEN_OBS="open design_conflict record(s) exist on $subject$subject_note — for each affected unit, either ITS OWN current content in the design artifact still matches (or could not be independently re-derived from) what the conflict was filed against, or no current satisfied DESIGN-REVIEW covers the artifact at all; only a change to the DISPUTED UNIT's OWN content, under a superseding satisfied review, clears it (affected unit(s) are in DESIGN_CONFLICT_OPEN_UNITS, the caller's own field for that — not repeated here so the two never drift apart in wording)"
     fi
     return 0
 }

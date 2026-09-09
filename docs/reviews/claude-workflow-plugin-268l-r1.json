@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-268l",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "66865d7715e421e4106205530baee260ddaa95352a3637fdfe3a7547894cef1a",
+  "risk_threshold": "high",
+  "stop_condition": "every acceptance criterion in the task description is traced to an executed assertion; the three subject dispositions (bound / determined-absent / unreadable) are each proven observably distinct; both sentinel mutants are proven to reproduce pre-fix behaviour rather than fail universally; and no critical/high finding remains in the design-conflict writer, reader, or the newly-wired producer prose",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:10887-10890 (cmd_design_conflict: add_comment then emit_json 'recorded')",
+      "evidence": "MEASURED LIVE, isolated fixture with a bd shim failing BOTH comment-write syntaxes (comments add / comment add), everything else real. design-conflict on a bound unit task returned rc=0 {\"ok\":true,\"status\":\"recorded\"} with observations 'comment posted at 2026-09-09T05:50:53Z on <TID_D> (resolved from <TID_U>'s DESIGN-UNIT binding)'. The record was ABSENT from TID_D's stream. design-gate-precheck <TID_U> then returned rc=0 status=ready. RESTORE CONTROL: with the kill-switch removed the identical command on the identical task recorded successfully and was detected (rc=4, design_conflict_open), so the only variable was the comment write. add_comment (qa-gate.sh:~2775) ends in '|| log_sync_error', and log_sync_error ends in 'printf ... || true', so add_comment ALWAYS returns 0.",
+      "description": "The gate FAILS OPEN on a lost conflict write, and this change is what makes that reachable. Three points. (1) POLARITY: claude-workflow-plugin-nod4 already tracks add_comment's fail-open write at P1, and bounds itself explicitly -- 'why this is P1 and not P0: every downstream reader is fail-CLOSED ... a lost write surfaces later as a confusing refusal, never as a false PASS'. That bounding argument INVERTS for design-conflict, the one comment-only record whose ABSENCE is the permissive state: for design-record/grilling-record/design-unit-bind a lost record means a precondition reads unmet and the reader refuses; for design-conflict a lost record means 'no conflict' and approve proceeds. nod4 does not list design-conflict, so this cannot be deferred to nod4 on nod4's own reasoning -- the priority analysis does not transfer. (2) NEWLY REACHABLE BY THIS CHANGE: the producer wiring added here is the first thing that ever instructs anyone to run design-conflict (the task description's own words: 'latent only because nothing is instructed to file a conflict'), and the new prose in all three prompts asserts the guarantee this breaks verbatim -- 'the command above is what actually gates approve' -- while telling the specialist to 'file the objection and stop'. So the change ships an instruction whose stated gating guarantee the code does not honour. This is the same 'newly reachable' standard the implementer itself applied when flagging the remediation text. (3) PRECEDENT EXISTS 80 LINES AWAY: cmd_design_unit_bind's WRITE-CONFIRMATION-GATE (:9562-9569) re-reads the exact predicate the downstream reader will evaluate and refuses with design_binding_write_unconfirmed / exit 5, under a comment that states the doctrine outright: this 'proves the write actually landed rather than trusting add_comment's exit status, which proves nothing'. nod4's own SUGGESTED DIRECTION recommends exactly this read-back. SUGGESTED FIX: after add_comment \"$subject\", re-read $subject's stream and confirm the just-written DESIGN-CONFLICT record is present, refusing with a named key (e.g. design_conflict_write_unconfirmed, exit 5) if absent; pair it with a bd shim failing both comment syntaxes (refusal), a restore control (records normally), and a leg proving the label-driven callers approve/block still tolerate a lost comment."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:4109, :5037, :9037 (the three design_conflict_open refusal texts)",
+      "evidence": "MEASURED LIVE. design-gate-precheck on a BOUND unit task emitted, in one message: 'open design_conflict record(s) exist on <TID_D> (resolved from <TID_U>'s DESIGN-UNIT binding) ... Affected unit(s): U1. ... amend docs/specs/<TID_U>.md and record a fresh, independent verdict: qa-gate.sh design-review-record <TID_U> --design-hash <h> --file <verdict.json>'. TID_U owns no design artifact at all. Census re-measured independently: exactly 3 sites hardcode docs/specs/$tid.md plus design-review-record $tid.",
+      "description": "Confirms the orchestrator's reading exactly: the observation half names the resolved design task while the trailing remediation sentence points at a nonexistent unit-task spec. RULING ON WHETHER IT SHOULD HAVE BLOCKED: no -- deferring to its own P2 was the correct call. The refusal itself is correct and fail-CLOSED (nobody ships on it), and the wrong guidance is self-limiting: a specialist who follows it runs design-review-record against a task with no artifact and gets a refusal rather than a bad outcome. The damage is a confusing message plus wasted cycles, not an unsound approval. It is cheap to fix ($subject in place of $tid at three sites) and should land before D6 rather than drift."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:11128-11159 (compute_design_conflict_open's per-record loop)",
+      "evidence": "MEASURED LIVE. With one conflict filed on U1 via TID_U, design-gate-precheck on the SIBLING task TID_U2 (bound to U2 of the same design, never filed anything) returned rc=4 error_key=design_conflict_open citing 'Affected unit(s): U1'. Confirmed by code reading: the loop iterates EVERY DESIGN-CONFLICT record on $subject's stream with no filter on the querying task's own bound unit_id.",
+      "description": "A NEW capability of this change, unremarked in the diff: before the fix a conflict record could only ever affect the task it sat on, because subject and stream were the same task by construction. Now one unit task's objection blocks every sibling task bound to the same design. NOT blocking -- the direction is fail-CLOSED, and it is internally consistent with the artifact-wide clearing model (a superseding satisfied DESIGN-REVIEW covers the whole artifact, so blocking on the whole artifact matches how clearing works). It is also the mirror image of a scope decision the implementer explicitly declined ('did not add a cross-check that --unit must equal the caller's own bound unit_id'), which puts both halves squarely in D6/fkm.8's per-unit-vs-artifact-wide scope decision. Recording it so D6 decides it deliberately rather than inheriting it."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:10888-10890 (design-conflict success envelope)",
+      "evidence": "emit_design_conform (:9747-9760) and design-unit-show's envelope (:10190-10196) both report task_id=$tid AND carry a dedicated structured design_task field. design-conflict's envelope keeps task_id=$tid (consistent) but discloses the resolved subject only inside the free-text observations string.",
+      "description": "This is the item-5 ruling, recorded as a finding only for the residual. Keeping task_id=$tid is CORRECT and is NOT an impersonation defect: the DESIGN-CONFLICT record itself carries NO task field at all (grammar: 'DESIGN-CONFLICT <unit-id> design_hash=<h> unit_hash=<h> at <ts>: <statement>'), so its subject is purely positional and there is no field available to lie with; the task_id in question lives in the transient CLI stdout envelope, which nothing machine-reads (verified: no consumer of a design-conflict envelope exists outside qa-gate.sh); and it matches the cited precedent exactly. THE RESIDUAL is the opposite of impersonation -- the record is UNDER-identified. It carries no filed_by/from_task, so once conflicts land on a design task's shared stream nobody can tell which unit task raised one; and unlike DESIGN-UNIT, whose reader validates select(.task == $tid) precisely to stop a foreign record reading as valid on the stream it happens to sit on (R2-F1), DESIGN-CONFLICT has no equivalent defence. That grammar was a deliberate fkm.7 choice for a lighter-weight record and is pre-existing, but it becomes consequential here because the stream is now SHARED across sibling units for the first time. Cheap partial improvement: expose the resolved subject as a first-class envelope field, matching design_task in the precedent this change cites."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "low",
+      "location": ".claude/agents/backend.md, frontend.md, devops.md (final paragraph of the new 'When the design is wrong' section)",
+      "evidence": "The new prose self-gate reads 'if design-unit-show reports bound:false, this section doesn't apply'. MEASURED: design-unit-show on an unreadable source emits {\"ok\":false,...,\"error_key\":\"design_binding_unreadable\",\"bound\":false,...} -- bound:false is present on the ERROR envelope too, alongside an observations string that says so outright ('whether a binding exists is unknown, which is not the same answer as bound:false').",
+      "description": "A specialist following the new prose literally, reading only .bound, would conclude 'not bound, section does not apply' when the store was merely unreadable. Low severity: it degrades to the ordinary blockers-array escalation, which the same paragraph already tells them to use, and ok:false plus the error_key are right there in the same envelope. Suggest gating the prose on ok:true AND bound:false rather than bound:false alone."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

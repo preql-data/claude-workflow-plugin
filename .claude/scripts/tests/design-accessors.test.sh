@@ -330,35 +330,57 @@ assert_eq "2.3 determined-absence vs unreadable-source are distinguishable" "tru
         && [ "$(json_field '.ok' "$U1_OUT")" = "false" ] && echo true || echo false )"
 
 # ===========================================================================
-printf '\n=== Section 3: H2-F2/H2R2-F2 META — the pre-fix call sites, restored ===\n'
+printf '\n=== Section 3: H2-F2/H2R2-F2/268l META — the pre-fix call sites, restored ===\n'
 # ===========================================================================
 # The pre-fix line was `binding_json=$(latest_design_unit_binding "$tid") ||
 # binding_json="{}"` — the reader's failure channel swallowed at the call
 # site, so an unreadable source flowed into the absent-binding arm. Round 1
 # fixed design-unit-show's call site; ROUND 2 (H2R2-F2) converted
-# design-conform's too, spelled BYTE-IDENTICALLY on purpose, so ONE sed
-# below restores the historical fail-open shape at BOTH call sites and this
-# section watches each consumer misbehave in its own named way: unit-show
+# design-conform's too, spelled BYTE-IDENTICALLY on purpose; claude-workflow-
+# plugin-268l added a THIRD consumer of the identical shape —
+# resolve_design_conflict_subject, shared by design-conflict (the writer)
+# and compute_design_conflict_open (the reader) — deliberately reusing the
+# SAME byte-shape rather than inventing a fourth. ONE sed
+# below restores the historical fail-open shape at ALL THREE call sites and
+# this section watches each consumer misbehave in its own named way: unit-show
 # reports the determined answer bound:false, conform rewrites the unread
 # source as unit_not_in_design (a claim whose remedy — "bind it first" — is
-# wrong when the store simply could not be read).
+# wrong when the store simply could not be read), and design-conflict (268l)
+# rewrites it as design_artifact_not_found (a claim whose remedy — "bind it
+# or record a design directly" — is equally wrong for the same reason). The
+# READER half of 268l (compute_design_conflict_open) is NOT independently
+# discriminated by T-NOFIXTURE/T-GARBLED here: its OWN separate design_
+# comments_json("$subject") call, one line after the resolution call this
+# mutant restores, fails on the IDENTICAL unreadable source for the IDENTICAL
+# reason (subject falls back to $tid on the fail-open path, and $tid's own
+# stream was never readable to begin with) — so design-gate-precheck still
+# correctly refuses (design_conflict_source_unreadable) under this exact
+# mutant, for a reason this fixture cannot attribute specifically to the
+# resolution call. That is not a gap in coverage: design-conflict-subject-
+# resolution.test.sh Section 5 isolates the reader's own regression properly,
+# with a fixture where the binding is genuinely READABLE but resolves to the
+# wrong subject — the shape THIS section's fixtures cannot produce (measured,
+# not assumed: probed directly against this exact mutant before writing this
+# comment).
 QG_MUT3="$SCRIPTS/qa-gate.mutant-s3.sh"
 # shellcheck disable=SC2016  # the sed pattern/replacement quote SHELL SOURCE
 # from qa-gate.sh verbatim; expanding $(...) here would defeat the mutation.
 sed 's/binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?/binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"/' \
     "$QG" > "$QG_MUT3"
-# Non-vacuity: the shipped script carries the rc-capture line at BOTH call
-# sites (design-unit-show + design-conform, H2R2-F2) and the fail-open
-# spelling at none; the mutant must carry zero and two respectively.
+# Non-vacuity: the shipped script carries the rc-capture line at ALL THREE
+# call sites (design-unit-show + design-conform, H2R2-F2; resolve_design_
+# conflict_subject, 268l) and the fail-open spelling at none; the mutant
+# must carry zero and three respectively.
 # (grep -cF counts LINES; the conform header comment quotes only the short
 # `|| binding_json="{}"` fragment, which cannot match these full-line
 # needles — counting text to prove a claim about code is exactly what the
-# tests README warns about, so 3.2/3.4 below DRIVE both mutated consumers.)
+# tests README warns about, so 3.2/3.4/3.6 below DRIVE all three mutated
+# consumers.)
 # shellcheck disable=SC2016  # grep -cF needles are literal shell source.
-assert_eq "3.1 NON-VACUITY: rc-capture call sites shipped/mutant = 2/0" "2|0" \
+assert_eq "3.1 NON-VACUITY: rc-capture call sites shipped/mutant = 3/0" "3|0" \
     "$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG")|$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG_MUT3")"
 # shellcheck disable=SC2016  # grep -cF needles are literal shell source.
-assert_eq "3.1b NON-VACUITY: fail-open call sites shipped/mutant = 0/2" "0|2" \
+assert_eq "3.1b NON-VACUITY: fail-open call sites shipped/mutant = 0/3" "0|3" \
     "$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG")|$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG_MUT3")"
 BASHN3_RC=0; bash -n "$QG_MUT3" 2>/dev/null || BASHN3_RC=$?
 assert_eq "3.1c ...and the mutant parses" "0" "$BASHN3_RC"
@@ -387,6 +409,22 @@ M3E_OUT=$(bash "$QG" design-conform "T-NOFIXTURE" 2>/dev/null) || M3E_RC=$?
 assert_eq "3.5 RESTORE CONTROL: shipped design-conform, same input, refuses with its own key at exit 2" \
     "2|design_binding_unreadable" \
     "$M3E_RC|$(json_field '.error_key' "$M3E_OUT")"
+
+# --- the THIRD consumer the same mutant resurrects (claude-workflow-plugin-
+# 268l): design-conflict's subject-resolution step ALSO sits before any
+# artifact work, for the identical reason design-conform's does — the
+# refusal (and the mutant's misreport) are reachable from the binding read
+# alone, no --unit membership gate ever reached.
+M3F_RC=0
+M3F_OUT=$(bash "$QG_MUT3" design-conflict "T-NOFIXTURE" --unit U1 "268l probe" 2>/dev/null) || M3F_RC=$?
+assert_eq "3.6 SPECIFIC MISBEHAVIOUR: mutant design-conflict rewrites the unread source as design_artifact_not_found/exit 1" \
+    "1|design_artifact_not_found" \
+    "$M3F_RC|$(json_field '.error_key' "$M3F_OUT")"
+M3G_RC=0
+M3G_OUT=$(bash "$QG" design-conflict "T-NOFIXTURE" --unit U1 "268l probe" 2>/dev/null) || M3G_RC=$?
+assert_eq "3.7 RESTORE CONTROL: shipped design-conflict, same input, refuses with its own key at exit 2" \
+    "2|design_binding_unreadable" \
+    "$M3G_RC|$(json_field '.error_key' "$M3G_OUT")"
 rm -f "$QG_MUT3"
 
 # ===========================================================================
