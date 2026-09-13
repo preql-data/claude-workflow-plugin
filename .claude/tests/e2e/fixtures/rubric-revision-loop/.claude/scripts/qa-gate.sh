@@ -108,6 +108,28 @@
 #   review-record <task-id> [--file <path>] Phase V2: validate a reviewer artifact via
 #                                           review-check.sh then append the REVIEW-ARTIFACT
 #                                           v1 record comment (record writer only).
+#   review-reconcile <task-id> --file <path> [--acknowledge-findings] <reason>
+#                                           claude-workflow-plugin-k6re R13-F1/F2:
+#                                           validate a HISTORIC, already-on-disk reviewer
+#                                           artifact via review-check.sh, then append the
+#                                           NON-GOVERNING REVIEW-ARTIFACT-RECONCILED v1
+#                                           record comment. Accounted for by
+#                                           review-check.sh recorded-hashes (so approve
+#                                           stops refusing it) but never matched by
+#                                           gate's K3 selector (so it can never win
+#                                           release-verdict selection). For backfilling
+#                                           rounds that already happened without
+#                                           inverting cmd_gate's iteration-vs-timestamp
+#                                           agreement requirement -- see the
+#                                           review_artifact_unrecorded remedy below for
+#                                           when to use this instead of review-record.
+#                                           R14-F5: refuses (reconcile_open_findings_
+#                                           unacknowledged) when the artifact carries a
+#                                           finding at/above its own risk_threshold, unless
+#                                           --acknowledge-findings is given -- the reason
+#                                           is then embedded in the comment as a visible
+#                                           marker so the open finding is never silently
+#                                           dropped from the trust chain.
 #   completion-record <task-id> [--file <path>]
 #                                           P7: validate an F7 specialist completion
 #                                           payload via review-check.sh
@@ -157,6 +179,11 @@
 #       review_cap_terminated), or the review predicate itself is unavailable
 #       (fail-closed). error_key names which; the remediation names the
 #       resolve-finding / arbitrate / review-record command that clears it.
+#       ALSO exit 4 (error_key review_artifact_unrecorded, claude-workflow-
+#       plugin-k6re): a review artifact on disk for this task binds no
+#       well-formed REVIEW-ARTIFACT v1 record BY CONTENT HASH — the artifact
+#       exists but was never recorded, currently silent before this fix.
+#       --accept-unrecorded-review '<reason>' is the audited bypass.
 #
 # The P7 completion-contract refusal exits 2, not 5, deliberately: exit 2 is
 # already this file's "refused because a mechanical artifact is missing, stale or
@@ -167,6 +194,322 @@
 # the exit status silently incomplete for no gain.
 
 set -e
+
+# BARE-SUBSTITUTION-CENSUS BEGIN (claude-workflow-plugin-k6re R17-F1 class sweep)
+#
+# WHY THIS EXISTS. R16-F1 guarded ONE unguarded `review-check.sh gate`
+# command substitution and its own fix comment asserted "this was the ONLY
+# unguarded one" — true of the four call sites it actually checked, false of
+# the file as a whole: the R16-F3 remedy, in the SAME change set, added a
+# second bare substitution of the identical shape ~110 lines away
+# (`unrecorded_content_iter=$(cat ... | jq ...)`, no guard), and it shipped
+# unnoticed for a full review round (found later as R17-F1). The lesson: a
+# claim that a CLASS is closed has to be checked against the whole file, not
+# against however many call sites of one specific command prompted the fix.
+# This census is that whole-file check, done once, honestly, with its own
+# scope stated rather than implied: it is accurate against the change set
+# it was written for (this task, R17), not a standing guarantee about
+# anything added to this file afterward. The NEXT bare substitution added
+# here is this census's blind spot, exactly as R17-F1 was R16-F1's.
+#
+# THE RULE THIS SCRIPT RUNS UNDER (bash 3.2.57, this file's own target,
+# EMPIRICALLY VERIFIED before being relied on — see the probes cited below
+# rather than assumed from general `set -e` folklore, which gets shell
+# corner cases wrong often enough that this task's own root cause was one):
+#
+#   - `var=$(cmd)` (bare, no `local` on the SAME statement) — under `set -e`,
+#     a non-zero exit from `cmd` (or, for a pipeline, its LAST stage) aborts
+#     the whole script immediately, UNLESS the assignment sits inside an
+#     `if`/`while`/`until` CONDITION, is a non-final element of an `&&`/`||`
+#     list, or is negated with `!`.
+#   - `var="$(cmd)"` (quoted) is IDENTICAL for this purpose: POSIX ties an
+#     assignment's exit status to its command substitution's regardless of
+#     quoting, and this was verified empirically, not assumed — a prior
+#     round's census (this task, R17) initially missed an entire class of
+#     sites for exactly this reason (a regex anchored on the bare `=$(` form
+#     only), including a genuinely exploitable one: `has_label()`'s own
+#     `labels="$(get_labels "$1")"`. Do not repeat that mistake by grepping
+#     for only one of the two forms.
+#   - `local var=$(cmd)` (declared and assigned in ONE statement) does NOT
+#     abort — bash's `local` builtin returns ITS OWN status, masking the
+#     substitution's, which is why this codebase's shellcheck pass (SC2155)
+#     already forces "declare and assign separately" everywhere in this
+#     file; every `local` in this file is followed by a SEPARATE bare
+#     assignment line, which IS subject to the rule above.
+#   - A substitution used as an ARGUMENT to another simple command (e.g.
+#     `echo "$(cmd)"`, `printf '%s' "$(cmd)"`) does NOT propagate `cmd`'s
+#     exit status to the enclosing command's own exit status — the enclosing
+#     command's success is what `set -e` tests, and `echo`/`printf` succeed
+#     regardless of what they were given. This is what makes every review-
+#     record/-reconcile/completion-record field extraction below safe to
+#     write as `field=$(printf '%s' "$raw" | jq ...)` — it is the ASSIGNMENT
+#     form that is at risk, not merely "a jq call over untrusted input".
+#   - A substitution embedded in a `${var:-$(cmd)}` parameter-expansion
+#     default is NOT exempt — if the default branch actually runs, its
+#     command substitution's exit status reaches the assignment exactly as
+#     the bare form does. (PROJECT_DIR below is the one site in this file
+#     with this shape; see its disposition.)
+#   - COMMAND SUBSTITUTION `$(cmd)` does NOT enforce `errexit` WITHIN its own
+#     subshell on this build. `set -e; x=$(false; echo AFTER-RAN)` yields
+#     `x=[AFTER-RAN]`, the WHOLE invocation exiting 0: `false` failing does
+#     NOT stop `echo AFTER-RAN` from running, and the substitution's own
+#     exit status is simply whatever its LAST command produced. This is the
+#     documented reason bash 4.4 added `shopt -s inherit_errexit` — the
+#     option's own description states command substitution "inherit[s] the
+#     value of the errexit option, INSTEAD OF UNSETTING IT in the subshell
+#     environment" once enabled, naming UNSETTING as the pre-4.4 default it
+#     changes. This build has no such option at all (`shopt -s
+#     inherit_errexit` answers "invalid shell option name": it did not exist
+#     before 4.4) and sets no `set -o posix` anywhere in this file, so the
+#     pre-4.4 "unset inside `$( )`" behaviour is what actually runs here. An
+#     explicit `( cmd )` SUBSHELL is the OTHER construct and behaves
+#     OPPOSITELY: it DOES enforce errexit internally — `set -e; ( false;
+#     echo SUBSHELL-AFTER )` never reaches the echo, whole invocation exit 1.
+#     CONSEQUENCE FOR THIS FILE: any function invoked ONLY through `$(...)`
+#     — every caller captures its output, never its bare/direct exit status
+#     — executes its ENTIRE body in a zone where a bare internal command
+#     substitution failing aborts nothing and skips no later line in that
+#     same body, REGARDLESS of whether that internal substitution carries a
+#     guard. `get_labels()` and `get_parent_epic()` are exactly this shape
+#     (see their own, corrected disposition below — this is NOT the
+#     "genuine defect" an earlier version of this census called it). The two
+#     `( )`-body functions this file defines (review_dir_is_review_subdir,
+#     design_dir_is_spec_dir) are the OTHER construct and WOULD enforce
+#     errexit internally against any command substitution they contained —
+#     checked directly: neither contains one, so nothing there is at risk
+#     either way, but a reader relying on "subshells abort like the parent"
+#     as a single rule cannot tell these two function KINDS apart, and this
+#     entry is why the file states them separately rather than as one rule.
+#
+# All of the above was checked against this exact bash build with disposable
+# probe scripts before being relied on (isolated `bash -c`/subshell
+# invocations per shape, so a shape that DOES abort couldn't take a whole
+# probe run down with it) — this file does not carry the probes themselves
+# (they are throwaway harness-session scratch, not shipped source). ONE
+# bullet in an earlier version of this list was not among the probes
+# actually run before shipping — it asserted "set -e inherits into
+# subshells (including command-substitution subshells)" opposite to the
+# `$(cmd)` behaviour above, and was caught by independent review
+# (claude-workflow-plugin-k6re R19-F1), which ran the missing probe and
+# supplied the result now recorded here. It had manufactured two "genuine
+# defects" that were not reachable on any call path (get_labels(),
+# get_parent_epic()) and a forward-looking warning that does not hold
+# either (see their disposition below) — named here rather than only fixed
+# silently, on the same "a claim about a class has to be checked, not
+# extrapolated" doctrine the R16-F1/R17-F1 history a few hundred lines below
+# is itself the cautionary tale for. The specific, sometimes counterintuitive
+# results above (`local var=$(false)` reaching its own next line at rc 0;
+# `echo "$(false)"` reaching its own next line at rc 0; `${u:-$(false)}`
+# NOT reaching; `$(false; echo AFTER)` reaching AFTER at rc 0 — the one that
+# was missing; `( false; echo AFTER )` NOT reaching AFTER) are each
+# independently reproducible in under five lines of bash if ever doubted
+# again.
+#
+# METHOD: every `IDENT=$(` and `IDENT="$(` at the start of a (whitespace-
+# trimmed) line in this file was located, its matching close-paren resolved
+# with a quote/escape/nesting-aware scan (not a naive greedy regex — several
+# of these substitutions embed multi-line jq programs and nested `$(...)`),
+# and classified below. Two mixed forms (`var="literal text$(cmd)"` and one
+# `${var:-$(cmd)}`) were additionally located by a broader sweep and folded
+# into the same categories. Argument-embedded and condition-embedded
+# substitutions are exempt BY CONSTRUCTION (see the rule above) and are not
+# individually re-enumerated here — the file has many of them (e.g. the
+# `[ "$(get_labels "$tid")" = "$snapshot" ]` a few hundred lines below, or
+# the `.ok`-check brackets throughout the unrecorded-artifact walk), and
+# listing every one would document a category that needs no per-site
+# judgment, only the one rule above.
+#
+# CATEGORY: SAFE, already OUTER-guarded (`... ) || fallback`) or INNER-
+# guarded (the substitution's own last pipeline stage ends `... || fallback`
+# BEFORE its closing paren, so the substitution itself always "succeeds").
+# The large majority of this file's command substitutions are one of these
+# two shapes. Not enumerated individually — `grep -n '|| ' .claude/scripts/
+# qa-gate.sh` finds them, and each was confirmed to guard the SAME statement
+# it sits on, not a neighbour.
+#
+# CATEGORY: SAFE-BY-CALLEE-CONTRACT. Command substitutions whose callee is
+# a function in THIS file already proven to always `return`/exit 0 on every
+# path — either because its last statement is an unfailable `printf` with a
+# fixed format string, or because every exit path is an explicit `return 0`.
+# Confirmed by reading each function body, not assumed from its name:
+# `impact_report_path_for`, `completion_payload_path_for`,
+# `review_artifact_path_for`, `design_artifact_path_for`,
+# `_design_unit_lock_root`, `design_declared_unit_ids`, and
+# `approval_worktree_token`. Every bare call site of these seven (there are
+# nearly twenty) is safe regardless of its own arguments' content, because
+# the callee's own construction cannot produce a non-zero exit.
+#
+# CATEGORY: SAFE-BY-PIPELINE-MECHANICS. The substitution's LAST pipeline
+# stage is a command that does not fail based on its input's content —
+# `tr` (with or without `-c`/`-d`), `cut`, `head -c N` / `head -N`, `sed`
+# running ONLY substitute commands with no failure mode of their own (a
+# non-matching `s///` is not an error, it passes the line through), and
+# bare `cat` reading stdin to EOF (never fails on empty or arbitrary input;
+# each of this file's four `raw=$(cat)` stdin-reads is exactly this shape,
+# gated beforehand by its own `[ -t 0 ]` terminal check). An upstream stage
+# in the same pipe CAN exit non-zero (e.g. `grep -c` on zero matches exits
+# 1) without it mattering, because a pipeline's exit status — absent
+# `pipefail`, which this file does not set globally — is its LAST stage's.
+# `unnorm_detail=$(head -5 "$actual_stderr_file" ...)` is the same category
+# for a different reason: the file it reads was just created by the
+# STDERR REDIRECT of the immediately preceding command, so its existence at
+# read time is guaranteed by construction, not merely likely.
+#
+# CATEGORY: SAFE-BY-PRIOR-VALIDATION. Every field extraction inside
+# `cmd_review_record`, `cmd_review_reconcile`, and `cmd_completion_record`
+# that reads `$raw` (the caller-supplied artifact/payload bytes) does so
+# ONLY after that exact `$raw` has already been round-tripped through
+# `review-check.sh validate-artifact`/`validate-completion` via a temp file
+# and confirmed `.ok == "true"` — itself via a GUARDED extraction
+# (`... || echo "false"`). Since jq parses an entire document before
+# evaluating any filter against it, a validator that successfully confirmed
+# schema conformance on those bytes has already proven they parse; every
+# LATER unguarded `$(printf '%s' "$raw" | jq -r '.field' ...)` in the same
+# function, on the same unmodified `$raw`, cannot fail on a parse error it
+# would have already hit at validation time. The same argument covers
+# `unrecorded_ack_count` and its siblings against `$unrecorded_hashes_out`
+# (gated by its own `.ok` check a few lines earlier in the same block) and
+# `ack_findings_token` against `$ack_findings_json` (derived from an
+# already-validated `$raw` by a STATIC jq filter with its own `[]` fallback,
+# so it is always well-formed JSON text by construction, never a second
+# unvalidated input). This argument depends on review-check.sh's validators
+# genuinely refusing anything that fails to parse — reasonable to lean on,
+# since that is their entire stated purpose, but named as a DEPENDENCY here
+# rather than a proof independent of review-check.sh's own correctness.
+#
+# CATEGORY: not a command substitution at all. `$((...))` arithmetic
+# expansion (`sub_count=$((sub_count + 1))` and its siblings) matches the
+# same anchor regex used to find candidates but is a different construct
+# entirely, with no realistic runtime failure mode for the fixed, simple
+# integer expressions this file uses it for.
+#
+# CATEGORY: DELIBERATELY ALLOWED TO ABORT, with a stated reason.
+#   - `PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"`, immediately below —
+#     the `$(pwd)` default only runs if `$CLAUDE_PROJECT_DIR` is unset or
+#     empty, and `pwd` failing means the process's own current working
+#     directory cannot be read at all. This is bootstrap code, BEFORE
+#     argument parsing and subcommand dispatch: there is no `$tid`, no
+#     subcommand, and often no reliably resolvable filesystem location to
+#     construct a meaningful per-subcommand JSON envelope INTO at this
+#     point. Left unguarded deliberately, not merely unnoticed.
+#   - The ~16 `ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"` timestamp sites scattered
+#     through this file's record-writing functions. `date` with a fixed,
+#     valid format string and no external/variable input has no realistic
+#     content-dependent failure mode on any platform this script targets —
+#     unlike every genuine fix below, there is no untrusted byte on the
+#     other end of this call. Two OTHER pre-existing timestamp sites in this
+#     file (`ts=$(date ... 2>/dev/null || echo "?")` and `|| echo
+#     "unknown")`) already guard defensively; this sweep did not force the
+#     remaining ones into uniformity with those two, on the judgment that
+#     patching sixteen near-zero-risk call sites for a class this task did
+#     not reproduce there would be scope beyond what a P0 fix-and-verify
+#     round should spend, not scope this census is unaware of.
+#
+# CATEGORY: GENUINE DEFECTS, FIXED THIS ROUND (each carries its own detailed
+# comment at its own site; this is the index, not the explanation):
+#   - `unrecorded_content_iter` (cmd_approve, the unrecorded-artifact walk)
+#     — R17-F1 ITSELF, the task's named defect. `|| true`.
+#   - `review_remedy` (cmd_approve, REVIEW-SEPARATION's rc=4 case-arms,
+#     TWO call sites: review_artifact_malformed|... and
+#     review_artifact_selection_disagreement) — R17-F2. Reachability
+#     analysis (recorded at each site) concludes these are transitively
+#     protected by the `review_key` extraction that gates entry to their
+#     case arms, on the same jq document — guarded anyway with `|| true`,
+#     on the same "a proof of safety today is not a substitute for
+#     surviving being wrong" reasoning this whole census exists to apply
+#     rather than merely state.
+#   - `review_out` (cmd_approve, the same block's own gate consult) —
+#     R17-F2's third named candidate. Narrowed from `2>&1` to `2>/dev/null`
+#     (matching this file's other three `review-check.sh gate` call sites)
+#     rather than guarded, since nothing downstream ever reads its raw
+#     stderr content and the merge was the one plausible way an unrelated
+#     diagnostic line could corrupt the JSON this whole case-arm parses.
+#
+# CATEGORY: CONTRACT-HYGIENE / DEFENSIVE HARDENING, NO REACHABLE DEFECT.
+# claude-workflow-plugin-k6re R19-F1 corrected this whole category: an
+# earlier version of this census placed `get_labels()`/`get_parent_epic()`
+# under "genuine defects" and reasoned about `has_label`/`restore_labels`/
+# `set_terminal_label` using the now-corrected-above `$(cmd)`-inherits-
+# errexit rule. Both were wrong in the same direction (over-predicting an
+# abort), independently re-derived by review, and independently reproduced
+# again here before writing this correction — the code is UNCHANGED (every
+# one of these guards is behaviour-preserving, confirmed by A/B below), only
+# the claim about WHY is fixed.
+#   - `get_labels()` and `get_parent_epic()` — each has a `raw=$(bd show
+#     ... 2>/dev/null)` immediately followed by `rc=$?`. Both functions are
+#     invoked ONLY through `$(...)` at every call site (every caller
+#     captures their output) — meaning their ENTIRE body, on this
+#     interpreter, executes in a zone where command substitution does not
+#     enforce errexit (see the rule above). A/B, stubbing `bd` to fail,
+#     across all four combinations of {original bare `rc=$?}` / this
+#     round's `|| rc=$?`} x {the whole call bare / wrapped in `if`}: the
+#     internal `rc=$?` line executes in EVERY case, captures bd's real exit
+#     code identically in every case, and the OUTER caller's behaviour
+#     (abort when bare, clean `if`-false when wrapped) is IDENTICAL between
+#     the original and the changed form. The function's own documented
+#     "exit status is the signal, not a global" contract was already true
+#     before this change; `|| rc=$?` makes that contract explicit in the
+#     source rather than dependent on an unstated interpreter quirk a
+#     future reader would have to already know, and is the form that would
+#     matter if this script were ever run under bash >= 4.4 with `shopt -s
+#     inherit_errexit` explicitly enabled (nothing in this file sets it
+#     today).
+#   - `has_label()`'s `labels="$(get_labels "$1")"`, `restore_labels()`'s
+#     `current="$(get_labels "$tid")"`, and `set_terminal_label()`'s
+#     `snapshot="$(get_labels "$tid")"` and its rollback-path `restore_obs=`
+#     — DIFFERENT reasoning from get_labels' own, and correctly so: these
+#     three functions are called DIRECTLY (never through `$(...)`), so it is
+#     THEIR OWN calling context, not command-substitution inertness, that
+#     matters for them. Checked individually: every one of has_label's ten
+#     call sites, both of set_terminal_label's, and restore_labels' one
+#     currently sits inside an `if`/`&&`/`||`/`!` context, which (ordinary
+#     function-call errexit exemption, confirmed separately from — and
+#     unrelated to — the `$(cmd)` correction above: a DIRECTLY-called
+#     function inherits its caller's "-e is being ignored" state through its
+#     own body) transitively protects each of these three functions' entire
+#     bodies for every call that exists today. Smoke-tested directly
+#     (`qa-gate.sh status`/`block` against a nonexistent task id) and
+#     confirmed with an isolated A/B revert against `block`: no behaviour
+#     change either way. `|| true` kept as the same explicit-contract
+#     hygiene as get_labels' own change, not because a caller-side accident
+#     needs a backstop — DROPPED: the earlier "the next caller that writes
+#     a plain, unwrapped `x=$(has_label ...)` reopens exactly this" warning.
+#     It does not: writing the result through `$(...)` is itself the
+#     command-substitution-inertness case above, not the direct-call case,
+#     so that hypothetical caller would ALSO see no difference between the
+#     guarded and unguarded forms.
+#   - `art_prefix` (inside `finding_id_in_latest_artifact`) — same shape as
+#     has_label: BOTH of this function's callers (`resolve-finding`,
+#     `arbitrate`) invoke it directly as `if ! finding_id_in_latest_artifact
+#     ...; then`, transitively protecting this whole function's body today.
+#     Kept, same contract-hygiene reasoning, not a proof of an active
+#     defect.
+#
+# `unrecorded_content_iter`, `review_remedy` (both sites) and `review_out`
+# above remain GENUINE, independently-reproduced defects: `cmd_approve` is
+# dispatched directly from this file's top-level `case` (never through
+# `$(...)`), so its body runs where `set -e` is fully, literally active —
+# unlike every function in the CONTRACT-HYGIENE category above.
+#
+# review-check.sh: CHECKED, does NOT set `-e` anywhere (only `set -u`,
+# confirmed at its own line 108; grep for `set -` finds no other `set -e`/
+# `set -o errexit` in that file). The ABORT mechanism this whole census is
+# about therefore cannot occur there: a failing bare command substitution
+# in review-check.sh degrades into a variable holding wrong or empty data
+# and execution continuing, never an uncontrolled process exit. That is a
+# DIFFERENT hazard class (silently wrong output, not a missing envelope),
+# and R19-F1 found it is NOT confined to that one sibling script the way an
+# earlier version of this sentence implied: the SAME silent-wrong-data class
+# applies INSIDE any qa-gate.sh function invoked only through `$(...)` —
+# get_labels() and get_parent_epic() among them — for exactly the reason the
+# CONTRACT-HYGIENE entries above state: command substitution does not
+# enforce errexit there either, so an unguarded internal failure would not
+# abort, it would silently produce empty/wrong data that the calling
+# `$(...)` then captures as if it were a normal result. Named as a residual
+# the same way review-check.sh's is: out of scope for this sweep (which
+# targets the missing-envelope/abort class specifically), not fixed here,
+# and not silently absent from the record either.
+# BARE-SUBSTITUTION-CENSUS END (claude-workflow-plugin-k6re R17-F1 class sweep)
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
@@ -1596,7 +1939,27 @@ TERMINAL_SWEEP_OBS=""
 restore_labels() {
     local tid="$1" snapshot="$2"
     local current rc=0 l
-    current="$(get_labels "$tid")"
+    # claude-workflow-plugin-k6re R17 class sweep: bare quoted command-
+    # substitution assignment under `set -e` (line 196) -- if get_labels
+    # returned non-zero (bd unreachable, task vanished mid-rollback), this
+    # line would abort the whole process before `current` was ever compared
+    # to anything. THIS function is called DIRECTLY (never through `$(...)`),
+    # so — unlike get_labels itself, whose own internal guard turned out to
+    # be behaviour-preserving rather than defect-fixing, see its header,
+    # corrected under R19-F1 — it is restore_labels' OWN calling context
+    # that determines whether this line is at real risk, not command-
+    # substitution inertness.
+    # REACHABILITY: this function's one caller (set_terminal_label, a few
+    # hundred lines below) invokes it as `if restore_labels ...; then`,
+    # which transitively exempts this whole body from `set -e` for that
+    # call — so this specific line was not reachable through the one path
+    # that exists today (checked, not assumed). Guarded anyway: that is a
+    # property of set_terminal_label's OWN calling convention, not a
+    # contract restore_labels documents or enforces, and `|| true` accepts
+    # an empty `current` on failure, which this function's own remaining
+    # logic already treats safely (an empty snapshot-vs-current diff adds/
+    # removes nothing).
+    current="$(get_labels "$tid")" || true
     local IFS=,
     for l in $snapshot; do
         [ -n "$l" ] || continue
@@ -1675,8 +2038,24 @@ set_terminal_label() {
 
     # SNAPSHOT BEFORE ANY MUTATION. This is what makes the rollback real rather
     # than a hand-maintained inverse of the steps above it.
+    #
+    # claude-workflow-plugin-k6re R17 class sweep: same bare-quoted-
+    # substitution-under-set-e hazard as restore_labels' own `current=`, a
+    # few dozen lines above. REACHABILITY: this function's only two callers
+    # (cmd_approve, cmd_block) both invoke it as `if ! set_terminal_label
+    # ...; then`, which transitively exempts this entire body from `set -e`
+    # for those calls — checked directly, including an A/B that reverted
+    # only this guard and ran `qa-gate.sh block <nonexistent-id>` through
+    # it: no abort, the exact same clean refusal envelope either way. Not
+    # reachable through either existing caller today, guarded anyway for
+    # the same reason restore_labels' own `current=` is: `|| true`, an
+    # unreadable pre-call snapshot degrades to "<none>" downstream via the
+    # existing `${snapshot:-<none>}` defaults used everywhere below, never
+    # to a bare process abort — a property this function should hold on
+    # its own, not one it should have to borrow from whoever happens to
+    # call it.
     local snapshot
-    snapshot="$(get_labels "$tid")"
+    snapshot="$(get_labels "$tid")" || true
 
     # Phase 1: the terminal label. Verified with has_label for the same reason
     # remove_label verifies (l1r.3) — bd's exit status is not evidence.
@@ -1705,8 +2084,29 @@ set_terminal_label() {
         if restore_labels "$tid" "$snapshot"; then
             restore_obs="pre-call label set restored exactly (${snapshot:-<none>})"
         else
-            restore_obs="WARNING the restore itself did not complete: labels now read '$(get_labels "$tid")' against a pre-call set of '${snapshot:-<none>}' — reconcile by hand before re-running"
-            log_sync_error "set_terminal_label: rollback INCOMPLETE on $tid after failing to remove $lbl; pre-call='${snapshot:-<none>}' now='$(get_labels "$tid")'"
+            # claude-workflow-plugin-k6re R17 class sweep: the two
+            # `$(get_labels "$tid")` reads below used to be re-run live,
+            # inline, inside a plain (mixed literal+substitution) assignment
+            # and inside a function-call argument respectively. The
+            # assignment form is the SAME bare-command-substitution-under-
+            # set-e hazard as every other get_labels call site fixed this
+            # round (POSIX: the exit status of an assignment whose value
+            # contains a command substitution IS that substitution's exit
+            # status, quoting and surrounding literal text notwithstanding).
+            # Same reachability caveat as this function's own `snapshot=`
+            # above: this whole function is currently only ever entered via
+            # `if ! set_terminal_label ...; then`, which transitively
+            # exempts this branch too, so this was not an actively firing
+            # abort through either existing caller — but this branch is
+            # specifically the DIAGNOSTIC for an already-degraded rollback,
+            # exactly the wrong place to depend on a caller-side accident
+            # for whether it can even run to completion. Captured ONCE into
+            # a local, guarded, and reused for both messages — also removes
+            # a redundant second `bd show` for the same fact.
+            local now_labels=""
+            now_labels="$(get_labels "$tid")" || now_labels="<unreadable>"
+            restore_obs="WARNING the restore itself did not complete: labels now read '$now_labels' against a pre-call set of '${snapshot:-<none>}' — reconcile by hand before re-running"
+            log_sync_error "set_terminal_label: rollback INCOMPLETE on $tid after failing to remove $lbl; pre-call='${snapshot:-<none>}' now='$now_labels'"
         fi
         TERMINAL_SWEEP_OBS="failed to remove $lbl after $terminal was set; rolled back — $restore_obs"
         return 1
@@ -2644,6 +3044,7 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               from a task that was simply never entered).
   approve <task-id> [--expect-hash <hash>] [--accept-reconstructed '<reason>']
           [--no-impact-report '<reason>'] [--no-review '<reason>']
+          [--accept-unrecorded-review '<reason>']
           [--no-completion '<reason>'] [--no-design '<reason>']
           <approval-summary>
               --expect-hash <hash> is the change set the CALLER classified.
@@ -2703,6 +3104,29 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               --no-review '<reason>' bypasses it; the reason lands in the
               approval comment as `[review bypass: <reason>]` (which the Stop
               hook's review-discipline check honours) and in the gate JSON.
+
+              ALSO REFUSES (exit 4, error_key review_artifact_unrecorded —
+              claude-workflow-plugin-k6re, the HEADLINE defect) when
+              docs/reviews/<task-id>-r*.json holds an artifact whose CONTENT
+              HASH (never mtime — a checkout, copy or restore can move an
+              mtime without changing a byte) binds no well-formed
+              REVIEW-ARTIFACT v1 record for this task, per
+              `review-check.sh recorded-hashes`. The external reviewer
+              driver writes the artifact and exits; nothing calls
+              `review-record` for it unless a human/agent remembers to — this
+              refusal is what makes that omission loud instead of silent, for
+              every review pathway (the external driver, Claude's own
+              in-session review, or a hand-run review), not only the one a
+              fix to the driver could reach. Reconcile the named file(s) with:
+                bash .claude/scripts/qa-gate.sh review-record <task-id> \
+                    --file <path>
+              --accept-unrecorded-review '<reason>' is the audited bypass —
+              for a task carrying a legitimate HISTORIC backlog (e.g. one
+              reopened after nine WAVE-1-era artifacts were never recorded)
+              that should not be permanently stranded by a refusal with no
+              escape. The reason lands in the approval comment as
+              `[unrecorded review artifact accepted: <reason>]` and in the
+              gate JSON.
 
               ALSO REFUSES (exit 2, error_key completion_record_missing) when
               the task carries no `COMPLETION v1` record — the F7 specialist
@@ -2766,8 +3190,9 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                 design_verdict_hash=<h> at <ts>: <summary>
               Every optional MACHINE field carries its own trailing space and
               defaults to empty. The bracketed suffixes are free-text audit
-              prose appended AFTER the summary, all seven of them:
+              prose appended AFTER the summary, all eight of them:
                 [ [impact-report bypass: ...]][ [review bypass: ...]]
+                [ [unrecorded review artifact accepted: ...]]
                 [ [rubric mismatch: ...]][ [reconstructed change set accepted: ...]]
                 [ [completion bypass: ...]][ [completion cross-check: ...]]
                 [ [design bypass: ...]]
@@ -2886,6 +3311,55 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                   earlier, schema-level check instead (a model-id class, a
                   closed enum, and an id/severity grammar respectively), so
                   they are not re-asserted here.
+  review-reconcile <task-id> --file <path> [--acknowledge-findings] <reason>
+              claude-workflow-plugin-k6re (R13-F1/F2): account for a HISTORIC
+              review artifact that already exists on disk without letting it
+              govern the release verdict. Same validation, canonical-path
+              derivation, containment check and hashing discipline as
+              review-record, but --file is REQUIRED (no stdin mode — there is
+              nothing to write, only existing bytes to verify) and <reason>
+              is REQUIRED (a non-empty explanation, recorded verbatim).
+              Appends:
+                REVIEW-ARTIFACT-RECONCILED v1 iteration=<n>
+                artifact_hash=<h> at <ts>: <reason>
+              This grammar is deliberately NOT `REVIEW-ARTIFACT v1` — it
+              diverges at the character immediately after "REVIEW-ARTIFACT",
+              so review-check.sh gate's K3 selector (which requires a record
+              to be simultaneously max(iteration) AND max(at-timestamp))
+              never matches it and can never select it. WHY THIS EXISTS:
+              review-record stamps WRITE time, not review time, so
+              backfilling several historic rounds through review-record in
+              any order the caller does not carefully control can make a
+              low-iteration round the newest by write-time while the
+              highest-iteration round stays older — the two axes disagree,
+              and gate refuses with review_artifact_selection_disagreement.
+              Reconciling every historic round through this command instead
+              means only the round that should actually govern the release
+              verdict is ever recorded through review-record — see the
+              review_artifact_unrecorded remedy for when to use which.
+              recorded-hashes accounts for a RECONCILED record exactly like
+              a governing one, so approve stops refusing on it.
+              --acknowledge-findings (R14-F5): REQUIRED when the artifact
+              carries a findings[] entry ranked at or above its own
+              risk_threshold — a RECONCILED record is non-governing and
+              carries no findings of its own, so reconciling one that still
+              has an open at-threshold finding would let it leave the trust
+              chain silently (gate's open-findings count only ever reads
+              GOVERNING records). Without the flag, refuses (exit 1,
+              reconcile_open_findings_unacknowledged) naming the qualifying
+              finding id(s)/severity and pointing at review-record +
+              resolve-finding as the alternative ("this finding was actually
+              resolved by a different round — make THAT one govern"). With
+              the flag, the comment gains a visible
+              "[open findings acknowledged: <id>:<severity>,...]" marker
+              ahead of <reason>. review-check.sh recorded-hashes surfaces
+              this too (acknowledged_hashes/acknowledged_count, R15-F3), and
+              approve's own success observations note the count when any
+              accounted-for artifact carries one — so the acknowledgment
+              reaches a human reading the comment stream AND the two
+              mechanical readers on this path, though it still never governs:
+              gate's own open-findings count correctly stays at the
+              GOVERNING record only, by design, unaffected by this marker.
   completion-record <task-id> [--file <path>]
               P7: record the F7 specialist completion contract. Validates the
               payload JSON via review-check.sh `validate-completion` (the ONE
@@ -3200,10 +3674,38 @@ require_bd() {
 #
 # `bd show <id> --json` returns either an object or a 1-element array
 # depending on the bd version, so we handle both shapes.
+#
+# claude-workflow-plugin-k6re R17 class sweep, CORRECTED by R19-F1: this
+# function's `raw=$(bd show "$1" --json 2>/dev/null)` was changed from a
+# bare assignment to `|| rc=$?` on the theory that the bare form aborted the
+# whole process before `rc=$?` next line ever ran. That theory does not
+# reproduce, and is corrected here (the code is unchanged — it is
+# behaviour-preserving either way, see the A/B below — only the claim about
+# why is fixed): this function is invoked ONLY through `$(...)` at every
+# call site (every caller captures its output), and command substitution
+# does NOT enforce `errexit` within its own subshell on this bash build (see
+# the BARE-SUBSTITUTION-CENSUS block after `set -e` near the top of this
+# file for the probe that establishes this). So `raw=$(bd show ...)` failing
+# never stopped `rc=$?` from running, in EITHER form — A/B, stubbing `bd` to
+# fail, confirms the internal `rc=$?` line executes and captures the same
+# real exit code whether the assignment is bare or guarded, and the OUTER
+# caller's behaviour (abort when the whole call is written bare and
+# unwrapped; clean `if`-false when wrapped) is IDENTICAL between the two
+# forms. The "EXIT STATUS, NOT A GLOBAL" contract this header already
+# claims was already true on its own terms before this change, for a reason
+# this comment previously misdiagnosed.
+#
+# `|| rc=$?` (matching this file's own established idiom for exactly this
+# shape — see `review_out=$(... gate ...) || review_rc=$?`, further down in
+# this file) is kept anyway: it states the contract explicitly in the
+# source rather than leaving a future reader to already know that command
+# substitution is errexit-inert here, and it is the form that would start
+# to matter functionally if this script were ever run under bash >= 4.4
+# with `shopt -s inherit_errexit` explicitly enabled (nothing in this file
+# sets it today).
 get_labels() {
-    local raw rc
-    raw=$(bd show "$1" --json 2>/dev/null)
-    rc=$?
+    local raw rc=0
+    raw=$(bd show "$1" --json 2>/dev/null) || rc=$?
     if [ "$rc" -ne 0 ]; then
         return "$rc"
     fi
@@ -3216,8 +3718,48 @@ get_labels() {
 
 has_label() {
     # has_label <task-id> <label>
+    #
+    # claude-workflow-plugin-k6re R17 class sweep, corrected by R19-F1's
+    # review (the conclusion below survives; ONE sentence describing WHY was
+    # wrong and is fixed here — see get_labels()'s own comment for the
+    # broader correction, which does NOT apply to this function the same
+    # way: has_label is called DIRECTLY by every existing caller, never
+    # through `$(...)`, so — unlike get_labels — its OWN calling context is
+    # what actually matters here, not command-substitution inertness.
+    # `labels="$(get_labels "$1")"` is a bare quoted command-substitution
+    # assignment (POSIX ties an assignment's exit status to its command
+    # substitution's regardless of quoting — verified empirically, not
+    # assumed).
+    #
+    # REACHABILITY: every call site of has_label() in this file today (10 of
+    # them, checked individually) sits inside an `if`/`!`/non-final `&&`/`||`
+    # context — e.g. `has_label ... && was_x=1`, `has_label ... || continue`
+    # — each of which transitively exempts this function's OWN body from
+    # `set -e` for that invocation (ordinary function-call errexit exemption
+    # — confirmed with an isolated probe that this holds independent of the
+    # `$(...)`-inertness question, which is a different mechanism entirely).
+    # So, as of this change set, nothing currently calls has_label() in a
+    # way this specific line could abort through. Guarded anyway: that
+    # protection is a property of how today's ten callers happen to be
+    # written, not a contract this function documents or enforces.
+    # CORRECTED EXAMPLE of what would actually reopen it (an earlier version
+    # of this comment named `x=$(has_label ...)` and `present=$(has_label
+    # ...; echo $?)` — both WRONG: wrapping the whole call in `$(...)` puts
+    # it inside the same command-substitution-inertness zone get_labels
+    # benefits from, unconditionally, regardless of this guard): a caller
+    # that invokes `has_label "$tid" "$lbl"` as a fully BARE, UNTESTED
+    # statement — no `if`, no `&&`/`||`, no `$(...)` around it at all, from
+    # a context that is itself not exempt (e.g. directly inside a `cmd_*`
+    # dispatched straight from this file's top-level `case`) — is the shape
+    # that would still abort without this guard, because that is the one
+    # shape where has_label's own body runs where `set -e` is genuinely
+    # enforced.
+    # `|| true`, not a captured rc: this function does not need to
+    # distinguish "confirmed absent" from "unreadable" — either way
+    # `$labels` reads empty, `,,` never contains `,$2,`, and has_label
+    # correctly reports "not present" for both.
     local labels
-    labels="$(get_labels "$1")"
+    labels="$(get_labels "$1")" || true
     echo ",$labels," | grep -q ",$2,"
 }
 
@@ -3618,8 +4160,12 @@ cmd_status() {
     # cascade below, which is only ever reached once the read is confirmed to
     # have worked.
     local labels labels_rc=0
-    # THIS FILE RUNS UNDER `set -e` (line 155). A bare `labels="$(get_labels
-    # "$tid")"` on its own line is NOT one of set -e's exemptions (an `if`/
+    # THIS FILE RUNS UNDER `set -e` (line 196 as of the R17 class sweep —
+    # this comment previously said "line 155", stale even before this round;
+    # corrected in passing while re-verifying it, the way any other line
+    # number cited from memory in this file should be). A bare
+    # `labels="$(get_labels "$tid")"` on its own line is NOT one of set -e's
+    # exemptions (an `if`/
     # `while`/`until` condition, or a command before `&&`/`||`) — MEASURED,
     # by actually running the paired test below: when get_labels() returned
     # non-zero, the script ABORTED right there under `set -e`, before a
@@ -3779,6 +4325,13 @@ cmd_approve() {
     local bypass_reason=""
     local bypass_review=0
     local review_bypass_reason=""
+    # UNRECORDED-REVIEW-ARTIFACT-REFUSAL (claude-workflow-plugin-k6re):
+    # declared OUTSIDE the sentinel-wrapped block further down, for the same
+    # two reasons impact_obs / review_obs are — the bypass path skips the
+    # block but must still record WHY, and a stripped-copy META test stays
+    # syntactically coherent.
+    local bypass_unrecorded_review=0
+    local unrecorded_review_bypass_reason=""
     local summary=""
     # CHANGE-SET-RECONSTRUCTED BEGIN (94d.1)
     local bypass_reconstructed=0
@@ -3883,6 +4436,36 @@ cmd_approve() {
                     emit_error_json "approve" "$tid" "bypass_reason_required" \
                         "--no-review requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the independent-review requirement is indistinguishable from signing off on your own work" \
                         "qa-gate.sh approve $tid --no-review '<reason>' '<summary>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --accept-unrecorded-review)
+                # claude-workflow-plugin-k6re (the HEADLINE defect): the
+                # audited bypass for the review_artifact_unrecorded refusal
+                # below. Mirrors --accept-reconstructed / --no-review exactly,
+                # including the empty-reason refusal.
+                #
+                # A DEDICATED flag, not a reuse of --no-review, deliberately:
+                # --no-review waives the WHOLE independent-review predicate
+                # (including "no open findings", "reviewer independent") —
+                # strictly more than this narrower fact ("a stray unrecorded
+                # artifact sits on disk") needs waived, and folding the two
+                # together would force an operator who only wants to
+                # acknowledge the backlog to also silently waive findings
+                # resolution they never intended to skip. THE INTENDED
+                # PRODUCER is an operator reconciling a task with a legitimate
+                # HISTORIC backlog (e.g. claude-workflow-plugin-i8cx, 9
+                # WAVE-1-era artifacts never recorded) that needs a fresh
+                # approval without being permanently stranded — see the
+                # refusal's own comment for why a bypass-free refusal here
+                # would convert an old silence into a new dead end.
+                bypass_unrecorded_review=1
+                unrecorded_review_bypass_reason="${2:-}"
+                if [ -z "$unrecorded_review_bypass_reason" ]; then
+                    emit_error_json "approve" "$tid" "bypass_reason_required" \
+                        "--accept-unrecorded-review requires a non-empty reason; the bypass is recorded in the approval comment + gate JSON, and an unexplained bypass of the unrecorded-review-artifact check is indistinguishable from certifying a review that was never actually recorded" \
+                        "qa-gate.sh approve $tid --accept-unrecorded-review '<reason>' '<summary>'"
                     exit 1
                 fi
                 shift 2 || true
@@ -4564,7 +5147,26 @@ cmd_approve() {
             exit 4
         fi
         local review_out review_rc=0 review_key review_open
-        review_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$tid" 2>&1) || review_rc=$?
+        # claude-workflow-plugin-k6re R17-F2 / class sweep: this was the
+        # ONLY one of this file's four `review-check.sh gate` call sites
+        # merging stderr into the captured variable (`2>&1`) rather than
+        # discarding it (`2>/dev/null`, matching the other three). Narrowed
+        # for two independent reasons, verified rather than assumed: (1)
+        # nothing downstream of `$review_out` in this case-arm ever reads
+        # its raw text for display — every consumer (below) extracts a named
+        # JSON field via jq, and the one arm that does NOT recognize a
+        # specific error_key (the trailing `*)`) reports `$review_rc`, never
+        # `$review_out` itself — so the `2>&1` bought no observable benefit;
+        # (2) it was the one plausible way an unrelated stderr line (e.g.
+        # from a `mktemp` failure inside review-check.sh's own `cmd_gate`,
+        # itself unguarded — see review-check.sh:2078, out of scope for a
+        # qa-gate.sh-only sweep) could prepend non-JSON text ahead of the
+        # real envelope and break every jq parse below at once, including
+        # the R17-F1-class ones a few lines down. Removing the corruption
+        # vector at its source is strictly better than guarding every
+        # consumer against a shape review-check.sh's own three OTHER call
+        # sites in this file never have to worry about.
+        review_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$tid" 2>/dev/null) || review_rc=$?
         case "$review_rc" in
             0)
                 # REVIEW-CAP-TERMINATED-REFUSAL BEGIN (v5 D2 / claude-workflow-plugin-fkm.4)
@@ -4672,8 +5274,65 @@ cmd_approve() {
                         # Falls back to the generic line only if
                         # review-check.sh's own envelope somehow carried no
                         # observations at all.
-                        review_remedy=$(printf '%s' "$review_out" | jq -r '.observations // empty' 2>/dev/null)
+                        #
+                        # claude-workflow-plugin-k6re R17-F2 / class sweep:
+                        # `|| true` added defensively. Reachability analysis
+                        # (not merely asserted — see the census after `set -e`
+                        # near the top of this file): reaching THIS case arm
+                        # at all requires `review_key` (a few lines above,
+                        # itself guarded by its own `|| echo
+                        # "review_check_violation"`) to have ALREADY
+                        # extracted one of this arm's literal match strings
+                        # from `$review_out` via the identical `.foo`-on-an-
+                        # object jq operation this line performs on a
+                        # DIFFERENT field of the SAME already-parsed value —
+                        # which is only possible if `$review_out` is a
+                        # complete, valid JSON object (jq 1.8.1, empirically
+                        # confirmed: a top-level parse failure or a non-
+                        # object top level makes `.error_key` fail exactly
+                        # like `.observations` would, and `//` does NOT
+                        # swallow that class of error, only a `null`/`false`
+                        # value). So this specific jq call should not be able
+                        # to fail once reached. Guarded anyway, for the same
+                        # reason the R16-F1 comment's "this was the ONLY
+                        # unguarded one" claim is being retracted a few
+                        # hundred lines below rather than trusted a second
+                        # time: a proof that a call site is safe TODAY is not
+                        # a substitute for making it survive being wrong.
+                        review_remedy=$(printf '%s' "$review_out" | jq -r '.observations // empty' 2>/dev/null) || true
                         [ -z "$review_remedy" ] && review_remedy="review-check.sh gate $tid reported: $review_key. Re-run it directly for the full envelope."
+                        ;;
+                    review_artifact_selection_disagreement)
+                        # claude-workflow-plugin-k6re R13-F1: this used to
+                        # fall into the generic `*)` arm below, which named
+                        # ONLY --no-review -- a blanket waiver of the whole
+                        # independent-review predicate -- for a state that
+                        # usually needs neither waiving nor re-reviewing, only
+                        # a record correctly timestamped. review-check.sh's
+                        # own observations (relayed first, same discipline as
+                        # the malformed case above) names the conflicting
+                        # records by iteration and timestamp; the remedy
+                        # appended here names the two REAL fixes review-record
+                        # alone cannot express: going forward, historic rounds
+                        # belong through review-reconcile (never a K3
+                        # candidate, so it cannot recreate this disagreement);
+                        # to repair a task that already carries it, re-run
+                        # review-record on the SAME artifact that has the
+                        # HIGHEST iteration number among those named above
+                        # (even though it is already recorded) so its
+                        # timestamp becomes the newest, making it win both
+                        # axes at once.
+                        #
+                        # claude-workflow-plugin-k6re R17-F2 / class sweep:
+                        # `|| true`, same reasoning as this case's sibling
+                        # arm immediately above (review_artifact_malformed
+                        # et al.) — reaching this arm already proves
+                        # `$review_out` parsed as a valid JSON object, via
+                        # the identical `review_key` extraction a few lines
+                        # up. Guarded anyway, not trusted on that proof alone.
+                        review_remedy=$(printf '%s' "$review_out" | jq -r '.observations // empty' 2>/dev/null) || true
+                        [ -z "$review_remedy" ] && review_remedy="review-check.sh gate $tid reported: $review_key."
+                        review_remedy="$review_remedy TWO REAL FIXES, not a review-separation waiver: (1) to repair THIS task now, identify which of the conflicting records named above has the HIGHEST iteration number, then re-run review-record on that SAME artifact again (it is already recorded; re-recording refreshes its timestamp to the newest, which is what makes it win both the iteration and the timestamp axis at once) -- bash .claude/scripts/qa-gate.sh review-record $tid --file <path-to-that-artifact>. (2) going forward, every OTHER historic round should be accounted for via review-reconcile, never review-record -- bash .claude/scripts/qa-gate.sh review-reconcile $tid --file <path> '<reason>' -- a REVIEW-ARTIFACT-RECONCILED v1 record is never a K3 selection candidate, so it cannot recreate this disagreement no matter what order it is written in."
                         ;;
                     *)
                         review_remedy="review-check.sh gate $tid reported: $review_key. Re-run it directly for the full envelope."
@@ -4695,6 +5354,531 @@ cmd_approve() {
         esac
     fi
     # REVIEW-SEPARATION END (v4 V3 / claude-workflow-plugin-jio.1)
+
+    # UNRECORDED-REVIEW-ARTIFACT-REFUSAL BEGIN (claude-workflow-plugin-k6re)
+    #
+    # THE HEADLINE DEFECT THIS TASK FIXES. The external reviewer driver
+    # writes docs/reviews/<tid>-r<n>.json and exits; nothing calls `qa-gate.sh
+    # review-record` for it unless an agent remembers to (orchestrator.md 5c
+    # Step D / qa.md 6-prime are PROSE instructions, not a mechanical driver —
+    # LESSONS.md entry 8: "when a workflow REQUIRES a tool call, make it
+    # mechanical... don't prompt for it"). MEASURED on this task's own
+    # tracking: claude-workflow-plugin-i8cx accumulated 12 artifacts on disk
+    # against 3 recorded rounds; pqnd, 9 against 5. REVIEW-SEPARATION above
+    # already proved there EXISTS a valid, independent, complete review for
+    # the CURRENT governing record — this block asks a DIFFERENT question: is
+    # there ALSO a review artifact on disk for this task that never entered
+    # the trust chain at all. "independent review verified" in the
+    # observations above is not a lie when that is true, but it is not the
+    # whole truth either: an operator reading it has no way to see that a
+    # nine-round-stale, or simply unrecorded, artifact sits beside it — the
+    # gate reporting confidence its evidence does not fully support.
+    #
+    # OPTION 2 OF THE TASK'S OWN TWO CANDIDATES, CHOSEN OVER OPTION 1
+    # (deliberately not also shipped — see the completion report). The
+    # description offered: (1) the external reviewer driver calls
+    # review-record itself; (2) approve refuses when an unrecorded artifact
+    # exists. Option 1 closes only that DRIVER's own pathway — a review
+    # authored inside an agent turn (qa.md 6-prime) has no deterministic
+    # driver to wire at all, so a fix confined to the driver would look
+    # complete while leaving half the surface on prose (this task's own
+    # "REQUIREMENT 1 CHARACTERISED" comment). Option 2 catches every review
+    # pathway — the external driver, an agent's own in-session review, and
+    # a hand-typed review-record — because it checks the RESULT (bytes on
+    # disk, records in bd) rather than the PATH that produced it.
+    #
+    # CONTENT HASH, NEVER MTIME. The description's own framing was an
+    # artifact "NEWER than the newest record" — mtime is the wrong
+    # instrument: a `git checkout`, a file copy, or a filesystem restore
+    # (`make sync-fixtures`, a backup) all move mtime without changing a
+    # single byte, and a bd comment's `at <ts>` field and a file's mtime are
+    # not even the same clock. This block instead asks, PER FILE, "does ANY
+    # well-formed REVIEW-ARTIFACT v1 record for this task bind this exact
+    # sha256" — answered by review-check.sh's `recorded-hashes` (the UNION of
+    # every recorded round, never `gate`'s single K3 winner — see that
+    # subcommand's own header for why the distinction matters here: the very
+    # corpus this fix targets, i8cx, is nine SUPERSEDED-but-real rounds that a
+    # single-winner selector would never surface).
+    #
+    # WHY A DEDICATED BYPASS, NOT --no-review. --no-review waives the WHOLE
+    # independent-review predicate; this refusal is about a narrower,
+    # orthogonal fact (a stray artifact exists) that can be true even when the
+    # CURRENT governing review is perfectly valid, independent and clean.
+    # Folding the two together would force an operator who wants to
+    # acknowledge only the backlog to also silently waive findings-resolution
+    # they never intended to skip. See --accept-unrecorded-review's own
+    # comment (option parsing, above) for the historic-backlog case it exists
+    # for: a task with a large historic review-artifact backlog (i8cx and
+    # pqnd are the two concrete examples that motivated this refusal, i8cx
+    # nine SUPERSEDED-but-real rounds as noted above) needs an escape that is
+    # not "run review-record on nine-round-stale history nobody asked to
+    # relitigate" the next time it comes back through approve — per the task
+    # brief's own warning that a refusal with no bypass converts an old
+    # silence into a new dead end. NEITHER TASK'S CURRENT STATUS is
+    # load-bearing for that point, so this comment does not claim one
+    # (claude-workflow-plugin-k6re R14-F3: an earlier draft asserted both
+    # were CLOSED, which was already false for i8cx at the time it was
+    # written — checked directly with `bd show claude-workflow-plugin-i8cx
+    # --json`, reporting status=in_progress, rather than re-asserted from an
+    # unchecked earlier claim).
+    #
+    # DOES NOT NEST inside "if bypass_review" — it is independent of whether
+    # --no-review waived the review-separation predicate above: a stray
+    # unrecorded artifact is a fact about the filesystem and the comment
+    # stream, orthogonal to whether THIS approval is relying on review
+    # evidence at all. It has its own, separate bypass instead (declared with
+    # the other bypass locals, above).
+    local unrecorded_review_obs=""
+    if [ "$bypass_unrecorded_review" = "1" ]; then
+        unrecorded_review_obs="; unrecorded-artifact bypass: $unrecorded_review_bypass_reason (review_artifact_unrecorded refusal waived via --accept-unrecorded-review; reason recorded per claude-workflow-plugin-k6re)"
+    fi
+    if [ "$bypass_unrecorded_review" != "1" ]; then
+        if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+            emit_error_json "approve" "$tid" "review_check_unavailable" \
+                "approve refused: the unrecorded-review-artifact predicate is unavailable — $REVIEW_CHECK_SCRIPT is missing, so whether every on-disk review artifact for $tid is recorded cannot be verified. This FAILS CLOSED by design (a deleted checker must not read as a passing check). Restore the script, or bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --accept-unrecorded-review '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--accept-unrecorded-review '<reason>'] <summary>"
+            exit 4
+        fi
+        local unrecorded_sanitized_tid
+        unrecorded_sanitized_tid=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+        # claude-workflow-plugin-k6re R16-F2: AN UNLISTABLE DIRECTORY IS
+        # INDISTINGUISHABLE FROM AN EMPTY ONE TO A GLOB, and this whole
+        # block's job is to detect exactly the shape "an artifact exists
+        # but nobody can see it" -- so an unreadable docs/reviews/ used to
+        # make one invisible to the glob below, landing in the SAME
+        # affirmative "nothing to reconcile" PASS a genuinely clean task
+        # prints (MEASURED: docs/reviews at 0000 or 0111, same records,
+        # same files, only the permission bit differing -> approve rc=0,
+        # qa-approved SET, while the unrecorded artifact was still present
+        # and still unrecorded the whole time). This block's own two
+        # SIBLING unavailability modes a few lines up both fail CLOSED by
+        # explicit design (review_check_unavailable: "a deleted checker
+        # must not read as a passing check"; review_recorded_hashes_
+        # unavailable: "this FAILS CLOSED") -- the directory being
+        # enumerated was the one mode that read as a pass, newly introduced
+        # by this change set, not pre-existing.
+        #
+        # THE CENSUS (claude-workflow-plugin-k6re, R16), because R13, R14,
+        # R15 and R16 each found the unavailability mode the round before
+        # had not enumerated, and a fifth patch discovered by a sixth
+        # reviewer is not an acceptable way to keep finding them. Every mode
+        # this block (directory enumeration) and the gate-consult a few
+        # lines below can be in, and its disposition:
+        #   - directory ABSENT           -> PASS, "nothing to reconcile".
+        #     Legitimate: a task that never had a review yet has nothing
+        #     under docs/reviews/ at all, and that is not an error.
+        #   - directory present, r+x (the ordinary case) -> glob runs
+        #     normally, enumerates real files.
+        #   - directory present, NOT readable and/or NOT traversable
+        #     (0000, 0111, any missing r or x bit) -> FAIL CLOSED here,
+        #     review_dir_unreadable, exit 4. THE FIX THIS FINDING IS ABOUT.
+        #   - directory path is a DANGLING SYMLINK (points nowhere) ->
+        #     FAIL CLOSED here too, same error_key. `-d`/`-e` alone cannot
+        #     distinguish this from "absent" (both read false), which would
+        #     silently re-open the same class this fix closes if the real
+        #     directory were ever swapped for a broken link; checked
+        #     explicitly rather than left to the same blind spot.
+        #   - directory path is a PLAIN FILE, not a directory -> `-d` is
+        #     false, so this guard does not fire, and the glob below cannot
+        #     expand into it either; behaves like "absent". Verified SAFE
+        #     rather than merely unhandled: nothing can ever have written a
+        #     review artifact "inside" a non-directory, so "nothing to
+        #     reconcile" is not just the code's answer here, it is the true
+        #     answer.
+        #   - directory is a symlink to a REAL, readable directory ->
+        #     transparent; behaves exactly like an ordinary directory.
+        #   - review-check.sh (the script FILE) absent -> already caught
+        #     above, review_check_unavailable, FAILS CLOSED (pre-existing).
+        #   - review-check.sh present but UNREADABLE -> not given a
+        #     dedicated error_key; `bash "$REVIEW_CHECK_SCRIPT" gate` fails
+        #     to produce parseable JSON, so every jq extraction below falls
+        #     to its `// ""`/`// false` default and the gate-consult's own
+        #     catch-all `else` branch (a few lines down) fires -- still
+        #     FAILS CLOSED, just not under its own specific message. Named
+        #     here rather than left unenumerated; not worth a fourth
+        #     error_key for a mode indistinguishable in practice from "gate
+        #     produced garbage" below.
+        #   - review-check.sh present, runs, EXITS NON-ZERO for any reason
+        #     (a crash, a refusal, a malformed candidate) -> the gate-
+        #     consult's `else` branch, FAILS CLOSED (this round's R16-F1
+        #     fix is what keeps this branch reachable at all).
+        #   - review-check.sh TIMES OUT -> NOT GUARDED. This host has no
+        #     `timeout` binary, and none of the other three `review-check.sh
+        #     gate` call sites in this file guard against a hang either.
+        #     Named explicitly as OUT OF SCOPE for this round rather than
+        #     left unenumerated, not silently absent.
+        #   - review-check.sh returns MALFORMED JSON -> every jq extraction
+        #     falls to its default, same as "unreadable" above; FAILS
+        #     CLOSED via the catch-all `else` branch.
+        #   - review-check.sh returns valid JSON, ok:true, but with NO
+        #     numeric .artifact.iteration -> structurally impossible per
+        #     gate's own construction (its one `emit_gate 0` call site is
+        #     reached only after a numeric iteration is already
+        #     established), not merely untested.
+        #   - review-check.sh returns valid JSON, ok:false, with an
+        #     error_key OTHER than review_artifact_missing -> the gate-
+        #     consult's `else` branch, FAILS CLOSED (covers selection
+        #     disagreement, a malformed record, an unreadable comment set,
+        #     and an empty/absent error_key alike).
+        local unrecorded_review_dir="$PROJECT_DIR/$REVIEW_ARTIFACT_SUBDIR"
+        if [ -L "$unrecorded_review_dir" ] && [ ! -e "$unrecorded_review_dir" ]; then
+            emit_error_json "approve" "$tid" "review_dir_unreadable" \
+                "approve refused: $unrecorded_review_dir is a dangling symlink (it resolves to nothing), so whether any review artifact exists under it cannot be verified -- an unlistable path is indistinguishable from an empty one to a glob, and this FAILS CLOSED rather than reading that ambiguity as a pass. Repair or remove the symlink, or bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --accept-unrecorded-review '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--accept-unrecorded-review '<reason>'] <summary>"
+            exit 4
+        fi
+        if [ -d "$unrecorded_review_dir" ] && { [ ! -r "$unrecorded_review_dir" ] || [ ! -x "$unrecorded_review_dir" ]; }; then
+            emit_error_json "approve" "$tid" "review_dir_unreadable" \
+                "approve refused: $unrecorded_review_dir exists but is not readable and/or not traversable (checked separately: a directory needs BOTH bits to be listable), so whether any review artifact for $tid sits inside it cannot be verified -- an unlistable directory is indistinguishable from an empty one to a glob, and this FAILS CLOSED rather than reading that ambiguity as a pass. Restore the directory's permissions, or bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --accept-unrecorded-review '<reason>' '<summary>'" \
+                "qa-gate.sh approve <task-id> [--accept-unrecorded-review '<reason>'] <summary>"
+            exit 4
+        fi
+        # Glob mirrors review_artifact_path_for's own format string
+        # byte-for-byte (sanitized task id, literal "-r", wildcard iteration,
+        # ".json"), so it matches exactly what the external reviewer driver
+        # and cmd_review_record derive — never a looser pattern that could catch
+        # the docs/reviews/impact-report-approve_XXXXXX_*.json litter files a
+        # DIFFERENT generator (impact-report.sh, invoked from approve itself)
+        # leaves in the same directory: those never carry this exact task
+        # id immediately followed by "-r", so this anchored glob cannot match
+        # them regardless of how many sit alongside real artifacts.
+        local -a unrecorded_disk_artifacts=()
+        local unrecorded_f
+        for unrecorded_f in "$unrecorded_review_dir/$unrecorded_sanitized_tid"-r*.json; do
+            [ -e "$unrecorded_f" ] || continue
+            unrecorded_disk_artifacts+=("$unrecorded_f")
+        done
+        if [ "${#unrecorded_disk_artifacts[@]}" -eq 0 ]; then
+            unrecorded_review_obs="; no on-disk review artifact for $tid under $REVIEW_ARTIFACT_SUBDIR/ (nothing to reconcile)"
+        else
+            local unrecorded_hashes_out unrecorded_hashes_rc=0
+            unrecorded_hashes_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" recorded-hashes "$tid" 2>/dev/null) || unrecorded_hashes_rc=$?
+            if [ "$unrecorded_hashes_rc" -ne 0 ] || [ "$(printf '%s' "$unrecorded_hashes_out" | jq -r '.ok // false' 2>/dev/null)" != "true" ]; then
+                emit_error_json "approve" "$tid" "review_recorded_hashes_unavailable" \
+                    "approve refused: could not enumerate recorded review-artifact hashes for $tid (review-check.sh recorded-hashes exited $unrecorded_hashes_rc), so whether every on-disk review artifact is accounted for is unverifiable. This FAILS CLOSED. Re-run it directly to see why, or bypass: bash .claude/scripts/qa-gate.sh approve $tid --accept-unrecorded-review '<reason>' '<summary>'" \
+                    "qa-gate.sh approve <task-id> [--accept-unrecorded-review '<reason>'] <summary>"
+                exit 4
+            fi
+            # claude-workflow-plugin-k6re R13-F1: track the HIGHEST iteration
+            # among the genuinely-unrecorded files (hashable, hash confirmed
+            # absent from the recorded set) — used ONLY as a fallback signal
+            # (see R15-F1 below) for the one case where nothing better
+            # exists: no governing record anywhere yet. It is NOT used to
+            # decide whether something ELSE already governs — that question
+            # is answered by consulting review-check.sh gate directly, below,
+            # never by comparing on-disk files against each other.
+            local -a unrecorded_missing=()
+            local unrecorded_file_hash unrecorded_hash_rc
+            local unrecorded_max_iter="" unrecorded_max_iter_file=""
+            for unrecorded_f in "${unrecorded_disk_artifacts[@]}"; do
+                unrecorded_hash_rc=0
+                if ! review_path_is_contained "$unrecorded_f"; then
+                    unrecorded_missing+=("$unrecorded_f (outside $REVIEW_ARTIFACT_SUBDIR/ -- a symlink out of the declared directory; cannot corroborate)")
+                    continue
+                fi
+                # R13-F6: [ -e ] above admits a directory or other non-regular
+                # object; naming the true cause here rather than letting it
+                # fall through to a generic "unhashable" from the hash tool.
+                if [ ! -f "$unrecorded_f" ]; then
+                    unrecorded_missing+=("$unrecorded_f (not a regular file -- a directory or other non-file object at this path; cannot corroborate)")
+                    continue
+                fi
+                unrecorded_file_hash=$(bash "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" hash-file "$unrecorded_f" 2>/dev/null) || unrecorded_hash_rc=$?
+                if [ "$unrecorded_hash_rc" -ne 0 ] || ! is_sha256_hex "$unrecorded_file_hash"; then
+                    unrecorded_missing+=("$unrecorded_f (unhashable, rc=$unrecorded_hash_rc -- cannot corroborate)")
+                    continue
+                fi
+                if ! printf '%s' "$unrecorded_hashes_out" | jq -e --arg h "$unrecorded_file_hash" '.hashes | index($h) != null' >/dev/null 2>&1; then
+                    local unrecorded_this_iter
+                    unrecorded_this_iter=$(basename "$unrecorded_f" | sed -E "s/^${unrecorded_sanitized_tid}-r([0-9]+)\.json\$/\1/")
+                    # claude-workflow-plugin-k6re R16-F3: the filename-
+                    # derived iteration above is a fast proxy, not the
+                    # source of truth -- review_artifact_path_for (the
+                    # derivation review-record AND review-reconcile both
+                    # actually enforce) computes a file's CANONICAL path
+                    # from the artifact's OWN .iterations content field, not
+                    # from whatever this file happens to be named. When the
+                    # two disagree (a hand-placed or hand-renamed file), the
+                    # filename-derived iteration this loop would otherwise
+                    # promote to "the round to record" names a --file
+                    # argument review-record/review-reconcile will BOTH
+                    # refuse (artifact_path_not_derived), since neither
+                    # writer ever trusts a filename over its own content --
+                    # so recommending either command here would be
+                    # unfollowable advice. Reading .iterations directly
+                    # (never trusting the filename for this specific
+                    # decision) and refusing to let a mismatched file become
+                    # unrecorded_max_iter_file closes that: a mismatched
+                    # file is still correctly reported as unrecorded (the
+                    # sha256= entry below still fires), it is just never
+                    # RECOMMENDED for review-record, since no path this loop
+                    # could name for it would ever be accepted.
+                    local unrecorded_content_iter
+                    # claude-workflow-plugin-k6re R17-F1: `|| true`. This was
+                    # a bare command substitution under `set -e` (line 196):
+                    # `$unrecorded_f` is a file this loop does NOT control
+                    # the contents of (it can be anything left on disk under
+                    # docs/reviews/ by an external reviewer driver, or by
+                    # hand), and a TRUNCATED or otherwise malformed-but-
+                    # hashable file makes `jq` exit non-zero on the parse
+                    # itself — `.iterations // ""` is a jq FILTER-LANGUAGE
+                    # default, which only ever fires once jq has successfully
+                    # parsed its input; it is invisible to a parse failure,
+                    # exactly as `emit_gate`'s own `// default` operators are
+                    # (see review-check.sh's `printf '{"x":%s}\n' "$(false)"`
+                    # comment, the same mechanism from the argument-embedded
+                    # side). REPRODUCED end to end through the shipped
+                    # `approve`, A/B, with only one on-disk file's JSON
+                    # validity differing: well-formed -> exit 4, a real
+                    # envelope, error_key=review_artifact_unrecorded (the
+                    # correct, documented refusal — the file IS genuinely
+                    # unrecorded); malformed-but-hashable -> exit 5 (jq's own
+                    # parse-error code), ZERO bytes on stdout, no error_key,
+                    # no envelope at all — a silent process abort in place of
+                    # that same documented refusal. `|| true` accepts an
+                    # empty `unrecorded_content_iter` on failure, which the
+                    # `if` below already treats safely: an empty value is not
+                    # digit-only, so the mismatch branch is skipped and this
+                    # file is reported as an ordinary unrecorded artifact
+                    # (the `else` arm, a few lines down) — the same outcome a
+                    # well-formed file with no `.iterations` field at all
+                    # already produces today, which is the correct behaviour
+                    # for "could not determine a content-derived iteration",
+                    # regardless of WHY it could not be determined.
+                    unrecorded_content_iter=$(cat -- "$unrecorded_f" 2>/dev/null | jq -r '.iterations // ""' 2>/dev/null) || true
+                    if printf '%s' "$unrecorded_content_iter" | grep -qE '^[0-9]+$' \
+                        && [ "$unrecorded_content_iter" != "$unrecorded_this_iter" ]; then
+                        unrecorded_missing+=("$unrecorded_f (sha256=$unrecorded_file_hash; filename says iteration=$unrecorded_this_iter but its own content says iterations=$unrecorded_content_iter -- neither review-record nor review-reconcile will accept this path for either number; remove it, rename it to match its content, or bypass with --accept-unrecorded-review)")
+                    else
+                        unrecorded_missing+=("$unrecorded_f (sha256=$unrecorded_file_hash)")
+                        if printf '%s' "$unrecorded_this_iter" | grep -qE '^[0-9]+$'; then
+                            if [ -z "$unrecorded_max_iter" ] || [ "$unrecorded_this_iter" -gt "$unrecorded_max_iter" ] 2>/dev/null; then
+                                unrecorded_max_iter="$unrecorded_this_iter"
+                                unrecorded_max_iter_file="$unrecorded_f"
+                            fi
+                        fi
+                    fi
+                fi
+                # A file already accounted for (hash present in recorded-
+                # hashes) needs no further handling here: whether it is the
+                # GOVERNING round is answered below, from the record stream
+                # via review-check.sh gate, never from this loop.
+            done
+            if [ "${#unrecorded_missing[@]}" -gt 0 ]; then
+                # claude-workflow-plugin-k6re R13-F1: two commands, named
+                # explicitly for which files, NOT one command against an
+                # unordered list. See review-reconcile's own header for the
+                # full mechanism (the K3 selector in gate requires the
+                # highest-iteration record to also be the latest by
+                # write-time timestamp; review-record stamps write time, so
+                # backfilling several historic rounds through it in
+                # uncontrolled order can invert that agreement and produce
+                # review_artifact_selection_disagreement on a LATER approve
+                # attempt — reproduced independently on both a backlog whose
+                # highest iteration is itself unrecorded, where numeric
+                # ordering happens to avoid it, and one whose highest
+                # iteration is already recorded, where no ordering of the
+                # remainder can).
+                # claude-workflow-plugin-k6re R15-F1/F2 (THIRD ROUND against
+                # this one comparison: R13-F1, R14-F1, now R15-F1, all
+                # patched the SAME assumption and were each wrong the same
+                # way -- the two-bounce signal that the ASSUMPTION, not the
+                # comparison, was the defect). THE CLAIM THIS REPLACES, held
+                # as fact here for two rounds: "this in-loop derivation --
+                # over the exact same on-disk files this refusal already
+                # reports on -- is the more robust source [than gate], not a
+                # second computation of something gate already knows." It
+                # was not more robust. It answered "what is the highest
+                # iteration among ON-DISK FILES whose hash is recorded" -- a
+                # question about the filesystem -- when the question that
+                # matters is "what is the highest iteration among RECORDS",
+                # a question about the bd comment stream. Those differ
+                # exactly when a governing record's FILE is missing or
+                # unreadable (deleted, chmod 000, or simply untracked in git
+                # -- confirmed true of THIS repo's own r13/r14 artifacts via
+                # `git ls-files --others --exclude-standard`, so any fresh
+                # clone or `git clean -fdx` reproduces the shape) -- the
+                # governing round is then invisible to a loop over
+                # unrecorded_disk_artifacts no matter how the comparison
+                # inside it is written, because that loop only ever sees the
+                # filesystem. R15-F2 is the same root cause on the other
+                # branch: recorded-hashes is deliberately the UNION over
+                # every record INCLUDING non-governing REVIEW-ARTIFACT-
+                # RECONCILED v1 ones (see recorded-hashes' own header), so a
+                # disk-side "is this hash recorded" check could mistake a
+                # RECONCILED iteration for a governing one.
+                #
+                # THE FIX IS NOT A FOURTH PATCH TO THIS COMPARISON'S DISK-
+                # DERIVED INPUT: it is retiring the DISK as a source for it.
+                # The comparison itself (is anything unrecorded NEWER than
+                # what currently governs?) still has to exist -- an
+                # unrecorded file can legitimately be a fresher round that
+                # should be PROMOTED to governing, the ordinary i8cx-shaped
+                # case -- but its "what currently governs" side now comes
+                # from review-check.sh gate's K3 selector, the ONE place in
+                # this codebase that already answers that question
+                # authoritatively over the RECORD stream, the same doctrine
+                # this repo applies to the DESIGN-UNIT grammar
+                # (latest_design_unit_binding: "the ONE authoritative
+                # reader... nothing should carry its own copy"). Consult it;
+                # never re-derive a second opinion of THAT ONE FACT from the
+                # filesystem. If gate itself cannot establish a governing
+                # record for any reason other than "none exist yet", this
+                # refusal does NOT guess a file -- losing the guess is
+                # strictly better than a FOURTH wrong one, since reconciling
+                # every listed file is always safe (reconcile never creates a
+                # new REVIEW-ARTIFACT v1 record, so it can never invert what
+                # gate selects) while recording the wrong one is not.
+                # R15-GATE-CONSULT BEGIN (claude-workflow-plugin-k6re)
+                # claude-workflow-plugin-k6re R16-F1: `|| true`, matching the
+                # OTHER three `review-check.sh gate` call sites in this file
+                # (4705's own `|| review_rc=$?`; two more further down, both
+                # `|| true`).
+                #
+                # THE CLAIM THIS REPLACES, held as fact here for one review
+                # round: "this was the ONLY unguarded one." That claim was
+                # already false the moment it was written: the R16-F3 remedy
+                # in this SAME change set added a second bare command
+                # substitution of the identical shape ~110 lines below this
+                # one (`unrecorded_content_iter=$(cat ... | jq ...)`, no
+                # guard) — found and fixed as R17-F1, a full review round
+                # later, by an independent reviewer who had ALSO read this
+                # exact comment earlier in the same session and, by their own
+                # account, took its "ONLY" on trust instead of re-deriving
+                # it against the change set that contained it. The lesson is
+                # not "sweep harder" — R16-F1's own sweep was thorough for
+                # what it checked, four call sites of ONE specific function
+                # call (`review-check.sh gate`) — it is that a comment
+                # asserting a CLASS is closed ("the only one") is a claim
+                # about the whole file, not about the four sites actually
+                # inspected, and it goes stale the instant a sibling
+                # unguarded substitution is added anywhere else in the same
+                # script, guarded or not by this comment's own vigilance.
+                # R17 replaced the per-call-site sweep with a file-wide
+                # census (see the BARE-SUBSTITUTION-CENSUS block just after
+                # `set -e` near the top of this file) precisely so the next
+                # version of this sentence has something broader than "I
+                # checked these four" to stand on — and even that census
+                # states its own scope rather than claiming permanence: it is
+                # accurate as of the change set it was written against, not a
+                # standing guarantee about every substitution added after it.
+                #
+                # THE REST OF THIS COMMENT'S REASONING STANDS UNCHANGED: `gate`
+                # EXITS 4 ON EVERY REFUSAL, and this whole file runs under
+                # `set -e` (line 196), so a bare command substitution here
+                # aborts cmd_approve outright the moment gate has anything to
+                # say other than a clean ok:true -- which is to say, on every
+                # path except the one where a governing record already
+                # exists and everything else is fine. That is EXACTLY the two
+                # branches (elif review_artifact_missing; else, "will NOT
+                # guess") this whole mechanism exists to reach: review-
+                # check.sh has exactly one `emit_gate 0`, reached only once a
+                # numeric iteration is already established, so a NON-zero
+                # gate exit is the ONLY way either of those two branches
+                # could ever run -- and a non-zero exit is precisely what a
+                # bare substitution here would turn into an immediate, silent
+                # process abort (zero bytes on stdout AND stderr, no
+                # error_key, nothing for verify-before-stop.sh's own
+                # review_artifact_unrecorded documentation, added THIS round,
+                # to ever actually see on the shape it documents). Same
+                # mechanism ERREXIT-HASH-GUARD (claude-workflow-plugin-qzv.3,
+                # a few hundred lines above in this same function) already
+                # named exactly once: "this is not defensive noise: without
+                # it this refusal is DEAD CODE."
+                local unrecorded_gate_out unrecorded_gate_iter unrecorded_gate_ok unrecorded_gate_ekey
+                unrecorded_gate_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" gate "$tid" 2>/dev/null || true)
+                unrecorded_gate_ok=$(printf '%s' "$unrecorded_gate_out" | jq -r '.ok // false' 2>/dev/null || echo "false")
+                unrecorded_gate_ekey=$(printf '%s' "$unrecorded_gate_out" | jq -r '.error_key // ""' 2>/dev/null || echo "")
+                unrecorded_gate_iter=$(printf '%s' "$unrecorded_gate_out" | jq -r '.artifact.iteration // ""' 2>/dev/null || echo "")
+                local unrecorded_current_advice
+                if printf '%s' "$unrecorded_gate_iter" | grep -qE '^[0-9]+$'; then
+                    # gate ESTABLISHED a governing record: emit_gate always
+                    # populates .artifact.iteration from the SAME K3-selected
+                    # record every LATER check (unresolved_findings,
+                    # reviewer_not_independent, ...) still runs against, so
+                    # this is non-empty whenever a governing record exists at
+                    # all -- regardless of whether gate's overall ok is true
+                    # or false, and regardless of whether that round's FILE
+                    # is present, missing, or unreadable on disk.
+                    #
+                    # THE COMPARISON ITSELF SURVIVES (only its SOURCE changed
+                    # from a disk-walk to this gate consultation): a governing
+                    # record existing does not by itself mean every listed
+                    # file is historic -- an unrecorded file can be a NEWER
+                    # round than the one gate currently selects (the ordinary
+                    # i8cx-shaped case: review round 1 governs, a fresher
+                    # round 4 sits unrecorded and should be PROMOTED, not
+                    # reconciled). Only when NOTHING unrecorded outranks the
+                    # governing iteration is "reconcile everything, record
+                    # nothing" the correct advice; collapsing this to "a
+                    # governing record exists, therefore reconcile
+                    # everything" would silently break that ordinary case.
+                    # claude-workflow-plugin-k6re R16-F4: `-ge`, not `-gt`.
+                    # An unrecorded file whose FILENAME-derived iteration
+                    # EQUALS the governing one is not "newer" -- it is the
+                    # same round, whose bytes have drifted from what is
+                    # recorded (the reachable trigger: record iteration N
+                    # through the real writer, then overwrite that SAME file
+                    # afterward without re-recording, so its hash no longer
+                    # matches recorded-hashes and it reads as "unrecorded"
+                    # despite sharing a round number with something that
+                    # already governs). Recommending review-record on it
+                    # would post a SECOND REVIEW-ARTIFACT v1 record at the
+                    # SAME iteration, deciding between the two only by
+                    # write-time -- exactly the ambiguity this whole
+                    # mechanism exists to avoid. `-ge` folds the equal case
+                    # into "already recorded, reconcile" (never record),
+                    # which is always safe regardless of which of the two
+                    # same-numbered artifacts is the "right" one.
+                    if [ -z "$unrecorded_max_iter" ] || [ "$unrecorded_gate_iter" -ge "$unrecorded_max_iter" ] 2>/dev/null; then
+                        unrecorded_current_advice="the round that should GOVERN this approval (iteration=$unrecorded_gate_iter) is ALREADY recorded -- per \`review-check.sh gate $tid\`, the ONE authoritative selector for this question. Do NOT run review-record on ANY of the files listed above, or you will invert cmd_gate's iteration-vs-timestamp agreement and wedge a selector that currently works (MEASURED: review-check.sh gate reports iteration=$unrecorded_gate_iter as today's governing round; gate's own ok=$unrecorded_gate_ok). Reconcile EVERY listed file instead, none of them governing: bash .claude/scripts/qa-gate.sh review-reconcile $tid --file <path> '<reason>' for each"
+                    else
+                        unrecorded_current_advice="review-check.sh gate reports iteration=$unrecorded_gate_iter as the CURRENT governing round, but the highest-iteration listed file, $unrecorded_max_iter_file (iteration=$unrecorded_max_iter), is a NEWER round than that and is ordinarily the one that should GOVERN this approval instead -- record THAT one with: bash .claude/scripts/qa-gate.sh review-record $tid --file $unrecorded_max_iter_file -- every OTHER listed file is historic and must be reconciled WITHOUT letting it govern: bash .claude/scripts/qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+                    fi
+                elif [ "$unrecorded_gate_ekey" = "review_artifact_missing" ]; then
+                    # gate found ZERO REVIEW-ARTIFACT v1 records at all: there
+                    # is genuinely nothing to consult yet, so (and ONLY so)
+                    # picking a file from the currently-unrecorded set on
+                    # disk is the best available signal -- the ordinary
+                    # first-review case this branch has always covered.
+                    if [ -n "$unrecorded_max_iter_file" ]; then
+                        unrecorded_current_advice="review-check.sh gate reports no governing record exists yet (review_artifact_missing), so the highest-iteration listed file, $unrecorded_max_iter_file (iteration=$unrecorded_max_iter), is ordinarily the round that should GOVERN this approval -- record THAT one with: bash .claude/scripts/qa-gate.sh review-record $tid --file $unrecorded_max_iter_file -- every OTHER listed file is historic and must be reconciled WITHOUT letting it govern: bash .claude/scripts/qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+                    else
+                        unrecorded_current_advice="review-check.sh gate reports no governing record exists yet (review_artifact_missing); if one of the listed files is the round that should GOVERN this approval, record THAT one with: bash .claude/scripts/qa-gate.sh review-record $tid --file <path> -- every OTHER listed file is historic and must be reconciled WITHOUT letting it govern: bash .claude/scripts/qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+                    fi
+                else
+                    # gate could not establish a single governing record for
+                    # a reason OTHER than "none exist" (selection
+                    # disagreement, a malformed candidate, an unreadable
+                    # comment set, or the gate call itself producing no
+                    # parseable envelope) -- do NOT guess which file should
+                    # govern. This refusal will not name one.
+                    unrecorded_current_advice="review-check.sh gate could not establish which round governs (ok=$unrecorded_gate_ok, error_key=${unrecorded_gate_ekey:-<none -- the gate call itself may have produced no parseable output>}) -- this refusal will NOT guess which listed file should be recorded, since a wrong guess can wedge a working selector while reconciling everything cannot. Run \`bash .claude/scripts/review-check.sh gate $tid\` directly to diagnose which round should govern, resolve that first, then reconcile every OTHER listed file: bash .claude/scripts/qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+                fi
+                # R15-GATE-CONSULT END (claude-workflow-plugin-k6re)
+                emit_error_json "approve" "$tid" "review_artifact_unrecorded" \
+                    "approve refused: ${#unrecorded_missing[@]} of ${#unrecorded_disk_artifacts[@]} review artifact(s) on disk for $tid have NO corresponding record (REVIEW-ARTIFACT v1 or REVIEW-ARTIFACT-RECONCILED v1), checked by CONTENT HASH (never mtime): $(printf '%s; ' "${unrecorded_missing[@]}"). The gate would otherwise report 'independent review verified' while a review round nobody folded into the trust chain sits beside it. DO NOT record every listed file the same way: $unrecorded_current_advice. Or, for a legitimate historic backlog that should not permanently strand this task, bypass with a recorded reason: bash .claude/scripts/qa-gate.sh approve $tid --accept-unrecorded-review '<reason>' '<summary>'" \
+                    "qa-gate.sh approve <task-id> [--accept-unrecorded-review '<reason>'] <summary>"
+                exit 4
+            fi
+            unrecorded_review_obs="; unrecorded-artifact check PASSED -- all ${#unrecorded_disk_artifacts[@]} on-disk review artifact(s) for $tid are bound by a REVIEW-ARTIFACT v1 or REVIEW-ARTIFACT-RECONCILED v1 record (verified by content hash)"
+            # claude-workflow-plugin-k6re R15-F3: --accept-unrecorded-review's
+            # bypass reason reaches this same observations string (branch
+            # above), so an acknowledged historic finding must too, or the
+            # one audited escape on this path whose subject is an unresolved
+            # finding is the one that leaves no trace where an approver
+            # looks. recorded-hashes' acknowledged_count is the SAME
+            # instrument this block already calls (unrecorded_hashes_out),
+            # never a second computation of the ack-marker grammar.
+            local unrecorded_ack_count
+            unrecorded_ack_count=$(printf '%s' "$unrecorded_hashes_out" | jq -r '.acknowledged_count // 0' 2>/dev/null)
+            case "$unrecorded_ack_count" in ''|*[!0-9]*) unrecorded_ack_count=0 ;; esac
+            if [ "$unrecorded_ack_count" -gt 0 ]; then
+                unrecorded_review_obs="$unrecorded_review_obs; $unrecorded_ack_count of the recorded artifact(s) for $tid carry an acknowledged open finding (review-reconcile --acknowledge-findings; see the REVIEW-ARTIFACT-RECONCILED v1 comment(s) for which finding and why)"
+            fi
+        fi
+    fi
+    # UNRECORDED-REVIEW-ARTIFACT-REFUSAL END (claude-workflow-plugin-k6re)
 
     # P7: the completion-contract audit fields. Declared OUTSIDE the sentinel
     # block below for the same two reasons impact_obs and review_obs are —
@@ -5145,11 +6329,14 @@ cmd_approve() {
     #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
     #     design_hash=<h> artifact_hash=<h> design_verdict_hash=<h> at <ts>: <summary>
     #     [ [impact-report bypass: <reason>]][ [review bypass: <reason>]]
+    #     [ [unrecorded review artifact accepted: <reason>]]
     #     [ [rubric mismatch: …]][ [reconstructed change set accepted: …]]
     #     [ [completion bypass: …]][ [completion cross-check: …]]
     #     [ [design bypass: <reason>]]
-    # Seven suffix spellings from six sites; the two `completion cross-check`
-    # bodies differ in text and share the marker. claude-workflow-plugin-i8cx
+    # Eight suffix spellings from seven sites (claude-workflow-plugin-k6re
+    # added the unrecorded-review-artifact bypass); the two `completion
+    # cross-check` bodies differ in text and share the marker.
+    # claude-workflow-plugin-i8cx
     # (operator ruling on rounds 6/7/8 independent review) REMOVED an eighth,
     # `[design conflict waived: units=<ids>]` — it existed only to shape the
     # marker a reader consumed, and that reader is gone; an open DESIGN-
@@ -5171,6 +6358,16 @@ cmd_approve() {
         # reads to skip its own review-discipline check for this record (the
         # F1 doc-only fast path is the intended producer).
         comment_suffix="$comment_suffix [review bypass: $review_bypass_reason]"
+    fi
+    # claude-workflow-plugin-k6re: same reasoning as every bracketed suffix
+    # here — "was a stray unrecorded review artifact known and waived, and
+    # why" is an audit question asked LATER, by someone reading the task, and
+    # an envelope read once by whoever typed the command is not where it
+    # survives. Bracketed suffix, after every machine token, so the
+    # `change_set_hash=` / `reviewed_by=` / `worktree=` captures stop where
+    # they always did.
+    if [ "$bypass_unrecorded_review" = "1" ]; then
+        comment_suffix="$comment_suffix [unrecorded review artifact accepted: $unrecorded_review_bypass_reason]"
     fi
     # R2-F2: the mismatch goes in the DURABLE record, not only the envelope.
     # An envelope is read once by whoever ran the command; the audit question
@@ -5551,7 +6748,7 @@ cmd_approve() {
     # status=approved exit checks this" true by construction rather than by
     # two authors each remembering to duplicate the check.
     emit_approve_success "$tid" "$approved_hash" "$expect_hash_arg" \
-        "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${completion_obs:-}${design_satisfied_obs:-}$binding_obs${design_binding_obs:-}${review_file_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
+        "qa-approved set; removed qa-gate-entered=$removed_entered qa-pending=$removed_pending; summary recorded; current-task + iteration state cleared (escalation labels also cleared if present)$sweep_obs$rubric_obs${reconcile_obs:-}${reconstructed_obs:-}$impact_obs$review_obs${unrecorded_review_obs:-}${completion_obs:-}${design_satisfied_obs:-}$binding_obs${design_binding_obs:-}${review_file_binding_obs:-}${expect_hash_obs:-}$stale_label_obs"
 }
 
 # Phase 5 / E8: write a feedback-type memory entry when a block fires. The
@@ -6567,7 +7764,27 @@ finding_id_in_latest_artifact() {
             return (n == 1) ? RLENGTH : 0
         }
         { n = art_prefix_len($0); if (n > 0) print substr($0, 1, n) }
-    ' <<<"$art" 2>/dev/null)
+    ' <<<"$art" 2>/dev/null) || true
+    # claude-workflow-plugin-k6re R17 class sweep: `|| true` added for
+    # consistency with this function's own `comments=`/`art=` assignments a
+    # few lines above (both already guarded) and defensively rather than in
+    # response to a reproduced failure — `$art` is free-text pulled straight
+    # from a bd comment, not JSON review-check.sh has already validated the
+    # way the review-record/-reconcile/completion-record functions' `$raw`
+    # is, so this awk invocation does not get the same "provably safe"
+    # argument the census gives those. awk's own match()/substr() do not
+    # error on non-matching input (a static, well-formed program simply
+    # prints nothing), so no failure mode was found here — but the class
+    # this whole sweep exists to close is exactly "not yet been shown to
+    # fail" standing in for "cannot fail", so it is guarded rather than left
+    # to make that argument implicitly. SEPARATELY (R19-F1 re-audit): this
+    # whole function (`finding_id_in_latest_artifact`) is called directly by
+    # both of its callers as `if ! finding_id_in_latest_artifact ...; then`
+    # — an exempt context that would transitively protect this line's own
+    # body regardless, the same reasoning as `has_label`'s (see its own
+    # comment) — so even an awk failure here would not currently reach
+    # either caller. Both reasons are independent; neither depends on the
+    # other.
     [ -z "$art_prefix" ] && return 1
     token=$(printf '%s' "$art_prefix" | sed -nE 's/.*findings=\[([^]]*)\].*/\1/p' || true)
     [ -z "$token" ] && return 1
@@ -6882,6 +8099,308 @@ cmd_review_record() {
     comment_text="REVIEW-ARTIFACT v1 iteration=$iter reviewer=$reviewer model=$model pin=$pin reviewed_hash=$hash risk_threshold=$rt verdict=$verdict stopped_by=$stopped findings=[$findings_token] artifact_hash=$artifact_hash at $ts: $summary"
     add_comment "$tid" "$comment_text"
     emit_json 1 "review-record" "$tid" "recorded" "comment posted at $ts: $comment_text; artifact $derived bound at artifact_hash=$artifact_hash over its RAW BYTES (reproduce with: shasum -a 256 $derived)"
+}
+
+# ---------------------------------------------------------------------------
+# review-reconcile <tid> --file <path> [--acknowledge-findings] <reason>
+# (claude-workflow-plugin-k6re R13-F1/F2, implementing the 2026-09-01
+# BACKFILL CONSTRAINT this task recorded on itself five days before the
+# headline fix shipped; --acknowledge-findings is R14-F5, see the
+# R14F5-FINDINGS-GUARD block below for what it guards)
+#
+# THE DEFECT THIS CLOSES. review-record writes the GOVERNING
+# REVIEW-ARTIFACT v1 grammar, stamped at WRITE time. review-check.sh gate's
+# K3 selector (ART-ITERATION-SELECT) requires a single record to be
+# SIMULTANEOUSLY max(iteration) AND max(at-timestamp), refusing with
+# review_artifact_selection_disagreement on disagreement. Backfilling
+# several historic, already-on-disk rounds through review-record in any
+# order the caller does not carefully control almost always produces that
+# disagreement: a low-iteration round backfilled LAST becomes the newest by
+# write-time while carrying the lowest iteration number of the set, so the
+# two axes point at different records. MEASURED, independently, on two
+# distinct shapes: an artifact set where the globally-highest iteration is
+# itself among the unrecorded ones (ordering the backfill numerically
+# ascending happens to fix this shape, by construction, because the highest
+# iteration is then also written last), and one where the globally-highest
+# iteration is ALREADY recorded (no order of backfilling the REMAINING,
+# lower-numbered set can ever make one of them simultaneously max-iteration,
+# so this shape wedges regardless of order). The second shape is why
+# "sort the backfill ascending" is not a fix, only a narrower trap: the L1
+# negative control below is built on exactly that shape rather than on the
+# shape that happens to look fixed.
+#
+# THE FIX IS NOT TO GOVERN. review-reconcile writes a SEPARATE,
+# NON-GOVERNING grammar -- REVIEW-ARTIFACT-RECONCILED v1 -- that
+# review-check.sh recorded-hashes accounts for (so qa-gate.sh approve's
+# UNRECORDED-REVIEW-ARTIFACT-REFUSAL stops firing on the reconciled file)
+# but that cmd_gate's K3 selector never matches at all (confirmed
+# structurally: the trigger pattern in gate requires "REVIEW-ARTIFACT v1 "
+# starting at position 1, and this grammar diverges at the very next
+# character after "REVIEW-ARTIFACT" -- a hyphen here, a space there -- so no
+# governing-selector code path is reachable from a reconciled record,
+# regardless of its iteration or timestamp). A historic round backfilled
+# this way is accounted for without ever becoming a K3 candidate, which is
+# the only shape of fix that works for BOTH backlog shapes above rather than
+# only the one that happens to look fixed under an ordering rule.
+#
+# WHAT review-reconcile IS FOR, and what it is NOT for: a review round that
+# genuinely happened in the past and needs to be accounted for without
+# retroactively changing which round governs the release verdict. The round
+# that SHOULD currently govern still belongs through review-record, not
+# through this command -- reconciling the CURRENT round would account for
+# its bytes without ever letting it win a selection, which defeats review
+# separation rather than repairing it. This command does not attempt to
+# detect that case; the operator names it via the required reason argument
+# instead, matching every other audited action in this file that could be
+# misused (an unexplained one is indistinguishable from evasion; an
+# explained one is visible in the audit trail for a human to question).
+#
+# --file, NOT stdin: unlike review-record, there is no Claude-lane
+# equivalent here (an in-session review authors a FRESH artifact; a
+# reconciliation is inherently about bytes that ALREADY exist on disk from a
+# past round), so this command has nothing to write and everything to
+# verify. Same canonical-path derivation, same containment check, same
+# validate-artifact schema check, same "hash the bytes that are actually
+# there" discipline as review-record -- copied rather than shared, one
+# function, matching this file's own convention of NOT abstracting a shared
+# recorder for design-record / review-record / completion-record, each of
+# which independently re-derives the same shape for its own grammar.
+cmd_review_reconcile() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "review-reconcile" "" "missing_task_id" \
+            "review-reconcile requires <task-id> as first positional argument" \
+            "qa-gate.sh review-reconcile <task-id> --file <path> '<reason>'"
+        exit 1
+    fi
+    shift || true
+
+    local input_path="" reason="" ack_findings=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                input_path="${2:-}"
+                if [ -z "$input_path" ]; then
+                    emit_error_json "review-reconcile" "$tid" "missing_file_path" \
+                        "--file requires a path argument" \
+                        "qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            # claude-workflow-plugin-k6re R14-F5: the audited escape for the
+            # findings-acknowledgment guard below. A boolean, not a second
+            # reason -- the <reason> argument this command already requires
+            # is where the operator explains WHY reconciling over an open
+            # finding is correct (most often: it was addressed in a later
+            # round), and that same text is what a future reader sees next
+            # to the marker this flag causes to be written.
+            --acknowledge-findings) ack_findings=1; shift || true ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                if [ -z "$reason" ]; then
+                    reason="$1"
+                else
+                    reason="$reason $1"
+                fi
+                shift || true
+                ;;
+        esac
+    done
+
+    if [ -z "$input_path" ]; then
+        emit_error_json "review-reconcile" "$tid" "missing_file_path" \
+            "review-reconcile requires --file <path> naming an EXISTING review artifact already at its canonical derived path -- there is no stdin mode, because reconciliation is about bytes that already exist on disk from a past round, not a fresh artifact to write" \
+            "qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+        exit 1
+    fi
+    if [ -z "$reason" ]; then
+        emit_error_json "review-reconcile" "$tid" "bypass_reason_required" \
+            "review-reconcile requires a non-empty reason explaining why this historic round is being accounted for without governing the release verdict; the reason is recorded in the durable comment, and an unexplained reconciliation is indistinguishable from quietly hiding a round that should have governed" \
+            "qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+        exit 1
+    fi
+
+    require_bd "review-reconcile" "$tid"
+
+    if [ ! -f "$input_path" ]; then
+        emit_error_json "review-reconcile" "$tid" "file_not_found" \
+            "artifact file does not exist: $input_path" \
+            "qa-gate.sh review-reconcile $tid --file <existing-path> '<reason>'"
+        exit 1
+    fi
+    local raw
+    if ! raw=$(cat -- "$input_path" 2>/dev/null); then
+        emit_error_json "review-reconcile" "$tid" "file_unreadable" \
+            "could not read artifact file: $input_path" \
+            "qa-gate.sh review-reconcile $tid --file <readable-path> '<reason>'"
+        exit 1
+    fi
+    if [ -z "$raw" ]; then
+        emit_error_json "review-reconcile" "$tid" "empty_input" \
+            "artifact file is empty: $input_path" \
+            "qa-gate.sh review-reconcile $tid --file <path> '<reason>'"
+        exit 1
+    fi
+
+    # Validate via the ONE validator (subprocess). Reconciling a malformed
+    # file would defeat the purpose of reconciling at all -- the grammar
+    # governs nothing, but the bytes it points at must still be a real
+    # review artifact, not arbitrary content.
+    local tmpf vout ok ekey
+    tmpf=$(mktemp -t qa-gate-reconcile.XXXXXX 2>/dev/null) || tmpf="$QA_TRACKING_DIR/.review-reconcile-$$.json"
+    printf '%s' "$raw" > "$tmpf"
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-artifact "$tmpf" 2>/dev/null || true)
+    rm -f "$tmpf" 2>/dev/null || true
+    ok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
+    if [ "$ok" != "true" ]; then
+        ekey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_artifact"' 2>/dev/null || echo "invalid_artifact")
+        emit_error_json "review-reconcile" "$tid" "$ekey" \
+            "artifact failed validation via review-check.sh: $ekey" \
+            "provide a valid review artifact (see review-check.sh validate-artifact schema)"
+        exit 1
+    fi
+
+    # THE DECOY-ARTIFACT CHECK, same as review-record RRV-GUARD: an artifact
+    # whose own task_id names a different task would make this reconciliation
+    # attest to the wrong task entirely.
+    local art_tid
+    art_tid=$(printf '%s' "$raw" | jq -r '.task_id' 2>/dev/null)
+    if [ "$art_tid" != "$tid" ]; then
+        emit_error_json "review-reconcile" "$tid" "artifact_task_id_mismatch" \
+            "the artifact's own task_id='$art_tid' is not the task being reconciled ('$tid')" \
+            "qa-gate.sh review-reconcile $art_tid --file <path> '<reason>'"
+        exit 1
+    fi
+
+    # CANONICAL PATH: same derivation review-record and the external
+    # reviewer driver both use. --file must ASSERT it, never name arbitrary
+    # bytes -- this is a read-only recorder (see below), so unlike
+    # review-record there is no write branch to fall back on if the file
+    # sits somewhere else.
+    local iter derived derived_rel
+    iter=$(printf '%s' "$raw" | jq -r '.iterations' 2>/dev/null)
+    derived=$(review_artifact_path_for "$tid" "$iter")
+    derived_rel="${derived#"$PROJECT_DIR"}"
+    derived_rel="${derived_rel#/}"
+    if [ "$input_path" != "$derived" ] && [ "$input_path" != "$derived_rel" ]; then
+        emit_error_json "review-reconcile" "$tid" "artifact_path_not_derived" \
+            "--file names '$input_path', which is not the canonical path for this artifact iteration: $derived, or its repo-relative spelling $derived_rel. review-reconcile only reads bytes already at their canonical location; it does not write" \
+            "qa-gate.sh review-reconcile $tid --file $derived '<reason>'"
+        exit 1
+    fi
+    if ! review_path_is_contained "$derived"; then
+        emit_error_json "review-reconcile" "$tid" "artifact_outside_review_dir" \
+            "the review artifact must live directly in $PROJECT_DIR/$REVIEW_ARTIFACT_SUBDIR, and '$derived' does not resolve to a file there -- check whether it is a symlink out of the directory" \
+            "inspect $derived, then re-run qa-gate.sh review-reconcile $tid --file $derived '<reason>'"
+        exit 1
+    fi
+    if [ ! -f "$derived" ]; then
+        emit_error_json "review-reconcile" "$tid" "artifact_not_found" \
+            "no review artifact at $derived -- review-reconcile only accounts for bytes that already exist there, it never writes them" \
+            "qa-gate.sh review-reconcile $tid --file $derived '<reason>'"
+        exit 1
+    fi
+
+    # THE HASH, over the RAW BYTES resting at the canonical path -- same
+    # instrument review-record uses, same refuse-before-hashing-a-placeholder
+    # discipline.
+    local manifest_tool artifact_hash art_hash_rc=0
+    manifest_tool="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+    if [ ! -f "$manifest_tool" ]; then
+        emit_error_json "review-reconcile" "$tid" "hash_tool_unavailable" \
+            "cannot hash the review artifact: workflow-manifest.sh is missing at $manifest_tool. FAILS CLOSED -- a record without a real binding is a record the gate would trust for nothing" \
+            "restore .claude/scripts/workflow-manifest.sh"
+        exit 2
+    fi
+    artifact_hash=$(bash "$manifest_tool" hash-file "$derived" 2>/dev/null) || art_hash_rc=$?
+    if [ "$art_hash_rc" -ne 0 ] || ! is_sha256_hex "$artifact_hash"; then
+        emit_error_json "review-reconcile" "$tid" "artifact_hash_unavailable" \
+            "the review artifact at $derived could not be hashed into 64 hex characters (workflow-manifest.sh hash-file exited $art_hash_rc, produced '${artifact_hash:-<empty>}')" \
+            "bash .claude/scripts/workflow-manifest.sh hash-file $derived"
+        exit 2
+    fi
+    assert_record_scalar "review-reconcile" "$tid" "artifact_hash" "$artifact_hash"
+    assert_record_scalar "review-reconcile" "$tid" "iterations" "$iter"
+
+    # THE FINDINGS-ACKNOWLEDGMENT GUARD (claude-workflow-plugin-k6re R14-F5).
+    # review-reconcile already validated .verdict and .findings[].severity
+    # via validate-artifact above but never looked at them — a historic
+    # round carrying an unresolved finding at/above its OWN risk_threshold
+    # could be reconciled silently, and since the RECONCILED comment below
+    # deliberately carries no findings (that data already has a home in the
+    # on-disk artifact), that finding would never enter the trust chain at
+    # all: gate's open-findings count only ever reads GOVERNING records.
+    # NOT a regression — with this whole mechanism absent, the same approve
+    # already succeeded and left no record at all, so the prior state was
+    # already "silently dropped, and unaudited" — but the review_artifact_
+    # unrecorded refusal now actively instructs operators to reconcile
+    # "every OTHER listed file" with no severity qualifier, so the edge sits
+    # directly downstream of a printed instruction rather than only in
+    # expert hands.
+    #
+    # NOT A BLANKET REFUSAL, deliberately: a historic critical is more often
+    # than not already addressed by a later round — that is close to what
+    # "historic" means in this exact context — so refusing unconditionally
+    # would strand a legitimate backlog reconciliation on precisely the case
+    # this mechanism exists to serve. The escape is the same "explain
+    # yourself" discipline every other guard in this file uses:
+    # --acknowledge-findings, required only when there is something to
+    # acknowledge, with the existing <reason> argument carrying the human
+    # explanation (most often: which later round actually addressed it).
+    #
+    # THE RANK TABLE is the same closed 5-value severity enum validate-
+    # artifact already enforces on this exact field (critical > high >
+    # medium > low > info) — not a second copy of review-check.sh's
+    # sev_rank/threshold_rank, which are private to that file's own K3
+    # machinery and answer a different question (which record GOVERNS);
+    # this is a one-shot membership test over a single already-validated
+    # artifact, computed once, not a running selector.
+    # R14F5-FINDINGS-GUARD BEGIN (claude-workflow-plugin-k6re)
+    local ack_findings_json ack_findings_count ack_findings_token
+    ack_findings_json=$(printf '%s' "$raw" | jq -c '
+        {"critical":5,"high":4,"medium":3,"low":2,"info":1} as $rank
+        | .risk_threshold as $rt
+        | (.findings // [])
+        | map(select(($rank[.severity] // 0) >= ($rank[$rt] // 999)))
+    ' 2>/dev/null)
+    [ -n "$ack_findings_json" ] || ack_findings_json="[]"
+    ack_findings_count=$(printf '%s' "$ack_findings_json" | jq 'length' 2>/dev/null || echo 0)
+    if [ "$ack_findings_count" -gt 0 ] && [ "$ack_findings" != "1" ]; then
+        ack_findings_token=$(printf '%s' "$ack_findings_json" | jq -r 'map(.id+":"+.severity) | join(",")' 2>/dev/null)
+        emit_error_json "review-reconcile" "$tid" "reconcile_open_findings_unacknowledged" \
+            "review-reconcile refused: the artifact at $derived (artifact_hash=$artifact_hash) carries $ack_findings_count finding(s) at or above its own risk_threshold=$(printf '%s' "$raw" | jq -r '.risk_threshold' 2>/dev/null) that would never enter the trust chain if reconciled as-is: $ack_findings_token. A REVIEW-ARTIFACT-RECONCILED v1 record carries no findings, so gate's open-findings count would read this round as clean. If this finding was actually resolved, record the round that resolved it through review-record and resolve-finding instead of reconciling this one. If it is genuinely historic (addressed or superseded in a LATER round already governing this task), re-run with --acknowledge-findings and state why in the reason: bash .claude/scripts/qa-gate.sh review-reconcile $tid --file $input_path --acknowledge-findings '<reason naming the round that addressed it>'" \
+            "qa-gate.sh review-reconcile $tid --file <path> --acknowledge-findings '<reason>'"
+        exit 1
+    fi
+    # R14F5-FINDINGS-GUARD END (claude-workflow-plugin-k6re)
+
+    # THE COMMENT ITSELF: deliberately minimal, and structurally distinct
+    # from REVIEW-ARTIFACT v1 starting at the very next character (a
+    # hyphen, not a space) so no shared prefix can ever let cmd_gate select
+    # on it. No reviewer/model/pin/verdict — those already exist in the
+    # on-disk artifact this comment points at by iteration and hash;
+    # duplicating them into a non-governing pointer record would be a second
+    # copy of data that already has one home. findings[] is the ONE
+    # exception, and only when non-empty at/above threshold: the bracketed
+    # marker below is NOT a copy of the findings data (no location/evidence/
+    # description, just id:severity), it is the audit trail proving this
+    # reconciliation was not a silent drop — see the guard immediately
+    # above. The reason argument is free text after the mandatory
+    # "at <ts>: " marker, matching every other writer in this file
+    # (resolve-finding own summary, arbitrate own rationale) -- anchored
+    # parsers never need to read past the marker they require, so free text
+    # after it is safe by the same construction the whole grammar family
+    # already relies on.
+    local ts comment_text ack_marker=""
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ "$ack_findings_count" -gt 0 ]; then
+        ack_marker="[open findings acknowledged: $(printf '%s' "$ack_findings_json" | jq -r 'map(.id+":"+.severity) | join(",")' 2>/dev/null)] "
+    fi
+    comment_text="REVIEW-ARTIFACT-RECONCILED v1 iteration=$iter artifact_hash=$artifact_hash at $ts: ${ack_marker}${reason}"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "review-reconcile" "$tid" "reconciled" "comment posted at $ts: $comment_text; artifact $derived accounted for at artifact_hash=$artifact_hash WITHOUT becoming a K3 selection candidate (reproduce the hash with: shasum -a 256 $derived)"
 }
 
 # ---------------------------------------------------------------------------
@@ -7508,10 +9027,22 @@ is_sha256_hex() {
 # get_labels already handles across the bd version range, so the same
 # ternary; `// ""` collapses "absent key" and "present but empty" to the one
 # answer a caller actually needs (falsy either way).
+#
+# claude-workflow-plugin-k6re R17 class sweep, CORRECTED by R19-F1 (see
+# get_labels()'s own comment above for the full correction — this function
+# is a byte-for-byte structural copy of get_labels() and the same correction
+# applies verbatim): `raw=$(bd show ...)` followed by `rc=$?` was never at
+# risk of an abort skipping `rc=$?` in the first place, because this
+# function too is invoked ONLY through `$(...)` (its one caller,
+# `parent=$(get_parent_epic "$tid") || parent=""` in grilling_record_exists,
+# still captures output via command substitution regardless of the `||`
+# beside it), and command substitution does not enforce errexit within its
+# own subshell on this build. `|| rc=$?` is kept as the same explicit-
+# contract hygiene get_labels' own comment describes, not as a fix for a
+# reachable defect.
 get_parent_epic() {
-    local raw rc
-    raw=$(bd show "$1" --json 2>/dev/null)
-    rc=$?
+    local raw rc=0
+    raw=$(bd show "$1" --json 2>/dev/null) || rc=$?
     if [ "$rc" -ne 0 ]; then
         return "$rc"
     fi
@@ -11459,6 +12990,7 @@ case "$SUB" in
     choose)       cmd_choose "$@" ;;
     grade-record) cmd_grade_record "$@" ;;
     review-record)   cmd_review_record "$@" ;;
+    review-reconcile) cmd_review_reconcile "$@" ;;
     completion-record) cmd_completion_record "$@" ;;
     grilling-record) cmd_grilling_record "$@" ;;
     design-record)   cmd_design_record "$@" ;;

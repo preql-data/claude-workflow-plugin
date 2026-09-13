@@ -4584,6 +4584,50 @@ Diagnose the two records this compared:
                 #     it is qzv's own refusal, and until now it was swallowed
                 #     too, so the guard qzv shipped ended in a silent release.
                 #   * exit 3 — approve rolled back a partial label write.
+                #   * review_artifact_unrecorded (claude-workflow-plugin-k6re,
+                #     R13-F3) — a stray review artifact under docs/reviews/ for
+                #     this task, not named in changed-files.txt, whose content
+                #     hash binds no REVIEW-ARTIFACT v1 / REVIEW-ARTIFACT-
+                #     RECONCILED v1 record. This arm calls approve with
+                #     --no-review (below) but carries NO --accept-unrecorded-
+                #     review slot, and the unrecorded-artifact check sits
+                #     OUTSIDE the bypass_review guard in cmd_approve
+                #     deliberately (qa-gate.sh: the two are orthogonal facts),
+                #     so --no-review does not waive it here either — reachable
+                #     precisely because nothing in this call clears it.
+                #     Recorded via review-record (the current round) or
+                #     review-reconcile (a historic one), same as any other
+                #     caller of approve.
+                #   * review_check_unavailable — this arm now depends on
+                #     review-check.sh existing to answer the unrecorded-
+                #     artifact question, in addition to the review-separation
+                #     dependency it already had. Same degraded-install class as
+                #     impact_report_unverifiable above, verified with the SAME
+                #     technique: a k6re-stripped build releases (rc=0) where
+                #     the shipped build blocks (rc=4) on an identical missing
+                #     review-check.sh, isolating the dependency this bullet
+                #     names.
+                #   * review_recorded_hashes_unavailable (claude-workflow-
+                #     plugin-k6re, R14-F6) — review-check.sh's OWN file is
+                #     present (review_check_unavailable above does not fire),
+                #     but its `recorded-hashes` subcommand itself exits
+                #     non-zero or answers ok:false at runtime, e.g. bd is on
+                #     PATH but $PROJECT_DIR/.beads is missing (recorded-hashes'
+                #     own bd_unavailable arm) — so whether every on-disk
+                #     artifact under docs/reviews/ is accounted for cannot be
+                #     verified. FAILS CLOSED the same way review_check_
+                #     unavailable does, distinguished only by WHICH half of
+                #     the dependency broke (the file, or the command it runs).
+                #   * review_dir_unreadable (claude-workflow-plugin-k6re,
+                #     R16-F2) — docs/reviews/ itself exists but is not
+                #     readable and/or not traversable (or is a dangling
+                #     symlink), so whether any on-disk artifact for this
+                #     task sits inside it cannot be verified — an unlistable
+                #     directory is indistinguishable from an empty one to a
+                #     glob, and the glob used to read that ambiguity as a
+                #     pass. FAILS CLOSED the same way its two siblings above
+                #     do, one level up: the file being enumerable, not just
+                #     the file existing.
                 # NOT reachable: change_set_reconstructed and
                 # tracker_unreconcilable. The hook's own unconditional
                 # reconcile-tracker fail-closes above, so the in-arm `enter` is

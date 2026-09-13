@@ -39,6 +39,29 @@
 #      load-bearing rather than incidental. TEXT-anchored on the sentinels
 #      (LESSONS llh.20), never on line numbers.
 #
+# claude-workflow-plugin-k6re (test-suite split, 2026-09-12): Sections 7
+# through 8.14 — the UNRECORDED-REVIEW-ARTIFACT-REFUSAL family and its
+# review-reconcile governance, added across independent review rounds 13-16
+# — moved to unrecorded-review-artifact.test.sh. NOT a content change: the
+# pre-split file (264 assertions total, confirmed via `bash
+# review-separation.test.sh` run standalone to completion) splits into 94
+# assertions staying here in Sections 1-6, and 170 moving to the companion
+# file (167 call-sites there; the +3 is Section 8.3's own
+# `for i in 3 1 4 2` loop around one assert_eq, which runs four times).
+# Reason: this file alone had grown from 955 to 2146 lines (2.2x) across
+# those rounds and crossed run-tests.sh's SPEC_TIMEOUT_S=900 per-spec
+# watchdog cap under the tier's own contention — QA round 16 had already
+# measured it at 227/227 assertions in 849s (94% of budget), and the
+# round-16 fix-verification work (old Sections 8.12-8.14) pushed it over:
+# the full L1 tier killed it at 250 assertions against the 900s cap, tree
+# dc4a4c8d, 2026-09-10 16:25:52. Run standalone (no watchdog), the pre-split
+# file completed all 264 assertions but took ~1000s real time — genuinely
+# over budget, not merely close to it. Splitting restores real margin to
+# both halves rather than raising a cap for a spec that had simply outgrown
+# it. EXPECTED_SPECS in run-tests.sh moved 60 -> 61 in the same change. See
+# unrecorded-review-artifact.test.sh's own header for the full account and
+# the section-by-section table of contents for 7 through 8.14.
+#
 # Conventions mirror qa-gate-choose.test.sh / qa-gate-grade-record.test.sh:
 # plain bash, `set -u`, local assert helpers, trailing summary, tempdir fixture
 # with a pass-through bd shim, skip-with-log when bd is absent in CI.

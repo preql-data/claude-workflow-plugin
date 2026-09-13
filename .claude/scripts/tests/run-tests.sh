@@ -630,31 +630,89 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # frontend.md/devops.md producer-wiring prose (a structural census plus a
 # leg that the named subcommand is actually recognised by the CLI
 # dispatcher).
+#
+# 60 -> 61 (claude-workflow-plugin-k6re, test-suite split, 2026-09-12): NOT
+# new coverage — review-separation.test.sh's Sections 7 through 8.14 (the
+# UNRECORDED-REVIEW-ARTIFACT-REFUSAL family and its review-reconcile
+# governance, added across independent review rounds 13-16) moved verbatim
+# into a new file, unrecorded-review-artifact.test.sh. The pre-split file
+# had grown from 955 to 2146 lines (2.2x) across those rounds and, run
+# standalone with no watchdog, completed all 264 assertions in ~1000s real
+# time — over this file's own SPEC_TIMEOUT_S=900 cap, not merely close to
+# it (QA round 16 had measured 227/227 in 849s before the round's own
+# fix-verification legs, Sections 8.12-8.14, pushed it over: the full L1
+# tier killed it at 250 assertions, tree dc4a4c8d, 2026-09-10 16:25:52).
+# 94 of the 264 assertions stayed behind in review-separation.test.sh's
+# Sections 1-6; 170 moved (167 call-sites in the new file; the +3 is a
+# single `for i in 3 1 4 2` loop around one assert_eq in old Section 8.3,
+# which runs four times — a static grep of assert_* call sites therefore
+# undercounts the moved file's own runtime total by exactly 3, not a
+# transcription loss). Both halves measured standalone, alone, nothing else
+# running (`/usr/bin/time -p bash <file>`, this tree): review-separation.
+# test.sh 94/94 in 315.62s real (35% of the 900s cap);
+# unrecorded-review-artifact.test.sh 170/170 in 676.60s real (75.2% of the
+# cap) — the tighter of the two, closer to the line than declared safe, so
+# flagged plainly rather than rounded down. See both files' own headers for
+# the full account.
+#
+# 170 -> 185 (claude-workflow-plugin-k6re R17-F1 fix round, 2026-09-13): the
+# same file gained Section 8.15/8.15.M (15 assertions) pairing-testing the
+# R17-F1 fix. `/usr/bin/time -p bash unrecorded-review-artifact.test.sh`,
+# standalone, no other load: 185/185 assertions, exit 0, 756.16s real
+# (implementer); 771.35s (QA's independent confirming run, same tree). See
+# the SPEC_TIMEOUT_S comment below for the updated headroom this moves.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=60
+EXPECTED_SPECS=61
 
-# Per-spec wall-clock cap (seconds). HEADROOM IS 3.7x, NOT 5x. The earlier
-# "~5x" here was sized against an idle-machine figure (review-separation 183s)
-# that does not bound anything: a cap is only ever tested under load, and
-# under load the same specs run half again as long.
+# Per-spec wall-clock cap (seconds). HEADROOM IS 1.167x, NOT 3.7x (nor the
+# 1.31x this comment stated one round ago — see below). The 3.7x figure went
+# stale exactly the way it once replaced a stale "~5x", and the 1.31x figure
+# that replaced IT went stale the same way one round later: each reasoned
+# from the worst case measured at the time (originally four CI-shaped tier
+# runs at 535c89a: qa-gate-grade-record.test.sh 243s, review-separation.
+# test.sh 228s, qa-gate-choose.test.sh 120s — 900/243 = 3.7x), and nothing
+# flagged it when a later spec grew past that worst case — twice now.
 #
-# Measured across four full CI-shaped runs of this tier at 535c89a + this
-# change set, on the same dev box, with this command over each run's log:
-#   $ grep -oE '^--- [a-z0-9.-]+\.sh: PASSED[^(]*\([0-9]+ assertion\(s\) in [0-9]+s\)' <log> \
-#       | sed -E 's/^--- ([^:]+).*in ([0-9]+)s\)/\2 \1/' | sort -rn | head -3
-# Worst observed, in QA's independent run under heavy contention:
-#   qa-gate-grade-record.test.sh 243s, review-separation.test.sh 228s,
-#   qa-gate-choose.test.sh 120s. My own three runs, lighter load, peaked at
-#   186s (review-separation); everything outside that top three is under 90s.
-# 900/243 = 3.7x against the worst figure anyone has measured here.
+# Current worst observed, standalone (`/usr/bin/time -p bash <file>`, no
+# other load, no watchdog outside run-tests.sh's own harness), MEASURED
+# 2026-09-13 against this round's own 170 -> 185 assertion growth (see
+# EXPECTED_SPECS's comment above): unrecorded-review-artifact.test.sh,
+# 185/185 assertions, exit 0 — 756.16s (implementer), 771.35s (QA's
+# independent confirming run, same tree). The prior round's figures
+# (170/170 — 676.60s implementer, 684.91s QA, 711s implementer's own
+# contended full-tier run) are superseded, not merely rounded; this file
+# grew again, the way it was always going to. review-separation.test.sh,
+# 94/94 assertions, exit 0 — 315.62s (implementer) / 365.95s (QA) —
+# comfortably under half the cap either way, unchanged this round.
+# 900/771.35 = 1.167x against the worst figure anyone has measured here —
+# the ratio moved because the worst-case input moved AGAIN (this file's own
+# pairing test for R17-F1, see EXPECTED_SPECS above), not because the cap
+# did.
 #
-# Deliberately NOT raised to restore a round multiple. ubuntu-latest is
-# typically slower than this box, so the real CI margin is smaller again, and
-# the number that matters is "comfortably above the slowest legitimate spec
-# under contention", not the ratio. Only a genuine hang or severe
-# environmental degradation (mwrb: five stale bd daemons made every bd call
-# take >1s) should reach it — if a real spec ever does, raise this and say
-# what you measured, do not delete the cap.
+# Also over the cap and unrelated to this change set: design-review-
+# record.test.sh, reported at 987s standalone — tracked separately on
+# claude-workflow-plugin-fcq3, not touched here.
+#
+# RULING (claude-workflow-plugin-k6re R19-F2): 84-86% of cap SHIPS for this
+# task. The tier passes with the file inside, this round's growth (+71-95s
+# depending which pair of figures is compared) is roughly half the prior
+# round's (~147s), and requiring a second split as a precondition of a P0
+# bug fix is scope creep. But 144s of headroom (900 - 756.16) is one
+# ordinary round's growth, the LAST split in this exact file was done
+# reactively AFTER crossing the cap once already, and a sibling spec
+# (design-review-record.test.sh, named above) is over the cap RIGHT NOW.
+# File the next split as a follow-up task with a concrete numeric trigger
+# (e.g. split at 800s standalone, or at the next round that adds assertions
+# to this file, whichever comes first) rather than leaving "ships for now"
+# as a header note with no owner.
+#
+# Deliberately NOT raised. ubuntu-latest is typically slower than the boxes
+# these numbers were measured on, so the real CI margin is smaller again —
+# and at 1.167x standalone the margin for the tightest spec is thinner than
+# it was, not comfortable. Only a genuine hang or severe environmental
+# degradation (mwrb: five stale bd daemons made every bd call take >1s) is
+# meant to reach the cap outright — if a real spec ever does, raise this and
+# say what you measured, do not delete the cap.
 SPEC_TIMEOUT_S="${SPEC_TIMEOUT_S:-900}"
 case "$SPEC_TIMEOUT_S" in
     ''|*[!0-9]*)

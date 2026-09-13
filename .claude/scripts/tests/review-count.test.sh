@@ -2648,6 +2648,244 @@ assert_eq "14.4k discriminator: the mutant still reports the real open HIGH on t
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 15: recorded-hashes -- the UNION of every well-formed REVIEW-ARTIFACT v1 record's artifact_hash, never gate's single K3 winner (claude-workflow-plugin-k6re, the HEADLINE defect) ==="
+# THE DEFECT THIS SUBCOMMAND FEEDS THE FIX FOR: codex-review.sh writes
+# docs/reviews/<tid>-r<n>.json and exits; nothing calls qa-gate.sh
+# review-record for it unless an agent remembers to. qa-gate.sh's
+# UNRECORDED-REVIEW-ARTIFACT-REFUSAL (unrecorded-review-artifact.test.sh
+# Section 7) drives this subcommand through the REAL approve path end to
+# end; this section proves the SELECTOR itself, offline, against the
+# --comments-json seam -- the same split of responsibility
+# review-count.test.sh already uses for `gate` vs. the end-to-end
+# unrecorded-review-artifact.test.sh coverage.
+run_rh() {
+    # run_rh <comments-json> -> sets RH_OUT / RH_EXIT
+    printf '%s' "$1" > "$WORK/comments.json"
+    RH_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RCHECK" recorded-hashes t-1 --comments-json "$WORK/comments.json" 2>/dev/null)
+    RH_EXIT=$?
+}
+RH_OUT=""
+RH_EXIT=0
+hashes_of() { printf '%s' "$1" | jq -c '.hashes | sort' 2>/dev/null || echo "null"; }
+count_of()  { printf '%s' "$1" | jq -r '.count // -1' 2>/dev/null || echo -1; }
+
+# k6re_art <iteration> <artifact-hash> <timestamp> [reviewer] -> a well-formed
+# REVIEW-ARTIFACT v1 record carrying artifact_hash= (art_hashed above, from
+# the 2ty ROUNDS section, deliberately omits it -- that field is optional in
+# the grammar, so a record without one is well-formed but has nothing for
+# THIS subcommand to extract).
+k6re_art() {
+    printf 'REVIEW-ARTIFACT v1 iteration=%s reviewer=%s model=m pin=m reviewed_hash=h risk_threshold=high verdict=approve stopped_by=verdict findings=[] artifact_hash=%s at %s: round %s' \
+        "$1" "${4:-qa-claude}" "$2" "$3" "$1"
+}
+
+# 15.1 Zero REVIEW-ARTIFACT records at all -> empty set, not an error.
+run_rh "$(mk_comments "$IMPL_BACKEND")"
+assert_eq "15.1 no records: exit 0" "0" "$RH_EXIT"
+assert_eq "15.1 ...ok=true" "true" "$(printf '%s' "$RH_OUT" | jq -r '.ok')"
+assert_eq "15.1 ...hashes=[]" "[]" "$(hashes_of "$RH_OUT")"
+assert_eq "15.1 ...count=0" "0" "$(count_of "$RH_OUT")"
+
+# 15.2 One well-formed record -> its hash is in the set.
+run_rh "$(mk_comments "$IMPL_BACKEND" "$(k6re_art 1 aaaa1111 2026-01-01T00:00:01Z)")"
+assert_eq "15.2 one record: exit 0" "0" "$RH_EXIT"
+assert_eq "15.2 ...hashes=[aaaa1111]" '["aaaa1111"]' "$(hashes_of "$RH_OUT")"
+assert_eq "15.2 ...count=1" "1" "$(count_of "$RH_OUT")"
+
+# 15.3 THE CORE DISTINCTION FROM `gate`: THREE well-formed records at
+# different iterations/timestamps, unambiguously K3-selectable (iteration and
+# timestamp agree on a single winner: iteration=5). `gate` would report
+# information about ONLY that one record -- reproduced directly below, so
+# this is a measured contrast, not an assertion about a function this file
+# does not call. recorded-hashes must return the UNION of all three: this is
+# the corpus shape this fix targets (claude-workflow-plugin-i8cx: many
+# superseded-but-real rounds, one K3 winner).
+K6RE_MULTI=$(mk_comments "$IMPL_BACKEND" \
+    "$(k6re_art 1 aaaa1111 2026-01-01T00:00:01Z)" \
+    "$(k6re_art 3 cccc3333 2026-01-01T00:00:02Z)" \
+    "$(k6re_art 5 bbbb2222 2026-01-01T00:00:03Z)")
+run_rh "$K6RE_MULTI"
+assert_eq "15.3a THREE recorded rounds: exit 0" "0" "$RH_EXIT"
+assert_eq "15.3b ...hashes= the UNION of all three, not just the K3 winner's" \
+    '["aaaa1111","bbbb2222","cccc3333"]' "$(hashes_of "$RH_OUT")"
+assert_eq "15.3c ...count=3" "3" "$(count_of "$RH_OUT")"
+# The measured contrast: `gate` over the IDENTICAL comment stream reports the
+# K3 winner (iteration=5) alone -- its artifact.artifact_hash names ONE hash,
+# not the set. This is why UNRECORDED-REVIEW-ARTIFACT-REFUSAL cannot be built
+# on `gate`'s own selection.
+run_gate "$K6RE_MULTI"
+assert_eq "15.3d CONTRAST: gate selects iteration=5 as the sole K3 winner" \
+    "5" "$(printf '%s' "$GATE_OUT" | jq -r '.artifact.iteration')"
+assert_eq "15.3e CONTRAST: ...gate's own artifact_hash names only ONE of the three hashes" \
+    "bbbb2222" "$(printf '%s' "$GATE_OUT" | jq -r '.artifact.artifact_hash')"
+
+# 15.4 A MALFORMED record (non-numeric iteration) contributes NOTHING -- same
+# "never trust a malformed candidate's hash" doctrine the removed
+# ART-QUARANTINE-HASH mechanism documents (a malformed candidate cannot
+# attest to anything, so this subcommand must not surface its hash either).
+run_rh "$(mk_comments "$IMPL_BACKEND" \
+    "$(k6re_art 1 aaaa1111 2026-01-01T00:00:01Z)" \
+    "REVIEW-ARTIFACT v1 iteration=abc reviewer=qa-claude model=m pin=m reviewed_hash=h risk_threshold=high verdict=approve stopped_by=verdict findings=[] artifact_hash=malformed9999 at 2026-01-01T00:00:02Z: bad iteration")"
+assert_eq "15.4a malformed iteration alongside a well-formed record: exit 0 (this subcommand never refuses, it reports)" "0" "$RH_EXIT"
+assert_eq "15.4b ...only the well-formed record's hash is in the set" \
+    '["aaaa1111"]' "$(hashes_of "$RH_OUT")"
+assert_eq "15.4c ...the malformed record's hash never appears anywhere in the envelope" \
+    "0" "$(printf '%s' "$RH_OUT" | grep -c malformed9999)"
+
+# 15.5 ANTI-INJECTION: a findings=[...] bracket attempting to smuggle its own
+# "artifact_hash=" ahead of the real one is refused the SAME way any other
+# ERE/glob-metacharacter injection into findings=[...] is (claude-workflow-
+# plugin-k6re recurrence 5's allowlist: `=` is not in ART_FINDINGS_LIST_RE's
+# alphabet at all) -- the whole record fails art_prefix_len() and
+# contributes NOTHING, rather than laundering the attacker's chosen value.
+run_rh "$(mk_comments "$IMPL_BACKEND" \
+    "REVIEW-ARTIFACT v1 iteration=1 reviewer=x model=m pin=m reviewed_hash=h risk_threshold=high verdict=findings stopped_by=verdict findings=[R1-F1:high,artifact_hash=DEADBEEF] artifact_hash=REALHASH at 2026-01-01T00:00:00Z: adversarial bracket")"
+assert_eq "15.5a adversarial bracket: exit 0" "0" "$RH_EXIT"
+assert_eq "15.5b ...hashes=[] -- neither the smuggled nor the real hash surfaces (the whole record is malformed)" \
+    "[]" "$(hashes_of "$RH_OUT")"
+
+# 15.6 DEDUP: two records (e.g. a re-record over identical bytes) sharing one
+# artifact_hash collapse to a single set member.
+run_rh "$(mk_comments "$IMPL_BACKEND" \
+    "$(k6re_art 1 samehash 2026-01-01T00:00:00Z)" \
+    "$(k6re_art 1 samehash 2026-01-01T00:00:01Z)")"
+assert_eq "15.6a duplicate hash: count=1 (deduplicated)" "1" "$(count_of "$RH_OUT")"
+assert_eq "15.6b ...hashes=[samehash]" '["samehash"]' "$(hashes_of "$RH_OUT")"
+
+# 15.7 FIRSTLINE-ONLY GUARD: a comment whose free-text summary continues past
+# an embedded literal newline into something shaped like a second,
+# well-formed-looking record must not leak that second hash -- the same
+# ART-FIRSTLINE-GUARD discipline `gate` and finding_id_in_latest_artifact
+# both already apply (claude-workflow-plugin-k6re R4-F1).
+K6RE_ML=$(printf '%s\n%s' \
+    "$(k6re_art 1 realhash 2026-01-01T00:00:00Z)" \
+    "$(k6re_art 99 injectedhash 2026-01-01T00:00:01Z injected)")
+run_rh "$(mk_comments "$IMPL_BACKEND" "$K6RE_ML")"
+assert_eq "15.7a multi-line comment: only the FIRST line's hash is extracted" \
+    '["realhash"]' "$(hashes_of "$RH_OUT")"
+
+# 15.8 Usage errors.
+RC=0
+USAGE_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RCHECK" recorded-hashes 2>/dev/null) || RC=$?
+assert_eq "15.8a missing task-id: exit 1" "1" "$RC"
+assert_eq "15.8b ...error_key=usage" "usage" "$(ekey_of "$USAGE_OUT")"
+RC=0
+BADFLAG_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$RCHECK" recorded-hashes t-1 --nope 2>/dev/null) || RC=$?
+assert_eq "15.8c unknown flag: exit 1" "1" "$RC"
+assert_eq "15.8d ...error_key=usage" "usage" "$(ekey_of "$BADFLAG_OUT")"
+
+# 15.9 META: REVERT THE UNION TO A SINGLE MATCH, WATCH AN EARLIER REAL HASH
+# GO MISSING. The single textual change this fix's value rests on is
+# collecting EVERY well-formed match rather than one -- reverting the final
+# `| LC_ALL=C sort -u` to `| tail -1` (keeping the identical extraction
+# grammar) reproduces exactly the "single winner" shape this subcommand
+# exists to avoid, on the SAME three-record fixture as 15.3.
+#
+# THE SED PATTERN IS ANCHORED ON THE FULL "sed -n 's/^HASH //p' | LC_ALL=C
+# sort -u)" TAIL, not merely on "| LC_ALL=C sort -u)" (claude-workflow-
+# plugin-k6re R15-F3): recorded-hashes now derives a SECOND, purely
+# additive field the same way (acknowledged_hashes, via "sed -n
+# 's/^ACK //p' | LC_ALL=C sort -u)"), so the shorter pattern would touch
+# BOTH lines -- the exact "same-shaped declaration in two places doubles a
+# sed mutation's footprint" class 14.4c/R13-F7 already caught once, this
+# time on this subcommand's return-value derivation rather than a grammar
+# declaration. The longer, HASH-branch-specific anchor is what keeps this
+# mutation scoped to the property 15.9 actually tests (the GOVERNING/
+# recognized hash set), never the separate acknowledged-hash set 8.11
+# covers.
+K6RE_TAIL1_REVERT="$WORK/review-check-k6re-recordedhashes-tail1.sh"
+sed "s/sed -n 's\/^HASH \/\/p' | LC_ALL=C sort -u)/sed -n 's\/^HASH \/\/p' | tail -1)/" "$RCHECK" > "$K6RE_TAIL1_REVERT"
+chmod +x "$K6RE_TAIL1_REVERT"
+assert_eq "15.9a META: the tail-1 revert applied (mutant differs from source)" "differs" \
+    "$(cmp -s "$RCHECK" "$K6RE_TAIL1_REVERT" && echo identical || echo differs)"
+# R13-F7 (claude-workflow-plugin-k6re QA round 13): the FOOTPRINT assertion
+# 14.4c already applies to the R7-F1 revert -- proving the mutation touches
+# EXACTLY the one targeted line, not merely THAT it touches something --
+# extended here to this subcommand's own revert. This is the same class of
+# regression this round shipped by hand once already: a same-named,
+# same-shaped declaration living in TWO places in this file made an earlier
+# sed-based mutation here double its footprint unnoticed until 14.4c (not
+# this section) caught it. Guarding 15.9 the same way closes the class for
+# any FUTURE second occurrence of this exact sed target too, not only the
+# one already found and fixed.
+assert_eq "15.9a2 META: the tail-1 revert touches EXACTLY one line, nothing else" "1" \
+    "$(diff "$RCHECK" "$K6RE_TAIL1_REVERT" | grep -c '^<')"
+assert_eq "15.9b META: mutated checker parses" "0" \
+    "$(bash -n "$K6RE_TAIL1_REVERT" 2>/dev/null && echo 0 || echo 1)"
+printf '%s' "$K6RE_MULTI" > "$WORK/comments.json"
+META_TAIL1_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$K6RE_TAIL1_REVERT" recorded-hashes t-1 --comments-json "$WORK/comments.json" 2>/dev/null)
+META_TAIL1_EXIT=$?
+assert_eq "15.9c META: WITHOUT the union, exit is still 0 (the mutant does not crash, it silently under-reports)" \
+    "0" "$META_TAIL1_EXIT"
+assert_eq "15.9d META: ...count drops from 3 to 1 -- the exact under-reporting this fix prevents" \
+    "1" "$(count_of "$META_TAIL1_OUT")"
+assert_eq "15.9e META: ...an EARLIER real recorded hash (aaaa1111, iteration=1) silently disappears" \
+    "0" "$(printf '%s' "$META_TAIL1_OUT" | jq -c '.hashes' | grep -c aaaa1111)"
+# Discriminator: the mutant still functions correctly on the ordinary
+# single-record case -- proving 15.9c-e measure the union behavior
+# specifically, not a broken script.
+printf '%s' "$(mk_comments "$IMPL_BACKEND" "$(k6re_art 1 aaaa1111 2026-01-01T00:00:01Z)")" > "$WORK/comments.json"
+META_TAIL1_DISCRIM=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$K6RE_TAIL1_REVERT" recorded-hashes t-1 --comments-json "$WORK/comments.json" 2>/dev/null)
+assert_eq "15.9f discriminator: the mutant still reports a lone record's hash correctly" \
+    '["aaaa1111"]' "$(printf '%s' "$META_TAIL1_DISCRIM" | jq -c '.hashes | sort')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 15.10: a RECONCILED record ABOVE the governing iteration -- the only shape that can distinguish RECOGNIZED from SELECTABLE (claude-workflow-plugin-k6re R14-F2) ==="
+# Every RECONCILED fixture before this one (15.1-15.9, and
+# unrecorded-review-artifact.test.sh's 8.3f) reconciles iterations BELOW
+# the governing one, which would pass even if RECONCILED records were
+# fully selectable by gate's K3 trigger -- that file's 8.5 META strip
+# catches lost RECOGNITION (removing it makes
+# approve refuse again), not gained SELECTION (a reader or trigger loosened
+# into treating a reconciled record as a K3 candidate). This is the missing
+# negative control R14-F2 named.
+
+# k6re_reconciled <iteration> <artifact-hash> <timestamp> <reason> -> a
+# well-formed REVIEW-ARTIFACT-RECONCILED v1 record, mirroring k6re_art's
+# shape for the non-governing grammar.
+k6re_reconciled() {
+    printf 'REVIEW-ARTIFACT-RECONCILED v1 iteration=%s artifact_hash=%s at %s: %s' \
+        "$1" "$2" "$3" "$4"
+}
+
+K6RE_ABOVE_GOV=$(k6re_art 3 gov3hash 2026-01-01T00:00:00Z)
+K6RE_ABOVE_RECON=$(k6re_reconciled 999 recon999hash 2026-01-01T00:00:01Z "historic round, superseded by iteration 3")
+
+run_rh "$(mk_comments "$IMPL_BACKEND" "$K6RE_ABOVE_GOV" "$K6RE_ABOVE_RECON")"
+assert_eq "15.10a recorded-hashes recognizes BOTH the governing (iteration=3) and the ABOVE-governing reconciled (iteration=999) hash" \
+    '["gov3hash","recon999hash"]' "$(hashes_of "$RH_OUT")"
+
+run_gate "$(mk_comments "$IMPL_BACKEND" "$K6RE_ABOVE_GOV" "$K6RE_ABOVE_RECON")"
+assert_eq "15.10b THE SAFETY PROPERTY: gate still selects the LOWER governing iteration=3, never the reconciled iteration=999" \
+    "3" "$(printf '%s' "$GATE_OUT" | jq -r '.artifact.iteration')"
+assert_eq "15.10c ...artifact_hash is the governing one, not the reconciled one" \
+    "gov3hash" "$(printf '%s' "$GATE_OUT" | jq -r '.artifact.artifact_hash')"
+
+# 15.10d-g ADVERSARIAL REASON on the above-governing shape specifically: an
+# embedded newline plus a complete fake governing record at an iteration
+# HIGHER than either real record (9999), aimed exactly at the shape this
+# leg exists to guard -- the firstline-only reduction both cmd_gate and
+# cmd_recorded_hashes apply must still cut this off at line 1, same as the
+# newline-injection legs proven elsewhere, but never measured on THIS shape.
+K6RE_ABOVE_ADVERSARIAL_REASON="historic round
+$(k6re_art 9999 fakehash 2026-01-01T00:00:02Z)"
+K6RE_ABOVE_RECON_ADV=$(k6re_reconciled 999 recon999hash 2026-01-01T00:00:01Z "$K6RE_ABOVE_ADVERSARIAL_REASON")
+
+run_gate "$(mk_comments "$IMPL_BACKEND" "$K6RE_ABOVE_GOV" "$K6RE_ABOVE_RECON_ADV")"
+assert_eq "15.10d adversarial reason (embedded newline + fake iteration=9999 record) on the above-governing shape: gate envelope UNCHANGED, still iteration=3" \
+    "3" "$(printf '%s' "$GATE_OUT" | jq -r '.artifact.iteration')"
+assert_eq "15.10e ...still gov3hash, never fakehash or the reconciled hash" \
+    "gov3hash" "$(printf '%s' "$GATE_OUT" | jq -r '.artifact.artifact_hash')"
+
+run_rh "$(mk_comments "$IMPL_BACKEND" "$K6RE_ABOVE_GOV" "$K6RE_ABOVE_RECON_ADV")"
+assert_eq "15.10f ...recorded-hashes count stays 2 -- the embedded fake iteration=9999 record is never parsed as a THIRD record" \
+    "2" "$(count_of "$RH_OUT")"
+assert_eq "15.10g ...and fakehash never enters the set" \
+    '["gov3hash","recon999hash"]' "$(hashes_of "$RH_OUT")"
+
+# ---------------------------------------------------------------------------
+echo ""
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"
     for t in "${FAILED_TESTS[@]}"; do printf '  - %s\n' "$t"; done

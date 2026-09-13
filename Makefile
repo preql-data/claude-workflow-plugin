@@ -89,11 +89,13 @@ test:
 #     careful about what "cheap but load-bearing" means.
 # Deliberately EXCLUDED: the design-workflow specs (design-*, plan-batches,
 # grilling-record), packaging/installer/mcp-deps parity, and the remaining
-# qa-gate-grade-record.test.sh / review-separation.test.sh (each independently
-# measured over 200s under contention elsewhere in this repo's own test
-# history) -- real coverage, but peripheral to "did this Stop's release
-# decision stay safe", and expensive enough to defeat the point of a fast
-# tier if included.
+# qa-gate-grade-record.test.sh / review-separation.test.sh (each
+# independently measured over 200s under contention elsewhere in this
+# repo's own test history) and, since the k6re test-suite split,
+# unrecorded-review-artifact.test.sh (the expensive half of that split,
+# measured 676-711s) -- real coverage, but peripheral to "did this Stop's
+# release decision stay safe", and expensive enough to defeat the point of
+# a fast tier if included.
 #
 # MEASURED 2026-08-27, HEAD 2eced52 + claude-workflow-plugin-yzo9 (uncommitted;
 # other specialists' wave-2 work concurrently active in the same tree AND a

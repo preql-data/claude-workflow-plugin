@@ -20,6 +20,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`approve` refuses when a review artifact exists on disk with no
+  corresponding record, and a non-governing path to reconcile historic ones
+  without disturbing which round governs** (`k6re`, the headline defect: "a
+  gate reporting confidence its evidence does not support"). The external
+  reviewer driver writes `docs/reviews/<task-id>-r<n>.json` and exits;
+  nothing called `review-record` for it unless an agent remembered to, so a
+  fresh artifact could sit unrecorded indefinitely while `approve` still
+  reported "independent review verified" for whichever round *was* recorded
+  — the corpus this fix was measured against (`claude-workflow-plugin-i8cx`,
+  documented in `review-check.sh`'s own `recorded-hashes` header comment) was
+  12 artifacts on disk against 3 recorded rounds at the time of that
+  measurement. The reconciliation mechanism below (`review-reconcile`)
+  exists and works — exercised end-to-end and independently verified
+  against k6re's own 10-artifact backlog — but i8cx itself has NOT been
+  reconciled: the identical shape still reproduces today, at HEAD
+  `adaf64d`:
+  `ls -1 docs/reviews/claude-workflow-plugin-i8cx-r*.json | wc -l` -> 12;
+  `bd comments claude-workflow-plugin-i8cx | grep -c 'REVIEW-ARTIFACT v1 iteration='` -> 3;
+  `bd comments claude-workflow-plugin-i8cx | grep -c 'REVIEW-ARTIFACT-RECONCILED v1 iteration='` -> 0.
+  Three more tasks carry an unreconciled backlog of the same shape —
+  `pqnd` (4 unrecorded), `xsu1` (2), `6im2` (1) — for **16 unrecorded
+  artifacts across 4 tasks** outstanding in total; tracked separately on
+  `claude-workflow-plugin-r6zh`.
+
+  - **`review-check.sh recorded-hashes <task-id>`** (new subcommand) — the
+    UNION of every `artifact_hash=` bound by a well-formed
+    `REVIEW-ARTIFACT v1` (or, see below, `REVIEW-ARTIFACT-RECONCILED v1`)
+    record for a task, deduplicated. Deliberately not `gate`'s single
+    K3-selected winner — a membership question over every recorded round,
+    not a release-verdict selection.
+  - **`qa-gate.sh approve`** gains a new refusal (exit 4,
+    `review_artifact_unrecorded`) between `REVIEW-SEPARATION` and the
+    completion-contract check: for every `docs/reviews/<task-id>-r*.json` on
+    disk, its content hash (never mtime — a checkout, copy or restore moves
+    an mtime without changing a byte) must appear in `recorded-hashes`, or
+    approval refuses naming the file(s), each annotated with its SHA-256 when
+    it could be computed — a file outside the declared review directory, not
+    a regular file, or unhashable for some other reason is named with that
+    reason instead, since there is no hash to report in those cases. New
+    audited bypass `--accept-unrecorded-review '<reason>'`, a dedicated flag
+    rather than a `--no-review` overload, so acknowledging a historic backlog
+    does not also silently waive open-findings resolution.
+  - **`qa-gate.sh review-reconcile <task-id> --file <path> [--acknowledge-findings] <reason>`**
+    (new subcommand). `review-record` stamps WRITE time, not review time, into
+    the grammar `gate`'s K3 selector reads — that selector requires a
+    single record to be simultaneously max(iteration) AND
+    max(at-timestamp), refusing with `review_artifact_selection_disagreement`
+    on disagreement. Backfilling several historic rounds through
+    `review-record` in any order the caller does not carefully control can
+    invert that agreement (measured on two distinct backlog shapes: one
+    where numeric-ascending order happens to avoid it, and one — the
+    highest iteration already recorded — where no order of the remaining
+    set can). `review-reconcile` instead appends the NON-GOVERNING
+    `REVIEW-ARTIFACT-RECONCILED v1` grammar: accounted for by
+    `recorded-hashes` so `approve` stops refusing on it, but structurally
+    unmatchable by `gate`'s K3 trigger (the grammar diverges at the
+    character immediately after `REVIEW-ARTIFACT`), so it can never become
+    a selection candidate no matter what order it lands in. Refuses (exit 1,
+    `reconcile_open_findings_unacknowledged`) when the artifact being
+    reconciled carries a `findings[]` entry at or above its own
+    `risk_threshold` — a RECONCILED record is non-governing and carries no
+    findings of its own, so reconciling one with an open at-threshold finding
+    would let it leave the trust chain silently — unless `--acknowledge-findings`
+    is given, in which case the comment gains a visible
+    `[open findings acknowledged: <id>:<severity>,...]` marker ahead of the
+    reason.
+  - **Test coverage for this feature now spans two files.** The
+    UNRECORDED-REVIEW-ARTIFACT-REFUSAL family and its `review-reconcile`
+    governance (added across independent review rounds 13-16) outgrew the
+    file they landed in — measured at ~1000s real time standalone, over
+    `run-tests.sh`'s own `SPEC_TIMEOUT_S=900` per-spec cap — and were
+    split verbatim into a new L1 spec, `unrecorded-review-artifact.test.sh`
+    (170 assertions as measured by `/usr/bin/time -p bash
+    .claude/scripts/tests/unrecorded-review-artifact.test.sh` at HEAD
+    `adaf64d`); `review-separation.test.sh` keeps Sections 1-6, the
+    original REVIEW-SEPARATION contract, and its own count dropped to 94.
+    See `run-tests.sh`'s `EXPECTED_SPECS` comment (60 -> 61) for the full
+    accounting.
+
 - **Concurrency ownership: a lease answers "who owns this tree right now"
   before D4 needs to ask** (`gsfd`, the D4 prerequisite). j7kk's
   skip-when-unchanged removes the redundant-run case but does not resolve

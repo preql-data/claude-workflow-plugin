@@ -36,6 +36,20 @@
 #   gate <task-id> [--comments-json <file>] [--change-set-hash <h>]
 #                                               independence + open-finding count
 #                                               + the ROUNDS count (see below)
+#   recorded-hashes <task-id> [--comments-json <file>]
+#                                               claude-workflow-plugin-k6re (the
+#                                               headline defect): every
+#                                               artifact_hash= bound by a
+#                                               WELL-FORMED REVIEW-ARTIFACT v1
+#                                               record for <task-id>, as a
+#                                               deduplicated JSON array — the
+#                                               UNION over every recorded
+#                                               round, never `gate`'s
+#                                               single-winner K3 selection.
+#                                               Feeds qa-gate.sh approve's
+#                                               UNRECORDED-REVIEW-ARTIFACT-
+#                                               REFUSAL: for each artifact on
+#                                               disk, is its hash in this set.
 #
 # Exit codes:
 #   0  ok / clean
@@ -1725,6 +1739,276 @@ normalize_comments() {
     ' 2>/dev/null || printf '[]'
 }
 
+# ---------------------------------------------------------------------------
+# recorded-hashes <task-id> [--comments-json <file>]
+# ---------------------------------------------------------------------------
+# claude-workflow-plugin-k6re (the HEADLINE defect this task fixes): a review
+# artifact written to docs/reviews/<tid>-r<n>.json with NO corresponding
+# REVIEW-ARTIFACT v1 record was invisible to `approve` — nothing ever asked
+# "which BYTES have EVER been recorded", only "which record GOVERNS the
+# release verdict right now" (`gate`, below). This subcommand answers the
+# first question: every artifact_hash= bound by a WELL-FORMED REVIEW-ARTIFACT
+# v1 record for <task-id>, as a JSON array (deduplicated; order carries no
+# meaning). qa-gate.sh's UNRECORDED-REVIEW-ARTIFACT-REFUSAL treats this as a
+# SET, testing membership per on-disk file — content over mtime: a
+# `git checkout`, a file copy, or a filesystem restore can all move an mtime
+# without changing a byte, and a bd comment timestamp is not the same clock
+# as a file's mtime anyway.
+#
+# WHY NOT `gate`'s OWN SELECTOR. `gate`'s whole job is choosing the ONE record
+# that GOVERNS a release predicate — K3: simultaneously the highest
+# well-formed iteration= AND the latest well-formed timestamp, REFUSING on
+# disagreement (ART-ITERATION-SELECT, below). That is the wrong shape for a
+# membership question: "has THIS file's hash EVER been recorded, by any
+# well-formed record" needs the UNION over every well-formed record on the
+# task, not a single winner. Importing K3 here would silently drop every
+# record that lost the selection — the corpus this fix was measured against
+# (claude-workflow-plugin-i8cx: 12 artifacts on disk, 3 recorded at the time
+# of measurement) is exactly that shape: nine SUPERSEDED rounds, each a real,
+# well-formed record in its own right, invisible to `gate`'s single-winner
+# view by design.
+#
+# MIRRORS ART_SOFT_FIELDS_RE / ART_FINDINGS_LIST_RE / art_prefix_len from
+# `gate`, BELOW IN THIS FILE — copied, deliberately not shared (the same
+# "mirrored, not shared" discipline qa-gate.sh's finding_id_in_latest_artifact
+# already documents, for the identical reason: this function's loop-over-ALL-
+# candidates shape is fundamentally different from `gate`'s winner-take-one
+# shape, so calling into `gate` would import K3 semantics nobody asked for
+# here). Reusing the CURRENT, post-operator-ruling allowlist (recurrence 5) is
+# the one thing that must never drift: a findings=[...] bracket cannot contain
+# the substring "artifact_hash=" under that allowlist (no `=` in its alphabet
+# — R, F, digits, `-`, `:`, `,`, and the five severity words only), so
+# extracting artifact_hash= from a $prefix that art_prefix_len() already
+# proved well-formed end-to-end is safe: there is exactly one such span in a
+# matching prefix (the grammar admits the field at most once), always after
+# the bracket closes, never before. This function does NOT re-derive that
+# safety property — it inherits it by copying the grammar verbatim. If
+# `gate`'s copy of this grammar ever changes, this one must change with it by
+# hand; there is no third place to share it from without pulling in K3.
+cmd_recorded_hashes() {
+    local tid="${1:-}"
+    shift || true
+    local comments_file=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --comments-json)
+                comments_file="${2:-}"
+                if [ -z "$comments_file" ]; then
+                    emit_validate "recorded-hashes" "false" "usage" "--comments-json requires a path"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            *)
+                emit_validate "recorded-hashes" "false" "usage" "unknown argument: $1"
+                exit 1
+                ;;
+        esac
+    done
+    if [ -z "$tid" ]; then
+        emit_validate "recorded-hashes" "false" "usage" "recorded-hashes requires <task-id>"
+        exit 1
+    fi
+
+    local comments_json
+    if [ -n "$comments_file" ]; then
+        if [ ! -f "$comments_file" ]; then
+            emit_validate "recorded-hashes" "false" "usage" "--comments-json file not found: $comments_file"
+            exit 1
+        fi
+        comments_json=$(normalize_comments < "$comments_file")
+    else
+        if ! command -v bd >/dev/null 2>&1; then
+            emit_validate "recorded-hashes" "false" "bd_unavailable" "bd CLI not on PATH and no --comments-json given"
+            exit 2
+        fi
+        if [ ! -d "$PROJECT_DIR/.beads" ]; then
+            emit_validate "recorded-hashes" "false" "bd_unavailable" "Beads not initialized ($PROJECT_DIR/.beads missing)"
+            exit 2
+        fi
+        local show
+        show=$(bd_show_with_comments "$tid" || echo "")
+        if [ -z "$show" ]; then
+            emit_validate "recorded-hashes" "false" "bd_unavailable" "bd show $tid returned nothing"
+            exit 2
+        fi
+        comments_json=$(printf '%s' "$show" | normalize_comments)
+    fi
+
+    # First line of each comment only — a record's own grammar is single-line
+    # by construction, and a later line of a multi-line comment must never be
+    # read as its own top-level candidate (the ART-FIRSTLINE-GUARD discipline
+    # `gate` and finding_id_in_latest_artifact both already apply).
+    local firstlines
+    firstlines=$(printf '%s' "$comments_json" | jq -r '.[] | split("\n")[0]' 2>/dev/null || echo "")
+
+    # RECORDED-HASHES-GRAMMAR-MIRROR BEGIN (claude-workflow-plugin-k6re). Byte-
+    # identical VALUES to `gate`'s CURRENT ART_SOFT_FIELDS_RE / ART_FINDINGS_LIST_RE
+    # / art_prefix_len — see this function's header comment for why mirrored
+    # rather than shared, and why "current" is load-bearing. NAMED
+    # DIFFERENTLY (RH_ prefix), deliberately, not merely re-declared: `gate`'s
+    # own copies are the literal, exact-text target of review-count.test.sh's
+    # 14.4 sed-based mutation (`s/^    ART_FINDINGS_LIST_RE=.*/.../`), which
+    # counts the diff as exactly one changed line to prove the mutation
+    # touches only that declaration. A same-named local here, at the same
+    # 4-space indentation `cmd_gate`'s own copy uses, is textually
+    # indistinguishable from that declaration to a pattern match — sed has no
+    # notion of "which function" — so it silently doubled the mutation's
+    # footprint the first time this was tried (caught by 14.4c, "the mutation
+    # touches EXACTLY the one grammar-declaration line, nothing else", which
+    # is exactly the failure mode that assertion exists to catch). The RH_
+    # prefix removes the ambiguity at the source rather than teaching that
+    # test about a second call site.
+    local RH_ART_SOFT_FIELDS_RE RH_ART_FINDINGS_LIST_RE
+    RH_ART_SOFT_FIELDS_RE='( reviewer=[A-Za-z0-9._-]+)?( model=[]A-Za-z0-9._:/[-]+)?( pin=[]A-Za-z0-9._:/[-]+)?( reviewed_hash=[A-Za-z0-9._-]+)?( risk_threshold=[A-Za-z0-9_]+)?( verdict=[A-Za-z]+)?( stopped_by=[A-Za-z0-9_:]+)?'
+    RH_ART_FINDINGS_LIST_RE='(R[0-9]+-F[0-9]+:(critical|high|medium|low|info)(,R[0-9]+-F[0-9]+:(critical|high|medium|low|info))*)?'
+
+    local hashes_out
+    hashes_out=$(LC_ALL=C awk -v ART_SOFT="$RH_ART_SOFT_FIELDS_RE" -v ART_FLIST="$RH_ART_FINDINGS_LIST_RE" '
+        function art_prefix_len(line,    re, n) {
+            re = "^REVIEW-ARTIFACT v1 iteration=[0-9]+" ART_SOFT \
+                 " findings=\\[" ART_FLIST "\\]( artifact_hash=[A-Za-z0-9._-]+)?" \
+                 " at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z: "
+            n = match(line, re)
+            return (n == 1) ? RLENGTH : 0
+        }
+        /^REVIEW-ARTIFACT v1 / {
+            plen = art_prefix_len($0)
+            if (plen > 0) {
+                prefix = substr($0, 1, plen)
+                if (match(prefix, /artifact_hash=[A-Za-z0-9._-]+/)) {
+                    h = substr(prefix, RSTART, RLENGTH)
+                    sub(/^artifact_hash=/, "", h)
+                    # TAGGED "HASH "/"ACK " (claude-workflow-plugin-k6re
+                    # R15-F3): see the RECONCILED branch below for why. A
+                    # governing REVIEW-ARTIFACT v1 record never carries the
+                    # ack-marker grammar (only cmd_review_reconcile writes
+                    # it), so this branch only ever emits the HASH tag.
+                    print "HASH " h
+                }
+            }
+        }
+        # RECONCILED-GRAMMAR BEGIN (claude-workflow-plugin-k6re R13-F1/F2).
+        # NOTE ON PUNCTUATION: this block is prose, but it lives INSIDE a
+        # single-quoted bash string (the whole awk program below is one bash
+        # literal) -- so no apostrophe or single quote may ever appear here,
+        # in this comment or in any future edit to it, no matter how natural
+        # the possessive reads. That exact mistake broke this block once
+        # already while it was being written (a bash parse error two
+        # functions away, from an unrelated closing quote finally matching);
+        # caught before it shipped, but the phrasing below is deliberately
+        # apostrophe-free from here on so it cannot recur silently.
+        #
+        # REVIEW-ARTIFACT-RECONCILED v1 -- the NON-GOVERNING grammar that the
+        # 2026-09-01 BACKFILL CONSTRAINT comment on this task declared
+        # mandatory: the K3 selector in gate (ART-ITERATION-SELECT) requires
+        # a SINGLE record to be simultaneously max(iteration) AND
+        # max(at-timestamp); review-record stamps WRITE time, so backfilling
+        # N historic rounds in ANY order the caller does not carefully
+        # control can make a low-iteration record the newest by write-time
+        # timestamp, and the two axes disagree --
+        # review_artifact_selection_disagreement, reproduced independently
+        # on both an i8cx-shaped backlog (highest iteration itself
+        # unrecorded -- order alone decides) and a pqnd-shaped one (highest
+        # iteration ALREADY recorded, where no backfill order of the
+        # remaining set can avoid the disagreement). The new review-reconcile
+        # subcommand in qa-gate.sh writes exactly this grammar for that
+        # historic-backfill case: the same artifact_hash= binding this
+        # function already trusts, deliberately WITHOUT the
+        # "^REVIEW-ARTIFACT v1 " prefix the trigger rule in gate requires
+        # (confirmed structurally distinct -- the character immediately
+        # after "REVIEW-ARTIFACT" differs, a hyphen here versus a space in
+        # the governing grammar, so no shared prefix can ever cause one rule
+        # to fire on the lines of the other), so a RECONCILED record is
+        # accounted for HERE without ever being a K3 selection candidate.
+        # Simpler than the governing grammar on purpose: no soft fields, no
+        # findings bracket -- a reconciliation record carries no verdict, so
+        # there is nothing there for a future recurrence-5-shaped bracket
+        # injection to land in. Every character position up to
+        # artifact_hash= is either a fixed literal or a digit-only class, so
+        # (unlike the governing grammar) no field ordering or bracket
+        # partitioning question arises at all.
+        function reconciled_prefix_len(line,    re, n) {
+            re = "^REVIEW-ARTIFACT-RECONCILED v1 iteration=[0-9]+ artifact_hash=[A-Za-z0-9._-]+" \
+                 " at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z: "
+            n = match(line, re)
+            return (n == 1) ? RLENGTH : 0
+        }
+        /^REVIEW-ARTIFACT-RECONCILED v1 / {
+            plen = reconciled_prefix_len($0)
+            if (plen > 0) {
+                prefix = substr($0, 1, plen)
+                if (match(prefix, /artifact_hash=[A-Za-z0-9._-]+/)) {
+                    h = substr(prefix, RSTART, RLENGTH)
+                    sub(/^artifact_hash=/, "", h)
+                    print "HASH " h
+                    # ACK-MARKER DETECTION (claude-workflow-plugin-k6re
+                    # R15-F3). NOTE ON PUNCTUATION, same discipline as the
+                    # RECONCILED-GRAMMAR comment above: this whole awk
+                    # program is one single-quoted bash string, so no
+                    # apostrophe may appear anywhere in this comment (that
+                    # exact mistake broke this file once already, per the
+                    # RECONCILED-GRAMMAR note above -- and broke it AGAIN
+                    # while writing this one comment, caught before it
+                    # shipped by bash -n).
+                    #
+                    # Purely informational, and bounded to the ALREADY-
+                    # anchored prefix this branch established above -- never
+                    # an unanchored scan of the free-text tail for its own
+                    # sake, which would reopen exactly the recurrence-5 class
+                    # this file elsewhere guards against (a crafted reason
+                    # claiming to contain a marker for a different record).
+                    # This does not change what governs: a RECONCILED record
+                    # is still structurally unmatchable by gate (see this
+                    # block header), so tagging one here cannot promote it to
+                    # a selection candidate; it only lets a MECHANICAL reader
+                    # (qa-gate.sh cmd_approve) learn that an accounted-for
+                    # artifact carried an acknowledged open finding, a fact
+                    # that reached only a human reading the comment stream
+                    # before this round (R15-F3).
+                    if (index(substr($0, plen + 1), "[open findings acknowledged:") == 1) {
+                        print "ACK " h
+                    }
+                }
+            }
+        }
+        # RECONCILED-GRAMMAR END (claude-workflow-plugin-k6re R13-F1/F2)
+    ' <<<"$firstlines" 2>/dev/null)
+    # RECORDED-HASHES-GRAMMAR-MIRROR END (claude-workflow-plugin-k6re)
+
+    # SPLIT THE TAGGED STREAM (claude-workflow-plugin-k6re R15-F3): every
+    # line the awk program above emits is "HASH <h>" (from either grammar) or
+    # "ACK <h>" (RECONCILED + ack-marker only) -- never bare, so a real hash
+    # value (hex plus [._-], never a space) can never collide with either
+    # literal tag. hashes_raw is the awk program's UNSPLIT, UNSORTED output;
+    # hashes_out keeps its PRE-R15-F3 shape and meaning exactly (every
+    # recorded hash, tag stripped, deduplicated); ack_hashes_out is the new,
+    # separate, purely additive field, derived from the SAME raw capture so
+    # the two can never desync from running the awk program twice.
+    local hashes_raw="$hashes_out"
+    local ack_hashes_out
+    hashes_out=$(printf '%s\n' "$hashes_raw" | sed -n 's/^HASH //p' | LC_ALL=C sort -u)
+    ack_hashes_out=$(printf '%s\n' "$hashes_raw" | sed -n 's/^ACK //p' | LC_ALL=C sort -u)
+
+    local hashes_json count
+    hashes_json=$(printf '%s\n' "$hashes_out" | jq -Rs 'split("\n") | map(select(length > 0))' 2>/dev/null)
+    [ -n "$hashes_json" ] || hashes_json="[]"
+    count=$(printf '%s' "$hashes_json" | jq 'length' 2>/dev/null || echo 0)
+    local acknowledged_hashes_json acknowledged_count
+    acknowledged_hashes_json=$(printf '%s\n' "$ack_hashes_out" | jq -Rs 'split("\n") | map(select(length > 0))' 2>/dev/null)
+    [ -n "$acknowledged_hashes_json" ] || acknowledged_hashes_json="[]"
+    acknowledged_count=$(printf '%s' "$acknowledged_hashes_json" | jq 'length' 2>/dev/null || echo 0)
+    # shellcheck disable=SC2016
+    printf '{"ok":true,"subcommand":"recorded-hashes","task_id":%s,"hashes":%s,"count":%s,"acknowledged_hashes":%s,"acknowledged_count":%s,"error_key":"","observations":%s}\n' \
+        "$(printf '%s' "$tid" | jq -Rs .)" \
+        "$hashes_json" \
+        "$count" \
+        "$acknowledged_hashes_json" \
+        "$acknowledged_count" \
+        "$(printf '%s well-formed REVIEW-ARTIFACT v1 / REVIEW-ARTIFACT-RECONCILED v1 record(s) contributed an artifact_hash for %s' "$count" "$tid" | jq -Rs .)"
+    exit 0
+}
+
 cmd_gate() {
     local tid="${1:-}"
     shift || true
@@ -3190,6 +3474,7 @@ case "$SUB" in
     validate-design)   cmd_validate_design "$@" ;;
     design-unit-json)  cmd_design_unit_json "$@" ;;
     gate)              cmd_gate "$@" ;;
+    recorded-hashes)   cmd_recorded_hashes "$@" ;;
     ""|-h|--help)
         cat >&2 <<'USAGE'
 Usage: review-check.sh <subcommand> [args]
@@ -3268,6 +3553,15 @@ Usage: review-check.sh <subcommand> [args]
                                               counted rounds needed the
                                               exception rather than an exact
                                               hash match
+  recorded-hashes <task-id> [--comments-json <file>]
+                                              every artifact_hash= bound by a
+                                              well-formed REVIEW-ARTIFACT v1
+                                              record for <task-id>, deduped,
+                                              as JSON {hashes:[...],count:N} —
+                                              the UNION over every recorded
+                                              round, not gate's single K3
+                                              winner (claude-workflow-plugin-
+                                              k6re)
 Exit: 0 ok | 4 violation | 2 bd-unavailable | 1 usage.
 USAGE
         exit 1
