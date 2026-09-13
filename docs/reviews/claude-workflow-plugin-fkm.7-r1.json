@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.7",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "edce80ea386b260fab104d351c7a791d2468a8a3cf0f88cfda1d77c72080a439",
+  "risk_threshold": "high",
+  "stop_condition": "Every claim in the D5-piece-2 brief is verified against the shipped code -- readers chained not reparsed, per-unit unit_hash never the whole-artifact design_hash, the new SPEC-INJECTED v1 grammar plus its reader, unbound-silent vs bound-unreadable-loud, and gates nothing -- and no finding at or above high remains in the gate, hook, or record-grammar paths.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/subagent-start.sh:697 (functional), :705, :739, :789 (prompt text)",
+      "evidence": "subagent-start.sh builds \"$PROJECT_DIR/docs/specs/${design_task}.md\" by raw interpolation at 4 live sites (:591 is header comment). Every other consumer, including cmd_design_unit_bind at qa-gate.sh:12104, resolves via design_artifact_path_for, which sanitises with tr -c A-Za-z0-9._- _ . The binding class at cmd_design_unit_show:53 is ^[A-Za-z0-9._+-]+$ and admits +; the sanitiser does not. Measured: design_task=a+b -> writer docs/specs/a+b.md, reader docs/specs/a_b.md; and + survives the SPEC-INJECTED capture class, so it round-trips into the reader.",
+      "description": "Two disagreeing artifact-path resolvers for one convention. For a design_task containing +, the hook injects from one file while spec-injection-status checks another: best case a permanent exit 2 (spec_injection_content_unreadable), worst case a false FRESH/STALE against an unrelated artifact; the three prompt-text sites would additionally direct the implementer at a filename that does not exist. NOT reachable from a bd-generated id (0 of 442 ids in the ledger snapshot contain +; BD_ID_RE excludes it) and --design-task is the only injection point, which is why this is medium and not high. The defect-family point: the author verified the upstream class prevents TRAVERSAL (correct -- I confirmed cmd_design_unit_show:53 refuses anything outside the class before bound:true, and a literal .. yields the harmless docs/specs/...md) and then relied on that for EQUIVALENCE, which does not follow. Fix is confined to this one file but is 4 sites, not 1."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:13036-13040 (the live_hash-empty STALE arm)",
+      "evidence": "Reachability measured, not assumed: review-check.sh design-unit-json <valid-artifact> U9 returns rc 1 with error_key=unit_not_in_design, and qa-gate.sh design_unit_json explicitly maps that to printf ; return 0, so design_unit_content_hash returns rc 0 with empty stdout and cmd_spec_injection_status reaches if [ -z \"$live_hash\" ]. Neither design-accessors.test.sh Section 12 nor the component spec references it (grep for \"no longer declared\" / \"amended away\": no hits).",
+      "description": "The unit-amended-away-entirely STALE arm is live, reachable code with no assertion. It is one of the three fresh:false reasons the usage text advertises and the only one untested -- content-changed is 12.3, rebound is 12.4. Visibility-only impact in this slice since nothing gates on the reader."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh SPEC-INJECTION-STATUS region",
+      "evidence": "Seven error keys are defined in the new region; exactly one (spec_injection_source_unreadable) is asserted in Section 12. Unasserted: spec_injection_content_unreadable, design_binding_unreadable, spec_injection_record_malformed, envelope_construction_failed, jq_unavailable, missing_task_id, unknown_flag.",
+      "description": "Coverage question, not a defect. design_binding_unreadable is explicitly and honestly disclosed as non-discriminable in the function header (both readers share design_comments_json, so a store outage fails at the first call) -- that disclosure is good practice and is not counted against the author. spec_injection_record_malformed is correctly-scoped defence against a jq TOOL failure mid-run (both sites guard on rshape_rc -ne 0 and on post-extraction empty fields), not dead code and not a content coverage hole. The remaining six are a genuine gap worth one follow-up."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "low",
+      "location": ".claude/scripts/subagent-start.sh:789-800 (unit_pretty splice) and :937",
+      "evidence": "unit_pretty is rendered verbatim into CONTEXT inside <subagent_assignment>. Transport is safe -- the envelope is built with jq -Rs . at :943 -- but the rendered prompt text is not tag-escaped.",
+      "description": "A design artifact whose text contained a literal </subagent_assignment> would render as a closing tag in the implementer prompt, letting artifact content impersonate the harness frame. The artifact is validate-design-gated, hash-bound and already a trusted instruction channel (instructing the implementer is the feature), so this is containment hygiene rather than a vulnerability."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "stop_condition"
+}

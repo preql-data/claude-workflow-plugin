@@ -486,4 +486,210 @@ if assert_mutant_applied "implementer I10 META" "$REAL_HOOK" "$CK_MUT"; then
         "1" "$(count_role "$TID_CKN" devops)"
 fi
 
+# ===========================================================================
+# SPEC INJECTION AT SPAWN (v5 D5, claude-workflow-plugin-fkm.7).
+#
+# Each IMPLEMENTER spawn (never qa — same implementer-only scope as the
+# IMPLEMENTER records above) whose task is bound to a design unit gets that
+# unit's spec injected VERBATIM from the mirrored artifact, read at spawn
+# time — never the orchestrator's paraphrase — with the injected hash
+# recorded so a later mismatch is visible via `qa-gate.sh
+# spec-injection-status`. See subagent-start.sh's own SPEC INJECTION AT
+# SPAWN header for the full resolution path and failure-direction rationale;
+# design-accessors.test.sh Section 12 (L1) covers that reader's OWN logic
+# against engineered fixtures exhaustively. THIS section proves the REAL
+# WRITER (this hook) and the REAL READER (spec-injection-status) agree end
+# to end over an actual spawn and an actual design artifact on disk — the
+# thing no engineered fixture can prove on its own.
+# ===========================================================================
+
+QG="$FIXTURE/.claude/scripts/qa-gate.sh"
+mkdir -p "$FIXTURE/docs/specs"
+
+# A distinctive criterion text and goal, chosen so they cannot appear in
+# additionalContext by any path OTHER than verbatim injection from the
+# artifact bytes below (never authored into any task title/notes in this
+# file) — the "compare against the artifact's bytes, not a re-derivation"
+# leg of the pairing requirement.
+cat > "$FIXTURE/docs/specs/E-SI-DESIGN.md" <<'ART'
+## Problem
+p
+## Approaches considered
+a
+## Chosen approach
+c
+## Units
+u
+## Global constraints
+g
+## Out of scope
+o
+## Verification plan
+v
+## Revision log
+r
+<!-- DESIGN-UNITS BEGIN -->
+{
+  "contract_version": "1",
+  "task_id": "E-SI-DESIGN",
+  "designer_identity": "designer-claude",
+  "units": [
+    { "unit_id": "U1", "goal": "the flux capacitor must recalibrate before every jump", "verification": "make test",
+      "files": ["src/flux.sh"],
+      "acceptance": [ { "id": "AC1", "text": "a jump attempted without recalibration raises FluxMisalignment" } ],
+      "depends_on": [] },
+    { "unit_id": "U2", "goal": "g2", "verification": "v2",
+      "files": ["src/b.sh"],
+      "acceptance": [ { "id": "AC2", "text": "t2" } ],
+      "depends_on": [] }
+  ]
+}
+<!-- DESIGN-UNITS END -->
+ART
+
+si_comments_of() {
+    bd_show_with_comments "$1" \
+        | jq -r '(if type == "array" then .[0].comments else .comments end) // []
+                 | .[].text' 2>/dev/null || echo ""
+}
+si_count_spec_injected() {
+    si_comments_of "$1" | grep -cE '^SPEC-INJECTED v1 ' | tr -d '[:space:]'
+}
+
+# SI1. A bound implementer task's spawn gets the unit injected VERBATIM.
+TID_SI1=$(cd "$FIXTURE" && bd create "spec-inject: bound implementer" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" design-unit-bind "$TID_SI1" --design-task E-SI-DESIGN --unit-id U1 "bound for spec-injection spec" >/dev/null 2>&1
+bash "$CT" set "$TID_SI1"
+SI1_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+assert_valid_envelope "spec-inject SI1: envelope still valid with injection" "$SI1_OUT"
+SI1_CTX=$(printf '%s' "$SI1_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "spec-inject SI1: additionalContext carries the VERBATIM criterion text" \
+    "a jump attempted without recalibration raises FluxMisalignment" "$SI1_CTX"
+assert_contains "spec-inject SI1: ...and the verbatim goal text" \
+    "the flux capacitor must recalibrate before every jump" "$SI1_CTX"
+assert_contains "spec-inject SI1: ...and the declared file path" "src/flux.sh" "$SI1_CTX"
+assert_eq "spec-inject SI1: exactly one SPEC-INJECTED record posted" "1" "$(si_count_spec_injected "$TID_SI1")"
+assert_match "spec-inject SI1: the record matches its own grammar (task, design_task, unit_id, both 64-hex hashes, ISO ts)" \
+    "^SPEC-INJECTED v1 task=${TID_SI1} design_task=E-SI-DESIGN unit_id=U1 design_hash=[0-9a-fA-F]{64} unit_hash=[0-9a-fA-F]{64} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: injected at spawn$" \
+    "$(si_comments_of "$TID_SI1" | grep '^SPEC-INJECTED v1 ')"
+
+# SI2. The REAL reader agrees the injection landed fresh, end to end.
+SI2_STATUS=$(bash "$QG" spec-injection-status "$TID_SI1" 2>/dev/null)
+assert_eq "spec-inject SI2: the REAL spec-injection-status reads it back injected:true, fresh:true" "true|true" \
+    "$(printf '%s' "$SI2_STATUS" | jq -r '.injected')|$(printf '%s' "$SI2_STATUS" | jq -r '.fresh')"
+
+# SI3. Unbound task: no injection, silent (the ordinary, ubiquitous case).
+TID_SI3=$(cd "$FIXTURE" && bd create "spec-inject: never bound" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$CT" set "$TID_SI3"
+SI3_OUT=$(printf '%s' '{"agent_type":"devops"}' | bash "$HOOK")
+SI3_CTX=$(printf '%s' "$SI3_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_not_contains "spec-inject SI3: an unbound task gets NO 'SPEC INJECTION' text at all" \
+    "SPEC INJECTION" "$SI3_CTX"
+assert_eq "spec-inject SI3: ...and posts no SPEC-INJECTED record" "0" "$(si_count_spec_injected "$TID_SI3")"
+
+# SI4. A QA spawn is never spec-injected, even on a BOUND task (same scope
+# as record_implementer — qa reviews the unit, it does not implement it).
+TID_SI4=$(cd "$FIXTURE" && bd create "spec-inject: qa spawn, same binding" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" design-unit-bind "$TID_SI4" --design-task E-SI-DESIGN --unit-id U1 "bound, but qa will spawn" >/dev/null 2>&1
+bash "$CT" set "$TID_SI4"
+SI4_OUT=$(printf '%s' '{"agent_type":"qa"}' | bash "$HOOK")
+SI4_CTX=$(printf '%s' "$SI4_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_not_contains "spec-inject SI4: a QA spawn on a BOUND task still gets no injection (implementer-only scope)" \
+    "SPEC INJECTION" "$SI4_CTX"
+assert_eq "spec-inject SI4: ...and posts no SPEC-INJECTED record" "0" "$(si_count_spec_injected "$TID_SI4")"
+
+# SI5. The artifact vanishes after binding: LOUD degradation, never silent,
+# and no record is posted (nothing trustworthy to record).
+TID_SI5=$(cd "$FIXTURE" && bd create "spec-inject: artifact vanishes" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" design-unit-bind "$TID_SI5" --design-task E-SI-DESIGN --unit-id U1 "bound, artifact will vanish" >/dev/null 2>&1
+mv "$FIXTURE/docs/specs/E-SI-DESIGN.md" "$FIXTURE/docs/specs/E-SI-DESIGN.md.hidden"
+bash "$CT" set "$TID_SI5"
+SI5_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+mv "$FIXTURE/docs/specs/E-SI-DESIGN.md.hidden" "$FIXTURE/docs/specs/E-SI-DESIGN.md"
+assert_valid_envelope "spec-inject SI5: envelope still valid even when the artifact is missing" "$SI5_OUT"
+SI5_CTX=$(printf '%s' "$SI5_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "spec-inject SI5: a LOUD, distinguishable degradation notice, never silent" \
+    "SPEC INJECTION DEGRADED" "$SI5_CTX"
+assert_eq "spec-inject SI5: ...and NOTHING was recorded (no trustworthy hash to bind)" "0" "$(si_count_spec_injected "$TID_SI5")"
+
+# SI6. A hash mismatch surfaces end to end: amend the unit's content AFTER
+# injection (no re-spawn), then ask the REAL reader — never the whole-
+# artifact hash, the same false-alarm-on-an-unrelated-unit concern
+# DESIGN-CONFLICT's own R2-F3 fix exists for. Re-arm the active task back to
+# TID_SI1 first — SI3/SI4/SI5 moved it on to their OWN tasks in between, and
+# SI7 below re-spawns, so leaving it pointed at SI5's task would silently
+# write and read the wrong task's record instead of failing loudly.
+bash "$CT" set "$TID_SI1"
+sed 's/a jump attempted without recalibration raises FluxMisalignment/UPDATED: recalibration failure is now a warning, not an error/' \
+    "$FIXTURE/docs/specs/E-SI-DESIGN.md" > "$FIXTURE/docs/specs/E-SI-DESIGN.md.new"
+mv "$FIXTURE/docs/specs/E-SI-DESIGN.md.new" "$FIXTURE/docs/specs/E-SI-DESIGN.md"
+SI6_STATUS=$(bash "$QG" spec-injection-status "$TID_SI1" 2>/dev/null)
+assert_eq "spec-inject SI6: a real amendment after injection surfaces as fresh:false via the REAL reader" "true|false" \
+    "$(printf '%s' "$SI6_STATUS" | jq -r '.injected')|$(printf '%s' "$SI6_STATUS" | jq -r '.fresh')"
+assert_match "spec-inject SI6: ...naming the content-change reason" "CHANGED since injection" \
+    "$(printf '%s' "$SI6_STATUS" | jq -r '.observations')"
+
+# SI7. Re-spawn refreshes the injection (deliberately NOT idempotent per
+# cycle, unlike IMPLEMENTER): a second spawn after the amendment above posts
+# a SECOND record carrying the amended content's OWN hash, and the reader
+# now reports fresh again against the CURRENT (amended) content.
+SI7_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+SI7_CTX=$(printf '%s' "$SI7_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "spec-inject SI7: the re-spawn injects the AMENDED text, not the stale original" \
+    "UPDATED: recalibration failure is now a warning, not an error" "$SI7_CTX"
+assert_eq "spec-inject SI7: a re-spawn posts a FRESH SPEC-INJECTED record (not idempotent — two total now)" "2" \
+    "$(si_count_spec_injected "$TID_SI1")"
+SI7_STATUS=$(bash "$QG" spec-injection-status "$TID_SI1" 2>/dev/null)
+assert_eq "spec-inject SI7: ...and the REAL reader now reports fresh again (reads the LATEST record)" "true|true" \
+    "$(printf '%s' "$SI7_STATUS" | jq -r '.injected')|$(printf '%s' "$SI7_STATUS" | jq -r '.fresh')"
+
+# ===========================================================================
+# META: strip the SPEC INJECTION AT SPAWN region and watch a bound task's
+# injection silently disappear, WITHOUT crashing the hook and WITHOUT
+# touching the unrelated IMPLEMENTER-recording mechanism (the discriminator
+# — claude-workflow-plugin-ybhc's lesson: prove the strip's damage is
+# narrow, not a blanket break that would pass for the wrong reason).
+# ===========================================================================
+SI_MUT="$FIXTURE/subagent-start-nospecinject.sh"
+awk '
+    /^# SPEC INJECTION AT SPAWN BEGIN/ { skip = 1; next }
+    /^# SPEC INJECTION AT SPAWN END/   { skip = 0; next }
+    !skip { print }
+' "$REAL_HOOK" > "$SI_MUT"
+chmod +x "$SI_MUT"
+if assert_mutant_applied "spec-inject META" "$REAL_HOOK" "$SI_MUT"; then
+    assert_eq "spec-inject META: NON-VACUITY — the function definition is gone from the mutant" "0" \
+        "$(grep -c '^inject_unit_spec() {' "$SI_MUT" | tr -d '[:space:]')"
+    assert_eq "spec-inject META: ...while it remains in the shipped hook" "1" \
+        "$(grep -c '^inject_unit_spec() {' "$REAL_HOOK" | tr -d '[:space:]')"
+    assert_eq "spec-inject META: the mutated hook still parses" "0" \
+        "$(bash -n "$SI_MUT" 2>/dev/null && echo 0 || echo 1)"
+
+    TID_SIM=$(cd "$FIXTURE" && bd create "spec-inject META: bound, stripped hook" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$QG" design-unit-bind "$TID_SIM" --design-task E-SI-DESIGN --unit-id U1 "bound for the META" >/dev/null 2>&1
+    bash "$CT" set "$TID_SIM"
+    SIM_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$SI_MUT")
+    assert_valid_envelope "spec-inject META: the stripped hook still emits a valid envelope (never crashes the spawn)" "$SIM_OUT"
+    SIM_CTX=$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+    assert_not_contains "spec-inject META: SPECIFIC MISBEHAVIOUR — a BOUND task's spec silently vanishes (SI1 WOULD fail)" \
+        "SPEC INJECTION" "$SIM_CTX"
+    assert_eq "spec-inject META: ...and no record is posted either" "0" "$(si_count_spec_injected "$TID_SIM")"
+    assert_contains "spec-inject META: ...yet the task id is still present (the rest of the envelope is intact)" \
+        "$TID_SIM" "$SIM_CTX"
+
+    # DISCRIMINATOR: the SAME stripped hook, same spawn, still writes the
+    # UNRELATED IMPLEMENTER record correctly — the strip's damage is confined
+    # to spec injection, not a blanket break of the whole hook.
+    assert_eq "spec-inject META DISCRIMINATOR: the unrelated IMPLEMENTER record still posts correctly under the SAME stripped hook" \
+        "1" "$(count_role "$TID_SIM" backend)"
+
+    # RESTORE CONTROL: the SAME bound task state, the SHIPPED hook, re-spawned
+    # — the injection is back.
+    RESTORE_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+    RESTORE_CTX=$(printf '%s' "$RESTORE_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+    assert_contains "spec-inject META: RESTORE CONTROL — the shipped hook, same task, injects again" \
+        "the flux capacitor must recalibrate before every jump" "$RESTORE_CTX"
+fi
+rm -f "$SI_MUT"
+
 [ "$FAIL" -eq 0 ]

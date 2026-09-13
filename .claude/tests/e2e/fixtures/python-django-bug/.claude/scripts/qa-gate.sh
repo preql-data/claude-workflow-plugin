@@ -3602,6 +3602,32 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               mechanism this paragraph used to describe; it bypasses only
               the requirement for a satisfied verdict, same as when no
               conflict was ever filed).
+  spec-injection-status <task-id>
+              v5 D5 (fkm.7): READ-ONLY accessor over a NEW record grammar,
+              SPEC-INJECTED v1, written by subagent-start.sh's
+              inject_unit_spec at spawn time (this file never writes it —
+              reader only). Answers "is the spec this task's implementer
+              was last handed still the spec that's actually current" —
+              decision #3 of the fkm.7 D5 brief: an injected hash nothing
+              ever compares is decoration, and this subcommand is the
+              comparison. Gates nothing in this slice (that is D5's
+              separate, not-yet-built per-unit alignment check) — this is
+              visibility only. injected:false (no record) is the ORDINARY
+              case (never spawned as an implementer since binding, or never
+              bound at all). injected:true, fresh:true means the recorded
+              unit_hash — a PER-UNIT content hash, never the whole-artifact
+              design_hash, for the identical false-alarm-on-an-unrelated-
+              unit reason design-conflict's own R2-F3 fix exists — still
+              matches a live recompute AND the CURRENT DESIGN-UNIT binding
+              still names the same (design_task, unit_id). fresh:false
+              names why: the unit's content changed since injection, it was
+              amended away entirely, or the task was rebound/unbound since.
+              Exits 0 on every DETERMINED answer (absent, fresh, or stale).
+              Exits 2 (ok:false) when the SPEC-INJECTED source, the CURRENT
+              binding re-read, or the live content-hash recompute could not
+              be read at all — "could not look" is never folded into
+              injected:false, the same xsu1 doctrine as design-unit-show /
+              design-status.
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -12768,6 +12794,268 @@ EOF
 }
 # DESIGN-CONFLICT END (v5 D5 / claude-workflow-plugin-fkm.7)
 
+# ---------------------------------------------------------------------------
+# SPEC-INJECTION-STATUS BEGIN (v5 D5, claude-workflow-plugin-fkm.7)
+#
+# spec-injection-status <task-id> -- READ-ONLY accessor over a NEW record
+# grammar, SPEC-INJECTED v1, written by subagent-start.sh's inject_unit_spec
+# at spawn time (never by this file -- this is the reader half only). This
+# is decision #3 of the fkm.7 D5 brief ("the injected hash is recorded so a
+# later mismatch is visible ... an injected hash nothing ever compares is
+# decoration"): this subcommand IS the comparison. It does not gate
+# `approve` or anything else in this slice -- that is D5's separate,
+# not-yet-built per-unit alignment check (docs/plans/v5-design-phase.md:168)
+# -- it only makes a recorded injection's freshness VISIBLE to a human, to
+# QA, or to that future check.
+#
+# GRAMMAR (posted ON the spawned task by subagent-start.sh, one line, no
+# operator-authored free text -- see that file's record_spec_injection for
+# the writer):
+#   SPEC-INJECTED v1 task=<tid> design_task=<dt> unit_id=<uid>
+#     design_hash=<h> unit_hash=<h2> at <ISO8601-UTC>: injected at spawn
+# unit_hash is a live hash of the UNIT'S OWN current content at injection
+# time (design_unit_content_hash's exact convention, reused verbatim below)
+# -- NEVER the whole-artifact design_hash, for the SAME reason DESIGN-
+# CONFLICT's R2-F3 fix (see compute_design_conflict_open's own header)
+# moved that predicate off the whole artifact: a whole-artifact comparison
+# would flag an amendment to an UNRELATED unit as "this unit changed", a
+# false alarm. design_hash is carried alongside for provenance only (which
+# artifact revision was live at injection time) and is NEVER what freshness
+# below gates on.
+#
+# latest_spec_injection <tid> -- the ONE reader for this grammar, mirroring
+# latest_design_unit_binding's own shape byte-for-structure (same anchored
+# capture, same task= cross-check against a copy-pasted or foreign record,
+# same rc-3-means-unreadable / {}-means-confirmed-absence contract). A
+# comment that starts with "SPEC-INJECTED v1 " but fails the full capture
+# (a truncated hash, a missing field) is silently dropped from the
+# selection, exactly as latest_design_unit_binding's own header documents
+# for its grammar ("a forged or corrupted timestamp is refused the same way
+# a forged hash already is") -- this reader does not distinguish "hand-
+# damaged record" from "never written", the same choice made there.
+latest_spec_injection() {
+    local tid="$1"
+    local comments="" c_rc=0
+    comments=$(design_comments_json "$tid") || c_rc=$?
+    [ "$c_rc" -eq 0 ] || return 3
+    local out="" out_rc=0
+    out=$(printf '%s' "$comments" \
+        | jq -c --arg tid "$tid" '
+            [ .[].text
+              | select(startswith("SPEC-INJECTED v1 "))
+              | capture("^SPEC-INJECTED v1 task=(?<task>[A-Za-z0-9._+-]+) design_task=(?<design_task>[A-Za-z0-9._+-]+) unit_id=(?<unit_id>[A-Za-z0-9._-]+) design_hash=(?<design_hash>[0-9a-fA-F]{64}) unit_hash=(?<unit_hash>[0-9a-fA-F]{64}) at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: ")
+              | select(.task == $tid)
+              | {design_task, unit_id, design_hash, unit_hash}
+            ]
+            | last // {}
+        ' 2>/dev/null) || out_rc=$?
+    if [ "$out_rc" -ne 0 ] || [ -z "$out" ]; then
+        return 3
+    fi
+    printf '%s' "$out"
+    return 0
+}
+
+# emit_spec_injection_status <ok> <error_key> <observations> <task_id>
+#   <injected> <fresh> <design_task> <unit_id> <unit_hash> <live_unit_hash>
+# Same guarded-build discipline as emit_design_conform/emit_design_unit_json:
+# ONE jq -nc construction, shape-validated before printing, a caller-data-
+# free literal on construction failure.
+emit_spec_injection_status() {
+    local ok="$1" ekey="$2" obs="$3" tid="${4:-}" injected="${5:-false}" \
+          fresh="${6:-false}" design_task="${7:-}" unit_id="${8:-}" \
+          unit_hash="${9:-}" live_unit_hash="${10:-}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" --arg tid "$tid" \
+        --argjson injected "$injected" --argjson fresh "$fresh" \
+        --arg dt "$design_task" --arg uid "$unit_id" \
+        --arg uh "$unit_hash" --arg luh "$live_unit_hash" '
+        {ok: $ok, subcommand: "spec-injection-status", task_id: $tid,
+         error_key: $ekey, injected: $injected, fresh: $fresh,
+         design_task: $dt, unit_id: $uid, unit_hash: $uh,
+         live_unit_hash: $luh, observations: $obs}
+    ' 2>/dev/null) || env_rc=$?
+    if [ "$env_rc" -eq 0 ] && [ -n "$envelope" ] \
+       && printf '%s' "$envelope" | jq -e '
+            type == "object"
+            and (keys | sort) == ["design_task", "error_key", "fresh", "injected", "live_unit_hash", "observations", "ok", "subcommand", "task_id", "unit_hash", "unit_id"]
+            and (.ok | type) == "boolean"
+            and .subcommand == "spec-injection-status"
+            and (.task_id | type) == "string"
+            and (.error_key | type) == "string"
+            and (.injected | type) == "boolean"
+            and (.fresh | type) == "boolean"
+            and (.design_task | type) == "string"
+            and (.unit_id | type) == "string"
+            and (.unit_hash | type) == "string"
+            and (.live_unit_hash | type) == "string"
+            and (.observations | type) == "string"
+          ' >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"spec-injection-status","task_id":null,"error_key":"envelope_construction_failed","observations":"the spec-injection-status envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","injected":false,"fresh":false,"design_task":"","unit_id":"","unit_hash":"","live_unit_hash":""}\n'
+    return 1
+}
+
+# cmd_spec_injection_status <task-id> -- exit 0 on EVERY determined answer
+# (no record; a fresh record; a stale one, naming why); exit 2 on an
+# UNREADABLE source at any step (the SPEC-INJECTED stream itself, the
+# re-read of the CURRENT DESIGN-UNIT binding, or the live content-hash
+# recompute) -- the SAME xsu1 doctrine as design-unit-show/design-status:
+# "could not look" is never folded into "looked, and found nothing".
+#
+# NOT independently discriminated here: a SPEC-INJECTED read that succeeds
+# followed by an INDEPENDENT failure of the later latest_design_unit_binding
+# re-read on the SAME task (both calls read the identical `bd show`
+# stream, so an ordinary "the store is unreadable" fixture fails both calls
+# together, at the first one — latest_spec_injection). Reaching that
+# specific second-call-only failure would need a source that heals or
+# breaks BETWEEN two reads of the same task within one process -- the exact
+# shape compute_design_satisfied's own DESIGN-REVIEW-SOURCE-UNREADABLE-GUARD
+# tests for (xsu1 H2R2-F3) -- and is not separately reproduced for this
+# accessor: this function's OWN new logic is only the PROPAGATION (return 2,
+# error_key design_binding_unreadable), and that propagation is exercised by
+# forcing the FIRST call to fail (the shared entry point for both readers,
+# covered by design-accessors.test.sh Section 12 below); the correctness of
+# latest_design_unit_binding's own unreadable-handling is already proven
+# by design-accessors.test.sh Sections 2-3 and design-conform.test.sh, and
+# is not re-proven here.
+cmd_spec_injection_status() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"spec-injection-status","task_id":null,"error_key":"jq_unavailable","observations":"jq is required to read the SPEC-INJECTED record and is not on PATH","injected":false,"fresh":false,"design_task":"","unit_id":"","unit_hash":"","live_unit_hash":""}\n'
+        exit 2
+    fi
+
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "spec-injection-status" "" "missing_task_id" \
+            "spec-injection-status requires <task-id> as first positional argument" \
+            "qa-gate.sh spec-injection-status <task-id>"
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_error_json "spec-injection-status" "$tid" "unknown_flag" \
+            "unknown argument '$1'; spec-injection-status takes only <task-id>" \
+            "qa-gate.sh spec-injection-status <task-id>"
+        exit 1
+    fi
+
+    require_bd "spec-injection-status" "$tid"
+
+    local rec_json="" rec_rc=0
+    rec_json=$(latest_spec_injection "$tid") || rec_rc=$?
+    if [ "$rec_rc" -ne 0 ]; then
+        emit_spec_injection_status "false" "spec_injection_source_unreadable" \
+            "the SPEC-INJECTED record source for $tid could not be read (both bd show forms failed, or the comment stream did not parse); whether an injection ever happened is unknown, which is not the same answer as injected:false" \
+            "$tid" "false" "false" "" "" "" ""
+        exit 2
+    fi
+
+    local rshape="" rshape_rc=0
+    rshape=$(printf '%s' "$rec_json" | jq -er '
+        if type != "object" then "malformed"
+        elif . == {} then "absent"
+        elif ( (keys | sort) == ["design_hash", "design_task", "unit_hash", "unit_id"]
+               and (.design_task | type == "string" and test("^[A-Za-z0-9._+-]+$"))
+               and (.unit_id     | type == "string" and test("^[A-Za-z0-9._-]+$"))
+               and (.design_hash | type == "string" and test("^[0-9a-fA-F]{64}$"))
+               and (.unit_hash   | type == "string" and test("^[0-9a-fA-F]{64}$")) )
+          then "present"
+        else "malformed" end
+    ' 2>/dev/null) || rshape_rc=$?
+    if [ "$rshape_rc" -ne 0 ] || { [ "$rshape" != "absent" ] && [ "$rshape" != "present" ]; }; then
+        emit_spec_injection_status "false" "spec_injection_record_malformed" \
+            "the SPEC-INJECTED record read for $tid produced neither a confirmed absence ({}) nor a complete valid quadruple; refusing to report a partial or malformed record as a determined answer" \
+            "$tid" "false" "false" "" "" "" ""
+        exit 2
+    fi
+
+    if [ "$rshape" = "absent" ]; then
+        emit_spec_injection_status "true" "" \
+            "no SPEC-INJECTED record exists for $tid (the comment stream was read and parsed) -- either it has never been spawned as an implementer since binding, or it was never bound to a design unit at all" \
+            "$tid" "false" "false" "" "" "" ""
+        return 0
+    fi
+
+    local rec_design_task="" rec_unit_id="" rec_design_hash="" rec_unit_hash=""
+    rec_design_task=$(printf '%s' "$rec_json" | jq -re '.design_task' 2>/dev/null) || rec_design_task=""
+    rec_unit_id=$(printf '%s' "$rec_json" | jq -re '.unit_id' 2>/dev/null) || rec_unit_id=""
+    rec_design_hash=$(printf '%s' "$rec_json" | jq -re '.design_hash' 2>/dev/null) || rec_design_hash=""
+    rec_unit_hash=$(printf '%s' "$rec_json" | jq -re '.unit_hash' 2>/dev/null) || rec_unit_hash=""
+    if [ -z "$rec_design_task" ] || [ -z "$rec_unit_id" ] || [ -z "$rec_design_hash" ] || [ -z "$rec_unit_hash" ]; then
+        emit_spec_injection_status "false" "spec_injection_record_malformed" \
+            "the validated SPEC-INJECTED record for $tid could not be split into its four fields (jq failed mid-run); refusing to report a determined answer with required fields missing" \
+            "$tid" "false" "false" "" "" "" ""
+        exit 2
+    fi
+
+    # Re-resolve the CURRENT binding -- an amendment or a --rebind between
+    # injection and now must not be masked by comparing against a stale
+    # recollection of what "the bound unit" was.
+    local binding_json="" binding_rc=0
+    binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?
+    if [ "$binding_rc" -ne 0 ]; then
+        emit_spec_injection_status "false" "design_binding_unreadable" \
+            "a SPEC-INJECTED record exists for $tid (unit_id=$rec_unit_id under $rec_design_task), but the CURRENT DESIGN-UNIT binding could not be re-read to confirm it still applies" \
+            "$tid" "true" "false" "$rec_design_task" "$rec_unit_id" "$rec_unit_hash" ""
+        exit 2
+    fi
+    local cur_design_task="" cur_unit_id=""
+    cur_design_task=$(printf '%s' "$binding_json" | jq -r '.design_task // ""' 2>/dev/null) || cur_design_task=""
+    cur_unit_id=$(printf '%s' "$binding_json" | jq -r '.unit_id // ""' 2>/dev/null) || cur_unit_id=""
+
+    if [ "$cur_design_task" != "$rec_design_task" ] || [ "$cur_unit_id" != "$rec_unit_id" ]; then
+        local rebind_obs="the CURRENT DESIGN-UNIT binding for $tid"
+        if [ -z "$cur_design_task" ] || [ -z "$cur_unit_id" ]; then
+            rebind_obs="$rebind_obs is now ABSENT (unbound since injection)"
+        else
+            rebind_obs="$rebind_obs is now unit_id=$cur_unit_id under $cur_design_task"
+        fi
+        emit_spec_injection_status "true" "" \
+            "STALE: the SPEC-INJECTED record for $tid names unit_id=$rec_unit_id under $rec_design_task, but $rebind_obs -- the injected packet no longer describes the governing unit; re-spawn to refresh it" \
+            "$tid" "true" "false" "$rec_design_task" "$rec_unit_id" "$rec_unit_hash" ""
+        return 0
+    fi
+
+    # Same governing unit still bound -- compare the recorded per-unit
+    # content hash against a LIVE recompute (design_unit_content_hash, the
+    # SAME function DESIGN-CONFLICT's own clearing predicate uses, per
+    # R2-F3 -- never the whole-artifact design_hash, for the identical
+    # false-alarm-on-an-unrelated-unit reason named at the top of this
+    # section).
+    local artifact live_hash="" hash_rc=0
+    artifact=$(design_artifact_path_for "$rec_design_task")
+    live_hash=$(design_unit_content_hash "$artifact" "$rec_unit_id") || hash_rc=$?
+    if [ "$hash_rc" -ne 0 ]; then
+        emit_spec_injection_status "false" "spec_injection_content_unreadable" \
+            "a SPEC-INJECTED record exists for $tid (unit_id=$rec_unit_id under $rec_design_task), but the unit's CURRENT content could not be re-derived from $artifact to check freshness" \
+            "$tid" "true" "false" "$rec_design_task" "$rec_unit_id" "$rec_unit_hash" ""
+        exit 2
+    fi
+    if [ -z "$live_hash" ]; then
+        emit_spec_injection_status "true" "" \
+            "STALE: unit_id=$rec_unit_id is no longer declared in $rec_design_task's CURRENT artifact -- it was likely amended away since injection" \
+            "$tid" "true" "false" "$rec_design_task" "$rec_unit_id" "$rec_unit_hash" ""
+        return 0
+    fi
+    if [ "$live_hash" != "$rec_unit_hash" ]; then
+        emit_spec_injection_status "true" "" \
+            "STALE: unit_id=$rec_unit_id's own content in $rec_design_task has CHANGED since injection (injected unit_hash=$rec_unit_hash, live=$live_hash) -- the implementer may be working from a superseded spec; re-spawn to refresh it or confirm via design_conflict" \
+            "$tid" "true" "false" "$rec_design_task" "$rec_unit_id" "$rec_unit_hash" "$live_hash"
+        return 0
+    fi
+
+    emit_spec_injection_status "true" "" \
+        "fresh: the injected spec for $tid (unit_id=$rec_unit_id under $rec_design_task) still matches the unit's current content and the current binding" \
+        "$tid" "true" "true" "$rec_design_task" "$rec_unit_id" "$rec_unit_hash" "$live_hash"
+    return 0
+}
+# SPEC-INJECTION-STATUS END (v5 D5, claude-workflow-plugin-fkm.7)
+
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
     local tid="${1:-}" fid="${2:-}"
@@ -13001,6 +13289,7 @@ case "$SUB" in
     design-unit-show) cmd_design_unit_show "$@" ;;
     design-status)    cmd_design_status "$@" ;;
     design-conflict)  cmd_design_conflict "$@" ;;
+    spec-injection-status) cmd_spec_injection_status "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     # quarantine-artifact dispatch -- REMOVED (claude-workflow-plugin-k6re,

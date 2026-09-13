@@ -201,6 +201,7 @@ export PATH="$FIXTURE/fake-bd:$PATH"
 # fixture-local copies and run from there; that is the point of a mutant.
 QG="$PLUGIN_DIR/.claude/scripts/qa-gate.sh"
 WM="$SCRIPTS/workflow-manifest.sh"
+RC="$SCRIPTS/review-check.sh"
 
 json_field() { printf '%s' "$2" | "$REAL_JQ" -r "$1" 2>/dev/null || printf ''; }
 
@@ -339,48 +340,56 @@ printf '\n=== Section 3: H2-F2/H2R2-F2/268l META — the pre-fix call sites, res
 # design-conform's too, spelled BYTE-IDENTICALLY on purpose; claude-workflow-
 # plugin-268l added a THIRD consumer of the identical shape —
 # resolve_design_conflict_subject, shared by design-conflict (the writer)
-# and compute_design_conflict_open (the reader) — deliberately reusing the
-# SAME byte-shape rather than inventing a fourth. ONE sed
-# below restores the historical fail-open shape at ALL THREE call sites and
-# this section watches each consumer misbehave in its own named way: unit-show
-# reports the determined answer bound:false, conform rewrites the unread
-# source as unit_not_in_design (a claim whose remedy — "bind it first" — is
-# wrong when the store simply could not be read), and design-conflict (268l)
-# rewrites it as design_artifact_not_found (a claim whose remedy — "bind it
-# or record a design directly" — is equally wrong for the same reason). The
-# READER half of 268l (compute_design_conflict_open) is NOT independently
-# discriminated by T-NOFIXTURE/T-GARBLED here: its OWN separate design_
-# comments_json("$subject") call, one line after the resolution call this
-# mutant restores, fails on the IDENTICAL unreadable source for the IDENTICAL
-# reason (subject falls back to $tid on the fail-open path, and $tid's own
-# stream was never readable to begin with) — so design-gate-precheck still
-# correctly refuses (design_conflict_source_unreadable) under this exact
-# mutant, for a reason this fixture cannot attribute specifically to the
-# resolution call. That is not a gap in coverage: design-conflict-subject-
-# resolution.test.sh Section 5 isolates the reader's own regression properly,
-# with a fixture where the binding is genuinely READABLE but resolves to the
-# wrong subject — the shape THIS section's fixtures cannot produce (measured,
-# not assumed: probed directly against this exact mutant before writing this
-# comment).
+# and compute_design_conflict_open (the reader); v5 D5 (fkm.7) added a
+# FOURTH — cmd_spec_injection_status's re-read of the CURRENT binding, used
+# to detect a rebind since injection — deliberately reusing the SAME
+# byte-shape each time rather than inventing a new one per consumer. ONE sed
+# below restores the historical fail-open shape at ALL FOUR call sites (3.1/
+# 3.1b prove the byte-level non-vacuity across all four); this section
+# watches THREE of the four consumers misbehave in their own named way:
+# unit-show reports the determined answer bound:false, conform rewrites the
+# unread source as unit_not_in_design (a claim whose remedy — "bind it
+# first" — is wrong when the store simply could not be read), and
+# design-conflict (268l) rewrites it as design_artifact_not_found (a claim
+# whose remedy — "bind it or record a design directly" — is equally wrong
+# for the same reason). The READER half of 268l (compute_design_conflict_
+# open) is NOT independently discriminated by T-NOFIXTURE/T-GARBLED here:
+# its OWN separate design_comments_json("$subject") call, one line after the
+# resolution call this mutant restores, fails on the IDENTICAL unreadable
+# source for the IDENTICAL reason (subject falls back to $tid on the
+# fail-open path, and $tid's own stream was never readable to begin with) —
+# so design-gate-precheck still correctly refuses
+# (design_conflict_source_unreadable) under this exact mutant, for a reason
+# this fixture cannot attribute specifically to the resolution call. That is
+# not a gap in coverage: design-conflict-subject-resolution.test.sh
+# Section 5 isolates the reader's own regression properly, with a fixture
+# where the binding is genuinely READABLE but resolves to the wrong subject
+# — the shape THIS section's fixtures cannot produce (measured, not
+# assumed: probed directly against this exact mutant before writing this
+# comment). The FOURTH consumer, cmd_spec_injection_status, is ALSO not
+# independently discriminated here, for a DIFFERENT and stronger reason —
+# see the comment just above `rm -f "$QG_MUT3"` below, which records a
+# retracted attempt and why the gap is structural, not merely unattempted.
 QG_MUT3="$SCRIPTS/qa-gate.mutant-s3.sh"
 # shellcheck disable=SC2016  # the sed pattern/replacement quote SHELL SOURCE
 # from qa-gate.sh verbatim; expanding $(...) here would defeat the mutation.
 sed 's/binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?/binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"/' \
     "$QG" > "$QG_MUT3"
-# Non-vacuity: the shipped script carries the rc-capture line at ALL THREE
+# Non-vacuity: the shipped script carries the rc-capture line at ALL FOUR
 # call sites (design-unit-show + design-conform, H2R2-F2; resolve_design_
-# conflict_subject, 268l) and the fail-open spelling at none; the mutant
-# must carry zero and three respectively.
+# conflict_subject, 268l; cmd_spec_injection_status, fkm.7) and the fail-open
+# spelling at none; the mutant must carry zero and four respectively.
 # (grep -cF counts LINES; the conform header comment quotes only the short
 # `|| binding_json="{}"` fragment, which cannot match these full-line
 # needles — counting text to prove a claim about code is exactly what the
-# tests README warns about, so 3.2/3.4/3.6 below DRIVE all three mutated
-# consumers.)
+# tests README warns about, so 3.2/3.4/3.6 below DRIVE three of the four
+# mutated consumers — the fourth is named, not driven; see the comment above
+# `rm -f "$QG_MUT3"` below.)
 # shellcheck disable=SC2016  # grep -cF needles are literal shell source.
-assert_eq "3.1 NON-VACUITY: rc-capture call sites shipped/mutant = 3/0" "3|0" \
+assert_eq "3.1 NON-VACUITY: rc-capture call sites shipped/mutant = 4/0" "4|0" \
     "$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG")|$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG_MUT3")"
 # shellcheck disable=SC2016  # grep -cF needles are literal shell source.
-assert_eq "3.1b NON-VACUITY: fail-open call sites shipped/mutant = 0/3" "0|3" \
+assert_eq "3.1b NON-VACUITY: fail-open call sites shipped/mutant = 0/4" "0|4" \
     "$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG")|$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG_MUT3")"
 BASHN3_RC=0; bash -n "$QG_MUT3" 2>/dev/null || BASHN3_RC=$?
 assert_eq "3.1c ...and the mutant parses" "0" "$BASHN3_RC"
@@ -425,6 +434,33 @@ M3G_OUT=$(bash "$QG" design-conflict "T-NOFIXTURE" --unit U1 "268l probe" 2>/dev
 assert_eq "3.7 RESTORE CONTROL: shipped design-conflict, same input, refuses with its own key at exit 2" \
     "2|design_binding_unreadable" \
     "$M3G_RC|$(json_field '.error_key' "$M3G_OUT")"
+
+# The FOURTH consumer this same mutant touches (v5 D5, fkm.7):
+# cmd_spec_injection_status's re-read of the CURRENT binding. NOT
+# independently driven here, and this was VERIFIED rather than assumed: a
+# first attempt at a dedicated leg (a task carrying only a well-formed
+# SPEC-INJECTED comment, no .unreadable sidecar) was written, run, and its
+# own restore-control leg FAILED — because a task with no .unreadable marker
+# is, by this harness's convention, genuinely READABLE, so
+# latest_design_unit_binding legitimately returns a determined {} (no
+# binding) whether or not the mutation is applied; the mutation only changes
+# behaviour on an ACTUAL rc=3, which that fixture never produces either way.
+# That failure is the exact vacuity leg 12.10's discriminator elsewhere in
+# this spec exists to catch, one level up: it surfaced as the restore
+# control disagreeing with the mutant leg instead, and was retracted rather
+# than patched into passing. The STRUCTURAL reason generalises, so a
+# differently-shaped fixture cannot fix it: spec-injection-status's own
+# FIRST read (latest_spec_injection) reads the IDENTICAL `bd show <tid>`
+# stream this mutant's SECOND read does, for the SAME tid, so making the
+# store genuinely unreadable fails the FIRST read before this mutant's line
+# is ever reached — T-NOFIXTURE proves exactly that at Section 12's own
+# 12.5/12.6 (spec-injection-status's own unreadable-source path) and 12.7-
+# 12.10 (its own META, targeting the FIRST read specifically). Reaching a
+# state where the first read succeeds and the second independently fails
+# would need a source that heals or breaks BETWEEN two reads of the same
+# task within one process — the same class of gap this spec's own Section 8
+# header names for compute_design_satisfied's DESIGN-REVIEW-SOURCE-
+# UNREADABLE-GUARD, and not solved here for the identical reason.
 rm -f "$QG_MUT3"
 
 # ===========================================================================
@@ -1205,6 +1241,190 @@ R117C_OUT=$(bash "$QG" design-conform "T-CFM2" 2>/dev/null) || R117C_RC=$?
 assert_eq "11.7b CONTROL: real validator, same task, conforms end to end" "0|true|[]" \
     "$R117C_RC|$(json_field '.ok' "$R117C_OUT")|$(json_field '.undeclared_files | tojson' "$R117C_OUT")"
 rm -f "$SCRIPTS/review-check.real.sh"
+
+# ===========================================================================
+printf '\n=== Section 12: spec-injection-status (v5 D5, claude-workflow-plugin-fkm.7) ===\n'
+# ===========================================================================
+# The THIRD read-only accessor this spec covers, over a NEW record grammar
+# (SPEC-INJECTED v1) written by subagent-start.sh's inject_unit_spec at spawn
+# time — see that file's own header and qa-gate.sh's cmd_spec_injection_status
+# for the full contract. Reuses this spec's EXISTING fake-bd store (bd_task)
+# and REAL docs/specs/ + review-check.sh + workflow-manifest.sh (the fixture
+# only fakes the bd SIDE; the artifact and its hashing are the genuine
+# article, exactly like Section 9/11's real-artifact legs above).
+#
+# Covers: determined absence (12.1); a fresh, correctly-injected record
+# (12.2); content changed since injection — the SAME false-alarm-on-an-
+# unrelated-unit concern DESIGN-CONFLICT's own R2-F3 fix exists for, so this
+# gates on a PER-UNIT hash, never the whole-artifact one (12.3); rebound
+# since injection (12.4); an unreadable source, reusing this spec's EXISTING
+# T-NOFIXTURE/T-GARBLED fixtures rather than inventing new ones since the
+# failure channel (design_comments_json) is identical (12.5-12.6); and a
+# META proving the unreadable-vs-absent distinction is the mutant's own
+# doing, not an artefact of the fixture, WITH a discriminator leg (12.10)
+# proving the same mutant still answers a DIFFERENT, valid input correctly —
+# the ybhc lesson this task's own brief names: a sentinel region that also
+# captures a needed statement yields a mutant that fails for every input,
+# which would make 12.8 pass for the wrong reason.
+
+# A dedicated design artifact (E-SPECINJECT), independent of E-DESIGN above
+# so this section's state can never be coupled to what Sections 8-11 left
+# E-DESIGN.md as.
+cat > "$FIXTURE/docs/specs/E-SPECINJECT.md" <<'ART'
+## Problem
+p
+## Approaches considered
+a
+## Chosen approach
+c
+## Units
+u
+## Global constraints
+g
+## Out of scope
+o
+## Verification plan
+v
+## Revision log
+r
+<!-- DESIGN-UNITS BEGIN -->
+{
+  "contract_version": "1",
+  "task_id": "E-SPECINJECT",
+  "designer_identity": "designer-claude",
+  "units": [
+    { "unit_id": "U1", "goal": "g1", "verification": "v1",
+      "files": ["src/a.sh"],
+      "acceptance": [ { "id": "AC1", "text": "t1" } ],
+      "depends_on": [] },
+    { "unit_id": "U2", "goal": "g2", "verification": "v2",
+      "files": ["src/b.sh"],
+      "acceptance": [ { "id": "AC2", "text": "t2" } ],
+      "depends_on": [] }
+  ]
+}
+<!-- DESIGN-UNITS END -->
+ART
+
+SI_DHASH=$(bash "$WM" hash-file "$FIXTURE/docs/specs/E-SPECINJECT.md")
+SI_U1_JSON=$(bash "$RC" design-unit-json "$FIXTURE/docs/specs/E-SPECINJECT.md" U1 | "$REAL_JQ" -r '.unit_json')
+SI_U1_TMP="$FIXTURE/.si-u1-hash-input.json"
+printf '%s\n' "$SI_U1_JSON" > "$SI_U1_TMP"
+SI_U1_HASH=$(bash "$WM" hash-file "$SI_U1_TMP")
+rm -f "$SI_U1_TMP"
+assert_eq "12.0 precondition: the real per-unit content hash computed cleanly (64 hex)" "64" "${#SI_U1_HASH}"
+SI_WRONG_HASH="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+# shellcheck disable=SC2016  # '[$c]' is a jq program.
+bd_task "T-SI-NONE" "$("$REAL_JQ" -nc --arg c "DESIGN-UNIT v1 task=T-SI-NONE design_task=E-SPECINJECT unit_id=U1 design_hash=$SI_DHASH at 2026-08-25T00:00:00Z: bound" '[$c]')"
+
+# shellcheck disable=SC2016  # {text:$b},{text:$s} are jq program variables.
+bd_task "T-SI-FRESH" "$("$REAL_JQ" -nc \
+    --arg b "DESIGN-UNIT v1 task=T-SI-FRESH design_task=E-SPECINJECT unit_id=U1 design_hash=$SI_DHASH at 2026-08-25T00:00:00Z: bound" \
+    --arg s "SPEC-INJECTED v1 task=T-SI-FRESH design_task=E-SPECINJECT unit_id=U1 design_hash=$SI_DHASH unit_hash=$SI_U1_HASH at 2026-08-25T00:00:01Z: injected at spawn" \
+    '[$b,$s]')"
+
+# shellcheck disable=SC2016  # {text:$b},{text:$s} are jq program variables.
+bd_task "T-SI-STALE-CONTENT" "$("$REAL_JQ" -nc \
+    --arg b "DESIGN-UNIT v1 task=T-SI-STALE-CONTENT design_task=E-SPECINJECT unit_id=U1 design_hash=$SI_DHASH at 2026-08-25T00:00:00Z: bound" \
+    --arg s "SPEC-INJECTED v1 task=T-SI-STALE-CONTENT design_task=E-SPECINJECT unit_id=U1 design_hash=$SI_DHASH unit_hash=$SI_WRONG_HASH at 2026-08-25T00:00:01Z: injected at spawn" \
+    '[$b,$s]')"
+
+# shellcheck disable=SC2016  # {text:$b1},{text:$s},{text:$b2} are jq program variables.
+bd_task "T-SI-REBOUND" "$("$REAL_JQ" -nc \
+    --arg b1 "DESIGN-UNIT v1 task=T-SI-REBOUND design_task=E-SPECINJECT unit_id=U1 design_hash=$SI_DHASH at 2026-08-25T00:00:00Z: bound" \
+    --arg s "SPEC-INJECTED v1 task=T-SI-REBOUND design_task=E-SPECINJECT unit_id=U1 design_hash=$SI_DHASH unit_hash=$SI_U1_HASH at 2026-08-25T00:00:01Z: injected at spawn" \
+    --arg b2 "DESIGN-UNIT v1 task=T-SI-REBOUND design_task=E-SPECINJECT unit_id=U2 design_hash=$SI_DHASH at 2026-08-25T00:00:02Z: rebound [rebind: moved to U2]" \
+    '[$b1,$s,$b2]')"
+
+# --- 12.1 determined absence: bound, never spawned since --------------------
+S12_1_RC=0
+S12_1_OUT=$(bash "$QG" spec-injection-status "T-SI-NONE" 2>/dev/null) || S12_1_RC=$?
+assert_eq "12.1 no SPEC-INJECTED record: exit 0, determined absence" "0" "$S12_1_RC"
+assert_eq "12.1b ...ok:true, injected:false, fresh:false" "true|false|false" \
+    "$(json_field '.ok' "$S12_1_OUT")|$(json_field '.injected' "$S12_1_OUT")|$(json_field '.fresh' "$S12_1_OUT")"
+
+# --- 12.2 a fresh, correctly-injected record ---------------------------------
+S12_2_RC=0
+S12_2_OUT=$(bash "$QG" spec-injection-status "T-SI-FRESH" 2>/dev/null) || S12_2_RC=$?
+assert_eq "12.2 a correctly-injected record: exit 0" "0" "$S12_2_RC"
+assert_eq "12.2b ...injected:true, fresh:true, unit_hash == live_unit_hash == the REAL computed hash" \
+    "true|true|$SI_U1_HASH|$SI_U1_HASH" \
+    "$(json_field '.injected' "$S12_2_OUT")|$(json_field '.fresh' "$S12_2_OUT")|$(json_field '.unit_hash' "$S12_2_OUT")|$(json_field '.live_unit_hash' "$S12_2_OUT")"
+
+# --- 12.3 content changed since injection (never the whole-artifact hash) ---
+S12_3_RC=0
+S12_3_OUT=$(bash "$QG" spec-injection-status "T-SI-STALE-CONTENT" 2>/dev/null) || S12_3_RC=$?
+assert_eq "12.3 content changed since injection: exit 0, injected:true, fresh:false" "0|true|false" \
+    "$S12_3_RC|$(json_field '.injected' "$S12_3_OUT")|$(json_field '.fresh' "$S12_3_OUT")"
+assert_eq "12.3b ...observations name the content-change reason" "yes" \
+    "$(printf '%s' "$S12_3_OUT" | grep -qF "CHANGED since injection" && echo yes || echo no)"
+assert_eq "12.3c ...live_unit_hash is the REAL current hash (not the wrong recorded one)" "$SI_U1_HASH" \
+    "$(json_field '.live_unit_hash' "$S12_3_OUT")"
+
+# --- 12.4 rebound since injection --------------------------------------------
+S12_4_RC=0
+S12_4_OUT=$(bash "$QG" spec-injection-status "T-SI-REBOUND" 2>/dev/null) || S12_4_RC=$?
+assert_eq "12.4 rebound since injection: exit 0, injected:true, fresh:false" "0|true|false" \
+    "$S12_4_RC|$(json_field '.injected' "$S12_4_OUT")|$(json_field '.fresh' "$S12_4_OUT")"
+assert_eq "12.4b ...observations name the NEW governing unit" "yes" \
+    "$(printf '%s' "$S12_4_OUT" | grep -qF "now unit_id=U2" && echo yes || echo no)"
+
+# --- 12.5/12.6 unreadable source (reusing this spec's existing fixtures) ---
+S12_5_RC=0
+S12_5_OUT=$(bash "$QG" spec-injection-status "T-NOFIXTURE" 2>/dev/null) || S12_5_RC=$?
+assert_eq "12.5 unreadable source (no fixture file at all): exit 2" "2" "$S12_5_RC"
+assert_eq "12.5b ...ok:false, error_key=spec_injection_source_unreadable" "false|spec_injection_source_unreadable" \
+    "$(json_field '.ok' "$S12_5_OUT")|$(json_field '.error_key' "$S12_5_OUT")"
+assert_eq "12.5c distinguishable from 12.1's determined absence" "true" \
+    "$( [ "$S12_1_RC" = "0" ] && [ "$S12_5_RC" = "2" ] \
+        && [ "$(json_field '.ok' "$S12_1_OUT")" = "true" ] \
+        && [ "$(json_field '.ok' "$S12_5_OUT")" = "false" ] && echo true || echo false )"
+
+S12_6_RC=0
+S12_6_OUT=$(bash "$QG" spec-injection-status "T-GARBLED" 2>/dev/null) || S12_6_RC=$?
+assert_eq "12.6 unparseable comment JSON: exit 2 with the same key" "2|spec_injection_source_unreadable" \
+    "$S12_6_RC|$(json_field '.error_key' "$S12_6_OUT")"
+
+# --- 12.7-12.10 META: restore the pre-fix fail-open call-site shape ---------
+QG_MUT12="$SCRIPTS/qa-gate.mutant-s12.sh"
+# shellcheck disable=SC2016  # the sed pattern/replacement quote SHELL SOURCE
+# from qa-gate.sh verbatim; expanding $(...) here would defeat the mutation.
+sed 's/rec_json=$(latest_spec_injection "$tid") || rec_rc=$?/rec_json=$(latest_spec_injection "$tid") || rec_json="{}"/' \
+    "$QG" > "$QG_MUT12"
+# shellcheck disable=SC2016  # grep -cF needles are literal shell source.
+assert_eq "12.7 NON-VACUITY: rc-capture call site shipped/mutant = 1/0" "1|0" \
+    "$(grep -cF 'rec_json=$(latest_spec_injection "$tid") || rec_rc=$?' "$QG")|$(grep -cF 'rec_json=$(latest_spec_injection "$tid") || rec_rc=$?' "$QG_MUT12")"
+# shellcheck disable=SC2016  # grep -cF needles are literal shell source.
+assert_eq "12.7b NON-VACUITY: fail-open call site shipped/mutant = 0/1" "0|1" \
+    "$(grep -cF 'rec_json=$(latest_spec_injection "$tid") || rec_json="{}"' "$QG")|$(grep -cF 'rec_json=$(latest_spec_injection "$tid") || rec_json="{}"' "$QG_MUT12")"
+BASHN12_RC=0; bash -n "$QG_MUT12" 2>/dev/null || BASHN12_RC=$?
+assert_eq "12.7c ...and the mutant parses" "0" "$BASHN12_RC"
+chmod 0755 "$QG_MUT12"
+
+M12_RC=0
+M12_OUT=$(bash "$QG_MUT12" spec-injection-status "T-NOFIXTURE" 2>/dev/null) || M12_RC=$?
+assert_eq "12.8 SPECIFIC MISBEHAVIOUR: the mutant reports the unreadable source as determined absence (injected:false/ok:true/exit 0)" \
+    "0|true|false|" \
+    "$M12_RC|$(json_field '.ok' "$M12_OUT")|$(json_field '.injected' "$M12_OUT")|$(json_field '.error_key' "$M12_OUT")"
+
+M12C_RC=0
+M12C_OUT=$(bash "$QG" spec-injection-status "T-NOFIXTURE" 2>/dev/null) || M12C_RC=$?
+assert_eq "12.9 RESTORE CONTROL: shipped script, same input, still refuses" "2|spec_injection_source_unreadable" \
+    "$M12C_RC|$(json_field '.error_key' "$M12C_OUT")"
+
+# DISCRIMINATOR (claude-workflow-plugin-ybhc's lesson, named in this task's
+# own brief): a sentinel region that ALSO captures a needed statement yields
+# a mutant that fails for every input and reproduces the pre-fix exit code
+# by an unrelated mechanism. Prove the mutant is narrowly wrong, not broken
+# outright, by running it against a DIFFERENT, valid input and confirming it
+# still answers correctly.
+M12D_RC=0
+M12D_OUT=$(bash "$QG_MUT12" spec-injection-status "T-SI-FRESH" 2>/dev/null) || M12D_RC=$?
+assert_eq "12.10 DISCRIMINATOR: the same mutant still reports FRESH correctly on valid input (the strip is narrow, not a blanket break)" \
+    "0|true|true" \
+    "$M12D_RC|$(json_field '.injected' "$M12D_OUT")|$(json_field '.fresh' "$M12D_OUT")"
+rm -f "$QG_MUT12"
 
 # ===========================================================================
 printf '\n=== Summary ===\n'

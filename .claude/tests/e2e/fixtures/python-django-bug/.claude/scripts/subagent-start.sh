@@ -45,6 +45,13 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 CURRENT_TASK_HELPER="$PROJECT_DIR/.claude/scripts/current-task.sh"
 SYNC_ERRORS_LOG="$QA_TRACKING_DIR/sync-errors.log"
+# v5 D5 (claude-workflow-plugin-fkm.7): spec injection at spawn shells out to
+# these two rather than re-implementing the DESIGN-UNITS parser or the
+# record-grammar readers they already own -- see the SPEC INJECTION AT SPAWN
+# section below for the full resolution path.
+QA_GATE_SCRIPT="$PROJECT_DIR/.claude/scripts/qa-gate.sh"
+REVIEW_CHECK_SCRIPT="$PROJECT_DIR/.claude/scripts/review-check.sh"
+WORKFLOW_MANIFEST_SCRIPT="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
 
 # Always emit a non-blocking empty result on any failure path. The function
 # is the catch-all for "we couldn't do anything useful, but don't want to
@@ -504,6 +511,297 @@ record_implementer() {
     return 1
 }
 
+# SPEC INJECTION AT SPAWN BEGIN (v5 D5, claude-workflow-plugin-fkm.7)
+#
+# Phase D5's first piece (docs/plans/v5-design-phase.md:165): "Each
+# implementer's packet includes its unit's spec, criterion texts, and
+# declared file set read verbatim from the mirrored artifact at spawn time,
+# via the existing SubagentStart injection. The implementer never works
+# from the orchestrator's paraphrase, and the injected hash is recorded so a
+# later mismatch is visible."
+#
+# RESOLUTION PATH, each step reusing an EXISTING authoritative reader —
+# nothing here re-parses the DESIGN-UNITS grammar or any record grammar:
+#   1. qa-gate.sh design-unit-show <tid> — the ONE binding accessor (wraps
+#      latest_design_unit_binding). Built, by its own header, for exactly
+#      this situation: "a SEPARATE process [that] cannot call
+#      latest_design_unit_binding ... directly". bound:false is the
+#      ORDINARY case (most tasks never carry a design binding) — silent,
+#      nothing injected.
+#   2. review-check.sh design-unit-json <artifact> <unit-id> — the ONE
+#      per-unit content reader (built for design_conflict; i8cx R4-F1's
+#      "authoritative fetch": no second read of the artifact, the unit's own
+#      canonical body is a straight projection off validate-design's single
+#      guarded parse). This is where "verbatim" comes from: unit_json's
+#      string VALUES (criterion text, file paths) are untouched by
+#      validate-design's canonicalisation, which only re-sorts keys and
+#      reformats whitespace — never rewrites content.
+#   3. workflow-manifest.sh hash-file, twice: once over a tempfile holding
+#      unit_json (unit_hash — the value that actually gates freshness in
+#      qa-gate.sh's spec-injection-status, reusing design-conflict's own
+#      R2-F3 doctrine: a WHOLE-ARTIFACT hash would flag an amendment to an
+#      UNRELATED unit as "this unit changed", a false alarm already paid for
+#      and fixed in the sibling feature) and once over the whole artifact
+#      (design_hash — provenance only, never what freshness gates on).
+#
+# THE INJECTED HASH IS RECORDED as a `SPEC-INJECTED v1` Beads comment on the
+# spawned task (grammar below), read back by `qa-gate.sh
+# spec-injection-status <tid>` — decision #3 of the fkm.7 D5 brief ("an
+# injected hash nothing ever compares is decoration"). Nothing GATES on it
+# in this slice (that is D5's separate, not-yet-built per-unit alignment
+# check) — this is visibility.
+#
+# FAILURE DIRECTION. A SubagentStart hook CANNOT block subagent creation AT
+# ALL (this file's own header, above, quoting the hooks reference) — so
+# "refuse the spawn" is not an available verb here, not merely an expensive
+# one. Three-way split, matching this file's EXISTING bd-absence precedent
+# (the TASK_HEADER block below) rather than inventing a fourth behaviour:
+#   - bd / .beads / qa-gate.sh / jq unavailable: SILENT skip — the same
+#     bucket the existing TASK_HEADER guard already uses for this exact
+#     condition. If bd is gone, the whole workflow is already degraded
+#     elsewhere; this is not the layer that should announce it.
+#   - ok:true, bound:false: SILENT skip (the ordinary, ubiquitous case —
+#     most tasks never carry a design binding at all).
+#   - anything else (a binding exists but its content/hash could not be
+#     established right now): LOUD degradation notice in additionalContext,
+#     never silent — this is exactly the scenario the feature exists to
+#     prevent. A silently-dropped injection would leave the implementer
+#     doing precisely what the feature exists to stop ("working from the
+#     orchestrator's paraphrase") with no sign anything was supposed to be
+#     there instead.
+#
+# GRAMMAR (posted ON the spawned task, one line, no operator-authored free
+# text — this is a fully mechanical event record, unlike IMPLEMENTER/
+# DESIGN-UNIT/DESIGN-CONFLICT which all carry a human- or agent-authored
+# summary as their last field):
+#   SPEC-INJECTED v1 task=<tid> design_task=<dt> unit_id=<uid>
+#     design_hash=<h> unit_hash=<h2> at <ISO8601-UTC>: injected at spawn
+# Read back by qa-gate.sh's latest_spec_injection (the ONE reader for this
+# grammar — see that function's header in qa-gate.sh). Best-effort, same
+# discipline as record_implementer above: a failed write logs to
+# sync-errors.log and is never retried or confirmed — nothing in this slice
+# GATES on the write landing, so paying spawn latency for a write-
+# confirmation read-back here is not justified the way it is for DESIGN-
+# UNIT/DESIGN-CONFLICT (which DO gate `approve`).
+#
+# design_task's character class is enforced UPSTREAM by design-unit-show's
+# own binding-shape classifier (`test("^[A-Za-z0-9._+-]+$")`) before it is
+# ever returned with bound:true — no `/` (or `..` as its own path segment)
+# can appear in a value from that envelope, so building
+# "$PROJECT_DIR/docs/specs/${design_task}.md" directly below can never
+# traverse outside docs/specs/. This is RELIED ON, not re-derived:
+# qa-gate.sh's own design_path_is_contained is a private, in-process
+# function with no CLI exposure, so re-deriving an equivalent check here
+# would be a second implementation of a guarantee the upstream reader
+# already provides. (Probed directly, not assumed: a design_task value of
+# literally ".." cannot introduce a "/" either — the character class has
+# none — so the worst case is a harmless literal filename like
+# "docs/specs/...md", never a traversal.)
+
+# hash_file_safe <path> -> 64-hex sha256 on stdout, rc 0; rc 1 with no
+# stdout on any failure. Thin glue over workflow-manifest.sh hash-file's
+# shape check — the SAME kind of tempfile-then-hash glue qa-gate.sh's own
+# design_unit_content_hash already duplicates at "three other call sites"
+# by its own comment; freely duplicated boilerplate in this tree, NOT the
+# DESIGN-UNITS parser (which this function never touches).
+hash_file_safe() {
+    local path="$1" h="" h_rc=0
+    [ -f "$WORKFLOW_MANIFEST_SCRIPT" ] || return 1
+    h=$(bash "$WORKFLOW_MANIFEST_SCRIPT" hash-file "$path" 2>/dev/null) || h_rc=$?
+    [ "$h_rc" -eq 0 ] || return 1
+    printf '%s' "$h" | grep -qE '^[0-9a-fA-F]{64}$' || return 1
+    printf '%s' "$h"
+    return 0
+}
+
+# record_spec_injection <tid> <design_task> <unit_id> <design_hash> <unit_hash>
+# Best-effort writer for the SPEC-INJECTED v1 grammar above. Mirrors
+# record_implementer's own `bd comments add || bd comment add` fallback
+# chain and failure logging; unlike record_implementer this is NOT
+# idempotent per cycle — every implementer spawn that resolves a binding
+# gets a fresh record, deliberately: a re-spawn should carry the FRESHEST
+# read (especially valuable right after a design_conflict amendment), and
+# qa-gate.sh spec-injection-status only ever reads the LATEST record, so a
+# stale one left in place by skipping the write would be strictly worse.
+record_spec_injection() {
+    local tid="$1" design_task="$2" unit_id="$3" design_hash="$4" unit_hash="$5"
+    command -v bd >/dev/null 2>&1 || return 1
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
+    local record="SPEC-INJECTED v1 task=$tid design_task=$design_task unit_id=$unit_id design_hash=$design_hash unit_hash=$unit_hash at $ts: injected at spawn"
+    if bd comments add "$tid" "$record" >/dev/null 2>&1 \
+        || bd comment add "$tid" "$record" >/dev/null 2>&1; then
+        return 0
+    fi
+    log_sync_error "failed to record SPEC-INJECTED ($unit_id under $design_task) on $tid; spec-injection-status will report no record for this spawn"
+    return 1
+}
+
+# inject_unit_spec <tid> -> the additionalContext fragment to splice into
+# <subagent_assignment> for an IMPLEMENTER spawn, on stdout; "" when there
+# is nothing to say (bd/.beads/qa-gate.sh/jq unavailable, or no binding —
+# both silent by design, see the header above). Never fails the caller in a
+# way that matters: every reachable branch `printf`s something (possibly
+# empty) and returns 0; the trailing `|| return 0` guards are defensive
+# only, matching this file's `set -e` discipline elsewhere (a bare
+# assignment that fails aborts the WHOLE script under `set -e` — see
+# get_current_task's own header — so every command substitution below that
+# can plausibly fail is paired with `|| var=...`, never left bare).
+inject_unit_spec() {
+    local tid="$1"
+    command -v bd >/dev/null 2>&1 || return 0
+    [ -d "$PROJECT_DIR/.beads" ] || return 0
+    [ -f "$QA_GATE_SCRIPT" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local show_out="" show_rc=0 show_ok="false" bound="false"
+    show_out=$(bash "$QA_GATE_SCRIPT" design-unit-show "$tid" 2>/dev/null) || show_rc=$?
+    show_ok=$(printf '%s' "$show_out" | jq -r '(.ok == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || show_ok="false"
+    if [ "$show_ok" != "true" ]; then
+        log_sync_error "spec injection DEGRADED for $tid: design-unit-show did not return ok:true (exit=$show_rc)"
+        local msg=""
+        read -r -d '' msg <<EOF || true
+SPEC INJECTION DEGRADED for ${tid}: the DESIGN-UNIT binding could not be
+read right now (design-unit-show exit=${show_rc:-?}). This packet may be
+missing a governing unit spec that actually exists -- do NOT assume no
+design applies. Re-check yourself (bd_doc_read, or
+"qa-gate.sh design-unit-show ${tid}") before treating this task as unbound,
+and file a design_conflict if you establish a unit whose criteria conflict
+with reality rather than improvising.
+EOF
+        printf '%s' "$msg"
+        return 0
+    fi
+    bound=$(printf '%s' "$show_out" | jq -r '(.bound == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || bound="false"
+    if [ "$bound" != "true" ]; then
+        # Ordinary case: most tasks are never bound to a design unit at all.
+        printf ''
+        return 0
+    fi
+
+    local design_task="" unit_id=""
+    design_task=$(printf '%s' "$show_out" | jq -r '.design_task // ""' 2>/dev/null) || design_task=""
+    unit_id=$(printf '%s' "$show_out" | jq -r '.unit_id // ""' 2>/dev/null) || unit_id=""
+    if [ -z "$design_task" ] || [ -z "$unit_id" ]; then
+        log_sync_error "spec injection DEGRADED for $tid: design-unit-show reported bound:true with an empty design_task/unit_id"
+        local msg=""
+        read -r -d '' msg <<EOF || true
+SPEC INJECTION DEGRADED for ${tid}: design-unit-show reported bound:true
+but returned an empty design_task/unit_id -- a malformed response, not a
+determined binding. Do not assume no unit governs this task.
+EOF
+        printf '%s' "$msg"
+        return 0
+    fi
+
+    local artifact="$PROJECT_DIR/docs/specs/${design_task}.md"
+    if [ ! -f "$artifact" ]; then
+        log_sync_error "spec injection DEGRADED for $tid: bound to unit_id=$unit_id under design_task=$design_task but $artifact does not exist"
+        local msg=""
+        read -r -d '' msg <<EOF || true
+SPEC INJECTION DEGRADED for ${tid}: bound to unit_id=${unit_id} under
+design_task=${design_task}, but the mirrored artifact is not currently
+readable at ${artifact}. Do NOT proceed as if no design governs this task --
+read docs/specs/${design_task}.md yourself (or bd_doc_read the design
+task), and file a design_conflict (qa-gate.sh design-conflict ${tid} --unit
+${unit_id} "<statement>") if it genuinely cannot be found.
+EOF
+        printf '%s' "$msg"
+        return 0
+    fi
+
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        printf ''
+        return 0
+    fi
+
+    local uj_out="" uj_rc=0 uj_ok="false"
+    uj_out=$(bash "$REVIEW_CHECK_SCRIPT" design-unit-json "$artifact" "$unit_id" 2>/dev/null) || uj_rc=$?
+    # Mirrors qa-gate.sh's own design_unit_json() wrapper: only attempt the
+    # parse when the subprocess actually exited 0 with something on stdout —
+    # jq's own `// "false"` defaulting would likely catch a crash anyway, but
+    # gating on rc+non-empty first is the established, explicit shape rather
+    # than relying on that as a second line of defense.
+    if [ "$uj_rc" -eq 0 ] && [ -n "$uj_out" ]; then
+        uj_ok=$(printf '%s' "$uj_out" | jq -r '(.ok == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || uj_ok="false"
+    fi
+    if [ "$uj_ok" != "true" ]; then
+        local uj_ekey="unknown" uj_obs=""
+        uj_ekey=$(printf '%s' "$uj_out" | jq -r '.error_key // "unknown"' 2>/dev/null) || uj_ekey="unknown"
+        uj_obs=$(printf '%s' "$uj_out" | jq -r '.observations // ""' 2>/dev/null) || uj_obs=""
+        log_sync_error "spec injection DEGRADED for $tid: design-unit-json($artifact, $unit_id) error_key=$uj_ekey"
+        local msg=""
+        read -r -d '' msg <<EOF || true
+SPEC INJECTION DEGRADED for ${tid}: bound to unit_id=${unit_id} under
+design_task=${design_task}, but its content could not be read from the
+CURRENT artifact (error_key=${uj_ekey}${uj_obs:+: ${uj_obs}}). The unit may
+have been amended or removed since binding. Do NOT improvise -- read
+docs/specs/${design_task}.md yourself, and file a design_conflict if the
+unit genuinely no longer matches what you were asked to build.
+EOF
+        printf '%s' "$msg"
+        return 0
+    fi
+
+    local unit_json=""
+    unit_json=$(printf '%s' "$uj_out" | jq -r '.unit_json // ""' 2>/dev/null) || unit_json=""
+    if [ -z "$unit_json" ]; then
+        log_sync_error "spec injection DEGRADED for $tid: design-unit-json($artifact, $unit_id) returned ok:true with empty unit_json"
+        local msg=""
+        read -r -d '' msg <<EOF || true
+SPEC INJECTION DEGRADED for ${tid}: the design-unit-json read for
+unit_id=${unit_id} under design_task=${design_task} came back empty despite
+ok:true -- a malformed response. Do not treat this as a confirmed absence
+of the unit.
+EOF
+        printf '%s' "$msg"
+        return 0
+    fi
+
+    local unit_pretty=""
+    unit_pretty=$(printf '%s' "$unit_json" | jq . 2>/dev/null) || unit_pretty="$unit_json"
+
+    local tmpf="" unit_hash="" design_hash=""
+    tmpf=$(mktemp -t spec-inject-unit.XXXXXX 2>/dev/null) || tmpf="$QA_TRACKING_DIR/.spec-inject-unit-$$.json"
+    if printf '%s\n' "$unit_json" > "$tmpf" 2>/dev/null; then
+        unit_hash=$(hash_file_safe "$tmpf") || unit_hash=""
+    fi
+    rm -f "$tmpf" 2>/dev/null || true
+    design_hash=$(hash_file_safe "$artifact") || design_hash=""
+
+    if [ -n "$unit_hash" ] && [ -n "$design_hash" ]; then
+        record_spec_injection "$tid" "$design_task" "$unit_id" "$design_hash" "$unit_hash" || true
+    else
+        log_sync_error "spec injection for $tid: content delivered but NOT recorded (unit_hash='${unit_hash:-<empty>}' design_hash='${design_hash:-<empty>}') -- staleness will not be checkable via spec-injection-status for this spawn"
+    fi
+
+    local hash_note="unit_hash could not be computed this spawn (traceability unavailable; the content above is still verbatim)"
+    if [ -n "$unit_hash" ]; then
+        hash_note="unit_hash=${unit_hash}"
+        [ -n "$design_hash" ] && hash_note="${hash_note}, design_hash=${design_hash}"
+        hash_note="${hash_note} (recorded on this task; compare later via qa-gate.sh spec-injection-status ${tid})"
+    fi
+
+    local msg=""
+    read -r -d '' msg <<EOF || true
+SPEC INJECTION (v5 D5, claude-workflow-plugin-fkm.7): ${tid} is bound to
+unit_id=${unit_id} in the design governed by ${design_task} (mirrored at
+docs/specs/${design_task}.md). The declaration below is read VERBATIM from
+that artifact at THIS spawn -- never the orchestrator's paraphrase. Build
+exactly this. If it conflicts with what you find in the code, or its
+acceptance criteria cannot be satisfied as written, file a design_conflict
+(qa-gate.sh design-conflict ${tid} --unit ${unit_id} "<statement>") and
+stop rather than improvising or partially satisfying it:
+
+${unit_pretty}
+
+(${hash_note})
+EOF
+    printf '%s' "$msg"
+    return 0
+}
+# SPEC INJECTION AT SPAWN END (v5 D5, claude-workflow-plugin-fkm.7)
+
 # Read the input. If stdin is empty (script invoked manually for testing),
 # fall through to the empty-output path.
 INPUT=$(cat 2>/dev/null || echo "")
@@ -564,6 +862,19 @@ if is_implementer_role "$CANON"; then
     record_implementer "$CANON" "$CURRENT_TASK" || true
 fi
 
+# v5 D5 (claude-workflow-plugin-fkm.7): spec injection at spawn. Same
+# implementer-only scope as record_implementer above (qa reviews, it does
+# not implement a design unit) — see inject_unit_spec's own header for the
+# full resolution path and failure-direction rationale. `|| SPEC_INJECTION_
+# BLOCK=""` is defensive: inject_unit_spec is designed to always return 0
+# with SOME stdout (possibly empty), but this runs inside a command
+# substitution's own subshell, so even an unexpected internal abort under
+# `set -e` can only ever leave this empty, never crash the spawn.
+SPEC_INJECTION_BLOCK=""
+if is_implementer_role "$CANON"; then
+    SPEC_INJECTION_BLOCK=$(inject_unit_spec "$CURRENT_TASK") || SPEC_INJECTION_BLOCK=""
+fi
+
 # Pull a short summary of the task. We keep this conservative — no full
 # bd show dump (that can be hundreds of lines), just the header lines + the
 # notes. The specialist can run bd_show_task or bd_doc_read for the rest.
@@ -619,6 +930,10 @@ spawning you — read it FIRST via the bd_doc_read MCP tool:
 first via bd_doc_read(task_id="${CURRENT_TASK}", list_only=true).)
 
 If no spec/context doc is attached, the Task() prompt is your full brief.
+
+${SPEC_INJECTION_BLOCK:+
+${SPEC_INJECTION_BLOCK}
+}
 </subagent_assignment>
 EOF
 
