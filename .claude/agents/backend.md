@@ -325,7 +325,8 @@ When you finish a task and hand it back to the orchestrator (and onward to QA), 
   "unit_id": "",
   "design_hash": "",
   "green_before": "none",
-  "green_after": "none"
+  "green_after": "none",
+  "criteria_tests": {}
 }
 ```
 
@@ -340,6 +341,7 @@ Field semantics:
 - `context_coverage` — **mandatory free-form text**. Three things, in order: what you read to ground this change (the migration history, the caller set from `impact_of`, the vendor's OpenAPI, the incident thread); what you deliberately did NOT read and why (the whole ORM layer, because the change is confined to one repository class); and the largest remaining unknown you are shipping on (whether the downstream consumer tolerates the new nullable column). Name files and artefacts — "read the relevant code" is a non-answer, and a coverage note with no deliberate omission in it is boilerplate, because there is always one. This is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. QA and the rubric grader both read it (default rubric C8).
 - `unit_id` / `design_hash` — empty string unless you were bound to a design unit; see "Green-to-green per unit" above for where these values come from and why they may legitimately diverge (a bound unit with no recorded `design_hash` is a disclosed gap, not a mistake).
 - `green_before` / `green_after` — `"none"` unless you ran `qa-gate.sh green-check`; when you did, copy its `result` field verbatim (`green` or `red`). Never write `"green"` here because you believe the suite is fine — the field exists precisely so that claim is backed by a command that actually ran.
+- `criteria_tests` — `{}` unless you were bound to a design unit; when bound, maps each declared acceptance-criterion id to the `tests_added` entries that cover it (`{"U3-1": ["path/to/file.test.sh::assertion label"]}`). Every reference here must also appear, verbatim, in `tests_added` above — a reference to anything else is refused at record time. `qa-gate.sh design-unit-align` (run at `approve`) is what checks completeness (every declared criterion covered) and existence (the file and label still on disk); this field only has to be well-formed and internally consistent.
 
 Emit the JSON object verbatim in your final message to the orchestrator (alongside any prose summary). The orchestrator parses it; QA reads it before starting the gate.
 

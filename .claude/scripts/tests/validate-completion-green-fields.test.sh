@@ -90,10 +90,17 @@ trap 'rm -rf "$WORKDIR"' EXIT
 # below isolates the ONE field it is about.
 payload() {
     local extra="$1" out="$WORKDIR/p-$RANDOM$RANDOM.json"
+    # criteria_tests:{} is in the BASE, not overridden per test, for the
+    # same reason role/model/pin are: this file is about the FOUR green
+    # fields, not about criteria_tests (v5 D5 piece 4, which has its own
+    # dedicated file, validate-completion-criteria-tests.test.sh) — {} is
+    # always schema-legal regardless of what unit_id/design_hash this
+    # payload's own $extra sets, so it cannot mask or interact with any
+    # assertion below.
     jq -n --argjson extra "$extra" '
         {task_id:"t-1", files_changed:[], tests_added:[], decisions:[],
          blockers:[], llm_observations:"x", context_coverage:"y",
-         role:"devops", model:"m", pin:"m"} + $extra
+         role:"devops", model:"m", pin:"m", criteria_tests:{}} + $extra
     ' > "$out"
     printf '%s' "$out"
 }
@@ -255,11 +262,17 @@ assert_eq "META.3 the mutant still parses (bash -n rc=0)" "0" "$BASH_N_RC"
 
 # A payload with NO trace of the four new fields at all — the shape a
 # specialist would submit if nothing ever required them, which is exactly
-# the pre-piece-3 world this META-TEST reconstructs.
+# the pre-piece-3 world this META-TEST reconstructs. criteria_tests:{} IS
+# included (unlike unit_id/design_hash/green_before/green_after, which
+# this payload deliberately omits): this META-TEST isolates
+# GREEN-FIELDS-VALIDATION specifically, and CRITERIA-TESTS-VALIDATION (v5
+# D5 piece 4) is a SEPARATE, later region this strip does not touch — an
+# unrelated missing_key:criteria_tests refusal on the mutant would prove
+# nothing about the region actually under test here.
 P_NOFIELDS=$(jq -n '
     {task_id:"t-1", files_changed:[], tests_added:[], decisions:[],
      blockers:[], llm_observations:"x", context_coverage:"y",
-     role:"devops", model:"m", pin:"m"}
+     role:"devops", model:"m", pin:"m", criteria_tests:{}}
 ' > "$WORKDIR/nofields.json"; printf '%s' "$WORKDIR/nofields.json")
 
 MUTANT_OUT=$(bash "$META_RC" validate-completion "$P_NOFIELDS" 2>/dev/null); MUTANT_RC=$?
@@ -284,7 +297,7 @@ assert_eq "META.5 ...error_key=missing_key:unit_id" \
 P_CLAIMGREEN_NOOTHERFIELDS=$(jq -n '
     {task_id:"t-1", files_changed:[], tests_added:[], decisions:[],
      blockers:[], llm_observations:"x", context_coverage:"y",
-     role:"devops", model:"m", pin:"m", green_before:"green"}
+     role:"devops", model:"m", pin:"m", criteria_tests:{}, green_before:"green"}
 ' > "$WORKDIR/claimgreen.json"; printf '%s' "$WORKDIR/claimgreen.json")
 MUTANT_CG_RC=0
 bash "$META_RC" validate-completion "$P_CLAIMGREEN_NOOTHERFIELDS" >/dev/null 2>&1 || MUTANT_CG_RC=$?

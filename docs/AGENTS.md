@@ -914,7 +914,8 @@ how the orchestrator chains delegations without re-deriving context.
   "unit_id": "<design unit id, or \"\" if this task is not bound to one>",
   "design_hash": "<64-hex hash of the bound design artifact, or \"\" >",
   "green_before": "green | red | none",
-  "green_after": "green | red | none"
+  "green_after": "green | red | none",
+  "criteria_tests": {"<criterion-id>": ["<file>::<label>", "..."]}
 }
 ```
 
@@ -998,6 +999,50 @@ how the orchestrator chains delegations without re-deriving context.
   not proceed.** See `.claude/agents/devops.md`'s "Green-to-green per unit"
   section (backend.md/frontend.md carry the same section) for the full
   protocol an implementer follows.
+- **`criteria_tests`** — **required**, object, MAY be `{}`. v5 D5 piece 4
+  (claude-workflow-plugin-fkm.7). Maps each of the bound unit's acceptance-
+  criterion ids to the array of `tests_added` entries that cover it:
+  `{"U3-1": ["path/to/file.test.sh::assertion label"], "U3-2": [...]}`. `{}`
+  is legal even when `unit_id` is non-empty — not every payload has finished
+  mapping its coverage, and the plan's "criteria have tests" requirement is
+  enforced at `approve` time (`qa-gate.sh design-unit-align`), not by this
+  field's shape alone. Two things ARE checked at record time: every test
+  reference named here must ALSO appear, byte-for-byte, in this SAME
+  payload's `tests_added` — a reference to anything else is a stale or
+  invented claim, never something this payload declares as its own work —
+  and a non-empty map with an empty `unit_id` is refused
+  (`criteria_tests_without_unit_id`, the same one-directional shape
+  `design_hash_without_unit_id` already enforces). What record time does
+  NOT check — it has no access to the design artifact, only to this one
+  payload — is completeness (does every criterion the unit actually
+  declares have an entry here) or existence (does the named file/label
+  still exist on disk). Both are the job of `qa-gate.sh design-unit-align`,
+  which composes this field with the design artifact's own declared
+  criteria and a live filesystem check; see "Per-unit alignment" below.
+
+### Per-unit alignment (v5 D5 piece 4)
+
+For a task bound to a design unit, `qa-gate.sh approve` also runs
+`design-unit-align` — a deterministic, no-LLM, no-bypass-flag check with
+three legs, each reusing an existing accessor rather than a new one: FILES
+(`design-conform` — touched files stay within the unit's declared set, or
+the excess reaches the gate through a reviewed design amendment, never a
+side-channel flag); FRESHNESS (`spec-injection-status` — the spec the
+implementer worked from still matches what is currently bound); CRITERIA
+HAVE TESTS (new — every criterion the unit declares has a `criteria_tests`
+entry naming a file inside the project tree that exists, a label found in
+it, and `green_after` green on the same record — corroborated, since QA
+round 7 (R7-F3), against a real `GREEN-CHECK v1 phase=after` record on the
+same task rather than trusted as the payload's own unverified claim). A
+task with no DESIGN-UNIT binding at all is
+unaffected — there is nothing to align against, and no flag is needed to
+say so. A misaligned, bound task is refused (exit 2) with no bypass; the
+two remedies are the same two `design-conform`'s own doctrine already
+states — fix the work, or amend the design and re-bind. See
+`.claude/scripts/qa-gate.sh`'s DESIGN-ALIGNMENT region for the full
+per-leg contract and the reasoning for what this check deliberately does
+NOT do (it is not part of TIER 0's idempotent re-approval recheck — a
+named, deliberate scope boundary, not an oversight).
 
 ### Runtime enforcement (P7)
 
@@ -1014,30 +1059,37 @@ bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" --file <payload.jso
 ```
 
 The payload is the seven fields above, plus (v5 D5, claude-workflow-plugin-
-fkm.7) the four green-to-green fields — `unit_id`, `design_hash`,
-`green_before`, `green_after` — plus three transport keys — `"role"`,
-`"model"`, `"pin"` (claude-workflow-plugin-46w9) — none of them an eighth F7
-field; the seven are unchanged and keep their canonical names and ordering.
-`role` supplies the record's `role=` token, naming who completed the task;
-what `model` and `pin` each mean, and why both are required, is in the next
-bullet.
+fkm.7) the FOUR green-to-green fields — `unit_id`, `design_hash`,
+`green_before`, `green_after` (piece 3) — plus ONE more (piece 4) —
+`criteria_tests` — plus three transport keys — `"role"`, `"model"`,
+`"pin"` (claude-workflow-plugin-46w9) — none of them an eighth (or
+thirteenth) F7 field; the seven are unchanged and keep their canonical
+names and ordering. `role` supplies the record's `role=` token, naming who
+completed the task; what `model` and `pin` each mean, and why both are
+required, is in the next bullet.
 
 Three mechanisms, each in one place:
 
 - **`review-check.sh validate-completion`** is the ONE validator. It
   rejects a payload missing any of the seven (or `role`, `model`,
   `pin` — claude-workflow-plugin-46w9 — or, since v5 D5 piece 3,
-  `unit_id`/`design_hash`/`green_before`/`green_after`), a control
-  character in `task_id` or `role`, a wrongly-typed field, a non-string
-  entry in `files_changed`, an `llm_observations` / `context_coverage`
-  that is empty after trimming, a `model` / `pin` that fails the
-  model-id character class, a `unit_id`/`design_hash` that fails ITS
-  character class when non-empty, a `green_before`/`green_after` outside
-  the closed `green|red|none` enum, or a non-empty `design_hash` paired
-  with an empty `unit_id` (`design_hash_without_unit_id` — the reverse
-  pairing is legal). That last-but-one makes this document's two "a
-  completion payload without it is malformed" sentences mechanical
-  rather than aspirational.
+  `unit_id`/`design_hash`/`green_before`/`green_after`, or since v5 D5
+  piece 4, `criteria_tests`), a control character in `task_id` or `role`,
+  a wrongly-typed field, a non-string entry in `files_changed`, an
+  `llm_observations` / `context_coverage` that is empty after trimming, a
+  `model` / `pin` that fails the model-id character class, a
+  `unit_id`/`design_hash` that fails ITS character class when non-empty, a
+  `green_before`/`green_after` outside the closed `green|red|none` enum, a
+  non-empty `design_hash` paired with an empty `unit_id`
+  (`design_hash_without_unit_id` — the reverse pairing is legal), a
+  `criteria_tests` entry that is not a non-empty array of non-empty
+  strings, a non-empty `criteria_tests` map paired with an empty `unit_id`
+  (`criteria_tests_without_unit_id` — same one-directional shape, same
+  reason), or a `criteria_tests` test reference absent from this SAME
+  payload's own `tests_added` array (`criteria_test_ref_not_declared`). The
+  `llm_observations` / `context_coverage` emptiness check named above makes
+  this document's two "a completion payload without it is malformed"
+  sentences mechanical rather than aspirational.
 - **`qa-gate.sh completion-record`** validates through that subprocess
   — it carries no second schema — then persists the payload to
   `.claude/.qa-tracking/completion-<task-id>.json` and appends

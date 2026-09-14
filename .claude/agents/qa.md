@@ -154,7 +154,7 @@ Before writing any test, ask:
 - [ ] Tests are deterministic (no flakiness).
 - [ ] Each new test was observed failing before the fix landed. If you didn't watch the test fail, you don't know if it tests the right thing — and neither did the specialist. You cannot replay their session, so check it structurally instead: does the assertion actually depend on the changed code? Would reverting the fix turn it red? A test that would stay green against the unfixed state is coverage theatre, and that is a `must_fix`, not a nitpick.
 - [ ] All tests pass.
-- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape), plus (v5 D5) `unit_id`, `design_hash`, `green_before`, `green_after`. Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field. For the four new fields, substance means: `green_before`/`green_after` reflect an ACTUAL `qa-gate.sh green-check` run (cross-check against the durable `GREEN-CHECK v1` comment on the task, not just the payload's own claim) rather than a hand-typed "green".
+- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape), plus (v5 D5) `unit_id`, `design_hash`, `green_before`, `green_after`, `criteria_tests`. Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field. For the five v5 D5 fields, substance means: `green_before`/`green_after` reflect an ACTUAL `qa-gate.sh green-check` run (cross-check against the durable `GREEN-CHECK v1` comment on the task, not just the payload's own claim) rather than a hand-typed "green"; and, for a unit-bound task, that `criteria_tests`' mapping is a GENUINE match — the test named actually exercises the criterion's own behaviour, not merely a test that happens to touch the same file. `qa-gate.sh design-unit-align` already mechanically refuses an incomplete map, an unknown criterion id, or a reference that cannot be found on disk; what it cannot judge is whether a present, well-formed mapping is a HONEST one, which is exactly the class of question this checklist item exists to catch.
 
 Since P7 (`claude-workflow-plugin-qbhw`) this checklist item is no longer the contract's *only* enforcement — `review-check.sh validate-completion` rejects a payload missing or malformed on any of these fields at record time, and `qa-gate.sh approve` refuses without a recorded contract at all. What remains QA's alone, and is why this item stays on the checklist, is QUALITY: the validator accepts a well-shaped but hollow `llm_observations`, a `context_coverage` that names the wrong files, or a `green_before`/`green_after` that is well-formed but never actually checked against the durable record — none of that is a schema violation, and only a reader judges it. Through v4.0 the doc cited this checklist and the checklist did not carry the item at all — do not let it drift back to that state either.
 
@@ -449,6 +449,7 @@ printf '%s' "$ART_JSON" | bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" 
   "design_hash": "",
   "green_before": "none",
   "green_after": "none",
+  "criteria_tests": {},
 
   "approved": false,
   "qa_status": "needs-review",
@@ -640,6 +641,7 @@ Then return the structured `needs-grading` status in your completion contract �
   "design_hash": "",
   "green_before": "none",
   "green_after": "none",
+  "criteria_tests": {},
 
   "approved": false,
   "qa_status": "needs-grading",
@@ -816,7 +818,7 @@ The helper dedup-merges by normalized text, so re-proposing a lesson the ledger 
 
 ## 10. Completion contract
 
-When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus (v5 D5, claude-workflow-plugin-fkm.7) four more green-to-green fields appended after them, plus a documented QA-specific superset on top of all eleven. The base seven must keep their canonical names and ordering; the four green-to-green fields and the QA-specific fields are both additive, never replacements. `context_coverage` is the seventh and newest of the base seven, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises; `unit_id`/`design_hash`/`green_before`/`green_after` are newer still, appended after that.
+When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus (v5 D5, claude-workflow-plugin-fkm.7) four more green-to-green fields appended after them (piece 3), plus one more — `criteria_tests` (piece 4) — appended after that, plus a documented QA-specific superset on top of all twelve. The base seven must keep their canonical names and ordering; the five v5 D5 fields and the QA-specific fields are both additive, never replacements. `context_coverage` is the seventh and newest of the base seven, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises; `unit_id`/`design_hash`/`green_before`/`green_after` are newer still, appended after that; `criteria_tests` newer again, appended last of the five. `criteria_tests` on a QA-authored payload is ordinarily `{}` — you verify criteria coverage, you do not author it — see `.claude/scripts/qa-gate.sh`'s DESIGN-ALIGNMENT region if you need to check a specialist's own mapping.
 
 ```json
 {
@@ -831,6 +833,7 @@ When you finish a review — whether you approved or blocked — return a struct
   "design_hash": "",
   "green_before": "none",
   "green_after": "none",
+  "criteria_tests": {},
 
   "approved": true,
   "files_verified": ["path/to/file.ts", "path/to/other.py"],

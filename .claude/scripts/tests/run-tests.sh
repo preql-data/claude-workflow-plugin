@@ -778,8 +778,68 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 #     EXPECTED_SPECS's own file-count is. If it drifts, re-run the spec and
 #     read its own total, and re-run the static cross-check with the
 #     command above rather than hand-adjusting either figure from memory.
+#
+# 63 -> 66 (claude-workflow-plugin-fkm.7 D5 piece 4, 2026-09-14): added
+# THREE new files for the per-unit alignment check (docs/plans/
+# v5-design-phase.md Phase D5: "the unit's criteria have tests, the touched
+# files fall within the declared set..., and the injected design_hash
+# matches the currently bound artifact"):
+#   - validate-completion-criteria-tests.test.sh (43 assertions) — the
+#     fifth v5 D5 field's required/type/value checks in review-check.sh
+#     cmd_validate_completion (criteria_tests: shape, the criteria_tests_
+#     without_unit_id one-directional rule, and the tests_added cross-
+#     reference), plus a META-TEST stripping the whole CRITERIA-TESTS-
+#     VALIDATION region from a copy and proving the mutant then accepts a
+#     payload missing the field entirely (and an INVENTED, undeclared test
+#     reference) that the shipped script still refuses. Needs no bd
+#     fixture, same reason validate-completion-green-fields.test.sh does
+#     not: validate-completion is a stateless JSON validator.
+#   - design-artifact-parity.test.sh (23 assertions) — the ez9h fix: two
+#     design-artifact path resolvers (qa-gate.sh's design_artifact_path_for,
+#     the WRITER and every other reader; subagent-start.sh's OWN raw
+#     construction) used to disagree on a design_task containing `+` (legal
+#     per that field's own grammar), so spec injection degraded on every
+#     spawn for such an id. Extracts BOTH shipped sanitisers by awk, proves
+#     the `tr` invocations are byte-identical text, then RUNS both
+#     extracted functions (never just compares source) across a `+`-bearing
+#     id and confirms they resolve the SAME path, with a META-TEST
+#     reproducing the pre-fix raw construction and showing it disagrees on
+#     the exact input that was the defect. No bd fixture needed — pure
+#     string-derivation functions, no filesystem or Beads access.
+#   - design-unit-align.test.sh (44 assertions) — `qa-gate.sh design-unit-
+#     align` itself: not-applicable when unbound; LEG 1 (files, reused from
+#     design-conform, propagated verbatim); LEG 2 (freshness, reused from
+#     spec-injection-status; injected:false legal, fresh:false is not); LEG
+#     3 (criteria have tests — no implementer record, incomplete coverage,
+#     an unknown criterion id, green_after not green, a malformed/missing-
+#     file/missing-label test reference, and the full success path); wiring
+#     into `approve`'s DESIGN-ALIGNMENT-REFUSAL (a misaligned bound task
+#     refuses, exit 2; an aligned one does not); and a METatest proving that
+#     refusal block is load-bearing. This is the FIRST spec to drive
+#     `approve` on a real v5 task-per-unit CHILD task at all (design-
+#     conform.test.sh never calls approve; design-review-record.test.sh's
+#     own tasks own their design directly, never through a DESIGN-UNIT
+#     binding) — building it surfaced two structural findings neither
+#     predecessor could have, both recorded in this file's own comments and
+#     in qa-gate.sh: DESIGN-SATISFIED-REFUSAL does not resolve through the
+#     DESIGN-UNIT binding the way design-conform/design-unit-align do, so
+#     every such child's `approve` needs `--no-design` (matching design-
+#     artifact.test.sh's own established convention, extended here rather
+#     than reinvented); and design-conform itself, never previously
+#     exercised against a change set that had been through a REAL review
+#     cycle, flagged review-record's own canonical artifact
+#     (docs/reviews/<tid>-r<n>.json) as undeclared_files on every such
+#     task's first alignment/approval attempt — fixed at the shared root
+#     (qa-gate.sh's REVIEW-ARTIFACT-EXCLUSION, inside cmd_design_conform
+#     itself, task-specific, never a blanket docs/reviews/ exemption) and
+#     covered by design-conform.test.sh's own new Section 17, not only
+#     here, since every OTHER caller of design-conform inherits the fix.
+#     Needs a real bd fixture, same shape as design-conform.test.sh; nearly
+#     all of its runtime is real `bd create`/`bd comments add`/`approve`
+#     subprocess calls across three epic+child pairs and roughly a dozen
+#     completion-record cycles.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=63
+EXPECTED_SPECS=66
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 1.167x, NOT 3.7x (nor the
 # 1.31x this comment stated one round ago — see below). The 3.7x figure went

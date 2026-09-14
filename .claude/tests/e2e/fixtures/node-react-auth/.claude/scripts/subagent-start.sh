@@ -587,16 +587,20 @@ record_implementer() {
 # design_task's character class is enforced UPSTREAM by design-unit-show's
 # own binding-shape classifier (`test("^[A-Za-z0-9._+-]+$")`) before it is
 # ever returned with bound:true — no `/` (or `..` as its own path segment)
-# can appear in a value from that envelope, so building
-# "$PROJECT_DIR/docs/specs/${design_task}.md" directly below can never
-# traverse outside docs/specs/. This is RELIED ON, not re-derived:
-# qa-gate.sh's own design_path_is_contained is a private, in-process
-# function with no CLI exposure, so re-deriving an equivalent check here
-# would be a second implementation of a guarantee the upstream reader
-# already provides. (Probed directly, not assumed: a design_task value of
-# literally ".." cannot introduce a "/" either — the character class has
-# none — so the worst case is a harmless literal filename like
-# "docs/specs/...md", never a traversal.)
+# can appear in a value from that envelope, so resolve_design_artifact_path
+# (below) can never traverse outside docs/specs/ even before its own `tr`
+# sanitiser runs. This is RELIED ON, not re-derived: qa-gate.sh's own
+# design_path_is_contained is a private, in-process function with no CLI
+# exposure, so re-deriving an equivalent check here would be a second
+# implementation of a guarantee the upstream reader already provides.
+# (Probed directly, not assumed: a design_task value of literally ".."
+# cannot introduce a "/" either — the character class has none — so the
+# worst case is a harmless literal filename like "docs/specs/...md", never
+# a traversal. resolve_design_artifact_path's OWN `tr -c 'A-Za-z0-9._-' '_'`
+# is a second, independent layer of the same property — it maps `/` and
+# `..`'s `.` sequences the same way qa-gate.sh's design_artifact_path_for
+# does, so even a value that somehow bypassed the upstream class check
+# could not escape docs/specs/ through this function either.)
 
 # hash_file_safe <path> -> 64-hex sha256 on stdout, rc 0; rc 1 with no
 # stdout on any failure. Thin glue over workflow-manifest.sh hash-file's
@@ -635,6 +639,51 @@ record_spec_injection() {
     fi
     log_sync_error "failed to record SPEC-INJECTED ($unit_id under $design_task) on $tid; spec-injection-status will report no record for this spawn"
     return 1
+}
+
+# resolve_design_artifact_path <design_task> -- the mirrored design
+# artifact's path for THIS task id (claude-workflow-plugin-fkm.7, ez9h,
+# v5 D5 piece 4). MUST replicate qa-gate.sh's design_artifact_path_for
+# byte-for-byte, because that function is the WRITER (cmd_design_record's
+# own derived path, qa-gate.sh:~9558) as well as every OTHER reader in that
+# file (compute_design_satisfied, cmd_design_conform,
+# cmd_spec_injection_status, compute_design_conflict_open all resolve the
+# artifact this same way) -- there is exactly one physical notion of where
+# a design_task's artifact lives, and this file previously had a SECOND
+# one: `"$PROJECT_DIR/docs/specs/${design_task}.md"`, built raw, with no
+# sanitisation at all.
+#
+# THE DEFECT THIS CLOSES. design_task's own grammar (this file's
+# DESIGN-UNIT-BINDING-READ region below, and qa-gate.sh's identical
+# `latest_design_unit_binding`/`latest_spec_injection` capture patterns)
+# allows `[A-Za-z0-9._+-]+` -- note the `+`. design_artifact_path_for
+# replaces every character OUTSIDE `[A-Za-z0-9._-]` (no `+`) with `_`
+# before building the filename. A design_task containing a `+` therefore
+# resolved to TWO DIFFERENT FILENAMES depending on which side read it: the
+# writer (and every qa-gate.sh reader) at `..._'`, this file's raw
+# construction at `...+.md`. Concretely, for such a design_task, the file
+# this function used to build would not exist on disk at all (the real
+# artifact lives at the sanitised path), so `[ -f "$artifact" ]` below
+# would ALWAYS read false and spec injection would ALWAYS degrade, on every
+# spawn, for that design_task, silently blamed on "the artifact does not
+# exist" rather than on the path mismatch that was the actual cause. No
+# fixture in this repo currently exercises a `+`-bearing design_task (v5
+# task ids observed so far are `.`-separated, never `+`-separated), which
+# is why this went unnoticed rather than untested-and-wrong: it is a real,
+# reachable defect on any Beads/Linear id that legally contains one.
+#
+# PURE STRING DERIVATION, NO FILESYSTEM ACCESS -- same contract
+# design_artifact_path_for's own header states for itself, so calling this
+# speculatively (before confirming the file exists) is always safe.
+# design-artifact-parity.test.sh asserts the two `tr` invocations across
+# this file and qa-gate.sh stay byte-identical, so a future edit to
+# EITHER sanitiser's character class that does not also update the other
+# is caught at L1 rather than reproducing this exact class of bug one
+# character class over.
+resolve_design_artifact_path() {
+    local sanitized
+    sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    printf '%s/docs/specs/%s.md' "$PROJECT_DIR" "$sanitized"
 }
 
 # inject_unit_spec <tid> -> the additionalContext fragment to splice into
@@ -694,7 +743,8 @@ EOF
         return 0
     fi
 
-    local artifact="$PROJECT_DIR/docs/specs/${design_task}.md"
+    local artifact
+    artifact=$(resolve_design_artifact_path "$design_task")
     if [ ! -f "$artifact" ]; then
         log_sync_error "spec injection DEGRADED for $tid: bound to unit_id=$unit_id under design_task=$design_task but $artifact does not exist"
         local msg=""
@@ -702,7 +752,7 @@ EOF
 SPEC INJECTION DEGRADED for ${tid}: bound to unit_id=${unit_id} under
 design_task=${design_task}, but the mirrored artifact is not currently
 readable at ${artifact}. Do NOT proceed as if no design governs this task --
-read docs/specs/${design_task}.md yourself (or bd_doc_read the design
+read ${artifact} yourself (or bd_doc_read the design
 task), and file a design_conflict (qa-gate.sh design-conflict ${tid} --unit
 ${unit_id} "<statement>") if it genuinely cannot be found.
 EOF
@@ -736,7 +786,7 @@ SPEC INJECTION DEGRADED for ${tid}: bound to unit_id=${unit_id} under
 design_task=${design_task}, but its content could not be read from the
 CURRENT artifact (error_key=${uj_ekey}${uj_obs:+: ${uj_obs}}). The unit may
 have been amended or removed since binding. Do NOT improvise -- read
-docs/specs/${design_task}.md yourself, and file a design_conflict if the
+${artifact} yourself, and file a design_conflict if the
 unit genuinely no longer matches what you were asked to build.
 EOF
         printf '%s' "$msg"
@@ -786,7 +836,7 @@ EOF
     read -r -d '' msg <<EOF || true
 SPEC INJECTION (v5 D5, claude-workflow-plugin-fkm.7): ${tid} is bound to
 unit_id=${unit_id} in the design governed by ${design_task} (mirrored at
-docs/specs/${design_task}.md). The declaration below is read VERBATIM from
+${artifact}). The declaration below is read VERBATIM from
 that artifact at THIS spawn -- never the orchestrator's paraphrase. Build
 exactly this. If it conflicts with what you find in the code, or its
 acceptance criteria cannot be satisfied as written, file a design_conflict

@@ -185,6 +185,17 @@ CANONICAL="task_id,files_changed,tests_added,decisions,blockers,llm_observations
 # ordered) — docs/plans/v5-design-phase.md Phase D5's own field order.
 EXTENDED_ELEVEN="$CANONICAL,unit_id,design_hash,green_before,green_after"
 
+# v5 D5 piece 4 (claude-workflow-plugin-fkm.7): ONE more field —
+# criteria_tests — APPENDS after the eleven, for the SAME reason
+# EXTENDED_ELEVEN is its own constant rather than folded into CANONICAL: a
+# regression in the base seven, a regression in the four green-to-green
+# fields, and a regression in this fifth field must each be their OWN
+# assertion (Section 2c, below), never indistinguishable from one another.
+# It is grouped with the green-to-green evidence fields (append LAST, after
+# green_after) because it IS more evidence about the same unit — which
+# criteria that unit's declared tests actually cover — not a new category.
+EXTENDED_TWELVE="$EXTENDED_ELEVEN,criteria_tests"
+
 # Files that carry a copy of the contract or its field list. Order is the
 # reading order a maintainer would follow: definition, then the prompts that
 # implement it, then the docs that describe it.
@@ -264,6 +275,18 @@ fence_head7() {
 fence_head11() {
     printf '%s' "$1" \
         | jq -r 'keys_unsorted[0:11] | join(",")' 2>/dev/null \
+        || printf 'PARSE_ERROR'
+}
+
+# fence_head12 <json-text> — v5 D5 piece 4 (claude-workflow-plugin-fkm.7):
+# the first TWELVE keys in DOCUMENT order, comma joined; PARSE_ERROR when the
+# body is not valid JSON. A SEPARATE function from fence_head7/fence_head11
+# for the identical reason those two are separate from each other — three
+# independent checks, so a regression in any one of the three field groups
+# is never masked by, or mistaken for, a regression in either other group.
+fence_head12() {
+    printf '%s' "$1" \
+        | jq -r 'keys_unsorted[0:12] | join(",")' 2>/dev/null \
         || printf 'PARSE_ERROR'
 }
 
@@ -350,6 +373,23 @@ for spec in "${FENCES[@]}"; do
     body=$(f7_fence "$PROJECT_DIR/$file" "$idx")
     assert_eq "$file fence #$idx: first eleven keys are the extended eleven, in order" \
         "$EXTENDED_ELEVEN" "$(fence_head11 "$body")"
+done
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 2c: every fence's first TWELVE keys are the extended twelve ==="
+echo "    (v5 D5 piece 4, claude-workflow-plugin-fkm.7 -- a SEPARATE assertion"
+echo "    from Sections 2/2b above, over the SAME fences, so a regression in"
+echo "    the base seven, a regression in the four green-to-green fields, and"
+echo "    a regression in criteria_tests are three independent failures, never"
+echo "    one masking another)"
+
+for spec in "${FENCES[@]}"; do
+    file="${spec%:*}"
+    idx="${spec##*:}"
+    body=$(f7_fence "$PROJECT_DIR/$file" "$idx")
+    assert_eq "$file fence #$idx: first twelve keys are the extended twelve, in order" \
+        "$EXTENDED_TWELVE" "$(fence_head12 "$body")"
 done
 
 # ---------------------------------------------------------------------------
@@ -705,6 +745,71 @@ assert_eq "META-D: ...but the SEVEN-key checker (fence_head7) still agrees — t
 # 4. RESTORE CONTROL: the shipped devops.md still passes fence_head11.
 assert_eq "META-D: control — the shipped devops.md still matches the extended eleven" \
     "yes" "$([ "$(fence_head11 "$(f7_fence "$PROJECT_DIR/.claude/agents/devops.md" 1)")" = "$EXTENDED_ELEVEN" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== META-TEST E: a fence with criteria_tests deleted must be flagged by"
+echo "    Section 2c, and NOT by Section 2 or 2b (three independent checks)"
+
+# The mutation happens on a COPY in a mktemp dir (reuses META_DIR, still
+# live). criteria_tests is qa.md's target rather than backend/frontend/
+# devops's: in THOSE three files criteria_tests is now the LAST key before
+# the closing brace, and stripping the last key leaves a dangling trailing
+# comma that breaks the WHOLE fence's JSON syntax (the exact failure mode
+# META-D's own header already rejected green_after for, one field over) —
+# in qa.md's first fence, criteria_tests is FOLLOWED by a blank line and the
+# QA-specific superset (`"approved": false,` and friends), so removing its
+# one line leaves valid JSON with a clean comma between its neighbours,
+# exactly like META-D's own unit_id choice in devops.md.
+META_E_PROMPT="$META_DIR/qa-e.md"
+cp "$PROJECT_DIR/.claude/agents/qa.md" "$META_E_PROMPT"
+
+# Anchored on the field's own line text, never on a line number.
+grep -v '"criteria_tests": {},' "$META_E_PROMPT" > "$META_DIR/stripped-e" \
+    && mv "$META_DIR/stripped-e" "$META_E_PROMPT"
+
+# 1. Non-vacuity: the mutation landed. `grep -v` removes EVERY matching
+#    line file-wide, and qa.md's three F7 fences all carry the IDENTICAL
+#    `"criteria_tests": {},` text, so this strip removes it from all three
+#    at once (unlike META-D's devops.md target, which has only one fence to
+#    begin with) — confirmed directly rather than assumed, and the fence
+#    COUNT itself must stay three (only field lines were removed, not
+#    whole fences).
+BEFORE_CT_COUNT=$(printf '%s' "$(cat "$PROJECT_DIR/.claude/agents/qa.md")" | grep -c '"criteria_tests": {},')
+AFTER_CT_COUNT=$(printf '%s' "$(cat "$META_E_PROMPT")" | grep -c '"criteria_tests": {},')
+assert_eq "META-E: the shipped qa.md carries criteria_tests in all three fences before the strip" \
+    "3" "$BEFORE_CT_COUNT"
+assert_eq "META-E: the mutation landed — ZERO occurrences remain after the strip" \
+    "0" "$AFTER_CT_COUNT"
+assert_eq "META-E: the mutated copy still has exactly three F7 fences (field lines were removed, not whole fences)" \
+    "3" "$(f7_fence_count "$META_E_PROMPT")"
+META_E_BODY=$(f7_fence "$META_E_PROMPT" 1)
+assert_eq "META-E: the mutation landed on fence #1 (criteria_tests no longer in it)" \
+    "0" "$(printf '%s' "$META_E_BODY" | grep -c '"criteria_tests"' | tr -d '[:space:]')"
+assert_eq "META-E: ...and the mutated fence #1 still PARSES as JSON (the strip did not corrupt syntax)" \
+    "yes" "$(fence_parses "$META_E_BODY")"
+
+# 2. SPECIFIC MISBEHAVIOUR: Section 2c's own checker (fence_head12) now
+#    disagrees with the extended twelve — the sensitivity proof, without it
+#    Section 2c could be matching something true of any prompt.
+assert_eq "META-E: the twelve-key checker (fence_head12) flags the stripped fence" \
+    "no" "$([ "$(fence_head12 "$META_E_BODY")" = "$EXTENDED_TWELVE" ] && echo yes || echo no)"
+
+# 3. THE INDEPENDENCE CLAIM, made mechanical, TWICE: Section 2's checker
+#    (fence_head7) and Section 2b's (fence_head11) do NOT flag this same
+#    mutant — removing a field at position 12 cannot perturb a check that
+#    only ever looks at positions 1-7 or 1-11. This is what "a regression
+#    in criteria_tests is never confused with a regression in the base
+#    seven or the four green-to-green fields" means, demonstrated rather
+#    than asserted.
+assert_eq "META-E: ...but the SEVEN-key checker (fence_head7) still agrees — the base seven are untouched" \
+    "yes" "$([ "$(fence_head7 "$META_E_BODY")" = "$CANONICAL" ] && echo yes || echo no)"
+assert_eq "META-E: ...and the ELEVEN-key checker (fence_head11) still agrees too — positions 8-11 are untouched" \
+    "yes" "$([ "$(fence_head11 "$META_E_BODY")" = "$EXTENDED_ELEVEN" ] && echo yes || echo no)"
+
+# 4. RESTORE CONTROL: the shipped qa.md's fence #1 still passes fence_head12.
+assert_eq "META-E: control — the shipped qa.md fence #1 still matches the extended twelve" \
+    "yes" "$([ "$(fence_head12 "$(f7_fence "$PROJECT_DIR/.claude/agents/qa.md" 1)")" = "$EXTENDED_TWELVE" ] && echo yes || echo no)"
 
 rm -rf "$META_DIR"
 

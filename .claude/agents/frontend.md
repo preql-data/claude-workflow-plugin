@@ -313,7 +313,8 @@ When a task is finished, return a structured report alongside the Beads update. 
   "unit_id": "",
   "design_hash": "",
   "green_before": "none",
-  "green_after": "none"
+  "green_after": "none",
+  "criteria_tests": {}
 }
 ```
 
@@ -345,7 +346,7 @@ path that produced it.
 
 `context_coverage` is mandatory on the same terms. Three things, in order: what you read to ground this change (the design system tokens, the API's response shape, the existing route's focus handling, the component's prior test file); what you deliberately did NOT read and why (the whole state-management layer, because the change is presentational); and the largest remaining unknown (whether the empty state can actually occur for a returning user). Name files — "read the relevant components" is a non-answer, and a coverage note with no deliberate omission is boilerplate, because there is always one. It is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. The rubric grader scores it under default criterion C8.
 
-`unit_id` / `design_hash` are empty string unless you were bound to a design unit; see "Green-to-green per unit" above for where these values come from. `green_before` / `green_after` are `"none"` unless you ran `qa-gate.sh green-check`, in which case copy its `result` field verbatim (`green` or `red`) — never assert a state here that a real command did not produce.
+`unit_id` / `design_hash` are empty string unless you were bound to a design unit; see "Green-to-green per unit" above for where these values come from. `green_before` / `green_after` are `"none"` unless you ran `qa-gate.sh green-check`, in which case copy its `result` field verbatim (`green` or `red`) — never assert a state here that a real command did not produce. `criteria_tests` is `{}` unless you were bound to a design unit; when bound, it maps each declared acceptance-criterion id to the `tests_added` entries that cover it (`{"U3-1": ["path/to/file.test.tsx::describes the covered behaviour"]}`) — every reference here must also appear, verbatim, in `tests_added` above, or the payload is refused at record time. `qa-gate.sh design-unit-align` (run at `approve`) is what checks completeness and existence; this field only has to be well-formed and internally consistent.
 
 ### Record the contract — your LAST action
 

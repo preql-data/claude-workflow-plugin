@@ -1477,6 +1477,140 @@ assert_eq "16.5 CONTROL: the SAME bind, real bd, genuinely succeeds and is confi
 assert_eq "16.5b ...and IS actually recorded this time" "1" "$(count_binding "$CHILD18")"
 
 # ===========================================================================
+printf '\n=== Section 17: REVIEW-ARTIFACT-EXCLUSION — a real review cycle does not\n'
+printf '    make design-conform refuse its own evidence (v5 D5 piece 4,\n'
+printf '    claude-workflow-plugin-fkm.7) ===\n'
+# ===========================================================================
+#
+# THE GAP THIS CLOSES: no section above ever drives design-conform against a
+# change set that has been through a REAL `review-record` cycle — every
+# section writes $TRACKING by hand. Once combined for the first time (design-
+# unit-align.test.sh Section 10, built alongside this fix), the canonical
+# review artifact `review-record` itself writes to docs/reviews/<tid>-r<n>.json
+# — documented, intended behaviour (qa.md section 6-prime: "the canonical
+# file... enters the change set the approval binds") — was flagged as
+# undeclared_files on EVERY SUCH TASK's first conform/align/approve attempt,
+# because no unit's files[] ever declares gate-written review evidence.
+
+EPIC17=$(bd create "D5 piece 4 review-artifact-exclusion epic" -t epic -p 1 --json 2>/dev/null | jq -r '.id')
+CHILD17=$(bd create "D5 piece 4 review-artifact-exclusion child" -t task -p 1 --parent "$EPIC17" --no-inherit-labels --json 2>/dev/null | jq -r '.id')
+ONE_UNIT_U1_17='[{"unit_id":"U1","role":"devops","goal":"unit one",
+  "acceptance":[{"id":"AC1","text":"fixture"}],
+  "files":["src/a.sh"],"verification":"make test","depends_on":[]}]'
+design_and_review "$EPIC17" "$ONE_UNIT_U1_17" >/dev/null
+bash "$QG" design-unit-bind "$CHILD17" --design-task "$EPIC17" --unit-id U1 "bound to U1" >/dev/null 2>&1
+
+mkdir -p "$FIXTURE/src"
+: > "$FIXTURE/src/a.sh"
+printf '%s\n' "$FIXTURE/src/a.sh" > "$TRACKING"
+
+# A REAL review cycle: reconcile, hash, write+record the canonical artifact
+# (landing at docs/reviews/<CHILD17>-r1.json), reconcile AGAIN (the artifact
+# itself is a new untracked path git did not see at the first reconcile —
+# the SAME ordering design-review-record.test.sh's own seed_approvable
+# uses), then regenerate the persisted impact report.
+bd comments add "$CHILD17" "IMPLEMENTER: role=devops task=$CHILD17 at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
+bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+H17=$(bash "$IR" --hash-only 2>/dev/null)
+ART17="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$CHILD17" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
+printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"qa-claude","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+    "$CHILD17" "$H17" > "$ART17"
+bash "$QG" review-record "$CHILD17" < "$ART17" >/dev/null 2>&1
+bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+bash "$IR" "$CHILD17" >/dev/null 2>&1 || true
+
+assert_contains "17.0 precondition: the canonical review artifact genuinely entered the tracker" \
+    "docs/reviews/" "$(cat "$TRACKING")"
+
+OUT17=$(bash "$QG" design-conform "$CHILD17" 2>&1); RC17=$?
+assert_eq "17.1 THE FIX: design-conform CONFORMS after a real review cycle (rc=0), never refusing over its own evidence" \
+    "0" "$RC17"
+assert_eq "17.1b ...ok=true, undeclared_files empty" "true|[]" \
+    "$(json_field '.ok' "$OUT17")|$(json_field '.undeclared_files | tojson' "$OUT17")"
+
+# --- ANTI-OVERREACH: a DIFFERENT task's review artifact is NOT exempted ---
+# The exclusion is task-SPECIFIC (matches THIS task's own canonical path
+# only), never a blanket docs/reviews/ pass. Simulate scope creep: an extra
+# file under docs/reviews/ that is NOT CHILD17's own canonical artifact
+# name lands in the tracker — it must still be flagged.
+printf '%s\ndocs/reviews/some-other-task-r1.json\n' "$FIXTURE/src/a.sh" > "$TRACKING"
+mkdir -p "$FIXTURE/docs/reviews"
+printf '{}' > "$FIXTURE/docs/reviews/some-other-task-r1.json"
+OUT17B=$(bash "$QG" design-conform "$CHILD17" 2>&1); RC17B=$?
+assert_eq "17.2 ANTI-OVERREACH: an unrelated docs/reviews/ path (not THIS task's own artifact) is STILL flagged (rc=4)" \
+    "4" "$RC17B"
+assert_eq "17.2b ...error_key=undeclared_files" \
+    "undeclared_files" "$(json_field '.error_key' "$OUT17B")"
+assert_contains "17.2c ...names the unrelated path specifically" \
+    "some-other-task-r1.json" "$(json_field '.undeclared_files | tojson' "$OUT17B")"
+
+# Restore the tracker to the genuinely-conforming state for the META below
+# -- AND remove the unrelated file from DISK, not just from $TRACKING. The
+# tracker reset alone is not enough: the file is still a REAL, uncommitted
+# path in the fixture's own git working tree, and `reconcile-tracker`
+# (right below, and again inside the META block) is a real git-status
+# scan that rediscovers anything still on disk regardless of what
+# $TRACKING said a moment ago -- the identical class of bug design-unit-
+# align.test.sh's own UNDECLARED.sh fix already closed once (see that
+# file's comment on the same lesson). Measured directly while building
+# this: leaving the file in place turned 17.5's own restore control into a
+# false undeclared_files refusal.
+rm -f "$FIXTURE/docs/reviews/some-other-task-r1.json"
+bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+bash "$IR" "$CHILD17" >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+printf '\n=== Section 17 META: REVIEW-ARTIFACT-EXCLUSION is load-bearing ===\n'
+# ---------------------------------------------------------------------------
+
+# Under .claude/.qa-tracking/, NOT .claude/scripts/ where this file's OTHER
+# mutant copies (Sections 4, 14, 16) live -- those sections never call
+# reconcile-tracker, so a mutant sitting in the tracked tree never matters
+# to them; THIS section does call it (twice, above and below), and a
+# mutant .sh file left in .claude/scripts/ is a REAL untracked path that
+# gets rediscovered exactly like the two fixes just above. Same root cause,
+# same fix, applied to the mutant file itself this time.
+QG_NOEXCL="$FIXTURE/.claude/.qa-tracking/.dua-qa-gate-noreviewexcl.sh"
+STRIP17_RC=0
+awk '
+    /^# REVIEW-ARTIFACT-EXCLUSION BEGIN/ { skip = 1; found = 1; next }
+    /^# REVIEW-ARTIFACT-EXCLUSION END/   { skip = 0; next }
+    skip { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$QG" > "$QG_NOEXCL" || STRIP17_RC=$?
+chmod +x "$QG_NOEXCL" 2>/dev/null || true
+
+assert_eq "17.3 META NON-VACUITY: the sentinels were found and the strip ran cleanly" "0" "$STRIP17_RC"
+SHIPPED_LINES17=$(wc -l < "$QG" | tr -d '[:space:]')
+STRIPPED_LINES17=$(wc -l < "$QG_NOEXCL" | tr -d '[:space:]')
+assert_eq "17.3b ...the mutant copy is shorter than the shipped script" \
+    "shorter" "$([ "$STRIPPED_LINES17" -lt "$SHIPPED_LINES17" ] && echo shorter || echo same-or-longer)"
+P17_RC=0
+bash -n "$QG_NOEXCL" 2>/dev/null || P17_RC=$?
+assert_eq "17.3c ...and the mutant still parses" "0" "$P17_RC"
+
+# Restore the genuinely-conforming tracker (the unrelated file itself was
+# already removed from disk above; this just re-derives $TRACKING's own
+# content the same way reconcile always would) before driving the mutant.
+printf '%s\n' "$FIXTURE/src/a.sh" > "$TRACKING"
+bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+bash "$IR" "$CHILD17" >/dev/null 2>&1 || true
+assert_contains "17.3d precondition: the review artifact is STILL in the (restored) tracker" \
+    "docs/reviews/" "$(cat "$TRACKING")"
+
+MUT17_OUT=$(bash "$QG_NOEXCL" design-conform "$CHILD17" 2>&1); MUT17_RC=$?
+assert_eq "17.4 SPECIFIC MISBEHAVIOUR: WITHOUT the exclusion, the SAME real review cycle is refused (rc=4)" \
+    "4" "$MUT17_RC"
+assert_eq "17.4b ...error_key=undeclared_files, naming the artifact this task itself wrote" \
+    "true" "$(printf '%s' "$MUT17_OUT" | jq -r --arg tid "$CHILD17" '(.error_key == "undeclared_files") and ((.undeclared_files | tostring) | contains($tid))')"
+
+CTRL17_OUT=$(bash "$QG" design-conform "$CHILD17" 2>&1); CTRL17_RC=$?
+assert_eq "17.5 RESTORE CONTROL: the SHIPPED script, same state, conforms (rc=0)" "0" "$CTRL17_RC"
+assert_eq "17.5b ...ok=true" "true" "$(json_field '.ok' "$CTRL17_OUT")"
+rm -f "$QG_NOEXCL"
+
+# ===========================================================================
 printf '\n=== Summary ===\n'
 printf '\nTotal: %d assertion(s) run\n' "$((PASS + FAIL))"
 if [ "$FAIL" -gt 0 ]; then

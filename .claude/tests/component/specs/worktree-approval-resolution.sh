@@ -355,7 +355,7 @@ JSON
     # sections 1.1-1.3 assert the grammar of.
     local pay="$root/.claude/.qa-tracking/completion-draft-$san.json"
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}
+{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none","criteria_tests":{}}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
     # v5 D2 (claude-workflow-plugin-fkm.4) MIGRATION, R2-F1: approve
@@ -744,7 +744,7 @@ JSON
     fi
     pay="$root/.claude/.qa-tracking/completion-draft-$san.json"
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution design-axis fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}
+{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution design-axis fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none","criteria_tests":{}}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
     CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" "$summary" 2>&1 | tail -1
@@ -1034,7 +1034,7 @@ approve_in_no_review() {
     bd comments add "$tid" "IMPLEMENTER: role=devops task=$tid at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
     local pay="$root/.claude/.qa-tracking/completion-draft-$san.json"
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture (yrij leg)","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}
+{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the worktree-approval-resolution fixture (yrij leg)","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none","criteria_tests":{}}
 JSON
     CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
     CLAUDE_PROJECT_DIR="$root" bash "$qg" approve "$tid" --no-design "worktree-approval-resolution spec: no design phase modeled (yrij)" --no-review "$reason" "$summary" 2>&1 | tail -1

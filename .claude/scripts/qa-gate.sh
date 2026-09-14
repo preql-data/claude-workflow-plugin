@@ -2697,6 +2697,80 @@ completion_roles_seen() {
     return 0
 }
 
+# latest_green_check_result <task-id> <phase> -- prints the `result=` value
+# (green|red|none) of the LATEST `GREEN-CHECK v1` comment on <task-id> for
+# the given <phase> (before|after), rc 0. Empty stdout with rc 0 is a
+# PROVEN absence -- the comment stream WAS retrieved and no matching record
+# is in it. rc 3 with no stdout means the stream itself could not be proven
+# retrieved, which is a DIFFERENT claim (xsu1 doctrine: "could not look"
+# must never read as "looked, and found nothing").
+#
+# R7-F3 (QA round 7, claude-workflow-plugin-fkm.7): green-check's own writer
+# (GREEN-CHECK BEGIN/END, this file, cmd_green_check) posts this record to
+# <task-id> ITSELF via add_comment -- the SAME task compute_design_
+# alignment already holds as $tid throughout LEG 3. There is no
+# implementer-vs-approver task resolution problem to solve here: green-check
+# $tid --phase after and approve $tid operate on the identical task id
+# under this file's v5 task-per-unit model, so a caller that already has
+# $tid can read this directly.
+#
+# READS VIA design_comments_json, NEVER bd_show_with_comments OR the
+# human-formatted `bd comments <id>` text channel -- two independent,
+# MEASURED reasons (orchestrator relay, 2026-09-14), not a style
+# preference:
+#   (1) WRAP-HOSTILITY. `bd comments <id>` wraps at ~78 columns, and
+#       "GREEN-CHECK v1 task=<a real task id>" alone already consumes most
+#       of that budget before `phase=` or `result=` ever appear, so a
+#       `grep`/text-pipe reader can report NO MATCH on a perfectly valid
+#       record -- a vacuous leg that fails closed on every honest payload
+#       and reads, to whoever hits the refusal, exactly like a real defect.
+#       `bd show --json --include-comments` (what design_comments_json
+#       calls) emits each comment's `text` UNWRAPPED; this reader is built
+#       on that, never on wrapped text.
+#   (2) THE LEGACY HELPER'S OWN HEADER (bd_show_with_comments, above)
+#       already documents why it is wrong for a gate-relevant reader: on an
+#       --include-comments failure it falls back to plain `bd show --json`,
+#       which OMITS the `comments` key entirely on at least one measured bd
+#       version, and `.comments // []` reads that omission as a
+#       confirmed-empty stream -- "could not look" read as "looked and
+#       found nothing", the exact xsu1 violation every DESIGN reader is
+#       built to avoid. This leg BLOCKS approve, so it gets the SAME
+#       proven-retrieval discipline the DESIGN readers already have.
+#
+# ANCHORED ON THE FULL RECORD SHAPE, not a bare substring: `startswith
+# ("GREEN-CHECK v1 ")` rejects a comment that merely QUOTES or DISCUSSES a
+# GREEN-CHECK v1 line without opening with it (a QA finding, an escalation,
+# this very fix's own commit message) -- the identical anchoring
+# `latest_implementer_completion_record` already applies to `COMPLETION v1
+# `. `last` picks the MOST RECENT matching record when more than one
+# exists for the same phase (a corrected re-run after an earlier accidental
+# red), matching that same function's "most recent wins" semantic.
+#
+# CALLER CONTRACT: the caller (compute_design_alignment, LEG 3 step (d))
+# decides what an EMPTY result (proven absence) versus a NON-EMPTY,
+# non-matching result (a record that disagrees with the payload's own
+# claim) each mean -- this function only reports what is or is not on
+# record, never whether that is acceptable.
+latest_green_check_result() {
+    local tid="$1" phase="$2"
+    [ -n "$tid" ] && [ -n "$phase" ] || return 3
+    local comments_json="" dc_rc=0
+    comments_json=$(design_comments_json "$tid") || dc_rc=$?
+    [ "$dc_rc" -eq 0 ] || return 3
+    printf '%s' "$comments_json" | jq -r --arg phase "$phase" '
+        [ .[].text
+          | select(type == "string" and startswith("GREEN-CHECK v1 "))
+          | select(
+              ( [ capture("^GREEN-CHECK v1 task=\\S+ unit_id=\\S+ phase=(?<p>\\S+) result=(?<r>\\S+) exit_code=\\S+ at ") ]
+                | first | .p? // "" ) == $phase )
+          | ( [ capture("^GREEN-CHECK v1 task=\\S+ unit_id=\\S+ phase=(?<p>\\S+) result=(?<r>\\S+) exit_code=\\S+ at ") ]
+              | first | .r? // "" )
+        ]
+        | last // ""
+    ' 2>/dev/null || true
+    return 0
+}
+
 # assert_record_scalar <subcommand> <tid> <field> <value> — THE bjx GRAMMAR-
 # INJECTION GUARD. Refuses (exit 1) any value that could move a field boundary
 # in a one-line record, and REJECTS rather than sanitising.
@@ -3530,13 +3604,20 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               denylist-filtered change set `approve` hashes
               (impact-report.sh --relativized-changed-files, so an
               absolute-vs-relative spelling of the same file never shows up
-              as both). `undeclared_files` non-empty is the ONLY failure —
-              an extra file is scope the design never reviewed; a missing
+              as both) -- MINUS <task-id>'s own canonical review-artifact
+              path(s) (docs/reviews/<task-id>-r<n>.json, v5 D5 piece 4,
+              REVIEW-ARTIFACT-EXCLUSION): review-record's own evidence file
+              is gate-written, never something any unit declares, and
+              excluding it is task-SPECIFIC -- an unrelated task's review
+              artifact is still flagged if it somehow enters the change
+              set. `undeclared_files` non-empty is the ONLY failure — an
+              extra file is scope the design never reviewed; a missing
               file (`unbuilt`) is reported but never gates. Exactly two
               remedies for undeclared_files: drop the file, or land an
               amendment and re-bind (design-unit-bind ... --rebind). NOT
-              wired into `approve` in this slice — built and tested
-              standalone.
+              wired into `approve` DIRECTLY -- design-unit-align (below)
+              composes this subcommand as its FILES leg and is what
+              `approve`'s DESIGN-ALIGNMENT-REFUSAL actually calls.
   design-unit-show <task-id>
               v5 D4b (fkm.6): READ-ONLY accessor over
               latest_design_unit_binding — the ONE authoritative reader,
@@ -3615,9 +3696,11 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               was last handed still the spec that's actually current" —
               decision #3 of the fkm.7 D5 brief: an injected hash nothing
               ever compares is decoration, and this subcommand is the
-              comparison. Gates nothing in this slice (that is D5's
-              separate, not-yet-built per-unit alignment check) — this is
-              visibility only. injected:false (no record) is the ORDINARY
+              comparison. Gates nothing DIRECTLY in this slice — this
+              accessor still only reports; design-unit-align (D5 piece 4,
+              below) is the per-unit alignment check that reuses this
+              command's own output as ITS freshness leg and is what
+              actually gates `approve`. injected:false (no record) is the ORDINARY
               case (never spawned as an implementer since binding, or never
               bound at all). injected:true, fresh:true means the recorded
               unit_hash — a PER-UNIT content hash, never the whole-artifact
@@ -3691,6 +3774,29 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               backend.md/frontend.md/devops.md's own "Green-to-green per
               unit" section) — this command is the mechanical recording
               half only.
+  design-unit-align <task-id>
+              v5 D5 piece 4 (fkm.7): the per-unit alignment check
+              (docs/plans/v5-design-phase.md Phase D5), deterministic, no
+              LLM, no bypass flag. Three legs, each reused rather than
+              rebuilt: FILES (design-conform, above — touched files fall
+              within the unit's declared set); FRESHNESS
+              (spec-injection-status, above — the injected spec still
+              matches the currently bound artifact); CRITERIA HAVE TESTS
+              (new — every acceptance criterion the unit declares has a
+              `criteria_tests` entry naming a file inside the project tree
+              (R7-F4) that exists, a label found in it, and green_after=
+              green on the same COMPLETION record, corroborated against a
+              real GREEN-CHECK v1 phase=after record on the same task
+              rather than trusted as a self-declaration (R7-F3)).
+              `applicable:false` (exit 0) when the task carries no
+              DESIGN-UNIT binding at all — nothing to align, the ordinary
+              case for most tasks. Exit 2 when a leg's own source could not
+              be read. Exit 4 on a substantive misalignment — see
+              DESIGN-ALIGNMENT-REFUSAL in cmd_approve for how this composes
+              into an approval refusal (unconditional once a binding
+              exists, exactly like design-conflict; wired into the main
+              refusal ladder only, not TIER 0's idempotent recheck — see
+              that block's own header for why).
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -6316,6 +6422,63 @@ cmd_approve() {
         exit 2
     fi
 # DESIGN-CONFLICT-REFUSAL END (v5 D5 / claude-workflow-plugin-fkm.7)
+
+# DESIGN-ALIGNMENT-REFUSAL BEGIN (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
+    #
+    # docs/plans/v5-design-phase.md Phase D5: "Per-unit alignment check at
+    # unit completion... Failures block that unit, not the epic."
+    # compute_design_alignment (see its own header, above DESIGN-ALIGNMENT
+    # BEGIN, well before this function) is that check; this is its ONLY
+    # wiring into a gate in this slice, matching design-conform's own header
+    # ("NOT WIRED INTO approve IN THIS SLICE... the enforcement decision...
+    # is deferred") — this block is that deferred decision, made.
+    #
+    # CONDITIONAL ON BINDING, UNLIKE DESIGN-SATISFIED-REFUSAL ABOVE — see
+    # compute_design_alignment's own header for the full reasoning. In
+    # short: DESIGN-SATISFIED-REFUSAL is unconditional because "was this
+    # task's design reviewed" is askable of any task; alignment is not
+    # askable of a task with no unit to align against, so this block SKIPS
+    # with no refusal and no bypass flag when $tid resolves no DESIGN-UNIT
+    # binding at all (the DESIGN_ALIGNMENT_APPLICABLE=false arm below), and
+    # --no-design has no effect on it either way — there is nothing here
+    # for that flag to waive when a binding does not exist, and no flag
+    # waives a real misalignment once one does, matching
+    # DESIGN-CONFLICT-REFUSAL's own no-overrule philosophy immediately
+    # above.
+    #
+    # NOT ADDED TO TIER 0's idempotent recheck, above in this function. See
+    # compute_design_alignment's own header for why this is a named,
+    # deliberate scope boundary rather than an oversight — it has the
+    # identical reach-around shape the operator's own ruling on i8cx already
+    # declined to bundle into that fix.
+    #
+    # EXIT 2, matching this axis's established convention
+    # (DESIGN-SATISFIED-REFUSAL / DESIGN-CONFLICT-REFUSAL immediately
+    # above, both documented "EXIT 2, NOT 4... AC 4.9's 'no new exit code'
+    # honoured") for BOTH an infra-unreadable source and a substantive
+    # misalignment — cmd_approve does not distinguish the two by exit code
+    # anywhere on this axis; error_key is what a caller reads to tell them
+    # apart.
+    #
+    # The sentinel comments are load-bearing: an L1 META strips everything
+    # between them and asserts approve then succeeds on a task carrying a
+    # substantive misalignment (an undeclared file, a stale spec injection,
+    # or an uncovered criterion). Do not rename them.
+    local align_rc=0
+    compute_design_alignment "$tid" || align_rc=$?
+    if [ "$align_rc" -ne 0 ]; then
+        emit_error_json "approve" "$tid" "$DESIGN_ALIGNMENT_KEY" \
+            "approve refused: could not determine whether $tid's unit is aligned ($DESIGN_ALIGNMENT_OBS). Refusing rather than approving over an alignment question that was never actually answered" \
+            "qa-gate.sh design-unit-align <task-id>"
+        exit 2
+    fi
+    if [ "$DESIGN_ALIGNMENT_APPLICABLE" = "true" ] && [ "$DESIGN_ALIGNMENT_OK" != "true" ]; then
+        emit_error_json "approve" "$tid" "$DESIGN_ALIGNMENT_KEY" \
+            "approve refused: $DESIGN_ALIGNMENT_OBS Affected unit: $DESIGN_ALIGNMENT_UNIT_ID under $DESIGN_ALIGNMENT_DESIGN_TASK. The remedies are the same two design-conform's own header states: fix the work (drop an undeclared file, add the missing test coverage, re-spawn to refresh a stale spec), or land a design amendment through D2's review loop and re-bind: qa-gate.sh design-unit-bind $tid --design-task $DESIGN_ALIGNMENT_DESIGN_TASK --unit-id $DESIGN_ALIGNMENT_UNIT_ID --rebind '<reason>'. No overrule flag exists" \
+            "qa-gate.sh design-unit-align <task-id>"
+        exit 2
+    fi
+# DESIGN-ALIGNMENT-REFUSAL END (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
 
     # ---- APPROVE-COMMIT ORDER (gz3 / v4.1 U1) -----------------------------
     #
@@ -11293,8 +11456,14 @@ latest_design_unit_binding() {
 # review loop) and re-bind. NO OVERRULE PATH — deliberately no flag exists
 # to pass one.
 #
-# NOT WIRED INTO `approve` IN THIS SLICE. Built and tested standalone; the
-# enforcement decision (where, and under what bypass if any) is deferred.
+# NOT WIRED INTO `approve` DIRECTLY, still (D4/fkm.6's own scope: built and
+# tested standalone here). D5 piece 4 (design-unit-align, DESIGN-ALIGNMENT
+# below) is the enforcement decision this note used to call "deferred" —
+# it composes THIS subcommand (invoked as a subprocess, its output parsed,
+# never re-implemented) as one of three legs and is what `approve` actually
+# calls. This subcommand's own CLI entry point, exit codes and standalone
+# behaviour are unchanged by that; it still answers only "did this task
+# touch a file its unit did not declare" and nothing more.
 #
 # RESOLUTION ORDER, each step reusing an existing predicate rather than
 # re-deriving it:
@@ -11592,6 +11761,68 @@ cmd_design_conform() {
             "[]" "[]" "$unit_id" "$design_task" "$tid"
         exit 2
     fi
+
+# REVIEW-ARTIFACT-EXCLUSION BEGIN (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
+    # THE GAP THIS CLOSES, measured directly rather than guessed: no prior
+    # test ever drove design-conform against a change set that had been
+    # through a REAL review cycle (design-conform.test.sh hand-writes
+    # $TRACKING; it never calls review-record). The first time both were
+    # combined (design-unit-align.test.sh Section 10, built alongside this
+    # fix), `qa-gate.sh review-record` had already written this task's
+    # canonical artifact to docs/reviews/<tid>-r<n>.json — review-record's
+    # OWN documented behaviour ("the canonical file... enters the change
+    # set the approval binds", qa.md section 6-prime) — and design-conform
+    # refused EVERY SUCH TASK's first alignment/approval attempt with
+    # undeclared_files naming that artifact, because no unit's `files[]`
+    # ever declares GATE-WRITTEN REVIEW EVIDENCE (it is not implementation
+    # work; nothing should have to declare it to pass). Since
+    # compute_design_alignment (DESIGN-ALIGNMENT, below) reuses this
+    # subcommand's OWN computation verbatim for its FILES leg, the gap
+    # applied to it identically: `design-unit-align`, and therefore
+    # `approve`'s DESIGN-ALIGNMENT-REFUSAL, would have refused every real
+    # v5 task-per-unit implementer's first approval attempt after an
+    # ordinary review round — the exact scenario the mechanism exists to
+    # allow through once genuinely aligned.
+    #
+    # THE FIX excludes ONLY this task's OWN canonical review-artifact
+    # path(s) — never a blanket docs/reviews/ exemption, which would let a
+    # design touch ANOTHER task's review evidence undetected. Built via
+    # string prefix/suffix matching (startswith/endswith), deliberately
+    # NOT jq regex interpolation of $tid: $tid can legally contain `.`
+    # (dot, a regex metacharacter) and interpolating it into a pattern
+    # would silently widen the match to any single character in that
+    # position, rather than the literal dot review_artifact_path_for
+    # itself always produces. The prefix is built from THE SAME sanitiser
+    # review_artifact_path_for uses (tr -c 'A-Za-z0-9._-' '_' — reused
+    # verbatim on $tid, not reimplemented), so this can never name a
+    # different path than the one the gate itself would derive to write
+    # (or has already written) for $tid.
+    #
+    # FAILS OPEN ON ITS OWN COMPUTATION FAILURE, DELIBERATELY, unlike the
+    # undeclared-computation this feeds: this filter is a REFINEMENT that
+    # only ever REMOVES candidates from `actual_json` before the diff, so
+    # a filter that fails to compute and leaves `actual_json` UNCHANGED
+    # produces, at worst, an unnecessary undeclared_files flag on the
+    # review artifact (a false positive with an existing, documented
+    # remedy) — never a real violation passing silently. That is the
+    # opposite direction from the UNDECLARED-FILES-GATE's own "must never
+    # fail open" rule below, which is about the DIFFERENCE itself, not
+    # this narrower pre-filter.
+    local review_artifact_tid_sanitized="" review_artifact_prefix="" rae_rc=0 rae_filtered=""
+    review_artifact_tid_sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    review_artifact_prefix="$REVIEW_ARTIFACT_SUBDIR/${review_artifact_tid_sanitized}-r"
+    rae_filtered=$(printf '%s' "$actual_json" | jq -c --arg pfx "$review_artifact_prefix" '
+        map(select(
+            (startswith($pfx) and endswith(".json")
+             and (.[($pfx|length):(length-5)] | test("^[0-9]+$")))
+            | not
+        ))
+    ' 2>/dev/null) || rae_rc=$?
+    if [ "$rae_rc" -eq 0 ] && [ -n "$rae_filtered" ] \
+        && printf '%s' "$rae_filtered" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        actual_json="$rae_filtered"
+    fi
+# REVIEW-ARTIFACT-EXCLUSION END (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
 
     # Same errexit hazard, same `cmd || rc=$?` fix — see the comment on
     # actual_json above; do not "simplify" this back to a two-line `x=$(...);
@@ -13120,6 +13351,725 @@ cmd_spec_injection_status() {
 # SPEC-INJECTION-STATUS END (v5 D5, claude-workflow-plugin-fkm.7)
 
 # ---------------------------------------------------------------------------
+# DESIGN-ALIGNMENT BEGIN (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
+#
+# design-unit-align <task-id> -- the per-unit alignment check
+# docs/plans/v5-design-phase.md Phase D5 asks for directly: "the unit's
+# criteria have tests, the touched files fall within the declared set (or
+# the excess is explicitly recorded as drift), and the injected design_hash
+# matches the currently bound artifact. Failures block that unit, not the
+# epic -- fail on unit two, not after unit ten."
+#
+# THREE LEGS, EACH REUSED RATHER THAN REBUILT (DS7: "reuse before
+# building... a new field or enum value on an existing contract, a
+# deterministic check, or a new condition in an existing gate. NO NEW
+# HARNESSES.").
+#
+# LEG 1 -- FILES. `design-conform` (D4, fkm.6) ALREADY computes exactly "did
+# <task-id> touch any file its unit did not declare", against the SAME
+# canonical, denylist-filtered change set `approve` hashes (impact-report.sh
+# --relativized-changed-files, which is the same reader --hash-only uses, so
+# the e2e fixture .claude/{scripts,beads} denylist rule already applies —
+# there is no second file-diff reader here to have that rule missing from).
+# Invoked here as a SUBPROCESS (`bash qa-gate.sh design-conform <tid>`) --
+# NOT refactored into a shared compute_* function, so its own, separately
+# reviewed and tested behaviour (design-conform.test.sh) is reused
+# byte-for-byte rather than risked in an extraction. This mirrors this
+# file's EXISTING subprocess-reuse idiom (cmd_design_conform itself already
+# shells out to review-check.sh's validate-design rather than re-parsing the
+# artifact in place, and review-check.sh's own design-unit-json shells out
+# to validate-design the identical way) -- applied reflexively, to itself,
+# for the first time in this file. The same choice was evaluated for LEG 2
+# and made the same way, for the same reason: see that leg's own note.
+#
+# "OR THE EXCESS IS EXPLICITLY RECORDED AS DRIFT" in the plan's own words is
+# design-conform's EXISTING two remedies, reused rather than reinvented:
+# drop the file, or land a design amendment through D2's review loop and
+# re-bind (qa-gate.sh design-unit-bind --rebind). There is no THIRD,
+# separate "mark as drift" bypass here -- design-conform's own header is
+# explicit that no overrule flag exists ("NO OVERRULE PATH -- deliberately
+# no flag exists to pass one"), and D6's own text states the identical
+# two-ways-to-clear rule for its rollup ("fix the work, or amend the
+# artifact through D2 so design and reality reconverge... Silent
+# approval-time editing of the design is not available"). Building a
+# second, softer remedy here would contradict a deliberately reviewed
+# invariant (fkm.6) for no documented reason. This piece reads "explicitly
+# recorded as drift" as naming THAT amendment path (an amendment IS the
+# explicit record), not as inventing a new one -- a reading, not a given;
+# flagged here as a decision this report names explicitly.
+#
+# LEG 2 -- FRESHNESS. `spec-injection-status` (D5 piece 2, shipped 0dfb82a)
+# ALREADY recomputes the live per-unit content hash and compares it against
+# what was injected at spawn -- "the injected design_hash matches the
+# currently bound artifact" IS that comparison, not a new one ("Use it. Do
+# not recompute" — a second, parallel hash-vs-hash check beside an existing
+# one is exactly the drift class compute_design_satisfied's own reuse
+# already guards against one level down). Also invoked as a subprocess, for
+# the identical reason LEG 1 is: refactoring cmd_spec_injection_status into
+# a shared compute_* function (mirroring compute_design_satisfied /
+# compute_design_conflict_open's own split) was considered and rejected --
+# that command has many more exit points than compute_design_satisfied's
+# uniform "always return 0, signal via key" shape, and extracting a
+# compute_ core from it risks perturbing an already-shipped, individually
+# tested subcommand for a savings of one subprocess spawn. `injected:false`
+# (spec injection never recorded, or never spawned since binding) does NOT
+# fail this leg: docs/AGENTS.md already documents that gap as legal and
+# best-effort ("spec injection is best-effort and can legitimately fail to
+# record even on genuinely unit-bound work"), and this leg does not
+# tighten a rule piece 3 deliberately left loose. Only a POSITIVELY
+# evidenced `fresh:false` on an `injected:true` record fails it.
+#
+# LEG 3 -- CRITERIA HAVE TESTS. The one genuinely new predicate.
+# RECORD: `criteria_tests` on the F7 completion contract (v5 D5 piece 4,
+# review-check.sh validate-completion) -- the implementer's own claim,
+# already schema-checked and self-consistency-checked against `tests_added`
+# at record time (every ref named in criteria_tests must ALSO appear in
+# tests_added, or validate-completion refuses the payload outright before
+# it is ever recorded -- see that region's own header).
+# CORROBORATION, here: (a) every criterion id the unit's OWN acceptance[]
+# declares (read via review-check.sh design-unit-json, the ONE existing
+# per-unit body reader -- no second parser for the DESIGN-UNITS grammar) is
+# a covered key in criteria_tests; (b) conversely, every criteria_tests key
+# names a criterion the unit actually declares (the D6-shaped symmetry:
+# unmapped criteria mean incomplete, unmapped/unknown ids mean a stale or
+# invented reference); (c) every test_ref names a file that exists on disk
+# right now and a label found in it (the "actually exists" half of "exists
+# and ran" -- a check record time could not make, because a referenced
+# file can be deleted or a label renamed between completion-record and
+# approve); (d) `green_after` on the SAME record is "green", AND (QA round
+# 7, R7-F3) that claim is EXTERNALLY CORROBORATED, not merely read back:
+# latest_green_check_result reads the actual `GREEN-CHECK v1 phase=after`
+# record green-check's OWN writer posts to this SAME task (see that
+# function's own header), and its result must EQUAL the payload's claim --
+# a record that is simply absent, or one that disagrees (e.g. says "red"),
+# each refuse distinctly. BEFORE R7-F3, (d) read `.green_after` off the
+# very payload it was checking and string-compared it against a literal --
+# a self-declaration on the same surface criteria_tests itself sits on, not
+# yet the "actually ran" half its own header claimed. It is that now, and
+# this text describes what the code does rather than what an earlier draft
+# asserted it did. Neither the record alone nor a grep alone is sufficient
+# (see the D5 piece 4 brief this was built from, verbatim): a criterion id
+# "merely appearing in a passing assertion label is a mention mistaken for
+# a test", and an implementer's own claim with nothing checking it is a
+# self-certification. Both halves, neither alone -- true of (c) from the
+# start, and true of (d) since R7-F3.
+#
+# THIS DOES NOT MAKE grader.md's OWN GREEN-CHECK CROSS-CHECK REDUNDANT,
+# named here because QA round 7 flagged the risk of a future editor reading
+# it that way. The grader's item 4 (docs/AGENTS.md / grader.md) asks
+# whether green_before/green_after correspond to a REAL record "rather than
+# a value the specialist typed" at GRADING time, which is STRICTLY BEFORE
+# approve (R7-F1/R7-F2's own evidence) -- the only check of this kind that
+# has run yet at that point in the workflow, and a HOLISTIC one (does the
+# record's own content make sense, not merely does one exist). LEG 3 step
+# (d) is a narrow, deterministic string-equality check that runs LATER, at
+# approve, and cannot substitute for the grader's substance judgement any
+# more than the grader's judgement can substitute for a mechanical gate
+# that actually blocks release. Two checks, two different points in the
+# workflow, two different failure modes each is positioned to catch.
+#
+# THE FILE+LABEL CHECK IS LANGUAGE-AGNOSTIC AND DELIBERATELY SHALLOW, NAMED
+# RATHER THAN HIDDEN. qa-gate.sh ships as PART OF THE PLUGIN, installed into
+# host projects of every language -- it cannot assume this repo's own
+# `assert_eq`/`assert_contains` bash convention. The check is therefore
+# `grep -qF -- "$label" "$file"`: does the label appear anywhere in the
+# named file, full stop. It cannot distinguish a real assertion call from
+# the SAME text sitting in an unrelated comment -- the exact "mention
+# mistaken for a test" shape this leg exists to rule out, one layer down.
+# What narrows that gap is NOT this check alone but its composition with
+# the tests_added cross-reference above: the label has to be a string the
+# specialist ALSO separately declared, on the SAME payload, as work it
+# added or modified for THIS task.
+#
+# THE FILE ITSELF IS ALSO BOUNDED NOW, MECHANICALLY, NOT MERELY ASSERTED IN
+# THIS PARAGRAPH (QA round 7, R7-F4). An earlier draft of this paragraph
+# claimed the residual was bounded to "a materially smaller set than 'any
+# string appearing anywhere in the repo'" -- DEMONSTRATED FALSE: step (e)
+# applied NO containment at all, so an absolute path
+# ({"AC1":["/etc/passwd::root"]}, the same string also in tests_added, with
+# green_after=green) satisfied step (e) end to end, and a `../`-relative
+# ref escaped identically -- the real search space was the whole
+# filesystem, not the repo. design_alignment_ref_is_contained (see its own
+# header, above compute_design_alignment) now refuses any ref whose
+# resolved PARENT DIRECTORY is not $PROJECT_DIR or a descendant of it,
+# checked via the SAME physical `cd -P` resolution design_dir_is_spec_dir /
+# review_dir_is_review_subdir already use and for the identical reason
+# (bash's LOGICAL-mode `cd` collapses `..` lexically, so a naive string
+# check could be satisfied by a spelling that never leaves the tree ON
+# PAPER while the kernel opens a directory outside it). What remains,
+# confined now to files genuinely inside the project tree, is the
+# mention-vs-real-test gap the tests_added cross-reference narrows but does
+# not close. Disclosed as the largest remaining gap in this leg, not
+# papered over.
+#
+# WHY UNCONDITIONAL WHEN BOUND, LIKE DESIGN-CONFLICT, NOT LENIENT LIKE
+# DESIGN-SATISFIED. DESIGN-SATISFIED-REFUSAL (fkm.4/D2) fires on EVERY
+# approve call, including a task that never had a design phase, and clears
+# only through an explicit, audited `--no-design '<reason>'` -- a
+# deliberate choice for THAT axis (D2's own comment: "a task that never had
+# or needed a design phase clears this... with an explicit, audited,
+# reasoned --no-design, never silently"). Alignment does not follow that
+# shape: unlike "was this task's design ever reviewed" (a question every
+# task can meaningfully be asked), "does this unit's touched work match its
+# OWN declared file set / injected spec / acceptance criteria" is not a
+# question a task with no unit binding can even be asked -- there is no
+# declared file set, no injected spec and no acceptance array to compare
+# against. This block therefore reports DESIGN_ALIGNMENT_APPLICABLE=false,
+# with NO bypass flag needed, when <task-id> resolves no DESIGN-UNIT
+# binding at all -- the ordinary case for the overwhelming majority of
+# tasks -- and is UNCONDITIONAL, exactly like DESIGN-CONFLICT-REFUSAL, once
+# a binding exists: no flag clears a genuine misalignment. The two remedies
+# are the same two design-conform's own header already states.
+#
+# claude-workflow-plugin-2tv5 (open, issue_type=decision, unassigned to
+# this piece) ASKS A RELATED BUT DISTINCT QUESTION FOR A DIFFERENT
+# MECHANISM, AND IS DELIBERATELY NOT INHERITED HERE. 2tv5 was filed
+# against DESIGN-CONFLICT-REFUSAL (fkm.2/18c9319): an open design_conflict
+# filed against ONE unit blocks approve for EVERY sibling task bound to
+# the SAME design artifact (measured: refusing a U2-bound caller with
+# "Affected unit(s): U1"), and 2tv5 asks whether that scope should be
+# per-unit or per-artifact -- explicitly assigning the decision to
+# D6/fkm.8 ("the coherence rollup gate and the first consumer that
+# resolves child->design-task... deciding it here would pre-empt that
+# design"), and stating plainly "blocks nothing yet; surfaces on fkm.8".
+# This piece is not fkm.8, and there is no analogous question to decide
+# here regardless of who owns it: DESIGN-ALIGNMENT-REFUSAL has no
+# sibling-scanning code path AT ALL. All three legs above (files,
+# freshness, criteria-tests) are evaluated exclusively against <task-id>'s
+# OWN binding, OWN spec-injection record and OWN completion payload --
+# nothing in compute_design_alignment ever reads another task's state, so
+# a misalignment on U1 has no mechanism by which it could block U2's
+# approve in the first place. The two checks differ in kind, not just in
+# current answer: DESIGN-CONFLICT-REFUSAL asks a question ABOUT the
+# shared artifact (is there an open objection against it), which is why
+# an artifact-wide blast radius is even arguable; DESIGN-ALIGNMENT-
+# REFUSAL asks a question about ONE task's own conformance to the ONE
+# unit it alone is bound to, which has no artifact-wide reading available
+# even in principle. 2tv5 remains entirely D6's to decide, unmoved by
+# this piece landing.
+#
+# WHAT THIS BLOCK DELIBERATELY DOES NOT DO -- named rather than silently
+# assumed, because IDEMPOTENT-APPROVE-CONFLICT-RECHECK's own header (A2,
+# claude-workflow-plugin-i8cx, in cmd_approve below) already flagged the
+# identical open question for DESIGN-SATISFIED and REVIEW-SEPARATION, and
+# the operator's own ruling there was to fix ONE evidenced reach-around per
+# change, not bundle an unaudited guess about a second axis into the same
+# fix. This check has the SAME STRUCTURAL SHAPE as that open question: a
+# design amendment (LEG 1's artifact, LEG 2's injected spec) or a
+# hand-edited persisted completion payload (LEG 3) can all change without
+# moving <task-id>'s OWN change-set hash, so an idempotent re-approval after
+# a change-set-hash match is NOT proven to still reflect the current
+# alignment state. This is therefore wired into cmd_approve's MAIN
+# (non-idempotent) refusal ladder only (see DESIGN-ALIGNMENT-REFUSAL,
+# below), exactly where DESIGN-SATISFIED-REFUSAL and DESIGN-CONFLICT-
+# REFUSAL already sit, and is NOT added to TIER 0's idempotent recheck
+# alongside DESIGN-CONFLICT. Whether it should be is left exactly as open
+# as the question already on record for DESIGN-SATISFIED/REVIEW-SEPARATION
+# -- named here so it is findable, not decided by omission.
+#
+# EXIT CODES (compute_design_alignment): 0 a DETERMINED answer was reached
+# (DESIGN_ALIGNMENT_OK true, or APPLICABLE false); nonzero (3) the question
+# could not be answered at all (a subprocess's own source was unreadable) --
+# the SAME rc-3-means-"could not look" convention latest_design_unit_binding
+# and resolve_design_conflict_subject already use, chosen because this
+# function composes calls to exactly those.
+
+# design_alignment_ref_is_contained <path> -- 0 when <path>'s PARENT
+# DIRECTORY, resolved PHYSICALLY, is $PROJECT_DIR itself OR a descendant of
+# it; 1 for everything else (including an empty argument, an unresolvable
+# directory, or an unresolvable $PROJECT_DIR -- fail-closed).
+#
+# R7-F4 (QA round 7): LEG 3 step (e) resolved a criteria_tests test_ref with
+# NO containment check at all -- an absolute path (/etc/passwd) or a
+# `../`-relative escape both passed straight through to `grep -qF`,
+# DEMONSTRATED end to end ({"AC1":["/etc/passwd::root"]} with the same
+# string in tests_added and green_after=green satisfied step (e)). The
+# region header's own stated bound -- "a materially smaller set than 'any
+# string appearing anywhere in the repo'" -- was therefore wrong in the one
+# paragraph written to state it honestly: the real search space was the
+# whole filesystem.
+#
+# NOT review_dir_is_review_subdir / design_dir_is_spec_dir THEMSELVES --
+# reused is the `cd -P` IDIOM those two share, not the functions, because
+# the question here is different in kind. Those two ask "is the parent
+# EQUAL TO one specific declared directory" (a design/review artifact is
+# deliberately flat, one level -- "NESTED IS FOREIGN" is their own stated
+# doctrine). A criteria_tests test_ref names an ordinary source or test
+# file, which can legitimately sit at ANY depth under the project tree
+# (.claude/scripts/tests/foo.test.sh, src/nested/dir/bar.sh), so the
+# question this function answers is CONTAINMENT under a root, not equality
+# with a leaf directory.
+#
+# `cd -P` IS WHAT MAKES THE WALK PHYSICAL, for the identical reason
+# design_dir_is_spec_dir's own comment gives: bare `cd` is bash LOGICAL
+# mode and collapses `..` LEXICALLY, so a `../`-bearing ref could reduce to
+# a spelling that never leaves the tree ON PAPER while the kernel opens a
+# directory outside it. $PROJECT_DIR is resolved with the SAME `cd -P`
+# call, not trusted literally, so a symlinked project root is compared
+# against on equal footing rather than assumed already-physical.
+#
+# CALL THIS AFTER THE EXISTENCE CHECK, NOT BEFORE -- deliberately, so the
+# two failure modes stay distinguishable. A ref whose file (or whose
+# file's directory) does not exist at all is `criteria_test_file_missing`
+# regardless of whether the spelling also happens to escape the project
+# tree (a typo and an escape attempt read identically here: neither
+# resolves to bytes on disk to leak). Only once a ref's target is PROVEN TO
+# EXIST does "where does it exist" become the interesting question -- which
+# is exactly the shape of the demonstrated defect (/etc/passwd exists,
+# hence `-f` alone passed it through).
+#
+# SCOPE, DISCLOSED RATHER THAN SILENTLY ASSUMED: this checks the FILE'S
+# PARENT DIRECTORY only. It does not walk the file's OWN last component for
+# a symlink the way design_path_is_contained/review_path_is_contained do
+# for THEIR narrower, one-file-per-task question -- a symlink planted
+# inside the project tree pointing outside it is a different vector,
+# mitigated differently: creating one is itself a tracked, visible change
+# to the specialist's own diff, the same "not a privilege boundary"
+# reasoning the finding itself gives for why the practical risk here is
+# low even before this fix. Extending to a full bounded symlink walk for
+# every criteria_tests ref was considered and deferred as disproportionate
+# to a MEDIUM-severity, already-low-practical-risk finding; if a future
+# review disagrees, design_path_is_contained's walk is the pattern to port.
+design_alignment_ref_is_contained() (
+    local p="${1:-}" here proot
+    [ -n "$p" ] || return 1
+    case "$p" in /*) ;; *) p="$PROJECT_DIR/$p" ;; esac
+    while [ "${p%/}" != "$p" ] && [ -n "${p%/}" ]; do p="${p%/}"; done
+    p="${p%/*}"
+    [ -n "$p" ] || p="/"
+    cd -P "$p" 2>/dev/null || return 1
+    here="$PWD"
+    proot=$(cd -P "$PROJECT_DIR" 2>/dev/null && pwd -P) || return 1
+    case "$here" in
+        "$proot") return 0 ;;
+        "$proot"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+)
+
+# compute_design_alignment <task-id> -- sets globals, never prints, never
+# exits. Every branch resets and then sets:
+#   DESIGN_ALIGNMENT_OK           "true"/"false" -- meaningless when
+#                                 APPLICABLE is "false"
+#   DESIGN_ALIGNMENT_APPLICABLE   "false" when <task-id> has no DESIGN-UNIT
+#                                 binding at all (nothing to align)
+#   DESIGN_ALIGNMENT_KEY          "" when OK, else the first-offending key
+#                                 (propagated VERBATIM from whichever leg's
+#                                 subprocess reported it, where one exists --
+#                                 see each leg's own comment -- never
+#                                 re-derived under a different name)
+#   DESIGN_ALIGNMENT_OBS          human-readable observation
+#   DESIGN_ALIGNMENT_UNIT_ID / DESIGN_ALIGNMENT_DESIGN_TASK
+#                                 "" until a binding is resolved
+compute_design_alignment() {
+    local tid="$1"
+    DESIGN_ALIGNMENT_OK="false"
+    DESIGN_ALIGNMENT_APPLICABLE="false"
+    DESIGN_ALIGNMENT_KEY=""
+    DESIGN_ALIGNMENT_OBS=""
+    DESIGN_ALIGNMENT_UNIT_ID=""
+    DESIGN_ALIGNMENT_DESIGN_TASK=""
+
+    local binding_json="" binding_rc=0
+    binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?
+    if [ "$binding_rc" -ne 0 ]; then
+        DESIGN_ALIGNMENT_KEY="design_binding_unreadable"
+        DESIGN_ALIGNMENT_OBS="the DESIGN-UNIT binding source for $tid could not be read (both bd show forms failed, or the comment stream did not parse); whether alignment even applies is unknown -- refusing rather than treating an unread source as not-applicable"
+        return 3
+    fi
+    local unit_id="" design_task=""
+    unit_id=$(printf '%s' "$binding_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+    design_task=$(printf '%s' "$binding_json" | jq -r '.design_task // ""' 2>/dev/null || echo "")
+    if [ -z "$unit_id" ] || [ -z "$design_task" ]; then
+        DESIGN_ALIGNMENT_APPLICABLE="false"
+        DESIGN_ALIGNMENT_OK="true"
+        DESIGN_ALIGNMENT_OBS="not applicable: $tid carries no DESIGN-UNIT binding, the ordinary case for the overwhelming majority of tasks -- nothing to align against"
+        return 0
+    fi
+    DESIGN_ALIGNMENT_APPLICABLE="true"
+    DESIGN_ALIGNMENT_UNIT_ID="$unit_id"
+    DESIGN_ALIGNMENT_DESIGN_TASK="$design_task"
+
+    # --- LEG 1: FILES, via design-conform (subprocess reuse) ---------------
+    local dc_out="" dc_rc=0
+    dc_out=$(bash "$PROJECT_DIR/.claude/scripts/qa-gate.sh" design-conform "$tid" 2>/dev/null) || dc_rc=$?
+    local dc_ok=""
+    dc_ok=$(printf '%s' "$dc_out" | jq -r '(.ok == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || dc_ok="false"
+    if [ "$dc_ok" != "true" ]; then
+        local dc_key="" dc_obs=""
+        dc_key=$(printf '%s' "$dc_out" | jq -r '.error_key // ""' 2>/dev/null) || dc_key=""
+        [ -n "$dc_key" ] || dc_key="design_conform_unreadable"
+        dc_obs=$(printf '%s' "$dc_out" | jq -r '.observations // ""' 2>/dev/null) || dc_obs=""
+        DESIGN_ALIGNMENT_KEY="$dc_key"
+        DESIGN_ALIGNMENT_OBS="LEG 1 (files) failed: $dc_obs"
+        # design-conform's OWN exit 4 is its one substantive-failure code
+        # (undeclared_files, an unsatisfied/stale governing design, a unit
+        # dropped by amendment); anything else (usage, infra, or an
+        # unexpected code) means the question was never actually answered.
+        [ "$dc_rc" -eq 4 ] && return 0
+        return 3
+    fi
+
+    # --- LEG 2: FRESHNESS, via spec-injection-status (subprocess reuse) ----
+    # No rc capture here (unlike LEG 1's $dc_rc): spec-injection-status's
+    # own contract guarantees exit 0 pairs with ok:true on EVERY determined
+    # answer and ok:false means ONLY "could not read the source" — so the
+    # jq-derived $si_ok below already carries everything the exit code
+    # would have distinguished; a second, unused rc capture here would be
+    # dead weight (and shellcheck SC2034 flags exactly that).
+    local si_out=""
+    si_out=$(bash "$PROJECT_DIR/.claude/scripts/qa-gate.sh" spec-injection-status "$tid" 2>/dev/null) || true
+    local si_ok=""
+    si_ok=$(printf '%s' "$si_out" | jq -r '(.ok == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || si_ok="false"
+    if [ "$si_ok" != "true" ]; then
+        # spec-injection-status's own contract: exit 0 pairs with ok:true on
+        # EVERY determined answer; ok:false only ever means an unreadable
+        # source (its own header: "exit 2 (ok:false) when ... could not be
+        # read at all"). So ok:false here is unambiguously "could not
+        # determine", never a substantive alignment failure.
+        local si_key="" si_obs=""
+        si_key=$(printf '%s' "$si_out" | jq -r '.error_key // ""' 2>/dev/null) || si_key=""
+        [ -n "$si_key" ] || si_key="spec_injection_status_unreadable"
+        si_obs=$(printf '%s' "$si_out" | jq -r '.observations // ""' 2>/dev/null) || si_obs=""
+        DESIGN_ALIGNMENT_KEY="$si_key"
+        DESIGN_ALIGNMENT_OBS="LEG 2 (freshness) source unreadable: $si_obs"
+        return 3
+    fi
+    local si_injected="" si_fresh=""
+    si_injected=$(printf '%s' "$si_out" | jq -r '(.injected == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || si_injected="false"
+    si_fresh=$(printf '%s' "$si_out" | jq -r '(.fresh == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || si_fresh="false"
+    if [ "$si_injected" = "true" ] && [ "$si_fresh" != "true" ]; then
+        local si_obs2=""
+        si_obs2=$(printf '%s' "$si_out" | jq -r '.observations // ""' 2>/dev/null) || si_obs2=""
+        DESIGN_ALIGNMENT_KEY="spec_injection_stale"
+        DESIGN_ALIGNMENT_OBS="LEG 2 (freshness) failed: $si_obs2"
+        return 0
+    fi
+
+    # --- LEG 3: CRITERIA HAVE TESTS -----------------------------------------
+    # 3a. The unit's OWN declared acceptance ids -- design-unit-json is the
+    # ONE existing per-unit body reader (i8cx R4-F1: it re-validates the
+    # artifact itself rather than re-parsing it, so this does not become a
+    # second DESIGN-UNITS parser).
+    local artifact=""
+    artifact=$(design_artifact_path_for "$design_task")
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        DESIGN_ALIGNMENT_KEY="validator_unavailable"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): cannot read the unit's own declared criteria: the ONE validator is missing at $REVIEW_CHECK_SCRIPT"
+        return 3
+    fi
+    local uj_out="" uj_rc=0
+    uj_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" design-unit-json "$artifact" "$unit_id" 2>/dev/null) || uj_rc=$?
+    local uj_ok=""
+    uj_ok=$(printf '%s' "$uj_out" | jq -r '(.ok == true) as $b | if $b then "true" else "false" end' 2>/dev/null) || uj_ok="false"
+    if [ "$uj_ok" != "true" ]; then
+        local uj_key="" uj_obs=""
+        uj_key=$(printf '%s' "$uj_out" | jq -r '.error_key // ""' 2>/dev/null) || uj_key=""
+        [ -n "$uj_key" ] || uj_key="design_unit_json_unreadable"
+        uj_obs=$(printf '%s' "$uj_out" | jq -r '.observations // ""' 2>/dev/null) || uj_obs=""
+        DESIGN_ALIGNMENT_KEY="$uj_key"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): could not read the unit's own declared criteria: $uj_obs"
+        # LEG 1 already confirmed (moments ago) that $unit_id IS currently
+        # declared in $artifact, so uj_ok reaching false here can only be a
+        # read racing an edit between the two subprocess calls, or an
+        # infrastructure hiccup local to this second read -- never a
+        # determined "this unit does not exist" this function has not
+        # already ruled out. Fail closed rather than name a substantive key
+        # for a state LEG 1's own pass should have made unreachable.
+        return 3
+    fi
+    local unit_json="" acc_ids_json="" acc_rc=0
+    unit_json=$(printf '%s' "$uj_out" | jq -r '.unit_json // ""' 2>/dev/null) || unit_json=""
+    acc_ids_json=$(printf '%s' "$unit_json" | jq -c '[ (.acceptance // [])[] | .id ]' 2>/dev/null) || acc_rc=$?
+    if [ "$acc_rc" -ne 0 ] || [ -z "$acc_ids_json" ] || ! printf '%s' "$acc_ids_json" | jq -e '(type == "array") and (length > 0)' >/dev/null 2>&1; then
+        DESIGN_ALIGNMENT_KEY="design_unit_json_unparseable"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the unit's own body from design-unit-json could not be read for its acceptance ids (validate-design's own schema check already refuses a unit with an empty acceptance array, so an empty result here means the read failed, not that the unit genuinely declares none)"
+        return 3
+    fi
+
+    # 3b. The IMPLEMENTER's own completion payload -- SAME reading
+    # discipline completion_files_crosscheck already established: locate by
+    # role, confirm the on-disk artifact digests to what the COMPLETION
+    # record bound, and only then read fields out of it. UNLIKE
+    # completion_files_crosscheck (which reports, never refuses, because it
+    # is a diagnostic layered on top of an ALREADY-gating
+    # completion_record_missing refusal), every unreadable step below fails
+    # CLOSED (return 3): this check IS the gate for this axis, not a report
+    # layered on one.
+    local impl_rec="" impl_role="" impl_sha=""
+    impl_rec=$(latest_implementer_completion_record "$tid") || impl_rec=""
+    if [ -z "$impl_rec" ]; then
+        DESIGN_ALIGNMENT_KEY="no_implementer_completion_record"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): no COMPLETION v1 record on $tid carries an implementer role (roles seen: $(completion_roles_seen "$tid" 2>/dev/null || echo "<unreadable>")); a reviewer's own contract does not declare unit coverage"
+        return 0
+    fi
+    impl_role=$(printf '%s' "$impl_rec" | grep -oE 'role=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+    impl_sha=$(printf '%s' "$impl_rec" | grep -oE 'payload_sha=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+    if [ -z "$impl_role" ]; then
+        DESIGN_ALIGNMENT_KEY="completion_record_malformed"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the implementer COMPLETION record for $tid carries no readable role= token"
+        return 3
+    fi
+    local payload_file=""
+    payload_file=$(completion_payload_path_for "$tid" "$impl_role")
+    if [ ! -f "$payload_file" ]; then
+        DESIGN_ALIGNMENT_KEY="completion_payload_absent"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the validated payload artifact is absent at $payload_file (expected when the record was written in another checkout, or the tracking dir was cleaned) -- refusing rather than certifying criteria coverage against evidence that is not actually on this disk"
+        return 3
+    fi
+    local disk_sha="" disk_sha_rc=0
+    disk_sha=$(sha256_file "$payload_file") || disk_sha_rc=$?
+    if [ "$disk_sha_rc" -ne 0 ] || [ -z "$disk_sha" ]; then
+        DESIGN_ALIGNMENT_KEY="completion_payload_undigestable"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the persisted payload at $payload_file exists but could not be digested (sha256_file rc=$disk_sha_rc)"
+        return 3
+    fi
+    if [ -n "$impl_sha" ] && [ "$impl_sha" != "$disk_sha" ]; then
+        DESIGN_ALIGNMENT_KEY="completion_payload_hash_mismatch"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the persisted payload at $payload_file digests to $disk_sha, but the COMPLETION record binds payload_sha=$impl_sha -- the artifact on disk is NOT the one that was recorded"
+        return 3
+    fi
+    local payload_raw=""
+    payload_raw=$(cat -- "$payload_file" 2>/dev/null) || payload_raw=""
+    if [ -z "$payload_raw" ] || ! printf '%s' "$payload_raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        DESIGN_ALIGNMENT_KEY="completion_payload_unparseable"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the persisted payload at $payload_file could not be parsed as JSON"
+        return 3
+    fi
+
+    # 3c. Declared-vs-covered set difference -- the exact analogue of
+    # design-conform's own undeclared/unbuilt split, computed in ONE
+    # guarded jq pass so a jq failure mid-computation refuses rather than
+    # silently reading as "every criterion is covered" (the fail-open shape
+    # design-conform's own R1-F1 fix exists to prevent, one leg over).
+    local ct_json="" crit_diff="" crit_diff_rc=0
+    ct_json=$(printf '%s' "$payload_raw" | jq -c '.criteria_tests // {}' 2>/dev/null) || ct_json="{}"
+    crit_diff=$(jq -nc --argjson acc "$acc_ids_json" --argjson ct "$ct_json" '
+        ($ct | keys) as $covered
+        | ($acc - $covered) as $missing
+        | ($covered - $acc) as $unknown
+        | { missing: ($missing | sort), unknown: ($unknown | sort) }
+    ' 2>/dev/null) || crit_diff_rc=$?
+    if [ "$crit_diff_rc" -ne 0 ] || [ -z "$crit_diff" ] || ! printf '%s' "$crit_diff" | jq -e '(.missing|type)=="array" and (.unknown|type)=="array"' >/dev/null 2>&1; then
+        DESIGN_ALIGNMENT_KEY="criteria_diff_computation_failed"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): could not compute the declared-vs-covered criterion set difference -- refusing rather than reporting an assumed-complete map"
+        return 3
+    fi
+    local missing_ids="" unknown_ids=""
+    missing_ids=$(printf '%s' "$crit_diff" | jq -r '.missing | join(",")' 2>/dev/null) || missing_ids=""
+    unknown_ids=$(printf '%s' "$crit_diff" | jq -r '.unknown | join(",")' 2>/dev/null) || unknown_ids=""
+
+    if [ -n "$unknown_ids" ]; then
+        DESIGN_ALIGNMENT_KEY="criteria_test_unknown_criterion"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): criteria_tests names criterion id(s) unit $unit_id does not declare: $unknown_ids -- ids must match the design artifact's own acceptance[].id exactly (a stale id from a prior amendment, or a typo, reads as an invented criterion rather than coverage of a real one)"
+        return 0
+    fi
+    if [ -n "$missing_ids" ]; then
+        DESIGN_ALIGNMENT_KEY="criteria_incomplete"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): unit $unit_id declares criterion id(s) with no covering test in criteria_tests: $missing_ids"
+        return 0
+    fi
+
+    # 3d. "Actually ran" (self-declared half): green_after on the SAME
+    # digest-bound record. Cheap and fast-failing on its own terms -- a
+    # payload that does not even CLAIM green need not cost a second read --
+    # but on its own this is a string compare against a field on the exact
+    # payload criteria_tests sits on, not yet the external corroboration
+    # step (d) is supposed to be. See 3d2 immediately below for that half.
+    local green_after=""
+    green_after=$(printf '%s' "$payload_raw" | jq -r '.green_after // ""' 2>/dev/null) || green_after=""
+    if [ "$green_after" != "green" ]; then
+        DESIGN_ALIGNMENT_KEY="criteria_tests_without_green_after"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): criteria_tests names a covering test for every declared criterion, but green_after='${green_after:-<empty>}' on the same record, not green -- a coverage claim needs the suite to have actually run and passed (qa-gate.sh green-check --phase after), not merely to be named"
+        return 0
+    fi
+
+    # 3d2. "Actually ran" (externally-corroborated half). R7-F3 (QA round 7):
+    # 3d alone is a self-declaration -- it reads .green_after out of the
+    # SAME payload criteria_tests is being checked against and string-
+    # compares it, which the header above used to describe as "never an
+    # unexecuted claim" while nothing anywhere made that true. This step is
+    # what makes it true: latest_green_check_result reads the record
+    # green-check's OWN writer produces on $tid (see that function's own
+    # header for why it goes through design_comments_json and never the
+    # wrap-hostile human-formatted comment channel), and the record's
+    # result must EQUAL the payload's claim -- not merely exist. A record
+    # saying red does not corroborate a payload claiming green; it
+    # CONTRADICTS it, and is refused for that reason, distinctly from a
+    # record that is simply absent.
+    #
+    # THREE OUTCOMES, THREE DISTINCT KEYS, because an operator's remedy
+    # differs for each: unreadable means try again once bd is reachable;
+    # unrecorded means run green-check for the first time; mismatch means
+    # the suite was not actually green when the payload says it was, and
+    # re-running (not merely re-approving) is what the remedy has to be.
+    # LEG-3-GREEN-CHECK-CORROBORATION BEGIN (R7-F3, QA round 7)
+    local gc_result="" gc_rc=0
+    gc_result=$(latest_green_check_result "$tid" "after") || gc_rc=$?
+    if [ "$gc_rc" -ne 0 ]; then
+        DESIGN_ALIGNMENT_KEY="green_check_record_unreadable"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): could not read $tid's GREEN-CHECK v1 comment stream to corroborate green_after='$green_after' -- the retrieval itself could not be proven (not merely 'nothing found'), so refusing rather than trusting the payload's own unverified claim"
+        return 3
+    fi
+    if [ -z "$gc_result" ]; then
+        DESIGN_ALIGNMENT_KEY="criteria_tests_green_check_unrecorded"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the payload claims green_after='$green_after', but $tid carries NO 'GREEN-CHECK v1 ... phase=after' record at all -- qa-gate.sh green-check $tid --phase after was never actually run (or its record never landed), so the claim is a self-declaration with nothing behind it. Run it, then re-approve"
+        return 0
+    fi
+    if [ "$gc_result" != "$green_after" ]; then
+        DESIGN_ALIGNMENT_KEY="criteria_tests_green_check_mismatch"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): the payload claims green_after='$green_after', but $tid's latest 'GREEN-CHECK v1 ... phase=after' record says result='$gc_result' -- a record disagreeing with the payload's own claim is refused, never averaged or trusted on the payload's side"
+        return 0
+    fi
+    # LEG-3-GREEN-CHECK-CORROBORATION END (R7-F3, QA round 7)
+
+    # 3e. "Actually exists": file+label corroboration. See this block's own
+    # header for why this is deliberately shallow (grep -qF, no per-language
+    # parsing) and why that is disclosed rather than hidden. Every ref was
+    # ALREADY confirmed present in tests_added at record time on these
+    # EXACT, digest-verified bytes (review-check.sh validate-completion); it
+    # is not re-checked here. What this adds is a check record time could
+    # not make: does the referenced file/label still exist RIGHT NOW.
+    local refs_json="" refs_rc=0
+    refs_json=$(printf '%s' "$ct_json" | jq -c '[ .[][] ] | unique' 2>/dev/null) || refs_rc=$?
+    if [ "$refs_rc" -ne 0 ] || [ -z "$refs_json" ]; then
+        DESIGN_ALIGNMENT_KEY="criteria_refs_computation_failed"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): could not enumerate the test references named in criteria_tests"
+        return 3
+    fi
+    local ref=""
+    while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        case "$ref" in
+            *::*) : ;;
+            *)
+                DESIGN_ALIGNMENT_KEY="criteria_test_ref_malformed"
+                DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): test reference '$ref' is not <file>::<label> shaped"
+                return 0
+                ;;
+        esac
+        local ref_file="${ref%%::*}" ref_label="${ref#*::}" ref_file_abs=""
+        case "$ref_file" in
+            /*) ref_file_abs="$ref_file" ;;
+            *)  ref_file_abs="$PROJECT_DIR/$ref_file" ;;
+        esac
+        if [ ! -f "$ref_file_abs" ]; then
+            DESIGN_ALIGNMENT_KEY="criteria_test_file_missing"
+            DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): test reference '$ref' names a file that does not exist at $ref_file_abs"
+            return 0
+        fi
+        # LEG-3-REF-CONTAINMENT BEGIN (R7-F4, QA round 7)
+        # Only once the target is PROVEN TO EXIST (immediately above) does
+        # containment become the question -- see
+        # design_alignment_ref_is_contained's own header for why this order
+        # is deliberate.
+        if ! design_alignment_ref_is_contained "$ref_file_abs"; then
+            DESIGN_ALIGNMENT_KEY="criteria_test_ref_outside_project"
+            DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): test reference '$ref' resolves to $ref_file_abs, which is outside $PROJECT_DIR -- criteria_tests may only name files inside the project tree"
+            return 0
+        fi
+        # LEG-3-REF-CONTAINMENT END (R7-F4, QA round 7)
+        if ! grep -qF -- "$ref_label" "$ref_file_abs" 2>/dev/null; then
+            DESIGN_ALIGNMENT_KEY="criteria_test_label_not_found"
+            DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): test reference '$ref' names a label not found anywhere in $ref_file_abs"
+            return 0
+        fi
+    done < <(printf '%s' "$refs_json" | jq -r '.[]')
+
+    DESIGN_ALIGNMENT_OK="true"
+    DESIGN_ALIGNMENT_OBS="aligned: $tid (unit_id=$unit_id, design_task=$design_task) -- files conform (design-conform), spec injection is fresh or was never recorded (spec-injection-status), and every declared criterion has a corroborated covering test with green_after=green"
+    return 0
+}
+
+# emit_design_unit_align <ok> <error_key> <observations> <task_id>
+#   <applicable> [unit_id] [design_task]
+# Same guarded-build discipline as emit_spec_injection_status/emit_design_
+# conform: ONE jq -nc construction, shape-validated before printing, a
+# caller-data-free literal on construction failure.
+emit_design_unit_align() {
+    local ok="$1" ekey="$2" obs="$3" tid="${4:-}" applicable="${5:-false}" \
+          unit_id="${6:-}" design_task="${7:-}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" --arg tid "$tid" \
+        --argjson applicable "$applicable" --arg uid "$unit_id" --arg dt "$design_task" '
+        {ok: $ok, subcommand: "design-unit-align", task_id: $tid,
+         error_key: $ekey, applicable: $applicable, unit_id: $uid,
+         design_task: $dt, observations: $obs}
+    ' 2>/dev/null) || env_rc=$?
+    if [ "$env_rc" -eq 0 ] && [ -n "$envelope" ] \
+       && printf '%s' "$envelope" | jq -e '
+            type == "object"
+            and (keys | sort) == ["applicable", "design_task", "error_key", "observations", "ok", "subcommand", "task_id", "unit_id"]
+            and (.ok | type) == "boolean"
+            and .subcommand == "design-unit-align"
+            and (.task_id | type) == "string"
+            and (.error_key | type) == "string"
+            and (.applicable | type) == "boolean"
+            and (.unit_id | type) == "string"
+            and (.design_task | type) == "string"
+            and (.observations | type) == "string"
+          ' >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"design-unit-align","task_id":null,"error_key":"envelope_construction_failed","observations":"the design-unit-align envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","applicable":false,"unit_id":"","design_task":""}\n'
+    return 1
+}
+
+# design-unit-align <task-id> -- deterministic, no LLM, no bypass flag (the
+# SAME "no overrule path" design-conform's own header states, reused here
+# rather than restated as a new policy). Exit 0: aligned, OR not applicable
+# (no binding). Exit 2: infrastructure (a leg's own source unreadable).
+# Exit 4: a substantive misalignment (matching design-conform's own exit 4
+# for its one substantive failure, undeclared_files -- the same family of
+# claim, "a real, named, remediable gap", not an infrastructure question).
+cmd_design_unit_align() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-unit-align","task_id":null,"error_key":"jq_unavailable","observations":"jq is required and not on PATH","applicable":false,"unit_id":"","design_task":""}\n'
+        exit 2
+    fi
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_design_unit_align "false" "missing_task_id" \
+            "design-unit-align requires <task-id> as first positional argument" \
+            "" "false" "" ""
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_design_unit_align "false" "unknown_flag" \
+            "unknown argument '$1'; design-unit-align takes only <task-id> -- there is no bypass flag by design, matching design-conform's own no-overrule-path convention" \
+            "$tid" "false" "" ""
+        exit 1
+    fi
+
+    require_bd "design-unit-align" "$tid"
+
+    local align_rc=0
+    compute_design_alignment "$tid" || align_rc=$?
+    if [ "$align_rc" -ne 0 ]; then
+        emit_design_unit_align "false" "$DESIGN_ALIGNMENT_KEY" "$DESIGN_ALIGNMENT_OBS" \
+            "$tid" "$DESIGN_ALIGNMENT_APPLICABLE" "$DESIGN_ALIGNMENT_UNIT_ID" "$DESIGN_ALIGNMENT_DESIGN_TASK"
+        exit 2
+    fi
+    if [ "$DESIGN_ALIGNMENT_APPLICABLE" != "true" ]; then
+        emit_design_unit_align "true" "" "$DESIGN_ALIGNMENT_OBS" "$tid" "false" "" ""
+        exit 0
+    fi
+    if [ "$DESIGN_ALIGNMENT_OK" != "true" ]; then
+        emit_design_unit_align "false" "$DESIGN_ALIGNMENT_KEY" "$DESIGN_ALIGNMENT_OBS" \
+            "$tid" "true" "$DESIGN_ALIGNMENT_UNIT_ID" "$DESIGN_ALIGNMENT_DESIGN_TASK"
+        exit 4
+    fi
+    emit_design_unit_align "true" "" "$DESIGN_ALIGNMENT_OBS" \
+        "$tid" "true" "$DESIGN_ALIGNMENT_UNIT_ID" "$DESIGN_ALIGNMENT_DESIGN_TASK"
+    exit 0
+}
+# DESIGN-ALIGNMENT END (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
+
+# ---------------------------------------------------------------------------
 # GREEN-CHECK BEGIN (v5 D5 piece 3, claude-workflow-plugin-fkm.7 D5)
 #
 # green-check <tid> --phase before|after
@@ -14040,6 +14990,7 @@ case "$SUB" in
     design-conflict)  cmd_design_conflict "$@" ;;
     spec-injection-status) cmd_spec_injection_status "$@" ;;
     green-check) cmd_green_check "$@" ;;
+    design-unit-align) cmd_design_unit_align "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     # quarantine-artifact dispatch -- REMOVED (claude-workflow-plugin-k6re,

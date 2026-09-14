@@ -235,7 +235,7 @@ record_completion() {
     local tid="$1" file="$2" pay
     pay="$TRACK/draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"devops","model":"i8cx-spec","pin":"i8cx-spec","files_changed":["$file"],"tests_added":["qa-gate-pipefail.test.sh::seeded"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the qa-gate-pipefail fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}
+{"task_id":"$tid","role":"devops","model":"i8cx-spec","pin":"i8cx-spec","files_changed":["$file"],"tests_added":["qa-gate-pipefail.test.sh::seeded"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the qa-gate-pipefail fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none","criteria_tests":{}}
 JSON
     bash "$QG" completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }

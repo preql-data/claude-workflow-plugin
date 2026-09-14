@@ -312,7 +312,7 @@ DESIGNDOC
     # very observations several assertions below read.
     local pay
     pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
-    printf '{"task_id":"%s","role":"%s","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the qa-gate-choose fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}\n' \
+    printf '{"task_id":"%s","role":"%s","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the qa-gate-choose fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none","criteria_tests":{}}\n' \
         "$tid" "$role" > "$pay"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
         completion-record "$tid" --file "$pay" >/dev/null 2>&1
