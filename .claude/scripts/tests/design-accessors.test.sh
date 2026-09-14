@@ -340,13 +340,21 @@ printf '\n=== Section 3: H2-F2/H2R2-F2/268l META — the pre-fix call sites, res
 # design-conform's too, spelled BYTE-IDENTICALLY on purpose; claude-workflow-
 # plugin-268l added a THIRD consumer of the identical shape —
 # resolve_design_conflict_subject, shared by design-conflict (the writer)
-# and compute_design_conflict_open (the reader); v5 D5 (fkm.7) added a
+# and compute_design_conflict_open (the reader); v5 D5 (fkm.7 piece 2) added a
 # FOURTH — cmd_spec_injection_status's re-read of the CURRENT binding, used
-# to detect a rebind since injection — deliberately reusing the SAME
-# byte-shape each time rather than inventing a new one per consumer. ONE sed
-# below restores the historical fail-open shape at ALL FOUR call sites (3.1/
-# 3.1b prove the byte-level non-vacuity across all four); this section
-# watches THREE of the four consumers misbehave in their own named way:
+# to detect a rebind since injection; v5 D5 (fkm.7 piece 3, QA round 2 R2-F1)
+# added a FIFTH — cmd_green_check, which must consult the binding to scope
+# cannot_start_from_green to unit-bound tasks (decision D-1) — deliberately
+# reusing the SAME byte-shape each time rather than inventing a new one per
+# consumer. ONE sed below restores the historical fail-open shape at EVERY
+# call site sharing this shape, however many there are today (3.1/3.1b prove
+# the byte-level non-vacuity via a COUNT-INDEPENDENT invariant, never a
+# hand-maintained absolute — R2-F1's own fix: the shipped script is proven to
+# carry at least one such call site, the mutant is proven to carry the
+# fail-open spelling at every one of them and the rc-capture spelling at
+# none, so growing this list again — a sixth consumer, a seventh — costs
+# nothing here). This section watches THREE of the (now five) consumers
+# misbehave in their own named way:
 # unit-show reports the determined answer bound:false, conform rewrites the
 # unread source as unit_not_in_design (a claim whose remedy — "bind it
 # first" — is wrong when the store simply could not be read), and
@@ -375,22 +383,44 @@ QG_MUT3="$SCRIPTS/qa-gate.mutant-s3.sh"
 # from qa-gate.sh verbatim; expanding $(...) here would defeat the mutation.
 sed 's/binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?/binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"/' \
     "$QG" > "$QG_MUT3"
-# Non-vacuity: the shipped script carries the rc-capture line at ALL FOUR
-# call sites (design-unit-show + design-conform, H2R2-F2; resolve_design_
-# conflict_subject, 268l; cmd_spec_injection_status, fkm.7) and the fail-open
-# spelling at none; the mutant must carry zero and four respectively.
+# Non-vacuity, as a COUNT-INDEPENDENT INVARIANT (QA round 2, R2-F1). This
+# USED TO be a hardcoded "4|0" / "0|4" pair — the population of call sites
+# sharing this shape, asserted as an absolute that needed a hand-bump every
+# time a legitimate new consumer was added (design-unit-show + design-conform
+# were "2", 268l made it "3", fkm.7 piece 2 made it "4" — each bump touching
+# this same pair of lines). fkm.7 piece 3's cmd_green_check made it "5" and
+# broke the tier (R2-F1). Rather than bump 4->5 and re-arm the identical trap
+# at call site six, the invariant below asserts the SHAPE the absolute was
+# always standing in for, and holds at "4", at "5", and at any N>0:
+#   - shipped_failopen == 0        (nothing is pre-mutated in the real script)
+#   - mutant_rc        == 0        (the mutation converted every rc-capture
+#                                    site — none is left behind as "0")
+#   - mutant_failopen  == shipped_rc  (every rc-capture site became fail-open;
+#                                       the sed is a total, not partial, rewrite)
+#   - shipped_rc       >  0        (there IS at least one site to mutate —
+#                                    the actual non-vacuity claim)
 # (grep -cF counts LINES; the conform header comment quotes only the short
 # `|| binding_json="{}"` fragment, which cannot match these full-line
 # needles — counting text to prove a claim about code is exactly what the
-# tests README warns about, so 3.2/3.4/3.6 below DRIVE three of the four
-# mutated consumers — the fourth is named, not driven; see the comment above
-# `rm -f "$QG_MUT3"` below.)
+# tests README warns about, so 3.2/3.4/3.6 below DRIVE three of the five
+# mutated consumers — the other two are named, not driven; see the comments
+# above `rm -f "$QG_MUT3"` below.)
 # shellcheck disable=SC2016  # grep -cF needles are literal shell source.
-assert_eq "3.1 NON-VACUITY: rc-capture call sites shipped/mutant = 4/0" "4|0" \
-    "$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG")|$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG_MUT3")"
+S3_SHIPPED_RC=$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG")
 # shellcheck disable=SC2016  # grep -cF needles are literal shell source.
-assert_eq "3.1b NON-VACUITY: fail-open call sites shipped/mutant = 0/4" "0|4" \
-    "$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG")|$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG_MUT3")"
+S3_SHIPPED_FAILOPEN=$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG")
+# shellcheck disable=SC2016  # grep -cF needles are literal shell source.
+S3_MUTANT_RC=$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?' "$QG_MUT3")
+# shellcheck disable=SC2016  # grep -cF needles are literal shell source.
+S3_MUTANT_FAILOPEN=$(grep -cF 'binding_json=$(latest_design_unit_binding "$tid") || binding_json="{}"' "$QG_MUT3")
+assert_eq "3.1 NON-VACUITY: the shipped script has at least one rc-capture call site to mutate (count-independent — was a hardcoded '4', R2-F1)" \
+    "true" "$([ "$S3_SHIPPED_RC" -gt 0 ] 2>/dev/null && echo true || echo false)"
+assert_eq "3.1a NON-VACUITY: the shipped script has ZERO fail-open call sites of this shape (nothing pre-mutated)" \
+    "0" "$S3_SHIPPED_FAILOPEN"
+assert_eq "3.1b SPECIFIC MISBEHAVIOUR (mutation side): the mutant has ZERO rc-capture call sites left (every one converted)" \
+    "0" "$S3_MUTANT_RC"
+assert_eq "3.1c ...and the mutant's fail-open count equals the shipped rc-capture count (a TOTAL rewrite, not a partial one — this is what makes 3.1/3.1a/3.1b a complete, count-independent replacement for the old absolute pair)" \
+    "$S3_SHIPPED_RC" "$S3_MUTANT_FAILOPEN"
 BASHN3_RC=0; bash -n "$QG_MUT3" 2>/dev/null || BASHN3_RC=$?
 assert_eq "3.1c ...and the mutant parses" "0" "$BASHN3_RC"
 chmod 0755 "$QG_MUT3"

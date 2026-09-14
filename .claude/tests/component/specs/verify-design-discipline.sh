@@ -174,7 +174,7 @@ seed_code_review_only() {
         CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" "$tid" >/dev/null 2>&1 || true
     fi
     pay="$TRACK/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
-    printf '{"task_id":"%s","role":"%s","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded"],"blockers":[],"llm_observations":"seeded","context_coverage":"seeded"}\n' \
+    printf '{"task_id":"%s","role":"%s","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded"],"blockers":[],"llm_observations":"seeded","context_coverage":"seeded","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}\n' \
         "$tid" "$role" > "$pay"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }

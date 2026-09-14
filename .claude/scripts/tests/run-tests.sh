@@ -661,8 +661,125 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # standalone, no other load: 185/185 assertions, exit 0, 756.16s real
 # (implementer); 771.35s (QA's independent confirming run, same tree). See
 # the SPEC_TIMEOUT_S comment below for the updated headroom this moves.
+#
+# 61 -> 63 (claude-workflow-plugin-fkm.7 D5 piece 3, 2026-09-14): added TWO
+# new files for the four green-to-green completion-contract fields (unit_id,
+# design_hash, green_before, green_after — docs/plans/v5-design-phase.md
+# Phase D5):
+#   - validate-completion-green-fields.test.sh (43 assertions) — the four
+#     fields' required/type/value checks in review-check.sh
+#     cmd_validate_completion, plus a META-TEST stripping the whole
+#     GREEN-FIELDS-VALIDATION region from a copy and proving the mutant then
+#     accepts a payload missing all four fields (and a bare, unchecked
+#     `green_before: "green"` claim) that the shipped script still refuses.
+#     Needs no bd fixture — validate-completion is a stateless JSON
+#     validator — so this spec runs in well under a second standalone.
+#   - green-check.test.sh (119 assertions as of QA round 5, fkm.7 D5 — see
+#     the CORRECTIONS below; 57 when this file was first added) — `qa-gate.sh
+#     green-check <tid> --phase before|after`: runner=none/green/red across
+#     bound and unbound tasks, the phase=before+bound+red refusal
+#     (cannot_start_from_green) and its phase=after non-refusal, argument
+#     errors, design_binding_unreadable on a never-created task id, and a
+#     META-TEST that hardcodes the green/red derivation on a COPY of
+#     qa-gate.sh to always claim green — the mechanical form of the plan's
+#     own "stub the suite result to claim green while red" line — and shows
+#     the mutant both mis-reports an actually-red command AND (the named
+#     consequence) lets a BOUND unit past the start gate it should have
+#     stopped at, while the shipped script, same fixture, still reports red
+#     and still refuses. Needs a real bd fixture (mirrors review-
+#     separation.test.sh's shape); standalone runtime is dominated by real
+#     `bd create`/`bd comments add` subprocess calls across ~15+ seeded
+#     tasks.
+#
+#     CORRECTION (QA round 3, R3-F5): this trail said "57 assertions" through
+#     a round (R2-F2) that actually shipped 67 (a Section 10 hang/timeout
+#     leg, +10) without updating this comment — caught, not by inspection,
+#     but by literally running `bash green-check.test.sh` and reading its own
+#     "Total: N Passed: N" line, the same instrument run-tests.sh itself uses
+#     (`grep -cE '^[[:space:]]*(PASS|FAIL):'`).
+#
+#     CORRECTION (QA round 4, R4-F2): green_check_run has TWO dispatch arms
+#     (the elapsed-time HEURISTIC arm when timeout/gtimeout is on PATH, the
+#     marker-based WATCHDOG arm when neither is), and the 88-assertion count
+#     the round-3 correction above left standing was itself the R4-F2 defect
+#     in miniature — EVERY one of those 88 assertions ran on THIS host, which
+#     lacks both binaries, so all 88 exercised the watchdog arm ONLY; the
+#     heuristic arm (the exact code R4-F1's --help claim was about) executed
+#     ZERO times, and a count that looks host-independent while covering
+#     only one of two arms is precisely the "measurement that did not happen
+#     looking identical to one that passed" shape LESSONS.md:282 names. Per
+#     R4-F2's own binding repair, this comment now says WHICH ARM each
+#     section covers, not just a bare total:
+#       Section 10 (WATCHDOG arm, FORCED via a PATH_NO_TIMEOUT ALLOWLIST --
+#         see the R5-F2 CORRECTION below for why "filter" became
+#         "allowlist") — cap enforcement, tree-kill.
+#       Section 11 (WATCHDOG arm, same PATH_NO_TIMEOUT force) — timed_out
+#         disambiguation, airtight on this arm (R3-F1).
+#       Section 13 (HEURISTIC arm, FORCED via a `timeout` PATH shim so it
+#         runs on ANY host, real binary present or not) — timed_out on this
+#         arm is a best-effort elapsed-time inference, NOT airtight (R4-F1,
+#         R5-F1). THE REAL BOUND (R5-F1, stated here rather than just
+#         referenced): a self-124 landing anywhere in the real-duration
+#         window (cap-1, cap] can measure AT the cap and read as a false
+#         positive, with probability equal to the start instant's
+#         sub-second fraction; only a 124 landing MORE than one second
+#         before the cap is guaranteed to read false. "Case G is the one
+#         false positive" would itself be the same overclaim in miniature —
+#         case G (self-124 landing exactly at the cap) is the one
+#         IRREDUCIBLE false positive, not the only possible one. Cases
+#         A/B/D/E/F are controls; 13.C-STATIC ALONE proves the R4-F3 fix (a
+#         timing-independent grep) — case C itself is a generous-margin
+#         control that passes identically against the UNFIXED predicate too
+#         and proves nothing about R4-F3, credited to case C through QA
+#         round 4, corrected in round 5 (R5-F6) once it was shown a
+#         behavioural leg at the actual cap-1 boundary is inherently
+#         probabilistic (R5-F1), which is exactly why 13.C-STATIC, not a
+#         boundary race, is the right instrument.
+#       Section 14 (arm-independent — QA_TRACKING_DIR resolution happens
+#         before dispatch) — tracking_dir_unwritable refuses rather than
+#         silently reporting a phantom red for a suite that never ran,
+#         covering BOTH the directory-missing-and-uncreatable case (R4-F4)
+#         and the directory-exists-but-lost-its-write-bit case R4-F4's own
+#         fix did not close (R5-F3).
+#
+#     CORRECTION (QA round 5, R5-F4): the paragraph that used to follow
+#     this one said a static grep read "113, not 115" for this file, MEANT
+#     as another instance of the R3-F5 static-undercounts-runtime gap. That
+#     figure and its causal explanation were BOTH wrong, independent of the
+#     round-5 additions below. `grep -c 'assert_eq'` = 113 (then) counts the
+#     FUNCTION DEFINITION `assert_eq() {` as if it were a call site and
+#     drops every `assert_contains` call entirely -- not a call-site count
+#     at all. The correct static instrument is `grep -cE
+#     '^[[:space:]]*assert_(eq|contains) '` (line-anchored, both assertion
+#     helpers, excludes the definitions): at the round-4 state that read
+#     116, not 113, and the true relationship ran the OTHER direction --
+#     116 static EXCEEDS 115 runtime because exactly one assertion (8.6,
+#     `if command -v timeout` gating a hang-safety check) is host-gated and
+#     skipped on a host lacking a real timeout binary; 116 - 1 = 115. On a
+#     host WITH timeout, 8.6 would run and the static and runtime figures
+#     would match exactly. "Static undercounts runtime" was backwards in
+#     both the earlier round's arithmetic AND its causal story.
+#
+#     88 -> 115 -> 119 (+27 at round 4: Section 10/11 gained explicit
+#     dispatch/timed_out assertions when they were retrofitted to FORCE the
+#     watchdog arm rather than rely on host luck; Section 13 and Section 14
+#     were new. +4 at round 5: Section 10.0b, the allowlist's own negative
+#     control (R5-F2); Section 14.1b, the existing-but-unwritable case
+#     (R5-F3)). Deliberately NOT presented as a per-section sum -- the
+#     authoritative figure is `bash green-check.test.sh`'s own
+#     "Total: N Passed: N" line, re-measured three consecutive times this
+#     round, all 119/119. The static cross-check, correctly computed
+#     (`grep -cE '^[[:space:]]*assert_(eq|contains) ' .claude/scripts/tests/
+#     green-check.test.sh`), reads 120 on this host today; 120 - 1
+#     (the same host-gated 8.6) = 119, matching the runtime total. This
+#     count is NOT expected to move again on its own — it is the number of
+#     PASS/FAIL lines one specific spec file emits on this host today, not
+#     a quantity with a count-independent expression the way
+#     EXPECTED_SPECS's own file-count is. If it drifts, re-run the spec and
+#     read its own total, and re-run the static cross-check with the
+#     command above rather than hand-adjusting either figure from memory.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=61
+EXPECTED_SPECS=63
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 1.167x, NOT 3.7x (nor the
 # 1.31x this comment stated one round ago — see below). The 3.7x figure went

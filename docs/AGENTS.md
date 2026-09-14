@@ -910,7 +910,11 @@ how the orchestrator chains delegations without re-deriving context.
   ],
   "blockers": [],
   "llm_observations": "<free-form medium-length text>",
-  "context_coverage": "<free-form medium-length text>"
+  "context_coverage": "<free-form medium-length text>",
+  "unit_id": "<design unit id, or \"\" if this task is not bound to one>",
+  "design_hash": "<64-hex hash of the bound design artifact, or \"\" >",
+  "green_before": "green | red | none",
+  "green_after": "green | red | none"
 }
 ```
 
@@ -962,6 +966,38 @@ how the orchestrator chains delegations without re-deriving context.
   QA reads it to judge whether the specialist's confidence was earned;
   the rubric grader scores it under default criterion C8. **A completion
   payload without `context_coverage` is malformed.**
+- **`unit_id`** — **required**, string, MAY be empty. v5 D5 (green-to-green
+  per unit, claude-workflow-plugin-fkm.7). The design unit this task
+  implemented, read from `qa-gate.sh design-unit-show` — empty when the
+  task is not bound to a design unit at all, which is the ordinary case for
+  the overwhelming majority of tasks (the same shape as `blockers: []`
+  meaning "no blockers"). When non-empty it must match `[A-Za-z0-9._-]+`,
+  the same class `design-unit-show` and `design-unit-json` already enforce.
+- **`design_hash`** — **required**, string, MAY be empty. The 64-hex hash
+  of the design artifact this task's unit is bound under, read back from
+  `qa-gate.sh spec-injection-status` (recorded at spawn by subagent-start.sh's
+  spec injection). Empty is legal both when `unit_id` is empty AND — a
+  narrower, disclosed case — when `unit_id` is non-empty but spec injection
+  failed to record it (best-effort; see `record_spec_injection`'s own
+  header). The REVERSE is refused: a non-empty `design_hash` with an empty
+  `unit_id` is not a coherent claim (there is no unit for the hash to
+  describe) and is rejected as `design_hash_without_unit_id`.
+- **`green_before`** / **`green_after`** — **required**, string, one of
+  `green` | `red` | `none`. Whether the suite was green immediately before
+  starting the unit's implementation, and immediately after finishing it —
+  `qa-gate.sh green-check <task-id> --phase before|after` derives this from
+  an actual run of detect-stack.sh's resolved test command (no new runner)
+  and records it durably; the value here is copied from that command's own
+  `result` field, never invented. `none` means detect-stack.sh resolved no
+  test command at all (`runner: "none"`) — a real, distinct state, never
+  collapsed into a boolean (which would make "nothing to run" indistinguishable
+  from "ran and passed"). **A unit that cannot start from green — `green-check
+  --phase before` reports `red` AND the task is bound to a design unit —
+  stops and reports rather than implementing on top of a pre-existing
+  failure: the red baseline becomes its own task, and the specialist does
+  not proceed.** See `.claude/agents/devops.md`'s "Green-to-green per unit"
+  section (backend.md/frontend.md carry the same section) for the full
+  protocol an implementer follows.
 
 ### Runtime enforcement (P7)
 
@@ -977,21 +1013,29 @@ The specialist records the contract as its LAST action:
 bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" --file <payload.json>
 ```
 
-The payload is the seven fields above plus three transport keys —
-`"role"`, `"model"`, `"pin"` (claude-workflow-plugin-46w9) — none of
-them an eighth F7 field; the seven are unchanged. `role` supplies the
-record's `role=` token, naming who completed the task; what `model`
-and `pin` each mean, and why both are required, is in the next bullet.
+The payload is the seven fields above, plus (v5 D5, claude-workflow-plugin-
+fkm.7) the four green-to-green fields — `unit_id`, `design_hash`,
+`green_before`, `green_after` — plus three transport keys — `"role"`,
+`"model"`, `"pin"` (claude-workflow-plugin-46w9) — none of them an eighth F7
+field; the seven are unchanged and keep their canonical names and ordering.
+`role` supplies the record's `role=` token, naming who completed the task;
+what `model` and `pin` each mean, and why both are required, is in the next
+bullet.
 
 Three mechanisms, each in one place:
 
 - **`review-check.sh validate-completion`** is the ONE validator. It
   rejects a payload missing any of the seven (or `role`, `model`,
-  `pin` — claude-workflow-plugin-46w9), a control character in
-  `task_id` or `role`, a wrongly-typed field, a non-string entry in
-  `files_changed`, an `llm_observations` / `context_coverage` that is
-  empty after trimming, or a `model` / `pin` that fails the model-id
-  character class. That last-but-one makes this document's two "a
+  `pin` — claude-workflow-plugin-46w9 — or, since v5 D5 piece 3,
+  `unit_id`/`design_hash`/`green_before`/`green_after`), a control
+  character in `task_id` or `role`, a wrongly-typed field, a non-string
+  entry in `files_changed`, an `llm_observations` / `context_coverage`
+  that is empty after trimming, a `model` / `pin` that fails the
+  model-id character class, a `unit_id`/`design_hash` that fails ITS
+  character class when non-empty, a `green_before`/`green_after` outside
+  the closed `green|red|none` enum, or a non-empty `design_hash` paired
+  with an empty `unit_id` (`design_hash_without_unit_id` — the reverse
+  pairing is legal). That last-but-one makes this document's two "a
   completion payload without it is malformed" sentences mechanical
   rather than aspirational.
 - **`qa-gate.sh completion-record`** validates through that subprocess

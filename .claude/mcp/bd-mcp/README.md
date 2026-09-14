@@ -63,7 +63,7 @@ The QA tools (`bd_qa_*`) call `qa-gate.sh` from the plugin (`.claude/scripts/qa-
 The plugin uses these tools as follows:
 
 - **Orchestrator**: `bd_create_epic` to plan multi-task work in one call; `bd_doc_write({task_id, name: "spec", ...})` to attach the SPEC the spawned specialist reads first.
-- **Specialists** (backend / frontend / devops): `bd_doc_read({task_id, name: "spec"})` to pick up the brief; `bd_update_task({task_id, status: "in_progress"})` to claim; `bd_qa_enter` then `bd_add_label("qa-pending")` on completion. The completion contract from F7 (`{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations, context_coverage}`) maps cleanly onto these calls.
+- **Specialists** (backend / frontend / devops): `bd_doc_read({task_id, name: "spec"})` to pick up the brief; `bd_update_task({task_id, status: "in_progress"})` to claim; `bd_qa_enter` then `bd_add_label("qa-pending")` on completion. The completion contract from F7 (`{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations, context_coverage}`) maps cleanly onto these calls. Since v5 D5 (claude-workflow-plugin-fkm.7) four more fields append after those seven on every payload — `unit_id, design_hash, green_before, green_after` — required the same way and validated by the same `review-check.sh validate-completion` call.
 - **QA agent**: `bd_list_tasks({labels_all: ["qa-pending"]})` to find the queue; `bd_qa_approve` (atomic — sets `qa-approved`, drops `qa-pending`/`qa-gate-entered`, comments) or `bd_qa_block(reason)` to gate.
 - **Hooks** (post-edit, verify-before-stop, etc.) still shell out to `bd` directly — migration is a Phase 7+ task. The MCP tools and the bash hooks coexist on the same Beads database.
 

@@ -729,7 +729,7 @@ else
         local tid="$1" file="$2" pay
         pay="$TRACK8/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
         cat > "$pay" <<JSON
-{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":["$file"],"tests_added":["impact-report.test.sh::section-8"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the impact-report section-8 fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+{"task_id":"$tid","role":"devops","model":"seeded","pin":"seeded","files_changed":["$file"],"tests_added":["impact-report.test.sh::section-8"],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the impact-report section-8 fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}
 JSON
         CLAUDE_PROJECT_DIR="$F8" bash "$QG8" completion-record "$tid" --file "$pay" >/dev/null 2>&1
     }

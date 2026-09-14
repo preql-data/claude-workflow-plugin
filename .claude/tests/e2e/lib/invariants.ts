@@ -447,6 +447,13 @@ function invOrchestratorNoEdits(trace: Trace): InvariantResult {
  * v4.1 (context_coverage, C2) widened the field list this invariant
  * WOULD check. It did not narrow the trace gap, so the skip stands.
  *
+ * v5 D5 (claude-workflow-plugin-fkm.7 D5 piece 3) widened it again: four
+ * more fields — unit_id, design_hash, green_before, green_after — append
+ * after the seven above on every completion payload. Same non-narrowing
+ * of the trace gap, same skip; the analogue of this sentence lives in
+ * .claude/tests/README.md's row for this same invariant (QA round 2,
+ * R2-F7 — this file's docblock had drifted out of step with that row).
+ *
  * TRACE GAP: capturing the completion payload as structured trace
  * fields is a Phase A follow-up (it ties into the rubric grader's
  * input packet). When that lands, this skip becomes a real check.

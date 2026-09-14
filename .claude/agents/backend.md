@@ -144,6 +144,29 @@ Do this INSTEAD of reinterpreting, improvising, or partially satisfying the desi
 
 Most tasks carry no unit binding at all — if `design-unit-show` reports `ok:true` and `bound:false`, this section doesn't apply; use the ordinary blockers-array escalation instead. (`bound:false` alone is not enough to check: it also appears on an UNREADABLE-source error envelope, where `ok:false` — check that too, not just `.bound`.)
 
+## Green-to-green per unit (v5 D5)
+
+If you are working a design-bound unit, the suite's state before and after your change is recorded, not assumed. Before you write a line of implementation:
+
+```bash
+bash .claude/scripts/qa-gate.sh green-check $TASK_ID --phase before
+```
+
+Issue this — and the `--phase after` call below — as a Bash tool call with an explicit `timeout` of `600000` (milliseconds: the tool's own maximum). Left unset, the call defaults to 120000ms (120s); `GREEN_CHECK_TIMEOUT_S`'s own 540s default (QA round 3, R3-F2) is sized against the Bash tool's harness ceiling on the assumption that the full 600s was actually requested, so an unbounded-looking test command could otherwise get YOUR tool call killed by the harness before green-check's internal watchdog ever reports back — the cap you are relying on never gets a chance to act if the call that invokes it is cut off first.
+
+This runs whatever `detect-stack.sh` resolves (no new runner — the same test command the Stop hook would run) and posts a durable `GREEN-CHECK v1` record either way.
+
+- **If it reports `ok:true`** (result `green` or `none`) — proceed: add the failing test for the unit's criteria, implement, and when you're done run `qa-gate.sh green-check $TASK_ID --phase after` (same explicit `timeout: 600000` treatment) to record the closing state.
+- **If it refuses** (`error_key=cannot_start_from_green`) — the suite is genuinely red before you have touched anything, and this only fires when you are bound to a unit. **Do not implement on top of it.** The red baseline is not your unit's problem to absorb into an unrelated diff; open it as its own task (`bd_create_task`, typed `bug`, linked back to $TASK_ID with a `discovered-from` dependency — `bd_add_dep`), name it in your `blockers` array, and stop. This is the same discipline as "When the design is wrong" above: file the objection structurally rather than improvising past it. Once that task is closed and the suite is actually green again, re-run `green-check --phase before` before starting the unit's own work.
+
+Your completion contract's four new fields come from these calls, plus the identity your spawn was already handed:
+
+- `unit_id` — from `qa-gate.sh design-unit-show $TASK_ID` (empty string if unbound).
+- `design_hash` — from `qa-gate.sh spec-injection-status $TASK_ID` (empty string if unbound, or if injection was never recorded — a disclosed, legitimate gap, not an error to paper over).
+- `green_before` / `green_after` — the `result` field from each `green-check` call above, copied verbatim (`green`, `red`, or `none`). Never hand-write a value here that a `green-check` call did not actually produce — the whole point of running it is that the claim is derived from a real command exiting with a real status, not asserted.
+
+If you were never bound to a unit at all, `unit_id`/`design_hash` are `""` and `green_before`/`green_after` are `"none"` unless you ran `green-check` anyway (which is good practice and always legal — the check is not gated on being unit-bound, only the START refusal is).
+
 ## When completing work
 
 ```bash
@@ -298,7 +321,11 @@ When you finish a task and hand it back to the orchestrator (and onward to QA), 
     "Need devops to provision the new Redis instance before the rate-limiter can ship."
   ],
   "llm_observations": "<freeform notes>",
-  "context_coverage": "<freeform notes>"
+  "context_coverage": "<freeform notes>",
+  "unit_id": "",
+  "design_hash": "",
+  "green_before": "none",
+  "green_after": "none"
 }
 ```
 
@@ -311,6 +338,8 @@ Field semantics:
 - `blockers` — anything preventing this task from being closed: missing infra, ambiguous spec, dependency on another in-progress task. Empty array if none.
 - `llm_observations` — **mandatory free-form text**. Anything that didn't fit the schema and is worth surfacing: gotchas you spotted, surprises in the codebase, smells you didn't fix because they were out of scope, hypotheses you'd want QA or the orchestrator to verify, areas where you were uncertain and chose a default. This field exists precisely because the structured fields above can't anticipate everything; do not leave it empty.
 - `context_coverage` — **mandatory free-form text**. Three things, in order: what you read to ground this change (the migration history, the caller set from `impact_of`, the vendor's OpenAPI, the incident thread); what you deliberately did NOT read and why (the whole ORM layer, because the change is confined to one repository class); and the largest remaining unknown you are shipping on (whether the downstream consumer tolerates the new nullable column). Name files and artefacts — "read the relevant code" is a non-answer, and a coverage note with no deliberate omission in it is boilerplate, because there is always one. This is not a new rule: it is the evidence-before-fix discipline applied *before* the change rather than after, on the ordinary feature work that never gets bug-typed and so never arms that protocol. QA and the rubric grader both read it (default rubric C8).
+- `unit_id` / `design_hash` — empty string unless you were bound to a design unit; see "Green-to-green per unit" above for where these values come from and why they may legitimately diverge (a bound unit with no recorded `design_hash` is a disclosed gap, not a mistake).
+- `green_before` / `green_after` — `"none"` unless you ran `qa-gate.sh green-check`; when you did, copy its `result` field verbatim (`green` or `red`). Never write `"green"` here because you believe the suite is fine — the field exists precisely so that claim is backed by a command that actually ran.
 
 Emit the JSON object verbatim in your final message to the orchestrator (alongside any prose summary). The orchestrator parses it; QA reads it before starting the gate.
 

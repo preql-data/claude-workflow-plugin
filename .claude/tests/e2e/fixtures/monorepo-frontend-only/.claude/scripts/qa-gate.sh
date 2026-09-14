@@ -2131,6 +2131,11 @@ IMPACT_REPORT_SCRIPT="$PROJECT_DIR/.claude/scripts/impact-report.sh"
 # impact-report.sh --hash-only). This script is reviewer-transport-agnostic.
 REVIEW_CHECK_SCRIPT="$PROJECT_DIR/.claude/scripts/review-check.sh"
 
+# v5 D5 piece 3 (claude-workflow-plugin-fkm.7 D5): green-check's ONE source
+# of a test command. Detection only — this script never runs anything; see
+# green_check_run below for the (separate, minimal) execution step.
+DETECT_STACK_SCRIPT="$PROJECT_DIR/.claude/scripts/detect-stack.sh"
+
 impact_report_path_for() {
     local sanitized
     sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
@@ -3628,6 +3633,64 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               be read at all — "could not look" is never folded into
               injected:false, the same xsu1 doctrine as design-unit-show /
               design-status.
+  green-check <task-id> --phase before|after
+              v5 D5 piece 3 (fkm.7): records whether the suite is green
+              RIGHT NOW, by actually running detect-stack.sh's resolved test
+              command (no new runner — the ONLY execution primitive is
+              `bash -c "$test_cmd"`). ALWAYS bounded (QA round 2, R2-F2):
+              `timeout`/`gtimeout` when either is on PATH, otherwise an
+              in-process watchdog (ported from verify-before-stop.sh's
+              run_with_timeout, 03tf) that TERMs then KILLs the whole
+              process tree at GREEN_CHECK_TIMEOUT_S (default 540s, sized
+              against the Bash tool's own ~600s per-call ceiling that binds
+              every real foreground caller — see that constant's own header
+              — override via the environment for a slower project's suite,
+              or when invoking this from the background or an operator's
+              own terminal, where that ceiling does not apply).
+              The envelope's `dispatch` field names WHICH MECHANISM bounded
+              THIS run (timeout|gtimeout|watchdog|n/a — n/a when no test
+              command ran at all) — it does NOT by itself say whether the
+              cap is why the run ended (QA round 3, R3-F1: `dispatch=timeout`
+              looks identical whether the deadline killed the command or the
+              command exited 124 on its own). The separate `timed_out`
+              boolean answers that: true when the deadline ended the run.
+              This is EXACT on the watchdog path (the marker file is the
+              only way rc is ever forced to 124 there). On the
+              timeout/gtimeout path it is an INFERENCE from rc=124 plus
+              elapsed wall time, measured with whole-second `date +%s`
+              readings at both ends (QA round 5, R5-F1: an earlier version
+              of this text claimed the inference was correct at "any point
+              BEFORE the cap" — that is FALSE, not merely imprecise, and
+              was itself a stronger restatement of the same overclaim
+              R3-F1/R4-F1 exist to fix). Because both ends truncate, a run
+              whose real duration falls anywhere in (cap-1, cap] can
+              measure AT the cap: a self-inflicted 124 in the final second
+              before the deadline reads as a false positive, with
+              probability equal to the start instant's sub-second
+              fraction. Only a 124 landing MORE than one second before the
+              cap is guaranteed to read timed_out=false. A red
+              result's `observations` carries a tail of the run's own log
+              (kept at a stable `.qa-tracking/green-check-<tid>-<phase>.log`
+              path, never deleted) — evidence, not just a one-line verdict.
+              Emits result: green|red|none (none = no test command resolved
+              — detect-stack.sh runner=none), and posts a durable
+              `GREEN-CHECK v1` comment. --phase before, result=red, AND the
+              task IS bound to a design unit (latest_design_unit_binding)
+              REFUSES (exit 2, cannot_start_from_green) — "a unit that
+              cannot start from green stops and reports; the red baseline
+              becomes its own task" (docs/plans/v5-design-phase.md Phase
+              D5). An UNBOUND task's red --phase before is REPORTED, not
+              refused — this command does not impose a new blocking
+              precondition on ordinary, non-unit-bound work. An UNREADABLE
+              design-unit binding is refused (design_binding_unreadable),
+              never folded into "unbound" — the same xsu1 doctrine every
+              other accessor in this file already applies. Does NOT compute
+              design_hash (already recorded at spawn — read it back via
+              spec-injection-status above) and does NOT open the red-
+              baseline task itself (that is agent judgment, documented in
+              backend.md/frontend.md/devops.md's own "Green-to-green per
+              unit" section) — this command is the mechanical recording
+              half only.
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -13056,6 +13119,692 @@ cmd_spec_injection_status() {
 }
 # SPEC-INJECTION-STATUS END (v5 D5, claude-workflow-plugin-fkm.7)
 
+# ---------------------------------------------------------------------------
+# GREEN-CHECK BEGIN (v5 D5 piece 3, claude-workflow-plugin-fkm.7 D5)
+#
+# green-check <tid> --phase before|after
+#
+# Phase D5's own text (docs/plans/v5-design-phase.md:166): "Record the suite
+# green before starting; add the failing test for the unit's criteria;
+# implement; record the suite green after. Both states plus unit_id and the
+# injected design_hash go into the completion contract as new fields. Reuse
+# existing test-run and detect-stack machinery -- no new runner. A unit that
+# cannot start from green stops and reports; the red baseline becomes its own
+# task."
+#
+# THIS IS THE "RECORD" HALF ONLY. It runs the ALREADY-RESOLVED test command
+# (detect-stack.sh -- unmodified, no new parser, no new runner) and reports
+# green/red/none, so a specialist can copy the result straight into its
+# completion contract's green_before/green_after field. It deliberately does
+# NOT compute design_hash -- that value is already recorded at spawn time by
+# subagent-start.sh's SPEC-INJECTED record and is read back via spec-
+# injection-status above -- and it does NOT open the red-baseline task
+# itself. Both are left to the caller: this file's existing split between
+# MECHANICAL recording (here, and everywhere else in this file) and AGENT
+# JUDGMENT (backend.md/frontend.md/devops.md's own "Green-to-green per unit"
+# section, which names the exact bd_create_task shape to use) is preserved
+# rather than blurred by having a shell script improvise a task title.
+#
+# THE STOP BEHAVIOUR, SCOPED NARROWLY -- an implementer decision, named here
+# so the orchestrator can confirm or override it. "A unit that cannot start
+# from green stops and reports" is the plan's own language for "green-to-
+# green PER UNIT", so this command REFUSES (ok:false, exit 2, error_key=
+# cannot_start_from_green) ONLY when ALL THREE hold: --phase before,
+# result=red, AND the task IS bound to a design unit (latest_design_unit_
+# binding resolves a non-empty unit_id). An UNBOUND task's red --phase
+# before is REPORTED, not refused (ok:true, result:red) -- ordinary,
+# non-unit-bound feature work was never asked to adopt a new blocking
+# precondition by this piece, and the plan's own language never claims it
+# should.
+#
+# UNREADABLE BINDING IS REFUSED, NEVER FOLDED INTO "UNBOUND" -- the SAME
+# xsu1 doctrine design-unit-show / spec-injection-status / design-conflict
+# all already apply (see resolve_design_conflict_subject's own header):
+# latest_design_unit_binding's rc 3 means "could not look", not "looked and
+# found nothing", so this refuses (design_binding_unreadable) rather than
+# silently proceeding as though no unit governed the task -- which matters
+# here specifically because it is what decides whether the STOP behaviour
+# above is even in play.
+#
+# NO NEW RUNNER. The only execution primitive is `bash -c "$test_cmd"` over
+# whatever detect-stack.sh already resolved, wrapped in `timeout`/`gtimeout`
+# when either is on PATH, or -- QA round 2, R2-F2 -- an IN-PROCESS WATCHDOG
+# (a port of verify-before-stop.sh's run_with_timeout fallback, 03tf) when
+# neither is.
+#
+# THIS WAS NOT PORTED IN THE FIRST ROUND, on the reasoning that an
+# unenforced cap on an interactive, specialist-invoked call merely runs the
+# caller's own turn long rather than silently wedging an unattended
+# session. QA's round-2 review demonstrated that reasoning was wrong on its
+# own terms, not merely incomplete: backend.md/frontend.md/devops.md --
+# ADDED IN THIS SAME CHANGE SET -- instruct IMPLEMENTER AGENTS to run
+# `qa-gate.sh green-check $TASK_ID --phase before` before writing any
+# implementation. That is an unattended agent Bash call, on exactly the
+# class of host (no timeout/gtimeout) this repo's own authoring box already
+# is. Demonstrated, not argued: the shipped (pre-fix) green_check_run with
+# GREEN_CHECK_TIMEOUT_S=1 over a 5s sleep returned "0 none" at elapsed=5s --
+# the advertised cap was not enforced at all on this host.
+#
+# THE FIX HAD FOUR PARTS in that first (round-2) pass, per the finding,
+# because a fix addressing only the first is incomplete: (1) the watchdog
+# below, ported from run_with_timeout almost verbatim (deadline + tree-kill
+# escalation; the once-a-second poll doubles as the liveness check -- it is
+# what lets the watchdog notice the command already finished instead of
+# idling out the full budget); (2) the `dispatch` value
+# (timeout|gtimeout|watchdog) is threaded through to the envelope (see
+# emit_green_check) instead of being computed and discarded, so a caller can
+# tell a bounded run from an unbounded one; (3) the constant was sized
+# against the measured suite (corrected below -- that ceiling was wrong);
+# (4) green-check.test.sh gained a hang/timeout leg that is NOT skipped on a
+# host without timeout/gtimeout, with its own negative control -- see that
+# file's Section 10.
+#
+# ROUND 3 (QA, R3-F1 and R3-F2) found two things wrong with that pass. Both
+# are fixed here, not merely reworded:
+#
+# R3-F1 -- (2) above OVERCLAIMED. `dispatch` names WHICH MECHANISM bounded a
+# run, not WHETHER the cap is why it ended: `dispatch=timeout, exit_code=124`
+# is the identical envelope whether the deadline killed the command or the
+# command called `exit 124` on its own -- GNU/BSD `timeout` propagates the
+# wrapped command's own exit status verbatim when it exits by itself, and
+# 124 is a value an ordinary process can return for reasons that have
+# nothing to do with this cap. The fix is a new signal, `timed_out`
+# (boolean), not a rewording: computed from the watchdog's own marker file
+# on the fallback path (airtight -- a TERM/KILL-ed child reports a
+# 128+signal wait status, never a bare 124, so the marker's presence is the
+# only way rc is ever forced to 124 on that path; verify-before-stop.sh's
+# run_with_timeout documents the identical reasoning for its own, unrelated
+# 124-means-timeout convention) and from elapsed wall-clock time on the
+# timeout/gtimeout path (rc=124 AND elapsed AT OR PAST THE CAP EXACTLY, no
+# tolerance -- QA round 4, R4-F3 removed a "-1 for `date +%s` truncation"
+# fudge that was shipped on a premise later proven false: with an integer
+# cap and a real duration d>=cap, measured elapsed = floor(f+d) >= floor(d)
+# >= cap for any start-fraction f in [0,1), so truncation can never make a
+# genuine cap-fire read BELOW the cap -- 120 empirical trials, zero
+# undercounts. The -1 bought nothing in the direction it claimed to guard
+# and cost exactly one extra second of false-positive window -- a
+# best-effort signal on this path, not airtight the way the watchdog path
+# is: a command that runs to EXACTLY the cap duration and then exits 124
+# on its own is still irreducible for any elapsed heuristic (there is no
+# wall-clock reading that distinguishes "the deadline fired at t=cap" from
+# "the command finished, coincidentally, at t=cap"). green-check.test.sh's
+# Section 11 `self_124` control demonstrates the common case (an early
+# self-exit, far under the cap); a dedicated PATH-shim section demonstrates
+# the exact boundary this predicate governs, forced deterministically
+# rather than left to host luck (QA round 4, R4-F2).
+#
+# CORRECTION (QA round 5, R5-F1): the paragraph above, as first written,
+# went on to claim the R4-F3 fix meant "a command that exits 124 at any
+# point BEFORE the cap is now correctly NOT reported as a timeout" and that
+# it "was not before this fix once inside the tolerance's one-second
+# window" -- i.e., that R4-F3 CLOSED the false-positive window. It did not,
+# and the claim was measurably false: `elapsed = floor(f+d)` where f is the
+# start instant's sub-second fraction means a sub-cap real duration can
+# STILL measure at the cap whenever f is large enough, regardless of the
+# -1's removal -- R4-F3 only proved truncation cannot make a GENUINE
+# cap-fire read BELOW the cap, never that a SUB-cap run cannot read AT it.
+# Measured (QA): sleep 2.5 at start-fraction .914 against cap=3 ->
+# timed_out=TRUE, 0.5s of real headroom read as a cap fire. THE ACCURATE
+# STATEMENT: the OLD (-1) predicate's real-duration false-positive window
+# was about (cap-2, cap] -- one second made deterministic by the -1, plus
+# the SAME one second of truncation exposure the new predicate still has;
+# the NEW predicate's window is about (cap-1, cap] -- truncation exposure
+# only. R4-F3 HALVED the window. It did not close it, and "exactly at the
+# cap" undersells what remains open: only a self-124 landing MORE than one
+# second before the cap is guaranteed to read false. This is a text-only
+# correction; `-ge "$GREEN_CHECK_TIMEOUT_S"` (no further tolerance) remains
+# the right predicate -- `-gt` would miss genuine fires, and bash 3.2 on
+# macOS has no portable sub-second clock to close the remaining window with.
+#
+# This is also the correction to the paragraph immediately below (kept,
+# rather than deleted, as the record of the mistake): LESSONS.md:282 is
+# directly on point -- "a waiter that cannot say why it stopped is the same
+# defect family as a measurement that did not happen looking identical to
+# one that passed" is exactly the property `timed_out` restores. The
+# citation was judged not to verify because a search for the invented label
+# "UNBOUNDED-WAITER family" returned zero hits; the entry exists under
+# different wording. Grep for the concept a finding describes, not a label
+# it coined for convenience -- that search-methodology error is itself worth
+# keeping on record.
+#
+# R3-F2 -- (3) above sized the constant against the WRONG ceiling. Suite
+# duration was never the binding constraint: green-check's only real callers
+# (backend.md/frontend.md/devops.md's foreground `qa-gate.sh green-check`
+# call, "Green-to-green per unit") are issued through a Bash tool whose own
+# timeout parameter is capped at 600000ms -- 600s -- regardless of what this
+# constant says, and defaults to 120000ms (120s) unless the caller asks for
+# the ceiling explicitly (those three files' own call sites are updated in
+# this same round to request it). A 4500s internal cap behind a 600s (or
+# 120s) external one is not a cap at all from the caller's own vantage
+# point: the calling agent's turn is killed by the harness first, before the
+# watchdog below ever gets to act. GREEN_CHECK_TIMEOUT_S is now sized to
+# that ceiling, not to the suite -- see its own header below.
+#
+# ONE CITATION IN THE REVIEW DID NOT VERIFY (round 2's own claim, corrected
+# above, kept verbatim as the record of what was actually written): the
+# finding names this "the UNBOUNDED-WAITER family... in LESSONS.md" --
+# `grep -i unbounded LESSONS.md` returns zero hits at this tree. The fix
+# below stands on the demonstrated defect and the named, real reference
+# implementation (run_with_timeout, 03tf), not on that citation.
+GREEN_CHECK_TIMEOUT_S="${GREEN_CHECK_TIMEOUT_S:-540}"
+# SIZED AGAINST THE BASH TOOL'S OWN CEILING (QA round 3, R3-F2 -- corrects
+# the round-2 "sized against the real suite" rationale below; that round's
+# own fix brief supplied that instruction and this round withdraws it: "size
+# the constant against the real suite" was the wrong instruction, not merely
+# an incomplete one). The ceiling that actually governs every real caller is
+# NOT this repo's suite duration -- it is the Bash tool's own per-call
+# limit: max 600000ms (600s), defaulting to 120000ms (120s) unless the
+# caller explicitly requests the max. 540s leaves ~60s of headroom under the
+# 600s ceiling for cmd_green_check's OWN overhead outside the timed run
+# itself (require_bd/assert_record_scalar, latest_design_unit_binding,
+# detect-stack.sh, the log-tail read, and add_comment's own bd round-trip)
+# plus the watchdog's TERM-then-grace-then-KILL escalation (~2s) on hosts
+# without timeout/gtimeout, so the CALLING agent's own foreground Bash call
+# has a chance to see this command's own exit before the harness kills the
+# call out from under it. This figure is HARNESS-dependent, not
+# suite-dependent -- a project whose own suite genuinely needs longer should
+# run this from an operator's own terminal, or from an agent invoking this
+# in the background rather than as a blocking foreground call, where the
+# Bash-tool ceiling above does not apply, and override via the
+# GREEN_CHECK_TIMEOUT_S environment variable exactly as before.
+#
+# THIS IS A RECURRING MISTAKE, NOT A NOVEL ONE -- verify-before-stop.sh's own
+# TEST_TIMEOUT_S carries a HISTORY paragraph (claude-workflow-plugin-03tf.1)
+# for the identical shape: that constant was briefly raised to 6000, sized
+# against the suite the same way 4500 was sized here, and reverted the same
+# day once it was noticed that any internal value above the Stop hook's own
+# EXTERNAL 1320s kill makes the internal watchdog unreachable regardless --
+# "a real, well-measured fix to the WRONG layer." R3-F2 is that exact
+# paragraph's own warning, missed once more one file over.
+#
+# VALIDATED (R3-F3), not merely defaulted: cmd_green_check rejects an empty,
+# non-numeric, or zero override before ever reaching green_check_run -- see
+# that function's own case statement, copied from run-tests.sh's own
+# SPEC_TIMEOUT_S validation (same two rejected shapes, same "0 is the mwrb
+# defect" reasoning), delivered as a JSON envelope via emit_error_json
+# rather than SPEC_TIMEOUT_S's bare stderr text, matching every other
+# cmd_green_check failure path.
+#
+# (Superseded reasoning, kept for the record rather than deleted: 4500s was
+# derived from verify-before-stop.sh's own TEST_TIMEOUT_S comment, which
+# records this repo's measured worst case -- 1731s/1777s UNCONTENDED,
+# 3336s-3913s CONTENDED, HEAD 7b803ad + 03tf, operator-measured -- as
+# 3913s x ~1.15 margin, rounded. That measurement is real; it was simply
+# never the constraint this constant needed to respect.)
+
+# _gc_tree_pids <pid> -> print <pid> and every live descendant, depth-first
+# (children before parent), via a ppid walk. Direct port of
+# verify-before-stop.sh's _wd_tree_pids (itself a port of run-tests.sh's
+# tree_pids) -- portable across macOS/Linux `ps`, and renamed to this
+# file's own convention rather than shared, since qa-gate.sh and
+# verify-before-stop.sh source no common lib (see this file's own
+# hash_file_safe-style precedent elsewhere in this codebase for why
+# duplication-with-attribution, not a new shared lib, is the norm here).
+_gc_tree_pids() {
+    local gpid="$1" gkids gk
+    gkids=$(ps -axo pid,ppid 2>/dev/null | awk -v p="$gpid" '$2 == p { print $1 }')
+    for gk in $gkids; do
+        _gc_tree_pids "$gk"
+    done
+    printf '%s\n' "$gpid"
+}
+
+# green_check_run <cmd> <log-path> -> stdout "<rc> <dispatch> <timed_out>",
+# dispatch one of timeout|gtimeout|watchdog, timed_out one of true|false.
+# EVERY branch now bounds the run (R2-F2 closed the gap where the fallback
+# branch ran `bash -c "$cmd"` with no cap at all). THE MUTATION TARGET for
+# this piece's META-TEST is the caller's own `if [ "$rc" -eq 0 ]` below,
+# deliberately NOT inside this function: green_check_run's only job is to
+# report the REAL exit code faithfully, so a mutant that hardcodes the
+# derived result is a mutant of the INTERPRETATION, not of the execution.
+#
+# `timed_out` (QA round 3, R3-F1): `dispatch` alone cannot say WHETHER the
+# cap is why a run ended, only WHICH mechanism was bounding it -- see the
+# region header above for the full defect. On the watchdog path this is
+# airtight (the marker file is the ONLY way rc is ever forced to 124, and a
+# TERM/KILL-ed child's own `wait` status is 128+signal, never a bare 124 --
+# same reasoning verify-before-stop.sh's run_with_timeout documents for its
+# own, unrelated 124-convention). On the timeout/gtimeout path it is a
+# best-effort elapsed-time heuristic, not airtight the same way: rc=124 AND
+# elapsed wall time at or past the cap EXACTLY (QA round 4, R4-F3 removed
+# the "-1 for date +%s truncation" this used to carry -- that premise was
+# false; truncation cannot undercount a genuine cap-fire, see this
+# function's own predicate comments below) is treated as cap-caused. NOT
+# "any point before the cap is correctly read as false" (QA round 5,
+# R5-F1: that claim was measurably false -- `elapsed=floor(f+d)` truncates
+# BOTH ends, so a real duration anywhere in (cap-1, cap] can still measure
+# AT the cap, with probability equal to the start instant's sub-second
+# fraction f; only a 124 landing more than one second before the cap is
+# guaranteed to read false). The one irreducible case: a command that runs
+# to EXACTLY the cap and then exits 124 on its own reads identically to the
+# cap firing -- no elapsed reading can tell those apart. green-check.test.sh
+# Section 11 carries the ambient-host positive case and the `self_124`
+# negative control; a dedicated PATH-shim section forces this exact arm
+# deterministically on any host and exercises the boundary itself (QA
+# round 4, R4-F2).
+green_check_run() {
+    local cmd="$1" log="$2"
+    : > "$log" 2>/dev/null || true
+    local rc=0 dispatch="watchdog" timed_out="false"
+    if command -v timeout >/dev/null 2>&1; then
+        dispatch="timeout"
+        local _gc_start _gc_end _gc_elapsed
+        _gc_start=$(date +%s)
+        timeout "${GREEN_CHECK_TIMEOUT_S}s" bash -c "$cmd" >"$log" 2>&1 || rc=$?
+        _gc_end=$(date +%s)
+        _gc_elapsed=$((_gc_end - _gc_start))
+        if [ "$rc" -eq 124 ] && [ "$_gc_elapsed" -ge "$GREEN_CHECK_TIMEOUT_S" ]; then
+            timed_out="true"
+        fi
+        printf '%s %s %s' "$rc" "$dispatch" "$timed_out"
+        return 0
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        dispatch="gtimeout"
+        local _gc_start _gc_end _gc_elapsed
+        _gc_start=$(date +%s)
+        gtimeout "${GREEN_CHECK_TIMEOUT_S}s" bash -c "$cmd" >"$log" 2>&1 || rc=$?
+        _gc_end=$(date +%s)
+        _gc_elapsed=$((_gc_end - _gc_start))
+        if [ "$rc" -eq 124 ] && [ "$_gc_elapsed" -ge "$GREEN_CHECK_TIMEOUT_S" ]; then
+            timed_out="true"
+        fi
+        printf '%s %s %s' "$rc" "$dispatch" "$timed_out"
+        return 0
+    fi
+
+    # WATCHDOG FALLBACK (ported from verify-before-stop.sh's
+    # run_with_timeout, claude-workflow-plugin-03tf; QA round 2, R2-F2).
+    # Neither timeout nor gtimeout is on PATH. Run the command in the
+    # background under its OWN process group (the tight `set -m` bracket
+    # matches 03tf's own reasoning: on just long enough to get a distinct
+    # pgid, off again before anything else in this function can be affected
+    # by job-control side effects), poll once a second for
+    # GREEN_CHECK_TIMEOUT_S seconds -- this poll IS the liveness check: it
+    # is what lets the watchdog notice the command already finished instead
+    # of idling out the full budget -- and at the deadline write a marker
+    # FIRST (so a kill racing the command's own near-boundary exit still
+    # classifies as a timeout), then escalate: TERM the tree, TERM the
+    # group, a short grace, re-walk survivors (a TERM handler can spawn a
+    # new child during the grace), KILL the union and the group, then name
+    # anything still alive after that in the log.
+    local wd_marker child_pid wd_pid wd_grace=2
+    wd_marker="${log}.wd-timeout"
+    rm -f "$wd_marker" 2>/dev/null || true
+    set -m
+    bash -c "$cmd" >"$log" 2>&1 &
+    child_pid=$!
+    set +m
+    (
+        waited=0
+        while [ "$waited" -lt "$GREEN_CHECK_TIMEOUT_S" ]; do
+            sleep 1 || true
+            waited=$((waited + 1))
+            kill -0 "$child_pid" 2>/dev/null || exit 0
+        done
+        : > "$wd_marker" 2>/dev/null || true
+        doomed=$(_gc_tree_pids "$child_pid")
+        for p in $doomed; do
+            kill -TERM "$p" 2>/dev/null || true
+        done
+        kill -TERM -- "-$child_pid" 2>/dev/null || true
+        sleep "$wd_grace" || true
+        rewalk=""
+        for p in $doomed; do
+            if kill -0 "$p" 2>/dev/null; then
+                rewalk="$rewalk
+$(_gc_tree_pids "$p")"
+            fi
+        done
+        for p in $doomed $rewalk; do
+            kill -KILL "$p" 2>/dev/null || true
+        done
+        kill -KILL -- "-$child_pid" 2>/dev/null || true
+        sleep 0.2 || true
+        survivors=""
+        for p in $doomed $rewalk; do
+            if kill -0 "$p" 2>/dev/null; then
+                survivors="$survivors $p"
+            fi
+        done
+        if [ -n "$survivors" ]; then
+            printf '[green_check_run] WATCHDOG SURVIVORS after the KILL pass (still alive, not a zombie):%s\n' \
+                "$survivors" >> "$log" 2>/dev/null || true
+        fi
+    ) &
+    wd_pid=$!
+
+    wait "$child_pid" 2>/dev/null || rc=$?
+
+    if [ -f "$wd_marker" ]; then
+        # The cap fired: let the watchdog finish its OWN escalation before
+        # this function returns, so nothing from this run is still alive
+        # and contending for the store when the caller moves on. The
+        # marker's presence is the ONLY way rc is forced to 124 on this
+        # path, which is exactly what makes timed_out airtight here (R3-F1)
+        # -- a TERM/KILL-ed child's own `wait` status is 128+signal, never a
+        # bare 124, so this branch is never reached by a self-inflicted 124.
+        wait "$wd_pid" 2>/dev/null || true
+        rc=124
+        timed_out="true"
+    else
+        # No timeout: stop the watchdog now rather than let it idle out the
+        # rest of the budget for nothing.
+        kill -TERM "$wd_pid" 2>/dev/null || true
+        wait "$wd_pid" 2>/dev/null || true
+    fi
+    rm -f "$wd_marker" 2>/dev/null || true
+    printf '\n[green_check_run] NOTE: neither timeout nor gtimeout is on PATH -- WATCHDOG FALLBACK ENFORCED: the advertised %ss cap is bounded by an in-process poll+tree-kill watchdog instead. claude-workflow-plugin-03tf / R2-F2.\n' \
+        "$GREEN_CHECK_TIMEOUT_S" >> "$log" 2>/dev/null || true
+    printf '%s %s %s' "$rc" "$dispatch" "$timed_out"
+}
+
+# emit_green_check <ok> <error_key> <observations> <tid> <phase> <unit_bound>
+#                  <unit_id> <result> <exit_code> <dispatch> <timed_out>
+# Self-contained emit function (mirrors emit_spec_injection_status's own
+# shape rather than going through the print_envelope_checked switch above —
+# adding a case there is a second, more distant edit for the same result;
+# this keeps the whole feature reviewable as one region).
+#
+# `dispatch` (QA round 2, R2-F2): timeout|gtimeout|watchdog|n/a -- WHICH
+# mechanism bounded this run, surfaced rather than computed-then-discarded,
+# so a caller can tell a bounded run from an unbounded one. "n/a" is the
+# honest value on every path that never executed a test command at all (no
+# unit_id/binding-source/detect-stack error path, and result="none").
+#
+# `timed_out` (QA round 3, R3-F1): WHETHER the cap in GREEN_CHECK_TIMEOUT_S
+# is why this run ended -- `dispatch` alone cannot say that (a 124 this cap
+# produced and a 124 the test runner produced on its own look identical in
+# `dispatch` and `exit_code` both). false on every path that never executed
+# a test command (matches `dispatch`'s own "n/a" default reasoning above).
+# See green_check_run's own header for how each dispatch value computes it.
+emit_green_check() {
+    local ok="$1" ekey="$2" obs="$3" tid="${4:-}" phase="${5:-}" \
+          unit_bound="${6:-false}" unit_id="${7:-}" result="${8:-}" exit_code="${9:-0}" \
+          dispatch="${10:-n/a}" timed_out="${11:-false}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" --arg tid "$tid" \
+        --arg phase "$phase" --argjson unit_bound "$unit_bound" --arg uid "$unit_id" \
+        --arg result "$result" --argjson exit_code "$exit_code" --arg dispatch "$dispatch" \
+        --argjson timed_out "$timed_out" '
+        {ok: $ok, subcommand: "green-check", task_id: $tid, error_key: $ekey,
+         phase: $phase, unit_bound: $unit_bound, unit_id: $uid,
+         result: $result, exit_code: $exit_code, dispatch: $dispatch,
+         timed_out: $timed_out, observations: $obs}
+    ' 2>/dev/null) || env_rc=$?
+    if [ "$env_rc" -eq 0 ] && [ -n "$envelope" ] \
+       && printf '%s' "$envelope" | jq -e '
+            type == "object"
+            and (keys | sort) == ["dispatch", "error_key", "exit_code", "observations", "ok", "phase", "result", "subcommand", "task_id", "timed_out", "unit_bound", "unit_id"]
+            and (.ok | type) == "boolean"
+            and .subcommand == "green-check"
+            and (.task_id | type) == "string"
+            and (.error_key | type) == "string"
+            and (.phase | type) == "string"
+            and (.unit_bound | type) == "boolean"
+            and (.unit_id | type) == "string"
+            and (.result | type) == "string"
+            and (.exit_code | type) == "number"
+            and (.dispatch | type) == "string"
+            and (.timed_out | type) == "boolean"
+            and (.observations | type) == "string"
+          ' >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"green-check","task_id":null,"error_key":"envelope_construction_failed","observations":"the green-check envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","phase":"","unit_bound":false,"unit_id":"","result":"","exit_code":-1,"dispatch":"n/a","timed_out":false}\n'
+    return 1
+}
+
+cmd_green_check() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"green-check","task_id":null,"error_key":"jq_unavailable","observations":"jq is required and not on PATH","phase":"","unit_bound":false,"unit_id":"","result":"","exit_code":-1,"dispatch":"n/a","timed_out":false}\n'
+        exit 2
+    fi
+
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "green-check" "" "missing_task_id" \
+            "green-check requires <task-id> as first positional argument" \
+            "qa-gate.sh green-check <task-id> --phase before|after"
+        exit 1
+    fi
+    shift || true
+
+    local phase=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --phase)
+                phase="${2:-}"
+                if [ -z "$phase" ]; then
+                    emit_error_json "green-check" "$tid" "missing_phase" \
+                        "--phase requires a value: before or after" \
+                        "qa-gate.sh green-check $tid --phase before|after"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                emit_error_json "green-check" "$tid" "unknown_flag" \
+                    "unknown argument '$1'; green-check takes <task-id> --phase before|after" \
+                    "qa-gate.sh green-check $tid --phase before|after"
+                exit 1
+                ;;
+        esac
+    done
+
+    case "$phase" in
+        before|after) ;;
+        "")
+            emit_error_json "green-check" "$tid" "missing_phase" \
+                "--phase is required and must be 'before' or 'after'" \
+                "qa-gate.sh green-check $tid --phase before|after"
+            exit 1
+            ;;
+        *)
+            emit_error_json "green-check" "$tid" "invalid_phase" \
+                "--phase='$phase' is not 'before' or 'after' -- those are the only two legal values" \
+                "qa-gate.sh green-check $tid --phase before|after"
+            exit 1
+            ;;
+    esac
+
+    # GREEN_CHECK_TIMEOUT_S validation (QA round 3, R3-F3): same two
+    # rejected shapes and reasoning as run-tests.sh's own SPEC_TIMEOUT_S
+    # case statement (see that constant's own header in this file for why
+    # 0 is refused rather than treated as "no cap"), delivered as this
+    # subcommand's own JSON envelope rather than SPEC_TIMEOUT_S's bare
+    # stderr text -- every other cmd_green_check failure already speaks
+    # JSON, and a misconfigured environment variable should not be the one
+    # path that silently reaches `"${GREEN_CHECK_TIMEOUT_S}s"` as a
+    # malformed timeout(1) duration argument instead.
+    case "$GREEN_CHECK_TIMEOUT_S" in
+        ''|*[!0-9]*)
+            emit_error_json "green-check" "$tid" "invalid_timeout_config" \
+                "GREEN_CHECK_TIMEOUT_S must be a positive integer (got '$GREEN_CHECK_TIMEOUT_S')" \
+                "qa-gate.sh green-check $tid --phase before|after"
+            exit 2
+            ;;
+        0)
+            emit_error_json "green-check" "$tid" "timeout_disabled_not_offered" \
+                "GREEN_CHECK_TIMEOUT_S=0 (no cap) is not offered -- an unbounded run is the same mwrb defect run-tests.sh's SPEC_TIMEOUT_S refuses" \
+                "qa-gate.sh green-check $tid --phase before|after"
+            exit 2
+            ;;
+    esac
+
+    require_bd "green-check" "$tid"
+    assert_record_scalar "green-check" "$tid" "task" "$tid"
+
+    # Resolve the unit binding ONCE. Unreadable is refused, never folded
+    # into "unbound" -- see the region header above for why that matters
+    # for the STOP behaviour below.
+    local binding_json="" binding_rc=0
+    binding_json=$(latest_design_unit_binding "$tid") || binding_rc=$?
+    if [ "$binding_rc" -ne 0 ]; then
+        emit_green_check "false" "design_binding_unreadable" \
+            "the DESIGN-UNIT binding source for $tid could not be read; whether this is unit-bound work is unknown, which is not the same answer as unbound -- refusing rather than proceeding as if no unit governed this task" \
+            "$tid" "$phase" "false" "" "" "-1" "n/a" "false"
+        exit 2
+    fi
+    # unit_id is NOT re-validated via assert_unit_id_scalar here (QA round 2,
+    # R2-F8): latest_design_unit_binding's own capture regex already
+    # constrains it to the identical class ([A-Za-z0-9._-]+) BEFORE this
+    # binding_json can ever carry a non-empty value, so the call was
+    # unreachable by construction -- and if it ever DID fire, its hardcoded
+    # usage suffix ("--design-task <id> --unit-id <U-n>") names flags
+    # green-check does not have, which would misdirect rather than help.
+    # Dropped rather than given a green-check-specific usage string:
+    # parameterising the shared helper's message would touch its two OTHER
+    # call sites (design-unit-bind, design-conflict) for a check this one
+    # can never reach either way. (Adjacent, NOT fixed here: design-conflict's
+    # own call to the same helper inherits the identical wrong-suffix defect
+    # today, since the message is hardcoded to design-unit-bind's flag
+    # names regardless of which subcommand calls it -- out of scope for this
+    # round, worth a follow-up.)
+    local unit_id="" unit_bound="false"
+    unit_id=$(printf '%s' "$binding_json" | jq -r '.unit_id // ""' 2>/dev/null) || unit_id=""
+    [ -n "$unit_id" ] && unit_bound="true"
+
+    if [ ! -f "$DETECT_STACK_SCRIPT" ]; then
+        emit_green_check "false" "detect_stack_unavailable" \
+            "detect-stack.sh is missing at $DETECT_STACK_SCRIPT, so no test command can be resolved" \
+            "$tid" "$phase" "$unit_bound" "$unit_id" "" "-1" "n/a" "false"
+        exit 2
+    fi
+    local stack_json="" stack_rc=0
+    stack_json=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$DETECT_STACK_SCRIPT" 2>/dev/null) || stack_rc=$?
+    if [ "$stack_rc" -ne 0 ] || [ -z "$stack_json" ] \
+       || ! printf '%s' "$stack_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        emit_green_check "false" "detect_stack_output_unreadable" \
+            "detect-stack.sh did not produce a parseable JSON object (rc=$stack_rc)" \
+            "$tid" "$phase" "$unit_bound" "$unit_id" "" "-1" "n/a" "false"
+        exit 2
+    fi
+    local test_cmd=""
+    test_cmd=$(printf '%s' "$stack_json" | jq -r '.test_cmd // ""' 2>/dev/null) || test_cmd=""
+
+    # Log path (QA round 2, R2-F6): a STABLE, per-(task,phase) path under
+    # QA_TRACKING_DIR, never a random mktemp name -- so it survives this
+    # call (see the region header: verify-before-stop.sh's own
+    # last-test-output.log precedent). Sanitised the same way every other
+    # per-task path in this file is (impact_report_path_for, completion_
+    # payload_path_for). Truncated by green_check_run itself at the top of
+    # each call, so repeat calls for the SAME (task,phase) do not
+    # accumulate -- only the population of distinct (task,phase) pairs
+    # ever exercised does, the same growth shape every other artifact under
+    # .qa-tracking/ already has.
+    local log_sanitized log_path
+    log_sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    log_path="$QA_TRACKING_DIR/green-check-${log_sanitized}-${phase}.log"
+
+    local result="" exit_code="-1" dispatch="n/a" timed_out="false"
+    if [ -z "$test_cmd" ]; then
+        result="none"
+    else
+        local rc=0 run_out="" run_rest=""
+        # QA round 4, R4-F4: `|| true` here used to swallow an unwritable
+        # QA_TRACKING_DIR entirely. `bash -c "$cmd" >"$log" 2>&1 &` then
+        # fails its OWN redirect and the subshell exits 1 WITHOUT EVER
+        # RUNNING THE COMMAND -- green_check_run silently returned "1
+        # watchdog false", which this function's own logic below turns
+        # into result=red, timed_out=false, with NO log to tail (the
+        # observations block below only fires `[ -f "$log_path" ]`): a
+        # suite that never ran, indistinguishable from one that ran and
+        # genuinely failed. Reused the EXISTING checked idiom this file
+        # already has at completion-record (cmd_completion_record,
+        # qa-gate.sh:8724) rather than inventing a new one, per DS7.
+        if ! mkdir -p "$QA_TRACKING_DIR" 2>/dev/null; then
+            emit_green_check "false" "tracking_dir_unwritable" \
+                "cannot create $QA_TRACKING_DIR, so the test command's own log has nowhere to be written; refusing to run the suite and report a false red rather than silently fail before the command ever starts" \
+                "$tid" "$phase" "$unit_bound" "$unit_id" "" "-1" "n/a" "false"
+            exit 2
+        fi
+        # QA round 5, R5-F3: `mkdir -p` succeeding is NOT the same claim as
+        # the directory being WRITABLE -- an EXISTING directory whose own
+        # permissions were later tightened (the exact case R4-F4's own
+        # evidence measured: chmod 500 on an already-created
+        # .qa-tracking/) makes `mkdir -p` return 0 (nothing to create) while
+        # every subsequent write into it still fails. Probe with the SAME
+        # operation green_check_run itself is about to perform first (`: >
+        # "$log_path"`, its own truncate-on-open), so a refusal here is
+        # never a false alarm about an operation nothing downstream
+        # actually needs. Same error_key as the missing-directory case --
+        # both are "this task cannot write its own evidence", not two
+        # different problems.
+        if ! : > "$log_path" 2>/dev/null; then
+            emit_green_check "false" "tracking_dir_unwritable" \
+                "$QA_TRACKING_DIR exists but $log_path could not be created inside it; refusing to run the suite and report a false red rather than silently fail before the command ever starts" \
+                "$tid" "$phase" "$unit_bound" "$unit_id" "" "-1" "n/a" "false"
+            exit 2
+        fi
+        run_out=$(green_check_run "$test_cmd" "$log_path")
+        rc="${run_out%% *}"
+        run_rest="${run_out#* }"
+        dispatch="${run_rest%% *}"
+        timed_out="${run_rest#* }"
+        case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
+        exit_code="$rc"
+        # THE MUTATION TARGET (see the region header): this is the ONE line
+        # that turns a real exit code into the claim the rest of this
+        # function -- and the STOP behaviour below -- acts on.
+        if [ "$rc" -eq 0 ]; then result="green"; else result="red"; fi
+    fi
+
+    # Durable record, best-effort -- add_comment already logs a failed write
+    # to sync-errors.log; nothing here gates on the write landing (matches
+    # record_spec_injection's own failure discipline).
+    #
+    # TWO SEPARATE STRINGS, deliberately (QA round 2, R2-F6):
+    #   short_summary  -- what goes into the PERMANENT bd comment. Stays a
+    #                     one-liner plus the log's PATH (not its content) and
+    #                     dispatch, so repeated calls do not bloat the task's
+    #                     comment history with a 50-line tail every time.
+    #   observations   -- what goes into the JSON envelope THIS invocation
+    #                     returns to its caller. On a red result this folds
+    #                     in a tail of the log this run itself just
+    #                     produced (the same shape verify-before-stop.sh's
+    #                     log_tail folds into its own block reasons), so the
+    #                     agent reading this turn's output has the evidence
+    #                     the evidence-before-fix protocol's first step asks
+    #                     for -- INCLUDING on the cannot_start_from_green
+    #                     refusal, whose own remedy text otherwise asked an
+    #                     agent to file a bug report with nothing to cite.
+    local ts short_summary observations
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ "$phase" = "before" ]; then
+        short_summary="suite $result before starting"
+    else
+        short_summary="suite $result after implementing"
+    fi
+    short_summary="$short_summary (log: $log_path, dispatch=$dispatch, timed_out=$timed_out)"
+    observations="$short_summary"
+    if [ "$result" = "red" ] && [ -f "$log_path" ]; then
+        local log_excerpt
+        log_excerpt=$(tail -n 50 "$log_path" 2>/dev/null)
+        if [ -n "$log_excerpt" ]; then
+            observations="$observations. Last 50 line(s) of $log_path:
+$log_excerpt"
+        fi
+    fi
+    add_comment "$tid" "GREEN-CHECK v1 task=$tid unit_id=${unit_id:-none} phase=$phase result=$result exit_code=$exit_code at $ts: $short_summary"
+
+    if [ "$phase" = "before" ] && [ "$result" = "red" ] && [ "$unit_bound" = "true" ]; then
+        emit_green_check "false" "cannot_start_from_green" \
+            "$tid is bound to unit_id=$unit_id and the suite is RED before starting -- per docs/plans/v5-design-phase.md Phase D5, a unit that cannot start from green stops and reports rather than implementing on top of a pre-existing failure. Do NOT implement. Open the red baseline as its own task (bd_create_task, typed bug, linked back via a discovered-from dependency to $tid) and report it in your blockers array; once the baseline is fixed and the suite is green again, re-run this check before starting the unit's own work. $observations" \
+            "$tid" "before" "true" "$unit_id" "red" "$exit_code" "$dispatch" "$timed_out"
+        exit 2
+    fi
+
+    emit_green_check "true" "" "$observations" \
+        "$tid" "$phase" "$unit_bound" "$unit_id" "$result" "$exit_code" "$dispatch" "$timed_out"
+    exit 0
+}
+# GREEN-CHECK END (v5 D5 piece 3, claude-workflow-plugin-fkm.7 D5)
+
 # resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
 cmd_resolve_finding() {
     local tid="${1:-}" fid="${2:-}"
@@ -13290,6 +14039,7 @@ case "$SUB" in
     design-status)    cmd_design_status "$@" ;;
     design-conflict)  cmd_design_conflict "$@" ;;
     spec-injection-status) cmd_spec_injection_status "$@" ;;
+    green-check) cmd_green_check "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     # quarantine-artifact dispatch -- REMOVED (claude-workflow-plugin-k6re,

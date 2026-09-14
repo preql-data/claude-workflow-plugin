@@ -1024,7 +1024,7 @@ seed_approvable() {
     # derived path; piped via stdin instead.
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" review-record "$tid" < "$art" >/dev/null 2>&1
     pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
-    printf '{"task_id":"%s","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded"],"blockers":[],"llm_observations":"seeded by the design-artifact fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}\n' \
+    printf '{"task_id":"%s","role":"devops","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded"],"blockers":[],"llm_observations":"seeded by the design-artifact fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}\n' \
         "$tid" > "$pay"
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }

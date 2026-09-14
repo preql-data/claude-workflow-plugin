@@ -384,12 +384,32 @@ assert_eq "4.2 unit_id containing a colon: ALSO unit_id_invalid_chars" \
 # assumed.
 # shellcheck disable=SC2016  # single-quoted deliberately: this is the
 # LITERAL source text to grep/sed for, not an expression to expand.
+# QA round 2, R2-F5: this assertion USED TO hardcode "2" as if it were a
+# claim about the total population of assert_unit_id_scalar call sites in
+# qa-gate.sh. It never was one — MUT_LINE is subcommand-qualified
+# ("design-unit-bind" is the literal first argument), so it can only ever
+# match design-unit-bind's own two call sites (the early fail-fast and the
+# write-section defense-in-depth, per Section 1's header) — REGARDLESS of
+# how many OTHER subcommands also call assert_unit_id_scalar with their own,
+# differently-named first argument (design-conflict's one call site;
+# green-check's, added in fkm.7 D5 piece 3 and the reason this survived only
+# "by luck" per QA — a needle that happened to stay subcommand-scoped, not a
+# guard that was actually counting the shared idiom's total population). The
+# fix is not a re-count: it is asserting what was always true, a
+# COUNT-INDEPENDENT non-vacuity check (there is at least one line to
+# mutate), rather than the population claim the old wording implied.
 MUT_LINE='assert_unit_id_scalar "design-unit-bind" "$tid" "unit_id" "$unit_id"'
 GREP_BEFORE=$(grep -cF "$MUT_LINE" "$QG")
-assert_eq "4.3 precondition: the guard line exists (exactly twice) in the shipped script" "2" "$GREP_BEFORE"
+assert_eq "4.3 NON-VACUITY: design-unit-bind's own (subcommand-qualified) guard line exists at least once in the shipped script" \
+    "true" "$([ "$GREP_BEFORE" -gt 0 ] 2>/dev/null && echo true || echo false)"
 sed "\\|$MUT_LINE|d" "$QG" > "$FIXTURE/.claude/scripts/qa-gate-nounitidguard.sh"
 GREP_AFTER=$(grep -cF "$MUT_LINE" "$FIXTURE/.claude/scripts/qa-gate-nounitidguard.sh")
-assert_eq "4.3b META: both occurrences were actually removed" "0" "$GREP_AFTER"
+# QA round 3, R3-F6: this message used to read "both occurrences were
+# actually removed", baking in a population claim (exactly 2) the R2-F5 fix
+# above deliberately moved away from -- the assertion itself (GREP_AFTER==0)
+# was always count-independent (zero remain, whatever the original count
+# was); only the wording still implied otherwise.
+assert_eq "4.3b META: no occurrences of the guard line remain in the mutant" "0" "$GREP_AFTER"
 chmod +x "$FIXTURE/.claude/scripts/qa-gate-nounitidguard.sh"
 NG_PARSE_RC=0
 bash -n "$FIXTURE/.claude/scripts/qa-gate-nounitidguard.sh" 2>/dev/null || NG_PARSE_RC=$?

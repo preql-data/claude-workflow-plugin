@@ -550,7 +550,7 @@ seed_completion_record() {
     pay="$root/.claude/.qa-tracking/completion-draft-$sanitized.json"
     mkdir -p "$root/.claude/.qa-tracking" 2>/dev/null || true
     cat > "$pay" <<JSON
-{"task_id":"$tid","role":"$role","model":"seeded","pin":"seeded","files_changed":$files_json,"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the component fixture harness","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}
+{"task_id":"$tid","role":"$role","model":"seeded","pin":"seeded","files_changed":$files_json,"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the component fixture harness","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}
 JSON
     if ! CLAUDE_PROJECT_DIR="$root" bash "$root/.claude/scripts/qa-gate.sh" \
             completion-record "$tid" --file "$pay" >/dev/null 2>&1; then

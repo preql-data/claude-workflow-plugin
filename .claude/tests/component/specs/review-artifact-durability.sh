@@ -151,7 +151,7 @@ run_cycle_pre_approve() {
 run_cycle_approve() {
     local qg="$1" root="$2" tid="$3" srcfile="$4"
     local pay="$root/.claude/.qa-tracking/.rqer-completion-$tid.json"
-    printf '{"task_id":"%s","role":"backend","model":"seeded","pin":"seeded","files_changed":["%s"],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by review-artifact-durability.sh","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown"}' \
+    printf '{"task_id":"%s","role":"backend","model":"seeded","pin":"seeded","files_changed":["%s"],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by review-artifact-durability.sh","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none"}' \
         "$tid" "$srcfile" > "$pay"
     CLAUDE_PROJECT_DIR="$root" bash "$qg" completion-record "$tid" --file "$pay" >/dev/null 2>&1
 

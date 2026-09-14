@@ -154,9 +154,9 @@ Before writing any test, ask:
 - [ ] Tests are deterministic (no flakiness).
 - [ ] Each new test was observed failing before the fix landed. If you didn't watch the test fail, you don't know if it tests the right thing — and neither did the specialist. You cannot replay their session, so check it structurally instead: does the assertion actually depend on the changed code? Would reverting the fix turn it red? A test that would stay green against the unfixed state is coverage theatre, and that is a `must_fix`, not a nitpick.
 - [ ] All tests pass.
-- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape). Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field.
+- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape), plus (v5 D5) `unit_id`, `design_hash`, `green_before`, `green_after`. Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field. For the four new fields, substance means: `green_before`/`green_after` reflect an ACTUAL `qa-gate.sh green-check` run (cross-check against the durable `GREEN-CHECK v1` comment on the task, not just the payload's own claim) rather than a hand-typed "green".
 
-That last item is the F7 contract's **only** claimed enforcement (`docs/AGENTS.md`, "Specialist Completion Contract (F7)"): the gate does not reject a payload with a field missing, so if you do not ask, nothing does. Through v4.0 the doc cited this checklist and the checklist did not carry the item — do not let it drift back out.
+Since P7 (`claude-workflow-plugin-qbhw`) this checklist item is no longer the contract's *only* enforcement — `review-check.sh validate-completion` rejects a payload missing or malformed on any of these fields at record time, and `qa-gate.sh approve` refuses without a recorded contract at all. What remains QA's alone, and is why this item stays on the checklist, is QUALITY: the validator accepts a well-shaped but hollow `llm_observations`, a `context_coverage` that names the wrong files, or a `green_before`/`green_after` that is well-formed but never actually checked against the durable record — none of that is a schema violation, and only a reader judges it. Through v4.0 the doc cited this checklist and the checklist did not carry the item at all — do not let it drift back to that state either.
 
 ### 3a. Regression impact scan (extends J19, code-graph)
 
@@ -445,6 +445,10 @@ printf '%s' "$ART_JSON" | bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" 
   "blockers": [],
   "llm_observations": "freeform — REVIEW-RELAY: status=needs-review. The validated review request is at .claude/.qa-tracking/review-request-<task-id>.json (risk_threshold=<sev>, stop_condition=<...>). The root orchestrator runs codex-review.sh at the root, records the artifact via qa-gate.sh review-record, and re-engages QA; the artifact is ADVISORY packet item 8.",
   "context_coverage": "freeform — what you read to reach this handoff (the diff, the SPEC, the impact report, which review modules you ran), what you deliberately skipped and why, and the largest unknown the reviewer should chase.",
+  "unit_id": "",
+  "design_hash": "",
+  "green_before": "none",
+  "green_after": "none",
 
   "approved": false,
   "qa_status": "needs-review",
@@ -632,6 +636,10 @@ Then return the structured `needs-grading` status in your completion contract �
   "blockers": [],
   "llm_observations": "freeform — RUBRIC-RELAY: status=needs-grading. The grading packet is persisted as bd_doc grading-packet on the task; the root orchestrator picks it up, spawns the grader, records the verdict via qa-gate.sh grade-record, and re-engages QA on the next spawn.",
   "context_coverage": "freeform — which of the eight packet items you actually read end-to-end versus pasted through, anything you could not obtain (and why), and the largest unknown the grader is being asked to decide without.",
+  "unit_id": "",
+  "design_hash": "",
+  "green_before": "none",
+  "green_after": "none",
 
   "approved": false,
   "qa_status": "needs-grading",
@@ -808,7 +816,7 @@ The helper dedup-merges by normalized text, so re-proposing a lesson the ledger 
 
 ## 10. Completion contract
 
-When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus a documented QA-specific superset on top. The base seven must keep their canonical names and ordering; QA-specific fields are additive, not replacements. `context_coverage` is the seventh and newest, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises.
+When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus (v5 D5, claude-workflow-plugin-fkm.7) four more green-to-green fields appended after them, plus a documented QA-specific superset on top of all eleven. The base seven must keep their canonical names and ordering; the four green-to-green fields and the QA-specific fields are both additive, never replacements. `context_coverage` is the seventh and newest of the base seven, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises; `unit_id`/`design_hash`/`green_before`/`green_after` are newer still, appended after that.
 
 ```json
 {
@@ -819,6 +827,10 @@ When you finish a review — whether you approved or blocked — return a struct
   "blockers": ["issues that prevented QA from completing the review"],
   "llm_observations": "freeform — mandatory",
   "context_coverage": "freeform — mandatory: what you read, what you deliberately skipped and why, the largest remaining unknown",
+  "unit_id": "",
+  "design_hash": "",
+  "green_before": "none",
+  "green_after": "none",
 
   "approved": true,
   "files_verified": ["path/to/file.ts", "path/to/other.py"],
@@ -838,6 +850,8 @@ Base-field semantics for the QA role:
 - `blockers`: issues that blocked QA from completing the review itself (missing fixtures, environment failures, unreviewable diffs, upstream task incomplete). This is review-process-blocking and is different from `must_fix`, which is implementation-blocking and feeds into `qa-gate.sh block`.
 - `llm_observations`: freeform, mandatory. Use it for anything the schema does not capture — surprising behaviour, hunches about brittle areas, notes for the QA-of-QA reviewer, or context the next agent in the chain will need. Never leave it empty; an empty string defeats the purpose of the contract.
 - `context_coverage`: freeform, mandatory. Three things, in order — what you read to reach this verdict (which packet items, which files in the diff, which prior comments on the task), what you deliberately did NOT read and why (a file you judged out of blast radius, a subsystem you scoped out), and the largest remaining unknown your verdict rests on. For QA specifically this is where a bounded review declares its own bounds: an approval that scoped itself to two files is honest, an approval that silently did so is not. Name files; "reviewed the change set" is a non-answer.
+- `unit_id` / `design_hash`: `""` for QA — you review, you do not implement a design unit, so there is nothing to bind these to. Leave them empty rather than copying the specialist's values; the completeness cross-check reads the IMPLEMENTER's contract for that identity, not yours (section 3's F7 checklist item covers the same "don't overwrite the implementer's declaration" discipline).
+- `green_before` / `green_after`: `"none"` for QA on the same grounds — the green-to-green protocol is the implementer's, not the reviewer's.
 
 QA-specific superset (additive, on top of the base seven):
 

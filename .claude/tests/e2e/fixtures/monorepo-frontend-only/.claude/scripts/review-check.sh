@@ -877,6 +877,115 @@ cmd_validate_completion() {
         exit 4
     fi
 
+    # GREEN-FIELDS-VALIDATION BEGIN (v5 D5 piece 3, claude-workflow-plugin-fkm.7)
+    #
+    # Everything between these sentinels is ADDITIVE and runs LAST, after
+    # every existing check above has passed — stripping this whole region
+    # reproduces cmd_validate_completion's EXACT pre-fkm.7-D5-piece-3
+    # behaviour (the four fields are undeclared and unchecked: absent,
+    # wrongly typed, or holding any string at all, all pass). An L1
+    # META-TEST does exactly that (validate-completion-green-fields.test.sh)
+    # and asserts a payload claiming green_before="green" over what would
+    # actually be a red suite is accepted by the STRIPPED copy and refused
+    # by the shipped one whenever the shape itself is wrong — the mechanical
+    # half of "stub the suite result to claim green while red" the plan's
+    # META-TEST line asks for; the OTHER half (proving the shipped detection
+    # itself does not lie about a REAL test run) is qa-gate.sh green-check's
+    # own META-TEST, in green-check.test.sh.
+    #
+    # docs/plans/v5-design-phase.md Phase D5: "Both states plus unit_id and
+    # the injected design_hash go into the completion contract as new
+    # fields ... a field the recorder does not reject when malformed is
+    # documentation, and this release does not add decorative fields."
+    #
+    # PART 1 — the four new keys are REQUIRED on EVERY payload regardless of
+    # role, the SAME universal treatment role/model/pin already get above
+    # (checked in a SEPARATE loop from theirs, not folded into it, so a
+    # payload missing only a v5 field gets a message naming the v5 group
+    # rather than reusing role/model/pin's wording).
+    for k in unit_id design_hash green_before green_after; do
+        has=$(printf '%s' "$raw" | jq -r --arg k "$k" 'has($k)' 2>/dev/null || echo "false")
+        if [ "$has" != "true" ]; then
+            emit_validate "validate-completion" "false" "missing_key:$k" \
+                "completion payload missing required key: $k (v5 D5 green-to-green fields: unit_id, design_hash, green_before, green_after — claude-workflow-plugin-fkm.7 D5 piece 3)"
+            exit 4
+        fi
+    done
+
+    # PART 2 — TYPE and VALUE checks for the same four fields. A SEPARATE jq
+    # pass from the type_err pipeline above, deliberately: this whole region
+    # is then fully additive and cannot perturb the already-proven canonical-
+    # seven/role/model/pin checks that precede it.
+    #
+    # unit_id / design_hash MAY be EMPTY — "not bound to a design unit" is a
+    # real, legal answer for the overwhelming majority of tasks (the same
+    # shape as blockers:[] meaning "no blockers"), so neither is subject to
+    # the llm_observations/context_coverage non-empty rule. When non-empty,
+    # unit_id must match the SAME class review-check.sh's own design-unit-json
+    # schema and qa-gate.sh's assert_unit_id_scalar already enforce
+    # (`^[A-Za-z0-9._-]+$`) and design_hash must be 64 hex characters — the
+    # SAME class design-unit-show / spec-injection-status already enforce
+    # when reading either back, so this validator and those two readers can
+    # never disagree about what a well-formed value looks like.
+    #
+    # green_before / green_after are a CLOSED THREE-VALUE ENUM
+    # (green|red|none), never a boolean: a boolean would make "no test
+    # command resolved" (detect-stack.sh runner=none) indistinguishable from
+    # "ran and passed", which is a materially different claim about the unit.
+    #
+    # design_hash_without_unit_id is intentionally ONE-DIRECTIONAL. A
+    # design_hash with no owning unit_id is not a coherent claim (there is no
+    # unit for the artifact hash to describe), so that combination is
+    # refused. The REVERSE — unit_id present, design_hash empty — is legal:
+    # subagent-start.sh's inject_unit_spec records SPEC-INJECTED on a
+    # best-effort basis and can legitimately fail to record even on
+    # genuinely unit-bound work (see record_spec_injection's own header:
+    # "content delivered but NOT recorded"), and refusing that disclosed,
+    # acknowledged degradation would block a legitimate completion on a gap
+    # this release already documents rather than hides.
+    local green_err
+    green_err=$(printf '%s' "$raw" | jq -r '
+        def id_class: test("^[A-Za-z0-9._-]+$");
+        def hash_class: test("^[0-9a-fA-F]{64}$");
+        def green_enum: (. == "green") or (. == "red") or (. == "none");
+        . as $p
+        | [ (if ($p.unit_id | type) != "string" then "field_type_invalid:unit_id"
+             elif ($p.unit_id != "" and ($p.unit_id | id_class | not)) then "field_invalid_chars:unit_id"
+             else empty end),
+            (if ($p.design_hash | type) != "string" then "field_type_invalid:design_hash"
+             elif ($p.design_hash != "" and ($p.design_hash | hash_class | not)) then "field_invalid_chars:design_hash"
+             else empty end),
+            (["green_before","green_after"]
+             | map(. as $k
+                   | if ($p[$k] | type) != "string" then "field_type_invalid:" + $k
+                     elif ($p[$k] | green_enum | not) then "field_invalid_enum:" + $k
+                     else empty end)
+             | .[]),
+            (if ($p.design_hash != "" and $p.unit_id == "") then "design_hash_without_unit_id" else empty end)
+          ]
+        | .[0] // ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$green_err" ]; then
+        local green_detail="v5 D5 field failed its check: $green_err"
+        case "$green_err" in
+            field_invalid_enum:green_before|field_invalid_enum:green_after)
+                green_detail="$green_err — must be exactly one of green, red, none: the state a real test run produced (qa-gate.sh green-check derives this from detect-stack.sh's resolved command, never from an unexecuted claim), or none when no runner was resolved"
+                ;;
+            field_invalid_chars:unit_id)
+                green_detail="$green_err — unit_id, when non-empty, must match [A-Za-z0-9._-]+, the same class qa-gate.sh's assert_unit_id_scalar and this file's own design-unit-json schema already enforce; a value outside it could never match any unit a design declares"
+                ;;
+            field_invalid_chars:design_hash)
+                green_detail="$green_err — design_hash, when non-empty, must be 64 hex characters, the same class design-unit-show / spec-injection-status already enforce when reading it back"
+                ;;
+            design_hash_without_unit_id)
+                green_detail="$green_err — design_hash is non-empty but unit_id is empty; a design artifact hash with no unit to bind it to is not a coherent claim. (The reverse — unit_id present, design_hash empty — is legal: spec injection is best-effort and can legitimately fail to record even on genuinely unit-bound work.)"
+                ;;
+        esac
+        emit_validate "validate-completion" "false" "$green_err" "$green_detail"
+        exit 4
+    fi
+    # GREEN-FIELDS-VALIDATION END (v5 D5 piece 3, claude-workflow-plugin-fkm.7)
+
     emit_validate "validate-completion" "true" "" "completion payload valid"
     exit 0
 }

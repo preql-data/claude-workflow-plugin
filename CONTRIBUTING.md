@@ -305,6 +305,76 @@ recording session** against the SessionStart-resolved model with
 same contract, take
 that path.
 
+### Which EXISTING tests must I re-run before calling a change verified?
+
+The implied set is **not** "the specs I wrote or extended" — it is **"the
+specs that cover what I touched."** A round of QA review on D5 piece 3
+(claude-workflow-plugin-fkm.7, R2-F4) found the implementer had run every
+spec it authored (all green) but not `design-accessors.test.sh`, the spec
+covering the one existing accessor (`latest_design_unit_binding`) its new
+code had added a consumer of — which was, at that exact tree, the ONE spec
+that had gone red.
+
+A cheap, mechanical form, usable before you trust a change set as green:
+for each function or accessor your diff **calls** (not just the ones it
+defines), grep the tiers for a spec that names it, and run those too.
+
+```bash
+# Which files changed, regardless of commit state? (QA round 3, R3-F4: a
+# bare `git diff --name-only`, or even `git diff --name-only HEAD`, goes
+# quietly empty the moment the work is staged OR committed — verified
+# directly, three primitives in isolation: `printf '' | xargs grep ...`
+# never runs grep at all (rc=0, empty output); `grep -v "$(git diff
+# --name-only)"` degenerates to `grep -v ""`, which discards every line
+# (rc=1); end to end, the ORIGINAL recipe produced NO OUTPUT AT ALL against
+# a committed change — read as "nothing to run", the exact conclusion this
+# whole subsection exists to prevent. `HEAD` alone does not fully fix this:
+# it still reads empty once the change is committed, not merely staged, so
+# the base below is the merge point with the trunk branch rather than HEAD
+# — it survives uncommitted, staged, AND already-committed work alike.)
+BASE_REF=$(git merge-base main HEAD 2>/dev/null || git merge-base origin/main HEAD 2>/dev/null || echo HEAD)
+CHANGED_FILES=$(git diff --name-only "$BASE_REF" 2>/dev/null)
+if [ -z "$CHANGED_FILES" ]; then
+  echo "No changed files found against $BASE_REF -- nothing to check. If you" \
+       "expected files here, BASE_REF may not have resolved (no local" \
+       "main/origin/main); verify manually rather than trust this silence."
+else
+  CALLED=$(mktemp)
+  # The regex matches shell/TS/JS FUNCTION DEFINITIONS as well as call
+  # sites (`name(` immediately after a word boundary catches both
+  # `function name(` and a plain `name(args)` call) — over-inclusion, not
+  # under: a name your diff only DEFINES and never calls may still trigger
+  # a lookup below, which just means one extra, harmless grep. The
+  # direction that would be unsafe (a real call silently NOT extracted)
+  # is not what this over-matches.
+  printf '%s\n' "$CHANGED_FILES" | xargs grep -ohE '\b[a-z_][a-zA-Z0-9_]*\(' \
+    | tr -d '(' | sort -u > "$CALLED"
+  # For each, does an existing spec OUTSIDE this diff reference it by name?
+  while read -r fn; do
+    grep -rl "\b$fn\b" .claude/scripts/tests/*.sh .claude/tests/component/specs/*.sh \
+      2>/dev/null | grep -vxF -f <(printf '%s\n' "$CHANGED_FILES") \
+      && echo "  ^ covers $fn -- RUN IT"
+  done < "$CALLED"
+  rm -f "$CALLED"
+fi
+```
+
+This is a starting point, not a proof — a false negative (a spec that
+exercises the function indirectly, through another function it calls,
+without naming it) is possible, and the mechanical form does not replace
+reading `git diff` for what you actually touched. Treat a hit as
+mandatory; treat a miss as "keep reading the diff for what else might be
+covered," not as "nothing else needs to run."
+
+Diffing against the merge-base with `main` is deliberately wider than "just
+my task" on a long-lived branch — measured on this repo's own
+`v5/design-phase` branch, which carries many prior tasks' history, it
+surfaced 450 changed files and 1823 candidate names, noisier than a single
+task's own diff would be. That is the same "safe direction" as the
+over-inclusive regex above: more candidates checked, never fewer. If you
+know the specific commit your own task started from, diff against that
+instead for a tighter signal.
+
 ### Local commands
 
 ```bash
