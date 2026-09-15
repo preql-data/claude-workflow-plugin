@@ -318,6 +318,79 @@ EOF
     elif [ "$approved" -eq "$total" ]; then
         decision="pass"
         reason="All $total sub-task(s) qa-approved under epic $epic; epic can close."
+        # v5 D6 judgement half (claude-workflow-plugin-fkm.8, coordinator
+        # ruling): plan:718-737's SECOND enforcement surface. "All children
+        # approved" is necessary but not sufficient when $epic ITSELF
+        # carries a design the coherence rollup axis applies to -- every
+        # child clearing its OWN cycle says nothing about whether the
+        # MECHANICAL rollup is clean or whether a design-reviewer has
+        # judged the whole-system criteria (DS1/DS2/DS8) coherent against
+        # the built result. Shelled out to qa-gate.sh (DS7: it remains the
+        # ONE authoritative reader of this axis, exactly as plan-batches
+        # above already shells out to it for design accessors) rather than
+        # re-implementing any part of compute_design_coherence/latest_
+        # design_rollup here. This block is ADVISORY ONLY, by the plan's
+        # own words ("because that path is advisory for the active task,
+        # qa-gate.sh approve... additionally requires..." — the HARD gate
+        # is cmd_approve's own DESIGN-ROLLUP-REFUSAL, exit 5); this changes
+        # only what the Stop hook's EPIC_DEFER_NOTE prints, never what any
+        # single task's own approve does.
+        #
+        # EPIC_GATE_SKIP_ROLLUP_CHECK=1 SKIPS this whole side-check: set by
+        # qa-gate.sh's OWN compute_design_coherence when IT shells out to
+        # `epic-gate.sh check` for pure children-enumeration (it reads only
+        # .sub_tasks[].id and never this block's .decision/.observations).
+        # Without this second guard the reentrancy fix above still
+        # terminates (bounded, not infinite -- design-rollup-status runs
+        # its OWN direct bd read rather than calling back into this script)
+        # but wastefully: EVERY design-coherence/design-rollup/approve call
+        # on a task with an applicable design axis would ALSO trigger this
+        # entire rollup-status round-trip for a result nothing reads,
+        # doubling real subprocess cost on the common path this axis exists
+        # to serve. MEASURED, not assumed: caught live via a smoke test's
+        # own process count while verifying the reentrancy fix.
+        if [ "${EPIC_GATE_SKIP_ROLLUP_CHECK:-}" = "1" ]; then
+            :
+        elif [ -f "$QA_GATE_SCRIPT" ]; then
+            # QA_GATE_SKIP_EPIC_GATE_REENTRY=1 is REQUIRED here, not
+            # decorative: design-rollup-status calls compute_design_
+            # coherence, which itself enumerates children via a shell-out
+            # to THIS script's own `check` subcommand by default -- without
+            # this guard that shell-out closes a cycle back into the very
+            # `check` invocation that is running right now (epic-gate.sh
+            # check -> design-rollup-status -> compute_design_coherence ->
+            # epic-gate.sh check -> ...), unbounded. MEASURED: a smoke test
+            # reproduced this live as a genuine runaway fork chain before
+            # this guard existed. See qa-gate.sh's own compute_design_
+            # coherence header for the guarded, non-recursive read path
+            # this env var selects.
+            local rollup_status_out="" rollup_status_rc=0
+            rollup_status_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" QA_GATE_SKIP_EPIC_GATE_REENTRY=1 bash "$QA_GATE_SCRIPT" design-rollup-status "$epic" 2>/dev/null) || rollup_status_rc=$?
+            if printf '%s' "$rollup_status_out" | jq -e 'type=="object" and has("applicable")' >/dev/null 2>&1; then
+                local ers_applicable="" ers_ok=""
+                ers_applicable=$(printf '%s' "$rollup_status_out" | jq -r '.applicable // false' 2>/dev/null) || ers_applicable="false"
+                ers_ok=$(printf '%s' "$rollup_status_out" | jq -r '.ok // false' 2>/dev/null) || ers_ok="false"
+                if [ "$ers_applicable" = "true" ] && [ "$ers_ok" != "true" ]; then
+                    local ers_obs=""
+                    ers_obs=$(printf '%s' "$rollup_status_out" | jq -r '.observations // ""' 2>/dev/null) || ers_obs=""
+                    decision="block"
+                    reason="All $total sub-task(s) under epic $epic are qa-approved, but the coherence rollup for $epic itself is not both mechanically clean AND judged coherent: $ers_obs Run 'qa-gate.sh design-coherence $epic' and 'qa-gate.sh design-rollup-status $epic' for the full breakdown before closing this epic."
+                fi
+            else
+                # ANY other outcome -- a malformed/empty envelope, a crash,
+                # an unexpected exit code -- is treated the SAME as a
+                # confirmed infra failure, not silently as "no design
+                # here". Branching on the exit code alone (e.g. "only
+                # rc=2 means trouble") would leave exactly the gap this
+                # comment exists to close: a subprocess that crashes with
+                # some OTHER code and prints nothing parseable must not
+                # read as "pass" by falling through every named case.
+                # Advisory scope means this still does not touch any
+                # individual task's own approve.
+                decision="block"
+                reason="All $total sub-task(s) under epic $epic are qa-approved, but whether $epic itself carries a coherence rollup requirement could not be determined (design-rollup-status exit rc=$rollup_status_rc, no parseable envelope) -- treating as unresolved rather than assuming no design phase applies."
+            fi
+        fi
     else
         # Some "other" state (e.g., qa-state=none with closed status). Treat
         # as pass if all closed; defer otherwise.

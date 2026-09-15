@@ -889,6 +889,105 @@ bash .claude/scripts/qa-gate.sh choose <approve|continue|tech-debt|defer> "$TASK
 - `design-review-record` refuses `design_review_iteration_not_advancing` → the `iteration` you passed is at or below the latest recorded one; increment and retry.
 - Two consecutive cap-hits on the same artifact → the design itself is likely the problem, not the reviewer's patience. Surface to the operator via `AskUserQuestion` rather than raising the cap or re-spawning blind.
 
+#### 5f. Coherence-rollup relay (ROLLUP-RELAY: coherence-rollup)
+
+v5 D6's judgement half (`claude-workflow-plugin-fkm.8`, plan:718-737) reuses the SAME design-reviewer agent a THIRD time on a given design arc — once per revision at 5e (the artifact, pre-implementation), and once more here, after every declared unit has been implemented and independently approved, to judge the three whole-system criteria a mechanical check cannot: DS1 (are the criteria still falsifiable now that the system exists), DS2 (is the decomposition still complete and disjoint now that it is built), and DS8 (does the FINISHED system contradict `LESSONS.md`, and is this verdict being waved through under cap pressure). Same structural reason as every relay in this file: subagents cannot spawn subagents, so this spawn lives here, at the root, never inside `qa.md` or `design-reviewer.md` itself.
+
+**Trigger.** Either:
+- `epic-gate.sh check <epic-id>` reports `decision: "block"` with an observations string naming "the coherence rollup for `<epic-id>` itself is not both mechanically clean AND judged coherent" — this is the ADVISORY signal (plan:718-737's own words), surfaced to you via a Stop hook's `EPIC_DEFER_NOTE` on any child's own completion, or by running the check yourself.
+- You notice directly (via `bd_list_tasks` under the epic, or a specialist's own completion contract) that every child bound to a unit under a design-governing task is now `qa-approved`, and you are about to attempt that governing task's own `approve`.
+
+Either way, do NOT attempt the governing task's own `approve` yet if `qa-gate.sh design-coherence <epic-id>` reports `ok:false` — that is the MECHANICAL half (section 4c's own axis, D5/`fkm.7`), a DIFFERENT and prior gate this relay does not touch. Fix or amend against that breakdown first; this relay's own first step (`design-rollup-packet`) refuses outright when the mechanics are not yet settled, precisely so a spawn is never wasted judging data that is about to change.
+
+**Step A — read the iteration cap.** Same file, same key, same default as every relay in this file (5a/5e):
+
+```bash
+ITERATION_CAP=$(grep -E '^iteration_cap=' "$CLAUDE_PROJECT_DIR/.claude/rubric-config" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '[:space:]')
+ITERATION_CAP="${ITERATION_CAP:-3}"
+```
+
+Unlike 5e, there is no iteration counter recorded on the `DESIGN-ROLLUP v1` grammar itself (plan:718-737's own record shape carries `reviewer`/`model`/`design_hash`/`units`/`verdict`/`gaps` only) — the round you are on is however many times you have run this relay for the CURRENT `design_hash`, tracked in your own relay notes, defaulting to 1 for a hash that has never had a rollup verdict recorded against it yet. This can genuinely reach 2 or more against the SAME hash (not only after an artifact amendment moves it): each `incoherent` verdict for an implementation-side gap is superseded by a fresh record at that SAME hash (Step D's own `incoherent` branch below), so a design that took several rounds to get right on the implementation side, never touching the artifact, still needs its own iteration count tracked and capped like any other loop in this file.
+
+If `ITERATION` > `ITERATION_CAP`, do NOT spawn the reviewer; jump to Step F (cap escalation).
+
+**Step B — assemble the packet.**
+
+```bash
+PKT_OUT=$(bash .claude/scripts/qa-gate.sh design-rollup-packet "$EPIC_ID")
+```
+
+If this refuses (`error_key: design_rollup_mechanical_prerequisite`), STOP — this is not a cap-hit and not a reviewer disagreement, it means the mechanical rollup (section 4c's own axis) has reopened since you last checked. Re-run `qa-gate.sh design-coherence "$EPIC_ID"` for the breakdown, route the fix or amendment to whichever unit's task needs it, and only return to Step B once that axis reports `ok:true` again. If it refuses `design_rollup_not_applicable`, this task was never the right target for this relay at all — re-check which task actually governs the design (`design-unit-show` on the child that surfaced the trigger).
+
+On success, `Read` the packet at `.packet_path` — it is a plain file under `.claude/.qa-tracking/`, the same convention `impact-report.sh`'s own JSON artifact already uses, not a `bd_doc`.
+
+**Step C — spawn the design reviewer at root, a second time.**
+
+```
+Task(
+    subagent_type="design-reviewer",
+    description="Coherence rollup for $EPIC_ID (round $ITERATION)",
+    prompt="""
+        ## Design rollup packet — round $ITERATION
+        (Paste the packet file's contents verbatim here — it already carries
+        all four sections: the artifact, every unit's F7 contract, the
+        union diff, and the conflict/amendment history.)
+
+        This is the SECOND invocation (design-reviewer.md's own "Second
+        invocation — the coherence rollup" section): grade DS1, DS2 and
+        DS8 substantively against what was actually built; mark DS3
+        through DS7 pass, citing that they are already discharged by the
+        per-unit mechanical rollup and the original design review. Return
+        the SAME six-key JSON your first invocation always returns.
+    """,
+)
+```
+
+The reviewer returns the SAME `{verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity}` shape 5e's own Step B already documents — capture it verbatim, do not re-narrate or edit it. A non-JSON response or a missing key is a malformed handoff; `design-rollup` in Step D rejects it with a structured error naming the offending key, exactly like `design-review-record` does.
+
+**Step D — record the verdict.**
+
+```bash
+# --design-hash and --model are BOTH required (unlike the rubric relay's
+# optional --graded-hash): an unbound or unattributed rollup verdict
+# cannot support cmd_approve's own hard DESIGN-ROLLUP-REFUSAL.
+DESIGN_HASH="<the packet's own design_hash field>"
+MODEL="<the model that actually produced this verdict — your own runtime
+        self-report for the design-reviewer spawn, the SAME 46w9 split
+        every other model-bearing record in this file's relays already
+        uses; never re-derived from re-reading design-reviewer.md's
+        frontmatter a second time>"
+
+printf '%s' "$REVIEWER_JSON" \
+    | bash .claude/scripts/qa-gate.sh design-rollup "$EPIC_ID" \
+        --design-hash "$DESIGN_HASH" --model "$MODEL"
+```
+
+`design-rollup` refuses (`design_reviewer_not_independent`) when `reviewer_identity` equals the recorded designer, exactly like `design-review-record`; refuses (`design_rollup_hash_stale`) when `--design-hash` no longer matches the epic's CURRENT governing hash — an amendment landed while the reviewer was working, and this verdict cannot be bound to a state that no longer exists; and refuses (`design_rollup_mechanical_prerequisite`) if the mechanical rollup itself reopened in that same window. Any of these three means: re-run Step B against the current state and re-spawn, never retry the record call with the same inputs.
+
+- `coherent` — `epic-gate.sh check` now reads `pass` for this epic and `qa-gate.sh approve` on it no longer refuses on this axis at all (`design_rollup_missing`, `design_rollup_verdict_stale`, or `design_rollup_incoherent` — three distinct `error_key`s for the three ways this refusal could have fired, since QA round 1 on `fkm.8`). Proceed with the governing task's own approval (yours, or QA's, depending on who owns that call in your workflow).
+- `incoherent` — this is a WHOLE-SYSTEM finding, not a per-unit one, and WHICH kind of gap it names determines the route out (QA round 2 on `fkm.8`, R2-F1: `cmd_design_rollup`'s own duplicate-hash check refuses a second verdict at the SAME `design_hash` only when the PRIOR one at that hash was itself `coherent` — an incoherent prior verdict can always be superseded by a fresh one at the SAME hash, no amendment required). Read the reviewer's `required_fixes` first to tell the two cases apart:
+  - **Implementation-side gaps** (the ordinary case — DS1/DS2/DS8 judging what units actually built, not what the design document says): fix the implementation the fixes name, re-run `design-rollup-packet` against the UNCHANGED `design_hash` (the packet now reflects the fixed work), re-spawn the reviewer (Step C), and record the superseding verdict at Step D with the SAME `--design-hash` you started with. No artifact edit, no `@designer` spawn, no moved hash — the design document was never what was wrong.
+  - **Design-side gaps** (the `required_fixes` name the ARTIFACT itself — an acceptance criterion that was never falsifiable as written, a decomposition that is missing a unit): re-spawn `@designer` with the reviewer's `required_fixes` verbatim (the same relay shape as 5e's own `needs_revision` branch). The designer amends the artifact in place (a fresh `Revision log` row, a moved `design_hash`); once a fresh `DESIGN-REVIEW v1` verdict is satisfied again (re-run 5e if the amendment is substantial enough to warrant a full re-review, or record one directly if it is not), decide with the operator's own judgement whether any unit's own implementation needs to change too — an incoherent DS2 finding in particular ("the decomposition no longer reads as complete") can mean a unit's scope needs to grow, which is a NEW unit-binding decision (section 2b), not something this relay resolves on its own.
+  Either way, return to Step B at `iteration + 1` — against the SAME `design_hash` for an implementation-side fix, or the amended one for a design-side fix.
+
+**Step E — re-engage whichever side needs the result,** the same "depends on Step D's branch" shape 5e's own Step D uses: the waiting approver on `coherent`, or `@designer` (with the required fixes) on `incoherent`.
+
+**Step F — cap-hit escalation.** Same J21 escalation every loop in this file uses:
+
+```bash
+bash .claude/scripts/qa-gate.sh choose <approve|continue|tech-debt|defer> "$EPIC_ID" '<note>'
+```
+
+`choose approve` is not an unconditional escape here either: it delegates to `cmd_approve`, which still refuses on this axis — at a cap-hit the LATEST recorded verdict, if any, is most often `design_rollup_incoherent` (the reason you are escalating at all is that superseding it with a fresh coherent one, per Step D's own `incoherent` branch above, kept not happening), though `design_rollup_missing`/`design_rollup_verdict_stale` are also possible if the cap was hit before a verdict was ever successfully recorded at the current hash — and `choose` has no flag to waive any of the three, deliberately, per this region's own header in `qa-gate.sh` ("no bypass flag exists on this axis"). A cap-hit on the judgement half means the operator decides whether an incoherent-but-capped rollup is accepted as tech debt (filed as its own follow-up task, `discovered-from` the epic) or the arc stays open past the cap.
+
+**Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
+
+- `design-rollup-packet` refuses `design_rollup_mechanical_prerequisite` on EVERY retry → some unit's own per-unit alignment (section 4c) is not actually settled; do not keep re-running this relay against it, route back to whichever child owns the gap.
+- Reviewer's `reviewer_identity` matches the designer's own → same `design_reviewer_not_independent` refusal 5e's own failure-modes list names, same fix.
+- `design-rollup` refuses `design_rollup_duplicate_hash` → this fires ONLY when the LATEST verdict already recorded against this exact `design_hash` was itself `coherent` (QA round 2 on `fkm.8`, R2-F1 — narrowed from the unconditional rule an earlier version of this bullet described). If you are seeing this, either: the epic already has a coherent, current rollup and you should be proceeding to approval instead of re-running this relay; or you are re-running Step D against genuinely stale state (re-check `design-rollup-status`). It is NEVER the correct response to spawn `@designer` for an artifact amendment on THIS refusal specifically — if the prior verdict at this hash was `incoherent`, Step D's own record call does not refuse at all; it records the fresh verdict as the new latest.
+- Two consecutive cap-hits on the same epic → the same signal 5e's own list names: the design itself, or its decomposition, is likely the problem. Surface to the operator via `AskUserQuestion` rather than raising the cap.
+
 ## Self-check
 
 Before responding, verify:

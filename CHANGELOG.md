@@ -20,6 +20,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **v5 Phase D6 — the coherence rollup gate** (`fkm.8`): at approve time,
+  `qa-gate.sh design-coherence <task-id>` rolls up per-unit results into an
+  epic-level count, "in the manner of the unresolved-findings count"
+  (`review-check.sh gate`'s own `OPEN_COUNT`) — reusing D5's
+  `compute_design_alignment` per unit rather than re-scanning the design
+  artifact's acceptance array. Applicable only when `<task-id>` is itself a
+  satisfied design task (typically the epic) declaring at least one unit
+  **and having at least one real bd parent-child dependent** — a satisfied
+  design that was never decomposed via D4 (the common case: one small task
+  is its own design holder, with no separate per-unit children ever
+  created) reads `applicable:false` rather than "every declared unit is
+  unresolved"; a v5 task-per-unit child, or any task with no design phase,
+  also reads `applicable:false`. The zero-children gate was not part of the
+  original design and was added after it regressed several pre-existing
+  `design-review-record.test.sh` fixtures that use one task as both design
+  holder and sole unit of work — every one of them tripped
+  `coherence_issues_open` on first approval, unrelated to what the test was
+  actually exercising, until `compute_design_coherence` started checking
+  `epic-gate.sh check "$tid"`'s own child count before resolving any unit's
+  binding. Four kinds of open issue, aggregated into one array
+  and one count, each with its own remedy: `incomplete` (a criterion has
+  no covering test, whether because no task is bound to its unit at all or
+  because a bound task's own coverage is incomplete), `undeclared_scope` (a
+  resolved unit's persisted completion contract claims a file no unit
+  declares anywhere — the epic-wide union check `design-conform`'s own
+  per-task check is never asked), `hash_divergence` (a unit's own
+  `DESIGN-UNIT` binding hash, or its spec injection, no longer matches the
+  artifact's current governing `design_hash` — never `change_set_hash`,
+  which cannot detect content drift by construction), and
+  `tracker_diff_mismatch` (a file genuinely in the live, denylist-filtered
+  change-set tracker that nothing the rollup examined accounts for — the
+  94d-shaped under-coverage case; the OPPOSITE direction, the rollup's own
+  file set naming a path absent from today's residual diff, is reported but
+  deliberately not gated, since most of a design's history is not in
+  today's tracker). Before that comparison runs, the governing task's own
+  design artifact and every resolved unit's own review artifact(s) are
+  excluded (`GATE-EVIDENCE-EXCLUSION`), generalising `design-conform`'s own
+  `REVIEW-ARTIFACT-EXCLUSION` across every resolved child rather than one
+  task — without it, an otherwise-coherent epic fails on its own design doc
+  and its children's review artifacts on every ordinary run. Wired into
+  `qa-gate.sh approve` as `COHERENCE-ROLLUP-REFUSAL` (exit 2, unconditional
+  once applicable — no bypass flag exists on this axis; the two remedies
+  are fix the work, or amend the artifact through the D2 review loop and
+  re-bind). A coherent approval's record gains a sixth machine token,
+  `design_artifact=<task-id>@<design_hash>`, last among the machine tokens.
+  `claude-workflow-plugin-2tv5` (deferred to this phase by design) is
+  resolved: an open `DESIGN-CONFLICT` stays artifact-wide (blocks every
+  sibling unit, not just the disputed one — coherence's own epic-level
+  framing makes the artifact the right scope for both questions), and the
+  refusal text now names the calling task's own bound unit alongside the
+  blocking one so it no longer reads as a mislabel to an uninvolved
+  sibling. `compute_design_alignment` gains an opt-in `mode=rollup`
+  parameter (default unchanged, proven byte-for-byte via the existing
+  64-assertion `design-unit-align.test.sh`) that skips its files leg for
+  exactly this caller — reusing that leg's live-tracker comparison against
+  a historical unit would be unsound, not merely redundant, once that
+  unit's own approve has already truncated the tracker. Tests:
+  `design-coherence.test.sh` (55 assertions — `bash
+  .claude/scripts/tests/design-coherence.test.sh`'s own `Total: 55 Passed:
+  55` line) — three not-applicable states (not a design task; satisfied
+  design with zero declared units; satisfied design with declared units but
+  zero bd children, pinning the fix above), the "declared unit with no
+  bound task, in an epic that DOES have children" case kept as its own
+  section specifically so it cannot be confused with the zero-children
+  case, all five named issue cases from the plan with individual restore
+  controls (including `tracker_diff_mismatch` proven distinct from
+  `undeclared_scope`), the full success path, the `approve` wiring
+  end-to-end, and a METatest stripping only the issue-count translation
+  step. `design-accessors.test.sh`'s own census assertion (`11.0c`, counting
+  call sites of the shared `validate_design_envelope_ok` consumption
+  pattern) was updated from 3 to 4: `compute_design_coherence` is a
+  legitimate fourth consumer, needed because it reads `validate-design`'s
+  raw `unit_ids`/`unit_files` directly rather than through
+  `design-conform`'s own subprocess, which does not expose them (confirmed
+  via a full 154/154 `design-accessors.test.sh` re-run after the count
+  update). Building the rollup surfaced a bash 3.2 parsing hazard, fixed at every
+  occurrence: a literal apostrophe in a double-quoted `--arg` value, on a
+  backslash-continued line ahead of a later single-quoted `jq` filter,
+  silently corrupted the whole multi-line command — the filter arrived at
+  `jq` split into unrelated fragments, each a distinct compile error, with
+  the array element silently becoming empty. The fix is structural, not a
+  one-off: every such message is now assigned to a plain variable first and
+  never inlined.
+
+- **v5 Phase D6, the coherence rollup's JUDGEMENT half** (`fkm.8`, added
+  after the operator's ruling that `docs/plans/v5-design-phase-plan.md`
+  governs where it disagrees with the directive this phase was originally
+  briefed from — see the FINDING comment on `claude-workflow-plugin-fkm`
+  for the full evidence trail). The mechanical rollup above answers "does
+  every declared unit map to a complete, aligned, correctly-scoped task";
+  it cannot answer DS1 (are the criteria, now that the system is built,
+  still falsifiable), DS2 (is the decomposition, now that it is
+  implemented, still complete and disjoint), or DS8 (does the FINISHED
+  system contradict `LESSONS.md`, and is this verdict capped rather than
+  earned) — plan:718-737's own three whole-system criteria. Those go to a
+  SECOND, cheaper `design-reviewer` spawn — the SAME agent D2 already uses,
+  root-relayed a second time (subagents cannot spawn subagents) against a
+  DIFFERENT packet (the artifact, every unit's F7 contract, a union diff,
+  the conflict/amendment history — no grilling record, no `impact_of`),
+  scoped by the spawn prompt to grade DS1/DS2/DS8 substantively and mark
+  DS3-DS7 pass/vacuous (already discharged mechanically and at the first
+  review). **No change to the agent's output contract** — same six keys,
+  same validation ladder `design-review-record` already runs. Three new
+  subcommands: `design-rollup-packet <epic-id>` (assembles + persists the
+  packet, refusing `design_rollup_mechanical_prerequisite` unless the
+  mechanical rollup is already clean); `design-rollup <epic-id>
+  --design-hash <h> --model <m> [--file <path>]` (records `DESIGN-ROLLUP
+  v1 reviewer=<id> model=<m> design_hash=<h> units=<n>/<n>
+  verdict=<coherent|incoherent> gaps=<n> at <ts>: <summary>` — `gaps` is a
+  COUNT, not the array plan:718-737's own illustrative grammar shows (a
+  genuine D6 deviation, recorded on `uwzv`; QA round 1, R1-F6, corrected
+  the real reason here after an earlier version of this entry gave a false
+  one — `REVIEW-ARTIFACT`'s own `findings=[R8-F1:medium,...]` IS a
+  verbatim array in this codebase's machine-prefix grammar, so "no record
+  stores one" was never true; the actual reason is that `required_fixes`
+  elements are free-text sentences with no gap-id space analogous to
+  `REVIEW-ARTIFACT`'s own `R<n>-F<n>` ids, so they cannot survive this
+  single-line grammar verbatim), matching `RUBRIC`/`DESIGN-REVIEW`'s own
+  "scalar prefix, free text in the tail" convention for the same reason;
+  adds a required `--model` flag, a mechanical TOCTOU
+  re-check, a hash-freshness check, and a duplicate-hash refusal on top of
+  `design-review-record`'s reused six-key ladder); `design-rollup-status
+  <epic-id>` (READ-ONLY `{applicable, mechanical_ok, rollup_recorded,
+  rollup_coherent, rollup_hash_fresh}`, the accessor `epic-gate.sh`
+  shells out to). Two enforcement surfaces: `epic-gate.sh cmd_check`'s
+  "all children approved" branch now additionally checks this axis
+  (advisory — changes only the Stop hook's `EPIC_DEFER_NOTE`), and
+  `qa-gate.sh approve` on the governing task gains **`DESIGN-ROLLUP-
+  REFUSAL`, exit 5 for all three shapes** — `error_key=design_rollup_
+  missing` (never recorded), `design_rollup_verdict_stale` (recorded but
+  superseded by a later amendment), or `design_rollup_incoherent`
+  (recorded, current, but not coherent) — three distinct keys since QA
+  round 1 (R1-F10; originally one shared key, distinguishable only by
+  parsing the observations string), independent of the mechanical axis's
+  own exit 2 in
+  both directions: a coherent rollup record can never paper over a broken
+  mechanical check, and a reopened mechanical issue still refuses at exit 2
+  even with a coherent rollup already on file. No bypass flag on either
+  axis. TWO REAL DEFECTS found by driving the shipped code, both fixed
+  structurally: (1) a genuine unbounded recursion — `epic-gate.sh check` →
+  `design-rollup-status` → `compute_design_coherence` → `epic-gate.sh
+  check` again — measured live as a runaway subprocess chain, fixed with a
+  reentrancy guard (`QA_GATE_SKIP_EPIC_GATE_REENTRY=1`) that switches
+  child-enumeration to a direct `bd` query for that one call, plus a
+  complementary efficiency guard (`EPIC_GATE_SKIP_ROLLUP_CHECK=1`) so the
+  fix is not merely bounded but not wastefully doubling every ordinary
+  `design-coherence` call's subprocess cost; (2) a `set -e` interaction —
+  this file runs under `set -e` throughout, and a bare (non-`||`-guarded)
+  call to a function that can legitimately return non-zero trips `errexit`
+  and terminates the whole process before the caller's own error-envelope
+  construction ever runs, at all five of this axis's internal call sites,
+  fixed with the SAME `fn "$tid" || rc=$?` guard the original `compute_
+  design_coherence`/`cmd_design_coherence` pair already used correctly —
+  caught only by the formal L1 suite's explicit `error_key` assertions,
+  not by the looser smoke-testing that preceded it. Tests:
+  `design-rollup.test.sh` (new) covers packet assembly's refusals and
+  restore control, the full record validation ladder and exact grammar on
+  both a genuine `coherent` and a genuine `incoherent` verdict, all three
+  `design-rollup-status` states, `epic-gate.sh check`'s new branch with a
+  negative control proving a non-design epic's own text is byte-for-byte
+  unchanged, the reentrancy fix's termination bounded by a wall-clock
+  assertion rather than assumed, `approve`'s exit-5 refusal in the
+  never-recorded and stale shapes plus its success path, the mechanical
+  axis's independence proven by reopening an issue AFTER a coherent
+  rollup was recorded, and a METatest — the coordinator's own explicit
+  instruction — stripping only the hash-freshness comparison to prove a
+  genuinely `coherent` verdict bound to a superseded hash must still
+  refuse, because this axis's trustworthiness was never the verdict's
+  semantic content but the binding to current state.
+
+  **QA ROUND 1 (fkm.8): 1 CRITICAL + 3 HIGH fixed, plus three false
+  justifications corrected.** R1-F1 (CRITICAL) — `reviewer_identity` was
+  checked only for emptiness before being interpolated raw into the
+  `DESIGN-ROLLUP v1` machine prefix; PROVEN forgeable against the shipped
+  parser (a crafted identity mimicking a second record's own grammar made
+  the reader capture a forged `verdict=coherent`/`design_hash`, clearing
+  the refusal on a genuinely incoherent verdict — the `bjx` class). Fixed
+  with `assert_record_scalar`, the same guard `design-review-record`
+  already applies to `reviewer`. R1-F2 (HIGH) — the spec measured at
+  806.83s/823.17s standalone, above the 800s split trigger against a 900s
+  cap; split into `design-rollup-incoherent.test.sh` (the self-contained
+  incoherent-verdict/deadlock-fix scenario). R1-F3 (HIGH) — the packet's
+  union diff (`git diff [--stat] "$base...HEAD"`) was simultaneously too
+  wide (the whole branch since diverging from main — MEASURED at 9.97x
+  the packet's own cap for a D6-scoped change alone) and blind to the
+  actual uncommitted change set this workflow gates (a merge-base
+  comparison only ever sees committed history); now `HEAD` vs the working
+  tree, with untracked files rendered via `git diff --no-index`. R1-F4
+  (HIGH, split ruling) — the duplicate-hash check admitted at most one
+  verdict per `design_hash` ever, so an incoherent verdict locked the
+  governing task with no escape short of a design-document edit; the
+  SUSTAINED half now allows a superseding verdict at the same hash when
+  the PRIOR one was incoherent (a coherent verdict remains a terminus,
+  unchanged); the NOT-SUSTAINED half (binding the record to
+  `change_set_hash` too) was declined — plan:721 specifies no such field,
+  and the resulting staleness gap is an accepted residual, linked to
+  `r7ed`. Three false justifications corrected (same family as D5's own
+  round-7 block): `gaps=<n>` vs the plan's own `gaps=[…]` was justified
+  with "no record in this codebase stores an array verbatim", which
+  `REVIEW-ARTIFACT`'s own `findings=[R8-F1:medium,...]` directly
+  contradicts — corrected to the real reason (no gap-id space for
+  free-text `required_fixes` elements) and recorded as a deviation on
+  `uwzv`; a comment claiming "zero `issue_type=epic` rows exist" was
+  measured false (23 exist, 0 open) — the predicate itself was kept (it
+  is the better match for the actual question) but the justification
+  corrected; and an exit-5-belongs-to-a-different-command argument was
+  self-contradicted by this same axis's own new exit-5 usage in the same
+  function. Also: the three exit-5 `approve` refusal shapes gained
+  distinct `error_key`s (previously one shared key). `design-reviewer.md`
+  gains a "Second
+  invocation" section (prose only — no new spawn instruction, verified
+  against `no-nested-spawn-instructions.test.sh`'s own 16 assertions) and
+  `orchestrator.md` gains "5f. Coherence-rollup relay".
+
 - **`approve` refuses when a review artifact exists on disk with no
   corresponding record, and a non-governing path to reconcile historic ones
   without disturbing which round governs** (`k6re`, the headline defect: "a

@@ -2125,6 +2125,425 @@ METatest, cap_terminated with its own METatest, and the bjx scalar-class
 discipline) and `.claude/tests/component/specs/verify-design-discipline.sh`
 (the Stop-hook re-check).
 
+### The coherence rollup (`COHERENCE-ROLLUP-REFUSAL`)
+
+v5 Phase D6 (`claude-workflow-plugin-fkm.8`) adds the epic-level check that
+closes the loop D2/D5 open per task: DESIGN-SATISFIED-REFUSAL (above) asks
+whether *this task's* design was reviewed; DESIGN-ALIGNMENT-REFUSAL (D5,
+`fkm.7`, undocumented here — a known gap this phase does not attempt to
+close) asks whether *one unit's* implementation matches its own declared
+scope. Neither ever asks whether **the whole decomposition still adds up**:
+every declared unit implemented, every criterion covered, nothing built
+outside what was declared anywhere. That is `qa-gate.sh design-coherence
+<task-id>` — "in the manner of the unresolved-findings count"
+(`review-check.sh gate`'s own `OPEN_COUNT`): a rollup over every unit the
+bound artifact declares, not a fresh scan (`compute_design_alignment` is
+reused per unit, in a `mode=rollup` that skips its files leg — see that
+function's own header for why re-running a live-tracker comparison against
+a *historical* unit is unsound, not merely redundant).
+
+**Applicability is self-determined, like DESIGN-ALIGNMENT-REFUSAL, never a
+caller's bypass flag.** `<task-id>` must be a satisfied design task **itself**
+(`compute_design_satisfied "$tid"` called directly — the same convention
+`design-status` and `epic-gate.sh plan-batches` already use), and its
+artifact must declare at least one unit. Both are the ordinary state for the
+task that owns a decomposed design (typically the epic), and neither holds
+for a v5 task-per-unit **child** — which already needs `--no-design` for the
+unrelated reason DESIGN-SATISFIED-REFUSAL's own section states. Applicable
+and not-yet-coherent both report `ok:true`/`ok:false` at exit 0 vs 4 from the
+standalone subcommand; wired into `approve` both collapse to **exit 2**,
+matching this axis's own established convention (error_key is what
+distinguishes an infra failure from a substantive one, not the exit code).
+
+**A third, easy-to-miss applicability gate: at least one bd parent-child
+dependent must actually exist.** A satisfied design task can legitimately
+declare units and never be decomposed via D4 at all — the common case is a
+single small task that is its own design holder, with no separate
+per-unit children ever created (`compute_design_alignment` itself is only
+ever asked of a *bound* unit's own task; nothing forces that binding to
+happen). `compute_design_coherence` enumerates children via `epic-gate.sh
+check "$tid"` before resolving any unit's binding, and when the count is
+zero it reports **not applicable** (`ok:true`, not a defect) rather than
+"every declared unit is unresolved" — the coherence question is about
+whether a decomposition that happened still adds up, not about penalizing a
+design that was never decomposed in the first place. Getting this wrong
+regressed a pre-existing fixture directly: several `design-review-record`
+cases use one task as both the design holder and the sole unit of work, and
+before this check existed every one of them tripped `coherence_issues_open`
+on first approval, unrelated to whatever the test was actually exercising.
+The distinction that matters is "never decomposed" (not applicable) vs.
+"decomposed but a specific unit isn't bound yet" (applicable, and an
+`incomplete` issue against that unit) — the latter is exercised in
+`design-coherence.test.sh` by creating real bd children first and leaving
+one deliberately unbound, precisely so it cannot be confused with the
+zero-children case.
+
+**Four kinds of issue, aggregated into one count and one array** — plan
+176's own three conditions plus the tracker/diff trap (below), never a
+single boolean:
+
+- `incomplete` — a declared unit has no bound task at all (its own criteria
+  named as uncovered by construction), or its bound task's own
+  `criteria_incomplete` (or any other LEG-3 failure) means some criterion
+  lacks a corroborated passing test.
+- `undeclared_scope` — a resolved unit's *persisted completion contract*
+  claims a file no unit declares anywhere. This is the union check
+  `design-conform`'s own per-task, per-own-unit-only comparison is never
+  asked; it reads from the same digest-verified payload LEG 3 already
+  establishes how to read, not from a second, live-tracker comparison.
+- `hash_divergence` — a unit's own `DESIGN-UNIT` binding hash no longer
+  equals the artifact's current governing hash (an amendment landed and
+  this unit was never re-bound), or its spec injection is stale
+  (`spec_injection_stale`, LEG 2) — "the hash the unit was **built
+  against**" no longer matching, plan 174's own words. **This is not
+  `change_set_hash`** — that hash is a sha256 over the sorted,
+  denylist-filtered *path list*, so re-editing the same files never moves
+  it; using it here would produce a check that passes forever on a stable
+  file set. `design_hash` (the artifact's own content hash) is the only
+  correct subject.
+- `tracker_diff_mismatch` — plan 177's own trap, and the one most likely to
+  be weakened by a future edit, so its shape is spelled out fully: the
+  rollup's own file set (every unit's declared scope, union every resolved
+  unit's claimed-touched files) is compared against the **live,
+  denylist-filtered change-set tracker** for `<task-id>`
+  (`impact-report.sh --relativized-changed-files` — the exact same reader
+  `design-conform`'s own "actual" side uses). Two directions, computed and
+  reported **separately**, never collapsed into one boolean: *diff minus
+  rollup* (a file is genuinely, freshly changed and nothing this rollup
+  examined accounts for it) **gates** — the 94d-shaped under-coverage case
+  this condition exists for; *rollup minus diff* (declared/claimed paths
+  absent from today's tiny residual diff) is normal at ordinary rollup
+  time — most of a design's history is not in today's tracker — and is
+  reported in `observations` but does not gate. Before comparing, the
+  governing task's own design artifact and every resolved unit's own
+  review artifact(s) are excluded from the live-diff side
+  (`GATE-EVIDENCE-EXCLUSION`, `qa-gate.sh`) — the same principle
+  `design-conform`'s own `REVIEW-ARTIFACT-EXCLUSION` established one task
+  at a time, generalised here across every resolved child: gate-written
+  evidence is not implementation work, and nothing should have to declare
+  it to pass. Without this exclusion an otherwise-coherent epic fails this
+  condition on every ordinary run, on its own design doc and its
+  children's own review artifacts.
+
+**Clearing is two-way, both recorded, never silent — no bypass flag exists
+on this axis.** Fix the work (add the missing test, drop or declare a
+scope-drift file), or amend the artifact through the D2 review loop and
+re-bind the affected unit(s) (`qa-gate.sh design-unit-bind --rebind`).
+"Silent approval-time editing of the design is not available" (plan 175) is
+enforced by construction: `design-coherence` takes exactly one argument.
+
+Once coherent, the approval record carries a sixth machine token,
+`design_artifact=<ref>@<hash>` — last among the machine tokens, immediately
+before `at <ts>` — present **only** when the rollup found `<task-id>`
+applicable and coherent:
+
+```
+QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
+  design_hash=<h> artifact_hash=<h> design_verdict_hash=<h>
+  design_artifact=<ref>@<h> at <ts>: <summary>
+```
+
+`<ref>` is `<task-id>` itself and `<hash>` is the same confirmed-fresh
+`design_hash` `design_verdict_hash=` already names — the two tokens answer
+different questions (was this design ever reviewed, vs. was the whole
+decomposition found coherent) but can never disagree about which bytes they
+describe.
+
+Pinned by `.claude/scripts/tests/design-coherence.test.sh`: the two
+not-applicable states, all five named issue kinds each with its own restore
+control (including `tracker_diff_mismatch` proven **distinct** from
+`undeclared_scope`, not merely a renamed duplicate), the full success path,
+the `approve` wiring end to end, and a METatest stripping only the
+issue-count translation step (never the individual condition checks) to
+confirm a real, present defect clears when it is stubbed to zero.
+
+### The coherence rollup's judgement half (`DESIGN-ROLLUP-REFUSAL`)
+
+v5 D6's second half (`claude-workflow-plugin-fkm.8`, added after the
+operator's ruling that `docs/plans/v5-design-phase-plan.md` governs where
+it disagrees with the directive this phase was originally briefed from —
+see the FINDING comment on `claude-workflow-plugin-fkm` for the full
+evidence trail). The mechanical rollup above answers "does every declared
+unit map to a complete, aligned, correctly-scoped task" — a question a
+deterministic check can fully answer. It cannot answer three others
+plan:718-737 names explicitly: DS1 (are the acceptance criteria, now that
+the system is actually built, still genuinely falsifiable), DS2 (is the
+decomposition, now that it is implemented, still complete and disjoint),
+and DS8 (does the FINISHED system contradict `LESSONS.md`, and is this
+verdict being waved through under iteration-cap pressure). Those three go
+to a SECOND, cheaper `design-reviewer` spawn — the same agent D2 already
+uses for the pre-implementation review, spawned a second time against a
+different packet, root-relayed exactly like the rubric grader (subagents
+cannot spawn subagents) — documented as `design-reviewer.md`'s own "Second
+invocation — the coherence rollup" section and `orchestrator.md`'s "5f.
+Coherence-rollup relay". **No change to the agent's output contract**: it
+still returns the same six keys (`verdict`, `criterion_results`,
+`required_fixes`, `iteration`, `rubric_version`, `reviewer_identity`) the
+first invocation already does; only the packet and the scoping instruction
+in the spawn prompt differ.
+
+**Three new subcommands**, deliberately split (packet assembly, verdict
+recording, and a read-only status accessor are three different
+operations with three different callers):
+
+```
+qa-gate.sh design-rollup-packet <epic-id>
+qa-gate.sh design-rollup <epic-id> --design-hash <sha256> --model <m> [--file <path>]
+qa-gate.sh design-rollup-status <epic-id>
+```
+
+`design-rollup-packet` assembles the FOUR items plan:718-737 names — the
+design artifact, every resolved unit's own F7 completion contract, the
+union diff (`git diff --stat` always, full content under a 100,000-byte
+cap, a named `DEGRADED:` note when git or HEAD is unavailable — the SAME
+"disclose, never silently grade around it" convention the first
+invocation's own missing-packet-item rule already states), and every
+`DESIGN-CONFLICT`/`DESIGN-REVIEW` record on the task — and persists it to
+`.claude/.qa-tracking/design-rollup-packet-<id>.md`, a plain file the
+orchestrator `Read`s directly and pastes into the spawn prompt (the same
+convention `impact-report.sh`'s own JSON artifact already uses, not a
+`bd_doc`). It **refuses** (`design_rollup_mechanical_prerequisite`, exit 2)
+unless the mechanical rollup already reports `ok:true` — the judgement half
+is "cheaper" precisely because it never re-derives what the mechanical half
+already discharged, so assembling a packet before that axis is settled
+would spend a spawn on data about to change.
+
+**The union diff is `HEAD` vs the WORKING TREE** (QA round 1, R1-F3, HIGH,
+fixed — it was originally `git diff [--stat] "$base...HEAD"` against a
+locally-resolved branch merge-base). MEASURED as wrong in two directions
+at once, not assumed: on this repo, `main...HEAD` reported 14,532
+insertions / 997,254 bytes for a D6-scoped change alone — 9.97x the
+packet's own cap, silently degrading to `--stat` only — while the ACTUAL
+uncommitted change set under review was 2,189 insertions / 150,097 bytes,
+invisible to a merge-base comparison entirely, because this workflow gates
+UNCOMMITTED working-tree changes and `base...HEAD` only ever sees committed
+history. `HEAD` needs no branch-name resolution and cannot be "unavailable"
+the way a remote-tracking ref can; untracked (brand-new) files — which
+`git diff` never shows regardless of base — are rendered via `git diff
+--no-index -- /dev/null <path>` per file, without touching the index.
+
+`design-rollup` records the reviewer's verdict as:
+
+```
+DESIGN-ROLLUP v1 reviewer=<id> model=<m> design_hash=<h> units=<n>/<n>
+  verdict=<coherent|incoherent> gaps=<n> at <ts>: <summary>
+```
+
+translating the agent's own `satisfied`/`needs_revision`/`required_fixes`
+vocabulary to this record's `coherent`/`incoherent`/`gaps` on the recording
+side only — `gaps=<n>` is a **count**, not the array plan:718-737's own
+illustrative `gaps=[…]` shows: a genuine D6 deviation from the governing
+plan, recorded on `claude-workflow-plugin-uwzv` (QA round 1, R1-F6). The
+REAL reason (an earlier version of this doc, like the shipped code's own
+comment, gave a FALSE one — "no record in this codebase stores an array
+verbatim" — which `REVIEW-ARTIFACT`'s own `findings=[R8-F1:medium,...]`
+directly contradicts): `required_fixes` elements are free-text sentences
+that can contain spaces and commas, and carry no gap-id space analogous to
+`REVIEW-ARTIFACT`'s own `R<n>-F<n>` ids, so a verbatim array of them
+cannot survive this grammar's single-line, space/comma-delimited machine
+prefix — the same "prefix stays scalar, free text stays in the tail"
+convention `grade-record`'s own `RUBRIC` comment and `design-review-
+record`'s own `DESIGN-REVIEW` comment already use for `required_fixes`,
+for the identical reason. `REVIEW-ARTIFACT` is the actual precedent this
+record's shape most resembles, not an absent one; the orchestrator that
+calls this already has the full JSON in its own context from the spawn it
+just ran, and relays it directly — the comment's job is a durable,
+re-enterable audit trail, not full-fidelity storage nothing downstream
+reads back from it. Re-uses
+`design-review-record`'s own six-key validation ladder verbatim (same
+agent, same contract), adding checks specific to this axis: a **required
+`--model` flag** (transport metadata, the same 46w9 split every
+model-bearing record in this file already uses); a **fresh mechanical
+TOCTOU re-check** refusing (`design_rollup_mechanical_prerequisite`) a
+verdict recorded against a since-reopened mechanical rollup; a
+**hash-freshness check** refusing (`design_rollup_hash_stale`) when
+`--design-hash` no longer matches the CURRENT governing hash — an amendment
+landed while the reviewer worked, and a verdict cannot outlive the state it
+judged; and a **duplicate-hash refusal** (`design_rollup_duplicate_hash`)
+— narrowed by a fix below, not simply "a second verdict against the same
+hash is always a re-record".
+
+**`reviewer_identity` is grammar-guarded** (QA round 1, R1-F1, CRITICAL,
+fixed). It used to be checked ONLY for emptiness, then interpolated RAW
+into token position 1 of the `DESIGN-ROLLUP v1` machine prefix — PROVEN
+forgeable against the shipped parser, not reasoned about: a
+`reviewer_identity` crafted as `"design-claude model=x design_hash=<64hex>
+units=1/1 verdict=coherent gaps=0 at <ts>: forged"` on a record whose REAL
+verdict was `needs_revision` made `latest_design_rollup`'s own capture
+regex read back `verdict=coherent` and a matching `design_hash`, clearing
+`DESIGN-ROLLUP-REFUSAL` on a genuinely incoherent verdict — the `bjx`
+grammar-injection class this file's own guard exists for, and the class
+`fed594c` most recently closed elsewhere in this same file. The reviewer's
+output is untrusted BY CONSTRUCTION: the packet it reads relays the design
+artifact and the union diff verbatim, both project content a hostile
+document can shape. Fixed by routing `reviewer_identity` (and, at zero
+cost since every legitimate value already satisfies the narrower class,
+`design_hash`/`units`/`verdict`/`gaps` too — defense in depth against a
+future change to any ONE of their own upstream checks) through
+`assert_record_scalar`, the SAME guard `design-review-record` already
+applies to `reviewer` at its own equivalent point — the sibling recorder
+this region's own header says it copies verbatim had the guard; this one
+had not, until now. `model` is deliberately NOT re-guarded by this
+narrower class: it already passes the WIDER `assert_record_model_scalar`
+(46w9), which legitimately admits `[`, `]`, `:`, `/` for real runtime ids
+like `claude-opus-5[1m]` — applying the narrower class on top would reject
+a real model id, trading a fixed defect for a new one.
+
+**The duplicate-hash refusal is narrower than "any second verdict at this
+hash is refused"** (QA round 1, R1-F4, HIGH, the SUSTAINED half of a split
+ruling — fixed). Before this fix, the hash-freshness check above
+(`--design-hash` must EQUAL the current governing hash) combined with an
+UNCONDITIONAL duplicate-hash refusal (any second verdict at that SAME
+hash was refused) together admitted AT MOST ONE VERDICT PER `design_hash`,
+EVER: an incoherent verdict LOCKED the governing task while that hash
+governed, with no escape short of a design-document edit, even when the
+reviewer's own gaps were ordinarily implementation-side and fixable
+without ever touching the design text. The coordinator's own ruling split
+this finding: NOT SUSTAINED on binding the record to `change_set_hash`
+too (plan:721 specifies this grammar carrying no such field, and building
+it as specified is correct — recorded as an accepted residual instead: a
+coherent verdict does not go stale as the change set moves, so it can pass
+`approve` at arbitrarily many LATER change sets, which is a gap shared
+with D5's own green-check corroboration, linked as one family on
+`claude-workflow-plugin-r7ed`); SUSTAINED on the deadlock itself, fixed
+WITHOUT any new persisted field: the duplicate-hash refusal now fires only
+when the PRIOR record at this same hash was itself `coherent` — a coherent
+verdict remains a terminus at its own `design_hash` (re-recording over an
+already-passing judgement at unchanged design content is a genuine
+duplicate), but an INCOHERENT prior verdict is no longer one, since that is
+exactly the state a re-spawned reviewer judging updated evidence (fresh F7
+contracts, a fresh union diff) is expected to supersede.
+
+`design-rollup-status` is READ-ONLY (`{applicable, mechanical_ok,
+rollup_recorded, rollup_coherent, rollup_hash_fresh}`) — the accessor
+`epic-gate.sh cmd_check` shells out to, so `qa-gate.sh` remains the ONE
+authoritative reader of this axis (exactly as for design-satisfied/
+design-unit-align/design-coherence). It never enforces anything itself.
+
+**Two enforcement surfaces, plan:718-737's own words.** `epic-gate.sh
+cmd_check`'s existing "all children approved → pass" branch now ALSO
+checks this axis, downgrading to `block` (with a named reason) when the
+epic's own design axis is applicable but not both mechanically clean and
+judged coherent and current — this is **advisory only**: it changes what a
+Stop hook's `EPIC_DEFER_NOTE` prints, never any individual task's own
+`approve`. The HARD gate is `qa-gate.sh approve` on the governing task
+itself: **`DESIGN-ROLLUP-REFUSAL`**, exit 5 for all three shapes — but,
+since QA round 1 (R1-F10, "also fix"), THREE DISTINCT `error_key`s, not
+one: `design_rollup_missing` (never recorded), `design_rollup_verdict_
+stale` (recorded, but against a design_hash an amendment has since
+superseded — distinct from the record-time `design_rollup_hash_stale`
+above, which is a different check at a different moment), and
+`design_rollup_incoherent` (recorded, current, but the reviewer's own
+verdict was `needs_revision`). A caller no longer has to parse the
+observations string to tell the three apart. Reached only once
+`COHERENCE-ROLLUP-REFUSAL` (the mechanical axis, exit 2) has already NOT
+fired — the two axes are fully independent: a genuinely coherent
+`DESIGN-ROLLUP v1` record can never make the mechanical check pass if the
+mechanics are actually broken, and reopening a mechanical issue after a
+coherent rollup was already recorded still refuses at exit 2, never
+silently waved through because a "coherent" record exists on file. No
+bypass flag exists on either axis. (Exit 2 is not EXCLUSIVE to the
+mechanical axis, contrary to an earlier draft of this region's own header:
+`design_rollup_history_unreadable`, an infra-read failure inside the
+judgement block itself, also exits 2 — the boundary the two axes actually
+keep is "mechanical vs. judged", not "exit 2 vs. exit 5".)
+
+**Split** (QA round 1, R1-F2, HIGH): the incoherent-verdict scenario and
+the duplicate-hash-deadlock fix above moved to their own file,
+`design-rollup-incoherent.test.sh` — self-contained on its own epic.
+Pre-split, both readings (806.83s/823.17s) were above the 800s split
+trigger `run-tests.sh` already names, against `SPEC_TIMEOUT_S=900`
+(1.093x headroom, 76.83s margin). POST-split (QA round 2, R2-F4 — the
+figure this claim was missing): parent 709.07s (73/73), child 221.22s
+(13/13), headroom 900/709.07 = **1.269x**, margin **190.93s** — measured
+under concurrent load (four competing `run-tests.sh --filter` processes),
+so these are upper bounds. The split costs total tier time even as it
+buys per-spec headroom: 709.07 + 221.22 = 930.29s versus 823.17s
+(+107.12s, the child's own duplicated fixture bootstrap) — the right
+trade against a per-spec cap.
+
+**Five real defects found by driving the shipped code, not by reading it,
+all fixed structurally rather than patched at the symptom** (the first
+three are QA round 1 findings; the last two predate that round):
+
+1. **A forgeable `reviewer_identity`** (R1-F1, CRITICAL) — see the record
+   grammar section above for the full mechanism and fix.
+2. **A union diff that was both too wide and blind to the change under
+   review** (R1-F3, HIGH) — see the packet section above.
+3. **A duplicate-hash check that admitted at most one verdict per
+   design_hash, ever** (R1-F4, HIGH, the sustained half of a split
+   ruling) — see the record grammar section above.
+4. **A genuine unbounded recursion**, MEASURED live as a runaway
+   subprocess chain, not reasoned about in the abstract: `epic-gate.sh
+   check` shells out to `qa-gate.sh design-rollup-status` (the new
+   enforcement surface above), which calls `compute_design_coherence`,
+   which — for its own, PRE-EXISTING children-enumeration step — shells
+   back out to `epic-gate.sh check`, closing the cycle. Fixed with a
+   reentrancy guard (`QA_GATE_SKIP_EPIC_GATE_REENTRY=1`, set only by
+   `epic-gate.sh`'s own new call site) that switches `compute_design_
+   coherence`'s children read to a direct, non-recursive `bd show
+   --include-dependents` query instead of the ordinary shell-out —
+   changing nothing for any OTHER caller of `design-coherence`, including
+   this file's own test suite, which never sets it. A SECOND,
+   complementary guard (`EPIC_GATE_SKIP_ROLLUP_CHECK=1`, set on that same
+   call site) additionally skips `epic-gate.sh`'s own rollup side-check
+   entirely for that ONE call, closing a real efficiency gap the
+   reentrancy guard alone left open: without it, every `design-coherence`/
+   `design-rollup`/`approve` call on a task with an applicable design axis
+   would ALSO trigger a full, wasted rollup-status round-trip through
+   `epic-gate.sh` for a result nothing downstream reads.
+5. **A `set -e` interaction**: this file runs under `set -e` throughout,
+   and a bare `compute_design_coherence "$tid"` call — not part of an
+   `if`/`while`/`&&`/`||` list — trips `errexit` on any non-zero return
+   (the ordinary "not applicable" or "mechanical issues open" cases),
+   terminating the WHOLE PROCESS before the calling function's own `local
+   rc=$?` line, its own error-envelope construction, or its own `exit 2`
+   ever run. Every one of this axis's five internal call sites now uses
+   the established `fn "$tid" || rc=$?` guard the ORIGINAL `compute_design_
+   coherence`/`cmd_design_coherence` pair already used correctly. Caught
+   by this axis's own L1 suite (`design-rollup.test.sh`), not by manual
+   review or by the ad hoc smoke-testing that preceded it — the smoke
+   test's own looser assertions (an empty `packet_path` on refusal) could
+   not distinguish "a well-formed refusal envelope" from "no output at all
+   because the process already exited", which is exactly what the formal
+   suite's explicit `error_key` assertions caught.
+
+Pinned by `.claude/scripts/tests/design-rollup.test.sh`: packet assembly's
+own not-applicable and mechanical-prerequisite refusals with a restore
+control; a NON-EMPTY union diff observed directly (R1-F3's own required
+leg — a fixture where the diff is empty by construction could never catch
+that class): an uncommitted modification to a tracked file, asserted
+present in the packet's own diff section verbatim; a forged
+`reviewer_identity` refused (`reviewer_invalid_chars`) with a non-vacuity
+check that no record was actually written, and a restore control proving
+a legitimate one still records (R1-F1); the record's full validation
+ladder (model required, independence, hash-staleness, duplicate-hash) and
+its exact grammar on a genuine `coherent` and a genuine `incoherent`
+verdict; `design-rollup-status` reflecting all three states (never
+recorded, stale, current); `epic-gate.sh check`'s new block branch AND a
+negative control proving a non-design epic's own `pass` text is
+byte-for-byte unchanged; the reentrancy fix's own termination bounded
+directly (not assumed) by a wall-clock timing assertion; `approve`'s
+exit-5 refusal (never-recorded and stale-hash shapes) plus its success
+path; the mechanical axis (exit 2) proven independent of a recorded
+coherent rollup by deliberately reopening a mechanical issue AFTER
+recording one; and a METatest stripping only `DESIGN-ROLLUP-REFUSAL`'s own
+hash-freshness comparison — the coordinator's own explicit instruction —
+proving that a **genuinely** `coherent` verdict (not a forged one) still
+must not clear the gate once it is bound to a superseded hash, because the
+axis's trustworthiness was never the verdict's semantic content; it is the
+binding to current state.
+
+Pinned by `.claude/scripts/tests/design-rollup-incoherent.test.sh` (split
+off the former file, R1-F2): a genuinely incoherent verdict records
+cleanly and `approve` still refuses it (`design_rollup_incoherent`); and
+the duplicate-hash-deadlock fix proven as three states in sequence —
+incoherent → incoherent (still allowed), incoherent → coherent (the actual
+escape the fix exists for, no artifact amendment needed), then
+coherent → anything at that same hash (refused again, `design_rollup_
+duplicate_hash` — proving the fix narrowed the check rather than removing
+it).
+
 ### A design cannot be recorded without having been grilled first (`GRILLING-PRECONDITION`)
 
 v5 Phase D3 (`claude-workflow-plugin-fkm.5`) adds the design phase's own

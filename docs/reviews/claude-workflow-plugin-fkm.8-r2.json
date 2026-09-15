@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.8",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "4b0b2b0d16b7a0547b2d0b7d7e3b2bae3fd870dd8b3f8bce50895bd3412fb3fa",
+  "risk_threshold": "high",
+  "stop_condition": "Every repair claimed for R1-F1/F2/F3/F4 is verified by driving the shipped code rather than reading the claim, the split actually buys measured wall-clock headroom, the six disclosed-unfixed findings genuinely fail closed, and no critical/high finding remains in the record-writing, record-reading, approve-refusal or operator-instruction paths of either rollup axis.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/agents/orchestrator.md:969 (the `incoherent` branch of section 5f Step D) and :985 (the `design_rollup_duplicate_hash` failure-mode bullet)",
+      "evidence": "The R1-F4 deadlock fix is real in the code and verified below, but orchestrator.md — the document an orchestrator actually executes — still describes the PRE-FIX workflow in the two places that depend on it. :969 still reads: 'The designer amends the artifact in place (a fresh Revision log row, a moved design_hash) ... Then return to Step B at iteration + 1 against the amended hash', i.e. an artifact amendment is presented as the only route out of an incoherent verdict. :985 still reads: 'design-rollup refuses design_rollup_duplicate_hash -> you already recorded a verdict against this exact design_hash; either the artifact genuinely needs a fresh amendment first, or you are re-running Step D against stale state', i.e. the unconditional rule. `grep -n 'prior.*incoherent|superseding|was itself .coherent|narrowed' .claude/agents/orchestrator.md` returns NOTHING — the file carries zero mention of the narrowing. This is not a forgotten file: `ls -lT` shows orchestrator.md was modified at 22:11 local, AFTER qa-gate.sh (21:56), HOOKS.md (21:49), CHANGELOG.md (21:51) and both spec files (21:50), and :968 was updated in that edit to name the three new error keys 'since QA round 1 on fkm.8'. The F4 half was missed inside an edit that touched the adjacent line. Every other surface IS correct: qa-gate.sh's own region comment, docs/HOOKS.md:2392-2409 (a full and accurate account including the residual), CHANGELOG.md:211, and design-rollup-incoherent.test.sh's I.7/I.8/I.9 pairing.",
+      "description": "The coordinator's ruling was that the deadlock half of R1-F4 is SUSTAINED and fixed. The mechanism is fixed; the instruction layer still routes around it. An orchestrator following 5f verbatim on an `incoherent` verdict re-spawns the designer and forces a Revision-log-row-only edit to move the design_hash — the hash-moving no-op artifact edit this arc has refused elsewhere — when the fix now makes that unnecessary for the ordinary implementation-side gap. The orchestrator has no reason to read HOOKS.md mid-relay, and 5f actively tells it the escape does not exist, so the escape will not be discovered by following the documented path. In a repo whose shipped product IS its agent prompts (CLAUDE.md routes prompt edits to .claude/agents/<role>.md), a fix delivered to the code and not to the prompt has not been delivered. Nothing unsafe ships and nothing is wrongly approved — this fails safe, at the cost of a wasted designer round and a spurious artifact revision per incoherent verdict. FIX (two sentences, same change set): in the :969 `incoherent` branch, state that when the reviewer's gaps are implementation-side the escape is to fix the implementation, re-assemble the packet at the SAME design_hash and record a superseding verdict — amendment is needed only when the ARTIFACT is what is wrong; and correct :985 to say the refusal fires only when the PRIOR record at that hash was itself coherent. ARBITRATION NOTE, stated plainly because I flagged R1-F4's own split correctly last round and the same reasoning applies: if the orchestrator rates this MEDIUM on the grounds that it is documentation-only and fails safe, that is a legitimate call and I would not sustain it on a re-read. I rate it HIGH because the thing I was asked to verify was the FIX, and end-to-end it is not yet one."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "low",
+      "location": ".claude/scripts/tests/run-tests.sh:917-921 (the design-rollup.test.sh ledger entry)",
+      "evidence": "The entry states the parent's 73 was reached 'MEASURED after both the split (-13, moved to design-rollup-incoherent.test.sh below) and this same round's own new coverage (+3 R1-F1, +3 R1-F3) net against the pre-round 74'. As stated that is 74 - 13 + 3 + 3 = 67, not 73. MEASURED: the child has 13 assertions in total (`grep -cE '^\\s*assert_(eq|ne|contains) '` = 13) but only SEVEN moved from the parent — the former Section I was I.1, I.2, I.3, I.4, I.5, I.6, I.6b; the other six (I.7, I.7b, I.8, I.8b, I.9, I.9b) are NEW this round, the F4 three-state pairing. The arithmetic that actually reaches the stated total is 74 - 7 + 3 + 3 = 73, and the parent's own run confirms 73 ('Total: 73  Passed: 73  Failed: 0').",
+      "description": "Every headline figure in the ledger is correct and independently verified (parent 73, child 13, EXPECTED_SPECS 69 against a real discovery glob of 69). Only the derivation is wrong, because '13' conflates 'the child's assertion count' with 'assertions removed from the parent'. Worth correcting in a file whose stated purpose is to be the audit ledger for exactly these numbers: -7 moved, +6 new in the child, +3 +3 new in the parent."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/design-rollup-incoherent.test.sh:27 (file header, WHAT THIS COVERS item 1)",
+      "evidence": "The header says 'approve still refuses (exit 5, design_rollup_missing) on a RECORDED, CURRENT, but incoherent rollup'. The shipped key for that arm is `design_rollup_incoherent` — one of the three distinct keys added in this same round — and the file's own I.6b asserts exactly that: 'error_key=design_rollup_incoherent (QA round 1, R1-F10: distinct from the never-recorded/stale shapes)', which passed in my run.",
+      "description": "The file's own header contradicts its own assertion, in the round that introduced the distinction. Carried over verbatim when Section I was moved out of the parent. Documentation-only; the assertion is right and the code is right."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/run-tests.sh:970-972 and docs/HOOKS.md:2452-2458",
+      "evidence": "Both say the split 'brought the parent file's own standalone runtime back under (comfortable) headroom on the 800s split trigger', and both cite ONLY pre-split figures ('measured pre-split at 806.83s/823.17s against SPEC_TIMEOUT_S=900'). No post-split measurement appears anywhere in the change set. I have now measured it, and the claim is TRUE: `/usr/bin/time -p bash .claude/scripts/tests/design-rollup.test.sh` -> 73/73, exit 0, real 709.07 (user 310.53, sys 312.49); `/usr/bin/time -p bash .claude/scripts/tests/design-rollup-incoherent.test.sh` -> 13/13, exit 0, real 221.22 (user 96.45, sys 96.69). Working tree over HEAD 6de6c9e, DEVELOPER_DIR=/Library/Developer/CommandLineTools, and — disclosed because it makes these UPPER bounds rather than best cases — measured against concurrent load (4 competing `run-tests.sh --filter` processes at start, load average 3.54 falling to ~2.5 by the end). Headroom is therefore 900/709.07 = 1.269x with 190.93s of margin, up from 1.093x and 76.83s.",
+      "description": "The fix works and the claim is correct; the number that proves it was never taken, in the very finding that was about asserting numbers without the command behind them. Two things to record while correcting it. (a) The cap header's 'Current worst observed ... 771.35s ... 900/771.35 = 1.167x' needs NO change and should be left alone: at 709.07s the parent is no longer the tier's tightest spec, so unrecorded-review-artifact.test.sh correctly reclaims that slot and the header is accurate again. (b) The split costs total tier time even as it buys per-spec headroom — 709.07 + 221.22 = 930.29s across the two files versus 823.17s for the one, so +107.12s, which is the price of the child's 365-line duplicated fixture bootstrap (the parent's own setup is 451 lines). That is the right trade against a PER-SPEC cap and should be stated rather than discovered later."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

@@ -2131,6 +2131,16 @@ IMPACT_REPORT_SCRIPT="$PROJECT_DIR/.claude/scripts/impact-report.sh"
 # impact-report.sh --hash-only). This script is reviewer-transport-agnostic.
 REVIEW_CHECK_SCRIPT="$PROJECT_DIR/.claude/scripts/review-check.sh"
 
+# v5 D6 (claude-workflow-plugin-fkm.8): compute_design_coherence's ONE
+# enumerator of "which tasks are this design's children" (epic-gate.sh
+# cmd_check's sub_tasks_of wrapper, already shipped and tested for exactly
+# this question -- see that command's own header). Not used before D6:
+# qa-gate.sh previously only ever appeared as a subprocess FROM epic-gate.sh,
+# never the reverse; this is the first call in the other direction, and it
+# terminates (cmd_check reads only `bd show`, never qa-gate.sh) so it adds no
+# cycle.
+EPIC_GATE_SCRIPT="$PROJECT_DIR/.claude/scripts/epic-gate.sh"
+
 # v5 D5 piece 3 (claude-workflow-plugin-fkm.7 D5): green-check's ONE source
 # of a test command. Detection only — this script never runs anything; see
 # green_check_run below for the (separate, minimal) execution step.
@@ -3263,10 +3273,14 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               is omitted and the envelope names why), AND (since rqer) the
               REVIEW-ARTIFACT file's own content hash under the same rule, AND
               (since v5 D2) the design VERDICT's design_hash once
-              design-satisfied verifies:
+              design-satisfied verifies, AND (since v5 D6) design_artifact=
+              <task-id>@<hash> once the coherence rollup finds <task-id>
+              applicable (itself a satisfied design task with declared
+              units) and coherent:
                 QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id>
                 worktree=<tok> design_hash=<h> artifact_hash=<h>
-                design_verdict_hash=<h> at <ts>: <summary>
+                design_verdict_hash=<h> design_artifact=<ref>@<h>
+                at <ts>: <summary>
               Every optional MACHINE field carries its own trailing space and
               defaults to empty. The bracketed suffixes are free-text audit
               prose appended AFTER the summary, all eight of them:
@@ -3797,6 +3811,74 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
               exists, exactly like design-conflict; wired into the main
               refusal ladder only, not TIER 0's idempotent recheck — see
               that block's own header for why).
+  design-coherence <task-id>
+              v5 D6 (fkm.8): the coherence ROLLUP (docs/plans/
+              v5-design-phase.md Phase D6) — NOT a fresh scan. Runs D5's
+              own compute_design_alignment across every unit the design
+              governing <task-id> declares and aggregates, in the manner of
+              review-check.sh gate's own unresolved-findings count.
+              <task-id> must be a satisfied design task ITSELF (not a
+              per-unit child bound to one — compute_design_satisfied is
+              called on <task-id> directly, the same convention design-
+              status/plan-batches use); `applicable:false` (exit 0) when it
+              is not, when its artifact declares zero units, or when it
+              declares units but has ZERO bd parent-child dependents at all
+              (never decomposed via D4 — a single small task can
+              legitimately be its own design holder with no separate
+              children, and the rollup does not yet apply to it).
+              Deterministic, no LLM, no bypass flag: the two remedies are
+              fix the work, or amend the artifact through D2 and re-bind.
+              Reports `coherence_count` open issues, each tagged with a
+              `kind`: incomplete (a criterion has no covering test, or a
+              whole unit has no bound task), undeclared_scope (a resolved
+              unit's completion contract touched a file no unit declares),
+              hash_divergence (a unit's own binding, or its spec injection,
+              no longer matches the artifact's current governing hash), or
+              tracker_diff_mismatch (the live change-set tracker names a
+              file this rollup's own file set does not account for — the
+              94d-shaped under-coverage case; see compute_design_coherence's
+              own header for the two-direction reasoning and which one
+              gates). Exit 2 when a source could not be read at all
+              (fail-closed — never reads as zero issues). Exit 4 when
+              coherence_count is nonzero — see COHERENCE-ROLLUP-REFUSAL in
+              cmd_approve for how this composes into an approval refusal.
+  design-rollup-packet <epic-id>
+              v5 D6 judgement half (fkm.8, coordinator ruling): assembles
+              the rollup packet (the artifact, every resolved unit's F7
+              contract, the union diff, every DESIGN-CONFLICT/DESIGN-
+              REVIEW record) for a second, cheaper design-reviewer spawn
+              scoped to DS1/DS2/DS8 — the per-unit criteria the mechanical
+              rollup above already discharged. REFUSES (exit 2,
+              design_rollup_mechanical_prerequisite) unless design-
+              coherence already reports ok:true; the judgement half is
+              cheaper precisely because the mechanics are already settled.
+              Persists to .claude/.qa-tracking/design-rollup-packet-
+              <id>.md and prints its path — the root orchestrator Reads it
+              and pastes it into the design-reviewer spawn prompt (see
+              orchestrator.md's coherence-rollup relay).
+  design-rollup <epic-id> --design-hash <sha256> --model <m> [--file <path>]
+              Records the design-reviewer's verdict against the rollup
+              packet as `DESIGN-ROLLUP v1 reviewer=<id> model=<m>
+              design_hash=<h> units=<n>/<n> verdict=<coherent|incoherent>
+              gaps=<n> at <ts>: <summary>`. Input is the SAME six-key JSON
+              design-review-record already validates (verdict, criterion_
+              results, required_fixes, iteration, rubric_version,
+              reviewer_identity — design-reviewer.md's output contract is
+              unchanged); this command TRANSLATES satisfied/needs_revision
+              to coherent/incoherent. Re-derives the mechanical rollup
+              fresh (TOCTOU) and refuses if it has reopened or if
+              --design-hash no longer matches the CURRENT governing hash
+              (design_rollup_hash_stale) — a verdict cannot outlive the
+              state it judged. Independence-checked against the recorded
+              designer identity, exactly like design-review-record.
+  design-rollup-status <epic-id>
+              READ-ONLY. {applicable, mechanical_ok, rollup_recorded,
+              rollup_coherent, rollup_hash_fresh}. This is what epic-
+              gate.sh cmd_check shells out to — qa-gate.sh stays the ONE
+              authoritative reader of this axis. Never the hard gate
+              itself (that is cmd_approve's own DESIGN-ROLLUP-REFUSAL,
+              exit 5, design_rollup_missing) — this accessor is advisory,
+              matching epic-gate.sh's own documented advisory scope.
   resolve-finding <tid> <finding-id> --fix '<ref>' --test '<ref>' '<summary>'
               Phase V2: mark a review finding resolved. The id must appear in
               the latest REVIEW-ARTIFACT comment; empty --fix/--test exit 1.
@@ -4883,8 +4965,17 @@ cmd_approve() {
                 exit 2
             fi
             if [ "$DESIGN_CONFLICT_OPEN" = "true" ]; then
+                # Same CONFLICT-SCOPE-DECISION and message-clarity fix as
+                # the main (non-idempotent) DESIGN-CONFLICT-REFUSAL call
+                # site further down this function — see that block's own
+                # comment for the full claude-workflow-plugin-2tv5 argument.
+                local idem_caller_binding_json="" idem_caller_unit_id=""
+                idem_caller_binding_json=$(latest_design_unit_binding "$tid" 2>/dev/null) || idem_caller_binding_json=""
+                idem_caller_unit_id=$(printf '%s' "$idem_caller_binding_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+                local idem_caller_unit_clause="$tid carries no DESIGN-UNIT binding of its own"
+                [ -n "$idem_caller_unit_id" ] && idem_caller_unit_clause="$tid is bound to unit $idem_caller_unit_id"
                 emit_error_json "approve" "$tid" "design_conflict_open" \
-                    "approve refused: qa-approved is already set and change_set_hash=$idem_ref matches a prior approval record, which would ordinarily make this call an idempotent no-op — but $DESIGN_CONFLICT_OPEN_OBS Affected unit(s): $DESIGN_CONFLICT_OPEN_UNITS. The files staying unchanged proves the REVIEWED CONTENT is the same; it does not prove the DESIGN is still undisputed — a design conflict is filed against a unit, never against a change-set hash, so it can post-date an approval that no file-level check will ever see move. The single legal clearing path is a superseding, independently-reviewed, SATISFIED DESIGN-REVIEW whose entry for the affected unit(s) changed — amend docs/specs/$tid.md and record a fresh verdict: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>. This cannot be waived by --no-design or any other flag" \
+                    "approve refused: qa-approved is already set and change_set_hash=$idem_ref matches a prior approval record, which would ordinarily make this call an idempotent no-op — but $DESIGN_CONFLICT_OPEN_OBS Affected unit(s) under open objection: $DESIGN_CONFLICT_OPEN_UNITS ($idem_caller_unit_clause -- this refusal is ARTIFACT-WIDE by design, claude-workflow-plugin-2tv5). The files staying unchanged proves the REVIEWED CONTENT is the same; it does not prove the DESIGN is still undisputed — a design conflict is filed against a unit, never against a change-set hash, so it can post-date an approval that no file-level check will ever see move. The single legal clearing path is a superseding, independently-reviewed, SATISFIED DESIGN-REVIEW whose entry for the affected unit(s) changed — amend docs/specs/$tid.md and record a fresh verdict: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>. This cannot be waived by --no-design or any other flag" \
                     "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
                 exit 2
             fi
@@ -6389,11 +6480,25 @@ cmd_approve() {
     # identical shape, "is a required, satisfied, unconflicted state
     # established", not REVIEW-SEPARATION's "no independent review /
     # reviewer also implementer / open findings / predicate unavailable").
-    # Exit 5 is a DIFFERENT command's convention entirely — design-unit-
-    # bind's write-unconfirmed refusals (fkm.6; grep '^\s*exit 5$' this file
-    # rather than trust a line number) — reusing it here would put two
-    # unrelated meanings on one exit code for no reason this block's own
-    # ordering rationale would recognise.
+    #
+    # EXIT 5 IS A DIFFERENT AXIS'S CONVENTION (QA round 1, R1-F10b, corrected:
+    # the prior version of this comment claimed exit 5 belonged to "a
+    # DIFFERENT COMMAND entirely" — design-unit-bind's write-unconfirmed
+    # refusals (fkm.6) — which was true when written but is now
+    # self-contradicted a few dozen lines below, WITHIN THIS SAME cmd_approve
+    # function: DESIGN-ROLLUP-REFUSAL (v5 D6, grep 'exit 5' below this block)
+    # ALSO uses exit 5, by explicit coordinator instruction, for a THIRD
+    # axis — "has a design-reviewer judged the whole system coherent" — that
+    # shares nothing with design_conflict_open's own question here. The
+    # semantic class exit 5 actually names across this file is narrower and
+    # more specific than "a different command": it is design-unit-bind's own
+    # write-confirmation family (was a record's OWN write, or re-read of it,
+    # confirmed) and, as of D6, ALSO the "no coherent rollup verdict is
+    # bound" family — neither of which is "a design conflict is open", the
+    # condition this block checks. Reusing exit 5 here would now put THREE
+    # unrelated meanings on one exit code WITHIN THE SAME FUNCTION rather
+    # than merely across two different commands, which is a stronger reason
+    # to keep exit 2 here, not a weaker one.
     #
     # FAIL CLOSED ON AN UNREADABLE SOURCE, never as "no conflict" — the SAME
     # xsu1 discipline design_source_unreadable/design_verdict_missing
@@ -6416,8 +6521,38 @@ cmd_approve() {
         exit 2
     fi
     if [ "$DESIGN_CONFLICT_OPEN" = "true" ]; then
+        # CONFLICT-SCOPE-DECISION (claude-workflow-plugin-2tv5, resolved by
+        # v5 D6/fkm.8): this refusal is ARTIFACT-WIDE by design, not
+        # per-unit -- an open conflict filed against ONE unit blocks
+        # approve for EVERY sibling task bound to the SAME design,
+        # including a caller bound to a completely different unit. 2tv5
+        # asked D6 to decide this deliberately rather than let it stand by
+        # accident, and the decision (recorded on that task and here) is to
+        # KEEP it: D6's own coherence rollup treats the WHOLE artifact as
+        # the unit of "is this design done" (every unit's criteria, files
+        # and hash are checked against ONE shared document), so a live,
+        # unresolved objection that the document itself is wrong makes
+        # every OTHER unit's conformance a conformance to a design a peer
+        # has already disputed -- approving around it is exactly the
+        # silent-proceed-past-a-known-defect this release exists to
+        # prevent (see backend.md/frontend.md/devops.md's own "When the
+        # design is wrong" section). The "convert one disputed unit into a
+        # stalled epic" cost 2tv5 named against blocking is the correct
+        # trade: an epic SHOULD stall on a live design objection rather
+        # than let most of its units complete around an unaddressed one.
+        # 2tv5's THIRD question -- does the message name the CALLER's own
+        # unit distinctly from the blocking one, so "Affected unit(s): U1"
+        # does not read as a mislabel to a U2-bound caller -- is answered
+        # below: resolve $tid's own binding (read-only, the same accessor
+        # DESIGN-ALIGNMENT-REFUSAL already calls) purely for this message;
+        # it does not change which units block or how the conflict clears.
+        local caller_binding_json="" caller_unit_id=""
+        caller_binding_json=$(latest_design_unit_binding "$tid" 2>/dev/null) || caller_binding_json=""
+        caller_unit_id=$(printf '%s' "$caller_binding_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+        local caller_unit_clause="$tid carries no DESIGN-UNIT binding of its own"
+        [ -n "$caller_unit_id" ] && caller_unit_clause="$tid is bound to unit $caller_unit_id"
         emit_error_json "approve" "$tid" "design_conflict_open" \
-            "approve refused: $DESIGN_CONFLICT_OPEN_OBS Affected unit(s): $DESIGN_CONFLICT_OPEN_UNITS. The single legal clearing path is a superseding, independently-reviewed, SATISFIED DESIGN-REVIEW whose entry for the affected unit(s) changed — amend docs/specs/$tid.md and record a fresh verdict: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>. This cannot be waived by --no-design or any other flag: an open, evidenced design objection has exactly one legal clearing path, and a content edit alone is not enough without an accompanying satisfied review" \
+            "approve refused: $DESIGN_CONFLICT_OPEN_OBS Affected unit(s) under open objection: $DESIGN_CONFLICT_OPEN_UNITS ($caller_unit_clause -- this refusal is ARTIFACT-WIDE by design: an open objection on ANY unit blocks approval for EVERY unit under the same design until resolved, claude-workflow-plugin-2tv5). The single legal clearing path is a superseding, independently-reviewed, SATISFIED DESIGN-REVIEW whose entry for the affected unit(s) changed — amend docs/specs/$tid.md and record a fresh verdict: qa-gate.sh design-review-record $tid --design-hash <h> --file <verdict.json>. This cannot be waived by --no-design or any other flag: an open, evidenced design objection has exactly one legal clearing path, and a content edit alone is not enough without an accompanying satisfied review" \
             "qa-gate.sh design-review-record <task-id> --design-hash <sha256> --file <path>"
         exit 2
     fi
@@ -6479,6 +6614,166 @@ cmd_approve() {
         exit 2
     fi
 # DESIGN-ALIGNMENT-REFUSAL END (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
+
+# COHERENCE-ROLLUP-REFUSAL BEGIN (v5 D6, claude-workflow-plugin-fkm.8)
+    #
+    # docs/plans/v5-design-phase.md Phase D6: "the gate refuses approval
+    # while the coherence count is nonzero or while the bound artifact hash
+    # differs from the one the units were built against." compute_design_
+    # coherence (see its own header, above, well before this function) is
+    # that check.
+    #
+    # UNCONDITIONAL ONCE APPLICABLE, exactly like DESIGN-ALIGNMENT-REFUSAL
+    # and DESIGN-CONFLICT-REFUSAL immediately above -- no bypass flag
+    # exists, and --no-design has no bearing on it either way: this axis
+    # asks a question about <task-id>'s OWN artifact (is it internally
+    # coherent), and --no-design only ever waived DESIGN-SATISFIED-
+    # REFUSAL's "was this reviewed" question, several refusals above.
+    #
+    # APPLICABLE ONLY WHEN <task-id> IS ITSELF A SATISFIED DESIGN TASK WITH
+    # DECLARED UNITS -- see compute_design_coherence's own header for the
+    # full reasoning. This is the ordinary case for an epic-level approve,
+    # once every per-unit child has completed its OWN cycle; a v5
+    # task-per-unit CHILD (which needs --no-design above, or carries no
+    # unit binding at all) never reaches this leg with APPLICABLE=true, so
+    # this block never asks the same question twice the way DESIGN-
+    # ALIGNMENT-REFUSAL already answers it per unit.
+    #
+    # EXIT 2, matching this axis's established convention (DESIGN-
+    # SATISFIED-REFUSAL / DESIGN-CONFLICT-REFUSAL / DESIGN-ALIGNMENT-
+    # REFUSAL, all documented "EXIT 2, NOT 4... AC 4.9's 'no new exit code'
+    # honoured") for BOTH an infra-unreadable source and a nonzero
+    # coherence count -- error_key is what a caller reads to tell them
+    # apart, exactly as it already does on this axis.
+    #
+    # The sentinel comments are load-bearing: an L1 META strips everything
+    # between them and asserts approve then succeeds on a design task
+    # carrying an open coherence issue (an unmapped criterion, a
+    # scope-drift file, a stale binding hash, or a tracker/diff mismatch).
+    # Do not rename them.
+    local coherence_rc=0
+    compute_design_coherence "$tid" || coherence_rc=$?
+    if [ "$coherence_rc" -eq 3 ]; then
+        emit_error_json "approve" "$tid" "$DESIGN_COHERENCE_KEY" \
+            "approve refused: could not determine whether $tid's design is coherent ($DESIGN_COHERENCE_OBS). Refusing rather than approving over a coherence question that was never actually answered" \
+            "qa-gate.sh design-coherence <task-id>"
+        exit 2
+    fi
+    if [ "$DESIGN_COHERENCE_APPLICABLE" = "true" ] && [ "$DESIGN_COHERENCE_OK" != "true" ]; then
+        emit_error_json "approve" "$tid" "$DESIGN_COHERENCE_KEY" \
+            "approve refused: $DESIGN_COHERENCE_OBS Run qa-gate.sh design-coherence $tid for the full, per-issue breakdown. The remedies are the same two design-conform's own header states: fix the work (add the missing test coverage, drop or declare a scope-drift file), or land a design amendment through D2's review loop and re-bind the affected unit(s). No overrule flag exists" \
+            "qa-gate.sh design-coherence <task-id>"
+        exit 2
+    fi
+# COHERENCE-ROLLUP-REFUSAL END (v5 D6, claude-workflow-plugin-fkm.8)
+
+# DESIGN-ROLLUP-REFUSAL BEGIN (v5 D6 judgement half, claude-workflow-plugin-fkm.8)
+    #
+    # plan:718-737's SECOND enforcement surface: "because [epic-gate.sh's
+    # own block state] is advisory for the active task, qa-gate.sh approve
+    # on an epic-typed task additionally requires the coherent rollup ->
+    # design_rollup_missing, exit 5." "Epic-typed" reads here as "a task
+    # the coherence rollup axis applies to" -- exactly the population
+    # COHERENCE-ROLLUP-REFUSAL above already scopes to
+    # (DESIGN_COHERENCE_APPLICABLE=true) -- rather than a literal
+    # `issue_type=epic` string match.
+    #
+    # THE REAL REASON (QA round 1, R1-F10a, corrected: the prior version of
+    # this comment claimed "zero issue_type=epic rows exist" as the
+    # premise; MEASURED and FALSE — `bd list --all --json` on this store
+    # returns 23, all historically closed and 0 currently open). The
+    # predicate is kept anyway because it is the BETTER match for what
+    # this axis is actually asking, not because the literal type is
+    # unavailable: `issue_type=epic` answers "was this task FILED as an
+    # epic", which is a labelling choice made at creation time and
+    # decoupled from whether it IS the coordinating task of a design's own
+    # unit decomposition (the question this axis actually needs answered).
+    # DESIGN_COHERENCE_APPLICABLE answers that directly -- it is already
+    # true exactly for a satisfied design task with declared units, the
+    # SAME governing population COHERENCE-ROLLUP-REFUSAL scopes to two
+    # blocks above -- so reusing it here means the two enforcement surfaces
+    # plan:727-731 names can never disagree about which tasks they cover.
+    #
+    # Reached only when that block did NOT exit -- i.e. the MECHANICAL rollup is already clean --
+    # so this block asks the ONE remaining question: has a design-reviewer
+    # ALSO judged the whole-system criteria (DS1/DS2/DS8) coherent, against
+    # THIS SAME governing hash.
+    #
+    # A DIFFERENT EXIT CODE FROM COHERENCE-ROLLUP-REFUSAL'S EXIT 2, BY
+    # EXPLICIT INSTRUCTION: exit 5, error_key design_rollup_missing --
+    # naming it distinctly from exit 2 (design_coherence_missing/
+    # coherence_issues_open) lets a reader tell "the mechanics are not yet
+    # settled" apart from "the mechanics are settled but nobody has judged
+    # the whole system yet" without parsing the observations string.
+    #
+    # REUSES THIS CALL'S OWN GLOBALS, not a second compute_design_coherence
+    # invocation -- the SAME "one call, multiple consumers" discipline the
+    # design_artifact= token below already uses, and for the identical
+    # TOCTOU reason: a second call here could observe a different answer
+    # than the one that just cleared the block above if the store moved in
+    # between, which is exactly the class of drift this file's own
+    # brackets exist to prevent.
+    #
+    # STUB-VERDICT MISBEHAVIOUR THIS BLOCK IS BUILT TO REFUSE (the
+    # coordinator's own META-TEST instruction): a design-reviewer verdict
+    # of "coherent" is NEVER sufficient on its own. It must ALSO be
+    # RECORDED (rollup_recorded), CURRENT (rollup_hash_fresh — bound to
+    # THIS call's own $DESIGN_COHERENCE_DESIGN_HASH, not whatever hash a
+    # stale record happens to carry), and this block is reached AT ALL
+    # only once COHERENCE-ROLLUP-REFUSAL's own independent mechanical
+    # check has already passed. A reviewer that always says "coherent" —
+    # rigged, buggy, or lazy — cannot manufacture a matching, current
+    # record it never wrote, and cannot make the mechanical check above
+    # pass if the mechanics are genuinely broken. The LLM leg's own
+    # semantic content is exactly as trustworthy as this file lets it be
+    # and no more: binding is a fact about records and hashes, never about
+    # what the verdict's text claims.
+    #
+    # No bypass flag exists on this axis either, matching every other leg
+    # of this refusal ladder.
+    if [ "$DESIGN_COHERENCE_APPLICABLE" = "true" ]; then
+        local rollup_json="" rollup_rc=0
+        rollup_json=$(latest_design_rollup "$tid") || rollup_rc=$?
+        if [ "$rollup_rc" -ne 0 ]; then
+            emit_error_json "approve" "$tid" "design_rollup_history_unreadable" \
+                "approve refused: the DESIGN-ROLLUP history for $tid could not be read right now, so whether a coherent judgement verdict exists is unknown. Refusing to treat unreadable as present" \
+                "qa-gate.sh design-rollup-status $tid"
+            exit 2
+        fi
+        local rollup_verdict_val="" rollup_hash_val=""
+        if [ "$rollup_json" != "{}" ]; then
+            rollup_verdict_val=$(printf '%s' "$rollup_json" | jq -r '.verdict // ""' 2>/dev/null || echo "")
+            rollup_hash_val=$(printf '%s' "$rollup_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
+        fi
+        # THREE DISTINCT error_keys (QA round 1, R1-F10, "also fix"): before
+        # this fix all three arms below shared error_key=design_rollup_
+        # missing, so a caller could only tell "never recorded" apart from
+        # "recorded but stale" apart from "recorded, current, but
+        # incoherent" by parsing the free-text observations string. Each
+        # arm still exits 5 (the shared axis-level signal DESIGN-ROLLUP-
+        # REFUSAL's own header documents) and the remedy prose is unchanged;
+        # only the machine-readable key now distinguishes which of the
+        # three states actually fired.
+        if [ "$rollup_json" = "{}" ]; then
+            emit_error_json "approve" "$tid" "design_rollup_missing" \
+                "approve refused: $tid's mechanical rollup is clean, but no DESIGN-ROLLUP v1 judgement verdict has ever been recorded (DS1/DS2/DS8 -- the whole-system criteria a mechanical check cannot answer -- have never been reviewed against the built system). Run qa-gate.sh design-rollup-packet $tid, spawn a design-reviewer against the packet at the root conversation level, and record the verdict via qa-gate.sh design-rollup" \
+                "qa-gate.sh design-rollup-packet $tid"
+            exit 5
+        fi
+        if [ "$rollup_hash_val" != "$DESIGN_COHERENCE_DESIGN_HASH" ]; then
+            emit_error_json "approve" "$tid" "design_rollup_verdict_stale" \
+                "approve refused: the latest DESIGN-ROLLUP v1 verdict for $tid was recorded against design_hash=$rollup_hash_val, which no longer matches the current governing design_hash=$DESIGN_COHERENCE_DESIGN_HASH -- stale, an amendment landed since. A judgement verdict cannot outlive the artifact state it judged" \
+                "qa-gate.sh design-rollup-packet $tid (against the current artifact), re-spawn the reviewer, and record a fresh verdict via qa-gate.sh design-rollup"
+            exit 5
+        fi
+        if [ "$rollup_verdict_val" != "coherent" ]; then
+            emit_error_json "approve" "$tid" "design_rollup_incoherent" \
+                "approve refused: the latest, current DESIGN-ROLLUP v1 verdict for $tid is verdict=$rollup_verdict_val, not coherent. The mechanical rollup is clean, but a design-reviewer judged the whole-system criteria (DS1/DS2/DS8) not satisfied" \
+                "amend the artifact through D2's review loop for the named gaps, re-run design-rollup-packet against the fresh hash, re-spawn the reviewer, and record a fresh verdict"
+            exit 5
+        fi
+    fi
+# DESIGN-ROLLUP-REFUSAL END (v5 D6 judgement half, claude-workflow-plugin-fkm.8)
 
     # ---- APPROVE-COMMIT ORDER (gz3 / v4.1 U1) -----------------------------
     #
@@ -6577,9 +6872,22 @@ cmd_approve() {
     # among the machine tokens per the placement rule rqer established for
     # `artifact_hash=`; fkm.4 also corrects this example, which had drifted —
     # `artifact_hash=` was already shipping at :3944 without ever being added
-    # here):
+    # here. v5 D6 / claude-workflow-plugin-fkm.8 adds `design_artifact=`,
+    # now last, per the SAME placement rule: plan 176's own words, "approval
+    # records gain design_artifact=<ref>@<hash> alongside change_set_hash
+    # and reviewed_by". <ref> is <task-id> itself -- the same id every other
+    # reader on this axis already addresses the design by -- and <hash> is
+    # the SAME confirmed-fresh design_hash design_verdict_field already
+    # names, so the two never disagree; this token marks, distinct from
+    # "was this design ever reviewed" (design_verdict_hash=), that the
+    # ROLLUP across every declared unit was ALSO checked and found coherent
+    # for THIS approval -- present only when COHERENCE-ROLLUP-REFUSAL
+    # (below) found <task-id> applicable and coherent, empty otherwise (a
+    # task with no units to roll up, or one not itself a satisfied design
+    # task, carries no such claim to make)):
     #   QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
-    #     design_hash=<h> artifact_hash=<h> design_verdict_hash=<h> at <ts>: <summary>
+    #     design_hash=<h> artifact_hash=<h> design_verdict_hash=<h>
+    #     design_artifact=<ref>@<h> at <ts>: <summary>
     #     [ [impact-report bypass: <reason>]][ [review bypass: <reason>]]
     #     [ [unrecorded review artifact accepted: <reason>]]
     #     [ [rubric mismatch: …]][ [reconstructed change set accepted: …]]
@@ -6835,7 +7143,28 @@ cmd_approve() {
     fi
     # REVIEW-ARTIFACT-BINDING-TOKEN END (v5 D2 / claude-workflow-plugin-rqer)
 
-    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}${design_verdict_field}at $ts: $summary$comment_suffix"
+    # DESIGN-ARTIFACT-COHERENCE-TOKEN BEGIN (v5 D6 / claude-workflow-plugin-fkm.8)
+    #
+    # Plan 176's own words: "approval records gain design_artifact=<ref>@
+    # <hash> alongside change_set_hash and reviewed_by." Present ONLY when
+    # COHERENCE-ROLLUP-REFUSAL (above) actually ran, found <tid> applicable
+    # (itself a satisfied design task with declared units), and found it
+    # coherent -- the ordinary case is every OTHER task on this repo, for
+    # which this stays empty, exactly like design_field/design_verdict_
+    # field already do for a task with no design axis at all. Reads the
+    # globals COHERENCE-ROLLUP-REFUSAL's own call to compute_design_
+    # coherence set, rather than re-deriving them: a SECOND call here could
+    # observe a different answer than the one that actually gated this
+    # approval if the store moved between the two reads, which is exactly
+    # the class of drift this file's own TOCTOU brackets exist to prevent
+    # one level up.
+    local design_artifact_field=""
+    if [ "$DESIGN_COHERENCE_APPLICABLE" = "true" ]; then
+        design_artifact_field="design_artifact=$tid@$DESIGN_COHERENCE_DESIGN_HASH "
+    fi
+    # DESIGN-ARTIFACT-COHERENCE-TOKEN END (v5 D6 / claude-workflow-plugin-fkm.8)
+
+    add_comment "$tid" "QA-GATE APPROVED ${hash_field}reviewed_by=$reviewed_by ${worktree_field}${design_field}${review_file_hash_field}${design_verdict_field}${design_artifact_field}at $ts: $summary$comment_suffix"
 
     # Step 2 (gz3: after the record): THE terminal-label transition. One call
     # replaces what were four separate steps — add qa-approved, remove
@@ -13661,8 +13990,42 @@ design_alignment_ref_is_contained() (
 #   DESIGN_ALIGNMENT_OBS          human-readable observation
 #   DESIGN_ALIGNMENT_UNIT_ID / DESIGN_ALIGNMENT_DESIGN_TASK
 #                                 "" until a binding is resolved
+#
+# SECOND, OPTIONAL ARGUMENT (v5 D6, claude-workflow-plugin-fkm.8): mode.
+# "" (the default, EVERY call site before D6) runs all three legs exactly as
+# shipped in D5 -- this is unchanged and this file's own design-unit-align.
+# test.sh (64 assertions, MEASURED via `bash .claude/scripts/tests/design-
+# unit-align.test.sh`'s own "Total: N Passed: N" line, QA round 1 on
+# fkm.8, R1-F8 -- this comment previously said 66, run-tests.sh:809
+# separately said 44, and CHANGELOG.md alone had the correct figure; all
+# three now agree) keeps proving it byte-for-byte. mode="rollup" SKIPS
+# LEG 1 (files) entirely and starts at LEG 2. This exists for exactly one
+# caller, compute_design_coherence (below), and the reason is a correctness
+# bound, not a performance one: LEG 1 (design-conform) reads its "actual"
+# side from impact-report.sh --relativized-changed-files, which is the ONE
+# GLOBAL, SESSION-SCOPED changed-files.txt tracker -- meaningful when <task-
+# id> is the task CURRENTLY being approved (its own diff is what the tracker
+# holds), but meaningless-to-actively-wrong for a HISTORICAL unit the
+# rollup revisits long after its own approve call truncated that tracker
+# (94d/approve's own documented truncation). Re-running LEG 1 against
+# whatever OTHER work happens to be in the CURRENT tracker at rollup time
+# would compare a past unit's declared files against a present, unrelated
+# diff -- measured directly while designing this: a closed unit with an
+# empty current tracker passes LEG 1 vacuously (harmless, since design-
+# conform gates only on "undeclared", and an empty actual set can never be
+# undeclared), but a closed unit revisited WHILE a DIFFERENT unit's work is
+# mid-flight in the same tracker would spuriously fail LEG 1 on files that
+# have nothing to do with it. LEG 2 (freshness) and LEG 3 (criteria have
+# tests) are NOT subject to this: both read DURABLE, digest-verified
+# records (the SPEC-INJECTED comment, the persisted completion payload, the
+# GREEN-CHECK comment) that do not move when the tracker is truncated or
+# reused, so both remain meaningful for a unit whose own approve cycle has
+# long since closed. Condition 2 of D6 (scope drift, an EPIC-WIDE question
+# design-conform was never asked) is computed separately, in compute_design_
+# coherence itself, from the SAME durable completion-payload evidence LEG 3
+# already establishes how to read -- not from this skipped leg.
 compute_design_alignment() {
-    local tid="$1"
+    local tid="$1" mode="${2:-}"
     DESIGN_ALIGNMENT_OK="false"
     DESIGN_ALIGNMENT_APPLICABLE="false"
     DESIGN_ALIGNMENT_KEY=""
@@ -13691,6 +14054,14 @@ compute_design_alignment() {
     DESIGN_ALIGNMENT_DESIGN_TASK="$design_task"
 
     # --- LEG 1: FILES, via design-conform (subprocess reuse) ---------------
+    # SKIPPED when mode="rollup" -- see this function's own header, above,
+    # for why re-running this leg against a HISTORICAL unit is unsound
+    # rather than merely redundant. Sentinel-wrapped so an L1 META can strip
+    # exactly this leg from a copy and confirm the DEFAULT (mode="") call
+    # path still gates on it -- the skip must be reachable ONLY via the
+    # opt-in second argument, never a standing behaviour change.
+    # LEG-1-FILES-ROLLUP-SKIP BEGIN (v5 D6, claude-workflow-plugin-fkm.8)
+    if [ "$mode" != "rollup" ]; then
     local dc_out="" dc_rc=0
     dc_out=$(bash "$PROJECT_DIR/.claude/scripts/qa-gate.sh" design-conform "$tid" 2>/dev/null) || dc_rc=$?
     local dc_ok=""
@@ -13709,6 +14080,8 @@ compute_design_alignment() {
         [ "$dc_rc" -eq 4 ] && return 0
         return 3
     fi
+    fi
+    # LEG-1-FILES-ROLLUP-SKIP END (v5 D6, claude-workflow-plugin-fkm.8)
 
     # --- LEG 2: FRESHNESS, via spec-injection-status (subprocess reuse) ----
     # No rc capture here (unlike LEG 1's $dc_rc): spec-injection-status's
@@ -13977,7 +14350,11 @@ compute_design_alignment() {
     done < <(printf '%s' "$refs_json" | jq -r '.[]')
 
     DESIGN_ALIGNMENT_OK="true"
-    DESIGN_ALIGNMENT_OBS="aligned: $tid (unit_id=$unit_id, design_task=$design_task) -- files conform (design-conform), spec injection is fresh or was never recorded (spec-injection-status), and every declared criterion has a corroborated covering test with green_after=green"
+    if [ "$mode" = "rollup" ]; then
+        DESIGN_ALIGNMENT_OBS="aligned: $tid (unit_id=$unit_id, design_task=$design_task) -- files check SKIPPED (mode=rollup; see compute_design_coherence for the epic-wide scope check that covers this axis instead), spec injection is fresh or was never recorded (spec-injection-status), and every declared criterion has a corroborated covering test with green_after=green"
+    else
+        DESIGN_ALIGNMENT_OBS="aligned: $tid (unit_id=$unit_id, design_task=$design_task) -- files conform (design-conform), spec injection is fresh or was never recorded (spec-injection-status), and every declared criterion has a corroborated covering test with green_after=green"
+    fi
     return 0
 }
 
@@ -14068,6 +14445,1805 @@ cmd_design_unit_align() {
     exit 0
 }
 # DESIGN-ALIGNMENT END (v5 D5 piece 4, claude-workflow-plugin-fkm.7)
+
+# ---------------------------------------------------------------------------
+# COHERENCE-ROLLUP BEGIN (v5 D6, claude-workflow-plugin-fkm.8)
+#
+# docs/plans/v5-design-phase.md Phase D6: "the gate rolls up per-unit
+# results into an epic-level count, in the manner of the unresolved-findings
+# count: every acceptance criterion in the bound artifact maps to at least
+# one passing test; every implemented unit maps to a design unit id; files
+# touched outside all declared unit sets are scope drift... Because D5
+# checked each unit already, this is a rollup rather than a fresh scan --
+# reuse the same algorithm."
+#
+# A ROLLUP, NOT A NEW SCAN (DS7 "reuse before building"): this never
+# re-parses the DESIGN-UNITS acceptance[] array itself -- review-check.sh
+# design-unit-json (LEG 3's own reader) stays the ONE place that happens.
+# Per resolved unit it calls compute_design_alignment "$cid" "rollup"
+# (this file, above) -- LEG 2 (freshness) and LEG 3 (criteria have tests)
+# REUSED VERBATIM. LEG 1 (files) is skipped for the correctness reason
+# documented on compute_design_alignment's own header (its "actual" side
+# reads the ONE GLOBAL, SESSION-SCOPED tracker, which is meaningless for a
+# unit whose own approve call has already truncated it) -- not reinvented
+# here under a different name. Condition 2 below (scope drift) asks the
+# EPIC-WIDE version of LEG 1's question from evidence that IS safe to
+# re-read after the fact: each unit's own PERSISTED, digest-verified
+# completion contract.
+#
+# WHAT "THE BOUND ARTIFACT" MEANS HERE: <task-id> ITSELF, not a task bound
+# TO it. compute_design_alignment resolves ITS target via a DESIGN-UNIT
+# binding (a per-unit CHILD's own pointer to its governing design); this
+# function is asked the opposite question -- "is the WHOLE design <task-id>
+# governs internally coherent" -- so it calls compute_design_satisfied
+# "$tid" DIRECTLY, exactly as DESIGN-SATISFIED-REFUSAL and epic-gate.sh's
+# own design-status ladder already do for the identical reason. In the v5
+# task-per-unit shape this is ordinarily the EPIC id (docs/specs/<epic-id>.md
+# is what plan-batches' own --design default already assumes), but nothing
+# here requires <task-id> to carry issue_type=epic -- only that it holds a
+# satisfied DESIGN-REVIEW and epic-gate.sh's sub_tasks_of(<task-id>) finds
+# the candidate implementers (parent-child dependents, D4's own "one Beads
+# task per design unit" convention).
+#
+# APPLICABILITY is cheap and self-determined, matching DESIGN-ALIGNMENT's
+# own convention -- never a caller's bypass flags: NOT APPLICABLE, ok:true,
+# no refusal, when <task-id> is not ITSELF a satisfied design task (the
+# ordinary case for a v5 task-per-unit CHILD, and for every task with no
+# design phase at all), or when its artifact declares ZERO units (nothing to
+# roll up). This must answer the same way regardless of who is asking --
+# `qa-gate.sh design-coherence <id>` run by hand, or cmd_approve's own call.
+#
+# ISSUES, aggregated into ONE array and ONE count -- "in the manner of the
+# unresolved-findings count" (review-check.sh cmd_gate's OPEN_COUNT/
+# open_ids, the house pattern for a rollup over independently-evaluated
+# items), each tagged with a `kind`:
+#   incomplete            an acceptance criterion has no passing test.
+#                         Either the WHOLE unit has no bound task at all
+#                         (every declared criterion is unmapped by
+#                         construction), or its bound task's own
+#                         compute_design_alignment LEG 3 answer is not ok.
+#   undeclared_scope      a file some resolved unit's PERSISTED completion
+#                         contract claims to have touched is not declared by
+#                         ANY unit -- the UNION check plan 174 asks for,
+#                         which design-conform's own per-task, per-OWN-unit
+#                         check was never asked (and, per compute_design_
+#                         alignment's own header, cannot safely be re-asked
+#                         against a live tracker for a historical unit).
+#   hash_divergence       EITHER a bound unit's OWN DESIGN-UNIT binding
+#                         record (design-unit-show's design_hash) no longer
+#                         equals the artifact's current, freshly-confirmed
+#                         governing hash, OR compute_design_alignment's LEG
+#                         2 reports spec_injection_stale for that unit's
+#                         task -- "the hash the unit was BUILT AGAINST" no
+#                         longer matches, plan 174's own words. "REFUSES
+#                         independently of the count" (plan 176) holds
+#                         structurally: there is no bypass anywhere on this
+#                         ladder, so ANY nonzero count already refuses; this
+#                         is not a separate gate to wire.
+#   tracker_diff_mismatch plan 177's own trap. See the dedicated section
+#                         below, right before the live-diff comparison, for
+#                         the two-direction reasoning and what is and is not
+#                         gated.
+#   ambiguous_unit_binding more than one task is bound to the SAME unit_id
+#                         under this design -- reported so a human resolves
+#                         which task actually governs; that unit is ALSO
+#                         counted `incomplete` (unresolved), since which
+#                         payload to trust is unknown.
+#
+# FAIL CLOSED ON ANY READ THIS FUNCTION CANNOT ESTABLISH (rc=3, "could not
+# determine" -- the SAME contract compute_design_alignment documents at its
+# own EXIT CODES header): an unreadable epic-children enumeration, an
+# unreadable per-child binding, or an unreadable live diff never reads as
+# "zero issues found". No argument suppresses a determined issue once
+# found -- plan 175's "silent approval-time editing of the design is not
+# available" is enforced by construction: this function takes exactly one
+# argument, <task-id>.
+compute_design_coherence() {
+    local tid="$1"
+    DESIGN_COHERENCE_OK="false"
+    DESIGN_COHERENCE_APPLICABLE="false"
+    DESIGN_COHERENCE_KEY=""
+    DESIGN_COHERENCE_OBS=""
+    DESIGN_COHERENCE_DESIGN_HASH=""
+    DESIGN_COHERENCE_COUNT=0
+    DESIGN_COHERENCE_ISSUES_JSON="[]"
+    DESIGN_COHERENCE_UNIT_IDS_JSON="[]"
+    DESIGN_COHERENCE_UNRESOLVED_JSON="[]"
+    DESIGN_COHERENCE_UNIT_TASK_MAP_JSON="{}"
+    # v5 D6 judgement half (claude-workflow-plugin-fkm.8, coordinator ruling
+    # 2026-09-14): the union of declared-scope and claimed-touched files this
+    # rollup already computes for the tracker/diff trap IS "the rollup's file
+    # set" the design-rollup packet needs for its own "union diff" section —
+    # exposed here rather than re-derived, so the packet builder can never
+    # disagree with the mechanical trap about what this design's own file set
+    # is. Empty until CONDITION 2/the trap below actually run (every early
+    # return above this point leaves it "[]", which is correct: there is no
+    # file set to speak of for a not-applicable or infra-failed rollup).
+    DESIGN_COHERENCE_UNION_FILES_JSON="[]"
+
+    # --- Applicability: <task-id> must ITSELF be a satisfied design task ---
+    compute_design_satisfied "$tid"
+    if [ "$DESIGN_SATISFIED" != "true" ]; then
+        if [ "$DESIGN_SATISFIED_KEY" = "design_source_unreadable" ]; then
+            DESIGN_COHERENCE_KEY="design_source_unreadable"
+            DESIGN_COHERENCE_OBS="could not determine whether $tid is a governing design task at all: $DESIGN_SATISFIED_OBS"
+            return 3
+        fi
+        DESIGN_COHERENCE_APPLICABLE="false"
+        DESIGN_COHERENCE_OK="true"
+        DESIGN_COHERENCE_OBS="not applicable: $tid is not itself a satisfied design task ($DESIGN_SATISFIED_KEY) -- the ordinary case for a v5 task-per-unit CHILD (its own coherence is asked of the design task that governs it, not of the child itself) and for every task with no design phase. Nothing to roll up here"
+        return 0
+    fi
+    local expected_design_hash="$DESIGN_VERDICT_HASH"
+    DESIGN_COHERENCE_DESIGN_HASH="$expected_design_hash"
+    local artifact=""
+    artifact=$(design_artifact_path_for "$tid")
+
+    # --- Declared units: validate-design (the ONE validator), reused -------
+    if [ ! -f "$REVIEW_CHECK_SCRIPT" ]; then
+        DESIGN_COHERENCE_KEY="validator_unavailable"
+        DESIGN_COHERENCE_OBS="cannot roll up: the ONE validator is missing at $REVIEW_CHECK_SCRIPT"
+        return 3
+    fi
+    local vout="" vout_rc=0
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-design "$artifact" 2>/dev/null) || vout_rc=$?
+    if ! validate_design_envelope_ok "$vout_rc" "$vout"; then
+        local vkey="" vobs=""
+        vkey=$(printf '%s' "$vout" | jq -r '.error_key // ""' 2>/dev/null) || vkey=""
+        [ -n "$vkey" ] || vkey="invalid_design_artifact"
+        vobs=$(printf '%s' "$vout" | jq -r '.observations // ""' 2>/dev/null) || vobs=""
+        DESIGN_COHERENCE_KEY="$vkey"
+        DESIGN_COHERENCE_OBS="could not re-validate the artifact governing $tid (validator exit rc=$vout_rc): $vkey${vobs:+ -- $vobs}"
+        return 3
+    fi
+    local unit_ids_json="" unit_files_json=""
+    unit_ids_json=$(printf '%s' "$vout" | jq -c '.unit_ids // []' 2>/dev/null) || unit_ids_json="[]"
+    unit_files_json=$(printf '%s' "$vout" | jq -c '.unit_files // {}' 2>/dev/null) || unit_files_json="{}"
+    if ! printf '%s' "$unit_ids_json" | jq -e 'type=="array"' >/dev/null 2>&1 \
+        || ! printf '%s' "$unit_files_json" | jq -e 'type=="object"' >/dev/null 2>&1; then
+        DESIGN_COHERENCE_KEY="design_unit_json_unparseable"
+        DESIGN_COHERENCE_OBS="the validated design's unit_ids/unit_files could not be re-extracted from validate-design's own envelope"
+        return 3
+    fi
+    DESIGN_COHERENCE_UNIT_IDS_JSON="$unit_ids_json"
+    local unit_count=0
+    unit_count=$(printf '%s' "$unit_ids_json" | jq 'length' 2>/dev/null) || unit_count=0
+    if [ "$unit_count" -eq 0 ] 2>/dev/null; then
+        DESIGN_COHERENCE_APPLICABLE="false"
+        DESIGN_COHERENCE_OK="true"
+        DESIGN_COHERENCE_OBS="not applicable: $tid's design declares no units at all -- nothing to roll up (a satisfied design with no per-unit decomposition, D4's own ordinary case for work too small to split)"
+        return 0
+    fi
+    DESIGN_COHERENCE_APPLICABLE="true"
+
+    # --- TOCTOU bracket: re-hash before trusting unit_files below (the SAME
+    # discipline design-conform's own CLOSING BRACKET documents; reused in
+    # spirit rather than shared code, since this function carries none of
+    # design-conform's LEG-1 apparatus) --------------------------------
+    local post_hash="" post_hash_rc=0
+    post_hash=$(bash "$PROJECT_DIR/.claude/scripts/workflow-manifest.sh" hash-file "$artifact" 2>/dev/null) || post_hash_rc=$?
+    if [ "$post_hash_rc" -ne 0 ] || ! is_sha256_hex "$post_hash" || [ "$post_hash" != "$expected_design_hash" ]; then
+        DESIGN_COHERENCE_KEY="design_verdict_stale"
+        DESIGN_COHERENCE_OBS="the design artifact governing $tid changed between the satisfaction check and the declarations read (expected design_hash=$expected_design_hash, now ${post_hash:-<unreadable, rc=$post_hash_rc>}); refusing to roll up against declarations no reviewer confirmed"
+        return 3
+    fi
+
+    # --- Enumerate candidate implementers: epic-gate.sh check (reused) -----
+    #
+    # REENTRANCY GUARD (v5 D6 judgement half, claude-workflow-plugin-fkm.8).
+    # epic-gate.sh's OWN cmd_check, for the v5 D6 judgement half, shells out
+    # to `qa-gate.sh design-rollup-status`, which calls THIS function --
+    # so the ordinary shell-out below (qa-gate.sh -> epic-gate.sh) would
+    # close a cycle back into the epic-gate.sh invocation that started it:
+    # epic-gate.sh check -> design-rollup-status -> compute_design_coherence
+    # -> epic-gate.sh check -> ... unbounded. MEASURED, not assumed: this
+    # was caught live, as a genuine runaway fork bomb (a smoke test hung at
+    # 100+ nested subprocess pairs before being killed), not reasoned about
+    # in the abstract. QA_GATE_SKIP_EPIC_GATE_REENTRY=1 is set ONLY by
+    # epic-gate.sh's own new call site immediately before invoking qa-
+    # gate.sh for exactly this reason; every OTHER caller of design-
+    # coherence/design-rollup-status/approve (including this function's
+    # own 55-assertion test suite) never sets it and takes the UNCHANGED
+    # shell-out path below. When set, this step reads children directly
+    # via the SAME bd query epic-gate.sh's own sub_tasks_of()/
+    # bd_show_with_dependents() already use (duplicated, not sourced --
+    # this file's own header states no script here is sourceable) -- never
+    # a SECOND definition of what a "child" means, just a second READER of
+    # the same relation.
+    local children_json="" children_lines="" check_rc=0
+    if [ "${QA_GATE_SKIP_EPIC_GATE_REENTRY:-}" = "1" ]; then
+        local direct_show="" direct_rc=0
+        direct_show=$(bd show "$tid" --json --include-dependents 2>/dev/null) || direct_rc=$?
+        if [ "$direct_rc" -ne 0 ] || [ -z "$direct_show" ]; then
+            direct_show=$(bd show "$tid" --json 2>/dev/null) || direct_rc=$?
+        fi
+        if [ -z "$direct_show" ]; then
+            DESIGN_COHERENCE_KEY="coherence_children_unreadable"
+            DESIGN_COHERENCE_OBS="could not enumerate $tid's children directly (bd show failed under the epic-gate.sh reentrancy guard); refusing to roll up over an unestablished set of implementers"
+            return 3
+        fi
+        children_json=$(printf '%s' "$direct_show" | jq -c '
+            if type == "array" then .[0] else . end
+            | [ (.dependents // [])
+                | map(select(.dependency_type == "parent-child"))
+                | .[].id ]
+        ' 2>/dev/null) || children_json="[]"
+        children_lines=$(printf '%s' "$children_json" | jq -r '.[]' 2>/dev/null) || children_lines=""
+    else
+        if [ ! -f "$EPIC_GATE_SCRIPT" ]; then
+            DESIGN_COHERENCE_KEY="epic_gate_unavailable"
+            DESIGN_COHERENCE_OBS="cannot enumerate $tid's children: epic-gate.sh is missing at $EPIC_GATE_SCRIPT"
+            return 3
+        fi
+        # EPIC_GATE_SKIP_ROLLUP_CHECK=1: this shell-out wants ONLY
+        # .sub_tasks[].id (pure enumeration) -- it never reads epic-gate.sh
+        # check's own .decision/.observations fields. Without this,
+        # epic-gate.sh's own v5 D6 rollup side-check (added for ITS OWN
+        # cmd_check callers) would ALSO run here on every single call,
+        # unconditionally, for a result this caller discards -- correct
+        # (bounded by the reentrancy guard above, not a repeat of that
+        # cycle) but pure waste: doubling the subprocess cost of every
+        # design-coherence/design-rollup/approve call on any task with an
+        # applicable design axis, which is the common case this axis
+        # exists for. MEASURED, not assumed: caught live via a smoke test's
+        # own process count while verifying the reentrancy fix above.
+        local check_out=""
+        check_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" EPIC_GATE_SKIP_ROLLUP_CHECK=1 bash "$EPIC_GATE_SCRIPT" check "$tid" 2>/dev/null) || check_rc=$?
+        if [ "$check_rc" -ne 0 ] || ! printf '%s' "$check_out" | jq -e 'type=="object" and (.ok==true) and (.sub_tasks|type)=="array"' >/dev/null 2>&1; then
+            DESIGN_COHERENCE_KEY="coherence_children_unreadable"
+            DESIGN_COHERENCE_OBS="could not enumerate $tid's children (epic-gate.sh check exit rc=$check_rc, or a malformed answer); refusing to roll up over an unestablished set of implementers"
+            return 3
+        fi
+        children_json=$(printf '%s' "$check_out" | jq -c '[.sub_tasks[].id]' 2>/dev/null) || children_json="[]"
+        children_lines=$(printf '%s' "$children_json" | jq -r '.[]' 2>/dev/null) || children_lines=""
+    fi
+
+    # --- NOT APPLICABLE when $tid has NEVER been decomposed at all --------
+    # A satisfied design task with declared units but ZERO bd parent-child
+    # dependents was never run through D4's decomposition (no orchestrator
+    # ever created "one Beads task per design unit" under it) -- it is being
+    # implemented AS ITSELF, the ordinary shape for a design too small to
+    # split and for every design-satisfied task this repo's own test suite
+    # (design-review-record.test.sh, design-artifact.test.sh, and others)
+    # exercises WITHOUT the task-per-unit epic+children machinery at all.
+    # "Does every declared unit map to its own child task" is not a
+    # question that can be meaningfully asked of a task that was never
+    # decomposed into children in the first place -- the same category
+    # distinction compute_design_alignment's own header draws for a task
+    # with no DESIGN-UNIT binding ("there is no declared file set... to
+    # compare against"), one level up. MEASURED, not assumed: without this
+    # check, EVERY satisfied, undecomposed design-holding task in this
+    # repo's own test suite started refusing approval with
+    # coherence_issues_open the moment it declared one unit -- a real
+    # regression this check exists to close, found by the L1 tier's own
+    # design-review-record.test.sh (its section 5.3, the most basic
+    # "satisfied verdict, matching artifact: approved" case).
+    local children_n=0
+    children_n=$(printf '%s' "$children_json" | jq 'length' 2>/dev/null) || children_n=0
+    if [ "$children_n" -eq 0 ] 2>/dev/null; then
+        DESIGN_COHERENCE_APPLICABLE="false"
+        DESIGN_COHERENCE_OK="true"
+        DESIGN_COHERENCE_OBS="not applicable: $tid declares $unit_count unit(s) but has NO bd parent-child dependents at all -- it was never decomposed via D4 (no per-unit child tasks exist to roll up), the ordinary case for a design implemented as a single, undecomposed task. Nothing to roll up here"
+        return 0
+    fi
+
+    # --- Resolve every child's DESIGN-UNIT binding, exactly as plan-
+    # batches' own resolution loop does (epic-gate.sh:1612-1649), reused in
+    # SHAPE (same three-way disposition: unreadable / unbound / bound to a
+    # unit this artifact declares) rather than by subprocess -- plan-batches
+    # ALSO folds in batching-specific refusals (path canonicalisation,
+    # dependency-cycle scheduling) this rollup has no reason to inherit: a
+    # cyclic unit_deps graph is a scheduling defect, not a coherence one.
+    # Heredoc-fed, never a pipe or `for x in $(...)`, for every accumulating
+    # loop below -- this file's own established discipline (a piped
+    # `while read` runs in a subshell and drops every mutation on exit; a
+    # bare `for x in $(cmd)` word-splits an id that need not be simple). ---
+    local child_ids=()
+    local cid=""
+    while IFS= read -r cid; do
+        [ -n "$cid" ] && child_ids+=("$cid")
+    done <<CHILDEOF
+$children_lines
+CHILDEOF
+
+    local unit_task_map_json="{}"
+    local coh_issues=()
+    local bound_design_hash_units=() bound_design_hash_vals=()
+    local show_json="" show_rc=0 u_id="" u_dhash="" u_design_task="" u_bound="" u_in_ids=""
+    for cid in "${child_ids[@]}"; do
+        show_rc=0
+        show_json=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$PROJECT_DIR/.claude/scripts/qa-gate.sh" design-unit-show "$cid" 2>/dev/null) || show_rc=$?
+        if [ "$show_rc" -ne 0 ] || ! printf '%s' "$show_json" | jq -e 'type=="object" and (.bound|type)=="boolean"' >/dev/null 2>&1; then
+            DESIGN_COHERENCE_KEY="coherence_child_binding_unreadable"
+            DESIGN_COHERENCE_OBS="design-unit-show $cid did not return a well-formed answer (rc=$show_rc); refusing to roll up over an unestablished binding -- a missed binding could hide a real mapping or a real conflict"
+            return 3
+        fi
+        u_bound=$(printf '%s' "$show_json" | jq -r '.bound' 2>/dev/null || echo "false")
+        [ "$u_bound" = "true" ] || continue
+        u_design_task=$(printf '%s' "$show_json" | jq -r '.design_task // ""' 2>/dev/null || echo "")
+        [ "$u_design_task" = "$tid" ] || continue
+        u_id=$(printf '%s' "$show_json" | jq -r '.unit_id // ""' 2>/dev/null || echo "")
+        u_in_ids=$(jq -nc --argjson ids "$unit_ids_json" --arg u "$u_id" '$ids | index($u) != null' 2>/dev/null || echo "false")
+        [ "$u_in_ids" = "true" ] || continue
+        u_dhash=$(printf '%s' "$show_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
+
+        local existing=""
+        existing=$(printf '%s' "$unit_task_map_json" | jq -r --arg u "$u_id" '.[$u] // ""' 2>/dev/null || echo "")
+        if [ -n "$existing" ]; then
+            coh_issues+=("$(jq -nc --arg k "ambiguous_unit_binding" --arg u "$u_id" --arg t "$cid" \
+                --arg d "unit $u_id is bound to more than one task: $existing and $cid; which payload governs this unit cannot be determined" \
+                '{kind:$k, unit_id:$u, task_id:$t, detail:$d}')")
+            continue
+        fi
+        unit_task_map_json=$(printf '%s' "$unit_task_map_json" | jq -c --arg u "$u_id" --arg t "$cid" '. + {($u): $t}' 2>/dev/null) || unit_task_map_json="{}"
+        bound_design_hash_units+=("$u_id")
+        bound_design_hash_vals+=("$u_dhash")
+    done
+    DESIGN_COHERENCE_UNIT_TASK_MAP_JSON="$unit_task_map_json"
+
+    # --- CONDITION 3a: binding-recorded hash vs the CURRENT governing hash -
+    local hi=0
+    for hi in "${!bound_design_hash_units[@]}"; do
+        if [ "${bound_design_hash_vals[$hi]}" != "$expected_design_hash" ]; then
+            local hi_task="" hi_detail=""
+            hi_task=$(printf '%s' "$unit_task_map_json" | jq -r --arg u "${bound_design_hash_units[$hi]}" '.[$u] // ""' 2>/dev/null || echo "")
+            # DO NOT inline this message: a LITERAL apostrophe in a
+            # double-quoted --arg value, on a backslash-continued line
+            # ahead of a single-quoted jq filter, corrupts bash 3.2's
+            # parse of the WHOLE multi-line command (reproduced directly:
+            # the filter arrives at jq split into fragments -- "kind:$k",
+            # "unit_id:$u", etc. -- each its own failed compile, and the
+            # array element silently becomes empty). Assigning the text to
+            # a plain, single-line variable FIRST and passing "$var" is
+            # immune (the apostrophe then exists only in the EXPANDED
+            # VALUE, never in the source bash lexes) -- confirmed
+            # empirically, not assumed; every --arg in this function that
+            # embeds a possessive is fixed the same way, and none is
+            # simplified back to an inline literal.
+            hi_detail="unit ${bound_design_hash_units[$hi]}'s own DESIGN-UNIT binding was recorded at design_hash=${bound_design_hash_vals[$hi]}, which no longer matches the current governing design_hash=$expected_design_hash"
+            coh_issues+=("$(jq -nc --arg k "hash_divergence" --arg u "${bound_design_hash_units[$hi]}" --arg t "$hi_task" \
+                --arg d "$hi_detail" \
+                '{kind:$k, unit_id:$u, task_id:$t, detail:$d}')")
+        fi
+    done
+
+    # --- Ambiguous unit_ids also count as unresolved for condition 1 -------
+    local ambiguous_ids_json="[]"
+    if [ "${#coh_issues[@]}" -gt 0 ]; then
+        ambiguous_ids_json=$(printf '%s\n' "${coh_issues[@]}" | jq -sc '[.[] | select(.kind=="ambiguous_unit_binding") | .unit_id]' 2>/dev/null) || ambiguous_ids_json="[]"
+    fi
+
+    # --- CONDITION 1: every declared criterion maps to >=1 passing test ----
+    # (reuses design-unit-json for the unit's OWN acceptance ids, and
+    # compute_design_alignment "$cid" "rollup" -- LEG 2+3 -- for a bound
+    # unit's own answer; no second acceptance-array traversal here).
+    local unit_ids_lines=""
+    unit_ids_lines=$(printf '%s' "$unit_ids_json" | jq -r '.[]' 2>/dev/null) || unit_ids_lines=""
+    local uid="" mapped_task="" is_ambiguous=""
+    while IFS= read -r uid; do
+        [ -n "$uid" ] || continue
+        mapped_task=$(printf '%s' "$unit_task_map_json" | jq -r --arg u "$uid" '.[$u] // ""' 2>/dev/null || echo "")
+        is_ambiguous=$(printf '%s' "$ambiguous_ids_json" | jq --arg u "$uid" 'index($u) != null' 2>/dev/null || echo "false")
+        if [ -z "$mapped_task" ]; then
+            local uj_out="" uj_unit_json="" uj_ids="[]" reason=""
+            uj_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" design-unit-json "$artifact" "$uid" 2>/dev/null) || uj_out=""
+            uj_unit_json=$(printf '%s' "$uj_out" | jq -r '.unit_json // ""' 2>/dev/null) || uj_unit_json=""
+            if [ -n "$uj_unit_json" ]; then
+                uj_ids=$(printf '%s' "$uj_unit_json" | jq -c '[ (.acceptance // [])[] | .id ]' 2>/dev/null) || uj_ids="[]"
+            fi
+            reason="no task is bound to unit $uid"
+            [ "$is_ambiguous" = "true" ] && reason="unit $uid's binding is ambiguous (see the ambiguous_unit_binding issue above); its criteria cannot be confirmed covered"
+            coh_issues+=("$(jq -nc --arg k "incomplete" --arg u "$uid" --argjson crit "$uj_ids" --arg d "$reason" \
+                '{kind:$k, unit_id:$u, task_id:"", criteria:$crit, detail:$d}')")
+            continue
+        fi
+        local align_rc=0
+        compute_design_alignment "$mapped_task" "rollup" || align_rc=$?
+        if [ "$align_rc" -eq 3 ]; then
+            DESIGN_COHERENCE_KEY="$DESIGN_ALIGNMENT_KEY"
+            DESIGN_COHERENCE_OBS="could not determine unit $uid's own alignment (task $mapped_task): $DESIGN_ALIGNMENT_OBS"
+            return 3
+        fi
+        if [ "$DESIGN_ALIGNMENT_APPLICABLE" != "true" ]; then
+            DESIGN_COHERENCE_KEY="coherence_unit_binding_inconsistent"
+            DESIGN_COHERENCE_OBS="unit $uid resolved a bound task ($mapped_task) but that task's own alignment check reports no binding at all -- a read raced an edit between this rollup's own resolution and compute_design_alignment's; re-run once the store is quiescent"
+            return 3
+        fi
+        if [ "$DESIGN_ALIGNMENT_OK" != "true" ]; then
+            # Pre-assigned to plain variables, not inlined -- see the
+            # identical apostrophe/bash-3.2/multi-line-$() fix and its full
+            # explanation on hi_detail, above.
+            local align_issue_detail=""
+            case "$DESIGN_ALIGNMENT_KEY" in
+                spec_injection_stale)
+                    align_issue_detail="unit $uid's task ($mapped_task) was built against a spec hash that no longer matches the currently bound artifact: $DESIGN_ALIGNMENT_OBS"
+                    coh_issues+=("$(jq -nc --arg k "hash_divergence" --arg u "$uid" --arg t "$mapped_task" \
+                        --arg d "$align_issue_detail" \
+                        '{kind:$k, unit_id:$u, task_id:$t, detail:$d}')")
+                    ;;
+                *)
+                    align_issue_detail="unit $uid's task ($mapped_task) does not have every declared criterion covered by a corroborated passing test ($DESIGN_ALIGNMENT_KEY): $DESIGN_ALIGNMENT_OBS"
+                    coh_issues+=("$(jq -nc --arg k "incomplete" --arg u "$uid" --arg t "$mapped_task" \
+                        --arg d "$align_issue_detail" \
+                        '{kind:$k, unit_id:$u, task_id:$t, detail:$d}')")
+                    ;;
+            esac
+        fi
+    done <<UNITEOF
+$unit_ids_lines
+UNITEOF
+
+    # --- CONDITION 2: scope drift -- union(touched) minus union(declared) --
+    # "touched" is read from each mapped unit's PERSISTED completion
+    # contract files_changed[] (latest_implementer_completion_record +
+    # completion_payload_path_for + sha256_file -- the SAME digest-verified
+    # reading discipline LEG 3 step 3b already establishes; re-read here to
+    # extract a SIBLING field from the SAME already-verified JSON blob, not
+    # to re-decide anything LEG 3 did not already decide). A unit whose
+    # payload cannot be read is ALREADY an `incomplete` issue from condition
+    # 1 above (compute_design_alignment's own LEG 3 refuses on exactly
+    # that); this condition simply does not contribute its files, which is
+    # the SAFE direction -- under-counting actual can only narrow
+    # scope_drift, never manufacture a false one.
+    local declared_union_json="[]" actual_union_json="[]"
+    declared_union_json=$(printf '%s' "$unit_files_json" | jq -c '[.[][]] | unique' 2>/dev/null) || declared_union_json="[]"
+    local mapped_units_lines=""
+    mapped_units_lines=$(printf '%s' "$unit_task_map_json" | jq -r 'keys[]' 2>/dev/null) || mapped_units_lines=""
+    local actual_files=()
+    while IFS= read -r uid; do
+        [ -n "$uid" ] || continue
+        mapped_task=$(printf '%s' "$unit_task_map_json" | jq -r --arg u "$uid" '.[$u] // ""' 2>/dev/null || echo "")
+        [ -n "$mapped_task" ] || continue
+        local impl_rec="" impl_role="" impl_sha="" payload_file="" disk_sha="" payload_raw="" f=""
+        impl_rec=$(latest_implementer_completion_record "$mapped_task" 2>/dev/null) || impl_rec=""
+        [ -n "$impl_rec" ] || continue
+        impl_role=$(printf '%s' "$impl_rec" | grep -oE 'role=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+        [ -n "$impl_role" ] || continue
+        payload_file=$(completion_payload_path_for "$mapped_task" "$impl_role")
+        [ -f "$payload_file" ] || continue
+        disk_sha=$(sha256_file "$payload_file" 2>/dev/null) || continue
+        impl_sha=$(printf '%s' "$impl_rec" | grep -oE 'payload_sha=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+        if [ -n "$impl_sha" ] && [ "$impl_sha" != "$disk_sha" ]; then
+            continue
+        fi
+        payload_raw=$(cat -- "$payload_file" 2>/dev/null) || continue
+        printf '%s' "$payload_raw" | jq -e 'type=="object"' >/dev/null 2>&1 || continue
+        local pf_lines=""
+        pf_lines=$(printf '%s' "$payload_raw" | jq -r '(.files_changed // [])[]' 2>/dev/null) || pf_lines=""
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+                "$PROJECT_DIR"/*) f="${f#"$PROJECT_DIR"/}" ;;
+            esac
+            actual_files+=("$f")
+        done <<PFEOF
+$pf_lines
+PFEOF
+    done <<MUEOF
+$mapped_units_lines
+MUEOF
+    if [ "${#actual_files[@]}" -gt 0 ]; then
+        actual_union_json=$(printf '%s\n' "${actual_files[@]}" | jq -R . | jq -sc 'unique' 2>/dev/null) || actual_union_json="[]"
+    fi
+    # Filter BOTH sides through the ONE shared denylist function before
+    # comparing (the trap plan 177 names: an unfiltered comparison fails on
+    # essentially every run that touches e2e fixture churn -- 14 of 31
+    # paths measured on D5 piece 4's own change set). Never re-derived.
+    local declared_filtered_json="[]" actual_filtered_json="[]"
+    local dline=""
+    declared_filtered_json=$( { printf '%s' "$declared_union_json" | jq -r '.[]' 2>/dev/null; } | \
+        { while IFS= read -r dline; do [ -n "$dline" ] || continue; workflow_denylisted "$dline" && continue; printf '%s\n' "$dline"; done; } | \
+        jq -R . 2>/dev/null | jq -sc '.' 2>/dev/null) || declared_filtered_json="[]"
+    actual_filtered_json=$( { printf '%s' "$actual_union_json" | jq -r '.[]' 2>/dev/null; } | \
+        { while IFS= read -r dline; do [ -n "$dline" ] || continue; workflow_denylisted "$dline" && continue; printf '%s\n' "$dline"; done; } | \
+        jq -R . 2>/dev/null | jq -sc '.' 2>/dev/null) || actual_filtered_json="[]"
+    [ -n "$declared_filtered_json" ] || declared_filtered_json="[]"
+    [ -n "$actual_filtered_json" ] || actual_filtered_json="[]"
+
+    local scope_drift_json="[]"
+    scope_drift_json=$(jq -nc --argjson a "$actual_filtered_json" --argjson d "$declared_filtered_json" '$a - $d' 2>/dev/null) || scope_drift_json="[]"
+    local scope_drift_n=0
+    scope_drift_n=$(printf '%s' "$scope_drift_json" | jq 'length' 2>/dev/null) || scope_drift_n=0
+    if [ "$scope_drift_n" -gt 0 ] 2>/dev/null; then
+        # Pre-assigned, not inlined -- see hi_detail's own fix comment above.
+        local scope_drift_detail=""
+        scope_drift_detail="$scope_drift_n file(s) some resolved unit's completion contract claims to have touched are not declared by ANY unit in this design"
+        coh_issues+=("$(jq -nc --arg k "undeclared_scope" --argjson files "$scope_drift_json" \
+            --arg d "$scope_drift_detail" \
+            '{kind:$k, unit_id:"", task_id:"", files:$files, detail:$d}')")
+    fi
+
+    # --- plan 177's TRAP: the rollup's file set vs the repository diff for
+    # the bound change set. "rollup's file set" here is declared UNION
+    # actual (everything this computation is AWARE of, whether declared-
+    # scope or claimed-touched); "the bound change set" is <task-id>'s OWN
+    # CURRENT tracker, read the SAME way design-conform's own "actual" is
+    # (impact-report.sh --relativized-changed-files -- already denylist-
+    # filtered by that script's own copy of the SAME shared regex). TWO
+    # DIRECTIONS, reported distinctly rather than collapsed into one
+    # boolean:
+    #   diff MINUS rollup   -- UNDER-COVERAGE. A file is genuinely, freshly
+    #                          changed right now and nothing this rollup
+    #                          examined (no unit declares it, no completion
+    #                          payload claims it) accounts for it. THIS
+    #                          GATES (tracker_diff_mismatch, test case (e)
+    #                          of plan 178) -- the 94d failure mode restated
+    #                          for this gate: a tracker that misses real
+    #                          work must not read as clean.
+    #   rollup MINUS diff   -- the rollup's declared/claimed set contains a
+    #                          path absent from the live diff. EXPECTED and
+    #                          NORMAL at ordinary rollup time: declared (an
+    #                          epic-wide, historically-accumulated union)
+    #                          and claimed-touched (every unit ever
+    #                          completed) both span the WHOLE design's life,
+    #                          while the live tracker is truncated to
+    #                          near-empty by every individual unit's own
+    #                          approve (docs/HOOKS.md "Approve idempotency
+    #                          is hash-aware"). Gating on this direction
+    #                          would refuse coherence on every ordinary,
+    #                          healthy epic. REPORTED (count only, in
+    #                          observations), NOT gated. Named here as a
+    #                          decision, not discovered by omission -- see
+    #                          this task's own completion report for the
+    #                          full argument and an explicit request for the
+    #                          operator's adjudication if a different
+    #                          trade-off is wanted.
+    if [ ! -f "$IMPACT_REPORT_SCRIPT" ]; then
+        DESIGN_COHERENCE_KEY="impact_tool_unavailable"
+        DESIGN_COHERENCE_OBS="cannot compute the live diff for the tracker/rollup comparison: impact-report.sh is missing at $IMPACT_REPORT_SCRIPT"
+        return 3
+    fi
+    local live_diff_raw="" live_diff_rc=0
+    live_diff_raw=$(bash "$IMPACT_REPORT_SCRIPT" --relativized-changed-files 2>/dev/null) || live_diff_rc=$?
+    if [ "$live_diff_rc" -ne 0 ] && [ "$live_diff_rc" -ne 4 ]; then
+        DESIGN_COHERENCE_KEY="change_set_unreadable"
+        DESIGN_COHERENCE_OBS="impact-report.sh --relativized-changed-files exited $live_diff_rc; refusing to roll up over a change set that could not be read"
+        return 3
+    fi
+    local live_diff_json="[]"
+    live_diff_json=$(printf '%s' "$live_diff_raw" | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null) || live_diff_json="[]"
+
+    # --- GATE-EVIDENCE-EXCLUSION: exclude the governing task's OWN design
+    # artifact and every resolved unit's OWN review artifact(s) from the
+    # live-diff side of the trap comparison below, BEFORE computing
+    # under/invented -- the SAME principle design-conform's own
+    # REVIEW-ARTIFACT-EXCLUSION already established one level down ("no
+    # unit's files[] ever declares GATE-WRITTEN REVIEW EVIDENCE; nothing
+    # should have to declare it to pass"), generalised here across EVERY
+    # resolved child rather than one task, plus the design artifact
+    # itself, which likewise sits outside any unit's declared file set BY
+    # CONSTRUCTION -- a design document is the INPUT to the units, never
+    # one of their outputs. Without this, an epic-level coherence check
+    # would falsely report tracker_diff_mismatch on its own design doc and
+    # on every child's review artifact on EVERY ordinary, healthy run --
+    # measured directly building this fix (not assumed): a fresh two-unit
+    # epic with both units fully complete and aligned still reported one
+    # open issue naming exactly its own docs/reviews/<child>-r1.json
+    # files, before this exclusion existed.
+    #
+    # SAME sanitiser design_artifact_path_for/review_artifact_path_for use
+    # (tr -c 'A-Za-z0-9._-' '_'), applied in bash per id and fed through
+    # REVIEW-ARTIFACT-EXCLUSION's OWN startswith/endswith/digit-test
+    # expression UNCHANGED, once per id -- not a new jq combinator over an
+    # array of prefixes, and not a jq-regex reimplementation of $tid (that
+    # region's own header explains why: $tid can legally contain `.`, a
+    # regex metacharacter, and a literal prefix/suffix match is what the
+    # path derivers actually produce). FAILS OPEN ON ITS OWN COMPUTATION
+    # FAILURE, exactly like that region: this filter only ever REMOVES
+    # candidates from live_diff_json, so a step that fails to compute
+    # leaves the set UNCHANGED -- at worst an extra, explained
+    # tracker_diff_mismatch entry, never a real gap passing silently.
+    local live_diff_filtered_json="$live_diff_json"
+    local gate_evidence_ids=("$tid")
+    local gee_id="" gee_uid=""
+    while IFS= read -r gee_uid; do
+        [ -n "$gee_uid" ] || continue
+        local gee_task=""
+        gee_task=$(printf '%s' "$unit_task_map_json" | jq -r --arg u "$gee_uid" '.[$u] // ""' 2>/dev/null || echo "")
+        [ -n "$gee_task" ] && gate_evidence_ids+=("$gee_task")
+    done <<GEEEOF
+$mapped_units_lines
+GEEEOF
+    for gee_id in "${gate_evidence_ids[@]}"; do
+        local gee_pfx="" gee_step_rc=0 gee_step=""
+        gee_pfx="$REVIEW_ARTIFACT_SUBDIR/$(printf '%s' "$gee_id" | tr -c 'A-Za-z0-9._-' '_')-r"
+        gee_step=$(printf '%s' "$live_diff_filtered_json" | jq -c --arg pfx "$gee_pfx" '
+            map(select(
+                (startswith($pfx) and endswith(".json")
+                 and (.[($pfx|length):(length-5)] | test("^[0-9]+$")))
+                | not
+            ))
+        ' 2>/dev/null) || gee_step_rc=$?
+        if [ "$gee_step_rc" -eq 0 ] && [ -n "$gee_step" ] && printf '%s' "$gee_step" | jq -e 'type=="array"' >/dev/null 2>&1; then
+            live_diff_filtered_json="$gee_step"
+        fi
+    done
+    local design_doc_rel="" gee_doc_rc=0 gee_doc_step=""
+    design_doc_rel="$DESIGN_SPEC_SUBDIR/$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').md"
+    gee_doc_step=$(printf '%s' "$live_diff_filtered_json" | jq -c --arg doc "$design_doc_rel" 'map(select(. != $doc))' 2>/dev/null) || gee_doc_rc=$?
+    if [ "$gee_doc_rc" -eq 0 ] && [ -n "$gee_doc_step" ] && printf '%s' "$gee_doc_step" | jq -e 'type=="array"' >/dev/null 2>&1; then
+        live_diff_filtered_json="$gee_doc_step"
+    fi
+
+    local rollup_set_json="[]"
+    rollup_set_json=$(jq -nc --argjson a "$actual_filtered_json" --argjson d "$declared_filtered_json" '($a + $d) | unique' 2>/dev/null) || rollup_set_json="[]"
+    DESIGN_COHERENCE_UNION_FILES_JSON="$rollup_set_json"
+    local under_coverage_json="[]" invented_json="[]"
+    under_coverage_json=$(jq -nc --argjson diff "$live_diff_filtered_json" --argjson roll "$rollup_set_json" '$diff - $roll' 2>/dev/null) || under_coverage_json="[]"
+    invented_json=$(jq -nc --argjson diff "$live_diff_filtered_json" --argjson roll "$rollup_set_json" '$roll - $diff' 2>/dev/null) || invented_json="[]"
+    local under_n=0 invented_n=0
+    under_n=$(printf '%s' "$under_coverage_json" | jq 'length' 2>/dev/null) || under_n=0
+    invented_n=$(printf '%s' "$invented_json" | jq 'length' 2>/dev/null) || invented_n=0
+    if [ "$live_diff_rc" -eq 4 ]; then
+        coh_issues+=("$(jq -nc --arg k "tracker_diff_mismatch" \
+            --arg d "impact-report.sh reported UNNORMALIZABLE tracked path(s) it could not relativize at all -- treated as unexamined by construction, the same direction as under-coverage" \
+            '{kind:$k, unit_id:"", task_id:"", detail:$d}')")
+    fi
+    if [ "$under_n" -gt 0 ] 2>/dev/null; then
+        # Pre-assigned, not inlined -- see hi_detail's own fix comment above.
+        local under_coverage_detail=""
+        under_coverage_detail="$under_n file(s) in the CURRENT change set for $tid are not accounted for by any unit's declared scope or any resolved unit's completion contract (under-coverage -- plan 177's own concern)"
+        coh_issues+=("$(jq -nc --arg k "tracker_diff_mismatch" --argjson files "$under_coverage_json" \
+            --arg d "$under_coverage_detail" \
+            '{kind:$k, unit_id:"", task_id:"", files:$files, detail:$d}')")
+    fi
+
+    # --- Aggregate ----------------------------------------------------------
+    # "in the manner of the unresolved-findings count" (review-check.sh
+    # cmd_gate's own OPEN_COUNT): every issue pushed onto coh_issues across
+    # every condition above collapses here into ONE count and ONE array.
+    # Sentinel-wrapped so an L1 META can strip exactly this translation
+    # step and confirm the shipped gate is load-bearing: with it gone,
+    # issues_json/count fall through to their DECLARED "[]"/0 defaults
+    # regardless of how many real issues coh_issues actually holds -- "stub
+    # the rollup to always return zero" in the most literal sense the D6
+    # brief asks for, without touching any of the individual condition
+    # checks that populate coh_issues in the first place.
+    # COHERENCE-COUNT-ROLLUP BEGIN (v5 D6, claude-workflow-plugin-fkm.8)
+    local issues_json="[]"
+    if [ "${#coh_issues[@]}" -gt 0 ]; then
+        issues_json=$(printf '%s\n' "${coh_issues[@]}" | jq -sc '.' 2>/dev/null) || issues_json="[]"
+    fi
+    DESIGN_COHERENCE_ISSUES_JSON="$issues_json"
+    local count=0
+    count=$(printf '%s' "$issues_json" | jq 'length' 2>/dev/null) || count="${#coh_issues[@]}"
+    DESIGN_COHERENCE_COUNT="$count"
+    # COHERENCE-COUNT-ROLLUP END (v5 D6, claude-workflow-plugin-fkm.8)
+    local unresolved_json="[]"
+    unresolved_json=$(jq -nc --argjson ids "$unit_ids_json" --argjson map "$unit_task_map_json" '$ids - ($map | keys)' 2>/dev/null) || unresolved_json="[]"
+    DESIGN_COHERENCE_UNRESOLVED_JSON="$unresolved_json"
+
+    if [ "$count" -gt 0 ] 2>/dev/null; then
+        DESIGN_COHERENCE_OK="false"
+        DESIGN_COHERENCE_KEY="coherence_issues_open"
+        DESIGN_COHERENCE_OBS="$count coherence issue(s) open for $tid across $unit_count declared unit(s) (informational, not gated: rollup-set-minus-diff -- declared/claimed paths absent from the live diff -- is $invented_n; expected at ordinary rollup time, see this function's own header). Fix the work, or amend the artifact through D2 so design and reality reconverge -- there is no bypass"
+        return 0
+    fi
+
+    DESIGN_COHERENCE_OK="true"
+    DESIGN_COHERENCE_OBS="coherent: $tid's design (design_hash=$expected_design_hash) has all $unit_count declared unit(s) mapped to a task whose criteria are covered by corroborated passing tests, no file touched outside the union of declared scope, no hash divergence, and the live tracker names nothing this rollup did not already account for"
+    return 0
+}
+
+# emit_design_coherence <ok> <error_key> <observations> <task_id> <applicable>
+#   [design_hash] [count] [issues_json] [unit_ids_json] [unresolved_json]
+#   [unit_task_map_json]
+# Same guarded-build discipline as emit_design_unit_align/emit_validate_
+# design: ONE jq -nc construction, shape-validated before printing, a
+# caller-data-free literal on construction failure.
+emit_design_coherence() {
+    local ok="$1" ekey="$2" obs="$3" tid="${4:-}" applicable="${5:-false}"
+    local dhash="${6:-}" count="${7:-0}" issues="${8:-}" uids="${9:-}"
+    local unresolved="${10:-}" map="${11:-}"
+    [ -n "$issues" ] || issues="[]"
+    [ -n "$uids" ] || uids="[]"
+    [ -n "$unresolved" ] || unresolved="[]"
+    [ -n "$map" ] || map="{}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" --arg tid "$tid" \
+        --argjson applicable "$applicable" --arg dhash "$dhash" --argjson count "$count" \
+        --argjson issues "$issues" --argjson uids "$uids" --argjson unresolved "$unresolved" \
+        --argjson map "$map" '
+        {ok: $ok, subcommand: "design-coherence", task_id: $tid,
+         error_key: $ekey, observations: $obs, applicable: $applicable,
+         design_hash: $dhash, coherence_count: $count, issues: $issues,
+         unit_ids: $uids, unresolved_unit_ids: $unresolved, unit_task_map: $map}
+    ' 2>/dev/null) || env_rc=$?
+    if [ "$env_rc" -eq 0 ] && printf '%s' "$envelope" | jq -e '
+            type == "object" and (.ok|type)=="boolean"
+            and .subcommand == "design-coherence"
+            and (.coherence_count|type)=="number" and (.issues|type)=="array"
+        ' >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"design-coherence","task_id":null,"error_key":"envelope_construction_failed","observations":"the design-coherence envelope could not be constructed (jq failed, or produced unparseable or wrong-shaped output); refusing to print it under a success status. No caller-supplied data is included in this message","applicable":false,"design_hash":"","coherence_count":0,"issues":[],"unit_ids":[],"unresolved_unit_ids":[],"unit_task_map":{}}\n'
+}
+
+# design-coherence <task-id> -- deterministic, no LLM, no bypass flag (the
+# SAME "no overrule path" design-conform/design-unit-align's own header
+# states, reused here rather than restated as a new policy). Exit 0:
+# coherent, OR not applicable (no units declared, or <task-id> is not
+# itself a satisfied design task). Exit 2: infrastructure (a source could
+# not be read at all -- never silently zero issues). Exit 4: one or more
+# coherence issues are open -- matching design-conform/design-unit-align's
+# own exit 4 for "a real, named, remediable gap".
+cmd_design_coherence() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-coherence","task_id":null,"error_key":"jq_unavailable","observations":"jq is required and not on PATH","applicable":false,"design_hash":"","coherence_count":0,"issues":[],"unit_ids":[],"unresolved_unit_ids":[],"unit_task_map":{}}\n'
+        exit 2
+    fi
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_design_coherence "false" "missing_task_id" \
+            "design-coherence requires <task-id> as first positional argument" \
+            "" "false"
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_design_coherence "false" "unknown_flag" \
+            "unknown argument '$1'; design-coherence takes only <task-id> -- there is no bypass flag by design: the two remedies are fix the work, or amend the artifact through D2 and re-bind" \
+            "$tid" "false"
+        exit 1
+    fi
+
+    require_bd "design-coherence" "$tid"
+
+    local coh_rc=0
+    compute_design_coherence "$tid" || coh_rc=$?
+    if [ "$coh_rc" -eq 3 ]; then
+        emit_design_coherence "false" "$DESIGN_COHERENCE_KEY" "$DESIGN_COHERENCE_OBS" \
+            "$tid" "$DESIGN_COHERENCE_APPLICABLE" "$DESIGN_COHERENCE_DESIGN_HASH" \
+            "$DESIGN_COHERENCE_COUNT" "$DESIGN_COHERENCE_ISSUES_JSON" "$DESIGN_COHERENCE_UNIT_IDS_JSON" \
+            "$DESIGN_COHERENCE_UNRESOLVED_JSON" "$DESIGN_COHERENCE_UNIT_TASK_MAP_JSON"
+        exit 2
+    fi
+    if [ "$DESIGN_COHERENCE_APPLICABLE" != "true" ]; then
+        emit_design_coherence "true" "" "$DESIGN_COHERENCE_OBS" "$tid" "false" \
+            "$DESIGN_COHERENCE_DESIGN_HASH" "0" "[]" "$DESIGN_COHERENCE_UNIT_IDS_JSON" "[]" "{}"
+        exit 0
+    fi
+    if [ "$DESIGN_COHERENCE_OK" != "true" ]; then
+        emit_design_coherence "false" "$DESIGN_COHERENCE_KEY" "$DESIGN_COHERENCE_OBS" \
+            "$tid" "true" "$DESIGN_COHERENCE_DESIGN_HASH" "$DESIGN_COHERENCE_COUNT" \
+            "$DESIGN_COHERENCE_ISSUES_JSON" "$DESIGN_COHERENCE_UNIT_IDS_JSON" \
+            "$DESIGN_COHERENCE_UNRESOLVED_JSON" "$DESIGN_COHERENCE_UNIT_TASK_MAP_JSON"
+        exit 4
+    fi
+    emit_design_coherence "true" "" "$DESIGN_COHERENCE_OBS" "$tid" "true" \
+        "$DESIGN_COHERENCE_DESIGN_HASH" "0" "[]" "$DESIGN_COHERENCE_UNIT_IDS_JSON" \
+        "$DESIGN_COHERENCE_UNRESOLVED_JSON" "$DESIGN_COHERENCE_UNIT_TASK_MAP_JSON"
+    exit 0
+}
+# COHERENCE-ROLLUP END (v5 D6, claude-workflow-plugin-fkm.8)
+
+# ---------------------------------------------------------------------------
+# DESIGN-ROLLUP-JUDGEMENT BEGIN (v5 D6 judgement half, claude-workflow-plugin-fkm.8)
+#
+# plan:718-737's SECOND half, added after the operator's ruling that
+# docs/plans/v5-design-phase-plan.md governs where it disagrees with the
+# directive this task was originally briefed from (see the FINDING comment
+# on claude-workflow-plugin-fkm and this task's own completion report for
+# the full evidence trail). The MECHANICAL half (COHERENCE-ROLLUP above,
+# compute_design_coherence/design-coherence) answers "does every declared
+# unit map to a complete, aligned, correctly-scoped task" — a set of
+# questions a deterministic check can fully answer. This half answers the
+# THREE questions plan:718-737 names as needing judgement rather than
+# arithmetic — DS1 (are the acceptance criteria, now that the system is
+# actually built, still genuinely falsifiable), DS2 (is the decomposition,
+# now that it is actually implemented, still complete and disjoint), and
+# DS8 (does the FINISHED system contradict LESSONS.md, and is this verdict
+# being waved through under iteration-cap pressure rather than earned) —
+# against a rollup packet a second, cheaper `design-reviewer` spawn reads.
+# DS3-DS7 are per-unit/per-artifact properties the mechanical rollup and
+# the ORIGINAL design review (D2) already discharged; re-asking them here
+# would be pure duplication (DS8's own text — "no capped-out review stands
+# in for a verdict" — is the doctrine this whole region upholds one level
+# up: no capped-out MECHANICAL rollup stands in for a JUDGEMENT verdict
+# either).
+#
+# NO CHANGE TO design-reviewer.md's OUTPUT CONTRACT. The agent still
+# returns exactly {verdict: satisfied|needs_revision, criterion_results
+# (all eight DS ids, always), required_fixes, iteration, rubric_version,
+# reviewer_identity} — the SAME six keys the first (pre-implementation)
+# invocation already returns, validated by the SAME ladder design-review-
+# record already runs. The only thing that differs between the two
+# invocations is the SPAWN PROMPT (a different packet; an instruction to
+# grade DS1/DS2/DS8 substantively and mark DS3-DS7 pass/vacuous, citing
+# design-reviewer.md's own ALREADY-DOCUMENTED "vacuously satisfied" rule —
+# the same one DS3's interface half already uses when no unit has a
+# dependent) — never a second output schema, and never a second reader.
+# `design-rollup` (below) TRANSLATES the agent's own satisfied/
+# needs_revision/required_fixes vocabulary into the ROLLUP record's own
+# coherent/incoherent/gaps vocabulary; the agent itself never has to know
+# which vocabulary its caller will use.
+#
+# THREE SUBCOMMANDS. Packet assembly and verdict recording are SEPARATE
+# subcommands (mirroring the QA-to-grader relay's own split between
+# assembling a packet and recording a verdict — qa.md 6a/6b vs the
+# orchestrator's grade-record call, orchestrator.md 5a Step C), but BOTH
+# halves live in THIS script, not split across an agent prompt and a
+# script the way the FIRST design-review relay's Step B is: the packet's
+# own ingredients (every resolved unit's F7 contract, the union file set,
+# the conflict/amendment history) are EXACTLY what compute_design_coherence
+# already collects as a byproduct of its own per-unit resolution loop, so
+# re-deriving them from an agent prompt's own ad hoc bd/git calls would
+# duplicate a resolution loop that already exists here — DS7's "reuse
+# before building" doctrine, pointed at the SCRIPT rather than the
+# ORCHESTRATOR for exactly this reason:
+#   design-rollup-packet <epic-id>
+#       Assembles + persists the packet. REFUSES if the mechanical rollup
+#       is not itself clean yet (asking an LLM to judge whole-system
+#       coherence before the per-unit mechanics are even settled would
+#       spend a spawn on data about to change).
+#   design-rollup <epic-id> --design-hash <h> --model <m> [--file <path>]
+#       Records the verdict the orchestrator relayed back from a design-
+#       reviewer spawn against that packet, writing DESIGN-ROLLUP v1.
+#   design-rollup-status <epic-id>
+#       READ-ONLY, no side effects — the accessor epic-gate.sh's cmd_check
+#       shells out to (DS7 reuse: qa-gate.sh stays the ONE authoritative
+#       reader of this axis, exactly as it already is for design-
+#       satisfied/design-unit-align/design-coherence).
+#
+# THE RECORD GRAMMAR'S `gaps=<n>` IS A COUNT, NOT THE ARRAY plan:718-737's
+# own illustrative `gaps=[…]` shows -- a genuine D6 deviation from the
+# governing plan, recorded as such on claude-workflow-plugin-uwzv (QA
+# round 1, R1-F6, medium: the ledger that exists so a deviation like this
+# is never silent).
+#
+# THE REAL REASON (QA round 1 corrected this comment's own prior
+# justification, which was FALSE): required_fixes elements are free-text
+# sentences the reviewer writes -- they can and do contain spaces and
+# commas -- and there is no gap-id space analogous to REVIEW-ARTIFACT's
+# own R<n>-F<n> ids, so a verbatim array of them genuinely cannot survive
+# this file's single-line, space/comma-delimited machine-prefix grammar.
+# grade-record's own RUBRIC comment and design-review-record's own
+# DESIGN-REVIEW comment make the identical choice for `required_fixes`,
+# for the identical reason.
+#
+# What this comment used to claim -- "neither record in this codebase
+# stores an array verbatim in its machine prefix" -- is FALSE, and REVIEW-
+# ARTIFACT is the counter-example, not an absence: its own `findings=`
+# field carries a literal bracketed csv (findings=[R8-F1:medium,R8-F2:low,
+# ...], built at :8641) BECAUSE finding ids have no spaces or commas of
+# their own and fit this grammar directly. REVIEW-ARTIFACT is therefore
+# the PRECEDENT this record's own shape most closely matches structurally
+# -- gaps=<n> deviates from it on engineering grounds (no equivalent id
+# space for a required_fix), not because no array-carrying record exists
+# to compare against. The orchestrator that calls this recorder already
+# has the full JSON verbatim in its own context from the spawn it just
+# ran and relays gaps/required_fixes to the designer directly from that
+# in-context copy regardless -- the comment's own job is a durable,
+# re-enterable AUDIT TRAIL (is there a verdict, what does it say, how many
+# gaps), not full-fidelity storage of free text nothing downstream reads
+# back from the comment itself.
+
+# default_git_ref was REMOVED here (R1-F3 fix, QA round 1): it resolved the
+# LOCAL merge target for "what changed on this branch" (duplicated from
+# worktree-sweep.sh's own default_ref()) and was design_rollup_union_diff's
+# ONLY caller. That function no longer diffs against a branch merge-base at
+# all -- see its own header comment for why a `base...HEAD` scope was both
+# too wide (the whole branch, not this design) and blind to the uncommitted
+# change set the gate actually binds. Left as a removal note, not silently
+# dropped, since a future reader grepping for it would otherwise find
+# nothing explaining why.
+
+# latest_design_rollup <tid> — JSON {reviewer, model, design_hash,
+# units_have, units_total, verdict, gaps} from the LAST `DESIGN-ROLLUP v1 `
+# comment, or `{}` when none exists. Same anchored-capture, same failure
+# channel as latest_design_review immediately above this region (rc 3 =
+# read not established; `{}` at rc 0 = genuinely never recorded) — the
+# callers below (cmd_design_rollup's own iteration-advance check, the
+# design-rollup-status accessor, and the approve-time design_rollup_missing
+# refusal) need the SAME "unread is not empty" guarantee that record's own
+# header explains at length.
+latest_design_rollup() {
+    local tid="$1"
+    local comments="" c_rc=0
+    comments=$(design_comments_json "$tid") || c_rc=$?
+    [ "$c_rc" -eq 0 ] || return 3
+    local out="" out_rc=0
+    out=$(printf '%s' "$comments" \
+        | jq -c '
+            [ .[].text
+              | select(startswith("DESIGN-ROLLUP v1 "))
+              | capture("^DESIGN-ROLLUP v1 reviewer=(?<reviewer>[A-Za-z0-9._+-]+) model=(?<model>[]A-Za-z0-9._:/[-]+) design_hash=(?<design_hash>[A-Za-z0-9-]+) units=(?<units_have>[0-9]+)/(?<units_total>[0-9]+) verdict=(?<verdict>[A-Za-z_]+) gaps=(?<gaps>[0-9]+) ")
+            ]
+            | last // {}
+        ' 2>/dev/null) || out_rc=$?
+    if [ "$out_rc" -ne 0 ] || [ -z "$out" ]; then
+        return 3
+    fi
+    if ! printf '%s' "$out" | jq -e '
+            (. == {}) or
+            (has("reviewer") and has("model") and has("design_hash") and
+             has("units_have") and has("units_total") and has("verdict") and
+             has("gaps"))
+        ' >/dev/null 2>&1; then
+        return 3
+    fi
+    printf '%s' "$out"
+    return 0
+}
+
+# DESIGN_ROLLUP_DIFF_CAP_BYTES — the full `git diff` content is included in
+# the packet only up to this size; beyond it, the packet carries `git diff
+# --stat` (always) plus a note naming the byte count and the cap, matching
+# the SAME "cap, disclose, never silently truncate" discipline the paid
+# review lane's own pre-spend cap uses (k6re's close_reason: refused
+# pre-spend at a measured byte count against a 100,000 B cap) — same order
+# of magnitude, same reason: a "cheaper" second spawn should not receive an
+# uncapped diff by accident.
+DESIGN_ROLLUP_DIFF_CAP_BYTES=100000
+
+# design_rollup_union_diff <files-json> — sets DESIGN_ROLLUP_DIFF_TEXT to a
+# self-describing packet SECTION (stat always; full content when under the
+# cap; a NAMED degradation note otherwise, or when git/a base ref is
+# unavailable). Never fails the caller — git is best-effort evidence here,
+# not a precondition (the packet's other three sections stand on their own
+# without it), so every failure mode degrades to a note rather than
+# refusing packet assembly outright. Mirrors design-reviewer.md's own
+# documented convention for a missing packet item: "note the degradation
+# rather than silently grading around it."
+design_rollup_union_diff() {
+    local files_json="$1"
+    local n=0
+    n=$(printf '%s' "$files_json" | jq 'length' 2>/dev/null) || n=0
+    if [ "$n" -eq 0 ] 2>/dev/null; then
+        DESIGN_ROLLUP_DIFF_TEXT="(no files in this design's union file set -- nothing to diff)"
+        return 0
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        DESIGN_ROLLUP_DIFF_TEXT="DEGRADED: git is not on PATH in this environment; the union diff could not be computed. Grade DS1/DS2/DS8 from the artifact, the per-unit F7 contracts and the conflict/amendment history below; treat the missing diff as an absent packet item per design-reviewer.md's own degradation convention, not as evidence of anything."
+        return 0
+    fi
+    if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        DESIGN_ROLLUP_DIFF_TEXT="DEGRADED: $PROJECT_DIR is not a git working tree right now; the union diff could not be computed. Grade DS1/DS2/DS8 from the artifact, the per-unit F7 contracts and the conflict/amendment history below."
+        return 0
+    fi
+    # R1-F3 fix (QA round 1, HIGH): the diff must be the change set the GATE
+    # itself binds, not a branch-vs-main comparison. `base...HEAD` (the prior
+    # shape, default_git_ref) used to sweep in every commit since the branch
+    # diverged from main -- MEASURED on this repo at 9.97x this function's
+    # own 100,000-byte cap for a D6-scoped change alone, D1-D5 included --
+    # while being BLIND to anything still uncommitted, because merge-base
+    # comparisons only ever see committed history. This workflow gates
+    # UNCOMMITTED working-tree changes (the change-set tracker cmd_approve
+    # binds is git-status-derived), so the most recently completed unit --
+    # exactly the one most likely to still be uncommitted at packet time --
+    # was invisible under the old scope. `HEAD` needs no branch-name
+    # resolution the way a remote-tracking ref does and is never
+    # "unavailable" the way origin/main can be absent; the one degradation
+    # left is a repository with nothing committed yet, handled below.
+    if ! git -C "$PROJECT_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+        DESIGN_ROLLUP_DIFF_TEXT="DEGRADED: $PROJECT_DIR has no HEAD commit yet (nothing has been committed in this repository). The union diff could not be computed against a starting point. Grade DS1/DS2/DS8 from the artifact, the per-unit F7 contracts and the conflict/amendment history below."
+        return 0
+    fi
+    local files_lines="" fl="" files_args=()
+    files_lines=$(printf '%s' "$files_json" | jq -r '.[]' 2>/dev/null) || files_lines=""
+    while IFS= read -r fl; do
+        [ -n "$fl" ] || continue
+        files_args+=("$fl")
+    done <<FLEOF
+$files_lines
+FLEOF
+    if [ "${#files_args[@]}" -eq 0 ]; then
+        DESIGN_ROLLUP_DIFF_TEXT="(no files in this design's union file set -- nothing to diff)"
+        return 0
+    fi
+
+    # --no-ext-diff / --no-textconv match verify-before-stop.sh's own
+    # tree_fingerprint convention (its header, "every tracked modification,
+    # by content"): neither a repository's diff-driver config nor a
+    # textconv filter should silently reshape evidence a reviewer is asked
+    # to judge the system from.
+    local stat_out="" stat_rc=0
+    stat_out=$(git -C "$PROJECT_DIR" diff --no-ext-diff --stat HEAD -- "${files_args[@]}" 2>/dev/null) || stat_rc=$?
+    local full_out="" full_rc=0
+    full_out=$(git -C "$PROJECT_DIR" diff --no-ext-diff --no-textconv HEAD -- "${files_args[@]}" 2>/dev/null) || full_rc=$?
+    if [ "$stat_rc" -ne 0 ] || [ "$full_rc" -ne 0 ]; then
+        DESIGN_ROLLUP_DIFF_TEXT="DEGRADED: git diff HEAD failed (stat rc=$stat_rc, full rc=$full_rc) for this design's union file set. The union diff could not be computed. Grade DS1/DS2/DS8 from the artifact, the per-unit F7 contracts and the conflict/amendment history below."
+        return 0
+    fi
+
+    # UNTRACKED files (brand-new paths never yet added) never appear in
+    # `git diff HEAD` at all -- git only ever diffs what is in the index or
+    # HEAD, so a newly-created file the tracker already counts as part of
+    # the change set would otherwise go silently missing from this section
+    # specifically, reopening the same blindness for a narrower class of
+    # file. `--no-index` against /dev/null renders the whole file as an
+    # addition without touching the index (no `git add`, not even
+    # intent-to-add) -- rc=1 from --no-index means "a difference was found",
+    # the ordinary and expected outcome here, never a failure.
+    local untracked_paths=() fl2="" st=""
+    for fl2 in "${files_args[@]}"; do
+        st=$(git -C "$PROJECT_DIR" status --porcelain -- "$fl2" 2>/dev/null) || st=""
+        case "$st" in
+            '??'*) untracked_paths+=("$fl2") ;;
+        esac
+    done
+    local untracked_note="" untracked_out="" fl3="" one_diff="" one_rc=0
+    if [ "${#untracked_paths[@]}" -gt 0 ]; then
+        untracked_note="
+
+NOTE: ${#untracked_paths[@]} file(s) above are UNTRACKED (new, never committed) and do not appear in the --stat summary; full content follows below: ${untracked_paths[*]}"
+        for fl3 in "${untracked_paths[@]}"; do
+            one_rc=0
+            # RELATIVE path, not $PROJECT_DIR/$fl3 -- `-C` resolves a
+            # relative path against that directory even under --no-index
+            # (verified directly: called from an unrelated cwd, it still
+            # produces clean a/b.txt-style headers), while an absolute
+            # second argument makes --no-index print the full host path in
+            # both diff headers, which is correct but needlessly verbose in
+            # a packet an LLM reviewer reads.
+            one_diff=$(git -C "$PROJECT_DIR" diff --no-ext-diff --no-textconv --no-index -- /dev/null "$fl3" 2>/dev/null) || one_rc=$?
+            if [ "$one_rc" -le 1 ] && [ -n "$one_diff" ]; then
+                untracked_out="$untracked_out
+
+$one_diff"
+            fi
+        done
+    fi
+
+    local full_bytes=0
+    full_bytes=$(printf '%s%s' "$full_out" "$untracked_out" | wc -c | tr -d '[:space:]') || full_bytes=0
+    if [ "$full_bytes" -gt "$DESIGN_ROLLUP_DIFF_CAP_BYTES" ] 2>/dev/null; then
+        DESIGN_ROLLUP_DIFF_TEXT="Base: HEAD vs working tree (the current, uncommitted change set -- full diff is $full_bytes bytes, over the ${DESIGN_ROLLUP_DIFF_CAP_BYTES}B packet cap -- stat only; the per-unit F7 contracts above already list every touched path)
+
+$stat_out$untracked_note"
+        return 0
+    fi
+    DESIGN_ROLLUP_DIFF_TEXT="Base: HEAD vs working tree (the current, uncommitted change set -- the same evidence cmd_approve itself binds)
+
+$stat_out
+$full_out$untracked_out"
+    return 0
+}
+
+# compute_design_rollup_packet <tid> — assembles the rollup packet's FOUR
+# sections (plan:718-737's own words: "the artifact, every unit's F7
+# contract, the union diff, every conflict and amendment record"), sets
+# DESIGN_ROLLUP_PACKET_* globals, returns 0 (assembled) or 3 (refused —
+# infra failure, or the mechanical prerequisite is unmet; see this region's
+# own header for why packet assembly requires a CLEAN mechanical rollup
+# first).
+compute_design_rollup_packet() {
+    local tid="$1"
+    DESIGN_ROLLUP_PACKET_KEY=""
+    DESIGN_ROLLUP_PACKET_OBS=""
+    DESIGN_ROLLUP_PACKET_PATH=""
+    DESIGN_ROLLUP_PACKET_DESIGN_HASH=""
+    DESIGN_ROLLUP_PACKET_UNIT_COUNT=0
+
+    # set -e IS ACTIVE in this file (top-of-script). A bare `compute_design_
+    # coherence "$tid"` here, on a non-applicable or mechanically-open task,
+    # returns non-zero and — NOT being part of an if/while/&&/|| list —
+    # would trip errexit and terminate THIS ENTIRE SCRIPT PROCESS before
+    # `local coh_rc=$?` ever runs, before ANY caller's own error handling
+    # gets a chance to build a refusal envelope. MEASURED, not assumed:
+    # design-rollup.test.sh's own Section A caught this exact shape live
+    # (an empty subprocess exit under real conditions, not a hypothetical)
+    # before this `|| coh_rc=$?` guard existed. `|| var=$?` is the SAME
+    # established pattern the ORIGINAL cmd_design_coherence already uses
+    # for this identical call.
+    local coh_rc=0
+    compute_design_coherence "$tid" || coh_rc=$?
+    if [ "$coh_rc" -eq 3 ]; then
+        DESIGN_ROLLUP_PACKET_KEY="$DESIGN_COHERENCE_KEY"
+        DESIGN_ROLLUP_PACKET_OBS="cannot assemble a rollup packet for $tid: $DESIGN_COHERENCE_OBS"
+        return 3
+    fi
+    if [ "$DESIGN_COHERENCE_APPLICABLE" != "true" ]; then
+        DESIGN_ROLLUP_PACKET_KEY="design_rollup_not_applicable"
+        DESIGN_ROLLUP_PACKET_OBS="$tid is not a task the coherence rollup axis applies to: $DESIGN_COHERENCE_OBS. A judgement rollup packet makes sense only where the mechanical rollup does"
+        return 3
+    fi
+    if [ "$DESIGN_COHERENCE_OK" != "true" ]; then
+        DESIGN_ROLLUP_PACKET_KEY="design_rollup_mechanical_prerequisite"
+        DESIGN_ROLLUP_PACKET_OBS="refusing to assemble a rollup packet for $tid: the MECHANICAL rollup is not itself clean yet ($DESIGN_COHERENCE_COUNT issue(s) open). The judgement half is 'cheaper' precisely because DS3-DS7 are already discharged mechanically -- asking a design-reviewer to judge whole-system coherence before the per-unit mechanics settle would spend a spawn on data about to change. Run 'qa-gate.sh design-coherence $tid' for the breakdown, fix or amend, then re-run design-rollup-packet"
+        return 3
+    fi
+
+    DESIGN_ROLLUP_PACKET_DESIGN_HASH="$DESIGN_COHERENCE_DESIGN_HASH"
+    local unit_count=0
+    unit_count=$(printf '%s' "$DESIGN_COHERENCE_UNIT_IDS_JSON" | jq 'length' 2>/dev/null) || unit_count=0
+    DESIGN_ROLLUP_PACKET_UNIT_COUNT="$unit_count"
+
+    local artifact="" artifact_content=""
+    artifact=$(design_artifact_path_for "$tid")
+    if [ ! -f "$artifact" ]; then
+        DESIGN_ROLLUP_PACKET_KEY="design_artifact_not_found"
+        DESIGN_ROLLUP_PACKET_OBS="the design artifact governing $tid is not readable at $artifact, even though the mechanical rollup just confirmed it hashes to $DESIGN_COHERENCE_DESIGN_HASH -- refusing rather than assembling a packet with no artifact section"
+        return 3
+    fi
+    artifact_content=$(cat -- "$artifact" 2>/dev/null) || artifact_content=""
+
+    design_rollup_union_diff "$DESIGN_COHERENCE_UNION_FILES_JSON"
+    local diff_section="$DESIGN_ROLLUP_DIFF_TEXT"
+
+    local history_comments="" history_rc=0
+    history_comments=$(design_comments_json "$tid") || history_rc=$?
+    local history_section=""
+    if [ "$history_rc" -ne 0 ]; then
+        history_section="DEGRADED: the comment stream for $tid could not be read; the conflict/amendment history is unavailable for this packet."
+    else
+        history_section=$(printf '%s' "$history_comments" | jq -r '
+            [ .[].text
+              | select(startswith("DESIGN-CONFLICT ") or startswith("DESIGN-REVIEW v1 "))
+            ] | if length == 0 then "(no DESIGN-CONFLICT or DESIGN-REVIEW record exists on this task)" else join("\n") end
+        ' 2>/dev/null) || history_section="(the conflict/amendment history could not be extracted)"
+    fi
+
+    local ts sanitized packet_path
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    packet_path="$QA_TRACKING_DIR/design-rollup-packet-$sanitized.md"
+    if ! mkdir -p "$QA_TRACKING_DIR" 2>/dev/null; then
+        DESIGN_ROLLUP_PACKET_KEY="tracking_dir_unwritable"
+        DESIGN_ROLLUP_PACKET_OBS="cannot create $QA_TRACKING_DIR to persist the rollup packet"
+        return 3
+    fi
+    local mapped_units_lines="" uid="" mapped_task="" impl_rec="" impl_role="" payload_file="" payload_raw="" contracts_written=0
+    mapped_units_lines=$(printf '%s' "$DESIGN_COHERENCE_UNIT_TASK_MAP_JSON" | jq -r 'keys[]' 2>/dev/null) || mapped_units_lines=""
+    {
+        printf '## Design rollup packet -- %s\n\n' "$tid"
+        printf 'Generated: %s\n' "$ts"
+        printf 'design_hash: %s\n' "$DESIGN_COHERENCE_DESIGN_HASH"
+        printf 'units: %s\n\n' "$unit_count"
+        printf '### 1. The design artifact (docs/specs/%s.md)\n\n' "$tid"
+        printf '%s\n\n' "$artifact_content"
+        printf '### 2. Per-unit F7 completion contracts\n\n'
+        if [ -n "$mapped_units_lines" ]; then
+            while IFS= read -r uid; do
+                [ -n "$uid" ] || continue
+                mapped_task=$(printf '%s' "$DESIGN_COHERENCE_UNIT_TASK_MAP_JSON" | jq -r --arg u "$uid" '.[$u] // ""' 2>/dev/null || echo "")
+                [ -n "$mapped_task" ] || continue
+                impl_rec=$(latest_implementer_completion_record "$mapped_task" 2>/dev/null) || impl_rec=""
+                [ -n "$impl_rec" ] || continue
+                impl_role=$(printf '%s' "$impl_rec" | grep -oE 'role=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+                [ -n "$impl_role" ] || continue
+                payload_file=$(completion_payload_path_for "$mapped_task" "$impl_role")
+                [ -f "$payload_file" ] || continue
+                payload_raw=$(cat -- "$payload_file" 2>/dev/null) || continue
+                printf '%s' "$payload_raw" | jq -e 'type=="object"' >/dev/null 2>&1 || continue
+                printf -- '#### Unit %s -- task %s (role=%s)\n' "$uid" "$mapped_task" "$impl_role"
+                # The backticks are a literal markdown fence for the packet
+                # file, deliberately single-quoted so a backtick in the
+                # format string is never at risk of command substitution --
+                # $payload_raw is the SEPARATE printf argument filling %s,
+                # not part of the format string shellcheck is warning about.
+                # shellcheck disable=SC2016
+                printf '```json\n%s\n```\n\n' "$payload_raw"
+                contracts_written=$((contracts_written + 1))
+            done <<UNITSEOF
+$mapped_units_lines
+UNITSEOF
+        fi
+        if [ "$contracts_written" -eq 0 ]; then
+            printf '(no resolved unit completion contract could be read -- unexpected given the mechanical rollup reported ok:true; treat as a finding against packet assembly itself)\n\n'
+        fi
+        printf '### 3. The union diff\n\n%s\n\n' "$diff_section"
+        printf '### 4. Every conflict and amendment record\n\n%s\n' "$history_section"
+    } > "$packet_path" 2>/dev/null
+    if [ ! -s "$packet_path" ]; then
+        DESIGN_ROLLUP_PACKET_KEY="packet_write_failed"
+        DESIGN_ROLLUP_PACKET_OBS="the rollup packet could not be written to $packet_path"
+        return 3
+    fi
+    DESIGN_ROLLUP_PACKET_PATH="$packet_path"
+    DESIGN_ROLLUP_PACKET_OBS="rollup packet assembled for $tid ($unit_count unit(s), design_hash=$DESIGN_COHERENCE_DESIGN_HASH) and persisted to $packet_path"
+    return 0
+}
+
+emit_design_rollup_packet() {
+    local ok="$1" ekey="$2" obs="$3" tid="${4:-}" path="${5:-}" dhash="${6:-}" ucount="${7:-0}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" --arg tid "$tid" \
+        --arg path "$path" --arg dhash "$dhash" --argjson ucount "$ucount" '
+        {ok: $ok, subcommand: "design-rollup-packet", task_id: $tid,
+         error_key: $ekey, observations: $obs, packet_path: $path,
+         design_hash: $dhash, unit_count: $ucount}
+    ' 2>/dev/null) || env_rc=$?
+    if [ "$env_rc" -eq 0 ] && printf '%s' "$envelope" | jq -e '
+            type == "object" and (.ok|type)=="boolean" and .subcommand == "design-rollup-packet"
+        ' >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"design-rollup-packet","task_id":null,"error_key":"envelope_construction_failed","observations":"the design-rollup-packet envelope could not be constructed","packet_path":"","design_hash":"","unit_count":0}\n'
+}
+
+cmd_design_rollup_packet() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-rollup-packet","task_id":null,"error_key":"jq_unavailable","observations":"jq is required and not on PATH","packet_path":"","design_hash":"","unit_count":0}\n'
+        exit 2
+    fi
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_design_rollup_packet "false" "missing_task_id" \
+            "design-rollup-packet requires <task-id> as first positional argument" ""
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_design_rollup_packet "false" "unknown_flag" \
+            "unknown argument to design-rollup-packet; it takes only <task-id>" "$tid"
+        exit 1
+    fi
+    require_bd "design-rollup-packet" "$tid"
+
+    # set -e guard (this file's own top-of-script setting) -- see
+    # compute_design_rollup_packet's own header comment on its identical
+    # compute_design_coherence call for the full reasoning; the SAME
+    # unguarded-bare-call shape here would let a refusal terminate the
+    # process before this function's own error envelope is ever built.
+    local rc=0
+    compute_design_rollup_packet "$tid" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        emit_design_rollup_packet "false" "$DESIGN_ROLLUP_PACKET_KEY" "$DESIGN_ROLLUP_PACKET_OBS" "$tid"
+        exit 2
+    fi
+    emit_design_rollup_packet "true" "" "$DESIGN_ROLLUP_PACKET_OBS" "$tid" \
+        "$DESIGN_ROLLUP_PACKET_PATH" "$DESIGN_ROLLUP_PACKET_DESIGN_HASH" "$DESIGN_ROLLUP_PACKET_UNIT_COUNT"
+    exit 0
+}
+
+# compute_design_rollup_status <tid> — READ-ONLY, no side effects: the
+# epic-level "is the judgement rollup done and current" answer, composed
+# from the SAME two readers everything else in this axis already uses
+# (compute_design_coherence for the mechanical state, latest_design_rollup
+# for the recorded verdict) rather than a THIRD parser. This is what
+# epic-gate.sh cmd_check shells out to (DS7: qa-gate.sh remains the ONE
+# authoritative reader), and it deliberately does NOT re-run the TOCTOU
+# rebracket cmd_design_rollup's own record path uses -- epic-gate's own
+# check is documented ADVISORY for the active task (plan:718-737's own
+# words), so a plain, cheap read is the right cost here; the HARD gate is
+# cmd_approve's own DESIGN-ROLLUP-REFUSAL below, which re-derives
+# everything fresh at the moment it actually matters.
+compute_design_rollup_status() {
+    local tid="$1"
+    DESIGN_ROLLUP_STATUS_APPLICABLE="false"
+    DESIGN_ROLLUP_STATUS_MECHANICAL_OK="false"
+    DESIGN_ROLLUP_STATUS_RECORDED="false"
+    DESIGN_ROLLUP_STATUS_COHERENT="false"
+    DESIGN_ROLLUP_STATUS_HASH_FRESH="false"
+    DESIGN_ROLLUP_STATUS_KEY=""
+    DESIGN_ROLLUP_STATUS_OBS=""
+
+    # set -e guard -- see compute_design_rollup_packet's own header comment
+    # on its identical compute_design_coherence call for the full reasoning.
+    local coh_rc=0
+    compute_design_coherence "$tid" || coh_rc=$?
+    if [ "$coh_rc" -eq 3 ]; then
+        DESIGN_ROLLUP_STATUS_KEY="$DESIGN_COHERENCE_KEY"
+        DESIGN_ROLLUP_STATUS_OBS="mechanical rollup unreadable for $tid: $DESIGN_COHERENCE_OBS"
+        return 3
+    fi
+    if [ "$DESIGN_COHERENCE_APPLICABLE" != "true" ]; then
+        DESIGN_ROLLUP_STATUS_APPLICABLE="false"
+        DESIGN_ROLLUP_STATUS_OBS="not applicable: $DESIGN_COHERENCE_OBS"
+        return 0
+    fi
+    DESIGN_ROLLUP_STATUS_APPLICABLE="true"
+    if [ "$DESIGN_COHERENCE_OK" = "true" ]; then
+        DESIGN_ROLLUP_STATUS_MECHANICAL_OK="true"
+    else
+        DESIGN_ROLLUP_STATUS_OBS="mechanical rollup has $DESIGN_COHERENCE_COUNT issue(s) open for $tid; the judgement rollup cannot be current until it is clean ($DESIGN_COHERENCE_KEY)"
+        return 0
+    fi
+
+    local rollup_json="" rollup_rc=0
+    rollup_json=$(latest_design_rollup "$tid") || rollup_rc=$?
+    if [ "$rollup_rc" -ne 0 ]; then
+        DESIGN_ROLLUP_STATUS_KEY="design_rollup_history_unreadable"
+        DESIGN_ROLLUP_STATUS_OBS="the DESIGN-ROLLUP history for $tid could not be read right now"
+        return 3
+    fi
+    if [ "$rollup_json" = "{}" ] || [ -z "$rollup_json" ]; then
+        DESIGN_ROLLUP_STATUS_OBS="mechanical rollup is clean, but no DESIGN-ROLLUP v1 verdict has ever been recorded for $tid"
+        return 0
+    fi
+    DESIGN_ROLLUP_STATUS_RECORDED="true"
+    local r_verdict="" r_hash=""
+    r_verdict=$(printf '%s' "$rollup_json" | jq -r '.verdict // ""' 2>/dev/null || echo "")
+    r_hash=$(printf '%s' "$rollup_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
+    if [ "$r_hash" = "$DESIGN_COHERENCE_DESIGN_HASH" ]; then
+        DESIGN_ROLLUP_STATUS_HASH_FRESH="true"
+    fi
+    if [ "$r_verdict" = "coherent" ]; then
+        DESIGN_ROLLUP_STATUS_COHERENT="true"
+    fi
+    if [ "$DESIGN_ROLLUP_STATUS_COHERENT" = "true" ] && [ "$DESIGN_ROLLUP_STATUS_HASH_FRESH" = "true" ]; then
+        DESIGN_ROLLUP_STATUS_OBS="the latest DESIGN-ROLLUP v1 verdict for $tid is coherent and matches the current governing design_hash=$DESIGN_COHERENCE_DESIGN_HASH"
+    elif [ "$DESIGN_ROLLUP_STATUS_HASH_FRESH" != "true" ]; then
+        DESIGN_ROLLUP_STATUS_OBS="the latest DESIGN-ROLLUP v1 verdict for $tid was recorded against design_hash=$r_hash, which no longer matches the current governing design_hash=$DESIGN_COHERENCE_DESIGN_HASH -- stale, an amendment landed since"
+    else
+        DESIGN_ROLLUP_STATUS_OBS="the latest DESIGN-ROLLUP v1 verdict for $tid is verdict=$r_verdict against the current hash -- not coherent"
+    fi
+    return 0
+}
+
+emit_design_rollup_status() {
+    local ok="$1" ekey="$2" obs="$3" tid="${4:-}" applicable="${5:-false}" \
+        mech_ok="${6:-false}" recorded="${7:-false}" coherent="${8:-false}" fresh="${9:-false}"
+    local envelope="" env_rc=0
+    envelope=$(jq -nc \
+        --argjson ok "$ok" --arg ekey "$ekey" --arg obs "$obs" --arg tid "$tid" \
+        --argjson applicable "$applicable" --argjson mech_ok "$mech_ok" \
+        --argjson recorded "$recorded" --argjson coherent "$coherent" --argjson fresh "$fresh" '
+        {ok: $ok, subcommand: "design-rollup-status", task_id: $tid,
+         error_key: $ekey, observations: $obs, applicable: $applicable,
+         mechanical_ok: $mech_ok, rollup_recorded: $recorded,
+         rollup_coherent: $coherent, rollup_hash_fresh: $fresh}
+    ' 2>/dev/null) || env_rc=$?
+    if [ "$env_rc" -eq 0 ] && printf '%s' "$envelope" | jq -e '
+            type == "object" and (.ok|type)=="boolean" and .subcommand == "design-rollup-status"
+        ' >/dev/null 2>&1; then
+        printf '%s\n' "$envelope"
+        return 0
+    fi
+    printf '{"ok":false,"subcommand":"design-rollup-status","task_id":null,"error_key":"envelope_construction_failed","observations":"the design-rollup-status envelope could not be constructed","applicable":false,"mechanical_ok":false,"rollup_recorded":false,"rollup_coherent":false,"rollup_hash_fresh":false}\n'
+}
+
+cmd_design_rollup_status() {
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"ok":false,"subcommand":"design-rollup-status","task_id":null,"error_key":"jq_unavailable","observations":"jq is required and not on PATH","applicable":false,"mechanical_ok":false,"rollup_recorded":false,"rollup_coherent":false,"rollup_hash_fresh":false}\n'
+        exit 2
+    fi
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_design_rollup_status "false" "missing_task_id" \
+            "design-rollup-status requires <task-id> as first positional argument" ""
+        exit 1
+    fi
+    shift || true
+    if [ "$#" -gt 0 ]; then
+        emit_design_rollup_status "false" "unknown_flag" \
+            "unknown argument to design-rollup-status; it takes only <task-id>" "$tid"
+        exit 1
+    fi
+    require_bd "design-rollup-status" "$tid"
+
+    # set -e guard -- see compute_design_rollup_packet's own header comment
+    # on its identical compute_design_coherence call for the full reasoning.
+    local rc=0
+    compute_design_rollup_status "$tid" || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        emit_design_rollup_status "false" "$DESIGN_ROLLUP_STATUS_KEY" "$DESIGN_ROLLUP_STATUS_OBS" "$tid"
+        exit 2
+    fi
+    local overall_ok="false"
+    if [ "$DESIGN_ROLLUP_STATUS_APPLICABLE" != "true" ]; then
+        overall_ok="true"
+    elif [ "$DESIGN_ROLLUP_STATUS_MECHANICAL_OK" = "true" ] && [ "$DESIGN_ROLLUP_STATUS_COHERENT" = "true" ] && [ "$DESIGN_ROLLUP_STATUS_HASH_FRESH" = "true" ]; then
+        overall_ok="true"
+    fi
+    emit_design_rollup_status "$overall_ok" "" "$DESIGN_ROLLUP_STATUS_OBS" "$tid" \
+        "$DESIGN_ROLLUP_STATUS_APPLICABLE" "$DESIGN_ROLLUP_STATUS_MECHANICAL_OK" \
+        "$DESIGN_ROLLUP_STATUS_RECORDED" "$DESIGN_ROLLUP_STATUS_COHERENT" "$DESIGN_ROLLUP_STATUS_HASH_FRESH"
+    if [ "$overall_ok" = "true" ]; then
+        exit 0
+    fi
+    exit 4
+}
+
+# cmd_design_rollup <epic-id> --design-hash <h> --model <m> [--file <path>]
+# — records a design-reviewer verdict against the rollup packet as
+# `DESIGN-ROLLUP v1`. Structure and validation ladder copied from
+# cmd_design_review_record (this region's own header explains why: same
+# agent, same output contract, same recorder discipline) with three
+# ADDITIONS specific to this axis: a required --model flag (transport
+# metadata for the record grammar, the SAME 46w9 split every other
+# model-bearing record in this file already uses — never derived a second
+# time from re-parsing frontmatter), a fresh re-derivation of the
+# MECHANICAL rollup at record time (TOCTOU: a coherent verdict recorded
+# against a mechanical rollup that has since reopened must not stand), and
+# a hash-freshness check against that fresh mechanical state rather than
+# trusting the caller's --design-hash blindly.
+cmd_design_rollup() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "design-rollup" "" "missing_task_id" \
+            "design-rollup requires <task-id> as first positional argument" \
+            "qa-gate.sh design-rollup <task-id> --design-hash <sha256> --model <m> [--file <path>]"
+        exit 1
+    fi
+    shift || true
+
+    local input_path="" design_hash_arg="" model_arg=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                input_path="${2:-}"
+                if [ -z "$input_path" ]; then
+                    emit_error_json "design-rollup" "$tid" "missing_file_path" \
+                        "--file requires a path argument" \
+                        "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <path>"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --design-hash)
+                design_hash_arg="${2:-}"
+                if [ -z "$design_hash_arg" ]; then
+                    emit_error_json "design-rollup" "$tid" "missing_design_hash" \
+                        "--design-hash requires a value" \
+                        "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> [--file <path>]"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            --model)
+                model_arg="${2:-}"
+                if [ -z "$model_arg" ]; then
+                    emit_error_json "design-rollup" "$tid" "missing_model" \
+                        "--model requires a value" \
+                        "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> [--file <path>]"
+                    exit 1
+                fi
+                shift 2 || true
+                ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                emit_error_json "design-rollup" "$tid" "unknown_flag" \
+                    "unknown argument: $1 (expected --design-hash <sha256>, --model <m>, --file <path>, or stdin)" \
+                    "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> [--file <path>]"
+                exit 1
+                ;;
+        esac
+    done
+
+    require_bd "design-rollup" "$tid"
+
+    if [ -z "$design_hash_arg" ]; then
+        emit_error_json "design-rollup" "$tid" "missing_design_hash" \
+            "--design-hash requires the sha256 hash of the design artifact this verdict reviewed" \
+            "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <path>"
+        exit 1
+    fi
+    if ! is_sha256_hex "$design_hash_arg"; then
+        emit_error_json "design-rollup" "$tid" "design_hash_invalid" \
+            "--design-hash='$design_hash_arg' is not 64 hex characters, so it names no reproducible bytes" \
+            "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <path>"
+        exit 1
+    fi
+    if [ -z "$model_arg" ]; then
+        emit_error_json "design-rollup" "$tid" "missing_model" \
+            "--model requires the identity of the model that produced this verdict — transport metadata for the record grammar (46w9), the same split every other model-bearing record in this file uses" \
+            "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <path>"
+        exit 1
+    fi
+    assert_record_model_scalar "design-rollup" "$tid" "model" "$model_arg"
+
+    # --- MECHANICAL TOCTOU + hash-freshness, established BEFORE the JSON
+    # payload is even parsed: cheapest checks first, and a coherent verdict
+    # is not a coherent verdict once the mechanical state it was judged
+    # against has moved.
+    #
+    # set -e guard -- see compute_design_rollup_packet's own header comment
+    # on its identical compute_design_coherence call for the full reasoning.
+    local coh_rc=0
+    compute_design_coherence "$tid" || coh_rc=$?
+    if [ "$coh_rc" -eq 3 ]; then
+        emit_error_json "design-rollup" "$tid" "$DESIGN_COHERENCE_KEY" \
+            "cannot record a rollup verdict for $tid: the mechanical rollup could not be re-established right now: $DESIGN_COHERENCE_OBS" \
+            "re-run once the underlying read is available: qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <path>"
+        exit 2
+    fi
+    if [ "$DESIGN_COHERENCE_APPLICABLE" != "true" ]; then
+        emit_error_json "design-rollup" "$tid" "design_rollup_not_applicable" \
+            "$tid is not a task the coherence rollup axis applies to: $DESIGN_COHERENCE_OBS" \
+            "the judgement rollup only ever applies where the mechanical rollup does"
+        exit 1
+    fi
+    if [ "$DESIGN_COHERENCE_OK" != "true" ]; then
+        emit_error_json "design-rollup" "$tid" "design_rollup_mechanical_prerequisite" \
+            "refusing to record a rollup verdict for $tid: the MECHANICAL rollup has reopened since the packet this verdict was judged against was assembled ($DESIGN_COHERENCE_COUNT issue(s) now open, $DESIGN_COHERENCE_KEY). A coherent judgement over data that has since changed is not evidence about the current state" \
+            "qa-gate.sh design-coherence $tid for the breakdown; fix or amend, re-run design-rollup-packet, and re-spawn the reviewer against the fresh packet"
+        exit 2
+    fi
+    if [ "$design_hash_arg" != "$DESIGN_COHERENCE_DESIGN_HASH" ]; then
+        emit_error_json "design-rollup" "$tid" "design_rollup_hash_stale" \
+            "--design-hash=$design_hash_arg does not match $tid's CURRENT governing design_hash=$DESIGN_COHERENCE_DESIGN_HASH -- an amendment landed since the packet this verdict was judged against was assembled. This verdict cannot be bound to a hash that is no longer current" \
+            "re-run design-rollup-packet against the current artifact, re-spawn the reviewer, and record the fresh verdict"
+        exit 1
+    fi
+    local unit_count="0"
+    unit_count=$(printf '%s' "$DESIGN_COHERENCE_UNIT_IDS_JSON" | jq 'length' 2>/dev/null) || unit_count=0
+
+    local raw=""
+    if [ -n "$input_path" ]; then
+        if [ ! -f "$input_path" ]; then
+            emit_error_json "design-rollup" "$tid" "file_not_found" \
+                "verdict file does not exist: $input_path" \
+                "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <existing-path>"
+            exit 1
+        fi
+        if ! raw=$(cat -- "$input_path" 2>/dev/null); then
+            emit_error_json "design-rollup" "$tid" "file_unreadable" \
+                "could not read verdict file: $input_path" \
+                "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <readable-path>"
+            exit 1
+        fi
+    else
+        if [ -t 0 ]; then
+            emit_error_json "design-rollup" "$tid" "no_input" \
+                "no --file given and stdin is a terminal; pipe the design reviewer's JSON or pass --file <path>" \
+                "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <path>  OR  printf '%s' \"\$JSON\" | qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m>"
+            exit 1
+        fi
+        raw=$(cat)
+    fi
+    if [ -z "$raw" ]; then
+        emit_error_json "design-rollup" "$tid" "empty_input" \
+            "verdict input is empty" \
+            "qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <path>  OR  stdin pipe"
+        exit 1
+    fi
+    if ! printf '%s' "$raw" | jq -e 'type' >/dev/null 2>&1; then
+        emit_error_json "design-rollup" "$tid" "invalid_json" \
+            "verdict input is not valid JSON" \
+            "expected a JSON object with keys verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity"
+        exit 1
+    fi
+    local top_type
+    top_type=$(printf '%s' "$raw" | jq -r 'type' 2>/dev/null || echo "unknown")
+    if [ "$top_type" != "object" ]; then
+        emit_error_json "design-rollup" "$tid" "not_an_object" \
+            "verdict input top-level is $top_type, expected object" \
+            "expected a JSON object with keys verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity"
+        exit 1
+    fi
+
+    local has_key key
+    for key in verdict criterion_results required_fixes iteration rubric_version reviewer_identity; do
+        has_key=$(printf '%s' "$raw" | jq -r --arg k "$key" 'has($k)' 2>/dev/null || echo "false")
+        if [ "$has_key" != "true" ]; then
+            emit_error_json "design-rollup" "$tid" "missing_key:$key" \
+                "verdict input missing required key: $key" \
+                "required keys: verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity"
+            exit 1
+        fi
+    done
+
+    local verdict
+    verdict=$(printf '%s' "$raw" | jq -r '.verdict' 2>/dev/null || echo "")
+    case "$verdict" in
+        satisfied|needs_revision) ;;
+        *)
+            emit_error_json "design-rollup" "$tid" "verdict_invalid_enum" \
+                "verdict='$verdict' is not in the allowed enum {satisfied, needs_revision} -- design-reviewer.md's OUTPUT CONTRACT is unchanged by this second invocation; design-rollup translates it to coherent/incoherent itself" \
+                "set .verdict to either \"satisfied\" or \"needs_revision\""
+            exit 1
+            ;;
+    esac
+
+    local cr_type
+    cr_type=$(printf '%s' "$raw" | jq -r '.criterion_results | type' 2>/dev/null || echo "unknown")
+    if [ "$cr_type" != "array" ]; then
+        emit_error_json "design-rollup" "$tid" "criterion_results_not_array" \
+            "criterion_results is type=$cr_type, expected array" \
+            "criterion_results must be an array of {criterion, pass, justification} objects"
+        exit 1
+    fi
+    local cr_invalid
+    cr_invalid=$(printf '%s' "$raw" | jq -r '
+        .criterion_results
+        | map(
+            if type != "object" then "item_not_object"
+            elif (has("criterion") and (.criterion | type == "string")) | not then "missing_or_bad_criterion"
+            elif (has("pass") and (.pass | type == "boolean")) | not then "missing_or_bad_pass"
+            elif (has("justification") and (.justification | type == "string")) | not then "missing_or_bad_justification"
+            else "ok"
+            end
+        )
+        | map(select(. != "ok"))
+        | .[0] // ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$cr_invalid" ]; then
+        emit_error_json "design-rollup" "$tid" "criterion_results_item_invalid:$cr_invalid" \
+            "criterion_results contains an invalid item: $cr_invalid" \
+            "every criterion_results item must be {criterion: string, pass: boolean, justification: string}"
+        exit 1
+    fi
+
+    local rf_type
+    rf_type=$(printf '%s' "$raw" | jq -r '.required_fixes | type' 2>/dev/null || echo "unknown")
+    if [ "$rf_type" != "array" ]; then
+        emit_error_json "design-rollup" "$tid" "required_fixes_not_array" \
+            "required_fixes is type=$rf_type, expected array" \
+            "required_fixes must be an array (empty array allowed for satisfied)"
+        exit 1
+    fi
+
+    local it_type it_val
+    it_type=$(printf '%s' "$raw" | jq -r '.iteration | type' 2>/dev/null || echo "unknown")
+    if [ "$it_type" != "number" ]; then
+        emit_error_json "design-rollup" "$tid" "iteration_not_number" \
+            "iteration is type=$it_type, expected number" \
+            "iteration must be a JSON number (1, 2, 3, ...)"
+        exit 1
+    fi
+    it_val=$(printf '%s' "$raw" | jq -r '.iteration' 2>/dev/null || echo "?")
+    case "$it_val" in
+        ''|*[!0-9]*)
+            emit_error_json "design-rollup" "$tid" "iteration_not_integer" \
+                "iteration=$it_val is not a non-negative integer; it is interpolated into the DESIGN-ROLLUP record's machine prefix" \
+                "iteration must be a non-negative integer (1, 2, 3, ...)"
+            exit 1
+            ;;
+    esac
+
+    local rv_type rv_val
+    rv_type=$(printf '%s' "$raw" | jq -r '.rubric_version | type' 2>/dev/null || echo "unknown")
+    if [ "$rv_type" != "string" ]; then
+        emit_error_json "design-rollup" "$tid" "rubric_version_not_string" \
+            "rubric_version is type=$rv_type, expected string" \
+            "rubric_version must be a string (e.g. \"1\")"
+        exit 1
+    fi
+    rv_val=$(printf '%s' "$raw" | jq -r '.rubric_version' 2>/dev/null || echo "")
+    if [ -z "$rv_val" ]; then
+        emit_error_json "design-rollup" "$tid" "rubric_version_empty" \
+            "rubric_version is the empty string" \
+            "rubric_version must be a non-empty string (e.g. \"1\")"
+        exit 1
+    fi
+
+    local reviewer_identity
+    reviewer_identity=$(printf '%s' "$raw" | jq -r '.reviewer_identity' 2>/dev/null || echo "")
+    if [ -z "$reviewer_identity" ]; then
+        emit_error_json "design-rollup" "$tid" "reviewer_identity_empty" \
+            "reviewer_identity is the empty string" \
+            "reviewer_identity must be a non-empty string (design-reviewer.md's own contract: the fixed literal \"design-claude\")"
+        exit 1
+    fi
+
+    local designer_identity
+    designer_identity=$(latest_design_artifact_designer "$tid") || designer_identity=""
+    if [ -z "$designer_identity" ]; then
+        emit_error_json "design-rollup" "$tid" "design_artifact_record_missing" \
+            "no DESIGN-ARTIFACT v1 record exists for $tid, so there is no established designer identity to check this verdict's independence against" \
+            "qa-gate.sh design-record $tid"
+        exit 1
+    fi
+    if [ "$reviewer_identity" = "$designer_identity" ]; then
+        emit_error_json "design-rollup" "$tid" "design_reviewer_not_independent" \
+            "reviewer_identity='$reviewer_identity' equals designer='$designer_identity' on $tid's latest DESIGN-ARTIFACT record -- nobody reviews their own work, at the rollup level exactly as at the per-artifact review level" \
+            "qa-gate.sh design-rollup $tid --design-hash <h> --model <m> --file <a verdict from a different reviewer>"
+        exit 1
+    fi
+
+    local prior_json="" prior_rc=0
+    prior_json=$(latest_design_rollup "$tid") || prior_rc=$?
+    if [ "$prior_rc" -ne 0 ]; then
+        emit_error_json "design-rollup" "$tid" "design_rollup_history_unreadable" \
+            "the existing DESIGN-ROLLUP history for $tid could not be read right now, so the duplicate-hash check cannot run" \
+            "re-run once bd is reachable: qa-gate.sh design-rollup $tid --design-hash <sha256> --model <m> --file <verdict>"
+        exit 2
+    fi
+    # The prior record's own text does not carry `iteration=` -- unlike
+    # DESIGN-REVIEW, the ROLLUP grammar plan:718-737 specifies has no
+    # iteration field at all (reviewer/model/design_hash/units/verdict/
+    # gaps only). The advance check this region needs is therefore over
+    # DESIGN_HASH, not over an iteration counter that does not exist in
+    # this record's own grammar. Checked via the SAME prior_json read above.
+    #
+    # R1-F4 fix (QA round 1, HIGH, SUSTAINED half -- the coordinator's own
+    # split ruling). Originally this refused ANY second verdict at the SAME
+    # design_hash unconditionally. :15856 above already requires
+    # --design-hash to EQUAL the CURRENT governing hash; combined with the
+    # unconditional form of this check, the two together admitted AT MOST
+    # ONE VERDICT PER design_hash, EVER -- an incoherent verdict LOCKED the
+    # task while that hash governed, and the only documented escape was
+    # editing the design document, even when the reviewer's own gaps were
+    # entirely implementation-side (the ordinary case: DS1/DS2/DS8 judge
+    # what was actually BUILT, which keeps changing after the design text
+    # itself stops moving). Fixing the implementation -- the ordinary
+    # remedy -- could not clear it.
+    #
+    # NOT change-set-hash-bound (the coordinator's OWN explicit ruling,
+    # NOT SUSTAINED half): plan:721 specifies this grammar carrying no
+    # change_set_hash, and building it as specified is correct -- adding a
+    # new field here would be a second deviation from the same governing
+    # plan this arc already rebuilt once to conform to. So the gate below
+    # is NOT "has the change set moved" (that would need a persisted
+    # reference point this record's own grammar is not allowed to carry);
+    # it is narrower and needs no new state at all: a COHERENT prior
+    # verdict at this hash is a terminus (re-recording over an
+    # already-passing judgement at unchanged design content is a genuine
+    # duplicate, and DS8/staleness against LATER change sets is the
+    # accepted, documented residual -- see this function's own approve-
+    # time consumer). An INCOHERENT prior verdict is NOT a terminus: it is
+    # exactly the state a re-spawned reviewer, judging updated evidence
+    # (fresh F7 contracts, a fresh union diff), is expected to supersede.
+    # latest_design_rollup already returns the chronologically LATEST
+    # record regardless of which hash it names, so a fresh incoherent-or-
+    # coherent verdict recorded here becomes the new latest that approve's
+    # own DESIGN-ROLLUP-REFUSAL reads, with no reader-side change needed.
+    if [ "$prior_json" != "{}" ]; then
+        local prior_hash="" prior_verdict=""
+        prior_hash=$(printf '%s' "$prior_json" | jq -r '.design_hash // ""' 2>/dev/null || echo "")
+        prior_verdict=$(printf '%s' "$prior_json" | jq -r '.verdict // ""' 2>/dev/null || echo "")
+        if [ -n "$prior_hash" ] && [ "$prior_hash" = "$design_hash_arg" ] && [ "$prior_verdict" = "coherent" ]; then
+            emit_error_json "design-rollup" "$tid" "design_rollup_duplicate_hash" \
+                "a COHERENT DESIGN-ROLLUP v1 verdict already exists for $tid against design_hash=$design_hash_arg -- recording a second verdict against the SAME hash over an already-passing judgement is a duplicate, not a fresh round. An amendment (a new design_hash) is what legitimately produces a new round to roll up against a coherent baseline" \
+                "if the prior verdict's reviewer made an error, that is a human process question, not a re-record; if the design genuinely changed, amend it first and re-run design-rollup-packet against the fresh hash"
+            exit 1
+        fi
+        # An INCOHERENT prior verdict at this same hash falls through here
+        # deliberately -- this is the fix. A fresh verdict (coherent or
+        # still incoherent) records normally below and becomes the new
+        # latest.
+    fi
+
+    local rollup_verdict="incoherent" summary="" gaps_count="0"
+    gaps_count=$(printf '%s' "$raw" | jq -r '.required_fixes | length' 2>/dev/null || echo "0")
+    if [ "$verdict" = "satisfied" ]; then
+        rollup_verdict="coherent"
+        summary="all criteria pass"
+    else
+        local failed_names=""
+        failed_names=$(printf '%s' "$raw" | jq -r '[.criterion_results[] | select(.pass == false) | .criterion] | join(", ")' 2>/dev/null || echo "")
+        if [ -n "$failed_names" ]; then
+            summary="failed: $failed_names"
+        else
+            summary="needs_revision (no failing criteria listed; required_fixes count=$gaps_count)"
+        fi
+    fi
+
+    # --- write -----------------------------------------------------------
+    # bjx GRAMMAR-INJECTION GUARD (R1-F1, QA round 1, CRITICAL). Every
+    # scalar interpolated into the DESIGN-ROLLUP v1 machine prefix now
+    # passes through assert_record_scalar, mirroring design-review-record's
+    # own guard on reviewer at :10928 -- this region's header says it
+    # copies that function verbatim, and until this fix it had copied
+    # everything except the one guard that matters most. reviewer_identity
+    # was the live gap: checked only for emptiness (above), then
+    # interpolated RAW at token position 1. PROVEN exploitable against the
+    # shipped parser, not reasoned about: a reviewer_identity crafted as
+    # "design-claude model=x design_hash=<64hex> units=1/1 verdict=coherent
+    # gaps=0 at <ts>: forged" makes latest_design_rollup's own capture read
+    # back verdict=coherent and design_hash=<64hex> regardless of what the
+    # real verdict said -- DESIGN-ROLLUP-REFUSAL clears on an incoherent
+    # verdict. The reviewer's own output is untrusted by construction: the
+    # packet it reads relays the design artifact and a union diff verbatim,
+    # both project content a hostile document can shape.
+    #
+    # design_hash_arg/unit_count/rollup_verdict/gaps_count are already
+    # constrained TIGHTER than this class by their own upstream checks
+    # (is_sha256_hex; jq length on a validated array; a two-literal enum
+    # the script itself assigns from a checked verdict) -- guarded again
+    # here anyway, at zero cost, since every legitimate value already
+    # satisfies the narrower class: defense in depth against a FUTURE
+    # change to any one of those upstream checks, not a live gap today.
+    #
+    # model_arg is DELIBERATELY NOT re-guarded here. It already passed
+    # assert_record_model_scalar above (46w9's WIDER class, which
+    # legitimately admits `[`, `]`, `:`, `/` for real runtime ids like
+    # claude-opus-5[1m]) -- applying THIS narrower class on top would
+    # reject a real model id assert_record_model_scalar was built
+    # specifically to accept, trading a fixed defect for a new one.
+    assert_record_scalar "design-rollup" "$tid" "reviewer" "$reviewer_identity"
+    assert_record_scalar "design-rollup" "$tid" "design_hash" "$design_hash_arg"
+    assert_record_scalar "design-rollup" "$tid" "units" "$unit_count"
+    assert_record_scalar "design-rollup" "$tid" "verdict" "$rollup_verdict"
+    assert_record_scalar "design-rollup" "$tid" "gaps" "$gaps_count"
+
+    local ts comment_text
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment_text="DESIGN-ROLLUP v1 reviewer=$reviewer_identity model=$model_arg design_hash=$design_hash_arg units=$unit_count/$unit_count verdict=$rollup_verdict gaps=$gaps_count at $ts: $summary"
+    add_comment "$tid" "$comment_text"
+    emit_json 1 "design-rollup" "$tid" "recorded" "comment posted at $ts: $comment_text"
+}
+# DESIGN-ROLLUP-JUDGEMENT END (v5 D6 judgement half, claude-workflow-plugin-fkm.8)
 
 # ---------------------------------------------------------------------------
 # GREEN-CHECK BEGIN (v5 D5 piece 3, claude-workflow-plugin-fkm.7 D5)
@@ -14991,6 +17167,10 @@ case "$SUB" in
     spec-injection-status) cmd_spec_injection_status "$@" ;;
     green-check) cmd_green_check "$@" ;;
     design-unit-align) cmd_design_unit_align "$@" ;;
+    design-coherence) cmd_design_coherence "$@" ;;
+    design-rollup-packet) cmd_design_rollup_packet "$@" ;;
+    design-rollup-status) cmd_design_rollup_status "$@" ;;
+    design-rollup) cmd_design_rollup "$@" ;;
     resolve-finding) cmd_resolve_finding "$@" ;;
     arbitrate)       cmd_arbitrate "$@" ;;
     # quarantine-artifact dispatch -- REMOVED (claude-workflow-plugin-k6re,

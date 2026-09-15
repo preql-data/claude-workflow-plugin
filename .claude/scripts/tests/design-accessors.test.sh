@@ -1114,25 +1114,34 @@ assert_eq "10.7 RESTORE CONTROL: shipped script, readable history, same duplicat
 # ===========================================================================
 printf '\n=== Section 11: R7-F4 — the validator said it failed; believe it ===\n'
 # ===========================================================================
-# The three validate-design consumers (design-record, design-unit-bind,
-# design-conform step 3) used to run the validator with `|| true` and
+# The original three validate-design consumers (design-record, design-unit-
+# bind, design-conform step 3) used to run the validator with `|| true` and
 # compare `jq -r '.ok // false'` textually. Two vectors through that:
 #   (a) a SHAPE-PERFECT ok:true envelope from a validator that EXITS
 #       NONZERO — a command reporting its own failure out-of-band;
 #   (b) `"ok": "true"` — a JSON STRING — which `jq -r` renders identically
 #       to the boolean.
-# validate_design_envelope_ok is the ONE consumer-side gate for all three
+# validate_design_envelope_ok is the ONE consumer-side gate for all such
 # sites (rc 0 first, then exact types field by field, `.ok == true`
 # type-strict). The stubs below are swapped into the FIXTURE review-check.sh
 # — the support copy qa-gate resolves via CLAUDE_PROJECT_DIR — never the
 # canonical file.
+#
+# v5 D6 (claude-workflow-plugin-fkm.8) added a FOURTH: compute_design_
+# coherence needs validate-design's raw unit_ids/unit_files (to enumerate
+# every declared unit, not just one), which design-conform's own subprocess
+# does not expose — so it calls validate-design directly and reuses this
+# SAME shared shape-check helper, rather than inventing a second one. 3 -> 4
+# is the correct, reviewed count for that reason; a future consumer that
+# reimplements this check inline instead of calling the helper would NOT
+# move this count, which is exactly what makes it worth asserting.
 
 assert_eq "11.0 the rc-gate sentinels are unique in the shipped script" "1|1" \
     "$(grep -cF '# VALIDATE-DESIGN-CONSUMER-RC-GATE BEGIN (xsu1 R7-F4)' "$QG")|$(grep -cF '# VALIDATE-DESIGN-CONSUMER-RC-GATE END (xsu1 R7-F4)' "$QG")"
 assert_eq "11.0b the type-strict ok line is unique (the META-2 mutation target)" "1" \
     "$(grep -cF 'and .ok == true  # type-strict' "$QG")"
 # shellcheck disable=SC2016  # the grep -cF needle is literal shell source.
-assert_eq "11.0c the helper is wired at all three consumer sites" "3" \
+assert_eq "11.0c the helper is wired at all FOUR consumer sites (design-record, design-unit-bind, design-conform, and, since v5 D6, compute_design_coherence)" "4" \
     "$(grep -cF 'if ! validate_design_envelope_ok "$vout_rc" "$vout"; then' "$QG")"
 
 RC_FIXTURE="$SCRIPTS/review-check.sh"
