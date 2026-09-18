@@ -5979,6 +5979,273 @@ EOF
 }
 # --- EMIT-RELEASE END (claude-workflow-plugin-i8cx R5-F1) ------------------
 
+# --- NEXT-WORK BEGIN (claude-workflow-plugin-90av) --------------------------
+# THE DEFECT THIS CLOSES, OPERATOR-REPORTED 2026-09-15 (verbatim): "make sure
+# mechanisms for that continuous work are in place in the plugin itself,
+# because it bothers me that you keep interrupting like that every time and
+# not picking up the next tasks." This file has always answered exactly one
+# question -- "may this session stop?" -- never "what next?". On an ordinary
+# release (QA_APPROVED true, reached only past the
+# `if [ "$QA_APPROVED" = false ]; then emit_block ...; fi` gate far above --
+# NOTHING below that line runs on any path that has not already released)
+# every branch used to end in bare `{}` or a note about an unrelated axis
+# (the epic gate, an override, the close-hint). A note is not a
+# continuation: `additionalContext` on a Stop event is disclosure, read
+# after the turn already ended -- it does not feed back into Claude's own
+# turn, which is exactly why EPIC_DEFER_NOTE and CLOSE_HINT_NOTE already
+# existed for months without ever closing this complaint. The only lever
+# this hook has that actually keeps a turn alive is the one QA-required
+# already uses: `{"decision":"block","reason":...}` (emit_block). A genuine
+# continuation has to reuse that lever, deliberately, past the point where
+# release was already decided -- never as a second way to reach it.
+#
+# STRUCTURAL SAFETY (constraint 1: must never become a new way to release).
+# compute_next_work is called ONLY from the bottom-of-file release block
+# (search this file for "claude-workflow-plugin-90av: THE CONTINUATION
+# BLOCK"), itself reached only when QA_APPROVED already held through every
+# earlier gate (label + change-set-bound record + review-discipline +
+# design-discipline). Blocking from that call site fires only when this
+# function independently confirms MORE ready work exists under the SAME
+# epic -- it cannot manufacture an approval, only refuse to let an
+# already-approved session end while there is more of it still ready.
+# Reusing emit_block's exact JSON shape rather than a second inline
+# printf/jq pair follows this file's own discipline against duplicated
+# envelope logic (see emit_release's header just above for the same
+# argument made once already, R5-F1).
+#
+# THREE-WAY OUTCOME, DELIBERATELY NEVER COLLAPSED TO TWO (constraint 2;
+# this is the repo's unifying defect family -- LESSONS.md's `until`
+# poll-loop entry: "a waiter that cannot say why it stopped is the same
+# defect family as a measurement that did not happen looking identical to
+# one that passed", applied here to a query instead of a poll loop, same
+# shape: an empty result and a FAILED one render as the same nothing unless
+# something is printed for the sole purpose of telling them apart):
+#   READY     bd ready --parent <epic> returned a real, jq-parseable JSON
+#             ARRAY with at least one entry. NEXT_WORK_DECISION=ready; the
+#             call site blocks the Stop with a continuation directive.
+#   NOTHING   the SAME call returned a real, parseable, EMPTY array.
+#             NEXT_WORK_DECISION=nothing; the call site lets the release
+#             proceed, with an explicit "stopping is correct" sentence so
+#             this can never be mistaken for silence.
+#   DEGRADED  the call could not be trusted at all: bd missing, the
+#             bounded call timed out or exited non-zero, or its output
+#             does not parse as a JSON array. NEXT_WORK_DECISION=degraded;
+#             the call site lets the release proceed too (an unverifiable
+#             "maybe" is not grounds to force a busy-loop against a broken
+#             bd), but the text NAMES the escape
+#             (error_key=next_work_ready_unavailable plus which check
+#             failed) and explicitly denies being the NOTHING sentence, so
+#             a DEGRADED read is never mistaken for a confirmed empty
+#             queue. next-work.test.sh's meta-test stubs the ready lookup
+#             to always render as empty (including via a mutant that
+#             collapses a bd failure into the same "[]" a genuine empty
+#             queue produces) and asserts NOTHING and DEGRADED still
+#             render as textually distinct, mutually exclusive headlines.
+#
+# "BLOCKED-ONLY QUEUE -> NOT OFFERED AS READY" (one of the required test
+# legs) holds BY CONSTRUCTION, not by a filter this function applies: `bd
+# ready` itself (its own --help text) "excludes in_progress, blocked,
+# deferred, and hooked issues" via blocker-aware GetReadyWork semantics.
+# This function never widens that set -- the supplementary "remaining open
+# children" count below is read from epic-gate.sh's own siblings payload
+# (status != closed) SEPARATELY, purely for disclosure, and is NEVER used
+# to pick the continuation directive's target. Only bd ready's own result
+# picks the target.
+#
+# BOUNDED (constraint 4): the one new external call goes through
+# run_with_timeout, which already carries the in-process poll+tree-kill
+# watchdog fallback (claude-workflow-plugin-03tf) for a host with neither
+# timeout(1) nor gtimeout(1) on PATH -- this host among them. Never
+# timeout(1) directly. The dynamic epic id crosses into the `bash -c`
+# argument as an EXPORTED ENVIRONMENT VARIABLE the child script references
+# by name, never string-interpolated into the command text itself, so a
+# task id cannot be read as shell syntax regardless of its contents.
+#
+# STDOUT AND STDERR MUST NOT SHARE ONE FILE for this call, unlike
+# run_with_timeout's own TEST_LOG/LINT_LOG/TYPE_LOG convention (which wants
+# both merged for failure display): `bd ready --json` on this host writes
+# a genuinely clean JSON array to stdout but an unrelated advisory line
+# ("warning: beads.role not configured...") to stderr on every invocation,
+# success or not. Measured directly while building this: merging the two
+# with `2>&1` interleaves the warning into the JSON stream and jq fails to
+# parse a call that actually succeeded, which would misreport a HEALTHY bd
+# as DEGRADED. The inner command redirects its own stderr to /dev/null
+# before the outer capture ever sees it, so run_with_timeout's log
+# receives stdout only.
+NEXT_WORK_TIMEOUT_S="${NEXT_WORK_TIMEOUT_S:-30}"
+
+# compute_next_work <task_id> <epic_id> <siblings_json> -- sets
+# NEXT_WORK_DECISION (ready|nothing|degraded) and NEXT_WORK_TEXT (the
+# disclosure/directive text). siblings_json is the caller's own
+# already-fetched `epic-gate.sh siblings` payload (one shared read, not a
+# second epic-gate round trip for the same epic). Never called with an
+# empty epic_id -- the call site's own guard -- because there is no active
+# epic to scope a continuation to; this stays as silent as EPIC_DEFER_NOTE
+# already is on that same input.
+compute_next_work() {
+    local tid="$1" epic="$2" siblings_json="$3"
+    NEXT_WORK_DECISION="degraded"
+    NEXT_WORK_TEXT=""
+
+    if ! command -v bd >/dev/null 2>&1; then
+        NEXT_WORK_TEXT="
+
+NEXT-WORK: DEGRADED -- bd is not on PATH at this point in the run, so ready
+work under epic $epic could not be determined
+(error_key=next_work_bd_missing). This is NOT a confirmation that nothing
+is ready."
+        return 0
+    fi
+
+    local nonce out_log rwt_log rc
+    nonce=$(scoped_log_nonce)
+    out_log="$QA_TRACKING_DIR/next-work-ready.$nonce.out"
+    rwt_log="$QA_TRACKING_DIR/next-work-ready.$nonce.rwtlog"
+    rm -f "$out_log" "$rwt_log" 2>/dev/null || true
+
+    export NW_EPIC_ID="$epic"
+    export NW_OUT_LOG="$out_log"
+    rc=0
+    # SC2016: the non-expansion is the point -- run_with_timeout runs this
+    # string via `bash -c` in a CHILD process, and $NW_EPIC_ID/$NW_OUT_LOG
+    # must resolve there (from the exported env vars above), never here in
+    # the parent shell. Expanding them here would inline the task id (and a
+    # QA_TRACKING_DIR-derived path) as literal text into a command string
+    # re-parsed by a shell, which is the injection shape this function's
+    # own header explains avoiding.
+    #
+    # WHY THE INNER COMMAND REDIRECTS ITS OWN STDOUT TO $NW_OUT_LOG, RATHER
+    # THAN READING run_with_timeout's OWN "$rwt_log" PARAMETER BACK: on a
+    # host with neither timeout(1) nor gtimeout(1) -- this one -- run_with_
+    # timeout's watchdog-fallback branch unconditionally APPENDS its own
+    # "[run_with_timeout] NOTE: neither timeout nor gtimeout is on PATH..."
+    # disclosure line to whatever log path it was given, every single call,
+    # success or not (see that function's own WATCHDOG-END comment). That
+    # disclosure is exactly right for TEST_LOG/LINT_LOG/TYPE_LOG, which a
+    # human reads afterward -- but it POISONS a file this function needs to
+    # jq-parse as pure JSON: measured directly while building this fix, on
+    # this exact host, every call reported DEGRADED ("does not parse as a
+    # JSON array") even though bd itself had exited 0 with a clean array,
+    # because the footer landed in the same file right after it. Redirecting
+    # the real command's stdout to a SEPARATE, dedicated file this function
+    # controls end to end removes the collision instead of trying to strip a
+    # diagnostic line back out by matching its wording, which would silently
+    # break the moment that wording changed.
+    #
+    # rwt_log MUST be a real path in a real, writable directory -- NEVER
+    # /dev/null. Measured directly while building this fix: run_with_timeout
+    # derives its OWN timeout-marker path by simple concatenation
+    # (`wd_marker="${log}.wd-timeout"`), so passing /dev/null makes it try to
+    # create /dev/null.wd-timeout -- a path directly under /, "Operation not
+    # permitted" on an ordinary host -- which silently defeats the marker
+    # check that normalises a real timeout to rc=124. Without a real rwt_log,
+    # a genuine timeout on this exact class of host (no timeout/gtimeout)
+    # would report the child's raw SIGTERM exit status (143) instead, and
+    # this function's own `[ "$rc" -eq 124 ]` branch below would never fire
+    # -- the DEGRADED text would name the wrong escape ("bd ready exited
+    # 143") instead of "timed out after ${NEXT_WORK_TIMEOUT_S}s", which is
+    # still an honest DEGRADED classification (never misread as NOTHING) but
+    # names the wrong reason. next-work.test.sh's A5 drives a real hang past
+    # a real short timeout specifically to keep this measured, not assumed.
+    # shellcheck disable=SC2016
+    run_with_timeout "$NEXT_WORK_TIMEOUT_S" "$rwt_log" \
+        'bd ready --json --limit 0 --parent "$NW_EPIC_ID" >"$NW_OUT_LOG" 2>/dev/null' || rc=$?
+    unset NW_EPIC_ID NW_OUT_LOG 2>/dev/null || true
+    rm -f "$rwt_log" 2>/dev/null || true
+
+    local ready_json="" ready_ok=false
+    # --- NEXT-WORK-READY-VALIDATION-BEGIN (claude-workflow-plugin-90av) ----
+    # THE invariant constraint 2 depends on: ready_ok becomes true ONLY when
+    # the call exited 0 AND produced bytes AND those bytes parse as a JSON
+    # array. Any narrowing of this (trusting rc alone, or defaulting a read
+    # failure to "[]" the way a genuine empty queue would print) collapses
+    # DEGRADED into NOTHING -- exactly the LESSONS.md defect family this
+    # function's own header names. next-work.test.sh's Section B mutates
+    # this exact span back to a naive "rc doesn't matter, read failure means
+    # empty" shape and proves the collapse reproduces on the mutant and not
+    # on the shipped code.
+    if [ "$rc" -eq 0 ] && [ -s "$out_log" ]; then
+        ready_json=$(cat "$out_log" 2>/dev/null || echo "")
+        if printf '%s' "$ready_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            ready_ok=true
+        fi
+    fi
+    # --- NEXT-WORK-READY-VALIDATION-END (claude-workflow-plugin-90av) ------
+    rm -f "$out_log" 2>/dev/null || true
+
+    # Supplementary disclosure only -- never the readiness signal. The
+    # `.id != $tid` half is belt-and-braces: cmd_siblings already excludes
+    # the calling task from .siblings by construction (its own
+    # `[ "$sid" = "$tid" ] && continue`), but this count would silently
+    # include the task releasing right now if that upstream exclusion ever
+    # regressed, which is the same "count what changed, not what should
+    # have changed" discipline this file applies everywhere else.
+    local remaining_note="" remaining_count
+    remaining_count=$(printf '%s' "$siblings_json" | jq --arg tid "$tid" \
+        '[.siblings // [] | .[] | select(.status != "closed" and .id != $tid)] | length' 2>/dev/null || echo "")
+    remaining_count="${remaining_count:-0}"
+    remaining_note="
+Epic children: $remaining_count remaining open (non-closed) sibling
+task(s) under $epic (besides this one)."
+
+    if [ "$ready_ok" != true ]; then
+        local escape
+        if [ "$rc" -eq 124 ]; then
+            escape="bd ready timed out after ${NEXT_WORK_TIMEOUT_S}s"
+        elif [ "$rc" -ne 0 ]; then
+            escape="bd ready exited $rc"
+        elif [ -z "$ready_json" ]; then
+            escape="bd ready produced no output"
+        else
+            escape="bd ready produced output that does not parse as a JSON array"
+        fi
+        NEXT_WORK_DECISION="degraded"
+        NEXT_WORK_TEXT="
+
+NEXT-WORK: DEGRADED -- ready work under epic $epic could not be
+determined: $escape (error_key=next_work_ready_unavailable). This is NOT
+a confirmation that no work is ready. Check by hand:
+bd ready --parent $epic --json
+$remaining_note"
+        return 0
+    fi
+
+    local count
+    count=$(printf '%s' "$ready_json" | jq 'length' 2>/dev/null || echo 0)
+    count="${count:-0}"
+
+    if [ "$count" -eq 0 ]; then
+        NEXT_WORK_DECISION="nothing"
+        NEXT_WORK_TEXT="
+
+NEXT-WORK: NOTHING READY -- no ready work under epic $epic. Stopping is
+correct.
+$remaining_note"
+        return 0
+    fi
+
+    local list_text more_note next_id next_title
+    list_text=$(printf '%s' "$ready_json" | jq -r '.[] | "  - \(.id): \(.title)"' 2>/dev/null | head -10)
+    more_note=""
+    if [ "$count" -gt 10 ]; then
+        more_note="
+  ...and $((count - 10)) more"
+    fi
+    next_id=$(printf '%s' "$ready_json" | jq -r '.[0].id // empty' 2>/dev/null)
+    next_title=$(printf '%s' "$ready_json" | jq -r '.[0].title // empty' 2>/dev/null)
+    NEXT_WORK_DECISION="ready"
+    NEXT_WORK_TEXT="
+
+NEXT-WORK: READY -- $count ready task(s) remain under epic $epic:
+$list_text$more_note
+
+CONTINUATION DIRECTIVE: this epic is not finished. Delegate $next_id
+(\"$next_title\") to the appropriate specialist now -- Task(\"@<role>\", ...)
+in this same turn -- rather than ending here.
+$remaining_note"
+}
+# --- NEXT-WORK END (claude-workflow-plugin-90av) ----------------------------
+
 # ESCALATION READOUT (claude-workflow-plugin-2ty, QA round 1) -----------------
 #
 # THE ONE SUPPRESSION PREDICATE, AND WHY IT IS A FUNCTION.
@@ -7783,6 +8050,16 @@ fi
 
 # QA approved - check epic-level e2e gate (B2) before allowing the stop.
 EPIC_DEFER_NOTE=""
+# claude-workflow-plugin-90av: always initialised, mirroring EPIC_DEFER_NOTE
+# immediately above -- both the continuation-block check and NOTE_TEXT's own
+# composition near the bottom of this file read these unconditionally. This
+# whole feature is a no-op (silent, exactly like EPIC_DEFER_NOTE) whenever
+# there is no active epic to scope a continuation to: NEXT_WORK_DECISION
+# stays "none" (never "ready", so the continuation block below never fires)
+# unless compute_next_work actually runs, below, inside the confirmed-
+# active-epic branch.
+NEXT_WORK_DECISION="none"
+NEXT_WORK_TEXT=""
 if [ -n "$CURRENT_TASK" ] && [ -x "$EPIC_GATE" ] && command -v bd >/dev/null 2>&1; then
     SIBLINGS_JSON=$("$EPIC_GATE" siblings "$CURRENT_TASK" 2>/dev/null || echo '{}')
     EPIC_ID=$(echo "$SIBLINGS_JSON" | jq -r '.epic_id // empty' 2>/dev/null || echo "")
@@ -7826,6 +8103,14 @@ sibling(s). An integration check is recommended before the epic closes.
 Run \`bash .claude/scripts/epic-gate.sh shared-files $CURRENT_TASK\`
 for the file list."
         fi
+
+        # claude-workflow-plugin-90av: computed here, inside the confirmed-
+        # active-epic branch, reusing SIBLINGS_JSON already fetched above
+        # rather than a second epic-gate.sh round trip. See compute_next_
+        # work's own header (NEXT-WORK BEGIN, above emit_release) for the
+        # three-way outcome this sets and why blocked/in-progress/deferred
+        # siblings can never surface as "ready" from here.
+        compute_next_work "$CURRENT_TASK" "$EPIC_ID" "$SIBLINGS_JSON"
     fi
 fi
 
@@ -7929,6 +8214,24 @@ if [ -n "$CURRENT_TASK" ]; then
     rm -f "$(last_override_state_file_for "$CURRENT_TASK")" 2>/dev/null || true
 fi
 
+# claude-workflow-plugin-90av: THE CONTINUATION BLOCK. Reached only past
+# every line above -- QA_APPROVED was true, the epic-gate/close-hint/
+# override notes are already composed, and per-task tracking state for THIS
+# cycle is already cleared (the rm -f block just above). This task's own
+# release is not in question here; what happens next is. compute_next_work
+# (see its own header, "NEXT-WORK BEGIN" above emit_release) sets
+# NEXT_WORK_DECISION exactly once, earlier, inside the confirmed-active-epic
+# branch -- "ready" is the only value that reaches the block below, because
+# emit_block exits the whole script (constraint 1: this cannot become a
+# second way to release, only a reason to keep going after one already did).
+#
+# Folds in EPIC_DEFER_NOTE/CLOSE_HINT_NOTE/OVERRIDE_RELEASE_NOTE too, so
+# choosing to block here never drops disclosure the ordinary (non-blocking)
+# release path below would otherwise have shown.
+if [ "$NEXT_WORK_DECISION" = "ready" ]; then
+    emit_block "QA gate cleared${CURRENT_TASK:+ for $CURRENT_TASK}. This is NOT a QA rejection -- release conditions already held (qa-approved, a matching change-set-bound record, and review/design discipline all passed).$EPIC_DEFER_NOTE$CLOSE_HINT_NOTE$OVERRIDE_RELEASE_NOTE$NEXT_WORK_TEXT"
+fi
+
 # B2: if the epic gate had something to surface, emit it as a non-blocking
 # note via additionalContext. qzv: the close hint rides the SAME envelope rather
 # than a second mechanism — one note path, so nothing has to decide which of two
@@ -7942,8 +8245,13 @@ fi
 # override run that passes with an already matching approval releases with
 # no override notice"). ${CURRENT_TASK:+ for $CURRENT_TASK} keeps the header
 # grammatical when there is no active task and only the override note fires.
-if [ -n "$EPIC_DEFER_NOTE" ] || [ -n "$CLOSE_HINT_NOTE" ] || [ -n "$OVERRIDE_RELEASE_NOTE" ]; then
-    NOTE_TEXT="QA gate cleared${CURRENT_TASK:+ for $CURRENT_TASK}.$EPIC_DEFER_NOTE$CLOSE_HINT_NOTE$OVERRIDE_RELEASE_NOTE"
+#
+# claude-workflow-plugin-90av: NEXT_WORK_TEXT joins the SAME gate for the
+# NOTHING/DEGRADED outcomes (the READY outcome already exited above, via
+# emit_block, and never reaches this line) -- one more non-blocking
+# disclosure sharing the one envelope, not a second one to keep in sync.
+if [ -n "$EPIC_DEFER_NOTE" ] || [ -n "$CLOSE_HINT_NOTE" ] || [ -n "$OVERRIDE_RELEASE_NOTE" ] || [ -n "$NEXT_WORK_TEXT" ]; then
+    NOTE_TEXT="QA gate cleared${CURRENT_TASK:+ for $CURRENT_TASK}.$EPIC_DEFER_NOTE$CLOSE_HINT_NOTE$OVERRIDE_RELEASE_NOTE$NEXT_WORK_TEXT"
     cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":$(printf '%s' "$NOTE_TEXT" | jq -Rs .)}}
 EOF

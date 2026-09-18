@@ -68,6 +68,35 @@
 #             1/yes/true and 0/no/false/unset; anything else is an invocation
 #             error rather than a silent "off" (a strictness flag that fails
 #             open is the a9hh defect wearing a different hat).
+#   EXPECTED_SPEC_FILES_STRICT — TEST-HARNESS-ONLY; there is no legitimate
+#             reason to set this by hand, in CI, or in a Makefile target.
+#             Default (unset) is 1 -- the completeness floor's identity
+#             comparison against EXPECTED_SPEC_FILES below is unconditional
+#             and can fail the run on its own. 0 restores the pre-gytz-R2-F2
+#             count-only comparison for a single invocation. CORRECTED
+#             (claude-workflow-plugin-gytz R3-F3): this paragraph used to say
+#             run_l1/run_l1_env_bdactor "set" this variable. They do not --
+#             neither function body assigns it (QA's round-3 review measured
+#             21 mentions of the name in runner-completeness.test.sh against
+#             9 real assignments; re-verified here with the same count). The
+#             ONLY place that ever sets a DEFAULT is that file's own
+#             top-level `export EXPECTED_SPEC_FILES_STRICT=0`, read once near
+#             the top of the file; every other assignment is a plain shell
+#             prefix (`EXPECTED_SPEC_FILES_STRICT=1 run_l1 ...`) applied AT
+#             THE CALL SITE of run_l1/run_l1_env_bdactor, not inside them --
+#             it shadows the export for exactly that one command and its
+#             subprocess, then reverts, which is what lets that spec's own
+#             ~30 pre-existing sections (which build fixtures out of
+#             generic, count-sized stub-NNN.sh names to test UNRELATED
+#             runner mechanics, never claiming to model this repo's real
+#             spec inventory) pass on the export's default without renaming
+#             every one of them to a real spec basename, while the handful
+#             of sections that DO need strict mode override it at their own
+#             call site instead. See the EXPECTED_SPEC_FILES array's own
+#             header below, and the COMPLETENESS-FLOOR block, for the full
+#             account. Accepted values: 1/yes/true/unset and 0/no/false;
+#             anything else is an invocation error, same reasoning as
+#             STRICT_SECTIONS above.
 #
 # STDIN: every spec is launched with its stdin EXPLICITLY redirected from
 # /dev/null at the spawn site (a9hh R3-F2). This cannot be left to the POSIX
@@ -197,6 +226,49 @@ disarm_dolt_telemetry() {
 }
 disarm_dolt_telemetry "$PROJECT_DIR/.beads/embeddeddolt/beads"
 # --- TELEMETRY-DISARM-END (a9hh R3-F1 / claude-workflow-plugin-gsfd) ---------
+
+# --- STORE-CANARY ATTRIBUTION: REMOVED (claude-workflow-plugin-gytz) -------
+# A per-run BEADS_ACTOR marker used to live here, feeding attribute_store_
+# advance()'s self-vs-external attribution decision (formerly further down
+# this file). That decision, and the marker that fed it, was deleted under
+# the standing waiver ruling after failing three consecutive independent
+# review rounds: round 0, a `case` guard plus `sed -E` where a no-match
+# returned the line unchanged and exonerated the write; round 1, a
+# self-verifying `sed -nE '.../p'` defeated by a commit subject that merely
+# quoted the marker text; round 2, a companion check that verified two
+# subjects held equal parsed strings but never that they came from one
+# invocation. claude-workflow-plugin-u443: the operations a real spec's own
+# writes actually perform (comment/update/close/label) carry no actor at
+# all on bd 1.3.0, so the mechanism could not have fired in its own
+# motivating case either. DETECTION (did the protected store's HEAD differ
+# AFTER a spec's window from what it was BEFORE) is unaffected and lives on
+# below, unattributed: a spec whose window leaves HEAD net-changed fails,
+# loudly, by name — it just no longer tries to say who. Replacement: SPEC
+# ISOLATION (claude-workflow-plugin-h5lw) — if a spec cannot reach the
+# production store, there is no authorship question to adjudicate. Nothing
+# here is dormant; there is no flag to re-enable it.
+#
+# KNOWN LIMIT (R3-F2, round 3, independent review): two ENDPOINT samples —
+# one before a spec's window, one after — can only prove NET HEAD CHANGED.
+# H0 -> H1 -> back to EXACTLY H0 inside one spec's window is invisible to
+# this check by construction: a rollback landing on a DIFFERENT ancestor IS
+# caught (the range comparison sees a non-descendant move — see the R1-F2
+# NON-LINEAR handling below), but an exact round trip nets to no change and
+# there is nothing left to compare against. Every comment and every message
+# this file emits about detection is worded to that contract — NET HEAD
+# CHANGED — and no stronger. Reaching a stronger contract would require
+# durable history/audit evidence: parsing dolt's own commit log as an
+# authorizing/exonerating signal, which is EXACTLY the free-form-vendor-text
+# mechanism deleted above after three failed review rounds, and precisely
+# what this project's standing lesson forbids. Not built here; not planned.
+# Under SPEC ISOLATION (-h5lw) this limit costs nothing: on a store no spec
+# can legitimately reach at all, there is no genuine advance to restore, so
+# an undone move is not a scenario worth paying a parser for — a spec that
+# somehow DID touch the protected store and then restored it exactly would
+# still have proven the store was reachable, which is the actual property
+# isolation exists to rule out, and detection's coarser NET CHANGED contract
+# is sufficient for that job.
+# -----------------------------------------------------------------------
 
 # claude-workflow-plugin-gsfd (member 5, the lease): sourced early so the
 # runner can answer "who else is active" and report itself the same way, no
@@ -1014,8 +1086,186 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # Neither fix added a test file; both are pinned inside design-rollup.
 # test.sh's own existing Sections B/C (a non-empty diff observed directly;
 # a forged reviewer_identity refused with a non-vacuity check).
+#
+# 69 -> 71 (claude-workflow-plugin-gytz R1-F2, discovered by QA against the
+# unfiltered discovery query): two spec files landed in this same batch and
+# neither bumped this line, so the floor's `-ne` comparison was a hard
+# failure waiting for the first unfiltered run (the CI l1-unit job; hidden
+# so far only because every run so far was `--filter`'d or standalone,
+# which disarms the floor). Added:
+#   next-work.test.sh (claude-workflow-plugin-90av) -- the Stop hook's
+#     release path handing the session its next ready work instead of
+#     silently ending it; 75 assertions.
+#   review-request-build.test.sh (claude-workflow-plugin-wuu8) -- the Codex
+#     review lane's request assembly (diff capture, byte-cap enforcement,
+#     lane-agnostic packet building); 61 assertions.
+# Swept for a third whole-tree counter neither of the two adding agents
+# would have known to bump (the same race shape as EXPECTED_SPECS itself):
+# none found. EBF-CORE stays byte-identical across all four agent prompts
+# (qa.md, backend.md, frontend.md, devops.md); workflow-manifest.sh
+# deliberately excludes .claude/scripts/tests/ (its own :280 comment says
+# maxdepth is what keeps it out), so no manifest row was owed either.
+#
+# 71 -> 72 (claude-workflow-plugin-gytz, same batch, landed AFTER the 69 -> 71
+# bump above had already shipped): review-request-diff-budget.test.sh, a
+# sibling task's spec, discovered mid-batch by the coordinator re-measuring
+# rather than trusting the constant. This is the SAME hole recurring within
+# one batch — a hand-integer bumped by whichever agent noticed last is a
+# defect generator, not a guard, because "notice" is exactly the step that
+# has now failed twice. See the sentinel-delimited spec-name array
+# immediately below for the structural fix that replaces the bump mechanism
+# itself, not just this one value.
 # ---------------------------------------------------------------------------
-EXPECTED_SPECS=69
+# --- EXPECTED-SPEC-FILES-BEGIN (claude-workflow-plugin-gytz, second round) --
+# THE CLASS, NOT THE INSTANCE. A bare integer here was bumped twice in one
+# batch (69 -> 71 -> stale again within the hour, 71 -> 72 above) because a
+# COUNT carries no identity: nothing about "71" or "72" tells a reviewer
+# WHICH file changed, and nothing about the number ITSELF can be checked for
+# correctness except by re-running the same `find` the runner already runs.
+# The floor's whole value is comparing a HUMAN-DECLARED expectation against
+# DISCOVERED reality — collapsing that expectation to a single digit is what
+# made it un-reviewable and easy to forget.
+#
+# THE FIX: the declaration is now a NAMED LIST, not a count. EXPECTED_SPECS
+# below is DERIVED from this array's length (${#EXPECTED_SPEC_FILES[@]}), so
+# every existing reference to $EXPECTED_SPECS elsewhere in this file, and
+# runner-completeness.test.sh's own $EXPECTED sizing lever, needs zero
+# changes beyond how that one count gets produced. What changes is what a
+# human touches when a spec is added: ONE LINE naming the file, which is
+# exactly what a `git diff` on this region now shows, and exactly what
+# "naming the new spec is the fix" (the standing instruction for this round)
+# asked for.
+#
+# TWO OPTIONS WERE ON THE TABLE, and this is the one taken, with the other
+# named and rejected:
+#   REJECTED: keep EXPECTED_SPECS as a bare integer, and make the BREACH
+#   MESSAGE print a name-level diff anyway. This does not save anything: to
+#   print "which specs are present and uncounted, which are counted and
+#   missing" you need a maintained NAME LIST regardless — an integer alone
+#   cannot answer either half of that sentence. Once a name list has to
+#   exist for the diagnostic to be honest, making it the PRIMARY declaration
+#   (rather than a second, integer-shaped declaration plus a name list kept
+#   in sync with it by hand) is strictly less to maintain, not more: one
+#   thing to update instead of two, and the two can no longer silently drift
+#   from each other because only one of them is hand-written.
+#   TAKEN: this array. THIS PARAGRAPH ORIGINALLY SAID the PASS/FAIL decision
+#   stayed count-based "unchanged in shape from before this round" so every
+#   existing fixture-based test would keep passing on count alone. That
+#   claim held for the round it was written in, and stopped being true the
+#   moment claude-workflow-plugin-gytz R2-F2 made the identity comparison
+#   unconditional (a same-count rename must be caught, and a count-first
+#   gate structurally cannot catch one) — a full run of
+#   runner-completeness.test.sh at that point showed the predicted cost
+#   arriving for real: dozens of this file's own pre-existing sections,
+#   sized to $EXPECTED_SPECS with generic names, started failing, because
+#   COUNTS MATCH but generic names are never among these 72 real ones. The
+#   decision below is now IDENTITY-based by default (comparing the
+#   discovered and declared SETS, unconditionally computed) — see
+#   EXPECTED_SPEC_FILES_STRICT in the Environment: header above and the
+#   COMPLETENESS-FLOOR block for the narrow, test-harness-only escape hatch
+#   that keeps this paragraph's original promise (existing fixtures need no
+#   renaming) true for the ~30 sections that predate R2-F2, without
+#   weakening the check for the one invocation — a real one — that R2-F2 is
+#   actually about.
+#
+# WHAT MUST NOT HAPPEN, stated because it is the single way this fix could
+# be quietly undone: EXPECTED_SPEC_FILES must NEVER be computed from the
+# same discovery glob the TESTS array below uses (or any equivalent re-scan
+# of $TESTS_DIR). That would make the floor compare the discovered set
+# against ITSELF — tautologically equal for any set, including an empty one
+# or one missing forty specs, which is exactly the vacuity the floor exists
+# to eliminate. This array is a STATIC LITERAL and must stay one: no `$(`,
+# no backticks, no `find`, no reference to $TESTS_DIR or $PROJECT_DIR
+# anywhere inside this sentinel region. runner-completeness.test.sh section
+# 19 asserts this directly against the shipped text (not merely a comment
+# promise) and separately demonstrates, via a mutant that DOES self-derive,
+# that an added-but-undeclared spec then passes silently — the danger this
+# paragraph warns about, shown rather than only stated.
+#
+# Regenerate this list with (sorted to match the `find | sort` the TESTS
+# array below already uses, so a diff against discovered reality is a plain
+# set comparison):
+#   find .claude/scripts/tests -maxdepth 1 -type f -name '*.sh' \
+#       ! -name 'run-tests.sh' -exec basename {} \; | sort
+# One name per line, nothing else on the line, so both the array-length
+# derivation and runner-completeness.test.sh's own extraction (which counts
+# non-empty lines between this BEGIN/END pair) stay simple to parse.
+EXPECTED_SPEC_FILES=(
+    agent-mcp-tools-parity.test.sh
+    agent-time-budget.test.sh
+    agents-manifest-parity.test.sh
+    approval-record-disclosure-claim.test.sh
+    approve-success-gate.test.sh
+    bd-github-link.test.sh
+    beads-ledger.test.sh
+    change-set-undeterminable.test.sh
+    codex-review-wait-reason.test.sh
+    completion-contract-parity.test.sh
+    denylist-source.test.sh
+    design-accessors.test.sh
+    design-artifact-parity.test.sh
+    design-artifact.test.sh
+    design-coherence.test.sh
+    design-conflict-subject-resolution.test.sh
+    design-conform.test.sh
+    design-gate-precheck-wiring.test.sh
+    design-review-record.test.sh
+    design-rollup-incoherent.test.sh
+    design-rollup.test.sh
+    design-rubric.test.sh
+    design-unit-align.test.sh
+    design-unit-bind-parity.test.sh
+    doc-only-classifier.test.sh
+    effort-fail-open.test.sh
+    evidence-before-fix.test.sh
+    gate-claim-honesty.test.sh
+    green-check.test.sh
+    grilling-record.test.sh
+    impact-report.test.sh
+    installer-flags.test.sh
+    judge-calibration.test.sh
+    lessons.test.sh
+    linux-tier-driver.test.sh
+    make-session.test.sh
+    mcp-deps-preserve.test.sh
+    mcp-deps.test.sh
+    mcp-unestablished-results.test.sh
+    model-roles.test.sh
+    mutation-harness.test.sh
+    next-work.test.sh
+    no-nested-spawn-instructions.test.sh
+    override-disclosure.test.sh
+    packaging-parity.test.sh
+    phase5-synthetic-tests.sh
+    plan-batches.test.sh
+    platform-audit.test.sh
+    qa-gate-choose.test.sh
+    qa-gate-grade-record.test.sh
+    qa-gate-lock-recovery.test.sh
+    qa-gate-pipefail.test.sh
+    qa-impact-of-cue.test.sh
+    review-bypass-anchor.test.sh
+    review-check.test.sh
+    review-count.test.sh
+    review-request-build.test.sh
+    review-request-diff-budget.test.sh
+    review-separation.test.sh
+    reviewer-lane-structural.test.sh
+    run-with-timeout.test.sh
+    runner-completeness.test.sh
+    scoped-log-dir.test.sh
+    tree-lease.test.sh
+    unrecorded-review-artifact.test.sh
+    validate-completion-criteria-tests.test.sh
+    validate-completion-green-fields.test.sh
+    vendored-skills.test.sh
+    workflow-doctor.test.sh
+    workflow-manifest.test.sh
+    worktree-isolation.test.sh
+    worktree-sweep.test.sh
+)
+# --- EXPECTED-SPEC-FILES-END (claude-workflow-plugin-gytz, second round) ----
+EXPECTED_SPECS=${#EXPECTED_SPEC_FILES[@]}
 
 # Per-spec wall-clock cap (seconds). HEADROOM IS 1.167x, NOT 3.7x (nor the
 # 1.31x this comment stated one round ago — see below). The 3.7x figure went
@@ -1141,6 +1391,59 @@ case "${STRICT_SECTIONS:-0}" in
             "$STRICT_SECTIONS" >&2
         printf '  Refused rather than defaulted to off: a strictness flag that fails open is\n' >&2
         printf '  the a9hh defect wearing a different hat.\n' >&2
+        exit 2 ;;
+esac
+
+# EXPECTED_SPEC_FILES_STRICT — TEST-HARNESS-ONLY escape hatch, discovered
+# necessary while fixing claude-workflow-plugin-gytz R2-F2, not requested by
+# that finding. Default (unset) is ON: the COMPLETENESS-FLOOR block below
+# compares the discovered and declared basename SETS unconditionally, and a
+# same-count rename (equal cardinality, different set — the exact shape
+# QA's R2-F2 counterexample described) fails the run. That is correct, and
+# is what every real invocation gets, because nothing outside
+# runner-completeness.test.sh ever sets this variable.
+#
+# Turning it OFF restores the pre-R2-F2 count-only comparison
+# ($TOTAL -ne $EXPECTED_SPECS, nothing else) for one invocation. CORRECTED
+# (claude-workflow-plugin-gytz R3-F3): the paragraph below used to say
+# run_l1/run_l1_env_bdactor are what turn it off "as their OWN default".
+# Neither function body assigns this variable at all -- QA's round-3 review
+# measured 21 mentions of the name in runner-completeness.test.sh against 9
+# real assignments, re-verified here with the same count. The actual default
+# comes from that file's own top-level `export EXPECTED_SPEC_FILES_STRICT=0`
+# (read once, near the top, right after $EXPECTED is derived), which every
+# ordinary run_l1/run_l1_env_bdactor call simply inherits by plain
+# subprocess-environment inheritance; the OFF state is never something those
+# two functions decide.
+#
+# ~30 of that spec's sections predate R2-F2 and build fixtures via
+# mk_l1_fixture using generic, count-sized stub-NNN.sh names to test UNRELATED runner
+# mechanics (timeouts, signals, telemetry disarm, lease handling, ...) —
+# they never claimed to model this repo's real spec inventory, and an
+# unconditional identity check against the real EXPECTED_SPEC_FILES array
+# fails every one of them on "COUNTS MATCH but the SETS DO NOT", not
+# because anything renamed, but because a generic name is never among the
+# 72 real ones. Renaming those ~30 sections' fixtures (and the bespoke
+# extra files several of them layer on top, e.g. stub-hang.sh,
+# stub-skipper.sh) to real spec basenames was considered and REJECTED:
+# dozens of independently-reviewed sections built over many rounds, an
+# arbitrary choice of which real name each bespoke file "becomes", and the
+# loss of self-documenting names in favour of an unrelated real spec's
+# basename — for a check those sections were never testing in the first
+# place. The handful of sections that DO build real-named fixtures
+# specifically to exercise this comparison (runner-completeness.test.sh
+# 19a/19b/19e, 20a-20d) explicitly override back to ON
+# (EXPECTED_SPEC_FILES_STRICT=1 prefixed at the call site) rather than
+# inheriting the helper's off-by-default.
+EXPECTED_SPEC_FILES_STRICT_ON=1
+case "${EXPECTED_SPEC_FILES_STRICT:-1}" in
+    1|yes|true|YES|TRUE)  EXPECTED_SPEC_FILES_STRICT_ON=1 ;;
+    0|no|false|NO|FALSE)  EXPECTED_SPEC_FILES_STRICT_ON=0 ;;
+    *)
+        printf 'run-tests.sh: EXPECTED_SPEC_FILES_STRICT must be 1/yes/true or 0/no/false (got %s)\n' \
+            "$EXPECTED_SPEC_FILES_STRICT" >&2
+        printf '  This is a test-harness-only variable; if you set it by hand or in CI,\n' >&2
+        printf '  unset it instead — a real invocation should never be setting it at all.\n' >&2
         exit 2 ;;
 esac
 
@@ -1479,6 +1782,72 @@ trap on_interrupt INT TERM HUP
 # DISARMED reprint, none of which live inside THIS sentinel) must see a safe
 # default rather than an unbound-variable abort. An excised ARM behaves as
 # permanently DISARMED, not as a crash.
+# verify_actor_marker_took_effect() — REMOVED (claude-workflow-plugin-gytz).
+# It existed only to gate attribution (arming STORE_CANARY_ATTRIBUTION_ON /
+# ACTOR_SELFCHECK_OK), which no longer exists — see the STORE-CANARY
+# ATTRIBUTION: REMOVED tombstone above for the waiver ruling and pointers
+# (claude-workflow-plugin-gytz, -u443, -h5lw). Detection does not need an
+# actor and never called this function directly.
+
+# dolt_hash_looks_valid <value> — POSITIVE allow-list for a dolt commit hash
+# shape (claude-workflow-plugin-gytz R3-F1). A dolt commit hash is exactly 32
+# lowercase base32hex characters ([0-9a-v]) — confirmed empirically against
+# 200 real commits in THIS repo's own protected store (`dolt log --oneline -n
+# 200`: every hash length exactly 32, charset exactly [0-9a-v], zero
+# exceptions), and independently consistent with DoltHub's own published
+# format (a truncated SHA-512 rendered in that alphabet). Defined once,
+# outside every STORE-CANARY sentinel, and called from both the ARM read and
+# the per-spec AFTER read below, so the two can never drift apart.
+#
+# R3-F1: a DENYLIST ("anything non-empty that doesn't say hashof") is how an
+# error string, a stray warning, or literal "NULL" became an accepted
+# baseline. Only a string SHAPED like a hash may arm the canary or count as a
+# valid sample; everything else is a failed read, named as one.
+dolt_hash_looks_valid() {
+    # R4-F4 (independent review round 4): an EXPLICIT character class here,
+    # never a bracket RANGE ([0-9a-v]) -- bash `case`/glob bracket ranges
+    # collate per LC_COLLATE, and this runner pins neither LC_COLLATE nor
+    # LC_ALL (bash 3.2, in use here, also predates `globasciiranges`). Under
+    # a dictionary-order locale a range like [a-v] can admit collating
+    # characters outside the intended 22-letter run -- including uppercase
+    # -- so the range form is not the exact allow-list the function-level
+    # comment above claims, only the C-locale rendering of it. Enumerating
+    # every accepted character instead is a plain membership test with no
+    # collation step at all, so it needs no LC_* pinning and is exact in
+    # every locale. Do not "tidy" this back into a range.
+    case "$1" in
+        [0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv][0123456789abcdefghijklmnopqrstuv])
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# transcript_also_failed_note — R4-F1 (independent review round 4). The two
+# STORE-CANARY verdict arms below (STORE_SAMPLE_FAILED and STORE_WRITES) sit
+# ahead of the TRANSCRIPT-FAIL arm in one `if/elif` chain, so whichever of
+# the three fires first is the ONLY reason recorded for a spec — a spec that
+# both moves/breaks the canary AND holds its own FAIL: line(s) used to be
+# reported for the canary alone, and the transcript reason was never even
+# evaluated for it (the comment at the top of the STORE-CANARY verdict arms
+# says "these arms exist for the spec that is not already red", which is
+# false exactly when a FAIL: line is what makes it red). Prints an
+# additional "transcript ALSO holds N FAIL: line(s)" fragment when
+# FAIL_LINES is nonzero, or nothing when it is zero, so each STORE-CANARY
+# arm can append it to its own message instead of the elif chain silently
+# dropping whichever reason fires second. Never fires on its own — the
+# dedicated TRANSCRIPT-FAIL arm still owns the case where the canary itself
+# is clean. Reads FAIL_LINES and SPEC_OUT from the per-spec loop's own
+# globals (this script has no per-spec function scope to pass them
+# through — same convention dolt_hash_looks_valid's caller relies on).
+transcript_also_failed_note() {
+    [ "$FAIL_LINES" -gt 0 ] || return 0
+    tafn_first_fail=$(grep -m1 -E '^[[:space:]]*FAIL:' "$SPEC_OUT" 2>/dev/null \
+        | LC_ALL=C tr -c '[:print:]\n\t' '?' \
+        | sed 's/^[[:space:]]*//' | cut -c1-160)
+    printf '; its transcript ALSO holds %s FAIL: line(s) the exit code never carried -- first: %s' \
+        "$FAIL_LINES" "$tafn_first_fail"
+}
+
 PROTECTED_STORE="$PROJECT_DIR/.beads"
 STORE_CANARY_ARMED=0
 STORE_CANARY_DISARM_REASON="the STORE-CANARY-ARM region did not run"
@@ -1497,8 +1866,12 @@ STORE_HASH_BEFORE=""
 # states which is required — so a future spec author can reproduce exactly
 # this defect, and nothing here would notice until someone went looking for
 # 9,937 comments by hand. Prevention has to be structural: a harness-level
-# guard that fails ANY spec whose environment resolves to the production
-# store, by name, rather than a per-spec fix the next author can omit.
+# guard that fails, by name, any spec whose window leaves the production
+# store's HEAD net-changed (R4-F3, independent review round 4: mere
+# resolution to the production store is not what this detects, and neither
+# is an exact round trip within one spec's window — see the NET HEAD
+# CHANGED / KNOWN LIMIT tombstone below for exactly what is and is not
+# caught) -- never a per-spec fix the next author can omit.
 #
 # A per-writer guard (teach each of bd's ~11 write-capable production
 # scripts to refuse under a test marker) was rejected on two measured
@@ -1522,31 +1895,77 @@ STORE_HASH_BEFORE=""
 # need to contaminate production to prove the anti-contamination guard
 # works. A guard that hardcoded "$PROJECT_DIR/.beads" could only be paired
 # by causing the harm it exists to prevent, and would ship unpaired.
+#
+# TWO STATES, NOT THREE (claude-workflow-plugin-gytz waiver ruling). An
+# earlier version of this guard also armed a self-check that gated a
+# self-vs-external ATTRIBUTION decision layered on top of detection (state
+# 2/3 in a prior version of this comment). That decision was removed
+# entirely — see the STORE-CANARY ATTRIBUTION: REMOVED tombstone above for
+# the ruling and pointers (claude-workflow-plugin-gytz, -u443, -h5lw) — so
+# there is nothing left to gate. Detection alone needs no actor at all, and
+# was never disarmed by an unverifiable marker even before this cleanup: 23
+# pre-existing assertions in runner-completeness.test.sh (sections
+# 13d/13f/13h/13i/13j/13k/13l/13m at the time) depended on detection alone.
+# The canary is now either ARMED (detection working: a spec whose window
+# leaves the store's HEAD net-changed fails, loudly, by name -- R3-F2,
+# claude-workflow-plugin-gytz round 3: two ENDPOINT samples can only prove
+# NET HEAD CHANGED; see the KNOWN LIMIT in the tombstone above for exactly
+# what that does and does not catch) or DISARMED (detection itself
+# unavailable — dolt absent, no store, or the hashof read failed — named
+# below, never a silent pass).
 if ! command -v dolt >/dev/null 2>&1; then
     STORE_CANARY_DISARM_REASON="dolt is not on PATH"
 elif [ ! -d "$PROTECTED_STORE/embeddeddolt/beads/.dolt" ]; then
     STORE_CANARY_DISARM_REASON="$PROTECTED_STORE/embeddeddolt/beads/.dolt does not exist (no embedded-Dolt store here — a store-less CI checkout, or a pre-1.1.x bd install)"
 else
-    STORE_HASH_BEFORE=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
-        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
-    case "$STORE_HASH_BEFORE" in
-        ''|*[Hh]ashof*) STORE_CANARY_DISARM_REASON="could not read hashof('HEAD') from $PROTECTED_STORE (dolt query failed)"
-                        STORE_HASH_BEFORE="" ;;
-        *)              STORE_CANARY_ARMED=1 ;;
-    esac
+    STORE_HASH_BEFORE_RAW=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null)
+    store_rc=$?
+    STORE_HASH_BEFORE=$(printf '%s\n' "$STORE_HASH_BEFORE_RAW" | tail -n1)
+    if [ "$store_rc" -ne 0 ]; then
+        # R3-F1: the query's own exit status, captured on ITS OWN LINE right
+        # after the substitution it belongs to -- never behind the `| tail`
+        # pipe that used to mask it (a pipeline's $? is its LAST command's,
+        # i.e. tail's, never dolt's or cd's).
+        STORE_CANARY_DISARM_REASON="the cd into $PROTECTED_STORE/embeddeddolt/beads, or the dolt hashof('HEAD') read, exited rc=$store_rc"
+        STORE_HASH_BEFORE=""
+    elif ! dolt_hash_looks_valid "$STORE_HASH_BEFORE"; then
+        STORE_CANARY_DISARM_REASON="the hashof('HEAD') read from $PROTECTED_STORE returned '$STORE_HASH_BEFORE', which is not a well-formed dolt hash (expected exactly 32 characters from [0-9a-v]; see dolt_hash_looks_valid above)"
+        STORE_HASH_BEFORE=""
+    else
+        STORE_CANARY_ARMED=1
+    fi
 fi
 if [ "$STORE_CANARY_ARMED" = "1" ]; then
-    printf 'STORE-CANARY: ARMED — watching %s for unattributed writes during this run\n' "$PROTECTED_STORE"
+    printf 'STORE-CANARY: ARMED — watching %s; a spec whose window leaves HEAD net-changed fails, by name\n' "$PROTECTED_STORE"
 else
-    # HONEST DEGRADATION, LOUD AND COUNTED, NEVER A SILENT PASS. A store-less
-    # CI checkout has nothing to contaminate, so this does not fail the tier
-    # — but a permanently-DISARMED guard is indistinguishable from a working
-    # one unless every run says so, both here and in the summary.
+    # HONEST DEGRADATION, LOUD, NEVER A SILENT PASS -- but not COUNTED
+    # anywhere, and it correctly never affects the tier's exit code (R3-F4:
+    # the prior wording claimed disarming was both loud and tallied, and
+    # nothing here tallies anything). A store-less CI checkout has nothing
+    # to contaminate, so
+    # this does not fail the tier — but a permanently-DISARMED guard is
+    # indistinguishable from a working one unless every run says so, both
+    # here and in the summary (printed twice; see the tail of this file).
     printf 'STORE-CANARY: DISARMED — %s; this run cannot detect writes to %s\n' \
         "$STORE_CANARY_DISARM_REASON" "$PROTECTED_STORE"
 fi
 # --- STORE-CANARY-ARM-END (claude-workflow-plugin-j7kk) ---------------------
 
+# attribute_store_advance() — REMOVED (claude-workflow-plugin-gytz waiver
+# ruling). This was the self-vs-external ATTRIBUTION decision (including the
+# DEPADD-PRECURSOR-SKIP and ACTOR-ISSUE-EXTRACT regions, and the
+# STORE_ATTRIBUTED_EXTERNAL/STORE_ATTRIBUTION_NOTE globals it produced) that
+# tried to answer WHO advanced the protected store, layered on top of the
+# STORE-CANARY-ARM detection above. See the STORE-CANARY ATTRIBUTION:
+# REMOVED tombstone near the top of this file for the full account: three
+# failed independent review rounds, the u443 finding that the mechanism
+# could not fire in its own motivating case, and the h5lw spec-isolation
+# replacement (also see that tombstone's KNOWN LIMIT paragraph — R3-F2 —
+# for exactly what endpoint-only detection can and cannot see). Detection
+# is unaffected: a spec whose window leaves the store's HEAD net-changed
+# still fails, loudly, by name — it just no longer tries to say who, and
+# DEGRADED (the classification this function fed) no longer exists.
 TOTAL=0
 PASS=0
 FAIL=0
@@ -1692,26 +2111,97 @@ for test_file in "${TESTS[@]}"; do
     # mutant must still run under `set -u`, behaving as if this spec had
     # never been sampled at all.
     STORE_WRITES=0
+    STORE_WRITES_UNREADABLE=0
     STORE_NOTE=""
     STORE_DETAIL=""
+    STORE_SAMPLE_FAILED=0
+    TRANSCRIPT_ALSO=""
     # --- STORE-CANARY-BEGIN (claude-workflow-plugin-j7kk) ---------------------
     # Sampled HERE — after `wait "$spec_pid"` and after the survivor sweep —
     # so a spec that backgrounded a writer has already been reaped or killed
     # before this spec's "after" hash is taken; a write from that backgrounded
-    # process still counts (it happened during this spec's window), it is
-    # simply attributed at the earliest point it can be READ safely.
+    # process is caught if it leaves HEAD net-changed AT THIS SAMPLE (R4-F3,
+    # independent review round 4: it does not "still count" unconditionally —
+    # a write that is itself undone before this sample, e.g. a round trip
+    # back to the same HEAD within this same window, nets to no change and is
+    # invisible here, same as everywhere else this file makes the NET HEAD
+    # CHANGED claim; see the KNOWN LIMIT tombstone below). What this sampling
+    # point buys is READ safety: whatever the window did leave net-changed is
+    # attributed at the earliest point it can be read without racing a
+    # survivor still holding the store open.
     #
     # Sampling carries the PREVIOUS spec's "after" as the next spec's
     # "before" (STORE_HASH_BEFORE is reassigned at the bottom of this block,
     # never reset per-iteration) — 40 hashof calls across a 39-spec tier, not
-    # 78: one at arm time, one per spec thereafter.
+    # 78: one at arm time, one per spec thereafter. R3-F3 (independent review
+    # round 3): this means the window a FAIL message describes is never
+    # provably just "this spec's own execution" — it also covers whatever
+    # brief inter-spec bookkeeping (this loop's own cat/grep/rm work) ran
+    # since the previous spec's own after-sample was taken. A dedicated
+    # pre-launch resample would close that gap at the cost of DOUBLING the
+    # per-tier hashof-call count (78, not 40) and doubling the surface for a
+    # transient sample failure; instead every message below says "since the
+    # last confirmed sample" rather than "while it ran", which is what this
+    # sampling scheme can actually prove.
     if [ "$STORE_CANARY_ARMED" = "1" ]; then
-        STORE_HASH_AFTER=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
-            && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
-        if [ -n "$STORE_HASH_AFTER" ] && [ "$STORE_HASH_AFTER" != "$STORE_HASH_BEFORE" ]; then
+        STORE_HASH_AFTER_RAW=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
+            && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null)
+        store_rc=$?
+        STORE_HASH_AFTER=$(printf '%s\n' "$STORE_HASH_AFTER_RAW" | tail -n1)
+        STORE_VALID_SAMPLE=0
+        if [ "$store_rc" -eq 0 ] && dolt_hash_looks_valid "$STORE_HASH_AFTER"; then
+            STORE_VALID_SAMPLE=1
+        fi
+        # R3-F1 (HIGH, independent review round 3): a snapshot that FAILS
+        # must be LOUD and must DISARM the canary FOR THIS SPEC — it must
+        # never silently read as "no change". The pre-fix shape masked
+        # dolt's exit status behind `| tail -n1` (a pipeline's $? is its
+        # LAST command's) and accepted anything non-empty that didn't
+        # literally echo "hashof" as a valid baseline, so an empty read (cd
+        # failed, or dolt itself exited non-zero with nothing on stdout —
+        # confirmed directly: a missing .dolt/ makes dolt exit 1 with EMPTY
+        # stdout and an error on stderr) left STORE_WRITES at its 0 default
+        # and this spec read as clean. STORE_VALID_SAMPLE is 1 only when
+        # BOTH the query's own captured exit status is 0 (never masked by a
+        # pipe: store_rc is set on its own line, straight off the
+        # substitution, before any pipe touches the value) AND the result
+        # is POSITIVELY shaped like a dolt hash (dolt_hash_looks_valid,
+        # defined above the ARM block) — a denylist is how an error string
+        # became a baseline; this is the allow-list instead.
+        if [ "$STORE_VALID_SAMPLE" != "1" ]; then
+            STORE_SAMPLE_FAILED=1
+            if [ "$store_rc" -ne 0 ]; then
+                STORE_DETAIL="the store-canary AFTER-sample failed: the cd into $PROTECTED_STORE/embeddeddolt/beads, or the dolt hashof('HEAD') read, exited rc=$store_rc"
+            else
+                STORE_DETAIL="the store-canary AFTER-sample failed: hashof('HEAD') from $PROTECTED_STORE returned '$STORE_HASH_AFTER', which is not a well-formed dolt hash"
+            fi
+            STORE_NOTE="; $STORE_DETAIL -- this spec's window cannot be confirmed clean, and the store's last confirmed hash stays $STORE_HASH_BEFORE unchanged, so the next successful sample also covers this spec's unmeasured window"
+            # Never carry a failed/garbage sample forward as if it were a
+            # valid baseline (R3-F1's last requirement): STORE_HASH_AFTER is
+            # blanked here so the carry-forward line below is a no-op, and
+            # STORE_HASH_BEFORE is left UNCHANGED — not overwritten with ""
+            # or with whatever garbage came back — so the NEXT successful
+            # sample's comparison runs from the last CONFIRMED-good hash,
+            # honestly covering this spec's unmeasured window too.
+            STORE_HASH_AFTER=""
+        elif [ -n "$STORE_HASH_AFTER" ] && [ "$STORE_HASH_AFTER" != "$STORE_HASH_BEFORE" ]; then
             STORE_WRITES=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
                 && dolt log --oneline "$STORE_HASH_BEFORE".."$STORE_HASH_AFTER" 2>/dev/null | wc -l | tr -d ' ')
-            case "$STORE_WRITES" in ''|*[!0-9]*) STORE_WRITES=1 ;; esac
+            # R4-F2 (independent review round 4): an EMPTY or NON-NUMERIC
+            # read here means the count could not be taken AT ALL -- the cd
+            # above failed (the directory disappeared or became unreadable
+            # between the successful hashof read that got us into this branch
+            # and this line), so the right-hand side of `&&` never ran and
+            # the whole substitution is empty. That is a DIFFERENT fact from
+            # "dolt log ran and reported zero commits" (the well-formed "0"
+            # case handled below), and conflating the two used to let this
+            # sentinel reach the "advanced by N commit(s)" branch with a
+            # fabricated N=1. Flagged here, before the sentinel value
+            # overwrites it, so the classification below can route it to the
+            # same non-authoritative-count handling as the literal "0" case
+            # instead.
+            STORE_WRITES_UNREADABLE=0
+            case "$STORE_WRITES" in ''|*[!0-9]*) STORE_WRITES=1; STORE_WRITES_UNREADABLE=1 ;; esac
             STORE_DETAIL=$(cd "$PROTECTED_STORE/embeddeddolt/beads" 2>/dev/null \
                 && dolt log --oneline "$STORE_HASH_BEFORE".."$STORE_HASH_AFTER" 2>/dev/null | head -8)
             # claude-workflow-plugin-j7kk R1-F2: the hash MOVED (this `if`
@@ -1732,19 +2222,46 @@ for test_file in "${TESTS[@]}"; do
             # same STORE_WRITES=1 shape a genuine single write takes (so the
             # dedicated FAIL arm below fires) with a DETAIL that names the
             # actual observation instead of a fabricated commit count.
-            if [ "$STORE_WRITES" = "0" ]; then
+            #
+            # R3-F2 KNOWN LIMIT applies here too (see the tombstone near the
+            # top of this file): this comparison proves NET HEAD CHANGED
+            # between two endpoints, never a full history of what happened
+            # in between — an advance that was itself later undone within
+            # THIS SAME window would net to no change and never reach this
+            # branch at all. That is accepted, named, and out of scope; see
+            # the tombstone for why building past it is not the direction.
+            if [ "$STORE_WRITES" = "0" ] || [ "$STORE_WRITES_UNREADABLE" = "1" ]; then
                 STORE_WRITES=1
-                STORE_DETAIL="NON-LINEAR store movement: HEAD moved from $STORE_HASH_BEFORE to $STORE_HASH_AFTER but \`dolt log $STORE_HASH_BEFORE..$STORE_HASH_AFTER\` reported no commits — AFTER is not reachable via new commits on BEFORE (a rollback/reset-class move), or dolt log failed transiently after a successful hashof read"
-                STORE_NOTE="; the protected Beads store moved from $STORE_HASH_BEFORE to $STORE_HASH_AFTER by a NON-LINEAR change (not a chain of new commits — a rollback/reset-class move, or a transient dolt-log failure) while it ran"
+                if [ "$STORE_WRITES_UNREADABLE" = "1" ]; then
+                    # R4-F2: the count could not be READ at all (see the flag
+                    # above) -- distinct wording from the NON-LINEAR case
+                    # below, which DID get a reading and it was zero.
+                    STORE_MOVE_DESC="moved by an UNREADABLE change (the commit count between $STORE_HASH_BEFORE and $STORE_HASH_AFTER could not be read at all)"
+                    STORE_DETAIL="UNREADABLE store movement: HEAD moved from $STORE_HASH_BEFORE to $STORE_HASH_AFTER but the commit count between them could not be read -- the cd into $PROTECTED_STORE/embeddeddolt/beads failed (directory missing or unreadable after the hashof read above succeeded), or \`dolt log $STORE_HASH_BEFORE..$STORE_HASH_AFTER\` produced no usable output"
+                else
+                    STORE_MOVE_DESC="moved by a NON-LINEAR change (not a chain of new commits — a rollback/reset-class move, or a transient dolt-log failure)"
+                    STORE_DETAIL="NON-LINEAR store movement: HEAD moved from $STORE_HASH_BEFORE to $STORE_HASH_AFTER but \`dolt log $STORE_HASH_BEFORE..$STORE_HASH_AFTER\` reported no commits — AFTER is not reachable via new commits on BEFORE (a rollback/reset-class move), or dolt log failed transiently after a successful hashof read"
+                fi
             else
-                STORE_NOTE="; the protected Beads store advanced by $STORE_WRITES commit(s) while it ran"
+                # R3-F4: STORE_WRITES is a REAL measured count here (never
+                # the boolean sentinel the NON-LINEAR branch above sets) —
+                # this is the only branch entitled to say "N commit(s)".
+                STORE_MOVE_DESC="advanced by $STORE_WRITES commit(s)"
             fi
+            STORE_NOTE="; the protected Beads store $STORE_MOVE_DESC since the last confirmed sample"
+            # attribute_store_advance (WHO advanced it) was called here —
+            # REMOVED under the claude-workflow-plugin-gytz waiver ruling; see
+            # the STORE-CANARY ATTRIBUTION: REMOVED tombstone near the top of
+            # this file. Detection above ($STORE_WRITES, $STORE_DETAIL) is
+            # unaffected: the dedicated FAIL arm further down fails this spec
+            # unconditionally whenever this comparison finds HEAD net-changed,
+            # without asking who caused it.
         fi
-        # Carry forward regardless of whether this spec moved it — a NO-OP
-        # write compares equal next iteration; a real move becomes the next
-        # spec's baseline, so a later spec is never blamed for an earlier
-        # one's commits.
-        [ -n "$STORE_HASH_AFTER" ] && STORE_HASH_BEFORE="$STORE_HASH_AFTER"
+        # Carry forward only a CONFIRMED-good read (R3-F1: never carry a
+        # failed/garbage sample forward as a valid baseline — STORE_HASH_AFTER
+        # was already blanked above when the sample failed, so this is a
+        # plain no-op in that case, left explicit rather than relied upon).
+        [ "$STORE_SAMPLE_FAILED" != "1" ] && [ -n "$STORE_HASH_AFTER" ] && STORE_HASH_BEFORE="$STORE_HASH_AFTER"
     fi
     # --- STORE-CANARY-END (claude-workflow-plugin-j7kk) -----------------------
 
@@ -1812,21 +2329,57 @@ for test_file in "${TESTS[@]}"; do
         printf -- '--- %s: FAILED — returned with %s live background process(es), killed (%s assertion(s) in %ss)%s; its output ends wherever they were, so no outcome read from it is complete ---\n' \
             "$base" "$SURVIVOR_COUNT" "$ASSERTS" "$ELAPSED_S" "$STORE_NOTE"
     # --- STORE-CANARY-BEGIN (claude-workflow-plugin-j7kk) ---------------------
-    # A DEDICATED arm for a spec that would otherwise be entirely green but
-    # moved the protected store. Placed immediately after the SURVIVOR_COUNT
-    # arm and before TRANSCRIPT-FAIL, so a spec already failing for one of
-    # the reasons above keeps that reason (STORE_NOTE is appended to each of
-    # them instead); this arm exists for the spec that is not already red.
+    # TWO DEDICATED arms for a spec that would otherwise be entirely green
+    # but either broke its own store-canary sample or moved the protected
+    # store. Placed immediately after the SURVIVOR_COUNT arm and before
+    # TRANSCRIPT-FAIL, so a spec already failing for one of the reasons
+    # above keeps that reason (STORE_NOTE is appended to each of them
+    # instead); these arms exist for the spec that is not already red for
+    # ONE of those three reasons — TIMEOUT, rc!=0, or a live survivor. They
+    # do NOT preempt a fourth: a spec whose own transcript holds FAIL: line(s)
+    # (TRANSCRIPT-FAIL, below) is just as red, and R4-F1 (independent review
+    # round 4) found that being placed ahead of that arm in this same
+    # `if/elif` chain meant the transcript reason was never even evaluated
+    # for such a spec — the canary reason alone was reported, and the other
+    # reason was silently lost, not merely deferred. Both arms below now
+    # check FAIL_LINES too (via transcript_also_failed_note, defined above
+    # dolt_hash_looks_valid) and append it to their own message so a spec red
+    # for both reasons is reported for both.
     #
-    # L1 cannot attribute a Dolt commit to a PROCESS — no writer identity is
-    # recorded store-side (census, section 2.2 item 3: label writes carry no
-    # timestamp or attribution at all, and comment-writer provenance is
-    # self-reported and was WRONG in the one case measured, claiming a
-    # SessionStart apply for a write a test run actually made). So this is a
-    # REACHABILITY failure of the tier, not proven authorship: either this
-    # spec wrote, or another process wrote concurrently while it ran — both
-    # mean L1 ran against a live production store, and every record left
-    # behind is test-authored and must not be read as evidence.
+    # R3-F1 (HIGH, independent review round 3): a store-canary sample that
+    # FAILED must be exactly as adverse as a DETECTED advance, never read as
+    # "no change" — "a measurement that did not happen is indistinguishable
+    # from one that passed" is this whole batch's own defect family, and a
+    # silent PASS here would be that same defect in a new guard. STORE_NOTE
+    # was built above, at the SAMPLING occurrence of this same sentinel pair,
+    # from STORE_DETAIL, so this arm's message NAMES which operation failed —
+    # never a fabricated "no change".
+    elif [ "$STORE_SAMPLE_FAILED" = "1" ]; then
+        FAIL=$((FAIL + 1))
+        # --- STORE-CANARY-TRANSCRIPT-MERGE-BEGIN (claude-workflow-plugin-gytz R4-F1) ---
+        TRANSCRIPT_ALSO=$(transcript_also_failed_note)
+        # --- STORE-CANARY-TRANSCRIPT-MERGE-END -----------------------------------
+        FAILED_FILES+=("$base (${STORE_NOTE#; }${TRANSCRIPT_ALSO}; $ASSERTS assertion(s) in ${ELAPSED_S}s)")
+        printf -- '--- %s: FAILED — %s%s\n' "$base" "${STORE_NOTE#; }" "$TRANSCRIPT_ALSO"
+        printf '    A measurement that did not happen must not look like one that passed -- an\n'
+        printf '    unmeasurable window is treated as adverse, the same as a detected advance,\n'
+        printf '    never as "no change" (claude-workflow-plugin-gytz R3-F1). ---\n'
+    # claude-workflow-plugin-j7kk: this arm fires whenever the endpoint
+    # comparison finds the store's HEAD net-changed across a spec's window,
+    # unconditionally. The self-vs-external ATTRIBUTION decision that used
+    # to gate it (claude-workflow-plugin-dhh7) was removed under the
+    # standing waiver ruling — see the STORE-CANARY ATTRIBUTION: REMOVED
+    # tombstone near the top of this file. Either this spec wrote, or a
+    # concurrent writer did; the canary cannot say which any more, so every
+    # record left behind is test-authored and must not be read as evidence,
+    # either way. R3-F2 KNOWN LIMIT (same tombstone): this is a NET HEAD
+    # CHANGED claim from two endpoint samples, never a full history — an
+    # advance undone within this exact window is invisible by construction
+    # and out of scope by design. R4-F3 (independent review round 4): the
+    # message below says only what the two samples actually establish — the
+    # store moved, cause not established — rather than naming $base as the
+    # contaminator, which the "either this spec wrote, or a concurrent
+    # writer did" sentence right above it already contradicts.
     #
     # It does NOT roll back (deliberate — see the ARM block and the task's
     # own measurement: genuine agent writes interleave with a contaminating
@@ -1834,13 +2387,17 @@ for test_file in "${TESTS[@]}"; do
     # work alongside the synthetic records).
     elif [ "$STORE_WRITES" -gt 0 ]; then
         FAIL=$((FAIL + 1))
-        FAILED_FILES+=("$base (contaminated the protected Beads store: advanced by $STORE_WRITES commit(s) while this spec ran; $ASSERTS assertion(s) in ${ELAPSED_S}s)")
-        printf -- '--- %s: FAILED — the protected Beads store %s advanced by %s commit(s)\n' \
-            "$base" "$PROTECTED_STORE" "$STORE_WRITES"
-        printf '    while this spec ran. L1 cannot attribute a Dolt commit to a process, so this is a\n'
-        printf '    REACHABILITY failure of the tier, not proven authorship: either this spec wrote, or\n'
-        printf '    another process wrote concurrently — both mean L1 ran against a live production store.\n'
-        printf '    Commits below. Every record left by a spec is test-authored and must not be read as evidence. ---\n'
+        # --- STORE-CANARY-TRANSCRIPT-MERGE-BEGIN (claude-workflow-plugin-gytz R4-F1) ---
+        TRANSCRIPT_ALSO=$(transcript_also_failed_note)
+        # --- STORE-CANARY-TRANSCRIPT-MERGE-END -----------------------------------
+        FAILED_FILES+=("$base (the protected Beads store moved, cause not established: ${STORE_NOTE#; }${TRANSCRIPT_ALSO}; $ASSERTS assertion(s) in ${ELAPSED_S}s)")
+        printf -- '--- %s: FAILED — %s%s\n' "$base" "${STORE_NOTE#; }" "$TRANSCRIPT_ALSO"
+        printf '    (%s). The store moved; cause not established -- either this spec wrote, or\n' \
+            "$PROTECTED_STORE"
+        printf '    a concurrent writer did, and this canary detects a net HEAD change but no\n'
+        printf '    longer attributes it (claude-workflow-plugin-gytz). L1 ran against a live\n'
+        printf '    production store either way, so every record left behind is test-authored\n'
+        printf '    and must not be read as evidence. Commits below. ---\n'
         [ -n "$STORE_DETAIL" ] && printf '%s\n' "$STORE_DETAIL" | sed 's/^/    /'
     # --- STORE-CANARY-END (claude-workflow-plugin-j7kk) -----------------------
     # --- TRANSCRIPT-FAIL-BEGIN (a9hh R4-F2) ----------------------------------
@@ -1892,6 +2449,10 @@ for test_file in "${TESTS[@]}"; do
         printf -- '--- %s: PASSED but INCOMPLETE (%s assertion(s) in %ss; %s section-level skip(s) — see PARTIAL below) ---\n' \
             "$base" "$ASSERTS" "$ELAPSED_S" "$SECTION_SKIPS"
     else
+        # Unreachable with STORE_WRITES -gt 0 (the dedicated STORE-CANARY arm
+        # above now fails that case unconditionally — claude-workflow-plugin-
+        # gytz waiver ruling; DEGRADED no longer exists as a classification),
+        # so this branch is a plain PASS.
         PASS=$((PASS + 1))
         printf -- '--- %s: PASSED (%s assertion(s) in %ss) ---\n' \
             "$base" "$ASSERTS" "$ELAPSED_S"
@@ -1924,7 +2485,6 @@ if [ "$STORE_CANARY_ARMED" != "1" ]; then
     printf 'STORE-CANARY: DISARMED — %s; this run could not detect writes to %s\n' \
         "$STORE_CANARY_DISARM_REASON" "$PROTECTED_STORE"
 fi
-
 if [ "$FAIL" -gt 0 ]; then
     printf 'Failed tests:\n'
     for f in "${FAILED_FILES[@]}"; do
@@ -1959,13 +2519,76 @@ if [ -n "$FILTER" ]; then
     fi
     printf 'Completeness floor: DISARMED (--filter run; this summary describes a subset, not the tier)\n'
 else
-    if [ "$TOTAL" -ne "$EXPECTED_SPECS" ]; then
-        printf 'COMPLETENESS FLOOR BREACH: discovered %d spec file(s), expected exactly %d.\n' \
-            "$TOTAL" "$EXPECTED_SPECS" >&2
+    # claude-workflow-plugin-gytz R2-F2: the SET comparison runs
+    # UNCONDITIONALLY, every time, never gated behind a prior count
+    # mismatch. QA reproduced the gap a count-first gate leaves: declare
+    # {001,002,003}, discover {001,002,zz-undeclared} — EQUAL cardinality,
+    # DIFFERENT set, and a cardinality-only floor reads "HELD". A file
+    # RENAME is exactly this shape (one name leaves, a different one
+    # arrives, the count never moves), and it is the most likely real-world
+    # drift, more likely than a pure addition or deletion. The count is now
+    # a DERIVED detail of this set comparison, never the trigger for one —
+    # this is the same lesson the array itself encodes, one level in:
+    # comparing sizes is not comparing sets. That is what runs whenever
+    # EXPECTED_SPEC_FILES_STRICT_ON=1, which is every real invocation —
+    # make test, CI, and a human at a shell all leave the variable unset.
+    #
+    # EXPECTED_SPEC_FILES_STRICT_ON=0 restores the ORIGINAL, pre-R2-F2
+    # count-only comparison for the BREACH DECISION: breach iff $TOTAL
+    # disagrees with $EXPECTED_SPECS, full stop, identical message shape
+    # this floor always used for that case. CORRECTED (claude-workflow-
+    # plugin-gytz R3-F2): the set comparison below is now computed
+    # UNCONDITIONALLY, in both modes — this paragraph used to say it "never
+    # runs at all" under STRICT_ON=0, which stopped being quite true the
+    # moment the HELD-message caveat below was added, though the GATING
+    # decision (does a non-empty diff FAIL the run) is still exactly what
+    # STRICT_ON controls, unchanged. THIS IS STILL NOT "compute the diff
+    # only after a count mismatch" — the shape R2-F2 forbids — the diff is
+    # computed before either branch decides anything, on every run; only
+    # whether it can fail the run depends on STRICT_ON. It is a narrow,
+    # test-harness-only escape hatch (see the Environment: header and the
+    # array's own header above for the full account of why it exists and
+    # who is allowed to set it), unreachable from any real invocation, so
+    # R2-F2's actual guarantee — a real invocation against the real project
+    # cannot silently pass a same-count rename — holds unconditionally for
+    # the population it protects.
+    DISCOVERED_BASENAMES=$(for __t in "${TESTS[@]}"; do basename "$__t"; done | sort)
+    DECLARED_BASENAMES=$(printf '%s\n' "${EXPECTED_SPEC_FILES[@]}" | sort)
+    EXTRA_SPECS=$(comm -23 <(printf '%s\n' "$DISCOVERED_BASENAMES") <(printf '%s\n' "$DECLARED_BASENAMES"))
+    MISSING_SPECS=$(comm -13 <(printf '%s\n' "$DISCOVERED_BASENAMES") <(printf '%s\n' "$DECLARED_BASENAMES"))
+    SET_MISMATCH=0
+    if [ -n "$EXTRA_SPECS" ] || [ -n "$MISSING_SPECS" ]; then
+        SET_MISMATCH=1
+    fi
+    if [ "$EXPECTED_SPEC_FILES_STRICT_ON" -eq 1 ]; then
+        FLOOR_BREACHED="$SET_MISMATCH"
+    else
+        FLOOR_BREACHED=0
+        if [ "$TOTAL" -ne "$EXPECTED_SPECS" ]; then
+            FLOOR_BREACHED=1
+        fi
+    fi
+    if [ "$FLOOR_BREACHED" -eq 1 ]; then
+        if [ "$EXPECTED_SPEC_FILES_STRICT_ON" -eq 1 ] && [ "$TOTAL" -eq "$EXPECTED_SPECS" ]; then
+            printf 'COMPLETENESS FLOOR BREACH: %d spec file(s) discovered, %d declared — COUNTS MATCH but the SETS DO NOT (a rename-shaped drift: one file left, a different one arrived).\n' \
+                "$TOTAL" "$EXPECTED_SPECS" >&2
+        else
+            printf 'COMPLETENESS FLOOR BREACH: discovered %d spec file(s), expected exactly %d.\n' \
+                "$TOTAL" "$EXPECTED_SPECS" >&2
+        fi
         printf '  The completeness line above describes a DIFFERENT tier than the one this floor pins.\n' >&2
-        printf '  If you added or removed a spec deliberately, update EXPECTED_SPECS in run-tests.sh\n' >&2
-        printf '  in the same change. Otherwise, spec files have been lost and every summary since\n' >&2
-        printf '  has been green over a shrunken set.\n' >&2
+        printf '  If you added, removed, or renamed a spec deliberately, name it in\n' >&2
+        printf '  EXPECTED_SPEC_FILES in run-tests.sh in the same change. Otherwise, spec files\n' >&2
+        printf '  have been lost, renamed, or added and every summary since has described the\n' >&2
+        printf '  wrong set.\n' >&2
+        if [ -n "$EXTRA_SPECS" ]; then
+            printf '  DISCOVERED but NOT in EXPECTED_SPEC_FILES (add these lines to the array):\n' >&2
+            printf '%s\n' "$EXTRA_SPECS" | sed 's/^/    /' >&2
+        fi
+        if [ -n "$MISSING_SPECS" ]; then
+            printf '  in EXPECTED_SPEC_FILES but NOT discovered (removed or renamed without updating the array):\n' >&2
+            printf '%s\n' "$MISSING_SPECS" | sed 's/^/    /' >&2
+        fi
         finish 1
     fi
     # THE CLAIM, QUALIFIED WHERE IT IS MADE. "discovered and executed" is
@@ -1979,6 +2602,23 @@ else
     else
         printf 'Completeness floor: HELD (%d/%d specs discovered and executed; 0 skipped a section; %d assertion(s) executed)\n' \
             "$TOTAL" "$EXPECTED_SPECS" "$ASSERTS_TOTAL"
+    fi
+    # claude-workflow-plugin-gytz R3-F2: ANNOUNCE WHEN THE WEAKER MODE LETS
+    # SOMETHING THROUGH — the same convention STRICT_SECTIONS already
+    # follows for a skipped section (PARTIAL is named in the completeness
+    # line above regardless of STRICT_SECTIONS_ON; that flag only decides
+    # whether it fails the run). Byte-identical on a clean run either way,
+    # same as STRICT_SECTIONS: this can ONLY fire under
+    # EXPECTED_SPEC_FILES_STRICT_ON=0 with a genuine SET_MISMATCH, because
+    # under =1 that combination would already have failed the run above —
+    # HELD and a non-empty diff cannot coexist in strict mode by
+    # construction. Deliberately a SEPARATE line, appended after rather
+    # than folded into the HELD text itself, so every existing assertion
+    # that checks the HELD line's own exact wording is untouched.
+    if [ "$EXPECTED_SPEC_FILES_STRICT_ON" -eq 0 ] && [ "$SET_MISMATCH" -eq 1 ]; then
+        printf '  LEGACY MODE (EXPECTED_SPEC_FILES_STRICT=0): the spec-set IDENTITY was not\n'
+        printf '  checked this run, and it does not actually match EXPECTED_SPEC_FILES — do not\n'
+        printf '  read the HELD line above as a claim that the declared and discovered names agree.\n'
     fi
 fi
 

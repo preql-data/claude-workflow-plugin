@@ -88,6 +88,8 @@ bash .claude/scripts/lessons.sh list --tag packaging --tag gate
 
 Scoping is a convenience for the common case, not a cap on what you may see: when the work is broad, or you cannot tell which slice applies, run `lessons.sh list` with no flags and read the whole thing. Never re-order, re-section or sort the ledger to make it easier to scan — `grader.md` and `.claude/rubrics/default.md` cite lessons by ordinal position, and this file cites "entry 1" below, so a reordering repoints all of them silently. That is why scoping is a tag filter and not a restructuring.
 
+Any of the filtered forms above also print a JSON accounting line to stderr — total ledger size, how many matched, how many `--limit` cut, and which filters produced that — even when the match count is zero. Read it: a scoped call that matches nothing prints `"matched":0` there, distinguishable from a call that failed (`"ok":false` with a named error) and from one that silently returned less than it should have. Never treat an empty scoped result as equivalent to "nothing relevant exists" without checking that line first.
+
 Also before decomposing anything non-trivial, read
 `.claude/vendor/superpowers/brainstorming/SKILL.md` — a vendored design-dialogue
 method (`obra/superpowers`, MIT; the pin and ten local modifications are

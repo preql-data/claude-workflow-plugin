@@ -105,6 +105,15 @@
 #                                           Appends a Beads comment bound to the graded
 #                                           change set; on satisfied flips
 #                                           rubric-pending -> rubric-satisfied.
+#   review-request-build <task-id> --iteration <n> --stop-condition <t>
+#                         --spec-file <p> [--risk-threshold <sev>]
+#                         [--completion-contract-file <p>] [--out <p>]
+#                                           claude-workflow-plugin-wuu8: assemble +
+#                                           validate the independent-review REQUEST
+#                                           (denylist-filtered diff, summarised —
+#                                           never double-encoded/pretty-printed —
+#                                           impact report, jq --rawfile/--slurpfile
+#                                           throughout so no field can blow ARG_MAX).
 #   review-record <task-id> [--file <path>] Phase V2: validate a reviewer artifact via
 #                                           review-check.sh then append the REVIEW-ARTIFACT
 #                                           v1 record comment (record writer only).
@@ -2180,6 +2189,574 @@ compute_change_set_hash() {
 # Stop hook, so changing it belongs to that script's contract, not to this one.
 CHANGE_SET_HASH_UNAVAILABLE="sha256-unavailable"
 
+# ---------------------------------------------------------------------------
+# review-request-build helpers (claude-workflow-plugin-wuu8).
+#
+# AGNOSTIC TO WHICH REVIEW MECHANISM CONSUMES THE OUTPUT, BY DESIGN, matching
+# review-check.sh's own "STRUCTURAL PURITY (D5)" contract for the exact
+# schema these functions assemble: this file honours docs/plans/
+# v5-design-phase-plan.md item 10 (qa-gate.sh, verify-before-stop.sh and
+# review-check.sh carry zero knowledge of which review mechanism is
+# selected, so an outage in one mechanism never becomes a gate outage)
+# precisely BECAUSE nothing below reads which mechanism is selected, calls
+# the selection script, or shapes its output for one mechanism's transport.
+# It builds "a review request" — the same ten-key object review-check.sh
+# already validates the same way regardless of who wrote or who reads it —
+# and any consumer of that schema can use it. Confirmed empirically before
+# relying on it, not merely asserted: grepping this file's own new code
+# (excluding comments) for the request's one known size-budget config key,
+# for a selection call, or for any selection-conditional branch returns
+# nothing — every one of those concerns lives entirely in whichever script
+# chooses to consume the assembled request, never in its assembly.
+#
+# WHY THIS EXISTS: qa.md 6p.1 used to hand-assemble the independent-review
+# request with inline jq, and three defects compounded in production (see
+# wuu8's own comment stream for the measured numbers):
+#   1. the recipe never actually showed how to populate `.diff` — an unset
+#      $DIFF shell variable silently became the empty string, so the
+#      reviewer was handed zero bytes of the change on at least one real,
+#      captured request (a9hh-r9, 2026-08-11).
+#   2. `--arg impact "$(cat <report>)"` puts the ENTIRE impact report on
+#      jq's own argument list, which blows ARG_MAX/MAX_ARG_STRLEN on a real
+#      report (measured: 1.86MB) and dies with "argument list too long: jq"
+#      BEFORE any downstream byte-budget check is ever consulted, leaving an
+#      EMPTY request file that looks well-formed at a glance.
+#   3. even when assembly succeeded, the impact report was embedded
+#      PRETTY-PRINTED and DOUBLE-ENCODED (escaped inside a JSON string), and
+#      it dominated the packet (measured: 98.5% and 79.4% of two real
+#      requests) despite most of that content being of little use to a
+#      reviewer here — see review_request_impact_summary_json's own header
+#      for the corrected account of what this repo's impact reports
+#      actually contain.
+#
+# These two functions are used by cmd_review_request_build below; they are
+# also usable standalone (e.g. a future, larger packet) because neither one
+# is request-schema-specific.
+
+# review_config_read_cap <key> <default> — the SAME tiny, fail-open reader
+# pattern already used elsewhere in this codebase for .claude/review-config,
+# kept as its own copy here rather than a shared include: both call sites
+# are a few lines, single-purpose, and fail open to the same documented
+# defaults — a shared file would be a second thing to keep in sync for that
+# little code.
+review_config_read_cap() {
+    local key="$1" def="$2" val=""
+    local cfg="$PROJECT_DIR/.claude/review-config"
+    if [ -f "$cfg" ]; then
+        val=$(grep -E "^[[:space:]]*${key}[[:space:]]*=" "$cfg" 2>/dev/null \
+            | head -1 | sed -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//" | sed -E 's/[[:space:]]*$//')
+    fi
+    [ -n "$val" ] || val="$def"
+    printf '%s' "$val"
+}
+
+# review_request_diff_tier <path> -- 1 (behaviour-bearing/source), 2
+# (test), or 3 (doc/config/generated). Lower number = shown FIRST when the
+# diff budget cannot fit the whole change set (see review_request_diff_text
+# below for why smallest-file-first WITHIN a tier, not tier order alone,
+# decides what is actually shown). This classifier ships as PART OF THE
+# PLUGIN — installed into arbitrary target repos — so it is deliberately
+# ecosystem-agnostic rather than tuned to this repo's own .sh/.md layout:
+# tiers 2 and 3 are recognised by widely-shared naming conventions (a
+# test/tests/spec/specs/__tests__ path component; a .test./.spec./_test.
+# filename shape; common doc/config extensions), and tier 1 is the DEFAULT
+# for everything matching neither — an unrecognised language's real source
+# on a target repo this plugin has never seen should read as important, not
+# as low priority, by default.
+review_request_diff_tier() {
+    local p="$1" base=""
+    base=$(basename "$p" 2>/dev/null) || base="$p"
+    case "/$p/" in
+        */test/*|*/tests/*|*/spec/*|*/specs/*|*/__tests__/*)
+            printf '2\n'; return 0 ;;
+    esac
+    case "$base" in
+        *.test.*|*.spec.*|*_test.*|test_*|*Test.java|*Tests.java)
+            printf '2\n'; return 0 ;;
+    esac
+    # THIS PLUGIN'S OWN behaviour-bearing paths, checked BEFORE the generic
+    # doc/config demotion below — measured necessary against a real packet
+    # (wuu8 R1-F4 on claude-workflow-plugin-gytz): without this, an agent
+    # PROMPT (.md) or a hook/settings file (.json) fell into the SAME tier
+    # as an arbitrary README, and the real run showed six agent prompts
+    # bumped out of a packet entirely while lower-value doc content nearly
+    # made the cut instead. These paths are fixed and IDENTICAL wherever
+    # this plugin is installed — a property of the plugin, not of the
+    # target repo it happens to be reviewing — so listing them here does
+    # not reintroduce the ecosystem-specific tuning the rest of this
+    # function deliberately avoids. Matched on the relativized, repo-rooted
+    # spelling impact-report.sh --relativized-changed-files already
+    # produces (the input this function actually receives); an entry that
+    # could not be relativized falls through to the generic rules below,
+    # which is the same graceful degradation every other path gets.
+    case "$p" in
+        .claude/agents/*.md|.claude/commands/*|.claude/hooks.json|.claude/settings.json|.claude/review-config|.claude/rubric-config)
+            printf '1\n'; return 0 ;;
+    esac
+    case "$base" in
+        *.md|*.mdx|*.txt|*.rst|CHANGELOG*|LICENSE*|AUTHORS*|NOTICE*)
+            printf '3\n'; return 0 ;;
+        *.json|*.yml|*.yaml|*.toml|*.ini|*.cfg|*.lock)
+            printf '3\n'; return 0 ;;
+    esac
+    case "/$p/" in
+        */docs/*) printf '3\n'; return 0 ;;
+    esac
+    printf '1\n'
+}
+
+# REVIEW_REQUEST_DIFF_TARGET_BYTES / _MIN_BYTES / FIXED_OVERHEAD_BYTES
+# (claude-workflow-plugin-wuu8 R1-F4, found on claude-workflow-plugin-gytz
+# QA round 1): sizing the diff is now PROACTIVE rather than left entirely to
+# a downstream refusal, because a REAL packet measured 286,308 bytes with
+# the diff alone at 225,929-226,467 bytes (two independent measurements: a
+# live command run, and a direct re-read of the artifact it produced) —
+# 2.26x a 100,000-byte ceiling BY ITSELF, after the impact-report fix above
+# had already taken THAT field from 98.5% of an earlier packet down to 0.5%
+# of this one. The diff was always going to be the next thing to dominate
+# once the impact report stopped hiding it.
+#
+# DELIBERATELY NOT review-config's max_request_bytes, and this is not the
+# same thing under a different name: this constant governs how much diff
+# content THIS ASSEMBLY STEP tries to include before making an honest,
+# DISCLOSED choice about what to leave out — a property of producing a
+# well-formed, USABLE review request for ANY reader, the same reason a
+# well-written PR does not paste an entire monorepo's diff inline regardless
+# of who reviews it. The NUMBER was chosen with reference to a measured fact
+# about review-turn latency at different sizes recorded elsewhere in this
+# codebase (a size in the high 80-thousands completes; a size past it can
+# exhaust an entire budget with neither an artifact nor a diagnosis, and the
+# two points are explicitly non-linear) — citing a measurement is not the
+# same as depending on the mechanism that produced it, and nothing below
+# reads that other file, calls it, or checks which lane is active before
+# deciding whether to apply this constant.
+REVIEW_REQUEST_DIFF_TARGET_BYTES=80000
+REVIEW_REQUEST_DIFF_MIN_BYTES=3000
+REVIEW_REQUEST_FIXED_OVERHEAD_BYTES=1500
+
+# review_request_diff_text <diff-budget-bytes> — sets REVIEW_REQUEST_DIFF_TEXT
+# to the git diff (HEAD vs working tree — the SAME uncommitted change set
+# cmd_approve itself binds, never a branch/merge-base comparison) for the
+# CURRENT canonical, denylist-filtered change set: impact-report.sh
+# --relativized-changed-files, the exact list change_set_hash already
+# hashes. Filtering through that ONE shared list is the point — a fixture
+# mirror, a lockfile, or a memory file can never dominate the reviewer's
+# diff the way it would from an unfiltered `git diff HEAD`. Never fails the
+# caller: every missing precondition (no git, no HEAD yet, an unreadable
+# tracker) degrades to a NAMED note, mirroring design_rollup_union_diff's
+# own convention ("note the degradation rather than silently grading around
+# it").
+#
+# BUDGET-AWARE, NEVER SILENTLY TRUNCATED (wuu8 R1-F4). Below the budget: the
+# WHOLE diff, unchanged from before. Above it: per-FILE inclusion decisions
+# only — never a mid-file cut, which would show a reviewer an incomplete
+# hunk with no marker that anything followed it. Each touched file's own
+# diff is computed individually, classified into a priority tier
+# (review_request_diff_tier above), and files are considered for inclusion
+# in (tier ascending, byte-size DESCENDING, path ascending) order — LARGEST
+# FIRST within a tier.
+#
+# THIS WAS SMALLEST-FIRST IN THE FIRST SHIPPED VERSION OF THIS FUNCTION, AND
+# IT WAS WRONG — reversed after QA round 2 measured why on a real packet, not
+# a synthetic one, and the arithmetic is worth keeping here rather than only
+# in that review's own artifact: smallest-first optimises for the COUNT of
+# complete files a reviewer sees, and that objective actively fights the
+# packet's actual purpose. On the measured packet, six small tier-1 agent
+# prompts (each a few KB) were greedily seated before qa-gate.sh (48,868
+# bytes) ever got a turn — and this was not a near-miss tuning problem: the
+# small-file floor those always-first small files consumed (35,841 bytes)
+# left AT MOST budget-minus-that-floor for anything else, so a 48,868-byte
+# file could not fit under smallest-first AT ANY CONTRACT SIZE the observed
+# budget range could produce. The reviewer received zero bytes of either
+# gate script implementing either HIGH-severity repair under review, while
+# reading six prompts that were not the change under review. Largest-first
+# fit BOTH gate scripts (68,763 bytes) on the identical packet.
+#
+# WHAT THIS ORDERING OPTIMISES FOR, STATED SO THE TRADE IS NEVER IMPLICIT:
+# substance over count. Within a tier, the biggest files are taken first, on
+# the premise that size correlates with review-worthiness — a large diff is
+# usually where the risk actually is, and a handful of one-line config
+# tweaks are not what a reviewer needs to see AT THE COST of the file that
+# just rewrote a code path. The cost this pays, openly: fewer TOTAL files
+# may be shown when the budget is tight, because one large file can consume
+# what would otherwise have fit several small ones. That is the trade being
+# made, not a side effect nobody chose.
+#
+# A REAL FEEDBACK LOOP THIS ORDERING DOES NOT CONTROL (QA round 2, R2-F5,
+# LOW, not blocking, but worth naming here rather than only in that finding):
+# `spec` and `completion_contract` are NOT budgeted the way `diff` is, so
+# their size directly and silently determines how much diff budget remains
+# for THIS function — a verbose completion_contract shrinks the diff a
+# reviewer is shown; a terse one grows it. Measured moving a real file
+# (verify-before-stop.sh) from omitted to included purely by a completion
+# contract shrinking from 37,806 to 13,603 bytes, with the diff's own
+# content and the diff budget's own arithmetic completely unchanged. A
+# specialist's or reviewer's verbosity in writing its OWN contract is
+# therefore not neutral to what a later round's reviewer gets shown — named
+# here as a known, undisclosed-elsewhere property of this design, not
+# something this function corrects.
+#
+# Whatever is left out is named in the rendered text itself — path and byte
+# count, largest omission first within each tier — so "this diff is
+# complete" and "this diff was cut, and by how much" are both stated
+# in-band, never left to a log the reviewer never sees. THE OMISSION NOTICE
+# IS AN INSTRUCTION, NOT MERELY A DISCLOSURE (QA round 2): stating that a
+# file was left out is not the same as binding the reviewer's verdict to
+# that fact, and a reviewer that reads "omitted" as a footnote rather than
+# a constraint can still return verdict:"approve" over content it never
+# saw. The rendered text below tells the reviewer directly that it cannot
+# assess the omitted files and must not approve on their behalf, with
+# stronger, unconditional language specifically when a TIER-1 (source) file
+# is among the omissions — see the rendering pass below for the exact text
+# and why the two cases differ.
+#
+# Every accounting global below is also EXPOSED for a caller/test to verify
+# independently of parsing the rendered text:
+#   REVIEW_REQUEST_DIFF_TOTAL_BYTES     sum of every touched file's own diff,
+#                                       included or not (the ground truth)
+#   REVIEW_REQUEST_DIFF_INCLUDED_BYTES / _COUNT
+#   REVIEW_REQUEST_DIFF_OMITTED_BYTES / _COUNT
+# INCLUDED_BYTES + OMITTED_BYTES == TOTAL_BYTES is the invariant a META-TEST
+# checks directly against a stubbed accounting that always claims zero
+# omitted, rather than trusting the claim.
+review_request_diff_text() {
+    local budget="${1:-}"
+    printf '%s' "$budget" | grep -qE '^[0-9]+$' || budget=$REVIEW_REQUEST_DIFF_TARGET_BYTES
+
+    REVIEW_REQUEST_DIFF_TEXT=""
+    REVIEW_REQUEST_DIFF_TOTAL_BYTES=0
+    REVIEW_REQUEST_DIFF_INCLUDED_BYTES=0
+    REVIEW_REQUEST_DIFF_INCLUDED_COUNT=0
+    REVIEW_REQUEST_DIFF_OMITTED_BYTES=0
+    REVIEW_REQUEST_DIFF_OMITTED_COUNT=0
+
+    if ! command -v git >/dev/null 2>&1; then
+        REVIEW_REQUEST_DIFF_TEXT="DEGRADED: git is not on PATH in this environment; the diff could not be computed. The reviewer sees only the spec, the completion contract and the impact report for this round."
+        return 0
+    fi
+    if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        REVIEW_REQUEST_DIFF_TEXT="DEGRADED: $PROJECT_DIR is not a git working tree right now; the diff could not be computed."
+        return 0
+    fi
+    if ! git -C "$PROJECT_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+        REVIEW_REQUEST_DIFF_TEXT="DEGRADED: $PROJECT_DIR has no HEAD commit yet (nothing has been committed in this repository); the diff could not be computed against a starting point."
+        return 0
+    fi
+    if [ ! -f "$IMPACT_REPORT_SCRIPT" ]; then
+        REVIEW_REQUEST_DIFF_TEXT="DEGRADED: impact-report.sh is missing at $IMPACT_REPORT_SCRIPT; the canonical, denylist-filtered change set could not be read, so the diff could not be computed."
+        return 0
+    fi
+    local files_out="" f_rc=0
+    files_out=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$IMPACT_REPORT_SCRIPT" --relativized-changed-files 2>/dev/null) || f_rc=$?
+    # rc 4 = SOME entries were unnormalisable but the rest were still printed
+    # (impact-report.sh's own documented contract for that flag); any OTHER
+    # nonzero rc means the tracker could not be read at all (i8cx U2), so
+    # degrade rather than diff a set that was never actually established.
+    if [ "$f_rc" -ne 0 ] && [ "$f_rc" -ne 4 ]; then
+        REVIEW_REQUEST_DIFF_TEXT="DEGRADED: could not read the canonical, denylist-filtered change set (impact-report.sh --relativized-changed-files exited $f_rc); the diff could not be computed."
+        return 0
+    fi
+    local files_args=() fl=""
+    while IFS= read -r fl; do
+        [ -n "$fl" ] || continue
+        files_args+=("$fl")
+    done <<FLEOF
+$files_out
+FLEOF
+    if [ "${#files_args[@]}" -eq 0 ]; then
+        REVIEW_REQUEST_DIFF_TEXT="(no files in the current change set -- nothing to diff)"
+        return 0
+    fi
+
+    # --- PASS 1: compute each file's own diff individually, --no-ext-diff /
+    # --no-textconv throughout (same convention as design_rollup_union_diff
+    # and verify-before-stop.sh's own tree_fingerprint — neither a
+    # repository's diff-driver config nor a textconv filter should silently
+    # reshape evidence a reviewer is asked to judge the system from).
+    # UNTRACKED files (brand-new paths never yet added) never appear in
+    # `git diff HEAD` at all, so they go through --no-index against
+    # /dev/null instead — same idiom design_rollup_union_diff uses, folded
+    # into this SAME per-file loop rather than a separate pass, so every
+    # file (tracked or not) goes through identical tiering/budget
+    # accounting.
+    local idx=0
+    local -a idx_path=() idx_tier=() idx_size=() idx_text=()
+    for fl in "${files_args[@]}"; do
+        local st="" one_diff="" one_rc=0
+        st=$(git -C "$PROJECT_DIR" status --porcelain -- "$fl" 2>/dev/null) || st=""
+        case "$st" in
+            '??'*)
+                one_diff=$(git -C "$PROJECT_DIR" diff --no-ext-diff --no-textconv --no-index -- /dev/null "$fl" 2>/dev/null) || one_rc=$?
+                [ "$one_rc" -le 1 ] || one_diff=""
+                ;;
+            *)
+                one_diff=$(git -C "$PROJECT_DIR" diff --no-ext-diff --no-textconv HEAD -- "$fl" 2>/dev/null) || one_rc=$?
+                [ "$one_rc" -eq 0 ] || one_diff=""
+                ;;
+        esac
+        [ -n "$one_diff" ] || continue
+        idx=$((idx + 1))
+        # Bare `idx`, not `$idx`, as the array subscript: bash evaluates an
+        # array index as an arithmetic expression regardless, so `$` here is
+        # redundant (shellcheck SC2004) rather than load-bearing -- keep it
+        # bare so a future pass does not "fix" it back the other way.
+        idx_path[idx]="$fl"
+        idx_tier[idx]=$(review_request_diff_tier "$fl")
+        idx_size[idx]=$(printf '%s' "$one_diff" | wc -c | tr -d '[:space:]')
+        idx_text[idx]="$one_diff"
+        REVIEW_REQUEST_DIFF_TOTAL_BYTES=$((REVIEW_REQUEST_DIFF_TOTAL_BYTES + idx_size[idx]))
+    done
+
+    if [ "$idx" -eq 0 ]; then
+        REVIEW_REQUEST_DIFF_TEXT="(the current change set's files produced no diff content against HEAD -- if change_set_hash is not the empty-content sentinel, check whether every changed file is a mode/permission-only change git diff does not render as content)"
+        return 0
+    fi
+
+    # --- PASS 2: decide inclusion. Sort (tier asc, size DESC, path asc) and
+    # greedily add while it still fits -- a FULL pass over every remaining
+    # candidate in that order, not "stop at the first miss", so a small
+    # low-tier file after one big miss can still slot in if it fits.
+    # LARGEST-first within a tier (QA round 2 reversal -- see this
+    # function's own header for the arithmetic that made smallest-first
+    # provably wrong, not merely suboptimal).
+    local i=0 order="" t="" s="" p="" j=""
+    order=$(for ((i = 1; i <= idx; i++)); do
+        printf '%s\t%s\t%s\t%s\n' "${idx_tier[$i]}" "${idx_size[$i]}" "${idx_path[$i]}" "$i"
+    done | sort -t "$(printf '\t')" -k1,1n -k2,2nr -k3,3)
+
+    local running=0
+    local -a included=() omitted=()
+    while IFS="$(printf '\t')" read -r t s p j; do
+        [ -n "$j" ] || continue
+        if [ $((running + s)) -le "$budget" ]; then
+            running=$((running + s))
+            included+=("$j")
+        else
+            omitted+=("$j")
+        fi
+    done <<ORDEOF
+$order
+ORDEOF
+    REVIEW_REQUEST_DIFF_INCLUDED_COUNT=${#included[@]}
+    REVIEW_REQUEST_DIFF_INCLUDED_BYTES=$running
+    REVIEW_REQUEST_DIFF_OMITTED_COUNT=${#omitted[@]}
+    REVIEW_REQUEST_DIFF_OMITTED_BYTES=$((REVIEW_REQUEST_DIFF_TOTAL_BYTES - running))
+
+    # --- PASS 3: render. Included files in a STABLE, READABLE order (tier
+    # ascending, then path ascending -- NOT the size-fitting order from pass
+    # 2, which would read strangely, e.g. tests interleaved with source by
+    # coincidence of byte count). Membership test against the small
+    # `included` index array (bash 3.2 has no associative arrays, so this is
+    # a linear scan over at most a few dozen entries -- proportional to the
+    # change set, never to the diff content).
+    local render_order="" body="" fl3="" is_in=0 k=""
+    render_order=$(for ((i = 1; i <= idx; i++)); do
+        printf '%s\t%s\t%s\n' "${idx_tier[$i]}" "${idx_path[$i]}" "$i"
+    done | sort -t "$(printf '\t')" -k1,1n -k2,2)
+    while IFS="$(printf '\t')" read -r t p j; do
+        [ -n "$j" ] || continue
+        is_in=0
+        for k in "${included[@]}"; do
+            [ "$k" = "$j" ] && { is_in=1; break; }
+        done
+        [ "$is_in" -eq 1 ] || continue
+        body="$body
+
+${idx_text[$j]}"
+    done <<RENDEOF
+$render_order
+RENDEOF
+
+    if [ "$REVIEW_REQUEST_DIFF_OMITTED_COUNT" -eq 0 ]; then
+        REVIEW_REQUEST_DIFF_TEXT="$body
+
+=== DIFF COMPLETE: all $REVIEW_REQUEST_DIFF_INCLUDED_COUNT file(s) shown in full, $REVIEW_REQUEST_DIFF_INCLUDED_BYTES byte(s) total; nothing omitted ==="
+        return 0
+    fi
+
+    # Omitted-file list: same tier-then-path order for the header line, but
+    # WITHIN that the largest omission first (the one most worth an
+    # operator's attention), tier still the primary key so a big omitted
+    # doc never outranks a small omitted source file in the listing. Also
+    # track whether any TIER-1 (source) file is among the omissions -- the
+    # instruction below is unconditional and strongest in exactly that
+    # case (QA round 2): a reviewer missing test/doc content is missing
+    # context; a reviewer missing SOURCE content cannot judge the change at
+    # all, and the rendered text says so explicitly rather than leaving the
+    # distinction to be inferred from the tier number in the listing.
+    local omitted_list="" ol_order="" omitted_has_tier1=0
+    ol_order=$(for j in "${omitted[@]}"; do
+        printf '%s\t%s\t%s\n' "${idx_tier[$j]}" "${idx_size[$j]}" "${idx_path[$j]}"
+    done | sort -t "$(printf '\t')" -k1,1n -k2,2nr)
+    while IFS="$(printf '\t')" read -r t s p; do
+        [ -n "$p" ] || continue
+        [ "$t" = "1" ] && omitted_has_tier1=1
+        for j in "${omitted[@]}"; do
+            if [ "${idx_path[$j]}" = "$p" ]; then
+                omitted_list="$omitted_list
+  $p (${idx_size[$j]} bytes, tier $t)"
+                break
+            fi
+        done
+    done <<OLEOF
+$ol_order
+OLEOF
+
+    # THE INSTRUCTION, NOT MERELY THE DISCLOSURE (QA round 2, HALF TWO's
+    # second change). Addressed directly to whoever reads this text --
+    # generic "the reviewer", never a specific lane or model, so this
+    # stays exactly as lane-agnostic as the rest of this function. Binds
+    # the verdict mechanics the review-artifact schema actually has
+    # (verdict: "approve"|"findings"), not an invented third state: the
+    # instruction is to route an incomplete review through "findings"
+    # (a finding naming the omission) rather than through a silent
+    # "approve" that asserts something about content never shown.
+    local elision_instruction=""
+    if [ "$omitted_has_tier1" -eq 1 ]; then
+        elision_instruction="THIS REVIEW IS INCOMPLETE. At least one OMITTED file above is TIER 1 (source) -- the kind of change this packet exists to let you assess. You have not seen its content and CANNOT judge it from this packet. You MUST NOT return verdict:\"approve\": approving asserts nothing at or above risk_threshold remains anywhere in the change, which you have no basis to claim for a file you were never shown. Record a finding naming the omitted tier-1 path(s) by name, set verdict:\"findings\", and let stopped_by reflect that the review could not complete over the whole change set -- do not treat the files you COULD see as though they were the whole change."
+    else
+        elision_instruction="This review is incomplete for the files listed above (test/doc/config content, not source) -- you have not seen their content and cannot judge them from this packet. Do not treat their absence as evidence they are fine. If everything you COULD see clears your risk_threshold, you may still verdict:\"approve\" for the assessed source content, but name the omitted paths in a finding (or in your summary) so the gap is visible to whoever reads your verdict, rather than silently narrowing what \"approve\" actually covers."
+    fi
+
+    REVIEW_REQUEST_DIFF_TEXT="$body
+
+=== DIFF TRUNCATED FOR SIZE: showing $REVIEW_REQUEST_DIFF_INCLUDED_COUNT of $idx file(s) ($REVIEW_REQUEST_DIFF_INCLUDED_BYTES bytes); budget was $budget bytes ===
+$REVIEW_REQUEST_DIFF_OMITTED_COUNT file(s) OMITTED ENTIRELY (never partially shown -- a cut mid-file would look complete and would not be), $REVIEW_REQUEST_DIFF_OMITTED_BYTES byte(s) total, largest first within each priority tier (tier 1 = source, tier 2 = tests, tier 3 = docs/config):
+$omitted_list
+
+=== END OMITTED FILE LIST -- this diff is INCOMPLETE. The listed paths were deliberately left out of THIS packet to stay inside the size budget; their full content is unchanged in the working tree and reachable via git diff on each path directly. ===
+
+$elision_instruction"
+    return 0
+}
+
+# review_request_impact_summary_json <task-id> — sets
+# REVIEW_REQUEST_IMPACT_JSON to a COMPACT JSON *object* (never a
+# pretty-printed, double-encoded STRING — the wuu8 defect) summarising
+# .claude/.qa-tracking/impact-report-<task-id>.json. Every branch produces
+# an object naming what happened and why, on purpose: the point of this
+# function is that "the report was omitted" and "the report was present and
+# genuinely said nothing" must never look identical (wuu8's own name for
+# this repo's unifying defect family). Never fails the caller.
+#
+# A CORRECTION MADE WHILE FIXING wuu8, recorded here so it is not
+# re-litigated: "nodes" is NOT uniformly empty for this repo the way
+# file_dependents is. An earlier measurement (`.files[].impact.nodes`)
+# queried the WRONG jq path — the code-graph server's structuredContent
+# nests the real per-file data under `.impact.data.nodes` /
+# `.impact.data.file_dependents` — so that command returned 0 regardless of
+# the actual content, producing a FALSE confirmation of "structurally
+# edge-free" that happened to coincide with the separate, TRUE claim about
+# file_dependents. Queried correctly, this repo's own qa-gate.sh alone
+# carries 4000+ nodes (intra-file reachability from every symbol it
+# defines, including depth 1-6 caller chains) while file_dependents stays 0
+# everywhere (shell scripts invoke each other by PATH, not import, so the
+# code-graph's cross-file import edge genuinely finds nothing here). This
+# function summarises rather than assumes either field is always empty.
+#
+# THE SHAPE — always an object, never bare `{}`:
+#   {
+#     "path": "<repo-relative path to the full artifact>",
+#     "generated_at": "...", "change_set_hash": "...", "server": "...",
+#     "file_count": <n>,            every file impact-report.sh looked at
+#     "files_with_impact": <n>,     files with a non-empty nodes OR
+#                                   file_dependents set (see summary[])
+#     "total_nodes": <n>,           sum of .impact.data.nodes[] across files
+#     "total_dependents": <n>,      sum of .impact.data.file_dependents[]
+#     "summary": [ {file, nodes, self, callers, max_depth, dependents}, .. ]
+#                                   ONE entry per file with nodes>0 or
+#                                   dependents>0 — never the full per-symbol
+#                                   arrays (name/kind/line for every node),
+#                                   which is what actually dominated the
+#                                   packet (measured: 1.86MB in one report).
+#     "omitted": true,              the full per-symbol detail is ALWAYS
+#                                   omitted from the packet — "note" below
+#                                   says why and where to find it.
+#     "note": "<human-readable reason, always non-empty>"
+#   }
+# `summary` is legitimately `[]` when every file's nodes AND dependents are
+# empty — that stays DISTINGUISHABLE from an omitted/missing report because
+# file_count/total_nodes/server are still populated and `note` says exactly
+# that ("no file ... has any recorded ..."), never a bare `{}`.
+review_request_impact_summary_json() {
+    local tid="$1"
+    local report="$QA_TRACKING_DIR/impact-report-$tid.json"
+    local report_rel="${report#"$PROJECT_DIR"/}"
+
+    # BARE-SUBSTITUTION DISCIPLINE (this file's own census, right after
+    # `set -e`): every assignment below is `local x=""` FOLLOWED BY a
+    # separate `x=$(cmd)` line (SC2155), which means each one IS subject to
+    # errexit on a bare failure — so each carries its own `|| fallback`
+    # rather than relying on the surrounding `if` to protect a line that
+    # already ran to completion (or aborted the whole script) before that
+    # `if` is ever reached. Verified live (claude-workflow-plugin-wuu8): a
+    # fault-injected jq on the ANALOGOUS assembly line in
+    # cmd_review_request_build killed the whole script before its own
+    # non-empty guard ran, until this same discipline was applied there too.
+    if [ ! -f "$report" ]; then
+        REVIEW_REQUEST_IMPACT_JSON=$(jq -nc --arg p "$report_rel" --arg tid "$tid" \
+            '{omitted:true, path:$p, reason:("no impact report has been generated yet for " + $tid + " -- run: bash .claude/scripts/impact-report.sh " + $tid)}' 2>/dev/null) || \
+            REVIEW_REQUEST_IMPACT_JSON='{"omitted":true,"reason":"no impact report has been generated yet, and jq itself failed while saying so"}'
+        return 0
+    fi
+    local raw=""
+    raw=$(cat -- "$report" 2>/dev/null) || raw=""
+    if [ -z "$raw" ] || ! printf '%s' "$raw" | jq -e 'type=="object"' >/dev/null 2>&1; then
+        REVIEW_REQUEST_IMPACT_JSON=$(jq -nc --arg p "$report_rel" \
+            '{omitted:true, path:$p, reason:("the impact report at " + $p + " is empty or not valid JSON")}' 2>/dev/null) || \
+            REVIEW_REQUEST_IMPACT_JSON='{"omitted":true,"reason":"the impact report is empty or not valid JSON, and jq itself failed while saying so"}'
+        return 0
+    fi
+
+    local summarized=""
+    summarized=$(printf '%s' "$raw" | jq -c --arg p "$report_rel" --arg pd "$PROJECT_DIR" '
+        def relpath: if startswith($pd + "/") then .[($pd|length)+1:] else . end;
+        {
+            path: $p,
+            generated_at: (.generated_at // ""),
+            change_set_hash: (.change_set_hash // ""),
+            server: (.server // "unknown"),
+            file_count: (.files // [] | length),
+            total_nodes: ([.files[]?.impact.data.nodes? // [] | length] | add // 0),
+            total_dependents: ([.files[]?.impact.data.file_dependents? // [] | length] | add // 0),
+            summary: [
+                .files[]?
+                | select(((.impact.data.nodes? // []) | length) > 0 or ((.impact.data.file_dependents? // []) | length) > 0)
+                | {
+                    file: (.file | relpath),
+                    nodes: (.impact.data.nodes // [] | length),
+                    self: ([.impact.data.nodes[]? | select(.relation=="self")] | length),
+                    callers: ([.impact.data.nodes[]? | select(.relation=="caller")] | length),
+                    max_depth: ([.impact.data.nodes[]?.depth // 0] | max // 0),
+                    dependents: (.impact.data.file_dependents // [] | length)
+                  }
+            ]
+        }
+        | . + {
+            files_with_impact: (.summary | length),
+            omitted: true,
+            note: (
+                if .server == "absent" then
+                    "the code-graph MCP server was unavailable when this report was generated (server=\"absent\"); no impact data was collected for any file -- full artifact at " + $p
+                elif (.summary | length) == 0 then
+                    "no file in this change set has any recorded call-graph node or cross-file dependent -- full artifact (with the per-file zero detail) at " + $p
+                else
+                    "full per-symbol detail (name/kind/line for every node) omitted from this packet for size -- full artifact at " + $p
+                end
+            )
+        }
+    ' 2>/dev/null) || summarized=""
+
+    if [ -z "$summarized" ] || ! printf '%s' "$summarized" | jq -e 'type=="object"' >/dev/null 2>&1; then
+        REVIEW_REQUEST_IMPACT_JSON=$(jq -nc --arg p "$report_rel" \
+            '{omitted:true, path:$p, reason:("the impact report at " + $p + " could not be summarised")}' 2>/dev/null) || \
+            REVIEW_REQUEST_IMPACT_JSON='{"omitted":true,"reason":"the impact report could not be summarised, and jq itself failed while saying so"}'
+        return 0
+    fi
+    REVIEW_REQUEST_IMPACT_JSON="$summarized"
+    return 0
+}
+
 # bd_show_with_comments <task-id> — `bd show --json` that always carries
 # comment BODIES, across the supported bd range.
 #
@@ -3352,6 +3929,46 @@ Usage: qa-gate.sh <subcommand> <task-id> [args]
                   is the QA agent's move, not this script's)
               Malformed input exits non-zero with a structured JSON error
               naming the offending key.
+  review-request-build <task-id> --iteration <n> --stop-condition '<text>'
+          --spec-file <path> [--risk-threshold <sev>]
+          [--completion-contract-file <path>] [--out <path>]
+              claude-workflow-plugin-wuu8: assemble and validate the
+              independent-review REQUEST qa.md 6p.1 documents, as a real
+              command instead of inline jq an agent re-derives from
+              markdown each time. Writes (and, before reporting success,
+              re-validates through review-check.sh validate-request) to
+              .claude/.qa-tracking/review-request-<task-id>.json by default
+              (the same canonical path a downstream review consumer's own
+              --request flag, and section 6p.2, already expect) or to
+              --out <path>.
+              --risk-threshold defaults to review-config's
+              risk_threshold_default (built-in default: high) when omitted.
+              --completion-contract-file defaults to the latest recorded
+              COMPLETION v1 payload for <task-id> (same lookup chain
+              compute_design_alignment's own scope-drift check uses) when
+              omitted; refuses (missing_completion_contract) if neither is
+              available.
+              `.diff` is git diff HEAD-vs-working-tree (the change set
+              approve itself binds) over the canonical, denylist-filtered
+              file list impact-report.sh --relativized-changed-files
+              already produces for change_set_hash — never an unfiltered
+              `git diff`, so fixture mirrors and lockfiles cannot dominate
+              it. `.impact_report` is a compact SUMMARY (per-file node/
+              dependent counts, never the raw per-symbol arrays), always an
+              object naming what happened — omitted-with-reason (no report
+              yet, server absent, or genuinely edge-free) is never a bare
+              `{}`. Both large fields are staged to disk and read via jq
+              --rawfile / --slurpfile, never through jq's own argument
+              list, so a report or diff of any realistic size cannot repeat
+              the "argument list too long: jq" failure the prior hand-run
+              recipe hit on a 1.86MB report (which left an EMPTY request
+              file nothing checked for) — an empty or invalid assembly is
+              refused here (assembled_request_empty) rather than written.
+              Exit: 0 ok (path/bytes on stdout) | 1 usage error or the
+              assembled request failed its own schema validation
+              (error_key names which check) | 2 an infra failure (hash
+              unavailable, could not stage/write a file, or assembly
+              produced an empty/invalid request).
   review-record <task-id> [--file <path>]
               Phase V2: record a reviewer artifact. Validates the artifact
               JSON via review-check.sh (the ONE validator) then appends the
@@ -8092,6 +8709,264 @@ cmd_grade_record() {
 
     emit_json 1 "grade-record" "$tid" "$verdict" \
         "comment posted at $ts: $comment_text; $label_obs$binding_obs"
+}
+
+# ---------------------------------------------------------------------------
+# cmd_review_request_build (claude-workflow-plugin-wuu8) — assembles and
+# validates the independent-review REQUEST (qa.md 6p.1's own recipe, now a
+# real, testable command instead of hand-rolled jq an agent re-derives from
+# markdown each time). See the review_request_diff_text /
+# review_request_impact_summary_json headers above for the three defects
+# this closes.
+#
+# Exit codes: 0 ok (request written+validated, path/sizes on stdout) |
+# 1 usage error, or the assembled request failed schema validation
+# (error_key names which check — same vocabulary review-check.sh itself
+# uses) | 2 an infra failure (hash unavailable, could not stage/write a
+# file, or assembly produced an empty/invalid request — see the wuu8 guard
+# below).
+cmd_review_request_build() {
+    local tid="${1:-}"
+    if [ -z "$tid" ]; then
+        usage
+        emit_error_json "review-request-build" "" "missing_task_id" \
+            "review-request-build requires <task-id> as first positional argument" \
+            "qa-gate.sh review-request-build <task-id> --iteration <n> --stop-condition '<text>' --spec-file <path>"
+        exit 1
+    fi
+    shift || true
+
+    local iteration="" risk_threshold="" stop_condition="" spec_file="" cc_file="" out_path=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --iteration)                iteration="${2:-}"; shift 2 || true ;;
+            --risk-threshold)           risk_threshold="${2:-}"; shift 2 || true ;;
+            --stop-condition)           stop_condition="${2:-}"; shift 2 || true ;;
+            --spec-file)                spec_file="${2:-}"; shift 2 || true ;;
+            --completion-contract-file) cc_file="${2:-}"; shift 2 || true ;;
+            --out)                      out_path="${2:-}"; shift 2 || true ;;
+            -h|--help) usage; exit 1 ;;
+            *)
+                emit_error_json "review-request-build" "$tid" "unknown_flag" \
+                    "unknown argument: $1" \
+                    "qa-gate.sh review-request-build $tid --iteration <n> --stop-condition '<text>' --spec-file <path>"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ -z "$iteration" ] || ! printf '%s' "$iteration" | grep -qE '^[0-9]+$'; then
+        emit_error_json "review-request-build" "$tid" "missing_iteration" \
+            "--iteration <non-negative integer> is required" \
+            "qa-gate.sh review-request-build $tid --iteration 1 --stop-condition '<text>' --spec-file <path>"
+        exit 1
+    fi
+    if [ -z "$stop_condition" ]; then
+        emit_error_json "review-request-build" "$tid" "missing_stop_condition" \
+            "--stop-condition '<text>' is required -- what \"done reviewing\" means for this task, derived from the SPEC's acceptance criteria" \
+            "qa-gate.sh review-request-build $tid --iteration $iteration --stop-condition '<text>' --spec-file <path>"
+        exit 1
+    fi
+    if [ -z "$spec_file" ]; then
+        emit_error_json "review-request-build" "$tid" "missing_spec_file" \
+            "--spec-file <path> is required -- write the SPEC text there first (e.g. bd_doc_read's own output)" \
+            "qa-gate.sh review-request-build $tid --iteration $iteration --stop-condition '<text>' --spec-file <path>"
+        exit 1
+    fi
+    if [ ! -f "$spec_file" ]; then
+        emit_error_json "review-request-build" "$tid" "spec_file_not_found" \
+            "--spec-file names a path that does not exist: $spec_file" \
+            "qa-gate.sh review-request-build $tid --iteration $iteration --stop-condition '<text>' --spec-file <existing-path>"
+        exit 1
+    fi
+    if [ -n "$cc_file" ] && [ ! -f "$cc_file" ]; then
+        emit_error_json "review-request-build" "$tid" "completion_contract_file_not_found" \
+            "--completion-contract-file names a path that does not exist: $cc_file" \
+            "qa-gate.sh review-request-build $tid --iteration $iteration --stop-condition '<text>' --spec-file $spec_file --completion-contract-file <existing-path>"
+        exit 1
+    fi
+
+    [ -n "$risk_threshold" ] || risk_threshold=$(review_config_read_cap risk_threshold_default high)
+    [ -n "$out_path" ] || out_path="$QA_TRACKING_DIR/review-request-$tid.json"
+
+    if [ -d "$out_path" ]; then
+        emit_error_json "review-request-build" "$tid" "out_path_is_directory" \
+            "the target path $out_path is a directory, not a file -- cannot write a request there" \
+            "remove or rename the directory at $out_path, then re-run"
+        exit 2
+    fi
+
+    # --- completion_contract: explicit file, else derive from the latest
+    # recorded IMPLEMENTER completion payload -- the SAME lookup chain
+    # compute_design_alignment's own scope-drift check already uses (role
+    # from the COMPLETION v1 record, path from completion_payload_path_for)
+    # -- re-reading an already-verified blob, not a second decision.
+    local cc_source="$cc_file"
+    if [ -z "$cc_source" ]; then
+        local impl_rec="" impl_role="" derived_cc=""
+        impl_rec=$(latest_implementer_completion_record "$tid" 2>/dev/null) || impl_rec=""
+        if [ -n "$impl_rec" ]; then
+            impl_role=$(printf '%s' "$impl_rec" | grep -oE 'role=[A-Za-z0-9._+-]+' | head -1 | cut -d= -f2- || true)
+            if [ -n "$impl_role" ]; then
+                derived_cc=$(completion_payload_path_for "$tid" "$impl_role")
+                [ -f "$derived_cc" ] && cc_source="$derived_cc"
+            fi
+        fi
+    fi
+    if [ -z "$cc_source" ] || [ ! -f "$cc_source" ]; then
+        emit_error_json "review-request-build" "$tid" "missing_completion_contract" \
+            "no --completion-contract-file was given and no recorded COMPLETION v1 payload could be found for $tid. Record one first (qa-gate.sh completion-record) or pass --completion-contract-file <path>" \
+            "qa-gate.sh review-request-build $tid --iteration $iteration --stop-condition '<text>' --spec-file $spec_file --completion-contract-file <path>"
+        exit 1
+    fi
+
+    # --- change_set_hash: the SAME canonicalisation cmd_approve binds to.
+    local hash=""
+    hash=$(compute_change_set_hash) || hash=""
+    if [ -z "$hash" ]; then
+        emit_error_json "review-request-build" "$tid" "change_set_hash_unavailable" \
+            "could not compute change_set_hash (impact-report.sh --hash-only failed, or the tracker exists but could not be read)" \
+            "bash .claude/scripts/impact-report.sh --hash-only   # diagnose directly"
+        exit 2
+    fi
+
+    # --- impact_report FIRST (wuu8 R1-F4): its size must be KNOWN before the
+    # diff budget can be computed, since the diff gets whatever is left over
+    # after spec/completion_contract/impact_report's REAL, measured sizes —
+    # never a blind guess at how much room they will need.
+    review_request_impact_summary_json "$tid"
+
+    local spec_bytes=0 cc_bytes=0 impact_bytes=0 diff_budget=0
+    spec_bytes=$(wc -c < "$spec_file" 2>/dev/null | tr -d '[:space:]')
+    printf '%s' "$spec_bytes" | grep -qE '^[0-9]+$' || spec_bytes=0
+    cc_bytes=$(wc -c < "$cc_source" 2>/dev/null | tr -d '[:space:]')
+    printf '%s' "$cc_bytes" | grep -qE '^[0-9]+$' || cc_bytes=0
+    impact_bytes=$(printf '%s' "$REVIEW_REQUEST_IMPACT_JSON" | wc -c | tr -d '[:space:]')
+    printf '%s' "$impact_bytes" | grep -qE '^[0-9]+$' || impact_bytes=0
+
+    diff_budget=$((REVIEW_REQUEST_DIFF_TARGET_BYTES - spec_bytes - cc_bytes - impact_bytes - REVIEW_REQUEST_FIXED_OVERHEAD_BYTES))
+    [ "$diff_budget" -ge "$REVIEW_REQUEST_DIFF_MIN_BYTES" ] 2>/dev/null || diff_budget=$REVIEW_REQUEST_DIFF_MIN_BYTES
+
+    review_request_diff_text "$diff_budget"
+
+    mkdir -p "$(dirname "$out_path")" 2>/dev/null || true
+
+    # --- stage the two COMPUTED fields to disk for --rawfile/--slurpfile.
+    # Neither ever reaches jq's own argument list, unlike qa.md 6p.1's prior
+    # `--arg impact "$(cat ...)"` form -- exactly what died on a 1.86MB
+    # report with "argument list too long: jq" (ARG_MAX-safe by
+    # construction, not merely by the summary being small in practice).
+    local diff_tmp impact_tmp
+    diff_tmp="$QA_TRACKING_DIR/.review-request-build-diff-$$.txt"
+    impact_tmp="$QA_TRACKING_DIR/.review-request-build-impact-$$.json"
+    if ! printf '%s' "$REVIEW_REQUEST_DIFF_TEXT" > "$diff_tmp" 2>/dev/null; then
+        emit_error_json "review-request-build" "$tid" "diff_stage_failed" \
+            "could not stage the computed diff text to $diff_tmp for jq --rawfile" \
+            "check that $QA_TRACKING_DIR is writable and there is free disk space"
+        exit 2
+    fi
+    if ! printf '%s' "$REVIEW_REQUEST_IMPACT_JSON" > "$impact_tmp" 2>/dev/null; then
+        rm -f "$diff_tmp" 2>/dev/null || true
+        emit_error_json "review-request-build" "$tid" "impact_stage_failed" \
+            "could not stage the computed impact-report summary to $impact_tmp for jq --slurpfile" \
+            "check that $QA_TRACKING_DIR is writable and there is free disk space"
+        exit 2
+    fi
+
+    local out_tmp="$out_path.tmp.$$"
+    local assemble_rc=0
+    # `|| assemble_rc=$?`, NOT a bare command followed by a separate
+    # `assemble_rc=$?` line -- this file runs under `set -e` (see the
+    # BARE-SUBSTITUTION-CENSUS right after it), and a bare failing command
+    # here would abort the WHOLE SCRIPT before the wuu8 guard below ever
+    # ran, which is exactly the "an empty file reaches a caller unchecked"
+    # failure mode this function exists to close. REPRODUCED live while
+    # building this fix: a fault-injected jq on this exact line killed the
+    # process with no structured error and a stray 0-byte $out_tmp behind,
+    # until this `||` form was applied. `|| assemble_rc=$?` makes this line
+    # a non-final element of an and-or list (exempt from errexit) while
+    # still capturing jq's real exit code for the guard below; on success
+    # the `||` right side never runs and assemble_rc keeps its 0 default.
+    jq -n \
+        --arg tid "$tid" \
+        --argjson it "$iteration" \
+        --arg rt "$risk_threshold" \
+        --arg sc "$stop_condition" \
+        --arg hash "$hash" \
+        --rawfile spec "$spec_file" \
+        --rawfile diff "$diff_tmp" \
+        --rawfile cc "$cc_source" \
+        --slurpfile impact_arr "$impact_tmp" \
+        '{contract_version:"1", task_id:$tid, iteration:$it,
+          risk_threshold:$rt, stop_condition:$sc, change_set_hash:$hash,
+          spec:$spec, diff:$diff, completion_contract:$cc,
+          impact_report:$impact_arr[0]}' > "$out_tmp" 2>/dev/null || assemble_rc=$?
+    rm -f "$diff_tmp" "$impact_tmp" 2>/dev/null || true
+
+    # THE wuu8 GUARD: an empty or invalid assembly is an ERROR, never handed
+    # onward. This is what closes qa.md 6p.1's defect (3) structurally: the
+    # prior `--arg impact "$(cat <path>)"` form died with "argument list too
+    # long: jq" on a real report, left an EMPTY file at the request path,
+    # and NOTHING checked for that before the (also-empty) file could reach
+    # its downstream consumer, or validate-request. --rawfile/--slurpfile
+    # above avoid the ARG_MAX failure mode by construction, but this check stays
+    # regardless -- a full disk, a jq crash, or any other assembly failure
+    # must produce a NAMED refusal here, never a plausible-looking empty
+    # file sitting at the canonical path.
+    if [ "$assemble_rc" -ne 0 ] || [ ! -s "$out_tmp" ] || ! jq -e 'type=="object"' "$out_tmp" >/dev/null 2>&1; then
+        rm -f "$out_tmp" 2>/dev/null || true
+        emit_error_json "review-request-build" "$tid" "assembled_request_empty" \
+            "jq assembly failed or produced an empty/invalid request (jq rc=$assemble_rc); refusing to write or hand onward a request nobody could review. Nothing was written to $out_path" \
+            "check disk space and that the spec/completion-contract files are readable, then re-run"
+        exit 2
+    fi
+
+    if ! mv "$out_tmp" "$out_path" 2>/dev/null; then
+        rm -f "$out_tmp" 2>/dev/null || true
+        emit_error_json "review-request-build" "$tid" "write_failed" \
+            "could not move the assembled request into place at $out_path" \
+            "check that $QA_TRACKING_DIR is writable"
+        exit 2
+    fi
+
+    # --- validate through the ONE validator before reporting success. A
+    # request THIS function assembled failing its own schema would be a bug
+    # here, not a caller error -- surfaced with the SAME error_key
+    # review-check.sh itself reports, so a caller sees one vocabulary
+    # regardless of which layer answers.
+    local vout vok vekey
+    vout=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$REVIEW_CHECK_SCRIPT" validate-request "$out_path" 2>/dev/null || true)
+    vok=$(printf '%s' "$vout" | jq -r '.ok // false' 2>/dev/null || echo "false")
+    if [ "$vok" != "true" ]; then
+        vekey=$(printf '%s' "$vout" | jq -r '.error_key // "invalid_request"' 2>/dev/null || echo "invalid_request")
+        emit_error_json "review-request-build" "$tid" "$vekey" \
+            "the assembled request failed its own schema validation: $vekey (see review-check.sh validate-request)" \
+            "the request is at $out_path if you want to inspect it directly"
+        exit 1
+    fi
+
+    local out_bytes diff_bytes impact_bytes
+    out_bytes=$(wc -c < "$out_path" 2>/dev/null | tr -d '[:space:]')
+    diff_bytes=$(printf '%s' "$REVIEW_REQUEST_DIFF_TEXT" | wc -c | tr -d '[:space:]')
+    impact_bytes=$(printf '%s' "$REVIEW_REQUEST_IMPACT_JSON" | wc -c | tr -d '[:space:]')
+    # Diff-elision accounting (wuu8 R1-F4) surfaced on the envelope too, not
+    # only inside .diff's own rendered text -- a caller scripting against
+    # this command's stdout can detect an elided packet without re-parsing
+    # the diff string for the "=== DIFF TRUNCATED" marker.
+    jq -n --arg sub "review-request-build" --arg tid "$tid" --arg path "$out_path" \
+        --argjson bytes "${out_bytes:-0}" --argjson diff_bytes "${diff_bytes:-0}" \
+        --argjson impact_bytes "${impact_bytes:-0}" \
+        --argjson diff_total "${REVIEW_REQUEST_DIFF_TOTAL_BYTES:-0}" \
+        --argjson diff_included_files "${REVIEW_REQUEST_DIFF_INCLUDED_COUNT:-0}" \
+        --argjson diff_included_bytes "${REVIEW_REQUEST_DIFF_INCLUDED_BYTES:-0}" \
+        --argjson diff_omitted_files "${REVIEW_REQUEST_DIFF_OMITTED_COUNT:-0}" \
+        --argjson diff_omitted_bytes "${REVIEW_REQUEST_DIFF_OMITTED_BYTES:-0}" \
+        '{ok:true, subcommand:$sub, task_id:$tid, status:"ok", path:$path, bytes:$bytes,
+          diff_bytes:$diff_bytes, impact_summary_bytes:$impact_bytes,
+          diff_total_bytes:$diff_total, diff_included_files:$diff_included_files,
+          diff_included_bytes:$diff_included_bytes, diff_omitted_files:$diff_omitted_files,
+          diff_omitted_bytes:$diff_omitted_bytes}'
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -17152,6 +18027,7 @@ case "$SUB" in
     block)        cmd_block "$@" ;;
     choose)       cmd_choose "$@" ;;
     grade-record) cmd_grade_record "$@" ;;
+    review-request-build) cmd_review_request_build "$@" ;;
     review-record)   cmd_review_record "$@" ;;
     review-reconcile) cmd_review_reconcile "$@" ;;
     completion-record) cmd_completion_record "$@" ;;

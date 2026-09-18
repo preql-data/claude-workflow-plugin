@@ -236,11 +236,60 @@ fi
 # The floor constant, read out of the shipped runner to PARAMETERISE the
 # fixtures below (this is sizing, not proof — the proof legs all RUN the
 # runner). If the constant moves, the fixtures move with it.
-EXPECTED=$(sed -nE 's/^EXPECTED_SPECS=([0-9]+)$/\1/p' "$L1_RUNNER" | head -1)
+#
+# claude-workflow-plugin-gytz (second round): EXPECTED_SPECS stopped being a
+# bare integer literal (`EXPECTED_SPECS=71`) and became a derived expression
+# (`EXPECTED_SPECS=${#EXPECTED_SPEC_FILES[@]}`) — the OLD single-line regex
+# below this comment used to anchor on `^EXPECTED_SPECS=([0-9]+)$` and would
+# now silently match NOTHING (an integer-shaped RHS no longer exists in the
+# source at all), so this reads the array's OWN declaration instead: every
+# non-empty line strictly between the EXPECTED-SPEC-FILES sentinel pair is
+# one declared spec name. L1_REAL_SPEC_NAMES (an actual bash array, not just
+# a count) is kept too — sections 19 below build fixtures out of THIS repo's
+# own real spec names, not synthetic stubs, specifically to exercise the
+# manifest comparison meaningfully.
+L1_REAL_SPEC_NAMES=()
+while IFS= read -r __name; do
+    L1_REAL_SPEC_NAMES+=("$__name")
+done < <(awk '
+    /^EXPECTED_SPEC_FILES=\($/ { infiles=1; next }
+    infiles && /^\)$/            { exit }
+    infiles && NF                { print }
+' "$L1_RUNNER" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+EXPECTED=${#L1_REAL_SPEC_NAMES[@]}
 if ! printf '%s' "$EXPECTED" | grep -qE '^[0-9]+$' || [ "$EXPECTED" -lt 2 ]; then
-    printf 'FAIL: could not read EXPECTED_SPECS from %s (got "%s")\n' "$L1_RUNNER" "$EXPECTED"
+    printf 'FAIL: could not read EXPECTED_SPEC_FILES from %s (got %d name(s))\n' "$L1_RUNNER" "$EXPECTED"
     exit 1
 fi
+
+# EXPECTED_SPEC_FILES_STRICT=0, EXPORTED HERE, ONCE, FOR THE WHOLE SCRIPT.
+# Discovered necessary fixing claude-workflow-plugin-gytz R2-F2: run-tests.sh's
+# own default for this variable is 1 (strict — the completeness floor's
+# identity comparison against EXPECTED_SPEC_FILES runs unconditionally and
+# can fail the tier on its own; see that file's Environment: header and its
+# COMPLETENESS-FLOOR block). That default is correct for every REAL
+# invocation, but this spec's OWN sections — dozens of them, built across
+# many rounds predating R2-F2 — drive $L1_RUNNER (or an L1-family mutant)
+# against fixtures sized to $EXPECTED with GENERIC stub-NNN.sh names, to
+# test UNRELATED runner mechanics (timeouts, signals, telemetry disarm,
+# lease handling, ...), never claiming to model this repo's real spec
+# inventory. Under the strict default, EVERY one of those fixtures breaches
+# on "COUNTS MATCH but the SETS DO NOT" — proven by running the full suite
+# once with the naive unconditional fix and watching failures start at
+# section 1 and recur throughout, none of them anywhere near the R2-F2 fix
+# itself. Exporting the OFF value here, ONCE, covers every subprocess this
+# script spawns — through run_l1/run_l1_env_bdactor/run_l1_capped AND the
+# many places that invoke $L1_RUNNER or a mutant directly — without
+# touching each call site's own logic or renaming any fixture. The few
+# sections that build REAL-named fixtures specifically to exercise the
+# strict comparison (19a/19b/19e, 20a-20d) override back to ON at their own
+# call site (`EXPECTED_SPEC_FILES_STRICT=1 <command>`), a plain prefix
+# assignment that shadows this export for exactly that one command and its
+# subprocess, then reverts — verified empirically, not assumed, before this
+# was written this way: an exported base value, a prefix override on one
+# call, a plain call after it, and the plain call sees the base value
+# again, never the override.
+export EXPECTED_SPEC_FILES_STRICT=0
 
 # mk_l1_fixture <root> <n-passing-stubs> — a project root whose L1 tests dir
 # holds exactly <n> fast, honestly-passing stubs (each emits one PASS: line).
@@ -265,6 +314,20 @@ run_l1() {
     # laptop. Measured, not theorised: leg 8.5 failed exactly that way on the
     # first CI-shaped run of this file. The legs that mean "strict ON" set it
     # themselves, explicitly, at their own call site.
+    #
+    # EXPECTED_SPEC_FILES_STRICT is NOT pinned here, unlike STRICT_SECTIONS
+    # above — it does not need to be. Nothing but this file's own top-level
+    # `export EXPECTED_SPEC_FILES_STRICT=0` (see its header, right after
+    # $EXPECTED is derived) ever sets it, so plain inheritance through the
+    # command substitution below already gives every ordinary call the
+    # legacy, count-only floor comparison its generic-named fixture needs.
+    # The sections that need the real, strict comparison instead
+    # (19a/19b/19e, built from real spec basenames via mk_l1_fixture_named)
+    # override it at their own call site — `EXPECTED_SPEC_FILES_STRICT=1
+    # run_l1 ...` — a plain prefix assignment that shadows the export for
+    # exactly that one call and reverts after, same mechanism STRICT_SECTIONS
+    # would use if any leg here needed strict sections AND legacy floor
+    # semantics together (none currently do).
     local root="$1"; shift
     local runner="${1:-$L1_RUNNER}"; shift || true
     RUN_OUT=$(CLAUDE_PROJECT_DIR="$root" STRICT_SECTIONS=0 bash "$runner" "$@" 2>&1)
@@ -1971,9 +2034,12 @@ printf -- '\n--- 13. THE STORE CANARY: run-tests.sh fails a spec BY NAME when it
 # explicit `bd -C <dir>`; a fixture bin/bd stub; a callee that cds itself; a
 # store-independent subcommand; no bd call on the path at all) and nothing
 # states which is required — so the NEXT spec author can reproduce exactly
-# this defect. The canary is the fix for THAT: it fails ANY spec whose
-# environment resolves to the production store, by name, regardless of which
-# of the seven (or an eighth nobody has invented yet) a future spec omits.
+# this defect. The canary is the fix for THAT: it fails, by name, any spec
+# whose window leaves the production store's HEAD net-changed (R4-F3,
+# independent review round 4: mere resolution to the production store is
+# not what this detects — see section 13s below for the KNOWN LIMIT this
+# contract accepts), regardless of which of the seven (or an eighth nobody
+# has invented yet) a future spec omits.
 #
 # Fixture store, using the runner's OWN existing lever (CLAUDE_PROJECT_DIR) —
 # no new env knob, and no need to contaminate production to prove the
@@ -2184,11 +2250,19 @@ EOF
 
             # MUTANT: revert R1-F2 — the branch that escalates a well-formed
             # "0" to STORE_WRITES=1 is disabled, restoring the pre-fix
-            # behaviour where a non-descendant move stays silently 0.
+            # behaviour where a non-descendant move stays silently 0. The
+            # condition this targets grew an OR-clause under R4-F2
+            # (independent review round 4: STORE_WRITES_UNREADABLE, a
+            # SEPARATE non-authoritative-count case — see 13v) sharing the
+            # same `if`; `if false` disables the escalation in EITHER form,
+            # which is what "restore the pre-fix behaviour" means here, and
+            # is harmless to this leg specifically because a genuine
+            # non-descendant `dolt reset --hard` (built below) is a
+            # well-formed "0" read, never the UNREADABLE shape R4-F2 added.
             MUT_SC_NONDESC="$WORK/run-tests.no-nondescendant-fix.sh"
             # shellcheck disable=SC2016  # single-quoted on purpose: matching
             # literal source text in $L1_RUNNER, not expanding a variable.
-            sed 's/if \[ "\$STORE_WRITES" = "0" \]; then/if false; then/' \
+            sed 's/if \[ "\$STORE_WRITES" = "0" \] || \[ "\$STORE_WRITES_UNREADABLE" = "1" \]; then/if false; then/' \
                 "$L1_RUNNER" > "$MUT_SC_NONDESC"
             assert_eq "13f.4 MUTANT non-vacuity: the mutant differs from the shipped runner (the R1-F2 branch guard was excised)" \
                 "differs" "$(cmp -s "$L1_RUNNER" "$MUT_SC_NONDESC" && echo identical || echo differs)"
@@ -2214,13 +2288,601 @@ EOF
                 "NON-LINEAR" "$RUN_OUT"
         fi
 
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13q. claude-workflow-plugin-gytz R3-F1 (HIGH), shape half: dolt_hash_looks_valid() is a POSITIVE allow-list, driven from the SHIPPED definition ---\n'
+        # -----------------------------------------------------------------
+        # Extracted from $L1_RUNNER by its own `name() {` .. `}` range, never
+        # re-typed here -- same technique as doc-only-classifier.test.sh's
+        # is_doc_only_path extraction, so the thing under test is the
+        # shipped definition, free to drift only if this extraction breaks.
+        SC_SHAPE_LIB="$WORK/dolt-hash-shape.sh"
+        awk '/^dolt_hash_looks_valid\(\) \{/,/^\}/' "$L1_RUNNER" > "$SC_SHAPE_LIB"
+        assert_eq "13q.1 the extraction defines dolt_hash_looks_valid" "1" \
+            "$(grep -c '^dolt_hash_looks_valid() {$' "$SC_SHAPE_LIB")"
+        assert_eq "13q.2 the extraction parses" "0" \
+            "$(bash -n "$SC_SHAPE_LIB" 2>/dev/null; echo $?)"
+
+        # sc_shape_check <value> -> "valid"/"invalid" via the SHIPPED
+        # function, one bash per call so a value containing shell
+        # metacharacters can never leak into this process.
+        sc_shape_check() {
+            bash -c '. "$1"; dolt_hash_looks_valid "$2" && echo valid || echo invalid' \
+                -- "$SC_SHAPE_LIB" "$1"
+        }
+
+        # A REAL hash, sampled earlier in this same section (HASH_BEFORE_C,
+        # 13c) -- the actual artifact this function has to accept, not a
+        # hand-typed lookalike.
+        assert_eq "13q.3 a REAL sampled dolt hash is accepted" \
+            "valid" "$(sc_shape_check "$HASH_BEFORE_C")"
+        assert_eq "13q.4 a SECOND, independently sampled real hash is also accepted (13q.3 was not a one-off)" \
+            "valid" "$(sc_shape_check "$(sc_hash "$FX_READONLY")")"
+
+        # The exact adversarial set R3-F1 named: empty output, the CSV
+        # header echo (the pre-fix denylist's other explicit branch), NULL,
+        # whitespace, a dolt error string, wrong length both directions, and
+        # wrong alphabet -- every one of these is what "anything non-empty
+        # that doesn't say hashof" used to accept as a valid baseline.
+        assert_eq "13q.5 empty output is rejected" "invalid" "$(sc_shape_check '')"
+        assert_eq "13q.6 the CSV header echo is rejected" "invalid" \
+            "$(sc_shape_check "hashof('HEAD')")"
+        assert_eq "13q.7 literal NULL is rejected" "invalid" "$(sc_shape_check 'NULL')"
+        assert_eq "13q.8 whitespace is rejected" "invalid" "$(sc_shape_check '   ')"
+        assert_eq "13q.9 a real dolt error string is rejected" "invalid" \
+            "$(sc_shape_check "error on line 1 for query SELECT hashof('HEAD'): database not found")"
+        assert_eq "13q.10 31 characters (one short) is rejected" "invalid" \
+            "$(sc_shape_check '0123456789abcdefghijklmnopqrst')"
+        assert_eq "13q.11 33 characters (one long) is rejected" "invalid" \
+            "$(sc_shape_check '0123456789abcdefghijklmnopqrstuvw')"
+        assert_eq "13q.12 uppercase (wrong case) is rejected" "invalid" \
+            "$(sc_shape_check "$(printf '%s' "$HASH_BEFORE_C" | tr '[:lower:]' '[:upper:]')")"
+        assert_eq "13q.13 32 characters using w/x/y/z (outside the confirmed [0-9a-v] alphabet) is rejected" \
+            "invalid" "$(sc_shape_check 'wxyz56789abcdefghijklmnopqrstuv')"
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13r. claude-workflow-plugin-gytz R3-F1 (HIGH): a FAILED after-snapshot FAILS the spec, never silently reads as "no change" ---\n'
+        # -----------------------------------------------------------------
+        FX_VANISH_MUT="$WORK/store-canary-vanish-mut"
+        FX_VANISH_SHIP="$WORK/store-canary-vanish-ship"
+        mkdir -p "$FX_VANISH_MUT"
+        ( cd "$FX_VANISH_MUT" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        if [ ! -d "$FX_VANISH_MUT/.beads/embeddeddolt/beads/.dolt" ]; then
+            printf '  SKIPPED: could not initialise a fixture Dolt store for the 13r sample-failure leg\n'
+        else
+            # Clone BEFORE either spec runs, same convention as
+            # $FX_ROLLBACK_MUT/$FX_ROLLBACK_SHIP in 13f: the vanish spec
+            # DESTROYS its own .dolt metadata dir, a ONE-SHOT mutation, so
+            # the mutant run and the shipped-execution run each need their
+            # OWN untouched copy. (Reusing a single fixture across both
+            # run_l1 calls was tried first and silently broke the SECOND
+            # call's ARM step: the .dolt dir the first call already renamed
+            # away stays gone, so the second run starts already DISARMED
+            # rather than exercising the per-spec failure path at all.)
+            mkdir -p "$FX_VANISH_SHIP"
+            cp -R "$FX_VANISH_MUT/.beads" "$FX_VANISH_SHIP/.beads"
+
+            mk_l1_fixture "$FX_VANISH_MUT" "$((EXPECTED - 1))"
+            cat > "$FX_VANISH_MUT/.claude/scripts/tests/zz-vanish.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: vanish spec ran\n'
+# R3-F1 pairing: make the AFTER-snapshot query itself FAIL (not merely find
+# nothing) by hiding the store's OWN .dolt metadata dir after this spec has
+# started running -- the cd into .../beads still succeeds (the directory is
+# still there), but `dolt sql -q "SELECT hashof('HEAD')"` inside it exits
+# non-zero with EMPTY stdout (confirmed directly against this dolt build:
+# "error on line 1 for query SELECT hashof('HEAD'): database not found" on
+# stderr, nothing on stdout), which is exactly the shape the pre-fix
+# per-spec read treated as "no change" instead of "the sample failed".
+DOLT_DIR="$(dirname "$0")/../../../.beads/embeddeddolt/beads/.dolt"
+mv "$DOLT_DIR" "$DOLT_DIR.hidden-by-13r"
+exit 0
+EOF
+            chmod +x "$FX_VANISH_MUT/.claude/scripts/tests/zz-vanish.sh"
+
+            mk_l1_fixture "$FX_VANISH_SHIP" "$((EXPECTED - 1))"
+            cat > "$FX_VANISH_SHIP/.claude/scripts/tests/zz-vanish.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: vanish spec ran\n'
+DOLT_DIR="$(dirname "$0")/../../../.beads/embeddeddolt/beads/.dolt"
+mv "$DOLT_DIR" "$DOLT_DIR.hidden-by-13r"
+exit 0
+EOF
+            chmod +x "$FX_VANISH_SHIP/.claude/scripts/tests/zz-vanish.sh"
+
+            # 1. NON-VACUITY: a single targeted line-flip neutralises ONLY
+            #    the new "treat an invalid/failed sample as adverse" check,
+            #    leaving the rc-capture and shape-validation MACHINERY that
+            #    feeds it untouched -- this leg exercises that branch
+            #    specifically (13a/13b already cover whole-mechanism
+            #    excision).
+            MUT_SC_NOSAMPLEFAIL="$WORK/run-tests.no-samplefail-fix.sh"
+            # shellcheck disable=SC2016  # single-quoted on purpose: matching
+            # literal source text in $L1_RUNNER, not expanding a variable.
+            sed 's/if \[ "\$STORE_VALID_SAMPLE" != "1" \]; then/if false; then/' \
+                "$L1_RUNNER" > "$MUT_SC_NOSAMPLEFAIL"
+            assert_eq "13r.1 MUTANT non-vacuity: the mutant differs from the shipped runner (the R3-F1 branch guard was excised)" \
+                "differs" "$(cmp -s "$L1_RUNNER" "$MUT_SC_NOSAMPLEFAIL" && echo identical || echo differs)"
+            assert_eq "13r.2 MUTANT: still parses (bash -n)" \
+                "0" "$(bash -n "$MUT_SC_NOSAMPLEFAIL" 2>/dev/null; echo $?)"
+
+            # 2. SPECIFIC MISBEHAVIOUR: under the mutant, the vanish spec
+            #    (which genuinely breaks the AFTER read) is PASSED,
+            #    unreported -- "a measurement that did not happen is
+            #    indistinguishable from one that passed", reproduced.
+            run_l1 "$FX_VANISH_MUT" "$MUT_SC_NOSAMPLEFAIL"
+            assert_eq "13r.3 MUTANT: the runner exits 0 despite the broken AFTER read" "0" "$RUN_RC"
+            assert_contains "13r.4 MUTANT: the vanish spec is classified PASSED" \
+                "zz-vanish.sh: PASSED" "$RUN_OUT"
+            assert_contains "13r.5 MUTANT: the summary says Failed: 0" \
+                "Failed: 0" "$RUN_OUT"
+            assert_eq "13r.6 MUTANT: no verdict line anywhere names a sample failure (the exact silent-pass R3-F1 describes)" \
+                "0" "$(printf '%s' "$RUN_OUT" | grep -c 'AFTER-sample failed')"
+
+            # 3. RESTORE CONTROL: the shipped runner, a HEALTHY store, an
+            #    ordinary read -- unaffected by this fix. Reuses $FX_READONLY
+            #    (13c): its own store is already proven healthy and unmoved
+            #    by a plain read.
+            run_l1 "$FX_READONLY"
+            assert_eq "13r.7 RESTORE CONTROL: the shipped runner over a healthy store and an ordinary read is still green (rc=0)" \
+                "0" "$RUN_RC"
+            assert_absent "13r.8 ...with no AFTER-sample-failure line anywhere (a working sample is not a failed one)" \
+                "AFTER-sample failed" "$RUN_OUT"
+
+            # 4. EXECUTION (the discriminator): the SHIPPED runner, the SAME
+            #    broken read (its own never-yet-touched fixture copy), fails
+            #    the spec LOUDLY and NAMES the sample failure rather than
+            #    fabricating a "no change" verdict.
+            run_l1 "$FX_VANISH_SHIP"
+            assert_eq "13r.9 EXECUTION: the shipped runner exits non-zero over the spec that broke its own AFTER read" "1" "$RUN_RC"
+            assert_contains "13r.10 ...the failed-files entry NAMES the vanish spec" \
+                "zz-vanish.sh" "$(printf '%s\n' "$RUN_OUT" | grep -A3 'Failed tests:')"
+            assert_contains "13r.11 ...and the failure explicitly names an AFTER-sample failure" \
+                "AFTER-sample failed" "$RUN_OUT"
+            assert_contains "13r.12 ...naming the exit status it captured off the query rather than a masked pipe result" \
+                "exited rc=1" "$RUN_OUT"
+        fi
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13s. claude-workflow-plugin-gytz R3-F2: the corrected contract is NET HEAD CHANGED, and the KNOWN LIMIT (advance-then-restore) is real, not just claimed ---\n'
+        # -----------------------------------------------------------------
+        # The corrected wording, driven LIVE rather than grepped from source
+        # (the pairing README: prose is only provable through the executable
+        # whose behaviour it describes). Reuses $FX_READONLY (already proven
+        # healthy) for the ARMED line, and re-runs $FX_CANARY (13d's already
+        # -contaminated fixture -- one more commit there is harmless, it is
+        # disposable scratch under $WORK) for the dedicated arm's headline.
+        run_l1 "$FX_READONLY"
+        assert_contains "13s.1 the ARMED line states the corrected NET HEAD CHANGED contract" \
+            "a spec whose window leaves HEAD net-changed fails, by name" "$RUN_OUT"
+        assert_absent "13s.2 ...and no longer claims to catch ANY advance (the R3-F2 overclaim)" \
+            "any advance during a spec fails that spec" "$RUN_OUT"
+
+        run_l1 "$FX_CANARY"
+        assert_contains "13s.3 the dedicated arm's headline states a net change, not an unqualified advance" \
+            "net HEAD change" "$RUN_OUT"
+
+        # THE LIMIT ITSELF, characterised, not merely commented: an EXACT
+        # round trip inside ONE spec's window -- H0 -> write -> back to
+        # EXACTLY H0 -- nets to no change and is invisible by construction,
+        # in contrast to 13f's non-descendant move (a DIFFERENT ancestor),
+        # which IS caught. Same mechanics as 13f's own precondition checks,
+        # confirmed against the real dolt CLI before any runner is involved.
+        FX_ROUNDTRIP="$WORK/store-canary-roundtrip"
+        mkdir -p "$FX_ROUNDTRIP"
+        ( cd "$FX_ROUNDTRIP" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        if [ ! -d "$FX_ROUNDTRIP/.beads/embeddeddolt/beads/.dolt" ]; then
+            printf '  SKIPPED: could not initialise a fixture Dolt store for the 13s KNOWN-LIMIT leg\n'
+        else
+            RT_START=$(sc_hash "$FX_ROUNDTRIP")
+            mk_l1_fixture "$FX_ROUNDTRIP" "$((EXPECTED - 1))"
+            cat > "$FX_ROUNDTRIP/.claude/scripts/tests/zz-roundtrip.sh" <<EOF
+#!/bin/bash
+printf '  PASS: roundtrip spec ran\n'
+cd "\$(dirname "\$0")/../../.." && bd create "13s seed" -t task -p 4 >/dev/null 2>&1
+cd "\$(dirname "\$0")/../../../.beads/embeddeddolt/beads" && dolt reset --hard $RT_START >/dev/null 2>&1
+exit 0
+EOF
+            chmod +x "$FX_ROUNDTRIP/.claude/scripts/tests/zz-roundtrip.sh"
+
+            run_l1 "$FX_ROUNDTRIP"
+            RT_END=$(sc_hash "$FX_ROUNDTRIP")
+            assert_eq "13s.4 precondition: the fixture's OWN HEAD is exactly back where it started (a genuine round trip, not a near-miss)" \
+                "$RT_START" "$RT_END"
+            assert_eq "13s.5 KNOWN LIMIT, characterised: the SHIPPED runner exits 0 over an exact advance-then-restore inside one spec's window" \
+                "0" "$RUN_RC"
+            assert_contains "13s.6 ...the roundtrip spec is classified PASSED (net change is zero, exactly as the corrected NET HEAD CHANGED contract predicts)" \
+                "zz-roundtrip.sh: PASSED" "$RUN_OUT"
+            assert_absent "13s.7 ...and no verdict line mentions the protected store (contrast 13f.10, where a DIFFERENT-ancestor move IS caught)" \
+                "protected Beads store" "$RUN_OUT"
+        fi
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13t. claude-workflow-plugin-gytz R3-F3 + R3-F4: the window is described honestly, and a sentinel is never reported as a counted commit ---\n'
+        # -----------------------------------------------------------------
+        # R3-F3: re-run 13d's own contaminating spec and check the corrected
+        # wording -- "since the last confirmed sample", never "while it ran"
+        # (which claimed a precision this sampling scheme does not have:
+        # BEFORE is the PREVIOUS spec's own after-sample, so the window can
+        # include a brief inter-spec bookkeeping gap this spec never ran).
+        run_l1 "$FX_CANARY"
+        assert_eq "13t.1 EXECUTION: still catches the contaminator (no regression from the R3-F3 wording change)" "1" "$RUN_RC"
+        assert_contains "13t.2 R3-F3: the failure text says 'since the last confirmed sample'" \
+            "since the last confirmed sample" "$RUN_OUT"
+        assert_absent "13t.3 R3-F3: ...and no longer claims the tighter 'while it ran' precision" \
+            "while it ran" "$RUN_OUT"
+        assert_absent "13t.3b ...(the other pre-fix phrasing, 'while this spec ran')" \
+            "while this spec ran" "$RUN_OUT"
+
+        # R3-F4: a FRESH non-descendant-move fixture -- NOT a re-run of 13f's
+        # own $FX_ROLLBACK_SHIP. That fixture's zz-rollback.sh already spent
+        # its ONE-SHOT `dolt reset --hard $RB_ANCESTOR` at 13f.10; running
+        # the SAME fixture through run_l1 a second time starts with HEAD
+        # already sitting at $RB_ANCESTOR (the first run's own end state), so
+        # the second reset is a no-op -- nothing moves, nothing to name, and
+        # the assertions below would fail for a reason that has nothing to
+        # do with the R3-F4 wording under test (caught by this leg's own
+        # first run: rc=0, no NON-LINEAR anywhere, when it should have been
+        # 1/present). Independently reproduces 13f's own construction, once,
+        # purely to inspect the wording this round changed.
+        FX_ROLLBACK_SHIP2="$WORK/store-canary-rollback-ship2"
+        mkdir -p "$FX_ROLLBACK_SHIP2"
+        ( cd "$FX_ROLLBACK_SHIP2" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        if [ ! -d "$FX_ROLLBACK_SHIP2/.beads/embeddeddolt/beads/.dolt" ]; then
+            printf '  SKIPPED: could not initialise a fixture Dolt store for the 13t R3-F4 wording leg\n'
+        else
+            RS2_ANCESTOR=$(sc_hash "$FX_ROLLBACK_SHIP2")
+            ( cd "$FX_ROLLBACK_SHIP2" && bd create "13t seed" -t task -p 4 >/dev/null 2>&1 )
+            mk_l1_fixture "$FX_ROLLBACK_SHIP2" "$((EXPECTED - 1))"
+            cat > "$FX_ROLLBACK_SHIP2/.claude/scripts/tests/zz-rollback2.sh" <<EOF
+#!/bin/bash
+printf '  PASS: rollback2 spec ran\n'
+cd "\$(dirname "\$0")/../../../.beads/embeddeddolt/beads" && dolt reset --hard $RS2_ANCESTOR >/dev/null 2>&1
+exit 0
+EOF
+            chmod +x "$FX_ROLLBACK_SHIP2/.claude/scripts/tests/zz-rollback2.sh"
+
+            run_l1 "$FX_ROLLBACK_SHIP2"
+            assert_eq "13t.4 EXECUTION: still catches the non-descendant move (no regression from the R3-F4 wording change)" "1" "$RUN_RC"
+            assert_contains "13t.5 R3-F4: the NON-LINEAR case is still named" "NON-LINEAR" "$RUN_OUT"
+            assert_eq "13t.6 R3-F4: the sentinel is never reported as a counted commit ('1 commit(s)' does not appear anywhere)" \
+                "0" "$(printf '%s' "$RUN_OUT" | grep -c '1 commit(s)')"
+            assert_eq "13t.7 R3-F4: ...nor any other fabricated count alongside NON-LINEAR" \
+                "0" "$(printf '%s\n' "$RUN_OUT" | grep -c 'NON-LINEAR.*commit(s)\|commit(s).*NON-LINEAR')"
+        fi
+
+        # R3-F4, the comment fix: "LOUD AND COUNTED" no longer appears
+        # (nothing here counts a disarm event; it only prints, twice). This
+        # one check is DECLARED UNPAIRED rather than dressed up as an
+        # execution leg (.claude/tests/README.md, "The pairing
+        # requirement"): the artifact is a comment's own accuracy about
+        # itself, there is no runtime behaviour for it to diverge from, and
+        # a check that read this paragraph and asserted its wording would be
+        # exactly the false pair that convention warns about. The control
+        # is a human rereading the comment at review time; this line only
+        # catches the wording regressing back to the disproven claim.
+        assert_eq "13t.8 R3-F4 comment fix (UNPAIRED, source-level): the shipped source no longer claims disarming is COUNTED" \
+            "0" "$(grep -c 'LOUD AND COUNTED' "$L1_RUNNER")"
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13u. claude-workflow-plugin-gytz R4-F1 (MEDIUM): a spec that BOTH moves the canary AND fails its own transcript is reported for BOTH reasons ---\n'
+        # -----------------------------------------------------------------
+        # Pre-fix, the two STORE-CANARY verdict arms sat ahead of
+        # TRANSCRIPT-FAIL in one if/elif chain, so a spec red for a canary
+        # reason AND its own FAIL: line(s) was reported for the canary
+        # reason ONLY -- TRANSCRIPT-FAIL was never even reached for it.
+        FX_CANARY_FAIL="$WORK/store-canary-and-transcript-fail"
+        mkdir -p "$FX_CANARY_FAIL"
+        ( cd "$FX_CANARY_FAIL" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        if [ ! -d "$FX_CANARY_FAIL/.beads/embeddeddolt/beads/.dolt" ]; then
+            printf '  SKIPPED: could not initialise a fixture Dolt store for the 13u canary+transcript leg\n'
+        else
+            mk_l1_fixture "$FX_CANARY_FAIL" "$((EXPECTED - 1))"
+            cat > "$FX_CANARY_FAIL/.claude/scripts/tests/zz-contaminator-fail.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: contaminator-fail ran\n'
+printf '  FAIL: this assertion was designed to fail\n'
+cd "$(dirname "$0")/../../.." && bd create "13u seed" -t task -p 4 >/dev/null 2>&1
+exit 0
+EOF
+            chmod +x "$FX_CANARY_FAIL/.claude/scripts/tests/zz-contaminator-fail.sh"
+
+            # 1. NON-VACUITY: the merge fix has its own dedicated sentinel
+            #    pair (STORE-CANARY-TRANSCRIPT-MERGE-BEGIN/END), present once
+            #    inside EACH of the two STORE-CANARY verdict arms -- one awk
+            #    pass excises both, same technique as 13a's whole-mechanism
+            #    excision but scoped to only the new merge lines: detection
+            #    itself (13a/13b) is untouched by this mutant.
+            MUT_MERGE="$WORK/run-tests.no-transcript-merge.sh"
+            awk '
+                /STORE-CANARY-TRANSCRIPT-MERGE-BEGIN/ { skipping=1; found++; next }
+                /STORE-CANARY-TRANSCRIPT-MERGE-END/   { skipping=0; next }
+                !skipping { print }
+                END { if (found != 2) exit 9 }
+            ' "$L1_RUNNER" > "$MUT_MERGE"
+            AWK_MERGE_RC=$?
+            assert_eq "13u.1 MUTANT non-vacuity: both merge-fix occurrences were FOUND and excised (awk found-check)" \
+                "0" "$AWK_MERGE_RC"
+            assert_eq "13u.2 MUTANT: the mutant differs from the shipped runner (the excision landed)" \
+                "differs" "$(cmp -s "$L1_RUNNER" "$MUT_MERGE" && echo identical || echo differs)"
+            assert_eq "13u.3 MUTANT: the mutant still parses (bash -n)" \
+                "0" "$(bash -n "$MUT_MERGE" 2>/dev/null; echo $?)"
+
+            # 2. SPECIFIC MISBEHAVIOUR: under the mutant, the dual-reason spec
+            #    is reported for the canary reason ONLY. The spec's own raw
+            #    transcript is still echoed further up in the log (that is a
+            #    DIFFERENT, unrelated code path -- `cat "$SPEC_OUT"` runs
+            #    regardless of classification) so this checks the FAILED-
+            #    TESTS SUMMARY entry specifically, the one place the merge
+            #    fix actually changes, rather than the log as a whole.
+            run_l1 "$FX_CANARY_FAIL" "$MUT_MERGE"
+            assert_eq "13u.4 MUTANT: the runner still catches it (rc=1 -- the canary reason alone still reddens the tier)" \
+                "1" "$RUN_RC"
+            MUT_FT_BLOCK=$(printf '%s\n' "$RUN_OUT" | grep -A3 'Failed tests:')
+            assert_contains "13u.5 MUTANT: the failed-tests entry carries the canary reason" \
+                "the protected Beads store" "$MUT_FT_BLOCK"
+            assert_absent "13u.6 MUTANT: ...but never says the transcript ALSO failed" \
+                "ALSO holds" "$MUT_FT_BLOCK"
+            assert_absent "13u.7 MUTANT: ...and never quotes the FAIL: line in that SAME entry (only in the raw transcript echo above it)" \
+                "this assertion was designed to fail" "$MUT_FT_BLOCK"
+
+            # 3. RESTORE CONTROL: the fix does not fabricate a transcript
+            #    reason where none exists -- $FX_CANARY's own contaminator
+            #    (13d) has no FAIL: line, so its entry must carry no "ALSO
+            #    holds" fragment either.
+            run_l1 "$FX_CANARY"
+            assert_absent "13u.8 RESTORE CONTROL: a canary-only spec (no transcript FAIL:) gets no 'ALSO holds' fragment" \
+                "ALSO holds" "$RUN_OUT"
+
+            # 4. EXECUTION (the discriminator): the SHIPPED runner, the SAME
+            #    dual-reason spec the mutant saw at 13u.4-13u.7, reports BOTH
+            #    reasons in the SAME failed-tests entry.
+            run_l1 "$FX_CANARY_FAIL"
+            assert_eq "13u.9 EXECUTION: the shipped runner catches it (rc=1)" "1" "$RUN_RC"
+            FT_BLOCK=$(printf '%s\n' "$RUN_OUT" | grep -A3 'Failed tests:')
+            assert_contains "13u.10 EXECUTION: the failed-tests entry names the spec" \
+                "zz-contaminator-fail.sh" "$FT_BLOCK"
+            assert_contains "13u.11 EXECUTION: ...carries the canary reason" \
+                "the protected Beads store" "$FT_BLOCK"
+            assert_contains "13u.12 EXECUTION: ...AND carries the transcript reason, named" \
+                "ALSO holds 1 FAIL: line(s)" "$FT_BLOCK"
+            assert_contains "13u.13 EXECUTION: ...quoting the FAIL: line itself in that SAME entry, not just a count" \
+                "this assertion was designed to fail" "$FT_BLOCK"
+        fi
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13v. claude-workflow-plugin-gytz R4-F2 (LOW): an UNREADABLE commit count is never reported as a fabricated "advanced by 1 commit(s)" ---\n'
+        # -----------------------------------------------------------------
+        # The empty/non-numeric case-guard sentinel (case "$STORE_WRITES" in
+        # ''|*[!0-9]*) used to be indistinguishable, downstream, from a
+        # genuine single-commit count -- only the literal "0" was routed to
+        # the NON-LINEAR (non-authoritative-count) wording. Reachable when
+        # the `cd` into the store directory fails between the successful
+        # AFTER-hashof read and the STORE_WRITES `dolt log` read -- proven
+        # here by making `wc -l` itself fail on its FIRST invocation (the
+        # only `wc -l` call the shipped runner makes anywhere -- confirmed:
+        # `grep -c 'wc -l' run-tests.sh` = 1), which empties the command
+        # substitution the exact same way a failed `cd` would, without
+        # needing to race a real filesystem disappearance.
+        FX_LOGBREAK="$WORK/store-canary-logbreak"
+        mkdir -p "$FX_LOGBREAK" "$FX_LOGBREAK/bin"
+        ( cd "$FX_LOGBREAK" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        if [ ! -d "$FX_LOGBREAK/.beads/embeddeddolt/beads/.dolt" ]; then
+            printf '  SKIPPED: could not initialise a fixture Dolt store for the 13v unreadable-count leg\n'
+        else
+            REAL_WC=$(command -v wc)
+            # A `wc` stub that fails ONLY the first `-l` call, then defers to
+            # the real binary for anything else -- self-limiting via its own
+            # marker file, so a bug elsewhere cannot make it fire twice.
+            cat > "$FX_LOGBREAK/bin/wc" <<EOF
+#!/bin/bash
+if [ "\$1" = "-l" ] && [ ! -e "$FX_LOGBREAK/.wc-fired" ]; then
+    : > "$FX_LOGBREAK/.wc-fired"
+    cat >/dev/null
+    exit 1
+fi
+exec "$REAL_WC" "\$@"
+EOF
+            chmod +x "$FX_LOGBREAK/bin/wc"
+
+            mk_l1_fixture "$FX_LOGBREAK" "$((EXPECTED - 1))"
+            cat > "$FX_LOGBREAK/.claude/scripts/tests/zz-logbreak.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: logbreak spec ran\n'
+cd "$(dirname "$0")/../../.." && bd create "13v seed" -t task -p 4 >/dev/null 2>&1
+exit 0
+EOF
+            chmod +x "$FX_LOGBREAK/.claude/scripts/tests/zz-logbreak.sh"
+
+            # 1. NON-VACUITY: a single targeted line-flip neutralises ONLY
+            #    the new STORE_WRITES_UNREADABLE routing, leaving the flag's
+            #    own computation (the case-guard) untouched -- this leg
+            #    exercises that routing specifically.
+            MUT_LOGBREAK="$WORK/run-tests.no-unreadable-fix.sh"
+            # shellcheck disable=SC2016  # single-quoted on purpose: matching
+            # literal source text in $L1_RUNNER, not expanding a variable.
+            sed 's/if \[ "\$STORE_WRITES" = "0" \] || \[ "\$STORE_WRITES_UNREADABLE" = "1" \]; then/if [ "$STORE_WRITES" = "0" ]; then/' \
+                "$L1_RUNNER" > "$MUT_LOGBREAK"
+            assert_eq "13v.1 MUTANT non-vacuity: the mutant differs from the shipped runner (the R4-F2 routing was excised)" \
+                "differs" "$(cmp -s "$L1_RUNNER" "$MUT_LOGBREAK" && echo identical || echo differs)"
+            assert_eq "13v.2 MUTANT: still parses (bash -n)" \
+                "0" "$(bash -n "$MUT_LOGBREAK" 2>/dev/null; echo $?)"
+
+            # 2. SPECIFIC MISBEHAVIOUR: under the mutant, an unreadable count
+            #    is reported as a fabricated "advanced by 1 commit(s)".
+            PATH="$FX_LOGBREAK/bin:$PATH" run_l1 "$FX_LOGBREAK" "$MUT_LOGBREAK"
+            assert_eq "13v.3 precondition: wc -l really was intercepted exactly once (the fixture's own marker exists)" \
+                "1" "$([ -e "$FX_LOGBREAK/.wc-fired" ] && echo 1 || echo 0)"
+            assert_eq "13v.4 MUTANT: the runner still catches the move (rc=1 -- this is not a silent pass)" \
+                "1" "$RUN_RC"
+            assert_contains "13v.5 MUTANT: but fabricates a ONE-commit count for a read that never happened" \
+                "advanced by 1 commit(s)" "$RUN_OUT"
+
+            rm -f "$FX_LOGBREAK/.wc-fired"
+
+            # 3. RESTORE CONTROL: the shipped fix, a GENUINE real count (no
+            #    interception at all -- $FX_CANARY's own contaminator, one
+            #    real commit) still says "advanced by 1 commit(s)" -- an
+            #    actual count of one is not turned into something else by
+            #    this fix.
+            run_l1 "$FX_CANARY"
+            assert_contains "13v.6 RESTORE CONTROL: a GENUINE single-commit advance is still reported as one commit" \
+                "advanced by 1 commit(s)" "$RUN_OUT"
+
+            # 4. EXECUTION (the discriminator): the SHIPPED runner, the SAME
+            #    interception, never claims a fabricated count.
+            PATH="$FX_LOGBREAK/bin:$PATH" run_l1 "$FX_LOGBREAK"
+            assert_eq "13v.7 precondition: wc -l was intercepted exactly once again on this run" \
+                "1" "$([ -e "$FX_LOGBREAK/.wc-fired" ] && echo 1 || echo 0)"
+            assert_eq "13v.8 EXECUTION: the shipped runner still catches the move (rc=1)" "1" "$RUN_RC"
+            assert_absent "13v.9 EXECUTION: ...without fabricating a commit count for a read that never happened" \
+                "advanced by 1 commit(s)" "$RUN_OUT"
+            assert_contains "13v.10 EXECUTION: ...naming the count as UNREADABLE instead" \
+                "UNREADABLE" "$RUN_OUT"
+        fi
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13w. claude-workflow-plugin-gytz R4-F4 (LOW): dolt_hash_looks_valid is locale-proof -- an explicit character class, never a bracket RANGE ---\n'
+        # -----------------------------------------------------------------
+        # A bracket RANGE ([0-9a-v]) collates per LC_COLLATE; an EXPLICIT
+        # enumeration does not. Rather than assert that in the abstract,
+        # this finds a locale ACTUALLY INSTALLED on this host under which
+        # bash 3.2's own `case` really does misclassify an uppercase letter
+        # as inside [a-v] (a plain claim about glibc/ICU collation would be
+        # exactly the un-evidenced kind of number this repo's own convention
+        # refuses), and SKIPS itself honestly if none is found rather than
+        # asserting anything on a host where the exposure cannot be shown.
+        SC_LOCALE_HIT=""
+        for _sc_loc in en_US.UTF-8 en_US.utf8 en_GB.UTF-8 en_GB.utf8 de_DE.UTF-8 de_DE.utf8; do
+            if [ "$(LC_ALL="$_sc_loc" LC_COLLATE="$_sc_loc" bash -c 'case "A" in [a-v]) echo MATCH ;; *) echo no ;; esac' 2>/dev/null)" = "MATCH" ]; then
+                SC_LOCALE_HIT="$_sc_loc"
+                break
+            fi
+        done
+        if [ -z "$SC_LOCALE_HIT" ]; then
+            printf '  SKIPPED: no locale installed on this host demonstrates the [a-v] collation exposure (tried en_US/en_GB/de_DE in both UTF-8 spellings) -- not a fix regression, just an environment gap; 13q'"'"'s C-locale coverage of dolt_hash_looks_valid is unaffected\n'
+        else
+            printf "  precondition: LC_COLLATE=%s makes bash 3.2 on this host match case 'A' in [a-v])\n" "$SC_LOCALE_HIT"
+
+            # 1. NON-VACUITY: revert JUST the explicit class back to the
+            #    pre-fix range, everywhere it appears (the 32-times-repeated
+            #    class on dolt_hash_looks_valid's one `case` line) -- same
+            #    "restore the historical shape" technique section 14 uses.
+            MUT_RANGE="$WORK/run-tests.range-not-explicit.sh"
+            sed 's/\[0123456789abcdefghijklmnopqrstuv\]/[0-9a-v]/g' "$L1_RUNNER" > "$MUT_RANGE"
+            assert_eq "13w.1 MUTANT non-vacuity: the mutant differs from the shipped runner (the explicit class was reverted to a range)" \
+                "differs" "$(cmp -s "$L1_RUNNER" "$MUT_RANGE" && echo identical || echo differs)"
+            assert_eq "13w.2 MUTANT: still parses (bash -n)" \
+                "0" "$(bash -n "$MUT_RANGE" 2>/dev/null; echo $?)"
+
+            SC_SHAPE_LIB_MUT="$WORK/dolt-hash-shape-mutant.sh"
+            awk '/^dolt_hash_looks_valid\(\) \{/,/^\}/' "$MUT_RANGE" > "$SC_SHAPE_LIB_MUT"
+            assert_eq "13w.3 MUTANT: the reverted extraction still parses on its own" \
+                "0" "$(bash -n "$SC_SHAPE_LIB_MUT" 2>/dev/null; echo $?)"
+            assert_eq "13w.4 MUTANT: the extracted function body differs from the shipped one (the revert reached the function under test, not just a comment)" \
+                "differs" "$(cmp -s "$SC_SHAPE_LIB" "$SC_SHAPE_LIB_MUT" && echo identical || echo differs)"
+
+            sc_shape_check_locale() {
+                # sc_shape_check_locale <lib> <locale> <value> -> valid/invalid
+                LC_ALL="$2" LC_COLLATE="$2" bash -c \
+                    '. "$1"; dolt_hash_looks_valid "$2" && echo valid || echo invalid' \
+                    -- "$1" "$3"
+            }
+
+            # An adversarial 32-character string: real dolt-hash SHAPE and
+            # LENGTH, but ten of its characters are uppercase A-J -- every
+            # one of which this host's own $SC_LOCALE_HIT collates as
+            # falling inside [a-v] (empirically confirmed above: bd/dolt
+            # itself never emits uppercase in a hash, so this string could
+            # only reach here as a corrupted or attacker-influenced read).
+            ADV_HASH="0123456789ABCDEFGHIJklmnopqrstuv"
+            assert_eq "13w.5 precondition: the adversarial string really is 32 characters (the real-hash SHAPE this function gates on)" \
+                "32" "${#ADV_HASH}"
+
+            # 2. SPECIFIC MISBEHAVIOUR: under the mutant AND the confirmed
+            #    locale, the adversarial uppercase-mixed string is WRONGLY
+            #    accepted as looking like a valid dolt hash.
+            assert_eq "13w.6 MUTANT: under $SC_LOCALE_HIT, the range-based mutant WRONGLY accepts the uppercase-mixed string" \
+                "valid" "$(sc_shape_check_locale "$SC_SHAPE_LIB_MUT" "$SC_LOCALE_HIT" "$ADV_HASH")"
+
+            # 3. RESTORE CONTROL: the SAME locale does not break the SHIPPED
+            #    fix's acceptance of a genuine, real-shaped all-lowercase
+            #    hash -- the fix is locale-proof in BOTH directions, not
+            #    merely stricter.
+            REAL_HASH="0123456789abcdefghijklmnopqrstuv"
+            assert_eq "13w.7 RESTORE CONTROL: under the SAME locale, the SHIPPED fix still accepts a genuine real-shaped hash" \
+                "valid" "$(sc_shape_check_locale "$SC_SHAPE_LIB" "$SC_LOCALE_HIT" "$REAL_HASH")"
+
+            # 4. EXECUTION (the discriminator): the SHIPPED fix, the SAME
+            #    locale, the SAME adversarial string the mutant accepted at
+            #    13w.6 -- correctly rejected.
+            assert_eq "13w.8 EXECUTION: under the SAME locale, the SHIPPED fix correctly REJECTS the uppercase-mixed string the mutant accepted" \
+                "invalid" "$(sc_shape_check_locale "$SC_SHAPE_LIB" "$SC_LOCALE_HIT" "$ADV_HASH")"
+        fi
+
+        # -----------------------------------------------------------------
+        printf -- '\n--- 13x. claude-workflow-plugin-gytz R4-F3 (LOW): the store-canary messages say what is known, never who caused it ---\n'
+        # -----------------------------------------------------------------
+        # R4-F3 is comment/message-only (independent review round 4): no
+        # detection logic changed, so the two OUTPUT-text corrections below
+        # are checked live against $RUN_OUT (the pairing README's stronger
+        # form -- prose proven through the executable it describes), and the
+        # two SOURCE-COMMENT corrections are checked the same UNPAIRED,
+        # source-level way 13t.8 already establishes for this file: a human
+        # rereading the comment is the control, this line only catches a
+        # regression back to the disproven wording.
+        run_l1 "$FX_CANARY"
+        R4F3_FT_BLOCK=$(printf '%s\n' "$RUN_OUT" | grep -A3 'Failed tests:')
+        assert_absent "13x.1 EXECUTION: the failed-tests entry no longer names the spec as having 'contaminated' the store" \
+            "contaminated the protected Beads store" "$R4F3_FT_BLOCK"
+        assert_contains "13x.2 EXECUTION: ...and instead says only what the two samples establish" \
+            "moved, cause not established" "$R4F3_FT_BLOCK"
+        assert_contains "13x.3 EXECUTION: ...while still stating the NET HEAD CHANGED contract (the R3-F2 wording is undisturbed)" \
+            "net HEAD change" "$RUN_OUT"
+        assert_eq "13x.4 SOURCE, UNPAIRED: 'contaminated the protected Beads store' no longer appears anywhere in the shipped source" \
+            "0" "$(grep -c 'contaminated the protected Beads store' "$L1_RUNNER")"
+        # The needle is split across two variables, and BOTH of the next two
+        # legs use the split form (even the one grepping run-tests.sh) -- so
+        # that 13x.6's self-scan of THIS file can never satisfy its own grep
+        # by finding 13x.5's literal pattern text sitting a few lines above
+        # it. Caught empirically: 13x.6 self-matched via exactly that route
+        # before this split (grep -c returned 1, from 13x.5's own quoted
+        # argument, not from any surviving overclaim). $0 is avoided for the
+        # same self-reference reason PLUGIN_DIR exists for at the top of
+        # this file -- a self-reference that survives any cwd change.
+        R4F3_NEEDLE_A="fails ANY spec whose environment"
+        R4F3_NEEDLE_B=" resolves"
+        assert_eq "13x.5 SOURCE, UNPAIRED: the shipped source no longer claims detection fires on mere environment resolution (run-tests.sh)" \
+            "0" "$(grep -c -- "${R4F3_NEEDLE_A}${R4F3_NEEDLE_B}" "$L1_RUNNER")"
+        assert_eq "13x.6 SOURCE, UNPAIRED: ...nor does this spec's own header comment (the identical overclaim lived here too)" \
+            "0" "$(grep -c -- "${R4F3_NEEDLE_A}${R4F3_NEEDLE_B}" "$PLUGIN_DIR/.claude/scripts/tests/runner-completeness.test.sh")"
+        assert_eq "13x.7 SOURCE, UNPAIRED: the shipped source no longer claims a backgrounded write 'still counts' unconditionally" \
+            "0" "$(grep -c 'a write from that backgrounded process still counts' "$L1_RUNNER")"
+
+        # --- STORE-CANARY ATTRIBUTION TEST SECTIONS 13g-13p, 13j, 13k: -----
+        # --- REMOVED (claude-workflow-plugin-gytz waiver ruling; recorded --
+        # --- as a test-vacuity census instance, claude-workflow-plugin-tumg)
+        # These sections exercised attribute_store_advance()'s self-vs-
+        # external ATTRIBUTION decision (the STORE-CANARY-ATTRIBUTION
+        # sentinel, DEPADD-PRECURSOR-SKIP, ACTOR-ISSUE-EXTRACT, and the
+        # verify_actor_marker_took_effect self-check), all deleted from
+        # run-tests.sh. Detection (13a-13f above; unaffected) needs no actor
+        # at all — the operations a real spec's own writes perform
+        # (comment/update/close/label) carry no actor on bd 1.3.0 at all,
+        # measured 14+ trials (claude-workflow-plugin-u443), so this
+        # mechanism could not fire in its own motivating case either; the
+        # ~500 lines here were green only because the fixtures below
+        # manufactured the one operation (`bd dep add`) that could reach it.
+        # Replacement: SPEC ISOLATION (claude-workflow-plugin-h5lw).
+
         # SELF-PROTECTION PROPERTY: every fixture built above lives under
         # $WORK ($FX_CANARY, $FX_READONLY, $FX_NODOLT, $FX_ROLLBACK_MUT,
-        # $FX_ROLLBACK_SHIP — all mktemp'd), never under the real .beads/. If
-        # any leg above had leaked to production, the OUTER canary — armed
-        # around THIS spec's own run inside the tier that invoked it — would
-        # fail this file by name the next time `make test` runs. The guard
-        # guards its own control.
+        # $FX_ROLLBACK_SHIP, $FX_ROLLBACK_SHIP2, $FX_VANISH_MUT,
+        # $FX_VANISH_SHIP, $FX_ROUNDTRIP — all mktemp'd), never under the
+        # real .beads/. If any leg above had
+        # leaked to production, the OUTER canary — armed around THIS spec's
+        # own run inside the tier that invoked it — would fail this file by
+        # name the next time `make test` runs. The guard guards its own
+        # control.
     fi
 fi
 
@@ -3392,6 +4054,320 @@ assert_eq "17.29 ...with no output leaked" \
 # adjacent sweep instruction. Deleted with the mechanism rather than
 # repaired, matching tree-lease.test.sh's own precedent for the identical
 # situation elsewhere in this batch.
+
+# ===========================================================================
+printf -- '\n--- 19. claude-workflow-plugin-gytz (second round): EXPECTED_SPEC_FILES replaces the hand-integer EXPECTED_SPECS entirely, so an undeclared spec fails BY NAME instead of by drift ---\n'
+# ===========================================================================
+# THE HOLE RECURRED WITHIN ONE BATCH: EXPECTED_SPECS went 69 -> 71 (the
+# gytz R1-F2 fix) and was ALREADY stale again at 71 vs a freshly-measured 72
+# before that fix's own review round finished — a sibling task's spec
+# landed in the gap. A bare integer bumped by whichever agent notices last
+# is not a guard, it is a race with a human in the loop; this section pins
+# the REPLACEMENT, not a bigger number.
+#
+# TWO THINGS THIS SECTION PROVES, both requested explicitly:
+#   1. An undeclared spec FAILS, NAMED (19a/19b) — the shipped, UNMODIFIED
+#      runner and its REAL, current manifest, not a synthetic stand-in.
+#   2. The ONE SHAPE THIS MUST NEVER TAKE — the declaration silently
+#      re-deriving itself from the same scan the runner uses to discover
+#      specs, which makes the floor compare a set against itself — is both
+#      STATICALLY forbidden (19c, a direct assertion on the shipped text)
+#      and DEMONSTRATED dangerous (19d, a mutant that takes that shape and
+#      is shown to swallow the exact defect this section exists to catch).
+#
+# WHY A REAL-NAMED FIXTURE, not another generic stub-NNN.sh set like every
+# other fixture in this file: EXPECTED_SPEC_FILES is a NAME list, not a
+# count, so a fixture built from arbitrary stub names can only ever
+# demonstrate "the counts differ" (every OTHER section already does this,
+# by construction, since none of their fixtures share names with this
+# repo's real specs) — it can never demonstrate "the diff correctly named
+# ONE genuinely new file among otherwise-matching ones", which is the
+# actual capability under test here and the actual failure mode QA and the
+# coordinator both hit. So 19a/19b build a fixture out of THIS repo's own
+# L1_REAL_SPEC_NAMES (read once, above, from the shipped runner's own
+# array) — trivial stub CONTENT, real NAMES — and run the genuinely
+# unmodified $L1_RUNNER against it. No mutant is needed for this half: the
+# code path under test is 100% shipped, unedited; only the fixture (data)
+# varies, exactly like 13b/13j/13k already vary fixture data against the
+# unmodified runner elsewhere in this file.
+mk_l1_fixture_named() {
+    # mk_l1_fixture_named <root> <name...> — like mk_l1_fixture, but named
+    # after real spec basenames instead of stub-NNN.sh, so a run against
+    # this fixture can be compared to EXPECTED_SPEC_FILES meaningfully.
+    local root="$1"; shift
+    mkdir -p "$root/.claude/scripts/tests"
+    local n
+    for n in "$@"; do
+        printf '#!/bin/bash\nprintf "  PASS: %s ran\\n"\nexit 0\n' "$n" \
+            > "$root/.claude/scripts/tests/$n"
+    done
+}
+
+FX_MANIFEST="$WORK/expected-spec-files-manifest"
+mk_l1_fixture_named "$FX_MANIFEST" "${L1_REAL_SPEC_NAMES[@]}"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19a. RESTORE CONTROL: a fixture matching the REAL manifest exactly is HELD, by the shipped, unmodified runner ---\n'
+# -----------------------------------------------------------------
+EXPECTED_SPEC_FILES_STRICT=1 run_l1 "$FX_MANIFEST"
+assert_eq "19a.1 the shipped runner over an exact-manifest fixture exits 0" "0" "$RUN_RC"
+assert_contains "19a.2 ...and the floor reads HELD" \
+    "Completeness floor: HELD" "$RUN_OUT"
+assert_absent "19a.3 ...with no breach text anywhere (the correctly-declared control the pairing requirement asks for)" \
+    "COMPLETENESS FLOOR BREACH" "$RUN_OUT"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19b. PAIRING: ONE undeclared spec added to that SAME fixture FAILS, and the failure NAMES it ---\n'
+# -----------------------------------------------------------------
+cat > "$FX_MANIFEST/.claude/scripts/tests/zz-manifest-undeclared-probe.test.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: undeclared probe ran\n'
+exit 0
+EOF
+EXPECTED_SPEC_FILES_STRICT=1 run_l1 "$FX_MANIFEST"
+assert_eq "19b.1 SPECIFIC: the SAME shipped, unmutated runner now exits non-zero (rc=1, the completeness-floor breach path) over the identical fixture plus one undeclared file" \
+    "1" "$RUN_RC"
+assert_contains "19b.2 ...the breach line names the counts (73 discovered vs 72 declared, or whatever the manifest measures at the moment this runs)" \
+    "COMPLETENESS FLOOR BREACH" "$RUN_OUT"
+assert_contains "19b.3 ...and, this is the actual point of this leg, NAMES THE SPEC ITSELF, not just a number" \
+    "zz-manifest-undeclared-probe.test.sh" "$(printf '%s\n' "$RUN_OUT" | grep -A5 'DISCOVERED but NOT in EXPECTED_SPEC_FILES')"
+assert_contains "19b.4 ...under a heading that says what to do about it" \
+    "DISCOVERED but NOT in EXPECTED_SPEC_FILES" "$RUN_OUT"
+assert_absent "19b.5 ...and does NOT claim a spec is missing (only added, nothing removed, in this fixture)" \
+    "in EXPECTED_SPEC_FILES but NOT discovered" "$RUN_OUT"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19c. STATIC GUARD: the shipped array is a pure literal — it must never compute itself from the same scan the runner uses to discover specs ---\n'
+# -----------------------------------------------------------------
+# Direct assertion on the SHIPPED text, not a mutant: this is the standing
+# regression guard for "what must not happen", checked every time this
+# spec runs, not only when someone happens to write the dangerous mutant in
+# 19d. A pure literal contains none of these; a self-deriving version
+# necessarily contains at least one.
+ARRAY_BLOCK=$(sed -n '/^EXPECTED_SPEC_FILES=($/,/^)$/p' "$L1_RUNNER")
+assert_eq "19c.1 the array block was actually captured (otherwise this leg is vacuous)" \
+    "yes" "$([ -n "$ARRAY_BLOCK" ] && echo yes || echo no)"
+# shellcheck disable=SC2016  # single-quoted on purpose: a literal grep
+# pattern for '$(', not a variable expansion.
+assert_eq "19c.2 no command substitution (\$() anywhere inside the declaration" \
+    "0" "$(printf '%s' "$ARRAY_BLOCK" | grep -c '\$(')"
+assert_eq "19c.3 no backtick command substitution either" \
+    "0" "$(printf '%s' "$ARRAY_BLOCK" | grep -c '`')"
+assert_eq "19c.4 no reference to \$TESTS_DIR (the live discovery directory) inside the declaration" \
+    "0" "$(printf '%s' "$ARRAY_BLOCK" | grep -c 'TESTS_DIR')"
+assert_eq "19c.5 no reference to \$PROJECT_DIR either" \
+    "0" "$(printf '%s' "$ARRAY_BLOCK" | grep -c 'PROJECT_DIR')"
+assert_eq "19c.6 no call to find(1) inside the declaration" \
+    "0" "$(printf '%s' "$ARRAY_BLOCK" | grep -c 'find ')"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19d. META-TEST: a mutant that DOES self-derive the declaration from the discovery scan is shown to swallow an undeclared spec silently ---\n'
+# -----------------------------------------------------------------
+# THE DANGER 19c FORBIDS, SHOWN RATHER THAN ONLY STATED. If
+# EXPECTED_SPEC_FILES were ever computed from the same $TESTS_DIR scan the
+# TESTS array already uses, the floor would compare a set against itself —
+# tautologically equal for ANY set, including one with an undeclared spec
+# freshly added, which is exactly the vacuity this whole mechanism exists
+# to eliminate.
+BEGIN_LN=$(grep -n 'EXPECTED-SPEC-FILES-BEGIN' "$L1_RUNNER" | head -1 | cut -d: -f1)
+END_LN=$(grep -n 'EXPECTED-SPEC-FILES-END' "$L1_RUNNER" | head -1 | cut -d: -f1)
+assert_eq "19d.pre both sentinel line numbers were found (otherwise the splice below is vacuous)" \
+    "yes" "$([ -n "$BEGIN_LN" ] && [ -n "$END_LN" ] && echo yes || echo no)"
+MUT_SELFDERIVE="$WORK/run-tests.selfderive-expected.sh"
+{
+    sed -n "1,${BEGIN_LN}p" "$L1_RUNNER"
+    cat <<'INJECT'
+EXPECTED_SPEC_FILES=()
+while IFS= read -r __self_derived_f; do
+    EXPECTED_SPEC_FILES+=("$__self_derived_f")
+done < <(find "$TESTS_DIR" -maxdepth 1 -type f -name '*.sh' ! -name 'run-tests.sh' -exec basename {} \; | sort)
+INJECT
+    sed -n "${END_LN},\$p" "$L1_RUNNER"
+} > "$MUT_SELFDERIVE"
+assert_eq "19d.1 MUTANT non-vacuity: the mutant differs from the shipped runner (the declaration was replaced)" \
+    "differs" "$(cmp -s "$L1_RUNNER" "$MUT_SELFDERIVE" && echo identical || echo differs)"
+assert_eq "19d.2 MUTANT: still parses (bash -n)" \
+    "0" "$(bash -n "$MUT_SELFDERIVE" 2>/dev/null; echo $?)"
+
+FX_VACUOUS="$WORK/expected-spec-files-vacuous"
+mk_l1_fixture "$FX_VACUOUS" 3
+run_l1 "$FX_VACUOUS" "$MUT_SELFDERIVE"
+assert_eq "19d.3 precondition: the self-deriving mutant still exits 0 over an HONESTLY-matching 3-spec fixture (it has to agree with itself by construction — establishing this ISN'T already broken some other way before trusting 19d.4)" \
+    "0" "$RUN_RC"
+# Now add a fourth, undeclared-by-a-human spec and re-run the SAME mutant.
+cat > "$FX_VACUOUS/.claude/scripts/tests/zz-vacuous-undeclared.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: vacuous-fixture undeclared spec ran\n'
+exit 0
+EOF
+run_l1 "$FX_VACUOUS" "$MUT_SELFDERIVE"
+assert_eq "19d.4 SPECIFIC MISBEHAVIOUR: the self-deriving mutant STILL exits 0 with a 4th, genuinely undeclared spec added — the floor cannot tell the difference, because its own declaration re-scanned the same directory and grew to match" \
+    "0" "$RUN_RC"
+assert_contains "19d.5 ...and reports the floor HELD, not breached — the exact silent vacuity this section exists to prevent" \
+    "Completeness floor: HELD" "$RUN_OUT"
+assert_absent "19d.6 ...with NO breach text anywhere, over a fixture that a correctly-declared (real, static) manifest would have caught" \
+    "COMPLETENESS FLOOR BREACH" "$RUN_OUT"
+
+# EXECUTION (the discriminator): the SAME 4-spec fixture, the SHIPPED
+# (unmutated, statically-declared) runner — it cannot agree with a
+# directory it never scans as its declaration, so it catches what the
+# mutant above missed. (This uses stub-shaped names, not the real
+# manifest, so it is expected to ALSO report the pre-existing count
+# mismatch against the real 72; the point of this leg is narrower than
+# 19b's: proving the self-derivation shape specifically is what went
+# missing in the mutant, not re-proving 19b's naming behaviour again.)
+run_l1 "$FX_VACUOUS"
+assert_eq "19d.7 EXECUTION: the shipped, statically-declared runner exits non-zero over the SAME fixture the self-deriving mutant passed at 19d.4" \
+    "1" "$RUN_RC"
+assert_contains "19d.8 ...via the ordinary completeness floor, not a crash or an unrelated error" \
+    "COMPLETENESS FLOOR BREACH" "$RUN_OUT"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19e. claude-workflow-plugin-gytz R2-F2: EQUAL CARDINALITY, DIFFERENT SET (the rename shape) is caught, not silently HELD ---\n'
+# -----------------------------------------------------------------
+# QA's own counterexample: declare {001,002,003}, discover {001,002,zz}. A
+# cardinality-first gate (the ORIGINAL shape of this floor, before this
+# leg) never even COMPUTES the set diff in this case, because the branch
+# that computes it only ran after $TOTAL disagreed with $EXPECTED_SPECS —
+# and here they agree (3 == 3). A file RENAME is exactly this: one name
+# leaves, a different one arrives, the count never moves. Built with a
+# SMALL, 3-name mutant declaration (not the real 72-entry manifest) so the
+# fixture stays lightweight and the ONLY variable under test is the
+# same-cardinality-different-set shape itself.
+MUT_3NAME="$WORK/run-tests.3name-declared.sh"
+BEGIN_LN_3=$(grep -n 'EXPECTED-SPEC-FILES-BEGIN' "$L1_RUNNER" | head -1 | cut -d: -f1)
+END_LN_3=$(grep -n 'EXPECTED-SPEC-FILES-END' "$L1_RUNNER" | head -1 | cut -d: -f1)
+assert_eq "19e.pre both sentinel line numbers were found (otherwise the splice below is vacuous)" \
+    "yes" "$([ -n "$BEGIN_LN_3" ] && [ -n "$END_LN_3" ] && echo yes || echo no)"
+{
+    sed -n "1,${BEGIN_LN_3}p" "$L1_RUNNER"
+    cat <<'INJECT3'
+EXPECTED_SPEC_FILES=(
+    rename-alpha.test.sh
+    rename-beta.test.sh
+    rename-gamma.test.sh
+)
+INJECT3
+    sed -n "${END_LN_3},\$p" "$L1_RUNNER"
+} > "$MUT_3NAME"
+assert_eq "19e.1 fixture-sizing mutant non-vacuity: differs from the shipped runner" \
+    "differs" "$(cmp -s "$L1_RUNNER" "$MUT_3NAME" && echo identical || echo differs)"
+assert_eq "19e.2 fixture-sizing mutant: still parses (bash -n)" \
+    "0" "$(bash -n "$MUT_3NAME" 2>/dev/null; echo $?)"
+
+FX_RENAME="$WORK/expected-spec-files-rename"
+mkdir -p "$FX_RENAME/.claude/scripts/tests"
+for n in rename-alpha.test.sh rename-beta.test.sh; do
+    printf '#!/bin/bash\nprintf "  PASS: %s ran\\n"\nexit 0\n' "$n" > "$FX_RENAME/.claude/scripts/tests/$n"
+done
+# rename-gamma.test.sh never lands; rename-delta.test.sh arrives instead —
+# EQUAL cardinality (3 declared, 3 discovered), DIFFERENT set.
+cat > "$FX_RENAME/.claude/scripts/tests/rename-delta.test.sh" <<'EOF'
+#!/bin/bash
+printf '  PASS: renamed-in spec ran\n'
+exit 0
+EOF
+EXPECTED_SPEC_FILES_STRICT=1 run_l1 "$FX_RENAME" "$MUT_3NAME"
+assert_eq "19e.3 SPECIFIC: the count-sized-correctly-but-renamed fixture still exits non-zero (the shape a cardinality-only floor would have missed)" \
+    "1" "$RUN_RC"
+assert_contains "19e.4 ...the breach line explicitly says counts MATCH but sets do NOT (not a fabricated count disagreement)" \
+    "COUNTS MATCH but the SETS DO NOT" "$RUN_OUT"
+assert_contains "19e.5 ...names the file that ARRIVED" \
+    "rename-delta.test.sh" "$(printf '%s\n' "$RUN_OUT" | grep -A3 'DISCOVERED but NOT in EXPECTED_SPEC_FILES')"
+assert_contains "19e.6 ...and names the file that LEFT, in the same verdict" \
+    "rename-gamma.test.sh" "$(printf '%s\n' "$RUN_OUT" | grep -A3 'in EXPECTED_SPEC_FILES but NOT discovered')"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19e (continued). claude-workflow-plugin-gytz: the EXPECTED_SPEC_FILES_STRICT escape hatch discovered fixing R2-F2 is itself proven, not merely asserted to be harmless ---\n'
+# -----------------------------------------------------------------
+# R2-F2's fix (making the identity comparison above unconditional) broke
+# ~30 of this file's OWN pre-existing sections, which build fixtures via
+# mk_l1_fixture using generic, count-sized stub-NNN.sh names to test
+# UNRELATED runner mechanics. run_l1 now defaults EXPECTED_SPEC_FILES_STRICT
+# to 0 (legacy, count-only) for exactly that reason — see run_l1's own
+# header. The three legs below are the pairing requirement for THAT fix,
+# reusing 19e's own fixture and mutant so no new setup is needed:
+#   - RESTORE CONTROL: the DEFAULT (nothing in the environment at all,
+#     which is the only state a real invocation can ever be in) still
+#     catches the SAME rename 19e.3-19e.6 just proved the strict path
+#     catches — proving the escape hatch cannot be reached by accident.
+#   - NON-VACUITY + SPECIFIC MISBEHAVIOUR: EXPECTED_SPEC_FILES_STRICT=0
+#     (exactly what run_l1 now defaults every OTHER section in this file
+#     to) silently re-opens the identical hole over the identical fixture
+#     — proving the toggle is real and load-bearing, not a name nothing
+#     reads.
+RUN_OUT=$(env -u EXPECTED_SPEC_FILES_STRICT CLAUDE_PROJECT_DIR="$FX_RENAME" STRICT_SECTIONS=0 bash "$MUT_3NAME" 2>&1)
+RUN_RC=$?
+assert_eq "19e.7 RESTORE CONTROL: with EXPECTED_SPEC_FILES_STRICT completely UNSET (what every real invocation gets — run_l1 itself always sets SOME value, so this bypasses run_l1 to prove the true default), the rename is still caught" \
+    "1" "$RUN_RC"
+assert_contains "19e.8 ...via the same strict/default path, same message as 19e.4" \
+    "COUNTS MATCH but the SETS DO NOT" "$RUN_OUT"
+
+EXPECTED_SPEC_FILES_STRICT=0 run_l1 "$FX_RENAME" "$MUT_3NAME"
+assert_eq "19e.9 NON-VACUITY/MISBEHAVIOUR: EXPECTED_SPEC_FILES_STRICT=0 (legacy count-only — run_l1's own default for every OTHER section in this file) reopens the exact R2-F2 hole on the SAME fixture and mutant: same cardinality, one file renamed, now HELD not BREACHED" \
+    "0" "$RUN_RC"
+assert_contains "19e.10 ...the floor claims HELD (the pre-R2-F2 deception QA's counterexample described)" \
+    "Completeness floor: HELD" "$RUN_OUT"
+assert_absent "19e.11 ...with no breach text anywhere — the identical fixture 19e.3 caught, silently passed" \
+    "COMPLETENESS FLOOR BREACH" "$RUN_OUT"
+
+# ===========================================================================
+printf -- '\n--- 19f. claude-workflow-plugin-gytz R3-F2: LEGACY MODE names when it let a set mismatch through, never when it did not ---\n'
+# ===========================================================================
+# ANNOUNCE WHEN THE WEAKER MODE LETS SOMETHING THROUGH -- the same
+# convention STRICT_SECTIONS already follows for a skipped section (named
+# in the completeness line regardless of STRICT_SECTIONS_ON; that flag only
+# decides whether it fails the run). 19f.b/19f.c reuse FX_RENAME/MUT_3NAME
+# (19e's rename-shaped mismatch, built once at 4057-4064 and never mutated
+# afterward — safe to reuse). 19f.a needs its OWN fixture rather than
+# reusing FX_MANIFEST: 19b permanently added
+# zz-manifest-undeclared-probe.test.sh to it, so by this point in the file
+# FX_MANIFEST is 73 files against 72 declared and would breach under EITHER
+# mode (a genuine count mismatch, not the identity-only gap this leg needs
+# to isolate) — reusing it here would make 19f.a wrong, not merely
+# redundant.
+FX_LEGACY_HELD="$WORK/r3f2-legacy-exact-match"
+mk_l1_fixture_named "$FX_LEGACY_HELD" "${L1_REAL_SPEC_NAMES[@]}"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19f.a RESTORE CONTROL: legacy mode over a fixture that GENUINELY matches carries no caveat ---\n'
+# -----------------------------------------------------------------
+EXPECTED_SPEC_FILES_STRICT=0 run_l1 "$FX_LEGACY_HELD"
+assert_eq "19f.a1 legacy mode over an exact-match fixture still exits 0" "0" "$RUN_RC"
+assert_contains "19f.a2 ...and the floor reads HELD" "Completeness floor: HELD" "$RUN_OUT"
+assert_absent "19f.a3 ...with NO legacy-mode caveat (nothing was let through — byte-identical to strict on a clean run, the same property STRICT_SECTIONS has)" \
+    "LEGACY MODE" "$RUN_OUT"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19f.b NON-VACUITY + SPECIFIC MISBEHAVIOUR: legacy mode over the SAME rename fixture 19e proved strict mode catches now carries the caveat, named ---\n'
+# -----------------------------------------------------------------
+EXPECTED_SPEC_FILES_STRICT=0 run_l1 "$FX_RENAME" "$MUT_3NAME"
+assert_eq "19f.b1 legacy mode over the rename-shaped fixture exits 0 (HELD, not breached — this is the R2-F2 shape legacy mode is DESIGNED to tolerate)" \
+    "0" "$RUN_RC"
+assert_contains "19f.b2 ...the floor still reads HELD" "Completeness floor: HELD" "$RUN_OUT"
+assert_contains "19f.b3 ...but now NAMES that legacy mode is why, not silent" \
+    "LEGACY MODE (EXPECTED_SPEC_FILES_STRICT=0)" "$RUN_OUT"
+assert_contains "19f.b4 ...specifically saying identity was not checked" \
+    "spec-set IDENTITY was not" "$RUN_OUT"
+assert_contains "19f.b5 ...and that it does not actually match" \
+    "does not actually match EXPECTED_SPEC_FILES" "$RUN_OUT"
+
+# -----------------------------------------------------------------
+printf -- '\n--- 19f.c EXECUTION (the discriminator): strict mode over the SAME fixture never reaches HELD at all -- the caveat cannot fire where the breach already did ---\n'
+# -----------------------------------------------------------------
+EXPECTED_SPEC_FILES_STRICT=1 run_l1 "$FX_RENAME" "$MUT_3NAME"
+assert_eq "19f.c1 EXECUTION: strict mode over the identical fixture breaches instead (rc=1, matching 19e.3)" \
+    "1" "$RUN_RC"
+assert_absent "19f.c2 ...never HELD" "Completeness floor: HELD" "$RUN_OUT"
+assert_absent "19f.c3 ...and therefore never carries the legacy-mode caveat either — HELD and a mismatch cannot coexist under strict mode by construction" \
+    "LEGACY MODE" "$RUN_OUT"
+
+# --- SECTION 20 (arm-time actor-marker self-check tests): REMOVED ----------
+# --- (claude-workflow-plugin-gytz waiver ruling; see the same tombstone ----
+# --- above section 13's former 13g-13p/13j/13k for the full account). ------
+# verify_actor_marker_took_effect() and the ARMED/ATTRIBUTION-DISABLED
+# three-state wording it fed no longer exist in run-tests.sh — the canary
+# is now ARMED or DISARMED, full stop. Nothing here to test.
 
 # ===========================================================================
 printf '\nTotal: %d assertion(s)\n' "$((PASS + FAIL))"

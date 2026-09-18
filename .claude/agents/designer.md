@@ -59,7 +59,29 @@ So read, rather than assume:
 - `mcp__bd` — `bd_show_task` for the task and its parent epic, `bd_doc_read` for
   any `spec` or `context` doc the spawning seat attached, `bd_list_comments` for
   the grilling record and prior design records.
-- `LESSONS.md`, `CLAUDE.md`, and the plan under `docs/plans/` if one is named.
+- `CLAUDE.md`, and the plan under `docs/plans/` if one is named.
+- `LESSONS.md` — scope this one. It runs past 200 entries and reading it whole
+  would crowd out the artifact you are about to write. You have no `Bash`, so
+  you cannot run `lessons.sh list` the way the orchestrator does — `Grep` the
+  file directly instead, which the entry grammar supports without it: every
+  lesson carries a `tags:` HTML comment drawn from the closed vocabulary
+  `lessons.sh` enforces at write time (`gate testing packaging agents
+  evidence process`). Grep for a `tags:` comment carrying the tag closest to
+  the work in front of you — e.g. `agents` for a design touching agent
+  prompts or spawning, `gate` for anything touching the QA gate or its
+  machinery. The six tags share no substrings, so matching the bare word is
+  unambiguous against this vocabulary; that stops being safe only if the
+  vocabulary itself grows a tag that is a substring of another — re-derive
+  the pattern then, don't assume it still holds. Also `Grep` the unfiltered
+  entry marker in count mode so you know roughly what fraction of the ledger
+  a tagged slice actually covers; do not reason about a scoped read as if it
+  were the whole ledger. When the work is broad, spans several tags, or you
+  cannot tell which slice applies, read the file whole rather than guess a
+  narrower filter — scoping is a convenience for the common case, not a cap
+  on what you may see, the same convention the orchestrator's own scoped read
+  states for itself. Never rely on a lesson's position in the file: `grader.md`
+  and `orchestrator.md` cite specific lessons by ordinal, so treat the file as
+  unordered content for your own purposes.
 - `mcp__code-graph` — `code_search` and `code_context` to find the symbols a unit
   would touch, then **`impact_of` per symbol or file** to score the blast radius.
   What that pass produces belongs in `Chosen approach` and in each unit's `files`

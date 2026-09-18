@@ -125,6 +125,10 @@ bd update $TASK_ID --notes "IN PROGRESS: Starting backend implementation"
 
 `post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad or under `.claude/.qa-tracking/`; both are already denylisted. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
 
+### 4. You do not receive background-job notifications
+
+Those events are delivered only to the root/orchestrator session's own turn, never to a subagent — your turn already ended (you returned control via the `Task` tool) by the time one would arrive, so ending it to wait for one is waiting on a signal that cannot structurally reach you, and it reads to the orchestrator as a stall rather than as progress. If you started a command with `run_in_background`, poll for it yourself inside the SAME turn with a BOUNDED loop — a wall-clock deadline plus a liveness check on the process, printing which one fired — never a bare `until ...; do sleep N; done` (LESSONS.md records that exact shape running for days against a producer that had already died) — and read its result file directly. (claude-workflow-plugin-90av)
+
 ## Self-check questions (always ask)
 
 1. **Bottlenecks**: Any bottlenecks with the current setup?

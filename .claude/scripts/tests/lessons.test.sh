@@ -1,6 +1,7 @@
 #!/bin/bash
 # lessons.test.sh — spec 0.7 (claude-workflow-plugin-e0d.7), extended for tag
-# scoping by claude-workflow-plugin-zerv (v5 phase P item P8).
+# scoping by claude-workflow-plugin-zerv (v5 phase P item P8), extended again
+# for the exclusion ACCOUNTING added by claude-workflow-plugin-9hv4.
 #
 # Asserts the behaviour of .claude/scripts/lessons.sh:
 #   - happy path: add a fresh lesson -> appended, with all three comments.
@@ -17,6 +18,16 @@
 #   - tag charset + closed vocabulary enforcement.
 #   - list: verbatim with no flags, filtered with --tag/--untagged/--since/
 #     --limit, and the flag-validation errors.
+#   - (9hv4) list's ACCOUNTING: a filtered call reports total/matched/
+#     returned/excluded_by_filter/excluded_by_limit on stderr, cross-checked
+#     against independently-computed ground truth (not lessons.sh's own
+#     arithmetic re-run) — a scoped read returns fewer than the unscoped
+#     control, and the gap is exactly what the accounting names as excluded.
+#   - (9hv4) DISTINGUISHABILITY: a legitimate zero-match (valid tag, an
+#     impossible --since bound) reports ok:true/matched:0; an out-of-
+#     vocabulary tag on the READ path and a missing ledger file both report
+#     ok:false with DIFFERENT, non-interchangeable error codes. All three are
+#     tellable apart without relying on the exit code alone.
 #   - LEDGER INVARIANTS against the committed LESSONS.md: zero untagged
 #     entries (backfill completeness), every prose string exactly once, and
 #     ordinal stability for the citations in grader.md / rubrics/default.md.
@@ -39,6 +50,17 @@
 #   M5 a fixture with a duplicated entry -> the prose-uniqueness invariant
 #      must see the duplicate.
 #   M6 a stubbed TAG_VOCABULARY -> the vocabulary-parity assertion must fail.
+#   M7 (9hv4) stub tags_contain to a no-op -> --tag returns EVERYTHING, and
+#      the accounting line claims zero exclusion for a filter that (on the
+#      shipped script, proven by a restore control in the same block)
+#      excludes most of the ledger. This is literally the task's own
+#      required META: "stub the scoping so it always returns everything, and
+#      assert a test notices."
+#   M8 (9hv4) stub the excluded_by_limit computation to always read 0 ->
+#      --limit still trims stdout for real, but the accounting now LIES
+#      about it; a consumer cross-checking matched-minus-returned against
+#      the claimed figure catches the lie, and a restore control proves the
+#      shipped script reports the true figure for the identical call.
 #
 # Conventions mirror qa-gate-choose.test.sh: a tempdir fixture with a
 # fresh LESSONS.md, helper functions for asserts, trailing summary.
@@ -510,6 +532,124 @@ rm -rf "$MISSING_DIR"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 9 (claude-workflow-plugin-9hv4): list's exclusion accounting ==="
+
+# 9.6 — a filtered list reports an accounting line on stderr: total ledger
+# size, how many matched, how many were returned, and how many were
+# excluded by the filter vs by --limit. Ground truth for "matched" is
+# computed the SAME way section 9.2 already does (grep over the tags
+# comment) — independently of lessons.sh's own arithmetic — so this cannot
+# pass merely because both sides share a bug.
+reseed
+TOTAL_TRUTH=$(grep -c '^- ' "$FIXTURE/LESSONS.md")
+GATE_TRUTH=$(grep '^- ' "$FIXTURE/LESSONS.md" | grep -c '<!-- tags: [^>]*gate')
+CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list --tag gate \
+    >"$FIXTURE/list-stdout.txt" 2>"$FIXTURE/list-stderr.json"
+STATS=$(cat "$FIXTURE/list-stderr.json")
+RETURNED_TRUTH=$(grep -c '^- ' "$FIXTURE/list-stdout.txt" || true)
+
+assert_contains "9.6: accounting line reports ok:true" '"ok":true' "$STATS"
+assert_contains "9.6: accounting reports the true total ledger size" \
+    "\"total_ledger_entries\":${TOTAL_TRUTH}" "$STATS"
+assert_contains "9.6: accounting's matched count agrees with an independent grep" \
+    "\"matched\":${GATE_TRUTH}" "$STATS"
+assert_contains "9.6: accounting names the tag filter actually applied" \
+    "\"tags\":[\"gate\"]" "$STATS"
+assert_eq "9.6: accounting's returned count equals the ACTUAL stdout line count" \
+    "$RETURNED_TRUTH" "$(printf '%s' "$STATS" | sed -n 's/.*"returned":\([0-9]*\).*/\1/p')"
+
+# 9.7 — CONTROL: a scoped read returns fewer entries than the unscoped read,
+# and excluded_by_filter accounts for the entire gap. Without this control,
+# 9.6 alone could pass against a script that always returned the whole
+# ledger and merely mislabeled the count.
+UNSCOPED_TRUTH=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list | grep -c '^- ')
+if [ "$GATE_TRUTH" -lt "$UNSCOPED_TRUTH" ]; then
+    PASS=$((PASS + 1))
+    printf '  PASS: %s\n' "9.7: scoped read (--tag gate) returns fewer than the unscoped CONTROL"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("9.7: scoped read returns fewer than the unscoped control")
+    printf '  FAIL: 9.7 - gate=%s unscoped=%s\n' "$GATE_TRUTH" "$UNSCOPED_TRUTH"
+fi
+EXCLUDED_TRUTH=$((TOTAL_TRUTH - GATE_TRUTH))
+assert_contains "9.7: excluded_by_filter accounts for the WHOLE gap to the total" \
+    "\"excluded_by_filter\":${EXCLUDED_TRUTH}" "$STATS"
+
+# 9.8 — --limit's cap is named too: excluded_by_limit is the gap between
+# what matched the filter and what the cap actually let through.
+if [ "$GATE_TRUTH" -gt 1 ]; then
+    LIMIT_STATS=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list --tag gate --limit 1 2>&1 >/dev/null)
+    assert_contains "9.8: --limit accounting reports exactly what the cap cut" \
+        "\"excluded_by_limit\":$((GATE_TRUTH - 1))" "$LIMIT_STATS"
+    assert_contains "9.8: --limit accounting still reports the filter's own exclusion separately" \
+        "\"excluded_by_filter\":${EXCLUDED_TRUTH}" "$LIMIT_STATS"
+else
+    printf '  note: 9.8 SKIPPED (fewer than 2 gate-tagged entries in this fixture; cap cannot be exercised)\n'
+fi
+
+# 9.9 — THE ONE THAT MATTERS MOST (9hv4's own framing): a read that FAILS
+# must be distinguishable from one that correctly matched nothing. A valid
+# tag combined with an impossible --since bound legitimately matches zero
+# entries; an unknown tag and a missing ledger are FAILURES. All three must
+# be tellable apart by parsing stderr (ok / error code), not by trusting a
+# bare exit code or an empty stdout stream alone.
+reseed
+
+# (a) Legitimate zero-match.
+RC=0
+ZERO_STATS=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list --tag gate --since 2099-01-01 2>&1 >/dev/null) || RC=$?
+assert_eq "9.9a: legitimate zero-match exits 0" "0" "$RC"
+assert_contains "9.9a: legitimate zero-match still reports ok:true" '"ok":true' "$ZERO_STATS"
+assert_contains "9.9a: legitimate zero-match reports matched:0 EXPLICITLY" \
+    '"matched":0' "$ZERO_STATS"
+
+# (b) Failure: an out-of-vocabulary tag on the READ path (not just `add`).
+RC=0
+BADTAG_STATS=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list --tag security 2>&1 >/dev/null) || RC=$?
+assert_eq "9.9b: unknown tag on list exits 1 (never silently treated as 'matches nothing')" "1" "$RC"
+assert_contains "9.9b: unknown tag reports ok:false" '"ok":false' "$BADTAG_STATS"
+assert_contains "9.9b: unknown tag names the closed-vocabulary failure specifically" \
+    "unknown-tag" "$BADTAG_STATS"
+
+# (c) Failure: missing ledger file, on a FILTERED call.
+MISSING_DIR2=$(mktemp -d -t lessons-missing2.XXXXXX)
+RC=0
+MISSING_STATS=$(CLAUDE_PROJECT_DIR="$MISSING_DIR2" bash "$LESSONS_SH" list --tag gate 2>&1 >/dev/null) || RC=$?
+assert_eq "9.9c: missing ledger on a filtered list exits 1" "1" "$RC"
+assert_contains "9.9c: missing ledger reports ok:false" '"ok":false' "$MISSING_STATS"
+assert_contains "9.9c: missing ledger names its OWN failure, not the tag one" \
+    "ledger-not-found" "$MISSING_STATS"
+rm -rf "$MISSING_DIR2"
+
+# (d) The two failure modes are pairwise distinguishable from EACH OTHER,
+# not just from the zero-match success — a reader parsing only "ok:false"
+# could not tell a bad tag from a missing file, which would still leave an
+# operator guessing what to fix.
+if printf '%s' "$BADTAG_STATS" | grep -qF '"ok":false' && \
+   printf '%s' "$MISSING_STATS" | grep -qF '"ok":false' && \
+   ! printf '%s' "$BADTAG_STATS" | grep -qF 'ledger-not-found' && \
+   ! printf '%s' "$MISSING_STATS" | grep -qF 'unknown-tag'; then
+    PASS=$((PASS + 1))
+    printf '  PASS: %s\n' "9.9d: the two failure modes carry distinct, non-interchangeable error codes"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("9.9d: the two failure modes carry distinct error codes")
+    printf '  FAIL: 9.9d - badtag=%s missing=%s\n' "$BADTAG_STATS" "$MISSING_STATS"
+fi
+
+# (e) The missing-ledger failure is structured JSON on the UNFILTERED path
+# too (list with no flags) — the existence check runs before the
+# filtered/unfiltered branch, so both paths must fail the same clear way.
+MISSING_DIR3=$(mktemp -d -t lessons-missing3.XXXXXX)
+RC=0
+MISSING_UNFILTERED=$(CLAUDE_PROJECT_DIR="$MISSING_DIR3" bash "$LESSONS_SH" list 2>&1 >/dev/null) || RC=$?
+assert_eq "9.9e: missing ledger on the unfiltered list also exits 1" "1" "$RC"
+assert_contains "9.9e: missing ledger on the unfiltered list reports ok:false too" \
+    '"ok":false' "$MISSING_UNFILTERED"
+rm -rf "$MISSING_DIR3"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Section 10: committed-ledger invariants ==="
 
 # 10.1 BACKFILL COMPLETENESS. Every entry in the shipped ledger carries tags.
@@ -580,23 +720,49 @@ echo "=== Section 11: META-TESTS ==="
 # Helper: build a stub copy of lessons.sh with one TEXT-anchored mutation, and
 # refuse to proceed unless the mutation actually landed. A stub that silently
 # failed to patch produces the same observable as a guard that does nothing.
+#
+# (claude-workflow-plugin-9hv4) EVERY call site below invokes this as
+# `VAR=$(make_stub ...)` — a command substitution, which runs the function in
+# a SUBSHELL. Any write this function made directly to $FAIL/$FAILED_TESTS on
+# the failure path was therefore CONFINED TO THAT SUBSHELL and discarded the
+# instant the substitution completed: the exact "bash functions invoked via
+# $(...) run in a subshell; any variable they set is lost to the parent"
+# lesson this ledger already records (LESSONS.md, the model-select.sh
+# manual-adopt entry). Worse, the diagnostic printf had no `>&2`, so on
+# failure it did not even reach the terminal — it was captured INTO the
+# caller's own $VAR (e.g. $M8_SH) as if it were a stub path, and the `if`
+# only ever tested the exit code, so the message went nowhere at all. Net
+# effect: a stale sed anchor made the whole META block vanish from BOTH the
+# Pass and the Fail count, with zero visible trace — discovered only because
+# M8's own anchor does not exist on lessons.sh's pre-9hv4 shape, which is
+# exactly the "run the new check against the unfixed state" step this task's
+# devops checklist requires. Fixed by moving ALL counting to the call site
+# (which runs in the PARENT shell, so it sticks) and sending the diagnostic
+# to stderr (which is never the captured return value).
 make_stub() {
     local name="$1" sed_expr="$2"
     local stub="$FIXTURE/lessons-$name.sh"
     sed "$sed_expr" "$LESSONS_SH" > "$stub"
     if cmp -s "$stub" "$LESSONS_SH"; then
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("META setup: stub '$name' did not modify lessons.sh")
-        printf '  FAIL: META setup: stub %s did not modify lessons.sh\n' "$name"
+        printf 'META setup: stub %s did not modify lessons.sh\n' "$name" >&2
         return 1
     fi
     if ! bash -n "$stub" 2>/dev/null; then
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("META setup: stub '$name' is not valid bash")
-        printf '  FAIL: META setup: stub %s is not valid bash\n' "$name"
+        printf 'META setup: stub %s is not valid bash\n' "$name" >&2
         return 1
     fi
     printf '%s' "$stub"
+}
+
+# Call-site helper for the failure branch every `if VAR=$(make_stub ...)`
+# needs: runs in the PARENT shell (never inside make_stub's own subshell), so
+# the count actually lands. $1 is the stub name, used verbatim in the
+# recorded failure text so a stale anchor names itself in the summary.
+make_stub_setup_failed() {
+    local name="$1"
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("META setup: stub '$name' failed (see stderr for which check)")
+    printf '  FAIL: META setup: stub %s failed (see stderr for which check)\n' "$name"
 }
 
 # --- M1: stubbed normalizer -> dedup must fail -----------------------------
@@ -680,6 +846,8 @@ if M2_SH=$(make_stub "notagcheck" 's/^validate_tag() {$/validate_tag() { return 
         PASS=$((PASS + 1))
         printf '  PASS: %s\n' "M2: the injected line violates the three-comment grammar"
     fi
+else
+    make_stub_setup_failed "notagcheck"
 fi
 
 # --- M3: stubbed comment-grammar guard -> prose `-->` corrupts read-back ---
@@ -711,6 +879,8 @@ if M3_SH=$(make_stub "nogrammar" "s/\\*'<!--'\\*|\\*'-->'\\*)/'@@nevermatches@@'
         FAILED_TESTS+=("M3: the entry's prose reads back TRUNCATED at the injected -->")
         printf '  FAIL: M3 — expected prose "Prose with -->", got "%s"\n' "$M3_PROSE"
     fi
+else
+    make_stub_setup_failed "nogrammar"
 fi
 
 # --- M4: a fixture with one untagged entry must be FLAGGED -----------------
@@ -759,6 +929,99 @@ if M6_SH=$(make_stub "vocabdrift" 's/^TAG_VOCABULARY="\(.*\)"$/TAG_VOCABULARY="\
         FAILED_TESTS+=("M6: a drifted TAG_VOCABULARY fails the parity assertion")
         printf '  FAIL: M6 — drifted vocab still compared equal (%s)\n' "$M6_VOCAB"
     fi
+else
+    make_stub_setup_failed "vocabdrift"
+fi
+
+# --- M7 (claude-workflow-plugin-9hv4): stub the scoping to a no-op --------
+# The task's own required META, verbatim: "stub the scoping so it always
+# returns everything, and assert a test notices." Stubs tags_contain() to
+# unconditionally match, so `--tag <anything>` returns the WHOLE ledger.
+# Proves 9.6/9.7's "scoped is strictly smaller than unscoped, and the
+# accounting names the gap" assertions are load-bearing: if tag scoping
+# silently degraded into a no-op, THIS is what would catch it, because a
+# suite that only ever compared "scoped vs zero" (never "scoped vs
+# unscoped") would stay green while every consumer silently received the
+# entire ledger on every "scoped" call.
+if M7_SH=$(make_stub "notagscope" 's/^tags_contain() {$/tags_contain() { return 0 ;/'); then
+    reseed
+    M7_UNSCOPED=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$M7_SH" list | grep -c '^- ')
+    M7_SCOPED=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$M7_SH" list --tag packaging | grep -c '^- ')
+    # With tags_contain always matching, --tag packaging can no longer
+    # exclude anything: scoped must equal unscoped exactly.
+    assert_eq "M7: with tags_contain stubbed to always-match, --tag returns EVERYTHING" \
+        "$M7_UNSCOPED" "$M7_SCOPED"
+    # The accounting line lies in exactly the way that matters for 9hv4's
+    # own stated failure mode: it claims nothing was excluded by a filter
+    # that, on the real script, excludes most of the ledger.
+    M7_STATS=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$M7_SH" list --tag packaging 2>&1 >/dev/null)
+    assert_contains "M7: the stubbed run's own accounting falsely claims NOTHING was excluded" \
+        '"excluded_by_filter":0' "$M7_STATS"
+    # Restore control: the SAME call against the SHIPPED script excludes
+    # most of the ledger and says so — proving the assertions above actually
+    # distinguish the stub from reality, not that they always read this way.
+    reseed
+    SHIPPED_SCOPED=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list --tag packaging | grep -c '^- ')
+    SHIPPED_UNSCOPED=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list | grep -c '^- ')
+    if [ "$SHIPPED_SCOPED" -lt "$SHIPPED_UNSCOPED" ]; then
+        PASS=$((PASS + 1))
+        printf '  PASS: %s\n' "M7 restore control: the shipped script's --tag packaging DOES exclude entries"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("M7 restore control: the shipped script's --tag packaging DOES exclude entries")
+        printf '  FAIL: M7 restore control — shipped scoped=%s unscoped=%s (should differ)\n' \
+            "$SHIPPED_SCOPED" "$SHIPPED_UNSCOPED"
+    fi
+else
+    make_stub_setup_failed "notagscope"
+fi
+
+# --- M8 (claude-workflow-plugin-9hv4): stub the --limit accounting to lie -
+# Stubs the excluded_by_limit computation itself (not the cap enforcement)
+# to a hardcoded 0, so --limit still trims stdout for real but the
+# accounting no longer admits it. Proves the "excluded_by_limit reports the
+# TRUE gap" assertions (9.8) are sensitive to the accounting lying about a
+# real cap, not merely to a cap existing somewhere. A consumer that trusted
+# "excluded_by_limit":0 without a cross-check would accept a scoped read
+# that silently dropped entries under a cap and reported nothing wrong.
+# shellcheck disable=SC2016  # single-quoted sed pattern; \$ must stay literal for sed, not expand in bash.
+if M8_SH=$(make_stub "fakelimit" \
+    's/^    local excluded_by_limit=\$((matched - returned))$/    local excluded_by_limit=0/'); then
+    reseed
+    M8_GATE_TOTAL=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$M8_SH" list --tag gate | grep -c '^- ')
+    if [ "$M8_GATE_TOTAL" -gt 1 ]; then
+        M8_STATS=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$M8_SH" list --tag gate --limit 1 2>&1 >/dev/null)
+        M8_RETURNED=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$M8_SH" list --tag gate --limit 1 2>/dev/null | grep -c '^- ')
+        # The cap IS still enforced on stdout (still exactly 1 line)...
+        assert_eq "M8: the stub still enforces --limit on stdout for real" "1" "$M8_RETURNED"
+        # ...but the accounting now lies about how much that cost.
+        assert_contains "M8: the stubbed accounting falsely claims nothing was cut by --limit" \
+            '"excluded_by_limit":0' "$M8_STATS"
+        # A consumer cross-checking matched-minus-returned against the
+        # claimed excluded_by_limit catches the lie directly: matched is
+        # still reported truthfully (M8 only touched the OTHER field), so
+        # matched-1 (the true gap) disagreeing with the claimed 0 exposes it.
+        M8_MATCHED=$(printf '%s' "$M8_STATS" | sed -n 's/.*"matched":\([0-9]*\).*/\1/p')
+        if [ "$((M8_MATCHED - 1))" -ne 0 ]; then
+            PASS=$((PASS + 1))
+            printf '  PASS: %s\n' "M8: matched-minus-returned disagrees with the stub's claimed excluded_by_limit, exposing the lie"
+        else
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("M8: matched-minus-returned disagrees with the stub's claimed excluded_by_limit")
+            printf '  FAIL: M8 — matched=%s (expected more than 1, to distinguish from the false 0)\n' "$M8_MATCHED"
+        fi
+        # Restore control: the SHIPPED script reports the REAL figure for
+        # the identical call.
+        reseed
+        SHIPPED_LIMIT_STATS=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$LESSONS_SH" list --tag gate --limit 1 2>&1 >/dev/null)
+        SHIPPED_MATCHED=$(printf '%s' "$SHIPPED_LIMIT_STATS" | sed -n 's/.*"matched":\([0-9]*\).*/\1/p')
+        assert_contains "M8 restore control: the shipped script reports the REAL excluded_by_limit" \
+            "\"excluded_by_limit\":$((SHIPPED_MATCHED - 1))" "$SHIPPED_LIMIT_STATS"
+    else
+        printf '  note: M8 SKIPPED (fewer than 2 gate-tagged entries in this fixture; cap cannot be exercised)\n'
+    fi
+else
+    make_stub_setup_failed "fakelimit"
 fi
 
 # ---------------------------------------------------------------------------

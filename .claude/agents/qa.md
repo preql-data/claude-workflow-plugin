@@ -338,20 +338,11 @@ But since V3 the artifact's EXISTENCE and INDEPENDENCE are mechanically enforced
 
 ### 6p.1 Assemble and validate the review request
 
-Write the request to `.claude/.qa-tracking/review-request-<task-id>.json`. Ten keys, all required by the validator:
+`qa-gate.sh review-request-build` assembles AND validates the request in one call — you no longer hand-roll the jq yourself. This replaced a hand-rolled recipe (claude-workflow-plugin-wuu8) that had three compounding defects on real packets: it never showed how `.diff` actually got populated (an unset `$DIFF` shell variable silently rendered as `""`, so at least one real review ran with zero bytes of the change); it embedded the impact report via `--arg impact "$(cat <path>)"`, which dies with `"argument list too long: jq"` on a real report (measured: 1.86MB) BEFORE the packet-budget cap is ever consulted, leaving an EMPTY request file nothing checked for; and even when assembly succeeded, that same impact report was embedded pretty-printed and double-encoded (escaped inside a JSON string), dominating the packet (measured: up to 98.5% of one real request) despite the underlying content rarely earning that much space. `review-request-build` fixes all three: `.diff` is git diff HEAD-vs-working-tree over the SAME denylist-filtered, canonical file list `change_set_hash` already covers (so a fixture mirror or a lockfile can never dominate it, and a brand-new untracked file is still included); the impact report is summarised into a small, honest object — omitted-with-reason (never a bare `{}`) when there's nothing useful to show; and every potentially-large field is read via `jq --rawfile`/`--slurpfile`, never through jq's own argument list, with an empty or invalid assembly refused rather than written.
 
 ```bash
 TID="$TASK_ID"
-REQ="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-request-$TID.json"
 REVIEW_ITERATION=1          # 1 on the first review pass; +1 per review round
-
-# risk_threshold — the severity at or above which a finding blocks. Default
-# comes from the ONE caps file; raise it (or lower it) when the diff's blast
-# radius warrants. Ordered enum: critical > high > medium > low > info.
-RISK=$(grep -E '^[[:space:]]*risk_threshold_default[[:space:]]*=' \
-    "$CLAUDE_PROJECT_DIR/.claude/review-config" 2>/dev/null \
-    | head -1 | cut -d= -f2 | tr -d '[:space:]')
-RISK="${RISK:-high}"
 
 # stop_condition — YOU write this, from the SPEC's acceptance criteria. It is
 # what "done reviewing" means for THIS task, e.g.
@@ -359,23 +350,29 @@ RISK="${RISK:-high}"
 #    critical/high finding remains in the auth or gate paths"
 STOP_CONDITION="<one sentence derived from the SPEC's acceptance criteria>"
 
-# change_set_hash — the SAME canonicalisation the approval record binds to.
-HASH=$(bash "$CLAUDE_PROJECT_DIR/.claude/scripts/impact-report.sh" --hash-only)
+# spec — write the SPEC text (already loaded via bd_doc_read per section 1)
+# to a file; review-request-build reads it via --rawfile, never through
+# jq's argument list, so a long SPEC cannot repeat the ARG_MAX failure
+# above.
+SPEC_FILE="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-spec-$TID.txt"
+printf '%s' "$SPEC_DOC" > "$SPEC_FILE"
 
-jq -n \
-    --arg tid "$TID" --argjson it "$REVIEW_ITERATION" \
-    --arg rt "$RISK" --arg sc "$STOP_CONDITION" --arg hash "$HASH" \
-    --arg spec "$SPEC_DOC" --arg diff "$DIFF" --arg cc "$F7_CONTRACT" \
-    --arg impact "$(cat "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/impact-report-$TID.json" 2>/dev/null)" \
-    '{contract_version:"1", task_id:$tid, iteration:$it,
-      risk_threshold:$rt, stop_condition:$sc, change_set_hash:$hash,
-      spec:$spec, diff:$diff, completion_contract:$cc,
-      impact_report:$impact}' > "$REQ"
-
-bash "$CLAUDE_PROJECT_DIR/.claude/scripts/review-check.sh" validate-request "$REQ"
+bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-request-build "$TID" \
+    --iteration "$REVIEW_ITERATION" \
+    --stop-condition "$STOP_CONDITION" \
+    --spec-file "$SPEC_FILE"
+    # --risk-threshold <sev>              optional; defaults to review-config's
+    #                                      own risk_threshold_default (built-in
+    #                                      default: high) — raise or lower it
+    #                                      when the diff's blast radius warrants.
+    #                                      Ordered enum: critical>high>medium>low>info.
+    # --completion-contract-file <path>   optional; defaults to the latest
+    #                                      recorded COMPLETION v1 payload for
+    #                                      $TID (found automatically — you
+    #                                      rarely need this flag).
 ```
 
-`validate-request` exits 0 with `{"ok":true,...}` or exits 4 with an `error_key` that NAMES the problem — `missing_key:<field>`, `missing_risk_threshold`, `missing_stop_condition`, `risk_threshold_invalid_enum`, `change_set_hash_unusable` (not 64 lowercase hex, or the SHA-256 empty-content sentinel — a genuinely empty or wholly-denylisted change set; see section 6p.2 below). Fix the named field and re-validate; `change_set_hash_unusable` on the sentinel specifically means there is nothing to review — use `qa-gate.sh approve --no-review '<reason>'` instead of retrying. Never hand an invalid request onward: the Codex driver rejects it with exit 4 and the round-trip is wasted.
+On success this prints `{"ok":true,...,"path":".../review-request-<task-id>.json","bytes":N,"diff_bytes":N,"impact_summary_bytes":N}` and exits 0 — the request is ALREADY validated (it runs the same `review-check.sh validate-request` internally before reporting success), written to `.claude/.qa-tracking/review-request-<task-id>.json` (the same path `codex-review.sh --request` and section 6p.2 below already expect), with the ten required keys all present. On failure it exits 1 (a usage error, or the assembled request failed its own schema validation) or 2 (an infra failure — hash unavailable, a file could not be staged/written, or assembly produced an empty/invalid request) and prints `{"ok":false,...,"error_key":"<name>",...}` with an `error_key` that NAMES the problem — `missing_key:<field>`, `missing_risk_threshold`, `missing_stop_condition`, `risk_threshold_invalid_enum`, `change_set_hash_unusable` (not 64 lowercase hex, or the SHA-256 empty-content sentinel — a genuinely empty or wholly-denylisted change set; see section 6p.2 below), `missing_completion_contract`, or `assembled_request_empty` (the assembly itself failed or produced nothing — a bug in the command, not something to retry with the same inputs). Fix the named field and re-run; `change_set_hash_unusable` on the sentinel specifically means there is nothing to review — use `qa-gate.sh approve --no-review '<reason>'` instead of retrying. Never hand an invalid request onward: the Codex driver rejects it with exit 4 and the round-trip is wasted.
 
 `risk_threshold` and `stop_condition` are the two mandatory-non-empty fields (v4 principle 4, bounded diligence). A reviewer without a blocking bar and a stopping rule loops; the validator refuses the request rather than letting that happen.
 

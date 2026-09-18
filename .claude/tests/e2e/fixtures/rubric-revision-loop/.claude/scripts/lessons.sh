@@ -3,7 +3,15 @@
 #
 # Spec 0.7 (claude-workflow-plugin-e0d.7) created it; tag scoping was added
 # by claude-workflow-plugin-zerv (v5 phase P, plan item P8) so consumers can
-# read a SLICE of the ledger instead of all of it.
+# read a SLICE of the ledger instead of all of it. claude-workflow-plugin-9hv4
+# added the exclusion ACCOUNTING below: zerv's `list` could already narrow
+# the ledger, but a filtered call that matched nothing printed nothing on
+# stdout — indistinguishable from a call that silently swallowed a bug
+# upstream. Every filtered call now also reports, on stderr, how many
+# entries exist in total, how many matched, how many were returned, and how
+# many were excluded by the filter versus by --limit — even when the match
+# count is zero. Stdout is untouched: every existing scoped-read consumer
+# keeps parsing exactly the bytes it already parsed.
 #
 # Subcommands:
 #   add <lesson text> --source <task-id> --tag <tag> [--tag <tag>]...
@@ -21,7 +29,18 @@
 #     With NO flags, print the ledger file verbatim — byte-identical to
 #     `cat LESSONS.md`. This is the form the grading packet uses and it
 #     must stay lossless (see "Who reads what" below). With any flag,
-#     print only the matching entry lines, in ledger order.
+#     print only the matching entry lines, in ledger order, and ALSO print
+#     one JSON accounting line to stderr:
+#       {"ok":true,"subcommand":"list","total_ledger_entries":N,
+#        "matched":M,"returned":R,"excluded_by_filter":F,
+#        "excluded_by_limit":L,"filters":{"tags":[...],"untagged":bool,
+#        "since":"YYYY-MM-DD"|null,"limit":n|null}}
+#     printed even when M is 0, so "matched nothing" is never silent and
+#     never looks like the unfiltered path's own different contract. A
+#     failure (missing ledger, an out-of-vocabulary tag on the READ path
+#     too, not just on add) is a SEPARATE, structured {"ok":false,...}
+#     shape on stderr with a non-zero exit — never an empty stdout stream
+#     that reads the same as a legitimate zero-match success.
 #
 # ---------------------------------------------------------------------------
 # Entry format — ONE line per lesson, THREE HTML comments in a FIXED order:
@@ -49,8 +68,34 @@
 #   - qa.md 6a step 5 assembles the GRADING PACKET and must pass the FULL
 #     ledger. Lessons are criteria-by-reference for the grader — narrowing
 #     its view narrows the criteria it can apply. Never add a filter there.
-#   - orchestrator.md reads a RECENT slice before decomposing work.
+#   - orchestrator.md reads a RECENT slice before decomposing work (--limit /
+#     --since / --tag, documented in its own "Analyze the request" section).
+#   - design-reviewer.md (v5 D2) reads the WHOLE ledger too, for the SAME
+#     reason as the grader: its DS8 criterion treats a lesson as a criterion
+#     by reference, so a filtered packet would silently narrow what it can
+#     cite. It never calls this script, though — it carries no `Bash` tool
+#     (read-only by design, same as grader.md/judge.md), so it opens
+#     LESSONS.md directly with its own `Read` tool. The orchestrator's
+#     design-review-relay packet (orchestrator.md 5e) hands it the file the
+#     same way: whole, never filtered.
+#   - designer.md (v5 D1) SCOPES, like the orchestrator, but also has no
+#     `Bash` tool — it cannot invoke this script either. It uses `Grep`
+#     against LESSONS.md directly, matching `<!-- tags: ... -->` for a tag in
+#     the closed vocabulary below: the tool-appropriate equivalent of
+#     `list --tag`, chosen because it is a composer of a NEW artifact (like
+#     the orchestrator planning work) rather than a verifier checking one
+#     against every criterion (like the grader / design-reviewer).
 #   - grader.md and rubrics/default.md cite lessons by ordinal.
+#
+# The split above is deliberate, not inconsistent: a role that CHECKS a
+# diff or artifact against every applicable criterion (grader, design-
+# reviewer) needs the whole ledger, because a lesson it never saw is a
+# criterion it silently could not apply. A role that PLANS or COMPOSES
+# (orchestrator, designer) benefits from a relevant slice instead, because
+# it is background judgment, not a checklist, and the whole 140KB+ file
+# would otherwise crowd out the artifact actually in front of it — the
+# concern claude-workflow-plugin-9hv4 named. When you add a new consumer,
+# classify it against this split before wiring its read.
 #
 # Conventions mirror tech-debt.sh: set -e, no jq for the core path,
 # usage-on-stderr-exit-1 for malformed input, JSON on stdout for add
@@ -91,6 +136,11 @@ Usage: lessons.sh <subcommand> [args]
       --untagged    keep entries with no tags (mutually exclusive with --tag).
       --since <d>   keep entries whose `recorded:` date is >= <d>.
       --limit <n>   keep the MOST RECENT <n> matches (ledger order preserved).
+
+      Any flag above also prints a JSON accounting line to STDERR, even
+      when zero entries match: total ledger size, how many matched, how
+      many were returned, and how many were excluded by the filter versus
+      by --limit. Stdout carries only the matched lesson lines, unchanged.
 
 Tag vocabulary (closed): gate testing packaging agents evidence process
 Each tag must match ^[a-z0-9][a-z0-9-]*$.
@@ -516,12 +566,15 @@ cmd_list() {
     done
 
     if [ ! -f "$LEDGER_FILE" ]; then
-        printf 'lessons.sh: %s does not exist.\n' "$LEDGER_FILE" >&2
-        exit 1
+        err_json "list" "ledger-not-found" "ledger" "$LEDGER_FILE" \
+            "the ledger file does not exist at the resolved path (check CLAUDE_PROJECT_DIR); this is a hard failure, never an empty match"
     fi
 
     # No flags: the ledger verbatim. The grading packet depends on these
-    # bytes being the whole file.
+    # bytes being the whole file, so this path prints NO accounting line —
+    # adding stderr output to a call site that has never had any, for a
+    # form that already unambiguously means "everything", would be a
+    # gratuitous behaviour change for zero benefit.
     if [ "$filtered" -eq 0 ]; then
         cat "$LEDGER_FILE"
         return 0
@@ -561,12 +614,14 @@ cmd_list() {
     fi
 
     local matches=()
+    local total_entries=0
     local line entry_tags entry_date keep
     while IFS= read -r line; do
         case "$line" in
             "- "*) ;;
             *) continue ;;
         esac
+        total_entries=$((total_entries + 1))
 
         entry_tags=$(extract_tags "$line")
 
@@ -596,19 +651,56 @@ cmd_list() {
         matches+=("$line")
     done < "$LEDGER_FILE"
 
-    local total="${#matches[@]}"
-    [ "$total" -eq 0 ] && return 0
+    local matched="${#matches[@]}"
 
     # --limit keeps the MOST RECENT n, because the ledger is append-ordered
     # and every consumer of --limit wants "what happened lately". Ledger order
     # is preserved within the kept window.
     local start=0
-    if [ -n "$limit" ] && [ "$total" -gt "$limit" ]; then
-        start=$((total - limit))
+    if [ -n "$limit" ] && [ "$matched" -gt "$limit" ]; then
+        start=$((matched - limit))
     fi
+    local returned=$((matched - start))
+
+    # Report what this scoped read excluded and why, ALWAYS, on stderr,
+    # before touching stdout — including the zero-match case
+    # (claude-workflow-plugin-9hv4). Without this, a caller cannot tell
+    # "3 of 204, filtered by tag=gate" from "3, because something upstream
+    # silently returned less than it should have" — both look identical on
+    # stdout. Stdout keeps carrying only the matched lesson lines, so every
+    # existing scoped-read consumer's own parsing (grep -c '^- ', etc.) sees
+    # no change at all.
+    local excluded_by_filter=$((total_entries - matched))
+    local excluded_by_limit=$((matched - returned))
+    local tags_json="[]"
+    if [ "${#want_tags[@]}" -gt 0 ]; then
+        tags_json="["
+        local first=1
+        for t in "${want_tags[@]}"; do
+            if [ "$first" -eq 1 ]; then
+                tags_json="${tags_json}\"${t}\""
+                first=0
+            else
+                tags_json="${tags_json},\"${t}\""
+            fi
+        done
+        tags_json="${tags_json}]"
+    fi
+    local since_json="null"
+    [ -n "$since" ] && since_json="\"${since}\""
+    local limit_json="null"
+    [ -n "$limit" ] && limit_json="$limit"
+    local untagged_json="false"
+    [ "$untagged" -eq 1 ] && untagged_json="true"
+
+    printf '{"ok":true,"subcommand":"list","total_ledger_entries":%d,"matched":%d,"returned":%d,"excluded_by_filter":%d,"excluded_by_limit":%d,"filters":{"tags":%s,"untagged":%s,"since":%s,"limit":%s}}\n' \
+        "$total_entries" "$matched" "$returned" "$excluded_by_filter" "$excluded_by_limit" \
+        "$tags_json" "$untagged_json" "$since_json" "$limit_json" >&2
+
+    [ "$matched" -eq 0 ] && return 0
 
     local i
-    for ((i = start; i < total; i++)); do
+    for ((i = start; i < matched; i++)); do
         printf '%s\n' "${matches[$i]}"
     done
 }

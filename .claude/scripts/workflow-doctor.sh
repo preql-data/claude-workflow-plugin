@@ -135,17 +135,39 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # own fix text (below) be the place a maintainer is told to update it
 # deliberately rather than let a package manager do it silently.
 #
-# check_beads() below is the ONLY check this pin's schema half can run
-# against (see that check's own header): the schema half needs the TARGET's
-# real .beads/embeddeddolt, which a sandboxed probe copy never carries by
-# design (mk_probe_sandbox() creates an EMPTY .beads/ on purpose). The
-# version half runs unconditionally; the schema half DISARMS (PASS,
-# informational) rather than fails when dolt is absent or the target's store
-# predates the embedded-Dolt layout — a version-only check on such a target
-# would compare against a pin measured against a Dolt-backed store and would
-# not be honest about what it actually verified.
+# DELIBERATELY NOT DERIVED, considered again this round for the same reason
+# it was rejected the first time this file's own EXPECTED_SPECS sibling
+# convention was written up: a pin computed FROM the live bd/schema pair it
+# is supposed to be checking compares that pair against itself and can never
+# disagree — vacuous by construction, the exact class of self-deriving check
+# claude-workflow-plugin-gytz's own EXPECTED_SPEC_FILES header warns against
+# for the identical reason. The whole point here is catching an UNPROMPTED,
+# UNREVIEWED bd self-upgrade; a derived pin would make that upgrade
+# invisible to this check by definition, which is precisely the hazard this
+# pin exists to surface.
+#
+# UPDATE PROCEDURE (a pin with no stated update procedure goes stale again
+# by construction — this one already has, once, silently, mid-arc — see
+# claude-workflow-plugin-dhh7/u443 for the incident this paragraph was added
+# after: bd self-upgraded 1.2.2 -> 1.3.0 partway through a multi-day task
+# arc, and nothing here noticed until an unrelated test started failing).
+# When you have DELIBERATELY upgraded bd, or a migration has DELIBERATELY
+# run, measure the new live pair with the SAME two commands this check
+# itself runs (do not trust a CHANGELOG or a version string alone — the
+# schema half is a separate, independently-drifting number):
+#   bd --version
+#   ( cd <target>/.beads/embeddeddolt/beads && dolt sql -r csv -q \
+#       "SELECT COALESCE(MAX(version),0) FROM schema_migrations" )
+# then update the constant below to "<bd-version>:<schema-version>" in the
+# SAME commit as the upgrade, and re-run workflow-doctor.test.sh's META-TEST
+# 8 to confirm the new pair is what this check now expects. If bd upgrades
+# UNPROMPTED again (no deliberate action taken, the check just starts
+# failing) — that is this pin doing its job, not a stale assumption; treat
+# the FAILURE itself as the finding, re-measure with the two commands above,
+# and decide whether to accept the new pair (update it) or investigate why
+# bd moved without anyone asking it to.
 # BEGIN DOCTOR_BD_SCHEMA_PIN (workflow-doctor.test.sh extracts this block; keep the sentinels)
-DOCTOR_BD_SCHEMA_PIN="1.2.2:53"
+DOCTOR_BD_SCHEMA_PIN="1.3.0:66"
 # END DOCTOR_BD_SCHEMA_PIN
 
 # Minimum bytes of post-frontmatter SKILL.md body. The `skill` check exists to
