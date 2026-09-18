@@ -11,8 +11,8 @@ The plugin includes 9 agents:
 | Agent | Role | File |
 |-------|------|------|
 | **Orchestrator** | Central coordinator | `agents/orchestrator.md` |
-| **Designer** | Produces the design artifact — problem framing, testable acceptance criteria, and the decomposition into independently buildable units. Writes no implementation code (v5.0.0; prompt body lands in Phase D1) | `agents/designer.md` |
-| **Design reviewer** | Separate-context reviewer of the design artifact, scored against `.claude/rubrics/design.md`. Spawned by the root orchestrator — the designer cannot spawn its own reviewer — and must resolve to an identity distinct from the designer (v5.0.0; prompt body shipped in Phase D2 Part A — the record grammar, subcommand, and gate enforcement that bind its verdict are Part B) | `agents/design-reviewer.md` |
+| **Designer** | Produces the design artifact — problem framing, testable acceptance criteria, and the decomposition into independently buildable units. Writes no implementation code (v5.0.0 Phase D1) | `agents/designer.md` |
+| **Design reviewer** | Separate-context reviewer of the design artifact, scored against `.claude/rubrics/design.md`. Spawned by the root orchestrator — the designer cannot spawn its own reviewer — and must resolve to an identity distinct from the designer (v5.0.0 Phase D2 — the record grammar, subcommand, and gate enforcement that bind its verdict shipped alongside it) | `agents/design-reviewer.md` |
 | **Backend** | API/DB specialist | `agents/backend.md` |
 | **Frontend** | UI/UX specialist | `agents/frontend.md` |
 | **DevOps** | CI/CD specialist | `agents/devops.md` |
@@ -741,6 +741,8 @@ The gate is precision-only; recall is reported alongside but not gating. C.2's d
 │  • Writes tests for user behavior                               │
 │  • Approves OR blocks with feedback                             │
 │  • Updates labels: qa-pending → qa-approved                     │
+│  • May relay a rubric/mutation packet to a ROOT-spawned         │
+│    @grader / @judge first — qa cannot spawn them itself         │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -749,6 +751,28 @@ The gate is precision-only; recall is reported alongside but not gating. C.2's d
 │                    bd close $ID --reason "..."                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+This diagram is the classic single-task **domain flow**: it names 5 of
+the 9 agents (orchestrator, the three specialists, qa) because those are
+the ones a typical bug fix or small feature actually touches. Two things
+a 9-agent, v5-complete system adds around it, deliberately not redrawn
+above to keep the happy path readable:
+
+- **The design loop can precede it.** For design-bound work, `@designer`
+  produces the design artifact first; `@design-reviewer` — spawned from
+  the ROOT, never by the designer, since subagents cannot spawn
+  subagents — scores it against `.claude/rubrics/design.md` in a fresh
+  context, and only a satisfied design decomposes into the
+  `@backend`/`@frontend`/`@devops` tasks this diagram starts from. See
+  the per-agent list and the "Model role classes" section above, and
+  `docs/WORKFLOW.md`.
+- **`@grader` and `@judge` are root-relayed, not auto-routed.** QA
+  requests a rubric verdict or a mutation-survivor classification; the
+  ROOT conversation performs the actual spawn (`RUBRIC-RELAY` /
+  `JUDGE-RELAY`) and hands the verdict back, because a subagent — QA
+  included — cannot spawn one itself. An epic-typed task additionally
+  requires a coherent `DESIGN-ROLLUP` verdict, from a second
+  `@design-reviewer` spawn, before `qa-gate.sh approve` will close it.
 
 ---
 

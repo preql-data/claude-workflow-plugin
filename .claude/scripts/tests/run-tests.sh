@@ -1158,7 +1158,7 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 #   runner-completeness.test.sh at that point showed the predicted cost
 #   arriving for real: dozens of this file's own pre-existing sections,
 #   sized to $EXPECTED_SPECS with generic names, started failing, because
-#   COUNTS MATCH but generic names are never among these 72 real ones. The
+#   COUNTS MATCH but generic names are never among these 73 real ones. The
 #   decision below is now IDENTITY-based by default (comparing the
 #   discovered and declared SETS, unconditionally computed) — see
 #   EXPECTED_SPEC_FILES_STRICT in the Environment: header above and the
@@ -1213,6 +1213,7 @@ EXPECTED_SPEC_FILES=(
     design-rollup-incoherent.test.sh
     design-rollup.test.sh
     design-rubric.test.sh
+    design-structural.test.sh
     design-unit-align.test.sh
     design-unit-bind-parity.test.sh
     doc-only-classifier.test.sh
@@ -1423,7 +1424,7 @@ esac
 # unconditional identity check against the real EXPECTED_SPEC_FILES array
 # fails every one of them on "COUNTS MATCH but the SETS DO NOT", not
 # because anything renamed, but because a generic name is never among the
-# 72 real ones. Renaming those ~30 sections' fixtures (and the bespoke
+# 73 real ones. Renaming those ~30 sections' fixtures (and the bespoke
 # extra files several of them layer on top, e.g. stub-hang.sh,
 # stub-skipper.sh) to real spec basenames was considered and REJECTED:
 # dozens of independently-reviewed sections built over many rounds, an

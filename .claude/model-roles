@@ -112,45 +112,71 @@
 # after; if rounds rise materially the revert is the ONE line below
 # (`implementer=opus-class`) and the observation belongs in LESSONS.md.
 #
-# DECLARED DEVIATION: ONE ROW DOES NOT MATCH THE PLAN'S D0 TABLE
-# --------------------------------------------------------------
-# (v5.0.0 / claude-workflow-plugin-fkm.10, raised as QA finding R1-F3.)
+# DEVIATION LANDED: BOTH D0 ROWS NOW MATCH THE PLAN'S TABLE
+# -----------------------------------------------------------
+# (v5.0.0 / claude-workflow-plugin-fkm.10, raised as QA finding R1-F3 on
+# fkm.2; reviewer landed 2026-09-07, orchestrator landed 2026-09-18 in
+# fkm.9 / D7. Both rows closed fkm.10 — see that task for the full record.)
 #
-#   role          plan (D0 table)      shipped here
-#   orchestrator  latest Opus-class    top   (Fable today)
+# D0 shipped two rows above the directive's own table
+# (docs/plans/v5-design-phase.md:106-110 — verified at that location on
+# 2026-09-18; earlier citations of :86-92 had drifted). The plan's own D0
+# "Config grammar" illustration (v5-design-phase-plan.md:362-374) shows
+# `orchestrator = top` and `reviewer = top` too — that block documents what
+# D0 actually SHIPPED, not the directive's target, so it is not a second
+# vote for `top`; read it as the deviation's starting point, not its cover.
 #
-# Correction 7 does NOT cover this row, and it is worth being exact about why:
-# it licenses `top` for the DESIGN lanes because Fable IS the top family there,
-# so `top` resolves to precisely what the plan asked for while still adopting a
-# newer top family on day zero. Opus is not the top family, so `top` here is a
-# HIGHER tier than the plan specified — a deviation, in the safe direction,
-# named here rather than left to be inferred from the file.
+#   role          directive (D0 table)              shipped in D0
+#   orchestrator  latest Opus-class                  top   (Fable today)
+#   reviewer      Sol via Codex, fallback Opus-class  top + reviewer_lane
 #
-# Deferred, not forgotten: D0 ships no working designer (D1) or design-review
-# loop (D2), so the ORCHESTRATOR SEAT is still where design judgment happens,
-# and demoting it now removes capability from the seat doing that work. It
-# lands in D4, where the plan itself narrows the orchestrator's job to
-# execution planning. Tracked as claude-workflow-plugin-fkm.10; the change is
-# the one line below.
+# Correction 7 does NOT cover either row, and it is worth being exact about
+# why: it licenses `top` for the DESIGN lanes because Fable IS the top
+# family there, so `top` resolves to precisely what the plan asked for
+# while still adopting a newer top family on day zero. Opus is not the top
+# family, so `top` on these two rows was a HIGHER tier than the plan
+# specified — a deviation, in the safe direction, named here rather than
+# left to be inferred from the file.
 #
-# REVIEWER LANDED EARLY (2026-09-07). This section used to cover two rows.
-# `reviewer` (plan: Sol via Codex, fallback latest Opus-class) shipped `top`
-# (Fable today) + reviewer_lane the same way orchestrator still does above.
-# Its deferral rested on a third reason, dropped from the paragraph above
-# because it no longer applies: `reviewer` is the gate's own seat, so trading
-# away review capability while the design phases are still being built
-# weakens the surface that catches everything else. That reason weighs
-# Fable's capability against Opus's — and Fable is not an available seat for
-# this role at all. The operator's standing instruction is that QA and review
-# run on Sol in priority to Opus, and never on Fable (a weekly-limit
-# constraint); `top` resolving to Fable was silently violating that
-# instruction on every reviewer spawn. `reviewer` now ships `opus-class`,
-# matching the plan's fallback tier — not the capability trade the deferral
-# was written to protect, so it did not wait for D4.
+# WHY BOTH WERE DEFERRED IN D0: D0 shipped no working designer (D1) or
+# design-review loop (D2), so the ORCHESTRATOR SEAT was still where design
+# judgment happened, and `reviewer` is the gate's own seat — demoting
+# either before its replacement/safety-net existed would have removed
+# capability from the surface doing (or catching) that work.
+#
+# REVIEWER LANDED EARLY (2026-09-07), ahead of its own deferral. The
+# deferral reason didn't survive contact with the operator's actual
+# standing instruction: QA and review run on Sol in priority to Opus, and
+# NEVER on Fable (a weekly-limit constraint). `top` resolving to Fable was
+# silently violating that instruction on every reviewer spawn — Fable was
+# never a legitimate seat for this role, so the capability trade the
+# deferral was protecting did not apply here. `reviewer` shipped
+# `opus-class` (the directive's own fallback tier) without waiting for D4.
+#
+# ORCHESTRATOR LANDS HERE (2026-09-18, fkm.9 / D7), also ahead of its D4
+# deferral, for the SAME weekly-limit reason at HIGHER volume: `top`
+# resolved to Fable, and the orchestrator is spawned on essentially every
+# non-trivial turn — far more often than any reviewer — so it was the seat
+# burning the protected weekly Fable budget hardest, not the seat the
+# deferral was protecting. DISCLOSURE, so this can be challenged rather
+# than inherited: the operator's instruction as literally stated names QA
+# and review, not the orchestrator; extending it here is an inference from
+# the same weekly-limit rationale, made explicit rather than assumed. The
+# directive's own D0 table is not an inference — it independently
+# specifies latest Opus-class for this row on its own terms, and D1/D2
+# (the design lanes) are now shipped, so the capability-removal concern
+# above no longer applies either. Re-checked at this landing: the
+# identity-collapse condition is unaffected (it compares `designer`
+# against `design_reviewer`, never `orchestrator`), and the statusline
+# group render still degrades correctly through more than three distinct
+# groups — see `.claude/scripts/tests/model-roles.test.sh` section 4
+# (4.7-4.12 cover the grouping/truncation mechanism generally; it is
+# strategy-agnostic, so no new case was required for this specific
+# role-value combination).
 
 designer=top
 design_reviewer=top
-orchestrator=top
+orchestrator=opus-class
 implementer=sonnet-class
 reviewer=opus-class
 

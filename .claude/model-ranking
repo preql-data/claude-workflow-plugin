@@ -1,9 +1,17 @@
-# Model ranking — spec 0.3 + hotfix vlp.1 (exclusion + tertiary tie-break).
+# Model ranking — spec 0.3 + hotfix vlp.1 (exclusion + capability tiers),
+# sort order fixed by capability-class bug `en9` (see CHANGELOG): the
+# ranking-file position below is the PRIMARY sort key, not a tie-break of
+# last resort — that was the pre-en9 (and pre-fkm.9) behavior this file
+# used to describe.
 #
-# This file is an EXCLUSION list and a TERTIARY TIE-BREAK hint. It does
-# NOT restrict which models the resolver considers. Unknown families are
-# FIRST-CLASS candidates: a newly-launched tier above Fable wins
-# automatically by recency, without an edit to this file.
+# This file is an EXCLUSION list and a CAPABILITY-CLASS order. It does
+# NOT restrict which models the resolver considers — every candidate not
+# excluded below is still eligible, including families this file has
+# never heard of. Unknown families are FIRST-CLASS candidates: they are
+# ranked in the TOP capability class, so a newly-launched tier above
+# Fable still wins automatically (by recency, WITHIN that top class)
+# without an edit to this file. Day-zero adoption survives en9 unchanged
+# — only the mechanism producing it changed; see "Resolver sort" below.
 #
 # Syntax
 # ------
@@ -11,18 +19,25 @@
 #
 #     !claude-haiku       # drop every claude-haiku-* model
 #
-# Lines without `!` are family prefixes used to break ties when two
-# surviving candidates have identical created_at AND max_input_tokens.
-# Lines higher in the file get a lower (better) tie-break rank.
+# Lines without `!` are family prefixes, listed BEST TIER FIRST. A line's
+# position here is that family's CAPABILITY CLASS — the resolver's
+# PRIMARY sort key (see "Resolver sort" below), not a fallback used only
+# when two candidates tie on created_at and max_input_tokens. A known
+# lower-tier family never outranks a known higher-tier family, however
+# much newer it is.
 #
 # Comments (`#`) and blank lines are ignored. Whitespace is trimmed.
 #
-# Resolver sort (primary -> tertiary)
-# -----------------------------------
-#   1. created_at DESC   — newest model wins (ISO 8601 from /v1/models).
-#   2. max_input_tokens DESC — larger context wins on date tie.
-#   3. ranking-file position ASC — families listed earlier preferred;
-#      unknown families slot after every listed family for the tie-break.
+# Resolver sort (primary -> tertiary) — en9
+# -------------------------------------------
+#   1. capability class ASC — this file's family-prefix position (unknown
+#      family = TOP class). This is now the PRIMARY key: with recency
+#      primary (the pre-en9 behavior), a newer-but-lesser family could
+#      hijack `top` and collapse the role split — reproduced with
+#      claude-opus-5 (2026-07-24) displacing claude-fable-5 (2026-06-07).
+#   2. created_at DESC — newest wins WITHIN a class (ISO 8601 from
+#      /v1/models).
+#   3. max_input_tokens DESC — larger context wins a same-class date tie.
 #
 # When the resolver picks a winner whose created_at is missing or
 # unparseable, the SessionStart notice prints LOUDLY with the manual
@@ -35,13 +50,16 @@
 # whose prefix appeared here could be selected, with version-tuple
 # sorting inside each family. That meant a brand-new family tier shipped
 # upstream (e.g. above Fable) would be invisible to the resolver until
-# someone hand-edited this file. Reversing the polarity — exclusion +
-# tie-break, with created_at as the primary sort — fixes principle 1
-# ("auto-upgrade") without requiring this file to track upstream
-# releases.
+# someone hand-edited this file. Reversing the polarity — exclusion plus
+# a capability-tier order, with an unrecognised family ranked in the top
+# class — fixes principle 1 ("auto-upgrade") without requiring this file
+# to track upstream releases. (The sort's own primary key later moved
+# from recency to capability class under `en9` — day-zero adoption for a
+# genuinely new top-tier family is unaffected: it still wins on recency,
+# now within the top class rather than file-wide.)
 #
-# Tier list (tertiary tie-break order; from best to worst when dates
-# are identical):
+# Tier list (capability-class order, best to worst — the resolver's
+# PRIMARY sort key since en9, not a tie-break for same-date candidates):
 
 # --- Regional exclusions ---
 #

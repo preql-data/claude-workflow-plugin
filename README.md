@@ -43,7 +43,8 @@ every step.
   labels, records no approval, and with Codex absent the workflow is
   byte-identical (proved by a degradation spec, not asserted). The
   review turn is manual and cost-confirmed, and it meters your own
-  OpenAI account. See [The tri-model workflow](#-the-tri-model-workflow)
+  OpenAI account. See
+  [The model-role-class workflow](#-the-model-role-class-workflow)
   below; setup, billing, and troubleshooting:
   [`docs/CODEX_SETUP.md`](docs/CODEX_SETUP.md).
 - **Two MCP servers ship in the box.** `bd-mcp` exposes 21 typed Beads
@@ -71,25 +72,29 @@ every step.
   grading packet. The two seed lessons (parallel-agent worktree
   isolation; boundary-mock fidelity) shipped with v3.1.0.
 
-## 🧠 The tri-model workflow
+## 🧠 The model-role-class workflow
 
-Three classes of agent, three model lanes, one gate. `.claude/model-roles`
-maps each **role** to a selection **strategy**, and `model-select.sh`
-re-resolves every lane at session start — so each class auto-adopts the
-newest model in its own tier without anyone editing a version string.
+Five role classes, one gate. `.claude/model-roles` maps each **role** to a
+selection **strategy**, and `model-select.sh` re-resolves every lane at
+session start — so each class auto-adopts the newest model in its own
+tier without anyone editing a version string.
 
 | Role | Agents | Strategy | Resolves to |
 |------|--------|----------|-------------|
-| `orchestrator` | `orchestrator` | `top` | the resolver's single best pick — the newest, most capable family in your account listing |
-| `implementer` | `backend`, `frontend`, `devops` | `opus-class` | the newest `claude-opus-*` model listed, falling back to `top` when your account lists none |
-| `reviewer` | `qa`, `grader`, `judge` | `top` | the top pick for the fresh-context Claude review path; the optional external lane routes the review turn to Sol via Codex when connected |
+| `designer` | `designer` | `top` | the resolver's single best pick — the newest, most capable family in your account listing |
+| `design_reviewer` | `design-reviewer` | `top` | same pick as `designer`; the optional external lane routes design review to Sol via Codex when connected, which is what keeps the two from reviewing each other under the same identity |
+| `orchestrator` | `orchestrator` | `opus-class` | the newest `claude-opus-*` model listed, falling back to `top` when your account lists none |
+| `implementer` | `backend`, `frontend`, `devops` | `sonnet-class` | the newest `claude-sonnet-*` model listed, falling back to `top` when your account lists none |
+| `reviewer` | `qa`, `grader`, `judge` | `opus-class` | the newest `claude-opus-*` model listed; the optional external lane routes the review turn to Sol via Codex when connected |
 
 The model each lane lands on is **resolver output, not configuration**.
 Read the live mapping with `bash .claude/scripts/model-select.sh roles`
-(prints `role  strategy  resolved-id`), see it in the statusline
-(`orch:… impl:… rev:…`, collapsing to the single-model shape only when all
-three lanes resolved to the same id *and* the reviewer lane is `claude`),
-and override with `/workflow-model`. Setting every role to `top` in
+(prints `role  strategy  resolved-id`), see it in the statusline (fixed
+render order `des dsr orch impl rev`, roles sharing a resolved model
+joined with `+`, at most three groups printed before the tail becomes
+` +<k> more`, collapsing to the single-model shape only when **all five**
+roles resolve to the same id *and* both review lanes are `claude`), and
+override with `/workflow-model`. Setting every role to `top` in
 `.claude/model-roles` reproduces the v3.5 single-model behavior exactly.
 
 ### Nobody signs off on their own work
@@ -234,15 +239,16 @@ bash .claude/tests/component/run.sh --filter bd-compat
 
 ## 📦 What you get on disk
 
-Counts re-derived from the tree on 2026-07-30 for the v4.1.0 release audit,
-not carried forward from the previous release.
+Counts re-derived from the tree on 2026-09-18 for the v5.0.0 release
+(claude-workflow-plugin-fkm.9), not carried forward from the v4.1.0
+release audit. The command behind each changed row is in that row.
 
 | Component | Count | Where |
 |-----------|-------|-------|
-| Agents | 7 | `.claude/agents/{orchestrator,qa,backend,frontend,devops,grader,judge}.md` |
-| Shell scripts | 26 | `.claude/scripts/*.sh` — of which **7** are hook entry points, wired across **7** hook events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, `SessionEnd`); the rest are helpers the agents and hooks call (`qa-gate`, `impact-report`, `review-check`, `workflow-doctor`, `workflow-manifest`, `worktree-sweep`, `model-select`, `lessons`, `statusline`, …) |
+| Agents | 9 | `.claude/agents/{orchestrator,designer,design-reviewer,qa,backend,frontend,devops,grader,judge}.md` — `ls .claude/agents/*.md \| wc -l` |
+| Shell scripts | 29 | `.claude/scripts/*.sh` (`ls .claude/scripts/*.sh \| wc -l`) — of which **7** are hook entry points, wired across **7** hook events (`SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` — `jq '.hooks\|keys\|length' .claude/settings.json`); the rest are helpers the agents and hooks call (`qa-gate`, `epic-gate`, `impact-report`, `review-check`, `workflow-doctor`, `workflow-manifest`, `worktree-sweep`, `model-select`, `codex-detect`, `lessons`, `statusline`, …) |
 | MCP servers | 2 | `.claude/mcp/{bd-mcp,code-graph-mcp}/` — 21 and 7 tools respectively; `bash .claude/scripts/workflow-doctor.sh` spawns both and asserts those exact counts |
-| Rubrics | 5 | `.claude/rubrics/{default,backend,frontend,devops}.md` + `bugfix.md` overlay |
+| Rubrics | 6 | `.claude/rubrics/{default,backend,frontend,devops,design}.md` + `bugfix.md` overlay — `ls .claude/rubrics/*.md \| wc -l` |
 | Slash commands | 3 | `.claude/commands/{workflow-model,mutation-sweep,workflow-doctor}.md` |
 | Skills | 1 | `.claude/skills/workflow-engine/SKILL.md` — the only registered skill, and `plugin.json`'s `skills[]` array is asserted to be length 1 by `vendored-skills.test.sh` |
 | Vendored reference | 1 | `.claude/vendor/superpowers/` — `brainstorming/SKILL.md` from `obra/superpowers` at pin `3dcbd5c4` (MIT), plus `MANIFEST.md` and `LICENSE.upstream`. Deliberately **not** under `.claude/skills/` and **not** registered: an explicit `Read` in `orchestrator.md` loads it exactly where it is wired instead of session-wide. Provenance and the ten local modifications are in `MANIFEST.md`; see also `THIRD_PARTY.md` |

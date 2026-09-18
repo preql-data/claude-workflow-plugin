@@ -6,9 +6,12 @@ Complete documentation of all hook scripts in the claude-workflow plugin.
 
 ## Overview
 
-The plugin wires 6 Claude Code hook events in `.claude/settings.json`
-(the plugin-manifest `.claude/hooks/hooks.json` adds a 7th, SubagentStart,
-for plugin-scoped installs):
+The plugin wires **7** Claude Code hook events in `.claude/settings.json`
+(confirmed via `jq '.hooks|keys|length' .claude/settings.json`). The
+plugin-manifest `.claude/hooks/hooks.json` mirrors the same seven events;
+its only addition beyond `settings.json` is a second `PostToolUse` matcher
+(`^Bash$` → `bd-github-link.sh`) for plugin-scoped installs — see "Hook
+Configuration" below for the exact diff between the two files:
 
 | Hook | File | Trigger |
 |------|------|---------|
@@ -18,7 +21,7 @@ for plugin-scoped installs):
 | PostToolUse | `post-edit.sh` | After Write/Edit/MultiEdit/NotebookEdit tools |
 | Stop | `verify-before-stop.sh` | Claude attempts to stop |
 | SessionEnd | `session-end.sh` | Session ends |
-| SubagentStart (`hooks.json` only) | `subagent-start.sh` | A subagent starts (auto-assign injection) |
+| SubagentStart | `subagent-start.sh` | A subagent starts (auto-assign injection) |
 
 ---
 
@@ -26,7 +29,7 @@ for plugin-scoped installs):
 
 **File**: `.claude/settings.json`
 
-The shipped `hooks` block wires all six event types (the file also carries
+The shipped `hooks` block wires all seven event types (the file also carries
 `statusLine`, an `env` block, and a `permissions.allow` list alongside
 `hooks` — omitted here for focus):
 

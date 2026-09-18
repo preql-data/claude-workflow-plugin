@@ -27,17 +27,25 @@ English; Claude internally maps to these roles.
   complement.
 - **Designer** — `@designer`. Produces the design artifact and nothing else:
   problem framing, testable acceptance criteria, and the decomposition into
-  independently buildable units. Writes no implementation code. (v5.0.0; the
-  prompt body lands in Phase D1.)
+  independently buildable units. Writes no implementation code. (v5.0.0
+  Phase D1.)
 - **Design reviewer** — `@design-reviewer`. Reviews that artifact in a fresh
   context against `.claude/rubrics/design.md`, and must resolve to an identity
   distinct from the designer. Spawned from the ROOT, never by the designer:
-  subagents cannot spawn subagents. (v5.0.0; the prompt body lands in Phase D2.)
+  subagents cannot spawn subagents. (v5.0.0 Phase D2.)
 - **Specialists** — `@backend`, `@frontend`, `@devops`. Implement code in
   their domain. Have full broad tool access.
 - **QA** — mandatory gate. No code reaches the user without QA approval. QA
   approves/blocks via the `qa-gate.sh` helper, not manual `bd label add/remove`
-  commands.
+  commands. Two more agents ride the same `reviewer` model-role class as QA
+  but are never auto-routed: `@grader` (separate-context rubric scoring) and
+  `@judge` (separate-context mutation-survivor classification). Both are
+  spawned from the ROOT conversation only, relayed by QA's own request —
+  subagents cannot spawn subagents.
+
+Nine agents ride five model-role classes in total (`designer`,
+`design_reviewer`, `orchestrator`, `implementer`, `reviewer`) — see
+`.claude/model-roles` and `docs/AGENTS.md`.
 
 ## Mandatory delegation flow
 

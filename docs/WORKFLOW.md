@@ -156,23 +156,72 @@ After QA approval:   [backend, qa-approved]
 
 ### QA Label Flow
 
+Earlier revisions of this diagram showed only `qa-pending` and
+`qa-approved` — a two-node happy path that left out `qa-gate-entered`,
+`qa-blocked`, `qa-escalated` and `qa-deferred` entirely: the whole
+escalation/defer path that v5 D-phase work made load-bearing. Rebuilt below
+from the state table in **[`docs/HOOKS.md`](../docs/HOOKS.md)** — Hook
+Configuration → "States — each row lists the trigger, label set, and
+Stop-hook behaviour" — which **is normative**; this diagram (and the table
+under it) is a navigational summary, not a second source of truth. Where
+the two disagree, HOOKS.md governs.
+
 ```
-Implementation done:     qa-pending added
-                              │
-                              ▼
-QA starts review:       qa-pending (still)
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                                           ▼
-    Issues found                              Approved
-        │                                           │
-        ▼                                           ▼
-    qa-pending (still)                   qa-pending → qa-approved
+    qa-pending added (specialist finishes, adds the label)
         │
-        │ (fix issues)
+        ▼
+    qa-gate.sh enter            →  +qa-gate-entered, gate armed
         │
-        └───────────────────────────────────────────┘
+        ▼
+    ┌─────────┐   block          ┌─────────────┐
+    │ pending │ ───────────────▶ │ qa-blocked  │  (fix, re-submit)
+    └────┬────┘                  └──────┬──────┘
+         │                              │
+         │ cap reached                  │ fresh `enter`
+         │ (max(iterations,             │ (or `approve`)
+         │  rounds) hits                │
+         │  MAX_ITERATIONS,             │
+         │  no review in flight)        │
+         ▼                              │
+    ┌───────────┐                       │
+    │ escalated │                       │
+    └─────┬─────┘                       │
+          │ choose defer, OR            │
+          │ 2 unanswered escalated      │
+          │ Stops (auto-defer)          │
+          ▼                             │
+    ┌──────────┐                        │
+    │ deferred │                        │
+    └─────┬────┘                        │
+          │                             │
+          └── qa-gate.sh approve ───────┘   (reachable from pending,
+                     │                        qa-blocked, escalated,
+                     ▼                        OR deferred — the ONE
+              ┌─────────────┐                 universal exit)
+              │ qa-approved │   Stop hook releases
+              └─────────────┘
+
+    (from `escalated`, `choose continue` / `choose tech-debt` also
+     returns directly to `pending` — not drawn above to keep the
+     happy-path arrows readable; see the table below)
 ```
+
+| State | Labels actually on the task | Stop-hook behaviour | How you leave it |
+| --- | --- | --- | --- |
+| `pending` | `qa-pending` + `qa-gate-entered` | Run the full suite each loop; block until approved | `block` → `qa-blocked`; cap reached → `escalated`; `approve` → `qa-approved` |
+| `qa-blocked` | `qa-blocked` **+ `qa-pending` + `qa-gate-entered`, preserved** — `cmd_block` clears only `qa-approved` | Same as `pending`; the specialist fixes and re-submits | Specialist fixes, re-adds `qa-pending` if needed; QA re-`enter`s; or `approve` |
+| `escalated` | `qa-pending` + `qa-escalated` | Skip the full suite, reuse the cached failure, block on a J21 choice (posted once) | `choose continue` / `choose tech-debt` → back to `pending`; `choose defer` (or 2 unanswered escalated Stops, auto-defer) → `deferred`; or `approve` |
+| `deferred` | `qa-pending` + `qa-deferred` | Allow the Stop immediately — the single audited escape valve (principle 6) | A fresh `enter` clears `qa-escalated`/`qa-deferred` and resumes `pending`; or `approve` |
+| `qa-approved` | `qa-approved` only — every other QA-cycle label is dropped in the same atomic transition, including a prior `qa-blocked` | Stop hook releases | Terminal — `bd close` |
+
+`qa-gate.sh approve` (or `choose approve`) is reachable from every
+non-terminal state above, not just `pending` — that is the one universal
+exit the diagram draws explicitly. `rubric-pending`/`rubric-satisfied` run
+alongside this machine rather than inside it (see the
+[QA Status Labels](#qa-status-labels) table above): `rubric-pending` is
+swept by the same `approve` transition; `rubric-satisfied` is not a
+cycle label at all — it is the verdict-backed audit trail behind the
+approval, and it survives the approval that used it.
 
 ---
 

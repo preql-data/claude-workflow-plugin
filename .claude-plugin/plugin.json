@@ -1,6 +1,6 @@
 {
   "name": "claude-workflow",
-  "version": "4.1.0",
+  "version": "5.0.0",
   "description": "Mandatory orchestrator -> specialists -> QA workflow with Beads task tracking",
   "author": {
     "name": "preql-data",

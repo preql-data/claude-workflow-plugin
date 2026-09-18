@@ -67,11 +67,16 @@ The plugin implements an **orchestrator-first architecture** where:
 
 ## Hooks
 
-The plugin wires 6 Claude Code hook events in `.claude/settings.json`
-(SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
-SessionEnd); the plugin-manifest `.claude/hooks/hooks.json` adds a 7th,
-SubagentStart, for plugin-scoped installs. The numbered subsections below
-cover the load-bearing ones:
+The plugin wires **7** Claude Code hook events directly in
+`.claude/settings.json` — SessionStart, UserPromptSubmit, SubagentStart,
+PreToolUse, PostToolUse, Stop, SessionEnd, confirmed with
+`jq '.hooks|keys[]' .claude/settings.json` against the live file. The
+plugin-manifest `.claude/hooks/hooks.json` mirrors the same seven events
+for plugin-scoped installs; it does not add an eighth. Its only addition
+beyond `settings.json` is a second `PostToolUse` matcher (`^Bash$` →
+`bd-github-link.sh`) — see [`docs/HOOKS.md`](../docs/HOOKS.md) "Hook
+Configuration" for the exact diff between the two files. The numbered
+subsections below cover all seven:
 
 ### 1. SessionStart
 
@@ -122,7 +127,70 @@ ledger row.)
 
 **Output**: JSON with `additionalContext` carrying the workflow contract
 
-### 3. PostToolUse
+### 3. SubagentStart
+
+**Trigger**: When Claude Code spawns a subagent (the payload carries
+`agent_type` — e.g. `@backend`, `@qa`, or a built-in like
+`general-purpose`)
+
+**Purpose**: J3 cross-session auto-assign. Hand the spawned specialist the
+active Beads task without the orchestrator having to repeat it in the
+`Task()` prompt. This hook **cannot block the spawn** — the only channel
+it has is injecting `additionalContext` into the new subagent's first
+turn.
+
+**What it does**:
+```bash
+# 1. Read agent_type from stdin
+# 2. If agent_type is a specialist (backend/frontend/devops/qa, with or
+#    without a leading @) AND current-task.sh is non-empty: inject
+#    additionalContext with the task id + a header-only `bd show` summary
+# 3. For the three IMPLEMENTING roles (backend/frontend/devops — never
+#    qa), append an `IMPLEMENTER: role=<r> task=<t> at <ts>` Beads
+#    comment, once per (role, task, review cycle) — the record
+#    review-check.sh reads to refuse a self-review
+# 4. If the active task carries a DESIGN-UNIT binding (v5 D5), splice the
+#    unit's declaration verbatim into additionalContext and record a
+#    SPEC-INJECTED v1 comment with a per-unit content hash
+# 5. Otherwise (no specialist, no current task, any read failure) emit {}
+#    and exit cleanly — silent on every error, per principle 3
+```
+
+**Output**: `additionalContext` injected into the spawned subagent's first
+turn, or `{}`. There is no `permissionDecision` field for this event — it
+cannot deny or delay the spawn, only inform it.
+
+### 4. PreToolUse
+
+**Trigger**: Before a `Write`, `Edit`, or `MultiEdit` tool call (matcher
+`^(Write|Edit|MultiEdit)$`)
+
+**Purpose**: Defense-in-depth complement to the orchestrator's own tool
+list, which is the primary guard (it omits `Write`/`Edit`/`MultiEdit`
+outright). When the payload's subagent identity clearly resolves to the
+orchestrator, deny the edit; otherwise allow.
+
+**What it does**:
+```bash
+# 1. Probe several candidate JSON paths for the active subagent name (the
+#    schema has evolved across runtime versions; empty/null fields are
+#    skipped rather than treated as a match)
+# 2. Normalize: lower-case, strip a leading "@", trim whitespace
+# 3. Exact-match (never substring) against orchestrator |
+#    subagent_orchestrator | claude-orchestrator — avoids false positives
+#    like "data-orchestrator-pipeline"
+# 4. Match: deny, with a "delegate to a specialist" reason
+#    No reliable signal: allow ({}) — never false-positive when identity
+#    isn't surfaced (v5 plan correction 9 forbids re-scoping this hook)
+```
+
+**Output**: `{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+"permissionDecision": "deny", "permissionDecisionReason": "..."}}` on
+block, `{}` otherwise. Bash is **not** matched — `tool_input.command` has
+no path field, so a write-shaped Bash command cannot be denied here; this
+is an accepted, documented residual (see `docs/HOOKS.md`).
+
+### 5. PostToolUse
 
 **Trigger**: After the Write, Edit, MultiEdit or NotebookEdit tools — the four
 whose `tool_input` carries a path (`file_path` for the first three,
@@ -184,7 +252,7 @@ prevention lives at the deleter.
 records state; the Stop hook surfaces the "changes require QA review"
 context. (`post-edit.sh:75` `emit_empty() { echo '{}'; }`.)
 
-### 4. Stop
+### 6. Stop
 
 **Trigger**: When Claude attempts to complete/stop
 
@@ -205,7 +273,7 @@ context. (`post-edit.sh:75` `emit_empty() { echo '{}'; }`.)
 
 **Output**: Either `{}` (allow) or `{"decision": "block", "reason": "..."}` 
 
-### 5. SessionEnd
+### 7. SessionEnd
 
 **Trigger**: When session ends
 

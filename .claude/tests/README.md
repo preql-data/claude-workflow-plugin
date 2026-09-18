@@ -1,9 +1,11 @@
 # Tests
 
-Four-tier test pyramid for the claude-workflow-plugin. Each tier catches a
-different failure mode; together they form the gate that a change has to
-clear before it ships. The live tier is manual-only and invariant-based as
-of v3.1.0 (spec item 0.8) — see [Live e2e (manual, invariant-based)](#live-e2e-manual-invariant-based)
+Five-tier test pyramid for the claude-workflow-plugin (reconciled with
+`docs/HOOKS.md` "five-tier pyramid" — the L3.5 mutation tier below is the
+fifth). Each tier catches a different failure mode; together they form
+the gate that a change has to clear before it ships. The live tier is
+manual-only and invariant-based as of v3.1.0 (spec item 0.8) — see
+[Live e2e (manual, invariant-based)](#live-e2e-manual-invariant-based)
 below.
 
 ## Overview
@@ -14,6 +16,7 @@ below.
 | L2 — component | `.claude/tests/component/specs/*.sh` | Hook pipelines end-to-end with tempdir fixtures | Offline | `make test-component`, CI |
 | L3 — vitest unit | `.claude/tests/e2e/specs/*.unit.spec.ts` | Harness internals: trace schema, normalization, custom matchers, the invariant engine | Offline | `make test-e2e-unit`, CI |
 | L3 — live e2e | `.claude/tests/e2e/specs/<fixture>.spec.ts` | Plugin behaviour end-to-end against real Claude, asserted via fixture-declared invariants | Live (~$5–10 per fixture) | `make test-live FIXTURE=<name>` (manual only) |
+| L3.5 — mutation | `.claude/tests/mutation/` (`mutation-sweep.sh`) | Whether the offline suite would actually catch a fault-class mutation of a hook script — deterministic pass, survivors optionally classified by a separate-context `@judge` | Offline for the sweep itself; the judge classification is a paid call, cost-gated behind `--confirm-judge`, off by default | `bash .claude/tests/mutation/mutation-sweep.sh`, `/mutation-sweep` (dev-cycle-manual; zero CI wiring — see `.claude/tests/mutation/README.md`) |
 
 The tiers above are a statement about WHAT is covered. Where they RUN is a
 second axis, and it is not free: every one of them is authored and measured on

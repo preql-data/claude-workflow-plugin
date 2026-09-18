@@ -16,7 +16,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
-## [Unreleased]
+## [5.0.0] - 2026-09-18
+
+**Design becomes a first-class, reviewed, continuously-enforced phase.**
+Through 4.1.0 the orchestrator both designed and delegated, and nothing
+reviewed the design — every downstream guarantee (the rubric grader, the
+independent reviewer, the change-set-bound approval) verified that the work
+matched the plan, and none of them verified the plan itself, or noticed when
+it quietly stopped governing the work. This release adds a `designer` role
+that produces a reviewed artifact before any implementation task exists; a
+`design_reviewer` role — a distinct identity, mechanically enforced, reusing
+the grader machinery with a new eight-criterion rubric (`DS1`–`DS8`) — that
+gates it through a review loop capped and escalating through the existing
+J21 machinery; a deterministic, no-LLM conformance check binding every
+implementation task to a design unit, with no review round; computed
+parallel batching that names its own degradation rather than hiding it;
+green-to-green implementation per unit with the spec injected verbatim at
+spawn and a `design_conflict` blocker that routes a wrong design to
+amendment instead of improvisation; and a coherence rollup that blocks
+approval while any acceptance criterion is untested, any implemented unit is
+unmapped, any touched file falls outside every declared unit set, or the
+bound artifact hash has moved. Two role classes became five, and the roster
+grows from seven agents to nine (`designer`, `design-reviewer`).
+
+**Why this is a major.** The `## Versioning` criteria above name four things
+that make a release major; the one this release claims is **the agent
+contract**. The roster grows from seven agents to nine; the completion
+contract every specialist files at close gains five new fields (`unit_id`,
+`design_hash`, `green_before`, `green_after`, `criteria_tests`), validated
+at `approve` rather than merely documented (a field the recorder does not
+reject when malformed is documentation, not a contract); and the
+orchestrator's own job narrows — from planning-and-designing to
+execution-planning against a reviewed artifact, with its output checked
+deterministically instead of by review. A stock `.claude/model-roles` from
+any prior release has no `designer`/`design_reviewer` keys at all, which is
+exactly the shape the major criterion's "operators may need to re-run the
+installer in fresh mode" clause describes. Stated so it is not read as an
+unmapped second criterion: the QA gate also gains new preconditions this
+release — an epic cannot proceed to implementation without
+`design-satisfied` plus a bound `design_artifact`, and cannot approve
+without a coherent rollup — but that is the gate enforcing the new agent
+contract's consequences, not an independent widening of gate semantics in
+the sense v4.0.0 used the term (two new NECESSARY conditions on every
+approval, independent of role). The agent contract is where this release's
+weight actually sits.
+
+> **UPGRADE NOTE — four things to act on, in this order.**
+>
+> **1. `.claude/model-roles` is operator-owned, and an edited copy does not
+> self-upgrade.** The file is manifest class `operator`, so an install whose
+> copy was customized receives the v5 defaults as a
+> `.claude/model-roles.new` sidecar and silently keeps running the OLD key
+> set — with no `designer`/`design_reviewer` mapping at all, both falling
+> back to `top` fail-open rather than to anything this release intends.
+> `missing_keys` in the resolved artifact and a new SessionStart warning are
+> what make that visible instead of silent. If you have ever hand-edited
+> `.claude/model-roles`, diff it against the `.new` sidecar after upgrading
+> and merge in the two design-lane keys plus the escalation/reviewer-lane
+> grammar by hand.
+>
+> **2. Implementers move from Opus-class to Sonnet-class.** `backend`,
+> `frontend` and `devops` now resolve to the latest Sonnet-class model — a
+> deliberate quality-for-cost trade that the reviewed design artifact and
+> per-unit green-to-green tests are meant to absorb, with a unit's own
+> declared `implementer_class: high` as the escalation safety valve for
+> work whose complexity or fan-in warrants it. Revert is one line:
+> `implementer=opus-class` in `.claude/model-roles`. Track grader rounds per
+> implementation task before and after; if rounds rise materially, revert
+> and record the observation in `LESSONS.md`, per this release's own rider
+> in `.claude/model-roles` itself. Separately, and landed in this same
+> release rather than deferred: `orchestrator` and `reviewer` — which
+> shipped Phase D0 still pinned to `top` (Fable today), a recorded deviation
+> from the plan's own D0 table — have both since moved to `opus-class`,
+> closing that deviation; see the Added section below for the full
+> rationale and dates.
+>
+> **3. The Linear adapter ships unproven — no live validation was run.**
+> `docs/specs/<task-id>.md` is the design-artifact path that is actually
+> exercised; Linear is written and unit-tested behind the same degradation
+> contract the Codex reviewer lane uses, but its live path against a
+> connected workspace has never been run. The mechanical honesty guard for
+> that fact — `.claude/tests/component/specs/design-degradation.sh`
+> (behavioural: byte-identical gate output with and without
+> `DESIGN_STORE=linear`) plus `.claude/scripts/tests/design-structural.test.sh`
+> (structural: a lexical tripwire for three tracked literal spellings
+> across the three gate scripts — an early warning, not a completeness
+> proof) — ships in this same release. No line in this CHANGELOG, the
+> README, or the drafted Slack update may assert the Linear path works, and
+> none does.
+>
+> **4. Re-run `--verify` after upgrading.** `bash install.sh --verify` now
+> runs twelve named checks (up from eleven — Phase P added `beads_ledger`),
+> including two that spawn the MCP servers over stdio and assert exact tool
+> counts (21 / 7, unchanged) and two (`gate_pretooluse`, `gate_stop`) that
+> exercise the live hook contract. A `beads_ledger` failure means your
+> installed target's `.beads/issues.jsonl` and its live `bd` database have
+> diverged with no provable direction — read the check's own `fix:` line
+> and reconcile with `bash .claude/scripts/beads-ledger.sh reconcile
+> --apply` before trusting the rest of the report.
 
 ### Added
 
@@ -1852,20 +1949,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   machinery lands in D1-D5.** Track grader rounds per implementation task before
   and after; the revert is one line in `.claude/model-roles`.
 
-- **`orchestrator` and `reviewer` keep `top`, which is NOT what the plan's D0
-  table specifies** (`fkm.2`, tracked as `fkm.10`; QA finding R1-F3). The plan
+- **`orchestrator` and `reviewer` shipped D0 on `top`, which was NOT what the
+  plan's D0 table specified — both rows have since LANDED at the plan's own
+  tier** (`fkm.2`; tracked and closed on `fkm.10`; QA finding R1-F3). The plan
   asks for latest Opus-class on `orchestrator`, and Sol-via-Codex with a latest
-  Opus-class fallback on `reviewer`. The Sol half ships; the two tiers do not.
-  Correction 7 licenses `top` for the DESIGN lanes only, and the reason does not
-  transfer: there `top` IS the Fable class the plan named, whereas Opus is not
-  the top family, so `top` on these two lanes is a *higher* tier than specified.
-  Deferred to D4 rather than applied here because D0 ships no working designer,
-  which leaves the orchestrator seat doing design-shaped work; because this
-  phase already lands one tier drop ahead of the machinery meant to absorb it;
-  and because `reviewer` is the gate's own seat. Recorded here and in the
-  `.claude/model-roles` header rather than left to be inferred — a deviation
-  nobody wrote down is indistinguishable from an oversight, which is the
-  standard this release is built on.
+  Opus-class fallback on `reviewer`. D0 shipped the Sol half of `reviewer` but
+  left both tiers on `top` (Fable today) — correction 7 licenses `top` for the
+  DESIGN lanes only, and the reason does not transfer: there `top` IS the
+  Fable class the plan named, whereas Opus is not the top family, so `top` on
+  these two lanes was a *higher* tier than specified, not the same one.
+  **`reviewer` landed first** (2026-09-07): `top` -> `opus-class`, because the
+  deferral rationale never actually applied to it — the operator's standing
+  instruction is that QA and review run on Sol in priority to Opus and NEVER
+  on Fable (a weekly-limit constraint), so `top` resolving to Fable was a live,
+  silent policy violation on every reviewer spawn, not a deliberate capability
+  trade being protected. **`orchestrator` landed second** (2026-09-18, `fkm.9`
+  / D7): `top` -> `opus-class`, for two independent reasons — the plan's own
+  D0 table specifies `latest Opus-class` on its own terms, and the original
+  deferral reason (the orchestrator seat still doing design-shaped judgment,
+  because D0 shipped no working designer) no longer holds now that D1
+  (`designer`) and D2 (`design_reviewer`, the review loop) have shipped; and,
+  as an *extension* of the same weekly-limit reasoning rather than the
+  operator instruction's literal text, the orchestrator is spawned on
+  essentially every non-trivial turn — far more often than any reviewer — so
+  it was the seat burning the protected weekly Fable budget hardest of the
+  two still on `top`. Both landings are recorded with full rationale in
+  `.claude/model-roles`'s own header (rewritten from "DECLARED DEVIATION" to
+  "DEVIATION LANDED" describing both rows), and `fkm.10` is closed. The design
+  lanes (`designer`, `design_reviewer`) remain `top` — that was never a
+  deviation to begin with, per correction 7 above.
 
 - **Eight files stopped hardcoding agent/role lists** (`fkm.2`). The unit is a
   FILE that no longer enumerates agents or roles, which is what the list below
@@ -2260,6 +2372,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped file's bytes, with a drifted-config negative control — a
   spec-authored fixture config is exactly how the first raise rode through
   provably untested.
+
+### Fixed
+
+- **Four gate defects that each made a measurement that never happened look
+  exactly like one that passed** (`gytz`; commit `261e09e`, 43 paths). Four
+  tasks share one change set because they share one defect family: in every
+  case the failure mode was not "the check said no" but "the check said
+  nothing, and nothing is what success looks like here."
+  - **`90av` — the Stop hook was a gate pretending to be a scheduler.** On
+    release it ended the session instead of handing over the next ready
+    work — shipped, unfixed, across two prior attempts over months —
+    because `additionalContext` on a Stop event is DISCLOSURE-ONLY and
+    cannot resume a turn; only a top-level `{"decision":"block"}` continues
+    a session. `compute_next_work()` now resolves READY / NOTHING /
+    DEGRADED as three distinct states and emits a block for READY only, so
+    an empty queue and a broken query no longer render identically.
+  - **`9hv4` — a zero-match lesson search looked like a clean search.**
+    Phase P's `LESSONS.md` scoping never fully landed, and both consumers
+    required to follow it had already shipped against the gap.
+    `lessons.sh list` with filters now emits accounting on stderr, so a
+    search matching zero entries is reported as zero rather than returning
+    the same clean, confident, empty output as a search that matched
+    nothing because it was scoped wrong.
+  - **`wuu8` — a refused review packet looked like a reviewer with no
+    findings.** A real review packet measured 14.5x over
+    `codex-review.sh`'s `max_request_bytes`, so the "Codex lane active" arc
+    silently exercised the exit-7 fallback instead of reaching Codex at
+    all. The packet is now built with a byte budget and whole-file-only
+    elision — never a mid-file cut, which would hand a reviewer an
+    incomplete hunk with no marker that anything followed it — ordered
+    largest-first within a tier. Shipped smallest-first for one round, and
+    that was measurably wrong: six small agent prompts consumed a
+    35,841-byte floor before `qa-gate.sh` (48,868 bytes) could be seated at
+    all, so the reviewer received zero bytes of either gate script
+    implementing the HIGH-severity repairs actually under review.
+  - **`dhh7` — the store canary's ATTRIBUTION mechanism is DELETED, not
+    fixed.** A hand-written regex parser over `bd`'s free-form
+    commit-message text decided self-vs-external, and failed three
+    consecutive independent review rounds as each tightened the regex
+    while the underlying defect survived — the input was never a protocol,
+    it was a vendor's human-readable prose, which changed under the
+    project mid-arc when the host's `bd` moved 1.2.2 -> 1.3.0. Removed
+    under the standing waiver ruling: when a defect family survives
+    repeated rounds against the same mechanism, remove the mechanism —
+    tombstones only, no dormant code, no flag, no `NOT-PROVEN` row.
+    Detection survives and is now honest: `hashof('HEAD')` needs no actor,
+    so it does not depend on the same commit-message prose that just
+    failed three times, and any store advance during a spec now fails that
+    spec, named. Four further defects in that detection path, found by the
+    fourth and fifth review rounds, are fixed in the same commit: a failed
+    snapshot no longer reads as "no change" (the query's `rc` is captured
+    on its own line rather than masked behind a pipe, and the hash is
+    validated by a POSITIVE allow-list — a bracket-range allow-list follows
+    locale collation, and under `en_US.UTF-8` on this host bash 3.2 matches
+    uppercase `A`-`U` against what was meant to be lowercase-hex-only); a
+    boolean sentinel can no longer render as "advanced by 1 commit(s)"; and
+    the canary no longer shadows a spec's own transcript failures.
+  - **`bd dep add` on an already-existing edge is a silent no-op** — rc=0,
+    an identical success message, and the store hash provably does not
+    move. Found while fixing the four above; fixtures now verify the write
+    LANDED before asserting any verdict, so a write that did not happen can
+    never again be read as a guard that did not fire.
+
+  **A known limit ships openly rather than being papered over**: the
+  canary's contract is now stated as exactly what two endpoint samples can
+  prove — NET HEAD CHANGED, never "advanced at any time." An exact
+  advance-then-restore inside one spec is invisible, and that limit is
+  characterised by a test that drives a real `dolt reset --hard` round trip,
+  not described in a comment. Closing it fully would mean rebuilding the
+  mechanism just deleted; spec isolation (`h5lw`, filed, not yet landed)
+  removes the need instead.
+
+  Measured at `261e09e` (cited from the commit's own record — not re-run by
+  this piece, per this task's constraint against a full-tier run while
+  sibling agents are concurrently writing to `bd`): `make test` (full L1)
+  72/72 specs, completeness floor HELD, 7,306 assertions (71 passed / 1
+  failed — the one failure was a store advance caused by the gate's own
+  mandatory J21 write during the run itself, and a quiesced re-run proved
+  the store hash byte-identical before and after); `runner-completeness`
+  463/463 assertions, rc=0; `make lint` rc=0; `bd --version` 1.3.0
+  (`f45b249ce`). Nine follow-ups filed, none silent, including `h5lw` (spec
+  isolation, the family-level fix several of the above converge on) and
+  `srlo` — filed, still OPEN, NOT fixed by this commit: a fake
+  system-reminder, shaped like a genuine one, observed attached to tool
+  results and steering agents to edit via Bash (`sed`, heredocs) instead of
+  the dedicated Write/Edit tools specifically because `post-edit.sh` hooks
+  Write/Edit/MultiEdit/NotebookEdit and NOT Bash, so a Bash-mediated edit
+  never enters `changed-files.txt` or `change_set_hash` and ships outside
+  what the QA approval attests. Observed against 12+ agent carriers this
+  arc; every agent that reported on it refused except one, which
+  self-reported complying once, caught itself, and remediated via a real
+  Edit call. The defence today is each agent independently recognising and
+  refusing the carrier — filed specifically because that is a per-agent
+  judgement call repeated dozens of times rather than a mechanical gate,
+  and it has already failed once.
 
 ## [4.1.0] - 2026-07-30
 
