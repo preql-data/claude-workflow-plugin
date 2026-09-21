@@ -6,8 +6,8 @@
 # so its own contract has to be pinned hard. Four properties matter most:
 #
 #   1. THE CHECK REGISTRY IS THE TEST CONTRACT. Other specs and the
-#      /workflow-doctor command assert on the twelve check names by name, so the
-#      DOCTOR_CHECK_NAMES sentinel block, the runner's case arms, --help and a
+#      /workflow-doctor command assert on the thirteen check names by name, so
+#      the DOCTOR_CHECK_NAMES sentinel block, the runner's case arms, --help and a
 #      real --json-out run must all agree exactly. A name that exists in one
 #      place and not another is a check that silently never runs.
 #
@@ -43,6 +43,11 @@
 #      CI floor asserting a bound the truncation it guards against would clear.
 #      Section 7 derives the expected count from the sentinel and scans every
 #      tracked surface, so the next registry change goes red instead of quiet.
+#      `model_parity` (claude-workflow-plugin-a13r) took the count to
+#      thirteen the same disciplined way: every surface Section 7 tracks was
+#      updated in the same change, and Section 7 itself needed no code
+#      changes to notice a thirteenth name — that is the point of deriving
+#      the expected count from the sentinel rather than typing it.
 #
 # META-TESTs (all anchored to unique TEXT patterns, never line numbers, per
 # LESSONS.md; all operate on separate mutant/fixture COPIES so the repo tree
@@ -82,6 +87,32 @@
 #                equality and not a floor — and a target whose .beads/ has no
 #                embedded-Dolt store at all still PASSES (DISARMED, never a
 #                failure over an environment gap the check cannot evaluate).
+#   META-TEST 10 (section 9, claude-workflow-plugin-a13r) `model_parity`
+#                actually gates: a target whose model-select cache and agent
+#                pins genuinely agree PASSES; a drifted pin FAILs by name
+#                with check-parity's own DISAGREEMENT detail; a target with
+#                no cache at all SELF-SKIPS (never PASSes, and — measured
+#                against install.sh's own --verify block, which runs with no
+#                --skip flags at all — never FAILs either, since nothing in
+#                the install path ever populates this cache and FAILing here
+#                broke every fresh install with no ANTHROPIC_API_KEY) with
+#                the UNVERIFIABLE detail, so an unpopulated cache can never
+#                look healthy; and a target seeded with a real cache proves
+#                mk_probe_sandbox's copy of it is what the sandboxed check
+#                actually reads, by removing the LIVE copy after seeding the
+#                sandbox source and confirming the verdict still reflects
+#                the seeded state, not an empty one.
+#   META-TEST 11 (section 9, claude-workflow-plugin-a13r round 3) an
+#                unreadable (chmod 000) agent file on the REAL target FAILS
+#                model_parity by name, through the DURABLE path — mk_target
+#                -> chmod 000 -> the real doctor_run -> the real
+#                mk_probe_sandbox, whose `cp -R` silently drops a file it
+#                cannot read. A copy of the doctor with only the new
+#                fail-closed gate disarmed reproduces the original defect:
+#                the sandbox is quietly missing the file, that reads as a
+#                legitimate "never installed" exclusion, and the run
+#                WRONGLY PASSES; the shipped doctor, identical fixture,
+#                still FAILs.
 #
 # Exit codes: 0 all assertions pass, 1 otherwise, 2 invocation error.
 
@@ -517,7 +548,7 @@ assert_eq "registry: exactly one END DOCTOR_CHECK_NAMES sentinel" "1" "$SENTINEL
 
 SENTINEL_LIST=$(sentinel_names "$DOCTOR")
 SENTINEL_COUNT=$(printf '%s' "$SENTINEL_LIST" | wc -w | tr -d ' ')
-assert_eq "registry: the sentinel declares 12 check names" "12" "$SENTINEL_COUNT"
+assert_eq "registry: the sentinel declares 13 check names" "13" "$SENTINEL_COUNT"
 
 # Sorted comparison so the assertion is about SET equality, not ordering.
 SENTINEL_SORTED=$(printf '%s' "$SENTINEL_LIST" | sort_words)
@@ -612,9 +643,11 @@ assert_eq "skip: the kept check still ran (deps has a non-SKIP status)" "false" 
     "$([ "$(status_of "$SKIP_JSON" deps)" = "SKIP" ] && echo true || echo false)"
 assert_eq "skip: a skipped check's status is SKIP" "SKIP" \
     "$(status_of "$SKIP_JSON" gate_stop)"
-# 12 checks in the registry, one kept (deps) => 11 skipped. Bumped from 10
-# when beads_ledger joined the registry (claude-workflow-plugin-fkm.1.1).
-assert_eq "skip: .skipped counts every skipped name" "11" \
+# 13 checks in the registry, one kept (deps) => 12 skipped. Bumped from 11
+# when model_parity joined the registry (claude-workflow-plugin-a13r); before
+# that it was bumped from 10 when beads_ledger joined
+# (claude-workflow-plugin-fkm.1.1).
+assert_eq "skip: .skipped counts every skipped name" "12" \
     "$(jq -r '.skipped' "$SKIP_JSON" 2>/dev/null || echo "-1")"
 assert_eq "skip: a skipped check is NOT counted in .passed" "true" \
     "$(jq -r '.passed <= 1' "$SKIP_JSON" 2>/dev/null || echo "false")"
@@ -629,7 +662,7 @@ assert_eq "skip: skipping every check yields passed=0" "0" \
     "$(jq -r '.passed' "$ALL_SKIP_JSON" 2>/dev/null || echo "-1")"
 assert_eq "skip: skipping every check yields failed=0" "0" \
     "$(jq -r '.failed' "$ALL_SKIP_JSON" 2>/dev/null || echo "-1")"
-assert_eq "skip: skipping every check yields skipped=12" "12" \
+assert_eq "skip: skipping every check yields skipped=13" "13" \
     "$(jq -r '.skipped' "$ALL_SKIP_JSON" 2>/dev/null || echo "-1")"
 
 # ===========================================================================
@@ -1370,6 +1403,21 @@ COUNT_SURFACES_SILENT=(
 # docs/v4.1-closure.md and docs/plans/v4.1-upgrade-wave.md all say "eleven" and
 # all are DATED records of what shipped at v4.1.0, when eleven was true.
 # Rewriting history to satisfy a guard would be the worse failure.
+#
+# HANDOFF.md is the SAME shape, deliberately excluded for the SAME reason,
+# not merely forgotten (claude-workflow-plugin-a13r round 3, item 4). Its
+# "Verify conditions for v5.0.0 shipped" section quotes TWO LITERAL
+# `install.sh --verify` transcripts, captured at HEAD 261e09e and at LIVE-1's
+# 2026-09-19 run, when the registry's own summary line reported a
+# checks-count of 12 for itself --
+# `grep -noniE "$DOCTOR_CLAIM_RE" HANDOFF.md` matches ONLY those two
+# quoted-output lines (verified directly, not assumed). The file's several
+# OTHER stale "12" mentions are typed as "confirm `12`" / "Expect `12/12`" --
+# a shape this regex does not reach at all, adjacent-to-"check" or not -- and
+# those were corrected in place with an explicit HISTORICAL pin instead of
+# relying on this guard. Tracking the file here would force the two literal
+# transcripts to read "13", which they never printed -- the same
+# rewriting-history failure the surfaces above exist to avoid.
 
 COUNT_MISSING=""
 COUNT_NAMING_PATHS=()
@@ -1697,6 +1745,428 @@ REPL
         printf '  note: META-TEST 9 fault-injection leg skipped -- Section 8 fixtures were not built (see the note above).\n'
     fi
 fi
+
+# ===========================================================================
+echo ""
+echo "=== Section 9: model_parity actually gates (claude-workflow-plugin-a13r, META-TEST 10) ==="
+#
+# WHY THIS EXISTS. claude-workflow-plugin-a13r's round-2 independent review
+# found the check-parity FIX real but unwired: nothing but a human running
+# model-select.sh by hand ever saw its exit code, so a drifted pin could sit
+# forever behind a doctor that only ever asked file-existence questions.
+# model_parity closes that gap; this section proves the closure is real,
+# not merely present. mk_target() does NOT copy .claude/model-roles or the
+# model-select cache (neither is part of what the doctor's OTHER checks
+# read), so every role in these fixtures uses the fail-open `top` default
+# deliberately -- the point here is the GATE'S plumbing (a real drift
+# reaching the doctor's own FAIL/exit code, and an unverifiable cache
+# reaching an honest SKIP rather than either extreme), not model-roles'
+# parsing, which Section 14 of model-roles.test.sh already owns in full.
+#
+# seed_model_pins <dir> <id> -- rewrite EVERY copied agent's model: line to
+# <id>, so a target's agreement/drift shape is deterministic regardless of
+# what the live repo's own pins currently are.
+seed_model_pins() {
+    local d="$1" id="$2" f tmp
+    for f in "$d"/.claude/agents/*.md; do
+        [ -f "$f" ] || continue
+        tmp="$f.tmp.$$"
+        sed "s/^model:.*/model: $id/" "$f" > "$tmp" && mv "$tmp" "$f"
+    done
+}
+
+# seed_cache <dir> <id> -- a minimal, valid model-select cache listing
+# exactly one candidate, so `top` resolves to <id> unambiguously with no
+# ranking file needed.
+seed_cache() {
+    local d="$1" id="$2"
+    mkdir -p "$d/.claude/.qa-tracking"
+    cat > "$d/.claude/.qa-tracking/model-select-cache.json" <<JSON
+{"timestamp": $(date +%s), "models": [{"id":"$id","max_input_tokens":400000,"created_at":"2026-07-01T00:00:00Z"}]}
+JSON
+}
+
+# write_helperfail_stub <dir> -- install a role/agent map helper that prints
+# a COMPLETE, correctly-agreeing map (so a naive reader could mistake it for
+# healthy data -- the coincidental-OK trap) and then exits nonzero anyway.
+# model-roles.test.sh's 14.11 already proves check-parity itself catches
+# this shape; 9.5 / META-TEST 12 below prove what happens ONE LEVEL UP, at
+# this doctor (claude-workflow-plugin-a13r round 4, item (b)).
+write_helperfail_stub() {
+    local d="$1"
+    cat > "$d/.claude/scripts/workflow-model-apply.sh" <<'STUB'
+#!/bin/bash
+printf 'designer\tdesigner\n'
+printf 'design_reviewer\tdesign-reviewer\n'
+printf 'orchestrator\torchestrator\n'
+printf 'implementer\tbackend\n'
+printf 'implementer\tfrontend\n'
+printf 'implementer\tdevops\n'
+printf 'reviewer\tqa\n'
+printf 'reviewer\tgrader\n'
+printf 'reviewer\tjudge\n'
+exit 7
+STUB
+    chmod +x "$d/.claude/scripts/workflow-model-apply.sh"
+}
+
+ONLY_MP="$(all_but model_parity)"
+
+# --- 9.1 POSITIVE: every agent pin agrees with the seeded cache -------------
+MP_AGREE="$WORK/mp-agree"
+mk_target "$MP_AGREE"
+seed_model_pins "$MP_AGREE" "claude-sec9-agree"
+seed_cache "$MP_AGREE" "claude-sec9-agree"
+MP1_JSON="$WORK/mp1.json"
+doctor_run "$DOCTOR" "$MP_AGREE" "$MP1_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "9.1 a target whose agent pins agree with the seeded cache PASSES model_parity" \
+    "PASS" "$(status_of "$MP1_JSON" model_parity)"
+assert_contains "9.1 ...and the detail carries check-parity's own OK marker" \
+    "check-parity: OK" "$(jq -r '(.checks[]|select(.name=="model_parity").detail)//""' "$MP1_JSON")"
+
+# --- 9.2 NEGATIVE: one agent's pin is deliberately drifted, landing-proven --
+MP_DRIFT="$WORK/mp-drift"
+mk_target "$MP_DRIFT"
+seed_model_pins "$MP_DRIFT" "claude-sec9-agree"
+seed_cache "$MP_DRIFT" "claude-sec9-agree"
+DRIFT_TMP="$MP_DRIFT/.claude/agents/qa.md.tmp"
+sed "s/^model:.*/model: claude-sec9-DRIFTED/" "$MP_DRIFT/.claude/agents/qa.md" > "$DRIFT_TMP" \
+    && mv "$DRIFT_TMP" "$MP_DRIFT/.claude/agents/qa.md"
+assert_eq "9.2 landing proof: qa.md is genuinely drifted from the seeded id before the doctor ever runs" \
+    "model: claude-sec9-DRIFTED" "$(grep '^model:' "$MP_DRIFT/.claude/agents/qa.md")"
+MP2_JSON="$WORK/mp2.json"
+doctor_run "$DOCTOR" "$MP_DRIFT" "$MP2_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "9.2 a genuinely drifted agent pin FAILS model_parity, and the doctor's own exit code says so" \
+    "1" "$DOCTOR_RC"
+assert_eq "9.2 ...specifically, model_parity itself is the FAIL" \
+    "FAIL" "$(status_of "$MP2_JSON" model_parity)"
+MP2_DETAIL=$(jq -r '(.checks[]|select(.name=="model_parity").detail)//""' "$MP2_JSON")
+assert_contains "9.2 ...naming check-parity's own DISAGREEMENT verdict" \
+    "CONFIG/FILE DISAGREEMENT" "$MP2_DETAIL"
+assert_contains "9.2 ...and the SPECIFIC file, reviewer/qa" \
+    "reviewer/qa: agent file has 'claude-sec9-DRIFTED'" "$MP2_DETAIL"
+MP2_FIX=$(jq -r '(.checks[]|select(.name=="model_parity").fix)//""' "$MP2_JSON")
+assert_contains "9.2 ...and the FAIL carries a fix: line naming model-select.sh apply" \
+    "model-select.sh apply" "$MP2_FIX"
+
+# --- 9.3 UNVERIFIABLE: no cache at all -- SELF-SKIPS, never a silent PASS --
+#
+# SKIP, not FAIL. MEASURED (not assumed): install.sh's own functional-
+# verification block invokes the target's workflow-doctor.sh with NO --skip
+# flags at all (see install.sh's "Functional verification" section), and
+# nothing in the install path ever populates the model-select cache — so a
+# FAIL mapping here broke "installed, verification FAILED" (exit 3) for
+# EVERY fresh install with no ANTHROPIC_API_KEY, which is this plugin's
+# common case (Claude Code's typical auth is subscription/OAuth, not a raw
+# API key). SKIP still satisfies "never read as a pass" — this file's own
+# header: "a skipped check must count as SKIPPED, never as passed".
+MP_NOCACHE="$WORK/mp-nocache"
+mk_target "$MP_NOCACHE"
+seed_model_pins "$MP_NOCACHE" "claude-sec9-agree"
+assert_eq "9.3 landing proof: mk_target genuinely leaves no model-select cache behind" \
+    "no" "$([ -f "$MP_NOCACHE/.claude/.qa-tracking/model-select-cache.json" ] && echo yes || echo no)"
+MP3_JSON="$WORK/mp3.json"
+doctor_run "$DOCTOR" "$MP_NOCACHE" "$MP3_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "9.3 an unpopulated cache SELF-SKIPs model_parity (never FAILs the install, never a silent PASS)" \
+    "SKIP" "$(status_of "$MP3_JSON" model_parity)"
+assert_eq "9.3 ...and the doctor's OWN exit code stays 0 (a fresh install with no API key must still verify clean)" \
+    "0" "$DOCTOR_RC"
+MP3_DETAIL=$(jq -r '(.checks[]|select(.name=="model_parity").detail)//""' "$MP3_JSON")
+assert_contains "9.3 ...says UNVERIFIABLE" "UNVERIFIABLE" "$MP3_DETAIL"
+assert_contains "9.3 ...specifically tagged NO-DATA, not HELPER-FAILURE (claude-workflow-plugin-a13r round 4, item (b))" \
+    "UNVERIFIABLE:NO-DATA" "$MP3_DETAIL"
+assert_not_contains "9.3 ...and is never mistaken for a pass" "check-parity: OK" "$MP3_DETAIL"
+MP3_FIX=$(jq -r '(.checks[]|select(.name=="model_parity").fix)//""' "$MP3_JSON")
+assert_contains "9.3 ...and the fix: line (carried in the JSON regardless of status) explains how to populate the cache with the command that actually works (round 4 MEDIUM: status only reads, resolve populates)" \
+    "model-select.sh resolve" "$MP3_FIX"
+
+# --- 9.4 DOCTOR-LEVEL CHMOD CONTROL (round 3, item 2) -----------------------
+#
+# WHY THIS EXISTS. model-roles.test.sh Section 14.9 already proves
+# model-select.sh ITSELF folds an unreadable agent file into DISAGREEMENT
+# rather than silently excluding it -- but that test drives model-select.sh
+# DIRECTLY against a hand-built sandbox that already has the file in place,
+# unreadable. It never exercises mk_probe_sandbox's own `cp -R`, which is
+# the ACTUAL path a real target's chmod-000 file travels through before
+# model_parity ever sees it, and `cp -R ... 2>/dev/null || true` silently
+# DROPS a file it cannot read (confirmed directly: `cp -R` on this platform
+# exits 1, prints "Permission denied", and the destination directory simply
+# never gets the file -- readable siblings still copy). Absent reads as a
+# LEGITIMATE "never installed" exclusion (14.6's shape), not a permission
+# problem -- the original false-success shape reappearing at THIS
+# integration boundary, invisible to a unit test that skips the boundary
+# entirely. This is the DURABLE path: mk_target -> chmod 000 -> the REAL
+# doctor_run, which calls the REAL workflow-doctor.sh, which calls its own
+# REAL mk_probe_sandbox.
+if [ "$(id -u)" = "0" ]; then
+    printf '  note: 9.4 SKIPPED - running as root, chmod 000 does not block a read, so this trigger cannot fire here\n'
+else
+    MP_UNREADABLE="$WORK/mp-unreadable"
+    mk_target "$MP_UNREADABLE"
+    seed_model_pins "$MP_UNREADABLE" "claude-sec9-agree"
+    seed_cache "$MP_UNREADABLE" "claude-sec9-agree"
+    chmod 000 "$MP_UNREADABLE/.claude/agents/qa.md"
+    assert_eq "9.4 landing proof: qa.md is genuinely unreadable by this process before the doctor ever runs" \
+        "no" "$([ -r "$MP_UNREADABLE/.claude/agents/qa.md" ] && echo yes || echo no)"
+    MP4_JSON="$WORK/mp4.json"
+    doctor_run "$DOCTOR" "$MP_UNREADABLE" "$MP4_JSON" --quiet --skip "$ONLY_MP"
+    chmod 644 "$MP_UNREADABLE/.claude/agents/qa.md"
+    assert_eq "9.4 SPECIFIC MISBEHAVIOUR (of the OLD sandbox copy): an unreadable agent file on the REAL target FAILS model_parity, not a silent PASS" \
+        "FAIL" "$(status_of "$MP4_JSON" model_parity)"
+    assert_eq "9.4 ...and the doctor's own exit code says so" "1" "$DOCTOR_RC"
+    MP4_DETAIL=$(jq -r '(.checks[]|select(.name=="model_parity").detail)//""' "$MP4_JSON")
+    assert_contains "9.4 ...naming the SPECIFIC file the sandbox could not copy" \
+        "qa.md" "$MP4_DETAIL"
+    assert_contains "9.4 ...and saying WHY (unreadable, not just absent)" \
+        "unreadable file(s) that the probe sandbox could not copy" "$MP4_DETAIL"
+    MP4_FIX=$(jq -r '(.checks[]|select(.name=="model_parity").fix)//""' "$MP4_JSON")
+    assert_contains "9.4 ...and the fix: line names the actual remedy (chmod), not model-select.sh apply" \
+        "chmod +r" "$MP4_FIX"
+fi
+
+# --- 9.5 UNVERIFIABLE:HELPER-FAILURE FAILs, not SKIPs (round 4, item (b)) --
+#
+# WHY THIS EXISTS. Round 4's independent review found that check-parity
+# correctly returns 2 (UNVERIFIABLE) on a nonzero or partial
+# --print-role-map, but this doctor mapped EVERY rc=2 to SKIP regardless of
+# WHY -- so "a broken --print-role-map produces zero failed checks and
+# doctor exit 0", indistinguishable from the normal cold-cache SKIP proven
+# in 9.3. check-parity's detail line now carries a machine-readable tag
+# (UNVERIFIABLE:NO-DATA vs UNVERIFIABLE:HELPER-FAILURE); this doctor's rc=2
+# handling branches on it. This is the DURABLE path: mk_target -> a broken
+# workflow-model-apply.sh -> the REAL doctor_run.
+MP_HELPERFAIL="$WORK/mp-helperfail"
+mk_target "$MP_HELPERFAIL"
+seed_model_pins "$MP_HELPERFAIL" "claude-sec9-agree"
+seed_cache "$MP_HELPERFAIL" "claude-sec9-agree"
+write_helperfail_stub "$MP_HELPERFAIL"
+assert_eq "9.5 landing proof: the stub genuinely exits nonzero" \
+    "7" "$(bash "$MP_HELPERFAIL/.claude/scripts/workflow-model-apply.sh" --print-role-map >/dev/null 2>&1; echo $?)"
+assert_eq "9.5 landing proof: the stub's map is genuinely COMPLETE (all 9 members, the coincidental-OK trap if the exit code were ignored)" \
+    "9" "$(bash "$MP_HELPERFAIL/.claude/scripts/workflow-model-apply.sh" --print-role-map 2>/dev/null | grep -c . | tr -d '[:space:]')"
+MP5_JSON="$WORK/mp5.json"
+doctor_run "$DOCTOR" "$MP_HELPERFAIL" "$MP5_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "9.5 a detected helper failure FAILS model_parity, and the doctor's own exit code says so" \
+    "1" "$DOCTOR_RC"
+assert_eq "9.5 ...specifically, model_parity itself is the FAIL, not a SKIP" \
+    "FAIL" "$(status_of "$MP5_JSON" model_parity)"
+MP5_DETAIL=$(jq -r '(.checks[]|select(.name=="model_parity").detail)//""' "$MP5_JSON")
+assert_contains "9.5 ...naming check-parity's own HELPER-FAILURE tag" \
+    "UNVERIFIABLE:HELPER-FAILURE" "$MP5_DETAIL"
+assert_contains "9.5 ...and the nonzero exit itself" \
+    "print-role-map exited 7" "$MP5_DETAIL"
+MP5_FIX=$(jq -r '(.checks[]|select(.name=="model_parity").fix)//""' "$MP5_JSON")
+assert_contains "9.5 ...and the fix: line names the ACTUAL remedy (read the helper's own failure), not a cache to populate" \
+    "workflow-model-apply.sh --print-role-map" "$MP5_FIX"
+assert_not_contains "9.5 ...and the fix: line does NOT send the operator chasing a cache that was never the problem" \
+    "model-select.sh resolve" "$MP5_FIX"
+
+echo ""
+echo "--- META-TEST 11: the unreadable-agent-file gate is what actually blocks the false PASS ---"
+#
+# A COPY of the shipped doctor with ONLY the new fail-closed gate in
+# check_model_parity disarmed (mk_probe_sandbox's own detection is left
+# running and still writes the sentinel; this mutant just never reads it)
+# reproduces the ORIGINAL defect exactly: the sandbox is quietly missing
+# qa.md, model-select.sh's own missing-agent-file exclusion (legitimate for
+# a role that was never installed) cannot tell that apart from a
+# permission problem, every OTHER file still agrees, and the run reports a
+# clean PASS over a target that, in reality, has a file nobody could read.
+if [ "$(id -u)" = "0" ]; then
+    printf '  note: META-TEST 11 SKIPPED - running as root, chmod 000 does not block a read, so this trigger cannot fire here\n'
+else
+    MUT11="$WORK/doctor-mut11.sh"
+    # shellcheck disable=SC2016  # matching LITERAL shell-source text, not expanding this script's own vars
+    sed 's/if \[ -s "\$unreadable_marker" \]; then/if false; then/' "$DOCTOR" > "$MUT11"
+    # shellcheck disable=SC2016
+    assert_eq "META-TEST 11 non-vacuity: the fail-closed gate was found and disarmed" \
+        "0" "$(grep -c 'if \[ -s "\$unreadable_marker" \]; then' "$MUT11" | tr -d '[:space:]')"
+    assert_eq "META-TEST 11 non-vacuity: the mutant differs from the shipped doctor" \
+        "differs" "$(cmp -s "$MUT11" "$DOCTOR" && echo same || echo differs)"
+    assert_eq "META-TEST 11 non-vacuity: the mutant is still valid bash" "0" \
+        "$(bash -n "$MUT11" 2>/dev/null && echo 0 || echo 1)"
+    chmod +x "$MUT11"
+
+    MP_UNREADABLE_M="$WORK/mp-unreadable-mut"
+    mk_target "$MP_UNREADABLE_M"
+    seed_model_pins "$MP_UNREADABLE_M" "claude-sec9-agree"
+    seed_cache "$MP_UNREADABLE_M" "claude-sec9-agree"
+    chmod 000 "$MP_UNREADABLE_M/.claude/agents/qa.md"
+    MUT11_JSON="$WORK/mut11.json"
+    doctor_run "$MUT11" "$MP_UNREADABLE_M" "$MUT11_JSON" --quiet --skip "$ONLY_MP"
+    chmod 644 "$MP_UNREADABLE_M/.claude/agents/qa.md"
+    assert_eq "META-TEST 11 SPECIFIC MISBEHAVIOUR: WITHOUT the gate, the identical unreadable-file target WRONGLY PASSES model_parity" \
+        "PASS" "$(status_of "$MUT11_JSON" model_parity)"
+    assert_eq "META-TEST 11 ...and the mutant's own exit code says healthy (0), over a target with a file nobody could read" \
+        "0" "$DOCTOR_RC"
+
+    # RESTORE CONTROL: identical fixture shape, freshly built, the SHIPPED
+    # doctor -- still correctly FAILs.
+    MP_UNREADABLE_MC="$WORK/mp-unreadable-ctrl"
+    mk_target "$MP_UNREADABLE_MC"
+    seed_model_pins "$MP_UNREADABLE_MC" "claude-sec9-agree"
+    seed_cache "$MP_UNREADABLE_MC" "claude-sec9-agree"
+    chmod 000 "$MP_UNREADABLE_MC/.claude/agents/qa.md"
+    MUT11C_JSON="$WORK/mut11-ctrl.json"
+    doctor_run "$DOCTOR" "$MP_UNREADABLE_MC" "$MUT11C_JSON" --quiet --skip "$ONLY_MP"
+    chmod 644 "$MP_UNREADABLE_MC/.claude/agents/qa.md"
+    assert_eq "META-TEST 11 RESTORE CONTROL: the SHIPPED doctor, identical fixture shape, still FAILS model_parity" \
+        "FAIL" "$(status_of "$MUT11C_JSON" model_parity)"
+    assert_eq "META-TEST 11 RESTORE CONTROL: ...and the doctor's own exit code is 1" "1" "$DOCTOR_RC"
+fi
+
+echo ""
+echo "--- META-TEST 10: mk_probe_sandbox's cache copy is what model_parity actually reads ---"
+#
+# claude-workflow-plugin-a13r taught mk_probe_sandbox to copy
+# .claude/.qa-tracking/model-select-cache.json (check-parity NEVER fetches —
+# it is the only external input this check has besides the config/agent
+# files the sandbox already copied). A COPY of the shipped doctor with that
+# one addition removed, run against 9.1's own AGREEING fixture, must turn a
+# real PASS into a SKIP (the sandbox's cache is genuinely gone, so
+# check-parity is honestly UNVERIFIABLE, not agreeing by luck) -- proving
+# the copy is what lets the sandboxed check see the target's real cache at
+# all, not an accident of some other copy loop already covering it. The
+# observable is SKIP, not FAIL: rc=2 self-skips regardless of WHY the cache
+# is missing (see 9.3's own header), so a mutant that removes the copy is
+# indistinguishable, per-check, from a target that genuinely has no cache —
+# which is exactly why the aggregate .passed/.skipped counts, not the
+# doctor's own exit code (0 either way once every OTHER check is skipped),
+# are what this META asserts on.
+MUT10_DIR=$(mktemp -d "$WORK/doctor-mut10.XXXXXX")
+MUT10="$MUT10_DIR/workflow-doctor.sh"
+sed "/model-select.sh's local cache, read-only/,/^    fi\$/d" "$DOCTOR" > "$MUT10"
+# `$TARGET` is a literal to match in the doctor's own source text, not a
+# variable to expand — single quotes are deliberate.
+# shellcheck disable=SC2016
+assert_eq "META-TEST 10: the cache-copy block was found and removed" \
+    "0" "$(grep -c 'cp "\$TARGET/.claude/.qa-tracking/model-select-cache.json"' "$MUT10" | tr -d '[:space:]')"
+assert_eq "META-TEST 10: the mutant differs from the shipped doctor" \
+    "differs" "$(cmp -s "$MUT10" "$DOCTOR" && echo same || echo differs)"
+assert_eq "META-TEST 10: the mutant is still valid bash" "0" \
+    "$(bash -n "$MUT10" 2>/dev/null && echo 0 || echo 1)"
+chmod +x "$MUT10"
+
+MUT10_JSON="$WORK/mut10.json"
+# The mutant's own exit code is NOT asserted on: SKIP never fails the
+# doctor (by design — see 9.3's header), so it is 0 whether the copy is
+# present or not once every OTHER check is skipped. The observable
+# difference is the model_parity STATUS itself and the aggregate counts,
+# both asserted below.
+bash "$MUT10" --target "$MP_AGREE" --json-out "$MUT10_JSON" --quiet --skip "$ONLY_MP" \
+    >/dev/null 2>&1 || true
+assert_eq "META-TEST 10: WITHOUT the cache copy, the SAME agreeing fixture loses its PASS (SKIP, not the real OK)" \
+    "SKIP" "$(status_of "$MUT10_JSON" model_parity)"
+assert_contains "META-TEST 10: ...specifically because the sandbox's cache is missing, not because pins disagree" \
+    "UNVERIFIABLE" "$(jq -r '(.checks[]|select(.name=="model_parity").detail)//""' "$MUT10_JSON")"
+# .skipped is the GLOBAL aggregate over all 13 checks, not model_parity's
+# own contribution alone: the 12 OTHER checks are skipped via --skip
+# "$ONLY_MP", and model_parity's own self-skip (the mutation under test)
+# is the 13th -- so the mutant shows 0 passed, 13 skipped, where the
+# shipped script (below) shows 1 passed, 12 skipped. That one-check shift
+# IS the mutation's observable effect.
+assert_eq "META-TEST 10: ...and the mutant's own summary counts it as skipped, not passed, for a fixture that is actually healthy" \
+    "0 13" "$(jq -r '"\(.passed) \(.skipped)"' "$MUT10_JSON" 2>/dev/null || echo "?")"
+
+# RESTORE CONTROL: the identical fixture (9.1's, not rebuilt — proving this
+# is the copy mechanism and not some other difference between two builds),
+# the SHIPPED doctor, still PASSes.
+MUT10C_JSON="$WORK/mut10-ctrl.json"
+doctor_run "$DOCTOR" "$MP_AGREE" "$MUT10C_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "META-TEST 10 RESTORE CONTROL: the SHIPPED doctor, identical fixture, still PASSES model_parity" \
+    "PASS" "$(status_of "$MUT10C_JSON" model_parity)"
+# 1 passed (model_parity itself), 12 skipped (the OTHER checks, via --skip
+# "$ONLY_MP" -- see the mutant's own comment above for why .skipped is the
+# 13-check aggregate, not model_parity's own count).
+assert_eq "META-TEST 10 RESTORE CONTROL: ...and the summary counts it as passed, with only the OTHER checks skipped" \
+    "1 12" "$(jq -r '"\(.passed) \(.skipped)"' "$MUT10C_JSON" 2>/dev/null || echo "?")"
+
+echo ""
+echo "--- META-TEST 12: the HELPER-FAILURE routing is what makes 9.5 a FAIL (round 4, item (b), direction 1) ---"
+#
+# Disarm ONLY the new tag-based routing (the HELPER-FAILURE case arm is
+# rewritten so it can never match, so EVERY rc=2 falls through to the SKIP
+# arm below it -- reproducing the ORIGINAL, pre-round-4 doctor exactly) and
+# prove the EXACT regression the review found: "a broken --print-role-map
+# produces zero failed checks and doctor exit 0".
+MUT12="$WORK/doctor-mut12.sh"
+# shellcheck disable=SC2016  # matching LITERAL shell-source text, not expanding this script's own vars
+sed "s/\*'UNVERIFIABLE:HELPER-FAILURE'\*)/'NEVER-MATCHES-A13R-MUT12')/" "$DOCTOR" > "$MUT12"
+assert_eq "META-TEST 12 non-vacuity: the HELPER-FAILURE case arm was found and disarmed" \
+    "0" "$(grep -c "'UNVERIFIABLE:HELPER-FAILURE'" "$MUT12" | tr -d '[:space:]')"
+assert_eq "META-TEST 12 non-vacuity: the mutant differs from the shipped doctor" \
+    "differs" "$(cmp -s "$MUT12" "$DOCTOR" && echo same || echo differs)"
+assert_eq "META-TEST 12 non-vacuity: the mutant is still valid bash" "0" \
+    "$(bash -n "$MUT12" 2>/dev/null && echo 0 || echo 1)"
+chmod +x "$MUT12"
+
+MP_HELPERFAIL_M="$WORK/mp-helperfail-mut"
+mk_target "$MP_HELPERFAIL_M"
+seed_model_pins "$MP_HELPERFAIL_M" "claude-sec9-agree"
+seed_cache "$MP_HELPERFAIL_M" "claude-sec9-agree"
+write_helperfail_stub "$MP_HELPERFAIL_M"
+MUT12_JSON="$WORK/mut12.json"
+doctor_run "$MUT12" "$MP_HELPERFAIL_M" "$MUT12_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "META-TEST 12 SPECIFIC MISBEHAVIOUR: WITHOUT the routing, the identical helper-failure target WRONGLY SKIPS model_parity" \
+    "SKIP" "$(status_of "$MUT12_JSON" model_parity)"
+assert_eq "META-TEST 12 ...and the mutant's own exit code says healthy (0), over a target whose role/agent map helper is broken" \
+    "0" "$DOCTOR_RC"
+
+# RESTORE CONTROL: identical fixture shape, freshly built, the SHIPPED
+# doctor -- still correctly FAILs.
+MP_HELPERFAIL_MC="$WORK/mp-helperfail-ctrl"
+mk_target "$MP_HELPERFAIL_MC"
+seed_model_pins "$MP_HELPERFAIL_MC" "claude-sec9-agree"
+seed_cache "$MP_HELPERFAIL_MC" "claude-sec9-agree"
+write_helperfail_stub "$MP_HELPERFAIL_MC"
+MUT12C_JSON="$WORK/mut12-ctrl.json"
+doctor_run "$DOCTOR" "$MP_HELPERFAIL_MC" "$MUT12C_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "META-TEST 12 RESTORE CONTROL: the SHIPPED doctor, identical fixture shape, still FAILS model_parity" \
+    "FAIL" "$(status_of "$MUT12C_JSON" model_parity)"
+assert_eq "META-TEST 12 RESTORE CONTROL: ...and the doctor's own exit code is 1" "1" "$DOCTOR_RC"
+
+echo ""
+echo "--- META-TEST 13: the SKIP branch is what keeps a cold cache from FAILING the doctor (round 4, item (b), direction 2) ---"
+#
+# The OPPOSITE mistake: force EVERY rc=2 to FAIL unconditionally (the
+# HELPER-FAILURE pattern is widened to a bare catch-all, so it matches
+# BEFORE the SKIP arm ever gets a chance -- case takes the FIRST matching
+# arm) and prove that a hypothetical "just FAIL every UNVERIFIABLE" reading
+# of the review would have broken the exact case 9.3 exists to protect: a
+# fresh install with no ANTHROPIC_API_KEY.
+MUT13="$WORK/doctor-mut13.sh"
+# shellcheck disable=SC2016  # matching LITERAL shell-source text, not expanding this script's own vars
+sed "s/\*'UNVERIFIABLE:HELPER-FAILURE'\*)/*)/" "$DOCTOR" > "$MUT13"
+assert_eq "META-TEST 13 non-vacuity: the HELPER-FAILURE arm was found and widened to an unconditional catch-all" \
+    "0" "$(grep -c "'UNVERIFIABLE:HELPER-FAILURE'" "$MUT13" | tr -d '[:space:]')"
+assert_eq "META-TEST 13 non-vacuity: the mutant differs from the shipped doctor" \
+    "differs" "$(cmp -s "$MUT13" "$DOCTOR" && echo same || echo differs)"
+assert_eq "META-TEST 13 non-vacuity: the mutant is still valid bash" "0" \
+    "$(bash -n "$MUT13" 2>/dev/null && echo 0 || echo 1)"
+chmod +x "$MUT13"
+
+MP_NOCACHE_M="$WORK/mp-nocache-mut"
+mk_target "$MP_NOCACHE_M"
+seed_model_pins "$MP_NOCACHE_M" "claude-sec9-agree"
+assert_eq "META-TEST 13 landing proof: mk_target genuinely leaves no model-select cache behind" \
+    "no" "$([ -f "$MP_NOCACHE_M/.claude/.qa-tracking/model-select-cache.json" ] && echo yes || echo no)"
+MUT13_JSON="$WORK/mut13.json"
+doctor_run "$MUT13" "$MP_NOCACHE_M" "$MUT13_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "META-TEST 13 SPECIFIC MISBEHAVIOUR: WITHOUT the SKIP branch reachable, a plain cold cache WRONGLY FAILS model_parity" \
+    "FAIL" "$(status_of "$MUT13_JSON" model_parity)"
+assert_eq "META-TEST 13 ...and the mutant's own exit code says unhealthy (1), over a target whose ONLY issue is 'no key ever set'" \
+    "1" "$DOCTOR_RC"
+
+# RESTORE CONTROL: identical fixture shape, freshly built, the SHIPPED
+# doctor -- still correctly SKIPs, exit 0.
+MP_NOCACHE_MC="$WORK/mp-nocache-ctrl"
+mk_target "$MP_NOCACHE_MC"
+seed_model_pins "$MP_NOCACHE_MC" "claude-sec9-agree"
+MUT13C_JSON="$WORK/mut13-ctrl.json"
+doctor_run "$DOCTOR" "$MP_NOCACHE_MC" "$MUT13C_JSON" --quiet --skip "$ONLY_MP"
+assert_eq "META-TEST 13 RESTORE CONTROL: the SHIPPED doctor, identical fixture shape, still SKIPS model_parity" \
+    "SKIP" "$(status_of "$MUT13C_JSON" model_parity)"
+assert_eq "META-TEST 13 RESTORE CONTROL: ...and the doctor's own exit code stays 0" "0" "$DOCTOR_RC"
 
 # ---------------------------------------------------------------------------
 echo ""

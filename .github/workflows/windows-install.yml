@@ -445,14 +445,17 @@ jobs:
           # above.
           #
           # DERIVED, NOT TYPED. This used to be a literal 8, hand-derived from a
-          # registry that has since grown: `beads_ledger` took it to 12 checks
-          # while the literal stayed at 8, so a report truncated to 8 entries
-          # sailed straight through the guard written to catch exactly that. A
-          # fresh literal would be the same defect one increment later, so the
-          # size is read from the registry sentinel in the doctor THIS INSTALL
-          # landed. (.claude/scripts/tests/workflow-doctor.test.sh section 7
-          # asserts this step still derives it rather than reverting to a
-          # literal, and keeps the count named in this comment honest.)
+          # registry that has grown twice since: first when `beads_ledger`
+          # joined, again when `model_parity` (claude-workflow-plugin-a13r)
+          # did, and the literal never moved either time, so a report
+          # truncated to 8 entries sailed straight through the guard written
+          # to catch exactly that. A fresh literal would be the same defect
+          # one increment later, so the size is read from the registry
+          # sentinel in the doctor THIS INSTALL landed. It currently declares
+          # thirteen named checks. (.claude/scripts/tests/workflow-doctor.test.sh
+          # section 7 asserts this step still derives it rather than
+          # reverting to a literal, and keeps the count named in this
+          # comment honest.)
           #
           # The pattern deliberately does not anchor on the closing quote: a
           # checkout under core.autocrlf=true leaves a trailing CR on the line,

@@ -346,7 +346,7 @@ echo "=== Section 3b: --verify (v4.1 / C0b) ==="
 # A target that carries a STUB workflow-doctor.sh. The stub records the argv it
 # was handed and exits with a code the test chooses, which is what makes
 # "install.sh execs the TARGET's doctor and returns its status" measurable
-# without running an install or a real 12-check doctor.
+# without running an install or a real 13-check doctor.
 VERIFY_TARGET="$WORK/verify-target"
 mkdir -p "$VERIFY_TARGET/.claude/scripts"
 STUB_ARGV="$WORK/stub-argv.txt"

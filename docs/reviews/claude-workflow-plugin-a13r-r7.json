@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-a13r",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "de8b57dfeb766199c7bf1c7ec44f0e74d9a5ee1eb6607dd68613cd912bd6d069",
+  "risk_threshold": "high",
+  "stop_condition": "All Round-7 questions were adjudicated. I traced the role list, shipped --print-role-map path, extracted _expected_members path, check-parity completeness surface, deleted assertions, and both META blocks. I tested the split-arm mutation in memory (both mutants changed, bash -n rc=0, old selector identical, runtime designer/WRONG), the duplicate-role mutation (changed, bash -n rc=0, raw=5, unique=4, set inequality), one-sided partial output, and identical two-sided partial output with nonzero function statuses. The latter can make output equality pass, but the independent exact map-to-disk assertion reports inequality; a one-sided truncation is caught directly. No seventh-level live false pass was found: the same-file ROLE_KEYS preconditions establish the live helper's domain, and META-1's exact expected mismatch makes a zero-iteration helper fail loudly. Both-empty, one-sided-empty, whitespace/error, circularity, extraction/sentinel, shared-helper, and deleted-coverage cases were checked. The behavioural comparison intentionally loses only source shape and output order, neither of which is a required member-set invariant. Execution limit: mktemp remains denied with Operation not permitted, and the shipped map command's here-docs are consequently blocked, so I could not validly execute the suite. The packet's 452 passed / 0 failed, suite rc=0, and make lint rc=0 are orchestrator-measured, not independently re-executed. I independently ran bash -n successfully on the three named shell files and executed the two extracted mapping functions in memory for all five roles.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R7-F1",
+      "severity": "low",
+      "location": ".claude/scripts/tests/model-roles.test.sh:609-641; .claude/tests/README.md:535-560",
+      "evidence": "The packet's claim that both METAs call compare_role_outputs() is false. META-1 does so at lines 600-602 and 605-606. META-2 never calls it or another shared live guard: it creates the duplicate-key mutant, runs syntax-only bash -n, then independently retypes the raw-count, sort-u, unique-count, and set-comparison operations into MUT_R6F2_* variables. Its restore legs likewise compare previously parsed variables without behaviorally running model-select.sh. My read-only reproduction confirmed that its mutation lands and exposes raw=5, unique=4 and set inequality, so the arithmetic is correct today. However, weakening or deleting the live assertions at lines 516-524 would not make META-2 fail; its separately typed calculations would remain green. It also lacks pairing requirement leg 4 for this check: bash -n parses but does not observe the mutated or restored role-list behavior running. META-1's execution leg belongs to the distinct output-comparison check and does not make META-2 a behavioral pair.",
+      "description": "R6-F3 is closed for the split-arm/output comparison but not fully for the duplicate-role completeness guard. Factor role-set validation into one helper used by the live assertion, mutant, and restore control, and add a behavioral mutant/restored invocation of model-select.sh's roles surface; alternatively declare this check UNPAIRED with the reason required by the project rule."
+    },
+    {
+      "id": "R7-F2",
+      "severity": "info",
+      "location": ".claude/scripts/model-select.sh:173-181,1928-1937; .claude/scripts/tests/model-roles.test.sh:407-427,526-529",
+      "evidence": "The production comments still state that Section 3.1c extracts member arms as text, never executes either function, and requires byte identity. The new check instead executes sorted outputs. The test comments also say the comparison uses the already-captured $MAP, but compare_role_outputs() re-runs --print-role-map at line 431, and say the mutation tests plural use identical helper logic although META-2 does not call that helper. These are direct contradictions of the mechanism shipped in this round.",
+      "description": "Update the load-bearing design comments to describe behavioral output equality, the deliberate set/order semantics, the fresh map invocation, and META-2's separate role-set guard. Deleting the textual assertions did not lose a required invariant, but leaving documentation that promises those deleted assertions makes future maintenance and review reason about a mechanism that no longer exists."
+    }
+  ],
+  "iterations": 7,
+  "stopped_by": "stop_condition"
+}

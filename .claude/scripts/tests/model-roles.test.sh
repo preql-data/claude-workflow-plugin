@@ -47,6 +47,32 @@
 #       exercises); the META neutralises the CHECK_ONLY gate at BOTH of its
 #       call sites and proves --check would then ALSO write — the exact
 #       regression this flag exists to prevent.
+#   14. check-parity (claude-workflow-plugin-a13r) is a HARD exit-code gate
+#       over the identical config/file comparison --check (12) reports
+#       advisory-only: agreement, single-role drift (landing-proven, then
+#       fixed by apply and re-checked), no-cache UNVERIFIABLE (never a
+#       false pass), an active implementer escalation excluded rather than
+#       misread as drift, a missing agent file excluded the same way, and a
+#       META that neutralises the comparison in a copy of the shipped
+#       script to prove a broken check-parity would silently pass real
+#       drift. ROUND 2 (independent review) added four more false-success
+#       controls, each pairing a landing-proven fixture with a META that
+#       reverts JUST that fix in a copy of the shipped script: 14.7 a cache
+#       whose `.models` is present but not the documented array shape (an
+#       object) must read as UNVERIFIABLE, never a coincidental OK; 14.8 a
+#       role with NO strategy key in .claude/model-roles at all is still
+#       evaluated against the fail-open `top` default, but the OK/
+#       DISAGREEMENT wording must say so rather than claiming a declaration
+#       that was never made; 14.9 an agent file that EXISTS but whose
+#       `model:` pin cannot be read (malformed frontmatter, or — where the
+#       test does not run as root — chmod 000) must be folded into
+#       DISAGREEMENT, never silently excluded the way a genuinely absent
+#       file is; 14.10 is the WIDENED-COVERAGE proof itself: every
+#       discovered agent file in a role class is compared, not one
+#       representative, so a sibling drift (e.g. devops.md disagreeing with
+#       backend.md, both `implementer`) is caught by name — the META here
+#       reverts to a representative-only comparison and shows it would
+#       silently miss exactly that drift.
 
 set -u
 
@@ -349,6 +375,332 @@ assert_eq "3.1 non-vacuity: the discovered agent set is non-empty" \
 # failure current_pin's catch-all used to hide (section 6).
 APPLY_ROLES=$(sed -n 's/^CONCRETE_ROLES="\(.*\)"$/\1/p' "$APPLY" | head -1 | tr ' ' '\n' | sort | tr '\n' ',')
 assert_eq "3.1b CONCRETE_ROLES (apply) == ALL_ROLES (select)" "$EXPECTED_ROLES" "$APPLY_ROLES"
+
+# 3.1c cmd_check_parity's _expected_members() (claude-workflow-plugin-a13r
+# ROUND 4, ITEM (a)) is a DELIBERATE duplicate of role_agents()'s member
+# list — a completeness guard has no map to trust, because the map is the
+# very thing being validated (see that function's own header).
+#
+# THIS IS A BEHAVIOURAL COMPARISON, not a text comparison, as of ROUND 6 —
+# a WAIVER RULING, the operator's call, not mine, attributed here per their
+# instruction: "when a defect family survives repeated rounds against the
+# same mechanism, remove the mechanism rather than guard it again." Text
+# comparison was guarded five times across rounds 4-6, each fix closing the
+# previous gap and opening the next one exactly one layer up: a whole-file
+# grep counted a set the mutation never touched; the scoped grep replacing
+# it could match an empty range; the selector could drop an arm from BOTH
+# sides at once (a shared reindent); the completeness loop's own role-key
+# source could itself parse empty; and finally the completeness predicate's
+# `.*printf` was a SUBSTRING test a COMMENT could satisfy — round 6 built a
+# valid, `bash -n`-clean, multi-line case arm whose label line
+# ("designer)        # printf payload follows") is byte-identical on both
+# sides and contains the word "printf" only in a comment, while the real
+# payload lived on a second line no selector ever captured. Every text
+# guard passed. The two functions, EXECUTED, returned "designer" and
+# "WRONG". Every one of those five guards existed only to make TEXT
+# approximate a BEHAVIOURAL question — do these two functions produce the
+# SAME OUTPUT for every role — so the question is now answered directly:
+# for each role, RUN both and diff what they print. No selector to go
+# empty, no indentation to drift, no substring to spoof, no split arm to
+# hide a payload in, no comment to fool a grep.
+#
+# role_agents()'s side uses the SHIPPED, REAL entry point already proven
+# out in section 3.1 above ($MAP there is one fixed sample of it, against
+# the real $APPLY only) — satisfying .claude/tests/README.md's pairing-
+# requirement leg 4 (observe the shipped artifact RUNNING). compare_role_
+# outputs() below does NOT reuse that cached $MAP: it re-invokes
+# `--print-role-map` FRESH on every call (round 7, R7-F2 — corrected here
+# after review found the earlier wording claimed reuse that does not
+# happen), because it must work generically against WHATEVER apply-script
+# it is handed, including the mutant copies 3.1c-META-1 builds below — a
+# cached sample of the real file would be silently wrong for those calls.
+# _expected_members() has no shipped CLI surface of its own (it exists
+# purely to back cmd_check_parity's internal completeness check), so it is
+# extracted and SOURCED IN ISOLATION — never the whole model-select.sh
+# file, which runs its own unconditional bottom-of-script dispatch (a trap
+# this task already hit once) — guarded by a non-empty precondition on the
+# extraction, a `bash -n` parse check, and a SENTINEL call (an unknown role
+# must return non-zero) proving the sourced function is genuinely live
+# before its output is trusted for anything.
+#
+# compare_role_outputs <apply-script> <ms-script> -- prints one line per
+# MISMATCHING role (empty = every role agrees). SET semantics, deliberately
+# order-independent: each side's per-role output is piped through `sort`
+# before comparison, so role_agents() and _expected_members() printing
+# implementer's three members in a different sequence is not a mismatch --
+# membership is the invariant this check owns, not print order, and
+# nothing downstream (cmd_check_parity's own per-file loop) depends on
+# ordering either. A function, not inline code, so 3.1c's own live check
+# below and 3.1c-META-1 (further down, the
+# ONLY mutation test that exercises this particular helper — 3.1c-META-2
+# validates a different property, the ROLE LIST itself, through
+# validate_role_keys() below) run the IDENTICAL logic — not a re-typed
+# copy free to drift from what actually ships. Assumes its caller's
+# ALL_ROLES source is already sound (validate_role_keys(), immediately
+# below, is what establishes that for $MS).
+compare_role_outputs() {
+    local apply_script="$1" ms_script="$2"
+    local map em_src em_dir em_file role_keys role agents_out expected_out mismatch=""
+    map=$(bash "$apply_script" --print-role-map 2>/dev/null)
+    em_src=$(sed -n '/^_expected_members() {/,/^}/p' "$ms_script")
+    em_dir=$(mktemp -d "$TESTROOT/expmembers-cmp.XXXXXX")
+    em_file="$em_dir/_expected_members.sh"
+    printf '%s\n' "$em_src" > "$em_file"
+    role_keys=$(sed -n 's/^ALL_ROLES="\(.*\)"$/\1/p' "$ms_script" | head -1)
+    for role in $role_keys; do
+        agents_out=$(printf '%s\n' "$map" | awk -F'\t' -v r="$role" '$1 == r { print $2 }' | sort)
+        # $em_file is a mktemp'd extraction of the function under test (see
+        # em_dir above), not a static path -- nothing on disk at authoring
+        # time for shellcheck to follow, by construction.
+        # shellcheck source=/dev/null
+        expected_out=$( (source "$em_file"; _expected_members "$role" 2>/dev/null) | sort)
+        # TWO EMPTY OUTPUTS ARE NOT AGREEMENT. Checked as its OWN condition,
+        # BEFORE the equality test below, and deliberately worded
+        # differently in the message: a concrete role legitimately having
+        # zero members is not a real state (every role in ALL_ROLES owns at
+        # least one agent), so an empty/empty pair is a finding in its own
+        # right, never silently absorbed into "matches". This is the sixth
+        # level of the family this whole section exists to close: replacing
+        # a text comparison with a behavioural one is worthless if the
+        # behavioural comparison can itself pass on no output vs no output.
+        if [ -z "$agents_out" ] && [ -z "$expected_out" ]; then
+            mismatch="${mismatch:+$mismatch; }$role: BOTH SIDES EMPTY -- not treated as agreement (a concrete role must resolve to at least one member on each side for this comparison to mean anything)"
+        elif [ -z "$agents_out" ]; then
+            mismatch="${mismatch:+$mismatch; }$role: role_agents() produced NO output (expected_members=[$(printf '%s' "$expected_out" | tr '\n' ',')])"
+        elif [ -z "$expected_out" ]; then
+            mismatch="${mismatch:+$mismatch; }$role: _expected_members() produced NO output (role_agents=[$(printf '%s' "$agents_out" | tr '\n' ',')])"
+        elif [ "$agents_out" != "$expected_out" ]; then
+            mismatch="${mismatch:+$mismatch; }$role: role_agents=[$(printf '%s' "$agents_out" | tr '\n' ',')] expected_members=[$(printf '%s' "$expected_out" | tr '\n' ',')]"
+        fi
+    done
+    printf '%s' "$mismatch"
+}
+
+EXPECTED_MEMBERS_SRC=$(sed -n '/^_expected_members() {/,/^}/p' "$MS")
+assert_eq "3.1c precondition: _expected_members() was found and extracted (non-empty)" \
+    "yes" "$([ -n "$EXPECTED_MEMBERS_SRC" ] && echo yes || echo no)"
+EXPECTED_MEMBERS_ISOLATED_DIR=$(mktemp -d "$TESTROOT/expmembers.XXXXXX")
+EXPECTED_MEMBERS_ISOLATED="$EXPECTED_MEMBERS_ISOLATED_DIR/_expected_members.sh"
+printf '%s\n' "$EXPECTED_MEMBERS_SRC" > "$EXPECTED_MEMBERS_ISOLATED"
+assert_eq "3.1c precondition: the isolated extraction still parses" \
+    "0" "$(bash -n "$EXPECTED_MEMBERS_ISOLATED" >/dev/null 2>&1 && echo 0 || echo 1)"
+# SENTINEL: an unknown role must return NON-ZERO. A silently-empty or
+# broken extraction (a `source` that failed, a function that never got
+# defined) would make ANY call return emptily just as readily as a genuine
+# "not implemented" case -- the sentinel's job is to prove the function is
+# actually live and running its own case statement, not merely that it
+# exists as text on disk.
+EM_SENTINEL_RC=0
+# $EXPECTED_MEMBERS_ISOLATED is a mktemp'd extraction of the function under
+# test, not a static path.
+# shellcheck source=/dev/null
+( source "$EXPECTED_MEMBERS_ISOLATED"; _expected_members __r6_sentinel_unknown_role__ ) >/dev/null 2>&1 || EM_SENTINEL_RC=$?
+assert_eq "3.1c precondition: the sourced _expected_members() is genuinely live (an unknown role returns non-zero)" \
+    "1" "$EM_SENTINEL_RC"
+
+# validate_role_keys <ms-script> <apply-script> -- prints a diagnostic
+# naming what is wrong with <ms-script>'s ALL_ROLES (empty = sound:
+# present, no duplicates, and set-IDENTICAL to <apply-script>'s
+# CONCRETE_ROLES, parsed fresh and independently -- a different constant in
+# a different file, not via 3.1b's own EXPECTED_ROLES/APPLY_ROLES
+# variables, so this does not silently depend on that section existing or
+# staying unedited: the exact coupling R6-F2 named). A function, not
+# inline code -- round 7, R7-F1: the prior shape computed this arithmetic
+# inline once for the live check, and 3.1c-META-2 RE-TYPED an entire
+# second copy of it for its own mutant, so weakening or deleting the live
+# assertion below would not have reddened META-2's separately-typed
+# arithmetic at all. Now the live check, META-2's mutant leg and META-2's
+# restore control all call this SAME function, so there is one place this
+# logic can be wrong, not two silently drifting from each other.
+#
+# COMPLETENESS SURVIVES THE ROUND-6 CHANGE (round 6, R6-F2 -- fixed
+# properly, not merely re-guarded): comparing outputs role-by-role is still
+# vacuous if the ROLE LIST itself is empty, short, or carries a duplicate
+# standing in for a missing role. R6-F2's own proof: "designer designer
+# design_reviewer orchestrator implementer" is five WORDS, four ROLES, and
+# reviewer is never iterated -- a bare word-count pin reads this as
+# healthy.
+validate_role_keys() {
+    local ms_script="$1" apply_script="$2"
+    local role_keys role_keys_sorted_unique role_keys_raw role_keys_unique
+    local concrete_keys concrete_sorted_unique problems=""
+    role_keys=$(sed -n 's/^ALL_ROLES="\(.*\)"$/\1/p' "$ms_script" | head -1)
+    if [ -z "$role_keys" ]; then
+        printf '%s' "ALL_ROLES parsed empty from $ms_script"
+        return
+    fi
+    # BASH-SPECIFIC, noted rather than silently relied on: unquoted
+    # word-splitting of a space-separated value, correct in bash (this
+    # suite's shebang and every invocation in this repo) but NOT the same
+    # under zsh, where unquoted parameter expansion does not word-split by
+    # default. Not a portability bug here -- this file only ever runs
+    # under bash.
+    # shellcheck disable=SC2086  # word-splitting IS the point; quoting
+    # would count 1 line, not N words.
+    role_keys_sorted_unique=$(printf '%s\n' $role_keys | sort -u)
+    # shellcheck disable=SC2086  # same rationale as the line above.
+    role_keys_raw=$(printf '%s\n' $role_keys | grep -c .)
+    role_keys_unique=$(printf '%s\n' "$role_keys_sorted_unique" | grep -c .)
+    if [ "$role_keys_raw" != "$role_keys_unique" ]; then
+        problems="${problems:+$problems; }ALL_ROLES has duplicate(s): raw count $role_keys_raw, unique count $role_keys_unique"
+    fi
+    concrete_keys=$(sed -n 's/^CONCRETE_ROLES="\(.*\)"$/\1/p' "$apply_script" | head -1)
+    if [ -z "$concrete_keys" ]; then
+        printf '%s' "${problems:+$problems; }CONCRETE_ROLES parsed empty from $apply_script"
+        return
+    fi
+    # shellcheck disable=SC2086  # same word-splitting rationale as above.
+    concrete_sorted_unique=$(printf '%s\n' $concrete_keys | sort -u)
+    if [ "$role_keys_sorted_unique" != "$concrete_sorted_unique" ]; then
+        problems="${problems:+$problems; }ALL_ROLES set != CONCRETE_ROLES set: ALL_ROLES=[$(printf '%s' "$role_keys_sorted_unique" | tr '\n' ',')] CONCRETE_ROLES=[$(printf '%s' "$concrete_sorted_unique" | tr '\n' ',')]"
+    fi
+    printf '%s' "$problems"
+}
+
+assert_eq "3.1c role-set precondition: ALL_ROLES (model-select.sh) is sound — present, unique, and set-identical to CONCRETE_ROLES (workflow-model-apply.sh)" \
+    "" "$(validate_role_keys "$MS" "$APPLY")"
+
+# THE COMPARISON ITSELF: role_agents()'s REAL, executed output (via a
+# fresh `--print-role-map` invocation inside compare_role_outputs(), NOT
+# the cached $MAP from section 3.1 -- see that function's own header) must
+# equal _expected_members()'s REAL, executed output (the sourced,
+# sentinel-proven function, actually called) for every verified role key.
+assert_eq "3.1c _expected_members() produces the SAME OUTPUT as role_agents() for every role (behavioural, not textual)" \
+    "" "$(compare_role_outputs "$APPLY" "$MS")"
+
+echo ""
+echo "--- 3.1c-META-1: the comment-bearing split arm from R6-F1, SHIPPED as a named control (round 6, R6-F3) ---"
+#
+# Round 6's own proof-of-concept, reproduced here as a committed mutant so
+# it runs every time this file does -- not a one-off scratch measurement
+# (R6-F3: "the pairing requirement is not met... the control must SHIP").
+# This is exactly the shape that defeated every text-comparison guard
+# added across rounds 4-6; it is what the behavioural replacement above
+# exists to close, and shipping only a simpler mutant would "pin the
+# instance we already knew and leave the class open again" (the operator's
+# own words).
+MUT_R6F1_APPLY_DIR=$(mktemp -d "$TESTROOT/r6f1apply.XXXXXX")
+MUT_R6F1_APPLY="$MUT_R6F1_APPLY_DIR/workflow-model-apply.sh"
+# NOTE the doubled backslashes below (`\\\\n`, not `\\n`): `awk -v` applies
+# its OWN escape processing on top of bash's, so a value meant to contain
+# the two LITERAL characters backslash+n (matching the file's actual
+# `printf 'designer\n' ;;` source text) needs FOUR backslashes in this
+# double-quoted bash string -- bash collapses them to two (`\\`), and
+# awk's -v then collapses THAT pair to one literal backslash, leaving the
+# trailing `n` untouched. Measured directly: with only `\\n`, awk -v turns
+# it into an actual newline BYTE, the exact-line match against `old` never
+# fires, `cmp` reports the mutant identical to the shipped file, and the
+# non-vacuity legs below catch it -- exactly the discipline this section's
+# own non-vacuity checks exist to enforce, applied to the harness that
+# builds the fixture and not just the fixture itself.
+awk -v old="        designer)        printf 'designer\\\\n' ;;" \
+    -v new1="        designer)        # printf payload follows" \
+    -v new2="            printf 'designer\\\\n' ;;" \
+    '$0 == old { print new1; print new2; next } { print }' "$APPLY" > "$MUT_R6F1_APPLY"
+
+MUT_R6F1_MS_DIR=$(mktemp -d "$TESTROOT/r6f1ms.XXXXXX")
+MUT_R6F1_MS="$MUT_R6F1_MS_DIR/model-select.sh"
+awk -v old="        designer)        printf 'designer\\\\n' ;;" \
+    -v new1="        designer)        # printf payload follows" \
+    -v new2="            printf 'WRONG\\\\n' ;;" \
+    '$0 == old { print new1; print new2; next } { print }' "$MS" > "$MUT_R6F1_MS"
+
+assert_eq "3.1c-META-1 non-vacuity: the split-arm mutation landed in workflow-model-apply.sh (differs from shipped)" \
+    "differs" "$(cmp -s "$MUT_R6F1_APPLY" "$APPLY" && echo same || echo differs)"
+assert_eq "3.1c-META-1 non-vacuity: the split-arm mutation landed in model-select.sh (differs from shipped)" \
+    "differs" "$(cmp -s "$MUT_R6F1_MS" "$MS" && echo same || echo differs)"
+assert_eq "3.1c-META-1 non-vacuity: both mutants still parse" \
+    "0 0" "$(bash -n "$MUT_R6F1_APPLY" >/dev/null 2>&1 && echo 0 || echo 1) $(bash -n "$MUT_R6F1_MS" >/dev/null 2>&1 && echo 0 || echo 1)"
+# Non-vacuity of the DIVERGENCE itself, via ISOLATED extraction on BOTH
+# sides (never source either file whole: workflow-model-apply.sh, like
+# model-select.sh, runs its own unconditional bottom-of-script dispatch --
+# `case "${1:-}" in "") usage; exit 1 ;; ...` -- when sourced with no
+# args, which would exit the subshell before role_agents ever ran; measured
+# directly, not assumed). The two mutants must genuinely disagree at
+# runtime before the "catches it" leg below can mean anything.
+MUT_R6F1_RA_DIR=$(mktemp -d "$TESTROOT/r6f1ra.XXXXXX")
+MUT_R6F1_RA="$MUT_R6F1_RA_DIR/role_agents.sh"
+sed -n '/^role_agents() {/,/^}/p' "$MUT_R6F1_APPLY" > "$MUT_R6F1_RA"
+MUT_R6F1_EM_DIR=$(mktemp -d "$TESTROOT/r6f1em.XXXXXX")
+MUT_R6F1_EM="$MUT_R6F1_EM_DIR/_expected_members.sh"
+sed -n '/^_expected_members() {/,/^}/p' "$MUT_R6F1_MS" > "$MUT_R6F1_EM"
+# $MUT_R6F1_RA / $MUT_R6F1_EM are mktemp'd extractions of the functions
+# under test, not static paths.
+# shellcheck source=/dev/null
+assert_eq "3.1c-META-1 non-vacuity: the mutants genuinely diverge at runtime (designer vs WRONG)" \
+    "differs" "$( [ "$( (source "$MUT_R6F1_RA"; role_agents designer) 2>/dev/null)" \
+                  != "$( (source "$MUT_R6F1_EM"; _expected_members designer) 2>/dev/null)" ] \
+                  && echo differs || echo same )"
+assert_eq "3.1c-META-1 SPECIFIC MISBEHAVIOUR (of the OLD text-based design): the old whole-arm selector still selects an IDENTICAL label line on both sides" \
+    "identical" "$( [ "$(sed -n '/^role_agents() {/,/^}/p' "$MUT_R6F1_APPLY" | grep -E '^        [a-z_]+\)' | grep -v '^        all)')" \
+                     = "$(sed -n '/^_expected_members() {/,/^}/p' "$MUT_R6F1_MS" | grep -E '^        [a-z_]+\)' | grep -v '^        all)')" ] \
+                     && echo identical || echo different )"
+assert_eq "3.1c-META-1 SPECIFIC MISBEHAVIOUR: the NEW behavioural comparison catches the divergence the OLD text comparison could not" \
+    "designer: role_agents=[designer] expected_members=[WRONG]" \
+    "$(compare_role_outputs "$MUT_R6F1_APPLY" "$MUT_R6F1_MS")"
+
+# RESTORE CONTROL: the SHIPPED, unmutated pair -- still agrees on every role.
+assert_eq "3.1c-META-1 RESTORE CONTROL: the SHIPPED pair, same comparison, agrees on every role" \
+    "" "$(compare_role_outputs "$APPLY" "$MS")"
+
+echo ""
+echo "--- 3.1c-META-2: the duplicated-role-key shape from R6-F2, SHIPPED as a named control ---"
+#
+# R6-F2's own proof: a role LIST with a duplicate standing in for a missing
+# role reads as healthy under a bare word-count pin. "designer designer
+# design_reviewer orchestrator implementer" is five words; four roles;
+# reviewer is never iterated.
+#
+# ROUND 7, R7-F1 (independent review): the ORIGINAL shape of this control
+# re-typed the raw-count/sort-u/unique-count/set-comparison arithmetic into
+# its own MUT_R6F2_* variables instead of calling validate_role_keys(), and
+# its restore legs compared previously-computed OUTER variables rather than
+# invoking anything fresh -- so weakening or deleting the LIVE role-set
+# assertion above would not have reddened this control at all; its
+# separately-typed copy would have stayed green. Fixed: every leg below
+# calls validate_role_keys(), the SAME function the live check calls, and a
+# NEW behavioural leg actually runs model-select.sh's shipped `roles`
+# surface against both the mutant and the restored file, so the control
+# also observes the shipped artifact RUNNING, not just re-parsing text.
+MUT_R6F2_MS_DIR=$(mktemp -d "$TESTROOT/r6f2ms.XXXXXX")
+MUT_R6F2_MS="$MUT_R6F2_MS_DIR/model-select.sh"
+sed 's/^ALL_ROLES="designer design_reviewer orchestrator implementer reviewer"$/ALL_ROLES="designer designer design_reviewer orchestrator implementer"/' "$MS" > "$MUT_R6F2_MS"
+assert_eq "3.1c-META-2 non-vacuity: the duplicate-role mutation landed (differs from shipped)" \
+    "differs" "$(cmp -s "$MUT_R6F2_MS" "$MS" && echo same || echo differs)"
+assert_eq "3.1c-META-2 non-vacuity: the mutant still parses" \
+    "0" "$(bash -n "$MUT_R6F2_MS" >/dev/null 2>&1 && echo 0 || echo 1)"
+assert_eq "3.1c-META-2 SPECIFIC MISBEHAVIOUR (of a bare word-count pin, the OLD design): raw word count alone reads healthy" \
+    "5" "$(sed -n 's/^ALL_ROLES="\(.*\)"$/\1/p' "$MUT_R6F2_MS" | head -1 | tr ' ' '\n' | grep -c .)"
+MUT_R6F2_VALIDATION=$(validate_role_keys "$MUT_R6F2_MS" "$APPLY")
+assert_eq "3.1c-META-2 SPECIFIC MISBEHAVIOUR: validate_role_keys() -- the SAME helper the live check calls -- catches it (non-empty diagnostic)" \
+    "yes" "$([ -n "$MUT_R6F2_VALIDATION" ] && echo yes || echo no)"
+assert_contains "3.1c-META-2 ...names the duplicate specifically" \
+    "ALL_ROLES has duplicate(s): raw count 5, unique count 4" "$MUT_R6F2_VALIDATION"
+assert_contains "3.1c-META-2 ...and names the set mismatch against CONCRETE_ROLES (the missing 'reviewer')" \
+    "ALL_ROLES set != CONCRETE_ROLES set" "$MUT_R6F2_VALIDATION"
+
+# BEHAVIOURAL LEG: the duplicate/missing-role shape has a REAL, observable
+# runtime consequence via model-select.sh's own shipped `roles` subcommand
+# -- not just a text parse. cmd_roles() iterates the file's OWN ALL_ROLES
+# value exactly as written, so running it against the mutant genuinely
+# prints 'designer' TWICE and 'reviewer' NEVER.
+MUT_R6F2_ROLES_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$MUT_R6F2_MS" roles 2>/dev/null)
+assert_eq "3.1c-META-2 behavioural: the SHIPPED 'roles' surface, run for real against the mutant, prints designer TWICE" \
+    "2" "$(printf '%s\n' "$MUT_R6F2_ROLES_OUT" | awk -F'\t' '$1 == "designer"' | grep -c .)"
+assert_eq "3.1c-META-2 behavioural: ...and 'reviewer' NEVER (the missing role, genuinely absent at runtime, not just absent from a text parse)" \
+    "0" "$(printf '%s\n' "$MUT_R6F2_ROLES_OUT" | awk -F'\t' '$1 == "reviewer"' | grep -c .)"
+
+# RESTORE CONTROL: the SHIPPED, unmutated files -- validate_role_keys()
+# reports sound, freshly re-invoked rather than reusing the live check's
+# own result, and the SAME shipped `roles` surface, run for real, shows
+# every role exactly once.
+assert_eq "3.1c-META-2 RESTORE CONTROL: validate_role_keys() reports the SHIPPED files sound (fresh call)" \
+    "" "$(validate_role_keys "$MS" "$APPLY")"
+SHIPPED_ROLES_OUT=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$MS" roles 2>/dev/null)
+assert_eq "3.1c-META-2 RESTORE CONTROL: ...and the SHIPPED 'roles' surface prints designer exactly once" \
+    "1" "$(printf '%s\n' "$SHIPPED_ROLES_OUT" | awk -F'\t' '$1 == "designer"' | grep -c .)"
+assert_eq "3.1c-META-2 RESTORE CONTROL: ...and reviewer exactly once" \
+    "1" "$(printf '%s\n' "$SHIPPED_ROLES_OUT" | awk -F'\t' '$1 == "reviewer"' | grep -c .)"
 
 # Each agent maps to the expected role class (matches role_agents()).
 role_of() { printf '%s\n' "$MAP" | awk -F'\t' -v a="$1" '$2 == a { print $1 }'; }
@@ -676,16 +1028,81 @@ assert_eq "6.3-META non-vacuity: the mutant still parses (it fails for its own r
 #
 # `$DESIGNER_AGENT` is a literal to match in the resolver's source text, not a
 # variable to expand — single quotes are deliberate.
+#
+# SCOPED to _role_agent_file()'s own extracted body (claude-workflow-plugin-
+# a13r round 4 fix) rather than grep'd across the WHOLE mutant file. A
+# whole-file grep for this exact text shape is not specific to the arm being
+# mutated: this file's own case-arm column-alignment convention means ANY
+# other case statement over the same five role names formats its `designer)`
+# arm identically ("designer)" + spaces + "printf"), and round 4 added
+# exactly one -- cmd_check_parity's _expected_members(). That made this
+# assertion fail for the WRONG reason: the strip landed correctly (the
+# non-vacuity legs above all still passed) but a second, unrelated line
+# elsewhere in the file kept the whole-file count at 1, not 0. Scoping the
+# search to the mutated function's own body makes the non-vacuity check
+# specific to the mutation it exists to prove landed, regardless of what
+# else in the file happens to share its formatting -- closing the class of
+# collision, not just this one instance of it.
+#
+# POSITIVE CONTROL, ADDED IMMEDIATELY BESIDE IT (round 4, second pass): the
+# whole-file grep this replaced could never be vacuous (the file is never
+# empty); a SCOPED extraction can be -- if _role_agent_file is ever renamed,
+# the sed range yields NOTHING, `grep -c` yields 0, and the assertion below
+# would PASS reporting "the arm was stripped" on the strength of a range
+# that matched nothing at all. A measurement that did not happen would look
+# identical to one that passed (measured on a rename mutant: 432 passed / 1
+# failed -- this leg is what catches it; without it the suite would read
+# 433/0, wrongly). So the scope is proven real FIRST, on the UNMUTATED
+# resolver, matching 3.1c's own precedent exactly (extract, assert
+# non-empty, THEN compare/count): this leg reddens exactly when the
+# extraction itself breaks, which is the only way the mutant's "0" below
+# could lie.
+#
+# A DIFFERENT hazard sits next to renaming and neither leg below catches it
+# (independent review, round 5, R5-F2a -- corrected here after the original
+# text overclaimed): if _role_agent_file's closing `}` stops being a bare
+# `}` at column 0, the range does NOT empty -- it WIDENS, continuing to the
+# next bare `}` at column 0, which is current_pin()'s. Measured: indenting
+# only the closer at :1050 in a scratch copy grows the extracted range from
+# 14 to 22 lines (current_pin()'s body absorbed into it), and BOTH legs
+# below still read their expected 1 and 0 -- neither reddens. Emptying and
+# widening are different failure shapes; only emptying (the rename case) is
+# currently detected. Left as a named, disclosed gap rather than a third
+# guard: LOW severity, and this section already carries two completeness
+# legs plus the two live ones below.
+#
+# WHAT THESE TWO LEGS PROVE, AND WHAT THEY DO NOT (round 5, R5-F2b,
+# corrected after independent review showed the ORIGINAL name overclaimed):
+# both are SOURCE-TEXT SHAPE checks -- "does the exact `designer)
+# printf` text appear in the selected range" -- not a claim about runtime
+# BEHAVIOUR. The reviewer demonstrated the gap: insert a second,
+# differently-spaced `designer) printf ...` fallback arm into the mutant
+# alongside the stripped one, and both counts below are unaffected (still
+# 1 on $MS, still 0 on $MUT6) while `_role_agent_file designer` would still
+# resolve correctly at runtime, because bash's case statement does not care
+# how an arm is spaced. Confirmed independently: the scoped counts are
+# unaffected by that insertion (verified directly); the resolver's
+# continued success follows from ordinary case-statement parsing, which
+# does not depend on inter-token whitespace. The SEMANTIC claim -- that the
+# mutant actually stops resolving designer -- is proven separately, by the
+# SPECIFIC MISBEHAVIOUR and RESTORE CONTROL legs immediately below, which
+# run `apply` for real and read back the file it did or did not write.
 # shellcheck disable=SC2016
-assert_eq "6.3-META non-vacuity: the mutant no longer resolves designer to its own file" \
-    "0" "$(grep -c 'designer)        printf' "$MUT6" || true)"
+assert_eq "6.3-META non-vacuity: ...and the scope itself is real — the same extraction finds that exact text shape on the UNMUTATED resolver" \
+    "1" "$(sed -n '/^_role_agent_file() {/,/^}/p' "$MS" | grep -c 'designer)        printf' || true)"
+# shellcheck disable=SC2016
+assert_eq "6.3-META non-vacuity: the mutant's source no longer contains that exact designer)+printf text shape (source-shape removal — see SPECIFIC MISBEHAVIOUR below for the resolution claim)" \
+    "0" "$(sed -n '/^_role_agent_file() {/,/^}/p' "$MUT6" | grep -c 'designer)        printf' || true)"
 # shellcheck disable=SC2016
 assert_eq "6.3-META non-vacuity: ...while the DESIGNER_AGENT constant survives" \
     "1" "$(grep -c '^DESIGNER_AGENT=' "$MUT6" || true)"
 
-# SPECIFIC MISBEHAVIOUR: run the mutant over 6.1's exact configuration. The
-# designer lane must now go UNWRITTEN — the mutant reads orchestrator.md's pin
-# (already claude-fable-9), finds it equal to the desired id, and skips.
+# SPECIFIC MISBEHAVIOUR, live and behavioural (this is where the SEMANTIC
+# claim -- "the mutant no longer resolves designer" -- is actually proven,
+# not in the source-shape legs above): run the mutant over 6.1's exact
+# configuration. The designer lane must now go UNWRITTEN — the mutant reads
+# orchestrator.md's pin (already claude-fable-9), finds it equal to the
+# desired id, and skips.
 SB_63=$(ms_sandbox_with_listing "claude-base-0" "claude-fable-9")
 rm -f "$SB_63/.claude/scripts/model-select.sh"   # never cp over the symlink
 cp "$MUT6" "$SB_63/.claude/scripts/model-select.sh"
@@ -1865,6 +2282,804 @@ assert_eq "13.5-META SPECIFIC: with the guard stripped, the same fault injection
     "claude-haiku-9" "$MUT_PICK_135"
 assert_not_contains "13.5-META SPECIFIC: ...with NO warning at all -- the exact silent failure this section exists to close" \
     "could not read" "$MUT_WARN_135"
+
+# ===========================================================================
+echo ""
+echo "=== Section 14: check-parity is a hard CONFIG/FILE agreement gate (claude-workflow-plugin-a13r) ==="
+#
+# THE DEFECT THIS GUARDS: claude-workflow-plugin-fkm.10 closed on a
+# .claude/model-roles edit (orchestrator: top -> opus-class) whose EFFECT
+# never happened -- the agent file's frontmatter pin was never rewritten to
+# match, and nothing failed. `apply --check` (Section 12) already computes
+# the identical comparison but is deliberately advisory: it ALWAYS exits 0
+# (SessionStart must never block on an enumeration hiccup -- see that
+# flag's own header). check-parity reuses the SAME comparison primitives
+# (role_strategy, pick_for_role) but makes the verdict a real exit-code
+# contract, so THIS is the subcommand a human/CI/workflow-doctor can
+# actually assert on.
+#
+# 14.1 POSITIVE, 14.2 NEGATIVE (single-role drift, landing-proven before the
+# check ever runs), 14.3 RESTORE CONTROL (apply fixes it, re-check agrees),
+# 14.4 UNVERIFIABLE (no cache -- never a false pass), 14.5 an ACTIVE
+# per-unit escalation on `implementer` must not read as drift, 14.6 a role
+# missing its agent file is excluded rather than reported as drift. 14M is
+# the META: a copy of the shipped script with the disagreement comparison
+# neutralised WOULD wrongly pass 14.2's drifted fixture -- the exact failure
+# mode this section exists to rule out -- with a restore control proving the
+# SHIPPED script still fails it correctly.
+#
+# ROUND 2 (independent review, sol-codex): the comparison this section
+# exercises now checks EVERY discovered agent file per role, not one
+# representative (14.10), the cache's `.models` shape is validated before
+# it is trusted (14.7), an undeclared role's evaluation is distinguished in
+# the wording from a declared one (14.8), and a file that exists but cannot
+# be read is folded into DISAGREEMENT rather than silently excluded (14.9).
+# `checked` therefore now counts FILES, not roles: 14.1's fixture (every
+# role class fully populated: 1 designer + 1 design-reviewer + 1
+# orchestrator + 3 implementer [backend/frontend/devops] + 3 reviewer
+# [qa/grader/judge] = 9) reports "9 file(s) checked", and 14.5/14.6 below
+# are updated to the file counts their (still role-level) exclusions now
+# produce.
+#
+# ROUND 3 (independent review, sol-codex, third pass): 14.5's
+# assert_not_contains was VACUOUS -- "implementer: agent file" can never be
+# emitted (the format is always "$role/$agent:", and implementer's members
+# are backend/frontend/devops, never bare "implementer") -- fixed to
+# "implementer/backend: agent file", and 14.5M added to prove the corrected
+# string actually discriminates (item 1). --print-role-map's own exit
+# status and map completeness are now load-bearing rather than discarded
+# (`|| true`): a nonzero exit or a clean exit with a whole role missing
+# both fail the ENTIRE run closed (UNVERIFIABLE), never trusting whatever
+# partial output happened to print first (14.11, 14.12). The OK/DISAGREEMENT
+# wording no longer claims "across every discovered agent" -- a claim that
+# overstated coverage whenever a MANUAL/no-candidate role or an active
+# escalation dropped a whole role with no trace in the text -- role-level
+# exclusions are now named by reason in both branches (14.5's added
+# assertion, 14.13).
+
+# 14.1 POSITIVE -- every role agrees (same recipe as 12.2). Shipped
+# check-parity RUNS (leg 4 of the pairing requirement) and reports OK, exit
+# 0, and its own output carries the CRITICAL-CONSTRAINT disclaimer (config
+# agreement only, never a runtime claim).
+SB_141=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+OUT_141=$(CLAUDE_PROJECT_DIR="$SB_141" bash "$MS" check-parity 2>&1)
+RC_141=$?
+assert_eq "14.1 POSITIVE: full agreement exits 0" "0" "$RC_141"
+assert_contains "14.1 ...and says OK" "check-parity: OK" "$OUT_141"
+assert_contains "14.1 ...and explicitly disclaims any runtime claim (the CRITICAL-CONSTRAINT this subcommand exists to satisfy)" \
+    "does not and cannot claim any agent actually ran" "$OUT_141"
+
+# 14.2 NEGATIVE -- ONE role (orchestrator) deliberately drifted; every other
+# seeded lane already agrees, so a FAIL here is provably about that one
+# role, not a blanket mismatch. LANDING PROOF first: assert the fixture is
+# genuinely drifted before check-parity ever runs against it (non-vacuity --
+# a fixture that accidentally already agreed would prove nothing).
+SB_142=$(ms_sandbox_with_listing "claude-fable-9" "claude-base-0")
+assert_eq "14.2 landing proof: the orchestrator lane really is drifted before the check runs" \
+    "claude-base-0" "$(agent_pin_of "$SB_142/.claude/agents/orchestrator.md")"
+assert_eq "14.2 landing proof: every OTHER seeded lane already agrees (backend, the implementer role's representative)" \
+    "claude-fable-9" "$(agent_pin_of "$SB_142/.claude/agents/backend.md")"
+OUT_142=$(CLAUDE_PROJECT_DIR="$SB_142" bash "$MS" check-parity 2>&1)
+RC_142=$?
+assert_eq "14.2 SPECIFIC MISBEHAVIOUR: single-role drift exits 1 (disagreement), not 0 or 2" "1" "$RC_142"
+assert_contains "14.2 ...names the drifted role and its current pin" \
+    "orchestrator: agent file has 'claude-base-0'" "$OUT_142"
+assert_contains "14.2 ...and the id it should be" "resolves 'claude-fable-9'" "$OUT_142"
+assert_contains "14.2 ...and the exact fix command" \
+    "/workflow-model --role orchestrator claude-fable-9" "$OUT_142"
+
+# 14.3 RESTORE CONTROL -- the SAME drifted sandbox, `apply` (the existing,
+# unchanged write path) fixes it, and check-parity -- the SHIPPED script,
+# identical call shape -- now reports agreement. Proves 14.2's FAIL was a
+# real, fixable finding, not an artefact of the harness.
+CLAUDE_PROJECT_DIR="$SB_142" bash "$MS" apply --quiet >/dev/null 2>&1
+OUT_143=$(CLAUDE_PROJECT_DIR="$SB_142" bash "$MS" check-parity 2>&1)
+RC_143=$?
+assert_eq "14.3 RESTORE CONTROL: after apply, the SAME sandbox's check-parity exits 0" "0" "$RC_143"
+assert_contains "14.3 ...and says OK" "check-parity: OK" "$OUT_143"
+
+# 14.4 UNVERIFIABLE -- no cached listing at all. Must NOT read as agreement:
+# exit 2 (distinct from both 0 and 1), and the message must never carry the
+# OK marker -- an operator grepping for "OK" must not be misled.
+SB_144=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+rm -f "$SB_144/.claude/.qa-tracking/model-select-cache.json"
+OUT_144=$(CLAUDE_PROJECT_DIR="$SB_144" bash "$MS" check-parity 2>&1)
+RC_144=$?
+assert_eq "14.4 UNVERIFIABLE: no cache exits 2, not 0" "2" "$RC_144"
+assert_contains "14.4 ...says UNVERIFIABLE" "UNVERIFIABLE" "$OUT_144"
+assert_not_contains "14.4 ...and is never mistaken for a pass (no OK marker)" "check-parity: OK" "$OUT_144"
+
+# 14.5 ESCALATION EXCLUSION -- an ACTIVE per-unit escalation on `implementer`
+# pins that lane away from its BASE strategy on purpose (see cmd_escalate's
+# header: "declared, audited, reversible", not drift). Drift the backend
+# (implementer) pin deliberately, mark an escalation active, and assert the
+# implementer lane drops out of the picture entirely -- while a genuinely
+# drifted orchestrator alongside it is STILL caught, proving the exclusion
+# is role-specific, not a global suppression that would hide real drift.
+SB_145=$(ms_sandbox_with_listing "claude-fable-9" "claude-base-0")
+printf -- '---\nname: backend\nmodel: claude-opus-5-0\n---\nbody\n' > "$SB_145/.claude/agents/backend.md"
+cat > "$SB_145/.claude/.qa-tracking/implementer-escalation.json" <<'JSON'
+{"task_id":"section-14-fixture","previous_pin":"claude-fable-9","resolved":"claude-opus-5-0"}
+JSON
+OUT_145=$(CLAUDE_PROJECT_DIR="$SB_145" bash "$MS" check-parity 2>&1)
+RC_145=$?
+assert_eq "14.5 an active implementer escalation still exits 1 (the orchestrator drift alongside it is real)" "1" "$RC_145"
+assert_contains "14.5 ...names orchestrator" "orchestrator: agent file has 'claude-base-0'" "$OUT_145"
+# ROUND 3 CORRECTION (independent review, item 1): the OLD string here was
+# "implementer: agent file" -- but production's per-file format is always
+# "$role/$agent:", and implementer's members are backend/frontend/devops
+# (workflow-model-apply.sh's role_agents()), so "implementer:" with NO
+# "/backend" (etc.) after it can NEVER be emitted, drift or no drift. That
+# made the control VACUOUS: it passed whether or not the escalation
+# exclusion actually worked, which is the exact defect class this task is
+# about, inside this task's own control. Fixed to the string production
+# WOULD emit if the exclusion broke: backend is the specific drifted member
+# in this fixture (frontend/devops still agree with the seeded pin, so they
+# would stay silent either way -- see 14.5M below, which proves this by
+# actually breaking the exclusion and observing the string appear).
+assert_not_contains "14.5 ...but NEVER names implementer/backend (the escalated lane is excluded, not misread as drift)" \
+    "implementer/backend: agent file" "$OUT_145"
+# 6 = 9 total files minus the 3 implementer members (backend/frontend/devops)
+# the active escalation excludes wholesale.
+assert_contains "14.5 ...and only 6 of the 9 files were evaluated (all 3 implementer members genuinely excluded, not silently correct by luck)" \
+    "(6 file(s) checked)" "$OUT_145"
+# round 3, item 3: the DISAGREEMENT message itself now NAMES why implementer
+# dropped out, not just a smaller count a reader has to infer the reason for.
+assert_contains "14.5 ...and (round 3, item 3) the message itself names WHY implementer was excluded" \
+    "excluded from this run entirely (not counted, not compared): implementer (active per-unit escalation)" "$OUT_145"
+
+# 14.5M META (round 3, item 1): neutralise the escalation-exclusion check in
+# a COPY of the shipped script and prove the EXACT regression the corrected
+# assertion above now catches: an ACTIVE per-unit escalation would be
+# misread as ordinary drift -- the escalated member (backend) gets NAMED and
+# COUNTED instead of excluded. This is what makes 14.5's assert_not_contains
+# a real negative control rather than a string nothing can ever produce.
+MUT145_DIR=$(mktemp -d "$TESTROOT/paritymut145.XXXXXX")
+MUT145="$MUT145_DIR/model-select.sh"
+# shellcheck disable=SC2016
+sed 's/if \[ "\$role" = "implementer" \] && \[ -f "\$ESCALATION_STATE" \]; then/if false; then/' "$MS" > "$MUT145"
+# shellcheck disable=SC2016
+assert_eq "14.5M non-vacuity: the escalation-exclusion condition was found and neutralised" \
+    "1" "$(grep -c 'if false; then' "$MUT145" | tr -d '[:space:]')"
+assert_eq "14.5M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT145" "$MS" && echo same || echo differs)"
+assert_eq "14.5M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT145" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT145"
+SB_145M=$(ms_sandbox_with_listing "claude-fable-9" "claude-base-0")
+printf -- '---\nname: backend\nmodel: claude-opus-5-0\n---\nbody\n' > "$SB_145M/.claude/agents/backend.md"
+cat > "$SB_145M/.claude/.qa-tracking/implementer-escalation.json" <<'JSON'
+{"task_id":"section-14-fixture","previous_pin":"claude-fable-9","resolved":"claude-opus-5-0"}
+JSON
+MUT_OUT_145M=$(CLAUDE_PROJECT_DIR="$SB_145M" bash "$MUT145" check-parity 2>&1)
+MUT_RC_145M=$?
+assert_eq "14.5M SPECIFIC MISBEHAVIOUR: with the exclusion neutralised, the run still exits 1 (orchestrator alone would do that)" \
+    "1" "$MUT_RC_145M"
+assert_contains "14.5M ...but NOW for the WRONG additional reason: the escalated member (backend) is named as drifted instead of excluded" \
+    "implementer/backend: agent file has 'claude-opus-5-0'" "$MUT_OUT_145M"
+assert_contains "14.5M ...and all 9 files are WRONGLY counted (the escalation no longer removes the 3 implementer members)" \
+    "(9 file(s) checked)" "$MUT_OUT_145M"
+
+# RESTORE CONTROL: the SAME fixture shape, freshly built, the SHIPPED
+# script -- correctly excludes backend again. This is the leg that proves
+# 14.5's assert_not_contains above is discriminating on REAL behaviour, not
+# an artefact of the mutant harness: same inputs, shipped code, and the
+# string the mutant just proved production CAN emit is once again absent.
+SB_145MC=$(ms_sandbox_with_listing "claude-fable-9" "claude-base-0")
+printf -- '---\nname: backend\nmodel: claude-opus-5-0\n---\nbody\n' > "$SB_145MC/.claude/agents/backend.md"
+cat > "$SB_145MC/.claude/.qa-tracking/implementer-escalation.json" <<'JSON'
+{"task_id":"section-14-fixture","previous_pin":"claude-fable-9","resolved":"claude-opus-5-0"}
+JSON
+CTRL_OUT_145M=$(CLAUDE_PROJECT_DIR="$SB_145MC" bash "$MS" check-parity 2>&1)
+CTRL_RC_145M=0
+CLAUDE_PROJECT_DIR="$SB_145MC" bash "$MS" check-parity >/dev/null 2>&1 || CTRL_RC_145M=$?
+assert_eq "14.5M RESTORE CONTROL: the SHIPPED script, identical fixture shape, still excludes backend (exits 1 for orchestrator alone)" \
+    "1" "$CTRL_RC_145M"
+assert_not_contains "14.5M RESTORE CONTROL: ...and never names implementer/backend" \
+    "implementer/backend: agent file" "$CTRL_OUT_145M"
+assert_contains "14.5M RESTORE CONTROL: ...and still checks only 6 (backend/frontend/devops genuinely excluded)" \
+    "(6 file(s) checked)" "$CTRL_OUT_145M"
+
+# 14.6 MISSING-AGENT-FILE EXCLUSION -- a role with no representative agent
+# file (a v4 install upgrading, or any install rendered before D0 shipped
+# designer/design_reviewer) is excluded, not reported as drift -- mirrors
+# Section 6.5 and CHECK_ONLY's identical rule inside cmd_apply.
+SB_146=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+rm -f "$SB_146/.claude/agents/designer.md"
+OUT_146=$(CLAUDE_PROJECT_DIR="$SB_146" bash "$MS" check-parity 2>&1)
+RC_146=$?
+assert_eq "14.6 a role missing its agent file does not block a clean verdict" "0" "$RC_146"
+assert_not_contains "14.6 ...and is never named as drifted" "designer: agent file" "$OUT_146"
+# 8 = 9 total files minus the 1 designer member the missing file excludes.
+assert_contains "14.6 ...and only 8 of the 9 files were evaluated (designer genuinely excluded)" \
+    "8 file(s) checked" "$OUT_146"
+
+# ---------------------------------------------------------------------------
+# 14.7 MALFORMED CACHE SHAPE (round 2, item 2a) -- a valid-JSON cache whose
+# .models is PRESENT but not the documented array (here: an object) must
+# read as UNVERIFIABLE, never as a coincidental OK. jq's `.[]`/`map()` are
+# polymorphic over arrays and objects, so an object's VALUES can flow
+# through pick_best exactly like array elements and produce a plausible
+# resolved id -- the landing proof below confirms the fixture really is the
+# wrong shape, not merely empty, before check-parity ever sees it.
+# ---------------------------------------------------------------------------
+SB_147=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+cat > "$SB_147/.claude/.qa-tracking/model-select-cache.json" <<JSON
+{"timestamp": $(date +%s), "models": {"a": {"id":"claude-fable-9","max_input_tokens":1000000,"created_at":"2026-07-01T00:00:00Z"}, "b": {"id":"claude-opus-5-0","max_input_tokens":400000,"created_at":"2026-06-01T00:00:00Z"}}}
+JSON
+assert_eq "14.7 landing proof: the fixture's .models is genuinely an object, not the documented array" \
+    "object" "$(jq -r '.models | type' "$SB_147/.claude/.qa-tracking/model-select-cache.json" 2>/dev/null)"
+OUT_147=$(CLAUDE_PROJECT_DIR="$SB_147" bash "$MS" check-parity 2>&1)
+RC_147=$?
+assert_eq "14.7 SPECIFIC MISBEHAVIOUR: a wrong-shaped .models exits 2 (UNVERIFIABLE), never 0" "2" "$RC_147"
+assert_contains "14.7 ...says UNVERIFIABLE" "UNVERIFIABLE" "$OUT_147"
+assert_not_contains "14.7 ...and is never mistaken for a pass (no OK marker)" "check-parity: OK" "$OUT_147"
+assert_contains "14.7 ...and names the actual type found, not just 'wrong'" \
+    "has .models of type 'object'" "$OUT_147"
+
+# 14.7M META: disable the shape check in a COPY of the shipped script and
+# prove the EXACT regression: the malformed cache would then flow through
+# and produce a coincidental OK.
+MUT147_DIR=$(mktemp -d "$TESTROOT/paritymut147.XXXXXX")
+MUT147="$MUT147_DIR/model-select.sh"
+# shellcheck disable=SC2016
+sed 's/elif \[ "\$shape" != "array" \] && \[ "\$shape" != "null" \]; then/elif false; then/' "$MS" > "$MUT147"
+# shellcheck disable=SC2016
+assert_eq "14.7M non-vacuity: the shape-check condition was found and neutralised" \
+    "1" "$(grep -c 'elif false; then' "$MUT147" | tr -d '[:space:]')"
+assert_eq "14.7M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT147" "$MS" && echo same || echo differs)"
+assert_eq "14.7M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT147" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT147"
+SB_147M=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+cat > "$SB_147M/.claude/.qa-tracking/model-select-cache.json" <<JSON
+{"timestamp": $(date +%s), "models": {"a": {"id":"claude-fable-9","max_input_tokens":1000000,"created_at":"2026-07-01T00:00:00Z"}, "b": {"id":"claude-opus-5-0","max_input_tokens":400000,"created_at":"2026-06-01T00:00:00Z"}}}
+JSON
+MUT_OUT_147M=$(CLAUDE_PROJECT_DIR="$SB_147M" bash "$MUT147" check-parity 2>&1)
+MUT_RC_147M=$?
+assert_eq "14.7M SPECIFIC MISBEHAVIOUR: with the shape check neutralised, the wrong-shaped cache WRONGLY exits 0" \
+    "0" "$MUT_RC_147M"
+assert_contains "14.7M ...and wrongly claims OK over a cache that was never the documented shape" \
+    "check-parity: OK" "$MUT_OUT_147M"
+SB_147MC=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+cat > "$SB_147MC/.claude/.qa-tracking/model-select-cache.json" <<JSON
+{"timestamp": $(date +%s), "models": {"a": {"id":"claude-fable-9","max_input_tokens":1000000,"created_at":"2026-07-01T00:00:00Z"}, "b": {"id":"claude-opus-5-0","max_input_tokens":400000,"created_at":"2026-06-01T00:00:00Z"}}}
+JSON
+CTRL_RC_147M=0
+CLAUDE_PROJECT_DIR="$SB_147MC" bash "$MS" check-parity >/dev/null 2>&1 || CTRL_RC_147M=$?
+assert_eq "14.7M RESTORE CONTROL: the SHIPPED script, identical fixture shape, still correctly exits 2" \
+    "2" "$CTRL_RC_147M"
+
+# ---------------------------------------------------------------------------
+# 14.8 UNDECLARED ROLE (round 2, item 2b) -- a role with NO strategy key in
+# .claude/model-roles is still evaluated against the fail-open `top`
+# default (that IS what a spawn would get), but the wording must say the
+# role was undeclared rather than claim a declaration that was never made.
+# Two legs: (i) the undeclared role's pin happens to already agree with the
+# default -- OK, but the summary must still name it as undeclared, not fold
+# it silently into "declared"; (ii) the undeclared role's pin does NOT
+# agree -- still caught as DISAGREEMENT, worded as "fail-open default",
+# never ".claude/model-roles (strategy=...)" (which would be a lie: there
+# is no strategy line for this role at all).
+# ---------------------------------------------------------------------------
+SB_148=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf 'designer=top\ndesign_reviewer=top\norchestrator=top\nimplementer=top\n' > "$SB_148/.claude/model-roles"
+assert_eq "14.8 landing proof: 'reviewer' genuinely has no key in model-roles" \
+    "0" "$(grep -c '^reviewer=' "$SB_148/.claude/model-roles" | tr -d '[:space:]')"
+OUT_148=$(CLAUDE_PROJECT_DIR="$SB_148" bash "$MS" check-parity 2>&1)
+RC_148=$?
+assert_eq "14.8i an undeclared role that happens to agree still exits 0" "0" "$RC_148"
+assert_contains "14.8i ...OK, but names the undeclared role explicitly" \
+    "NO strategy declared in .claude/model-roles, evaluated only against the fail-open default 'top': reviewer" \
+    "$OUT_148"
+
+SB_148B=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf 'designer=top\ndesign_reviewer=top\norchestrator=top\nimplementer=top\n' > "$SB_148B/.claude/model-roles"
+printf -- '---\nname: qa\nmodel: claude-base-0\n---\nbody\n' > "$SB_148B/.claude/agents/qa.md"
+assert_eq "14.8ii landing proof: the reviewer (qa) pin is genuinely drifted from what top resolves" \
+    "claude-base-0" "$(agent_pin_of "$SB_148B/.claude/agents/qa.md")"
+OUT_148B=$(CLAUDE_PROJECT_DIR="$SB_148B" bash "$MS" check-parity 2>&1)
+RC_148B=$?
+assert_eq "14.8ii an undeclared AND drifted role still exits 1" "1" "$RC_148B"
+assert_contains "14.8ii ...and says fail-open DEFAULT, not a declared strategy" \
+    "the fail-open default 'top' (role 'reviewer' has NO strategy declared in .claude/model-roles) resolves 'claude-fable-9'" \
+    "$OUT_148B"
+assert_not_contains "14.8ii ...and NEVER claims a declaration that does not exist" \
+    "reviewer/qa: agent file has 'claude-base-0', .claude/model-roles (strategy=" "$OUT_148B"
+
+# 14.8M META: neutralise the declared/undeclared tracking in a COPY of the
+# shipped script (both the notation site and the wording branch collapse to
+# an unconditional "declared" reading) and prove the EXACT regression: the
+# undeclared role's drift would still be CAUGHT (the exit-code contract is
+# untouched by this bug), but it would be wrongly narrated as a declared
+# strategy, and the NOTE naming it undeclared would silently disappear.
+MUT148_DIR=$(mktemp -d "$TESTROOT/paritymut148.XXXXXX")
+MUT148="$MUT148_DIR/model-select.sh"
+# shellcheck disable=SC2016
+sed 's/\[ -n "\$declared_val" \]/true/g' "$MS" > "$MUT148"
+# shellcheck disable=SC2016
+assert_eq "14.8M non-vacuity: both declared_val checks were found and neutralised" \
+    "0" "$(grep -c '\[ -n "\$declared_val" \]' "$MUT148" | tr -d '[:space:]')"
+assert_eq "14.8M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT148" "$MS" && echo same || echo differs)"
+assert_eq "14.8M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT148" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT148"
+SB_148M=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf 'designer=top\ndesign_reviewer=top\norchestrator=top\nimplementer=top\n' > "$SB_148M/.claude/model-roles"
+printf -- '---\nname: qa\nmodel: claude-base-0\n---\nbody\n' > "$SB_148M/.claude/agents/qa.md"
+MUT_OUT_148M=$(CLAUDE_PROJECT_DIR="$SB_148M" bash "$MUT148" check-parity 2>&1)
+MUT_RC_148M=$?
+assert_eq "14.8M SPECIFIC MISBEHAVIOUR: the drift is still caught (rc unaffected by this specific bug)" \
+    "1" "$MUT_RC_148M"
+assert_contains "14.8M ...but WRONGLY claims a declared strategy for an undeclared role" \
+    "reviewer/qa: agent file has 'claude-base-0', .claude/model-roles (strategy=top) resolves" "$MUT_OUT_148M"
+assert_not_contains "14.8M ...and the undeclared NOTE silently disappears" \
+    "NO strategy declared in .claude/model-roles" "$MUT_OUT_148M"
+SB_148MC=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf 'designer=top\ndesign_reviewer=top\norchestrator=top\nimplementer=top\n' > "$SB_148MC/.claude/model-roles"
+printf -- '---\nname: qa\nmodel: claude-base-0\n---\nbody\n' > "$SB_148MC/.claude/agents/qa.md"
+CTRL_OUT_148M=$(CLAUDE_PROJECT_DIR="$SB_148MC" bash "$MS" check-parity 2>&1)
+assert_contains "14.8M RESTORE CONTROL: the SHIPPED script, identical fixture shape, still says fail-open DEFAULT" \
+    "the fail-open default 'top' (role 'reviewer' has NO strategy declared" "$CTRL_OUT_148M"
+
+# ---------------------------------------------------------------------------
+# 14.9 UNREADABLE/MALFORMED AGENT FILE (round 2, item 2c) -- a file that
+# EXISTS but whose model: pin cannot be read must be folded into
+# DISAGREEMENT, never silently excluded the way a genuinely absent file is
+# (current_pin()'s old `grep | head -1 | awk` pipeline masked exactly this).
+# Two triggers for the identical code path: (i) malformed frontmatter (no
+# `model:` line at all) -- deterministic and portable; (ii) permission
+# denied (chmod 000) -- gracefully DISARMED when the test itself runs as
+# root, matching every other root-aware DISARM in this file, since root
+# reads a 000 file anyway and the trigger would not fire.
+# ---------------------------------------------------------------------------
+SB_149=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf -- '---\nname: qa\ndescription: no model line here\n---\nbody\n' > "$SB_149/.claude/agents/qa.md"
+assert_eq "14.9i landing proof: qa.md genuinely has zero 'model:' lines" \
+    "0" "$(grep -c '^model:' "$SB_149/.claude/agents/qa.md" | tr -d '[:space:]')"
+OUT_149=$(CLAUDE_PROJECT_DIR="$SB_149" bash "$MS" check-parity 2>&1)
+RC_149=$?
+assert_eq "14.9i a malformed agent file (no model: line) exits 1, not excluded" "1" "$RC_149"
+assert_contains "14.9i ...names the file and says NOT excluded" \
+    "reviewer/qa: agent file exists at" "$OUT_149"
+assert_contains "14.9i ...cannot confirm agreement, NOT excluded" \
+    "cannot confirm agreement, NOT excluded" "$OUT_149"
+assert_contains "14.9i ...and it IS counted (9, not silently dropped to 8)" \
+    "(9 file(s) checked)" "$OUT_149"
+
+if [ "$(id -u)" = "0" ]; then
+    printf '  note: 14.9ii SKIPPED - running as root, chmod 000 does not block a read, so this trigger cannot fire here (14.9i already covers the code path via malformed frontmatter)\n'
+else
+    SB_149B=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+    chmod 000 "$SB_149B/.claude/agents/qa.md"
+    assert_eq "14.9ii landing proof: qa.md is genuinely unreadable by this process" \
+        "no" "$([ -r "$SB_149B/.claude/agents/qa.md" ] && echo yes || echo no)"
+    OUT_149B=$(CLAUDE_PROJECT_DIR="$SB_149B" bash "$MS" check-parity 2>&1)
+    RC_149B=$?
+    chmod 644 "$SB_149B/.claude/agents/qa.md"
+    assert_eq "14.9ii a permission-denied agent file ALSO exits 1, not excluded" "1" "$RC_149B"
+    assert_contains "14.9ii ...names the file and says NOT excluded" \
+        "reviewer/qa: agent file exists at" "$OUT_149B"
+fi
+
+# 14.9M META: drop just the "unreadable -> fold into drifted" finding in a
+# COPY of the shipped script, falling back to the OLD silent-exclude shape,
+# and prove the EXACT regression: an unreadable file lets the run report a
+# clean OK if every readable pin happens to agree.
+MUT149_DIR=$(mktemp -d "$TESTROOT/paritymut149.XXXXXX")
+MUT149="$MUT149_DIR/model-select.sh"
+sed '/cannot confirm agreement, NOT excluded/d' "$MS" > "$MUT149"
+assert_eq "14.9M non-vacuity: the finding line was found and dropped" \
+    "0" "$(grep -c 'cannot confirm agreement, NOT excluded' "$MUT149" | tr -d '[:space:]')"
+assert_eq "14.9M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT149" "$MS" && echo same || echo differs)"
+assert_eq "14.9M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT149" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT149"
+SB_149M=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf -- '---\nname: qa\ndescription: no model line here\n---\nbody\n' > "$SB_149M/.claude/agents/qa.md"
+MUT_OUT_149M=$(CLAUDE_PROJECT_DIR="$SB_149M" bash "$MUT149" check-parity 2>&1)
+MUT_RC_149M=$?
+assert_eq "14.9M SPECIFIC MISBEHAVIOUR: with the finding dropped, the malformed file is silently excluded and WRONGLY exits 0" \
+    "0" "$MUT_RC_149M"
+assert_contains "14.9M ...and wrongly claims OK over a file that was never actually read" \
+    "check-parity: OK" "$MUT_OUT_149M"
+SB_149MC=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf -- '---\nname: qa\ndescription: no model line here\n---\nbody\n' > "$SB_149MC/.claude/agents/qa.md"
+CTRL_RC_149M=0
+CLAUDE_PROJECT_DIR="$SB_149MC" bash "$MS" check-parity >/dev/null 2>&1 || CTRL_RC_149M=$?
+assert_eq "14.9M RESTORE CONTROL: the SHIPPED script, identical fixture shape, still correctly exits 1" \
+    "1" "$CTRL_RC_149M"
+
+# ---------------------------------------------------------------------------
+# 14.10 WIDENED FILE COVERAGE / SIBLING-FILE DRIFT (round 2, item 2d) --
+# EVERY discovered agent file in a role class is compared, not one
+# representative. backend.md is the `implementer` role's representative
+# (current_pin()'s single-file read for every OTHER subcommand); this
+# fixture drifts a DIFFERENT member, devops.md, while backend.md still
+# agrees -- exactly the shape a representative-only check would miss.
+# ---------------------------------------------------------------------------
+SB_1410=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf -- '---\nname: devops\nmodel: claude-base-0\n---\nbody\n' > "$SB_1410/.claude/agents/devops.md"
+assert_eq "14.10 landing proof: backend.md (the OLD representative) still agrees" \
+    "claude-fable-9" "$(agent_pin_of "$SB_1410/.claude/agents/backend.md")"
+assert_eq "14.10 landing proof: devops.md (a sibling member) is genuinely drifted" \
+    "claude-base-0" "$(agent_pin_of "$SB_1410/.claude/agents/devops.md")"
+OUT_1410=$(CLAUDE_PROJECT_DIR="$SB_1410" bash "$MS" check-parity 2>&1)
+RC_1410=$?
+assert_eq "14.10 SPECIFIC MISBEHAVIOUR (of the OLD design): a sibling-file drift exits 1" "1" "$RC_1410"
+assert_contains "14.10 ...names the SPECIFIC file, devops, not just the role" \
+    "implementer/devops: agent file has 'claude-base-0'" "$OUT_1410"
+assert_not_contains "14.10 ...and does NOT also blame backend (which genuinely agrees)" \
+    "implementer/backend: agent file has" "$OUT_1410"
+assert_contains "14.10 ...and all 9 files were checked (full role-class coverage, not one representative)" \
+    "(9 file(s) checked)" "$OUT_1410"
+
+# 14.10M META: revert to a REPRESENTATIVE-ONLY comparison in a COPY of the
+# shipped script (only the FIRST member role_agents() lists per role is
+# ever compared -- for `implementer` that is backend, for `reviewer` that
+# is qa, structurally identical to round 1's current_pin()-per-role design)
+# and prove the EXACT regression this section exists to rule out: a sibling
+# drift the representative does not share is invisible to it.
+MUT1410_DIR=$(mktemp -d "$TESTROOT/paritymut1410.XXXXXX")
+MUT1410="$MUT1410_DIR/model-select.sh"
+# shellcheck disable=SC2016  # matching LITERAL shell-source text, not expanding this script's own vars
+sed "s/r { print \\\$2 }')/r { print \\\$2 }' | head -1)/" "$MS" > "$MUT1410"
+assert_eq "14.10M non-vacuity: the member-discovery line was found and truncated to one" \
+    "1" "$(grep -c "head -1)\$" "$MUT1410" | tr -d '[:space:]')"
+assert_eq "14.10M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT1410" "$MS" && echo same || echo differs)"
+assert_eq "14.10M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT1410" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT1410"
+SB_1410M=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf -- '---\nname: devops\nmodel: claude-base-0\n---\nbody\n' > "$SB_1410M/.claude/agents/devops.md"
+MUT_OUT_1410M=$(CLAUDE_PROJECT_DIR="$SB_1410M" bash "$MUT1410" check-parity 2>&1)
+MUT_RC_1410M=$?
+assert_eq "14.10M SPECIFIC MISBEHAVIOUR: representative-only WRONGLY exits 0 over a real sibling drift" \
+    "0" "$MUT_RC_1410M"
+assert_contains "14.10M ...and checks only 5 files (one per role), not 9 (the coverage this whole item exists to widen)" \
+    "5 file(s) checked" "$MUT_OUT_1410M"
+SB_1410MC=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+printf -- '---\nname: devops\nmodel: claude-base-0\n---\nbody\n' > "$SB_1410MC/.claude/agents/devops.md"
+CTRL_RC_1410M=0
+CLAUDE_PROJECT_DIR="$SB_1410MC" bash "$MS" check-parity >/dev/null 2>&1 || CTRL_RC_1410M=$?
+assert_eq "14.10M RESTORE CONTROL: the SHIPPED script, identical fixture shape, still correctly exits 1" \
+    "1" "$CTRL_RC_1410M"
+
+# ---------------------------------------------------------------------------
+# 14.11 / 14.12 FAIL CLOSED ON A PARTIAL/FAILED --print-role-map (round 3,
+# item 3) -- the OLD `role_map=$(... || true)` discarded the helper's own
+# exit status entirely, so a helper that printed output and then died left
+# that output IN USE -- only `checked == 0` (every role excluded) produced
+# UNVERIFIABLE, so a handful of surviving, agreeing files could yield a
+# coincidental OK while other roles silently never entered the comparison.
+# TWO independent guards, TWO independent fixtures and mutants, because
+# either alone is not sufficient: 14.11 covers a NONZERO exit (even over a
+# map that LOOKS complete -- proving the exit status alone is disqualifying,
+# not merely a proxy for incompleteness); 14.12 covers a CLEAN exit (0)
+# whose map is still missing a whole role role_agents() always lists (a
+# helper that "succeeds" while truncated).
+#
+# Each fixture REPLACES the sandbox's OWN copy of workflow-model-apply.sh
+# with a test stub. new_sandbox() SYMLINKS that path to the real, shared
+# $APPLY -- `rm -f` first is load-bearing: without it, writing through the
+# symlink would truncate the REAL repo file every other fixture in this
+# suite also relies on, not just this one sandbox's copy.
+# ---------------------------------------------------------------------------
+
+# 14.11 NONZERO EXIT, EVEN OVER A COMPLETE, FULLY-AGREEING MAP -- the
+# strongest form of the coincidental-OK trap: every one of the 9 real
+# members is printed, correctly, and would show full agreement if trusted.
+SB_1411=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+rm -f "$SB_1411/.claude/scripts/workflow-model-apply.sh"
+cat > "$SB_1411/.claude/scripts/workflow-model-apply.sh" <<'STUB'
+#!/bin/bash
+# TEST STUB (14.11, claude-workflow-plugin-a13r round 3): prints the exact,
+# COMPLETE role map the real helper would for this fixture, then exits
+# nonzero anyway -- simulating a helper whose output looked fine but which
+# still signalled failure (a cleanup step at the end that failed, a trap
+# that fired late). The exit status alone must be disqualifying.
+printf 'designer\tdesigner\n'
+printf 'design_reviewer\tdesign-reviewer\n'
+printf 'orchestrator\torchestrator\n'
+printf 'implementer\tbackend\n'
+printf 'implementer\tfrontend\n'
+printf 'implementer\tdevops\n'
+printf 'reviewer\tqa\n'
+printf 'reviewer\tgrader\n'
+printf 'reviewer\tjudge\n'
+exit 7
+STUB
+chmod +x "$SB_1411/.claude/scripts/workflow-model-apply.sh"
+assert_eq "14.11 landing proof: the stub genuinely exits nonzero" \
+    "7" "$(bash "$SB_1411/.claude/scripts/workflow-model-apply.sh" --print-role-map >/dev/null 2>&1; echo $?)"
+assert_eq "14.11 landing proof: the stub's map is genuinely COMPLETE (all 9 members, the coincidental-OK trap if trusted)" \
+    "9" "$(bash "$SB_1411/.claude/scripts/workflow-model-apply.sh" --print-role-map 2>/dev/null | grep -c . | tr -d '[:space:]')"
+OUT_1411=$(CLAUDE_PROJECT_DIR="$SB_1411" bash "$MS" check-parity 2>&1)
+RC_1411=$?
+assert_eq "14.11 SPECIFIC MISBEHAVIOUR (of the OLD design): a nonzero --print-role-map exit is caught even over a complete map -- exits 2 (UNVERIFIABLE), never 0" \
+    "2" "$RC_1411"
+assert_contains "14.11 ...names the nonzero exit" "print-role-map exited 7" "$OUT_1411"
+assert_not_contains "14.11 ...and is never mistaken for a pass" "check-parity: OK" "$OUT_1411"
+
+# 14.11M META: neutralise ONLY the exit-status capture in a COPY of the
+# shipped script (restoring the OLD `|| true` idiom for that one line,
+# leaving the missing-roles guard untouched) and prove the EXACT
+# regression: with the exit status discarded again, 14.11's own
+# complete-but-failing fixture WRONGLY reports OK -- proving the exit-status
+# guard specifically is load-bearing, not merely redundant with the
+# missing-roles guard below.
+MUT1411_DIR=$(mktemp -d "$TESTROOT/paritymut1411.XXXXXX")
+MUT1411="$MUT1411_DIR/model-select.sh"
+# shellcheck disable=SC2016
+sed 's/|| role_map_rc=\$?$/|| true/' "$MS" > "$MUT1411"
+# shellcheck disable=SC2016
+assert_eq "14.11M non-vacuity: the exit-status capture was found and reverted to '|| true'" \
+    "0" "$(grep -c 'role_map_rc=\$?' "$MUT1411" | tr -d '[:space:]')"
+assert_eq "14.11M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT1411" "$MS" && echo same || echo differs)"
+assert_eq "14.11M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT1411" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT1411"
+MUT_OUT_1411M=$(CLAUDE_PROJECT_DIR="$SB_1411" bash "$MUT1411" check-parity 2>&1)
+MUT_RC_1411M=$?
+assert_eq "14.11M SPECIFIC MISBEHAVIOUR: with the exit status discarded again, the SAME nonzero-exit fixture WRONGLY exits 0" \
+    "0" "$MUT_RC_1411M"
+assert_contains "14.11M ...and wrongly claims OK over a helper that exited 7" \
+    "check-parity: OK" "$MUT_OUT_1411M"
+
+# RESTORE CONTROL: the SAME stub fixture (SB_1411, not rebuilt), the
+# SHIPPED script -- still correctly fails closed.
+CTRL_OUT_1411M=$(CLAUDE_PROJECT_DIR="$SB_1411" bash "$MS" check-parity 2>&1)
+CTRL_RC_1411M=$?
+assert_eq "14.11M RESTORE CONTROL: the SHIPPED script, the SAME nonzero-exit fixture, still exits 2" \
+    "2" "$CTRL_RC_1411M"
+assert_not_contains "14.11M RESTORE CONTROL: ...and never claims OK" "check-parity: OK" "$CTRL_OUT_1411M"
+
+# 14.12 CLEAN (0) EXIT, BUT THE MAP IS MISSING WHOLE ROLES -- "succeeded
+# while truncated". The three roles it DOES print (designer,
+# design_reviewer, orchestrator) all genuinely agree with the seeded pin.
+SB_1412=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+rm -f "$SB_1412/.claude/scripts/workflow-model-apply.sh"
+cat > "$SB_1412/.claude/scripts/workflow-model-apply.sh" <<'STUB'
+#!/bin/bash
+# TEST STUB (14.12, claude-workflow-plugin-a13r round 3): exits 0 but its
+# role map omits TWO roles entirely (implementer, reviewer) that
+# role_agents() always lists regardless of what is installed -- simulating
+# a helper that "succeeds" while truncated (a write cut off after the
+# exit-code path already committed, a future refactor that forgets a role).
+printf 'designer\tdesigner\n'
+printf 'design_reviewer\tdesign-reviewer\n'
+printf 'orchestrator\torchestrator\n'
+exit 0
+STUB
+chmod +x "$SB_1412/.claude/scripts/workflow-model-apply.sh"
+assert_eq "14.12 landing proof: the stub genuinely exits 0" \
+    "0" "$(bash "$SB_1412/.claude/scripts/workflow-model-apply.sh" --print-role-map >/dev/null 2>&1; echo $?)"
+assert_eq "14.12 landing proof: the stub's map genuinely omits 'implementer'" \
+    "0" "$(bash "$SB_1412/.claude/scripts/workflow-model-apply.sh" --print-role-map 2>/dev/null | awk -F'\t' '$1=="implementer"' | grep -c . | tr -d '[:space:]')"
+OUT_1412=$(CLAUDE_PROJECT_DIR="$SB_1412" bash "$MS" check-parity 2>&1)
+RC_1412=$?
+assert_eq "14.12 SPECIFIC MISBEHAVIOUR (of the OLD design): a role map missing whole roles despite exit 0 is caught -- exits 2 (UNVERIFIABLE), never 0" \
+    "2" "$RC_1412"
+assert_contains "14.12 ...names the missing role(s)" "missing role(s)" "$OUT_1412"
+assert_contains "14.12 ...specifically implementer" "implementer" "$OUT_1412"
+assert_contains "14.12 ...specifically reviewer" "reviewer" "$OUT_1412"
+assert_not_contains "14.12 ...and is never mistaken for a pass" "check-parity: OK" "$OUT_1412"
+
+# 14.12M META: neutralise ONLY the missing-roles enforcement in a COPY of
+# the shipped script (the exit-status guard stays intact and untouched) and
+# prove the EXACT regression: with it disarmed, 14.12's own clean-exit,
+# partial-map fixture WRONGLY reports OK over the three roles it happened
+# to print.
+MUT1412_DIR=$(mktemp -d "$TESTROOT/paritymut1412.XXXXXX")
+MUT1412="$MUT1412_DIR/model-select.sh"
+# shellcheck disable=SC2016
+sed 's/if \[ -n "\$_prc_missing" \]; then/if false; then/' "$MS" > "$MUT1412"
+# shellcheck disable=SC2016
+assert_eq "14.12M non-vacuity: the missing-roles enforcement was found and disarmed" \
+    "1" "$(grep -c 'if false; then' "$MUT1412" | tr -d '[:space:]')"
+assert_eq "14.12M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT1412" "$MS" && echo same || echo differs)"
+assert_eq "14.12M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT1412" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT1412"
+MUT_OUT_1412M=$(CLAUDE_PROJECT_DIR="$SB_1412" bash "$MUT1412" check-parity 2>&1)
+MUT_RC_1412M=$?
+assert_eq "14.12M SPECIFIC MISBEHAVIOUR: with the enforcement disarmed, the SAME partial-map fixture WRONGLY exits 0" \
+    "0" "$MUT_RC_1412M"
+assert_contains "14.12M ...and wrongly claims OK over a map that never listed implementer or reviewer at all" \
+    "check-parity: OK" "$MUT_OUT_1412M"
+
+# RESTORE CONTROL: the SAME stub fixture (SB_1412, not rebuilt), the
+# SHIPPED script -- still correctly fails closed.
+CTRL_OUT_1412M=$(CLAUDE_PROJECT_DIR="$SB_1412" bash "$MS" check-parity 2>&1)
+CTRL_RC_1412M=$?
+assert_eq "14.12M RESTORE CONTROL: the SHIPPED script, the SAME partial-map fixture, still exits 2" \
+    "2" "$CTRL_RC_1412M"
+assert_not_contains "14.12M RESTORE CONTROL: ...and never claims OK" "check-parity: OK" "$CTRL_OUT_1412M"
+
+# ---------------------------------------------------------------------------
+# 14.13 THE OK/DISAGREEMENT WORDING NO LONGER OVERCLAIMS UNDER A ROLE-LEVEL
+# EXCLUSION (round 3, item 3, second half) -- an ACTIVE escalation excludes
+# the whole `implementer` role from the count, same shape as 14.5, but here
+# EVERY evaluated file still agrees (rc=0, OK) -- proving the OK wording
+# itself, not just DISAGREEMENT's, now NAMES what was excluded and no
+# longer claims "every discovered agent" when a whole role -- one that DOES
+# have real, on-disk agent files, unlike 14.6's legitimately-absent
+# designer.md -- was silently dropped from the count.
+# ---------------------------------------------------------------------------
+SB_1413=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+cat > "$SB_1413/.claude/.qa-tracking/implementer-escalation.json" <<'JSON'
+{"task_id":"section-14-fixture-1413","previous_pin":"claude-fable-9","resolved":"claude-opus-5-0"}
+JSON
+OUT_1413=$(CLAUDE_PROJECT_DIR="$SB_1413" bash "$MS" check-parity 2>&1)
+RC_1413=$?
+assert_eq "14.13 an active escalation alongside total agreement elsewhere still exits 0" "0" "$RC_1413"
+assert_contains "14.13 ...OK, and only 6 of 9 were checked" "6 file(s) checked" "$OUT_1413"
+assert_not_contains "14.13 ...and no longer claims coverage over every discovered agent when a role was excluded" \
+    "across every discovered agent" "$OUT_1413"
+assert_contains "14.13 ...and instead NAMES the excluded role and reason" \
+    "excluded from this run entirely (not counted, not compared): implementer (active per-unit escalation)" "$OUT_1413"
+
+# 14.13M META: drop the excluded_note wiring in a COPY of the shipped
+# script (the exclusion itself stays correct -- implementer is still
+# excluded from `checked`, rc is still 0 -- only the NARRATION regresses)
+# and prove the EXACT regression: the OK message falls silent about WHY
+# only 6 of 9 were checked, the exact overclaim shape item 3 exists to rule
+# out.
+MUT1413_DIR=$(mktemp -d "$TESTROOT/paritymut1413.XXXXXX")
+MUT1413="$MUT1413_DIR/model-select.sh"
+# shellcheck disable=SC2016  # matching LITERAL shell-source text, not expanding this script's own vars
+sed 's/\[ -n "\$excluded" \] && excluded_note=.*/excluded_note=""/' "$MS" > "$MUT1413"
+# shellcheck disable=SC2016
+assert_eq "14.13M non-vacuity: the excluded_note wiring was found and neutralised" \
+    "0" "$(grep -c '\[ -n "\$excluded" \] && excluded_note=' "$MUT1413" | tr -d '[:space:]')"
+assert_eq "14.13M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT1413" "$MS" && echo same || echo differs)"
+assert_eq "14.13M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT1413" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT1413"
+SB_1413M=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+cat > "$SB_1413M/.claude/.qa-tracking/implementer-escalation.json" <<'JSON'
+{"task_id":"section-14-fixture-1413","previous_pin":"claude-fable-9","resolved":"claude-opus-5-0"}
+JSON
+MUT_OUT_1413M=$(CLAUDE_PROJECT_DIR="$SB_1413M" bash "$MUT1413" check-parity 2>&1)
+MUT_RC_1413M=$?
+assert_eq "14.13M SPECIFIC MISBEHAVIOUR: the exclusion itself is unaffected (still exits 0)" \
+    "0" "$MUT_RC_1413M"
+assert_contains "14.13M ...still only checks 6 of 9 (the exclusion logic is untouched)" \
+    "6 file(s) checked" "$MUT_OUT_1413M"
+assert_not_contains "14.13M ...but the WHY silently disappears from the message" \
+    "excluded from this run entirely" "$MUT_OUT_1413M"
+
+# RESTORE CONTROL: fresh identical fixture, the SHIPPED script -- the
+# exclusion reason is named again.
+SB_1413MC=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+cat > "$SB_1413MC/.claude/.qa-tracking/implementer-escalation.json" <<'JSON'
+{"task_id":"section-14-fixture-1413","previous_pin":"claude-fable-9","resolved":"claude-opus-5-0"}
+JSON
+CTRL_OUT_1413M=$(CLAUDE_PROJECT_DIR="$SB_1413MC" bash "$MS" check-parity 2>&1)
+assert_contains "14.13M RESTORE CONTROL: the SHIPPED script, identical fixture shape, still names the exclusion" \
+    "excluded from this run entirely (not counted, not compared): implementer (active per-unit escalation)" "$CTRL_OUT_1413M"
+
+# ---------------------------------------------------------------------------
+# 14.14 CLEAN (0) EXIT, EVERY ROLE PRESENT, BUT MEMBERS WITHIN A ROLE ARE
+# MISSING (claude-workflow-plugin-a13r round 4, item (a)) -- the reviewer's
+# own proof-of-concept: a map that satisfies 14.12's whole-role guard on its
+# own (every one of the 5 roles appears at least once) while implementer and
+# reviewer are each missing two of their three members. "checks 5 files,
+# SILENTLY IGNORES frontend, devops, grader and judge, and reaches the OK
+# branch" was the exact finding.
+# ---------------------------------------------------------------------------
+SB_1414=$(ms_sandbox_with_listing "claude-fable-9" "claude-fable-9")
+rm -f "$SB_1414/.claude/scripts/workflow-model-apply.sh"
+cat > "$SB_1414/.claude/scripts/workflow-model-apply.sh" <<'STUB'
+#!/bin/bash
+# TEST STUB (14.14, claude-workflow-plugin-a13r round 4 item (a)): exits 0
+# and every ROLE NAME appears at least once -- satisfying 14.12's
+# whole-role guard on its own -- but implementer and reviewer are each
+# missing two of their three members. This is the reviewer's own
+# proof-of-concept fixture, reproduced verbatim.
+printf 'designer\tdesigner\n'
+printf 'design_reviewer\tdesign-reviewer\n'
+printf 'orchestrator\torchestrator\n'
+printf 'implementer\tbackend\n'
+printf 'reviewer\tqa\n'
+exit 0
+STUB
+chmod +x "$SB_1414/.claude/scripts/workflow-model-apply.sh"
+assert_eq "14.14 landing proof: the stub genuinely exits 0" \
+    "0" "$(bash "$SB_1414/.claude/scripts/workflow-model-apply.sh" --print-role-map >/dev/null 2>&1; echo $?)"
+assert_eq "14.14 landing proof: the stub's map genuinely contains every ROLE at least once (would satisfy the OLD whole-role-only guard alone)" \
+    "5" "$(bash "$SB_1414/.claude/scripts/workflow-model-apply.sh" --print-role-map 2>/dev/null | awk -F'\t' '{print $1}' | sort -u | grep -c .)"
+assert_eq "14.14 landing proof: the stub's map genuinely omits implementer/frontend" \
+    "0" "$(bash "$SB_1414/.claude/scripts/workflow-model-apply.sh" --print-role-map 2>/dev/null | awk -F'\t' '$1=="implementer" && $2=="frontend"' | grep -c .)"
+OUT_1414=$(CLAUDE_PROJECT_DIR="$SB_1414" bash "$MS" check-parity 2>&1)
+RC_1414=$?
+assert_eq "14.14 SPECIFIC MISBEHAVIOUR (of the OLD design): a role map with every role present but members truncated is caught -- exits 2 (UNVERIFIABLE), never 0" \
+    "2" "$RC_1414"
+assert_contains "14.14 ...names the missing member(s)" "missing member(s)" "$OUT_1414"
+assert_contains "14.14 ...specifically implementer/frontend" "implementer/frontend" "$OUT_1414"
+assert_contains "14.14 ...specifically implementer/devops" "implementer/devops" "$OUT_1414"
+assert_contains "14.14 ...specifically reviewer/grader" "reviewer/grader" "$OUT_1414"
+assert_contains "14.14 ...specifically reviewer/judge" "reviewer/judge" "$OUT_1414"
+assert_not_contains "14.14 ...and is never mistaken for a pass" "check-parity: OK" "$OUT_1414"
+
+# 14.14M META: neutralise ONLY the member-level completeness enforcement in
+# a COPY of the shipped script (the whole-role guard from 14.12 stays intact
+# and untouched) and prove the EXACT regression: with it disarmed, 14.14's
+# own clean-exit, role-complete-but-member-truncated fixture WRONGLY reports
+# OK over the 5 files it happened to print -- this is the reviewer's own
+# scenario, reproduced end to end.
+MUT1414_DIR=$(mktemp -d "$TESTROOT/paritymut1414.XXXXXX")
+MUT1414="$MUT1414_DIR/model-select.sh"
+# shellcheck disable=SC2016  # matching LITERAL shell-source text, not expanding this script's own vars
+sed 's/if \[ -n "\$_prc_member_missing" \]; then/if false; then/' "$MS" > "$MUT1414"
+# shellcheck disable=SC2016
+assert_eq "14.14M non-vacuity: the member-completeness enforcement was found and disarmed" \
+    "1" "$(grep -c 'if false; then' "$MUT1414" | tr -d '[:space:]')"
+assert_eq "14.14M non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT1414" "$MS" && echo same || echo differs)"
+assert_eq "14.14M non-vacuity: the mutant still parses (fails for its own reason)" \
+    "0" "$(bash -n "$MUT1414" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT1414"
+MUT_OUT_1414M=$(CLAUDE_PROJECT_DIR="$SB_1414" bash "$MUT1414" check-parity 2>&1)
+MUT_RC_1414M=$?
+assert_eq "14.14M SPECIFIC MISBEHAVIOUR: with the enforcement disarmed, the SAME member-truncated fixture WRONGLY exits 0" \
+    "0" "$MUT_RC_1414M"
+assert_contains "14.14M ...and wrongly claims OK, checking only the 5 files that survived" \
+    "5 file(s) checked" "$MUT_OUT_1414M"
+
+# RESTORE CONTROL: the SAME stub fixture (SB_1414, not rebuilt), the SHIPPED
+# script -- still correctly fails closed.
+CTRL_OUT_1414M=$(CLAUDE_PROJECT_DIR="$SB_1414" bash "$MS" check-parity 2>&1)
+CTRL_RC_1414M=$?
+assert_eq "14.14M RESTORE CONTROL: the SHIPPED script, the SAME member-truncated fixture, still exits 2" \
+    "2" "$CTRL_RC_1414M"
+assert_not_contains "14.14M RESTORE CONTROL: ...and never claims OK" "check-parity: OK" "$CTRL_OUT_1414M"
+
+# ---------------------------------------------------------------------------
+# 14M. META -- neutralise the disagreement comparison in a COPY of the
+# shipped script and prove the EXACT regression this section exists to rule
+# out: a check-parity that reports agreement regardless of real drift.
+# ---------------------------------------------------------------------------
+MUT14_DIR=$(mktemp -d "$TESTROOT/paritymut.XXXXXX")
+MUT14="$MUT14_DIR/model-select.sh"
+# shellcheck disable=SC2016  # matching LITERAL shell-source text, not expanding this script's own vars
+sed 's/if \[ "\$pin" != "\$resolved" \]; then$/if [ "$pin" != "$pin" ]; then/' "$MS" > "$MUT14"
+# shellcheck disable=SC2016
+assert_eq "14M.0a non-vacuity: the comparison line was found and neutralised" \
+    "1" "$(grep -c 'if \[ "\$pin" != "\$pin" \]; then' "$MUT14" | tr -d '[:space:]')"
+# shellcheck disable=SC2016
+assert_eq "14M.0b non-vacuity: the ORIGINAL comparison is gone from the mutant" \
+    "0" "$(grep -c 'if \[ "\$pin" != "\$resolved" \]; then' "$MUT14" | tr -d '[:space:]')"
+assert_eq "14M.1 non-vacuity: the mutant differs from the shipped resolver" \
+    "differs" "$(cmp -s "$MUT14" "$MS" && echo same || echo differs)"
+assert_eq "14M.2 non-vacuity: the mutant still parses (fails for its own reason, not a syntax error)" \
+    "0" "$(bash -n "$MUT14" >/dev/null 2>&1 && echo 0 || echo 1)"
+chmod +x "$MUT14"
+
+# Drive the MUTANT against 14.2's exact drifted fixture shape (a fresh
+# sandbox, not the now-fixed SB_142).
+SB_14M=$(ms_sandbox_with_listing "claude-fable-9" "claude-base-0")
+MUT_OUT_14M=$(CLAUDE_PROJECT_DIR="$SB_14M" bash "$MUT14" check-parity 2>&1)
+MUT_RC_14M=$?
+assert_eq "14M.3 SPECIFIC MISBEHAVIOUR: with the comparison neutralised, a genuinely drifted role WRONGLY exits 0" \
+    "0" "$MUT_RC_14M"
+assert_contains "14M.4 ...and wrongly claims OK on a fixture that IS drifted (naming the exact defect: a check-parity that would silently ship this)" \
+    "check-parity: OK" "$MUT_OUT_14M"
+
+# RESTORE CONTROL: the identical fixture shape, freshly built, run against
+# the SHIPPED script -- still correctly fails.
+SB_14MC=$(ms_sandbox_with_listing "claude-fable-9" "claude-base-0")
+CTRL_RC_14M=0
+CLAUDE_PROJECT_DIR="$SB_14MC" bash "$MS" check-parity >/dev/null 2>&1 || CTRL_RC_14M=$?
+assert_eq "14M.5 RESTORE CONTROL: the SHIPPED script, identical fixture shape, still correctly exits 1" \
+    "1" "$CTRL_RC_14M"
 
 # ===========================================================================
 echo ""

@@ -68,6 +68,28 @@
 #       Print "role\tstrategy\tresolved-id" (strategy from model-roles,
 #       resolved id from the resolved-mapping artifact).
 #
+#   check-parity (claude-workflow-plugin-a13r)
+#       Hard CONFIG/FILE agreement gate, distinct from `apply --check`'s
+#       advisory-only drift report (that flag ALWAYS exits 0 by design, so
+#       SessionStart never blocks on it). check-parity's exit code IS the
+#       contract: 0 every evaluable FILE agrees (round 2: every discovered
+#       agent file in a role class, not one representative — a sibling
+#       drift, e.g. devops.md vs backend.md inside `implementer`, is caught
+#       by name), 1 at least one file's pin disagrees with what its role's
+#       EFFECTIVE strategy resolves to (declared, or the fail-open default
+#       when undeclared) OR a file exists but its pin could not be read at
+#       all (never silently excluded), 2 nothing could be evaluated at all
+#       (honest "cannot tell", never read as a pass — including a cache
+#       whose `.models` is present but not the documented array shape).
+#       NEVER fetches — reads only the existing cache file, exactly like
+#       `status`. See cmd_check_parity's own header for the full scope
+#       statement, including what this does NOT and cannot claim. Wired
+#       into `workflow-doctor.sh`'s `model_parity` check (sandboxed, so it
+#       reads a point-in-time copy of the cache/config/agents — see that
+#       check's own header for why that is not a weaker guarantee and how
+#       UNVERIFIABLE is surfaced there without making the doctor cry wolf
+#       on every install with no ANTHROPIC_API_KEY ever set).
+#
 # Caching:
 #   .claude/.qa-tracking/model-select-cache.json
 #     { "timestamp": <unix-ts>, "models": [ { "id":..., "max_input_tokens":..., "created_at":... }, ... ] }
@@ -151,8 +173,12 @@ CODEX_DETECT="$PROJECT_DIR/.claude/scripts/codex-detect.sh"
 
 # ALL_ROLES — the role set, defined ONCE. cmd_status, cmd_roles and cmd_apply
 # all iterate this; adding a sixth role means editing this line, adding a
-# current_pin() arm, and adding a workflow-model-apply.sh role_agents() arm.
-# Nothing else enumerates roles.
+# current_pin() arm, adding a workflow-model-apply.sh role_agents() arm, and
+# adding a matching arm to cmd_check_parity's _expected_members() (kept in
+# sync with role_agents() by model-roles.test.sh section 3.1c — a textual
+# byte-identity check, not discovery; see _expected_members()'s own header
+# for why a completeness guard is the one place a hardcoded duplicate is
+# correct instead of a drift risk). Nothing else enumerates roles.
 #
 # ORDER IS LOAD-BEARING for the statusline: it is the fixed render order
 # `des dsr orch impl rev`.
@@ -276,8 +302,44 @@ write_cache() {
 }
 
 # read_cache_models — print the cached models array on stdout, or empty.
+#
+# SHAPE-VALIDATED (claude-workflow-plugin-a13r item 2a). The documented cache
+# shape (file header) is `{"timestamp":N,"models":[...]}` — `.models` MUST be
+# a JSON array. Before this fix the read was `.models // []`, which only
+# guards against a MISSING/null key; a cache whose `.models` is PRESENT but
+# some other type (an object, a string, a number — corruption, a hand-edit, a
+# future writer bug) flowed through untouched. That is not a hypothetical:
+# jq's `.[]`/`map()` are polymorphic over arrays and objects, so pick_best
+# iterating an object's VALUES as if they were listing entries can still
+# produce a plausible-looking resolved id, and check-parity would report "OK
+# - N role(s) checked" over a cache that was never the shape it claims to be
+# — a cache that is the wrong shape rendering identically to one that is
+# merely empty, which is the same "returned OK without having checked"
+# defect this whole task exists to close, one layer further down.
+#
+# A non-array `.models` is now treated exactly like an absent/empty cache
+# (`[]`), NOT like the object/string/whatever it actually contained — every
+# caller's existing empty-cache handling already does the right thing
+# (cmd_check_parity's UNVERIFIABLE rc=2, cmd_status's "<no cache>",
+# get_models's fail-open) once it receives `[]`, so this is the one place
+# that needs to know the difference. A present-but-wrong-shaped `.models`
+# warns (distinct from the quiet, expected "no models key at all" case,
+# which every legitimate cache write always includes anyway); a malformed
+# cache file that fails to parse as JSON at all falls through to the
+# pre-existing `|| printf '[]'` with no warning, same as before this fix.
 read_cache_models() {
     [ -f "$CACHE_FILE" ] || { printf '[]'; return; }
+    local shape
+    shape=$(jq -r '(.models? | type) // "null"' "$CACHE_FILE" 2>/dev/null)
+    if [ -z "$shape" ]; then
+        # The file itself did not parse as JSON at all; fall through to the
+        # same recovery the array path below uses.
+        :
+    elif [ "$shape" != "array" ] && [ "$shape" != "null" ]; then
+        _warn "cache at $CACHE_FILE has .models of type '$shape', not the documented array; treating as no cached listing (a wrong-shaped cache must never be silently trusted as if it were merely empty — claude-workflow-plugin-a13r)"
+        printf '[]'
+        return
+    fi
     jq -c '.models // []' "$CACHE_FILE" 2>/dev/null || printf '[]'
 }
 
@@ -1686,16 +1748,430 @@ cmd_roles() {
 }
 
 # ---------------------------------------------------------------------------
+# Subcommand: check-parity (claude-workflow-plugin-a13r).
+#
+# THE DEFECT THIS EXISTS TO CATCH: claude-workflow-plugin-fkm.10 was closed
+# on the strength of a `.claude/model-roles` edit (orchestrator: top ->
+# opus-class) that was real and committed, but the agent file's frontmatter
+# pin was never rewritten to match — nothing checked the difference, so a
+# config file asserting opus-class and an agent file spawning Fable rendered
+# identically to anyone reading the config alone. `apply --check` (Section
+# 12 below / claude-workflow-plugin-j7kk) already computes exactly this
+# comparison, but it is DELIBERATELY advisory: it is what SessionStart runs
+# on every session, so it ALWAYS exits 0 (see that flag's own header — a
+# gate that could block a session on an enumeration hiccup violates spec 0.3
+# principle 1). check-parity reuses the identical comparison primitives
+# (role_strategy, pick_for_role) but turns the verdict into a real exit-code
+# contract, so it can be ASSERTED ON by a human, a test, or a CI job — the
+# thing "nothing today fails when pinned and resolved disagree" names as
+# missing.
+#
+# WHAT THIS CHECKS, EXACTLY (WIDENED at round 2, item 2d — see below): for
+# EVERY agent file mapped to a role in ALL_ROLES — discovered via
+# workflow-model-apply.sh --print-role-map, the SAME discovery cmd_status's
+# _drift_check already uses for intra-role lockstep warnings, not just the
+# single REPRESENTATIVE file current_pin() reads for every OTHER
+# subcommand — whether that file's `model:` frontmatter agrees with what
+# .claude/model-roles' EFFECTIVE strategy for its role (declared, or the
+# fail-open default of `top` when the role has no key at all — see
+# "UNDECLARED ROLES" below) resolves to AGAINST THE LOCAL CACHED MODEL
+# LISTING (read_cache_models — the same file `status` reads, now
+# SHAPE-VALIDATED, item 2a). Like `status`, and UNLIKE `apply`/`apply
+# --check`/`resolve`, this subcommand NEVER fetches: no network call is made
+# here, ever, regardless of cache freshness. This is CONFIG/FILE agreement —
+# a static comparison of on-disk files plus a cached snapshot of the model
+# catalog — exactly what claude-workflow-plugin-a13r's own measured evidence
+# used `model-select.sh status` to show.
+#
+# WHY "WIDENED". Round 1 read only ONE representative file per role
+# (backend.md for `implementer`, qa.md for `reviewer`, ...) — correct for
+# current_pin()'s OTHER callers, where reading one member is enough because
+# workflow-model-apply.sh --role keeps the whole class in lockstep ON WRITE.
+# check-parity is a READ, not a write, so that assumption does not carry
+# over: frontend.md or devops.md can drift from backend.md — a hand edit, a
+# partial /workflow-model run, a bad merge — while the representative file
+# still agrees, and round 1's check-parity reported "OK — every pinned agent
+# file agrees" over a role class that, in fact, did not. That wording
+# OVERSTATED file coverage: it checked one file per role and claimed every
+# file. Round 2 checks every discovered member, so a sibling-file drift is
+# caught BY NAME instead of hiding behind the class's representative.
+#
+# WHAT THIS DOES NOT CHECK, AND MUST NEVER BE READ TO CLAIM: whether any
+# agent spawned by the runtime actually RAN on the resolved or the pinned
+# model. Whether the Claude Code runtime honours a frontmatter `model:`
+# change at all — mid-session or otherwise — is not established anywhere in
+# this tree and is not verifiable offline (see --help and the
+# escalate/restore header above). This subcommand's entire claim is: "if a
+# subagent for role R were spawned right now from agent file F, F's
+# frontmatter pin would (or would not) be the id .claude/model-roles'
+# EFFECTIVE strategy for R currently resolves to against the last cached
+# listing." Nothing more.
+#
+# EXIT CODES ARE THE CONTRACT:
+#   0  OK             every evaluable file agrees.
+#   1  DISAGREEMENT   at least one file's pin differs from its role's
+#                     resolved id, OR at least one file EXISTS but its
+#                     `model:` pin could not be read at all (item 2c —
+#                     folded into disagreement, see below: NEVER silently
+#                     excluded the way a genuinely absent file is).
+#   2  UNVERIFIABLE   no file could be evaluated at all: no cached listing;
+#                     OR `workflow-model-apply.sh --print-role-map` exited
+#                     nonzero, or exited 0 with a map missing a whole role or
+#                     (round 4, item (a)) specific member(s) of a role it
+#                     always lists (round 3, item 3 — a helper that dies
+#                     partway through printing, or truncates silently, is
+#                     never trusted for the partial output it managed: the
+#                     ENTIRE run fails closed, not just the roles/members it
+#                     never reached); OR every role was excluded — see below.
+#                     This is NOT a pass: it is an honest "cannot tell", and
+#                     callers must not treat rc=2 as agreement.
+#
+#                     rc=2 IS NOT ONE THING, and a consumer that treats it as
+#                     one loses information the two shapes need opposite
+#                     handling for (claude-workflow-plugin-a13r round 4, item
+#                     (b)): "no cached listing" / "every role excluded" is a
+#                     normal, often-permanent ABSENCE OF DATA (a fresh
+#                     install with no ANTHROPIC_API_KEY); a broken or
+#                     truncated --print-role-map is a DETECTED DEFECT in the
+#                     helper itself. Every UNVERIFIABLE line therefore
+#                     carries a machine-readable tag right after the word
+#                     UNVERIFIABLE — `:NO-DATA` for the former,
+#                     `:HELPER-FAILURE` for the latter — so a consumer like
+#                     workflow-doctor.sh's model_parity check can self-skip
+#                     on one and FAIL on the other instead of rendering both
+#                     identically (see that check's own header for the
+#                     install.sh --verify measurement behind why the
+#                     NO-DATA half must stay a self-skip, never a FAIL).
+# A ROLE contributes NOTHING to the run — no member of it is compared, not
+# even a malformed one — when:
+#   - NONE of its members (role_agents()'s STATIC list — backend/frontend/
+#     devops for `implementer`, etc., regardless of what is installed) has
+#     an agent file that actually EXISTS on disk. This mirrors _apply_role's
+#     own "nothing to pin" skip, and CHECK_ONLY's identical rule inside
+#     cmd_apply, so this subcommand and `apply --check` agree about what
+#     counts as a lane worth naming. Unlike round 1, this is now a PER-FILE
+#     existence check inside the member loop, not a single representative
+#     lookup — a role with SOME members present and others not (a v4->v5
+#     upgrade mid-flight) gets the present ones evaluated and the absent
+#     ones silently skipped, rather than an all-or-nothing verdict for the
+#     whole class;
+#   - pick_for_role's MANUAL-adopt path fires (the winner's created_at is
+#     missing/unparseable) — there is no single resolved id yet to compare
+#     against;
+#   - pick_for_role returns no candidate at all (e.g. every model in the
+#     cached listing was excluded by .claude/model-ranking);
+#   - it is `implementer` AND a per-unit escalation is currently ACTIVE
+#     ($ESCALATION_STATE exists) — an escalated pin is DELIBERATELY not what
+#     the base `implementer` strategy resolves to; that is what escalation
+#     IS (see cmd_escalate's header), not drift. Reporting it as
+#     disagreement would make every legitimately escalated unit look like
+#     the exact defect this subcommand exists to catch.
+#
+# A single MEMBER FILE inside an otherwise-evaluated role is DIFFERENT from a
+# whole-role exclusion above (item 2c). Once a role has at least one
+# discovered agent file, EVERY discovered file is compared, and a file whose
+# `model:` pin cannot be read — permission denied, no frontmatter, no
+# `model:` line at all — is NOT excluded the way a genuinely absent file is:
+# it is folded into `drifted` as its own named finding and the run cannot
+# report OK. Before this fix, current_pin()'s `grep | head -1 | awk`
+# pipeline masked a failed grep exactly the way load_ranking_raw's own
+# header warns a masked read failure always does: an unreadable file and a
+# genuinely absent one both produced empty stdout, so both were
+# `[ -n "$pin" ] || continue`-excluded identically, and the run could still
+# report a clean OK if every other role happened to agree — the same
+# "returned OK after not actually evaluating" shape as items 2a/2b, sitting
+# INSIDE the guard built to catch that shape.
+#
+# UNDECLARED ROLES (item 2b). role_strategy()'s fail-open default is `top`
+# when a role has no key in .claude/model-roles at all — correct and
+# UNCHANGED, because that IS what a spawn would actually get; excluding an
+# undeclared role, or silently defaulting it without saying so, would both
+# be wrong in different directions. What round 1 got wrong was the
+# NARRATION: its OK/DISAGREEMENT messages both said "agrees with the
+# strategy declared in .claude/model-roles" even when the role in question
+# had no declaration at all and was only being compared against the
+# fail-open default — true by coincidence, not by configuration. Each role's
+# declared-vs-defaulted status is now tracked; an undeclared role is still
+# compared (silently excluding it would hide a real spawn-time mismatch),
+# but its finding — and the summary line, when any evaluated role was
+# undeclared — says so explicitly rather than claiming a declaration that
+# was never made.
+
+# _expected_members <role> — print the agent basenames (one per line) that
+# --print-role-map's output for <role> must contain, independent of
+# whatever the (possibly truncated) map subprocess actually returned this
+# run. Returns non-zero for an unknown role.
+#
+# claude-workflow-plugin-a13r ROUND 4, ITEM (a). Every OTHER role-lookup in
+# this file (_drift_check, the per-role loop in cmd_check_parity itself)
+# deliberately uses DISCOVERY — trusting `--print-role-map`'s output for
+# what a class's members are — rather than a hardcoded list, and
+# _drift_check's own header explains why: a class that gains a member and a
+# hardcoded caller that keeps checking the old set silently checks less,
+# forever, with no failure to notice it by.
+#
+# A COMPLETENESS GUARD is the one place that reasoning does not apply,
+# because it has no other ground truth available. The whole point is to
+# answer "is the map --print-role-map just produced actually complete", and
+# the map is the very thing being validated — trusting it to validate
+# itself is exactly the "returned OK after not actually evaluating" shape
+# this whole check exists to catch, recurring one level up (in the
+# role<->agent MAP now, rather than in `checked`, which round 3 already
+# closed). Proven necessary, not assumed: a map containing exactly
+# designer/designer, design_reviewer/design-reviewer,
+# orchestrator/orchestrator, implementer/backend and reviewer/qa has every
+# ROLE present at least once — satisfying the whole-role guard below on its
+# own — while silently never comparing frontend, devops, grader or judge at
+# all (model-roles.test.sh 14.14 reproduces this exact map and proves the
+# guard below is what catches it).
+#
+# DELIBERATELY DUPLICATED, and DELIBERATELY STATIC — this is workflow-
+# model-apply.sh's role_agents() with the `all` union arm removed (the
+# completeness loop below already iterates $ALL_ROLES one role at a time)
+# and the member arms copied VERBATIM, byte for byte. Kept from drifting
+# silently the same way ALL_ROLES/CONCRETE_ROLES already are
+# (model-roles.test.sh section 3.1b): section 3.1c extracts both functions'
+# member arms as text — never executing either — and requires them
+# byte-identical, so a role gaining or losing a member without updating
+# BOTH sides fails in CI, not by silently under-checking a map that still
+# happens to validate.
+_expected_members() {
+    case "$1" in
+        designer)        printf 'designer\n' ;;
+        design_reviewer) printf 'design-reviewer\n' ;;
+        orchestrator)    printf 'orchestrator\n' ;;
+        implementer)     printf 'backend\nfrontend\ndevops\n' ;;
+        reviewer)        printf 'qa\ngrader\njudge\n' ;;
+        *)               return 1 ;;
+    esac
+}
+
+cmd_check_parity() {
+    local models
+    models=""
+    if [ -f "$CACHE_FILE" ]; then
+        models=$(read_cache_models)
+    fi
+    if [ -z "$models" ] || [ "$models" = "[]" ]; then
+        printf 'model-select: check-parity: UNVERIFIABLE:NO-DATA - no cached model listing at %s (this does NOT mean pins agree; it means agreement could not be checked). Populate the cache first: model-select.sh resolve (or apply — status only READS an existing cache, it cannot populate a cold one), which needs ANTHROPIC_API_KEY on a cold cache; then re-run check-parity.\n' "$CACHE_FILE" >&2
+        return 2
+    fi
+
+    # Discovered ONCE, not once per role: --print-role-map is a subprocess
+    # spawn, and every role's membership is filtered out of one capture below
+    # (the same trade _drift_check makes for the identical reason).
+    #
+    # claude-workflow-plugin-a13r ROUND 3, ITEM 3: the helper's own exit
+    # status is now load-bearing, never discarded. The OLD `|| true` meant a
+    # helper that printed a PARTIAL map and then died (a truncated write, an
+    # interpreter crash, a future refactor bug) left that partial output IN
+    # USE — only `checked == 0` (every single role excluded) produced
+    # UNVERIFIABLE, so as few as ONE surviving file could yield a
+    # coincidental OK while whole roles silently never entered the
+    # comparison at all. Both failure shapes below fail the ENTIRE run
+    # closed — UNVERIFIABLE, never a partial OK — rather than trusting
+    # whatever happened to print before things went wrong.
+    local role_map role_map_rc=0
+    role_map=$(bash "$APPLY_HELPER" --print-role-map 2>/dev/null) || role_map_rc=$?
+    if [ "$role_map_rc" -ne 0 ]; then
+        printf 'model-select: check-parity: UNVERIFIABLE:HELPER-FAILURE - %s --print-role-map exited %d (expected 0); a non-clean exit means any output it printed cannot be trusted as a complete map, so NO file was evaluated (this does NOT mean pins agree). Run it by hand and read the failure: bash %s --print-role-map\n' \
+            "$APPLY_HELPER" "$role_map_rc" "$APPLY_HELPER" >&2
+        return 2
+    fi
+    # role_agents() is STATIC (workflow-model-apply.sh's own header: "the
+    # rewrite loop tolerates a missing file, so listing them here is safe
+    # even before the files exist"), so a CLEAN exit must still list every
+    # one of $ALL_ROLES at least once — a clean exit that is missing a whole
+    # role is the "succeeded while truncated" shape a naive rc==0 check
+    # cannot see (a write cut off after the exit-code path already
+    # committed, a future edit that forgets a role).
+    local _prc_role _prc_missing=""
+    for _prc_role in $ALL_ROLES; do
+        case "$(printf '%s\n' "$role_map" | awk -F'\t' -v r="$_prc_role" '$1 == r { print "y"; exit }')" in
+            y) ;;
+            *) _prc_missing="${_prc_missing:+$_prc_missing, }$_prc_role" ;;
+        esac
+    done
+    if [ -n "$_prc_missing" ]; then
+        printf 'model-select: check-parity: UNVERIFIABLE:HELPER-FAILURE - %s --print-role-map exited 0 but its output is missing role(s) that role_agents() always lists regardless of what is installed: %s (this does NOT mean pins agree; the map is partial, not empty-by-design). Run it by hand and read the output: bash %s --print-role-map\n' \
+            "$APPLY_HELPER" "$_prc_missing" "$APPLY_HELPER" >&2
+        return 2
+    fi
+
+    # claude-workflow-plugin-a13r ROUND 4, ITEM (a): whole-ROLE presence
+    # above is necessary but NOT sufficient. A map can list every role at
+    # least once while silently dropping specific MEMBERS of a multi-member
+    # role (implementer, reviewer) — see _expected_members()'s own header
+    # for the exact adversarial map this closes. Checked against
+    # _expected_members(), a deliberately duplicated STATIC reference — not
+    # against the map itself, which is the very thing being validated (see
+    # that function's header for why discovery does not apply here).
+    #
+    # A ROLE WITH ZERO ROWS IS SKIPPED HERE, DELIBERATELY — that shape is
+    # the guard ABOVE's job, and it already returned before this loop is
+    # ever reached in the shipped script. The two guards are kept
+    # responsible for disjoint shapes on purpose (whole-role-absent above,
+    # some-but-not-all-members-present here) rather than overlapping on a
+    # totally-absent role: model-roles.test.sh's 14.11M/14.12M mutants each
+    # disarm ONE guard at a time to prove it is independently load-bearing,
+    # and an overlap would let this guard silently cover for a disarmed
+    # whole-role guard, making 14.12M's mutant stop reproducing the
+    # regression it exists to catch.
+    local _prc_member _prc_member_missing=""
+    for _prc_role in $ALL_ROLES; do
+        case "$(printf '%s\n' "$role_map" | awk -F'\t' -v r="$_prc_role" '$1 == r { print "y"; exit }')" in
+            y) ;;
+            *) continue ;;
+        esac
+        while IFS= read -r _prc_member; do
+            [ -n "$_prc_member" ] || continue
+            case "$(printf '%s\n' "$role_map" | awk -F'\t' -v r="$_prc_role" -v m="$_prc_member" '$1 == r && $2 == m { print "y"; exit }')" in
+                y) ;;
+                *) _prc_member_missing="${_prc_member_missing:+$_prc_member_missing, }$_prc_role/$_prc_member" ;;
+            esac
+        done <<EOF
+$(_expected_members "$_prc_role")
+EOF
+    done
+    if [ -n "$_prc_member_missing" ]; then
+        printf 'model-select: check-parity: UNVERIFIABLE:HELPER-FAILURE - %s --print-role-map exited 0 and every role was present, but its output is missing member(s) role_agents() always lists for that role regardless of what is installed: %s (this does NOT mean pins agree; the map is truncated at the member level, not empty-by-design). Run it by hand and read the output: bash %s --print-role-map\n' \
+            "$APPLY_HELPER" "$_prc_member_missing" "$APPLY_HELPER" >&2
+        return 2
+    fi
+
+    local role strat resolved checked=0 drifted="" undeclared="" excluded=""
+    for role in $ALL_ROLES; do
+        if [ "$role" = "implementer" ] && [ -f "$ESCALATION_STATE" ]; then
+            excluded="${excluded:+$excluded, }implementer (active per-unit escalation)"
+            continue
+        fi
+
+        local members
+        members=$(printf '%s\n' "$role_map" | awk -F'\t' -v r="$role" '$1 == r { print $2 }')
+        # Defensive, not the primary "no agent file" path (that is the
+        # per-file `[ -f "$f" ]` check inside the loop below): with the
+        # completeness check above, `role_map` is now guaranteed to list
+        # every member role_agents() ever declares for $role, so this only
+        # fires if that guarantee itself is somehow wrong — a second line of
+        # defense, not the expected path.
+        if [ -z "$members" ]; then
+            excluded="${excluded:+$excluded, }$role (no member found in the role map)"
+            continue
+        fi
+
+        strat=$(role_strategy "$role")
+        local raw
+        raw=$(pick_for_role "$models" "$strat" 2>/dev/null) || raw=""
+        case "$raw" in
+            MANUAL$'\t'*)
+                excluded="${excluded:+$excluded, }$role (manual-adopt pending, no resolved id to compare)"
+                continue
+                ;;
+            "")
+                excluded="${excluded:+$excluded, }$role (no candidate after ranking exclusions)"
+                continue
+                ;;
+            *) resolved="$raw" ;;
+        esac
+
+        local declared_val
+        declared_val=$(_model_roles_value "$role")
+        [ -n "$declared_val" ] || undeclared="${undeclared:+$undeclared, }$role"
+
+        local agent f pin
+        while IFS= read -r agent; do
+            [ -n "$agent" ] || continue
+            f="$PROJECT_DIR/.claude/agents/$agent.md"
+            # A member with NO agent file on disk at all is a LEGITIMATE
+            # exclusion (mirrors _apply_role's own "nothing to pin" skip) —
+            # NOT the item-2c case below, which is specifically about a file
+            # that EXISTS but could not be read. workflow-model-apply.sh's
+            # role_agents() (what --print-role-map is derived from) is a
+            # STATIC role->agent map — its own header: "the rewrite loop
+            # tolerates a missing file, so listing them here is safe even
+            # before the files exist" — so `members` above is non-empty for
+            # every concrete role regardless of what is actually installed.
+            # This per-file existence check is what turns "hasn't shipped
+            # yet / mid v4->v5 upgrade" into a real, silent exclusion rather
+            # than a false "unreadable" finding two lines below. Deliberately
+            # NOT added to `excluded` above: that accumulator is for
+            # whole-ROLE drops (round 3, item 3), and enumerating every
+            # individual missing file would be noise for the common
+            # mid-upgrade case — the `checked` count already reflects it
+            # honestly (see the OK/DISAGREEMENT wording below, which no
+            # longer claims "every discovered agent").
+            [ -f "$f" ] || continue
+            checked=$((checked + 1))
+            pin=$(grep -E '^model:' "$f" 2>/dev/null | head -1 | awk '{print $2}')
+            if [ -z "$pin" ]; then
+                drifted="${drifted:+$drifted; }$role/$agent: agent file exists at $f but no readable 'model:' pin was found (permission denied, or missing/malformed frontmatter) — cannot confirm agreement, NOT excluded"
+                continue
+            fi
+            if [ "$pin" != "$resolved" ]; then
+                local via
+                if [ -n "$declared_val" ]; then
+                    via=".claude/model-roles (strategy=$strat)"
+                else
+                    via="the fail-open default 'top' (role '$role' has NO strategy declared in .claude/model-roles)"
+                fi
+                drifted="${drifted:+$drifted; }$role/$agent: agent file has '$pin', $via resolves '$resolved' (fix: /workflow-model --role $role $resolved, or model-select.sh apply)"
+            fi
+        done <<EOF
+$members
+EOF
+    done
+
+    if [ "$checked" -eq 0 ]; then
+        printf 'model-select: check-parity: UNVERIFIABLE:NO-DATA - no agent file had both a role worth evaluating and a resolvable candidate against the cached listing (this does NOT mean pins agree). Every role was excluded (no agent file, manual-adopt pending, no candidate after ranking exclusions, or an active implementer escalation).\n' >&2
+        return 2
+    fi
+
+    # claude-workflow-plugin-a13r ROUND 3, ITEM 3: the OK/DISAGREEMENT
+    # wording below no longer says "across every discovered agent" — that
+    # claimed full coverage even when a MANUAL/no-candidate role or an
+    # active escalation dropped a whole role out of `checked` with no trace
+    # in the text at all. `excluded_note` names every such role-level drop
+    # by reason, so a smaller-than-9 `checked` count is never left
+    # unexplained. Per-file exclusions (a role with SOME but not all members
+    # installed) are intentionally NOT enumerated here — see the comment at
+    # the per-file `[ -f "$f" ] || continue` above — the count alone speaks
+    # for that case, as it always has.
+    local undeclared_note="" excluded_note=""
+    [ -n "$undeclared" ] && undeclared_note=" NOTE: role(s) with NO strategy declared in .claude/model-roles, evaluated only against the fail-open default 'top': $undeclared."
+    [ -n "$excluded" ] && excluded_note=" NOTE: role(s) excluded from this run entirely (not counted, not compared): $excluded."
+
+    if [ -n "$drifted" ]; then
+        printf 'model-select: check-parity: CONFIG/FILE DISAGREEMENT (%d file(s) checked) - %s%s%s\n' "$checked" "$drifted" "$undeclared_note" "$excluded_note" >&2
+        return 1
+    fi
+
+    printf "model-select: check-parity: OK - %d file(s) checked against the cached listing; every one agrees with its role's EFFECTIVE strategy (declared in .claude/model-roles, or the fail-open default 'top' where undeclared).%s%s (This checks CONFIG/FILE agreement only; it does not and cannot claim any agent actually ran on the resolved model.)\n" "$checked" "$undeclared_note" "$excluded_note" >&2
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch.
 # ---------------------------------------------------------------------------
 
 case "$SUBCMD" in
-    resolve)  cmd_resolve ;;
-    apply)    cmd_apply ;;
-    status)   cmd_status ;;
-    roles)    cmd_roles ;;
-    escalate) cmd_escalate ;;
-    restore)  cmd_restore ;;
+    resolve)      cmd_resolve ;;
+    apply)        cmd_apply ;;
+    status)       cmd_status ;;
+    roles)        cmd_roles ;;
+    escalate)     cmd_escalate ;;
+    restore)      cmd_restore ;;
+    check-parity)
+        # EVERY OTHER ARM here relies on the unconditional `exit 0` below
+        # this case statement (the fail-open contract: none of
+        # resolve/apply/status/roles/escalate/restore ever signals failure
+        # via exit code). check-parity is the ONE subcommand whose exit code
+        # IS the contract (see cmd_check_parity's own header), so its arm
+        # exits immediately with the function's own return value instead of
+        # falling through to that trailing `exit 0` — which would otherwise
+        # silently turn every 1 (disagreement) and 2 (unverifiable) into 0.
+        cmd_check_parity
+        exit $?
+        ;;
     ""|help|-h|--help)
         cat <<'USAGE'
 model-select.sh — automatic best-model selection (spec 0.3 + V1 roles + D0
@@ -1716,6 +2192,20 @@ Usage:
       recording the previous pin first so the change is reversible
   model-select.sh restore
       undo an escalation: put the recorded previous implementer pin back
+  model-select.sh check-parity
+      hard CONFIG/FILE agreement gate: exit 0 every discovered agent file
+      that could be evaluated agrees, 1 at least one agent file's pin
+      disagrees with what its role's EFFECTIVE strategy resolves to
+      (declared in .claude/model-roles, or the fail-open default 'top'
+      where undeclared), 2 nothing could be evaluated (no cached listing, or
+      every role excluded — tagged UNVERIFIABLE:NO-DATA; OR
+      workflow-model-apply.sh --print-role-map failed or returned a map
+      missing a whole role or specific members of one — tagged
+      UNVERIFIABLE:HELPER-FAILURE, a detected defect rather than an absence
+      of data. NOT a pass either way). Never fetches (cache-only, like
+      status — use resolve or apply to populate a cold cache). Checks
+      CONFIG/FILE agreement only; does not and cannot claim any agent
+      actually ran on the resolved model.
 
 Roles (designer, design_reviewer, orchestrator, implementer, reviewer) and
 their strategies live in .claude/model-roles. A strategy is `top` or

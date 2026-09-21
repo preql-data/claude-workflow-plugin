@@ -62,9 +62,14 @@
 # exactly those three .beads/* files and nothing else; the same run with
 # `--skip beads` left all 6,936 files byte-identical; and `beads` alone
 # reproduced the change. (QA independently measured the same on a 10,358-file
-# target.) That measurement predates `beads_ledger`, the only check added since,
-# and that one reads the real target but writes nothing into it — it exports to
-# a temp file OUTSIDE the target — so the result carries over unchanged.
+# target.) That measurement predates two checks added since, not one
+# (claude-workflow-plugin-a13r round 4, LOW: `beads_ledger` was named here as
+# "the only" one; `model_parity` is the other). Both leave the result
+# unchanged: `beads_ledger` reads the real target but writes nothing into it
+# — it exports to a temp file OUTSIDE the target — and `model_parity` never
+# even reads the real target directly; it runs entirely inside its own
+# mk_probe_sandbox COPY (see that check's own header) and never writes that
+# copy back out either.
 # So `--skip beads` is the run that provably touches nothing — use it on a
 # read-only mount, mid-`bd` operation, or when you need that guarantee.
 
@@ -80,7 +85,7 @@ set -u
 # the runtime registry agree exactly, and other specs assert on individual
 # names. Renaming one is a breaking change to that contract.
 # BEGIN DOCTOR_CHECK_NAMES (workflow-doctor.test.sh extracts this block; keep the sentinels)
-DOCTOR_CHECK_NAMES="deps agents skill mcp_config settings_hooks beads beads_ledger session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop"
+DOCTOR_CHECK_NAMES="deps agents skill mcp_config settings_hooks beads beads_ledger model_parity session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop"
 # END DOCTOR_CHECK_NAMES
 
 # Expected tools/list cardinality per shipped MCP server, as
@@ -224,6 +229,10 @@ Flags:
                      past this check's 30s bound and FAIL a healthy install.
                      `--skip beads` is also the way to guarantee the run touches
                      nothing at all in the target (see the note below).
+                     `model_parity` needs no entry here: a target whose
+                     model-select cache has never been populated (no
+                     ANTHROPIC_API_KEY set — a normal, often-permanent
+                     state) makes it self-skip, never a FAIL.
   --quiet            Suppress PASS and SKIP lines. FAIL lines, their indented
                      `fix:` lines, and the final summary still print.
   -h, --help         Print this message and exit 0.
@@ -257,6 +266,15 @@ Checks (the names are a stable contract; specs assert on them):
                    directions get DIFFERENT remedies — database-ahead means
                    export, ledger-ahead means import, and prescribing the wrong
                    one destroys data.
+  model_parity     runs `model-select.sh check-parity` in the sandbox: does
+                   every agent file's model: pin agree with what its role's
+                   strategy in .claude/model-roles resolves to against the
+                   cached model listing? FAILs on real drift; SKIPs (never a
+                   silent PASS) when the cache was never populated, which
+                   needs ANTHROPIC_API_KEY — a normal state for many
+                   installs, not a broken one, so no --skip is needed for
+                   it. See check-parity's own header for exactly what this
+                   does and does not establish.
   session_start    EXECUTES the target's session-start.sh and asserts a valid
                    SessionStart envelope carrying a non-empty additionalContext
                    with the workflow_engine block and the delegation contract
@@ -319,6 +337,14 @@ AIR-GAPPED / OFFLINE INSTALL RECIPE
   report a false FAIL on a healthy install:
 
     bash .claude/scripts/workflow-doctor.sh --skip beads,mcp_bd,mcp_code_graph
+
+  `model_parity` needs no entry in that list. An air-gapped host also never
+  has ANTHROPIC_API_KEY populate the model-select cache, but unlike `beads`
+  that is not a bounded probe that can time out — the check self-skips
+  (never a FAIL) for as long as the cache stays empty, which is exactly the
+  install.sh functional-verification path's own default invocation (no
+  --skip flags at all): an air-gapped install must still be able to verify
+  clean.
 USAGE
 }
 
@@ -537,9 +563,17 @@ run_bounded() {
 # .claude/scripts/*.sh set (matching install.sh's glob — .claude/scripts/tests/
 # is repo-only and never shipped, see workflow-manifest.sh's scan scopes), the
 # skill, the agents (model-select.sh apply rewrites their frontmatter pins —
-# in here, harmlessly), settings.json, hooks/, and the operator config files
-# the resolvers read. A git repo with one empty commit so the gate's
-# git-identity and baseline machinery work.
+# in here, harmlessly), settings.json, hooks/, the operator config files the
+# resolvers read, and (claude-workflow-plugin-a13r) the cached model listing.
+# The cache is READ-ONLY input like everything else copied here — no check in
+# this file ever writes it back out — but it is copied deliberately rather
+# than left to the empty .qa-tracking/ mkdir below: `model_parity` runs
+# `model-select.sh check-parity` inside the sandbox, and that subcommand
+# NEVER fetches (its own header) — it reads ONLY this file. Without a copy,
+# `model_parity` would be permanently UNVERIFIABLE regardless of the real
+# target's state, which is not a weaker check, it is a different, useless
+# one. A git repo with one empty commit so the gate's git-identity and
+# baseline machinery work.
 #
 # Callers get a FRESH sandbox each time on purpose: session-start.sh truncates
 # changed-files.txt, so sharing one sandbox between the session_start and
@@ -577,12 +611,49 @@ mk_probe_sandbox() {
         fi
     done
 
+    # claude-workflow-plugin-a13r ROUND 3 ITEM 2: `cp -R` above silently
+    # DROPS a file it cannot read — permission denied on one agent file does
+    # not fail the directory copy (the redirected stderr and `|| true` both
+    # hide it), so an unreadable agent file is simply ABSENT from the
+    # sandbox. model-select.sh's own missing-agent-file exclusion (section
+    # 14.6: a LEGITIMATE skip for a role that was never installed) cannot
+    # tell that apart from a file that EXISTS on the real TARGET but could
+    # not be read — so `model_parity`, run inside the sandbox, silently
+    # excluded exactly the file the real target's own permission problem was
+    # hiding, and reported OK/PASS whenever every readable file happened to
+    # agree. Detected here, against the SOURCE ($TARGET, not $sb): the
+    # sandbox's own directory listing is not a reliable signal — a role that
+    # never had an agent file and one `cp` failed to populate look
+    # IDENTICAL from inside `$sb`. Handed to check_model_parity below as a
+    # named, un-skippable finding — never silently folded into "no agent
+    # file, nothing to check".
+    local unreadable_agents="" src_agent
+    if [ -d "$TARGET/.claude/agents" ]; then
+        for src_agent in "$TARGET"/.claude/agents/*.md; do
+            [ -e "$src_agent" ] || continue
+            [ -r "$src_agent" ] && continue
+            unreadable_agents="${unreadable_agents:+$unreadable_agents, }$(basename "$src_agent")"
+        done
+    fi
+    if [ -n "$unreadable_agents" ]; then
+        printf '%s\n' "$unreadable_agents" > "$sb/.claude/.qa-tracking/model-parity-unreadable-agents.txt"
+    fi
+
     local f
     for f in settings.json rubric-config review-config model-ranking model-roles effort-verdict; do
         if [ -f "$TARGET/.claude/$f" ]; then
             cp "$TARGET/.claude/$f" "$sb/.claude/$f" 2>/dev/null || true
         fi
     done
+
+    # claude-workflow-plugin-a13r: model-select.sh's local cache, read-only
+    # input for `model_parity` (see this function's own header). Not under
+    # the settings.json-style flat-file loop above because it lives one
+    # directory down, in .qa-tracking/ (already created a few lines up).
+    if [ -f "$TARGET/.claude/.qa-tracking/model-select-cache.json" ]; then
+        cp "$TARGET/.claude/.qa-tracking/model-select-cache.json" \
+            "$sb/.claude/.qa-tracking/model-select-cache.json" 2>/dev/null || true
+    fi
 
     mk_bd_shim "$sb/bin" >/dev/null || true
 
@@ -1382,6 +1453,220 @@ NOTE: ${detail:-beads-ledger.sh check returned $rc}"
 }
 
 # ===========================================================================
+# Check: model_parity (claude-workflow-plugin-a13r)
+#
+# WHY THIS EXISTS. claude-workflow-plugin-fkm.10 was closed on the strength
+# of a `.claude/model-roles` edit that was real and committed, but the agent
+# file's frontmatter pin was never rewritten to match — nothing checked the
+# difference, so a config file asserting `opus-class` and an agent file
+# spawning Fable rendered identically to anyone reading the config alone.
+# `model-select.sh check-parity` is the mechanical comparison; this check is
+# what makes it a GATE something actually runs, rather than a diagnostic an
+# operator has to remember to invoke by hand — the exact "recorded but not
+# effected" failure shape the underlying bug is named for, reappearing one
+# level up, in the fix's own delivery. It is deliberately NOT wired into
+# SessionStart's `apply --check` path: that path is fail-open by design
+# (spec 0.3 principle 1 — a session must never fail to start over an
+# enumeration hiccup) and must stay that way. This check is the surface that
+# actually gates.
+#
+# check-parity's exit code IS its own contract (0 OK / 1 DISAGREEMENT /
+# 2 UNVERIFIABLE — see model-select.sh's cmd_check_parity for the full
+# scope statement). NEITHER non-zero code is silently folded into a pass:
+#   1 DISAGREEMENT is a real, actionable finding — an agent file's model:
+#     pin disagrees with what its role's strategy resolves to. FAILs, no
+#     exceptions, no self-skip: this is the finding the whole check exists
+#     to surface.
+#   2 UNVERIFIABLE is NOT ONE THING (claude-workflow-plugin-a13r round 4,
+#     item (b)), and this check's own rc=2 handling below now reads
+#     check-parity's own tag (:NO-DATA vs :HELPER-FAILURE) rather than
+#     treating every rc=2 identically — the two are only described together
+#     here because the reasoning for the FIRST one's self-skip (below) is
+#     what the SECOND must NOT inherit by accident.
+#   2 UNVERIFIABLE:NO-DATA means nothing could be evaluated at all, MOST
+#     OFTEN because the model-select cache has never been populated — which
+#     needs ANTHROPIC_API_KEY, a credential this plugin's own spec 0.3
+#     treats as optional EVERYWHERE ELSE it touches model selection
+#     (fail-open on every path that needs it: fetch_models_from_api,
+#     get_models, pick_best's whole ranking machinery — "no key, no fresh
+#     cache: emit a warning, exit 0" is spec 0.3 principle 1, not an
+#     oversight this check gets to override). This SELF-SKIPS rather than
+#     FAILing — SKIP != PASS in this file's own vocabulary (see the header
+#     note: "a skipped check must count as SKIPPED, never as passed"), so
+#     "never read as a pass" still holds, but a FAIL here would make
+#     install.sh's OWN internal `--verify` step (TARGET_DOCTOR invoked with
+#     NO --skip flags at all — see install.sh's functional-verification
+#     block) exit 3 on EVERY fresh install: nothing in the install path
+#     ever populates this cache, so an UNVERIFIABLE-as-FAIL mapping would
+#     have broken "installed, verification FAILED" for any operator with no
+#     Anthropic API key configured — which, given this plugin's primary
+#     audience authenticates Claude Code by subscription/OAuth rather than
+#     a raw API key, is not a fringe case. Measured, not assumed: running
+#     install.sh's actual verify block against a freshly rendered target
+#     with the FAIL mapping in place produced exactly that exit 3. Once a
+#     cache DOES exist — one session with a real key, or one manual
+#     `model-select.sh resolve` (NOT `status`, which only reads an existing
+#     cache and can never populate a cold one) — this check activates
+#     automatically and stays active (check-parity has no TTL on the cache
+#     it reads), so the self-skip is a startup gap, not a permanent blind
+#     spot, for anyone who ever resolves a model at all. For an install that
+#     never does, the underlying auto-selection FEATURE is equally inert, so
+#     a check asking "does the config agree with what would be resolved"
+#     has no more of an answer than the feature itself does.
+#   2 UNVERIFIABLE:HELPER-FAILURE means the OPPOSITE of the above: data WAS
+#     available (or would have been) but workflow-model-apply.sh's own
+#     --print-role-map is broken or truncated, so nothing could be trusted
+#     to evaluate against it — a DETECTED DEFECT, not an absence of a key.
+#     This FAILs. Before round 4 it rendered as the identical self-skip
+#     above: "a broken --print-role-map produces zero failed checks and
+#     doctor exit 0" was the finding this distinction exists to close.
+#
+# SANDBOXED, not a `beads`/`beads_ledger`-style real-target exception:
+# unlike `bd doctor` (which needs the LIVE database — a copy would be
+# answering for a database nothing uses) check-parity's only external input
+# is STATIC files — .claude/model-roles, every .claude/agents/*.md
+# frontmatter pin, and the cached model listing — and it NEVER writes any
+# of them (its own header: "NEVER fetches"). mk_probe_sandbox already
+# copies the first two; it is taught to copy the cache file too (see that
+# function's own comment) so the copy this check reads is the same
+# point-in-time snapshot every other sandboxed check already works from,
+# not a materially weaker one. The one real consequence of sandboxing is a
+# narrow TOCTOU window (something edits the live cache/config/agents WHILE
+# the doctor is mid-run) — negligible, and no different from every other
+# sandboxed check's existing exposure to the same window.
+# ===========================================================================
+check_model_parity() {
+    local script="$TARGET/.claude/scripts/model-select.sh"
+    if [ ! -f "$script" ]; then
+        record model_parity FAIL "missing: .claude/scripts/model-select.sh" \
+"Re-run the plugin installer. Without this script nothing resolves or checks
+per-role model pins at all."
+        return
+    fi
+
+    local sb
+    sb=$(mk_probe_sandbox) || {
+        record model_parity FAIL "could not build a probe sandbox" \
+"Check that TMPDIR is writable."
+        return
+    }
+
+    # claude-workflow-plugin-a13r ROUND 3 ITEM 2: an unreadable agent file on
+    # the REAL target never made it into the sandbox at all (mk_probe_sandbox's
+    # own comment, above the block that writes this sentinel) — so asking
+    # check-parity inside the sandbox can only ever answer for the files that
+    # DID copy. Fail closed on that gap BEFORE running check-parity, naming
+    # the specific file(s), rather than letting a directory that is quietly
+    # smaller than the target's report an OK/PASS it never actually earned.
+    local unreadable_marker="$sb/.claude/.qa-tracking/model-parity-unreadable-agents.txt"
+    if [ -s "$unreadable_marker" ]; then
+        local unreadable
+        unreadable=$(cat "$unreadable_marker" 2>/dev/null || true)
+        record model_parity FAIL "the real target's .claude/agents/ has unreadable file(s) that the probe sandbox could not copy, so they could not be evaluated at all: $unreadable" \
+"A permission problem is hiding these agent file(s) from every reader,
+including a real Claude Code spawn -- not just this doctor run. This is NOT
+the same as a role that legitimately has no agent file yet; fix the
+permission and re-run:
+  chmod +r .claude/agents/*.md
+  bash .claude/scripts/workflow-doctor.sh"
+        return
+    fi
+
+    local out="$WORKDIR/model-parity.out" err="$WORKDIR/model-parity.err" rc=0
+    run_in_sandbox "$sb" 20 "$out" "$err" \
+        bash "$sb/.claude/scripts/model-select.sh" check-parity || rc=$?
+
+    # check-parity prints its ONE verdict line to stderr, always — never
+    # stdout (see its own header: stdout is reserved elsewhere in this
+    # script for resolved values, and check-parity emits none). Take the
+    # LAST matching line so a stray earlier warning cannot be mistaken for
+    # the verdict.
+    local detail
+    detail=$(grep '^model-select: check-parity:' "$err" 2>/dev/null | tail -1 || true)
+
+    if [ "$rc" = "124" ]; then
+        record model_parity FAIL "model-select.sh check-parity did not complete within 20s" \
+"check-parity reads only local files and never fetches (see its own header),
+so a stall here means jq is missing or wedged, not a network hang. Run it by
+hand in the target:
+  bash .claude/scripts/model-select.sh check-parity"
+        return
+    fi
+
+    case "$rc" in
+        0)
+            record model_parity PASS "${detail:-check-parity exited 0 (OK) but printed no detail line on stderr}"
+            ;;
+        1)
+            record model_parity FAIL "${detail:-check-parity exited 1 (CONFIG/FILE DISAGREEMENT) but printed no detail line on stderr}" \
+"At least one agent file's model: pin disagrees with what its role's
+strategy resolves to (or exists but could not be read at all) against the
+cached model listing. Apply the SPECIFIC fix named in the detail line above,
+or bring every lane into agreement at once:
+  bash .claude/scripts/model-select.sh apply"
+            ;;
+        2)
+            # claude-workflow-plugin-a13r ROUND 4, ITEM (b): rc=2 covers TWO
+            # conditions that must not share one verdict — see
+            # model-select.sh's own "rc=2 IS NOT ONE THING" note on
+            # cmd_check_parity for the full statement. check-parity's detail
+            # line now carries a machine-readable tag right after the word
+            # UNVERIFIABLE (:NO-DATA or :HELPER-FAILURE); branch on THAT, not
+            # on rc alone, which is what let "a broken --print-role-map
+            # produces zero failed checks and doctor exit 0" ship in the
+            # first place (round 4's own finding).
+            #
+            # DEFAULT IS SKIP, not FAIL, including when $detail is EMPTY
+            # (check-parity printed nothing evaluable on stderr) or carries a
+            # tag this doctor does not yet know about. This is the same
+            # fail-open direction every other enumeration hiccup in this
+            # plugin takes (spec 0.3 principle 1): an unanticipated new
+            # UNVERIFIABLE reason degrades to "unverified", never to
+            # breaking a fresh install the way an unconditional FAIL default
+            # would (the measured install.sh --verify consequence is in this
+            # function's own header). Only a POSITIVELY matched
+            # HELPER-FAILURE tag escalates to FAIL.
+            case "$detail" in
+                *'UNVERIFIABLE:HELPER-FAILURE'*)
+                    record model_parity FAIL "${detail:-check-parity exited 2 (UNVERIFIABLE) but printed no detail line on stderr}" \
+"model-select.sh's own role/agent map helper (workflow-model-apply.sh
+--print-role-map) is broken or returned a truncated map, so config/file
+agreement could not be evaluated at all -- this is a DETECTED DEFECT in the
+helper, not a missing cache, and self-skipping it would hide a real
+regression behind the same green a fresh, cache-less install gets. Run it by
+hand and read the failure:
+  bash .claude/scripts/workflow-model-apply.sh --print-role-map
+  bash .claude/scripts/model-select.sh check-parity"
+                    ;;
+                *)
+                    # SKIP, not FAIL — see this function's own header for
+                    # why (in short: install.sh's internal --verify runs
+                    # every check with no --skip flags, and nothing in the
+                    # install path ever populates this cache, so FAILing
+                    # here broke every fresh install with no
+                    # ANTHROPIC_API_KEY). SKIP is still never a pass — the
+                    # summary line and .skipped count both say so honestly.
+                    record model_parity SKIP "${detail:-check-parity exited 2 (UNVERIFIABLE) but printed no detail line on stderr} -- UNVERIFIABLE IS NOT A PASS: no cached model listing to compare against, so config/file agreement was never actually checked (self-skipped, not silently treated as healthy)" \
+"Populate the cache once — this needs ANTHROPIC_API_KEY on a cold cache:
+  bash .claude/scripts/model-select.sh resolve
+then re-run the doctor to actually exercise this check. If this target
+deliberately never sets ANTHROPIC_API_KEY (a CI runner, an install with no
+Anthropic API billing), that is a normal, often-permanent state for this
+plugin's optional model-selection feature, and this check will keep
+self-skipping — which is the correct behaviour, not a gap to silence with
+--skip model_parity (harmless if you do; simply unnecessary)."
+                    ;;
+            esac
+            ;;
+        *)
+            record model_parity FAIL "model-select.sh check-parity exited $rc (expected 0, 1 or 2); stderr: ${detail:-$(head -c 200 "$err" 2>/dev/null | tr '\n' ' ')}" \
+"Run it by hand in the target and read the full output:
+  bash .claude/scripts/model-select.sh check-parity"
+            ;;
+    esac
+}
+
+# ===========================================================================
 # Check: session_start — THE check.
 #
 # Symptom 1 of the P0 was "the plugin is installed and the session has no
@@ -1772,6 +2057,7 @@ for _check in $DOCTOR_CHECK_NAMES; do
         settings_hooks)  check_settings_hooks ;;
         beads)           check_beads ;;
         beads_ledger)    check_beads_ledger ;;
+        model_parity)    check_model_parity ;;
         session_start)   check_session_start ;;
         mcp_bd)          check_mcp_server "bd-mcp" ;;
         mcp_code_graph)  check_mcp_server "code-graph-mcp" ;;

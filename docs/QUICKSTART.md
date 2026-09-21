@@ -159,16 +159,25 @@ bash .claude/scripts/workflow-doctor.sh
 ```
 
 This is the one verification that asks whether the install **runs**, not
-whether its files exist. Twelve checks: it executes the SessionStart hook and
-asserts the emitted envelope actually carries the delegation contract, boots
-both MCP servers over stdio and asserts they register exactly 21 and 7 tools,
-drives both gate hooks against a synthetic change set, and compares
-`.beads/issues.jsonl` against the Beads database. Every failure prints its own
-indented `fix:` line.
+whether its files exist. Thirteen checks: it executes the SessionStart hook
+and asserts the emitted envelope actually carries the delegation contract,
+boots both MCP servers over stdio and asserts they register exactly 21 and 7
+tools, drives both gate hooks against a synthetic change set, compares
+`.beads/issues.jsonl` against the Beads database, and checks that every
+agent's pinned model agrees with `.claude/model-roles`. Every failure prints
+its own indented `fix:` line.
 
 ```
-workflow-doctor: 12 check(s) — 12 passed, 0 failed, 0 skipped
+workflow-doctor: 13 check(s) — 12 passed, 0 failed, 1 skipped
 ```
+
+The one SKIP right after a fresh install is expected: `model_parity` needs a
+populated model-select cache to compare against, and nothing in the install
+path populates one (it needs `ANTHROPIC_API_KEY`, which many installs never
+set). It activates automatically the first time something resolves a model —
+one session with a key, or a manual `model-select.sh resolve` (`status` only
+reads an existing cache; it cannot populate a cold one, so it will not
+activate this check) — and stays active from then on.
 
 Exit `0` = green, `1` = a check failed, `2` = usage error. The installer runs
 it for you at the end of an install and exits `3` when a check does not pass

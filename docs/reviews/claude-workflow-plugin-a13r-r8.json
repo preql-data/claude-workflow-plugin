@@ -1,0 +1,14 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-a13r",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "624b6223c4729d055a2d45b3323fa47c40117a1aaa56a7a0b07bc2320825246d",
+  "risk_threshold": "high",
+  "stop_condition": "Round-8 confirmation was limited to R7-F1 and R7-F2. For R7-F1, I traced validate_role_keys() from its definition through the live role-set precondition, META-2 mutant leg, and META-2 fresh restore control; META-2's separate raw count is explicitly the old-design discriminator, not a private implementation of the shipped guard. I independently traced and ran the behavioral path: it launches the mutant model-select.sh and the shipped $MS with roles; cmd_roles() directly iterates each script's own ALL_ROLES and neither sources nor calls the test helper. In a Bash read-only/process-substitution reproduction against the current uncommitted worktree over HEAD 26dac6c, the helper reported the shipped pair sound and the mutant duplicate plus set mismatch; after redefining the helper to a no-op, model-select.sh roles still yielded mutant designer=2/reviewer=0, while the shipped command yielded designer=1/reviewer=1. Thus the behavioral leg is not common-mode with validate_role_keys(), and its restore leg executes the actual shipped model-select.sh, satisfying execution leg 4. R7-F2 is closed: model-select.sh and Section 3.1c now describe behavioral output equality, fresh --print-role-map per call, deliberate sorted set/order-independent semantics, and the exact helper each META exercises. The only byte-identical wording in scope is historical narration of the defeated old comparator, not a promise of a live guard. No round-5-7 conclusion was reopened; the prior conclusion, \"No seventh-level live false pass was found,\" remains undisturbed. Execution limits: `mktemp -d /tmp/a13r-r8-review.XXXXXX` failed rc=1 with Operation not permitted, so I did not execute the suite or make lint. At 26dac6c, the packet's `bash .claude/scripts/tests/model-roles.test.sh` result of 453 passed / 0 failed, rc=0, its Section 11.4 PASS with 408 stubbed bd invocations, and `make lint` rc=0 are orchestrator-measured. The implementer mutant's additional Section 11.4 failure was caused by the concurrent orchestrator `qa-gate.sh choose` write into bd; it is explained, not flaky, and only the three META-2 failures belong to the disarmed-helper mutation. I independently ran `bash -n` on model-roles.test.sh, model-select.sh, and workflow-model-apply.sh, each rc=0, against the current uncommitted worktree over HEAD 26dac6c. reviewed_hash was reproduced with the readable tracker, LC_ALL=C sort-u, shared denylist, and SHA-256 pipeline in memory because the canonical --hash-only path requires mktemp.",
+  "verdict": "approve",
+  "findings": [],
+  "iterations": 8,
+  "stopped_by": "stop_condition"
+}

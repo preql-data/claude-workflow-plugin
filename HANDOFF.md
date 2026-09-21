@@ -366,7 +366,13 @@ alongside, and does not change, this checkout's own `11/12`, exit `1`.
   a check this release's own Phase P added.** Run
   `sed -n 's/^DOCTOR_CHECK_NAMES="\(.*\)"$/\1/p' .claude/scripts/workflow-doctor.sh | wc -w`
   and confirm **`12`**, not 11 — `beads_ledger` was added by
-  commit `fdfd6ce` (Phase P / `fkm.1.1`, the bd 1.1.2 migration). Then run
+  commit `fdfd6ce` (Phase P / `fkm.1.1`, the bd 1.1.2 migration).
+  **HISTORICAL, pinned to this block's own HEAD (`261e09e`) — a session
+  running this command today gets `13`, not `12`: `model_parity`
+  (claude-workflow-plugin-a13r) landed after this measurement and took the
+  registry to thirteen. The `12`/`fdfd6ce` narrative and the NOT-MET finding
+  below are the recorded 2026-09-18 checkout state, not a live target to
+  reproduce.** Then run
   `bash install.sh --verify; echo "exit=$?"` (capture `$?` directly — piping
   the output through another command loses it) and read the summary line.
   **NOT MET as of this measurement, and this is NOT rounded up to a pass**:
@@ -407,11 +413,14 @@ alongside, and does not change, this checkout's own `11/12`, exit `1`.
   ledger and re-export the union into that git-tracked file, writing the
   quarantined contamination in permanently), not an oversight of this piece.
   **Expect `12/12`, exit `0`, once `0rbi` lands and
-  `bash .claude/scripts/beads-ledger.sh reconcile --apply` has run** — and
-  correct the plan's own "11/11" gate line to "12/12" regardless, since that
-  correction is owed independent of the ledger reconciling. **Until then,
-  `install.sh --verify` does not pass on this tree — full stop, not a
-  caveat that changes the exit code.**
+  `bash .claude/scripts/beads-ledger.sh reconcile --apply` has run**
+  — **HISTORICAL, pinned to this block's own HEAD (`261e09e`): the registry
+  has since grown to `13` (`model_parity`, claude-workflow-plugin-a13r), so
+  the current expectation is `13/13`, not `12/12`.** And correct the plan's
+  own "11/11" gate line to "13/13" regardless, since that correction is
+  owed independent of the ledger reconciling. **Until then, `install.sh
+  --verify` does not pass on this tree — full stop, not a caveat that
+  changes the exit code.**
 - assert: **a genuinely fresh v4.1.0 -> v5.0.0 upgrade, on its own
   disposable target, is a different measurement from the one above and does
   not change it.** LIVE-1 (`fkm.9`, run 2026-09-19 — a day after the rest of

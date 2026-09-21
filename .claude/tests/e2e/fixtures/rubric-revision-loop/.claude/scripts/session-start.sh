@@ -263,8 +263,9 @@ $DEGRADED_LOSSES
 
     bash .claude/scripts/workflow-doctor.sh
 
-Twelve functional checks -- the SessionStart envelope, both MCP servers, both
-gate hooks, the Beads ledger -- each with its own fix: line.
+Thirteen functional checks -- the SessionStart envelope, both MCP servers,
+both gate hooks, the Beads ledger, per-role model pin agreement -- each with
+its own fix: line.
 </workflow_degraded>
 "
 fi
