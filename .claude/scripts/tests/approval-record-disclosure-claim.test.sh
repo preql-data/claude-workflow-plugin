@@ -223,7 +223,7 @@
 #       "operator-facing surface" below — a term this section's header
 #       defines, not a claim of totality; R6-F1): review-check.sh (the
 #       third script the brief names) + all three scripts' fixture
-#       mirrors, docs/**/*.md (excl. docs/reviews/**),
+#       mirrors, docs/**/*.md (excl. docs/reviews/** and docs/specs/**),
 #       HANDOFF/README/CONTRIBUTING/CLAUDE.md, every plugin.json-installed
 #       file (parsed from the manifests with jq, not hand-copied),
 #       .claude/agents/*.md. Zero banned-claim hits asserted per category
@@ -236,7 +236,28 @@
 #       locale, by driving the shared relpath_join helper, unmodified,
 #       under two forced non-C locales, and by driving a locale-pin-
 #       stripped copy of it under the same forced locale to prove the pin
-#       is load-bearing.
+#       is load-bearing. 1S.14 (claude-workflow-plugin-513j) makes the
+#       docs/specs/** exclusion likewise load-bearing, against a
+#       path-equivalent mirror of the real docs/ tree (cp -R; the pin
+#       covers the discovered PATH SET, not file contents) rather than a
+#       synthetic sandbox, and proves the exclusion stays scoped to
+#       docs/specs/** by showing a genuinely new docs/**/*.md file
+#       elsewhere — including one nested under an unrelated docs/a/
+#       (round 2's anchor-bug regression control) — still breaks the pin.
+#       Round 3 removed $root from the -path patterns entirely (a root
+#       containing '*' or '[' is still active pattern syntax to find even
+#       when quoted and anchored) and made the mirror's isolation guard
+#       FAIL-CLOSED (a symlink that cannot be replaced now skips the
+#       dependent leg loudly instead of writing through it), each proven
+#       by its own paired control. Round 4 closed the guard's remaining
+#       gap: it checked only the levels it walked BELOW the mirror's own
+#       docs/ base, never the base itself, so an inherited symlink AT the
+#       base (BSD `cp -R`'s documented default `-P` copies a command-line
+#       docs symlink as a symlink, not its contents) would have gone
+#       undetected and been written through by all three legs, including
+#       LEG 2, which had no isolation gate of its own at all. The guard
+#       now checks the base first and LEG 2 is gated identically to LEG
+#       1/LEG 3, each proven by its own paired control.
 #   1SM META for 1S — the pairing requirement applied to DISCOVERY BREADTH
 #       rather than phrase-matching accuracy (1M already covers the
 #       latter): seed the real historical HANDOFF.md defect string into a
@@ -471,11 +492,91 @@ discover_script_mirrors() {
 }
 
 # discover_docs_md <root> — every docs/**/*.md file EXCEPT docs/reviews/**
-# (an archive of dated review artifacts, excluded deliberately, not
-# incidentally — see the OUT-OF-SCOPE paragraph below).
+# (an archive of dated review artifacts) and docs/specs/** (the v5 design
+# phase's per-task design-record artifacts, docs/specs/<task-id>.md —
+# design-record derives this path from the task id and refuses any other,
+# so it is not avoidable by convention). Both exclusions are deliberate,
+# not incidental — see the OUT-OF-SCOPE paragraph below. (docs/specs/**
+# added at claude-workflow-plugin-513j: the first design artifact the v5
+# design phase ever produced broke this pin — MEASURED, 1S.2 expected 39
+# actual 40, the sole diff being docs/specs/claude-workflow-plugin-
+# fkm.1.17.md — because nothing had told discover_docs_md about a
+# directory v5 introduced. 1S.14 below is the pairing-requirement control:
+# a real docs/specs/*.md file does not move the pin, and a genuinely new
+# docs/**/*.md file outside both exclusions still does.)
+#
+# NEITHER EXCLUSION INTERPOLATES "$root" INTO A find -path PATTERN AT ALL
+# (round 3, independent review sol-codex, non-Claude — HIGH; supersedes
+# the "anchored to $root" fix below, kept as history because it explains
+# why LEG 3 and the ROOT-QUOTING ROBUSTNESS check, both in 1S.14 below,
+# exist and what they each proved at the time). Round 2 anchored the two
+# -path predicates to "$root" (double-quoted so it actually expands)
+# after discovering the OLD unanchored, single-quoted globs — ! -path
+# '*/docs/reviews/*' ! -path '*/docs/specs/*' — silently excluded a file
+# nested two directories under an unrelated docs/a/, at
+# docs/a/docs/specs/b.md: BSD find's -path matches fnmatch-style and '*'
+# CROSSES '/', so the leading '*' matched "/docs/specs/" as a SUBSTRING
+# anywhere in the path, not anchored to $root/docs/specs specifically.
+# Anchoring to "$root" fixed THAT shape — but round 3 found that quoting
+# only stops the SHELL from word-splitting/globbing $root; $root is still
+# ACTIVE PATTERN SYNTAX once the anchored string reaches find's -path,
+# which fnmatch-matches the WHOLE pattern regardless of which part of it
+# came from a variable. A root whose own name contains a literal '*'
+# reintroduces round 2's exact over-exclusion by a different route —
+# e.g. root=/tmp/root*, pattern "$root/docs/specs/*" expands to
+# /tmp/root*/docs/specs/*, and the '*' that is part of $root's OWN name
+# (not the trailing wildcard the code wrote) absorbs "*/docs/a" and still
+# matches /tmp/root*/docs/a/docs/specs/b.md — MEASURED directly against a
+# scratch tree before this comment was written, both before and after
+# this fix (513j round 3 task record has the literal output). A root
+# containing a literal '[' is worse: '[' opens an fnmatch bracket
+# expression, no ']' ever appears anywhere else in the pattern (the fixed
+# suffix is always "/docs/reviews/*" or "/docs/specs/*"), so the bracket
+# is unterminated and the WHOLE pattern fails to match ANYTHING — the
+# real, top-level docs/specs/*.md is not excluded at all, also MEASURED.
+# Escaping $root's own metacharacters before interpolation would work but
+# is fragile (miss one of '*'/'?'/'['/']' and the hazard returns) and
+# leaves a future reader re-deriving the escaping rule from scratch.
+# Instead $root is removed from the -path patterns ENTIRELY: cd into
+# "$root/docs" (a plain, non-glob argument — cd never pattern-matches its
+# operand, so this step tolerates any byte $root contains, including a
+# literal '*' or '[') and match against './reviews/*'/'./specs/*' — FIXED
+# STRING LITERALS with no variable interpolation left to exploit — then
+# reconstruct the "$root/docs/..." absolute-path convention every OTHER
+# discover_* function and this function's own callers (relpath_join, the
+# direct grep -cxF membership checks in 1S.14) already expect, via printf
+# '%s' plus "${rel#./}" parameter-expansion stripping — the same idiom
+# discover_plugin_installed_files already uses for the same purpose,
+# above — never sed: a sed REPLACEMENT string also treats '&' and a
+# trailing backslash specially, which would just trade the metacharacter-
+# in-$root hazard this fix removes for a different one in the re-join
+# step. A failed cd ($root/docs does not exist) exits the subshell
+# without printing anything, matching every other discover_* function's
+# existence-gated, absent-on-missing convention (e.g.
+# discover_plugin_installed_files's `[ -f "$pj" ] || return 0`) rather
+# than erroring. 1S.14's LEG 3 (below) remains the negative control that
+# an ordinary root's nested docs/a/docs/specs/b.md is not excluded; the
+# ROOT-QUOTING ROBUSTNESS check (also in 1S.14, below, strengthened at
+# round 3 — R3-F1's own finding: the round-2 version of this check seeded
+# only a top-level exclusion under its metacharacter root, never a NESTED
+# file, so it could not have caught this) proves the SAME nested case
+# stays discovered, and a top-level docs/specs file stays excluded, under
+# ONE root whose name contains both a literal '*' and a literal '[' —
+# note that finding BOTH assertions true under the OLD code for that
+# SAME combined root is not always possible (an unterminated '[' anywhere
+# in the pattern fails the whole match, which can coincidentally leave a
+# nested file "not excluded" for the wrong reason even pre-fix); the
+# round-3 task record's verification output shows each hazard reproduced
+# in isolation as well, precisely so the combined leg's regression value
+# is not overstated.
 discover_docs_md() {
-    local root="$1"
-    find "$root/docs" -name '*.md' ! -path '*/docs/reviews/*' 2>/dev/null | sort -u
+    local root="$1" rel
+    while IFS= read -r rel; do
+        printf '%s/docs/%s\n' "$root" "${rel#./}"
+    done < <(
+        cd "$root/docs" 2>/dev/null || exit 1
+        find . -name '*.md' ! -path './reviews/*' ! -path './specs/*' 2>/dev/null
+    ) | sort -u
 }
 
 # discover_named_root_files <root> — the four singleton operator-facing
@@ -753,7 +854,11 @@ assert_eq "1M.5 RESTORE CONTROL: shipped verify-before-stop.sh still carries zer
 # floor/count and its own zero-hit assertion:
 #   - qa-gate.sh / verify-before-stop.sh / review-check.sh (the three
 #     scripts the brief names) + all fixture mirrors — 24 files
-#   - docs/**/*.md, excluding docs/reviews/** — 39 files today
+#   - docs/**/*.md, excluding docs/reviews/** and docs/specs/** — 39 files
+#     today (claude-workflow-plugin-513j: docs/specs/** added because it
+#     holds the v5 design phase's per-task design-record artifacts, which
+#     change with work rather than with releases — same reason as
+#     docs/reviews/**, and the same one-line exclusion shape)
 #   - HANDOFF.md / README.md / CONTRIBUTING.md / CLAUDE.md — 4 files
 #   - every file the plugin actually installs per
 #     .claude-plugin/plugin.json (agents, commands, skills, the hook
@@ -768,10 +873,15 @@ assert_eq "1M.5 RESTORE CONTROL: shipped verify-before-stop.sh still carries zer
 # OUT OF SCOPE, DELIBERATELY, because they are archives and rewriting them
 # would be its own dishonesty: CHANGELOG.md entries for already-released
 # versions, .beads/**, .claude/.qa-tracking/**, docs/reviews/**,
+# docs/specs/** (the v5 design phase's per-task design-record artifacts —
+# generated, per-task, and changing with work rather than with releases,
+# same reason as docs/reviews/**; added at claude-workflow-plugin-513j),
 # LESSONS.md, and this spec file itself (which must quote the banned
 # phrase in order to detect it). 1S.12.* PROVES each named example is
 # absent from the discovered surface rather than describing the exclusion
-# only in this comment.
+# only in this comment; 1S.14 proves docs/specs/** specifically, the same
+# way, against a mirror of the real PROJECT_DIR rather than a synthetic
+# sandbox.
 #
 # NUMBERS BUMP LEGITIMATELY (matching EXPECTED_SPECS' own convention in
 # run-tests.sh): adding a doc, an agent, a command, a hook or an MCP server
@@ -907,9 +1017,17 @@ assert_set_pin() {
 # MUTATION (reversing each of the 11 bare `sort`/`sort -u` sites in this
 # file individually and re-running the suite under LC_ALL=C), not by
 # reading. The 11 sites split into three genuinely different reasons, not
-# one:
+# one. (The three PASS/FAIL totals below were RE-MEASURED at 513j round 3,
+# independent review sol-codex non-Claude, by actually re-running each
+# named scenario against the current file rather than carrying round 2's
+# 216/0 forward uncomputed — this file has grown since then, most
+# recently by round 3's own 12 assertions (1S.14.8b, 1S.14.19-.22,
+# 1S.14.G0-.G6), taking the total from 216 to 228; CONTRIBUTING.md's rule
+# is to re-measure a number, not assume it is still current. None of
+# round 3's new assertions touch any of these sort sites or relpath_join,
+# so only the TOTAL moved, not the shape of any scenario's result.):
 #   1. ORDER REACHES NO COMPARED VALUE (8 sites — reversing any one alone
-#      leaves the suite at 195/0, non-vacuously: every site emits 6+
+#      leaves the suite at 228/0, non-vacuously: every site emits 6+
 #      lines). discover_docs_md's and discover_operator_facing_surface's
 #      own internal sorts genuinely ARE superseded — by THIS function's
 #      own LC_ALL=C sort, which feeds 1S.2b/1S.10b; the hook-script
@@ -925,7 +1043,7 @@ assert_set_pin() {
 #   2. SYMMETRY, A PIN-TOGETHER-OR-NOT-AT-ALL UNIT — discover_script_
 #      mirrors' own bare `sort -u` (shared by both DSM_QAG and DSM_VBS,
 #      above) and the QAG_SORTED/VBS_SORTED lines each fail 1S.0a/1S.0b
-#      when reversed ALONE, but pass 195/0 when all three are reversed
+#      when reversed ALONE, but pass 228/0 when all three are reversed
 #      TOGETHER — because 1S.0a compares QAG_SORTED against DSM_QAG, and
 #      1S.0b compares VBS_SORTED against DSM_VBS, and NEITHER comparison
 #      goes through this function or any other locale pin: both sides of
@@ -933,7 +1051,7 @@ assert_set_pin() {
 #      process, under the same ambient locale, so they move together.
 #      This is DATA-INDEPENDENT as long as all three stay bare — QA
 #      measured that pinning any subset (e.g. QAG_SORTED/VBS_SORTED
-#      alone) still passes 195/0 TODAY, by COINCIDENCE (the current file
+#      alone) still passes 228/0 TODAY, by COINCIDENCE (the current file
 #      set happens to collate identically under LC_ALL=C and
 #      en_US.UTF-8), and that one e2e fixture directory named with a
 #      leading uppercase letter breaks that coincidence (mirror-set sha
@@ -1134,10 +1252,10 @@ EOF
 )
 # ---------------------------------------------------------------------------
 
-# Measured: find "$PROJECT_DIR/docs" -name '*.md' ! -path '*/docs/reviews/*' | wc -l
+# Measured: find "$PROJECT_DIR/docs" -name '*.md' ! -path "$PROJECT_DIR/docs/reviews/*" ! -path "$PROJECT_DIR/docs/specs/*" | wc -l
 DOCS_MD=()
 while IFS= read -r line; do DOCS_MD+=("$line"); done < <(discover_docs_md "$PROJECT_DIR")
-assert_eq "1S.2 non-vacuity: discovered exactly 39 docs/**/*.md files (excl. docs/reviews/**)" \
+assert_eq "1S.2 non-vacuity: discovered exactly 39 docs/**/*.md files (excl. docs/reviews/** and docs/specs/**)" \
     "39" "${#DOCS_MD[@]}"
 assert_set_pin "1S.2b exact SET (R6-F3): the discovered docs/**/*.md paths match the pinned list, not just its count" \
     "$EXPECTED_DOCS_MD_SET" "$(relpath_join "$PROJECT_DIR" "${DOCS_MD[@]}")"
@@ -1353,6 +1471,698 @@ assert_eq "1S.13.2 RESTORE CONTROL: under en_US.UTF-8, the SHIPPED relpath_join 
 SHIPPED_SURFACE_FR=$(LC_ALL=fr_FR.UTF-8 bash "$RELPATH_JOIN_SHIPPED" "$PROJECT_DIR" "${SURFACE[@]}")
 assert_eq "1S.13.3 RESTORE CONTROL (second locale): under fr_FR.UTF-8, the SHIPPED relpath_join still matches the pinned union set" \
     "$EXPECTED_SURFACE_SET" "$SHIPPED_SURFACE_FR"
+
+# ---------------------------------------------------------------------------
+# 1S.14 SPECS EXCLUSION CONTROL (claude-workflow-plugin-513j) — the
+# docs/specs/** exclusion this task adds to discover_docs_md (above),
+# proved the same way 1S.12M proves docs/reviews/**: not merely described
+# in prose, but actually exercised, with a paired negative control.
+#
+# THE DEFECT THIS CLOSES, MEASURED (513j task record): the v5 design
+# phase writes its artifact to docs/specs/<task-id>.md — design-record
+# derives that path from the task id and refuses any other
+# (artifact_path_not_derived), so it is not avoidable by convention. The
+# first design artifact ever written broke this file's own pin: 1S.2
+# expected 39, got 40, the sole diff being docs/specs/claude-workflow-
+# plugin-fkm.1.17.md. The spec was not wrong — it detected a new doc file,
+# which is its job — the gap was that discover_docs_md did not yet know
+# about a directory v5 introduced.
+#
+# WHY A MIRROR, NOT THE REAL PROJECT_DIR, AND NOT 1S.12M's SYNTHETIC
+# SANDBOX EITHER: this section needs the REAL EXPECTED_DOCS_MD_SET pin
+# (root-relative paths, captured against the real docs/ tree) to be
+# meaningfully comparable, which a tiny synthetic sandbox (1S.12M's
+# "kept.md"/"leaked.md") cannot give it — but creating and deleting real
+# files under the actual PROJECT_DIR/docs on every `make test` run is its
+# own risk (a concurrent reader of the working tree, or a second test
+# process, observing a transient extra file). MIRROR_ROOT_513J is a
+# `cp -R` of the real docs/ tree into $WORK (already an isolated,
+# trap-cleaned mktemp -d — see top of file); every path inside it is
+# root-relative-identical to the real tree, so EXPECTED_DOCS_MD_SET
+# applies unmodified, and every canary this section creates or removes
+# never touches the real PROJECT_DIR. 1S.14.0 is the non-vacuity check
+# that makes this path-equivalence a verified claim rather than an
+# assumed one: it asserts the mirror reproduces the pin BEFORE any canary
+# is added, so a bug in the `cp -R` step itself (a permissions failure,
+# an interrupted copy) would be caught here rather than silently
+# invalidating every assertion below it. NOT A CONTENT CLAIM (round 2,
+# independent review sol-codex, non-Claude — LOW): this section verifies
+# the discovered PATH SET only — a mirror with identical filenames but
+# altered file contents would pass every assertion here just the same.
+# That is fine for a discovery test (discover_docs_md itself never reads
+# file contents, only names and paths), so this comment no longer calls
+# the mirror "byte-for-byte" — a claim this section never actually
+# checked. ISOLATION (round 2, independent review sol-codex, non-Claude —
+# MEDIUM): BSD `cp -R` preserves an interior symlink; if the real
+# docs/specs were ever made a symlink, the naive mirror would inherit it
+# and LEG 1's `mkdir -p`/canary write below would go straight through it,
+# potentially outside $WORK. Not a symlink today — LEG 1 now replaces any
+# mirrored docs/specs symlink with a real directory and asserts the
+# result before writing anything under it, so a future change to the
+# real docs/specs cannot turn this spec into something that writes
+# outside its own sandbox.
+#
+# EXECUTION (.claude/tests/README.md "The pairing requirement", leg 4):
+# every assertion below calls the actual discover_docs_md/relpath_join
+# functions this file defines and 1S.2/1S.2b/1S.10b already drive against
+# PROJECT_DIR — not a reimplementation, not a byte comparison over
+# markdown — against a root whose docs/ subtree is provably
+# path-equivalent to the real one (see "NOT A CONTENT CLAIM" above). This
+# file's own header already establishes that a root-parameterized sandbox
+# leg counts as driving the shipped discovery logic (see
+# "WIDENED-SCOPE DISCOVERY" above: "the SAME functions drive both the
+# real scan ... and the 1SM sandbox ... the sandbox leg exercises this
+# file's actual discovery logic, not a reimplementation of it that could
+# silently diverge"); this section follows that same precedent.
+# Separately, and outside this file, the 513j task record itself carries
+# the direct manual reproduction against the TRUE, un-mirrored PROJECT_DIR
+# (spec RED with a real docs/specs file present before the fix, GREEN
+# after, RED again for a genuinely new docs/**/*.md elsewhere) — this
+# section is what keeps that proof from regressing silently on every
+# future run, without repeating real-tree mutation on every run.
+#
+# THE LEGS (round 1 shipped two, both required; round 2, independent
+# review sol-codex non-Claude, adds a third required leg plus a fourth
+# robustness check):
+#   (1) 1S.14.1-.3 — a docs/specs/*.md file does NOT break the pin:
+#       discover_docs_md/relpath_join still equal EXPECTED_DOCS_MD_SET
+#       with it present.
+#   (2) 1S.14.4-.7 — the NEGATIVE CONTROL: a genuinely new docs/**/*.md
+#       file OUTSIDE both docs/specs/** and docs/reviews/**, landing-
+#       proved present, DOES break the pin — proving the new exclusion is
+#       scoped to docs/specs/** only and this spec has not gone blind to a
+#       real, unrelated addition (the failure mode a blanket "docs/**"
+#       exclusion, or a typo'd glob, would produce silently). 1S.14.8 is
+#       RESTORE CONTROL for legs 1+2: both canaries gone, the mirror
+#       matches the pin again.
+#   (3) 1S.14.9-.13 (round 2 — HIGH) — the ANCHOR-BUG NEGATIVE CONTROL: a
+#       genuinely new docs/**/*.md file NESTED two directories under an
+#       unrelated docs/a/, at docs/a/docs/specs/b.md, must ALSO break the
+#       pin — see discover_docs_md's own header comment (above) for why
+#       the old unanchored -path predicates silently excluded exactly
+#       this shape. 1S.14.13 is RESTORE CONTROL for leg 3.
+#   (4) 1S.14.14-.22 (round 2, STRENGTHENED round 3 — independent review
+#       sol-codex, non-Claude, HIGH, R3-F1) — ROOT-QUOTING ROBUSTNESS: the
+#       fix keeps working when $root itself contains a space (a
+#       word-splitting hazard if quoting were ever dropped), a literal
+#       '*', AND a literal '[' (both active find -path/fnmatch pattern
+#       syntax, round 3's own finding — see discover_docs_md's header
+#       comment above) — driven against a small standalone sandbox, not
+#       the docs/ mirror above. 1S.14.14-.18 is the ORIGINAL (round 2)
+#       top-level-only check, kept and extended with '[' in the root
+#       name; 1S.14.19-.22 (round 3) is what round 2's version of this
+#       leg was missing — a NESTED docs/a/docs/specs/b.md seeded under
+#       that SAME metacharacter root, asserted discovered, alongside a
+#       top-level docs/specs file under it asserted excluded, both
+#       directions in one pass. Round 2's leg named a root containing a
+#       space and a '*' and asserted only a top-level exclusion; it could
+#       not have caught round 3's finding because it never seeded the
+#       nested shape the finding is about — the lesson stated directly in
+#       the round-3 task record: a control aimed at a class has to
+#       instantiate the class's hard case, not its easy one.
+#   (5) 1S.14.G0-.G6 (round 3, independent review sol-codex, non-Claude —
+#       MEDIUM, finding 2) — ISOLATION GUARD FAIL-CLOSED CONTROL: the
+#       shared ensure_real_dir_chain helper (defined just below, used by
+#       both 1S.14.0b and 1S.14.8b), proven directly against a dedicated
+#       sandbox rather than only through the two mirror call sites: it
+#       replaces a REMOVABLE inherited symlink with a real directory
+#       (POSITIVE), and when the symlink CANNOT be removed (its
+#       containing directory made read-only), it reports failure (G3/G4)
+#       AND a write gated on that report — the same gate LEG 1/LEG 3 use
+#       — never lands anywhere near the symlink's target (G5/G6, the
+#       load-bearing half: a pre-existing canary file outside the guarded
+#       parent subtree is asserted byte-for-byte unchanged and no new
+#       file appears beside it). Skips loudly, matching this repo's
+#       skip-marker convention, on a user who can write a mode-555
+#       directory (root).
+#   (6) 1S.14.G7-.G15 (round 4, independent review sol-codex, non-Claude —
+#       HIGH, F2 residual) — BASE-SYMLINK ISOLATION CONTROL: G0-G6 only
+#       ever exercise a symlink found WHILE WALKING below base; base
+#       itself (both real call sites pass "$MIRROR_ROOT_513J/docs") was
+#       never checked, so a symlink there — which BSD `cp -R` would
+#       inherit verbatim from a symlinked $PROJECT_DIR/docs, per its
+#       documented default `-P` behaviour — went undetected, and LEG 2
+#       had no gate at all. Proven directly against a dedicated sandbox
+#       where the symlink IS the base, with an ordinary real "specs"
+#       directory already inside its target (the exact shape that fools
+#       a below-base-only check): the guard now reports failure (G9),
+#       neither a LEG-1/LEG-3-style write one level below base (G11) nor
+#       a LEG-2-style write directly under it (G12) lands in the
+#       symlink's real target, and the pre-existing canary there is
+#       unchanged (G13). G14/G15 is the other direction: an ordinary,
+#       non-symlink base is not wrongly rejected.
+# ---------------------------------------------------------------------------
+
+# ensure_real_dir_chain <base> <rel/path> — a symlink-safe mkdir -p: walks
+# each path component from <base> down to <base>/<rel/path>, and at EVERY
+# level replaces an inherited symlink with a real directory and verifies
+# the result BEFORE descending into it (round 3, independent review
+# sol-codex, non-Claude — MEDIUM, finding 2). Round 2's isolation guard
+# (the 1S.14.0b assertion, below) checked and fixed only the mirror's
+# docs/specs — the SINGLE, FINAL path component it wrote through — and
+# only RECORDED a failure via assert_eq when the fix did not take:
+# assert_eq only increments a counter, so an `rm -f` that itself fails (a
+# permissions race, a still-open descriptor) left the symlink in place
+# and execution continued regardless. `mkdir -p` on a path that already
+# resolves to a directory (a symlink pointing at one satisfies that check
+# without creating anything) succeeds silently THROUGH it, and the very
+# next canary write lands wherever that symlink points — possibly
+# outside $WORK, with an interrupt before cleanup leaving it there.
+# MEASURED directly (513j round 3 task record has the literal
+# before/after output): forcing `rm -f` to fail this way on the round-2
+# guard lets the canary write escape into a directory outside the
+# sandbox, sitting right next to a pre-existing file that must never be
+# touched. FAIL-CLOSED here: returns 1 the instant any level cannot be
+# made a real, non-symlink directory, before creating or writing
+# anything past that point — callers gate their writes on the return
+# value instead of proceeding regardless (see 1S.14.0b/LEG 1 and
+# 1S.14.8b/LEG 3, below). Also closes finding 2's second bullet: LEG 3
+# writes through docs/a/docs/specs, a THREE-component chain, and a
+# symlink could in principle sit at any level of it, not only the leaf —
+# this checks each level on the way down rather than only the final
+# mkdir -p's target, so passing "a/docs/specs" as <rel/path> guards all
+# three ancestors LEG 3 writes through, immediately before each is used.
+#
+# bash 3.2.57 NOTE: `local base="$1" cur="$base"` on ONE `local` command
+# is NOT safe on this repo's target shell — measured directly: bash
+# 3.2.57 evaluates a later value expression in the SAME `local` command
+# against the OUTER scope, not the name the same command just declared,
+# so `$base` is "unbound variable" under `set -u` the moment `cur` is
+# not itself already set outside the function. `cur` is therefore
+# declared on its OWN, separate `local` line below, after `base` is
+# already established — the same reason discover_plugin_installed_files
+# (above) declares `root` on its own line before a later `local`
+# statement reads it.
+#
+# THE BASE ITSELF WAS NEVER CHECKED (round 4, independent review
+# sol-codex, non-Claude — HIGH, F2 residual). Every check described above
+# concerns `cur` AFTER `cur="$cur/$part"` has already descended past
+# `base` once; `local cur="$base"` (below) assigns it un-checked, and the
+# loop's first verification target is "$base/$part", never "$base"
+# itself. Both real call sites (1S.14.0b, 1S.14.8b, below) pass
+# "$MIRROR_ROOT_513J/docs" — the `cp -R` TARGET directory, not one of its
+# descendants — as that base. BSD cp(1) states -R's default is -P ("No
+# symbolic links are followed"), so if $PROJECT_DIR/docs were ever itself
+# a symlink, `cp -R "$PROJECT_DIR/docs" "$MIRROR_ROOT_513J/docs"` (above)
+# would copy THAT symlink, not its contents, and $MIRROR_ROOT_513J/docs
+# would BE a symlink rather than a directory. `cd "$root/docs"` in
+# discover_docs_md follows it regardless (cd always resolves symlinks in
+# the path it is given), so the mirror's own non-vacuity check could
+# still look valid while every write below — LEG 1, LEG 3, and LEG 2,
+# which unlike the other two never called this function at all and had
+# no gate of its own — lands through the symlink, outside $WORK; worse,
+# a deeper `rm -f "$cur"` inside this same function could then remove an
+# entry that lives inside the symlink's target rather than inside $WORK.
+# Fixed by checking `base` itself with is_real_dir_not_symlink (defined
+# just above) before the loop runs at all, fail-closed and with no
+# attempt to replace it — unlike a symlink found mid-walk, `base` is not
+# something this function created, and rebuilding it as an empty real
+# directory would silently discard the `cp -R` content every assertion
+# in this section depends on, trading a loud, correct SKIP for a quiet,
+# wrong result. LEG 2 gets the identical check directly (its write sits
+# one level under base with no chain to walk). 1S.14.G7-.G15 (below,
+# after G0-G6) is the direct, dedicated proof: it reproduces the exact
+# shape that would have fooled the un-fixed function — a symlinked base
+# whose real target already contains an ordinary, non-symlink "specs"
+# directory, so a below-base-only check finds nothing wrong — and proves
+# both write shapes (one level below base, and directly under it) refuse,
+# in both directions (a symlinked base is rejected; an ordinary one is
+# not).
+#
+# is_real_dir_not_symlink <path> — the base-level predicate round 4 adds:
+# true iff <path> exists as a directory AND is not itself a symlink (a
+# symlink to a directory passes a plain -d check but must be rejected
+# here). A straight two-test filesystem predicate, no pattern-matching
+# involved, so it carries none of discover_docs_md's fnmatch hazards.
+# Used by ensure_real_dir_chain (below) to check its own `base` argument,
+# and directly by LEG 2 (below), which writes one level under the
+# mirror's docs/ base with no component chain for ensure_real_dir_chain
+# to walk.
+is_real_dir_not_symlink() {
+    [ -d "$1" ] && [ ! -L "$1" ]
+}
+
+ensure_real_dir_chain() {
+    local base="$1" relpath="$2" part
+    local cur="$base"
+    is_real_dir_not_symlink "$cur" || return 1
+    local -a parts
+    IFS='/' read -ra parts <<< "$relpath"
+    for part in "${parts[@]}"; do
+        [ -z "$part" ] && continue
+        cur="$cur/$part"
+        if [ -L "$cur" ]; then
+            rm -f "$cur" 2>/dev/null
+        fi
+        if [ -L "$cur" ]; then
+            return 1
+        fi
+        mkdir -p "$cur" 2>/dev/null
+        if [ ! -d "$cur" ] || [ -L "$cur" ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+printf '\n--- 1S.14 SPECS EXCLUSION CONTROL: a real docs/specs/*.md does not break the pin; a genuinely new docs/**/*.md elsewhere still does ---\n'
+
+MIRROR_ROOT_513J="$WORK/docs-mirror-513j"
+mkdir -p "$MIRROR_ROOT_513J"
+cp -R "$PROJECT_DIR/docs" "$MIRROR_ROOT_513J/docs" 2>/dev/null
+
+MIRROR_BASELINE_513J=()
+while IFS= read -r line; do MIRROR_BASELINE_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
+assert_eq "1S.14.0 non-vacuity: the docs/ mirror (a cp -R of the real PROJECT_DIR/docs into \$WORK, so this section never touches the real tree) reproduces the pin before any canary is added" \
+    "$EXPECTED_DOCS_MD_SET" "$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_BASELINE_513J[@]}")"
+
+# ISOLATION GUARD (round 2, independent review sol-codex, non-Claude —
+# MEDIUM; FAIL-CLOSED round 3, independent review sol-codex, non-Claude —
+# MEDIUM, finding 2). BSD `cp -R` above PRESERVES an interior symlink: if
+# the real docs/specs is ever made a symlink pointing outward, the mirror
+# would inherit it as a symlink too, and an un-guarded `mkdir -p` on that
+# path would succeed THROUGH it (mkdir -p only checks that the result IS
+# a directory; a symlink resolving to one satisfies that check without
+# creating anything), so the canary write in LEG 1 just below would land
+# wherever that symlink points — OUTSIDE $WORK, possibly in the real
+# tree, with an interruption before LEG 1's own cleanup leaving it there.
+# Not a symlink today; this guard exists so a future change to the real
+# docs/specs cannot turn this spec into something that writes outside its
+# own sandbox. ensure_real_dir_chain (defined above, in "THE LEGS")
+# replaces any symlink the mirror inherited with a real directory and the
+# result is ASSERTED, not assumed, before LEG 1 writes anything under it
+# — and, since round 3, LEG 1 itself only RUNS if that assertion holds:
+# a guard that cannot be verified is a guard this section must not trust,
+# and proceeding to write through an unverified path is exactly the
+# finding-2 gap this round closes (see ensure_real_dir_chain's own header
+# comment and 1S.14.G0-.G6, below, for the direct fail-closed proof).
+# ROUND 4 (F2 residual): this call's own BASE argument
+# ("$MIRROR_ROOT_513J/docs", the `cp -R` target above) is now also
+# verified by ensure_real_dir_chain itself, before it ever looks at
+# "specs" — see the function's own header comment and 1S.14.G7-.G15,
+# below, for why that level was the one still missing and how it is
+# proven closed.
+if ensure_real_dir_chain "$MIRROR_ROOT_513J/docs" "specs"; then
+    MIRROR_513J_SPECS_ISOLATED=yes
+else
+    MIRROR_513J_SPECS_ISOLATED=no
+fi
+assert_eq "1S.14.0b ISOLATION (round 2, MEDIUM; FAIL-CLOSED round 3; round 4: the call's own base argument is now checked too, not just \"specs\" below it): the mirrored docs/specs is a real directory, not an inherited symlink, before anything is written under it" \
+    "yes" "$MIRROR_513J_SPECS_ISOLATED"
+
+if [ "$MIRROR_513J_SPECS_ISOLATED" = yes ]; then
+    # LEG 1 — a docs/specs/*.md file does NOT break the pin.
+    SPECS_CANARY_513J="$MIRROR_ROOT_513J/docs/specs/claude-workflow-plugin-513j-canary.md"
+    printf '# design-record fixture (mirror copy, not the real docs/specs/)\n' > "$SPECS_CANARY_513J"
+    assert_eq "1S.14.1 non-vacuity: the docs/specs/*.md canary landed in the mirror" \
+        "yes" "$([ -f "$SPECS_CANARY_513J" ] && echo yes || echo no)"
+
+    MIRROR_WITH_SPECS_513J=()
+    while IFS= read -r line; do MIRROR_WITH_SPECS_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
+    assert_eq "1S.14.2 SPECIFIC (the fix): discover_docs_md still returns exactly the pinned 39 files with a docs/specs/*.md file present" \
+        "39" "${#MIRROR_WITH_SPECS_513J[@]}"
+    assert_set_pin "1S.14.3 SPECIFIC (the fix): the exact-SET pin is unaffected — a docs/specs/*.md addition does not break it" \
+        "$EXPECTED_DOCS_MD_SET" "$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_WITH_SPECS_513J[@]}")"
+    rm -f "$SPECS_CANARY_513J"
+else
+    printf '  SKIP: 1S.14.1-.3 LEG 1 (docs/specs isolation guard failed closed — would have written the canary through a surviving symlink)\n'
+fi
+
+# LEG 2 — NEGATIVE CONTROL: a genuinely new docs/**/*.md file OUTSIDE both
+# docs/specs/** and docs/reviews/** must still break the pin. ISOLATION
+# (round 4, HIGH, F2 residual): unlike LEG 1 and LEG 3, LEG 2 writes
+# directly under the mirror's docs/ BASE itself — there is no descendant
+# chain for ensure_real_dir_chain to walk, so it never called that
+# function at all and, before this round, had no isolation gate of its
+# own: an inherited symlink at "$MIRROR_ROOT_513J/docs" would have been
+# written through here unconditionally. Gated now on the identical
+# is_real_dir_not_symlink predicate ensure_real_dir_chain itself uses for
+# this same base (defined next to it, above) — proven fail-closed
+# directly at 1S.14.G12/.G13, below.
+if is_real_dir_not_symlink "$MIRROR_ROOT_513J/docs"; then
+    MIRROR_513J_DOCS_BASE_ISOLATED=yes
+else
+    MIRROR_513J_DOCS_BASE_ISOLATED=no
+fi
+assert_eq "1S.14.3c ISOLATION (round 4, HIGH, F2 residual): the mirror's docs/ base itself is a real directory, not an inherited symlink, before LEG 2 writes directly under it" \
+    "yes" "$MIRROR_513J_DOCS_BASE_ISOLATED"
+
+if [ "$MIRROR_513J_DOCS_BASE_ISOLATED" = yes ]; then
+    NEGCTRL_CANARY_513J="$MIRROR_ROOT_513J/docs/claude-workflow-plugin-513j-negctrl-canary.md"
+    printf '# a genuinely new doc, outside docs/specs and docs/reviews (mirror copy)\n' > "$NEGCTRL_CANARY_513J"
+    assert_eq "1S.14.4 landing proof: the genuinely-new docs/*.md canary (outside docs/specs and docs/reviews) exists" \
+        "yes" "$([ -f "$NEGCTRL_CANARY_513J" ] && echo yes || echo no)"
+
+    MIRROR_WITH_NEGCTRL_513J=()
+    while IFS= read -r line; do MIRROR_WITH_NEGCTRL_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
+    assert_eq "1S.14.5 NEGATIVE CONTROL non-vacuity: discover_docs_md now returns 40 files, one more than the pin" \
+        "40" "${#MIRROR_WITH_NEGCTRL_513J[@]}"
+    MIRROR_NEGCTRL_ACTUAL_513J=$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_WITH_NEGCTRL_513J[@]}")
+    assert_eq "1S.14.6 NEGATIVE CONTROL SPECIFIC: the exact-SET pin now reports a mismatch — the exclusion has not gone blind to a real addition outside docs/specs" \
+        "yes" "$([ "$EXPECTED_DOCS_MD_SET" != "$MIRROR_NEGCTRL_ACTUAL_513J" ] && echo yes || echo no)"
+    assert_contains "1S.14.7 NEGATIVE CONTROL names the file that broke it" \
+        "claude-workflow-plugin-513j-negctrl-canary.md" "$MIRROR_NEGCTRL_ACTUAL_513J"
+    rm -f "$NEGCTRL_CANARY_513J"
+else
+    printf '  SKIP: 1S.14.4-.7 LEG 2 (docs/ base isolation guard failed closed — would have written the canary through a surviving symlink)\n'
+fi
+
+# RESTORE CONTROL — both canaries gone, the mirror matches the pin again.
+MIRROR_RESTORED_513J=()
+while IFS= read -r line; do MIRROR_RESTORED_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
+assert_set_pin "1S.14.8 RESTORE CONTROL: the mirror matches the pin again with both canaries removed" \
+    "$EXPECTED_DOCS_MD_SET" "$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_RESTORED_513J[@]}")"
+
+# ---------------------------------------------------------------------------
+# LEG 3 — ANCHOR-BUG NEGATIVE CONTROL (round 2, independent review
+# sol-codex, non-Claude — HIGH; ISOLATION extended round 3, MEDIUM,
+# finding 2's second bullet). See discover_docs_md's own header comment
+# (above, where the exclusions are defined) for the full defect
+# narrative: round 2's predicates used to be unanchored single-quoted
+# globs, and BSD find's -path wildcards match fnmatch-style, where '*'
+# CROSSES '/' — so the old form excluded any path containing
+# "/docs/specs/" as a SUBSTRING, not just paths actually under the
+# top-level $root/docs/specs/. A file nested two directories under an
+# unrelated docs/a/ — docs/a/docs/specs/b.md — exercises exactly that
+# gap: it must NOT be excluded by the fixed predicate, the same way LEG
+# 2's top-level canary must not be excluded, but LEG 2's canary sits
+# directly under docs/ and never exercised the substring-vs-anchor
+# distinction at all. Verified directly against a scratch tree before
+# writing this leg: the OLD unanchored form left this nested file
+# invisible (the discovered count stayed at the pre-canary total,
+# non-vacuously wrong); the fixed form correctly reports it as a new
+# file — see this task's verification output for the literal
+# reproduction. ISOLATION (round 3): this leg writes through a THREE-
+# component chain under the mirror — docs/a, docs/a/docs, and
+# docs/a/docs/specs — and, like docs/specs itself (1S.14.0b, above), any
+# of those three is a symlink the mirror could in principle inherit from
+# the real docs/ tree in the future; ensure_real_dir_chain (defined
+# above) guards all three, in order, before this leg writes anything.
+# ---------------------------------------------------------------------------
+printf '\n--- 1S.14 LEG 3: a nested docs/a/docs/specs/b.md is NOT excluded by the anchored pattern (round 2 HIGH) ---\n'
+
+if ensure_real_dir_chain "$MIRROR_ROOT_513J/docs" "a/docs/specs"; then
+    MIRROR_513J_A_ISOLATED=yes
+else
+    MIRROR_513J_A_ISOLATED=no
+fi
+assert_eq "1S.14.8b ISOLATION (round 3, MEDIUM, finding 2's second bullet): every ancestor LEG 3 writes through (docs/a, docs/a/docs, docs/a/docs/specs) is a real directory, not an inherited symlink, before anything is written under it" \
+    "yes" "$MIRROR_513J_A_ISOLATED"
+
+if [ "$MIRROR_513J_A_ISOLATED" = yes ]; then
+    NESTED_CANARY_513J="$MIRROR_ROOT_513J/docs/a/docs/specs/b.md"
+    printf '# nested docs/a/docs/specs/b.md fixture (mirror copy) — exercises the anchor fix, not a top-level docs/specs/ addition\n' > "$NESTED_CANARY_513J"
+    assert_eq "1S.14.9 landing proof: the nested docs/a/docs/specs/b.md canary exists" \
+        "yes" "$([ -f "$NESTED_CANARY_513J" ] && echo yes || echo no)"
+
+    MIRROR_WITH_NESTED_513J=()
+    while IFS= read -r line; do MIRROR_WITH_NESTED_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
+    assert_eq "1S.14.10 SPECIFIC (round 2 HIGH fix): discover_docs_md returns 40 files — the nested file is correctly NOT excluded by the anchored pattern" \
+        "40" "${#MIRROR_WITH_NESTED_513J[@]}"
+    MIRROR_NESTED_ACTUAL_513J=$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_WITH_NESTED_513J[@]}")
+    assert_eq "1S.14.11 SPECIFIC: the exact-SET pin reports a mismatch for the nested file too" \
+        "yes" "$([ "$EXPECTED_DOCS_MD_SET" != "$MIRROR_NESTED_ACTUAL_513J" ] && echo yes || echo no)"
+    assert_contains "1S.14.12 names the nested file that broke it" \
+        "docs/a/docs/specs/b.md" "$MIRROR_NESTED_ACTUAL_513J"
+    rm -f "$NESTED_CANARY_513J"
+    rmdir "$MIRROR_ROOT_513J/docs/a/docs/specs" "$MIRROR_ROOT_513J/docs/a/docs" "$MIRROR_ROOT_513J/docs/a" 2>/dev/null || true
+
+    MIRROR_RESTORED_AFTER_NESTED_513J=()
+    while IFS= read -r line; do MIRROR_RESTORED_AFTER_NESTED_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
+    assert_set_pin "1S.14.13 RESTORE CONTROL: the mirror matches the pin again with the nested canary removed" \
+        "$EXPECTED_DOCS_MD_SET" "$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_RESTORED_AFTER_NESTED_513J[@]}")"
+else
+    printf '  SKIP: 1S.14.9-.13 LEG 3 (docs/a isolation guard failed closed — would have written the nested canary through a surviving symlink)\n'
+fi
+
+# ---------------------------------------------------------------------------
+# ROOT-QUOTING ROBUSTNESS (round 2, independent review sol-codex,
+# non-Claude — part of the HIGH finding-1 fix; STRENGTHENED round 3,
+# independent review sol-codex, non-Claude — HIGH, R3-F1). discover_docs_md
+# no longer interpolates $root into any -path pattern at all (see its own
+# header comment, above) — prove that holds when $root itself contains
+# characters that used to be quoting or fnmatch-pattern hazards: a space
+# (a shell word-splitting hazard if quoting were ever dropped), a literal
+# '*' (an fnmatch wildcard — round 3's own finding: even the round-2
+# anchor fix still let a '*' in $root's own name contribute a wildcard to
+# the pattern find actually matched against), and a literal '[' (an
+# fnmatch bracket-expression opener — round 3's other half: with no ']'
+# anywhere else in the pattern, an unterminated '[' failed the WHOLE
+# match, so a real, top-level docs/specs/*.md was not excluded at all).
+# ROUND 2's version of this leg (now 1S.14.14-.18, unchanged below except
+# for '[' added to the root name) seeded only a TOP-LEVEL exclusion under
+# a space+'*' root — sufficient to prove quoting held, but not sufficient
+# to catch round 3's finding, because round 3's over-exclusion only shows
+# up against a NESTED file, and this leg never seeded one. 1S.14.19-.22
+# (round 3) is that missing case: a docs/a/docs/specs/b.md nested canary
+# under the SAME metacharacter root, seeded alongside the existing
+# top-level one, asserted discovered while the top-level one stays
+# excluded — both directions, in the same discovery pass, under one root
+# containing both hazard characters. NOTE ON WHAT THE COMBINED ROOT DOES
+# AND DOES NOT PROVE ABOUT THE OLD CODE: an unterminated '[' anywhere in
+# the pattern fails the whole match, which under the OLD (round 2) code
+# can leave a nested file looking "not excluded" for the WRONG reason
+# (nothing was excluded, top-level included) rather than because the
+# anchor held — so this one combined leg's pre-fix behaviour is not a
+# clean isolation of each hazard. The round-3 task record's verification
+# output reproduces each hazard in isolation as well (a bare trailing
+# '*' over-excludes the nested file; a bare '[' under-excludes the
+# top-level file), so the combined leg's regression value — proving BOTH
+# assertions hold simultaneously against the CURRENT, fixed code, for any
+# combination of these characters — is not overstated by implying it also
+# cleanly separates the two failure modes pre-fix. A small standalone
+# sandbox, not the docs/ mirror above: this checks quoting/pattern
+# robustness in isolation, not the docs/specs discovery semantics legs
+# 1-3 already cover.
+# ---------------------------------------------------------------------------
+printf '\n--- 1S.14 ROOT-QUOTING ROBUSTNESS: a root path with a space and active find -path metacharacters still filters correctly ---\n'
+
+WEIRD_ROOT_513J="$WORK/weird root with space and * glob and [ bracket"
+mkdir -p "$WEIRD_ROOT_513J/docs/specs"
+printf '# weird-root kept doc (must NOT be excluded)\n' > "$WEIRD_ROOT_513J/docs/weird-kept.md"
+printf '# weird-root excluded doc (must be excluded: docs/specs)\n' > "$WEIRD_ROOT_513J/docs/specs/weird-excluded.md"
+
+assert_eq "1S.14.14 non-vacuity: the weird-root kept.md seed landed" \
+    "yes" "$([ -f "$WEIRD_ROOT_513J/docs/weird-kept.md" ] && echo yes || echo no)"
+assert_eq "1S.14.15 non-vacuity: the weird-root docs/specs/*.md seed landed" \
+    "yes" "$([ -f "$WEIRD_ROOT_513J/docs/specs/weird-excluded.md" ] && echo yes || echo no)"
+
+WEIRD_RESULT_513J=()
+while IFS= read -r line; do WEIRD_RESULT_513J+=("$line"); done < <(discover_docs_md "$WEIRD_ROOT_513J")
+assert_eq "1S.14.16 SPECIFIC: exactly one file discovered under the weird root (the exclusion still fires with a space+'*'+'[' root)" \
+    "1" "${#WEIRD_RESULT_513J[@]}"
+WEIRD_JOINED_513J=$(printf '%s\n' "${WEIRD_RESULT_513J[@]}")
+KEPT_WEIRD_HIT=$(printf '%s\n' "$WEIRD_JOINED_513J" | grep -cxF "$WEIRD_ROOT_513J/docs/weird-kept.md" || true)
+assert_eq "1S.14.17 CONTROL: the ordinary weird-root doc IS discovered (the function and the weird root both work)" \
+    "1" "${KEPT_WEIRD_HIT:-0}"
+EXCLUDED_WEIRD_HIT=$(printf '%s\n' "$WEIRD_JOINED_513J" | grep -cxF "$WEIRD_ROOT_513J/docs/specs/weird-excluded.md" || true)
+assert_eq "1S.14.18 SPECIFIC: the weird-root docs/specs/*.md is excluded, not merely absent by coincidence" \
+    "0" "${EXCLUDED_WEIRD_HIT:-0}"
+
+# 1S.14.19-.22 (round 3, independent review sol-codex, non-Claude — HIGH,
+# R3-F1's missed case): the NESTED shape, under the SAME metacharacter
+# root as above, seeded alongside it rather than replacing it — proves
+# the metacharacter root does not reintroduce round 2's over-exclusion
+# (the nested file must be discovered) at the same time as proving it
+# still excludes the top-level file (1S.14.18 again, now with the nested
+# canary also present, so neither assertion is vacuously true because the
+# other file was absent).
+mkdir -p "$WEIRD_ROOT_513J/docs/a/docs/specs"
+printf '# weird-root nested doc (must NOT be excluded: docs/a/docs/specs, not top-level docs/specs)\n' \
+    > "$WEIRD_ROOT_513J/docs/a/docs/specs/weird-nested.md"
+assert_eq "1S.14.19 non-vacuity: the weird-root nested docs/a/docs/specs/*.md seed landed" \
+    "yes" "$([ -f "$WEIRD_ROOT_513J/docs/a/docs/specs/weird-nested.md" ] && echo yes || echo no)"
+
+WEIRD_RESULT_NESTED_513J=()
+while IFS= read -r line; do WEIRD_RESULT_NESTED_513J+=("$line"); done < <(discover_docs_md "$WEIRD_ROOT_513J")
+assert_eq "1S.14.20 SPECIFIC (round 3 HIGH fix): exactly two files discovered under the weird root now (the ordinary doc plus the nested one; the top-level docs/specs exclusion still fires)" \
+    "2" "${#WEIRD_RESULT_NESTED_513J[@]}"
+WEIRD_NESTED_JOINED_513J=$(printf '%s\n' "${WEIRD_RESULT_NESTED_513J[@]}")
+NESTED_WEIRD_HIT=$(printf '%s\n' "$WEIRD_NESTED_JOINED_513J" | grep -cxF "$WEIRD_ROOT_513J/docs/a/docs/specs/weird-nested.md" || true)
+assert_eq "1S.14.21 SPECIFIC (round 3 HIGH fix): the nested docs/a/docs/specs/*.md IS discovered under the metacharacter root — not excluded by the root's own '*'/'[' contributing to the fnmatch pattern" \
+    "1" "${NESTED_WEIRD_HIT:-0}"
+EXCLUDED_WEIRD_HIT_2=$(printf '%s\n' "$WEIRD_NESTED_JOINED_513J" | grep -cxF "$WEIRD_ROOT_513J/docs/specs/weird-excluded.md" || true)
+assert_eq "1S.14.22 CONTROL: the top-level weird-root docs/specs/*.md is STILL excluded with the nested file also present (both directions hold together)" \
+    "0" "${EXCLUDED_WEIRD_HIT_2:-0}"
+
+# ---------------------------------------------------------------------------
+# ISOLATION GUARD FAIL-CLOSED CONTROL (round 3, independent review
+# sol-codex, non-Claude — MEDIUM, finding 2). 1S.14.0b and 1S.14.8b
+# (above) prove ensure_real_dir_chain is CALLED at both sites that need
+# it; they do NOT prove the function itself is fail-closed, because
+# neither call site's symlink is actually un-removable today (nothing in
+# the real docs/ tree is a symlink, so both calls take the success path
+# every real run). This leg drives ensure_real_dir_chain directly against
+# a dedicated sandbox built to exercise BOTH outcomes: a removable
+# symlink (POSITIVE — the guard must replace it and report success, the
+# path every real run above actually takes) and an UNREMOVABLE one
+# (NEGATIVE — the guard must report failure and, critically, must not
+# have written anything through it; a canary file living OUTSIDE the
+# sandbox, beside the symlink's target, is the load-bearing assertion:
+# unlinking a directory ENTRY is gated on WRITE permission on the
+# directory that holds it, not on the entry's own permissions or its
+# owner, so `chmod 555` on the symlink's parent makes `rm -f` on the
+# symlink fail deterministically without needing root or an immutable
+# flag). MEASURED directly against the CURRENT round-2 guard logic before
+# this fix (513j round 3 task record): forcing the identical removal
+# failure there does NOT stop the write — a canary lands next to the
+# escape-target file this leg also uses, reproducing finding 2 exactly.
+# Skipped loudly (this repo's SECTION_SKIP_RE convention: a `  SKIP: `
+# line) for a user who can write a mode-555 directory (root), the same
+# guard design-artifact.test.sh's own chmod-000 leg already uses, for the
+# identical reason: a leg that cannot fail is worse than an absent one.
+# ---------------------------------------------------------------------------
+printf '\n--- 1S.14 ISOLATION GUARD FAIL-CLOSED CONTROL: a symlink that cannot be removed blocks the write instead of being written through ---\n'
+
+GUARD_SANDBOX_513J="$WORK/isolation-guard-sandbox-513j"
+mkdir -p "$GUARD_SANDBOX_513J/outside" "$GUARD_SANDBOX_513J/parent"
+printf 'CANARY: must never be written to (isolation guard fail-closed control)\n' \
+    > "$GUARD_SANDBOX_513J/outside/escape-target.txt"
+ln -s "$GUARD_SANDBOX_513J/outside" "$GUARD_SANDBOX_513J/parent/specs"
+assert_eq "1S.14.G0 non-vacuity: the guard-sandbox symlink was created" \
+    "yes" "$([ -L "$GUARD_SANDBOX_513J/parent/specs" ] && echo yes || echo no)"
+
+# POSITIVE — the guard CAN remove an ordinary, removable symlink.
+if ensure_real_dir_chain "$GUARD_SANDBOX_513J/parent" "specs"; then
+    GUARD_POSITIVE_RESULT=yes
+else
+    GUARD_POSITIVE_RESULT=no
+fi
+assert_eq "1S.14.G1 POSITIVE: the guard replaces a removable symlink with a real directory and reports success" \
+    "yes" "$GUARD_POSITIVE_RESULT"
+assert_eq "1S.14.G2 POSITIVE: the replaced path is now a real directory, not a symlink" \
+    "yes" "$([ -d "$GUARD_SANDBOX_513J/parent/specs" ] && [ ! -L "$GUARD_SANDBOX_513J/parent/specs" ] && echo yes || echo no)"
+
+# NEGATIVE — make removal impossible: recreate the symlink, then strip
+# write permission on its CONTAINING directory.
+rm -rf "$GUARD_SANDBOX_513J/parent/specs"
+ln -s "$GUARD_SANDBOX_513J/outside" "$GUARD_SANDBOX_513J/parent/specs"
+chmod 555 "$GUARD_SANDBOX_513J/parent"
+if [ -w "$GUARD_SANDBOX_513J/parent" ]; then
+    printf '  SKIP: 1S.14.G3-.G6 isolation guard fail-closed control (this user can write a mode-555 directory; likely root)\n'
+else
+    if ensure_real_dir_chain "$GUARD_SANDBOX_513J/parent" "specs"; then
+        GUARD_NEGATIVE_RESULT=yes
+    else
+        GUARD_NEGATIVE_RESULT=no
+    fi
+    assert_eq "1S.14.G3 NEGATIVE (the fix): the guard reports FAILURE when the symlink cannot be removed (parent dir not writable), rather than proceeding through it" \
+        "no" "$GUARD_NEGATIVE_RESULT"
+    assert_eq "1S.14.G4 NEGATIVE: the path is STILL a symlink — the guard did not silently succeed" \
+        "yes" "$([ -L "$GUARD_SANDBOX_513J/parent/specs" ] && echo yes || echo no)"
+    # G5/G6 SIMULATE THE REAL CALLER (LEG 1/LEG 3, above): a write gated on
+    # the guard's own return value, exactly like `if ensure_real_dir_chain
+    # ...; then <write>; else SKIP; fi`. G3 alone proves the guard SELF-
+    # REPORTS failure; it does not by itself prove a caller's write is
+    # actually skipped — that depends on the caller honouring the report,
+    # which is exactly what round 2's code did NOT do (it recorded the
+    # failure via assert_eq and proceeded regardless). This block is the
+    # same gate LEG 1/LEG 3 use, so it only ever attempts the write when
+    # GUARD_NEGATIVE_RESULT is (wrongly) "yes" — on the shipped, fixed
+    # guard this branch is dead code every real run; it is what turns red
+    # if the fail-closed check above is ever weakened again (see this
+    # leg's own RED proof in the round-3 task record, which reverted the
+    # guard and observed exactly this write land in outside/).
+    if [ "$GUARD_NEGATIVE_RESULT" = yes ]; then
+        printf 'canary (should never reach here — guard reported success wrongly)\n' \
+            > "$GUARD_SANDBOX_513J/parent/specs/escaped-canary.md" 2>/dev/null
+    fi
+    assert_eq "1S.14.G5 NEGATIVE: no new file appeared outside the guarded parent subtree (a write gated on the guard's result, the same gate LEG 1/LEG 3 use, never executed)" \
+        "no" "$([ -e "$GUARD_SANDBOX_513J/outside/escaped-canary.md" ] && echo yes || echo no)"
+    assert_eq "1S.14.G6 NEGATIVE: the pre-existing canary outside the guarded parent subtree is still byte-for-byte unchanged" \
+        "CANARY: must never be written to (isolation guard fail-closed control)" \
+        "$(cat "$GUARD_SANDBOX_513J/outside/escape-target.txt" 2>/dev/null)"
+fi
+chmod 755 "$GUARD_SANDBOX_513J/parent" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# BASE-SYMLINK ISOLATION CONTROL (round 4, independent review sol-codex,
+# non-Claude — HIGH, F2 residual). G0-G6 above only ever exercise a
+# symlink found WHILE WALKING below base — every check in the loop
+# operates on `cur` AFTER `cur="$cur/$part"` has already descended past
+# base once. `base` itself was never checked, and both real call sites
+# (1S.14.0b, 1S.14.8b, above) pass "$MIRROR_ROOT_513J/docs" — the `cp -R`
+# TARGET itself, not a descendant of it — as that base; see
+# ensure_real_dir_chain's own header comment (above) for the full BSD
+# `cp -R -P` narrative this reproduces. G8 below seeds the exact shape
+# that would have fooled the un-fixed function: the symlink's real target
+# already contains an ordinary, non-symlink "specs" directory, so a check
+# that only ever inspects levels BELOW base finds nothing wrong and
+# reports success. G9/G10 prove the guard itself now refuses; G11 proves
+# a LEG-1/LEG-3-style write (one level below base, gated on
+# ensure_real_dir_chain's result) never lands in the symlink's real
+# target; G12 proves a LEG-2-style write (directly under base, gated on
+# is_real_dir_not_symlink alone — LEG 2's own real shape, since it has no
+# component chain to walk) does not either; G13 is the load-bearing
+# byte-unchanged check shared by both. G14/G15 is the other direction: an
+# ordinary, non-symlink base is not wrongly rejected, and the guarded
+# level below it is still created as a real directory — the fix must not
+# turn every real run above into a false SKIP.
+# ---------------------------------------------------------------------------
+printf '\n--- 1S.14 BASE-SYMLINK ISOLATION CONTROL: a symlink AT the mirror docs/ base itself (round 4) is detected and every write leg refuses ---\n'
+
+GUARD_BASE_SANDBOX_513J="$WORK/isolation-guard-base-sandbox-513j"
+mkdir -p "$GUARD_BASE_SANDBOX_513J/target/specs"
+printf 'CANARY: must never be written to (base isolation guard fail-closed control)\n' \
+    > "$GUARD_BASE_SANDBOX_513J/target/escape-target.txt"
+ln -s "$GUARD_BASE_SANDBOX_513J/target" "$GUARD_BASE_SANDBOX_513J/mirror-docs"
+assert_eq "1S.14.G7 non-vacuity: the guard-sandbox BASE symlink was created (stands in for a symlinked \$MIRROR_ROOT_513J/docs)" \
+    "yes" "$([ -L "$GUARD_BASE_SANDBOX_513J/mirror-docs" ] && echo yes || echo no)"
+assert_eq "1S.14.G8 non-vacuity: the symlink's real target already has an ordinary, real 'specs' directory (the exact shape that made the un-fixed guard wrongly report success, since it only ever checked levels below base)" \
+    "yes" "$([ -d "$GUARD_BASE_SANDBOX_513J/target/specs" ] && [ ! -L "$GUARD_BASE_SANDBOX_513J/target/specs" ] && echo yes || echo no)"
+
+if ensure_real_dir_chain "$GUARD_BASE_SANDBOX_513J/mirror-docs" "specs"; then
+    GUARD_BASE_RESULT=yes
+else
+    GUARD_BASE_RESULT=no
+fi
+assert_eq "1S.14.G9 NEGATIVE (round 4 fix): the guard reports FAILURE when the BASE ITSELF is a symlink, even though \"specs\" below it resolves to a real directory through the symlink" \
+    "no" "$GUARD_BASE_RESULT"
+assert_eq "1S.14.G10 NEGATIVE: the base is STILL a symlink — the guard did not silently succeed or modify it" \
+    "yes" "$([ -L "$GUARD_BASE_SANDBOX_513J/mirror-docs" ] && echo yes || echo no)"
+
+# G11 SIMULATES LEG 1/LEG 3: a write one level below base, gated on the
+# guard's own result exactly like the real call sites — dead code on the
+# shipped, fixed guard; what turns red if the base check above regresses.
+if [ "$GUARD_BASE_RESULT" = yes ]; then
+    printf 'canary (should never reach here — guard reported success wrongly)\n' \
+        > "$GUARD_BASE_SANDBOX_513J/mirror-docs/specs/leg1-style-escaped-canary.md" 2>/dev/null
+fi
+assert_eq "1S.14.G11 NEGATIVE: a LEG-1/LEG-3-style write one level below the symlinked base never lands in the symlink's real target" \
+    "no" "$([ -e "$GUARD_BASE_SANDBOX_513J/target/specs/leg1-style-escaped-canary.md" ] && echo yes || echo no)"
+
+# G12 SIMULATES LEG 2 exactly: no ensure_real_dir_chain call at all, a
+# direct write gated only on is_real_dir_not_symlink of the base — the
+# identical predicate LEG 2's own new gate (above) uses.
+if is_real_dir_not_symlink "$GUARD_BASE_SANDBOX_513J/mirror-docs"; then
+    GUARD_BASE_LEG2_ISOLATED=yes
+else
+    GUARD_BASE_LEG2_ISOLATED=no
+fi
+if [ "$GUARD_BASE_LEG2_ISOLATED" = yes ]; then
+    printf 'canary (should never reach here — guard reported success wrongly)\n' \
+        > "$GUARD_BASE_SANDBOX_513J/mirror-docs/leg2-style-escaped-canary.md" 2>/dev/null
+fi
+assert_eq "1S.14.G12 NEGATIVE: a LEG-2-style write DIRECTLY under the symlinked base (LEG 2's own shape: no ensure_real_dir_chain call, gated on is_real_dir_not_symlink alone) never lands in the symlink's real target" \
+    "no" "$([ -e "$GUARD_BASE_SANDBOX_513J/target/leg2-style-escaped-canary.md" ] && echo yes || echo no)"
+assert_eq "1S.14.G13 NEGATIVE: the pre-existing canary in the symlink's real target is still byte-for-byte unchanged" \
+    "CANARY: must never be written to (base isolation guard fail-closed control)" \
+    "$(cat "$GUARD_BASE_SANDBOX_513J/target/escape-target.txt" 2>/dev/null)"
+
+# G14/G15 — THE OTHER DIRECTION: an ORDINARY, non-symlink base (today's
+# real shape: $MIRROR_ROOT_513J/docs is a real directory from `cp -R`,
+# never a symlink) is NOT wrongly rejected by the new check, and the
+# guarded level below it is still actually created.
+GUARD_BASE_OK_SANDBOX_513J="$WORK/isolation-guard-base-ok-sandbox-513j"
+mkdir -p "$GUARD_BASE_OK_SANDBOX_513J/mirror-docs"
+if ensure_real_dir_chain "$GUARD_BASE_OK_SANDBOX_513J/mirror-docs" "specs"; then
+    GUARD_BASE_OK_RESULT=yes
+else
+    GUARD_BASE_OK_RESULT=no
+fi
+assert_eq "1S.14.G14 POSITIVE (the other direction): an ordinary, non-symlink base is not rejected by the new base check" \
+    "yes" "$GUARD_BASE_OK_RESULT"
+assert_eq "1S.14.G15 POSITIVE (the other direction): with an ordinary base, the guarded 'specs' level is still created as a real directory, not a symlink — the new base check does not prevent the ordinary case from working" \
+    "yes" "$([ -d "$GUARD_BASE_OK_SANDBOX_513J/mirror-docs/specs" ] && [ ! -L "$GUARD_BASE_OK_SANDBOX_513J/mirror-docs/specs" ] && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
 # 1SM. META for 1S — the pairing requirement applied to DISCOVERY BREADTH,
