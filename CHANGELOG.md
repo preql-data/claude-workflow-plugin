@@ -2375,6 +2375,83 @@ weight actually sits.
 
 ### Fixed
 
+- **Three defects in v5.0.0 itself, found by LIVE-2 — the first end-to-end use
+  of the shipped design phase on real work.** The local `v5.0.0` tag sits at
+  `c5ba7cc`, before all three. They are folded into 5.0.0 rather than cut as a
+  `5.0.1` because v5.0.0 was never published: the tag is local, nothing was
+  pushed, and this branch *is* the release. All three share one shape with the
+  `gytz` family below — mechanisms each correct in isolation that had never been
+  run together.
+  - **`513j` — the design phase turned an operator's own `make test` red**
+    (commit `26dac6c`, 238 assertions in the touched spec). `@designer` writes
+    to `docs/specs/<task-id>.md` on a DERIVED path — `design-record` refuses any
+    other — while `approval-record-disclosure-claim.test.sh` pinned the exact
+    SET and count of `docs/**/*.md`, excluding only `docs/reviews/**`. First use
+    of the feature broke the suite: `1S.2` expected 39, actual 40. The spec was
+    working; nobody had taught it about a directory v5 introduced. The fix is
+    one exclusion, and it took four review rounds because TWO OF THE THREE
+    DEFECTS FOUND WERE NOT IN THE CHANGE: the pre-existing `docs/reviews`
+    predicate had been UNANCHORED since it was written (BSD `find`'s `-path`
+    wildcards cross `/`, so `docs/a/docs/reviews/x.md` was always invisible to
+    that census), and `$root` remains ACTIVE PATTERN SYNTAX to `find` even when
+    shell-quoted — a root containing `*` recreated the over-exclusion, one
+    containing `[` caused UNDER-exclusion. Both closed by removing `$root` from
+    the patterns entirely: `find` now runs from inside `docs/` so the exclusions
+    are the fixed literals `./reviews/*` and `./specs/*`.
+  - **`a13r` — `fkm.10` was recorded but never effected** (commit `ea8031d`,
+    37 files). `.claude/model-roles` declared `orchestrator=opus-class` while
+    `.claude/agents/orchestrator.md` still pinned `model: claude-fable-5`, and
+    the frontmatter pin is what a spawn actually honours. Nothing reconciled
+    them: `session-start.sh` CHECKS and warns but writes nothing. The pin is
+    corrected, and `model-select.sh check-parity` plus a `model_parity`
+    `workflow-doctor` registry check make the next disagreement visible instead
+    of silent. **The larger half of this commit is the guard that proves it.**
+    Section 3.1c compared SOURCE TEXT, and one defect family was closed FIVE
+    times across eight review rounds, each fix opening the next: a whole-file
+    grep counted a set the mutation never touched; the scoped grep replacing it
+    could match an EMPTY range; the selector dropped an arm from BOTH compared
+    sides on a shared reindent; the completeness loop added to fix that had a
+    key source that could go empty; its per-role predicate matched `printf`
+    inside a COMMENT. At the fifth, the project's waiver ruling was applied —
+    *when a defect family survives repeated rounds against the same mechanism,
+    remove the mechanism* — and the text comparison was DELETED in favour of
+    comparing what the two functions OUTPUT, with `role_agents()` driven through
+    the shipped `--print-role-map` entry point. Six assertions removed. The
+    diagnosis: a BEHAVIOURAL question had been approximated by a TEXTUAL one,
+    and every defect was an artifact of the approximation.
+  - **`1c82` — `design-conform` positively asserted that byte-identical,
+    freshly-synced fixture mirrors were UNBUILT** (commit `326deeb`, 23 files).
+    Not "I cannot see these files" — a false claim that the implementer had
+    failed to do work that was done. Root cause: `actual` (impact-report.sh's
+    change set) is denylist-filtered AT ITS SOURCE, so a denylisted-but-declared
+    path can never appear in it, built or not; `declared` was not filtered, so
+    `declared - actual` reported such a path unbuilt UNCONDITIONALLY AND
+    FOREVER, independent of build state. The gate was measuring a set difference
+    that could only ever have one answer. Fixed by filtering `declared` through
+    the same shared `workflow_denylisted()` before the diff — provably inert on
+    the `undeclared_files` gate (with `actual` A disjoint from denylist D and
+    filtered declared `C'=C\D`, `A\C = A\C'`). Independent review then found a
+    second defect IN THE FIX: availability was tested by `WORKFLOW_DENYLIST_REGEX`
+    being non-empty, so an inherited variable with the function undefined let the
+    pipeline return rc=0 and RETAIN the denylisted path, silently recreating
+    `1c82`. It now tests `declare -F workflow_denylisted`, re-sources from
+    `$PROJECT_DIR` when either half of the library contract is missing, and
+    REFUSES if either remains absent.
+  - **NOT FIXED, and stated because a changelog that read otherwise would be the
+    defect this release is about: `j4pe` remains OPEN.** D4 task-per-unit is
+    still structurally incompatible with the D2 design-satisfied gate — a
+    correctly-bound unit child refuses with `no_design_attempted`, because
+    `compute_design_satisfied()` resolves every input on the passed task id and
+    never consults `latest_design_unit_binding`. A direct fix was built across
+    six review rounds and then REVERTED WHOLESALE: round 5 ruled the resulting
+    fail-open NEWLY REACHABLE rather than inherited (shipped v5.0.0 exits 2
+    before any write, so it cannot occur there), and round 6 found the lock
+    meant to close it INERT on macOS — no `flock`, no `else` branch, proceeds
+    unlocked by design — with an incomplete lock population even where `flock`
+    exists. Round 7 ruled the revert exact. The safe version is filed as
+    `cfa3` (P1, design-pending) carrying all six rounds of findings as its
+    design brief; `robt` (the non-atomic approval boundary) folds into it.
+
 - **Four gate defects that each made a measurement that never happened look
   exactly like one that passed** (`gytz`; commit `261e09e`, 43 paths). Four
   tasks share one change set because they share one defect family: in every
