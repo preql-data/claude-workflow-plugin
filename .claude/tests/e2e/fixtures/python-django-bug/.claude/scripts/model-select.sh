@@ -175,10 +175,12 @@ CODEX_DETECT="$PROJECT_DIR/.claude/scripts/codex-detect.sh"
 # all iterate this; adding a sixth role means editing this line, adding a
 # current_pin() arm, adding a workflow-model-apply.sh role_agents() arm, and
 # adding a matching arm to cmd_check_parity's _expected_members() (kept in
-# sync with role_agents() by model-roles.test.sh section 3.1c — a textual
-# byte-identity check, not discovery; see _expected_members()'s own header
-# for why a completeness guard is the one place a hardcoded duplicate is
-# correct instead of a drift risk). Nothing else enumerates roles.
+# sync with role_agents() by model-roles.test.sh section 3.1c — a
+# BEHAVIOURAL check as of round 6: it executes both functions for every
+# role and compares their OUTPUT, not their source text; see
+# _expected_members()'s own header for why a completeness guard is the one
+# place a hardcoded duplicate is correct instead of a drift risk). Nothing
+# else enumerates roles.
 #
 # ORDER IS LOAD-BEARING for the statusline: it is the fixed render order
 # `des dsr orch impl rev`.
@@ -1925,16 +1927,19 @@ cmd_roles() {
 # all (model-roles.test.sh 14.14 reproduces this exact map and proves the
 # guard below is what catches it).
 #
-# DELIBERATELY DUPLICATED, and DELIBERATELY STATIC — this is workflow-
-# model-apply.sh's role_agents() with the `all` union arm removed (the
-# completeness loop below already iterates $ALL_ROLES one role at a time)
-# and the member arms copied VERBATIM, byte for byte. Kept from drifting
-# silently the same way ALL_ROLES/CONCRETE_ROLES already are
-# (model-roles.test.sh section 3.1b): section 3.1c extracts both functions'
-# member arms as text — never executing either — and requires them
-# byte-identical, so a role gaining or losing a member without updating
-# BOTH sides fails in CI, not by silently under-checking a map that still
-# happens to validate.
+# DELIBERATELY DUPLICATED — this is workflow-model-apply.sh's role_agents()
+# with the `all` union arm removed (the completeness loop below already
+# iterates $ALL_ROLES one role at a time) and the member arms re-expressed
+# by hand. Kept from drifting silently NOT by comparing source text (round
+# 4-6 tried that; see model-roles.test.sh section 3.1c's own header for the
+# five text-comparison shapes that were each defeated in turn, up to and
+# including a comment that satisfied a `.*printf` substring test while the
+# real payload sat on the next line) but by comparing OUTPUT: section 3.1c
+# EXECUTES this function and role_agents() for every role and requires
+# their PRINTED RESULTS to match, so a role gaining or losing a member
+# without updating both sides fails in CI on what the functions actually
+# produce, not by silently under-checking a map that still happens to
+# validate.
 _expected_members() {
     case "$1" in
         designer)        printf 'designer\n' ;;

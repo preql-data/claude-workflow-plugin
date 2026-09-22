@@ -12698,7 +12698,14 @@ latest_design_unit_binding() {
 #      whether a re-bind is warranted.
 #   4. declared = unit_files[unit_id] from validate-design's envelope (v5
 #      D4 addition, review-check.sh emit_validate_design) — no second
-#      parser for the DESIGN-UNITS grammar.
+#      parser for the DESIGN-UNITS grammar. Then filtered through the SAME
+#      shared workflow_denylisted() `actual` (step 5) is already filtered
+#      through (claude-workflow-plugin-1c82): a denylisted declared path
+#      (an e2e fixture mirror `make sync-fixtures` rewrites, the measured
+#      case) can never appear in `actual`, so leaving it in `declared` only
+#      ever manufactures a permanent, build-state-independent `unbuilt`
+#      entry — see the DENYLIST-EXCLUSION block, a few lines down, for the
+#      full reasoning and the proof this cannot relax `undeclared`.
 #   5. actual = impact-report.sh --relativized-changed-files — the SAME
 #      canonical, denylist-filtered change set `approve`/`--hash-only`
 #      hash, relativized so a Write/Edit-tracked absolute path and a
@@ -12894,6 +12901,119 @@ cmd_design_conform() {
         exit 4
     fi
 
+    # --- DENYLIST-EXCLUSION (claude-workflow-plugin-1c82) --------------------
+    # `actual`, computed a few lines down, is impact-report.sh's own
+    # canonical, denylist-filtered change set (step 5 above): a path
+    # workflow_denylisted() drops — the concrete case measured is the seven
+    # `.claude/tests/e2e/fixtures/*/.claude/scripts/<f>` mirrors `make
+    # sync-fixtures` rewrites, U1-AC8a's own sanctioned route to keeping them
+    # byte-identical to the canonical script — can NEVER appear in `actual`,
+    # built or not: the denylist excludes it at impact-report.sh's own
+    # source, unconditionally. Left unfiltered on the DECLARED side,
+    # `declared - actual` (the unbuilt computation, step 6 below) reports
+    # every such path `unbuilt` REGARDLESS of build state, forever — not a
+    # measurement of whether the work happened, a structural blind spot
+    # rendered identically to a genuine miss (the defect as filed: seven
+    # freshly-synced, byte-identical mirrors reported as unbuilt). Filtering
+    # `declared` through the SAME shared workflow_denylisted() (sourced once
+    # at this script's own top, TRACKER-RECONCILE) removes exactly the paths
+    # neither set can ever legitimately disagree about — the identical
+    # asymmetry compute_design_coherence's own declared/actual filter already
+    # applies for the same reason (that function's own declared_filtered_json/
+    # actual_filtered_json pair, D5 piece 4/fkm.8): never re-derived, reused
+    # by the same workflow_denylisted() call, not a second copy of its regex.
+    #
+    # `actual` is NOT re-filtered here — it is already denylist-filtered at
+    # its source (impact-report.sh) — and this changes NOTHING about the
+    # UNDECLARED-FILES-GATE below: a denylisted path was never a member of
+    # `actual` either, so removing it from `declared` cannot change `actual -
+    # declared` (removing a non-member of the minuend from the subtrahend is
+    # a no-op on a set difference — provable, not merely tested, but
+    # design-conform.test.sh's own new section pins it as an executed
+    # assertion rather than an argument). Fail-closed on ITS OWN computation,
+    # matching the R1-F1 discipline the diff below already documents: a
+    # filter that cannot compute REFUSES (set_computation_failed) rather than
+    # silently falling back to the unfiltered set or to "[]".
+    #
+    # RESOLVED VIA $PROJECT_DIR, NOT TRUSTED FROM THE AMBIENT TRACKER-RECONCILE
+    # SOURCE. Every OTHER dependency this function has (impact_tool,
+    # $REVIEW_CHECK_SCRIPT, workflow-manifest.sh) is addressed through
+    # $PROJECT_DIR — the LOGICAL project root — never through this SCRIPT's
+    # own ${BASH_SOURCE[0]}. The top-of-file TRACKER-RECONCILE source is the
+    # opposite: it resolves workflow-denylist.sh relative to wherever qa-
+    # gate.sh ITSELF physically is, which is normally the same directory but
+    # is NOT when qa-gate.sh is invoked from a relocated copy — precisely
+    # what design-conform.test.sh Section 18's own META reproduced directly:
+    # running $QG_NOEXCL (an unrelated META's mutant, deliberately placed
+    # under .claude/.qa-tracking/ to keep the mutant FILE itself out of
+    # reconcile_tracker's git-status scan) left workflow_denylisted()
+    # undefined, and the first call below died with "command not found" on
+    # stderr, interleaved with the JSON on stdout, under a status the caller
+    # could not parse. Re-sourcing here, via $PROJECT_DIR, is idempotent
+    # (workflow-denylist.sh "does nothing else" per its own header — no side
+    # effects beyond (re)defining the same two variables and two functions)
+    # and makes this function's OWN dependency resolve the SAME way its
+    # sibling dependencies already do, regardless of where the running qa-
+    # gate.sh copy physically sits.
+    # claude-workflow-plugin-j4pe R1-F3 (independent review round 1): THE
+    # LIBRARY CONTRACT IS TWO HALVES — WORKFLOW_DENYLIST_REGEX (a variable)
+    # AND workflow_denylisted() (a function) — and they can be present
+    # INDEPENDENTLY of each other. A variable can be inherited into this
+    # process's environment (exported by a caller, or — the reviewer's own
+    # reproduction — simply already set in a parent shell) WITHOUT the
+    # function that reads it ever having been sourced. Checking only the
+    # variable, as this block originally did, is checking the WRONG HALF: the
+    # reviewer ran this exact filter pipeline with the variable set and the
+    # function undefined and measured `workflow_denylisted: command not
+    # found` printed TWICE to stderr while the pipeline's OWN exit status
+    # stayed 0 and the returned array RETAINED the denylisted path — an
+    # undefined command in a `cmd && continue` guard is neither true nor an
+    # error the pipeline propagates, it is simply "don't continue", so every
+    # line falls through to be KEPT. That is 1c82's unfiltered declared set,
+    # reproduced through a gap this gate's own guard did not cover.
+    #
+    # Both halves are therefore checked with THEIR OWN mechanism —
+    # `declare -F` for the function (never `command -v`, which also matches
+    # an external executable named workflow_denylisted on PATH, a DIFFERENT
+    # and unintended source of a false "available") and a direct emptiness
+    # test for the variable — and EITHER being absent triggers the same
+    # re-source, exactly as a single half being absent already did. After
+    # re-sourcing, BOTH are re-checked; refusing unless BOTH are now present
+    # is what makes this a refusal on the CONTRACT, not on either half alone.
+    if ! declare -F workflow_denylisted >/dev/null 2>&1 || [ -z "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
+        if [ -f "$PROJECT_DIR/.claude/scripts/workflow-denylist.sh" ]; then
+            # shellcheck source=.claude/scripts/workflow-denylist.sh
+            . "$PROJECT_DIR/.claude/scripts/workflow-denylist.sh"
+        fi
+    fi
+    if ! declare -F workflow_denylisted >/dev/null 2>&1 || [ -z "${WORKFLOW_DENYLIST_REGEX:-}" ]; then
+        emit_design_conform "false" "workflow_denylist_unavailable" \
+            "the shared path denylist (workflow-denylist.sh) is not fully loaded (looked relative to the running script, then re-sourced from $PROJECT_DIR/.claude/scripts/workflow-denylist.sh) — function present: $(declare -F workflow_denylisted >/dev/null 2>&1 && echo yes || echo no), variable set: $([ -n "${WORKFLOW_DENYLIST_REGEX:-}" ] && echo yes || echo no) — so which of $unit_id's declared files are denylisted is unknowable; refusing rather than computing undeclared/unbuilt with an unknown or partial filter" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+    if ! printf '%s' "$declared_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        emit_design_conform "false" "set_computation_failed" \
+            "$unit_id's declared file set (from $artifact's DESIGN-UNITS block) did not read back as a JSON array; refusing to filter or diff a set that did not actually validate" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+    local declared_n_before=0 declared_n_after=0 declared_denylisted_n=0
+    declared_n_before=$(printf '%s' "$declared_json" | jq 'length' 2>/dev/null) || declared_n_before=0
+    local declared_filter_rc=0 dcl_line=""
+    declared_json=$( { printf '%s' "$declared_json" | jq -r '.[]' 2>/dev/null; } | \
+        { while IFS= read -r dcl_line; do [ -n "$dcl_line" ] || continue; workflow_denylisted "$dcl_line" && continue; printf '%s\n' "$dcl_line"; done; } | \
+        jq -R . 2>/dev/null | jq -sc '.' 2>/dev/null ) || declared_filter_rc=$?
+    if [ "$declared_filter_rc" -ne 0 ] || ! printf '%s' "${declared_json:-}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        emit_design_conform "false" "set_computation_failed" \
+            "could not apply the shared workflow-denylist filter to $unit_id's declared file set (jq exited $declared_filter_rc). Refusing rather than computing undeclared/unbuilt over a declared set that did not actually filter" \
+            "[]" "[]" "$unit_id" "$design_task" "$tid"
+        exit 2
+    fi
+    declared_n_after=$(printf '%s' "$declared_json" | jq 'length' 2>/dev/null) || declared_n_after="$declared_n_before"
+    declared_denylisted_n=$((declared_n_before - declared_n_after))
+    # --- DENYLIST-EXCLUSION END (claude-workflow-plugin-1c82) ----------------
+
     # --- 4/5: actual — the SAME canonical, denylist-filtered, relativized ---
     # change set the gate hashes.
     local impact_tool actual_raw actual_rc=0
@@ -13073,6 +13193,13 @@ cmd_design_conform() {
 
     local obs="conforms: $tid (unit_id=$unit_id, design_task=$design_task) touched no files outside its declared set"
     [ "${unbuilt_n:-0}" != "0" ] && obs="$obs; $unbuilt_n declared file(s) not yet touched (informational — unbuilt never gates)"
+    # claude-workflow-plugin-1c82: named explicitly, matching this codebase's
+    # own established convention (reconcile_tracker's `denylisted=N` beside
+    # `subtracted=N`) of never letting an exclusion be silent — a reader can
+    # see that SOME declared paths were never assessable either way, rather
+    # than concluding from their absence off unbuilt_files that everything
+    # declared was confirmed built.
+    [ "${declared_denylisted_n:-0}" != "0" ] && obs="$obs (denylisted=$declared_denylisted_n declared file(s) excluded from undeclared/unbuilt consideration — never enter the tracked change set by design)"
     emit_design_conform "true" "" "$obs" "[]" "$unbuilt_json" "$unit_id" "$design_task" "$tid"
 }
 # DESIGN-CONFORM END (fkm.6)

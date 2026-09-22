@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-j4pe",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "9041a484f8429e5e7a97b35c96be21842b0d04e9b571f6a237b6f0e283999329",
+  "risk_threshold": "high",
+  "stop_condition": "Round 2 independently checked the complete executable production census of compute_design_satisfied at HEAD ea8031de4ecc53554a37f35ad862a9a3cbbc82f9 plus the uncommitted tree: `rg --hidden` found exactly seven calls outside tests/fixtures, four own-mode and three default-mode, with no fifth literal, alias, or variable-indirect invocation. I traced all three default callers through their downstream artifact/hash consumers; design-status correctly switches to DESIGN_SATISFIED_SOURCE_TID and design-gate-precheck snapshots that source before compute_design_conflict_open overwrites globals, but cmd_approve later reads the argument's own DESIGN-ARTIFACT source. I checked the ownership gate under both C->A/A->B write orders, including an A->B binding written before A acquires its own artifact and after C->A: own-artifact presence forecloses the exact verdict-substitution path for newly written links, while reader own-mode protects legacy links, but the gate does not prevent a chained graph as its comments claim. I traced design-unit-align Section 10b through the fresh non-idempotent approve path: the positive call reaches design-satisfied, alignment/design-conform, and coherence (correctly not applicable for the child); the negative control reaches and names design_not_satisfied specifically. I verified Section 6a's first logical read consumes exactly two failing bd-show attempts before the second logical read heals, so guard 1 is isolated; Section 6b is fairly labelled as a joint redundancy control. R1-F3's pre/post-source declare-F checks and function-less-library test are sound, and R1-F5 captures SOURCE_TID before the conflict predicate can overwrite it. I also checked the committed fixture-mirror invariant. Execution limits: `mktemp -d -t j4pe-r2-review.XXXXXX` failed rc=1 with Operation not permitted, so I executed none of the suites or make lint; the packet's twelve-suite battery remains orchestrator-measured. My `bash -n` loop over the six changed/new shell files returned rc=0, and `git diff --check` returned rc=0. The reviewed_hash was reproduced without a temp file using the readable tracker, LC_ALL=C sort -u, the shared WORKFLOW_DENYLIST_REGEX, and shasum -a 256.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:6985, :7002-7003, and :7705-7723",
+      "evidence": "cmd_approve is one of the three default-mode sites. For bound child C it can obtain DESIGN_VERDICT_HASH and DESIGN_SATISFIED_SOURCE_TID from governing task A at :6985, but it snapshots only the hash/observation. The later DESIGN-BINDING-TOKEN unconditionally calls latest_design_artifact_hash \"$tid\" and design_artifact_path_for \"$tid\", therefore reading C's own artifact source rather than A's. In the ordinary stable C->A case the durable approval carries design_verdict_hash=<A hash> while omitting design_hash and reporting 'no DESIGN-ARTIFACT record on C', despite A's artifact having just governed approval. More sharply, because the two reads are separated by the complete conflict/alignment/coherence ladder and no source snapshot or lock exists, a DESIGN-ARTIFACT recorded on C in that interval can make the final approval combine design_hash=<C hash> with design_verdict_hash=<A hash>. Section 10b asserts only approval status and exit code, so it cannot detect this record-level source split.",
+      "description": "The corrected census exposes a missed R1-F1-family caller: approve follows a binding for satisfaction and later reads the argument's own artifact when constructing the durable approval record. Preserve the resolved source alongside the verdict hash and use or explicitly source-tag that same design for the later provenance token, with a closing revalidation before writing; add a bound-child assertion over the actual QA-GATE APPROVED record."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "high",
+      "location": ".claude/tests/e2e/fixtures/*/.claude/scripts/qa-gate.sh and .claude/tests/e2e/specs/_fixture-script-sync.unit.spec.ts:135-167",
+      "evidence": "A read-only parity loop using `cmp -s .claude/scripts/qa-gate.sh <fixture>/.claude/scripts/qa-gate.sh` at the reviewed tree measured seven fixture script directories, seven divergent qa-gate.sh copies, and zero missing copies. The committed drift guard hashes every canonical/fixture pair and requires byte identity; its own diagnostic directs maintainers to sync-fixtures. This offline l3-vitest-unit guard is part of test-e2e-unit/test-ci but is absent from the packet's targeted twelve-suite battery, so the reported green suites do not cover it.",
+      "description": "The canonical gate changed substantially but none of its seven committed e2e mirrors was synchronized. The repository's explicit CI drift guard will fail, and committed fixtures retain the pre-fix behavior. Run make sync-fixtures, include the resulting mirror changes, and run the offline fixture-sync unit guard."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:12419-12467",
+      "evidence": "The ownership condition closes the exact substitution path but does not establish the stronger invariant claimed at :12445-12462. If A and B each own a DESIGN-ARTIFACT, `design-unit-bind A --design-task B` passes because this invocation checks only B, and `design-unit-bind C --design-task A` passes because it checks only A; both writes succeed in either order and produce C->A->B. A->B may even be written before A owns an artifact because A is the source, not the checked target; recording A's artifact later then permits C->A. Conversely, a historical C->A written before this gate is not retroactively rejected. A's own record prevents fallback to B, so the specific verdict-laundering substitution is foreclosed, but the stated 'chain of length >1 can never be assembled' and 'write that would create a chain is refused' claims are false.",
+      "description": "Decide the actual invariant explicitly. If chained bindings are unsupported as the production comment says, reject a source or target that would form one and add both-order regression cases. If artifact-owning tasks may also be bound implementers, revise the two-level/no-chain claims and document the precedence semantics; the current gate guarantees non-substitution, not absence of chains."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

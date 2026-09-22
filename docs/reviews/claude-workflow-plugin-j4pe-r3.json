@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-j4pe",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "89e17aa026179786f5ae832f2d69d80b0ac8f140b92aee87395722ce8346ac33",
+  "risk_threshold": "high",
+  "stop_condition": "Round 3 reviewed only the responses to R2-F1, R2-F2, and R2-F3. I traced approve's initial design-satisfaction snapshot, all four redirected DESIGN-BINDING-TOKEN lookups, and the final durable write. I audited every requested new fixture: design-unit-align Section 10b, design-accessors Section 13, design-conform Section 19, and design-satisfied-unit-binding Sections 5-7. Their satisfaction-sensitive hashes are live workflow-manifest.sh hash-file results, directly or through design_and_review; Section 13 additionally distinguishes A and B with unequal live hashes and a direct-to-B discriminator. No requested fixture uses a hardcoded placeholder hash. R2-F2 is resolved: my read-only parity loop measured 27 canonical scripts across 7 fixtures (189 pairs), with missing=0, different=0, and extra=0; git's fixture-script diff inventory names only qa-gate.sh and model-select.sh, so no other canonical script was silently caught up by this sync run. R2-F3's option (b) is appropriate: the revised comment now admits chains are representable and accurately attributes verdict non-substitution to the one-hop own-mode read, matching the code and Section 13. R2-F1 remains unresolved as R3-F1. Execution limits: mktemp -d failed rc=1 with Operation not permitted. I therefore did not execute the packet's 12 suites, make lint, or the 203/203 Vitest guard; those results remain orchestrator-measured. I independently ran git diff --check and bash -n over qa-gate.sh plus the four named test scripts, all rc=0. impact-report.sh --hash-only also could not allocate its temp file; reviewed_hash was instead produced by the same readable-tracker, LC_ALL=C sort -u, shared denylist, and SHA-256 pipeline without materializing a temp file.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:6995-7025, :7745-7763, and :7833; .claude/scripts/tests/design-unit-align.test.sh:761-861",
+      "evidence": "approve evaluates compute_design_satisfied(\"$tid\") once and snapshots design_verdict_field and design_satisfied_source_tid. The late ladder then reads the latest DESIGN-ARTIFACT hash for that snapshotted source and compares its live hash only with that latest artifact record; it never re-runs resolution from $tid and never compares recorded_design_hash/live_design_hash with the earlier DESIGN_VERDICT_HASH. Consequently, if bound child C gains its own DESIGN-ARTIFACT after the initial check, a fresh predicate call would apply own-artifact precedence to C and could return design_verdict_missing, yet the ladder continues validating old source A and the approval is written. If A itself changes and receives a new DESIGN-ARTIFACT record, the ladder can emit design_hash=H2 while the snapshotted field remains design_verdict_hash=H1. If only A's file changes, the ladder merely omits design_hash and records a response warning; add_comment still writes an approval carrying the stale verdict hash. Section 10b uses live hashes and is non-vacuous for the stable-source bug, but its mutant only redirects the four lookups back to $tid and never mutates source precedence or artifact state between the satisfaction check and durable write.",
+      "description": "Pointing ARM 1a at the resolved source fixes the stable-state C/A record split, but ARM 1a is an observational provenance ladder, not a closing revalidation of the satisfaction decision. R2-F1's TOCTOU window therefore remains and can produce either an approval whose governing source is no longer current or a durable record combining different artifact and verdict revisions. Before writing, fail closed unless resolution still selects the snapshotted source and that source's latest recorded and live artifact hashes both equal the snapshotted satisfied-verdict hash. Add deterministic mutation controls for a child acquiring its own artifact and for the governing task being changed/re-recorded during the interval."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

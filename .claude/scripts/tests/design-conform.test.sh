@@ -1611,6 +1611,211 @@ assert_eq "17.5b ...ok=true" "true" "$(json_field '.ok' "$CTRL17_OUT")"
 rm -f "$QG_NOEXCL"
 
 # ===========================================================================
+printf '\n=== Section 18: claude-workflow-plugin-1c82 — a declared, denylisted\n'
+printf 'fixture-mirror path must not read as unbuilt ===\n'
+# ===========================================================================
+# THE DEFECT AS FILED: a unit legitimately declares an e2e fixture-mirror
+# path in its OWN files[] (U1-AC8a's `make sync-fixtures` sanctioned route to
+# keeping the seven fixture copies byte-identical to a canonical script), but
+# workflow_denylisted() means that path can NEVER reach `actual`
+# (impact-report.sh's own canonical, denylist-filtered change set) whether it
+# was rewritten or not. Pre-fix, `declared - actual` reported it `unbuilt`
+# UNCONDITIONALLY — not a measurement of build state, a structural blind
+# spot rendered identically to a genuine miss. This section proves the fix
+# WITHOUT instantiating the easy (vacuous) case: the declared set carries a
+# SECOND, ordinary, non-denylisted file that genuinely was never touched
+# either, and THAT one must still show up in unbuilt_files — proving the
+# filter removes exactly the denylisted entry, not the whole computation.
+
+ONE_UNIT_DENYLIST_BLOCK='[
+  {"unit_id":"U1","role":"devops","goal":"unit touching a fixture mirror",
+   "acceptance":[{"id":"AC1","text":"fixture"}],
+   "files":["src/real18.sh",".claude/tests/e2e/fixtures/onezerocxx/.claude/scripts/mirrored18.sh"],
+   "verification":"make test","depends_on":[]}
+]'
+
+EPIC18=$(bd create "1c82 conform: denylisted-declared epic" -t epic -p 1 --json 2>/dev/null | jq -r '.id')
+CHILD18=$(bd create "1c82 conform: denylisted-declared child" -t task -p 1 --parent "$EPIC18" --no-inherit-labels --json 2>/dev/null | jq -r '.id')
+design_and_review "$EPIC18" "$ONE_UNIT_DENYLIST_BLOCK" >/dev/null
+bash "$QG" design-unit-bind "$CHILD18" --design-task "$EPIC18" --unit-id U1 >/dev/null 2>&1
+# U1 declares src/real18.sh (ordinary) + the fixture-mirror path (denylisted).
+
+: > "$TRACKING"
+OUT18=$(bash "$QG" design-conform "$CHILD18" 2>&1); RC18=$?
+assert_eq "18.1 nothing touched yet: still conforms (rc 0)" "0" "$RC18"
+assert_eq "18.1b ok=true" "true" "$(json_field '.ok' "$OUT18")"
+assert_eq "18.1c undeclared_files is empty" "0" "$(json_field '.undeclared_files | length' "$OUT18")"
+assert_eq "18.1d NOT VACUOUS: unbuilt_files names EXACTLY ONE file, the ORDINARY one — the fixture mirror is excluded, src/real18.sh is not" \
+    "src/real18.sh" "$(json_field '.unbuilt_files[0]' "$OUT18")"
+assert_eq "18.1e ...and unbuilt_files has length 1, not 2 (the denylisted entry is genuinely gone, not just reordered)" \
+    "1" "$(json_field '.unbuilt_files | length' "$OUT18")"
+assert_eq "18.1f observations disclose the exclusion count, matching this codebase's own denylisted=N convention" \
+    "yes" "$(printf '%s' "$OUT18" | jq -r '.observations' | grep -qF 'denylisted=1' && echo yes || echo no)"
+
+# Tracker membership of the fixture-mirror path must not matter: it is
+# excluded from `declared` regardless, because it can never reach `actual`
+# either way (impact-report.sh's own denylist filter, applied at the source,
+# not something this fix adds). Proven, not assumed.
+mkdir -p "$FIXTURE/.claude/tests/e2e/fixtures/onezerocxx/.claude/scripts"
+touch "$FIXTURE/.claude/tests/e2e/fixtures/onezerocxx/.claude/scripts/mirrored18.sh"
+printf '.claude/tests/e2e/fixtures/onezerocxx/.claude/scripts/mirrored18.sh\n' > "$TRACKING"
+OUT18B=$(bash "$QG" design-conform "$CHILD18" 2>&1); RC18B=$?
+assert_eq "18.2 the fixture mirror IS now tracked (genuinely synced) — still conforms" "0" "$RC18B"
+assert_eq "18.2b ...unbuilt_files is UNCHANGED (still names only src/real18.sh): build state of a denylisted path cannot move this computation either way" \
+    "src/real18.sh" "$(json_field '.unbuilt_files[0]' "$OUT18B")"
+
+# ---------------------------------------------------------------------------
+printf '\n=== Section 18 META: DENYLIST-EXCLUSION is load-bearing ===\n'
+# ---------------------------------------------------------------------------
+: > "$TRACKING"
+QG_NODENY="$FIXTURE/.claude/.qa-tracking/.dua-qa-gate-nodeny.sh"
+STRIP18_RC=0
+awk '
+    /^    # --- DENYLIST-EXCLUSION \(claude-workflow-plugin-1c82\) --/ { skip = 1; found = 1; next }
+    /^    # --- DENYLIST-EXCLUSION END \(claude-workflow-plugin-1c82\) --/ { skip = 0; next }
+    skip { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$QG" > "$QG_NODENY" || STRIP18_RC=$?
+chmod +x "$QG_NODENY" 2>/dev/null || true
+
+assert_eq "18.3 META NON-VACUITY: the sentinels were found and the strip ran cleanly" "0" "$STRIP18_RC"
+SHIPPED_LINES18=$(wc -l < "$QG" | tr -d '[:space:]')
+STRIPPED_LINES18=$(wc -l < "$QG_NODENY" | tr -d '[:space:]')
+assert_eq "18.3b ...the mutant copy is shorter than the shipped script" \
+    "shorter" "$([ "$STRIPPED_LINES18" -lt "$SHIPPED_LINES18" ] && echo shorter || echo same-or-longer)"
+P18_RC=0
+bash -n "$QG_NODENY" 2>/dev/null || P18_RC=$?
+assert_eq "18.3c ...and the mutant still parses" "0" "$P18_RC"
+
+MUT18_OUT=$(bash "$QG_NODENY" design-conform "$CHILD18" 2>&1); MUT18_RC=$?
+assert_eq "18.4 SPECIFIC MISBEHAVIOUR: WITHOUT the filter, still conforms (unbuilt never gates, rc 0)..." "0" "$MUT18_RC"
+assert_eq "18.4b ...but unbuilt_files now ALSO names the fixture mirror (length 2, not 1)" \
+    "2" "$(json_field '.unbuilt_files | length' "$MUT18_OUT")"
+assert_eq "18.4c ...specifically containing the denylisted path the shipped script excludes" \
+    "yes" "$(printf '%s' "$MUT18_OUT" | jq -r '.unbuilt_files | tostring' | grep -qF 'onezerocxx' && echo yes || echo no)"
+
+CTRL18_OUT=$(bash "$QG" design-conform "$CHILD18" 2>&1); CTRL18_RC=$?
+assert_eq "18.5 RESTORE CONTROL: the SHIPPED script, same state, exit 0 (conforms)" "0" "$CTRL18_RC"
+assert_eq "18.5b ...and still excludes the fixture mirror (length 1)" "1" \
+    "$(json_field '.unbuilt_files | length' "$CTRL18_OUT")"
+rm -f "$QG_NODENY"
+
+# ===========================================================================
+printf '\n=== Section 19: claude-workflow-plugin-j4pe R1-F3 — the denylist\n'
+printf 'dependency guard must test the FUNCTION, not a variable that can be\n'
+printf 'inherited independently ===\n'
+# ===========================================================================
+# INDEPENDENT REVIEW ROUND 1's OWN REPRODUCTION: WORKFLOW_DENYLIST_REGEX set,
+# workflow_denylisted() undefined -> bash prints "command not found" TWICE
+# but the pipeline's own exit status stays 0 and the returned array RETAINS
+# the denylisted path, because `workflow_denylisted "$p" && continue` treats
+# an undefined command (rc 127) as "false", so the "drop it" arm never fires
+# and every line falls through to be kept. Reproduced directly against this
+# exact pipeline shape before writing this section (not merely trusted from
+# the review artifact):
+#   $ WORKFLOW_DENYLIST_REGEX=x; declared_json='["a","fixtures/mirror.sh"]'
+#   $ <the exact filter pipeline> -> rc=0, result=["a","fixtures/mirror.sh"]
+#   (both lines retained; the denylisted one was never dropped)
+#
+# THE ENVIRONMENT MUTATION this section drives: a copy of the CANONICAL qa-
+# gate.sh with ONE line inserted immediately after the top-level TRACKER-
+# RECONCILE source block: `unset -f workflow_denylisted`. This leaves
+# WORKFLOW_DENYLIST_REGEX exactly as sourced (unset -f touches only the
+# function namespace) while making the function itself undefined for the
+# REST of that process's execution — the identical state the reviewer's
+# in-memory probe constructed, built here as a file so it can actually run
+# design-conform end to end rather than a bare pipeline fragment.
+
+EPIC19=$(bd create "j4pe R1-F3 epic" -t epic -p 1 --json 2>/dev/null | jq -r '.id')
+CHILD19=$(bd create "j4pe R1-F3 child" -t task -p 1 --parent "$EPIC19" --no-inherit-labels --json 2>/dev/null | jq -r '.id')
+design_and_review "$EPIC19" "$ONE_UNIT_DENYLIST_BLOCK" >/dev/null
+bash "$QG" design-unit-bind "$CHILD19" --design-task "$EPIC19" --unit-id U1 >/dev/null 2>&1
+: > "$TRACKING"
+
+# THE MUTATION THIS SECTION ACTUALLY DRIVES (revised from an earlier `unset -f
+# workflow_denylisted` cut): this fix's OWN re-source step (cmd_design_
+# conform's DENYLIST-EXCLUSION block, "if ! declare -F ... ; then ... source
+# ... fi") makes a bare `unset -f` INSIDE a running qa-gate.sh process a
+# non-reproduction — the very first call site re-sources $PROJECT_DIR's own
+# workflow-denylist.sh and heals it right back, which is the fix working
+# CORRECTLY, not a gap in this test. To reach the state the guard exists for
+# — the function genuinely, persistently unavailable, re-source included —
+# the SIBLING LIBRARY FILE itself is temporarily replaced with a version that
+# defines WORKFLOW_DENYLIST_REGEX (so the variable half of the contract is
+# satisfied exactly as the reviewer's own reproduction set up) but OMITS
+# workflow_denylisted() entirely — so EVERY source of that path, including
+# qa-gate.sh's own top-level TRACKER-RECONCILE read and cmd_design_conform's
+# own re-source attempt, loads the SAME function-less file. This lets the
+# fully SHIPPED, UNMODIFIED qa-gate.sh run directly against the fault, which
+# is a stronger "shipped artifact running" leg than a qa-gate.sh copy would
+# have been.
+WFDL_LIVE="$FIXTURE/.claude/scripts/workflow-denylist.sh"
+WFDL_BACKUP="$FIXTURE/.claude/.qa-tracking/.dua-workflow-denylist-orig.sh"
+WFDL_NOFUNC="$FIXTURE/.claude/.qa-tracking/.dua-workflow-denylist-nofunc.sh"
+cp "$WFDL_LIVE" "$WFDL_BACKUP"
+grep '^WORKFLOW_DENYLIST_REGEX=' "$WFDL_LIVE" > "$WFDL_NOFUNC"
+assert_eq "19.1 NON-VACUITY: the variable-only mutant library actually carries the regex line" "1" \
+    "$(grep -cF 'WORKFLOW_DENYLIST_REGEX=' "$WFDL_NOFUNC")"
+assert_eq "19.1b ...and DELIBERATELY omits the function (grep for its definition finds nothing)" "0" \
+    "$(grep -cF 'workflow_denylisted()' "$WFDL_NOFUNC")"
+cp "$WFDL_NOFUNC" "$WFDL_LIVE"
+
+M19_OUT=$(bash "$QG" design-conform "$CHILD19" 2>&1); M19_RC=$?
+assert_eq "19.2 THE SHIPPED, UNMODIFIED CHECK CODE, run with the sibling library missing its function: refuses, exit 2" "2" "$M19_RC"
+assert_eq "19.2b ...error_key=workflow_denylist_unavailable, not a silent unfiltered pass" \
+    "workflow_denylist_unavailable" "$(json_field '.error_key' "$M19_OUT")"
+assert_contains "19.2c ...observations name which half of the contract was missing" \
+    "function present: no" "$M19_OUT"
+
+# --- the OLD (variable-only) shape, LAYERED on the SAME broken library ---
+# proves this is a real regression risk, not a hypothetical: revert JUST the
+# `! declare -F workflow_denylisted >/dev/null 2>&1 || ` clause this fix
+# added (both call sites; sed matches the exact literal, not a region) on a
+# COPY of qa-gate.sh, and drive the SAME function-less library through it.
+QG_OLDCHECK="$FIXTURE/.claude/.qa-tracking/.dua-qa-gate-mutant19-oldcheck.sh"
+sed 's/! declare -F workflow_denylisted >\/dev\/null 2>&1 || //g' "$QG" > "$QG_OLDCHECK"
+assert_eq "19.3 NON-VACUITY: the old-shape mutant differs from the shipped script" "differs" \
+    "$(cmp -s "$QG" "$QG_OLDCHECK" && echo same || echo differs)"
+assert_eq "19.3b ...and still parses" "0" "$(bash -n "$QG_OLDCHECK" 2>/dev/null; echo $?)"
+chmod +x "$QG_OLDCHECK"
+
+# stdout and stderr captured SEPARATELY, deliberately: the OLD (variable-
+# only) shape never detects the missing function, so execution reaches the
+# ACTUAL filtering pipeline and calls the genuinely-undefined
+# workflow_denylisted() directly -- printing "command not found" to stderr
+# exactly as the reviewer's own reproduction measured. Mixed into stdout via
+# a bare `2>&1` (as design-conform.test.sh's own Section 17 crash, fixed
+# earlier this cycle, already proved once) that text breaks jq's parse of
+# the JSON that follows it, which would make THIS assertion fail for a
+# harness reason having nothing to do with the production misbehaviour being
+# proven. Separating them lets both halves of the reviewer's own observation
+# be asserted directly: the noisy diagnostic (19.4a) AND the wrong-but-well-
+# formed JSON underneath it (19.4b/c/d).
+M19OLD_ERR="$FIXTURE/.claude/.qa-tracking/.dua-m19old-stderr.txt"
+M19OLD_OUT=$(bash "$QG_OLDCHECK" design-conform "$CHILD19" 2>"$M19OLD_ERR"); M19OLD_RC=$?
+assert_eq "19.4 SPECIFIC MISBEHAVIOUR: the OLD variable-only check, same broken library, exit 0 (silently WRONG)" "0" "$M19OLD_RC"
+assert_contains "19.4a ...stderr carries the SAME 'command not found' diagnostic the reviewer's own reproduction measured" \
+    "workflow_denylisted: command not found" "$(cat "$M19OLD_ERR" 2>/dev/null)"
+assert_eq "19.4b ...ok=true, never refused" "true" "$(json_field '.ok' "$M19OLD_OUT")"
+assert_eq "19.4c ...and 1c82's OWN defect shape is back: unbuilt_files now names the fixture mirror (length 2, not 1)" \
+    "2" "$(json_field '.unbuilt_files | length' "$M19OLD_OUT")"
+assert_contains "19.4d ...specifically re-including the denylisted path the shipped check would have refused over" \
+    "onezerocxx" "$M19OLD_OUT"
+rm -f "$QG_OLDCHECK" "$M19OLD_ERR"
+
+# --- restore the real library BEFORE the control, or 19.5 tests nothing ---
+cp "$WFDL_BACKUP" "$WFDL_LIVE"
+assert_eq "19.5 precondition: the sibling library is genuinely restored (function defined again)" "1" \
+    "$(grep -cF 'workflow_denylisted()' "$WFDL_LIVE")"
+
+CTRL19_OUT=$(bash "$QG" design-conform "$CHILD19" 2>&1); CTRL19_RC=$?
+assert_eq "19.5b RESTORE CONTROL: the SHIPPED script, library restored, exit 0 (conforms)" "0" "$CTRL19_RC"
+assert_eq "19.5c ...and correctly excludes the fixture mirror (length 1, not 2)" "1" \
+    "$(json_field '.unbuilt_files | length' "$CTRL19_OUT")"
+rm -f "$WFDL_BACKUP" "$WFDL_NOFUNC"
+
+# ===========================================================================
 printf '\n=== Summary ===\n'
 printf '\nTotal: %d assertion(s) run\n' "$((PASS + FAIL))"
 if [ "$FAIL" -gt 0 ]; then
