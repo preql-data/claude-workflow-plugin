@@ -106,14 +106,22 @@ weight actually sits.
 > none does.
 >
 > **4. Re-run `--verify` after upgrading.** `bash install.sh --verify` now
-> runs twelve named checks (up from eleven — Phase P added `beads_ledger`),
-> including two that spawn the MCP servers over stdio and assert exact tool
-> counts (21 / 7, unchanged) and two (`gate_pretooluse`, `gate_stop`) that
-> exercise the live hook contract. A `beads_ledger` failure means your
-> installed target's `.beads/issues.jsonl` and its live `bd` database have
-> diverged with no provable direction — read the check's own `fix:` line
-> and reconcile with `bash .claude/scripts/beads-ledger.sh reconcile
-> --apply` before trusting the rest of the report.
+> runs thirteen named checks (up from eleven — Phase P added `beads_ledger`,
+> then `a13r` added `model_parity`), including two that spawn the MCP
+> servers over stdio and assert exact tool counts (21 / 7, unchanged) and
+> two (`gate_pretooluse`, `gate_stop`) that exercise the live hook contract.
+> A `beads_ledger` FAIL is not always a divergence: the same named
+> FAIL also fires when `.claude/scripts/beads-ledger.sh` itself is
+> missing (a partial install) or when the check times out (30s
+> bound, no verdict produced) — neither is repaired by reconciling.
+> When it IS a real ledger/database divergence, the check names
+> which side is ahead — `stale` (database ahead), `ledger-ahead`, or
+> `indeterminate` (direction unprovable; handled the same as
+> `ledger-ahead`) — and prints that direction's own remedy. Read the
+> check's own `fix:` line rather than reaching for `bash
+> .claude/scripts/beads-ledger.sh reconcile --apply` on reflex:
+> reconcile is the right remedy for a real divergence, not for a
+> partial install or a timeout.
 
 ### Added
 
@@ -2376,12 +2384,15 @@ weight actually sits.
 ### Fixed
 
 - **Three defects in v5.0.0 itself, found by LIVE-2 — the first end-to-end use
-  of the shipped design phase on real work.** The local `v5.0.0` tag sits at
-  `c5ba7cc`, before all three. They are folded into 5.0.0 rather than cut as a
-  `5.0.1` because v5.0.0 was never published: the tag is local, nothing was
-  pushed, and this branch *is* the release. All three share one shape with the
-  `gytz` family below — mechanisms each correct in isolation that had never been
-  run together.
+  of the shipped design phase on real work.** v5.0.0 was first tagged at
+  `c5ba7cc`, before all three. Because it was never published — the tag is
+  local, only the branch has been pushed, to open PR #5, and this branch *is*
+  the release — the three fixes are folded into 5.0.0 rather than cut as a
+  `5.0.1`. `manifests/v5.0.0.sha256` is regenerated against the final release
+  surface to match, and publication is gated on the local tag resolving to
+  the final release commit. All three share one shape with the `gytz` family
+  below — mechanisms each correct in isolation that had never been run
+  together.
   - **`513j` — the design phase turned an operator's own `make test` red**
     (commit `26dac6c`, 238 assertions in the touched spec). `@designer` writes
     to `docs/specs/<task-id>.md` on a DERIVED path — `design-record` refuses any
@@ -2389,20 +2400,33 @@ weight actually sits.
     SET and count of `docs/**/*.md`, excluding only `docs/reviews/**`. First use
     of the feature broke the suite: `1S.2` expected 39, actual 40. The spec was
     working; nobody had taught it about a directory v5 introduced. The fix is
-    one exclusion, and it took four review rounds because TWO OF THE THREE
-    DEFECTS FOUND WERE NOT IN THE CHANGE: the pre-existing `docs/reviews`
-    predicate had been UNANCHORED since it was written (BSD `find`'s `-path`
-    wildcards cross `/`, so `docs/a/docs/reviews/x.md` was always invisible to
-    that census), and `$root` remains ACTIVE PATTERN SYNTAX to `find` even when
-    shell-quoted — a root containing `*` recreated the over-exclusion, one
-    containing `[` caused UNDER-exclusion. Both closed by removing `$root` from
-    the patterns entirely: `find` now runs from inside `docs/` so the exclusions
-    are the fixed literals `./reviews/*` and `./specs/*`.
+    one exclusion, and it took four review rounds. Only the pre-existing
+    `docs/reviews` predicate's bug pre-dated the change — it had been
+    UNANCHORED since it was written (BSD `find`'s `-path` wildcards cross
+    `/`, so `docs/a/docs/reviews/x.md` was always invisible to that census),
+    found only because the new `docs/specs` predicate sat next to it with
+    the same bug. The `$root` metacharacter defect was not pre-existing: it
+    was introduced by the fix itself, when anchoring the exclusion to
+    `$root/docs/specs/*` left `$root` ACTIVE PATTERN SYNTAX to `find` even
+    when shell-quoted, so a root containing `*` recreated the over-exclusion
+    and one containing `[` caused UNDER-exclusion. Both closed by removing
+    `$root` from the patterns entirely: `find` now runs from inside `docs/`
+    so the exclusions are the fixed literals `./reviews/*` and `./specs/*`.
+    The other half of the four rounds was sandbox isolation, unrelated to
+    the predicates: the mirror's symlink guard was not fail-closed,
+    `ensure_real_dir_chain` verified only below its own base and never the
+    base itself, and LEG 2 (one of three) had no isolation gate at all —
+    closed by a shared `is_real_dir_not_symlink` predicate, fail-closed
+    with no replacement attempt, and by gating every post-copy mirror
+    write.
   - **`a13r` — `fkm.10` was recorded but never effected** (commit `ea8031d`,
     37 files). `.claude/model-roles` declared `orchestrator=opus-class` while
     `.claude/agents/orchestrator.md` still pinned `model: claude-fable-5`, and
     the frontmatter pin is what a spawn actually honours. Nothing reconciled
-    them: `session-start.sh` CHECKS and warns but writes nothing. The pin is
+    them: `session-start.sh` runs `model-select.sh apply --quiet --check`
+    (`c5ba7cc:session-start.sh:618-625`), which warns and still records the
+    resolved-mapping artifact but writes no frontmatter pins — the one write
+    that would have closed the gap. The pin is
     corrected, and `model-select.sh check-parity` plus a `model_parity`
     `workflow-doctor` registry check make the next disagreement visible instead
     of silent. **The larger half of this commit is the guard that proves it.**
@@ -2443,9 +2467,15 @@ weight actually sits.
     correctly-bound unit child refuses with `no_design_attempted`, because
     `compute_design_satisfied()` resolves every input on the passed task id and
     never consults `latest_design_unit_binding`. A direct fix was built across
-    six review rounds and then REVERTED WHOLESALE: round 5 ruled the resulting
-    fail-open NEWLY REACHABLE rather than inherited (shipped v5.0.0 exits 2
-    before any write, so it cannot occur there), and round 6 found the lock
+    six review rounds and then REVERTED WHOLESALE: round 5 ruled the
+    resulting fail-open NEWLY REACHABLE rather than inherited (shipped
+    v5.0.0 exits 2 at `qa-gate.sh:6990` — before the durable approval write
+    at `:7784`, by which point `reconcile_tracker`, called at `:5642`, has
+    already run and written its reconciliation bookkeeping, unconditionally
+    truncating `reconcile-subtracted.txt` at `:1273` — though it appends
+    `changed-files.txt` (`:1615-1625`) only when unreconciled paths survive,
+    not on every call — so the fail-open cannot occur there), and round 6
+    found the lock
     meant to close it INERT on macOS — no `flock`, no `else` branch, proceeds
     unlocked by design — with an incomplete lock population even where `flock`
     exists. Round 7 ruled the revert exact. The safe version is filed as
