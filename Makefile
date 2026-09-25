@@ -2,7 +2,7 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help session test test-fast test-component test-all test-linux test-linux-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test clean
+.PHONY: help session test test-fast test-component test-all test-linux test-linux-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test verify-release clean
 
 help:
 	@echo "Targets:"
@@ -28,6 +28,7 @@ help:
 	@echo "  check             — run AgentLint against this repo"
 	@echo "  doctor            — functional health check of an install (TARGET=<dir>, DOCTOR_ARGS=\"...\"); safe mid-session (only 'beads' touches the target)"
 	@echo "  install-test      — install into a tempdir, then run the doctor against it (expected GREEN; needs the npm registry)"
+	@echo "  verify-release    — the frozen manifest table reproduces byte-for-byte from its own tag (RELEASE_TAG=vX.Y.Z to override; run pre-push, against a deliberately-local tag)"
 	@echo "  clean             — remove transient .qa-tracking state"
 
 # Launch a working session at the effort level the A/B interference test
@@ -479,6 +480,96 @@ install-test:
 doctor:
 	@t="$${TARGET:-$$(pwd)}" ; \
 	bash .claude/scripts/workflow-doctor.sh --target "$$t" $(DOCTOR_ARGS)
+
+# verify-release — the release-lifecycle gate (claude-workflow-plugin-h2zz
+# waiver ruling, round 4). The claim used to live inside workflow-manifest.
+# test.sh's Section 6, an L1 spec that runs on every `make test`; it cannot
+# hold on a pre-release ref (the tag may not exist yet, by definition), and
+# six independent-review findings across four rounds of trying to exempt L1
+# from that fact narrowly enough is why it moved here instead of being
+# guarded a seventh time — see run-tests.sh's PRE-RELEASE-REF EXEMPTION:
+# REMOVED tombstone for the full account.
+#
+# RUN THIS BEFORE PUSHING A RELEASE TAG. `git tag vX.Y.Z` creates the tag
+# LOCALLY; this target checks the frozen manifests/vX.Y.Z.sha256 against
+# that local tag's own tree before anything is pushed, catching a stale
+# table (forgot to regenerate) or a stale generator assumption before either
+# ships. RELEASE_TAG defaults to whatever .claude-plugin/plugin.json
+# currently names (the same derivation the removed Section 6 used); pass it
+# explicitly to check a different tag.
+#
+# THE SAME CHECK RUNS AGAIN IN CI, POST-PUSH: .github/workflows/
+# release-verify.yml, triggered by the tag push itself, where "not reachable
+# yet" cannot occur — the two contexts .claude/scripts/verify-release-
+# manifest.sh's own header documents.
+#
+# RELEASE_TAG REACHES THE SCRIPT AS ENVIRONMENT DATA, QUOTED (claude-
+# workflow-plugin-h2zz round 6, R6-F2, MEDIUM): a caller controls this value
+# (`make verify-release RELEASE_TAG=...`), and `git check-ref-format` has no
+# objection to a tag containing shell metacharacters -- `v1;id` and `v$(id)`
+# are both LEGAL refs (`git check-ref-format` exits 0 for each, verified
+# directly), so this was reachable via an entirely ordinary-looking tag, not
+# just a deliberately hostile override. Splicing $(RELEASE_TAG) straight
+# into recipe source, unquoted, handed the shell an extra command for free:
+# `make -n verify-release RELEASE_TAG='v1;printf PWNED'` used to print
+# `bash .claude/scripts/verify-release-manifest.sh v1;printf PWNED` — two
+# commands on one line. That is the SAME injection class R5-F5 already fixed
+# in .github/workflows/release-verify.yml's step (env: + a quoted `"$
+# RELEASE_TAG"` reference); it was left open here, the local half of the
+# same check. `$${RELEASE_TAG:+"$$RELEASE_TAG"}` below is POSIX parameter
+# expansion, evaluated by the RECIPE'S OWN SHELL, never by make: it forwards
+# the value as exactly one quoted word when RELEASE_TAG is set and
+# non-empty, and contributes NOTHING AT ALL — not even an empty argument —
+# when it is unset or empty, so the script's own no-argument default
+# (derive the tag from .claude-plugin/plugin.json) is unchanged. Beware two
+# near-miss fixes: wrapping in single quotes AT THE MAKE LEVEL
+# ('$(RELEASE_TAG)') still splices raw text before the shell ever sees a
+# quote character, so a value containing a single quote breaks out exactly
+# as the unquoted form does; wrapping in double quotes at the make level
+# ("$(RELEASE_TAG)") has the identical flaw for a value containing a double
+# quote (git-legal: neither `'` nor `"` is on check-ref-format's forbidden
+# list). Only a shell-side reference, expanded after make has finished
+# substituting, is safe against a value make itself cannot see coming.
+#
+# THAT SHELL-SIDE REFERENCE IS NOT THE ONLY THING THAT TOUCHES THIS VALUE,
+# THOUGH (claude-workflow-plugin-h2zz round 8, R8-F2, LOW): an earlier
+# revision of this comment claimed make "never touches the value" and that
+# the recipe forwards RELEASE_TAG "as exactly one untouched word" — true of
+# the RECIPE TEXT (nothing above splices $(RELEASE_TAG) into it), but false
+# of MAKE ITSELF. `make verify-release RELEASE_TAG=...` sets RELEASE_TAG as
+# an ordinary, RECURSIVELY-EXPANDED make variable; getting it into the
+# recipe's environment (so the shell-side reference above has something to
+# read) requires make to compute a concrete string, which means expanding
+# anything inside it that LOOKS like make's own `$(...)`/`${...}` syntax —
+# and `v$(id)` is exactly such a value: legal per `git check-ref-format`
+# (verified above), and ALSO a make reference to an undefined variable named
+# `id`, which make silently expands to empty. Reproduced directly, against
+# this Makefile as it read before this round:
+#   $ make verify-release 'RELEASE_TAG=v$(id)'
+#   verify-release-manifest.sh: manifests/v.sha256 has not been frozen yet
+# — "$(id)" never reached the shell, or the script, at all; make consumed it
+# while building the recipe's environment. FIXED by normalising the raw
+# command-line value into a SIMPLY-expanded variable, via the `value`
+# function: `$(value RELEASE_TAG)` returns a variable's text WITHOUT
+# expanding anything inside it, so the `override` line below captures
+# whatever RELEASE_TAG was set to (command line, inherited environment, or
+# absent) as an inert string exactly once — and every later use of it,
+# including make's own export into the recipe's environment, treats that
+# string as final rather than re-scanning it for `$(...)` syntax. Verified
+# directly, same reproduction, after the fix:
+#   $ make verify-release 'RELEASE_TAG=v$(id)'
+#   verify-release-manifest.sh: manifests/v$(id).sha256 has not been frozen yet
+# — the value now reaches the script whole (it still fails, correctly: no
+# such tag or table exists — this is a round-trip proof, not a claim that
+# this particular value is a usable release tag). The no-argument default
+# path (derive from .claude-plugin/plugin.json) is unaffected either way:
+# `$(value RELEASE_TAG)` on an unset variable is simply empty, exactly what
+# an unset variable already was. verify-release-manifest.test.sh Section 5.5
+# pins this round-trip.
+override RELEASE_TAG := $(value RELEASE_TAG)
+export RELEASE_TAG
+verify-release:
+	@bash .claude/scripts/verify-release-manifest.sh $${RELEASE_TAG:+"$$RELEASE_TAG"}
 
 clean:
 	rm -rf .claude/.qa-tracking

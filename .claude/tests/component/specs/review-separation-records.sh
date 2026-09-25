@@ -165,8 +165,27 @@ awk '
 ' "$(plugin_root)/.claude/scripts/qa-gate.sh" > "$RRV_MUT"
 chmod +x "$RRV_MUT"
 if assert_mutant_applied "R7 META" "$(plugin_root)/.claude/scripts/qa-gate.sh" "$RRV_MUT"; then
+    # claude-workflow-plugin-h2zz: NARROWED from a whole-file substring count.
+    # qa-gate.sh carries a THIRD, unrelated prose mention of "RRV-GUARD" (its
+    # own "THE DECOY-ARTIFACT CHECK, same as review-record RRV-GUARD" cross-
+    # reference, well outside this BEGIN/END region) alongside the two
+    # sentinels the awk strip above actually removes -- a bare
+    # `grep -c 'RRV-GUARD'` over the whole mutant counts that survivor too and
+    # reads 1, never 0, no matter how correctly the strip worked. The strip
+    # and the mutation both work; only the whole-file count was wrong. Narrow
+    # to the sentinel markers specifically -- "RRV-GUARD BEGIN"/"RRV-GUARD
+    # END", which is exactly the text the awk pattern above matches and
+    # `next`s past, so both disappear from the mutant while the unrelated
+    # "RRV-GUARD:" prose (no BEGIN/END after it) is untouched either way.
+    # Non-vacuity first: the SHIPPED, unstripped file must carry exactly the
+    # two sentinels this narrower pattern is meant to find -- never 0, or the
+    # "gone from the mutant" claim below would be vacuously true for the
+    # wrong reason (a pattern that never matches anything looks identical to
+    # one that correctly finds zero after a real strip).
+    assert_eq "R7 META non-vacuity: the SHIPPED qa-gate.sh carries exactly the two RRV-GUARD sentinels (BEGIN+END), separate from the decoy prose mention" \
+        "2" "$(grep -cE 'RRV-GUARD (BEGIN|END)' "$(plugin_root)/.claude/scripts/qa-gate.sh" 2>/dev/null | tr -d '[:space:]')"
     assert_eq "R7 META: RRV-GUARD sentinel is gone from the mutant" "0" \
-        "$(grep -c 'RRV-GUARD' "$RRV_MUT" 2>/dev/null | tr -d '[:space:]')"
+        "$(grep -cE 'RRV-GUARD (BEGIN|END)' "$RRV_MUT" 2>/dev/null | tr -d '[:space:]')"
     assert_eq "R7 META: the mutant still parses as bash" "1" \
         "$(bash -n "$RRV_MUT" 2>/dev/null && echo 1 || echo 0)"
 

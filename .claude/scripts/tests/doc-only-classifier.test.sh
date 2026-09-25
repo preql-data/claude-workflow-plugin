@@ -622,23 +622,40 @@ printf '%s\n' "$GROOT_PHYS/.claude/agents/qa.md" > "$WORK/gov-abs-physical.txt"
 assert_eq "6e2 trailing slash on PROJECT_DIR still resolves" "reviewable" \
     "$(verdict_of "$(classify_all "$GOV_LIB" "$GROOT/" "$WORK/gov-abs-logical.txt" 2>/dev/null)" \
        "$GROOT/.claude/agents/qa.md")"
-# The symlink pair only exists where the two spellings actually differ (macOS
-# /var -> /private/var). Asserted rather than assumed: on a platform where they
-# are equal these two legs would be re-runs of 6e above, and a leg that cannot
-# fail is worse than an absent one.
-if [ "$GROOT_PHYS" != "$GROOT" ]; then
-    assert_eq "6e2 precondition: the root has two distinct spellings on this platform" \
-        "differ" "$([ "$GROOT_PHYS" != "$GROOT" ] && echo differ || echo same)"
-    assert_eq "6e2 PROJECT_DIR logical + path physical resolves" "reviewable" \
-        "$(verdict_of "$(classify_all "$GOV_LIB" "$GROOT" "$WORK/gov-abs-physical.txt" 2>/dev/null)" \
-           "$GROOT_PHYS/.claude/agents/qa.md")"
-    assert_eq "6e2 PROJECT_DIR physical + path logical resolves" "reviewable" \
-        "$(verdict_of "$(classify_all "$GOV_LIB" "$GROOT_PHYS" "$WORK/gov-abs-logical.txt" 2>/dev/null)" \
-           "$GROOT/.claude/agents/qa.md")"
-else
-    printf '  note: 6e2 symlink-spelling legs SKIPPED - this platform spells the\n'
-    printf '        temp root identically physically and logically. Moves neither counter.\n'
-fi
+# claude-workflow-plugin-h2zz (= claude-workflow-plugin-hzv8): the second
+# spelling used to be BORROWED from the host's own incidental layout (macOS's
+# /var -> /private/var puts $WORK itself behind a symlink, so $GROOT_PHYS came
+# out different from $GROOT for free; Linux's `mktemp -d` returns an
+# already-physical /tmp path, so they coincided and the two legs below were
+# honestly SKIPPED, printing a note explaining why). That made the leg absent
+# on exactly the platform CI runs — under STRICT_SECTIONS=1 an honest skip is
+# still red, so this was never actually a "does not apply here" case, it was a
+# missing leg wearing a skip marker. Per the principle two paragraphs up ("a
+# leg that cannot fail is worse than an absent one"), the fix is not to weaken
+# or route around the assertions below — it is to make the second spelling
+# exist BY CONSTRUCTION instead of by host accident: an explicit alias symlink
+# placed beside $GROOT, pointing straight at it. $GROOT and $GROOT_ALIAS are
+# two textually different strings on every platform (different literal
+# basenames, chosen right here), and — because `pwd -P` fully resolves every
+# symlink component in its path, including the alias hop AND whatever $WORK
+# itself may or may not be sitting behind — both reduce to the SAME physical
+# directory through `cd + pwd -P`. Proven below rather than assumed: the
+# non-vacuity leg confirms the alias's physical resolution is byte-identical
+# to $GROOT_PHYS before either is used to assert anything about the veto.
+GROOT_ALIAS="$WORK/gov-project-alias"
+ln -sfn "$GROOT" "$GROOT_ALIAS"
+GROOT_ALIAS_PHYS=$(cd "$GROOT_ALIAS" 2>/dev/null && pwd -P)
+assert_eq "6e2 non-vacuity: the constructed alias is a real symlink resolving to \$GROOT's own physical directory" \
+    "$GROOT_PHYS" "$GROOT_ALIAS_PHYS"
+assert_eq "6e2 precondition: the root has two distinct spellings BY CONSTRUCTION, on every platform" \
+    "differ" "$([ "$GROOT_ALIAS" != "$GROOT" ] && echo differ || echo same)"
+printf '%s\n' "$GROOT_ALIAS/.claude/agents/qa.md" > "$WORK/gov-abs-alias.txt"
+assert_eq "6e2 PROJECT_DIR canonical + path via the ALIAS resolves" "reviewable" \
+    "$(verdict_of "$(classify_all "$GOV_LIB" "$GROOT" "$WORK/gov-abs-alias.txt" 2>/dev/null)" \
+       "$GROOT_ALIAS/.claude/agents/qa.md")"
+assert_eq "6e2 PROJECT_DIR via the ALIAS + path canonical resolves" "reviewable" \
+    "$(verdict_of "$(classify_all "$GOV_LIB" "$GROOT_ALIAS" "$WORK/gov-abs-logical.txt" 2>/dev/null)" \
+       "$GROOT/.claude/agents/qa.md")"
 # CONTAINMENT. The third reduction attempt resolves an ARBITRARY path's
 # directory, so it is exactly where an out-of-tree path could leak in. A second
 # project with the IDENTICAL layout, a real file on disk, must stay DOC-ONLY:

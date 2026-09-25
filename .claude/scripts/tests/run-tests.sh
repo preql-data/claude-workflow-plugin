@@ -1260,6 +1260,7 @@ EXPECTED_SPEC_FILES=(
     validate-completion-criteria-tests.test.sh
     validate-completion-green-fields.test.sh
     vendored-skills.test.sh
+    verify-release-manifest.test.sh
     workflow-doctor.test.sh
     workflow-manifest.test.sh
     worktree-isolation.test.sh
@@ -1382,6 +1383,38 @@ esac
 # literals), because a marker a HUMAN cannot recognise as a skip while
 # reading a log is still half the bug even when the runner counts it.
 SECTION_SKIP_RE='^[[:space:]]*(SKIPPED|SKIP)[[:space:]:]|^[[:space:]]*[Nn][Oo][Tt][Ee]:'
+
+# --- PRE-RELEASE-REF EXEMPTION: REMOVED (claude-workflow-plugin-h2zz waiver
+# ruling, round 4) -------------------------------------------------------
+# A narrow, token-gated exemption from STRICT_SECTIONS used to live here,
+# for exactly one spec's exactly one section, on the theory that a check
+# with no object to compare yet (a release tag not pushed) should be able to
+# say so without reddening an otherwise-clean strict run. It failed FIVE
+# independent-review rounds in a row, each fix correct on its own terms and
+# each one adding a new way to be wrong: round 1 found the emission
+# predicate proved local history completeness, not remote tag existence, AND
+# separately found the exempt-token regex was an unanchored substring a
+# passing assertion's own prose could satisfy; round 2 found the fix for the
+# first of those put a live network call inside a tier documented offline;
+# round 3 found the timeout guarding that network call was disableable via
+# its own public argument, AND separately found the control added to prove
+# the disableable-timeout fix was itself vacuous in CI; round 4 found the
+# fix for THAT timeout argument rejected only the byte-exact string "0",
+# letting "00"/"000" reproduce the original cross-platform split it was
+# supposed to close. Six findings, one mechanism, four rounds — this
+# project's standing waiver ruling exists for exactly that shape (see the
+# STORE-CANARY ATTRIBUTION: REMOVED tombstone above for the shape's first
+# instance, claude-workflow-plugin-gytz): remove the mechanism rather than
+# guard it again. The underlying claim (does the current release's frozen
+# table reproduce from its own tag) is not gone — it moved to
+# .claude/scripts/verify-release-manifest.sh, run manually against a
+# deliberately-local tag before push (`make verify-release`) and by
+# .github/workflows/release-verify.yml once a real tag is actually pushed,
+# where "the tag is not reachable yet" cannot occur by construction. L1 no
+# longer asserts anything a pre-release ref cannot satisfy, so there is
+# nothing here to exempt and nothing to re-guard. Nothing here is dormant;
+# there is no flag to re-enable it.
+# --- PRE-RELEASE-REF EXEMPTION: REMOVED (claude-workflow-plugin-h2zz) ----
 
 STRICT_SECTIONS_ON=0
 case "${STRICT_SECTIONS:-0}" in
@@ -2650,8 +2683,8 @@ fi
 if [ "$PARTIAL" -gt 0 ] && [ "$STRICT_SECTIONS_ON" -eq 1 ]; then
     printf 'SECTION SKIPS ARE NOT COVERAGE: %d spec(s) passed while skipping a section (listed above),\n' "$PARTIAL" >&2
     printf '  and STRICT_SECTIONS=1 says this environment is supposed to be able to run all of them.\n' >&2
-    printf '  Either provision what the marker names (that is what the l1-unit job does for bd, node\n' >&2
-    printf '  and BOTH MCP servers node_modules), or — if the section genuinely cannot run here —\n' >&2
+    printf '  Either provision what the marker names (that is what the l1-unit job does for bd, dolt,\n' >&2
+    printf '  node and BOTH MCP servers node_modules), or — if the section genuinely cannot run here —\n' >&2
     printf '  say so where the claim is made and take the section arm out of the strict environment.\n' >&2
     printf '  Do not read this run as full coverage: it is not.\n' >&2
     finish 1

@@ -454,12 +454,21 @@ alongside, and does not change, this checkout's own `11/12`, exit `1`.
   manifests/` shows it `??` — untracked, generated after the version bump
   and the surface changes this piece's own edits contributed, matching the
   sequencing the plan specified at `docs/plans/v5-design-phase-plan.md:763-766`).
-  **What this does NOT assert:** that the table is byte-reproducible from a
-  tagged v5.0.0 checkout the way `UW1` established for earlier releases, or
-  that any `--upgrade` run has actually classified against it — LIVE-1
-  (`docs/RELEASE_AUDIT.md` `DP15`/`DP18`) upgraded a v4.1.0 target using
-  that target's OWN install-manifest as the old table, never touching this
-  file. Both remain open, separately from existence.
+  **Byte-reproducibility from a tagged v5.0.0 checkout — the `UW1`-style check
+  for THIS release, CLOSED (`claude-workflow-plugin-h2zz` round 11):** this
+  bullet used to say neither half below was asserted; the first half now is.
+  Run `make verify-release` (pre-push, against the LOCAL `v5.0.0` tag this
+  whole section is about — not yet pushed to origin) and confirm the last line
+  reads `OK -- manifests/v5.0.0.sha256 reproduces byte-for-byte from v5.0.0
+  (138 rows)` with exit `0`. **MET as of 2026-09-25** (checked live, HEAD
+  `569174e`; the identical script runs automatically post-push, on every real
+  `v*` tag push, via `.github/workflows/release-verify.yml` — see
+  `.claude/scripts/verify-release-manifest.sh`'s own header for why both
+  contexts share one script rather than two implementations of the claim).
+  **What remains open, unrelated to this fix:** that any `--upgrade` run has
+  actually classified against THIS table — LIVE-1 (`docs/RELEASE_AUDIT.md`
+  `DP15`/`DP18`) upgraded a v4.1.0 target using that target's OWN
+  install-manifest as the old table, never touching this file.
 - assert: **`v4.1.0` is unmoved, and its manifest still reproduces from the
   tag's own tree** — this is the one condition this section is explicitly
   required to carry forward from every prior release, now re-verified
@@ -691,11 +700,19 @@ every command here.
   (`workflow-manifest.sh:490-503`) and collects `.new` sidecars for files they
   never touched — the defect class `016` closed, reintroduced from the other
   side. Regenerate at the D7 refreeze, against the tag that release actually
-  ships. Automated as `.claude/scripts/tests/workflow-manifest.test.sh`
-  Section 6, which runs this comparison on every L1 run for whichever release
-  `.claude-plugin/plugin.json` currently names, and prints a `note:` skip rather
-  than a failure when that tag or table is not in the checkout
-  (`claude-workflow-plugin-ce5`).
+  ships. *[SUPERSEDED (`claude-workflow-plugin-h2zz` round 11) — this used to
+  be automated as `.claude/scripts/tests/workflow-manifest.test.sh` Section 6,
+  which ran this comparison on every L1 run and printed a `note:` skip rather
+  than a failure when that tag or table was not in the checkout
+  (`claude-workflow-plugin-ce5`). Section 6 was REMOVED under the h2zz round-4
+  waiver ruling: the claim cannot hold on a pre-release ref, by definition, and
+  no per-file L1 exemption narrow enough survived six findings across four
+  independent-review rounds (see `.claude/scripts/verify-release-manifest.sh`'s
+  own header for the full account). The claim lives there now instead — run
+  pre-push, against a deliberately-local tag, via `make verify-release`; and
+  enforced post-push, on every real `v*` tag push, by
+  `.github/workflows/release-verify.yml`. It no longer runs inside L1, and
+  prints no `note:` skip.]*
 - assert: there are exactly TWO `SKILL.md` files in the plugin's own surface —
   one registered skill and one vendored reference. Run
   `find .claude -name SKILL.md -not -path '*/node_modules/*' -not -path '*/tests/e2e/*' | wc -l`

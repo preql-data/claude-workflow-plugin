@@ -1043,6 +1043,23 @@ assert_eq "8.28 WIRING: the test-ci recipe was located in the shipped Makefile" 
 assert_contains "8.29 WIRING: test-ci runs its L1 leg with STRICT_SECTIONS=1 (it claims to mirror CI)" \
     'STRICT_SECTIONS=1 $(MAKE) --no-print-directory test' "$MK_TESTCI"
 
+# --- STRICT_SECTIONS carve-out for a pre-release ref: REMOVED
+# (claude-workflow-plugin-h2zz waiver ruling, round 4) ----------------------
+# Seven legs used to live here (8h.1-8h.7), proving a narrow, token-gated
+# exemption from STRICT_SECTIONS for one spec's one section fired correctly,
+# was correctly narrow (an exempt skip plus an ordinary one still failed the
+# tier), and correctly refused a byte-identical marker from an impostor
+# file. The MECHANISM they proved is gone — see run-tests.sh's
+# PRE-RELEASE-REF EXEMPTION: REMOVED tombstone for the six-finding,
+# four-round account of why — so these legs would now only be testing that
+# removed code stays removed, which grepping this repo for the deleted
+# tokens by name already proves more directly, with no fixture harness to
+# maintain. Section 8 above (8a-8g) still proves the ORDINARY refusal path
+# end to end, unchanged: every PARTIAL spec fails under STRICT_SECTIONS=1,
+# no exceptions, which is now the ONLY path there is. Nothing here is
+# dormant; there is no flag to re-enable it.
+# ---------------------------------------------------------------------------
+
 # ===========================================================================
 printf -- '\n--- 9. the marker convention holds ACROSS THE TIER, not just in the runner ---\n'
 # ===========================================================================

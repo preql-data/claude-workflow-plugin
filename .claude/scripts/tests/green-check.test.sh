@@ -692,12 +692,145 @@ assert_eq "13.0 PATH_WITH_TIMEOUT: 'timeout' resolves (the shim)" \
 # (QA round 5, R5-F5): this shim TERM/KILLs only the process it directly
 # forked, not the whole tree (faithful to a real `timeout` without
 # --kill-after/--foreground -- not a defect in the shipped code), so a
-# `sleep 20` grandchild can outlive the kill and be reparented to ppid 1.
+# `sleep N` grandchild can outlive the kill and be reparented to ppid 1.
 # 10.3 greps for 10.1's exact command string via `pgrep -f`; reusing that
 # SAME string here would let a leaked 13.A orphan from one concurrent run
 # of this spec falsely trip 10.3 in ANOTHER concurrent run. One word
 # ("finish" -> "complete") is the whole fix.
-set_test_cmd "sleep 20; echo should-not-complete"
+#
+# claude-workflow-plugin-h2zz: the ORIGINAL "sleep 20" made this orphan
+# outlive run-tests.sh's own SURVIVOR-SWEEP, which polls only briefly (four
+# 0.5s polls, ~2s total) after the WHOLE SPEC exits before force-killing and
+# FAILING the spec for background work its own process group left running --
+# "exited 0 with 1 background process(es) still running", over a spec whose
+# 120/120 assertions all pass. Locally the remaining sections (13.B onward,
+# then 14) took long enough for the orphan to self-expire first (measured:
+# ~79s total run); CI is faster (measured: ~37s total run) and did not have
+# that margin -- a wall-clock race this file's own author already flagged as
+# "known and accepted" at the time, before the sweep existed to make it
+# fail. `sleep 6` keeps this a genuine, unambiguous hang (2x the 3s cap
+# below -- nowhere near the irreducible boundary 13.C/13.G are about).
+#
+# claude-workflow-plugin-h2zz round 8, R8-F6 (LOW): an earlier revision of
+# this comment credited the SURVIVOR-SWEEP's own ~2s grace window (the four
+# 0.5s polls named two paragraphs up) as the margin that keeps 13.A from
+# flaking -- "shrinking the orphan's remaining lifetime...comfortably inside
+# the sweep's grace window". That was never the actual margin, and naming it
+# understated the real one: the explicit reap a few lines below this comment
+# fires immediately after 13.A's own assertions return, with no additional
+# wait -- long before the spec's top-level bash exits and the sweep gets a
+# chance to run at all (sections 13.A-META through 14 still have to execute
+# first, the same tens-of-seconds gap the paragraph above already measured).
+# The actual margin is (1) that explicit ownership-filtered cleanup, which is
+# the primary defence, and (2) the wall-clock remaining in this spec after
+# 13.A, which is the (much larger) backup if that cleanup were ever somehow
+# skipped -- not the sweep's ~2s grace, which this test does not rely on
+# reaching at all.
+#
+# Shrinking the sleep narrows the race; it does not, by itself, prove the
+# race is closed on every possible host. So, defence in depth, mirroring
+# 10.3's own pgrep verification a few dozen lines up in this same file: reap
+# the orphan directly instead of trusting wall-clock timing alone. The
+# survivor's OWN argv is `sleep` plus its single duration argument -- this
+# run's nonce-bearing "6.$GC13_NONCE" (see the round-7 fix a few paragraphs
+# below), never a bare "sleep 6" (verified directly against this exact shim:
+# `bash -c "cmd1; cmd2"` forks a child to run the non-tail statement and
+# execs `sleep` into it, so the compound command string this fixture sets
+# never appears in the SURVIVING process's own cmdline at all -- only in the
+# "bash -c" parent, which the shim's own kill already reached).
+#
+# claude-workflow-plugin-h2zz round 6, R6-F3 (MEDIUM, independent review):
+# ppid==1 plus exact argv establishes IDENTITY ("this process really is an
+# orphaned `sleep 6`") but not OWNERSHIP ("this orphan is MINE"). An earlier
+# revision of this comment claimed the ppid==1 filter "keeps this from ever
+# touching an unrelated 'sleep 6' a concurrent, unrelated process might be
+# running for its own reasons" -- that claim was FALSE, and it directly
+# contradicted the R1-F4 fix comment a few lines below, which already
+# conceded the same gap ("does not distinguish ONE orphan from another
+# innocent one"). Two green-check.test.sh instances reaching 13.A
+# concurrently produce two ppid-1 "sleep 6" orphans that are, by argv and
+# ppid alone, indistinguishable; either one's cleanup can kill the other's
+# target, and an unrelated host process that happens to be an orphaned
+# "sleep 6" for its own reasons is killable too.
+#
+# FIXED (round 6) by adding a second signal, OWNERSHIP, not just identity:
+# the orphan's process GROUP. Reparenting to ppid 1 changes a process's
+# PARENT; it does not touch its process GROUP, which nothing in this call
+# chain ever reassigns (the shim below backgrounds with a plain `&`, never
+# `set -m`/`setsid`) -- so the orphan keeps the SAME pgid it was born with,
+# all the way from THIS script's own subshell, through the shim's `"$@" &`,
+# through the fork for the compound command's non-tail statement, to the
+# exec'd `sleep` itself. Verified directly (not inferred): spawning this
+# exact shim chain and reading the surviving orphan's pgid from `ps` shows
+# it equal to this script's own `ps -o pgid= -p $$` -- reparenting moved the
+# PPID column only, never PGID. GC13_MY_PGID below is captured once, and the
+# round-6 helper required pgid == GC13_MY_PGID in addition to ppid==1 and
+# the exact argv match.
+#
+# claude-workflow-plugin-h2zz round 7, R6-F3 PARTIAL (independent review):
+# the round-6 fix, and this comment's own round-6 wording ("a same-argv
+# orphan belonging to a DIFFERENT process group -- another concurrent run,
+# or an unrelated host process -- is never a candidate"), both assumed
+# "another concurrent run" is always in a DIFFERENT process group. FALSE --
+# true only when the shell that launched each instance has job control.
+# run-tests.sh's normal case closes on exactly that: `set -m` puts every
+# spec in its own process group, pgid == the spec's own pid (run-tests.sh's
+# own PROCESS GROUPS comment). But TWO DIRECT invocations (`bash
+# green-check.test.sh`, supported per this file's own usage comment near the
+# top) launched with a plain `&` from ONE non-job-controlled shell inherit
+# that SAME shell's pgid -- this file's own 13.A-META a few dozen lines down
+# already concedes the mechanism ("None of these three use `set -m`, so all
+# three inherit THIS script's own pgid"). So pgid alone is only ever as
+# reliable as the invoking shell's job-control state, which this script can
+# neither observe nor control from inside itself, and is not by itself an
+# ownership proof.
+#
+# FIXED (round 7) by adding a per-run TOKEN, in the spawned process's own
+# argv, that survives reparenting the same way pgid does but does not
+# depend on job control at all: GC13_NONCE below is this script's own $$ --
+# guaranteed distinct from every OTHER instance's $$ for as long as both are
+# alive (a hard OS invariant: two live processes can never share a PID),
+# not a probabilistic token. It rides inside the sleep DURATION itself
+# ("6.$GC13_NONCE" instead of a bare "6") rather than as a second argument,
+# because a second argument to `sleep` is REJECTED outright unless it is
+# itself a valid numeric time interval, on both platforms this repo tests
+# (verified directly: `sleep 1 nonce123` errors immediately on BSD sleep
+# here, locally, and on GNU coreutils sleep in an ubuntu:24.04 container
+# matching this repo's CI base image -- and a second NUMERIC argument is
+# silently summed into the duration on both, rather than kept as a separate,
+# greppable token). A decimal fraction folded into the single duration
+# argument is the shape that stays both a valid duration and an exact
+# token on either implementation, and `ps -axo args=` was confirmed (same
+# two platforms) to reproduce it byte-for-byte, so the awk match below can
+# compare against it exactly. _gc13a_find_orphan_sleep6 now matches on that
+# nonce-bearing duration -- sufficient on its own, since nothing else on the
+# host has a reason to know this script's own PID -- and additionally still
+# requires pgid == GC13_MY_PGID: no longer load-bearing for ownership, but
+# free to keep, since the real 13.A target always inherits GC13_MY_PGID by
+# construction (no `set -m` on that path) and the extra check only narrows
+# the (already minute) chance of colliding with some unrelated process that
+# happens to carry this run's PID digits in its own arguments for unrelated
+# reasons.
+#
+# 13.A-META-2 below still isolates pgid alone (a bystander carrying THIS
+# run's own nonce but a foreign pgid, via the same `set -m` technique
+# qa-gate.sh's own WATCHDOG FALLBACK arm uses) -- a synthetic case now,
+# since nothing spawns our own nonce into a foreign group in practice, kept
+# only as regression coverage for the pgid arm of the AND. 13.A-META-3, new
+# this round, is the realistic case R7 actually found: a bystander sharing
+# THIS run's pgid (simulating a concurrent, non-job-controlled sibling) but
+# carrying a FOREIGN nonce -- and proves the filter excludes it. This
+# narrows, but does not eliminate, every residual risk: a PID-reuse race
+# between a snapshot and its kill remains possible in principle, and remains
+# the SAME class of risk run-tests.sh's own SURVIVOR-SWEEP accepts and
+# documents, not a stronger guarantee than the shipped runner itself claims
+# to offer.
+GC13_MY_PGID=$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')
+# GC13_NONCE: this script's own PID, folded into the sleep duration below as
+# the per-run ownership token (round 7, R6-F3 PARTIAL -- see the comment
+# block above). Plain "$$", not a subshell -- this IS the top-level script.
+GC13_NONCE="$$"
+set_test_cmd "sleep 6.$GC13_NONCE; echo should-not-complete"
 TID13A=$(new_task "GC-HEUR: cap fires over a hang (13.A)")
 OUT13A=$(PATH="$PATH_WITH_TIMEOUT" GREEN_CHECK_TIMEOUT_S=3 bash "$QG" green-check "$TID13A" --phase after 2>/dev/null)
 assert_eq "13.A dispatch=timeout (the shim was actually used)" \
@@ -705,6 +838,253 @@ assert_eq "13.A dispatch=timeout (the shim was actually used)" \
 assert_eq "13.A ...exit_code=124" "124" "$(printf '%s' "$OUT13A" | jq -r '.exit_code')"
 assert_eq "13.A ...timed_out=true (the deadline genuinely ended this run)" \
     "true" "$(printf '%s' "$OUT13A" | jq -r '.timed_out')"
+# 13.A cleanup: best-effort reap (defence in depth -- see comment above). Not
+# itself a claim about the shim -- 13.A already proved dispatch/exit_code/
+# timed_out above -- this exists only so run-tests.sh's own SURVIVOR-SWEEP
+# never has anything left to find once THIS spec exits.
+#
+# claude-workflow-plugin-h2zz, R1-F4 fix (independent review, dual-family
+# sol-codex): `pgrep -f "sleep 6"` is an UNANCHORED substring match --
+# reproduced directly: it also matches "sleep 60", "sleep 600", and any
+# other process whose full command line merely CONTAINS "sleep 6" anywhere.
+# ppid==1 narrows to orphans but does not distinguish ONE orphan from
+# another innocent one; PID reuse between the identifying scan and the kill
+# is also possible in principle, and the original two-tool pgrep-THEN-ps
+# combination widened that window further by reading the process twice, at
+# two different moments, through two different tools. (Round 6/7: the
+# "another innocent one" gap conceded right here is exactly what the
+# ownership checks above close -- pgid in round 6, extended with a per-run
+# nonce in round 7 once R6-F3 PARTIAL showed pgid alone does not survive two
+# DIRECT invocations sharing one non-job-controlled shell's pgid -- this
+# paragraph is kept as the identity half of the fix, not superseded by
+# either; the ownership half is the new paragraph above.)
+#
+# Fixed by requiring an EXACT field match, never a substring: one `ps -axo
+# pid=,ppid=,pgid=,args=` snapshot, then awk on the SPLIT fields -- pgid
+# ($3) must equal GC13_MY_PGID, comm ($4) must equal "sleep" exactly, its
+# one argument ($5) must equal THIS RUN'S OWN nonce-bearing duration
+# ("6.$GC13_NONCE") exactly, and NF==5 confirms nothing FURTHER follows
+# (ruling out "sleep 6.<nonce> extra" or similar). Verified directly (round
+# 1, before the nonce existed): with real "sleep 60", "sleep 600" and
+# "sleep 6" processes all running at once, exact field matching named only
+# the "sleep 6" one -- those three values are numerically distinct as well
+# as textually distinct, so this round-1 verification could not, by itself,
+# tell the two apart. Same ps+awk idiom run-tests.sh's own SURVIVOR-SWEEP
+# already uses, for the identical reason (proven portable: this tier runs in
+# CI on Linux and locally on macOS). Identification and the kill both read
+# from ONE ps snapshot per pass now, not two separate tools at two separate
+# moments -- narrower, not eliminated: the residual PID-reuse window between
+# a snapshot and its kill is the SAME class of risk run-tests.sh's own sweep
+# accepts and documents in its own comments, not a stronger guarantee than
+# the shipped runner itself claims to offer.
+#
+# claude-workflow-plugin-h2zz round 8, R8-F1 (MEDIUM, independent review):
+# the claim just deleted above -- "awk field comparison is exact-string
+# equality, not substring search" -- was FALSE, and it was the root cause of
+# a real ownership gap once $5 started holding a DECIMAL FRACTION (round 7's
+# nonce). Both $5 and n ("6.$GC13_NONCE") are, in awk's terms, NUMERIC
+# STRINGS, so plain `$5 == n` compares them NUMERICALLY, not textually --
+# and a trailing zero folded into a decimal fraction never changes its
+# numeric value. Reproduced directly, on both awks this repo targets:
+#   printf '6.123\n6.1230\n6.12300\n' | awk -v n='6.1230' \
+#       '{ print $1, ($1==n?"EQUAL":"differ") }'
+# prints EQUAL for all three lines -- on macOS's BWK awk (20200816, this
+# repo's local default) and on Ubuntu 24.04's default mawk (1.3.4, this
+# repo's CI base image) alike; not a platform quirk, the same POSIX
+# "numeric string" comparison rule on both. CONSEQUENCE: two concurrent
+# same-pgid invocations of this file whose PIDs are, say, 123 and 1230
+# produce nonce-bearing durations "6.123" and "6.1230" -- numeric aliases of
+# each other -- and the unfixed selector below would match BOTH for EITHER
+# run, so one invocation's cleanup could SIGKILL the other's still-running
+# 13.A target. FIXED by forcing STRING context onto the $5 comparison
+# specifically: `("x" $5) == ("x" n)` -- concatenating a non-numeric
+# character strips the "numeric string" attribute from both operands, so
+# `==` falls back to awk's ordinary textual comparison, restoring the exact
+# match the paragraph above always claimed. $2 (ppid) and $3 (pgid) need no
+# equivalent fix: `ps` never emits a leading zero or a decimal point for
+# either, so two distinct real ppid/pgid values can never be numeric
+# aliases of each other the way two decimal-fraction durations can; $4
+# ("sleep") is never a numeric string to begin with, so it was never
+# exposed to this rule either. 13.A-META-4 below is the paired negative
+# control: a same-pgid bystander whose duration is a numeric alias of this
+# run's own nonce, proving the fixed selector excludes it (and, measured
+# directly against the PRE-FIX `$5 == n` form, that the unfixed selector did
+# not -- see this task's completion report for the before/after transcript).
+_gc13a_find_orphan_sleep6() {
+    ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
+        | awk -v g="$GC13_MY_PGID" -v n="6.$GC13_NONCE" \
+            '$2 == 1 && $3 == g && $4 == "sleep" && ("x" $5) == ("x" n) && NF == 5 { print $1 }'
+}
+for _gc13a_pid in $(_gc13a_find_orphan_sleep6); do
+    kill -9 "$_gc13a_pid" 2>/dev/null
+done
+sleep 0.3
+GC13A_LEAKED=$(_gc13a_find_orphan_sleep6 | wc -l | tr -d '[:space:]')
+assert_eq "13.A cleanup: no orphan (ppid=1, our own pgid, our own nonce-tagged sleep duration) remains after the reap" "0" "${GC13A_LEAKED:-0}"
+
+# 13.A-META (claude-workflow-plugin-h2zz, R1-F4 fix, independent review,
+# dual-family sol-codex): PRECISION, made permanent rather than trusted from
+# the fix comment alone. Construct two INNOCENT, genuinely orphaned
+# bystanders shaped exactly like the reviewer's own reproduction ("sleep
+# 60", "sleep 600" — both reparented to ppid 1, matching every property the
+# OLD `pgrep -f "sleep 6"` filtered on except the one that actually
+# distinguishes them) plus a real, nonce-tagged "sleep 6.<our PID>" orphan
+# target, and prove _gc13a_find_orphan_sleep6 finds ONLY the target. `( cmd
+# >/dev/null 2>&1 & echo $! )` is the construction: the subshell backgrounds
+# cmd with its stdout explicitly detached (an unredirected background job
+# inherits the subshell's own stdout pipe and would otherwise hold this
+# command substitution open until THAT job exits — measured directly
+# reproducing this leg without the redirect first, which hung on the 60s
+# bystander), echoes the real PID, then exits immediately — orphaning the
+# child before this script's own `wait` ever sees it. None of these three
+# use `set -m`, so all three inherit THIS script's own pgid same as
+# GC13_MY_PGID -- GC13AM_6 is meant to be found (it is genuinely ours, and
+# carries GC13_NONCE the same way the real 13.A target does). 13.A-META-2
+# below is the pairing for the pgid arm of the ownership check; 13.A-META-3
+# is the pairing for the nonce arm (round 7, R6-F3 PARTIAL).
+GC13AM_60=$( ( sleep 60 >/dev/null 2>&1 & echo $! ) )
+GC13AM_600=$( ( sleep 600 >/dev/null 2>&1 & echo $! ) )
+GC13AM_6=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
+sleep 0.3
+assert_eq "13.A-META non-vacuity: all three bystanders/target are genuinely orphaned (ppid=1)" \
+    "1 1 1" "$(ps -o ppid= -p "$GC13AM_60" 2>/dev/null | tr -d '[:space:]') $(ps -o ppid= -p "$GC13AM_600" 2>/dev/null | tr -d '[:space:]') $(ps -o ppid= -p "$GC13AM_6" 2>/dev/null | tr -d '[:space:]')"
+GC13AM_FOUND=$(_gc13a_find_orphan_sleep6 | sort -n | tr '\n' ' ' | sed 's/ $//')
+assert_eq "13.A-META SPECIFIC: the filter names ONLY the real target, never the sleep-60/sleep-600 bystanders" \
+    "$GC13AM_6" "$GC13AM_FOUND"
+# Cleanup: kill all three directly by PID (not via the filter under test --
+# this leg's own tidiness must not depend on the very thing it is proving).
+kill -9 "$GC13AM_60" "$GC13AM_600" "$GC13AM_6" 2>/dev/null
+sleep 0.2
+GC13AM_STILL_ALIVE=0
+for _gc13am_pid in "$GC13AM_60" "$GC13AM_600" "$GC13AM_6"; do
+    kill -0 "$_gc13am_pid" 2>/dev/null && GC13AM_STILL_ALIVE=$((GC13AM_STILL_ALIVE + 1))
+done
+assert_eq "13.A-META cleanup: all three bystanders/target are gone (this leg leaves nothing behind either)" \
+    "0" "$GC13AM_STILL_ALIVE"
+
+# 13.A-META-2 (claude-workflow-plugin-h2zz round 6, R6-F3): the PGID arm of
+# the ownership check, isolated on its own -- a bystander shaped EXACTLY
+# like the real target (ppid==1, argv exactly THIS run's own nonce-tagged
+# "sleep 6.$GC13_NONCE") except for the one property that varies here: it
+# belongs to a DIFFERENT process group. `set -m` gives the backgrounded job
+# its own NEW pgid before it is orphaned -- the same technique qa-gate.sh's
+# own WATCHDOG FALLBACK arm (green_check_run's `set -m` bracket around its
+# child) uses for the identical reason, so this fixture is not a novel
+# mechanism, just this file's own use of one already shipped.
+#
+# claude-workflow-plugin-h2zz round 7, R6-F3 PARTIAL: giving this bystander
+# OUR OWN nonce is deliberate but no longer realistic as "another concurrent
+# instance's own orphan" -- a genuinely different instance would carry ITS
+# OWN $$, not ours. What this leg actually proves now is narrower, and still
+# worth keeping: the pgid check still independently excludes a foreign-pgid
+# process even when the nonce matches, i.e. the AND in the selector really
+# is an AND, not a check that the nonce alone already made redundant.
+# 13.A-META-3 below is the realistic case: a bystander sharing THIS run's
+# pgid but carrying a FOREIGN nonce.
+#
+# Residual risk, named rather than hidden (round 7): if this whole script
+# were interrupted between spawning GC13AM2_FOREIGN and its cleanup a few
+# lines down, that bystander -- orphaned, ~6s duration, in its OWN foreign
+# process group -- would be left running for up to that ~6s before
+# self-expiring; it is deliberately unreachable by
+# _gc13a_find_orphan_sleep6 (wrong pgid) and, sitting in its own group, not
+# necessarily seen by run-tests.sh's SURVIVOR-SWEEP either (which walks the
+# SPEC's own group). Not fixed here -- no META test in this file uses a trap
+# for cleanup -- documented as the same class of accepted residual risk the
+# rest of this section already carries.
+GC13AM2_FOREIGN=$( set -m; sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! )
+GC13AM2_TARGET=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
+sleep 0.3
+GC13AM2_FOREIGN_PPID=$(ps -o ppid= -p "$GC13AM2_FOREIGN" 2>/dev/null | tr -d '[:space:]')
+GC13AM2_FOREIGN_PGID=$(ps -o pgid= -p "$GC13AM2_FOREIGN" 2>/dev/null | tr -d '[:space:]')
+GC13AM2_TARGET_PPID=$(ps -o ppid= -p "$GC13AM2_TARGET" 2>/dev/null | tr -d '[:space:]')
+assert_eq "13.A-META-2 non-vacuity: both the foreign bystander and the real target are genuinely orphaned (ppid=1)" \
+    "1 1" "$GC13AM2_FOREIGN_PPID $GC13AM2_TARGET_PPID"
+assert_eq "13.A-META-2 ...and the bystander is genuinely in a DIFFERENT process group (not GC13_MY_PGID)" \
+    "yes" "$([ -n "$GC13AM2_FOREIGN_PGID" ] && [ "$GC13AM2_FOREIGN_PGID" != "$GC13_MY_PGID" ] && echo yes || echo no)"
+GC13AM2_FOUND=$(_gc13a_find_orphan_sleep6 | sort -n | tr '\n' ' ' | sed 's/ $//')
+assert_eq "13.A-META-2 SPECIFIC MISBEHAVIOUR CLOSED: the filter names ONLY the same-pgid target, never the foreign-pgid bystander (even one sharing our nonce)" \
+    "$GC13AM2_TARGET" "$GC13AM2_FOUND"
+# Cleanup: kill both directly by PID, same discipline as 13.A-META.
+kill -9 "$GC13AM2_FOREIGN" "$GC13AM2_TARGET" 2>/dev/null
+sleep 0.2
+GC13AM2_STILL_ALIVE=0
+for _gc13am2_pid in "$GC13AM2_FOREIGN" "$GC13AM2_TARGET"; do
+    kill -0 "$_gc13am2_pid" 2>/dev/null && GC13AM2_STILL_ALIVE=$((GC13AM2_STILL_ALIVE + 1))
+done
+assert_eq "13.A-META-2 cleanup: both bystander/target are gone" "0" "$GC13AM2_STILL_ALIVE"
+
+# 13.A-META-3 (claude-workflow-plugin-h2zz round 7, R6-F3 PARTIAL): the
+# NONCE arm of the ownership check, isolated on its own -- the gap
+# 13.A-META-2 cannot see, and the one R7's independent review actually
+# found. A bystander sharing THIS run's OWN process group (no `set -m`, so
+# it inherits GC13_MY_PGID exactly the way it would if this script's own
+# invoking shell lacked job control and a second, concurrent `bash
+# green-check.test.sh` instance shared our pgid for that reason -- see the
+# comment block above 13.A) but carrying a DIFFERENT nonce, simulating that
+# other instance's own $$ rather than ours. `$GC13_NONCE + 1` is guaranteed
+# to differ from `$GC13_NONCE` (arithmetic on a value can never equal that
+# same value plus one), so this needs no second real process to source an
+# actual foreign PID from, and cannot accidentally collide with our own.
+GC13AM3_TARGET=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
+GC13AM3_FOREIGN=$( ( sleep "6.$((GC13_NONCE + 1))" >/dev/null 2>&1 & echo $! ) )
+sleep 0.3
+GC13AM3_TARGET_PPID=$(ps -o ppid= -p "$GC13AM3_TARGET" 2>/dev/null | tr -d '[:space:]')
+GC13AM3_TARGET_PGID=$(ps -o pgid= -p "$GC13AM3_TARGET" 2>/dev/null | tr -d '[:space:]')
+GC13AM3_FOREIGN_PPID=$(ps -o ppid= -p "$GC13AM3_FOREIGN" 2>/dev/null | tr -d '[:space:]')
+GC13AM3_FOREIGN_PGID=$(ps -o pgid= -p "$GC13AM3_FOREIGN" 2>/dev/null | tr -d '[:space:]')
+assert_eq "13.A-META-3 non-vacuity: both the target and the foreign-nonce bystander are genuinely orphaned (ppid=1)" \
+    "1 1" "$GC13AM3_TARGET_PPID $GC13AM3_FOREIGN_PPID"
+assert_eq "13.A-META-3 ...and BOTH genuinely share our own pgid (the job-control-absent shape R7 found)" \
+    "yes" "$([ "$GC13AM3_TARGET_PGID" = "$GC13_MY_PGID" ] && [ "$GC13AM3_FOREIGN_PGID" = "$GC13_MY_PGID" ] && echo yes || echo no)"
+GC13AM3_FOUND=$(_gc13a_find_orphan_sleep6 | sort -n | tr '\n' ' ' | sed 's/ $//')
+assert_eq "13.A-META-3 SAME-PGID MISBEHAVIOUR CLOSED: the filter names ONLY the nonce-matching target, never a same-pgid bystander with a foreign nonce" \
+    "$GC13AM3_TARGET" "$GC13AM3_FOUND"
+# Cleanup: kill both directly by PID, same discipline as 13.A-META/-2.
+kill -9 "$GC13AM3_TARGET" "$GC13AM3_FOREIGN" 2>/dev/null
+sleep 0.2
+GC13AM3_STILL_ALIVE=0
+for _gc13am3_pid in "$GC13AM3_TARGET" "$GC13AM3_FOREIGN"; do
+    kill -0 "$_gc13am3_pid" 2>/dev/null && GC13AM3_STILL_ALIVE=$((GC13AM3_STILL_ALIVE + 1))
+done
+assert_eq "13.A-META-3 cleanup: both the target and the foreign-nonce bystander are gone" "0" "$GC13AM3_STILL_ALIVE"
+
+# 13.A-META-4 (claude-workflow-plugin-h2zz round 9, R8-F1): the NUMERIC-ALIAS
+# arm of the ownership check -- the gap META-3 cannot see, and the one round
+# 8's independent review actually found. META-3's bystander is built via
+# `$GC13_NONCE + 1`: ARITHMETIC addition can never produce a trailing-zero
+# alias of the original value, only a genuinely different number, so that
+# construction is numerically distinct from our own nonce as well as
+# textually distinct -- it cannot exercise a comparison rule that only
+# misbehaves when two values are numerically EQUAL but textually different.
+# GC13AM4_ALIAS below is built the way the bug actually bites instead: this
+# run's own nonce with a trailing "0" appended, which changes the duration's
+# TEXT but not its VALUE (0.123 and 0.1230 are the same number), i.e. the
+# exact "6.123"/"6.1230" shape reproduced directly above the fixed selector.
+GC13AM4_TARGET=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
+GC13AM4_ALIAS=$( ( sleep "6.${GC13_NONCE}0" >/dev/null 2>&1 & echo $! ) )
+sleep 0.3
+GC13AM4_TARGET_PPID=$(ps -o ppid= -p "$GC13AM4_TARGET" 2>/dev/null | tr -d '[:space:]')
+GC13AM4_TARGET_PGID=$(ps -o pgid= -p "$GC13AM4_TARGET" 2>/dev/null | tr -d '[:space:]')
+GC13AM4_ALIAS_PPID=$(ps -o ppid= -p "$GC13AM4_ALIAS" 2>/dev/null | tr -d '[:space:]')
+GC13AM4_ALIAS_PGID=$(ps -o pgid= -p "$GC13AM4_ALIAS" 2>/dev/null | tr -d '[:space:]')
+assert_eq "13.A-META-4 non-vacuity: both the target and the numeric-alias bystander are genuinely orphaned (ppid=1)" \
+    "1 1" "$GC13AM4_TARGET_PPID $GC13AM4_ALIAS_PPID"
+assert_eq "13.A-META-4 ...and BOTH genuinely share our own pgid (no set -m on either construction)" \
+    "yes" "$([ "$GC13AM4_TARGET_PGID" = "$GC13_MY_PGID" ] && [ "$GC13AM4_ALIAS_PGID" = "$GC13_MY_PGID" ] && echo yes || echo no)"
+assert_eq "13.A-META-4 ...and the alias is genuinely a DIFFERENT token, textually (R8-F1's own precondition -- else this leg would be vacuous)" \
+    "yes" "$([ "6.$GC13_NONCE" != "6.${GC13_NONCE}0" ] && echo yes || echo no)"
+GC13AM4_FOUND=$(_gc13a_find_orphan_sleep6 | sort -n | tr '\n' ' ' | sed 's/ $//')
+assert_eq "13.A-META-4 NUMERIC-ALIAS MISBEHAVIOUR CLOSED (R8-F1): the filter names ONLY the exact-token target, never a same-pgid bystander whose duration is only a numeric alias of ours" \
+    "$GC13AM4_TARGET" "$GC13AM4_FOUND"
+# Cleanup: kill both directly by PID, same discipline as 13.A-META/-2/-3.
+kill -9 "$GC13AM4_TARGET" "$GC13AM4_ALIAS" 2>/dev/null
+sleep 0.2
+GC13AM4_STILL_ALIVE=0
+for _gc13am4_pid in "$GC13AM4_TARGET" "$GC13AM4_ALIAS"; do
+    kill -0 "$_gc13am4_pid" 2>/dev/null && GC13AM4_STILL_ALIVE=$((GC13AM4_STILL_ALIVE + 1))
+done
+assert_eq "13.A-META-4 cleanup: both the target and the numeric-alias bystander are gone" "0" "$GC13AM4_STILL_ALIVE"
 
 # 13.B self_124, WAY under the cap -- the discrimination the feature
 # claims: an ordinary self-inflicted 124 nowhere near the deadline.

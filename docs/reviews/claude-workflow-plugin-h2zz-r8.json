@@ -1,0 +1,64 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-h2zz",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "5680e538cfd11d72bc48c3b81a3db6b667fa2dd1268f95843847edf7036abe93",
+  "risk_threshold": "medium",
+  "stop_condition": "Round 8 reviews the fixes for round 7's five items. The reviewer self-reported its model id as gpt-5.6-sol this round, matching the configured default in ~/.codex/config.toml (no override was passed). No suite was run and no files were written; evidence came from the packet, the live files, the prior artifacts, static inspection, and small read-only probes. HASH: the reviewer independently reproduced the canonical membership hash 5680e538cfd11d72bc48c3b81a3db6b667fa2dd1268f95843847edf7036abe93 including the r5/r6/r7 artifacts. STRUCTURAL LAG, EXPLICITLY ADJUDICATED: persisting an r8 artifact necessarily adds another member and moves the hash again; the reviewer confirmed this accepted one-step lag matches the 42lw precedent, that the existing artifacts describe their hashes HISTORICALLY, and that none of them pretends a future artifact is already included -- the lag is honestly handled rather than hidden. THREE OF FIVE FIXES CONFIRMED CLOSED: R7-F1 (META 4 now explicitly conditional, with the version-bump-to-freeze window named at :119-122 and the skip implemented at :1268-1271), R7-F2 (both legality claims now cite genuinely legal refs; `git check-ref-format` measured rc=0 for v1;id and v$(id) and rc=1 for the spaced value, which now survives ONLY as a demonstrated make -n transcript), and R7-F3 (the workflow header now matches the workflow across every claim the reviewer re-checked individually: ubuntu-latest for all jobs, checksum-pinned ShellCheck before make lint, jq not installed, GIT_CONFIG_GLOBAL in L1 and L2, bd and dolt pinned in L1 only, BD_SHIM_ONLY=1 in L2, Node 20 and both MCP npm-ci steps -- and the known strict-L1 failures still documented rather than represented as green). TWO REMAIN OPEN, recorded below. ORCHESTRATOR VERIFICATION of both new reproducible findings, run independently before accepting them: the awk numeric-alias probe printed `6.123 numeric:EQUAL textual:differ` and `6.12300 numeric:EQUAL textual:differ` against n=6.1230; and `make verify-release 'RELEASE_TAG=v$(id)'` printed `manifests/v.sha256 has not been frozen yet`, confirming make consumed the expression before the shell saw it.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R8-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/green-check.test.sh:870",
+      "evidence": "green-check.test.sh:867-870 compares with `$5 == n`. Both operands are numeric strings, so awk compares them NUMERICALLY. Reproduced directly: `printf '6.123\\n6.1230\\n6.12300\\n' | awk -v n='6.1230' '{print ($1==n), ((\"x\" $1)==(\"x\" n))}'` reports all three numerically EQUAL while prefixed textual comparison distinguishes them. 13.A-META-3 at :983-996 builds its bystander with GC13_NONCE+1, which can never produce a trailing-zero alias.",
+      "description": "CARRIED FROM R6-F3, STATUS PARTIAL. The round-7 fix introduced a per-run PID nonce to establish ownership, and the nonce itself is sound -- PID reuse cannot occur while the owning script is alive, the fractional duration survives `ps -axo args=`, and the retained PGID layer is harmless narrowing. But the COMPARISON defeats it: distinct PID tokens whose decimal spellings differ only by trailing zeroes alias. Two concurrent same-PGID invocations with PIDs 123 and 1230 produce `sleep 6.123` and `sleep 6.1230`; either cleanup selects both and can SIGKILL the other invocation's target -- precisely the case the nonce was introduced to close. The control cannot see it because of how the bystander token was chosen. FIX: force textual comparison, e.g. `(\"x\" $5) == (\"x\" n)`, verified on both BWK awk (macOS) and mawk (Ubuntu 24.04's default), and add a same-PGID control whose token is a numeric alias such as ${GC13_NONCE}0."
+    },
+    {
+      "id": "R5-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/workflow-manifest.test.sh:1042",
+      "evidence": "The previously-targeted paragraph WAS correctly deleted, and :25-57 retain the invariant, point at cmd_classify(), and Section 4 exercises all six shipped verdicts -- so no necessary guidance was lost. But three surviving sites still characterise cmd_classify()'s verdicts: :1042-1046, :1056-1058 and :1189-1192. Checked against workflow-manifest.sh:919-938.",
+      "description": "CARRIED, STATUS NOT_FIXED FOR THE FOURTH ROUND -- with the diagnosis now shifted. The specific paragraph is fixed; what fails is the file-wide property. This file has produced a false verdict characterisation in four consecutive rounds, each fix correct on its own terms and each leaving another site standing. RESOLUTION: stop fixing sites and apply the waiver ruling to the CLASS -- sweep the entire file for every sentence asserting what workflow-manifest.sh will classify something as, and either delete it in favour of cmd_classify() and Section 4, or narrow it to exactly what an adjacent assertion in this file tests. The three known sites are recorded separately as R8-F3, R8-F4 and R8-F5."
+    },
+    {
+      "id": "R8-F2",
+      "severity": "low",
+      "location": "Makefile:520",
+      "evidence": "`make verify-release 'RELEASE_TAG=v$(id)'` emitted `verify-release-manifest.sh: manifests/v.sha256 has not been frozen yet` -- make expanded `$(id)` to empty before the shell saw anything. Existing Section 5 legs use semicolon-bearing values and never test literal dollar-parenthesis preservation.",
+      "description": "The recipe comment claims RELEASE_TAG is forwarded as exactly one untouched word and that make itself never touches the value, citing legal `v$(id)`. GNU make recursively expands command-line variables when exporting them into the recipe environment, so make consumes the expression first. The SHELL-injection fix from R6-F2 is sound and unaffected -- nothing executes -- but the documented local override cannot actually verify that legal tag, and the comment asserts otherwise. FIX: normalise the raw command-line value into a simply-expanded exported variable without evaluating it and add a round-trip leg for `v$(id)`, or document plainly that make consumes `$(...)`/`${...}` in RELEASE_TAG."
+    },
+    {
+      "id": "R8-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/workflow-manifest.test.sh:1045",
+      "evidence": "cmd_classify() at workflow-manifest.sh:924-938 falls through to replace-custom when source bytes differ and no oldhash exists. Section 4d tests only the absent, stock-HOOKS, edited-HOOKS and current-target shapes -- never a pre-existing or edited CODEX_SETUP.md.",
+      "description": "Claims that because CODEX_SETUP.md is absent from the old table it can ONLY ever classify as copy-new or skip-current. False: an operator who already has docs/CODEX_SETUP.md, or who edits it after installation, produces differing source bytes with no oldhash, and cmd_classify selects replace-custom. The case is neither acknowledged nor tested. FIX: remove the universal, or add and describe the edited/pre-existing case."
+    },
+    {
+      "id": "R8-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/workflow-manifest.test.sh:1058",
+      "evidence": "Section 5 checks only that v4 marker rows are absent; it never classifies against a wrong-tree table. workflow-manifest.sh:919-938 shows the unchanged outcomes for the customized and missing-target cases.",
+      "description": "Claims that generating the old table from the wrong tree would make EVERY customization verdict wrong in the safest-looking direction. False, and with no negative control: a genuinely customized workflow or operator target still yields replace-custom/preserve-custom even when the erroneous old hash equals the current source hash, and a missing target still yields copy-new. FIX: delete the characterisation per the waiver ruling, or replace it with a narrowly tested scenario."
+    },
+    {
+      "id": "R8-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/workflow-manifest.test.sh:1189",
+      "evidence": "Lines 1180-1192 inspect only the rubric preserve-custom result and the backend replace-stock result.",
+      "description": "Claims that after removing the operator-verdict block the other five verdicts are unaffected, while the mutant path actually checks only replace-stock. Merge, copy-new, skip-current and replace-custom are never checked against the mutant, so a future mutation touching one of those branches leaves the test green while the comment still claims five-verdict coverage. FIX: assert all five unaffected rows, or narrow the prose to the one control actually checked."
+    },
+    {
+      "id": "R8-F6",
+      "severity": "low",
+      "location": ".claude/scripts/tests/green-check.test.sh:714",
+      "evidence": "Lines 702-704 state a roughly two-second sweep grace; lines 713-725 describe the surviving argv as bare `sleep 6`; line 818 actually installs `sleep 6.$GC13_NONCE`.",
+      "description": "Both statements went stale when the nonce landed. A `sleep 6.<pid>` killed around 3.2 seconds in has roughly 2.8-3.8 seconds remaining, not the claimed margin, and its argv carries the nonce-bearing fractional argument. A maintainer could remove the explicit reap trusting the stated sweep margin, or restore a bare-argv selector trusting the stale description, reintroducing either survivor failures or cross-run matching. FIX: state that the margin comes from later sections plus the explicit ownership-filtered cleanup rather than the sweep grace, and describe the actual nonce-bearing argv."
+    }
+  ],
+  "iterations": 8,
+  "stopped_by": "verdict"
+}

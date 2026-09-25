@@ -584,8 +584,23 @@ printf '\n=== Section 3: Mutant 1 -- union accumulation ===\n'
 new_fixture_root "mutant1"
 # shellcheck disable=SC2016
 M1_OLD_COUNT_BEFORE=$(grep -cF '.batches[$fit].files += $ufiles' "$EG_M")
+# claude-workflow-plugin-h2zz: `sed -i ''` is BSD-only. Under GNU sed the
+# empty string after -i is consumed as the SCRIPT itself and the real
+# substitution becomes a FILENAME ("sed: can't read s/...: No such file or
+# directory"), so on Linux the mutant was never actually mutated and
+# assertions 3.2/3.3/3.5 below compared unmutated shipped behaviour against
+# mutant expectations. Portable fix, matching this file's OWN established
+# convention elsewhere for building a mutant (design-conform.test.sh's
+# Section 4 metatest: `sed '...' "$QG" > "$QG_OLDCHECK"`) rather than
+# `-i.bak`: read from the CANONICAL source and redirect straight to the
+# mutant path, never edit in place. $EG_M already holds a byte-identical
+# copy of $EG (new_fixture_root's own `cp`, a few lines above), so reading
+# from $EG here reproduces the identical starting bytes before applying the
+# one-line substitution -- and this never self-truncates the way
+# `sed '...' "$EG_M" > "$EG_M"` would (output redirection opens/truncates
+# its target before sed ever reads it, which would leave $EG_M empty).
 # shellcheck disable=SC2016
-sed -i '' 's/\.batches\[\$fit\]\.files += \$ufiles/.batches[$fit].files = $ufiles/' "$EG_M"
+sed 's/\.batches\[\$fit\]\.files += \$ufiles/.batches[$fit].files = $ufiles/' "$EG" > "$EG_M"
 # shellcheck disable=SC2016
 M1_OLD_COUNT_AFTER=$(grep -cF '.batches[$fit].files += $ufiles' "$EG_M")
 # shellcheck disable=SC2016
