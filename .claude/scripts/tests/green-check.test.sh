@@ -118,6 +118,38 @@ FAILED_TESTS=()
 # instruction.
 GC13_BYSTANDER_PIDS=()
 
+# _gc13_unregister_bystander (round 2, R2-F4): every Section 13 leg that
+# directly kills its own bystanders ALSO verifies the kill (a `kill -0`
+# liveness probe) a few lines later -- but until this fix, a pid that
+# verification confirmed dead stayed in GC13_BYSTANDER_PIDS forever, so
+# cleanup()'s own trap-driven pass, if it ever fires later in the run,
+# would blindly `kill -0` a pid NUMBER the OS is free to have recycled to
+# an unrelated process by then. `kill -0` only ever answers "does a
+# signalable process with this number exist right now" -- it is a
+# liveness optimisation, never an identity guarantee, and no amount of
+# calling it proves the process it finds is the one this file originally
+# captured. The actual fix is functional, not a stronger probe: once a
+# leg has VERIFIED (not merely attempted) that a specific pid is gone,
+# that pid must stop being anyone's responsibility, including a future
+# stale re-probe. Rebuilds the array excluding every occurrence of $1;
+# the length-guard before each "${arr[@]}" expansion is the SAME bash 3.2
+# requirement cleanup() itself already documents a few lines down (a
+# NEVER-declared array is unbound under `set -u`, but so, on this bash
+# version, is a declared-but-still-empty one expanded via "${arr[@]}" --
+# measured directly, this task's own QA transcript).
+_gc13_unregister_bystander() {
+    local _target="$1" _keep=() _p
+    if [ "${#GC13_BYSTANDER_PIDS[@]}" -gt 0 ]; then
+        for _p in "${GC13_BYSTANDER_PIDS[@]}"; do
+            [ "$_p" = "$_target" ] || _keep+=("$_p")
+        done
+    fi
+    GC13_BYSTANDER_PIDS=()
+    if [ "${#_keep[@]}" -gt 0 ]; then
+        GC13_BYSTANDER_PIDS=("${_keep[@]}")
+    fi
+}
+
 KEEP_FIXTURE=0
 [ "${1:-}" = "--keep" ] && KEEP_FIXTURE=1
 
@@ -175,12 +207,24 @@ cleanup() {
         local _gc13_bp
         for _gc13_bp in "${GC13_BYSTANDER_PIDS[@]}"; do
             # QA round 1, R1-F3 (LOW): liveness-gated -- a `kill -0` probe
-            # (sends no signal, only reports whether the pid still exists)
-            # immediately before the real `kill -9`, so this loop only ever
-            # signals a pid it has just confirmed is still live, never a
-            # stale one that might, in principle, have been recycled by the
-            # OS in the (measured) ~2500-pid window between capture and
-            # this trap firing.
+            # (sends no signal, only reports whether A signalable process
+            # with this NUMBER currently exists) immediately before the
+            # real `kill -9`. Round 2, R2-F4: stated precisely, because the
+            # original wording here read as stronger than it is -- `kill -0`
+            # is a liveness OPTIMISATION, not an identity guarantee. It
+            # narrows the window in which a recycled pid could be
+            # mis-signalled (measured directly: ~2500 pids typically churn
+            # between capture and this trap firing); it does not close that
+            # window to zero, because the OS is free to reuse a pid number
+            # the instant its previous holder exits, and a probe run any
+            # time after that reuse cannot distinguish the new occupant from
+            # the one this array actually captured. The functional half of
+            # the fix is `_gc13_unregister_bystander`, declared above: every
+            # direct-kill site in Section 13 now clears an entry the moment
+            # ITS OWN verification confirms the reap, so this trap is only
+            # ever asked to probe a pid that is genuinely still its
+            # responsibility, not a stale number left behind after someone
+            # else already finished the job.
             [ -n "$_gc13_bp" ] && kill -0 "$_gc13_bp" 2>/dev/null && kill -9 "$_gc13_bp" 2>/dev/null
         done
     fi
@@ -261,13 +305,23 @@ mkdir -p "$FIXTURE/bin-timeout-shim"
 # _gc13a_find_orphan_sleep6, which only ever looks for "6.$GC13_NONCE" --
 # survives every one of Section 13's PATH_WITH_TIMEOUT invocations where
 # cmd finishes ahead of the cap (13.B/13.C/13.D/13.E/13.F). Worst case is
-# 13.B (dur=20s, cmd="exit 124" finishing near-instantly): the orphan then
-# needs a full ~20s to self-expire, long enough to still be alive when
-# run-tests.sh's own pgid-scoped SURVIVOR-SWEEP runs on a host fast enough
-# to finish the rest of this spec in under that ~20s window -- exactly the
-# "background process(es) still running" shape reported on CI (Linux,
-# ~40s total) and never on a slower local macOS run, without needing any
-# interrupted-mid-script scenario at all.
+# 13.B (cmd="exit 124" finishing near-instantly, cap given by
+# GC13B_TIMEOUT_S below -- a value chosen for collision-avoidance in this
+# file's OWN teardown-verification selector, not for realism, and one this
+# comment deliberately does not restate as a literal: it has already
+# changed once, and pinning a specific number here again would only
+# recreate the exact staleness this paragraph itself was found to have
+# (round 2, independent review) after the round-1 fix changed the value
+# and this prose was never updated to match): the orphan then needs the
+# ENTIRE configured cap to self-expire on its own, which is -- by that
+# same constant's own design -- vastly longer than this spec's total
+# runtime (tens of seconds either locally or on CI). So a leak here does
+# not merely RISK still being alive when run-tests.sh's own pgid-scoped
+# SURVIVOR-SWEEP runs at spec-exit; if the fix above regressed, it would
+# be GUARANTEED to still be alive, unconditionally, regardless of host
+# speed -- exactly the "background process(es) still running" shape
+# reported on CI (Linux, ~40s total) and never on a slower local macOS
+# run, without needing any interrupted-mid-script scenario at all.
 #
 # FIXED the same way qa-gate.sh's own shipped WATCHDOG FALLBACK arm already
 # solves the identical problem for ITS OWN backgrounded child (green_check_run,
@@ -1056,7 +1110,17 @@ kill -9 "$GC13AM_60" "$GC13AM_600" "$GC13AM_6" 2>/dev/null
 sleep 0.2
 GC13AM_STILL_ALIVE=0
 for _gc13am_pid in "$GC13AM_60" "$GC13AM_600" "$GC13AM_6"; do
-    kill -0 "$_gc13am_pid" 2>/dev/null && GC13AM_STILL_ALIVE=$((GC13AM_STILL_ALIVE + 1))
+    if kill -0 "$_gc13am_pid" 2>/dev/null; then
+        GC13AM_STILL_ALIVE=$((GC13AM_STILL_ALIVE + 1))
+    else
+        # R2-F4: this pid is VERIFIED gone (this probe just confirmed it,
+        # not merely "we sent kill -9 a moment ago") -- unregister it from
+        # GC13_BYSTANDER_PIDS (it was registered a few lines above, at
+        # spawn) so cleanup()'s own trap-driven pass is never later asked
+        # to `kill -0` a pid number the OS may since have recycled to an
+        # unrelated process.
+        _gc13_unregister_bystander "$_gc13am_pid"
+    fi
 done
 assert_eq "13.A-META cleanup: all three bystanders/target are gone (this leg leaves nothing behind either)" \
     "0" "$GC13AM_STILL_ALIVE"
@@ -1115,7 +1179,14 @@ kill -9 "$GC13AM2_FOREIGN" "$GC13AM2_TARGET" 2>/dev/null
 sleep 0.2
 GC13AM2_STILL_ALIVE=0
 for _gc13am2_pid in "$GC13AM2_FOREIGN" "$GC13AM2_TARGET"; do
-    kill -0 "$_gc13am2_pid" 2>/dev/null && GC13AM2_STILL_ALIVE=$((GC13AM2_STILL_ALIVE + 1))
+    if kill -0 "$_gc13am2_pid" 2>/dev/null; then
+        GC13AM2_STILL_ALIVE=$((GC13AM2_STILL_ALIVE + 1))
+    else
+        # R2-F4: verified gone -- unregister so cleanup()'s trap never
+        # later probes a recycled pid number (see the helper's own comment
+        # near GC13_BYSTANDER_PIDS's declaration for the full rationale).
+        _gc13_unregister_bystander "$_gc13am2_pid"
+    fi
 done
 assert_eq "13.A-META-2 cleanup: both bystander/target are gone" "0" "$GC13AM2_STILL_ALIVE"
 
@@ -1151,7 +1222,13 @@ kill -9 "$GC13AM3_TARGET" "$GC13AM3_FOREIGN" 2>/dev/null
 sleep 0.2
 GC13AM3_STILL_ALIVE=0
 for _gc13am3_pid in "$GC13AM3_TARGET" "$GC13AM3_FOREIGN"; do
-    kill -0 "$_gc13am3_pid" 2>/dev/null && GC13AM3_STILL_ALIVE=$((GC13AM3_STILL_ALIVE + 1))
+    if kill -0 "$_gc13am3_pid" 2>/dev/null; then
+        GC13AM3_STILL_ALIVE=$((GC13AM3_STILL_ALIVE + 1))
+    else
+        # R2-F4: verified gone -- unregister (see the helper's own comment
+        # near GC13_BYSTANDER_PIDS's declaration for the full rationale).
+        _gc13_unregister_bystander "$_gc13am3_pid"
+    fi
 done
 assert_eq "13.A-META-3 cleanup: both the target and the foreign-nonce bystander are gone" "0" "$GC13AM3_STILL_ALIVE"
 
@@ -1189,7 +1266,13 @@ kill -9 "$GC13AM4_TARGET" "$GC13AM4_ALIAS" 2>/dev/null
 sleep 0.2
 GC13AM4_STILL_ALIVE=0
 for _gc13am4_pid in "$GC13AM4_TARGET" "$GC13AM4_ALIAS"; do
-    kill -0 "$_gc13am4_pid" 2>/dev/null && GC13AM4_STILL_ALIVE=$((GC13AM4_STILL_ALIVE + 1))
+    if kill -0 "$_gc13am4_pid" 2>/dev/null; then
+        GC13AM4_STILL_ALIVE=$((GC13AM4_STILL_ALIVE + 1))
+    else
+        # R2-F4: verified gone -- unregister (see the helper's own comment
+        # near GC13_BYSTANDER_PIDS's declaration for the full rationale).
+        _gc13_unregister_bystander "$_gc13am4_pid"
+    fi
 done
 assert_eq "13.A-META-4 cleanup: both the target and the numeric-alias bystander are gone" "0" "$GC13AM4_STILL_ALIVE"
 
@@ -1207,23 +1290,136 @@ assert_eq "13.A-META-4 cleanup: both the target and the numeric-alias bystander 
 # silently drift out of sync with a future edit to cleanup(). Per the
 # pairing doc's own wording ("a mutation of the shipped artifact -- or of
 # the STATE IT READS"), the mutation here is applied to the state, not the
-# code: the SHIPPED harness spawns a bystander and immediately registers it
-# into GC13_BYSTANDER_PIDS, matching this task's own fix (:1084 and
-# siblings); the MUTANT harness is derived from the shipped one by deleting
-# ONLY that registration line, reproducing the round-7 world this task's
-# fix closed -- a bystander spawned but never recorded anywhere the trap
-# can find it.
+# code: the SHIPPED harness immediately registers the (round 2: already
+# pre-spawned -- see below) bystander pair into GC13_BYSTANDER_PIDS,
+# matching this task's own fix (:1084 and siblings); the MUTANT harness is
+# derived from the shipped one by deleting ONLY that registration line,
+# reproducing the round-7 world this task's fix closed -- a bystander
+# spawned but never recorded anywhere the trap can find it.
+#
+# GC13_TRAP_EXTRACT_AWK (round 2, R2-F2): the extraction program, held in
+# ONE variable and reused below for both the real extraction and its own
+# negative control -- a hand-duplicated second copy could silently drift
+# from the first, exactly the drift-risk this whole mechanism exists to
+# avoid for cleanup() itself. Independent review measured the OLD
+# unanchored patterns (`/# GC13-BYSTANDER-TRAP BEGIN/`, no `^`) matching
+# TWICE against this file's own live bytes: once at the real markers, and
+# ONCE MORE at this very awk program's own embedded source text further
+# down this file -- an awk program that greps for a string is itself a
+# line that CONTAINS that string. The non-vacuity flag therefore went true
+# even in a hypothetical world where the real markers had been renamed
+# away: it was satisfied by the checker's own reflection, never by the
+# thing it was supposed to verify. FIXED two independent ways:
+#   1. ANCHORED (`^`): a match now requires the marker text at the START
+#      of the line. The real markers are comments, always column-1 "# ".
+#      This program's own embedded copy of that text is always part of an
+#      awk PATTERN LITERAL (`/.../ { ... }`), which in awk source syntax
+#      always begins with the `/` delimiter, never a bare `#` -- so
+#      anchoring makes the self-match structurally impossible, not merely
+#      unlikely, regardless of this program's own indentation or any
+#      future reformatting.
+#   2. COUNTED, not boolean: `begins`/`ends` tally EVERY match rather than
+#      latching a single found/not-found flag, and the END block demands
+#      EXACTLY one of each plus a closed capture -- zero, or two-or-more,
+#      of either fails loudly (exit 7) instead of silently accepting
+#      whatever the boolean happened to settle on. The END-marker action
+#      also calls `exit` the INSTANT it closes a valid pair, so scanning
+#      stops there -- belt-and-suspenders with the anchoring, not a
+#      substitute for it: even if some future line elsewhere in the file
+#      began, textually, with the marker string, this program would never
+#      read far enough to find out.
+GC13_TRAP_EXTRACT_AWK='
+    /^# GC13-BYSTANDER-TRAP BEGIN/ {
+        begins++
+        if (!capturing && !closed) { capturing=1; print }
+        next
+    }
+    /^# GC13-BYSTANDER-TRAP END/ {
+        ends++
+        if (capturing) { capturing=0; closed=1; print; exit }
+        next
+    }
+    capturing { print }
+    END { if (begins != 1 || ends != 1 || !closed) exit 7 }
+'
+
 SELF_SRC="$PLUGIN_DIR/.claude/scripts/tests/green-check.test.sh"
 TRAP_EXTRACT="$FIXTURE/gc13-trap-extract.sh"
 TRAP_EXTRACT_RC=0
-awk '
-    /# GC13-BYSTANDER-TRAP BEGIN/ { capturing=1; found=1; print; next }
-    /# GC13-BYSTANDER-TRAP END/   { capturing=0; print; next }
-    capturing { print }
-    END { if (!found) exit 7 }
-' "$SELF_SRC" > "$TRAP_EXTRACT" 2>/dev/null || TRAP_EXTRACT_RC=$?
-assert_eq "13.A-META-5.1 non-vacuity: the GC13-BYSTANDER-TRAP sentinels are present in this file's own source and the extraction landed" \
+awk "$GC13_TRAP_EXTRACT_AWK" "$SELF_SRC" > "$TRAP_EXTRACT" 2>/dev/null || TRAP_EXTRACT_RC=$?
+assert_eq "13.A-META-5.1 non-vacuity: the GC13-BYSTANDER-TRAP sentinels are present in this file's own source and the extraction landed (exactly one begin, one end, closed)" \
     "0" "$TRAP_EXTRACT_RC"
+
+# CONTENT CHECKS (round 2, R2-F2): `bash -n` alone (13.A-META-5.5, below)
+# proves only that the extraction PARSES -- it says nothing about whether
+# the extraction is the RIGHT bytes, which is exactly how the OLD
+# self-matching extraction (parseable, since the two spurious lines it
+# used to append were harmless-at-runtime shell statements -- see this
+# task's own completion report for the transcript) could have been wrong
+# without bash -n ever noticing. Assert on CONTENT here instead.
+TRAP_EXTRACT_BEGIN_LINES=$(grep -c 'GC13-BYSTANDER-TRAP BEGIN' "$TRAP_EXTRACT")
+TRAP_EXTRACT_END_LINES=$(grep -c 'GC13-BYSTANDER-TRAP END' "$TRAP_EXTRACT")
+assert_eq "13.A-META-5.1b content-check: the extracted output contains EXACTLY one BEGIN marker line" \
+    "1" "$TRAP_EXTRACT_BEGIN_LINES"
+assert_eq "13.A-META-5.1c content-check: ...and EXACTLY one END marker line" \
+    "1" "$TRAP_EXTRACT_END_LINES"
+assert_eq "13.A-META-5.1d content-check: the extracted output's LAST line is the END marker -- nothing was captured after it (proves the early-exit fired here, not just in theory)" \
+    "yes" "$(tail -n1 "$TRAP_EXTRACT" | grep -qF 'GC13-BYSTANDER-TRAP END' && echo yes || echo no)"
+TRAP_EXTRACT_LINE_COUNT=$(wc -l < "$TRAP_EXTRACT" | tr -d '[:space:]')
+assert_eq "13.A-META-5.1e content-check: the extracted region is a small, bounded block, not a runaway capture to EOF (a missing END would capture the rest of this 1700+-line file)" \
+    "yes" "$([ "${TRAP_EXTRACT_LINE_COUNT:-0}" -gt 0 ] && [ "${TRAP_EXTRACT_LINE_COUNT:-9999}" -lt 100 ] && echo yes || echo no)"
+assert_eq "13.A-META-5.1f content-check: the extraction contains the REAL trap registration, not just the two sentinel lines themselves" \
+    "yes" "$(grep -qF 'trap cleanup EXIT' "$TRAP_EXTRACT" && echo yes || echo no)"
+
+# NEGATIVE CONTROL (round 2, R2-F2's own closing demand: "verify the
+# repaired guard actually fails when the real markers are removed. That is
+# the whole point of it."). A scratch copy of this file's OWN bytes with
+# ONLY the two anchored marker lines deleted -- reusing
+# GC13_TRAP_EXTRACT_AWK unchanged, never a second hand-written copy of the
+# same logic, so this leg proves the ACTUAL shipped guard fails here, not
+# a stand-in that merely resembles it.
+NO_MARKERS_SRC="$FIXTURE/gc13-trap-no-markers.sh"
+grep -v '^# GC13-BYSTANDER-TRAP BEGIN' "$SELF_SRC" | grep -v '^# GC13-BYSTANDER-TRAP END' > "$NO_MARKERS_SRC"
+NO_MARKERS_BEGIN_HITS=$(grep -c '^# GC13-BYSTANDER-TRAP BEGIN' "$NO_MARKERS_SRC")
+NO_MARKERS_END_HITS=$(grep -c '^# GC13-BYSTANDER-TRAP END' "$NO_MARKERS_SRC")
+assert_eq "13.A-META-5.1g negative-control precondition: the scratch copy genuinely has NO anchored BEGIN marker left" \
+    "0" "$NO_MARKERS_BEGIN_HITS"
+assert_eq "13.A-META-5.1h negative-control precondition: ...nor an anchored END marker" \
+    "0" "$NO_MARKERS_END_HITS"
+NO_MARKERS_EXTRACT="$FIXTURE/gc13-trap-extract-no-markers.sh"
+NO_MARKERS_RC=0
+awk "$GC13_TRAP_EXTRACT_AWK" "$NO_MARKERS_SRC" > "$NO_MARKERS_EXTRACT" 2>/dev/null || NO_MARKERS_RC=$?
+assert_eq "13.A-META-5.1i NEGATIVE CONTROL: with the real markers removed, the SAME extraction guard FAILS LOUDLY (rc=7) instead of silently certifying an extraction that captured nothing real -- the exact gap R2-F2 found (begin_matches=2/end_matches=2 against the unanchored form, the boolean satisfied by the matcher's own source text)" \
+    "7" "$NO_MARKERS_RC"
+
+# Pre-spawn (round 2, R2-F3): independent review found that the harness
+# used to spawn its own two bystanders INSIDE the driver, and this
+# (parent, i.e. THIS running script's) copy of GC13_BYSTANDER_PIDS never
+# learned their pids until AFTER the whole harness process had already
+# returned and printed them out -- so an interrupt to THIS SCRIPT during
+# the harness's own run (a DIFFERENT concern from the harness's own,
+# already-tested, internal abort) would have left both processes
+# unprotected by anything but the harness's own soon-to-exit copy of the
+# mechanism. FIXED by moving the spawn out of the driver entirely: both
+# bystanders are created HERE, in the parent, using the exact same
+# construction 13.A-META-2 already uses (a subshell that backgrounds the
+# sleep and exits immediately, orphaning it while THIS script keeps
+# running) -- and each is registered into THIS SCRIPT's OWN
+# GC13_BYSTANDER_PIDS the INSTANT its pid is known, before anything else
+# runs, closing the window to zero rather than narrowing it. The driver
+# below no longer spawns anything; it only registers ALREADY-KNOWN pids
+# (received via the environment) into ITS OWN internal array, which is
+# all this leg ever needed to test about cleanup()/trap in the first
+# place -- spawning was never the mechanism under test.
+GC13_TD_FOREIGN=$( set -m; sleep 6 >/dev/null 2>&1 & echo $! )
+GC13_BYSTANDER_PIDS+=("$GC13_TD_FOREIGN")
+GC13_TD_TARGET=$( ( sleep 6 >/dev/null 2>&1 & echo $! ) )
+GC13_BYSTANDER_PIDS+=("$GC13_TD_TARGET")
+sleep 0.3
+GC13_TD_FOREIGN_PPID=$(ps -o ppid= -p "$GC13_TD_FOREIGN" 2>/dev/null | tr -d '[:space:]')
+GC13_TD_TARGET_PPID=$(ps -o ppid= -p "$GC13_TD_TARGET" 2>/dev/null | tr -d '[:space:]')
+assert_eq "13.A-META-5.1j non-vacuity: both pre-spawned bystanders are genuinely orphaned (ppid=1) before either harness ever runs, and are already registered with THIS script's own safety net" \
+    "1 1" "$GC13_TD_FOREIGN_PPID $GC13_TD_TARGET_PPID"
 
 GC13_TRAP_PREAMBLE="$FIXTURE/gc13-trap-preamble.sh"
 cat > "$GC13_TRAP_PREAMBLE" <<'PREAMBLEEOF'
@@ -1234,17 +1430,17 @@ FIXTURE=/nonexistent-gc13-trap-harness-fixture
 GC13_BYSTANDER_PIDS=()
 PREAMBLEEOF
 
-# Driver: reproduce the exact shape of GC13AM2_FOREIGN/TARGET (13.A-META-2)
-# -- one same-pgid bystander, one foreign-pgid (`set -m`) bystander -- then
-# abort via a `set -u` unbound-variable reference, mirroring an interrupted
-# run between spawn and this task's own inline kill a few lines later.
-# Quoted heredoc deliberately: "$B_FOREIGN"/"$B_TARGET"/"$!" must reach the
-# harness as LITERAL text, to be expanded when the harness itself runs, not
-# now while this file is only being generated.
+# Driver: register the ALREADY-SPAWNED, ALREADY-PARENT-PROTECTED pair
+# above into the HARNESS's OWN (separate process, separate array) copy of
+# GC13_BYSTANDER_PIDS, then abort via a `set -u` unbound-variable
+# reference -- mirroring an interrupted run between registration and this
+# task's own inline kill a few lines later. Quoted heredoc deliberately:
+# "$B_FOREIGN"/"$B_TARGET" must reach the harness as LITERAL text, to be
+# expanded when the harness itself runs (reading them from the
+# environment this script sets when it invokes `bash`, a few lines down),
+# not now while this file is only being generated.
 GC13_TRAP_DRIVER="$FIXTURE/gc13-trap-driver.sh"
 cat > "$GC13_TRAP_DRIVER" <<'DRIVEREOF'
-B_FOREIGN=$( set -m; sleep 6 >/dev/null 2>&1 & echo $! )
-B_TARGET=$( ( sleep 6 >/dev/null 2>&1 & echo $! ) )
 GC13_BYSTANDER_PIDS+=("$B_FOREIGN" "$B_TARGET")
 printf '%s %s\n' "$B_FOREIGN" "$B_TARGET"
 : "$__GC13_TRAP_HARNESS_ABORT_TRIGGER__"
@@ -1276,50 +1472,64 @@ bash -n "$GC13_TRAP_MUTANT" 2>/dev/null || MUTANT_HARNESS_PARSE_RC=$?
 assert_eq "13.A-META-5.5 the mutant harness still parses (bash -n rc=0)" "0" "$MUTANT_HARNESS_PARSE_RC"
 
 # Specific misbehaviour (leg 2) + execution (leg 4): both harnesses are run
-# for real, as real bash processes that really hit the `set -u` abort.
+# for real, as real bash processes that really hit the `set -u` abort, fed
+# the SAME pre-spawned, already-orphaned pair via the environment.
 # Command substitution still captures stdout written before an
-# unbound-variable abort terminates the shell that wrote it, so the two
-# bystander pids survive even though the harness itself exits non-zero.
-MUTANT_TRAP_OUT=$(bash "$GC13_TRAP_MUTANT" 2>/dev/null)
+# unbound-variable abort terminates the shell that wrote it.
+MUTANT_TRAP_OUT=$(B_FOREIGN="$GC13_TD_FOREIGN" B_TARGET="$GC13_TD_TARGET" bash "$GC13_TRAP_MUTANT" 2>/dev/null)
 MUTANT_TRAP_RC=$?
 assert_eq "13.A-META-5.6 non-vacuity: the mutant harness genuinely aborted (rc=1, the set -u unbound-variable exit code), not some other failure" \
     "1" "$MUTANT_TRAP_RC"
 MUTANT_B_FOREIGN=$(printf '%s' "$MUTANT_TRAP_OUT" | awk '{print $1}')
 MUTANT_B_TARGET=$(printf '%s' "$MUTANT_TRAP_OUT" | awk '{print $2}')
-assert_eq "13.A-META-5.7 non-vacuity: the mutant harness handed back two distinct, non-empty bystander pids before it aborted" \
-    "yes" "$([ -n "$MUTANT_B_FOREIGN" ] && [ -n "$MUTANT_B_TARGET" ] && [ "$MUTANT_B_FOREIGN" != "$MUTANT_B_TARGET" ] && echo yes || echo no)"
+assert_eq "13.A-META-5.7 non-vacuity: the mutant harness echoed back EXACTLY the pre-spawned pair (not two fresh pids of its own)" \
+    "$GC13_TD_FOREIGN $GC13_TD_TARGET" "$MUTANT_B_FOREIGN $MUTANT_B_TARGET"
 sleep 0.3
 MUTANT_TRAP_ALIVE=0
-kill -0 "$MUTANT_B_FOREIGN" 2>/dev/null && MUTANT_TRAP_ALIVE=$((MUTANT_TRAP_ALIVE + 1))
-kill -0 "$MUTANT_B_TARGET" 2>/dev/null && MUTANT_TRAP_ALIVE=$((MUTANT_TRAP_ALIVE + 1))
+kill -0 "$GC13_TD_FOREIGN" 2>/dev/null && MUTANT_TRAP_ALIVE=$((MUTANT_TRAP_ALIVE + 1))
+kill -0 "$GC13_TD_TARGET" 2>/dev/null && MUTANT_TRAP_ALIVE=$((MUTANT_TRAP_ALIVE + 1))
 assert_eq "13.A-META-5.8 SPECIFIC MISBEHAVIOUR: without the registration, an abort between spawn and this task's own inline kill leaves BOTH bystanders running (the round-7 residual risk, live)" \
     "2" "$MUTANT_TRAP_ALIVE"
-# Cleanup: these two are genuinely leaked (that is what the leg above just
-# proved) -- register with THIS spec's own safety net first, in case this
-# leg itself is interrupted before the explicit kill right below runs, then
-# reap them directly by pid.
-GC13_BYSTANDER_PIDS+=("$MUTANT_B_FOREIGN" "$MUTANT_B_TARGET")
-kill -9 "$MUTANT_B_FOREIGN" "$MUTANT_B_TARGET" 2>/dev/null
+# Deliberately NOT killed here: the restore-control leg below needs them
+# STILL ALIVE going in, to prove the SHIPPED harness -- not this script's
+# own parent-level safety net, which has protected them since spawn but
+# has no reason to act while this script is still running normally -- is
+# what reaps them.
 
-# Restore control (leg 3): the IDENTICAL abort, the SHIPPED (registered)
-# harness -- both bystanders reaped. Without this leg, the misbehaviour
-# above could be an artefact of the harness (e.g. the abort itself somehow
-# preventing the trap from running at all) rather than of the registration
-# actually being the difference.
-SHIPPED_TRAP_OUT=$(bash "$GC13_TRAP_SHIPPED" 2>/dev/null)
+# Restore control (leg 3): the IDENTICAL abort, the SAME pre-spawned pair,
+# the SHIPPED (registered) harness -- both bystanders reaped. Without this
+# leg, the misbehaviour above could be an artefact of the harness (e.g.
+# the abort itself somehow preventing the trap from running at all) rather
+# than of the registration actually being the difference.
+SHIPPED_TRAP_OUT=$(B_FOREIGN="$GC13_TD_FOREIGN" B_TARGET="$GC13_TD_TARGET" bash "$GC13_TRAP_SHIPPED" 2>/dev/null)
 SHIPPED_TRAP_RC=$?
 assert_eq "13.A-META-5.9 non-vacuity: the shipped harness aborted the SAME way (rc=1) -- the only difference from the mutant is the registration, not the failure mode" \
     "1" "$SHIPPED_TRAP_RC"
 SHIPPED_B_FOREIGN=$(printf '%s' "$SHIPPED_TRAP_OUT" | awk '{print $1}')
 SHIPPED_B_TARGET=$(printf '%s' "$SHIPPED_TRAP_OUT" | awk '{print $2}')
-assert_eq "13.A-META-5.10 non-vacuity: the shipped harness also handed back two distinct, non-empty bystander pids before it aborted" \
-    "yes" "$([ -n "$SHIPPED_B_FOREIGN" ] && [ -n "$SHIPPED_B_TARGET" ] && [ "$SHIPPED_B_FOREIGN" != "$SHIPPED_B_TARGET" ] && echo yes || echo no)"
+assert_eq "13.A-META-5.10 non-vacuity: the shipped harness echoed back the SAME pre-spawned pair" \
+    "$GC13_TD_FOREIGN $GC13_TD_TARGET" "$SHIPPED_B_FOREIGN $SHIPPED_B_TARGET"
 sleep 0.3
 SHIPPED_TRAP_ALIVE=0
-kill -0 "$SHIPPED_B_FOREIGN" 2>/dev/null && SHIPPED_TRAP_ALIVE=$((SHIPPED_TRAP_ALIVE + 1))
-kill -0 "$SHIPPED_B_TARGET" 2>/dev/null && SHIPPED_TRAP_ALIVE=$((SHIPPED_TRAP_ALIVE + 1))
+GC13_TD_FOREIGN_GONE=0
+GC13_TD_TARGET_GONE=0
+if kill -0 "$GC13_TD_FOREIGN" 2>/dev/null; then
+    SHIPPED_TRAP_ALIVE=$((SHIPPED_TRAP_ALIVE + 1))
+else
+    GC13_TD_FOREIGN_GONE=1
+fi
+if kill -0 "$GC13_TD_TARGET" 2>/dev/null; then
+    SHIPPED_TRAP_ALIVE=$((SHIPPED_TRAP_ALIVE + 1))
+else
+    GC13_TD_TARGET_GONE=1
+fi
 assert_eq "13.A-META-5.11 RESTORE CONTROL: the SAME abort, the SHIPPED (registered) harness -- cleanup()'s EXIT trap reaps both bystanders, including the foreign-pgid one, before the harness process finishes exiting" \
     "0" "$SHIPPED_TRAP_ALIVE"
+# R2-F4: unregister each pid THIS SCRIPT's own parent-level safety net has
+# VERIFIED is actually gone (the harness's own trap just reaped it) --
+# leaving it registered here would only risk a later stale-pid probe.
+[ "$GC13_TD_FOREIGN_GONE" = "1" ] && _gc13_unregister_bystander "$GC13_TD_FOREIGN"
+[ "$GC13_TD_TARGET_GONE" = "1" ] && _gc13_unregister_bystander "$GC13_TD_TARGET"
 
 # 13.B self_124, WAY under the cap -- the discrimination the feature
 # claims: an ordinary self-inflicted 124 nowhere near the deadline.
@@ -1330,44 +1540,98 @@ assert_eq "13.A-META-5.11 RESTORE CONTROL: the SAME abort, the SHIPPED (register
 # 13.B-TEARDOWN-META just below scan the WHOLE process table for a bare,
 # unadorned `sleep <that value>` to prove the shim's killer leaves no
 # orphan. That global scan cannot tell such a process apart from an
-# unrelated one sharing the same duration for its own reasons, so the
-# duration itself has to carry the uniqueness proof -- and the "20" used
-# here before this fix did NOT: Section 10.1, six hundred lines up (:594,
-# `sleep 20; echo should-not-finish`), uses the exact same duration for an
-# unrelated cap test, and QA measured the collision directly -- a live,
-# not-yet-reaped `sleep 20` from 10.1 was still on the host when
-# 13.B-TEARDOWN's own scan ran, satisfying its non-vacuity assertion
-# without the mutant shim having leaked anything, and the cleanup loop
-# between META.5 and META.6 then killed that unrelated process, laundering
-# the contamination so the restore-control leg also passed clean. Timing
-# measured, not assumed: locally 10.1 fires at t~25 and this section
-# samples at t~50, an unreaped 20s sleep expiring at t~45 -- a 5s margin
-# that collapses on CI's faster (37-40s) run, where the compressible work
-# around it shrinks roughly 3x but the 20s sleep does not compress at all.
+# unrelated one sharing the same duration for its own reasons -- and the
+# "20" used here before round 1's fix did NOT carry enough uniqueness to
+# rule that out: Section 10.1, six hundred lines up (:594, `sleep 20;
+# echo should-not-finish`), uses the exact same duration for an unrelated
+# cap test, and QA measured the collision directly (this file's own
+# history carries the transcript).
 #
-# FIXED (the repair R6-F1, this file's own history, already prescribed for
-# this exact class of gap) by moving the uniqueness into the DURATION.
-# Deliberately NOT repeating the shape of the claim R1-F1 found false --
-# "I enumerated every other value this file uses and 2011 isn't one of
-# them" is the SAME kind of unverified, staleness-prone assertion the "20"
-# comment made, just with a different list. Instead: `grep -n '2011'`
-# against this file, run before this fix was written and re-run after, is
-# EMPTY except for this constant's own definition and its downstream uses
-# -- i.e. the claim is "nothing else in this file's shipped bytes happens
-# to use this token", checked mechanically, not "I remember what every
-# other section does". If a future edit ever adds a genuine `sleep 2011`
-# elsewhere, that grep -- not a re-read of this comment -- is what catches
-# the collision; re-run it before trusting this constant again. 13.B's own
-# assertions below (dispatch, exit_code, timed_out) test the shim's
-# discrimination between "the cap fired" and "the command's own 124,
-# nowhere near the cap"; both are indifferent to the cap's actual numeric
-# value, so raising it from 20 to 2011 changes nothing about what 13.B
-# itself proves. NOT a pgid filter: QA checked, and it would be wrong here
-# -- the killer subshell sits in its OWN process group after this task's
-# fix, so a future regression that kept `set -m` but dropped the
-# group-kill would be invisible to a pgid-scoped scan. The global scan
-# stays; only the needle changes.
-GC13B_TIMEOUT_S=2011
+# claude-workflow-plugin-tnue round 2 (independent review, R2-F1): round
+# 1's own repair -- moving the uniqueness into a FILE-WIDE-unique literal,
+# "2011" -- narrowed that collision, it did not remove it. A literal
+# value, however distinctive within this one file's SOURCE TEXT, says
+# nothing about the process table at runtime: two CONCURRENT invocations
+# of this same spec both compute the identical literal and would satisfy
+# EACH OTHER's non-vacuity check and EACH OTHER's cleanup, exactly as "20"
+# did against Section 10.1 -- just needing two overlapping runs of this
+# file instead of one run plus one unrelated section six hundred lines
+# away. A distinctive duration can only ever REDUCE how often the absence
+# of an ownership proof gets exercised; it can never SUBSTITUTE for one.
+#
+# FIXED (round 2) two independent ways, closing two DIFFERENT gaps -- kept
+# both rather than picking one, the same discipline Section 13.A's own
+# ownership check already follows (pgid AND nonce, not either alone):
+#
+#  1. GC13B_TIMEOUT_S now folds THIS SCRIPT's OWN PID ($$) into the
+#     literal -- the same per-run ownership token _gc13a_find_orphan_sleep6
+#     already relies on (GC13_NONCE, defined above it): two live processes
+#     can never share a PID, so no two concurrent invocations of this file
+#     can ever compute the same value here, closing the concurrent-run
+#     collision R2-F1 measured as merely rarer, not gone. This cannot
+#     reuse GC13_NONCE's own fractional form ("6.$GC13_NONCE") the way
+#     13.A does, though: that nonce rides inside a free-form TEST COMMAND
+#     this file authors itself, which qa-gate.sh never inspects, whereas
+#     GC13B_TIMEOUT_S is read by qa-gate.sh as a GREEN_CHECK_TIMEOUT_S
+#     override, and THAT path REFUSES any value containing a non-digit
+#     character -- verified by reading the validation directly,
+#     qa-gate.sh's `case "$GREEN_CHECK_TIMEOUT_S" in ''|*[!0-9]*) ...
+#     invalid_timeout_config` -- which Section 12 above already exercises
+#     for exactly this reason (QA round 3, R3-F3). A decimal point would
+#     be refused outright, not silently accepted. Plain integer addition
+#     keeps the nonce load-bearing (arithmetic on a live PID can never
+#     equal that same arithmetic on a DIFFERENT, simultaneously-live PID)
+#     while staying inside the validated shape, with no leading-zero or
+#     numeric-string-aliasing risk of the kind R8-F1 found in the
+#     fractional case: bash arithmetic never produces a leading zero, and
+#     `ps` renders a plain integer identically to how it was computed.
+#  2. Independent of the nonce: the selector below no longer trusts a raw
+#     post-dispatch COUNT. It attributes by PRE/POST SNAPSHOT DIFFERENCE --
+#     a process already on the host BEFORE this invocation dispatches can
+#     never be attributed to this invocation, no matter what its argv
+#     says, because it was already present in the "before" snapshot. This
+#     is the actual ownership-by-construction proof independent review
+#     prescribed; the nonce above only makes the value improbable to
+#     collide on, it does not, by itself, prove non-membership the way a
+#     snapshot diff does. 13.B-TEARDOWN-PLANTED, after the META block
+#     below, demonstrates this directly: a deliberately-planted foreign
+#     process bearing the EXACT SAME duration, alive in both the "before"
+#     and "after" snapshot, is proven neither counted as a leak nor killed
+#     by this file's own cleanup.
+GC13B_TIMEOUT_S=$((2011000000 + $$))
+
+# _gc13b_find_teardown_sleep: the exact-field-match idiom
+# _gc13a_find_orphan_sleep6 established (one `ps -axo pid=,ppid=,pgid=,
+# args=` snapshot into awk, comm=="sleep", the single arg ==
+# GC13B_TIMEOUT_S exactly, NF==5 so nothing further follows), factored
+# into a function so it can be snapshotted MULTIPLE times (before and
+# after each dispatch) rather than counted once after the fact -- see the
+# round-2 comment above for why a single post-dispatch count is no longer
+# sufficient on its own.
+_gc13b_find_teardown_sleep() {
+    ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
+        | awk -v want="$GC13B_TIMEOUT_S" '$4 == "sleep" && $5 == want && NF == 5 { print $1 }'
+}
+
+# _gc13b_pids_new_in <before> <after>: the ownership-by-construction
+# primitive -- every pid present in <after> but ABSENT from <before>, i.e.
+# the set that appeared BECAUSE OF whatever ran between the two
+# snapshots, never a pid that merely happens to still match the same
+# argv. A single-pass awk (populate a set from the first "file", filter
+# the second against it) rather than `comm`, which requires pre-sorted
+# input neither snapshot is guaranteed to already be in; process
+# substitution keeps both operands as real inputs tolerant of an empty
+# list (an empty "$1"/"$2" still produces one blank line via printf,
+# filtered by the `$0 != ""` guards on both sides) instead of relying on
+# word-splitting a variable.
+_gc13b_pids_new_in() {
+    awk 'NR==FNR { if ($0 != "") seen[$0]=1; next } ($0 != "" && !($0 in seen))' \
+        <(printf '%s\n' "$1") <(printf '%s\n' "$2")
+}
+
+GC13B_PRE_13B=$(_gc13b_find_teardown_sleep)
+assert_eq "13.B precondition: no pre-existing process matches this run's own teardown needle before 13.B even dispatches (round 2, R2-F1's own 'assert no match exists before dispatch' requirement)" \
+    "" "$GC13B_PRE_13B"
 set_test_cmd "exit 124"
 TID13B=$(new_task "GC-HEUR: self_124 far under cap (13.B)")
 OUT13B=$(PATH="$PATH_WITH_TIMEOUT" GREEN_CHECK_TIMEOUT_S="$GC13B_TIMEOUT_S" bash "$QG" green-check "$TID13B" --phase after 2>/dev/null)
@@ -1382,15 +1646,15 @@ assert_eq "13.B ...timed_out=false (correct -- nowhere near the cap)" \
 # runner-mediated check alone. The PATH_WITH_TIMEOUT shim's "killer"
 # subshell (this file's own fixture setup, above) forks a REAL child to run
 # `sleep "$dur"` -- a non-tail statement in a multi-command subshell always
-# forks -- and this is an IMMEDIATE post-condition check on the ONE shim
-# invocation that just returned, not a disambiguation among several live
-# candidates, which is why ownership (pgid/ppid) proof is not needed here
-# the way Section 13.A's selector needs it: GC13B_TIMEOUT_S's own
-# file-wide uniqueness (see the comment above 13.B) carries that weight
-# instead. QA round 1 (R1-F1) found the PREVIOUS version of this claim
-# false -- it named "20" as unconfusable, and Section 10.1 six hundred
-# lines up uses that exact same value -- see this file's own completion
-# report / QA artifact for the measured collision.
+# forks. QA round 1 (R1-F1) found the ORIGINAL version of this claim false
+# (it named "20" as unconfusable when Section 10.1 uses that same value);
+# round 2 (R2-F1) found the round-1 repair ("2011" alone) merely RARER, not
+# fixed, for the reason explained above 13.B. What actually distinguishes
+# "this dispatch's own killer-subshell timer" from "anything else on the
+# host that happens to match the same argv" is no longer the duration's
+# rarity -- it is the PRE/POST SNAPSHOT DIFFERENCE computed below:
+# GC13B_PRE_13B (captured immediately above, before 13.B ever dispatched)
+# against a fresh snapshot taken now.
 #
 # Before this task's original fix, `kill "$killer"` (a bare pid) reached
 # only the subshell leader; its forked `sleep "$dur"` child was orphaned
@@ -1398,18 +1662,21 @@ assert_eq "13.B ...timed_out=false (correct -- nowhere near the cap)" \
 # reproduced directly (this task's own completion report: an isolated
 # extract of the pre-fix shim body, and a scratch copy of this whole file
 # with only the shim body reverted, both caught a live, unreaped orphan via
-# direct ps polling). The exact-field-match idiom (ps -axo
-# pid=,ppid=,pgid=,args= into awk, comm==\"sleep\", the single arg ==
-# GC13B_TIMEOUT_S exactly, NF==5 so nothing further follows) mirrors
-# _gc13a_find_orphan_sleep6's own established technique elsewhere in this
-# file, scoped down to the two fields ($4/$5) that matter for THIS check,
-# with the needle passed in via awk's `-v` rather than interpolated into
-# the awk program text.
+# direct ps polling).
 sleep 0.3
-GC13B_TEARDOWN_LEAKED=$(ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
-    | awk -v want="$GC13B_TIMEOUT_S" '$4 == "sleep" && $5 == want && NF == 5 { print $1 }' | wc -l | tr -d '[:space:]')
-assert_eq "13.B-TEARDOWN: the shim's OWN internal killer-subshell timer (bare 'sleep $GC13B_TIMEOUT_S', never nonce-tagged) leaves no orphan behind" \
+GC13B_POST_13B=$(_gc13b_find_teardown_sleep)
+GC13B_TEARDOWN_LEAKED_PIDS=$(_gc13b_pids_new_in "$GC13B_PRE_13B" "$GC13B_POST_13B")
+GC13B_TEARDOWN_LEAKED=$(printf '%s\n' "$GC13B_TEARDOWN_LEAKED_PIDS" | grep -c . || true)
+assert_eq "13.B-TEARDOWN: the shim's OWN internal killer-subshell timer (bare 'sleep $GC13B_TIMEOUT_S', never nonce-tagged) leaves no orphan ATTRIBUTABLE to this dispatch (pre/post snapshot diff, not a raw count)" \
     "0" "${GC13B_TEARDOWN_LEAKED:-0}"
+# Reap ONLY the attributed difference, never the raw matching set -- a
+# process present in BOTH snapshots is, by construction, not this
+# dispatch's to kill. 13.B-TEARDOWN-PLANTED, below, is what actually
+# exercises that distinction; nothing is expected to be attributed here in
+# the normal case, since the shipped shim does not leak.
+for _gc13b_pid in $GC13B_TEARDOWN_LEAKED_PIDS; do
+    kill -9 "$_gc13b_pid" 2>/dev/null
+done
 
 # 13.B-TEARDOWN-META (claude-workflow-plugin-tnue): the pairing requirement
 # (.claude/tests/README.md) applies to 13.B-TEARDOWN just above -- a new
@@ -1448,20 +1715,26 @@ assert_eq "13.B-TEARDOWN-META.3 the mutant still parses (bash -n rc=0)" "0" "$MU
 # scenario (dur=GC13B_TIMEOUT_S, cmd="exit 124"), dispatched through the
 # MUTANT shim -- must leak a bare, unadorned `sleep $GC13B_TIMEOUT_S`, the
 # exact defect this task fixes, reproduced LIVE rather than only in an
-# out-of-band scratch test.
+# out-of-band scratch test. Same pre/post-snapshot-diff discipline as
+# 13.B-TEARDOWN above (round 2, R2-F1) rather than a raw count.
+GC13B_PRE_META=$(_gc13b_find_teardown_sleep)
+assert_eq "13.B-TEARDOWN-META precondition: no pre-existing process matches the needle before the MUTANT dispatch either" \
+    "" "$GC13B_PRE_META"
 set_test_cmd "exit 124"
 TIDM_TD=$(new_task "GC-META: mutant shim leaks the killer's own sleep $GC13B_TIMEOUT_S")
 OUTM_TD=$(PATH="$PATH_WITH_MUTANT_TIMEOUT" GREEN_CHECK_TIMEOUT_S="$GC13B_TIMEOUT_S" bash "$QG" green-check "$TIDM_TD" --phase after 2>/dev/null)
 assert_eq "13.B-TEARDOWN-META.4 the mutant shim was actually used (dispatch=timeout)" \
     "timeout" "$(printf '%s' "$OUTM_TD" | jq -r '.dispatch')"
 sleep 0.3
-MUTANT_LEAKED_PIDS=$(ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
-    | awk -v want="$GC13B_TIMEOUT_S" '$4 == "sleep" && $5 == want && NF == 5 { print $1 }')
+GC13B_POST_META=$(_gc13b_find_teardown_sleep)
+MUTANT_LEAKED_PIDS=$(_gc13b_pids_new_in "$GC13B_PRE_META" "$GC13B_POST_META")
 MUTANT_LEAKED_COUNT=$(printf '%s\n' "$MUTANT_LEAKED_PIDS" | grep -c . || true)
-assert_eq "13.B-TEARDOWN-META.5 SPECIFIC MISBEHAVIOUR: the killer's own 'sleep $GC13B_TIMEOUT_S' DOES leak through the unfixed (mutant) shim -- reproduces the claude-workflow-plugin-tnue defect live" \
+assert_eq "13.B-TEARDOWN-META.5 SPECIFIC MISBEHAVIOUR: the killer's own 'sleep $GC13B_TIMEOUT_S' DOES leak through the unfixed (mutant) shim, ATTRIBUTABLE to this exact dispatch by snapshot diff -- reproduces the claude-workflow-plugin-tnue defect live, and confirms the round-2 ownership-by-construction fix did not narrow this leg into uselessness" \
     "true" "$([ "${MUTANT_LEAKED_COUNT:-0}" -gt 0 ] && echo true || echo false)"
-# Cleanup: reap the mutant's own leaked orphan(s) directly by pid -- this
-# leg's own tidiness must not depend on the fix under test.
+# Cleanup: reap ONLY the attributed difference, directly by pid -- this
+# leg's own tidiness must not depend on the fix under test, but it also
+# must not blindly kill everything matching the argv (13.B-TEARDOWN-PLANTED
+# below is what proves that distinction holds).
 for _meta_td_pid in $MUTANT_LEAKED_PIDS; do
     kill -9 "$_meta_td_pid" 2>/dev/null
 done
@@ -1469,21 +1742,74 @@ done
 # Restore control (leg 3): the IDENTICAL scenario, the SHIPPED (fixed) shim
 # -- no leak. Without this leg, the misbehaviour above could be an artefact
 # of the harness (e.g. some OTHER process coincidentally matching `sleep
-# $GC13B_TIMEOUT_S`) rather than of the mutation actually reverted --
-# exactly the confusion R1-F1 found when this value was a bare "20": QA's
-# own process-table sample caught Section 10.1's unrelated `sleep 20`
-# landing inside this same window, which is precisely what
-# GC13B_TIMEOUT_S's file-wide uniqueness (see the comment above 13.B) now
-# rules out.
+# $GC13B_TIMEOUT_S`) rather than of the mutation actually reverted -- the
+# per-run nonce (round 2) plus the pre/post diff below is what now rules
+# that out, rather than the duration's rarity alone (exactly the confusion
+# R1-F1 found when this value was a bare "20", and R2-F1 found the
+# rarer-but-not-unique "2011" alone did not fully close either).
+GC13B_PRE_RESTORE=$(_gc13b_find_teardown_sleep)
+assert_eq "13.B-TEARDOWN-META precondition: no pre-existing process matches the needle before the RESTORE-CONTROL dispatch either" \
+    "" "$GC13B_PRE_RESTORE"
 TIDM_TDB=$(new_task "GC-META: shipped shim, restore control")
 OUTM_TDB=$(PATH="$PATH_WITH_TIMEOUT" GREEN_CHECK_TIMEOUT_S="$GC13B_TIMEOUT_S" bash "$QG" green-check "$TIDM_TDB" --phase after 2>/dev/null)
 assert_eq "13.B-TEARDOWN-META.6 RESTORE CONTROL: the shipped shim was actually used (dispatch=timeout)" \
     "timeout" "$(printf '%s' "$OUTM_TDB" | jq -r '.dispatch')"
 sleep 0.3
-SHIPPED_LEAKED_COUNT=$(ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
-    | awk -v want="$GC13B_TIMEOUT_S" '$4 == "sleep" && $5 == want && NF == 5 { print $1 }' | grep -c . || true)
-assert_eq "13.B-TEARDOWN-META.7 RESTORE CONTROL: the shipped shim, same scenario, leaves no orphan" \
+GC13B_POST_RESTORE=$(_gc13b_find_teardown_sleep)
+SHIPPED_LEAKED_PIDS=$(_gc13b_pids_new_in "$GC13B_PRE_RESTORE" "$GC13B_POST_RESTORE")
+SHIPPED_LEAKED_COUNT=$(printf '%s\n' "$SHIPPED_LEAKED_PIDS" | grep -c . || true)
+assert_eq "13.B-TEARDOWN-META.7 RESTORE CONTROL: the shipped shim, same scenario, leaves no orphan ATTRIBUTABLE to this dispatch" \
     "0" "${SHIPPED_LEAKED_COUNT:-0}"
+
+# 13.B-TEARDOWN-PLANTED (round 2, R2-F1's own acceptance bar: "demonstrate
+# with a deliberately-planted foreign sleep bearing the SAME duration,
+# proving it is neither counted nor killed"). Everything above proves the
+# shipped shim does not leak; this proves the SELECTOR itself attributes
+# ONLY what THIS dispatch created, even when something else on the host
+# is, right now, genuinely running the exact same 'sleep $GC13B_TIMEOUT_S'
+# for entirely unrelated reasons -- the scenario a rarer-but-shared literal
+# could never rule out (round 1 relied on "20" being rare; round 2's own
+# review found that insufficient in principle, not only in the one case it
+# happened to catch).
+GC13B_FOREIGN=$( ( sleep "$GC13B_TIMEOUT_S" >/dev/null 2>&1 & echo $! ) )
+GC13_BYSTANDER_PIDS+=("$GC13B_FOREIGN")
+sleep 0.3
+GC13B_FOREIGN_PPID=$(ps -o ppid= -p "$GC13B_FOREIGN" 2>/dev/null | tr -d '[:space:]')
+assert_eq "13.B-TEARDOWN-PLANTED non-vacuity: the deliberately-planted foreign process is alive and genuinely orphaned before either snapshot" \
+    "1" "${GC13B_FOREIGN_PPID:-0}"
+GC13B_PRE_PLANTED=$(_gc13b_find_teardown_sleep)
+assert_eq "13.B-TEARDOWN-PLANTED non-vacuity: the 'before' snapshot genuinely contains the planted foreign process (this leg's own precondition is deliberately NON-empty, unlike every other leg above)" \
+    "yes" "$(printf '%s\n' "$GC13B_PRE_PLANTED" | grep -qxF "$GC13B_FOREIGN" && echo yes || echo no)"
+
+set_test_cmd "exit 124"
+TID13B_PLANTED=$(new_task "GC: shipped shim, foreign process shares the same needle")
+OUT13B_PLANTED=$(PATH="$PATH_WITH_TIMEOUT" GREEN_CHECK_TIMEOUT_S="$GC13B_TIMEOUT_S" bash "$QG" green-check "$TID13B_PLANTED" --phase after 2>/dev/null)
+assert_eq "13.B-TEARDOWN-PLANTED dispatch=timeout (the shipped shim actually ran)" \
+    "timeout" "$(printf '%s' "$OUT13B_PLANTED" | jq -r '.dispatch')"
+sleep 0.3
+GC13B_POST_PLANTED=$(_gc13b_find_teardown_sleep)
+GC13B_PLANTED_ATTRIBUTED=$(_gc13b_pids_new_in "$GC13B_PRE_PLANTED" "$GC13B_POST_PLANTED")
+GC13B_PLANTED_ATTRIBUTED_COUNT=$(printf '%s\n' "$GC13B_PLANTED_ATTRIBUTED" | grep -c . || true)
+assert_eq "13.B-TEARDOWN-PLANTED (i-a) NOT COUNTED: the planted foreign process is present in BOTH snapshots, so the attributed diff is EMPTY -- it is not reported as a leak from this dispatch" \
+    "0" "${GC13B_PLANTED_ATTRIBUTED_COUNT:-0}"
+# Reap ONLY the (empty) attributed difference -- exactly the same
+# production code path as every other leg above, not a special case
+# carved out for this test.
+for _gc13b_planted_pid in $GC13B_PLANTED_ATTRIBUTED; do
+    kill -9 "$_gc13b_planted_pid" 2>/dev/null
+done
+assert_eq "13.B-TEARDOWN-PLANTED (i-b) NOT KILLED: the planted foreign process is STILL ALIVE after this dispatch and its (empty) reap -- proving the mechanism does not blindly SIGKILL everything matching the argv" \
+    "yes" "$(kill -0 "$GC13B_FOREIGN" 2>/dev/null && echo yes || echo no)"
+
+# Test hygiene: this file's own responsibility, not the code-under-test's
+# -- the foreign process was deliberately planted BY this test and must
+# not outlive it.
+kill -9 "$GC13B_FOREIGN" 2>/dev/null
+sleep 0.2
+GC13B_FOREIGN_STILL_ALIVE=$(kill -0 "$GC13B_FOREIGN" 2>/dev/null && echo yes || echo no)
+assert_eq "13.B-TEARDOWN-PLANTED cleanup: the deliberately-planted foreign process is gone once THIS TEST (not the code under test) reaps it" \
+    "no" "$GC13B_FOREIGN_STILL_ALIVE"
+[ "$GC13B_FOREIGN_STILL_ALIVE" = "no" ] && _gc13_unregister_bystander "$GC13B_FOREIGN"
 
 # 13.C self_124 with a generous (5s) real margin under the cap. THIS CASE
 # DOES NOT PROVE THE R4-F3 FIX (QA round 5, R5-F6, correcting this
