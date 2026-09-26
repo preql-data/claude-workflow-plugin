@@ -97,6 +97,27 @@ PASS=0
 FAIL=0
 FAILED_TESTS=()
 
+# GC13_BYSTANDER_PIDS (claude-workflow-plugin-tnue): every background
+# bystander Section 13 spawns directly (13.A-META/-2/-3/-4) is appended here
+# immediately after it is captured, so the cleanup() trap below can reap it
+# even if this script exits BEFORE reaching that block's own inline
+# kill-and-verify a few lines later -- an interrupted run (a stray `set -u`
+# abort, an external signal, run-tests.sh's own per-spec timeout) must not
+# be able to skip teardown the way it could before. Declared here, at the
+# very top, rather than near its first use in Section 13: cleanup() is
+# trap-registered a few lines down and can fire at ANY point after that, so
+# the array must already exist (bash 3.2's `set -u` treats
+# "${arr[@]}" on a NEVER-declared array as an unbound-variable error, same
+# as an empty one -- see cleanup()'s own length-guard for the empty case).
+# kill -9 by BARE pid (never a "-$pid" group form) is deliberate: verified
+# directly (this task's own completion report) that a plain `kill -9 <pid>`
+# reaches a process regardless of which process group it belongs to, so
+# this one mechanism also covers 13.A-META-2's deliberately-foreign-pgid
+# bystander without widening _gc13a_find_orphan_sleep6's SELECTION at all --
+# selection and teardown remain two different problems, per this task's own
+# instruction.
+GC13_BYSTANDER_PIDS=()
+
 KEEP_FIXTURE=0
 [ "${1:-}" = "--keep" ] && KEEP_FIXTURE=1
 
@@ -131,6 +152,22 @@ FIXTURE=$(mktemp -d -t green-check.XXXXXX)
 
 # shellcheck disable=SC2329  # cleanup invoked via trap.
 cleanup() {
+    # Reap every Section 13 bystander this run ever captured a PID for,
+    # unconditionally, on ANY exit path (normal completion, an assertion
+    # failure that doesn't itself abort under `set -u`, or a genuine abort
+    # partway through) -- see GC13_BYSTANDER_PIDS's own declaration comment
+    # near the top of this file for why this exists in addition to (not
+    # instead of) each block's own immediate kill-and-verify. The length
+    # guard is REQUIRED, not defensive style: bash 3.2 (this repo's own
+    # local default, `bash --version` on this host) raises "unbound
+    # variable" for "${arr[@]}" on a zero-length array under `set -u`,
+    # verified directly against this exact host before writing this guard.
+    if [ "${#GC13_BYSTANDER_PIDS[@]}" -gt 0 ]; then
+        local _gc13_bp
+        for _gc13_bp in "${GC13_BYSTANDER_PIDS[@]}"; do
+            [ -n "$_gc13_bp" ] && kill -9 "$_gc13_bp" 2>/dev/null
+        done
+    fi
     if [ "$KEEP_FIXTURE" = "1" ]; then
         printf 'Fixture kept at: %s\n' "$FIXTURE"
         return
@@ -191,6 +228,44 @@ QG="$FIXTURE/.claude/scripts/qa-gate.sh"
 # child's real exit status otherwise -- INCLUDING when that status is
 # itself 124, the exact collision R4-F1/R4-F3 are about.
 mkdir -p "$FIXTURE/bin-timeout-shim"
+# claude-workflow-plugin-tnue: the killer subshell below forks its OWN real
+# child to run `sleep "$dur"` -- a non-tail statement in a multi-command
+# subshell always forks, never exec-replaces, on every shell this repo
+# targets. If the guarded command (cpid) finishes before "$dur" elapses
+# (true for every case in green-check.test.sh Section 13 except 13.A/13.G,
+# where the cap genuinely fires first), the caller below sends a signal to
+# the killer's own bare PID -- which kills the SUBSHELL process but does
+# NOT reach that forked sleep child, since killing a parent never signals
+# its children. The child is orphaned instead, and keeps running,
+# completely unsupervised, for up to the REMAINING "$dur" seconds.
+#
+# Reproduced directly, deterministically (not a race): a bare `sleep
+# "$dur"` -- never nonce-tagged, so invisible to green-check.test.sh's own
+# _gc13a_find_orphan_sleep6, which only ever looks for "6.$GC13_NONCE" --
+# survives every one of Section 13's PATH_WITH_TIMEOUT invocations where
+# cmd finishes ahead of the cap (13.B/13.C/13.D/13.E/13.F). Worst case is
+# 13.B (dur=20s, cmd="exit 124" finishing near-instantly): the orphan then
+# needs a full ~20s to self-expire, long enough to still be alive when
+# run-tests.sh's own pgid-scoped SURVIVOR-SWEEP runs on a host fast enough
+# to finish the rest of this spec in under that ~20s window -- exactly the
+# "background process(es) still running" shape reported on CI (Linux,
+# ~40s total) and never on a slower local macOS run, without needing any
+# interrupted-mid-script scenario at all.
+#
+# FIXED the same way qa-gate.sh's own shipped WATCHDOG FALLBACK arm already
+# solves the identical problem for ITS OWN backgrounded child (green_check_run,
+# "set -m" bracket around "bash -c \"\$cmd\" &"): give the killer subshell its
+# OWN process group (set -m, tightly bracketed -- off again immediately after
+# capturing its pid, before anything else in this shim can be affected by
+# job-control side effects), so the child it forks inherits that SAME group,
+# then signal the whole GROUP ("-$killer", not the bare pid) instead of just
+# the leader. This is scoped ENTIRELY to the killer's own internal timer; it
+# does not touch how cpid itself is grouped or killed, so 13.A/13.G's cap-
+# fires behaviour (dispatch/exit_code/timed_out, and the SEPARATE,
+# already-working reap of cpid's OWN "sleep 6.$NONCE" grandchild a few dozen
+# lines below in the outer test file) is unaffected -- verified directly,
+# not just argued: a standalone reproduction of this exact shim body, before
+# and after this exact change, is this task's own completion-report evidence.
 cat > "$FIXTURE/bin-timeout-shim/timeout" <<'SHIMEOF'
 #!/bin/bash
 dur="${1%s}"; shift
@@ -198,6 +273,7 @@ marker=$(mktemp -u -t timeoutshim.XXXXXX)
 rm -f "$marker" 2>/dev/null
 "$@" &
 cpid=$!
+set -m
 (
     sleep "$dur"
     : > "$marker" 2>/dev/null
@@ -206,8 +282,9 @@ cpid=$!
     kill -KILL "$cpid" 2>/dev/null
 ) &
 killer=$!
+set +m
 wait "$cpid" 2>/dev/null; rc=$?
-kill "$killer" 2>/dev/null
+kill -- "-$killer" 2>/dev/null
 wait "$killer" 2>/dev/null
 if [ -f "$marker" ]; then
     rm -f "$marker" 2>/dev/null
@@ -945,6 +1022,11 @@ assert_eq "13.A cleanup: no orphan (ppid=1, our own pgid, our own nonce-tagged s
 GC13AM_60=$( ( sleep 60 >/dev/null 2>&1 & echo $! ) )
 GC13AM_600=$( ( sleep 600 >/dev/null 2>&1 & echo $! ) )
 GC13AM_6=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
+# Registered with the trap-driven safety net (GC13_BYSTANDER_PIDS, declared
+# near the top of this file) THE MOMENT each pid is known -- before the
+# non-vacuity/filter assertions below run, not after -- so an abort partway
+# through this block still leaves cleanup() able to reap them.
+GC13_BYSTANDER_PIDS+=("$GC13AM_60" "$GC13AM_600" "$GC13AM_6")
 sleep 0.3
 assert_eq "13.A-META non-vacuity: all three bystanders/target are genuinely orphaned (ppid=1)" \
     "1 1 1" "$(ps -o ppid= -p "$GC13AM_60" 2>/dev/null | tr -d '[:space:]') $(ps -o ppid= -p "$GC13AM_600" 2>/dev/null | tr -d '[:space:]') $(ps -o ppid= -p "$GC13AM_6" 2>/dev/null | tr -d '[:space:]')"
@@ -982,18 +1064,24 @@ assert_eq "13.A-META cleanup: all three bystanders/target are gone (this leg lea
 # 13.A-META-3 below is the realistic case: a bystander sharing THIS run's
 # pgid but carrying a FOREIGN nonce.
 #
-# Residual risk, named rather than hidden (round 7): if this whole script
-# were interrupted between spawning GC13AM2_FOREIGN and its cleanup a few
-# lines down, that bystander -- orphaned, ~6s duration, in its OWN foreign
-# process group -- would be left running for up to that ~6s before
-# self-expiring; it is deliberately unreachable by
+# Residual risk, named in round 7, CLOSED in claude-workflow-plugin-tnue: if
+# this whole script were interrupted between spawning GC13AM2_FOREIGN and
+# its cleanup a few lines down, that bystander -- orphaned, ~6s duration, in
+# its OWN foreign process group -- would be left running for up to that ~6s
+# before self-expiring; it is deliberately unreachable by
 # _gc13a_find_orphan_sleep6 (wrong pgid) and, sitting in its own group, not
 # necessarily seen by run-tests.sh's SURVIVOR-SWEEP either (which walks the
-# SPEC's own group). Not fixed here -- no META test in this file uses a trap
-# for cleanup -- documented as the same class of accepted residual risk the
-# rest of this section already carries.
+# SPEC's own group) -- so an interruption here would not even show up as a
+# reported leak, just an orphan quietly left on the host. FIXED not by
+# widening either of those scans (selection stays narrow, per this task's
+# own instruction) but by registering the bare pid with GC13_BYSTANDER_PIDS
+# the moment it is known, below -- cleanup()'s trap kills it by bare pid on
+# ANY exit, which is pgid-independent (verified directly: this task's own
+# completion report) and so reaches this bystander whether this script
+# falls through normally or aborts right here.
 GC13AM2_FOREIGN=$( set -m; sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! )
 GC13AM2_TARGET=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
+GC13_BYSTANDER_PIDS+=("$GC13AM2_FOREIGN" "$GC13AM2_TARGET")
 sleep 0.3
 GC13AM2_FOREIGN_PPID=$(ps -o ppid= -p "$GC13AM2_FOREIGN" 2>/dev/null | tr -d '[:space:]')
 GC13AM2_FOREIGN_PGID=$(ps -o pgid= -p "$GC13AM2_FOREIGN" 2>/dev/null | tr -d '[:space:]')
@@ -1028,6 +1116,7 @@ assert_eq "13.A-META-2 cleanup: both bystander/target are gone" "0" "$GC13AM2_ST
 # actual foreign PID from, and cannot accidentally collide with our own.
 GC13AM3_TARGET=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
 GC13AM3_FOREIGN=$( ( sleep "6.$((GC13_NONCE + 1))" >/dev/null 2>&1 & echo $! ) )
+GC13_BYSTANDER_PIDS+=("$GC13AM3_TARGET" "$GC13AM3_FOREIGN")
 sleep 0.3
 GC13AM3_TARGET_PPID=$(ps -o ppid= -p "$GC13AM3_TARGET" 2>/dev/null | tr -d '[:space:]')
 GC13AM3_TARGET_PGID=$(ps -o pgid= -p "$GC13AM3_TARGET" 2>/dev/null | tr -d '[:space:]')
@@ -1063,6 +1152,7 @@ assert_eq "13.A-META-3 cleanup: both the target and the foreign-nonce bystander 
 # exact "6.123"/"6.1230" shape reproduced directly above the fixed selector.
 GC13AM4_TARGET=$( ( sleep "6.$GC13_NONCE" >/dev/null 2>&1 & echo $! ) )
 GC13AM4_ALIAS=$( ( sleep "6.${GC13_NONCE}0" >/dev/null 2>&1 & echo $! ) )
+GC13_BYSTANDER_PIDS+=("$GC13AM4_TARGET" "$GC13AM4_ALIAS")
 sleep 0.3
 GC13AM4_TARGET_PPID=$(ps -o ppid= -p "$GC13AM4_TARGET" 2>/dev/null | tr -d '[:space:]')
 GC13AM4_TARGET_PGID=$(ps -o pgid= -p "$GC13AM4_TARGET" 2>/dev/null | tr -d '[:space:]')
@@ -1096,6 +1186,103 @@ assert_eq "13.B ...exit_code=124 (the command's own code)" \
     "124" "$(printf '%s' "$OUT13B" | jq -r '.exit_code')"
 assert_eq "13.B ...timed_out=false (correct -- nowhere near the cap)" \
     "false" "$(printf '%s' "$OUT13B" | jq -r '.timed_out')"
+
+# 13.B-TEARDOWN (claude-workflow-plugin-tnue): THE REGRESSION TEST for the
+# shim's OWN internal leak, pinned in-file rather than left to the external
+# runner-mediated check alone. The PATH_WITH_TIMEOUT shim's "killer"
+# subshell (this file's own fixture setup, above) forks a REAL child to run
+# `sleep "$dur"` -- a non-tail statement in a multi-command subshell always
+# forks -- and 13.B is the ONE case in this section whose cap (dur=20,
+# GREEN_CHECK_TIMEOUT_S=20 above) is far enough from every OTHER duration
+# this file ever uses (6.*, 60, 600, 8, 3, 1) that a bare, unadorned `sleep
+# 20` cannot be confused with anything else Section 13 or its META blocks
+# spawn -- unlike those, ownership (pgid/ppid) proof is not needed here:
+# this is an IMMEDIATE post-condition check on the ONE shim invocation that
+# just returned, not a disambiguation among several live candidates. Before
+# this task's fix, `kill "$killer"` (a bare pid) reached only the subshell
+# leader; its forked "sleep 20" child was orphaned and kept running,
+# completely unsupervised, for up to ~20s -- reproduced directly (this
+# task's own completion report: an isolated extract of the pre-fix shim
+# body, and a scratch copy of this whole file with only the shim body
+# reverted, both caught a live, unreaped `sleep 20` via direct ps polling).
+# The exact-field-match idiom (ps -axo pid=,ppid=,pgid=,args= into awk,
+# comm==\"sleep\", the single arg == \"20\" exactly, NF==5 so nothing
+# further follows) mirrors _gc13a_find_orphan_sleep6's own established
+# technique elsewhere in this file, scoped down to the two fields ($4/$5)
+# that matter for THIS check.
+sleep 0.3
+GC13B_TEARDOWN_LEAKED=$(ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
+    | awk '$4 == "sleep" && $5 == "20" && NF == 5 { print $1 }' | wc -l | tr -d '[:space:]')
+assert_eq "13.B-TEARDOWN: the shim's OWN internal killer-subshell timer (bare 'sleep 20', never nonce-tagged) leaves no orphan behind" \
+    "0" "${GC13B_TEARDOWN_LEAKED:-0}"
+
+# 13.B-TEARDOWN-META (claude-workflow-plugin-tnue): the pairing requirement
+# (.claude/tests/README.md) applies to 13.B-TEARDOWN just above -- a new
+# check does not ship on an out-of-band reproduction alone. Same shape as
+# the END META-TEST section's own qa-gate.sh mutant, applied here to the
+# shim instead: a MUTANT timeout shim, derived from the SHIPPED one by
+# reverting ONLY this task's own fix (the `set -m`/`set +m` bracket and the
+# group-kill), in its own directory so PATH_WITH_TIMEOUT (used by 13.A/13.B
+# through 13.G) is never disturbed.
+MUTANT_TIMEOUT_DIR="$FIXTURE/bin-timeout-shim-mutant"
+mkdir -p "$MUTANT_TIMEOUT_DIR"
+# shellcheck disable=SC2016  # single-quoted deliberately: these are the
+# LITERAL source-text patterns/replacements for the shipped shim, not
+# expressions to shell-expand (same discipline as the END META-TEST's own
+# sed usage a few hundred lines down, and design-conform.test.sh's MUT_LINE).
+sed -e '/^set -m$/d' -e '/^set +m$/d' -e 's/-- "-\$killer"/"$killer"/' \
+    "$FIXTURE/bin-timeout-shim/timeout" > "$MUTANT_TIMEOUT_DIR/timeout"
+chmod +x "$MUTANT_TIMEOUT_DIR/timeout" 2>/dev/null || true
+PATH_WITH_MUTANT_TIMEOUT="$MUTANT_TIMEOUT_DIR:$PATH"
+
+# Non-vacuity (leg 1): the mutant DIFFERS from the shipped shim, the
+# specific line the fix touched is gone, and the mutant still parses.
+assert_eq "13.B-TEARDOWN-META.1 non-vacuity: the mutant shim DIFFERS from the shipped one" \
+    "differs" "$(cmp -s "$FIXTURE/bin-timeout-shim/timeout" "$MUTANT_TIMEOUT_DIR/timeout" && echo identical || echo differs)"
+# shellcheck disable=SC2016  # single-quoted deliberately: literal
+# source-text pattern, not an expression to shell-expand (same discipline
+# as this file's own 13.C-STATIC a few hundred lines down).
+MUTANT_GROUPKILL_HITS=$(grep -c 'kill -- "-\$killer"' "$MUTANT_TIMEOUT_DIR/timeout")
+assert_eq "13.B-TEARDOWN-META.2 non-vacuity: the mutation landed -- the group-kill form is gone from the mutant (0 occurrences)" \
+    "0" "$MUTANT_GROUPKILL_HITS"
+MUTANT_SHIM_BASH_N_RC=0
+bash -n "$MUTANT_TIMEOUT_DIR/timeout" 2>/dev/null || MUTANT_SHIM_BASH_N_RC=$?
+assert_eq "13.B-TEARDOWN-META.3 the mutant still parses (bash -n rc=0)" "0" "$MUTANT_SHIM_BASH_N_RC"
+
+# Specific misbehaviour (leg 2) + execution (leg 4): the IDENTICAL 13.B
+# scenario (dur=20, cmd="exit 124"), dispatched through the MUTANT shim --
+# must leak a bare, unadorned "sleep 20", the exact defect this task fixes,
+# reproduced LIVE rather than only in an out-of-band scratch test.
+set_test_cmd "exit 124"
+TIDM_TD=$(new_task "GC-META: mutant shim leaks the killer's own sleep 20")
+OUTM_TD=$(PATH="$PATH_WITH_MUTANT_TIMEOUT" GREEN_CHECK_TIMEOUT_S=20 bash "$QG" green-check "$TIDM_TD" --phase after 2>/dev/null)
+assert_eq "13.B-TEARDOWN-META.4 the mutant shim was actually used (dispatch=timeout)" \
+    "timeout" "$(printf '%s' "$OUTM_TD" | jq -r '.dispatch')"
+sleep 0.3
+MUTANT_LEAKED_PIDS=$(ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
+    | awk '$4 == "sleep" && $5 == "20" && NF == 5 { print $1 }')
+MUTANT_LEAKED_COUNT=$(printf '%s\n' "$MUTANT_LEAKED_PIDS" | grep -c . || true)
+assert_eq "13.B-TEARDOWN-META.5 SPECIFIC MISBEHAVIOUR: the killer's own 'sleep 20' DOES leak through the unfixed (mutant) shim -- reproduces the claude-workflow-plugin-tnue defect live" \
+    "true" "$([ "${MUTANT_LEAKED_COUNT:-0}" -gt 0 ] && echo true || echo false)"
+# Cleanup: reap the mutant's own leaked orphan(s) directly by pid -- this
+# leg's own tidiness must not depend on the fix under test.
+for _meta_td_pid in $MUTANT_LEAKED_PIDS; do
+    kill -9 "$_meta_td_pid" 2>/dev/null
+done
+
+# Restore control (leg 3): the IDENTICAL scenario, the SHIPPED (fixed) shim
+# -- no leak. Without this leg, the misbehaviour above could be an artefact
+# of the harness (e.g. some OTHER process coincidentally matching "sleep
+# 20") rather than of the mutation actually reverted.
+TIDM_TDB=$(new_task "GC-META: shipped shim, restore control")
+OUTM_TDB=$(PATH="$PATH_WITH_TIMEOUT" GREEN_CHECK_TIMEOUT_S=20 bash "$QG" green-check "$TIDM_TDB" --phase after 2>/dev/null)
+assert_eq "13.B-TEARDOWN-META.6 RESTORE CONTROL: the shipped shim was actually used (dispatch=timeout)" \
+    "timeout" "$(printf '%s' "$OUTM_TDB" | jq -r '.dispatch')"
+sleep 0.3
+SHIPPED_LEAKED_COUNT=$(ps -axo pid=,ppid=,pgid=,args= 2>/dev/null \
+    | awk '$4 == "sleep" && $5 == "20" && NF == 5 { print $1 }' | grep -c . || true)
+assert_eq "13.B-TEARDOWN-META.7 RESTORE CONTROL: the shipped shim, same scenario, leaves no orphan" \
+    "0" "${SHIPPED_LEAKED_COUNT:-0}"
 
 # 13.C self_124 with a generous (5s) real margin under the cap. THIS CASE
 # DOES NOT PROVE THE R4-F3 FIX (QA round 5, R5-F6, correcting this
