@@ -2092,12 +2092,25 @@ MCP_DEPS_RESERVE_NAME='.node_modules.cwp-reserve'
 mcp_sha256_of() {
     local f="$1" raw="" out=""
     [ -f "$f" ] || return 0
+    # `out="${out#\\}"` decodes the ESCAPED output line GNU coreutils and perl's
+    # Digest::SHA emit when the filename holds a backslash or a newline: the
+    # line is prefixed with ONE backslash, so field 1 reads `\<64 hex>` and the
+    # 64-char guard below rejects a CORRECT digest. See hash_file in
+    # .claude/scripts/workflow-manifest.sh for the format citation
+    # (claude-workflow-plugin-18fc). Here the refusal is fail-CLOSED and safe —
+    # an empty answer means "cannot prove it is current", so npm ci runs — but
+    # it degrades for any install target whose path carries either byte. The
+    # decode is a no-op on unescaped output: a hex digest cannot start with a
+    # backslash. openssl needs none; it prints the name raw and `${raw##* }`
+    # already takes the last field.
     if command -v sha256sum >/dev/null 2>&1; then
         raw=$(sha256sum "$f" 2>/dev/null) || raw=""
         out="${raw%% *}"
+        out="${out#\\}"  # SHA256-ESCAPE-DECODE
     elif command -v shasum >/dev/null 2>&1; then
         raw=$(shasum -a 256 "$f" 2>/dev/null) || raw=""
         out="${raw%% *}"
+        out="${out#\\}"  # SHA256-ESCAPE-DECODE
     elif command -v openssl >/dev/null 2>&1; then
         # openssl 1.x prints "SHA256(f)= <hex>", 3.x "SHA2-256(f)= <hex>";
         # the hash is the last field either way.

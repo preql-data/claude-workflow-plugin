@@ -1255,6 +1255,7 @@ EXPECTED_SPEC_FILES=(
     run-with-timeout.test.sh
     runner-completeness.test.sh
     scoped-log-dir.test.sh
+    sha256-escape-decode.test.sh
     tree-lease.test.sh
     unrecorded-review-artifact.test.sh
     validate-completion-criteria-tests.test.sh
