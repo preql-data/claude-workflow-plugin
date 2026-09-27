@@ -180,6 +180,48 @@ latest_binding_line() {
     comments_of "$1" | grep -E '^DESIGN-UNIT v1 ' | tail -1
 }
 
+# count_emit_sites <file> <subcommand> <error-key> — how many EXECUTABLE
+# emit_error_json call sites in <file> raise <error-key> under <subcommand>.
+# Used by the Section 9 METatests to pin how many copies of a refusal the
+# shipped script has, and to prove a strip removed ALL of them rather than
+# whichever one the author happened to name (claude-workflow-plugin-0z9v).
+#
+# Comment lines are skipped DELIBERATELY. qa-gate.sh's own --help text
+# (`refuses a second write with \`design_binding_exists\``, line ~4222) and
+# several block headers name these keys in prose, and prose survives any
+# strip — "do not verify a removal by grepping for the removed pattern" is
+# the exact antipattern .claude/tests/README.md warns about. The needle is
+# the whole three-argument call prefix, not the bare key, so a refusal
+# raised by a DIFFERENT subcommand (design-conflict raises
+# unit_not_in_artifact too) is not miscounted as this one's.
+count_emit_sites() {
+    awk -v needle="emit_error_json \"$2\" \"\$tid\" \"$3\"" '
+        { trimmed = $0; sub(/^[ \t]+/, "", trimmed) }
+        trimmed ~ /^#/ { next }
+        index($0, needle) { n++ }
+        END { print n + 0 }
+    ' "$1"
+}
+
+# rebind_lock_files <task-id> — how many design-unit-bind lock files for
+# <task-id> exist anywhere under $FIXTURE.
+#
+# This is an OBSERVATION of which arm of cmd_design_unit_bind's `if command
+# -v flock` fork a run actually took, not an inference from re-evaluating
+# that same predicate here: the lock file is named and created ONLY by the
+# `9>"$rebind_lock"` redirection inside the FLOCK arm (the no-flock arm
+# never references it), while the `mkdir -p` that precedes the fork creates
+# only the DIRECTORY, in both arms. Both roots _design_unit_lock_root can
+# return — the git-common-dir one and the $QA_TRACKING_DIR fallback — are
+# inside $PROJECT_DIR, which is $FIXTURE here, so one find covers both
+# without this test having to re-implement that derivation.
+rebind_lock_files() {
+    local sanitized
+    sanitized=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    find "$FIXTURE" -name ".design-unit-bind-$sanitized.lock" 2>/dev/null \
+        | wc -l | tr -d ' \n'
+}
+
 # write_artifact <path> <task-id> <unit-json-array> — a minimal, schema-valid
 # design artifact whose DESIGN-UNITS block is exactly <unit-json-array>
 # (a jq array of unit objects), so every section below can vary the
@@ -764,11 +806,50 @@ printf '\n=== Section 9: META — design-unit-bind'"'"'s two remaining gates are
 # unit_not_in_artifact and design_binding_exists directly. This section adds
 # the mutation leg those assertions do not: proof that each refusal is
 # CAUSED by its own sentinel-wrapped block, not by something incidental.
+#
+# claude-workflow-plugin-0z9v — WHAT A SENTINEL STRIP MUST ALSO PROVE.
+# cmd_design_unit_bind forks on `if command -v flock`, and the rebind
+# refusal is written out ONCE IN EACH ARM under two DIFFERENT sentinel
+# names. 9.2's strip named only one of them for the whole of v5's design
+# phase, so on every host that has flock — every Linux, so all of CI — the
+# "mutant" still carried an intact refusal in the arm it was about to
+# execute, refused with the SHIPPED error, and 9.2d/9.2e read that refusal
+# as the mutation having failed to misbehave. The three META legs above
+# them (sentinels found / still parses / bytes differ) were all satisfied
+# by a mutation aimed at a region the host would never run.
+#
+# So each strip below carries, beyond "the sentinels were found":
+#   (a) a per-NAME found flag, so renaming one sentinel of a twinned pair
+#       cannot half-strip in silence;
+#   (b) a COUNT of the shipped script's executable refusal sites and a
+#       count of the mutant's, so a surviving copy — a third arm, an
+#       unwrapped new copy, a moved gate — fails here by name; and
+#   (c) for 9.2, an OBSERVATION of which arm the host actually executed,
+#       plus one leg per arm pinning that arm by PATH rather than leaving
+#       it to whatever the runner image happens to ship.
 
 EPIC10=$(bd create "D4 bind: gate-9 epic" -t epic -p 1 --json 2>/dev/null | jq -r '.id')
 design_and_review "$EPIC10" "$ONE_UNIT_U1" >/dev/null
 
 # --- 9.1: UNIT-MEMBERSHIP-GATE ---------------------------------------------
+# 0z9v item 3: this strip is NOT arm-sensitive the way 9.2's was, and the
+# reason is structural rather than lucky. cmd_design_unit_bind's membership
+# gate sits BEFORE the flock fork, so there is exactly ONE copy of it and
+# every host executes it whichever arm it takes. `# UNIT-MEMBERSHIP-GATE
+# BEGIN` does also match design-conflict's own identically-named region
+# (fkm.7), which this strip therefore removes too: harmless, since nothing
+# below drives design-conflict, but it does mean the strip's `found` flag
+# alone cannot prove design-unit-bind's own copy was the one hit. 9.1g/9.1h
+# below are what proves that, and they are what would fail if the gate were
+# ever duplicated into the two arms the way the rebind gate is.
+#
+# Measured at 157e6f4 — the gate at 12305-12315, against the `if command -v
+# flock` at 12394, its `else` at 12481 and its `fi` at 12514; the fkm.7
+# twin at 14026-14056. qa-gate.sh moves under every task that touches it,
+# so regenerate rather than trusting these:
+#   grep -n '# UNIT-MEMBERSHIP-GATE BEGIN' .claude/scripts/qa-gate.sh
+#   awk '/^cmd_design_unit_bind\(\) \{/,/^\}/ { if (/command -v flock/ ||
+#        /^    (else|fi)$/) print NR": "$0 }' .claude/scripts/qa-gate.sh
 QG_NOMEMBER="$FIXTURE/.claude/scripts/qa-gate-nomembergate.sh"
 STRIP9_RC=0
 awk '
@@ -796,20 +877,38 @@ CTRL10=$(bd create "D4 bind: gate-9 nonexistent-unit control" -t task -p 1 --par
 CTRL9A_OUT=$(bash "$QG" design-unit-bind "$CTRL10" --design-task "$EPIC10" --unit-id U99-DOES-NOT-EXIST 2>&1)
 assert_eq "9.1f CONTROL: the SHIPPED script refuses the SAME nonexistent unit_id the mutant just recorded" \
     "unit_not_in_artifact" "$(json_field '.error_key' "$CTRL9A_OUT")"
+assert_eq "9.1g META NON-VACUITY: the SHIPPED script raises design-unit-bind's unit_not_in_artifact from exactly ONE executable site — a second copy (one moved or duplicated into an arm of the flock fork, the 0z9v shape) must fail HERE and be taught to the strip above" \
+    "1" "$(count_emit_sites "$QG" "design-unit-bind" "unit_not_in_artifact")"
+assert_eq "9.1h ...and the mutant retains ZERO of them, so the excision is live on every host whichever arm it takes (the same counter reads 1 on the shipped script one line above, so a 0 here is a removal and not a broken needle)" \
+    "0" "$(count_emit_sites "$QG_NOMEMBER" "design-unit-bind" "unit_not_in_artifact")"
 rm -f "$QG_NOMEMBER"
 
 # --- 9.2: REBIND-GATE -------------------------------------------------------
+# The rebind refusal is TWINNED across the flock fork: `# REBIND-GATE-
+# FLOCKED` inside the flock arm (qa-gate.sh 12471-12478 at 157e6f4),
+# `# REBIND-GATE` inside the no-flock arm (12505-12512 at the same commit;
+# `grep -n '# REBIND-GATE' .claude/scripts/qa-gate.sh` regenerates both).
+# `# REBIND-GATE-FLOCKED BEGIN` does not contain the substring `# REBIND-
+# GATE BEGIN`, so the single-name strip this section shipped with never
+# touched the flocked copy — 0z9v. BOTH names are stripped here, each with
+# its OWN found flag so that renaming either one fails loudly rather than
+# halving the mutation in silence.
 QG_NOREBIND="$FIXTURE/.claude/scripts/qa-gate-norebindgate.sh"
 STRIP9B_RC=0
 awk '
-    /# REBIND-GATE BEGIN/ { skipping=1; found=1; next }
-    /# REBIND-GATE END/   { skipping=0; next }
+    /# REBIND-GATE BEGIN/         { skipping=1; found_plain=1;   next }
+    /# REBIND-GATE END/           { skipping=0; next }
+    /# REBIND-GATE-FLOCKED BEGIN/ { skipping=1; found_flocked=1; next }
+    /# REBIND-GATE-FLOCKED END/   { skipping=0; next }
     skipping { next }
     { print }
-    END { if (!found) exit 7 }
+    END {
+        if (!found_plain)   exit 7
+        if (!found_flocked) exit 8
+    }
 ' "$QG" > "$QG_NOREBIND" || STRIP9B_RC=$?
 chmod +x "$QG_NOREBIND"
-assert_eq "9.2a META: REBIND-GATE sentinels are present (the strip found them)" "0" "$STRIP9B_RC"
+assert_eq "9.2a META: BOTH REBIND-GATE sentinel pairs are present and were stripped (rc 7 = the no-flock arm's pair went missing, rc 8 = the FLOCKED arm's did)" "0" "$STRIP9B_RC"
 P9B_RC=0
 bash -n "$QG_NOREBIND" 2>/dev/null || P9B_RC=$?
 assert_eq "9.2b META: the stripped copy still parses" "0" "$P9B_RC"
@@ -828,6 +927,111 @@ assert_eq "9.2e ...and a NEW record really landed (count advanced)" "$((BEFORE9B
 CTRL9B_OUT=$(bash "$QG" design-unit-bind "$CHILD11" --design-task "$EPIC10" --unit-id U1 2>&1)
 assert_eq "9.2f CONTROL: the SHIPPED script refuses the SAME second bind the mutant just recorded" \
     "design_binding_exists" "$(json_field '.error_key' "$CTRL9B_OUT")"
+
+# --- 9.2g-9.2i: what 9.2a/9.2b/9.2c could not say (0z9v) -------------------
+# Every leg above this point is satisfiable by a mutation aimed at a region
+# the host never executes: 9.2d/9.2e DO fail when that happens, but only on
+# a host taking the intact arm, and they fail with "expected recorded, got
+# error" — indistinguishable from the shipped gate simply working. These
+# three name the condition directly.
+assert_eq "9.2g META NON-VACUITY: the SHIPPED script raises design-unit-bind's design_binding_exists from exactly 2 executable sites — one per arm of the flock fork (a 3rd arm, or a moved refusal, must fail HERE and be taught to the strip above)" \
+    "2" "$(count_emit_sites "$QG" "design-unit-bind" "design_binding_exists")"
+assert_eq "9.2h THE EXCISION IS LIVE IN EVERY ARM, not merely the one this host runs: the mutant retains ZERO of them (the same counter reads 2 on the shipped script one line above, so a 0 here is a removal and not a broken needle)" \
+    "0" "$(count_emit_sites "$QG_NOREBIND" "design-unit-bind" "design_binding_exists")"
+ARM9B_EXPECTED=$(command -v flock >/dev/null 2>&1 && echo flock || echo no-flock)
+ARM9B_OBSERVED=$([ "$(rebind_lock_files "$CHILD11")" -gt 0 ] && echo flock || echo no-flock)
+# The arm is interpolated into the LABEL as well as compared, so the run's
+# own log says which arm 9.2d/9.2e/9.2f exercised here instead of leaving a
+# reader of a green CI log to work it out from the runner image.
+assert_eq "9.2i OBSERVED: 9.2d/9.2e/9.2f exercised the $ARM9B_EXPECTED arm on this host — read off the lock file ONLY the flock arm creates, not inferred by re-running the script's own \`command -v flock\`" \
+    "$ARM9B_EXPECTED" "$ARM9B_OBSERVED"
+
+# --- 9.2j-9.2o: drive the NO-FLOCK arm on a host that HAS flock ------------
+# The legs above exercise exactly one arm — whichever `command -v flock`
+# picks. CI is Linux, so CI has only ever driven the flock arm; nothing in
+# this file drives design-unit-bind's no-flock arm there at all (Sections
+# 14 and 15 need python3 and skip on CI's image). The arm is selected by
+# PATH alone, so pinning it needs no new mechanism: the same hand-built
+# restricted PATH Section 8.5 uses for jq_unavailable, minus flock. On a
+# host that already lacks flock this re-runs the ambient arm, which is the
+# point — the ARM is fixed by the test rather than by the host.
+#
+# It lives under $TEST_HOME, not $FIXTURE, on purpose: $FIXTURE is a real
+# git repo whose untracked state later sections reconcile changed-files.txt
+# against, and an untracked directory is reported by git as ONE collapsed
+# `?? dir/` line that reconcile_tracker expands to every path beneath it.
+NOFLOCK_BIN="$TEST_HOME/noflock-bin"
+mkdir -p "$NOFLOCK_BIN"
+for b in bash sh env bd jq git sed awk grep cut head tail tr cmp comm diff \
+         sort uniq wc date mkdir rmdir cp mv rm ln ls cat touch chmod stat \
+         find xargs dirname basename readlink realpath mktemp sleep id \
+         uname expr tee seq base64 od fold timeout python3 shasum sha256sum; do
+    bp=$(command -v "$b" 2>/dev/null) && ln -sf "$bp" "$NOFLOCK_BIN/$b"
+done
+assert_eq "9.2j precondition: the restricted PATH really resolves no flock" "yes" \
+    "$(PATH="$NOFLOCK_BIN" command -v flock >/dev/null 2>&1 && echo no || echo yes)"
+CHILD11B=$(bd create "D4 bind: gate-9 no-flock-arm child" -t task -p 1 --parent "$EPIC10" --no-inherit-labels --json 2>/dev/null | jq -r '.id')
+SETUP9C_OUT=$(PATH="$NOFLOCK_BIN" "$NOFLOCK_BIN/bash" "$QG" design-unit-bind "$CHILD11B" --design-task "$EPIC10" --unit-id U1 2>&1)
+assert_eq "9.2k precondition: the FIRST bind on the forced no-flock arm records, so the next one really is a SECOND (and so a thin PATH cannot pass this leg by turning the second bind into a first)" \
+    "recorded" "$(json_field '.status' "$SETUP9C_OUT")"
+BEFORE9C=$(count_binding "$CHILD11B")
+MUT9C_OUT=$(PATH="$NOFLOCK_BIN" "$NOFLOCK_BIN/bash" "$QG_NOREBIND" design-unit-bind "$CHILD11B" --design-task "$EPIC10" --unit-id U1 2>&1)
+assert_eq "9.2l MISBEHAVIOUR on the NO-FLOCK arm: WITHOUT the gate, a second bind with no --rebind records anyway" \
+    "recorded" "$(json_field '.status' "$MUT9C_OUT")"
+assert_eq "9.2m ...and a NEW record really landed (count advanced)" \
+    "$((BEFORE9C + 1))" "$(count_binding "$CHILD11B")"
+assert_eq "9.2n ...and those runs really took the NO-FLOCK arm: the lock file only the flock arm creates was never created for this task" \
+    "0" "$(rebind_lock_files "$CHILD11B")"
+CTRL9C_OUT=$(PATH="$NOFLOCK_BIN" "$NOFLOCK_BIN/bash" "$QG" design-unit-bind "$CHILD11B" --design-task "$EPIC10" --unit-id U1 2>&1)
+assert_eq "9.2o CONTROL: the SHIPPED script, SAME restricted PATH, SAME second bind — refuses, so what 9.2l recorded is the mutation and not the PATH" \
+    "design_binding_exists" "$(json_field '.error_key' "$CTRL9C_OUT")"
+rm -rf "$NOFLOCK_BIN"
+
+# --- 9.2p-9.2u: drive the FLOCK arm on a host that has NO flock ------------
+# The mirror of the leg above, for the same reason. With only the ambient
+# legs, whether the flock arm gets exercised AT ALL is a property of the
+# runner image rather than of this file — and "coverage that silently stops
+# happening when the environment moves" is the whole of 0z9v. A stub flock
+# pins that arm on every host, so a CI image that dropped util-linux could
+# not quietly take this leg away.
+#
+# The stub exits 0 without taking a real lock, which is sound HERE and only
+# here: every bind in this section is sequential, so there is nothing to
+# exclude, and the marker file below proves the arm actually ran rather
+# than assuming it. Section 14 is where genuine mutual exclusion is tested,
+# with an fcntl-backed stub. Technique, stub shape and non-vacuity marker
+# are all taken from design-accessors.test.sh Section 9.2, which pins both
+# arms this same way for the SIBLING guard (REBIND-READ-GUARD) — not a new
+# mechanism, an existing one applied to the pair that was missing it.
+STUBFLOCK_BIN="$TEST_HOME/stubflock-bin"
+FLOCK_MARKER="$TEST_HOME/flock-invoked-92"
+mkdir -p "$STUBFLOCK_BIN"
+cat > "$STUBFLOCK_BIN/flock" <<STUBEOF
+#!/bin/bash
+echo invoked >> "$FLOCK_MARKER"
+exit 0
+STUBEOF
+chmod 0755 "$STUBFLOCK_BIN/flock"
+assert_eq "9.2p precondition: the stub flock genuinely resolves ahead of any real one" "$STUBFLOCK_BIN/flock" \
+    "$(PATH="$STUBFLOCK_BIN:$PATH" command -v flock)"
+CHILD11C=$(bd create "D4 bind: gate-9 flock-arm child" -t task -p 1 --parent "$EPIC10" --no-inherit-labels --json 2>/dev/null | jq -r '.id')
+SETUP9D_OUT=$(PATH="$STUBFLOCK_BIN:$PATH" bash "$QG" design-unit-bind "$CHILD11C" --design-task "$EPIC10" --unit-id U1 2>&1)
+assert_eq "9.2q precondition: the FIRST bind on the forced flock arm records, so the next one really is a SECOND" \
+    "recorded" "$(json_field '.status' "$SETUP9D_OUT")"
+BEFORE9D=$(count_binding "$CHILD11C")
+rm -f "$FLOCK_MARKER"
+MUT9D_OUT=$(PATH="$STUBFLOCK_BIN:$PATH" bash "$QG_NOREBIND" design-unit-bind "$CHILD11C" --design-task "$EPIC10" --unit-id U1 2>&1)
+assert_eq "9.2r NON-VACUITY: the stub flock was invoked by THAT run (marker cleared immediately before it), so the FLOCK arm is the one that executed" "yes" \
+    "$( [ -f "$FLOCK_MARKER" ] && echo yes || echo no )"
+assert_eq "9.2s MISBEHAVIOUR on the FLOCK arm: WITHOUT the gate, a second bind with no --rebind records anyway" \
+    "recorded" "$(json_field '.status' "$MUT9D_OUT")"
+assert_eq "9.2t ...and a NEW record really landed (count advanced)" \
+    "$((BEFORE9D + 1))" "$(count_binding "$CHILD11C")"
+CTRL9D_OUT=$(PATH="$STUBFLOCK_BIN:$PATH" bash "$QG" design-unit-bind "$CHILD11C" --design-task "$EPIC10" --unit-id U1 2>&1)
+assert_eq "9.2u CONTROL: the SHIPPED script, SAME stub flock, SAME second bind — refuses, so what 9.2s recorded is the mutation and not the stub" \
+    "design_binding_exists" "$(json_field '.error_key' "$CTRL9D_OUT")"
+rm -rf "$STUBFLOCK_BIN"
+rm -f "$FLOCK_MARKER"
 rm -f "$QG_NOREBIND"
 
 # ===========================================================================
