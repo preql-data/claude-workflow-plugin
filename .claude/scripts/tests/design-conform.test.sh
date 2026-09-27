@@ -949,12 +949,22 @@ assert_eq "9.2i OBSERVED: 9.2d/9.2e/9.2f exercised the $ARM9B_EXPECTED arm on th
 # --- 9.2j-9.2o: drive the NO-FLOCK arm on a host that HAS flock ------------
 # The legs above exercise exactly one arm — whichever `command -v flock`
 # picks. CI is Linux, so CI has only ever driven the flock arm; nothing in
-# this file drives design-unit-bind's no-flock arm there at all (Sections
-# 14 and 15 need python3 and skip on CI's image). The arm is selected by
-# PATH alone, so pinning it needs no new mechanism: the same hand-built
-# restricted PATH Section 8.5 uses for jq_unavailable, minus flock. On a
-# host that already lacks flock this re-runs the ambient arm, which is the
-# point — the ARM is fixed by the test rather than by the host.
+# this file drives design-unit-bind's no-flock arm there at all. Sections 14
+# and 15 build a python-fcntl flock(1) STUB, so wherever they run they drive
+# the FLOCKED arm regardless of host — it is not that they "need python3 and
+# skip on CI's image": test.yml never installs or gates on python3, and
+# GitHub's ubuntu-latest ships it, so they almost certainly DO run in CI (the
+# CI-image-skip claim this comment used to make was never measured on a real
+# runner and was wrong; corrected per claude-workflow-plugin-4l1d R1-F5).
+# They skip only in narrower repro containers that genuinely lack python3
+# (e.g. cwp-l1-repro:1.1.2) — a real gap, but an unrelated one: even where
+# python3 IS present, Sections 14/15 still never cover the no-flock arm on
+# ANY host, which is the conclusion this comment exists to support and which
+# the wrong reason did not change. The arm here is selected by PATH alone,
+# so pinning it needs no new mechanism: the same hand-built restricted PATH
+# Section 8.5 uses for jq_unavailable, minus flock. On a host that already
+# lacks flock this re-runs the ambient arm, which is the point — the ARM is
+# fixed by the test rather than by the host.
 #
 # It lives under $TEST_HOME, not $FIXTURE, on purpose: $FIXTURE is a real
 # git repo whose untracked state later sections reconcile changed-files.txt

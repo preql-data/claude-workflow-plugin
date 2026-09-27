@@ -204,6 +204,26 @@ require_hash_tool() {
 # SUBSTITUTION subshell, not the script (LESSONS.md, 2026-06-12) — callers
 # therefore assign plainly (`h=$(hash_file "$f")`) so `set -e` propagates the
 # non-zero status, never wrapped in `|| true`.
+# THE ESCAPED-OUTPUT DECODE (claude-workflow-plugin-18fc). GNU coreutils and
+# perl's Digest::SHA both ESCAPE the output line when the filename contains a
+# backslash or a newline (coreutils also for a carriage return): the LINE is
+# prefixed with ONE backslash and the problematic bytes inside the NAME are
+# escaped. coreutils manual, "cksum output modes": "the line is started with a
+# backslash, and each problematic character in the file name is escaped with a
+# backslash ... any other backslash escape sequences are reserved for future
+# use" — so the marker is a single, line-level byte whose meaning does not
+# change as the trigger set grows. Field 1 therefore reads `\<64 hex>` = 65
+# chars, and this helper REFUSED a correct digest (design-artifact.test.sh 9.2
+# on Linux). The digest itself is never escaped, so decoding is exactly: drop
+# that one marker byte. It is applied unconditionally because a lowercase-hex
+# digest can never begin with a backslash — a no-op on unescaped output — and
+# the 64-char and hex guards below are untouched, so nothing new is accepted.
+#
+# Only the two arms that pass a path through a `<hash> <name>` formatter need
+# it. Apple's /sbin/sha256sum does not escape at all (which is the only reason
+# macOS passed), and openssl does not either: it prints the name RAW, so its
+# output can span lines for a newline-named file, and `${raw##* }` already
+# takes the LAST field — the hash — regardless.
 hash_file() {
     local f="$1"
     local raw=""
@@ -212,14 +232,16 @@ hash_file() {
         sha256sum)
             raw=$(sha256sum "$f" 2>/dev/null) || raw=""
             out="${raw%% *}"
+            out="${out#\\}"  # SHA256-ESCAPE-DECODE
             ;;
         shasum)
             raw=$(shasum -a 256 "$f" 2>/dev/null) || raw=""
             out="${raw%% *}"
+            out="${out#\\}"  # SHA256-ESCAPE-DECODE
             ;;
         openssl)
             # openssl 1.x prints "SHA256(f)= <hex>", 3.x "SHA2-256(f)= <hex>";
-            # the hash is the last field either way.
+            # the hash is the last field either way. No escaping — see above.
             raw=$(openssl dgst -sha256 "$f" 2>/dev/null) || raw=""
             out="${raw##* }"
             ;;

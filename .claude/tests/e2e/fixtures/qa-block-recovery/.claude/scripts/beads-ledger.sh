@@ -162,6 +162,16 @@ sha256_file() {
         printf ''
         return 0
     fi
+    # 18fc: both tools ESCAPE the output line for a filename containing a
+    # backslash or a newline — the line is prefixed with ONE backslash — so
+    # `awk '{print $1}'` reads `\<64 hex>` and this helper, rc-guarded only,
+    # EMITTED it as a digest. `cmd_check` compares two such values, so a
+    # backslash-named ledger path would make an unchanged file compare
+    # unequal against itself digested by any other spelling. Drop exactly the
+    # marker byte; see hash_file in workflow-manifest.sh for the format
+    # citation. The rc guard above is untouched, and a hex digest cannot begin
+    # with a backslash, so this is a no-op on unescaped output.
+    out="${out#\\}"  # SHA256-ESCAPE-DECODE
     printf '%s' "$out"
 }
 

@@ -3186,6 +3186,17 @@ sha256_file() {
         printf '%s' "$CHANGE_SET_HASH_UNAVAILABLE"
         return 0
     fi
+    # 18fc: both tools ESCAPE the output line for a filename containing a
+    # backslash or a newline — the line is prefixed with ONE backslash — so
+    # `awk '{print $1}'` reads `\<64 hex>`. Unlike workflow-manifest.sh's
+    # hash_file (which is length-guarded and so merely refused), this helper
+    # is guarded only for emptiness and EMITTED the 65-char value as a digest,
+    # into artifact_hash / design_hash bindings. Drop exactly the marker byte;
+    # see hash_file in workflow-manifest.sh for the format citation. Ordered
+    # BEFORE the emptiness guard deliberately: a lone `\` then refuses rather
+    # than emitting empty, which is stricter, never looser. A hex digest cannot
+    # begin with a backslash, so this is a no-op on unescaped output.
+    out="${out#\\}"  # SHA256-ESCAPE-DECODE
     [ -n "$out" ] || return 1
     printf '%s\n' "$out"
 }
