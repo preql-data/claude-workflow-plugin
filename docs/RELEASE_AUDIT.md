@@ -836,11 +836,28 @@ updated:
 > to re-point a positive control in `HANDOFF.md` that this exact re-scope
 > would otherwise have made vacuous — see that file's v4.1.0 verify block).
 
-**Stated plainly rather than rounded up: v5.0.0 NOW MEETS the strict
-"NOT-PROVEN = 0" release rule v3.5.0 set and v4.1.0 also met** (`11 / 6 / 0 /
-1`, not the `11 / 6 / 1 / 0` this section held from 2026-09-18 through F4 of
-the operator's finishing-pass brief). That is not a lapse quietly patched
-and left unremarked. At planning time (correction 4: "Linear ships as an
+**SUPERSEDED 2026-09-29 — READ THE NEXT PARAGRAPH INSTEAD.** This paragraph
+read, until the re-verification: *"Stated plainly rather than rounded up:
+v5.0.0 NOW MEETS the strict 'NOT-PROVEN = 0' release rule v3.5.0 set and
+v4.1.0 also met (`11 / 6 / 0 / 1`, not the `11 / 6 / 1 / 0` this section held
+from 2026-09-18 through F4 of the operator's finishing-pass brief)."* It is
+preserved rather than deleted because the reasoning below it about `DP17` is
+still sound and still worth reading; only its headline conclusion was wrong.
+
+**THE CORRECTED STATEMENT: v5.0.0 DOES NOT MEET the "NOT-PROVEN = 0" rule.**
+The split is **`10 / 6 / 1 / 1`**. Independent re-verification of all 18 rows
+on 2026-09-29 moved `DP5` to NOT-PROVEN and `DP3` to PROVEN-WITH-CAVEAT (see
+those rows and the Re-verification addendum at the foot of this section).
+
+And the correction is sharper than a count changing. `DP17` was withdrawn
+**specifically** to reach zero NOT-PROVEN — that is what the paragraphs below
+are arguing about. Re-verification then established that `DP5` had been
+NOT-PROVEN **all along**, for an entirely unrelated reason, and was simply
+not measured. So the property this section declared was never actually held
+at the moment it was declared: the withdrawal did not achieve zero, it
+achieved one, and nobody checked. Tracked as
+`claude-workflow-plugin-6ye1`, which carries the three options for resolving
+it. That is not a lapse quietly patched and left unremarked. At planning time (correction 4: "Linear ships as an
 unproven adapter... its live validation is recorded NOT-PROVEN — not
 PROVEN-WITH-CAVEAT, because there is no artifact at all") the decision was
 to ship Linear as an unproven adapter and disclose that plainly — "no
@@ -857,12 +874,18 @@ adapter so the ledger meets zero NOT-PROVEN — the row carrying this claim,
 still the bar this ledger holds itself to: no row in this section is bare
 about how it got to its status. `DP17` names what it said, why it was false
 rather than merely unvalidated, and the task that withdrew it, per the
-status-vocabulary table's own REMOVED rule above — and
-no row in this
-section is NOT-PROVEN. A future ledger auditing this one should read the
-`11/6/0/1/18` split as the honest count, not as a near-miss on `13/3/0/0/16`'s
-shape — one claim withdrawn is not one claim proven, and this ledger does
-not blur the two.
+status-vocabulary table's own REMOVED rule above — and, **as this section
+read until 2026-09-29, no row in it was NOT-PROVEN. CORRECTED: one row is.**
+`DP5` is NOT-PROVEN and always was; it was not measured until the
+re-verification. A future ledger auditing this one should read the
+**`10/6/1/1/18`** split as the honest count, not as a near-miss on
+`13/3/0/0/16`'s shape — one claim withdrawn is not one claim proven, and this
+ledger does not blur the two. **Nor should it read the withdrawal of `DP17` as
+having delivered zero NOT-PROVEN, which is what this section believed at the
+time and what the superseded paragraph above claimed: it did not, because a
+different row was already NOT-PROVEN and unexamined.** The lesson that
+generalises is the one this whole audit keeps restating — withdrawing the row
+you were looking at does not establish anything about the rows you were not.
 
 ### v5.0.0 residuals carried into the release notes
 
@@ -871,12 +894,34 @@ not blur the two.
   clearances (install Codex, or pin `design_reviewer` to a distinct
   `<family>-class`) are one-line fixes. *Flip:* either clearance, applied by
   the operator.
-- **`impact_of` under-reports cross-script dependencies on this repo's own
+- **~~`impact_of` under-reports cross-script dependencies on this repo's own
   shell-heavy surface, which can make D4's batching intersection silently
-  uninformative rather than silently wrong (`DP5`).** Filed by `dxz` against
-  its own P6 closure, assigned to `kk9y`, unresolved. *Flip:* teach the
-  indexer's bash grammar to resolve a quoted/flagged invocation
-  (`"$SCRIPT_DIR/other.sh" --flag`), not only a bare command word.
+  uninformative rather than silently wrong (`DP5`).~~ RETIRED 2026-09-29 —
+  THIS RESIDUAL CANNOT OCCUR.** It described a way the `impact_of` half of the
+  intersection could be uninformative. Re-verification established that the
+  `impact_of` half **is not computed at all**, so there is no impact set to
+  under-report. The `kk9y` flip (teach the indexer's bash grammar to resolve
+  `"$SCRIPT_DIR/other.sh" --flag`) is real work but is **not** the flip for
+  this row, and carrying it into release notes would tell a reader the smaller
+  problem is the one they have.
+- **THE RESIDUAL THAT REPLACES IT, and it is larger: `DP5` is NOT-PROVEN —
+  the claim is a conjunction and only the file-set conjunct ships.**
+  `graph_intersection_computed` is the literal `false` at every emission site
+  in `epic-gate.sh` and `:1082` validates that it is false; the `impact_of`
+  half is deferred to `claude-workflow-plugin-l7gd`, **open since 2026-08-22**.
+  Parallel batches are therefore certified parallel-safe on file-set
+  disjointness alone. *Flip:* implement `l7gd`, **or** perform a
+  prove-or-remove rewrite narrowing the claim to file-set intersection only
+  with the deferral named in the row. Tracked as
+  `claude-workflow-plugin-6ye1`.
+- **"Small enough for one coherent change" is enforced nowhere (`DP3`,
+  PROVEN-WITH-CAVEAT as of 2026-09-29).** No sizing criterion exists in
+  `DS1`–`DS8` and none in `review-check.sh`; the phrase lives only in
+  `.claude/agents/designer.md:165` as prose, absent from the designer's own
+  pre-declaration checklist, and the reviewer has no criterion to score it
+  against. The rest of `DP3` is genuinely mechanical. *Flip:* add a sizing
+  criterion to the rubric so the reviewer can score it, or drop the phrase
+  from the claim.
 - **RESOLVED DURING THIS LEDGER'S OWN AUTHORING, not left as a residual
   (`DP10`).** This row's first draft (earlier on 2026-09-18) listed the D0
   orchestrator tier deviation here as still open — `orchestrator` shipping
@@ -979,8 +1024,13 @@ found no adapter for that decision to track and withdrew the claim; it is
 REMOVED now, per the same no-adjective-without-an-artifact rule this
 paragraph opens with — a withdrawal is its own artifact pointer, not a gap
 either. None of the caveated rows' caveats are
-new discoveries hidden from the phases that shipped them — `DP2`, `DP5`,
+new discoveries hidden from the phases that shipped them — `DP2`, ~~`DP5`~~,
 `DP10` and `DP11` are each the shipping phase's own disclosed residual,
+**(`DP5` CORRECTED 2026-09-29: it is no longer caveated, it is NOT-PROVEN, and
+its caveat was retired as describing an unreachable residual — see the
+residuals list above. `DP3` joined the caveated set on the same date, and its
+caveat IS a new discovery that the shipping phase did not disclose, which
+makes it the one exception to the sentence this clause is making.)**
 independently re-confirmed live where this piece could do so cheaply; `DP15`,
 `DP16` and `DP18` are this piece's own live findings — `DP15`/`DP16` from
 this ledger's original 2026-09-18 authoring, `DP18` from the LIVE-1 run
@@ -1129,7 +1179,7 @@ evidence a reader would use to re-derive it.
 | `DP4` | "returns hits at three sites" | `grep -n 'design-conform' .claude/scripts/qa-gate.sh \| wc -l` → **65** (18 non-comment). The claim survives on structure checked directly: `cmd_design_conform()`@12773, dispatcher@18177, subprocess reuse@15079, no agent spawn. |
 | `DP13` | `session-start.sh:836` / `:852` | **`:837`** and **`:853`** — drifted by one. Quoted text verbatim; `statusline.sh:44` exact. |
 | `DP15` | `git status --porcelain -- manifests/` returns `??` | Returns **empty** — `manifests/v5.0.0.sha256` is now tracked (committed `c5ba7cc`, updated `569174e`). Moves in the safe direction, but the release notes would have carried it wrong. |
-| `DP16` | "now lists **12** names"; `12 check(s) — 11 passed, 1 failed, 0 skipped` | The registry holds **13** (`grep '^DOCTOR_CHECK_NAMES=' … \| wc -w` → 13; `model_parity` landed `ea8031d`, 2026-09-22). Live: **`13 check(s) — 11 passed, 1 failed, 1 skipped`, exit 1.** The cell is internally inconsistent — it carries both the 12 sentences and later 13 sentences added `569174e`. Its central finding holds and worsened: `beads_ledger` FAIL now reads **442 on disk / 599 in database** (was 442/536). The 442 independently confirmed: `grep -c '"_type":"issue"' .beads/issues.jsonl` → 442. Two line citations resolve to nothing (`workflow-doctor.sh:272` is `# Usage`, `:291` a JSON fragment; the sandbox statement is at `:35/:41/:52/:71` and now names all three exempt checks, including `model_parity`). |
+| `DP16` | "now lists **12** names"; `12 check(s) — 11 passed, 1 failed, 0 skipped` | The registry holds **13** (`grep '^DOCTOR_CHECK_NAMES=' … \| wc -w` → 13; `model_parity` landed `ea8031d`, 2026-09-22). Live: **`13 check(s) — 11 passed, 1 failed, 1 skipped`, exit 1.** The cell is internally inconsistent — it carries both the 12 sentences and later 13 sentences added `569174e`. Its central finding holds and worsened: `beads_ledger` FAIL now reads **442 on disk / 599 in database** (was 442/536). The 442 independently confirmed: `grep -c '"_type":"issue"' .beads/issues.jsonl` → 442. **PROVENANCE CORRECTION — the two halves of that pair are not the same kind of number.** 442 is a count of lines in a git-tracked file and IS pinned by the commit. **599 is a live-Dolt reading and is NOT pinnable by any commit**: re-running `workflow-doctor.sh --target . --skip beads` hours later on the same tree returned **603**, because the store accrued tasks filed during this very session. Whether 599 was correct when taken is **UNVERIFIABLE** and will stay so. Cite the database side as "≈600 and rising, read live on 2026-09-29", never as a figure measured at a commit — the divergence is the finding, and the exact right-hand number never was. Two line citations resolve to nothing (`workflow-doctor.sh:272` is `# Usage`, `:291` a JSON fragment; the sandbox statement is at `:35/:41/:52/:71` and now names all three exempt checks, including `model_parity`). |
 | `DP17` | `design-structural.test.sh` is 1070 lines | **1076.** `design-degradation.sh` is 256, exact. The REMOVED verdict itself is confirmed complete — widening the ledger's non-recursive globs with `git grep -l 'DESIGN_STORE' -- .` finds only guard files naming their own tripwire and documentation about the absence. **Zero live readers.** `docs/specs/` still does not exist. |
 | `DP18` | scratch-session-local log paths | **Partly UNVERIFIABLE.** The scratch target and all four log pairs are gone, so the classification line, verdict counts, sidecars, the twelve-check verify and the P1–P5 prediction scoring cannot be re-executed. The structural half re-verifies from git objects: `git ls-tree --name-only v4.1.0 .claude/agents/` → 7 files with neither `designer.md` nor `design-reviewer.md`; HEAD has 9. Rate it **structurally corroborated, behaviourally unreproducible** — the verdict is defensible, the evidence is no longer re-runnable, and the row should say so rather than cite paths that do not resolve. |
 | `DP1` | `grep -c` returns non-zero | Returns **152** (87 non-comment) — true, but near-unfalsifiable: it would stay non-zero after almost any regression. The substance was checked separately and holds (`no_design_attempted` IS a refusal at `approve`). Two things the claim text omits: enforcement is at `approve`, not before delegation begins — the code is explicit that *nothing* can gate delegation — and there is an audited `--no-design '<reason>'` bypass (`qa-gate.sh:5398-5416`). "Mandatory" carries an operator escape hatch. |

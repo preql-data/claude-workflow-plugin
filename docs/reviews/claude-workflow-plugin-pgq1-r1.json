@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-pgq1",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "322df837996690106479f507a008b7ce2018f7c80565e41e13322b4c8c1bf2d0",
+  "risk_threshold": "high",
+  "stop_condition": "Every acceptance criterion in the SPEC is traced to a re-executed command, and no critical/high finding remains unresolved in either document's decision-bearing claims (verdicts, tally, release-rule status, CI figures).",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": "docs/RELEASE_AUDIT.md:839-841,861-863",
+      "evidence": "docs/RELEASE_AUDIT.md:839-841 reads, in bold: 'Stated plainly rather than rounded up: v5.0.0 NOW MEETS the strict \"NOT-PROVEN = 0\" release rule v3.5.0 set and v4.1.0 also met (11 / 6 / 0 / 1, not the 11 / 6 / 1 / 0 ...)'. :861-862 reads 'no row in this section is NOT-PROVEN.' :863 instructs a future auditor to 'read the 11/6/0/1/18 split as the honest count'. Measured at 891a8c7: awk '/^## v5\\.0\\.0 claims ledger/,0' docs/RELEASE_AUDIT.md | grep -cE '\\| NOT-PROVEN \\|$' -> 1 (DP5). Tally is 10/6/1/1/18, not 11/6/0/1/18. git diff 430fe99 891a8c7 -- ':(glob)docs/RELEASE_AUDIT.md' contains no +/- line touching any of these three statements: the commit updated the tally TABLE (:812-816) and the blockquote NOTE (:823-836) and left the prose conclusion beneath them asserting the opposite.",
+      "description": "The single most decision-relevant sentence in the release audit now states the opposite of the truth, in bold, four lines below the note that states it correctly, and carries the superseded tally as if current. The operator's own brief asks whether the zero-NOT-PROVEN disclosure is 'prominent enough that a reader cannot miss it'; as committed it is immediately contradicted by a more emphatic statement ('Stated plainly rather than rounded up') at paragraph level, while the accurate disclosure sits inside a blockquote addressed to 'WHOEVER APPENDS THE NEXT LEDGER'. This is the same shape as the arc's already-recorded 'every L2 spec skips' defect: a flat false statement left standing inside the section that documents its own correction."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": "docs/RELEASE_AUDIT.md:874-879",
+      "evidence": "docs/RELEASE_AUDIT.md:874-879, under the heading '### v5.0.0 residuals carried into the release notes', still publishes DP5's residual as 'impact_of under-reports cross-script dependencies ... which can make D4's batching intersection silently uninformative' with 'Flip: teach the indexer's bash grammar to resolve a quoted/flagged invocation'. The DP5 row rewritten by this same commit (:789) says of exactly that residual: 'the caveat above describes a residual that CANNOT OCCUR' and 'Because nothing computes an impact set at all, the file_dependents:[] residual the caveat warns about is unreachable; the real residual is larger and was unstated.' DP5's own stated flip is now 'implement claude-workflow-plugin-l7gd ... or perform a prove-or-remove rewrite', not the indexer fix. Verified: grep -n 'graph_intersection_computed' .claude/scripts/epic-gate.sh -> literal false at 1014, 1093, 1394, 1412, 1423, 1430; no true path (anchored grep exits 1); epic-gate.sh never invokes code-graph.",
+      "description": "The section's own title says these residuals are carried into the release notes. A reader acting on this list would chase a residual the same commit proved unreachable, using a flip mechanism that does not apply, and would not learn the real residual (the impact_of conjunct is not computed at all). Same sweep miss as R1-F1: the row moved, the derived prose did not."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": "CHANGELOG.md (0z9v bullet, finishing-pass list)",
+      "evidence": "CHANGELOG.md, 0z9v bullet: 'macOS 228 -> 245 assertions; Linux 209 with 2 FAIL -> 226/226.' Real Linux CI, ubuntu-24.04, non-root: pre-fix run 36232214628 at bff6cc4 -> 'design-conform.test.sh: FAILED rc=1 (228 assertion(s))'; post-fix run 36465905492 at 430fe99 -- the run this same paragraph cites as green -> 'design-conform.test.sh: PASSED (245 assertion(s))'. So on Linux the pair is 228 -> 245, identical to the macOS pair. The 209/226 readings are repro-container values missing Sections 14/15, which skip without python3 (.claude/scripts/tests/design-conform.test.sh:1400-1401 and :1491-1492); the delta is the same 19 on both sides (228-209=19, 245-226=19).",
+      "description": "The bullet presents a macOS-vs-Linux platform contrast that does not exist, and is falsified by the CI run cited in the same paragraph. ad8f4cb (2026-09-28, one day before this commit) corrected precisely this misreading for two sibling specs and wrote the warning into its own message: 'Do not read 342/78 as a Linux-vs-macOS platform difference; there is no such difference here, only a root-vs-non-root one.' design-conform.test.sh's own header at :954-961, added by that same correction, says Sections 14/15 'skip only in narrower repro containers that genuinely lack python3' and that test.yml never gates on python3. The numbers are faithfully transcribed from the 0z9v task record, so the defect is the environment LABEL, not fabrication."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "low",
+      "location": "docs/RELEASE_AUDIT.md:1132",
+      "evidence": "docs/RELEASE_AUDIT.md:1132 (DP16 addendum row) states 'beads_ledger FAIL now reads 442 on disk / 599 in database', under a column headed 'Measured at 430fe99'. Re-run at 891a8c7: grep -c '\"_type\":\"issue\"' .beads/issues.jsonl -> 442 (reproduces exactly). bash .claude/scripts/workflow-doctor.sh --target . --skip beads -> 'on disk 442 record(s), database 603'. 599 does not reproduce; whether it was correct when taken is UNVERIFIABLE, because the Dolt store is not pinned by a commit.",
+      "description": "A commit is the wrong provenance anchor for a live-store reading, and CONTRIBUTING.md's rule ('every number carries the command that produced it and the commit it was measured at') is what makes that visible. The ledger already documents this number's volatility at :914 ('count moved 536 -> 538 between the two runs, which is the live store growing, not flakiness'), so the fix is provenance (timestamp, or an explicit volatility note on the addendum row), not the number. No verdict depends on it; DP16's central finding holds and is unchanged."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "low",
+      "location": "docs/RELEASE_AUDIT.md:866-879,982-983",
+      "evidence": "DP3 moved to PROVEN-WITH-CAVEAT in this commit. The status vocabulary at docs/RELEASE_AUDIT.md:85 says of PROVEN-WITH-CAVEAT: 'The caveat is part of the row and survives into the release notes as residual risk.' The residuals list covers DP2 DP5 DP10 DP11 DP15 DP16 DP17 DP18 -- DP3 is absent. Separately :982-983 still enumerates the caveated rows as 'DP2, DP5, DP10 and DP11', naming DP5 (no longer caveated; now NOT-PROVEN) and omitting DP3 (now caveated).",
+      "description": "Third instance of the same sweep miss. DP3's caveat -- that 'small enough for one coherent change' has no check anywhere -- is a genuine residual for an operator relying on unit sizing being enforced, and it does not reach the list the section says carries residuals into the release notes."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "medium",
+      "location": "claude-workflow-plugin-pgq1 (task record)",
+      "evidence": "bash .claude/scripts/qa-gate.sh review-request-build claude-workflow-plugin-pgq1 ... -> {\"ok\":false,...,\"error_key\":\"missing_completion_contract\"}. Confirmed independently: bd show claude-workflow-plugin-pgq1 --json --include-comments | jq '.comments' returns exactly 1 comment ('QA-GATE: entered at 2026-09-28T20:39:08Z'); zero COMPLETION v1 records. Task is not quarantined (beads-quarantine.sh check -> clean), so the comment stream is trustworthy evidence.",
+      "description": "The change set reached QA with no F7 completion contract, so there is no independent witness of what the author believed shipped, and qa-gate.sh approve would refuse with completion_record_missing regardless of verdict. Per qa.md section 10 the correct response is to send it back, not to satisfy the refusal with QA's own contract."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

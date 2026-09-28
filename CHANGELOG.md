@@ -2590,8 +2590,20 @@ weight actually sits.
     and a whole family of assertions was compared against text that still
     carried its marker. The strip now names both pairs with separate found-
     flags and distinct exits (7 and 8), so a future single-pair regression
-    cannot masquerade as the other, plus sections 9.2g–9.2u. macOS 228 -> 245
-    assertions; Linux 209 with 2 FAIL -> 226/226.
+    cannot masquerade as the other, plus sections 9.2g–9.2u. **228 -> 245
+    assertions, the same on both platforms** — real Linux CI reads
+    `design-conform.test.sh: FAILED rc=1 (228 assertion(s))` at `bff6cc4`
+    (run `36232214628`) and `PASSED (245 assertion(s))` at `430fe99` (run
+    `36465905492`), matching macOS exactly. *An earlier draft of this entry
+    reported "Linux 209 with 2 FAIL -> 226/226" as a platform contrast. There
+    is no platform contrast.* The 209/226 pair is a narrower repro container
+    missing Sections 14 and 15, which skip without python3
+    (`design-conform.test.sh:1400-1401`, `:1491-1492`); the delta is the same
+    19 assertions on both sides. `ad8f4cb` had corrected this exact
+    container-versus-runner misreading for two sibling specs one day earlier
+    and left the warning in its own commit message — and this entry
+    reproduced it anyway, which is why the correction is recorded here in
+    place rather than silently applied.
 
   - **`18fc`** — five independent SHA-256 helpers mis-parsed the one line
     format GNU coreutils and perl's `Digest::SHA` emit for a pathological
