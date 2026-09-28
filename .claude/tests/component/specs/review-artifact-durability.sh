@@ -266,22 +266,54 @@ rm -f "$ESCAPE_PATH" "$OUTSIDE" "$BAD_FILE"
 
 # AC-3 (mutate one byte after review-record, then approve must not claim a
 # verified binding): corrupt the canonical file post-record and confirm the
-# NEXT approve's own re-verification ladder withholds the token.
+# NEXT approve withholds the token.
 printf 'x' >> "$RC_CANONICAL"
 CORRUPT_TID="$TID_A"
 # fkm.4 R2-F1: same --no-design reasoning as run_cycle_approve above. This is
 # a SECOND approve on an already-approved task; the idempotency short-circuit
 # (gz3) only fires when an existing record already binds the CURRENT change
 # set, and the corruption changes what reconcile/impact-report see, so this
-# does not take that path — it re-verifies every precondition, design
-# included, exactly like the first approve does.
+# does not take that path — it re-verifies every precondition from scratch,
+# design included, the same MACHINERY as the first approve.
+#
+# claude-workflow-plugin-g47z: that re-verification does NOT reach the
+# REVIEW-ARTIFACT-BINDING-TOKEN ladder (rqer/c5d6706, qa-gate.sh ~line 7746)
+# this pair of assertions was originally written against, and the needle
+# below used to name that ladder's own wording. fa30d05
+# (claude-workflow-plugin-k6re), landed AFTER rqer, added an earlier,
+# unconditional, HARD-refusing check: every review-artifact FILE on disk for
+# a task is hashed and must match SOME existing REVIEW-ARTIFACT v1 /
+# RECONCILED v1 record BY CONTENT HASH, or approve exits 4 with
+# error_key=review_artifact_unrecorded — confirmed by reading the source,
+# `emit_error_json` is followed immediately by `exit 4` (qa-gate.sh:6773-6776)
+# — before the ladder below it ever runs. A one-byte post-record edit is, by
+# construction, content nothing has recorded, so k6re's gate catches it
+# FIRST every time this scenario runs, not just under this fixture. The
+# ladder's own "no review-artifact binding — changed since it was recorded"
+# wording (qa-gate.sh:7765) is real but is only ever assembled into the
+# SUCCESS summary (qa-gate.sh:7960, `${review_file_binding_obs:-}`) — it
+# cannot appear here because this call never reaches success.
+#
+# Measured on the real runner (CI run 36458045072, job "L2 — component (hook
+# pipelines)", byte-identical under local repro against the shipped script)
+# the actual second-approve output is:
+#   {"ok":false, ... "error_key":"review_artifact_unrecorded",
+#    "observations":"approve refused: 1 of 1 review artifact(s) on disk ...
+#    have NO corresponding record ... checked by CONTENT HASH ..."}
+# — which DOES name the reason, just under k6re's name rather than rqer's.
+# This was a stale expected-substring (the spec never having been re-checked
+# against a real runner after k6re shipped), not a live disclosure gap: the
+# fix is to the assertion's expected wording, not to qa-gate.sh — weakening
+# this to something that would pass under either gate would defeat the one
+# property AC-3 exists to pin, so the needle below names k6re's own error_key
+# rather than loosening to a substring both wordings happen to share.
 CORRUPT_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" reconcile-tracker 2>&1
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$IR" "$CORRUPT_TID" >/dev/null 2>&1
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$QG" approve "$CORRUPT_TID" --no-design "review-artifact-durability spec: no design phase; isolating review-artifact hash mechanics" "second approve after corrupting the artifact" 2>&1)
 assert_not_contains "Leg A / AC-3: a one-byte post-record edit means the NEXT approve claims no verified binding" \
     "review-artifact binding VERIFIED" "$CORRUPT_OUT"
 assert_contains "Leg A / AC-3: ...and says so by name" \
-    "no review-artifact binding" "$CORRUPT_OUT"
+    '"error_key":"review_artifact_unrecorded"' "$CORRUPT_OUT"
 
 printf 'Leg A: PASSED — AC-1 through AC-6 driven end to end against the shipped scripts.\n'
 
