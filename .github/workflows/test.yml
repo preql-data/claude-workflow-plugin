@@ -215,6 +215,20 @@ jobs:
     #     the pin itself is OUT OF SCOPE for h2zz (workflow-doctor.sh is
     #     product code, not one of its eight named fixes) and is filed
     #     separately rather than guessed at here.
+    #   CORRECTION (claude-workflow-plugin-we57/0cr6, 2026-09-28): the "out of
+    #     scope, filed separately" fix above has landed, and this paragraph
+    #     now describes a PAST failure, not a current one. `DOCTOR_BD_SCHEMA_
+    #     PIN` (a single exact pair) became `DOCTOR_BD_SCHEMA_VALIDATED` (a
+    #     membership set), specifically including `1.1.2:53` — THIS job's own
+    #     pinned pair — alongside `1.3.0:66`. META-TEST 8's control now PASSES
+    #     here, because this job's live pair is a validated member, not
+    #     because the check stopped checking. See workflow-doctor.sh's own
+    #     DOCTOR_BD_SCHEMA_VALIDATED header for why a set rather than a wider
+    #     pin (the schema number is not monotonic in bd's release order — a
+    #     floor or interval would be meaningless), and the l1-doctor-bd-max
+    #     job just below this one for how the set's OTHER member (1.3.0:66)
+    #     is now exercised too, rather than resting on "the development host
+    #     agrees" the way this paragraph originally had to.
     #   - model-roles.test.sh's 11.4 (and the identically-gated setup earlier
     #     in that file computing the same production-store HEAD) checks the
     #     PROJECT'S OWN store at a fixed path, `.beads/embeddeddolt/beads` —
@@ -497,6 +511,94 @@ jobs:
         # STRICT_SECTIONS=1 comes from the job env above: in THIS environment a
         # spec that skips a section fails the tier.
         run: bash .claude/scripts/tests/run-tests.sh
+
+  # ---------------------------------------------------------------------------
+  # L1 — bd MAX-END leg. workflow-doctor's DOCTOR_BD_SCHEMA_VALIDATED ceiling
+  # (claude-workflow-plugin-we57/0cr6) — see the job body below for why this
+  # is a separate job rather than a matrix leg of l1-unit above.
+  # ---------------------------------------------------------------------------
+  l1-doctor-bd-max:
+    name: L1 — workflow-doctor (bd max end)
+    runs-on: ubuntu-latest
+    # Exercises the CEILING of workflow-doctor.sh's DOCTOR_BD_SCHEMA_VALIDATED
+    # set (claude-workflow-plugin-we57/0cr6). l1-unit above pins the FLOOR
+    # (bd 1.1.2) on every run; before this job, the validated set's other
+    # member (1.3.0:66) could honestly be described only as "the development
+    # host's own bd" — measured, but exercised by no suite. This job is that
+    # suite, for exactly the claim the set makes.
+    #
+    # WHY A SEPARATE, NARROW JOB RATHER THAN A MATRIX LEG OF l1-unit ABOVE. bd
+    # 1.3.0 is not a drop-in replacement for 1.1.2 across everything this tier
+    # depends on: we57's own investigation found bd's actor attribution
+    # missing from `bd comment`/`update`/`close` output on 1.3.0 (claude-
+    # workflow-plugin-u443, unresolved as of this job), and several OTHER L1
+    # specs assert on that attribution. Matrixing l1-unit itself over both bd
+    # versions would make THIS task's coverage indistinguishable from u443's
+    # pre-existing, separately-tracked gap, and would block merges on
+    # behaviour this task does not touch. So this job installs bd 1.3.0 and
+    # runs ONLY workflow-doctor.test.sh — the one file whose behaviour the
+    # 1.3.0:66 member's validity claim is about — leaving l1-unit's full-tier
+    # run on the 1.1.2 floor untouched. If u443 is resolved later, revisit
+    # whether this should widen into a matrix leg of l1-unit instead.
+    #
+    # dolt stays pinned at 2.3.5 — the SAME release l1-unit installs, not a
+    # second pin to maintain. A `SELECT MAX(version) FROM schema_migrations`
+    # is a read of bd's own on-disk table, not a dolt-CLI-version-sensitive
+    # operation: verified directly, not assumed — a store built with bd 1.3.0
+    # + dolt 2.3.0 read back with dolt 2.3.5 still reports schema 66.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git identity (fixture git commits need one)
+        # Same defect and same fix as l1-unit's identical step above — see
+        # that step's comment for the full R1-F3/R2-F2 account (which
+        # fixtures need it, why GIT_CONFIG_GLOBAL rather than plain
+        # --global, and the corrected A/B that proved it).
+        # workflow-doctor.test.sh's own mk_target() is one of the fixtures
+        # that needs it: `git init` + an allow-empty commit, no local
+        # identity configured first.
+        run: |
+          GIT_ID_CONFIG="$RUNNER_TEMP/git-identity.gitconfig"
+          git config --file "$GIT_ID_CONFIG" user.email "ci@example.com"
+          git config --file "$GIT_ID_CONFIG" user.name "ci"
+          echo "GIT_CONFIG_GLOBAL=$GIT_ID_CONFIG" >> "$GITHUB_ENV"
+      - name: Install bd (Beads CLI) — MAX end, pinned release, checksum-verified
+        # The ceiling of DOCTOR_BD_SCHEMA_VALIDATED (workflow-doctor.sh) and
+        # the development host's own bd as of claude-workflow-plugin-we57/
+        # 0cr6. Same discipline as l1-unit's bd (floor) step above: pinned
+        # tarball, verified against the published release digest
+        # (github.com/steveyegge/beads/releases/download/v1.3.0/checksums.txt,
+        # cross-checked against an independent `sha256sum` of the downloaded
+        # tarball on 2026-09-28), so a moved tag or a tampered tarball fails
+        # loudly here instead of executing.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/beads.tar.gz \
+            "https://github.com/steveyegge/beads/releases/download/v1.3.0/beads_1.3.0_linux_amd64.tar.gz"
+          echo "2f92b904ecf35b607e44dc5c39229173af69c54f1183e8d709f1773540cdcf3b  /tmp/beads.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/beads.tar.gz -C /usr/local/bin bd
+          bd version
+      - name: Install dolt — pinned release, checksum-verified
+        # Identical pin, checksum and binary to l1-unit's own dolt step
+        # above — see that step's comment for the full reasoning. Repeated
+        # rather than factored out: this workflow has no composite-action or
+        # reusable-step mechanism in use elsewhere, so each job's
+        # provisioning stays legible on its own rather than depending on one.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/dolt.tar.gz \
+            "https://github.com/dolthub/dolt/releases/download/v2.3.5/dolt-linux-amd64.tar.gz"
+          echo "c49d4c3e004cf1581ba0d4a00c5023a26f84eb2ec15d5fe876eed36d5343f463  /tmp/dolt.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/dolt.tar.gz -C /usr/local/bin --strip-components=2 dolt-linux-amd64/bin/dolt
+          dolt version
+      - name: Run workflow-doctor.test.sh (bd max end)
+        # NOT run-tests.sh, and no node/MCP-server provisioning: this job
+        # exists to exercise ONE claim (1.3.0:66 is a validated pair) rather
+        # than to re-run the whole L1 tier a second time under a bd version
+        # this tier is not yet fully vetted against (see the job header
+        # above, u443). Sections of this file that need node (e.g. METATEST
+        # 4's mcp_bd leg) SKIP gracefully here, exactly as they do on a
+        # laptop without those servers installed — that degradation is this
+        # file's own designed behaviour, not a gap this job introduces, and
+        # STRICT_SECTIONS is deliberately not set for the same reason.
+        run: bash .claude/scripts/tests/workflow-doctor.test.sh
 
   # ---------------------------------------------------------------------------
   # L2 — component tier. Hook-pipeline tests with crafted stdin envelopes.

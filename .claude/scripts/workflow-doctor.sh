@@ -106,50 +106,96 @@ DOCTOR_TOOL_COUNTS="bd-mcp:21 code-graph-mcp:7"
 DOCTOR_MIN_BD_VERSION="0.47"
 DOCTOR_MIN_NODE_VERSION="18.17"
 
-# The validated <bd-binary-version>:<store-schema-version> pair for the
-# TARGET this doctor is running against (39cy rider, claude-workflow-plugin-
-# j7kk). DOCTOR_MIN_BD_VERSION above is a FLOOR — every one of bd 1.1.2,
-# 1.2.1 and 1.2.2 satisfies it — and floors cannot catch the hazard this one
-# exists for: bd auto-migrates a LOCAL (non-remote-backed) store's schema on
-# first run of a newer binary, with no confirmation and no opt-out (measured:
-# `bd migrate --help` — "Without subcommand, checks and updates database
-# metadata to current version" — and the installed binary's own embedded
-# changelog string "NEW: Auto-migrate SQLite to Dolt on first bd command";
-# `BD_ALLOW_REMOTE_MIGRATE` only gates a REMOTE-backed store, which this repo
-# does not configure). This repo lived that hazard directly: bd self-upgraded
-# 1.1.2 -> 1.2.1 -> 1.2.2 across one work arc, and 1.2.1 silently migrated
-# the Dolt schema, which then made `qa-gate.sh status` misreport an
-# unreachable store as "not-entered" (see cmd_status's own fix) until the
-# schema was rolled back to v53.
+# The validated SET of <bd-binary-version>:<store-schema-version> pairs for
+# the TARGET this doctor is running against (39cy rider, claude-workflow-
+# plugin-j7kk; generalised from a single exact pin to a validated set by
+# claude-workflow-plugin-we57/0cr6 — read both for the full incident and
+# measurement trail this header summarises). DOCTOR_MIN_BD_VERSION above is
+# a FLOOR — every one of bd 1.1.2, 1.2.1 and 1.2.2 satisfies it — and floors
+# cannot catch the hazard this one exists for: bd auto-migrates a LOCAL
+# (non-remote-backed) store's schema on first run of a newer binary, with no
+# confirmation and no opt-out (measured: `bd migrate --help` — "Without
+# subcommand, checks and updates database metadata to current version" —
+# and the installed binary's own embedded changelog string "NEW:
+# Auto-migrate SQLite to Dolt on first bd command"; `BD_ALLOW_REMOTE_MIGRATE`
+# only gates a REMOTE-backed store, which this repo does not configure).
+# This repo lived that hazard directly: bd self-upgraded 1.1.2 -> 1.2.1 ->
+# 1.2.2 across one work arc, and 1.2.1 silently migrated the Dolt schema,
+# which then made `qa-gate.sh status` misreport an unreachable store as
+# "not-entered" (see cmd_status's own fix) until the schema was rolled back
+# to v53.
 #
-# EXACT EQUALITY is the point, same reasoning as DOCTOR_TOOL_COUNTS above: a
-# drift in EITHER direction — bd newer than the pin, or the store's own
-# schema version newer/older than what that bd version wrote — is the thing
-# to catch, not a floor satisfied by every version that ever shipped.
+# WHY A SET, AND NOT A FLOOR OR AN INTERVAL ON THE SCHEMA NUMBER. MEASURED
+# 2026-09-27 (F1, claude-workflow-plugin-we57), method: for each release,
+# `git init` a throwaway directory with an isolated HOME, run that release's
+# own `bd init`, then read the schema_migrations table of the store it
+# created (dolt 2.3.0; two independent trials for 1.2.1 and 1.2.2, which
+# agreed):
+#   bd 1.1.2 -> schema 53
+#   bd 1.2.1 -> schema 65
+#   bd 1.2.2 -> schema 53   (the documented rollback described just above —
+#                            LOWER than 1.2.1's 65 despite being the newer
+#                            release)
+#   bd 1.3.0 -> schema 66
+# The schema number is NOT MONOTONIC in release order, so neither a floor
+# nor an interval on it means anything: 1.2.2 >= 1.2.1 by version but
+# 53 < 65 by schema — an interval wide enough to admit 1.2.1:65 would also
+# admit any schema between 53 and 65 for ANY intervening version, validated
+# or not. The only sound form is a SET of pairs, tested by MEMBERSHIP: it
+# accepts every configuration the project has actually validated while
+# still refusing one nobody has checked, which is what "a range, not one
+# pair" means for a quantity that does not order.
 #
-# THIS IS THE PIN. Update it in the SAME commit as a DELIBERATE bd upgrade or
-# a deliberate schema migration — exactly the EXPECTED_SPECS convention
-# (.claude/scripts/tests/run-tests.sh) applied to a second constant nobody
-# was watching. An untracked drift firing this check is the friction
-# working: it converts a silent, automatic version change back into a
-# reviewed one. "Disable unprompted self-upgrade" (the same 39cy rider) has
-# no bd-side lever to pull — there is no flag that turns off the local-store
+# ONLY TWO OF THE FOUR MEASURED PAIRS ARE VALIDATED BELOW, DELIBERATELY.
+# "Validated" means a suite this project actually runs exercises the pair,
+# not merely that it was measured once above — claiming an unexercised pair
+# as validated would be the exact defect family this pin exists to catch,
+# committed by the pin's own constant:
+#   1.1.2:53  the CI floor. .github/workflows/test.yml's l1-unit job
+#             installs exactly this bd release on every run.
+#   1.3.0:66  the CI ceiling as of the same workflow change (see that job's
+#             "Install bd (max)" step, added alongside this set), and the
+#             development host's own bd.
+# 1.2.1:65 and 1.2.2:53 are measured above but exercised by no suite, so
+# they are KNOWN, not validated, and are deliberately left out of the set.
+# If either gains suite coverage later, add it in the SAME commit as that
+# coverage (see UPDATE PROCEDURE below) — do not add a pair on the strength
+# of a one-off measurement alone, here or anywhere this pattern recurs.
+#
+# EXACT MEMBERSHIP is still the point, same reasoning DOCTOR_TOOL_COUNTS
+# above uses for exact equality: a drift to anything OUTSIDE the validated
+# set — bd newer than every validated entry, or a schema version that entry
+# never wrote — is the thing to catch, not a floor satisfied by every
+# version that ever shipped. A live pair INSIDE the set still gets a
+# VISIBLE pass: the note names which member matched (see check_beads), so
+# "the CI floor" and "the dev ceiling" stay distinguishable instead of
+# collapsing into one unconditional green — the drift signal is preserved,
+# not merely widened.
+#
+# THIS IS STILL THE DRIFT DETECTOR the single pin was; the purpose has not
+# changed, only the shape of what counts as expected. Update it in the SAME
+# commit as a DELIBERATE bd upgrade WITH suite coverage, or a deliberate
+# schema migration — exactly the EXPECTED_SPECS convention
+# (.claude/scripts/tests/run-tests.sh) applied to a constant nobody else was
+# watching. An untracked drift firing this check is the friction working: it
+# converts a silent, automatic version change back into a reviewed one.
+# "Disable unprompted self-upgrade" (the same 39cy rider) has no bd-side
+# lever to pull — there is no flag that turns off the local-store
 # auto-migration above, confirmed by reading `bd --help`, `bd config --help`,
 # `bd upgrade --help` and `bd migrate --help` in full — so prevention here IS
-# detection: pin the validated pair, fail loudly on drift, and let the FAIL's
-# own fix text (below) be the place a maintainer is told to update it
-# deliberately rather than let a package manager do it silently.
+# detection: validate the known-good pairs, fail loudly on anything else,
+# and let the FAIL's own fix text (below) be the place a maintainer is told
+# to add the new pair deliberately, with coverage, rather than let a package
+# manager update it silently.
 #
-# DELIBERATELY NOT DERIVED, considered again this round for the same reason
-# it was rejected the first time this file's own EXPECTED_SPECS sibling
-# convention was written up: a pin computed FROM the live bd/schema pair it
-# is supposed to be checking compares that pair against itself and can never
+# DELIBERATELY NOT DERIVED, for the identical reason the single-pin version
+# of this constant gave: a set computed FROM the live bd/schema pair it is
+# supposed to be checking compares that pair against itself and can never
 # disagree — vacuous by construction, the exact class of self-deriving check
-# claude-workflow-plugin-gytz's own EXPECTED_SPEC_FILES header warns against
-# for the identical reason. The whole point here is catching an UNPROMPTED,
-# UNREVIEWED bd self-upgrade; a derived pin would make that upgrade
-# invisible to this check by definition, which is precisely the hazard this
-# pin exists to surface.
+# claude-workflow-plugin-gytz's own EXPECTED_SPEC_FILES header warns against.
+# The whole point here is catching an UNPROMPTED, UNREVIEWED bd self-upgrade;
+# a derived set would make that upgrade invisible to this check by
+# definition, which is precisely the hazard this exists to surface.
 #
 # UPDATE PROCEDURE (a pin with no stated update procedure goes stale again
 # by construction — this one already has, once, silently, mid-arc — see
@@ -159,21 +205,44 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # When you have DELIBERATELY upgraded bd, or a migration has DELIBERATELY
 # run, measure the new live pair with the SAME two commands this check
 # itself runs (do not trust a CHANGELOG or a version string alone — the
-# schema half is a separate, independently-drifting number):
+# schema half is a separate, independently-drifting number). Resolve the
+# store directory by what EXISTS rather than assuming a name: bd names it
+# after the PROJECT DIRECTORY it was `init`'d in, non-alphanumerics folded
+# to `_`, so ".../embeddeddolt/beads" only exists when that directory is
+# literally named "beads" (claude-workflow-plugin-0cr6 — measured true of
+# THIS repo's own store, but not to be assumed of any other target):
 #   bd --version
-#   ( cd <target>/.beads/embeddeddolt/beads && dolt sql -r csv -q \
-#       "SELECT COALESCE(MAX(version),0) FROM schema_migrations" )
-# then update the constant below to "<bd-version>:<schema-version>" in the
-# SAME commit as the upgrade, and re-run workflow-doctor.test.sh's META-TEST
-# 8 to confirm the new pair is what this check now expects. If bd upgrades
+#   ls <target>/.beads/embeddeddolt/            # find the actual name first
+#   ( cd <target>/.beads/embeddeddolt/<name-from-the-ls-above> && dolt sql \
+#       -r csv -q "SELECT COALESCE(MAX(version),0) FROM schema_migrations" )
+# then, ONLY once a suite exercises the new pair (most naturally a CI leg,
+# mirroring the "Install bd (max)" step), add "<bd-version>:<schema-version>"
+# to the set below in the SAME commit as that coverage, and re-run
+# workflow-doctor.test.sh's META-TEST 8 to confirm the new pair is what this
+# check now accepts. Until it has coverage, record it in this header as
+# measured-but-unvalidated instead of adding it to the set. If bd upgrades
 # UNPROMPTED again (no deliberate action taken, the check just starts
-# failing) — that is this pin doing its job, not a stale assumption; treat
-# the FAILURE itself as the finding, re-measure with the two commands above,
-# and decide whether to accept the new pair (update it) or investigate why
-# bd moved without anyone asking it to.
-# BEGIN DOCTOR_BD_SCHEMA_PIN (workflow-doctor.test.sh extracts this block; keep the sentinels)
-DOCTOR_BD_SCHEMA_PIN="1.3.0:66"
-# END DOCTOR_BD_SCHEMA_PIN
+# failing) — that is this check doing its job, not a stale assumption; treat
+# the FAILURE itself as the finding, re-measure with the two steps above, and
+# decide whether to invest in coverage for the new pair (then add it) or
+# investigate why bd moved without anyone asking it to.
+# BEGIN DOCTOR_BD_SCHEMA_VALIDATED (workflow-doctor.test.sh extracts this block; keep the sentinels.
+# Renamed from BEGIN/END DOCTOR_BD_SCHEMA_PIN by claude-workflow-plugin-we57/
+# 0cr6 — deliberately, per that pair's own license to "keep the sentinels or
+# update the extractor deliberately": nothing greps this BEGIN/END comment
+# text as an extraction boundary — confirmed by reading workflow-doctor.
+# test.sh in full: its sentinel_names() helper anchors on the unrelated
+# DOCTOR_CHECK_NAMES="..." line, and META-TEST 8 (the only place that reads
+# this constant) anchors its sed/grep directly on the bare
+# DOCTOR_BD_SCHEMA_VALIDATED="..." assignment line below, never on this
+# comment — so the rename is a pure readability fix, carries no runtime
+# behaviour change, and needed no extractor update beyond META-TEST 8's own
+# pattern (already updated separately for the set-membership format change).
+# Left as-is, a sentinel still naming the retired single-pin design while the
+# variable inside is a set would be exactly the stale-prose defect this
+# codebase's own culture exists to catch.)
+DOCTOR_BD_SCHEMA_VALIDATED="1.1.2:53 1.3.0:66"
+# END DOCTOR_BD_SCHEMA_VALIDATED
 
 # Minimum bytes of post-frontmatter SKILL.md body. The `skill` check exists to
 # catch the one-line fallback stub session-start.sh substitutes when SKILL.md
@@ -746,6 +815,55 @@ version_at_least() {
     [ "$lowest" = "$want" ]
 }
 
+# resolve_bd_schema_store <target> — the embedded-Dolt store directory under
+# <target>/.beads/embeddeddolt/, located by what EXISTS rather than assumed
+# to be named "beads" (claude-workflow-plugin-0cr6: bd derives that
+# subdirectory's name from the PROJECT DIRECTORY bd was `init`'d in —
+# non-alphanumerics folded to `_` — so ".../embeddeddolt/beads" only exists
+# when the project directory is literally named "beads", true of this
+# repo's own store but not to be assumed of any other target). Echoes the
+# resolved path on stdout (which may not itself exist, on a miss) and
+# returns:
+#   0  exactly one candidate directory (one with a `.dolt` subdirectory)
+#      found under <target>/.beads/embeddeddolt/
+#   1  no candidate found — a store-less target, a pre-1.1.x/SQLite bd
+#      install, or embeddeddolt/ absent entirely
+#   2  more than one candidate found — refuses to guess which is live
+#      (e.g. leftover state from a renamed project directory)
+# No `dolt` binary needed to resolve the PATH; only to query it once found,
+# which check_beads does separately.
+resolve_bd_schema_store() {
+    local target="$1" base candidate found="" count=0
+    base="$target/.beads/embeddeddolt"
+    if [ ! -d "$base" ]; then
+        printf '%s' "$base"
+        return 1
+    fi
+    for candidate in "$base"/*/; do
+        [ -d "${candidate}.dolt" ] || continue
+        found="${candidate%/}"
+        count=$((count + 1))
+    done
+    case "$count" in
+        0) printf '%s' "$base"; return 1 ;;
+        1) printf '%s' "$found"; return 0 ;;
+        *) printf '%s' "$base"; return 2 ;;
+    esac
+}
+
+# bd_schema_pair_in_set <pair> <space-separated-set> — membership test, same
+# idiom as tool_count_for()'s iteration over DOCTOR_TOOL_COUNTS above. Exact
+# string equality per member; no version-ordering semantics, deliberately —
+# see DOCTOR_BD_SCHEMA_VALIDATED's own header for why an ordered comparison
+# is meaningless for this quantity.
+bd_schema_pair_in_set() {
+    local want="$1" set="$2" item
+    for item in $set; do
+        [ "$item" = "$want" ] && return 0
+    done
+    return 1
+}
+
 # frontmatter_of <file> — the first `---`-delimited block's body.
 frontmatter_of() {
     awk 'NR==1 && /^---[[:space:]]*$/ {inb=1; next}
@@ -1201,8 +1319,9 @@ hook failure per fire and the gate it belonged to is simply absent."
 # Check: beads
 #
 # DELIBERATELY TOLERANT of bd's own free-text wording. Presence of .beads/,
-# reachability of `bd doctor`, and (claude-workflow-plugin-j7kk, 39cy) an
-# EXACT bd-version-vs-store-schema match against DOCTOR_BD_SCHEMA_PIN are the
+# reachability of `bd doctor`, and (claude-workflow-plugin-j7kk, 39cy;
+# generalised to a validated SET by claude-workflow-plugin-we57/0cr6) bd-
+# version-vs-store-schema MEMBERSHIP in DOCTOR_BD_SCHEMA_VALIDATED are the
 # three FAIL conditions — the third is a deterministic structural comparison
 # against a constant THIS repo maintains, not bd's own prose, so it is held
 # to a different standard than the text findings below. bd's section wording
@@ -1288,49 +1407,79 @@ NOTE: bd doctor reported $warns advisory warning(s) (informational only). Run
 \`bd doctor\` in the target to read them."
     fi
 
-    # bd-VERSION-vs-STORE-SCHEMA PIN (39cy). EXACT equality against
-    # DOCTOR_BD_SCHEMA_PIN (see that constant's own header for the full
-    # reasoning) — a deterministic structural comparison, not bd's free-text
-    # wording, so it does not inherit the "never fail on cosmetic output"
-    # tolerance above. READ-ONLY: `bd version` never writes, and the schema
-    # read is a direct `dolt sql` SELECT against the schema_migrations table
-    # bd itself queries internally (same predicate string bd's own binary
-    # embeds) — this does not invoke `bd doctor` a second time, so it cannot
-    # also be the thing that triggers that call's own WAL-checkpoint side
-    # effect (see this check's header). The sandboxed-copy helper this file
-    # uses for every OTHER dynamic check builds only an EMPTY .beads/ (see
-    # its own definition further down), so a probe copy carries no schema at
-    # all — this, like the `bd doctor` call above, has to read the REAL
-    # target instead.
-    local pin_bd_ver="${DOCTOR_BD_SCHEMA_PIN%%:*}" pin_schema_ver="${DOCTOR_BD_SCHEMA_PIN#*:}"
+    # bd-VERSION-vs-STORE-SCHEMA MEMBERSHIP (39cy; generalised from an exact
+    # pin to a validated SET by claude-workflow-plugin-we57/0cr6). Membership
+    # in DOCTOR_BD_SCHEMA_VALIDATED (see that constant's own header for the
+    # full reasoning) — a deterministic structural comparison, not bd's
+    # free-text wording, so it does not inherit the "never fail on cosmetic
+    # output" tolerance above. READ-ONLY: `bd version` never writes, and the
+    # schema read is a direct `dolt sql` SELECT against the schema_migrations
+    # table bd itself queries internally (same predicate string bd's own
+    # binary embeds) — this does not invoke `bd doctor` a second time, so it
+    # cannot also be the thing that triggers that call's own WAL-checkpoint
+    # side effect (see this check's header). The sandboxed-copy helper this
+    # file uses for every OTHER dynamic check builds only an EMPTY .beads/
+    # (see its own definition further down), so a probe copy carries no
+    # schema at all — this, like the `bd doctor` call above, has to read the
+    # REAL target instead. The store directory is RESOLVED, not assumed
+    # (claude-workflow-plugin-0cr6: bd names it after the project directory
+    # it was `init`'d in, not literally "beads" except when that IS the
+    # directory's name) — see resolve_bd_schema_store's own header above.
     local live_bd_ver
     live_bd_ver=$(env "PATH=$shim_path" bd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
-    local schema_store="$TARGET/.beads/embeddeddolt/beads"
-    if ! command -v dolt >/dev/null 2>&1 || [ ! -d "$schema_store/.dolt" ]; then
+    if ! command -v dolt >/dev/null 2>&1; then
         note="$note
-NOTE: bd-version-vs-schema pin DISARMED (dolt not on PATH, or $schema_store
-has no embedded-Dolt store — a store-less target, or a pre-1.1.x/SQLite bd
-install). Pinned pair (bd:schema): $DOCTOR_BD_SCHEMA_PIN."
+NOTE: bd-version-vs-schema pin DISARMED (dolt not on PATH — cannot query any
+store's schema_migrations table regardless of whether one exists here).
+Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
     else
-        local live_schema_ver
-        live_schema_ver=$(cd "$schema_store" 2>/dev/null \
-            && dolt sql -r csv -q "SELECT COALESCE(MAX(version),0) FROM schema_migrations" 2>/dev/null | tail -n1)
-        case "$live_schema_ver" in ''|*[!0-9]*) live_schema_ver="" ;; esac
-        if [ -z "$live_bd_ver" ] || [ -z "$live_schema_ver" ]; then
+        local schema_store resolve_rc=0
+        schema_store=$(resolve_bd_schema_store "$TARGET") || resolve_rc=$?
+        case "$resolve_rc" in
+        1)
             note="$note
+NOTE: bd-version-vs-schema pin DISARMED (no embedded-Dolt store found under
+$schema_store — a store-less target, or a pre-1.1.x/SQLite bd install).
+Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
+            ;;
+        2)
+            note="$note
+NOTE: bd-version-vs-schema pin DISARMED (more than one embedded-Dolt store
+found under $schema_store — refusing to guess which one this target's bd
+actually uses). Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
+            ;;
+        *)
+            local live_schema_ver
+            live_schema_ver=$(cd "$schema_store" 2>/dev/null \
+                && dolt sql -r csv -q "SELECT COALESCE(MAX(version),0) FROM schema_migrations" 2>/dev/null | tail -n1)
+            case "$live_schema_ver" in ''|*[!0-9]*) live_schema_ver="" ;; esac
+            if [ -z "$live_bd_ver" ] || [ -z "$live_schema_ver" ]; then
+                note="$note
 NOTE: bd-version-vs-schema pin could not be evaluated (\`bd --version\` or the
-schema_migrations query produced no parseable value). Pinned pair
-(bd:schema): $DOCTOR_BD_SCHEMA_PIN."
-        elif [ "$live_bd_ver:$live_schema_ver" = "$pin_bd_ver:$pin_schema_ver" ]; then
-            # STATE THE MATCH, not just the absence of a failure — a check
-            # that can silently do nothing extra on its happy path is
-            # indistinguishable from a check that never ran (the exact class
-            # this task exists to close). See "M-2 is data plumbing, not a
-            # check" for why THAT script states the opposite thing instead.
-            note="$note
-NOTE: bd-version-vs-schema pin OK ($live_bd_ver:$live_schema_ver matches $DOCTOR_BD_SCHEMA_PIN)."
-        elif [ "$live_bd_ver:$live_schema_ver" != "$pin_bd_ver:$pin_schema_ver" ]; then
-            record beads FAIL "bd-version-vs-schema DRIFT: installed bd $live_bd_ver / store schema v$live_schema_ver != pinned $DOCTOR_BD_SCHEMA_PIN (bd:schema)" \
+schema_migrations query at $schema_store produced no parseable value).
+Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
+            elif bd_schema_pair_in_set "$live_bd_ver:$live_schema_ver" "$DOCTOR_BD_SCHEMA_VALIDATED"; then
+                # STATE THE MATCH, not just the absence of a failure — a
+                # check that can silently do nothing extra on its happy path
+                # is indistinguishable from a check that never ran (the
+                # exact class this task exists to close). See "M-2 is data
+                # plumbing, not a check" for why THAT script states the
+                # opposite thing instead. Naming WHICH member matched (not
+                # just "OK") is what keeps a multi-member set from
+                # collapsing into one undifferentiated green — see
+                # DOCTOR_BD_SCHEMA_VALIDATED's own header.
+                # The break is placed BEFORE "is in the validated set", not
+                # inside it: the phrase is a search anchor other tooling
+                # greps for verbatim (workflow-doctor.test.sh's META-TEST 8a
+                # among them), and `grep -F` does not match a needle split
+                # across a line break — measured directly, not assumed,
+                # after an earlier wording wrapped mid-phrase and the
+                # assertion checking for it failed for exactly that reason.
+                note="$note
+NOTE: bd-version-vs-schema pin OK:
+$live_bd_ver:$live_schema_ver is in the validated set: $DOCTOR_BD_SCHEMA_VALIDATED."
+            else
+                record beads FAIL "bd-version-vs-schema DRIFT: installed bd $live_bd_ver / store schema v$live_schema_ver is not in the validated set {$DOCTOR_BD_SCHEMA_VALIDATED} (bd:schema)" \
 "bd auto-migrates a LOCAL (non-remote-backed) store's schema on first run of a
 NEWER binary, with no confirmation and no opt-out — this is bd's own
 documented behaviour (\`bd migrate --help\`: \"Without subcommand, checks and
@@ -1340,15 +1489,21 @@ fix. This repo lived the hazard directly: bd self-upgraded 1.1.2 -> 1.2.1 ->
 then made \`qa-gate.sh status\` misreport an unreachable store as
 \"not-entered\" until the schema was rolled back.
 If this drift was DELIBERATE (you meant to upgrade bd, or ran a migration on
-purpose): update DOCTOR_BD_SCHEMA_PIN in workflow-doctor.sh to
-\"$live_bd_ver:$live_schema_ver\" in the SAME commit — the EXPECTED_SPECS
-convention (run-tests.sh) applied to this pin.
+purpose) and you can add suite coverage for the new pair (most naturally a
+CI leg — see the l1-unit job's bd-max leg for the pattern): add
+\"$live_bd_ver:$live_schema_ver\" to DOCTOR_BD_SCHEMA_VALIDATED in
+workflow-doctor.sh in the SAME commit as that coverage — the EXPECTED_SPECS
+convention (run-tests.sh) applied to this set. Until it has coverage, record
+it in that constant's own header as measured-but-unvalidated instead of
+adding it to the set.
 If it was NOT deliberate: something (a package manager, a reinstall script)
 upgraded bd without telling you. Pin bd at the OS/package-manager level (e.g.
 \`brew pin bd\`) so it cannot happen again unprompted, and read \`bd doctor\`'s
 own 'Database version and migration status' section for what changed."
-            return
-        fi
+                return
+            fi
+            ;;
+        esac
     fi
     record beads PASS ".beads/ present; \`bd doctor\` reachable (exit $rc)$note"
 }

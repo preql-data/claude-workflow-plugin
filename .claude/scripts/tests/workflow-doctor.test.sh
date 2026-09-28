@@ -1231,66 +1231,106 @@ else
 fi
 
 echo ""
-echo "--- META-TEST 8: bd-version-vs-store-schema pin is EXACT, not a floor (claude-workflow-plugin-j7kk, 39cy) ---"
+echo "--- META-TEST 8: bd-version-vs-store-schema is a VALIDATED SET, not a floor or a single pin (claude-workflow-plugin-j7kk, 39cy, we57, 0cr6) ---"
 if ! command -v bd >/dev/null 2>&1 || ! command -v dolt >/dev/null 2>&1; then
     printf '  note: META-TEST 8 SKIPPED - it needs both bd and dolt on PATH to build a real embedded-Dolt fixture store.\n'
 else
     ONLY_BEADS8=$(all_but beads)
+
+    # A shared schema-bump mutant, used against BOTH fixtures below (8a and
+    # 8b): exercises we57's concern (membership, not a floor) independently
+    # of 0cr6's (name-independent resolution). Anchored on the VARIABLE via
+    # its sentinel line, not the current literal values (unlike META-TEST
+    # 4's hardcoded 21->22): DOCTOR_BD_SCHEMA_VALIDATED is expected to change
+    # on every deliberate bd upgrade, and a sed anchored to today's exact
+    # schema numbers would silently stop mutating (the non-vacuity checks
+    # below would catch that, but there is no reason to invite it). Only the
+    # SCHEMA half of EACH member is bumped, so this specifically exercises
+    # "bd matches one of the validated versions, but neither schema half
+    # does" rather than accidentally proving something about the versions.
+    MUT8_SCHEMA="$WORK/doctor-mut8-schema.sh"
+    sed -E '/^DOCTOR_BD_SCHEMA_VALIDATED=/ s/:[0-9]+/:99/g' "$DOCTOR" > "$MUT8_SCHEMA"
+    assert_eq "META-TEST 8: the schema-bump mutant's line really changed to two :99 halves" "true" \
+        "$(grep -qE '^DOCTOR_BD_SCHEMA_VALIDATED="1\.1\.2:99 1\.3\.0:99"$' "$MUT8_SCHEMA" && echo true || echo false)"
+    assert_eq "META-TEST 8: the schema-bump mutant differs from the shipped doctor" \
+        "differs" "$(cmp -s "$DOCTOR" "$MUT8_SCHEMA" && echo identical || echo differs)"
+    assert_eq "META-TEST 8: the schema-bump mutant is still valid bash" "0" \
+        "$(bash -n "$MUT8_SCHEMA" 2>/dev/null && echo 0 || echo 1)"
+
+    # A second mutant, targeting 0cr6 specifically: reverts store DISCOVERY
+    # to the retired hardcoded assumption (append "/beads" to the resolved
+    # base, same effect as the old literal
+    # "$TARGET/.beads/embeddeddolt/beads" this task removed) while leaving
+    # set-membership logic untouched. Anchored on the function's own base=
+    # line so it keeps mutating if that line ever moves, not on a line
+    # number.
+    MUT8_PATH="$WORK/doctor-mut8-path.sh"
+    # [[:space:]]*, not \s: BSD sed's -E does not treat \s as whitespace (it
+    # silently matched zero lines when tried — measured directly, not
+    # assumed), which would have made this mutation vacuous while still
+    # exiting 0. The non-vacuity assertion just below is what would have
+    # caught that; POSIX classes are what avoid needing it to.
+    # shellcheck disable=SC2016  # $target is literal text matched against the script file, not meant to expand
+    sed -E 's#^([[:space:]]*base=")(\$target/\.beads/embeddeddolt)(")$#\1\2/beads\3#' "$DOCTOR" > "$MUT8_PATH"
+    # shellcheck disable=SC2016  # same: matching the literal source line, not expanding it
+    assert_eq "META-TEST 8: the path-regression mutant's base= line really gained the hardcoded /beads suffix" "true" \
+        "$(grep -qE '^[[:space:]]*base="\$target/\.beads/embeddeddolt/beads"$' "$MUT8_PATH" && echo true || echo false)"
+    assert_eq "META-TEST 8: the path-regression mutant differs from the shipped doctor" \
+        "differs" "$(cmp -s "$DOCTOR" "$MUT8_PATH" && echo identical || echo differs)"
+    assert_eq "META-TEST 8: the path-regression mutant is still valid bash" "0" \
+        "$(bash -n "$MUT8_PATH" 2>/dev/null && echo 0 || echo 1)"
+
+    # --- 8a: fixture whose store IS named "beads" (--database beads) -------
     SCHEMA_TARGET="$WORK/target-schema-pin"
     mk_target "$SCHEMA_TARGET"
     # --database beads matches THIS repo's OWN embedded-Dolt layout
     # (.beads/embeddeddolt/beads/.dolt) — a fresh `bd init` with no
     # --database names the subdirectory after the CURRENT DIRECTORY instead
-    # (measured, claude-workflow-plugin-j7kk: a fixture at .../dryrun-fx
-    # defaulted to embeddeddolt/dryrun_fx/.dolt), which would silently
-    # DISARM the check under test rather than exercise it. mk_target()'s own
-    # `.beads/` is an empty placeholder (like mk_probe_sandbox()'s), so it is
-    # removed first rather than initialised into.
+    # (measured, claude-workflow-plugin-j7kk/0cr6: a fixture at
+    # .../dryrun-fx defaulted to embeddeddolt/dryrun_fx/.dolt), which would
+    # silently DISARM the check under test rather than exercise it.
+    # mk_target()'s own `.beads/` is an empty placeholder (like
+    # mk_probe_sandbox()'s), so it is removed first rather than initialised
+    # into.
     rm -rf "$SCHEMA_TARGET/.beads"
     ( cd "$SCHEMA_TARGET" && bd init --database beads --non-interactive >/dev/null 2>&1 )
     if [ ! -d "$SCHEMA_TARGET/.beads/embeddeddolt/beads/.dolt" ]; then
-        printf '  note: META-TEST 8 SKIPPED - could not build a real embedded-Dolt fixture store at %s\n' \
+        printf '  note: META-TEST 8a SKIPPED - could not build a real embedded-Dolt fixture store at %s\n' \
             "$SCHEMA_TARGET/.beads/embeddeddolt/beads/.dolt"
     else
         # CONTROL FIRST: the fresh fixture's installed bd/schema is whatever
         # THIS host's bd actually writes on `bd init`, so the control is "the
-        # shipped doctor agrees with the pin over a store it just created" —
+        # shipped doctor finds this host's live pair in the validated set" —
         # never against a hardcoded expectation this spec would go stale
-        # against the day DOCTOR_BD_SCHEMA_PIN is deliberately updated.
-        CTRL8_JSON="$WORK/meta8-control.json"
-        doctor_run "$DOCTOR" "$SCHEMA_TARGET" "$CTRL8_JSON" --quiet --skip "$ONLY_BEADS8"
-        CTRL8_STATUS=$(status_of "$CTRL8_JSON" beads)
-        assert_eq "META-TEST 8 control: beads PASSES against a freshly bd-init'd fixture (this host's bd/schema pair matches the shipped pin by construction)" \
-            "PASS" "$CTRL8_STATUS"
+        # against the day DOCTOR_BD_SCHEMA_VALIDATED is deliberately updated.
+        # Unlike the single-pin predecessor this generalises, this control is
+        # expected to PASS on EITHER the CI floor (1.1.2:53) or the dev
+        # ceiling (1.3.0:66) host — that breadth is the whole point of a set.
+        CTRL8A_JSON="$WORK/meta8a-control.json"
+        doctor_run "$DOCTOR" "$SCHEMA_TARGET" "$CTRL8A_JSON" --quiet --skip "$ONLY_BEADS8"
+        CTRL8A_STATUS=$(status_of "$CTRL8A_JSON" beads)
+        assert_eq "META-TEST 8a control: beads PASSES against a freshly bd-init'd 'beads'-named fixture (this host's bd/schema pair is in the validated set by construction)" \
+            "PASS" "$CTRL8A_STATUS"
+        assert_contains "META-TEST 8a control: ...and the note names the validated set, not just 'OK'" \
+            "is in the validated set" \
+            "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$CTRL8A_JSON" 2>/dev/null || echo "")"
 
-        if [ "$CTRL8_STATUS" != "PASS" ]; then
-            printf '  note: META-TEST 8 mutant leg skipped — the control did not pass (this host'\''s bd/schema pair does not match DOCTOR_BD_SCHEMA_PIN), so a mutant FAIL would not be attributable to the pin logic.\n'
+        if [ "$CTRL8A_STATUS" != "PASS" ]; then
+            printf '  note: META-TEST 8a mutant legs skipped — the control did not pass (this host'\''s bd/schema pair is not in DOCTOR_BD_SCHEMA_VALIDATED), so a mutant FAIL would not be attributable to the pin logic.\n'
         else
-            MUT8="$WORK/doctor-mut8.sh"
-            # Anchored on the VARIABLE, not the current literal value (unlike
-            # META-TEST 4's hardcoded 21->22): DOCTOR_BD_SCHEMA_PIN is
-            # expected to change on every deliberate bd upgrade, and a sed
-            # anchored to today's exact value would silently stop mutating
-            # (and the non-vacuity checks below would catch that, but there
-            # is no reason to invite it). Only the SCHEMA half is bumped, so
-            # this specifically exercises "bd matches, schema does not".
-            sed -E 's/^(DOCTOR_BD_SCHEMA_PIN="[^:"]+):[0-9]+(")$/\1:99\2/' "$DOCTOR" > "$MUT8"
-            assert_eq "META-TEST 8: the mutant's schema half really changed to 99" "true" \
-                "$(grep -qE '^DOCTOR_BD_SCHEMA_PIN="[^:"]+:99"$' "$MUT8" && echo true || echo false)"
-            assert_eq "META-TEST 8: the mutant differs from the shipped doctor" \
-                "differs" "$(cmp -s "$DOCTOR" "$MUT8" && echo identical || echo differs)"
-            assert_eq "META-TEST 8: the mutant is still valid bash" "0" \
-                "$(bash -n "$MUT8" 2>/dev/null && echo 0 || echo 1)"
-            MUT8_JSON="$WORK/meta8-mutant.json"
-            doctor_run "$MUT8" "$SCHEMA_TARGET" "$MUT8_JSON" --quiet --skip "$ONLY_BEADS8"
-            assert_eq "META-TEST 8: an off-pin schema version flips beads to FAIL (equality, not a floor)" \
-                "FAIL" "$(status_of "$MUT8_JSON" beads)"
-            assert_contains "META-TEST 8: the FAIL detail names the DRIFT and both observed values" \
+            MUT8A_JSON="$WORK/meta8a-mutant.json"
+            doctor_run "$MUT8_SCHEMA" "$SCHEMA_TARGET" "$MUT8A_JSON" --quiet --skip "$ONLY_BEADS8"
+            assert_eq "META-TEST 8a: a pair outside the validated set flips beads to FAIL (membership, not a floor)" \
+                "FAIL" "$(status_of "$MUT8A_JSON" beads)"
+            assert_contains "META-TEST 8a: the FAIL detail names the DRIFT and both observed values" \
                 "bd-version-vs-schema DRIFT" \
-                "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$MUT8_JSON" 2>/dev/null || echo "")"
-            assert_contains "META-TEST 8: ...and the fix line tells the operator how to update the pin deliberately" \
-                "update DOCTOR_BD_SCHEMA_PIN" \
-                "$(jq -r '.checks[] | select(.name == "beads") | .fix' "$MUT8_JSON" 2>/dev/null || echo "")"
+                "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$MUT8A_JSON" 2>/dev/null || echo "")"
+            assert_contains "META-TEST 8a: ...names 'not in the validated set', not a stale single-pin phrase" \
+                "not in the validated set" \
+                "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$MUT8A_JSON" 2>/dev/null || echo "")"
+            assert_contains "META-TEST 8a: ...and the fix line tells the operator how to add a new pair deliberately" \
+                "DOCTOR_BD_SCHEMA_VALIDATED" \
+                "$(jq -r '.checks[] | select(.name == "beads") | .fix' "$MUT8A_JSON" 2>/dev/null || echo "")"
         fi
 
         # DISARM CONTROL: a target whose .beads/ exists but carries no
@@ -1305,6 +1345,80 @@ else
         assert_contains "META-TEST 8 disarm: ...and says so by name" \
             "DISARMED" \
             "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$DISARM_JSON" 2>/dev/null || echo "")"
+    fi
+
+    # --- 8b: fixture whose store is NOT named "beads" (claude-workflow-plugin-0cr6) ---
+    # THE CASE THAT HAS NEVER BEEN EXERCISED. Every fixture elsewhere in this
+    # tier (this file's own 8a above, runner-completeness.test.sh's store
+    # canary, model-roles.test.sh's isolation witness) passes `--database
+    # beads` deliberately, which matches THIS repo's own layout but is
+    # exactly the flag a teammate's target never passes — bd has no
+    # awareness of this project's conventions when it is run against a real
+    # target the plugin did not create. Omitting the flag here is the point:
+    # bd falls back to naming the store after the CURRENT DIRECTORY (non-
+    # alphanumerics folded to `_`), reproducing 0cr6's own three-target
+    # measurement (`some-real-project` -> `some_real_project`) inside this
+    # fixture rather than merely describing it in a comment.
+    NONBEADS_TARGET="$WORK/some-real-project"
+    mk_target "$NONBEADS_TARGET"
+    rm -rf "$NONBEADS_TARGET/.beads"
+    ( cd "$NONBEADS_TARGET" && bd init --non-interactive >/dev/null 2>&1 )
+    NONBEADS_STORE="$NONBEADS_TARGET/.beads/embeddeddolt/some_real_project"
+    if [ ! -d "$NONBEADS_STORE/.dolt" ]; then
+        printf '  note: META-TEST 8b SKIPPED - could not build a real embedded-Dolt fixture store at %s (bd may derive a different name on this bd release than the 0cr6 measurement did; if so this skip itself is evidence worth re-measuring, not a fixture bug to route around)\n' \
+            "$NONBEADS_STORE"
+    else
+        # CONTROL FIRST, same discipline as 8a: whatever this host's live
+        # bd/schema pair is, it is IDENTICAL to 8a's (same `bd` on PATH) —
+        # only the store's DIRECTORY NAME differs between the two fixtures.
+        # So this control is expected to reach the exact same verdict 8a's
+        # did, and the two assertions below are the direct regression test
+        # for 0cr6: NOT disarmed (the defect this task fixes), and REACHING
+        # A REAL VERDICT (proving evaluation happened, not a lucky
+        # coincidental PASS from a check that silently did nothing).
+        CTRL8B_JSON="$WORK/meta8b-control.json"
+        doctor_run "$DOCTOR" "$NONBEADS_TARGET" "$CTRL8B_JSON" --quiet --skip "$ONLY_BEADS8"
+        CTRL8B_STATUS=$(status_of "$CTRL8B_JSON" beads)
+        CTRL8B_DETAIL=$(jq -r '.checks[] | select(.name == "beads") | .detail' "$CTRL8B_JSON" 2>/dev/null || echo "")
+        assert_eq "META-TEST 8b control (0cr6): beads reaches the SAME verdict on a non-'beads'-named store as 8a's identically-configured 'beads'-named one" \
+            "$CTRL8A_STATUS" "$CTRL8B_STATUS"
+        assert_not_contains "META-TEST 8b control (0cr6): THE REGRESSION TEST — a non-'beads'-named target is NOT silently disarmed" \
+            "DISARMED" "$CTRL8B_DETAIL"
+        assert_contains "META-TEST 8b control (0cr6): ...the store was actually located and evaluated (names the validated set, proving a real comparison ran)" \
+            "validated set" "$CTRL8B_DETAIL"
+
+        if [ "$CTRL8B_STATUS" != "PASS" ]; then
+            printf '  note: META-TEST 8b mutant legs skipped — the control did not PASS (see 8a'\''s identical gate), so a mutant FAIL would not be attributable to the pin logic.\n'
+        else
+            # 8b-i: the SAME schema-bump mutant used in 8a, run against the
+            # non-'beads' fixture — proves EVALUATION (not just resolution)
+            # is name-independent: a validated-set membership failure fires
+            # here exactly as it does on a 'beads'-named store.
+            MUT8B_SCHEMA_JSON="$WORK/meta8b-mutant-schema.json"
+            doctor_run "$MUT8_SCHEMA" "$NONBEADS_TARGET" "$MUT8B_SCHEMA_JSON" --quiet --skip "$ONLY_BEADS8"
+            assert_eq "META-TEST 8b-i: a pair outside the validated set flips beads to FAIL on a non-'beads'-named store too" \
+                "FAIL" "$(status_of "$MUT8B_SCHEMA_JSON" beads)"
+            assert_contains "META-TEST 8b-i: ...naming the DRIFT, not a silent disarm" \
+                "bd-version-vs-schema DRIFT" \
+                "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$MUT8B_SCHEMA_JSON" 2>/dev/null || echo "")"
+
+            # 8b-ii: THE DIRECT 0cr6 REGRESSION PAIR. The path-regression
+            # mutant (store discovery reverted to the retired hardcoded
+            # "/beads" assumption) must DISARM FALSELY on this identical
+            # fixture, in contrast to the shipped doctor's real PASS above —
+            # same input, same host, same live bd/schema pair; the only
+            # variable is whether store discovery is resolved or assumed.
+            # This is the specific-misbehaviour leg the schema-bump mutant
+            # cannot provide: it proves the OLD bug's class is caught, not
+            # merely that SOME mutation of this check can be made to fail.
+            MUT8B_PATH_JSON="$WORK/meta8b-mutant-path.json"
+            doctor_run "$MUT8_PATH" "$NONBEADS_TARGET" "$MUT8B_PATH_JSON" --quiet --skip "$ONLY_BEADS8"
+            assert_eq "META-TEST 8b-ii REGRESSION: reverting store discovery to the retired hardcoded assumption DISARMS (falsely) on a non-'beads'-named store" \
+                "PASS" "$(status_of "$MUT8B_PATH_JSON" beads)"
+            assert_contains "META-TEST 8b-ii REGRESSION: ...and the mutant's note says DISARMED where the shipped doctor's does not (same fixture, same host)" \
+                "DISARMED" \
+                "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$MUT8B_PATH_JSON" 2>/dev/null || echo "")"
+        fi
     fi
 fi
 

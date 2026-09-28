@@ -237,6 +237,36 @@ exact command, on any output-shape mismatch):
 bash .claude/tests/component/run.sh --filter bd-compat
 ```
 
+Separately, `workflow-doctor.sh`'s `beads` check validates the **embedded-
+Dolt schema** of a *local* bd store — a narrower, different question from
+CLI compatibility above, because bd silently auto-migrates a local store's
+schema on first run of a newer binary, with no confirmation and no opt-out.
+The schema number does not order with bd's release number (measured
+2026-09-27, claude-workflow-plugin-we57: bd 1.2.2 ships schema 53, *lower*
+than 1.2.1's 65 — it is the documented rollback of 1.2.1's migration), so
+this is a **validated SET of exact `bd:schema` pairs**, membership-tested,
+not a floor or an interval:
+
+| bd version | schema | status |
+|---|---|---|
+| 1.1.2 | 53 | validated — the CI floor (`l1-unit`, every run) |
+| 1.2.1 | 65 | measured, not validated — no suite exercises it |
+| 1.2.2 | 53 | measured, not validated — no suite exercises it |
+| 1.3.0 | 66 | validated — the CI ceiling (`l1-doctor-bd-max`) and the development host |
+
+A live pair inside the set PASSes the doctor's `beads` check (the note names
+which member matched); a pair outside it — including the two measured-but-
+unvalidated rows above — FAILs as `bd-version-vs-schema DRIFT`, which is what
+converts a silent bd self-upgrade back into a reviewed one instead of a
+missed one. See `DOCTOR_BD_SCHEMA_VALIDATED`'s own header comment in
+`.claude/scripts/workflow-doctor.sh` for the full measurement method and the
+procedure for adding a pair once it gains suite coverage, and run the doctor
+to check your own install:
+
+```bash
+bash .claude/scripts/workflow-doctor.sh
+```
+
 ## 📦 What you get on disk
 
 Counts re-derived from the tree on 2026-09-18 for the v5.0.0 release
