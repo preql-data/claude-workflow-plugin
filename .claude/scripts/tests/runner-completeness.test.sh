@@ -2763,22 +2763,67 @@ EOF
         # A bracket RANGE ([0-9a-v]) collates per LC_COLLATE; an EXPLICIT
         # enumeration does not. Rather than assert that in the abstract,
         # this finds a locale ACTUALLY INSTALLED on this host under which
-        # bash 3.2's own `case` really does misclassify an uppercase letter
-        # as inside [a-v] (a plain claim about glibc/ICU collation would be
+        # bash's own `case` really does misclassify an uppercase letter as
+        # inside [a-v] (a plain claim about glibc/ICU collation would be
         # exactly the un-evidenced kind of number this repo's own convention
         # refuses), and SKIPS itself honestly if none is found rather than
         # asserting anything on a host where the exposure cannot be shown.
+        #
+        # claude-workflow-plugin-8lc1: this used to skip on EVERY GitHub
+        # runner even though the runner image genuinely ships en_US.UTF-8 --
+        # the loop below varied the locale six ways and never varied the
+        # second condition that actually gates it. Measured mechanism, with
+        # a negative control (ubuntu:24.04, glibc 2.39, bash 5.2.21):
+        #   bash 5.2 + en_US.UTF-8 + globasciiranges ON  (bash 5 default) -> no
+        #   bash 5.2 + en_US.UTF-8 + globasciiranges OFF                  -> MATCH
+        #   bash 5.2 + LC_ALL=C    + globasciiranges OFF                  -> no (the
+        #             locale is still doing real work; the shopt alone is not enough)
+        #   bash 3.2 (macOS), en_US.UTF-8, option does not exist          -> MATCH
+        # bash 5.0+ defaults the `globasciiranges` shell option ON, which
+        # forces bracket RANGE expressions to ASCII ordering regardless of
+        # LC_COLLATE -- 'A' is 0x41, [a-v] is 0x61-0x76, so [a-v] cannot
+        # match 'A' on such a host until that option is turned off. macOS
+        # ships bash 3.2, where the option does not exist at all and
+        # collation always applies, which is exactly why this section
+        # demonstrated the exposure on every dev host and never on a runner.
+        #
+        # Disabling globasciiranges where it exists is not a workaround for
+        # a fake pass -- it reproduces the SAME collation semantics macOS's
+        # bash 3.2 has unconditionally, recreating the real condition under
+        # which the shipped guard (the explicit character class) is
+        # load-bearing, which is this section's entire purpose. The probe
+        # below detects CAPABILITY (does this bash even have the option?),
+        # never a bash version number, so a future bash that changes the
+        # default again is still handled correctly.
+        SC_ASCII_RANGE_PREAMBLE=""
+        if bash -c 'shopt -p globasciiranges' >/dev/null 2>&1; then
+            SC_ASCII_RANGE_PREAMBLE='shopt -u globasciiranges; '
+        fi
         SC_LOCALE_HIT=""
         for _sc_loc in en_US.UTF-8 en_US.utf8 en_GB.UTF-8 en_GB.utf8 de_DE.UTF-8 de_DE.utf8; do
-            if [ "$(LC_ALL="$_sc_loc" LC_COLLATE="$_sc_loc" bash -c 'case "A" in [a-v]) echo MATCH ;; *) echo no ;; esac' 2>/dev/null)" = "MATCH" ]; then
+            if [ "$(LC_ALL="$_sc_loc" LC_COLLATE="$_sc_loc" bash -c "${SC_ASCII_RANGE_PREAMBLE}"'case "A" in [a-v]) echo MATCH ;; *) echo no ;; esac' 2>/dev/null)" = "MATCH" ]; then
                 SC_LOCALE_HIT="$_sc_loc"
                 break
             fi
         done
         if [ -z "$SC_LOCALE_HIT" ]; then
-            printf '  SKIPPED: no locale installed on this host demonstrates the [a-v] collation exposure (tried en_US/en_GB/de_DE in both UTF-8 spellings) -- not a fix regression, just an environment gap; 13q'"'"'s C-locale coverage of dolt_hash_looks_valid is unaffected\n'
+            printf '  SKIPPED: no locale on this host collates differently from C -- [a-v] cannot be shown to misclassify "A" even with the globasciiranges ASCII-range override disabled where it exists (tried en_US/en_GB/de_DE in both UTF-8 spellings) -- not a fix regression, just an environment gap; 13q'"'"'s C-locale coverage of dolt_hash_looks_valid is unaffected\n'
         else
-            printf "  precondition: LC_COLLATE=%s makes bash 3.2 on this host match case 'A' in [a-v])\n" "$SC_LOCALE_HIT"
+            if [ -n "$SC_ASCII_RANGE_PREAMBLE" ]; then
+                SC_ASCII_NOTE="globasciiranges recognised on this bash and disabled for the probe"
+            else
+                SC_ASCII_NOTE="no globasciiranges option on this bash (pre-4.3, e.g. macOS's shipped bash 3.2); collation applies unconditionally"
+            fi
+            printf "  precondition: %s; LC_COLLATE=%s makes this host's bash match case 'A' in [a-v])\n" "$SC_ASCII_NOTE" "$SC_LOCALE_HIT"
+
+            # NEGATIVE CONTROL (claude-workflow-plugin-8lc1): prove the
+            # locale above is doing real collation work and this is not
+            # merely globasciiranges-off producing a match unconditionally --
+            # same handling, but LC_ALL=C (no collating locale) must still
+            # say "no". Measured true on bash 5.2.21 + glibc 2.39
+            # (ubuntu:24.04) and on bash 3.2.57 (macOS, no such option).
+            assert_eq "13w.0 NEGATIVE CONTROL: with the SAME globasciiranges handling but LC_ALL=C, [a-v] still does NOT match 'A' -- the locale, not just the shopt, is load-bearing" \
+                "no" "$(LC_ALL=C LC_COLLATE=C bash -c "${SC_ASCII_RANGE_PREAMBLE}"'case "A" in [a-v]) echo MATCH ;; *) echo no ;; esac' 2>/dev/null)"
 
             # 1. NON-VACUITY: revert JUST the explicit class back to the
             #    pre-fix range, everywhere it appears (the 32-times-repeated
@@ -2800,8 +2845,17 @@ EOF
 
             sc_shape_check_locale() {
                 # sc_shape_check_locale <lib> <locale> <value> -> valid/invalid
+                # claude-workflow-plugin-8lc1: same globasciiranges handling
+                # as the detection loop above -- the mutant's reverted range
+                # ([0-9a-v]) is exactly the collation-dependent construct the
+                # option forces to ASCII ordering on a bash that has it, so
+                # without this a bash-5 host could never reproduce 13w.6's
+                # misbehaviour even under a genuinely collating locale.
+                # Harmless for the SHIPPED (explicit-class) library checked
+                # at 13w.7/13w.8 too: an explicit enumeration is not a
+                # range, and globasciiranges only governs ranges.
                 LC_ALL="$2" LC_COLLATE="$2" bash -c \
-                    '. "$1"; dolt_hash_looks_valid "$2" && echo valid || echo invalid' \
+                    "${SC_ASCII_RANGE_PREAMBLE}"'. "$1"; dolt_hash_looks_valid "$2" && echo valid || echo invalid' \
                     -- "$1" "$3"
             }
 
