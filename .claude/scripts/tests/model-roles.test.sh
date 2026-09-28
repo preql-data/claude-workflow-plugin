@@ -176,6 +176,14 @@ trap 'rm -rf "$TESTROOT"' EXIT
 # record_switch_role both `|| return 0`), so refusing changes no assertion in
 # this file — nothing here inspects the meta-task audit trail, only the
 # model PINS written to agent .md files and the warning text on stderr.
+#
+# claude-workflow-plugin-qwny: captured HERE, before PATH is mutated below,
+# so Section 11's hermetic-fixture construction can invoke the GENUINE bd
+# binary explicitly (bypassing PATH/the stub entirely) to build and drive a
+# throwaway store. Empty (never unbound, set -u safe) when no real bd is on
+# PATH at all -- that is a legitimate reason for Section 11's fixture legs
+# to DISARM, same as a missing dolt.
+REAL_BD="$(command -v bd 2>/dev/null || true)"
 BD_STUB_LOG="$TESTROOT/bd-stub-calls.log"
 BD_STUB_BIN=$(mktemp -d "$TESTROOT/bd-stub-bin.XXXXXX")
 cat > "$BD_STUB_BIN/bd" <<STUB
@@ -199,16 +207,57 @@ export PATH="$BD_STUB_BIN:$PATH"
 # matching every other DISARM path this task adds; this is a defense-in-depth
 # self-check, not a substitute for the tier-wide guard, which is a separate,
 # paired addition to run-tests.sh / runner-completeness.test.sh.
-BD_ISOLATION_STORE="$PROJECT_DIR/.beads/embeddeddolt/beads"
+#
+# claude-workflow-plugin-qwny: this used to point at the OPERATOR'S OWN live
+# $PROJECT_DIR/.beads/embeddeddolt/beads. That directory is gitignored (`git
+# ls-files .beads/` lists 8 tracked files, none under embeddeddolt/), so a
+# byte-for-byte fresh checkout — the CI case — never has one; the witness
+# below SKIPPED there, and under STRICT_SECTIONS=1 a section-level skip
+# fails the whole tier (run-tests.sh PARTIAL>0), turning an environment gap
+# into a tier failure unrelated to anything this file actually checks. Made
+# HERMETIC instead: a throwaway embedded-dolt store built fresh inside this
+# run's own $TESTROOT, using the GENUINE bd captured as REAL_BD above (the
+# stub refuses everything, so it cannot be the one to initialise a store).
+# `--database beads` is EXPLICIT and load-bearing, not decorative: bd names
+# an embedded store after the CURRENT DIRECTORY when this flag is omitted
+# (measured: a fixture at .../dryrun-fx defaulted to
+# embeddeddolt/dryrun_fx/, confirmed independently at three directory
+# names) — an implicit init would silently land the store somewhere this
+# file never looks, disarming every leg below while still reporting green.
+# runner-completeness.test.sh:2069-2077 hits the identical trap; this
+# mirrors its fix.
+BD_ISOLATION_ROOT="$TESTROOT/isolation-fixture"
+BD_ISOLATION_PROTECTED_ROOT="$TESTROOT/isolation-protected"
+BD_ISOLATION_UNPROTECTED_ROOT="$TESTROOT/isolation-unprotected"
+BD_ISOLATION_STORE="$BD_ISOLATION_ROOT/.beads/embeddeddolt/beads"
+BD_ISOLATION_PROTECTED="$BD_ISOLATION_PROTECTED_ROOT/.beads/embeddeddolt/beads"
+BD_ISOLATION_UNPROTECTED="$BD_ISOLATION_UNPROTECTED_ROOT/.beads/embeddeddolt/beads"
 BD_ISOLATION_ARMED=0
 BD_ISOLATION_HASH_BEFORE=""
-if command -v dolt >/dev/null 2>&1 && [ -d "$BD_ISOLATION_STORE/.dolt" ]; then
-    BD_ISOLATION_HASH_BEFORE=$(cd "$BD_ISOLATION_STORE" 2>/dev/null \
-        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
-    case "$BD_ISOLATION_HASH_BEFORE" in
-        ''|*[Hh]ashof*) BD_ISOLATION_ARMED=0 ;;
-        *)              BD_ISOLATION_ARMED=1 ;;
-    esac
+if [ -n "$REAL_BD" ] && command -v dolt >/dev/null 2>&1; then
+    mkdir -p "$BD_ISOLATION_ROOT"
+    ( cd "$BD_ISOLATION_ROOT" && "$REAL_BD" init --database beads --non-interactive >/dev/null 2>&1 )
+    if [ -d "$BD_ISOLATION_STORE/.dolt" ]; then
+        BD_ISOLATION_HASH_BEFORE=$(cd "$BD_ISOLATION_STORE" 2>/dev/null \
+            && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+        case "$BD_ISOLATION_HASH_BEFORE" in
+            ''|*[Hh]ashof*) BD_ISOLATION_ARMED=0 ;;
+            *)
+                BD_ISOLATION_ARMED=1
+                # Clone the pristine, just-initialised state into two more
+                # copies NOW — before Section 1 even starts, and long
+                # before either clone is exercised in Section 11 — the same
+                # "clone before contamination" convention
+                # runner-completeness.test.sh's store-canary fixtures use
+                # (FX_READONLY cloned from FX_CANARY pre-contamination), so
+                # both Section 11 drives start from an identical, verified
+                # state rather than a second, independently-fallible init.
+                mkdir -p "$BD_ISOLATION_PROTECTED_ROOT" "$BD_ISOLATION_UNPROTECTED_ROOT"
+                cp -R "$BD_ISOLATION_ROOT/.beads" "$BD_ISOLATION_PROTECTED_ROOT/.beads" 2>/dev/null
+                cp -R "$BD_ISOLATION_ROOT/.beads" "$BD_ISOLATION_UNPROTECTED_ROOT/.beads" 2>/dev/null
+                ;;
+        esac
+    fi
 fi
 # --- BD-ISOLATION-END (claude-workflow-plugin-j7kk) -------------------------
 
@@ -2016,8 +2065,9 @@ echo "=== Section 12: apply --check is DETECT-AND-WARN, never a write (claude-wo
 # passes it (a session-start.sh change, not exercised here — this file's
 # subject is model-select.sh's own contract).
 #
-# Placed BEFORE Section 11 on purpose: Section 11 takes its "production
-# store untouched across this ENTIRE file's run" snapshot at the bottom, so
+# Placed BEFORE Section 11 on purpose: Section 11 takes its "hermetic
+# fixture store untouched across this ENTIRE file's run" snapshot at the
+# bottom (claude-workflow-plugin-qwny; formerly a production-store read), so
 # 12.3's write-path call (the one assertion below that reaches _apply_role,
 # same as every other write-path assertion elsewhere in this file) has to
 # run before that snapshot to be covered by it.
@@ -3106,18 +3156,50 @@ assert_contains "11.2 the logged subcommands include find_or_create_meta_task's 
 assert_contains "11.3 ...and the title lookup it tries first (list)" \
     "list" "$(cat "$BD_STUB_LOG" 2>/dev/null || true)"
 
-# THE DIRECT WITNESS: the production store's HEAD did not move across this
-# entire file's run — not "the stub was installed", but "production was
-# provably untouched". Gracefully SKIPPED (never a silent pass, and never a
-# hard failure of the tier) when dolt or the embedded-Dolt layout is
-# unavailable, matching every DISARM path elsewhere in this task.
+# THE DIRECT WITNESS: the hermetic fixture store's HEAD did not move across
+# this entire file's run — not "the stub was installed", but "the store any
+# escaped call from this cwd would have to construct for itself was provably
+# untouched". Gracefully SKIPPED (never a silent pass, and never a hard
+# failure of the tier) when dolt or a real bd is unavailable to build the
+# fixture, matching every DISARM path elsewhere in this task.
 if [ "$BD_ISOLATION_ARMED" = "1" ]; then
     BD_ISOLATION_HASH_AFTER=$(cd "$BD_ISOLATION_STORE" 2>/dev/null \
         && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
-    assert_eq "11.4 SPECIFIC: the production Beads store's HEAD is UNCHANGED across this entire file's run ($BD_STUB_CALL_COUNT stubbed bd invocation(s) were logged)" \
+    assert_eq "11.4 SPECIFIC: the hermetic fixture store's HEAD is UNCHANGED across this entire file's run ($BD_STUB_CALL_COUNT stubbed bd invocation(s) were logged)" \
         "$BD_ISOLATION_HASH_BEFORE" "$BD_ISOLATION_HASH_AFTER"
+
+    # 11.4 alone cannot tell "isolation held" apart from "nothing could ever
+    # have moved this store regardless" — the exact false-pair shape
+    # .claude/tests/README.md's pairing requirement targets. 11.5-11.7
+    # settle that with a real drive: a genuine bd write against a pristine
+    # clone of the SAME fixture (non-vacuity + the specific misbehaviour
+    # isolation prevents), then the identical call routed the way every
+    # other line in this file makes it — through `bd` resolved on PATH,
+    # i.e. the SHIPPED stub — left unmoved (restore control, and the
+    # execution leg: this is the stub file actually running, not a
+    # description of it).
+    ISO_HASH_UNPROT_BEFORE=$(cd "$BD_ISOLATION_UNPROTECTED" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+    ( cd "$BD_ISOLATION_UNPROTECTED_ROOT" \
+        && "$REAL_BD" create "isolation witness probe (unprotected)" -t task -p 4 >/dev/null 2>&1 )
+    ISO_HASH_UNPROT_AFTER=$(cd "$BD_ISOLATION_UNPROTECTED" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+    assert_eq "11.5 NON-VACUITY: the fixture store is a REAL, live target — a genuine bd create (REAL_BD, no stub on the resolution path) moves its HEAD" \
+        "differs" "$([ "$ISO_HASH_UNPROT_BEFORE" != "$ISO_HASH_UNPROT_AFTER" ] && echo differs || echo same)"
+    assert_eq "11.6 SPECIFIC MISBEHAVIOUR: with no stub interposed, that write was not a no-op — it is the exact production-contamination class claude-workflow-plugin-j7kk's 417-call census found (create/list/comment landing on a real store)" \
+        "contaminated" "$([ "$ISO_HASH_UNPROT_BEFORE" != "$ISO_HASH_UNPROT_AFTER" ] && echo contaminated || echo clean)"
+
+    ISO_HASH_PROT_BEFORE=$(cd "$BD_ISOLATION_PROTECTED" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+    ( cd "$BD_ISOLATION_PROTECTED_ROOT" \
+        && bd create "isolation witness probe (protected)" -t task -p 4 >/dev/null 2>&1 )
+    ISO_HASH_PROT_AFTER=$(cd "$BD_ISOLATION_PROTECTED" 2>/dev/null \
+        && dolt sql -r csv -q "SELECT hashof('HEAD')" 2>/dev/null | tail -n1)
+    assert_eq "11.7 RESTORE CONTROL + EXECUTION: the IDENTICAL call through the shipped stub (PATH resolution, exactly how every sandbox above reaches bd) leaves an equally pristine clone unchanged" \
+        "$ISO_HASH_PROT_BEFORE" "$ISO_HASH_PROT_AFTER"
 else
-    printf '  note: 11.4 SKIPPED - dolt not on PATH or %s has no embedded Dolt store; cannot read the production store HEAD to verify\n' "$BD_ISOLATION_STORE"
+    printf '  note: 11.4 SKIPPED - dolt and/or a real bd not on PATH, or a fixture Dolt store could not be initialised; cannot construct the hermetic isolation witness to verify\n'
+    printf '  note: 11.5-11.7 SKIPPED - same reason; cannot demonstrate the isolation witness is non-vacuous\n'
 fi
 
 # ---------------------------------------------------------------------------
