@@ -91,19 +91,20 @@ weight actually sits.
 > closing that deviation; see the Added section below for the full
 > rationale and dates.
 >
-> **3. The Linear adapter ships unproven — no live validation was run.**
-> `docs/specs/<task-id>.md` is the design-artifact path that is actually
-> exercised; Linear is written and unit-tested behind the same degradation
-> contract the Codex reviewer lane uses, but its live path against a
-> connected workspace has never been run. The mechanical honesty guard for
-> that fact — `.claude/tests/component/specs/design-degradation.sh`
-> (behavioural: byte-identical gate output with and without
-> `DESIGN_STORE=linear`) plus `.claude/scripts/tests/design-structural.test.sh`
-> (structural: a lexical tripwire for three tracked literal spellings
-> across the three gate scripts — an early warning, not a completeness
-> proof) — ships in this same release. No line in this CHANGELOG, the
-> README, or the drafted Slack update may assert the Linear path works, and
-> none does.
+> **3. v5 ships no Linear integration.** `docs/specs/<task-id>.md` is the
+> design-artifact path — the only one that ships. No reader of a
+> `DESIGN_STORE` variable exists anywhere in `.claude/scripts`: there is no
+> adapter, written or otherwise, so there is nothing to validate live and
+> nothing to keep unproven. Two guards ship in this same release and assert
+> that absence rather than guard a claim of existence —
+> `.claude/tests/component/specs/design-degradation.sh` (behavioural:
+> byte-identical gate output with and without `DESIGN_STORE=linear` set)
+> and `.claude/scripts/tests/design-structural.test.sh` (structural: a
+> lexical tripwire for three tracked literal spellings across the three
+> gate scripts — an early warning should a store-selection path ever be
+> added, not a completeness proof). No line in this CHANGELOG, the README,
+> or the drafted Slack update may assert the Linear path works, and none
+> does — there is no Linear path for one to work.
 >
 > **4. Re-run `--verify` after upgrading.** `bash install.sh --verify` now
 > runs thirteen named checks (up from eleven — Phase P added `beads_ledger`,

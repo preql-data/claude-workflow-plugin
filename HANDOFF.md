@@ -327,13 +327,15 @@ alongside, and does not change, this checkout's own `11/12`, exit `1`.
   v4.0.0, v4.1.0, v5.0.0), so its greps are section-scoped per ledger. Run:
   - v5.0.0 ledger →
     `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
-    and the three sibling statuses → confirm `11 / 6 / 1 / 0`, and
-    `grep -cE '^\| DP[0-9]+ \|'` over the same range → `18`. The one
-    NOT-PROVEN row is `DP17` (Linear), by explicit directive decision — see
-    below. (`11/5/1/0/17` at this block's original 2026-09-18 measurement;
-    `11/6/1/0/18` after `DP18` — LIVE-1 — was appended 2026-09-19 and
-    `DP15`'s caveat was narrowed; PROVEN and NOT-PROVEN are unaffected, only
-    PROVEN-WITH-CAVEAT moved.)
+    and the three sibling statuses → confirm `11 / 6 / 0 / 1`, and
+    `grep -cE '^\| DP[0-9]+ \|'` over the same range → `18`. No row is
+    NOT-PROVEN; the one REMOVED row is `DP17` (Linear) — see below. (`11/5/
+    1/0/17` at this block's original 2026-09-18 measurement; `11/6/1/0/18`
+    after `DP18` — LIVE-1 — was appended 2026-09-19 and `DP15`'s caveat was
+    narrowed; and `11/6/0/1/18` from 2026-09-28 after F5
+    (`claude-workflow-plugin-qttq`) moved `DP17` from NOT-PROVEN to REMOVED
+    — see below. PROVEN is unaffected throughout; only PROVEN-WITH-CAVEAT,
+    NOT-PROVEN and REMOVED have moved, each named at the point it moved.)
   - assert the trap is closed for a fourth time: the v4.1.0 range must NOT
     end at `,0`. Run `grep -cF 'v4\.1\.0 claims ledger/,0'
     docs/RELEASE_AUDIT.md` and confirm `0`; run `grep -cF 'v4\.1\.0 claims
@@ -484,19 +486,34 @@ alongside, and does not change, this checkout's own `11/12`, exit `1`.
   manifests/v4.1.0.sha256` and confirm `cmp` is silent with exit `0`.
   **MET** (both checked live, 2026-09-18 — the tag has not moved and its
   frozen manifest still reproduces byte-for-byte from its own tree).
-- assert: the Linear adapter's status is exactly NOT-PROVEN, and no shipped
-  doc asserts otherwise. Run `ls docs/specs/ 2>&1` and confirm "No such file
-  or directory" (the repo-fallback path has never been exercised against a
-  connected workspace); run
-  `grep -c 'The Linear adapter ships unproven' CHANGELOG.md` and confirm
-  `>= 1`. **MET as a disclosure** (the honest, correct state for this
-  release, per directive correction 4 — not a gap this section is hiding).
-  Two more mechanisms for this SAME claim landed WHILE this HANDOFF section
-  was being written (a sibling D7 piece, not this one), and were then
-  narrowed under two rounds of independent, non-Claude review (sol-codex)
-  before this section's own correction pass on 2026-09-19 — read them as a
-  TRIPWIRE plus a scoped BEHAVIOURAL test, never as a completeness proof;
-  their own file headers say so explicitly, in exactly those words.
+- assert: v5 ships no Linear integration, and no shipped doc asserts
+  otherwise. Run `ls docs/specs/ 2>&1` and confirm "No such file or
+  directory" (the repo-fallback path is the only design-artifact path and
+  has never been exercised against a connected workspace); run
+  `grep -c 'v5 ships no Linear integration' CHANGELOG.md` and confirm
+  `>= 1`; run `grep -c 'The Linear adapter ships unproven' CHANGELOG.md`
+  and confirm `0` (the withdrawn sentence must not still be sitting
+  alongside its replacement). **MET as a disclosure, but read the next
+  sentence before treating this as the same disclosure the block below once
+  described: the claim underneath it changed on 2026-09-28**
+  (`claude-workflow-plugin-qttq`, F5 of the operator's finishing-pass
+  brief). Correction 4's original decision was to ship an unproven adapter
+  and disclose that plainly; F4/F5 measured that no adapter exists at all —
+  `grep -rn DESIGN_STORE .claude/scripts/*.sh` returns zero hits, re-run
+  live 2026-09-28 — so there was nothing left to disclose as unproven, and
+  the CHANGELOG sentence was rewritten rather than carried forward.
+  `docs/RELEASE_AUDIT.md` `DP17` moved from NOT-PROVEN to REMOVED in the
+  same change set; see the tally assert above, now corrected to read
+  `11 / 6 / 0 / 1`.
+  Two more mechanisms for this SAME underlying invariant landed WHILE this
+  HANDOFF section was being written (a sibling D7 piece, not this one), and
+  were then narrowed under two rounds of independent, non-Claude review
+  (sol-codex) before this section's own correction pass on 2026-09-19 —
+  read them as a TRIPWIRE plus a scoped BEHAVIOURAL test, never as a
+  completeness proof; their own file headers say so explicitly, in exactly
+  those words, and BOTH GUARDS SHIP UNCHANGED IN FUNCTION after F5 — only
+  their header framing moved, from guarding an unproven claim to asserting
+  the claim's absence.
   **CORRECTION: a prior draft of this section verified the L1 half with
   `grep -icE 'DESIGN_STORE.*linear|linear.*design.store'
   .claude/scripts/qa-gate.sh .claude/scripts/verify-before-stop.sh
@@ -506,7 +523,9 @@ alongside, and does not change, this checkout's own `11/12`, exit `1`.
   `test -f .claude/scripts/tests/design-structural.test.sh && bash
   .claude/scripts/tests/design-structural.test.sh` and confirm the last
   line reads `PASSED: 33 assertion(s)` with exit `0` (offline, no `bd`
-  dependency, safe to run standalone). This asserts `qa-gate.sh`,
+  dependency, safe to run standalone; re-confirmed live 2026-09-28, still
+  33/33 after F5's header-only edit to this file — no detection logic or
+  assertion changed). This asserts `qa-gate.sh`,
   `verify-before-stop.sh` and `review-check.sh` contain none of three
   tracked literal spellings (`DESIGN_STORE`, capitalised `Linear`,
   comment-stripped bare lowercase `linear`) — two rounds of independent
@@ -523,8 +542,9 @@ alongside, and does not change, this checkout's own `11/12`, exit `1`.
   unset, genuinely behavioural (it drives the real gate scripts end-to-end
   against a live Beads fixture) but scoped to that one sequence; it is not
   re-run here (it writes a Beads task, and this checklist stays read-only).
-  Neither mechanism is the same claim as Linear working, and this row's
-  status does not change because of either.
+  Neither mechanism is the same claim as Linear working, and neither is why
+  `DP17` changed status — it changed because F4/F5 found no adapter to
+  validate, not because either guard passed or failed.
 - assert: on-disk counts match what the docs will claim once the rewrite
   piece lands. Run `ls .claude/agents/*.md | wc -l` → `9`; run
   `ls .claude/rubrics/*.md | wc -l` → `6` (the new `design.md` rubric, up

@@ -2,9 +2,11 @@
 # design-structural.test.sh — L1 unit fixture for D7 Piece D
 # (claude-workflow-plugin-fkm.9, v5 Phase D7, release 5.0.0). Governing plan:
 # docs/plans/v5-design-phase-plan.md:790-798 — the CHANGELOG's honesty that
-# "the Linear adapter ships unproven — no live validation was run" gets an
-# EARLY-WARNING TRIPWIRE (not a proof — see "WHAT THIS FILE ACTUALLY IS"
-# below) from a pair of specs cloned from the SAME split
+# v5 ships no Linear integration at all (claude-workflow-plugin-qttq, F5 —
+# this sentence originally read "the Linear adapter ships unproven — no
+# live validation was run" until F4/F5 measured that no adapter existed to
+# validate) gets an EARLY-WARNING TRIPWIRE (not a proof — see "WHAT THIS
+# FILE ACTUALLY IS" below) from a pair of specs cloned from the SAME split
 # reviewer-lane-structural.test.sh / reviewer-lane-degradation.sh already
 # uses (claude-workflow-plugin-icn4 item 1): this file is the STRUCTURAL
 # half; the BEHAVIOURAL half lives at L2,
@@ -30,8 +32,12 @@
 # enforce against it — a gate that reasons about backend selection acquires
 # a second, invisible way to refuse, exactly the failure mode the reviewer-
 # lane invariant already exists to prevent for model/lane selection. LIVE-3
-# (plan:790-798) records that the Linear path has "no artifact at all" —
-# NOT-PROVEN, not PROVEN-WITH-CAVEAT.
+# (plan:790-798) was never run: the operator declined it (F5 of the
+# finishing-pass brief) once measurement showed there was no adapter to
+# validate in the first place — zero readers of DESIGN_STORE anywhere in
+# .claude/scripts. DP17 (docs/RELEASE_AUDIT.md) accordingly moved from
+# NOT-PROVEN to REMOVED rather than to PROVEN-WITH-CAVEAT: the claim was
+# withdrawn, not downgraded to a caveat.
 #
 # WHAT THIS FILE ACTUALLY IS, STATED WITHOUT OVERCLAIM (QA ROUND 2,
 # independent review, R2-F1, RELEASE-BLOCKING — read this before trusting
