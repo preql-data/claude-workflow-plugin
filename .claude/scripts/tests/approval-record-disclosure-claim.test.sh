@@ -854,7 +854,7 @@ assert_eq "1M.5 RESTORE CONTROL: shipped verify-before-stop.sh still carries zer
 # floor/count and its own zero-hit assertion:
 #   - qa-gate.sh / verify-before-stop.sh / review-check.sh (the three
 #     scripts the brief names) + all fixture mirrors — 24 files
-#   - docs/**/*.md, excluding docs/reviews/** and docs/specs/** — 39 files
+#   - docs/**/*.md, excluding docs/reviews/** and docs/specs/** — 41 files
 #     today (claude-workflow-plugin-513j: docs/specs/** added because it
 #     holds the v5 design phase's per-task design-record artifacts, which
 #     change with work rather than with releases — same reason as
@@ -868,7 +868,7 @@ assert_eq "1M.5 RESTORE CONTROL: shipped verify-before-stop.sh still carries zer
 #   - .claude/agents/*.md, globbed directly (the brief's own explicit
 #     bullet, independent of plugin.json's agents[] also reaching them) —
 #     9 files
-# Deduplicated across all of the above: 90 files today (1S.10/1S.11).
+# Deduplicated across all of the above: 92 files today (1S.10/1S.11).
 #
 # OUT OF SCOPE, DELIBERATELY, because they are archives and rewriting them
 # would be its own dishonesty: CHANGELOG.md entries for already-released
@@ -1118,6 +1118,8 @@ docs/al-2026-07-25-100556-f87d6410.md
 docs/al-2026-07-26-170112-031a02dc.md
 docs/al-2026-07-29-173819-e34ef46e.md
 docs/al-2026-08-12-014754-1f608934.md
+docs/handover/v5.0.0-handover-addendum-2026-09-26.md
+docs/handover/v5.0.0-handover.md
 docs/plans/README.md
 docs/plans/v3-upgrade.md
 docs/plans/v4-trimodel.md
@@ -1240,6 +1242,8 @@ docs/al-2026-07-25-100556-f87d6410.md
 docs/al-2026-07-26-170112-031a02dc.md
 docs/al-2026-07-29-173819-e34ef46e.md
 docs/al-2026-08-12-014754-1f608934.md
+docs/handover/v5.0.0-handover-addendum-2026-09-26.md
+docs/handover/v5.0.0-handover.md
 docs/plans/README.md
 docs/plans/v3-upgrade.md
 docs/plans/v4-trimodel.md
@@ -1255,8 +1259,8 @@ EOF
 # Measured: find "$PROJECT_DIR/docs" -name '*.md' ! -path "$PROJECT_DIR/docs/reviews/*" ! -path "$PROJECT_DIR/docs/specs/*" | wc -l
 DOCS_MD=()
 while IFS= read -r line; do DOCS_MD+=("$line"); done < <(discover_docs_md "$PROJECT_DIR")
-assert_eq "1S.2 non-vacuity: discovered exactly 39 docs/**/*.md files (excl. docs/reviews/** and docs/specs/**)" \
-    "39" "${#DOCS_MD[@]}"
+assert_eq "1S.2 non-vacuity: discovered exactly 41 docs/**/*.md files (excl. docs/reviews/** and docs/specs/**)" \
+    "41" "${#DOCS_MD[@]}"
 assert_set_pin "1S.2b exact SET (R6-F3): the discovered docs/**/*.md paths match the pinned list, not just its count" \
     "$EXPECTED_DOCS_MD_SET" "$(relpath_join "$PROJECT_DIR" "${DOCS_MD[@]}")"
 DOCS_HITS=0
@@ -1308,10 +1312,10 @@ assert_eq "1S.9 zero banned-claim hits across every plugin.json-installed file" 
 # verify-before-stop.sh once against 1S.8/1S.9's hook-script entry, and the
 # 9 agents once against 1S.8/1S.9's agents[] entries —
 # 8(qa-gate.sh mirrors)+8(verify-before-stop.sh mirrors)+
-# 8(review-check.sh mirrors)+39(docs)+4(named root)+9(agents)+
-# 24(plugin-installed) = 100 raw, minus 10 overlaps (9 agents + 1
+# 8(review-check.sh mirrors)+41(docs)+4(named root)+9(agents)+
+# 24(plugin-installed) = 102 raw, minus 10 overlaps (9 agents + 1
 # verify-before-stop.sh canonical, both also reached via plugin.json
-# parsing) = 90 (R6-F1: the previous formula here summed to 116 by
+# parsing) = 92 (R6-F1: the previous formula here summed to 116 by
 # duplicating a "24" term in place of one of the two "8"s — the five
 # categories actually sum to 100, not 116) — measured directly below
 # rather than hand-derived, which is the whole point of asserting the
@@ -1322,8 +1326,8 @@ assert_eq "1S.9 zero banned-claim hits across every plugin.json-installed file" 
 # the broader answer).
 SURFACE=()
 while IFS= read -r line; do SURFACE+=("$line"); done < <(discover_operator_facing_surface "$PROJECT_DIR")
-assert_eq "1S.10 non-vacuity: the deduplicated operator-facing surface has exactly 90 files" \
-    "90" "${#SURFACE[@]}"
+assert_eq "1S.10 non-vacuity: the deduplicated operator-facing surface has exactly 92 files" \
+    "92" "${#SURFACE[@]}"
 assert_set_pin "1S.10b exact SET (R6-F3): the discovered union paths match the pinned list, not just its count" \
     "$EXPECTED_SURFACE_SET" "$(relpath_join "$PROJECT_DIR" "${SURFACE[@]}")"
 SURFACE_HITS=0
@@ -1401,8 +1405,8 @@ assert_eq "1S.12M.2 SPECIFIC (the fix): the seeded docs/reviews/*.md is excluded
 # RESTORE CONTROL: the real PROJECT_DIR's own docs/**/*.md discovery is
 # unaffected by this sandbox — this is 1S.2 again, repeated here so the
 # sandbox proof and the real-tree count sit side by side.
-assert_eq "1S.12M.3 RESTORE CONTROL: the real PROJECT_DIR still discovers exactly 39 docs/**/*.md files" \
-    "39" "${#DOCS_MD[@]}"
+assert_eq "1S.12M.3 RESTORE CONTROL: the real PROJECT_DIR still discovers exactly 41 docs/**/*.md files" \
+    "41" "${#DOCS_MD[@]}"
 
 # ---------------------------------------------------------------------------
 # 1S.13 LOCALE CONTROL (R7-F1, independent review round 7) — makes the
@@ -1778,8 +1782,8 @@ if [ "$MIRROR_513J_SPECS_ISOLATED" = yes ]; then
 
     MIRROR_WITH_SPECS_513J=()
     while IFS= read -r line; do MIRROR_WITH_SPECS_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
-    assert_eq "1S.14.2 SPECIFIC (the fix): discover_docs_md still returns exactly the pinned 39 files with a docs/specs/*.md file present" \
-        "39" "${#MIRROR_WITH_SPECS_513J[@]}"
+    assert_eq "1S.14.2 SPECIFIC (the fix): discover_docs_md still returns exactly the pinned 41 files with a docs/specs/*.md file present" \
+        "41" "${#MIRROR_WITH_SPECS_513J[@]}"
     assert_set_pin "1S.14.3 SPECIFIC (the fix): the exact-SET pin is unaffected — a docs/specs/*.md addition does not break it" \
         "$EXPECTED_DOCS_MD_SET" "$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_WITH_SPECS_513J[@]}")"
     rm -f "$SPECS_CANARY_513J"
@@ -1814,8 +1818,8 @@ if [ "$MIRROR_513J_DOCS_BASE_ISOLATED" = yes ]; then
 
     MIRROR_WITH_NEGCTRL_513J=()
     while IFS= read -r line; do MIRROR_WITH_NEGCTRL_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
-    assert_eq "1S.14.5 NEGATIVE CONTROL non-vacuity: discover_docs_md now returns 40 files, one more than the pin" \
-        "40" "${#MIRROR_WITH_NEGCTRL_513J[@]}"
+    assert_eq "1S.14.5 NEGATIVE CONTROL non-vacuity: discover_docs_md now returns 42 files, one more than the pin" \
+        "42" "${#MIRROR_WITH_NEGCTRL_513J[@]}"
     MIRROR_NEGCTRL_ACTUAL_513J=$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_WITH_NEGCTRL_513J[@]}")
     assert_eq "1S.14.6 NEGATIVE CONTROL SPECIFIC: the exact-SET pin now reports a mismatch — the exclusion has not gone blind to a real addition outside docs/specs" \
         "yes" "$([ "$EXPECTED_DOCS_MD_SET" != "$MIRROR_NEGCTRL_ACTUAL_513J" ] && echo yes || echo no)"
@@ -1876,8 +1880,8 @@ if [ "$MIRROR_513J_A_ISOLATED" = yes ]; then
 
     MIRROR_WITH_NESTED_513J=()
     while IFS= read -r line; do MIRROR_WITH_NESTED_513J+=("$line"); done < <(discover_docs_md "$MIRROR_ROOT_513J")
-    assert_eq "1S.14.10 SPECIFIC (round 2 HIGH fix): discover_docs_md returns 40 files — the nested file is correctly NOT excluded by the anchored pattern" \
-        "40" "${#MIRROR_WITH_NESTED_513J[@]}"
+    assert_eq "1S.14.10 SPECIFIC (round 2 HIGH fix): discover_docs_md returns 42 files — the nested file is correctly NOT excluded by the anchored pattern" \
+        "42" "${#MIRROR_WITH_NESTED_513J[@]}"
     MIRROR_NESTED_ACTUAL_513J=$(relpath_join "$MIRROR_ROOT_513J" "${MIRROR_WITH_NESTED_513J[@]}")
     assert_eq "1S.14.11 SPECIFIC: the exact-SET pin reports a mismatch for the nested file too" \
         "yes" "$([ "$EXPECTED_DOCS_MD_SET" != "$MIRROR_NESTED_ACTUAL_513J" ] && echo yes || echo no)"
