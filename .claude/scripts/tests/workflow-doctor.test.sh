@@ -79,14 +79,20 @@
 #                failure), a perturbed .session-start must move it, and the skip
 #                branch that then runs must print a note while moving NEITHER
 #                counter — which is what keeps the run's exit code 0.
-#   META-TEST 8  (claude-workflow-plugin-j7kk, 39cy) bumping the SCHEMA half of
-#                DOCTOR_BD_SCHEMA_PIN by a few versions, against a freshly
-#                bd-init'd fixture whose real bd/schema pair matches the
-#                shipped pin (the control), flips `beads` from PASS to FAIL,
-#                proving the bd-version-vs-store-schema check is EXACT
-#                equality and not a floor — and a target whose .beads/ has no
-#                embedded-Dolt store at all still PASSES (DISARMED, never a
-#                failure over an environment gap the check cannot evaluate).
+#   META-TEST 8  (claude-workflow-plugin-j7kk, 39cy, we57, 0cr6) offering a
+#                bd/schema pair that is NOT a member of
+#                DOCTOR_BD_SCHEMA_VALIDATED, against a freshly bd-init'd
+#                fixture whose real pair IS a member (the control), flips
+#                `beads` from PASS to FAIL, proving the
+#                bd-version-vs-store-schema check is SET MEMBERSHIP — neither a
+#                floor (1.2.2 ships schema 53, LOWER than 1.2.1's 65, so the
+#                number does not order) nor the single exact pin it replaced —
+#                and a target whose .beads/ has no embedded-Dolt store at all
+#                still PASSES (DISARMED, never a failure over an environment
+#                gap the check cannot evaluate). 8a runs against a
+#                `beads`-named store; 8b builds one via plain `bd init` so it
+#                is named after its directory, which is the case 0cr6 existed
+#                for and which the retired hardcoded path silently disarmed.
 #   META-TEST 10 (section 9, claude-workflow-plugin-a13r) `model_parity`
 #                actually gates: a target whose model-select cache and agent
 #                pins genuinely agree PASSES; a drifted pin FAILs by name
