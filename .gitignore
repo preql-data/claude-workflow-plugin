@@ -77,3 +77,19 @@ venv/
 
 # live-run specialist worktrees inside fixtures (transient agent state)
 .claude/tests/e2e/fixtures/*/.claude/worktrees/
+
+# detect-stack.sh per-project TEST_CMD/LINT_CMD/TYPE_CMD overrides
+# (claude-workflow-plugin-lgq4). This repo's own .claude/test-cmd narrows
+# the Stop hook to `make test-fast` — the sanctioned answer to
+# claude-workflow-plugin-yzo9 (make test measures 1731-1777s uncontended,
+# exceeding the Stop hook's 1320s external wall-clock cap; test-fast is a
+# CONSEQUENCE-selected subset, not a speed shortcut — see Makefile). That
+# narrowing is disclosed on every gate run ("[OVERRIDE: .claude/test-cmd]")
+# but was untracked AND un-ignored, so a bare `git add -A` could commit it
+# and silently narrow the gate for every future clone. Ignoring the whole
+# override family (not just test-cmd) closes the same hole for lint-cmd
+# and type-cmd before it is ever hit. Never remove this file via the
+# override mechanism itself — see yzo9 for the actual decision needed.
+.claude/test-cmd
+.claude/lint-cmd
+.claude/type-cmd
