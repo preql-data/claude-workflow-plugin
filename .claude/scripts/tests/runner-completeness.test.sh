@@ -3265,6 +3265,43 @@ else
             [ -n "$cwd" ] && [ "$cwd" = "$want" ] && printf '%s\n' "$p"
         done < <(_dolt_send_metrics_argv_pids)
     }
+    _dolt_uptime_seconds() {
+        # Seconds-since-boot, decimal, from the kernel's own /proc/uptime --
+        # a MONOTONIC reference comparable against /proc/<pid>/stat's
+        # starttime field (also kernel-recorded, also since boot). Empty on
+        # a host without /proc (e.g. macOS); callers degrade gracefully.
+        awk '{print $1}' /proc/uptime 2>/dev/null
+    }
+    _dolt_log_attribution() {
+        # _dolt_log_attribution <pid> <baseline_uptime> <phase> --
+        # claude-workflow-plugin-4c6r item 3 instrumentation. Reports to
+        # STDERR ONLY (never stdout -- poll_for_dolt_flusher's stdout is
+        # the seen/not-seen/unattributable contract every caller captures
+        # via command substitution, and corrupting it would break every
+        # existing call site) which pid was attributed and its
+        # KERNEL-RECORDED start time (/proc/<pid>/stat field 22, ticks
+        # since boot, divided by CLK_TCK) relative to the baseline
+        # snapshot's own /proc/uptime reading. This is "when the kernel
+        # actually created the process", a property of the process itself,
+        # NOT "when our 50ms poll happened to notice it", a property of
+        # the poll interval -- the distinction this task's own root-cause
+        # investigation needed and did not have. Purely diagnostic: see
+        # the ROOT CAUSE note above this function's call sites in section
+        # 15 for why process attribution is no longer the pass/fail oracle
+        # for 15.9/15.10.
+        local pid="$1" baseline="$2" phase="$3" ticks clk secs
+        ticks=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+        clk=$(getconf CLK_TCK 2>/dev/null)
+        if [ -n "$ticks" ] && [ -n "$clk" ] && [ -n "$baseline" ]; then
+            secs=$(awk -v t="$ticks" -v c="$clk" -v b="$baseline" \
+                'BEGIN { printf "%.2f", (t / c) - b }')
+            printf '  info: poll_for_dolt_flusher attributed pid=%s phase=%s kernel_starttime_offset_from_baseline=%ss\n' \
+                "$pid" "$phase" "$secs" >&2
+        else
+            printf '  info: poll_for_dolt_flusher attributed pid=%s phase=%s (kernel starttime unavailable -- no /proc on this host, or the pid already exited)\n' \
+                "$pid" "$phase" >&2
+        fi
+    }
     poll_for_dolt_flusher() {
         # poll_for_dolt_flusher <store-dir> -- prints "seen", "not-seen", or
         # "unattributable". PRE-DRAINS and POST-DRAINS on THIS store's own
@@ -3317,8 +3354,35 @@ else
         # wait -- the latter is the same background-supervision shape this
         # task's own operator-directed collapse removed elsewhere (the lease
         # heartbeat), reappearing here, and is out of scope for this fix.
+        #
+        # claude-workflow-plugin-4c6r UPDATE: that residual turned out to be
+        # the WHOLE story, not a corner of it, and root-caused rather than
+        # inferred -- confirmed against the ACTUAL PINNED dolt v2.3.5 source
+        # (commit ad65af6cc937d10fa3c88e2041fed4325968b581):
+        # go/cmd/dolt/dolt.go's emitUsageEvents()/shouldFlushEvents() spawn
+        # this SAME subprocess for EVERY `sql` command UNCONDITIONALLY
+        # (gated only by the DOLT_DISABLE_EVENT_FLUSH env var, never by
+        # metrics.disabled); go/cmd/dolt/commands/send_metrics.go's
+        # SendMetricsCmd.Exec checks metrics.disabled ITSELF, after it is
+        # already a running process, and just prints and exits if disabled
+        # -- WITHOUT the network flush the enabled path attempts. So the
+        # subprocess's own LIFETIME, not its spawn timing, is what this
+        # function was actually racing: measured in this task's repro
+        # container, the enabled-path process lived ~1.0-1.3s (15/15 caught
+        # by this poll); the disabled-path process, doing nothing but a
+        # config read and a print, was caught by the SAME poll in only
+        # 4/30 trials (config readback confirmed "true" every time). A
+        # short-lived process is not a poll-INTERVAL problem this function
+        # can out-poll its way past -- it can be arbitrarily short. 15.9 and
+        # 15.10 below no longer use this function's return value as their
+        # oracle; see the ROOT CAUSE note at their call site. It is
+        # retained AND INSTRUMENTED (the _dolt_log_attribution calls below)
+        # for forensic visibility only -- reporting which pid it attributed
+        # and that pid's KERNEL start time relative to the baseline
+        # snapshot, the exact evidence this investigation needed and had to
+        # measure by hand the first time.
         local store="$1" i hit="" store_real p
-        local baseline_ids new_ids
+        local baseline_ids new_ids baseline_uptime
 
         if [ "$(_dolt_attribution_available)" != "yes" ]; then
             printf 'unattributable'
@@ -3331,6 +3395,7 @@ else
             sleep 0.05
         done
         baseline_ids=" $(_dolt_send_metrics_pids_at "$store_real" | tr '\n' ' ') "
+        baseline_uptime=$(_dolt_uptime_seconds)
 
         ( cd "$store" && dolt sql -r csv -q "SELECT hashof('HEAD')" >/dev/null 2>&1 ) &
         local bgpid=$!
@@ -3339,6 +3404,7 @@ else
             if [ -n "$p" ]; then
                 new_ids=$(printf '%s\n' "$p" | awk -v base="$baseline_ids" 'index(base, " " $1 " ") == 0 { print; exit }')
                 if [ -n "$new_ids" ]; then
+                    _dolt_log_attribution "$new_ids" "$baseline_uptime" "sampling"
                     hit="seen"
                     break
                 fi
@@ -3350,6 +3416,7 @@ else
             p=$(_dolt_send_metrics_pids_at "$store_real")
             if [ -n "$p" ]; then
                 new_ids=$(printf '%s\n' "$p" | awk -v base="$baseline_ids" 'index(base, " " $1 " ") == 0 { print; exit }')
+                [ -n "$new_ids" ] && [ -z "$hit" ] && _dolt_log_attribution "$new_ids" "$baseline_uptime" "post-drain"
                 [ -n "$new_ids" ] && hit="seen"
             fi
             [ -z "$p" ] && break
@@ -3357,29 +3424,113 @@ else
         done
         printf '%s' "${hit:-not-seen}"
     }
+    # claude-workflow-plugin-4c6r ROOT CAUSE (measured 2026-09-28, confirmed
+    # against the dolt v2.3.5 source actually pinned by this repo's CI,
+    # commit ad65af6cc937d10fa3c88e2041fed4325968b581 -- `gh api
+    # repos/dolthub/dolt/contents/go/cmd/dolt/dolt.go?ref=v2.3.5` and the
+    # sibling commands/send_metrics.go): dolt.go's emitUsageEvents() calls
+    # shouldFlushEvents(subCmd), which returns true for EVERY command
+    # except send-metrics/init/config -- "sql" is not exempt -- so
+    # flushEventsDir() (which spawns the `dolt send-metrics` subprocess
+    # poll_for_dolt_flusher above watches for) runs UNCONDITIONALLY,
+    # regardless of metrics.disabled. The spawned subprocess's OWN Exec
+    # method is what reads metrics.disabled, and when disabled it just
+    # prints "Sending metrics is currently disabled" and returns --
+    # skipping the network flush the enabled path performs. So the
+    # subprocess is not "sometimes spawned, sometimes not": it is ALWAYS
+    # spawned, and only its LIFETIME differs by config (long when it
+    # attempts a real flush, near-instant when it does not) -- which makes
+    # catching its mere EXISTENCE via a 50ms-interval ps-poll a coin flip
+    # in whichever direction has the shorter lifetime that run. Measured
+    # directly in this task's repro container: enabled-path process
+    # observed 15/15 (lifetime ~1.0-1.3s); disabled-path process, with
+    # `dolt config --local --get metrics.disabled` reading back "true"
+    # every time, observed in only 4/30 trials.
+    #
+    # THE FIX: stop polling for the transient PROCESS and read the
+    # DETERMINISTIC, SYNCHRONOUS side effect metrics.disabled actually
+    # gates. dolt.go's own startup wiring picks
+    # `metricsDisabled ? events.NullEmitter{} : events.NewFileEmitter(...)`
+    # before the sql command does anything else, and FileEmitter (via
+    # go/libraries/events/file_backed_proc.go) writes one `*.devts` file
+    # per logged event under `$HOME/.dolt/eventsData/`; NullEmitter writes
+    # nothing there at all. That decision and that write both happen
+    # synchronously inside the `dolt sql` call itself, so it is readable
+    # the instant the call returns -- no subprocess, no polling, no
+    # window. A fresh, per-call $HOME (a per-run nonce, same principle
+    # independent review established on claude-workflow-plugin-tnue) keeps
+    # the two probes below from ever sharing that directory, so there is
+    # no cross-call attribution question to get wrong either. Empirically
+    # validated in the same container: 20/20 positive and 20/20 negative
+    # trials, both correct, no polling required in either direction.
+    dolt_events_logged_count() {
+        # dolt_events_logged_count <home-dir> -- counts *.devts files
+        # under $home/.dolt/eventsData/ (file_backed_proc.go:
+        # eventsDir="eventsData", evtDataExt=".devts"). dolt.lock is
+        # created by that SAME constructor regardless of metrics.disabled
+        # (confirmed: it is present in both the enabled and disabled
+        # cases), so it is deliberately NOT counted -- only the real event
+        # extension is evidence an event was actually logged.
+        find "$1/.dolt/eventsData" -maxdepth 1 -name '*.devts' 2>/dev/null | wc -l | tr -d ' '
+    }
+
     FX_SPAWN="$WORK/dolt-spawn-probe"
     mkdir -p "$FX_SPAWN"
     ( cd "$FX_SPAWN" && bd init --database beads --non-interactive >/dev/null 2>&1 )
     if [ -d "$FX_SPAWN/.beads/embeddeddolt/beads/.dolt" ]; then
-        if [ "$(_dolt_attribution_available)" != "yes" ]; then
-            printf '  SKIPPED: neither /proc nor lsof is available on this host to attribute a dolt send-metrics pid to the fixture store -- 15.9/15.10 cannot run without falling back to the unattributed host-wide guess this fix removes (claude-workflow-plugin-gsfd R2-F7)\n'
+        FX_SPAWN_REAL=$(cd "$FX_SPAWN/.beads/embeddeddolt/beads" && pwd -P)
+        HOME_POS="$WORK/dolt-events-home-pos"
+        mkdir -p "$HOME_POS"
+        ( cd "$FX_SPAWN_REAL" && HOME="$HOME_POS" dolt sql -r csv -q "SELECT hashof('HEAD')" >/dev/null 2>&1 )
+        assert_eq "15.9 the installed dolt LOGS a usage event for a sql command against a fresh store with no local config (file-based oracle -- see ROOT CAUSE note above)" \
+            "yes" "$([ "$(dolt_events_logged_count "$HOME_POS")" -ge 1 ] && echo yes || echo no)"
+
+        FX_SPAWN2="$WORK/dolt-spawn-probe-neg"
+        mkdir -p "$FX_SPAWN2"
+        ( cd "$FX_SPAWN2" && bd init --database beads --non-interactive >/dev/null 2>&1 )
+        if [ -d "$FX_SPAWN2/.beads/embeddeddolt/beads/.dolt" ]; then
+            FX_SPAWN2_REAL=$(cd "$FX_SPAWN2/.beads/embeddeddolt/beads" && pwd -P)
+            ( cd "$FX_SPAWN2_REAL" && dolt config --local --add metrics.disabled true >/dev/null 2>&1 )
+            HOME_NEG="$WORK/dolt-events-home-neg"
+            mkdir -p "$HOME_NEG"
+            ( cd "$FX_SPAWN2_REAL" && HOME="$HOME_NEG" dolt sql -r csv -q "SELECT hashof('HEAD')" >/dev/null 2>&1 )
+            assert_eq "15.10 NEGATIVE CONTROL: with metrics.disabled=true set, the SAME call logs NOTHING (the config key is load-bearing, not decoration -- file-based oracle, no polling window to race)" \
+                "0" "$(dolt_events_logged_count "$HOME_NEG")"
         else
-            WITHOUT_CFG=$(poll_for_dolt_flusher "$FX_SPAWN/.beads/embeddeddolt/beads")
-            assert_eq "15.9 the installed dolt spawns its flusher against a fresh store with no local config" \
-                "seen" "$WITHOUT_CFG"
-            ( cd "$FX_SPAWN/.beads/embeddeddolt/beads" && dolt config --local --add metrics.disabled true >/dev/null 2>&1 )
-            WITH_CFG=$(poll_for_dolt_flusher "$FX_SPAWN/.beads/embeddeddolt/beads")
-            assert_eq "15.10 NEGATIVE CONTROL: with metrics.disabled=true set, the SAME call spawns nothing (the config key is load-bearing, not decoration)" \
-                "not-seen" "$WITH_CFG"
+            printf '  SKIPPED: could not initialise the SECOND fixture Dolt store for 15.10s negative-control leg\n'
+            FX_SPAWN2_REAL=""
+        fi
+
+        if [ "$(_dolt_attribution_available)" != "yes" ]; then
+            printf '  note: poll_for_dolt_flusher diagnostics SKIPPED - neither /proc nor lsof available on this host (15.9/15.10 above do not depend on this -- see ROOT CAUSE note)\n'
+        else
+            # NON-GATING from here down. poll_for_dolt_flusher watches the
+            # SPAWNED SUBPROCESS's existence, which the ROOT CAUSE note
+            # above establishes is racy in BOTH directions because the
+            # subprocess's own lifetime -- not its spawn timing -- is the
+            # uncontrolled variable, confirmed against dolt's own source
+            # rather than inferred. Called here purely for forensic
+            # visibility (claude-workflow-plugin-4c6r item 3's
+            # instrumentation fires inside it), never again as a pass/fail
+            # oracle.
+            DIAG_POS=$(poll_for_dolt_flusher "$FX_SPAWN_REAL")
+            printf '  info: 15.9 diagnostic (non-gating) -- poll_for_dolt_flusher against the SAME no-config store reported: %s\n' "$DIAG_POS"
+            if [ -n "$FX_SPAWN2_REAL" ]; then
+                DIAG_NEG=$(poll_for_dolt_flusher "$FX_SPAWN2_REAL")
+                printf '  info: 15.10 diagnostic (non-gating) -- poll_for_dolt_flusher against the metrics.disabled store reported: %s\n' "$DIAG_NEG"
+            fi
 
             # META-TEST: the attribution primitive itself discriminates by
             # cwd — a REAL process whose argv matches the flusher's shape
             # but whose cwd is a DIFFERENT directory must be invisible to a
-            # query for THIS store, proving 15.9/15.10 are not vacuously
-            # trusting "any dolt send-metrics anywhere" the way the
-            # pre-fix scan did. `exec -a` sets argv[0] directly (measured:
-            # `ps -axo args=` then shows the literal spoofed command,
-            # portable on bash 3.2+).
+            # query for THIS store, proving poll_for_dolt_flusher's
+            # diagnostic above is not vacuously trusting "any dolt
+            # send-metrics anywhere" the way the pre-fix scan did. This
+            # primitive is independent of the file-based oracle 15.9/15.10
+            # now use, so it is exercised and asserted on regardless.
+            # `exec -a` sets argv[0] directly (measured: `ps -axo args=`
+            # then shows the literal spoofed command, portable on bash
+            # 3.2+).
             FX_DOLT_FOREIGN_A="$WORK/dolt-attrib-a"
             FX_DOLT_FOREIGN_B="$WORK/dolt-attrib-b"
             mkdir -p "$FX_DOLT_FOREIGN_A" "$FX_DOLT_FOREIGN_B"
@@ -3395,7 +3546,7 @@ else
             wait "$FAKE_PID" 2>/dev/null
         fi
     else
-        printf '  SKIPPED: could not initialise a second fixture Dolt store for the spawn-detection legs (15.9/15.10)\n'
+        printf '  SKIPPED: could not initialise a fixture Dolt store for the dolt-events-logged legs (15.9/15.10)\n'
     fi
 
     # -----------------------------------------------------------------------
