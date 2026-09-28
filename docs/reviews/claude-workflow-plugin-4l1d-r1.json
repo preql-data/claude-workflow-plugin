@@ -1,0 +1,71 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-4l1d",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "5093163592d456750e73040b1e60f717d337dabd87f0d91ed9b8abe6208750ec",
+  "risk_threshold": "high",
+  "stop_condition": "every acceptance criterion A1-A9 in the staged spec is either verified by an independent re-measurement or recorded as unverified, and no critical/high finding remains open in the five sha256 helpers, the two deliberately-unchanged stdin sites, or design-conform section 9",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/tests/e2e/fixtures/{go-cli-refactor,monorepo-frontend-only,multi-domain-signup,node-react-auth,python-django-bug,qa-block-recovery,rubric-revision-loop}/.claude/scripts/{qa-gate,beads-ledger,workflow-manifest}.sh",
+      "evidence": "ad1f655 edited three scripts under .claude/scripts/ and synced ZERO of their seven committed e2e fixture mirrors. Measured at HEAD: `cd .claude/tests/e2e && npx vitest run specs/_fixture-script-sync.unit.spec.ts` -> `Tests 21 failed | 189 passed (210)`, every failure reading `has DRIFTED from canonical (run-4 staleness class) - re-sync fixtures`; 21 = 7 fixtures x 3 scripts, enumerated from the run output. The drift is NEW: at 157e6f4 all seven fixture copies of qa-gate.sh hashed to 92324097cae0352de8730e18ca8884acfc13de59b19b52c7527ce32ca5c882f4, byte-identical to the canonical script (`git show 157e6f4:<path> | shasum -a 256`, both sides). It is also a break with an established per-commit convention: of the twelve most recent commits touching .claude/scripts/qa-gate.sh, the eleven before ad1f655 each touched 7 fixture mirrors and ad1f655 touched 0 (`for c in $(git log --format=%h -12 -- .claude/scripts/qa-gate.sh); do git show --name-only --format= $c -- .claude/tests/e2e/fixtures | grep -c qa-gate.sh; done`). The spec runs in CI job l3-vitest-unit (.github/workflows/test.yml:583, `npm run test:unit`), on which release-gate depends (`needs: [l3-vitest-unit, manifest-validate]`).",
+      "description": "The change set's stated purpose is to clear CI. It clears two L1 specs on Linux and simultaneously turns 21 assertions red in a different CI job, and nobody ran that job. Beyond CI colour the guard's own docstring names the substantive cost: a fixture whose script predates a shipped fix means the fix NEVER REACHED THE LIVE RUN - the run-4 staleness class this guard exists for. Remedy uses only what already exists: `make sync-fixtures` (Makefile:595; `make help` describes it as heals the drift guard), then commit the 21 files in this change set. No new mechanism, no waiver."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": "bd task claude-workflow-plugin-4l1d (no COMPLETION v1 comment); bd task claude-workflow-plugin-18fc (no COMPLETION v1 comment)",
+      "evidence": "`bash .claude/scripts/qa-gate.sh review-request-build claude-workflow-plugin-4l1d --iteration 1 --stop-condition ... --spec-file ... --risk-threshold high` -> `{\"ok\":false,...,\"error_key\":\"missing_completion_contract\",\"observations\":\"no --completion-contract-file was given and no recorded COMPLETION v1 payload could be found for claude-workflow-plugin-4l1d\"}`. Comment scan: claude-workflow-plugin-0z9v DOES carry `COMPLETION v1 task=claude-workflow-plugin-0z9v role=devops model=claud...`; claude-workflow-plugin-18fc carries only the pointer comment `QA review for this task is carried by claude-workflow-plugin-4l1d` and NO completion record; 4l1d itself carries only `QA-GATE: entered at 2026-09-27T13:20:23Z`.",
+      "description": "Half the change set is attested by its implementer and half is attested by nobody - exactly the condition the task description flags. This is not merely procedural: `qa-gate.sh approve claude-workflow-plugin-4l1d` refuses with error_key=completion_record_missing, and the documented response to that refusal is to block and send it back, not to substitute QA's own contract (which would make the completeness cross-check read an empty files_changed as its witness) and not to reach for --no-completion (whose honest use is 'there was genuinely no specialist' - here there was one, it stalled). Remedy: a COMPLETION v1 payload for the 18fc work, written by whoever now stands behind it, recorded via `qa-gate.sh completion-record claude-workflow-plugin-4l1d` with files_changed naming all eight paths in the change set."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": "commit message ad1f655 (VERIFIED table) and the claude-workflow-plugin-4l1d task description (VERIFIED BEFORE REVIEW table)",
+      "evidence": "Both publish `design-artifact ... Linux after 342/342` and `sha256-escape-decode ... Linux after 78/78`. Measured on cwp-l1-repro:1.1.2 at HEAD: with no -u flag the container runs as uid 0 and design-artifact reports 342/342 with `SKIP: 1.4 unreadable-path refusal (this user can read a chmod-000 file; likely root)` (covering 1.4, 1.4b, 1.4c), sha256-escape-decode reports 78/78 with `SKIP: 3.4-3.6 unreadable-path refusals (... likely root)` (covering 3.4, 3.4a, 3.5, 3.5a, 3.6, 3.6a - diffed by assertion id against the macOS run). The SAME image with `-u 1000:1000` (uid 1000 ubuntu) reports design-artifact 345/345 and sha256-escape-decode 84/84, zero skips; the full L1 runner under that uid reports `design-artifact.test.sh: PASSED (345 assertion(s))` and `sha256-escape-decode.test.sh: PASSED (84 assertion(s))`. CI's l1-unit job runs on ubuntu-latest as the non-root runner user, so CI executes 345 and 84.",
+      "description": "The good news first: these are NAMED skips with an explicit reason, so this is NOT the silent-skip family the brief asked me to rule out, and I rule it out. What is wrong is the published number. The table reads as a platform difference between macOS and Linux and there is no such difference - the difference is root vs non-root, and CI is non-root. A reader comparing a future green CI log (345, 84) against these records (342, 78) is chasing a phantom regression. CONTRIBUTING's 'every number carries the command that produced it' is met only literally: the docker command is given, the uid that makes it yield 342/78 is not, and the number is not what CI will print. Remedy: correct the numbers on the task (and in any handover doc that copied them) to 345/84 with a note that 342/78 is the root-container reading."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/unrecorded-review-artifact.test.sh sections 8.1 and 8.12 (assertions 8.1b-8.1e, 8.12e, 8.12h)",
+      "evidence": "NOT attributable to this change set - it is flaky on BOTH sides. Sixteen runs of the spec on cwp-l1-repro:1.1.2 as uid 1000. At the PRE-FIX tree (git archive 157e6f4): 8 runs, 6 green, run4 red with `8.12e 8.12h`, run6 red with `8.1b 8.1c 8.1d 8.1e 8.12e 8.12h`. At HEAD (git archive ad1f655): 4 runs, 3 green, 1 red with `8.12e 8.12h`. At the LIVE working tree: 4 runs (one inside the full L1 tier), 2 green, and run3 red with `8.12e 8.12h` after run1 and run2 of the SAME command on the SAME bytes were green. Identical failure signatures on both sides.",
+      "description": "The spec is non-deterministic, which the review checklist forbids outright, and it is in the CI L1 gate. Mechanism (hypothesis, not instrumented): review-check.sh's ART-ITERATION-SELECT arm raises DISAGREEMENT (line ~2981, mapped to review_artifact_selection_disagreement at line ~3004) when an ITERATION-ordered pick and a TIMESTAMP-ordered pick disagree. Section 8.12e builds its wedge from nine consecutive `bd` writes (five record_artifact_at_iter at iterations 5-9, then four review-record calls at 1-4) and then asserts the wedge formed - so whether it forms depends on how those nine writes fall across second-granularity timestamps, i.e. on machine load, not on bytes. That is a fixture that assumes a race outcome. Per CONTRIBUTING this belongs in a NEW task, not a comment on closed work; I am recording it here so it is not mistaken for a regression by the next reader of a red L1 log."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/design-conform.test.sh, the 9.2j-9.2o header comment (Sections 14 and 15 need python3 and skip on CI's image)",
+      "evidence": "`grep -n python .github/workflows/test.yml` returns nothing, so the l1-unit job neither installs python3 nor gates on it; GitHub's ubuntu-latest image ships python3 with fcntl. Sections 14/15 skipped in MY runs only because cwp-l1-repro:1.1.2 has no python3 (`note: Section 14 needs python3 with fcntl (not found) - SKIPPING`), which is also the whole of the 245-vs-226 macOS/Linux assertion gap I measured for this spec (diffed by id: 14.1-14.3, 15.1-15.4f).",
+      "description": "The CONCLUSION the parenthetical supports survives intact: sections 14 and 15 build a python-fcntl flock(1) stub and drive the FLOCK arm, so they never covered design-unit-bind's no-flock arm on any host, python3 or not. Only the stated reason is wrong, and it will mislead the next person reasoning about CI coverage from this comment. I did not run on a GitHub runner, so this is 'almost certainly' rather than measured."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "low",
+      "location": ".claude/scripts/tests/sha256-escape-decode.test.sh, undecoded_in()/path_passing_files() and assertions 5.1/5.1a",
+      "evidence": "The comment above the leg says every site that hands a PATH to sha256sum/shasum must carry a decode marker `in its function`, but the implementation is `grep -q 'SHA256-ESCAPE-DECODE' \"$f\"` - a WHOLE-FILE test. A second, undecoded path-passing hasher added anywhere in qa-gate.sh (18,202 lines) satisfies 5.1a. Separately, path_passing_files()'s needle `(sha256sum|shasum -a 256)( --)? \"\\$` requires the argument to be a double-quoted $-expansion, so `sha256sum $f` (unquoted) or `sha256sum \"lit/path\"` is invisible to the membership sweep.",
+      "description": "A scope nit rather than a false claim - the spec labels this leg honestly ('this one IS a text scan... a membership TRIPWIRE, not the behavioural check'), and 4.0a-4.0c2 would catch a second DECODED site by exact hit count. Recorded so the next author does not over-trust 5.1a as proof that a newly added helper is covered."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "info",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh section 1S (EXPECTED_*_SET pins)",
+      "evidence": "PRE-EXISTING, identical on both sides. Failure sets compared by assertion id: at 157e6f4 and at HEAD both fail exactly `1S.10 1S.10b 1S.12M.3 1S.13.0d 1S.13.2 1S.13.3 1S.14.0 1S.14.10 1S.14.13 1S.14.2 1S.14.3 1S.14.5 1S.14.8 1S.2 1S.2b` (15 assertions). The diff the spec prints names the cause: `+docs/handover/v5.0.0-handover-addendum-2026-09-26.md` and `+docs/handover/v5.0.0-handover.md`, added by 03bc940 and d5be5a7 (`git log --diff-filter=A -- docs/handover/`), without the same-change-set pin update the spec's own failure message instructs.",
+      "description": "Not this change set's defect, and I am not asking for it here. It does mean the premise 'the two specs that fail in CI at HEAD' is incomplete: a third L1 spec was already red at 157e6f4 and stays red, so the tree is not one fix-pair away from green. New task, per CONTRIBUTING's rule about defects found in already-closed work. (1S.13.0d additionally wants en_US.UTF-8, which cwp-l1-repro:1.1.2 lacks - environment, not code.)"
+    },
+    {
+      "id": "R1-F8",
+      "severity": "info",
+      "location": ".claude/tests/component/specs/installer-manifest-parity.sh:183-198 (hash_of)",
+      "evidence": "An L2 replica of the same `${raw%% *}` idiom that 18fc fixed in five places, deliberately NOT decoded. Its own comment explains why it exists: `deliberately INDEPENDENT of workflow-manifest.sh: the target side of a parity check must not be hashed by the same code that produced the manifest`. Its targets are mktemp directories, which cannot contain a backslash or newline, so it can never observe the escape.",
+      "description": "Recorded as a deliberate non-member, not a miss, so that a future sweep does not 'fix' it into dependence on the shipped helper and destroy the independence that is its whole point. The new spec's section-5 sweep correctly scopes itself to install.sh, uninstall.sh and .claude/scripts/*.sh, so it does not flag this file."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

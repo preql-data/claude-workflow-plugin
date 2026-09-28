@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-1vrs",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "82d532351b1c78554456008109268adec77aaf1b04e5d0d6312cfb2b74ac202e",
+  "risk_threshold": "medium",
+  "stop_condition": "The change set an approval would BIND equals the change set actually reviewed, with no in-progress sibling task's unreviewed deliverable inside it.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": ".claude/tests/component/specs/review-artifact-durability.sh (commit 430fe99) — present in .claude/.qa-tracking/changed-files.txt line 39",
+      "evidence": "TIMELINE, measured. My round-2 artifact (verdict=approve, reviewed_hash 162c82e2) was recorded at 2026-09-28T18:24:15Z = 2026-09-29 01:24:15 +0700. Commit 430fe99 'fix(g47z): review-artifact-durability AC-3's expected wording was stale, not the gate' was authored at 2026-09-29 01:28:18 +0700 — FOUR MINUTES LATER — and `git merge-base --is-ancestor 430fe99 HEAD` confirms it is in the reviewed tree. Its file entered changed-files.txt, and the change-set hash moved 162c82e2 -> 82d53235; `qa-gate.sh approve` refused on exactly this (error_key=impact_report_stale) rather than my noticing it by inspection. The tracker grew from 13 entries to 15: my own r2 artifact (expected — the canonical artifact is designed to enter the set its approval binds) and this file (NOT expected). `bd show claude-workflow-plugin-g47z` reports status=in_progress, labels=[qa-pending]: it is an ACTIVE SIBLING TASK AWAITING ITS OWN QA REVIEW, and its notes/comments name 430fe99 as its deliverable.",
+      "description": "Approving 1vrs right now would write a change-set-bound QA-GATE APPROVED record over a change set containing another open task's UNREVIEWED deliverable, and would thereby pre-empt g47z's own qa-pending gate — its work would be certified by an approval on a different task, before its own review ever ran. That is precisely the property the change_set_hash binding exists to prevent, and it is the concurrency defect this very umbrella task's description already names (claude-workflow-plugin-qnvo / t4vf: 'they landed concurrently in one tree and the append-only tracker cannot separate them'). THIS IS NOT A QUALITY FINDING AGAINST EITHER BODY OF WORK. The five-commit wave is verified and approvable (see artifacts r1/r2). 430fe99 itself reads as sound on inspection: the retired needle 'no review-artifact binding' is assembled only into the SUCCESS summary (qa-gate.sh:7960) so it could never appear in a refusal — an unfalsifiable assertion — and replacing it with the gate's machine-stable '\"error_key\":\"review_artifact_unrecorded\"' strengthens rather than loosens it; the root cause is established by `git log -S` archaeology onto fa30d05/k6re, and the adjacent now-vacuous sibling assertion was FILED (d73j) rather than swept. But I have reviewed it only reactively and by diff; I have not run review-artifact-durability.sh, and neither of my recorded artifacts covers it. RESOLUTION IS A SCOPE/SEQUENCING DECISION FOR THE ORCHESTRATOR, not something QA should take unilaterally — the brief explicitly scoped g47z OUT, so folding another task's deliverable into this approval is not mine to decide. Options: (1) let g47z clear its own gate and approve 1vrs against a tracker reconciled to a clean state between the two reviews; (2) explicitly widen this review's scope to the union, in which case I will run the L2 spec, record an artifact binding the union, and approve once; (3) serialise — hold specialist commits in this tree while a QA gate is open, which is the standing fix and the qnvo/t4vf P0. NO CARVE-OUT: I deliberately did NOT reconcile or subtract the path from the tracker to make the hash match, and did not reach for approve --no-impact-report; both would be the change_set_reconstructed hazard and a new bypass mechanism respectively."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "low",
+      "location": "process observation — .claude/.qa-tracking/changed-files.txt vs docs/reviews/<tid>-r<n>.json",
+      "evidence": "Each review-record writes a canonical artifact that itself enters changed-files.txt, so the change-set hash moves AFTER the artifact binding it is written. Observed twice this cycle: r1 left the tracker at 12 and it later read 13 including r1; r2 was recorded while the hash still read 162c82e2, and by the time the regenerated impact report was consumed the hash was 82d53235. Consequence: an artifact's reviewed_hash necessarily lags the set its own approval binds by at least its own entry.",
+      "description": "NOT a blocker and not introduced by this wave — recorded because it interacted with R3-F1 and made the contamination visible only via approve's refusal rather than by inspection. Worth knowing when reading any reviewed_hash: it names the set as of composition, not as of approval."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

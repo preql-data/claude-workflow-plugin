@@ -1,0 +1,64 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-lto2",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "5870287e6a18b6dd015e79a7ff900f6fdc747bb34750706723fd9ad93889145f",
+  "risk_threshold": "high",
+  "stop_condition": "Every acceptance criterion above is traced to evidence I ran myself: both pinned lists diffed byte-for-byte against an independent LC_ALL=C enumeration, the pin+1 canary legs observed FAILING against a real docs/ addition, the before/after counts reproduced on macOS and on Linux at uid 1000, and no finding at or above high severity remains open in the pin, the canary legs, or the completeness of the update.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": "claude-workflow-plugin-lto2 (the correction recorded on the task) cross-checked against claude-workflow-plugin-8lc1",
+      "evidence": "GitHub Actions run 36232214628, headSha bff6cc4fc38ed35946a7d876de5a42337f126839, 2026-09-26, job 'L1 - bash unit tests'. One job's log carries all three of: (a) 'PASS: 1S.13.0d non-vacuity: en_US.UTF-8 is installed and really collates differently from C on this host'; (b) '=== approval-record-disclosure-claim.test.sh: 238 passed, 0 failed ==='; (c) 'SKIPPED: no locale installed on this host demonstrates the [a-v] collation exposure (tried en_US/en_GB/de_DE in both UTF-8 spellings)', emitted by runner-completeness.test.sh section 13w. The three L1 specs that actually failed in that run are design-artifact, design-conform and runner-completeness (gh run view 36232214628 --json jobs; --log | grep -E '^L1 .*--- .*: FAILED'). actions/runner-images Ubuntu2404-Readme.md lists the locales package 2.39-0ubuntu8.9 as installed in the IMAGE.",
+      "description": "The passage 'CI provisions NO locales (verified: no locale-gen, no locales package, no apt-get install anywhere in .github/workflows/test.yml), so those two WILL be red on CI. That is claude-workflow-plugin-8lc1' is wrong on all three clauses. (1) The runner IMAGE provisions locales, not the workflow; grepping test.yml is evidence about a FILE, not about a RUNTIME, which is the antipattern .claude/tests/README.md states as 'Do not count text to prove a claim about code'. (2) 1S.13.0d exists precisely to prove that host precondition and it PASSED on the real runner two days ago, along with 1S.13.1/.2/.3, with the whole spec green at 238/0. (3) 8lc1 is a different spec and a different exposure - its own title is 'runner-completeness skips the [a-v] collation section' - and its symptom appears in the SAME job alongside the passing 1S.13.0d, which is consistent rather than contradictory: en_US.UTF-8 can be installed and still not demonstrate a bracket-RANGE exposure. Nothing in the change set moves. What should move is the correction on lto2: on the available evidence 5384d49's 'last genuine L1 failure' line is not refuted by a locale gap, and nothing needs filing for 1S.13.0d/1S.13.1 because they are not red on CI."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh (is_doc_only_path) and .claude/scripts/workflow-manifest.sh",
+      "evidence": "Driving the SHIPPED is_doc_only_path - extracted by the same three awk ranges .claude/scripts/tests/doc-only-classifier.test.sh uses (DOC-CONTENT-VETO, GOVERNING-ARTIFACT-VETO, the function itself), with _GOV_TOOL pointed at the real .claude/scripts/workflow-manifest.sh so the governing-artifact query is live - classifies docs/handover/v5.0.0-handover.md and docs/handover/v5.0.0-handover-addendum-2026-09-26.md DOC-ONLY, while docs/HOOKS.md (workflow), CLAUDE.md (runtime-contract), LESSONS.md (operator) and .claude/agents/qa.md (workflow) all return REVIEWABLE with the GOVERNING ARTIFACT diagnostic. workflow-manifest.sh declares no docs/handover row. Both handover files are clean under BANNED_CLAIM_PATTERN today (0 hits each), verified non-vacuously: the identical normalize-then-grep over a copy with a Tamper-Evident sentence appended returns 1.",
+      "description": "I agree with the decision (include, not exclude) over its alternative. The finding is that the change set records no residual for what the decision does not close. (a) A handover-only change set is doc-only, so it takes verify-before-stop.sh's F1 fast path and AUTO-APPROVES with no QA round while silently breaking the pin this decision just widened - which is exactly how d5be5a7 and 03bc940 landed. The discipline the decision relies on, one pin update in the same commit as each future handover, has no gate at the moment the handover commits; its only detector is a delayed red tier. (b) workflow-manifest.sh, the repo's own oracle for what the project declares as its own surface, has no docs/handover row, so the disclosure spec and the manifest now disagree about whether a handover is part of that surface - the disagreement class LESSONS.md already records against this file's own arc ('90 discovered against 138 declared'). (c) A future handover that needs to QUOTE the banned phrase in order to describe this work - the reason this spec file excludes ITSELF - would fire 1S.11, whose only remedy is rewriting a dated audit document, the 'own dishonesty' the file's own OUT-OF-SCOPE paragraph names for CHANGELOG entries. No change requested here, per the no-new-mechanisms constraint; this wants a follow-up task."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": "the full-L1-tier measurement recorded for claude-workflow-plugin-lto2",
+      "evidence": "Two independent runs, image cwp-l1-repro:node, -u 1000:1000, -v $PWD:/src:ro, working tree at 5384d49, command 'bash .claude/scripts/tests/run-tests.sh'. Both report 'Total: 75  Passed: 73  Failed: 2  Skipped: 0  Partial: 3', 'Assertions executed: 7733' and 'Completeness floor: HELD (75/75 ...)'. The second run was made with no concurrent writes of any kind from this session, after I established that the first had overlapped my own .claude/.qa-tracking writes. Failed tests, both runs: mcp-unestablished-results.test.sh (rc=1, 53 assertions) and unrecorded-review-artifact.test.sh (rc=1, 185 assertions).",
+      "description": "Spec total (75), assertion total (7733), partial count (3) and the completeness floor all reproduce exactly; the pass/fail split does not - the brief records Passed: 74 Failed: 1. Neither failure is attributable to this change set, measured rather than argued. mcp-unestablished-results.test.sh fails the IDENTICAL eight assertions (1.9, 2.3-2.7, 3.13, 3.14) against a git archive of ad8f4cb with bd-mcp/node_modules copied in, and greps clean for any reference to the changed file, to docs/ or to the pin. unrecorded-review-artifact.test.sh is claude-workflow-plugin-16e6, already filed as flaky on both sides; I reproduced the nondeterminism directly - 185/185 rc=0 standalone against the same tree, four failures (8.1b-8.1e) via run-tests.sh --filter at 5384d49, and a DIFFERENT two failures (8.12e, 8.12h) via the same command at ad8f4cb. Correct the recorded number to 73/2 with both failures named, or re-measure it."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/mcp-unestablished-results.test.sh",
+      "evidence": "cwp-l1-repro:node, -u 1000:1000, /src read-only. At 5384d49 (working tree): 45 PASS / 8 FAIL, rc=1. At ad8f4cb (git archive plus bd-mcp/node_modules copied in): the same 45/8 with a byte-identical failing-assertion set. Against a bare git archive it SKIPS instead - 'SKIPPED: mcp-unestablished-results.test.sh (bd-mcp node_modules absent)' - so an archive-only comparison reads as a false pass, which is how I nearly mis-attributed it. Failure shape: '1.9 MUTANT reports the unreadable source as VERIFIED' expected 'verified', actual empty; the run also emits 'line 393: /tmp/mcp-unestab.<tmpdir>/simstate/.labels: No such file or directory'. It is NOT among the three L1 failures on CI run 36232214628, where the checkout is writable. A bd search over open tasks for mcp-unestablished / unestablished / bd-mcp mutant returns nothing.",
+      "description": "Pre-existing and apparently unfiled: the spec's mutant legs do not survive the read-only bind-mount shape the brief prescribes for this repro, so anyone following that recipe sees a red spec that CI does not have, and cannot tell it from a real regression without doing the ad8f4cb comparison by hand. Out of scope for this change set; worth its own task so the next person running the prescribed container does not re-derive it."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "low",
+      "location": ".claude/.qa-tracking/completion-claude-workflow-plugin-lto2-devops.json",
+      "evidence": "tests_added lists 8 assertion names. grep -cE for assert_eq/assert_contains/assert_set_pin/assert_not_contains returns 188 for BOTH 'git show ad8f4cb:.claude/scripts/tests/approval-record-disclosure-claim.test.sh' and the shipped file, and the spec itself reports 224+14 = 238 assertions before and 238+0 = 238 after.",
+      "description": "Zero assertions were added. The eight named entries are pre-existing assertions whose expected literal changed. The honest value is an empty array with the constants-only nature stated in llm_observations, which is otherwise the strongest field in this contract. It did not mislead this review, since the change is one file and I read the whole diff, but in a task whose entire subject is a number that stopped matching what it counted, a contract field claiming eight added tests is the same shape."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "low",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh:1318",
+      "evidence": "The one sentence at :1311-1321 now reads '...+41(docs)+4(named root)+9(agents)+24(plugin-installed) = 102 raw, minus 10 overlaps ... = 92 (R6-F1: the previous formula here summed to 116 by duplicating a 24 term in place of one of the two 8s - the five categories actually sum to 100, not 116)'. Measured now by driving the extracted discover_* functions standalone against PROJECT_DIR: 8/8/8 script mirrors, 41 docs, 4 named root, 9 agents, 24 plugin-installed, union 92; 8+8+8+41+4+9+24 = 102.",
+      "description": "Leaving 100 is the RIGHT call on the number: 100 and 116 are a matched pair anchored at 39 docs (116-100 = 16 = 24-8, exactly the substitution the clause describes), so updating 100 alone would break the arithmetic relation the sentence exists to explain. The residual is the TENSE. Unlike the three other retained citations - :501 'MEASURED', :951 'QA demonstrated', :1490 'the 513j task record' - this clause is present-tense with no date anchor and sits three lines under a live '= 102 raw', so one sentence now states the raw sum as both 102 and 100. Minimal repair is one tense word: no number changes, no new mechanism. The commit message names the retained 116 but not the 100, and decisions[] does not mention it, so it reads as missed rather than decided."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "info",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh (1S.13.3) / claude-workflow-plugin-mnxp",
+      "evidence": "GitHub Actions run 36232214628 at bff6cc4 emits, in the L1 job, between the '--- 1S.13 LOCALE CONTROL ---' banner and 1S.13.3's PASS line: 'bash: warning: setlocale: LC_ALL: cannot change locale (fr_FR.UTF-8)'.",
+      "description": "Not a defect - positive evidence for a filed one, recorded here because it closes a stated unknown rather than leaving it open. The implementer's context_coverage names 'whether the real GitHub Actions runner image has fr_FR.UTF-8' as its largest remaining unknown, and llm_observations says the gap 'plausibly reaches the real CI runner too but that was not verified either way'. It is verified now: fr_FR.UTF-8 is absent on the runner, so 1S.13.3 passes vacuously there for exactly the reason mnxp describes. This belongs on mnxp."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

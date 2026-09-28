@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
-## [5.0.0] - 2026-09-18
+## [5.0.0] - 2026-09-29
 
 **Design becomes a first-class, reviewed, continuously-enforced phase.**
 Through 4.1.0 the orchestrator both designed and delegated, and nothing
@@ -2575,6 +2575,158 @@ weight actually sits.
   refusing the carrier — filed specifically because that is a per-agent
   judgement call repeated dozens of times rather than a mechanical gate,
   and it has already failed once.
+
+- **The finishing pass: eleven fixes that took CI fully green for the first
+  time in the arc.** Every prior v5 candidate shipped with at least one red
+  job. At `430fe99` the full matrix is green — **L1 75/75 specs, 0 failed, 0
+  skipped, 0 partial, 7,890 assertions, completeness floor HELD; L2 48 specs,
+  33 passed, 0 failed** (15 skipped and 4 partial, stated rather than rounded
+  into "green"); shellcheck, manifest validation, the `bd`-max doctor job and
+  L3 vitest all passing, with only the manual live-Claude job skipped (run
+  `36465905492`). The eleven, each with the measurement that established it:
+
+  - **`0z9v`** — `design-conform.test.sh`'s sentinel strip named only ONE of
+    the two sentinel pairs it had to remove, so `REBIND-GATE-FLOCKED` survived
+    and a whole family of assertions was compared against text that still
+    carried its marker. The strip now names both pairs with separate found-
+    flags and distinct exits (7 and 8), so a future single-pair regression
+    cannot masquerade as the other, plus sections 9.2g–9.2u. macOS 228 -> 245
+    assertions; Linux 209 with 2 FAIL -> 226/226.
+
+  - **`18fc`** — five independent SHA-256 helpers mis-parsed the one line
+    format GNU coreutils and perl's `Digest::SHA` emit for a pathological
+    filename. Both prefix the output LINE with `\` and escape the name when it
+    contains a newline or a backslash, making field 1 sixty-five characters
+    instead of sixty-four, so the recorded "hash" silently carried a leading
+    backslash. Fixed at `workflow-manifest.sh hash_file` (both arms),
+    `qa-gate.sh sha256_file`, `beads-ledger.sh sha256_file`,
+    `install.sh mcp_sha256_of` and `uninstall.sh hash_of`, with a new 595-line
+    `sha256-escape-decode.test.sh` pairing each with a negative control.
+
+  - **`8lc1`** — a shell-compatibility probe measured the WRONG SHELL'S
+    behaviour. bash 5.0+ defaults `globasciiranges` ON, forcing bracket RANGE
+    expressions to ASCII ordering regardless of `LC_COLLATE`; macOS bash 3.2
+    has no such option, so the probe agreed with the platform it ran on and
+    disagreed with the platform it was predicting. Now capability-detected
+    (`SC_ASCII_RANGE_PREAMBLE='shopt -u globasciiranges; '`), applied to both
+    the probe and `sc_shape_check_locale`, with a new negative control `13w.0`.
+    455 -> 464 assertions.
+
+  - **`we57` + `0cr6`** — `workflow-doctor.sh` looked for the embedded-Dolt
+    store under a fixed name, but `bd` names it after the PROJECT DIRECTORY
+    with non-alphanumerics mapped to `_`, so the check silently examined
+    nothing on any project whose directory name differed. Resolved by name via
+    a new `resolve_bd_schema_store()`. In the same pass the single
+    `DOCTOR_BD_SCHEMA_PIN` became `DOCTOR_BD_SCHEMA_VALIDATED`, a validated
+    SET: the store schema version is **non-monotonic across bd releases**
+    (1.1.2:53, 1.2.1:65, 1.2.2:53, 1.3.0:66), so a floor or an interval is
+    meaningless and only an explicit set can be correct. A new CI job
+    `l1-doctor-bd-max` pins the upper end; README gained a "Supported bd range".
+
+  - **`qwny`** — `model-roles.test.sh` Section 11's isolation witness was not
+    hermetic; it now builds its fixture through `"$REAL_BD" init --database
+    beads`, pinning the store name instead of inheriting the directory's.
+    452 assertions + 1 skip -> 456 + 0 skips.
+
+  - **`4c6r`** — the runner-completeness oracle POLLED FOR A PROCESS that dolt
+    only transiently spawns. dolt v2.3.5's `shouldFlushEvents("sql")` is
+    unconditionally true and the config is read INSIDE the spawned subprocess,
+    so the race was the subprocess's LIFETIME, not its spawn timing, and a poll
+    could miss it entirely while reporting a clean result. Replaced with the
+    deterministic `.devts` events-log side effect under a fresh per-call
+    `$HOME` — an artefact that persists, rather than a process that may not be
+    there when looked at.
+
+  - **`lto2`** — `approval-record-disclosure-claim.test.sh` pinned line numbers
+    that had moved. Pins 39 -> 41 and 90 -> 92, and the pin+1 canaries
+    (`1S.14.5`, `1S.14.10`) 40 -> 42. 224 passed / 14 failed -> 238 / 0.
+
+  - **`g47z`** — `review-artifact-durability.sh`'s AC-3 asserted on the WORDING
+    of a refusal that no longer exists in that form. Post-`k6re` the
+    unrecorded-artifact path is a HARD REFUSAL, while the assertion had been
+    written against the older warn-and-succeed behaviour; its needle `"no
+    review-artifact binding"` derives from `review_file_binding_obs`, which has
+    exactly one consumer — the SUCCESS summary — so it could never appear in a
+    refusal at all. Retargeted to `'"error_key":"review_artifact_unrecorded"'`,
+    which `git log -S` confirms was introduced by exactly one commit
+    (`fa30d05`) and is followed by `exit 4`. `qa-gate.sh` was deliberately left
+    untouched: the gate was right and the assertion was stale. 40/1 -> 41/0.
+
+  - **`4l1d`** — 21 e2e fixture mirrors had drifted from the scripts they
+    mirror; `make sync-fixtures` re-synced them. 21 failing vitest specs -> 210
+    passing.
+
+  - **`lgq4`** — `.claude/test-cmd` had been deleted, which silently NARROWED
+    the Stop gate to whatever `detect-stack.sh` guessed. Restored (51 bytes)
+    and the whole `test-cmd`/`lint-cmd`/`type-cmd` family gitignored, so the
+    file can exist locally without ever entering a change set.
+
+  - **`1vrs` R1-F1** — a comment-only correction: `workflow-doctor.test.sh`'s
+    META-TEST index still described the retired single pin as current, which
+    would have sent the next reader looking for a mechanism that no longer
+    exists.
+
+- **First real-project validation, and what it found.** Nothing in the v5 arc
+  had ever pointed the plugin at a repository other than its own. It has now
+  been run end to end against a foreign poetry-managed Python product repo:
+  install exit 0 in 19s, `workflow-doctor` 12 passed / 0 failed / 1 skipped,
+  then the whole arc — grilling, design, three review rounds to
+  `verdict=satisfied`, decomposition into units, and a real implementation that
+  went **green-to-green (1,901 passing before, 1,907 after — +6, exactly its
+  own new tests, 0 failures across ~2,000)** with all seven acceptance criteria
+  met and the pairing requirement confirmed empirically by stashing the fix and
+  watching the new tests fail distinguishably. **This is the first evidence the
+  plugin works on anything but itself.** It also surfaced three defects that no
+  amount of self-testing could have found, all filed, none fixed in this
+  release:
+
+  - **`pqoj` (P0, INHERITED — present identically in 4.1.0, not a v5
+    regression).** The shared denylist's `(^|/)(node_modules|dist|build|
+    coverage|...|target|__pycache__)/` alternation anchors to a SEGMENT
+    BOUNDARY with no containment check against the project root, and
+    `changed-files.txt` carries absolute paths. So an ancestor directory at ANY
+    depth named `build`, `dist`, `target` or `coverage` denylists **every file
+    in the project**: `post-edit.sh` rejects each path at entry,
+    `changed-files.txt` is never created at all, and `change_set_hash` becomes
+    `e3b0c442…b7852b855` — sha256 of zero bytes — permanently and regardless of
+    what is edited. Because that value is CONSTANT, the "has the change set
+    moved since approval?" comparison protecting every downstream gate can
+    never fire. Verified by sourcing the real denylist and by direct
+    observation in the clone, where three genuinely-edited files produced no
+    tracker at all. It survived the whole arc because this repository's own
+    path contains no matching segment — invisible on the authoring host, fatal
+    elsewhere. **Consequence for this release note's own honesty: the run's
+    `design-conform` "ok:true" is VACUOUS** — it named the three just-written
+    files as "not yet touched" — so whether `design-conform` works on a foreign
+    repo remains UNESTABLISHED in either direction.
+
+  - **`6ob3` (P1).** `detect-stack.sh`'s Python branch hardcodes bare `python
+    -m pytest` with no poetry/venv/uv detection, while its npm branch
+    interrogates `package.json`'s own scripts and leaves the command EMPTY when
+    there is none. On a poetry project it resolved the ambient interpreter and
+    reported 103 collected / 98 errors, so `green-check --phase before` refused
+    with `cannot_start_from_green` — against a suite that is genuinely green
+    (2,180 collected / 0 errors; 1,901 passing in 45s under the project's own
+    interpreter). The documented `.claude/test-cmd` override fixes it
+    completely and was verified doing so; nothing tells an operator to write
+    one, which is the real defect. The same ambient-PATH blindness runs the
+    other way for lint and type: `command -v ruff`/`mypy` come back empty on a
+    venv-isolated project, so the gate would run no lint and no type check and
+    still report success — the loud half was discoverable, the silent half was
+    not.
+
+  - **`1dbz` (P2).** `design-unit-align`'s LEG 3 demands a covering test for
+    every declared acceptance criterion, with no accommodation for a
+    REGRESSION-SHAPED criterion whose entire content is "the pre-existing suite
+    still passes". A correct, fully-implemented unit could not be aligned. It
+    fails LOUD and names the exact criterion — the healthy failure mode, and
+    the deliberate contrast with `pqoj`. It is also a second, independent route
+    to `qnvo`'s uncompletable `approve`, needing no stray file at all.
+
+  The implementer refused the `.claude/test-cmd` workaround for its own
+  blocker, on the grounds that manufacturing a way past a refusal you have just
+  hit is indistinguishable from working around it — which is the behaviour the
+  design wants, and is why the operator provisioned the override instead.
 
 ## [4.1.0] - 2026-07-30
 

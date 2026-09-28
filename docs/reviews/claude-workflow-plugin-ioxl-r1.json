@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-ioxl",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "343eb8e1da693ffdcc8b20a669ded38ddd71f970fe84ad6f245fbe3d8321ae37",
+  "risk_threshold": "high",
+  "stop_condition": "Both appended entries are verified true against primary evidence rather than against files alone; the append is provably append-only with canonical trailers and no disturbance to the load-bearing line order; both tags are checked against the closed vocabulary; and neither entry substantially restates an existing lesson.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "low",
+      "location": "LESSONS.md:329",
+      "evidence": "Entry 329 ('A spec that SKIPS exits 0 ...') carries <!-- tags: testing --> only. The ledger preamble defines the `evidence` tag as covering 'how you know a thing is true: measurement versus claim, silent-success failure modes, root cause'. A skipping spec that exits 0 and renders as a clean comparison IS a silent-success failure mode -- it is the tag's own wording. The preamble further directs that 'an entry carries every tag a reader might plausibly filter on, and when in doubt the tag goes on'. The two closest siblings in the same family both carry BOTH tags: line 150 ('a \"no failures\" signal is not a \"the run finished\" signal') is tagged evidence, testing; line 287 ('a suite's pass total describes only what RAN') is tagged evidence, testing. Entry 329 is the sharpest statement of that family and is the only one of the three not retrievable under --tag evidence.",
+      "description": "Retrieval-consistency defect, not a factual one. An orchestrator filtering the ledger for silent-success failure modes (--tag evidence) gets 150 and 287 but misses 329. Non-blocking: no claim in the entry is wrong and nothing downstream reads tags as a gate. Remedy is non-destructive and does not require hand-editing the append-only file: lessons.sh dedups on normalized text (lowercase, whitespace-collapsed -- cmd_add lines 446-489) and MERGES the --tag and --source lists into the matched entry instead of appending a second one, with merge_tags emitting a sorted comma-joined list. Re-adding the byte-identical text with --source claude-workflow-plugin-lto2 (already present, so merge_sources returns the existing list unchanged) and both tags therefore rewrites only the tags trailer to 'evidence, testing'. SECONDARY, weaker, recorded but not filed separately: entry 328 could arguably also carry `testing` under the same when-in-doubt directive, since the evidence that settles it is a non-vacuity assertion inside a spec; I judge `evidence` alone defensible there because the lesson addresses a reader making a claim, not a test author designing an oracle."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "stop_condition"
+}

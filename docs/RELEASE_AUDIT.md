@@ -784,9 +784,9 @@ show, the row says so plainly rather than rounding up.
 | --- | --- | --- | --- | --- |
 | DP1 | Design is mandatory: implementation orchestration cannot begin until the epic carries `design-satisfied` and a bound `design_artifact` reference (directive `:185` "design is mandatory"; plan D2 "Gate precondition") | Structural: the precondition is implemented as a gate/relay condition, not a new hook (per correction 5, enforced at `approve`, not `enter`); D4's task-per-unit conformance check depends on it existing | `grep -c 'design.satisfied\|design_artifact' .claude/scripts/qa-gate.sh` returns non-zero (checked live, 2026-09-18); Phase D0-D4 (`fkm.2`-`fkm.6`) all `status=closed labels=[...,qa-approved]` in Beads, each a change-set-bound independent-review artifact | PROVEN |
 | DP2 | Design is independently reviewed: `design_reviewer` is read-only (no Write/Edit/Bash) and mechanically forbidden from sharing the designer's identity; a collapse is reported, never silently accepted (directive `:185` "independently reviewed"; D0 table; D2 "identity-collapse refusal") | Direct read of shipped agent frontmatter and the resolver's own documentation comment | `.claude/agents/design-reviewer.md:4` — `tools: Read, Grep, Glob, LS` (no Write, no Bash); `.claude/agents/designer.md:4` grants `Write` (needed to produce the artifact) but no `Edit`/`MultiEdit`/`Bash`. `.claude/model-roles`, "IDENTITY COLLAPSE" section, quoted verbatim: "on a stock install WITHOUT Codex they resolve to the same model and the design would be reviewed by its own identity. That is reported, never blocked: the resolver sets `identity_collapse: true`... warns at SessionStart, and the statusline shows `!id`." Two clearances documented in the same block (install Codex; or pin `design_reviewer` to a distinct `<family>-class`). CAVEAT: the mechanism is real and the collapse is never silent, but self-review is the DEFAULT on a stock, Codex-absent install until an operator acts on one of the two clearances; this is disclosed in the shipped file, not hidden, but "independently reviewed" is a claim about the steady state only after that action. | PROVEN-WITH-CAVEAT |
-| DP3 | Unit sizing is enforced pre-implementation: every unit must be independently buildable/verifiable and "small enough for one coherent change," with a declared file set, dependencies, and (for `implementer_class: high`) a stated reason (directive `:185` "unit sizing is enforced pre-implementation"; D1 schema; D2 rubric DS2/DS3) | Direct read of the shipped design rubric | `.claude/rubrics/design.md` — `### DS2. The decomposition is complete and disjoint.` ("Evidence that satisfies it: a one-line trace from each acceptance criterion to the unit that owns it, plus a pairwise check of every unit's `files[]` against every other unit's."); `### DS3. Every unit with a dependent declares its interface; verification is a real command.` Both read in full 2026-09-18; `fkm.3` (D1, schema + edit-scoping) and `fkm.4` (D2, rubric) both `status=closed labels=[...,qa-approved]`. | PROVEN |
+| DP3 | Unit sizing is enforced pre-implementation: every unit must be independently buildable/verifiable and "small enough for one coherent change," with a declared file set, dependencies, and (for `implementer_class: high`) a stated reason (directive `:185` "unit sizing is enforced pre-implementation"; D1 schema; D2 rubric DS2/DS3) | Direct read of the shipped design rubric | `.claude/rubrics/design.md` — `### DS2. The decomposition is complete and disjoint.` ("Evidence that satisfies it: a one-line trace from each acceptance criterion to the unit that owns it, plus a pairwise check of every unit's `files[]` against every other unit's."); `### DS3. Every unit with a dependent declares its interface; verification is a real command.` Both read in full 2026-09-18; `fkm.3` (D1, schema + edit-scoping) and `fkm.4` (D2, rubric) both `status=closed labels=[...,qa-approved]`. **CORRECTED 2026-09-29 by independent re-verification — PROVEN → PROVEN-WITH-CAVEAT. The cited command passes and does not prove the "small enough for one coherent change" half.** DS2 and DS3 are present verbatim as quoted, but neither checks SIZE, and no criterion in the rubric does: `grep -n -i 'size\|sizing\|small\|coherent change\|too large\|granular' .claude/rubrics/design.md` returns **zero hits, exit 1**, across DS1–DS8. `review-check.sh` has no size check either (`grep -n -i 'too_large\|unit_size\|size_limit\|max_files\|small enough'` → no hits). The phrase exists in exactly one place, `.claude/agents/designer.md:165`, under "The controlling standard" — and it is absent from the designer's own four-item pre-declaration checklist immediately below it (`:170-177`: falsifiable criteria; files list; runnable verification; no undeclared file sharing). The reviewer cannot score it either: `design-reviewer.md:52` states it reads `.claude/rubrics/design.md` and that there is "One rubric, one reader, always applied whole" — and that rubric contains no sizing criterion. CAVEAT, precisely scoped: the REST of this claim is genuinely enforced — `escalation_reason`-whenever-`implementer_class: high` is mechanical (`review-check.sh:1467`, named as a precondition at `design.md:10`), and the declared file set and non-empty `verification` are schema-enforced, with disjointness covered by DS2. Only "small enough to be implemented and verified as one coherent change" is an ASPIRATION IN PROSE with no check anywhere. | PROVEN-WITH-CAVEAT |
 | DP4 | Decomposition conformance is deterministic — no LLM, no review round: every task maps to a design unit, no orphans, dependency edges match the artifact, the bound hash matches (directive `:185`; D4 "Conformance check") | Structural: located the subcommand and its call sites directly | `grep -n 'design-conform' .claude/scripts/qa-gate.sh` returns hits at three sites (a dispatcher entry plus two internal consultation points), confirmed live 2026-09-18; the accountability table (`docs/plans/v5-design-phase.md:76`) names this row's owner as "Deterministic conformance check (D4) — no review round," matching what the code contains: a `case`-dispatched subcommand, not an agent spawn. `fkm.6` (D4) `status=closed labels=[...,qa-approved]`. | PROVEN |
-| DP5 | Parallel batches never share files or impact: two units may run concurrently only when their declared file sets AND their `impact_of` sets do not intersect, with graph-absent degradation named in the readout rather than silent (directive `:185`; D4 "Parallel batching, computed not judged") | Structural: `epic-gate.sh shared-files` exists and is documented as intersection computation; cross-checked against `dxz`'s own filed residual on this repo's specific graph behaviour | `grep -n 'shared-files\|shared_files' .claude/scripts/epic-gate.sh` returns the subcommand plus its help text ("Compute file-intersection with in-progress siblings"), confirmed live 2026-09-18. `fkm.6` (D4a/D4b, commits `6d0011f`/`ed45abe`) `status=closed labels=[...,qa-approved]`, titled "a batching plan that cannot compute its answer refuses instead of reporting one" — i.e. the no-silent-degradation half is the shipped headline, not an afterthought. CAVEAT: `dxz`'s own completion record (closed, P6) measured that on THIS repo's dominant shell idiom, `impact_of(file=...)` commonly returns `file_dependents:[]` even for a file another script directly `source`s, because the indexer's bash grammar only resolves a call edge when the invoked command is a bare word, not `"$SCRIPT_DIR/other.sh" --flag`. On a shell-heavy repo, near-every pair of units can therefore compute an empty (non-intersecting) `impact_of` set whether or not they actually touch related code — batches would not report degradation (the graph IS present and healthy), but the impact half of the intersection check would be silently uninformative. `dxz`'s own record names this "worth flagging now" for D4 and assigns it to `kk9y`, unresolved as of this ledger. | PROVEN-WITH-CAVEAT |
+| DP5 | Parallel batches never share files or impact: two units may run concurrently only when their declared file sets AND their `impact_of` sets do not intersect, with graph-absent degradation named in the readout rather than silent (directive `:185`; D4 "Parallel batching, computed not judged") | Structural: `epic-gate.sh shared-files` exists and is documented as intersection computation; cross-checked against `dxz`'s own filed residual on this repo's specific graph behaviour | `grep -n 'shared-files\|shared_files' .claude/scripts/epic-gate.sh` returns the subcommand plus its help text ("Compute file-intersection with in-progress siblings"), confirmed live 2026-09-18. `fkm.6` (D4a/D4b, commits `6d0011f`/`ed45abe`) `status=closed labels=[...,qa-approved]`, titled "a batching plan that cannot compute its answer refuses instead of reporting one" — i.e. the no-silent-degradation half is the shipped headline, not an afterthought. CAVEAT: `dxz`'s own completion record (closed, P6) measured that on THIS repo's dominant shell idiom, `impact_of(file=...)` commonly returns `file_dependents:[]` even for a file another script directly `source`s, because the indexer's bash grammar only resolves a call edge when the invoked command is a bare word, not `"$SCRIPT_DIR/other.sh" --flag`. On a shell-heavy repo, near-every pair of units can therefore compute an empty (non-intersecting) `impact_of` set whether or not they actually touch related code — batches would not report degradation (the graph IS present and healthy), but the impact half of the intersection check would be silently uninformative. `dxz`'s own record names this "worth flagging now" for D4 and assigns it to `kk9y`, unresolved as of this ledger. **CORRECTED 2026-09-29 by independent re-verification of all 18 rows (see the Re-verification addendum at the foot of this section) — this row was PROVEN-WITH-CAVEAT and is now NOT-PROVEN, and the caveat above describes a residual that CANNOT OCCUR.** The claim is a CONJUNCTION and only the first conjunct ships. `graph_intersection_computed` is the literal `false` at every emission site in `epic-gate.sh` (1014, 1093, 1394, 1412, 1423, 1430, header 564), with no `true` path; `:1082` goes further and VALIDATES the field is false (`and (.graph_intersection_computed == false)`), so it is structurally pinned rather than merely defaulted. `epic-gate.sh` never invokes the code-graph server. The script's own shipped help (`:95-97`) states "the `impact_of` half is deferred (claude-workflow-plugin-l7gd); `graph_intersection_computed` is always false this release", and its own final observation (`:2326`) says "file-set intersection only (impact_of half deferred)". `bd show claude-workflow-plugin-l7gd` → `status=open`, created **2026-08-22 — 27 days before this ledger was compiled**. Because nothing computes an impact set at all, the `file_dependents:[]` residual the caveat warns about is unreachable; the real residual is larger and was unstated. Separately, `graph_degradation_reason` is the unconditional literal `code_graph_absent` while the graph on this tree is present and healthy (`workflow-doctor`: `PASS mcp_code_graph  serverInfo.name=code-graph-mcp, tools/list returned exactly 7 tool(s)`), so the readout names a degradation with a false cause. THE CODE IS HONEST — every disclosure above is in the shipped artifact; the overclaim was entirely at this ledger layer. The original evidence grep compounded it by targeting the wrong subcommand: `shared-files` is `cmd_shared_files` (`:456`), the B2 helper intersecting against in-progress siblings, not the `plan-batches` mechanism (`~:512`) the claim is about — it passed, and proved something adjacent. **MECHANISM THAT WILL FLIP IT** (required of every NOT-PROVEN row): implement `claude-workflow-plugin-l7gd` so the `impact_of` conjunct is actually computed; or perform a prove-or-remove rewrite narrowing this claim to file-set intersection only, re-verdicted against what `plan-batches` computes, with the deferral named in the row. Tracked as `claude-workflow-plugin-6ye1`. | NOT-PROVEN |
 | DP6 | Specs are injected verbatim at spawn: each implementer's packet includes its unit's spec, criterion texts, and file set read from the mirrored artifact at spawn time via SubagentStart, with the injected hash recorded for later-mismatch visibility (directive `:185`; D5 "Spec injection at spawn") | Phase task record; commit inspected for subject/scope | `claude-workflow-plugin-fkm.7` (D5), commit `0dfb82a` "an implementer is handed its unit's spec at spawn, and the hash it was handed is recorded where a later mismatch can be seen" — commit subject read directly from `git log`, 2026-09-18; task `status=closed labels=[...,qa-approved]`. | PROVEN |
 | DP7 | `design_conflict` routes to amendment, never improvisation: when a unit's acceptance criteria cannot be satisfied as written, the implementer stops with evidence rather than reinterpreting, and the blocker routes through the D2 review loop (directive `:185`; D5 "design_conflict blocker") | Structural + self-referential: this is the same mechanism `devops.md`'s own "When the design is wrong" section operationalizes, which this piece's own spawn prompt carries verbatim | `fkm.7` (D5) `status=closed labels=[...,qa-approved]`; `fkm.4` (D2) notes, "Amendments run through this same loop" (`docs/plans/v5-design-phase.md:139`), quoted directly. The devops agent prompt this task ran under (`.claude/agents/devops.md`, section "When the design is wrong") instructs exactly this stop-and-report shape, checked live 2026-09-18 as the file this session's own spawn was given. | PROVEN |
 | DP8 | Implementation is green-to-green per unit: suite green recorded before and after, `unit_id`/`design_hash`/`green_before`/`green_after` on the completion contract, refused when malformed at the point completion payloads are recorded (directive `:185`; D5 "Green-to-green per unit") | Structural: located `cmd_green_check` directly; cross-checked against the operator-facing doc this piece's own spawn prompt carries | `grep -n 'cmd_green_check()' .claude/scripts/qa-gate.sh` — defined at one site, confirmed live 2026-09-18. Commits `0c3106b` "a green claim now comes from a command that ran, and every field it produces is refused when malformed" and `6de6c9e` "a unit's criteria must be covered by tests that exist, and the green claim now has a reader" (`fkm.7`, D5). `devops.md`'s own "Green-to-green per unit (v5 D5)" section documents the exact `--phase before`/`--phase after` protocol this piece's spawn prompt required it to follow, had it been unit-bound. | PROVEN |
@@ -810,9 +810,9 @@ updated:
 
 | Status | Count | Scoped grep |
 | ------ | ----- | ----------- |
-| PROVEN | 11 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
+| PROVEN | 10 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
 | PROVEN-WITH-CAVEAT | 6 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
-| NOT-PROVEN | 0 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
+| NOT-PROVEN | 1 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
 | REMOVED | 1 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
 | **Total** | **18** | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '^\| DP[0-9]+ \|'` |
 
@@ -820,9 +820,17 @@ updated:
 > correct ONLY while v5.0.0 is the last claims-ledger section.** Before you
 > write a single new row, change every `,0` above to
 > `,/^## v<next>\.0 claims ledger/` and re-run the five commands to confirm
-> the counts are still 11 / 6 / 0 / 1 / 18 (moved from `11 / 6 / 1 / 0 / 18`
-> on 2026-09-28 when `DP17` was withdrawn — see that row and the tally note
-> below). This is the fourth ledger and the
+> the counts are still 10 / 6 / 1 / 1 / 18 (moved from `11 / 6 / 0 / 1 / 18`
+> on **2026-09-29**, when independent re-verification of every row moved
+> `DP5` PROVEN-WITH-CAVEAT → **NOT-PROVEN** and `DP3` PROVEN →
+> PROVEN-WITH-CAVEAT; which itself moved from `11 / 6 / 1 / 0 / 18`
+> on 2026-09-28 when `DP17` was withdrawn — see those rows, the
+> Re-verification addendum at the foot of this section, and the tally note
+> below). **NOTE FOR THE RELEASE DECISION: this ledger no longer satisfies
+> the zero-NOT-PROVEN rule.** `DP17` was withdrawn specifically to reach zero
+> NOT-PROVEN; re-verification then established that `DP5` had been
+> NOT-PROVEN all along, for an unrelated reason, so the property was never
+> actually held at the moment it was declared. This is the fourth ledger and the
 > third time this correction has been paid — v3.5.0 -> v4.0.0, v4.0.0 ->
 > v4.1.0 (`uvk`), and v4.1.0 -> v5.0.0 (`fkm.9`, this ledger, which also had
 > to re-point a positive control in `HANDOFF.md` that this exact re-scope
@@ -1088,3 +1096,75 @@ in those words. (It said more than that until `fkm.1.11` QA round 1 — "the
 command recorded its own result" — which was false of the only record this
 repo's ledger held, one an operator had typed by hand after running the four
 tiers separately.)
+
+---
+
+## Re-verification addendum — 2026-09-29 — all 18 v5.0.0 rows re-run
+
+Before the release tag was placed, every `DP` row's own evidence was **re-run
+against the tree at `430fe99`** by an independent lane, rather than re-read.
+The distinction is the one this arc keeps relearning: reconciling a document
+against its own stated totals catches arithmetic, and only re-executing the
+commands catches a claim that has stopped being true.
+
+**Sixteen of eighteen rows hold.** Two moved, and both moves are recorded in
+the rows themselves:
+
+- **`DP5` PROVEN-WITH-CAVEAT → NOT-PROVEN.** The claim is a conjunction and
+  the `impact_of` conjunct was deferred to `claude-workflow-plugin-l7gd` —
+  **open, created 2026-08-22, twenty-seven days before this ledger was
+  compiled.** Tracked as `claude-workflow-plugin-6ye1`, which carries the full
+  measurement and the three options for resolving it.
+- **`DP3` PROVEN → PROVEN-WITH-CAVEAT.** "Small enough for one coherent
+  change" has no check anywhere — zero hits for any sizing term across
+  `DS1`–`DS8`, and none in `review-check.sh`.
+
+### Corrections to rows whose verdicts did NOT change
+
+Recorded because a row can be right in its conclusion and wrong in the
+evidence a reader would use to re-derive it.
+
+| Row | Stated | Measured at `430fe99` |
+| --- | ------ | --------------------- |
+| `DP4` | "returns hits at three sites" | `grep -n 'design-conform' .claude/scripts/qa-gate.sh \| wc -l` → **65** (18 non-comment). The claim survives on structure checked directly: `cmd_design_conform()`@12773, dispatcher@18177, subprocess reuse@15079, no agent spawn. |
+| `DP13` | `session-start.sh:836` / `:852` | **`:837`** and **`:853`** — drifted by one. Quoted text verbatim; `statusline.sh:44` exact. |
+| `DP15` | `git status --porcelain -- manifests/` returns `??` | Returns **empty** — `manifests/v5.0.0.sha256` is now tracked (committed `c5ba7cc`, updated `569174e`). Moves in the safe direction, but the release notes would have carried it wrong. |
+| `DP16` | "now lists **12** names"; `12 check(s) — 11 passed, 1 failed, 0 skipped` | The registry holds **13** (`grep '^DOCTOR_CHECK_NAMES=' … \| wc -w` → 13; `model_parity` landed `ea8031d`, 2026-09-22). Live: **`13 check(s) — 11 passed, 1 failed, 1 skipped`, exit 1.** The cell is internally inconsistent — it carries both the 12 sentences and later 13 sentences added `569174e`. Its central finding holds and worsened: `beads_ledger` FAIL now reads **442 on disk / 599 in database** (was 442/536). The 442 independently confirmed: `grep -c '"_type":"issue"' .beads/issues.jsonl` → 442. Two line citations resolve to nothing (`workflow-doctor.sh:272` is `# Usage`, `:291` a JSON fragment; the sandbox statement is at `:35/:41/:52/:71` and now names all three exempt checks, including `model_parity`). |
+| `DP17` | `design-structural.test.sh` is 1070 lines | **1076.** `design-degradation.sh` is 256, exact. The REMOVED verdict itself is confirmed complete — widening the ledger's non-recursive globs with `git grep -l 'DESIGN_STORE' -- .` finds only guard files naming their own tripwire and documentation about the absence. **Zero live readers.** `docs/specs/` still does not exist. |
+| `DP18` | scratch-session-local log paths | **Partly UNVERIFIABLE.** The scratch target and all four log pairs are gone, so the classification line, verdict counts, sidecars, the twelve-check verify and the P1–P5 prediction scoring cannot be re-executed. The structural half re-verifies from git objects: `git ls-tree --name-only v4.1.0 .claude/agents/` → 7 files with neither `designer.md` nor `design-reviewer.md`; HEAD has 9. Rate it **structurally corroborated, behaviourally unreproducible** — the verdict is defensible, the evidence is no longer re-runnable, and the row should say so rather than cite paths that do not resolve. |
+| `DP1` | `grep -c` returns non-zero | Returns **152** (87 non-comment) — true, but near-unfalsifiable: it would stay non-zero after almost any regression. The substance was checked separately and holds (`no_design_attempted` IS a refusal at `approve`). Two things the claim text omits: enforcement is at `approve`, not before delegation begins — the code is explicit that *nothing* can gate delegation — and there is an audited `--no-design '<reason>'` bypass (`qa-gate.sh:5398-5416`). "Mandatory" carries an operator escape hatch. |
+
+### Closed by this re-verification
+
+`DP15`/`DP18`'s **provenance caveat is now retired.** It warned that LIVE-1 ran
+against a working tree whose `.claude/model-roles` differed from HEAD. Both
+hashes the ledger states reproduce exactly, and the bytes LIVE-1 measured are
+now the release's committed bytes:
+
+```
+working tree : 7a9a1c2103b03df7f6597555cfcde5988ef025d7f0639b3145018292b0279c4e
+HEAD 430fe99 : 7a9a1c2103b03df7f6597555cfcde5988ef025d7f0639b3145018292b0279c4e
+HEAD 261e09e : f666919e071f863030259b4ed7c45d6079d582bbb4823f38d8ce407c256e96b6
+```
+
+The **other** half of `DP15`'s caveat stays open: the frozen
+`manifests/v5.0.0.sha256` table has still never been exercised by a
+regenerate-and-`cmp`.
+
+### Method, and what it did not cover
+
+Read-only. No files written by the verifying lane, no Beads writes, and
+`make test` deliberately not run (it writes tracking state). Where a row's
+evidence was a test, only that spec was run — `design-rollup` 73/73,
+`design-coherence` 55/55, `design-unit-align` 64/64, `design-review-record`
+203/203, `design-rollup-incoherent` 13/13, `design-structural` 33/33, all
+exact. `install.sh --verify` was **not** run in full; the lane ran the exact
+binary it `exec`s (`workflow-doctor.sh --target . --skip beads`, the only mode
+its own header documents as provably non-writing, confirmed by byte-identical
+`git status` and `.beads/` hashes before and after). **Consequence stated
+rather than hidden: that lane's `13 check(s) — 11 passed, 1 failed, 1 skipped`
+becomes `DP16`'s `12/13` only if `beads` passes, which is an inference, not a
+measurement.** `DP6`, `DP7` and `DP9`'s evidence class is "commit subject plus
+task state", which can be confirmed to reproduce but not independently
+corroborated; each claim's mechanism was spot-checked in code anyway and all
+three are backed by real implementations.
