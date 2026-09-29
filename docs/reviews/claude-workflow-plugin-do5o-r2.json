@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-do5o",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "55baeea0e65289b946ae4224f22c065410c48227843e9de72bf6747e2c91ca59",
+  "risk_threshold": "high",
+  "stop_condition": "The corrected LESSONS.md entry is present in the change set and every number in it, in the decision record and in any commit message citing it is reproduced by running the command it names at the commit it names; and no number was newly introduced that does not reproduce.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": "LESSONS.md (working tree) — the corrected entry is absent",
+      "evidence": "The corrected entry is NOT in the tree. `git diff --quiet HEAD -- LESSONS.md` exits clean; `git diff --stat` is empty; LESSONS.md is 337 lines in both the working tree and HEAD, and its last entry is the auic 'Regenerate a mechanical report' one -- the entry before the qnvo lesson. `grep -c 'sources: claude-workflow-plugin-qnvo' LESSONS.md` = 0. `lessons.sh list` reports total_ledger_entries=235 / evidence-tagged=114, against 236 / 115 measured in round 1 while the entry was present: one entry removed, none added. MECHANISM, from `git reflog --date=iso` on the MAIN working tree: 22:53:26 checkout v5/design-phase -> qnvo/primitive-replacement (a branch checkout CARRIES an uncommitted edit along, and LESSONS.md is identical in both commits so it transferred cleanly); 22:53:32 commit (amend) -> f94d80f; 22:54:07 checkout back to the branch at f94d80f; 22:54:11 `reset: moving to 1f4bd81`; 22:54:11 checkout back to v5/design-phase. The `git reset --hard 1f4bd81` ran in the MAIN working tree and discarded the uncommitted correction. NOT RECOVERABLE from git: the edit was never staged, so no blob was ever written -- `git fsck --lost-found` yields no LESSONS.md-shaped dangling blob (the only two blobs matching '139' are .beads/issues.jsonl exports, 190KB and 271KB, first line {\"id\":\"claude-workflow-plugin-0pj\"...}), and `git stash list` is empty. The near-miss note's 'tree verified identical, so nothing was lost' verified the COMMIT's tree -- I confirm f94d80f^{tree} == 1f4bd81^{tree}, so the amend touched the message only -- but the working tree was never checked, and that is where the correction lived.",
+      "description": "Round 2's fix is not in the change set. Nothing incorrect shipped, but nothing correct shipped either: with the entry gone, the reviewable content of this change set is now empty, and the ledger silently reverted to its pre-round-1 state. The false-negative that hid this is worth naming because it is the same shape as the original defect: `lessons.test.sh` 118/0 is TRUE and was read as confirmation, but it validates ledger GRAMMAR and passes identically on a ledger with no new entry -- a check that cannot fail for the thing it was taken to confirm. The prose must be re-authored; it cannot be restored. That is cheap, because the content survives in three places I verified: the f94d80f commit message (still reachable via reflog), the CORRECTION comment on this task, and the completion record's llm_observations, which carries the sharpened generalisation verbatim ('partially running a scan's list inherits the scan's blind spot while FEELING like measurement'). Re-add via `lessons.sh add --stdin --source claude-workflow-plugin-qnvo --tag evidence` with a quoted heredoc, then confirm presence with `grep -c 'sources: claude-workflow-plugin-qnvo' LESSONS.md` returning 1 and `lessons.sh list` reporting total=236 -- not with lessons.test.sh, which cannot answer that question."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "medium",
+      "location": "COMPLETION v1 record for claude-workflow-plugin-do5o, role=devops, payload_sha=8feea2ec",
+      "evidence": "The record attests `1 file(s)` with files_changed=[LESSONS.md]. Measured at 91b8e6d: LESSONS.md is byte-identical to HEAD and absent from `git diff --stat`. The only working-tree artifact is docs/reviews/claude-workflow-plugin-do5o-r1.json, which is my own round-1 review artifact, not the declared file.",
+      "description": "files_changed is the INDEPENDENT WITNESS that qa-gate.sh approve cross-checks against the change set it binds, and it is the one signal in the system that a change set is SHORT rather than merely stale. Here it attests a file change that does not exist, so the record asserts the fix landed when it did not. This is separable from R2-F1: F1 is the lost work, F2 is the record that would have let the loss pass unnoticed. Re-record the contract after the entry is genuinely re-added, and treat the declared-vs-actual comparison as a check to RUN rather than a field to fill."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "low",
+      "location": "claude-workflow-plugin-do5o task title, and the description body",
+      "evidence": "The title still reads 'breaks 4 L2 specs (45 assertions)'. The description still carries 'FOUR of them break, 45 assertions', 'the other three', 'impact-report.sh:261' and the two L1 figures with no commit. All corrections live in the CORRECTION comment of 2026-09-29T15:53:26Z.",
+      "description": "The comment-correction pattern is sound and auditable for the description -- an append-only correction preserves what was believed and when. The TITLE is the exception worth fixing directly: it is the only one of these fields that appears in `bd list` and in every ready-work query WITHOUT its comments, so the superseded 45/four figure is what a reader sees by default and the correction is invisible from there. This is a judgement call rather than a defect; the figure is superseded either way."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}
