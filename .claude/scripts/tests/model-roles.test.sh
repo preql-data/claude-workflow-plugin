@@ -860,16 +860,34 @@ assert_eq "4.7 both lanes claude -> grouped, design lanes first" \
 # they group together because their display value is now identical.
 SB=$(new_sandbox)
 five_role_artifact "$SB" claude-fable-5 claude-fable-5 claude-fable-5 claude-sonnet-5 claude-fable-5 codex codex
-assert_eq "4.8 both lanes codex -> dsr+rev group as sol" \
-    " • des+orch:fable-5 dsr+rev:sol impl:sonnet-5" "$(model_segment "$SB")"
+# 4.8 Both lanes codex -> ONLY `rev` renders `sol`. The design lane never
+# substitutes `sol` (claude-workflow-plugin-yvpe): no script drives design
+# review through Codex, so `sol` there named a reviewer that does not exist
+# AND displayed designer and design-reviewer as distinct identities at the
+# exact moment they resolve to the same model. This assertion previously
+# expected `dsr+rev:sol` — the spec encoded the false rendering.
+assert_eq "4.8 both lanes codex -> only rev is sol; dsr renders its real Claude id" \
+    " • des+dsr+orch:fable-5 impl:sonnet-5 rev:sol" "$(model_segment "$SB")"
+# NEGATIVE CONTROL: catches a revert of the yvpe fix in either arm.
+assert_not_contains "4.8 NEGATIVE CONTROL: dsr is never rendered as sol" \
+    "dsr:sol" "$(model_segment "$SB")"
+assert_not_contains "4.8 NEGATIVE CONTROL: dsr never joins a sol group" \
+    "dsr+rev:sol" "$(model_segment "$SB")"
 
-# 4.9 The lanes are INDEPENDENT: a codex design lane with a claude review lane
-# substitutes `sol` for dsr only. This is the row that would pass if the two
-# lanes were wired to one variable, so it is the one that proves they are not.
+# 4.9 REPURPOSED (claude-workflow-plugin-yvpe). This row used to prove the two
+# lanes were not wired to one variable, by showing a codex DESIGN lane
+# substituting `sol` for dsr alone. That substitution was the defect. The row
+# now proves the opposite and more useful thing: the DESIGN lane does not
+# affect rendering AT ALL, while the REVIEW lane still does (4.8 covers the
+# review half). A codex design lane with a claude review lane must therefore
+# render every Claude-lane role identically — if dsr ever reads `sol` here
+# again, the fix has been reverted.
 SB=$(new_sandbox)
 five_role_artifact "$SB" claude-fable-5 claude-fable-5 claude-fable-5 claude-sonnet-5 claude-fable-5 claude codex
-assert_eq "4.9 design lane codex + review lane claude -> only dsr is sol" \
-    " • des+orch+rev:fable-5 dsr:sol impl:sonnet-5" "$(model_segment "$SB")"
+assert_eq "4.9 a codex DESIGN lane changes nothing: dsr renders its resolved Claude id" \
+    " • des+dsr+orch+rev:fable-5 impl:sonnet-5" "$(model_segment "$SB")"
+assert_not_contains "4.9 NEGATIVE CONTROL: a codex design lane never yields sol" \
+    "sol" "$(model_segment "$SB")"
 
 # 4.10 All five equal AND both lanes claude -> single-model collapse.
 SB=$(new_sandbox)
@@ -900,7 +918,7 @@ SB=$(new_sandbox)
 five_role_artifact "$SB" claude-fable-5 claude-fable-5 claude-mythos-2 claude-sonnet-5 claude-haiku-1 claude codex
 OUT_412=$(model_segment "$SB")
 assert_eq "4.12 five distinct values truncate at MAX_GROUPS with a +N more tail" \
-    " • des:fable-5 dsr:sol orch:mythos-2 +2 more" "$OUT_412"
+    " • des+dsr:fable-5 orch:mythos-2 impl:sonnet-5 +1 more" "$OUT_412"
 
 # 4.12-META: the truncation is load-bearing, not incidental.
 #
@@ -939,7 +957,7 @@ assert_not_contains "4.12-META: with MAX_GROUPS raised, the +N more tail is GONE
 assert_contains "4.12-META: the mutant instead renders the truncated tail groups inline" \
     "impl:sonnet-5" "$OUT_412_MUT"
 assert_eq "4.12-META restore control: the SHIPPED script still truncates" \
-    " • des:fable-5 dsr:sol orch:mythos-2 +2 more" "$(model_segment "$SB")"
+    " • des+dsr:fable-5 orch:mythos-2 impl:sonnet-5 +1 more" "$(model_segment "$SB")"
 
 # ---------------------------------------------------------------------------
 echo "=== Section 5: packaging parity (install.sh / install.ps1) ==="
@@ -1600,7 +1618,22 @@ WARN_91=$(CLAUDE_PROJECT_DIR="$SB_91" bash "$MS" apply --quiet 2>&1 >/dev/null)
 RC_91=$?
 assert_eq "9.1 collapse does NOT block (exit 0)" "0" "$RC_91"
 assert_contains "9.1 collapse warns loudly" "identity collapse" "$WARN_91"
-assert_contains "9.1 the warning names both clearances" "installing Codex" "$WARN_91"
+# 9.1 The warning must name the ONE REAL clearance, and must NOT offer
+# installing Codex as one. It used to assert "installing Codex" was present,
+# because model-roles documented two clearances. That was wrong:
+# claude-workflow-plugin-yvpe established that installing Codex only moves
+# design_reviewer_lane off `claude`, which clears this very flag while both
+# roles still resolve to the same model -- no script drives design review
+# through Codex. An operator who followed the old warning ended up strictly
+# worse off, with the risk unchanged and the warning silenced.
+assert_contains "9.1 the warning names the one real clearance" \
+    "setting design_reviewer to a family-class distinct from top" "$WARN_91"
+assert_contains "9.1 the warning explicitly warns AGAINST installing Codex" \
+    "Do NOT install Codex" "$WARN_91"
+# NEGATIVE CONTROL: the warning must not present Codex as a remedy. This
+# would have caught the old text, and catches a revert to it.
+assert_not_contains "9.1 NEGATIVE CONTROL: the warning does not offer Codex as a clearance" \
+    "Clear it by installing Codex" "$WARN_91"
 assert_eq "9.1 the artifact records the collapse" "true" \
     "$(jq -r '.identity_collapse' "$SB_91/.claude/.qa-tracking/model-roles-resolved.json")"
 assert_eq "9.1 the flag file is written" "present" \
@@ -1883,8 +1916,18 @@ assert_contains "10.1 Warning 8 reports the session-model drift" "session-model 
 assert_contains "10.1 ...naming the id the session last rendered on" "claude-opus-5-0" "$CTX_101"
 assert_contains "10.1 ...and the fix verbatim" "/model claude-fable-9" "$CTX_101"
 assert_contains "10.1 Warning 9 reports the design identity collapse" "design identity collapse" "$CTX_101"
-assert_contains "10.1 ...with the Codex clearance" "install Codex" "$CTX_101"
+# 10.1 SessionStart's Warning 9 must offer the ONE real clearance and warn
+# against the disproved one. This previously asserted "install Codex" was
+# PRESENT as a clearance — a second spec pinning the wrong behaviour in place
+# (claude-workflow-plugin-yvpe). SessionStart is the warning operators
+# actually read, so it was the highest-traffic surface carrying the false
+# remedy.
 assert_contains "10.1 ...and the config clearance" "design_reviewer=<family>-class" "$CTX_101"
+assert_contains "10.1 ...warning AGAINST the disproved Codex remedy" \
+    "Do NOT install Codex" "$CTX_101"
+# NEGATIVE CONTROL: catches a revert to offering Codex as a clearance.
+assert_not_contains "10.1 NEGATIVE CONTROL: Codex is not offered as a clearance" \
+    "Two clearances" "$CTX_101"
 assert_contains "10.1 Warning 10 names every key this install lacks" \
     "missing key(s): designer, design_reviewer, implementer_class_high" "$CTX_101"
 assert_contains "10.1 ...and points at the sidecar an edited copy would have" \

@@ -168,6 +168,50 @@ and warns* when the live effort, the floor, and the verdict disagree —
 detect-and-warn is the ceiling here, and the plugin does not claim to
 enforce the session level.
 
+## 📐 The design phase (v5.0.0)
+
+Before any implementation task exists, a `designer` produces a design
+artifact and a `design-reviewer` scores it against `.claude/rubrics/design.md`
+through a review loop. **On a stock install those two roles resolve to the
+SAME model** — both are `top` — so the design is reviewed by its own identity
+family. The resolver reports that rather than blocking it: it sets
+`identity_collapse: true`, writes `.claude/.qa-tracking/design-family-collapse`,
+warns at SessionStart, and the statusline shows `!id`. What IS enforced
+mechanically is narrower — `qa-gate.sh design-record` refuses a verdict whose
+`reviewer_identity` equals the designer's. **Design review is Claude-lane only
+in v5.0.0.** `design_reviewer_lane` is resolved and displayed, but no script
+drives design review through Codex — `design-reviewer.md` instructs the agent
+to emit `design-claude` unconditionally, and it has no tool to read the lane.
+Worse, installing Codex sets the lane to `codex`, which makes
+`identity_collapse` report **false** while both roles still resolve to the same
+model — a cleared flag over an uncleared risk (`claude-workflow-plugin-yvpe`).
+**The one real clearance today is to set `design_reviewer` to a family-class
+distinct from whatever `top` resolves to** (e.g. `design_reviewer=opus-class`)
+in `.claude/model-roles`; that changes the resolved model rather than a label.
+Implementation
+then runs green-to-green per unit, and a coherence rollup blocks approval
+while any acceptance criterion is untested or any touched file falls outside
+every declared unit.
+
+**Design artifacts live in your repository, as files.** The path is
+`docs/specs/<task-id>.md`, derived from the task id — the same derivation
+`qa-gate.sh design-record` enforces, so there is exactly one path to check.
+The directory is created on demand in your project the first time the design
+phase runs; it does not ship with the plugin.
+
+**v5 ships no Linear integration.** There is no design-store adapter, no
+external issue-tracker write path, and nothing to configure. Design artifacts
+are files in your repo and task state is in Beads. If you read anywhere that
+a Linear path exists, that text is wrong — there is no Linear path for one to
+work.
+
+**Parallel batching is file-set-only.** Two units are scheduled concurrently
+when their declared file sets do not intersect. The `impact_of` half of the
+intersection check described in the design is **deferred**
+(`claude-workflow-plugin-l7gd`), and every batch readout says so with
+`graph_intersection_computed:false` rather than degrading silently. See
+Caveats for what that means in practice.
+
 ## ⚡ Install
 
 The plugin requires Beads (`bd`) ≥ 0.47 and `jq`. The installer fails
@@ -354,6 +398,20 @@ evidence pointer in [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md).
 
 ## ⚠ Caveats
 
+- **File-disjoint units can still conflict semantically, and nothing catches
+  that automatically.** Parallel batching proves that two units touch no file
+  in common; it does not prove they are behaviourally independent. The
+  `impact_of` half that would strengthen this is deferred
+  (`claude-workflow-plugin-l7gd`), and its own precondition
+  (`claude-workflow-plugin-kk9y`) is that the code indexer resolves call edges
+  through `"$SCRIPT_DIR/other.sh" --flag`-style invocations, which it does not
+  yet — so building the impact half alone would add a conjunct that is
+  uninformative on shell-heavy repositories. Worktree isolation for batch
+  members is an orchestrator responsibility, not something the batching
+  mechanism allocates or records, so a later unit's full-suite run cannot be
+  relied on to see an earlier unit's changes. **Run the cross-cutting
+  integration sweep yourself after a parallel batch; the gate does not do it
+  for you** — `epic-gate.sh` calls it "recommended", which means exactly that.
 - Live e2e runs cost roughly $5–10 per fixture against the
   SessionStart-resolved models (whichever family/tier the resolver picks
   for each role per `.claude/model-roles`, honouring the exclusions in

@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-auic",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "bb72402117f25051ebf86d1d1550571e73f84adfd8455adb27d0085b7b89d34d",
+  "risk_threshold": "high",
+  "stop_condition": "Every r1 finding (R1-F1,F2,F3,F6) is verified fixed against re-run commands; the 1dbz LEG 3 relaxation introduces NO new way for an acceptance criterion to escape coverage (approve-time enforcement provably unchanged); and no shipped surface still states a rule or property the change set removed or contradicts.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/agents/backend.md:348, .claude/agents/frontend.md:353, .claude/agents/devops.md:274, .claude/rubrics/default.md:32",
+      "evidence": "1dbz removed the criteria_tests-must-appear-in-tests_added rule from review-check.sh cmd_validate_completion (jq block + error case deleted; validate-completion-criteria-tests.test.sh assertion 5.1 'a criteria_tests ref absent from tests_added: rc=0 (no longer refused)' PASSES, 46/46). All four of these files are UNTOUCHED by the change set (git status --porcelain on each returns empty) and still state the removed rule as binding: backend.md:348 and devops.md:274 say 'Every reference here must also appear, verbatim, in tests_added above - a reference to anything else is refused at record time'; frontend.md:353 says 'or the payload is refused at record time'; rubrics/default.md:32 lists 'the reference-must-also-appear-in-tests_added self-consistency rule' as part of the shape check C3 grades. docs/AGENTS.md WAS updated correctly (:1025-1055, :1114-1127), so propagation was understood and then missed on four surfaces. The implementer's own context_coverage names designer.md, design.md and AGENTS.md as read; these four are not named, so the gap is undisclosed rather than deferred.",
+      "description": "The mechanism is fixed but the operative instructions still forbid the fix's own honest path. These three prompts are what specialists actually read at spawn (AGENTS.md is not). A unit-bound specialist meeting a regression-shaped criterion follows them and either (a) reports the refusal - the exact 1dbz failure mode, unfixed in practice - or (b) copies a PRE-EXISTING test into tests_added to satisfy a rule that no longer exists, which devops.md:267 defines as 'new or meaningfully modified test cases', i.e. the prompt now induces a false declaration in a field QA and the grader read for substance. rubrics/default.md:32 additionally makes the GRADER check a rule that no longer exists, re-imposing the removed constraint one gate later. Same class as R1-F2: a doc asserting a mechanical refusal the code contradicts."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "high",
+      "location": "CHANGELOG.md:28",
+      "evidence": "CHANGELOG.md:28 reads 'a design_reviewer role - a distinct identity, mechanically enforced'. UNTOUCHED by this change set (git diff CHANGELOG.md has no +/- line matching 'distinct identity'), and it is now the LAST surviving instance repo-wide (grep -rn 'distinct identity' --include=*.md returns only this line). It is contradicted by three things, two of them added BY this change set: (1) the new paragraph at CHANGELOG.md:2779-2789, inside the SAME [5.0.0] release entry - 'designer and design-reviewer resolve to the SAME model on a stock install... Both roles are top... What is enforced mechanically is narrower'; (2) the new README.md:174 section, same wording; (3) .claude/model-roles:92-98 - 'they resolve to the same model and the design would be reviewed by its own identity'. The narrower claim is true and I verified the mechanism: qa-gate.sh:11810 'if [ \"$reviewer_identity\" = \"$designer_identity\" ]' refuses.",
+      "description": "R1-F2 identified CHANGELOG.md:28 as the SOURCE of the phrasing it corrected in README ('The phrasing looks inherited from CHANGELOG.md:28'). The fix removed the derived copy and added a correcting paragraph 2750 lines below, but left the source standing - so the 5.0.0 release entry now asserts the overclaim in its headline and refutes it at its foot. This is the same false mechanical-safety claim R1-F2 was rated HIGH for, still shipping, now self-contradicting within one release entry, in the first description a reader meets."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/review-check.sh:1059",
+      "evidence": "The missing_key:criteria_tests detail message still reads: 'maps a design unit's acceptance-criterion ids to the tests_added entries that cover them; {} is legal when the task is not unit-bound or when tests_added itself carries nothing yet to reference'. The same change set corrected the region header 40 lines above (:1010 'array of test references') and this operator-facing emission was left.",
+      "description": "Shipped operator-facing output of the changed artifact still describes the removed coupling, and does so on a real refusal path. A specialist who hits this error and reads the guidance is steered back into precisely the constraint 1dbz removed."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:14863",
+      "evidence": "Present tense, inside the LEG 3 header block this change set edited: 'What remains, confined now to files genuinely inside the project tree, is the mention-vs-real-test gap the tests_added cross-reference narrows but does not close.' The paragraph ADDED 19 lines above at :14828-14831 states the opposite: 'THIS CHECK NO LONGER SHARES THAT NARROWING WITH A tests_added CROSS-REFERENCE -- there is no longer one to compose with'. The two other tests_added mentions in this file (:14851, :14948) are past-tense descriptions of the R7-F4 reproduction and are fine.",
+      "description": "Two paragraphs of one header block, one saying the cross-reference narrows the gap and one saying it no longer exists. This is the corrected-region-with-contradicting-prose-beneath shape, inside the shipped artifact."
+    },
+    {
+      "id": "R2-F5",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:15036 vs CHANGELOG.md:185",
+      "evidence": "The comment added by this change set claims the assertion count was reconciled: 'all three locations reconciled to 73 again here, the identical discipline R1-F8 established'. R1-F8's own text, quoted in the same comment, names the three locations as this comment, run-tests.sh, and CHANGELOG.md. MEASURED: bash .claude/scripts/tests/design-unit-align.test.sh -> 'Total: 73 Passed: 73 Failed: 0' exit 0; qa-gate.sh says 73; run-tests.sh:889 says 73; CHANGELOG.md:185 still says 'the existing 64-assertion design-unit-align.test.sh', under the ## [5.0.0] - 2026-09-29 heading being shipped now.",
+      "description": "Two of three reconciled, and the artifact asserts all three were. This is the exact defect R1-F8 established the discipline for, recurring - and the claim of reconciliation is itself the false part, which is what makes it worth a finding rather than a nitpick."
+    },
+    {
+      "id": "R2-F6",
+      "severity": "medium",
+      "location": "CHANGELOG.md:2733",
+      "evidence": "Under ## [5.0.0] - 2026-09-29, in the known-issues list, present tense: \"1dbz (P2). design-unit-align's LEG 3 demands a covering test for every declared acceptance criterion, with no accommodation for a REGRESSION-SHAPED criterion... A correct, fully-implemented unit could not be aligned.\" The same working tree contains the fix. The implementer DISCLOSED this deliberately (llm_observations: 'I deliberately did NOT update it: both files are RIGHT NOW under active, uncommitted edit by the concurrent auic task... Left for the orchestrator to sequence').",
+      "description": "Honest, reasoned deferral whose stated precondition has now lapsed: the reason for not touching CHANGELOG was that auic was mid-edit, and under the operator's union-scope ruling both tasks are settled and reviewed together. As it stands the 5.0.0 release notes announce as an open defect something the same release fixes, and carry no entry for the fix. Recorded so the operator decides fix-now versus follow-up rather than it being lost with the deferral's rationale."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

@@ -23,16 +23,26 @@
 #      positively evidenced `fresh:false` DOES (`spec_injection_stale`).
 #
 #   4. LEG 3 (CRITERIA HAVE TESTS) — the new predicate, tested exhaustively:
-#      no implementer completion record; incomplete coverage; an unknown
-#      criterion id; green_after not green (self-declared); green_after
-#      EXTERNALLY CORROBORATED against a real GREEN-CHECK v1 record, not
-#      merely read back (Section 7b, R7-F3 — QA round 7: absent record,
-#      contradicting record, corrected record, and a leg-level METatest); a
-#      malformed/missing-file/missing-label test reference; a test_ref
-#      confined to the project tree, not merely to "the repo" as an earlier
-#      draft claimed (Section 8.4-8.8, R7-F4 — an absolute-path escape, a
-#      `../`-relative escape, and a leg-level METatest); and the full
-#      success path.
+#      no implementer completion record; incomplete coverage (Section 5,
+#      now also asserting the refusal NAMES the recovery path — a design
+#      amendment via `design-conflict`, never an invented mapping,
+#      claude-workflow-plugin-1dbz); an unknown criterion id; green_after
+#      not green (self-declared); green_after EXTERNALLY CORROBORATED
+#      against a real GREEN-CHECK v1 record, not merely read back (Section
+#      7b, R7-F3 — QA round 7: absent record, contradicting record,
+#      corrected record, and a leg-level METatest); a malformed/missing-
+#      file/missing-label test reference; a test_ref confined to the
+#      project tree, not merely to "the repo" as an earlier draft claimed
+#      (Section 8.4-8.8, R7-F4 — an absolute-path escape, a `../`-relative
+#      escape, and a leg-level METatest); the full success path; and
+#      (Section 12, claude-workflow-plugin-1dbz) a criteria_tests reference
+#      that names a PRE-EXISTING test absent from tests_added — legal
+#      after 1dbz relaxed record-time's tests_added cross-check — subject
+#      to the SAME unconditional file+label existence and externally-
+#      corroborated green_after checks every other reference already had
+#      to clear, proven both ways: it aligns when those hold, and still
+#      refuses, by the SAME error_keys Sections 8 and 7 already established,
+#      when they do not.
 #
 #   5. Wiring into `qa-gate.sh approve` — DESIGN-ALIGNMENT-REFUSAL: a
 #      misaligned, bound task REFUSES approval (exit 2); an aligned one, or
@@ -414,6 +424,18 @@ assert_eq "5.1 AC2 has no covering test: exit 4" "4" "$RC_A"
 assert_eq "5.1b ...error_key=criteria_incomplete" \
     "criteria_incomplete" "$(json_field '.error_key' "$OUT")"
 assert_contains "5.1c ...names the missing criterion id" "AC2" "$(json_field '.observations' "$OUT")"
+# claude-workflow-plugin-1dbz: the refusal must name the RECOVERY PATH —
+# a design amendment via design-conflict — rather than a bare
+# criteria_incomplete, so a correct-but-regression-shaped criterion is not
+# read as "go invent a test". Negative control for the strictness that
+# STAYS: no mapping at all still refuses, it just refuses with the fix
+# named this time.
+assert_contains "5.1d ...names the recovery path (design-conflict), not an invented test" \
+    "design-conflict" "$(json_field '.observations' "$OUT")"
+assert_contains "5.1e ...names the amendment loop as the actual fix" \
+    "amendment" "$(json_field '.observations' "$OUT")"
+assert_contains "5.1f ...also discloses the alternative when a test genuinely exists: a PRE-EXISTING ref is allowed" \
+    "PRE-EXISTING" "$(json_field '.observations' "$OUT")"
 
 # ===========================================================================
 printf '\n=== Section 6: LEG 3 — unknown criterion id ===\n'
@@ -824,6 +846,77 @@ assert_eq "11.5 RESTORE CONTROL: the SAME misaligned shape against the SHIPPED s
     "2" "$CTRL_RC"
 assert_eq "11.5b ...error_key=criteria_tests_without_green_after" \
     "criteria_tests_without_green_after" "$(json_field '.error_key' "$CTRL_OUT")"
+
+# ===========================================================================
+printf '\n=== Section 12: LEG 3 -- a criteria_tests ref may name a PRE-EXISTING test (claude-workflow-plugin-1dbz) ===\n'
+# ===========================================================================
+# Through fkm.7's original shape, EVERY criteria_tests ref had to also
+# appear in tests_added -- enforced by review-check.sh validate-completion,
+# BEFORE the payload was ever recorded -- a category error for a
+# REGRESSION-SHAPED criterion, whose whole assertion is that some already-
+# shipped behaviour is unaffected and which therefore has nothing NEW to
+# add to tests_added. 1dbz relaxed record time so a ref may name a test
+# that pre-dates this task; this section proves what actually gates it now
+# is unconditionally the SAME two checks every other ref already had to
+# clear -- 3e file+label existence, 3d/3d2 externally-corroborated
+# green_after -- never a new "kind" or waiver.
+
+EPIC12=$(bd create "DUA epic 12 (pre-existing test mapping)" -t epic -p 1 --json 2>/dev/null | jq -r '.id')
+CHILD12=$(bd create "DUA child 12 (pre-existing test mapping)" -t task -p 1 --parent "$EPIC12" --no-inherit-labels --json 2>/dev/null | jq -r '.id')
+design_and_review "$EPIC12" "$TWO_CRIT_UNIT" >/dev/null
+bash "$QG" design-unit-bind "$CHILD12" --design-task "$EPIC12" --unit-id U1 "bound to U1" >/dev/null 2>&1
+printf '%s\n%s\n' "$FIXTURE/src/a.sh" "$FIXTURE/src/b.sh" > "$TRACKING"
+seed_spec_injection "$CHILD12" "$EPIC12" "U1"
+
+# A test file that EXISTS on disk but is NEVER named in tests_added below --
+# standing in for "a regression test that pre-dates this task".
+PREEXISTING_REL=".claude/scripts/tests/dua-preexisting.test.sh"
+write_test_file "$PREEXISTING_REL" "legacy behaviour X still holds"
+
+record_completion "$CHILD12" "devops" "$(jq -nc --arg r "$PREEXISTING_REL" '
+    {unit_id:"U1", green_before:"green", green_after:"green",
+     tests_added:[],
+     criteria_tests:{"AC1":[($r+"::legacy behaviour X still holds")],
+                      "AC2":[($r+"::legacy behaviour X still holds")]}}
+')"
+seed_green_check "$CHILD12" "after" "green"
+
+OUT=$(bash "$QG" design-unit-align "$CHILD12" 2>&1); RC_A=$?
+assert_eq "12.1 POSITIVE: criteria_tests refs a PRE-EXISTING test absent from tests_added, everything else valid: exit 0" \
+    "0" "$RC_A"
+assert_eq "12.1b ...ok=true (fully aligned)" "true" "$(json_field '.ok' "$OUT")"
+
+# --- 12.2: NEGATIVE CONTROL for the relaxation -- the ref is STILL absent
+# from tests_added, but it does not resolve to a real file at all. Proves
+# the relaxation did not also relax step 3e (file+label existence): an
+# unresolvable reference refuses regardless of tests_added membership.
+record_completion "$CHILD12" "devops" '
+    {"unit_id":"U1","green_before":"green","green_after":"green",
+     "tests_added":[],
+     "criteria_tests":{"AC1":[".claude/scripts/tests/DUA-DOES-NOT-EXIST.sh::x"],
+                        "AC2":[".claude/scripts/tests/DUA-DOES-NOT-EXIST.sh::x"]}}
+'
+seed_green_check "$CHILD12" "after" "green"
+OUT=$(bash "$QG" design-unit-align "$CHILD12" 2>&1); RC_A=$?
+assert_eq "12.2 NEGATIVE CONTROL: ref absent from tests_added AND does not resolve to a real file: exit 4 (still refuses)" \
+    "4" "$RC_A"
+assert_eq "12.2b ...error_key=criteria_test_file_missing (unchanged step 3e still binds)" \
+    "criteria_test_file_missing" "$(json_field '.error_key' "$OUT")"
+
+# --- 12.3: NEGATIVE CONTROL for green_after -- the SAME valid pre-existing
+# mapping as 12.1, but green_after is red. Proves the relaxation did not
+# also relax steps 3d/3d2 (the suite must have actually run green).
+record_completion "$CHILD12" "devops" "$(jq -nc --arg r "$PREEXISTING_REL" '
+    {unit_id:"U1", green_before:"green", green_after:"red",
+     tests_added:[],
+     criteria_tests:{"AC1":[($r+"::legacy behaviour X still holds")],
+                      "AC2":[($r+"::legacy behaviour X still holds")]}}
+')"
+OUT=$(bash "$QG" design-unit-align "$CHILD12" 2>&1); RC_A=$?
+assert_eq "12.3 NEGATIVE CONTROL: valid pre-existing mapping but green_after=red: exit 4 (still refuses)" \
+    "4" "$RC_A"
+assert_eq "12.3b ...error_key=criteria_tests_without_green_after (unchanged step 3d still binds)" \
+    "criteria_tests_without_green_after" "$(json_field '.error_key' "$OUT")"
 
 # --- Summary -------------------------------------------------------------
 

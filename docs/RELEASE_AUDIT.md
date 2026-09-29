@@ -735,6 +735,28 @@ from the commit that introduced it.
 
 ## v5.0.0 claims ledger — design becomes a first-class, reviewed, continuously-enforced phase
 
+> **LEDGER CONVENTION, adopted 2026-09-29 and binding on every future ledger.**
+> Two rules, both paid for by this arc:
+>
+> 1. **Every row cites its mechanism's CODE LOCATION** — a file and line, or a
+>    named subcommand — not merely a task id, a commit subject, or a grep that
+>    returns non-zero. A citation that does not point at an implementation
+>    cannot be checked against one. `DP1`'s `grep -c` returning 152 and `DP5`'s
+>    grep landing on `cmd_shared_files` instead of `plan-batches` are both this
+>    failure: a command that passes while proving something adjacent.
+>
+> 2. **A row whose mechanism HAS NO IMPLEMENTATION is REMOVED, never
+>    NOT-PROVEN.** NOT-PROVEN means "no executed evidence *yet*" and invites a
+>    reader to wait for validation. If there is nothing to validate, waiting is
+>    the wrong response and the claim should not exist. **`DP17` was carried as
+>    NOT-PROVEN — awaiting a live Linear run — for the entire arc, when there
+>    was no Linear adapter to run against at all**: measured at F5, zero
+>    `DESIGN_STORE` references in `.claude/scripts/`, zero `linear` in any
+>    agent or rubric file, and no `docs/specs/` directory. The row was not
+>    awaiting evidence; it was describing a mechanism that had never been
+>    built. Ask "does the mechanism exist?" BEFORE assigning NOT-PROVEN, and
+>    if the answer is no, withdraw the claim.
+
 Compiled 2026-09-18 (`claude-workflow-plugin-fkm.9`, Phase D7) against branch
 `v5/design-phase` at HEAD `261e09e`, with this ledger's own edits and the
 three sibling documents (`HANDOFF.md`, `CHANGELOG.md`) the only uncommitted
@@ -783,10 +805,10 @@ show, the row says so plainly rather than rounding up.
 | # | Claim (source) | Verification method | Evidence pointer | Status |
 | --- | --- | --- | --- | --- |
 | DP1 | Design is mandatory: implementation orchestration cannot begin until the epic carries `design-satisfied` and a bound `design_artifact` reference (directive `:185` "design is mandatory"; plan D2 "Gate precondition") | Structural: the precondition is implemented as a gate/relay condition, not a new hook (per correction 5, enforced at `approve`, not `enter`); D4's task-per-unit conformance check depends on it existing | `grep -c 'design.satisfied\|design_artifact' .claude/scripts/qa-gate.sh` returns non-zero (checked live, 2026-09-18); Phase D0-D4 (`fkm.2`-`fkm.6`) all `status=closed labels=[...,qa-approved]` in Beads, each a change-set-bound independent-review artifact | PROVEN |
-| DP2 | Design is independently reviewed: `design_reviewer` is read-only (no Write/Edit/Bash) and mechanically forbidden from sharing the designer's identity; a collapse is reported, never silently accepted (directive `:185` "independently reviewed"; D0 table; D2 "identity-collapse refusal") | Direct read of shipped agent frontmatter and the resolver's own documentation comment | `.claude/agents/design-reviewer.md:4` — `tools: Read, Grep, Glob, LS` (no Write, no Bash); `.claude/agents/designer.md:4` grants `Write` (needed to produce the artifact) but no `Edit`/`MultiEdit`/`Bash`. `.claude/model-roles`, "IDENTITY COLLAPSE" section, quoted verbatim: "on a stock install WITHOUT Codex they resolve to the same model and the design would be reviewed by its own identity. That is reported, never blocked: the resolver sets `identity_collapse: true`... warns at SessionStart, and the statusline shows `!id`." Two clearances documented in the same block (install Codex; or pin `design_reviewer` to a distinct `<family>-class`). CAVEAT: the mechanism is real and the collapse is never silent, but self-review is the DEFAULT on a stock, Codex-absent install until an operator acts on one of the two clearances; this is disclosed in the shipped file, not hidden, but "independently reviewed" is a claim about the steady state only after that action. | PROVEN-WITH-CAVEAT |
+| DP2 | Design is independently reviewed: `design_reviewer` is read-only (no Write/Edit/Bash) and mechanically forbidden from sharing the designer's identity. **NARROWED 2026-09-29: the conjunct "a collapse is reported, never silently accepted" is WITHDRAWN — it is FALSE on a Codex-present install** (`claude-workflow-plugin-yvpe`; see the evidence and the withdrawal note at the end of this row). What remains claimed is the read-only tool surface and the identity-string refusal, both of which hold unconditionally. (directive `:185` "independently reviewed"; D0 table; D2 "identity-collapse refusal") | Direct read of shipped agent frontmatter, PLUS the resolver's own CODE (`model-select.sh:1373-1376`) — **corrected 2026-09-29: this row originally cited only the resolver's documentation COMMENT, which is exactly why it could not detect that comment being wrong. Per the ledger convention adopted in this same change set, a row must cite its mechanism's code location.** | `.claude/agents/design-reviewer.md:4` — `tools: Read, Grep, Glob, LS` (no Write, no Bash); `.claude/agents/designer.md:4` grants `Write` (needed to produce the artifact) but no `Edit`/`MultiEdit`/`Bash`. `.claude/model-roles`, "IDENTITY COLLAPSE" section, quoted verbatim: "on a stock install WITHOUT Codex they resolve to the same model and the design would be reviewed by its own identity. That is reported, never blocked: the resolver sets `identity_collapse: true`... warns at SessionStart, and the statusline shows `!id`." That block documented TWO clearances (install Codex; or pin `design_reviewer` to a distinct `<family>-class`) — **and one of them was false; see the withdrawal below. Only the `<family>-class` pin works.** **WITHDRAWAL, 2026-09-29 — "the collapse is never silent" WAS FALSE AND IS WITHDRAWN.** This row previously read "the mechanism is real and the collapse is never silent". Measured live: `designer=claude-fable-5`, `design_reviewer=claude-fable-5` — the same model — with `design_reviewer_lane=codex`, `"identity_collapse": false`, and `.claude/.qa-tracking/design-family-collapse` **absent**. The collapse was silently accepted. `model-select.sh:1373-1376` raises the flag only when the picks are identical **AND** `dlane == claude`, so moving the lane off `claude` clears it without changing which model reviews the design — and nothing drives design review through Codex (`grep -c -i design .claude/scripts/codex-review.sh` → 0; `design-reviewer.md:39` states it is "the only wired path… you have no tool that could read the lane config"). Because `design_reviewer_lane` is not set in `.claude/model-roles` at all — only a commented example — it defaults to `auto`, so **this is the DEFAULT on any Codex-present host, not an operator opt-in**. Filed as `claude-workflow-plugin-yvpe`. **THIS ROW'S OWN VERIFICATION METHOD IS WHY IT WAS MISSED, and it is the case the ledger convention adopted in this same change set was written for:** the method is "Direct read of shipped agent frontmatter and the resolver's own documentation comment" — it quotes `.claude/model-roles` verbatim and NEVER reads `model-select.sh:1374-1376`, the condition that actually decides. A row that cites documentation instead of its mechanism's code location cannot detect the documentation being wrong. CAVEAT, on the narrowed claim: self-review of designs is the DEFAULT on EVERY install today — a Codex-absent one warns about it, a Codex-present one does not — and the ONE real clearance is pinning `design_reviewer` to a distinct `<family>-class`. "Independently reviewed" is a claim about the structural separation (separate spawn, fresh context, read-only tools, distinct identity string), NOT about model-family independence, which no install has by default. | PROVEN-WITH-CAVEAT |
 | DP3 | Unit sizing is enforced pre-implementation: every unit must be independently buildable/verifiable and "small enough for one coherent change," with a declared file set, dependencies, and (for `implementer_class: high`) a stated reason (directive `:185` "unit sizing is enforced pre-implementation"; D1 schema; D2 rubric DS2/DS3) | Direct read of the shipped design rubric | `.claude/rubrics/design.md` — `### DS2. The decomposition is complete and disjoint.` ("Evidence that satisfies it: a one-line trace from each acceptance criterion to the unit that owns it, plus a pairwise check of every unit's `files[]` against every other unit's."); `### DS3. Every unit with a dependent declares its interface; verification is a real command.` Both read in full 2026-09-18; `fkm.3` (D1, schema + edit-scoping) and `fkm.4` (D2, rubric) both `status=closed labels=[...,qa-approved]`. **CORRECTED 2026-09-29 by independent re-verification — PROVEN → PROVEN-WITH-CAVEAT. The cited command passes and does not prove the "small enough for one coherent change" half.** DS2 and DS3 are present verbatim as quoted, but neither checks SIZE, and no criterion in the rubric does: `grep -n -i 'size\|sizing\|small\|coherent change\|too large\|granular' .claude/rubrics/design.md` returns **zero hits, exit 1**, across DS1–DS8. `review-check.sh` has no size check either (`grep -n -i 'too_large\|unit_size\|size_limit\|max_files\|small enough'` → no hits). The phrase exists in exactly one place, `.claude/agents/designer.md:165`, under "The controlling standard" — and it is absent from the designer's own four-item pre-declaration checklist immediately below it (`:170-177`: falsifiable criteria; files list; runnable verification; no undeclared file sharing). The reviewer cannot score it either: `design-reviewer.md:52` states it reads `.claude/rubrics/design.md` and that there is "One rubric, one reader, always applied whole" — and that rubric contains no sizing criterion. CAVEAT, precisely scoped: the REST of this claim is genuinely enforced — `escalation_reason`-whenever-`implementer_class: high` is mechanical (`review-check.sh:1467`, named as a precondition at `design.md:10`), and the declared file set and non-empty `verification` are schema-enforced, with disjointness covered by DS2. Only "small enough to be implemented and verified as one coherent change" is an ASPIRATION IN PROSE with no check anywhere. | PROVEN-WITH-CAVEAT |
 | DP4 | Decomposition conformance is deterministic — no LLM, no review round: every task maps to a design unit, no orphans, dependency edges match the artifact, the bound hash matches (directive `:185`; D4 "Conformance check") | Structural: located the subcommand and its call sites directly | `grep -n 'design-conform' .claude/scripts/qa-gate.sh` returns hits at three sites (a dispatcher entry plus two internal consultation points), confirmed live 2026-09-18; the accountability table (`docs/plans/v5-design-phase.md:76`) names this row's owner as "Deterministic conformance check (D4) — no review round," matching what the code contains: a `case`-dispatched subcommand, not an agent spawn. `fkm.6` (D4) `status=closed labels=[...,qa-approved]`. | PROVEN |
-| DP5 | Parallel batches never share files or impact: two units may run concurrently only when their declared file sets AND their `impact_of` sets do not intersect, with graph-absent degradation named in the readout rather than silent (directive `:185`; D4 "Parallel batching, computed not judged") | Structural: `epic-gate.sh shared-files` exists and is documented as intersection computation; cross-checked against `dxz`'s own filed residual on this repo's specific graph behaviour | `grep -n 'shared-files\|shared_files' .claude/scripts/epic-gate.sh` returns the subcommand plus its help text ("Compute file-intersection with in-progress siblings"), confirmed live 2026-09-18. `fkm.6` (D4a/D4b, commits `6d0011f`/`ed45abe`) `status=closed labels=[...,qa-approved]`, titled "a batching plan that cannot compute its answer refuses instead of reporting one" — i.e. the no-silent-degradation half is the shipped headline, not an afterthought. CAVEAT: `dxz`'s own completion record (closed, P6) measured that on THIS repo's dominant shell idiom, `impact_of(file=...)` commonly returns `file_dependents:[]` even for a file another script directly `source`s, because the indexer's bash grammar only resolves a call edge when the invoked command is a bare word, not `"$SCRIPT_DIR/other.sh" --flag`. On a shell-heavy repo, near-every pair of units can therefore compute an empty (non-intersecting) `impact_of` set whether or not they actually touch related code — batches would not report degradation (the graph IS present and healthy), but the impact half of the intersection check would be silently uninformative. `dxz`'s own record names this "worth flagging now" for D4 and assigns it to `kk9y`, unresolved as of this ledger. **CORRECTED 2026-09-29 by independent re-verification of all 18 rows (see the Re-verification addendum at the foot of this section) — this row was PROVEN-WITH-CAVEAT and is now NOT-PROVEN, and the caveat above describes a residual that CANNOT OCCUR.** The claim is a CONJUNCTION and only the first conjunct ships. `graph_intersection_computed` is the literal `false` at every emission site in `epic-gate.sh` (1014, 1093, 1394, 1412, 1423, 1430, header 564), with no `true` path; `:1082` goes further and VALIDATES the field is false (`and (.graph_intersection_computed == false)`), so it is structurally pinned rather than merely defaulted. `epic-gate.sh` never invokes the code-graph server. The script's own shipped help (`:95-97`) states "the `impact_of` half is deferred (claude-workflow-plugin-l7gd); `graph_intersection_computed` is always false this release", and its own final observation (`:2326`) says "file-set intersection only (impact_of half deferred)". `bd show claude-workflow-plugin-l7gd` → `status=open`, created **2026-08-22 — 27 days before this ledger was compiled**. Because nothing computes an impact set at all, the `file_dependents:[]` residual the caveat warns about is unreachable; the real residual is larger and was unstated. Separately, `graph_degradation_reason` is the unconditional literal `code_graph_absent` while the graph on this tree is present and healthy (`workflow-doctor`: `PASS mcp_code_graph  serverInfo.name=code-graph-mcp, tools/list returned exactly 7 tool(s)`), so the readout names a degradation with a false cause. THE CODE IS HONEST — every disclosure above is in the shipped artifact; the overclaim was entirely at this ledger layer. The original evidence grep compounded it by targeting the wrong subcommand: `shared-files` is `cmd_shared_files` (`:456`), the B2 helper intersecting against in-progress siblings, not the `plan-batches` mechanism (`~:512`) the claim is about — it passed, and proved something adjacent. **MECHANISM THAT WILL FLIP IT** (required of every NOT-PROVEN row): implement `claude-workflow-plugin-l7gd` so the `impact_of` conjunct is actually computed; or perform a prove-or-remove rewrite narrowing this claim to file-set intersection only, re-verdicted against what `plan-batches` computes, with the deferral named in the row. Tracked as `claude-workflow-plugin-6ye1`. | NOT-PROVEN |
+| DP5 | **Parallel batches never share FILES. NARROWED 2026-09-29 to file-set intersection only — the `impact_of` half does not ship in v5.0.0.** Two units may run concurrently only when their declared file sets do not intersect, with the graph half's absence named in the readout (`graph_intersection_computed:false`) rather than silent (directive `:185`; D4 "Parallel batching, computed not judged"). **DEFERRAL: `claude-workflow-plugin-l7gd`** (open, created 2026-08-22) is the impact half. **ITS PRECONDITION: `claude-workflow-plugin-kk9y`** — on this repo's shell-heavy surface `impact_of(file=…)` commonly returns `file_dependents:[]` even for a file another script directly sources, because the indexer's bash grammar resolves a call edge only for a bare command word, not `"$SCRIPT_DIR/other.sh" --flag`. So implementing `l7gd` alone would add a conjunct that is uninformative here; `kk9y` is what makes it mean anything. **TRIGGER: implement `kk9y`, then `l7gd`, then re-verdict this row against a computed impact set.** | Structural: `epic-gate.sh shared-files` exists and is documented as intersection computation; cross-checked against `dxz`'s own filed residual on this repo's specific graph behaviour | `grep -n 'shared-files\|shared_files' .claude/scripts/epic-gate.sh` returns the subcommand plus its help text ("Compute file-intersection with in-progress siblings"), confirmed live 2026-09-18. `fkm.6` (D4a/D4b, commits `6d0011f`/`ed45abe`) `status=closed labels=[...,qa-approved]`, titled "a batching plan that cannot compute its answer refuses instead of reporting one" — i.e. the no-silent-degradation half is the shipped headline, not an afterthought. CAVEAT: `dxz`'s own completion record (closed, P6) measured that on THIS repo's dominant shell idiom, `impact_of(file=...)` commonly returns `file_dependents:[]` even for a file another script directly `source`s, because the indexer's bash grammar only resolves a call edge when the invoked command is a bare word, not `"$SCRIPT_DIR/other.sh" --flag`. On a shell-heavy repo, near-every pair of units can therefore compute an empty (non-intersecting) `impact_of` set whether or not they actually touch related code — batches would not report degradation (the graph IS present and healthy), but the impact half of the intersection check would be silently uninformative. `dxz`'s own record names this "worth flagging now" for D4 and assigns it to `kk9y`, unresolved as of this ledger. **CORRECTED 2026-09-29 by independent re-verification of all 18 rows (see the Re-verification addendum at the foot of this section) — this row was PROVEN-WITH-CAVEAT and is now NOT-PROVEN, and the caveat above describes a residual that CANNOT OCCUR.** The claim is a CONJUNCTION and only the first conjunct ships. `graph_intersection_computed` is the literal `false` at every emission site in `epic-gate.sh` (1014, 1093, 1394, 1412, 1423, 1430, header 564), with no `true` path; `:1082` goes further and VALIDATES the field is false (`and (.graph_intersection_computed == false)`), so it is structurally pinned rather than merely defaulted. `epic-gate.sh` never invokes the code-graph server. The script's own shipped help (`:95-97`) states "the `impact_of` half is deferred (claude-workflow-plugin-l7gd); `graph_intersection_computed` is always false this release", and its own final observation (`:2326`) says "file-set intersection only (impact_of half deferred)". `bd show claude-workflow-plugin-l7gd` → `status=open`, created **2026-08-22 — 27 days before this ledger was compiled**. Because nothing computes an impact set at all, the `file_dependents:[]` residual the caveat warns about is unreachable; the real residual is larger and was unstated. Separately, `graph_degradation_reason` is the unconditional literal `code_graph_absent` while the graph on this tree is present and healthy (`workflow-doctor`: `PASS mcp_code_graph  serverInfo.name=code-graph-mcp, tools/list returned exactly 7 tool(s)`), so the readout names a degradation with a false cause. THE CODE IS HONEST — every disclosure above is in the shipped artifact; the overclaim was entirely at this ledger layer. The original evidence grep compounded it by targeting the wrong subcommand: `shared-files` is `cmd_shared_files` (`:456`), the B2 helper intersecting against in-progress siblings, not the `plan-batches` mechanism (`~:512`) the claim is about — it passed, and proved something adjacent. **RESOLVED 2026-09-29 BY PROVE-OR-REMOVE REWRITE, operator-ruled (`claude-workflow-plugin-6ye1`).** The conjunction was withdrawn and the claim narrowed to what actually ships — file-set intersection only — rather than left asserting a mechanism that does not exist. The narrowed claim is PROVEN against the code: `bash .claude/scripts/tests/plan-batches.test.sh` → **319 passed / 0 failed** at `2b58370`, and `graph_intersection_computed:false` is emitted on every envelope so the absence is named, never silent. **THE NARROWING IS CARRIED ON EVERY SURFACE THAT DESCRIBES BATCHING** — this row, `CHANGELOG.md` and `README.md`, each verifiable by grep for `l7gd` / `graph_intersection_computed` — so no shipped surface claims the impact half exists. **BINDING ON THE RELEASE ANNOUNCEMENT TOO**, which is drafted at hand-back and must carry it; stated here as a requirement on that draft rather than as a completed fact, because an earlier version of this sentence asserted the CHANGELOG already carried it when it did not — caught as R1-F1 in the `claude-workflow-plugin-auic` review, and exactly the shape this ledger exists to catch. **CAVEAT, and it is the honest one rather than the one this row used to carry: FILE-DISJOINT UNITS CAN STILL CONFLICT SEMANTICALLY, AND NO AUTOMATIC CONTROL CATCHES THAT.** Two units may touch entirely disjoint files and still break each other's behaviour; file-set disjointness is not semantic independence. Measured, because an earlier draft of this caveat claimed a compensating control that does not exist: `.claude/scripts/epic-gate.sh` contains **zero** occurrences of `worktree`, **none of the `plan-batches` envelope's fourteen keys is a worktree field** (`sed -n '1011,1017p' .claude/scripts/epic-gate.sh | grep -oE '[a-z_]+:' | wc -l` → 14; an earlier draft of this sentence listed four of them as though that were the whole envelope), and `plan-batches.test.sh` never mentions one — while `docs/plans/v5-design-phase.md:45` and `:158` require "each member getting its own worktree per the existing isolation rule" and `:77` assigns worktree allocation to the **orchestrator**, a prompt. So isolation is an agent judgement, not a mechanism. **Either branch yields no automatic control:** if members ARE isolated, a later unit's full-suite `green-check --phase after` cannot see earlier units' changes until integration, and the integration sweep is explicitly MANUAL (`epic-gate.sh:6` "a cross-cutting integration check passes"; `:19` "requiring a manual integration sweep"; `:500` "integration check recommended"); if members are NOT isolated, that is the contamination failure recorded as the FIRST entry in this repo's lessons ledger (`LESSONS.md:103`, `e0d.7`, 2026-06-11 — "Parallel agents in the same working tree contaminate each other's branches"). **Operators running parallel batches must perform the integration sweep themselves; the gate does not do it for them.** | PROVEN-WITH-CAVEAT |
 | DP6 | Specs are injected verbatim at spawn: each implementer's packet includes its unit's spec, criterion texts, and file set read from the mirrored artifact at spawn time via SubagentStart, with the injected hash recorded for later-mismatch visibility (directive `:185`; D5 "Spec injection at spawn") | Phase task record; commit inspected for subject/scope | `claude-workflow-plugin-fkm.7` (D5), commit `0dfb82a` "an implementer is handed its unit's spec at spawn, and the hash it was handed is recorded where a later mismatch can be seen" — commit subject read directly from `git log`, 2026-09-18; task `status=closed labels=[...,qa-approved]`. | PROVEN |
 | DP7 | `design_conflict` routes to amendment, never improvisation: when a unit's acceptance criteria cannot be satisfied as written, the implementer stops with evidence rather than reinterpreting, and the blocker routes through the D2 review loop (directive `:185`; D5 "design_conflict blocker") | Structural + self-referential: this is the same mechanism `devops.md`'s own "When the design is wrong" section operationalizes, which this piece's own spawn prompt carries verbatim | `fkm.7` (D5) `status=closed labels=[...,qa-approved]`; `fkm.4` (D2) notes, "Amendments run through this same loop" (`docs/plans/v5-design-phase.md:139`), quoted directly. The devops agent prompt this task ran under (`.claude/agents/devops.md`, section "When the design is wrong") instructs exactly this stop-and-report shape, checked live 2026-09-18 as the file this session's own spawn was given. | PROVEN |
 | DP8 | Implementation is green-to-green per unit: suite green recorded before and after, `unit_id`/`design_hash`/`green_before`/`green_after` on the completion contract, refused when malformed at the point completion payloads are recorded (directive `:185`; D5 "Green-to-green per unit") | Structural: located `cmd_green_check` directly; cross-checked against the operator-facing doc this piece's own spawn prompt carries | `grep -n 'cmd_green_check()' .claude/scripts/qa-gate.sh` — defined at one site, confirmed live 2026-09-18. Commits `0c3106b` "a green claim now comes from a command that ran, and every field it produces is refused when malformed" and `6de6c9e` "a unit's criteria must be covered by tests that exist, and the green claim now has a reader" (`fkm.7`, D5). `devops.md`'s own "Green-to-green per unit (v5 D5)" section documents the exact `--phase before`/`--phase after` protocol this piece's spawn prompt required it to follow, had it been unit-bound. | PROVEN |
@@ -811,8 +833,8 @@ updated:
 | Status | Count | Scoped grep |
 | ------ | ----- | ----------- |
 | PROVEN | 10 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
-| PROVEN-WITH-CAVEAT | 6 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
-| NOT-PROVEN | 1 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
+| PROVEN-WITH-CAVEAT | 7 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
+| NOT-PROVEN | 0 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
 | REMOVED | 1 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
 | **Total** | **18** | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '^\| DP[0-9]+ \|'` |
 
@@ -820,17 +842,22 @@ updated:
 > correct ONLY while v5.0.0 is the last claims-ledger section.** Before you
 > write a single new row, change every `,0` above to
 > `,/^## v<next>\.0 claims ledger/` and re-run the five commands to confirm
-> the counts are still 10 / 6 / 1 / 1 / 18 (moved from `11 / 6 / 0 / 1 / 18`
-> on **2026-09-29**, when independent re-verification of every row moved
-> `DP5` PROVEN-WITH-CAVEAT → **NOT-PROVEN** and `DP3` PROVEN →
-> PROVEN-WITH-CAVEAT; which itself moved from `11 / 6 / 1 / 0 / 18`
-> on 2026-09-28 when `DP17` was withdrawn — see those rows, the
-> Re-verification addendum at the foot of this section, and the tally note
-> below). **NOTE FOR THE RELEASE DECISION: this ledger no longer satisfies
-> the zero-NOT-PROVEN rule.** `DP17` was withdrawn specifically to reach zero
+> the counts are still 10 / 7 / 0 / 1 / 18. **That figure moved TWICE on
+> 2026-09-29 and the intermediate state matters**, so it is recorded rather
+> than collapsed: from `11 / 6 / 0 / 1 / 18`, independent re-verification of
+> every row moved `DP5` PROVEN-WITH-CAVEAT → **NOT-PROVEN** and `DP3` PROVEN
+> → PROVEN-WITH-CAVEAT, giving `10 / 6 / 1 / 1 / 18`; an operator-ruled
+> prove-or-remove rewrite then narrowed `DP5` to the file-set-only claim that
+> actually ships, giving `10 / 7 / 0 / 1 / 18`. (`11 / 6 / 0 / 1 / 18` had
+> itself moved from `11 / 6 / 1 / 0 / 18` on 2026-09-28 when `DP17` was
+> withdrawn.) See those rows, the Re-verification addendum at the foot of
+> this section, and the tally note below. **NOTE FOR THE RELEASE DECISION:
+> this ledger satisfies the zero-NOT-PROVEN rule, and how it got there is
+> part of the record.** `DP17` was withdrawn specifically to reach zero
 > NOT-PROVEN; re-verification then established that `DP5` had been
-> NOT-PROVEN all along, for an unrelated reason, so the property was never
-> actually held at the moment it was declared. This is the fourth ledger and the
+> NOT-PROVEN all along, for an unrelated reason, so **the property was NOT
+> actually held at the moment it was first declared** — it is held now only
+> because `DP5` was subsequently narrowed to the truth. This is the fourth ledger and the
 > third time this correction has been paid — v3.5.0 -> v4.0.0, v4.0.0 ->
 > v4.1.0 (`uvk`), and v4.1.0 -> v5.0.0 (`fkm.9`, this ledger, which also had
 > to re-point a positive control in `HANDOFF.md` that this exact re-scope
@@ -844,10 +871,21 @@ from 2026-09-18 through F4 of the operator's finishing-pass brief)."* It is
 preserved rather than deleted because the reasoning below it about `DP17` is
 still sound and still worth reading; only its headline conclusion was wrong.
 
-**THE CORRECTED STATEMENT: v5.0.0 DOES NOT MEET the "NOT-PROVEN = 0" rule.**
-The split is **`10 / 6 / 1 / 1`**. Independent re-verification of all 18 rows
-on 2026-09-29 moved `DP5` to NOT-PROVEN and `DP3` to PROVEN-WITH-CAVEAT (see
-those rows and the Re-verification addendum at the foot of this section).
+**THE CORRECTED STATEMENT, IN TWO STEPS ON THE SAME DAY.** Independent
+re-verification of all 18 rows on 2026-09-29 first moved `DP5` to NOT-PROVEN
+and `DP3` to PROVEN-WITH-CAVEAT, taking the split to `10 / 6 / 1 / 1` — at
+which point **v5.0.0 did NOT meet the rule**. `DP5` was then resolved by an
+operator-ruled prove-or-remove rewrite (`claude-workflow-plugin-6ye1`)
+narrowing its claim to file-set intersection only, which is what actually
+ships and is PROVEN by `plan-batches.test.sh` (319/319 at `2b58370`).
+
+**THE CURRENT STATEMENT: the split is `10 / 7 / 0 / 1` and v5.0.0 MEETS the
+"NOT-PROVEN = 0" rule — by narrowing an overclaiming row to the truth, not by
+redefining the row until it passed.** The distinction matters and is the whole
+point of the prove-or-remove mechanism: the conjunct that does not ship was
+WITHDRAWN and its deferral named (`l7gd`, with `kk9y` as its precondition), so
+no reader is told the impact half exists. See `DP5`, `DP3`, and the
+Re-verification addendum at the foot of this section.
 
 And the correction is sharper than a count changing. `DP17` was withdrawn
 **specifically** to reach zero NOT-PROVEN — that is what the paragraphs below
@@ -875,10 +913,12 @@ still the bar this ledger holds itself to: no row in this section is bare
 about how it got to its status. `DP17` names what it said, why it was false
 rather than merely unvalidated, and the task that withdrew it, per the
 status-vocabulary table's own REMOVED rule above — and, **as this section
-read until 2026-09-29, no row in it was NOT-PROVEN. CORRECTED: one row is.**
-`DP5` is NOT-PROVEN and always was; it was not measured until the
-re-verification. A future ledger auditing this one should read the
-**`10/6/1/1/18`** split as the honest count, not as a near-miss on
+read until 2026-09-29, no row in it was NOT-PROVEN. CORRECTED: `DP5` WAS
+NOT-PROVEN and always had been — it was simply never measured until the
+re-verification. It is no longer, because it was then narrowed to the
+file-set-only claim that ships; but for the whole arc up to that day this
+section asserted a property it did not hold.** A future ledger auditing this
+one should read the **`10/7/0/1/18`** split as the honest count, not as a near-miss on
 `13/3/0/0/16`'s shape — one claim withdrawn is not one claim proven, and this
 ledger does not blur the two. **Nor should it read the withdrawal of `DP17` as
 having delivered zero NOT-PROVEN, which is what this section believed at the
@@ -889,11 +929,22 @@ you were looking at does not establish anything about the rows you were not.
 
 ### v5.0.0 residuals carried into the release notes
 
-- **A stock, Codex-absent install self-reviews its own designs by default
-  (`DP2`).** Disclosed in `.claude/model-roles` itself, not hidden; the two
-  clearances (install Codex, or pin `design_reviewer` to a distinct
-  `<family>-class`) are one-line fixes. *Flip:* either clearance, applied by
-  the operator.
+- **EVERY install self-reviews its own designs by default, and a
+  Codex-present one does so SILENTLY (`DP2`).** The self-review is disclosed
+  in `.claude/model-roles`, not hidden. What was NOT disclosed until
+  2026-09-29 is that one of the two documented clearances does not work:
+  installing Codex moves `design_reviewer_lane` off `claude`, and the collapse
+  condition (`model-select.sh:1374-1376`) requires identical pick **AND**
+  lane == `claude`, so **the flag clears while both roles still resolve to the
+  same model**. No script drives design review through Codex. Measured live:
+  `designer=claude-fable-5`, `design_reviewer=claude-fable-5`, lane `codex`,
+  `identity_collapse: false`, and the `design-family-collapse` marker absent.
+  Because the lane is not set in `model-roles` at all (only a commented
+  example) it defaults to `auto`, so this is the DEFAULT behaviour on a
+  Codex-present host, not an opt-in. Filed as `claude-workflow-plugin-yvpe`.
+  *Flip:* the ONE real clearance — pin `design_reviewer` to a distinct
+  `<family>-class` — plus fixing `yvpe` so the flag tracks the resolved model
+  rather than a lane label.
 - **~~`impact_of` under-reports cross-script dependencies on this repo's own
   shell-heavy surface, which can make D4's batching intersection silently
   uninformative rather than silently wrong (`DP5`).~~ RETIRED 2026-09-29 —
@@ -904,16 +955,29 @@ you were looking at does not establish anything about the rows you were not.
   `"$SCRIPT_DIR/other.sh" --flag`) is real work but is **not** the flip for
   this row, and carrying it into release notes would tell a reader the smaller
   problem is the one they have.
-- **THE RESIDUAL THAT REPLACES IT, and it is larger: `DP5` is NOT-PROVEN —
-  the claim is a conjunction and only the file-set conjunct ships.**
-  `graph_intersection_computed` is the literal `false` at every emission site
-  in `epic-gate.sh` and `:1082` validates that it is false; the `impact_of`
-  half is deferred to `claude-workflow-plugin-l7gd`, **open since 2026-08-22**.
-  Parallel batches are therefore certified parallel-safe on file-set
-  disjointness alone. *Flip:* implement `l7gd`, **or** perform a
-  prove-or-remove rewrite narrowing the claim to file-set intersection only
-  with the deferral named in the row. Tracked as
-  `claude-workflow-plugin-6ye1`.
+- **THE RESIDUAL THAT REPLACES IT: file-disjoint units can still conflict
+  SEMANTICALLY, and no automatic control catches that (`DP5`,
+  PROVEN-WITH-CAVEAT on a claim narrowed 2026-09-29).** The row's overclaim
+  was resolved, not carried: `DP5` briefly read NOT-PROVEN, then an
+  operator-ruled prove-or-remove rewrite (`claude-workflow-plugin-6ye1`)
+  withdrew the `impact_of` conjunct and narrowed the claim to file-set
+  intersection only — what ships, PROVEN by `plan-batches.test.sh` 319/319 at
+  `2b58370`, with `graph_intersection_computed:false` naming the absence on
+  every envelope. What REMAINS a residual is the thing narrowing cannot fix:
+  two units may touch entirely disjoint files and still break each other's
+  behaviour, and nothing runs automatically to catch it. Worktree isolation
+  for batch members is an orchestrator responsibility — `epic-gate.sh` has
+  zero occurrences of `worktree` and the batch envelope carries no worktree
+  field — so a later unit's full-suite run cannot be relied on to observe an
+  earlier unit's changes, and the cross-cutting integration sweep is
+  explicitly MANUAL (`epic-gate.sh:6`, `:19`, `:500`). **Operators running
+  parallel batches must perform that sweep themselves.** *Flip:* implement
+  `claude-workflow-plugin-kk9y` (so `impact_of` resolves call edges through
+  `"$SCRIPT_DIR/other.sh" --flag` invocations and becomes informative on
+  shell-heavy repositories), then `claude-workflow-plugin-l7gd` (the impact
+  conjunct itself), then re-verdict this row against a computed impact set.
+  Building `l7gd` without `kk9y` first would add a conjunct that is
+  uninformative here.
 - **"Small enough for one coherent change" is enforced nowhere (`DP3`,
   PROVEN-WITH-CAVEAT as of 2026-09-29).** No sizing criterion exists in
   `DS1`–`DS8` and none in `review-check.sh`; the phrase lives only in
@@ -1024,13 +1088,21 @@ found no adapter for that decision to track and withdrew the claim; it is
 REMOVED now, per the same no-adjective-without-an-artifact rule this
 paragraph opens with — a withdrawal is its own artifact pointer, not a gap
 either. None of the caveated rows' caveats are
-new discoveries hidden from the phases that shipped them — `DP2`, ~~`DP5`~~,
+new discoveries hidden from the phases that shipped them — `DP2`,
 `DP10` and `DP11` are each the shipping phase's own disclosed residual,
-**(`DP5` CORRECTED 2026-09-29: it is no longer caveated, it is NOT-PROVEN, and
-its caveat was retired as describing an unreachable residual — see the
-residuals list above. `DP3` joined the caveated set on the same date, and its
-caveat IS a new discovery that the shipping phase did not disclose, which
-makes it the one exception to the sentence this clause is making.)**
+**(UPDATED 2026-09-29, superseding a correction made earlier the same day
+which said `DP5` was no longer caveated. `DP5` IS caveated again: it was
+briefly NOT-PROVEN, then resolved by an operator-ruled prove-or-remove
+rewrite narrowing it to file-set intersection only, and it carries a NEW
+caveat — that file-disjoint units can still conflict semantically with no
+automatic control. That caveat is this auditing pass's own finding, not the
+shipping phase's. `DP3` likewise joined the caveated set on this date with a
+caveat the shipping phase did not disclose. Both therefore belong with
+`DP15`/`DP16`/`DP18` as findings by an auditing pass rather than
+shipping-phase disclosures — NOT, as an earlier draft of this parenthetical
+put it, as "the one exception" to this sentence. That phrasing was wrong
+against the very sentence it sat in, which already names three such rows;
+it was raised as R2-F1 and is corrected here.)**
 independently re-confirmed live where this piece could do so cheaply; `DP15`,
 `DP16` and `DP18` are this piece's own live findings — `DP15`/`DP16` from
 this ledger's original 2026-09-18 authoring, `DP18` from the LIVE-1 run
@@ -1160,7 +1232,15 @@ commands catches a claim that has stopped being true.
 **Sixteen of eighteen rows hold.** Two moved, and both moves are recorded in
 the rows themselves:
 
-- **`DP5` PROVEN-WITH-CAVEAT → NOT-PROVEN.** The claim is a conjunction and
+- **`DP5` PROVEN-WITH-CAVEAT → NOT-PROVEN → (same day, after an
+  operator-ruled prove-or-remove rewrite) PROVEN-WITH-CAVEAT on a NARROWED
+  claim.** The finding below is what the re-verification established and is
+  unchanged; the row's *resolution* came afterwards. The conjunction was
+  withdrawn and the claim narrowed to file-set intersection only — what
+  actually ships, PROVEN by `plan-batches.test.sh` 319/319 at `2b58370` — with
+  `l7gd` named as the deferral and `kk9y` as its precondition. The row's new
+  caveat is that file-disjoint units can still conflict semantically and **no
+  automatic control catches it**. The original finding:
   the `impact_of` conjunct was deferred to `claude-workflow-plugin-l7gd` —
   **open, created 2026-08-22, twenty-seven days before this ledger was
   compiled.** Tracked as `claude-workflow-plugin-6ye1`, which carries the full

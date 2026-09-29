@@ -856,16 +856,24 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 # v5-design-phase.md Phase D5: "the unit's criteria have tests, the touched
 # files fall within the declared set..., and the injected design_hash
 # matches the currently bound artifact"):
-#   - validate-completion-criteria-tests.test.sh (43 assertions) — the
-#     fifth v5 D5 field's required/type/value checks in review-check.sh
-#     cmd_validate_completion (criteria_tests: shape, the criteria_tests_
-#     without_unit_id one-directional rule, and the tests_added cross-
-#     reference), plus a META-TEST stripping the whole CRITERIA-TESTS-
-#     VALIDATION region from a copy and proving the mutant then accepts a
-#     payload missing the field entirely (and an INVENTED, undeclared test
-#     reference) that the shipped script still refuses. Needs no bd
-#     fixture, same reason validate-completion-green-fields.test.sh does
-#     not: validate-completion is a stateless JSON validator.
+#   - validate-completion-criteria-tests.test.sh (46 assertions — 43 through
+#     fkm.7, +3 as of claude-workflow-plugin-1dbz, which REMOVED the
+#     tests_added cross-reference this file used to test and added Section
+#     5.4 plus a replacement META assertion in its place) — the fifth v5 D5
+#     field's required/type/value checks in review-check.sh
+#     cmd_validate_completion (criteria_tests: shape, and the
+#     criteria_tests_without_unit_id one-directional rule; a test reference
+#     absent from tests_added is now LEGAL at this layer — 1dbz relaxed it,
+#     since a REGRESSION-SHAPED criterion's only honest reference pre-dates
+#     the task and can never be in tests_added; see design-unit-align.
+#     test.sh Section 12 for where that reference is actually checked now),
+#     plus a META-TEST stripping the whole CRITERIA-TESTS-VALIDATION region
+#     from a copy and proving the mutant then accepts a payload missing the
+#     field entirely (and, post-1dbz, an empty-array criterion value — the
+#     one shape this validator alone still catches) that the shipped script
+#     still refuses. Needs no bd fixture, same reason validate-completion-
+#     green-fields.test.sh does not: validate-completion is a stateless
+#     JSON validator.
 #   - design-artifact-parity.test.sh (23 assertions) — the ez9h fix: two
 #     design-artifact path resolvers (qa-gate.sh's design_artifact_path_for,
 #     the WRITER and every other reader; subagent-start.sh's OWN raw
@@ -878,19 +886,28 @@ TESTS_DIR="$PROJECT_DIR/.claude/scripts/tests"
 #     reproducing the pre-fix raw construction and showing it disagrees on
 #     the exact input that was the defect. No bd fixture needed — pure
 #     string-derivation functions, no filesystem or Beads access.
-#   - design-unit-align.test.sh (64 assertions, MEASURED via this spec's own
-#     "Total: N Passed: N" line, QA round 1 on fkm.8, R1-F8 correction —
-#     this ledger previously said 44, qa-gate.sh:13996 separately said 66;
-#     all three mentions across the tree now agree) — `qa-gate.sh design-unit-
-#     align` itself: not-applicable when unbound; LEG 1 (files, reused from
+#   - design-unit-align.test.sh (73 assertions, MEASURED via this spec's own
+#     "Total: N Passed: N" line -- 64 as of QA round 1 on fkm.8, R1-F8
+#     correction (this ledger previously said 44, qa-gate.sh:13996
+#     separately said 66; all three mentions across the tree were
+#     reconciled to agree), 73 as of claude-workflow-plugin-1dbz (+3
+#     recovery-path assertions on the existing criteria_incomplete
+#     refusal, +6 in a new Section 12 proving a criteria_tests ref may name
+#     a test absent from tests_added, subject to the SAME unconditional
+#     file+label and green_after checks -- reconciled across all three
+#     locations again here) — `qa-gate.sh design-unit-align` itself:
+#     not-applicable when unbound; LEG 1 (files, reused from
 #     design-conform, propagated verbatim); LEG 2 (freshness, reused from
 #     spec-injection-status; injected:false legal, fresh:false is not); LEG
-#     3 (criteria have tests — no implementer record, incomplete coverage,
-#     an unknown criterion id, green_after not green, a malformed/missing-
-#     file/missing-label test reference, and the full success path); wiring
-#     into `approve`'s DESIGN-ALIGNMENT-REFUSAL (a misaligned bound task
-#     refuses, exit 2; an aligned one does not); and a METatest proving that
-#     refusal block is load-bearing. This is the FIRST spec to drive
+#     3 (criteria have tests — no implementer record, incomplete coverage
+#     now naming its own recovery path rather than inviting an invented
+#     test, an unknown criterion id, green_after not green, a
+#     malformed/missing-file/missing-label test reference, a test_ref that
+#     may name a test absent from tests_added, and the full success path);
+#     wiring into `approve`'s DESIGN-ALIGNMENT-REFUSAL (a misaligned bound
+#     task refuses, exit 2; an aligned one does not); and a METatest
+#     proving that refusal block is load-bearing. This is the FIRST spec to
+#     drive
 #     `approve` on a real v5 task-per-unit CHILD task at all (design-
 #     conform.test.sh never calls approve; design-review-record.test.sh's
 #     own tasks own their design directly, never through a DESIGN-UNIT

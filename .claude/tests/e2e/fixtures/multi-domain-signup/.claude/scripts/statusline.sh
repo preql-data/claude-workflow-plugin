@@ -251,8 +251,16 @@ model_flags() {
 #      absent is absent, not an empty label.
 #   5. Flags are appended last, in the fixed order `!esc !id !sess`.
 #
-# A non-claude lane substitutes the literal `sol` for that lane's id, because
-# on that lane the reviewing identity is not the Claude model the pin names.
+# A non-claude CODE-review lane substitutes the literal `sol` for that lane's
+# id, because on that lane the reviewing identity genuinely is not the Claude
+# model the pin names -- codex-review.sh drives it.
+#
+# THE DESIGN LANE IS DIFFERENT AND DOES NOT DO THIS (claude-workflow-plugin-
+# yvpe). No script drives design review through Codex, so a non-claude DESIGN
+# lane still means a Claude reviewer; printing `sol` there named a reviewer
+# that does not exist and, worse, displayed the designer and its reviewer as
+# two distinct identities precisely when they resolve to the same model.
+# `design_reviewer` therefore always renders its resolved id.
 # Artifact missing/unparseable -> today's orchestrator.md-pin fallback.
 compute_model_suffix() {
     local collapse="false" drift="" flags=""
@@ -280,7 +288,19 @@ compute_model_suffix() {
             [ -n "$id" ] || continue
             case "$role" in
                 reviewer)        [ "$rlane" = "claude" ] && disp=$(short_id "$id") || disp="sol" ;;
-                design_reviewer) [ "$dlane" = "claude" ] && disp=$(short_id "$id") || disp="sol" ;;
+                # design_reviewer ALWAYS renders the resolved Claude id, never
+                # `sol` (claude-workflow-plugin-yvpe). The `reviewer` arm above
+                # is correct because the CODE-review Sol lane is genuinely
+                # wired (codex-review.sh drives it). There is NO design
+                # equivalent: codex-review.sh has no design handling, and
+                # design-reviewer.md instructs the reviewer to emit
+                # `design-claude` unconditionally because it cannot read this
+                # lane. Rendering `sol` here showed the designer and its
+                # reviewer as two distinct identities at exactly the moment
+                # they are the SAME model -- asserting the opposite of the
+                # truth, continuously, on screen. This arm was copied from the
+                # `reviewer` arm, where the conditional does hold.
+                design_reviewer) disp=$(short_id "$id") ;;
                 *)               disp=$(short_id "$id") ;;
             esac
             found=-1

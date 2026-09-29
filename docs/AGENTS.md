@@ -40,7 +40,7 @@ roles and own no agent files: `implementer_class_high`, the per-unit escalation
 strategy, and the two lane keys `reviewer_lane` / `design_reviewer_lane`, which
 decide *which* reviewer is engaged and never change a frontmatter pin. See the
 header of `.claude/model-roles` for the full grammar, the identity-collapse
-condition and its two clearances.
+condition and its ONE real clearance (`design_reviewer=<family>-class`). Installing Codex is NOT a clearance — it clears the flag without changing which model reviews the design (`claude-workflow-plugin-yvpe`).
 
 ---
 
@@ -1025,24 +1025,31 @@ how the orchestrator chains delegations without re-deriving context.
   protocol an implementer follows.
 - **`criteria_tests`** — **required**, object, MAY be `{}`. v5 D5 piece 4
   (claude-workflow-plugin-fkm.7). Maps each of the bound unit's acceptance-
-  criterion ids to the array of `tests_added` entries that cover it:
+  criterion ids to the array of test references that cover it:
   `{"U3-1": ["path/to/file.test.sh::assertion label"], "U3-2": [...]}`. `{}`
   is legal even when `unit_id` is non-empty — not every payload has finished
   mapping its coverage, and the plan's "criteria have tests" requirement is
   enforced at `approve` time (`qa-gate.sh design-unit-align`), not by this
-  field's shape alone. Two things ARE checked at record time: every test
-  reference named here must ALSO appear, byte-for-byte, in this SAME
-  payload's `tests_added` — a reference to anything else is a stale or
-  invented claim, never something this payload declares as its own work —
-  and a non-empty map with an empty `unit_id` is refused
+  field's shape alone. A test reference does **not** have to also appear in
+  `tests_added` (claude-workflow-plugin-1dbz relaxed this: a REGRESSION-
+  SHAPED criterion — one asserting that some already-shipped behaviour is
+  unaffected — has no new test to add by construction, so it may honestly
+  point at a test that pre-dates this task). ONE thing IS checked at record
+  time: a non-empty map with an empty `unit_id` is refused
   (`criteria_tests_without_unit_id`, the same one-directional shape
   `design_hash_without_unit_id` already enforces). What record time does
-  NOT check — it has no access to the design artifact, only to this one
-  payload — is completeness (does every criterion the unit actually
-  declares have an entry here) or existence (does the named file/label
-  still exist on disk). Both are the job of `qa-gate.sh design-unit-align`,
-  which composes this field with the design artifact's own declared
-  criteria and a live filesystem check; see "Per-unit alignment" below.
+  NOT check — it has no access to the design artifact or the filesystem,
+  only to this one payload's shape — is completeness (does every criterion
+  the unit actually declares have an entry here), existence (does the named
+  file/label still exist on disk, whether or not it was ever in
+  `tests_added`), or the suite having actually run green. All three are the
+  job of `qa-gate.sh design-unit-align`, which composes this field with the
+  design artifact's own declared criteria, a live filesystem check, and an
+  externally-corroborated `green_after`; see "Per-unit alignment" below. A
+  criterion with nothing honest to name — because its whole text restates
+  green-to-green's own standing guarantee rather than naming anything
+  unit-specific — is not cleared by inventing a reference: it is removed or
+  revised through a design amendment instead (`qa-gate.sh design-conflict`).
 
 ### Per-unit alignment (v5 D5 piece 4)
 
@@ -1107,13 +1114,17 @@ Three mechanisms, each in one place:
   non-empty `design_hash` paired with an empty `unit_id`
   (`design_hash_without_unit_id` — the reverse pairing is legal), a
   `criteria_tests` entry that is not a non-empty array of non-empty
-  strings, a non-empty `criteria_tests` map paired with an empty `unit_id`
-  (`criteria_tests_without_unit_id` — same one-directional shape, same
-  reason), or a `criteria_tests` test reference absent from this SAME
-  payload's own `tests_added` array (`criteria_test_ref_not_declared`). The
-  `llm_observations` / `context_coverage` emptiness check named above makes
-  this document's two "a completion payload without it is malformed"
-  sentences mechanical rather than aspirational.
+  strings, or a non-empty `criteria_tests` map paired with an empty
+  `unit_id` (`criteria_tests_without_unit_id` — same one-directional
+  shape, same reason). A `criteria_tests` test reference no longer has to
+  also appear in this SAME payload's own `tests_added` array
+  (claude-workflow-plugin-1dbz dropped `criteria_test_ref_not_declared` —
+  see the `criteria_tests` field entry above for why); whether such a
+  reference actually exists is `qa-gate.sh design-unit-align`'s job, at
+  approve time, against the live filesystem. The `llm_observations` /
+  `context_coverage` emptiness check named above makes this document's two
+  "a completion payload without it is malformed" sentences mechanical
+  rather than aspirational.
 - **`qa-gate.sh completion-record`** validates through that subprocess
   — it carries no second schema — then persists the payload to
   `.claude/.qa-tracking/completion-<task-id>.json` and appends

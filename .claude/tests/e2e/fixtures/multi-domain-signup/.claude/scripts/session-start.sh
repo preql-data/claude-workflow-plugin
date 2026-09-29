@@ -863,7 +863,7 @@ if command -v jq >/dev/null 2>&1; then
         if [ "$(jq -r '.identity_collapse // false' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo false)" = "true" ]; then
             SS_DESIGNER_ID=$(jq -r '.roles.designer // "?"' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo "?")
             WARNINGS+="
-- design identity collapse: designer and design_reviewer both resolve to '$SS_DESIGNER_ID' on the claude design lane, so a design would be reviewed by its own model identity. Not a block — pins are written and the workflow runs. Two clearances: install Codex (docs/CODEX_SETUP.md; the design lane then resolves to Sol) or set design_reviewer=<family>-class in .claude/model-roles."
+- design identity collapse: designer and design_reviewer both resolve to '$SS_DESIGNER_ID' on the claude design lane, so a design would be reviewed by its own model identity. Not a block — pins are written and the workflow runs. ONE clearance: set design_reviewer=<family>-class in .claude/model-roles. Do NOT install Codex expecting it to help — no script drives design review through Codex, so it only moves the lane off 'claude' and silences this warning while both roles still resolve to the same model (claude-workflow-plugin-yvpe)."
         fi
 
         # Warning 10: config keys this install's .claude/model-roles lacks.

@@ -170,6 +170,19 @@ is incomplete. Concretely, before you declare a unit done being designed:
 
 - its acceptance criteria are falsifiable as written — each names an artefact, a
   command, or a record, not a feeling ("works correctly" is not a criterion);
+- no acceptance criterion merely restates an invariant the gate already
+  enforces on every unit regardless of what this design says — "the
+  pre-existing suite still passes" is exactly what `green-check --phase
+  before|after` already proves for every unit (claude-workflow-plugin-1dbz);
+  a criterion whose whole content is that restatement is redundant, not
+  falsifiable about anything new, and `design-unit-align` LEG 3 has no
+  honest test to name for it later. There is no criterion "kind" or waiver
+  that exempts it — the choices are drop the criterion, or make it
+  concrete. When a change genuinely must preserve SPECIFIC existing
+  behaviour, name that behaviour and point at the existing test(s) that
+  already cover it — `criteria_tests` may cite a pre-existing test, not
+  only a newly added one — rather than asserting that nothing broke in
+  general;
 - its `files` list came from actually opening the files, not from guessing what
   a change like this usually touches;
 - its `verification` is a command someone can run;

@@ -83,12 +83,23 @@
 #     claude  force the Claude path regardless of any probe.
 #   WORKFLOW_REVIEWER_LANE / WORKFLOW_DESIGN_REVIEWER_LANE override their key
 #   (test/operator seam). Reviewer and design-reviewer agents ALWAYS carry a
-#   Claude `model:` pin in frontmatter — a lane only affects which reviewer is
-#   engaged and how the statusline renders (`claude` vs the literal `sol`),
-#   never the frontmatter pin, and it never blocks the session.
+#   Claude `model:` pin in frontmatter — never the frontmatter pin, and a lane
+#   never blocks the session.
+#   THE TWO LANES ARE NOT SYMMETRIC, despite the symmetric key names:
+#     reviewer_lane        REAL. codex-review.sh drives the Sol code review, so
+#                          this lane genuinely changes which reviewer is engaged
+#                          and the statusline renders the literal `sol` for it.
+#     design_reviewer_lane RESOLVED AND REPORTED, BUT NOT DRIVEN. Nothing
+#                          executes design review through Codex, so this lane
+#                          changes neither the reviewer nor (since
+#                          claude-workflow-plugin-yvpe) the statusline, which
+#                          always renders the design reviewer's resolved Claude
+#                          id. Its only remaining effect is the one documented
+#                          as a defect below: it suppresses the identity-collapse
+#                          flag.
 #
-# IDENTITY COLLAPSE — and the two ways to clear it
-# ------------------------------------------------
+# IDENTITY COLLAPSE — and the ONE way to clear it
+# -----------------------------------------------
 # `designer` and `design_reviewer` are both `top` by default, so on a stock
 # install WITHOUT Codex they resolve to the same model and the design would be
 # reviewed by its own identity. That is reported, never blocked: the resolver
@@ -97,13 +108,22 @@
 # statusline shows `!id`. Pins are still written and the exit status is 0 —
 # blocking here would make the Codex-absent arm unrunnable.
 #
-# Two clearances, both one step:
-#   1. Install Codex (see docs/CODEX_SETUP.md). design_reviewer_lane=auto then
-#      resolves to the Sol lane, the review identity is no longer Claude, and
-#      the collapse condition (identical id AND design lane == claude) is false.
-#   2. Set `design_reviewer=opus-class` (or any family-class distinct from
+# ONE REAL CLEARANCE, and one that only LOOKS like one:
+#   1. Set `design_reviewer=opus-class` (or any family-class distinct from
 #      whatever `top` resolves to). The two lanes then resolve to different
-#      models on the Claude path alone.
+#      models on the Claude path alone. THIS IS THE ONLY ONE THAT WORKS.
+#   2. DO NOT RELY ON INSTALLING CODEX. It was documented here as a clearance
+#      and it is not one (claude-workflow-plugin-yvpe). Installing Codex makes
+#      design_reviewer_lane resolve away from `claude`, and the collapse
+#      condition below requires (identical pick AND lane == claude) — so the
+#      flag goes out while BOTH ROLES STILL RESOLVE TO THE SAME MODEL. No
+#      script drives design review through Codex: codex-review.sh is the
+#      CODE-review driver and contains no design handling, and
+#      .claude/agents/design-reviewer.md instructs the reviewer to emit
+#      `design-claude` unconditionally because it has no tool to read this
+#      lane. Taking this "clearance" therefore leaves you strictly worse off
+#      than not taking it: the risk is unchanged and the warning that would
+#      have told you is gone.
 #
 # RIDER (v5.0.0): implementer moved from opus-class to sonnet-class. That is a
 # deliberate quality-for-cost trade the reviewed design artifact and the

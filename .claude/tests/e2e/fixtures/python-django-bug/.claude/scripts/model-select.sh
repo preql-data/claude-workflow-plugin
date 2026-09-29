@@ -1367,14 +1367,29 @@ cmd_apply() {
     #
     # On a stock install without Codex, `designer` and `design_reviewer` are
     # both `top` and this flag is therefore PERMANENTLY LIT. That is a known
-    # consequence of the locked default, documented with its two clearances in
-    # the .claude/model-roles header (install Codex, or set
-    # design_reviewer=<family>-class).
+    # consequence of the locked default. The ONE real clearance is setting
+    # design_reviewer=<family>-class; see the .claude/model-roles header.
+    #
+    # THE `dlane == claude` CONJUNCT BELOW IS A KNOWN DEFECT, NOT A FEATURE
+    # (claude-workflow-plugin-yvpe). It was written on the premise that "on
+    # the Sol lane the reviewing identity is not a Claude model at all" --
+    # a premise NOTHING IMPLEMENTS. codex-review.sh is the code-review driver
+    # and has no design handling; design-reviewer.md tells the reviewer to
+    # emit `design-claude` unconditionally and notes it cannot read this lane.
+    # So on a Codex-present host the conjunct goes false and this flag clears
+    # while designer and design_reviewer still resolve to the SAME model --
+    # measured live: claude-fable-5 / claude-fable-5, lane=codex,
+    # identity_collapse=false. Worse, design_reviewer_lane is not set in
+    # model-roles at all (only a commented example), so it defaults to `auto`
+    # and the probe decides: this fires on a DEFAULT Codex-present install
+    # with no operator opt-in. Fixing it means making the condition depend on
+    # what actually differs -- the resolved model -- or gating the lane clause
+    # behind a probe that the design lane is DRIVEN, not merely configured.
     local collapse="false"
     if [ -n "$designer_pick" ] && [ "$designer_pick" = "$design_reviewer_pick" ] \
         && [ "$dlane" = "claude" ]; then
         collapse="true"
-        _warn "identity collapse: designer and design_reviewer both resolve to '$designer_pick' on the claude design lane, so a design would be reviewed by its own model identity. Pins are still written and the session is NOT blocked. Clear it by installing Codex (design_reviewer_lane=auto then resolves to the Sol lane) or by setting design_reviewer to a family-class distinct from top in $MODEL_ROLES_FILE."
+        _warn "identity collapse: designer and design_reviewer both resolve to '$designer_pick' on the claude design lane, so a design would be reviewed by its own model identity. Pins are still written and the session is NOT blocked. Clear it by setting design_reviewer to a family-class distinct from top in $MODEL_ROLES_FILE. Do NOT install Codex expecting it to help: no script drives design review through Codex, so installing it only moves the lane off 'claude' and silences this warning while the two roles still resolve to the same model (claude-workflow-plugin-yvpe)."
     fi
     mkdir -p "$(dirname "$COLLAPSE_FLAG")" 2>/dev/null || true
     if [ "$collapse" = "true" ]; then

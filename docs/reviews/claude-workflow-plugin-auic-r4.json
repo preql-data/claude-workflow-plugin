@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-auic",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "7751b41da90028873374db8b7af72dad03b96920e1336bd65d9ceaeab16dd4d6",
+  "risk_threshold": "high",
+  "stop_condition": "All four R3 findings verified fixed in place; the DP2 withdrawal judged honest on its own terms; the negative controls proven to FIRE against a reverted artifact rather than merely present; and an exhaustive sweep run for any remaining surface - prose, code or UI - that still asserts Codex clears the design identity collapse.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "high",
+      "location": ".claude/scripts/statusline.sh:283 (premise comment at :255)",
+      "evidence": "The role-rendering case reads: design_reviewer) [ \"$dlane\" = \"claude\" ] && disp=$(short_id \"$id\") || disp=\"sol\" ;; — so whenever the design lane is not 'claude', the statusline prints the design_reviewer as the literal 'sol'. Simulated against the LIVE artifact on this host: dlane=codex, designer=claude-fable-5, design_reviewer=claude-fable-5, so the statusline renders des:fable-5 and dsr:sol as TWO DISTINCT GROUPS. No script drives design review through Codex - the reviewer is design-claude on claude-fable-5 - so 'sol' names a reviewer that does not exist. The block's own header comment at :255 states the same false premise the collapse condition carries: 'on that lane the reviewing identity is not the Claude model the pin names.' The `reviewer` arm ONE LINE ABOVE (:282) is CORRECT for its own lane, because the code-review lane IS wired and codex-review.sh really does run - which is how this got in: the design arm was copied from an arm where the conditional is true.",
+      "description": "A THIRD independent mechanism by which installing Codex hides design self-review, and the only one that is continuously on screen. The other two suppress a signal (identity_collapse goes false; !id is not emitted); this one ASSERTS A POSITIVE FALSEHOOD - it displays designer and design_reviewer as different identities, which is precisely the fact the collapse flag exists to deny. An operator looking at the statusline sees visual confirmation that their design is being reviewed by a different party. Not covered by any of the seven surfaces fixed so far, and it is code driving UI rather than prose, so no documentation edit reaches it. The fix belongs with yvpe: the design_reviewer arm should render the resolved model until a driver exists, or the lane label should stop standing in for a reviewer identity."
+    },
+    {
+      "id": "R4-F2",
+      "severity": "medium",
+      "location": "docs/AGENTS.md:43, docs/HOOKS.md:3073, .claude/model-roles:90",
+      "evidence": "Three surfaces still assert a count of two. docs/AGENTS.md:43 - IN this change set, edited this cycle for other reasons and this line not revisited - 'See the header of .claude/model-roles for the full grammar, the identity-collapse condition and ITS TWO CLEARANCES.' docs/HOOKS.md:3073, untouched, the statusline legend row for !id - 'Reported, never blocking; THE TWO CLEARANCES are in the .claude/model-roles header.' And model-roles' OWN section heading at :90 still reads 'IDENTITY COLLAPSE - and the two ways to clear it', ten lines above the body that now reads 'ONE REAL CLEARANCE, and one that only LOOKS like one'. grep -c 'two clearances' .claude/model-roles -> 0, so both pointers now cite a header that contradicts them.",
+      "description": "MEDIUM rather than HIGH because none of the three states the false remedy: a reader who follows either pointer lands on model-roles:100-116, which is now unambiguous and explicitly warns against Codex. The harm is a wrong count and a heading contradicting its own body. HOOKS.md is the one worth prioritising - the !id legend is exactly where an operator looks when the flag appears, i.e. when they are hunting a remedy. All three are one-line edits and they are the same edit."
+    },
+    {
+      "id": "R4-F3",
+      "severity": "medium",
+      "location": "docs/RELEASE_AUDIT.md:808 (DP2 evidence and verification-method columns)",
+      "evidence": "The narrowed CLAIM and the withdrawal note are correct, but two columns of the same row were not carried with them. The Evidence column still states, present tense, 'Two clearances documented in the same block (install Codex; or pin design_reviewer to a distinct <family>-class)' - and grep -c 'two clearances' .claude/model-roles now returns 0, so the row describes a file state that no longer exists. The Verification method column still reads only 'Direct read of shipped agent frontmatter and the resolver's own documentation comment', while this row's own withdrawal note says that method 'is why it was missed' and the ledger convention adopted IN THIS SAME CHANGE SET (RELEASE_AUDIT:744-748, rule 1) requires a row to cite its mechanism's CODE LOCATION. The row cites model-select.sh:1374-1376 in its narrative but never updates the column that is supposed to carry it.",
+      "description": "A row that correctly diagnoses its own verification method as the defect, and then leaves that method recorded unchanged. Fixing it is the convention applied to itself: add the code-location read to the method column and mark the stale model-roles quote as superseded. Not blocking - the row states the correct position twice elsewhere - but it is the release-certification artifact and an auditor re-deriving the cited evidence gets a different answer than the row records."
+    }
+  ],
+  "iterations": 4,
+  "stopped_by": "verdict"
+}

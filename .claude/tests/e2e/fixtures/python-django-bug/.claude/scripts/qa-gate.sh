@@ -14764,10 +14764,16 @@ cmd_spec_injection_status() {
 # LEG 3 -- CRITERIA HAVE TESTS. The one genuinely new predicate.
 # RECORD: `criteria_tests` on the F7 completion contract (v5 D5 piece 4,
 # review-check.sh validate-completion) -- the implementer's own claim,
-# already schema-checked and self-consistency-checked against `tests_added`
-# at record time (every ref named in criteria_tests must ALSO appear in
-# tests_added, or validate-completion refuses the payload outright before
-# it is ever recorded -- see that region's own header).
+# schema-checked at record time (every key non-empty, every value a
+# non-empty array of non-empty strings, criteria_tests non-empty only ever
+# paired with a non-empty unit_id -- see that region's own header). A
+# test_ref no longer also has to appear in tests_added (claude-workflow-
+# plugin-1dbz: that cross-check was a category error for a REGRESSION-
+# SHAPED criterion, whose whole assertion is that some already-shipped
+# behaviour is unaffected and which therefore has no NEW test to add by
+# construction) -- so THIS leg, below, is where a criteria_tests reference
+# is actually confirmed real, not merely a same-payload string comparison
+# record time could already make.
 # CORROBORATION, here: (a) every criterion id the unit's OWN acceptance[]
 # declares (read via review-check.sh design-unit-json, the ONE existing
 # per-unit body reader -- no second parser for the DESIGN-UNITS grammar) is
@@ -14818,10 +14824,24 @@ cmd_spec_injection_status() {
 # named file, full stop. It cannot distinguish a real assertion call from
 # the SAME text sitting in an unrelated comment -- the exact "mention
 # mistaken for a test" shape this leg exists to rule out, one layer down.
-# What narrows that gap is NOT this check alone but its composition with
-# the tests_added cross-reference above: the label has to be a string the
-# specialist ALSO separately declared, on the SAME payload, as work it
-# added or modified for THIS task.
+#
+# claude-workflow-plugin-1dbz: THIS CHECK NO LONGER SHARES THAT NARROWING
+# WITH A tests_added CROSS-REFERENCE -- there is no longer one to compose
+# with (review-check.sh's own header, at the region this relaxation
+# touches, states why: a regression-shaped criterion's honest reference is
+# to a PRE-EXISTING test, which tests_added never lists). What narrows the
+# mention-vs-real-test gap now is this check's own composition with 3d/3d2
+# immediately below: the label is not merely present in a real, in-tree
+# file -- green_after on the SAME record must ALSO be "green", externally
+# corroborated against a real GREEN-CHECK v1 record the suite run actually
+# produced, never read back from the payload's own unverified claim. A
+# file that merely contains the label text, with no corroborated green
+# suite run behind it, still refuses. Disclosed as the residual gap
+# rather than hidden: grep -qF still cannot tell a real assertion call
+# from the same string sitting in a comment inside a file that happens to
+# be part of a green run for unrelated reasons -- narrower than "any
+# string in the repo" (design_alignment_ref_is_contained bounds that), but
+# not zero.
 #
 # THE FILE ITSELF IS ALSO BOUNDED NOW, MECHANICALLY, NOT MERELY ASSERTED IN
 # THIS PARAGRAPH (QA round 7, R7-F4). An earlier draft of this paragraph
@@ -14840,9 +14860,15 @@ cmd_spec_injection_status() {
 # check could be satisfied by a spelling that never leaves the tree ON
 # PAPER while the kernel opens a directory outside it). What remains,
 # confined now to files genuinely inside the project tree, is the
-# mention-vs-real-test gap the tests_added cross-reference narrows but does
-# not close. Disclosed as the largest remaining gap in this leg, not
-# papered over.
+# mention-vs-real-test gap. The tests_added cross-reference USED to narrow
+# it; claude-workflow-plugin-1dbz removed that record-time check, so this
+# leg's file+label resolution and the externally-corroborated green_after
+# are now the ONLY things standing against an invented reference. That is
+# less of a loss than it sounds: tests_added was never externally verified
+# either (its only consumers check key-present, type, and a length), so a
+# caller willing to invent a criteria_tests ref could always have written
+# the same string into tests_added. Disclosed as the largest remaining gap
+# in this leg, not papered over.
 #
 # WHY UNCONDITIONAL WHEN BOUND, LIKE DESIGN-CONFLICT, NOT LENIENT LIKE
 # DESIGN-SATISFIED. DESIGN-SATISFIED-REFUSAL (fkm.4/D2) fires on EVERY
@@ -15007,11 +15033,16 @@ design_alignment_ref_is_contained() (
 # SECOND, OPTIONAL ARGUMENT (v5 D6, claude-workflow-plugin-fkm.8): mode.
 # "" (the default, EVERY call site before D6) runs all three legs exactly as
 # shipped in D5 -- this is unchanged and this file's own design-unit-align.
-# test.sh (64 assertions, MEASURED via `bash .claude/scripts/tests/design-
-# unit-align.test.sh`'s own "Total: N Passed: N" line, QA round 1 on
-# fkm.8, R1-F8 -- this comment previously said 66, run-tests.sh:809
-# separately said 44, and CHANGELOG.md alone had the correct figure; all
-# three now agree) keeps proving it byte-for-byte. mode="rollup" SKIPS
+# test.sh (73 assertions, MEASURED via `bash .claude/scripts/tests/design-
+# unit-align.test.sh`'s own "Total: N Passed: N" line -- 64 as of QA round 1
+# on fkm.8 (R1-F8 reconciled a three-way drift: this comment previously said
+# 66, run-tests.sh:809 separately said 44, CHANGELOG.md alone had the
+# correct figure), 73 as of claude-workflow-plugin-1dbz, which added
+# Section 5's three recovery-path assertions and Section 12's six proving a
+# criteria_tests ref may name a test absent from tests_added subject to the
+# SAME unconditional file+label and green_after checks -- all three
+# locations reconciled to 73 again here, the identical discipline R1-F8
+# established) keeps proving it byte-for-byte. mode="rollup" SKIPS
 # LEG 1 (files) entirely and starts at LEG 2. This exists for exactly one
 # caller, compute_design_coherence (below), and the reason is a correctness
 # bound, not a performance one: LEG 1 (design-conform) reads its "actual"
@@ -15252,7 +15283,7 @@ compute_design_alignment() {
     fi
     if [ -n "$missing_ids" ]; then
         DESIGN_ALIGNMENT_KEY="criteria_incomplete"
-        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): unit $unit_id declares criterion id(s) with no covering test in criteria_tests: $missing_ids"
+        DESIGN_ALIGNMENT_OBS="LEG 3 (criteria have tests): unit $unit_id declares criterion id(s) with no covering test in criteria_tests: $missing_ids -- a covering test_ref may name a PRE-EXISTING test, not only one added by this task (claude-workflow-plugin-1dbz), provided it resolves to a real file+label and green_after is green and externally corroborated (see steps below, which apply unconditionally either way). If NO test can honestly be named for one of these ids because its whole content restates an invariant this gate already enforces for every unit -- 'the pre-existing suite still passes' is exactly what green-check --phase before|after already proves, whether or not the design says so a second time -- do not invent a criteria_tests entry to clear this: the criterion itself is what is wrong, not the coverage. File the objection and land a design amendment that removes or revises it: qa-gate.sh design-conflict $tid --unit $unit_id '<why $missing_ids has no honest test to name>' -- 'Amendments run through this same loop' (docs/plans/v5-design-phase.md Phase D2): the designer revises, the reviewer re-reviews, design-satisfied is re-recorded with a new hash, and $tid re-binds. No overrule flag exists for this leg either"
         return 0
     fi
 
@@ -15311,11 +15342,15 @@ compute_design_alignment() {
 
     # 3e. "Actually exists": file+label corroboration. See this block's own
     # header for why this is deliberately shallow (grep -qF, no per-language
-    # parsing) and why that is disclosed rather than hidden. Every ref was
-    # ALREADY confirmed present in tests_added at record time on these
-    # EXACT, digest-verified bytes (review-check.sh validate-completion); it
-    # is not re-checked here. What this adds is a check record time could
-    # not make: does the referenced file/label still exist RIGHT NOW.
+    # parsing) and why that is disclosed rather than hidden. UNLIKE before
+    # claude-workflow-plugin-1dbz, a ref reaching here was NOT necessarily
+    # confirmed present in tests_added at record time -- record time only
+    # confirmed the SHAPE of these exact, digest-verified bytes (review-
+    # check.sh validate-completion); a ref may legitimately name a test that
+    # PRE-DATES this task entirely. What this step adds, for every ref
+    # regardless of origin, is the check record time never could make: does
+    # the referenced file/label actually exist, RIGHT NOW, on the live
+    # filesystem.
     local refs_json="" refs_rc=0
     refs_json=$(printf '%s' "$ct_json" | jq -c '[ .[][] ] | unique' 2>/dev/null) || refs_rc=$?
     if [ "$refs_rc" -ne 0 ] || [ -z "$refs_json" ]; then

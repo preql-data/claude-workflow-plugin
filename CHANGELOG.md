@@ -25,12 +25,18 @@ independent reviewer, the change-set-bound approval) verified that the work
 matched the plan, and none of them verified the plan itself, or noticed when
 it quietly stopped governing the work. This release adds a `designer` role
 that produces a reviewed artifact before any implementation task exists; a
-`design_reviewer` role — a distinct identity, mechanically enforced, reusing
+`design_reviewer` role — a distinct identity *string*, mechanically enforced
+at `design-record`, though it resolves to the SAME MODEL as the designer on
+every install today — connecting Codex does NOT change that, it only clears
+the warning (see the identity-collapse entry below) — reusing
 the grader machinery with a new eight-criterion rubric (`DS1`–`DS8`) — that
 gates it through a review loop capped and escalating through the existing
 J21 machinery; a deterministic, no-LLM conformance check binding every
 implementation task to a design unit, with no review round; computed
-parallel batching that names its own degradation rather than hiding it;
+parallel batching **on declared file sets only** — the `impact_of` half of
+the intersection check is deferred (`claude-workflow-plugin-l7gd`) and every
+batch readout says so with `graph_intersection_computed:false` rather than
+degrading silently;
 green-to-green implementation per unit with the spec injected verbatim at
 spawn and a `design_conflict` blocker that routes a wrong design to
 amendment instead of improvisation; and a coherence rollup that blocks
@@ -179,7 +185,8 @@ weight actually sits.
   blocking one so it no longer reads as a mislabel to an uninvolved
   sibling. `compute_design_alignment` gains an opt-in `mode=rollup`
   parameter (default unchanged, proven byte-for-byte via the existing
-  64-assertion `design-unit-align.test.sh`) that skips its files leg for
+  `design-unit-align.test.sh`, 64 assertions when this was written and 73
+  since `claude-workflow-plugin-1dbz`) that skips its files leg for
   exactly this caller — reusing that leg's live-tracker comparison against
   a historical unit would be unsound, not merely redundant, once that
   unit's own approve has already truncated the tracker. Tests:
@@ -1789,9 +1796,12 @@ weight actually sits.
     `.claude/.qa-tracking/design-family-collapse`, sets `identity_collapse` in
     the artifact and lights `!id` on the statusline — then writes every pin and
     exits 0. Blocking would make the Codex-absent arm unrunnable. On a stock
-    install without Codex the flag is permanently lit; the two clearances
-    (install Codex, or give `design_reviewer` a distinct family-class) are
-    documented in the `.claude/model-roles` header.
+    install without Codex the flag is permanently lit. **Only ONE of the two
+    clearances documented in the `.claude/model-roles` header actually works:
+    giving `design_reviewer` a distinct family-class.** Installing Codex clears
+    the flag without changing which model reviews the design, because no script
+    drives design review through Codex — see `claude-workflow-plugin-yvpe` and
+    the identity-collapse entry below.
 
   - **Session-model guard.** The root session is the orchestrator seat, and the
     live session model is observable ONLY in the statusline's stdin envelope —
@@ -2727,18 +2737,108 @@ weight actually sits.
     still report success — the loud half was discoverable, the silent half was
     not.
 
-  - **`1dbz` (P2).** `design-unit-align`'s LEG 3 demands a covering test for
-    every declared acceptance criterion, with no accommodation for a
-    REGRESSION-SHAPED criterion whose entire content is "the pre-existing suite
-    still passes". A correct, fully-implemented unit could not be aligned. It
-    fails LOUD and names the exact criterion — the healthy failure mode, and
-    the deliberate contrast with `pqoj`. It is also a second, independent route
-    to `qnvo`'s uncompletable `approve`, needing no stray file at all.
+  - **`1dbz` — FIXED IN THIS RELEASE, not shipped as a known issue.**
+    `design-unit-align`'s LEG 3 demanded a covering test for every declared
+    acceptance criterion, with no accommodation for a REGRESSION-SHAPED
+    criterion whose entire content is "the pre-existing suite still passes", so
+    a correct, fully-implemented unit could not be aligned. It failed LOUD and
+    named the exact criterion — the healthy failure mode, and the deliberate
+    contrast with `pqoj`. The fix is below under "A regression-shaped
+    acceptance criterion can now name the pre-existing test that covers it".
 
   The implementer refused the `.claude/test-cmd` workaround for its own
   blocker, on the grounds that manufacturing a way past a refusal you have just
   hit is indistinguishable from working around it — which is the behaviour the
   design wants, and is why the operator provisioned the override instead.
+
+- **Parallel batching ships on file sets only, and the claim was narrowed to
+  say so.** The v5 design asserted that two units may run concurrently only
+  when their declared file sets **and** their `impact_of` sets do not
+  intersect. Only the first conjunct ships. `graph_intersection_computed` is
+  the literal `false` at every emission site in `epic-gate.sh` — the success
+  path at `:1014` and all five error paths — and `:1082` structurally
+  validates that it is false, so there is no code path where it is true. The
+  `impact_of` half is deferred to **`claude-workflow-plugin-l7gd`** (open since
+  2026-08-22), and its own precondition is
+  **`claude-workflow-plugin-kk9y`**: the code indexer records no call edge for
+  a `"$SCRIPT_DIR/other.sh" --flag` invocation because the command name is not
+  a bare word node, so on a shell-heavy repository the impact conjunct would be
+  uninformative even once built. Rather than leave the overclaim standing, the
+  release-audit row was narrowed by prove-or-remove to the file-set claim that
+  actually ships — verified by `plan-batches.test.sh`, 319 passed / 0 failed —
+  with the deferral, its precondition and the re-verdict trigger named in the
+  row. **The withdrawn conjunct is withdrawn everywhere, including here.**
+
+- **What that costs you, stated rather than buried: file-disjoint units can
+  still conflict SEMANTICALLY, and no automatic control catches it.** Two units
+  may touch entirely disjoint files and still break each other's behaviour.
+  Worktree isolation for batch members is an **orchestrator responsibility, not
+  a mechanism**: `epic-gate.sh` contains zero occurrences of `worktree`, the
+  `plan-batches` envelope carries no worktree field, and `plan-batches.test.sh`
+  never mentions one — while the design requires per-member isolation. So
+  either members are isolated, in which case a later unit's full-suite
+  `green-check --phase after` cannot see an earlier unit's changes until
+  integration; or they are not, which is the contamination failure recorded as
+  the first entry in this repo's lessons ledger. Either way the cross-cutting
+  integration sweep is **manual** (`epic-gate.sh` calls it "recommended").
+  **Run it yourself after a parallel batch.**
+
+- **A regression-shaped acceptance criterion can now name the pre-existing
+  test that covers it (`claude-workflow-plugin-1dbz`).** `design-unit-align`
+  LEG 3 required every `criteria_tests` reference to appear byte-for-byte in
+  the same payload's `tests_added`, so a criterion asserting that specific
+  existing behaviour is preserved had nothing legal to name and the unit could
+  never align. Found by pointing the plugin at a real product repository: a
+  correctly implemented, green-to-green unit was refused. **LEG 3 stays
+  strict** — a criterion with no covering test is still refused, and no
+  criterion "kind", invariant category or exemption was added, because a
+  designer could label a behavioural criterion an invariant to escape testing.
+  Two changes instead. **(1)** The record-time `criteria_tests ⊆ tests_added`
+  cross-check is removed, so a reference may name a pre-existing test. This
+  loses nothing: `tests_added` was never externally verified either — its only
+  consumers check that the key exists, that it is an array, and its length for
+  a summary line — so a caller willing to invent a reference could always have
+  written the same string into `tests_added`. What actually guards the field is
+  untouched and unconditional: the reference must still resolve to a real file
+  inside the project tree with the named label found in it, and `green_after`
+  must be green *and externally corroborated* against the `GREEN-CHECK v1
+  phase=after` record rather than read off the payload making the claim.
+  Verified mechanically: the non-comment diff of `qa-gate.sh` is **two lines**,
+  the old and new refusal text. **(2)** Upstream, `designer.md`'s
+  pre-declaration checklist and rubric **DS1** now reject criteria that merely
+  restate an invariant the gate already enforces — a criterion saying "the
+  whole suite passes" is redundant, since green-to-green per unit enforces
+  exactly that. Folded into DS1 rather than added as a ninth criterion, so the
+  shipped "eight-criterion rubric" claim stays true (`DS1`–`DS8`, `version: 1`
+  unchanged). LEG 3's refusal now names the recovery path — remove the
+  criterion via `qa-gate.sh design-conflict` and the D2 amendment loop —
+  instead of returning a bare `criteria_incomplete`. `design-unit-align.test.sh`
+  64 → **73 assertions**, `validate-completion-criteria-tests.test.sh` 43 →
+  **46**, all passing, each of the four new scenarios driving the shipped
+  scripts rather than a stub.
+
+- **`designer` and `design-reviewer` resolve to the SAME model on a stock
+  install**, and the docs now say so where a reader will meet them. Both roles
+  are `top`, so without the optional Codex lane the design is reviewed by its
+  own identity family. This is reported, never blocked — `identity_collapse:
+  true` in the resolver artifact, a `design-family-collapse` marker, a
+  SessionStart warning and `!id` in the statusline. What is enforced
+  mechanically is narrower and worth stating precisely: `qa-gate.sh
+  design-record` refuses a verdict whose `reviewer_identity` equals the
+  designer's. **Design review is Claude-lane only in this release, and the
+  documented Codex clearance does not work.** `design_reviewer_lane` is
+  resolved and displayed, but no script drives design review through Codex —
+  `codex-review.sh` has zero design handling, and `design-reviewer.md`
+  instructs the agent to emit `design-claude` unconditionally because it has no
+  tool to read the lane. Installing Codex therefore makes things *report*
+  better without being better: `model-select.sh:1374` raises
+  `identity_collapse` only when the models match **and** the lane is `claude`,
+  so flipping the lane clears the flag over an unchanged risk. Measured live on
+  a Codex-installed host: `designer=claude-fable-5`,
+  `design_reviewer=claude-fable-5`, `design_reviewer_lane=codex`,
+  `"identity_collapse": false`. Filed as `claude-workflow-plugin-yvpe`. **The
+  only real clearance today is `design_reviewer=<family>-class` distinct from
+  `top`**, which changes the resolved model rather than a label.
 
 ## [4.1.0] - 2026-07-30
 

@@ -3070,7 +3070,7 @@ Three flags may follow, in this order:
 | Flag | Source | Meaning |
 | --- | --- | --- |
 | `!esc` | `.claude/.qa-tracking/implementer-escalation.json` exists | A per-unit implementer escalation is active, so the implementer lane is not on its configured strategy. Reverse with `model-select.sh restore`. |
-| `!id` | `.identity_collapse` in the artifact | `designer` and `design_reviewer` resolved to the same model on the Claude design lane. Reported, never blocking; the two clearances are in the `.claude/model-roles` header. |
+| `!id` | `.identity_collapse` in the artifact | `designer` and `design_reviewer` resolved to the same model on the Claude design lane. Reported, never blocking. The ONE real clearance is `design_reviewer=<family>-class` in `.claude/model-roles`. **Do NOT install Codex expecting it to help**: no script drives design review through Codex, so it only moves the lane off `claude`, which SILENCES this very flag while both roles still resolve to the same model (`claude-workflow-plugin-yvpe`). |
 | `!sess` | `.claude/.qa-tracking/session-model-drift.json` | The live session model differs from the resolved `orchestrator` id. |
 
 **The session-model guard is read-compare-write only.** The statusline runs on

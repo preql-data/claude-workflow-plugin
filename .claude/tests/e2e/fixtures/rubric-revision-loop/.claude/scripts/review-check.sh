@@ -1007,7 +1007,7 @@ cmd_validate_completion() {
     # transport, no external reach — see the file header above).
     #
     # `criteria_tests` maps a design unit's acceptance-criterion id to the
-    # array of `tests_added` entries the specialist claims cover it:
+    # array of test references the specialist claims cover it:
     #   {"U3-1": ["path/to/file.test.sh::assertion label"], "U3-2": [...]}
     # Empty `{}` is ALWAYS legal at this layer, even when `unit_id` is
     # non-empty — matching `tests_added: []` itself being legal ("rare" per
@@ -1017,17 +1017,36 @@ cmd_validate_completion() {
     # which criteria the unit declares; refusing it here would be a schema
     # validator making a claim about a design artifact it never reads.
     #
-    # THE ONE RULE THIS LAYER DOES ENFORCE ACROSS FIELDS: every string named
-    # in `criteria_tests` must ALSO appear, byte-for-byte, in `tests_added`.
-    # This is pure self-consistency — both fields live on the SAME payload,
-    # so checking one against the other needs no external reach — and it is
-    # the cheapest defense against this arc's own defect family: a criterion
-    # id "merely appearing in a passing assertion label is a mention mistaken
-    # for a test" (the D5 piece 4 brief's own words). A test_ref a specialist
-    # did not ALSO declare as newly-added-or-modified work is, at best, an
-    # incidental pre-existing match and, at worst, invented — either way it
-    # is not what `tests_added` is for, and forcing the two fields to agree
-    # closes that gap without needing to parse any test's own source dialect.
+    # claude-workflow-plugin-1dbz: THIS LAYER NO LONGER CROSS-CHECKS AGAINST
+    # `tests_added`. Through fkm.7's originally shipped shape, every string
+    # named in criteria_tests also had to appear, byte-for-byte, in
+    # tests_added — a same-payload self-consistency rule, cheap because it
+    # needed no external reach. That rule was a category error for a
+    # REGRESSION-SHAPED criterion: one whose entire assertion is that some
+    # already-shipped behaviour is unaffected has no NEW test to add, by
+    # construction, so its only honest reference is to a test that
+    # PRE-DATES this task — which tests_added, by definition, never lists.
+    # Measured directly against a real target repo: a unit implemented
+    # correctly in every other respect could not even RECORD such a
+    # criterion, because the one reference honest for it (a named,
+    # pre-existing regression file) was refused here before the payload was
+    # ever persisted.
+    #
+    # The protection this rule existed for — a criterion id "merely
+    # appearing in a passing assertion label is a mention mistaken for a
+    # test" (the D5 piece 4 brief's own words) — is not weakened by
+    # dropping it, because it was never this layer's alone to provide.
+    # `qa-gate.sh design-unit-align` LEG 3 independently confirms, against
+    # the LIVE filesystem at approve time, that every criteria_tests
+    # reference — whether or not it also appears in tests_added — resolves
+    # to a real file inside the project tree with the named label actually
+    # found in it, AND that green_after is "green" on an EXTERNALLY
+    # corroborated GREEN-CHECK v1 record, never a self-declaration. Those
+    # two checks, not a same-payload string comparison this validator could
+    # make with no external reach at all, are what rule out an invented or
+    # stale reference; this layer's job stays SHAPE only — every key
+    # non-empty, every value a non-empty array of non-empty strings, and
+    # the one-directional unit_id pairing immediately below.
     # shellcheck disable=SC2043  # single-item on purpose: same `for k in
     # ...; do has=...; done` shape the role/model/pin and unit_id/design_
     # hash/green_before/green_after loops above already use, kept
@@ -1037,7 +1056,7 @@ cmd_validate_completion() {
         has=$(printf '%s' "$raw" | jq -r --arg k "$k" 'has($k)' 2>/dev/null || echo "false")
         if [ "$has" != "true" ]; then
             emit_validate "validate-completion" "false" "missing_key:$k" \
-                "completion payload missing required key: $k (v5 D5 piece 4, claude-workflow-plugin-fkm.7: maps a design unit's acceptance-criterion ids to the tests_added entries that cover them; {} is legal when the task is not unit-bound or when tests_added itself carries nothing yet to reference)"
+                "completion payload missing required key: $k (v5 D5 piece 4, claude-workflow-plugin-fkm.7: maps a design unit's acceptance-criterion ids to the tests that cover them -- tests this payload added, OR pre-existing tests, since claude-workflow-plugin-1dbz removed the record-time requirement that every reference also appear in tests_added; {} is legal when the task is not unit-bound)"
             exit 4
         fi
     done
@@ -1046,7 +1065,6 @@ cmd_validate_completion() {
     crit_err=$(printf '%s' "$raw" | jq -r '
         def nonempty_string: (type == "string") and ((gsub("[[:space:]]";"")) != "");
         . as $p
-        | ($p.tests_added // []) as $ta
         | ($p.criteria_tests) as $ct
         | [
             (if ($ct | type) != "object" then "field_type_invalid:criteria_tests" else empty end),
@@ -1061,24 +1079,7 @@ cmd_validate_completion() {
                 )
              else empty end),
             (if ($ct | type) == "object" and (($ct | length) > 0) and ($p.unit_id == "")
-             then "criteria_tests_without_unit_id" else empty end),
-            # Guarded on every value already being a well-typed string array
-            # (the SAME condition the per-key checks above would have already
-            # refused on) — without the guard, a malformed value (a string
-            # instead of an array, say) makes `$ct[][]` itself throw before
-            # this whole expression can finish evaluating, which would crash
-            # the validator instead of reporting the earlier, more specific
-            # error. `. as $ref | ($ta | index($ref))`, NOT `$ta | index(.)`:
-            # piping into $ta rebinds `.` to $ta itself, so an unbound
-            # `index(.)` inside that pipe searches $ta for $ta — verified
-            # directly against jq 1.8.1 before shipping this, not assumed.
-            (if ($ct | type) == "object"
-                and ( $ct | to_entries | all(.value | (type == "array") and (all(.[]; type == "string"))) )
-             then
-                ( [ $ct[][] ] | unique
-                  | map(select(. as $ref | ($ta | index($ref)) == null)) | .[0]?
-                  | if . then "criteria_test_ref_not_declared:" + . else empty end )
-             else empty end)
+             then "criteria_tests_without_unit_id" else empty end)
           ]
         | .[0] // ""
     ' 2>/dev/null || echo "")
@@ -1096,9 +1097,6 @@ cmd_validate_completion() {
                 ;;
             criteria_tests_without_unit_id)
                 crit_detail="$crit_err — criteria_tests names at least one criterion but unit_id is empty; a criterion id with no owning unit is not a coherent claim, the same one-directional rule design_hash_without_unit_id already enforces for the D5 piece 3 fields. (The reverse — unit_id present, criteria_tests empty — is legal: not every task has finished mapping its coverage, and the alignment check is where an incomplete map for a BOUND unit is actually refused.)"
-                ;;
-            criteria_test_ref_not_declared:*)
-                crit_detail="$crit_err — this test reference does not appear, byte-for-byte, in this SAME payload's tests_added array. criteria_tests may only cite work this payload also declares as added or modified; a reference to anything else is exactly the 'mention mistaken for a test' shape this field exists to rule out"
                 ;;
         esac
         emit_validate "validate-completion" "false" "$crit_err" "$crit_detail"
