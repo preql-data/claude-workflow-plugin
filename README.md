@@ -117,6 +117,39 @@ record cannot know about them. Both ends call one counter
 second way to release. A missing or unrunnable counter fails **closed** at
 both ends.
 
+### An approval can bind nothing — and v5.0.0 refuses the worst case
+
+The credential above binds a **change set**, and through v4.1 that change set
+could be silently empty. The tracker behind it is fed by a `PostToolUse` hook
+on `Write|Edit|MultiEdit|NotebookEdit` — **not `Bash`** — so a file you edit in
+vim, in your IDE, or from a shell script never enters it. Work that pre-dates
+the session is invisible for the same reason: the gate's baseline treats
+anything already in the tree as pre-existing. Approve over either and you get:
+
+```
+impact-report.sh --hash-only   ->  e3b0c442…855      # sha256 of empty input
+approve                        ->  "impact-report verified (change_set_hash match)"
+```
+
+An approval bound to that hash covers zero files, permanently, no matter what
+is in your tree. **v4.1 does not warn about this. It says "verified".**
+
+v5.0.0 refuses the total case and only warns on the partial one:
+
+| Situation | v5.0.0 |
+|---|---|
+| **None** of the declared files in the bound change set, and at least one of them is not denylisted | **refuses**, `error_key=completion_files_total_miss`, and names the recovery commands |
+| **None** of them, but *every* declared file is denylisted | **approves** — deliberately: that is the legitimate all-denylisted case, not a swallowed tracker |
+| **Some** of them missing | **warns** (`completion_files_crosscheck`) and still approves |
+| No completion record at all | **refuses** — separately, because nothing states what was done |
+
+A partially-wrong change set is still bindable. The rewrite that closes the
+whole family (`claude-workflow-plugin-qnvo`) is implemented and independently
+verified, preserved on branch `qnvo/primitive-replacement` at `1f4bd81`, and
+**deferred to v5.0.1** — it broke six test specs, and that fixture work needs
+its own design. (Its own task record shows a QA block: that block is what
+established the six-spec floor, and is why it is deferred rather than shipped.)
+
 ### Arbitration
 
 When the implementing specialist disputes a finding, exactly two things
@@ -168,7 +201,57 @@ and warns* when the live effort, the floor, and the verdict disagree —
 detect-and-warn is the ceiling here, and the plugin does not claim to
 enforce the session level.
 
-## 📐 The design phase (v5.0.0)
+## 📐 The design phase (v5.0.0) — **opt-in**
+
+**This phase is opt-in in v5.0.0.** You opt IN by running it:
+`qa-gate.sh grilling-record` → `design-record` → `design-review-record` until
+`design-satisfied` holds. A task with no design phase takes the ordinary
+documented exit at approve — `--no-design '<reason>'` — and the reason is
+recorded in the approval comment. Neither path is new; both are pre-existing
+semantics.
+
+**Why opt-in, stated plainly:** `design-conform` has been observed on a real
+target project exactly twice, and both observations were vacuous — it reported
+"conforms" while naming the files that had just been written as untouched,
+because the change set it read was empty. Until that is fixed, the design
+phase's conformance check is not something to rely on.
+
+The coherence rollup has a defect of the same shape, independently — it skips
+the conformance leg and reads the same session-scoped tracker itself. Two
+qualifications, because the evidence here is weaker and the effect narrower
+than above, and saying so is the point:
+
+- **Never observed.** The rollup has never been run on a real target, in either
+  direction — it returns not-applicable without checking anything when the task
+  is not itself a satisfied design task, which is the ordinary case for a
+  task-per-unit child. So this is an inference from reading the code, not
+  something we watched happen.
+- **Narrow.** Scope is checked by two arms and only one reads the tracker. An
+  empty change set costs you the *under-coverage* direction — "a file was
+  touched that no unit covers". The other direction, "a unit's completion
+  contract claims a file no unit declares", reads persisted records and still
+  fires, as do the untested-criterion, unmapped-unit and moved-artifact-hash
+  checks.
+
+**What it costs**, measured on a real product repository. Measured gate-`enter`
+to change-set-bound approval, from that project's own Beads store:
+
+| Path | Time | Rounds | Outcome |
+|---|---|---|---|
+| Default, small code change | **3m57s** | 1 | approved |
+| Default, doc-only change | **17m51s** | 1 | approved |
+| Design, one small unit | **12m10s** | 1 | approved, but bound an empty change set |
+
+That last row is the gate cycle only. The cost you are actually opting into is
+the design phase that runs before implementation starts: **2h08m16s**, from the
+design task being created to the design review returning `satisfied`, across
+three review rounds (two `needs_revision`, one `satisfied`), producing a
+49,512-byte artifact. Budget against that number. No total-elapsed figure is
+given: the validation run spans an overnight gap, so a wall-clock total would
+not mean anything.
+
+And it did **not** reach a meaningful approval — the approval it produced bound
+an empty change set.
 
 Before any implementation task exists, a `designer` produces a design
 artifact and a `design-reviewer` scores it against `.claude/rubrics/design.md`

@@ -1262,6 +1262,7 @@ EXPECTED_SPEC_FILES=(
     qa-gate-lock-recovery.test.sh
     qa-gate-pipefail.test.sh
     qa-impact-of-cue.test.sh
+    release-claims-check.test.sh
     review-bypass-anchor.test.sh
     review-check.test.sh
     review-count.test.sh

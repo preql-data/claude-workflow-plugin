@@ -486,8 +486,8 @@ done
 
 # The version bump is the thing most likely to be applied to one copy only,
 # so pin it explicitly rather than relying on cmp alone to explain the break.
-assert_eq "default rubric declares version 2 (C8 landed in v4.1)" \
-    "1" "$(phrase_hits 'version: 2' "$PROJECT_DIR/.claude/rubrics/default.md")"
+assert_eq "default rubric declares version 3 (C9 landed in v5.0.0)" \
+    "1" "$(phrase_hits 'version: 3' "$PROJECT_DIR/.claude/rubrics/default.md")"
 
 # ---------------------------------------------------------------------------
 echo ""

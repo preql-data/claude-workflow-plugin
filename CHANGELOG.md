@@ -16,7 +16,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
-## [5.0.0] - 2026-09-29
+## [5.0.0] - 2026-09-30
+
+> **THE DESIGN PHASE SHIPS OPT-IN.** Read this before the feature description
+> below, which was written when it was going to be the default.
+>
+> You opt IN by running the design phase — `grilling-record`, `design-record`,
+> `design-review-record` until `design-satisfied`. A task with no design phase
+> takes the documented ordinary exit at approve: `--no-design '<reason>'`, and
+> the reason is recorded in the approval comment. **No new flag and no new
+> config key were added for this** — both paths are pre-existing semantics, and
+> `qa-gate.sh`'s own precheck already assumed most tasks have no design phase
+> ("the overwhelming majority of tasks never have a design phase").
+>
+> **Why opt-in.** Two of the checks the design phase adds are not yet
+> trustworthy in a target project: `design-conform`, and the coherence
+> rollup. **The evidence for the two is NOT the same, and the difference is
+> stated rather than blurred: `design-conform` was OBSERVED failing; the
+> rollup's case is an INFERENCE from the code, because it has never run on a
+> real target at all.** They are also independent — the rollup does not
+> inherit the conformance check's answer.
+> `compute_design_alignment` shells out to `design-conform` as LEG 1
+> only in default mode; `compute_design_coherence` calls it with
+> `mode="rollup"`, which skips LEG 1 entirely (`qa-gate.sh:15182`, and the
+> function header at `:15119-15145` states the reason: LEG 1 reads a
+> session-scoped tracker that is meaningless for a historical unit). The
+> rollup reads that same tracker directly instead
+> (`impact-report.sh --relativized-changed-files`, `:16119`). **The effect is
+> narrow and was overstated twice before reaching this wording.** Scope is
+> checked by two arms: the LIVE arm asks "was a file touched that no unit
+> covers" (`under_coverage = $diff - $roll`, `:16194`) and dies over an empty
+> change set; the DURABLE arm asks "does a unit's persisted completion contract
+> claim a file no unit declares" (`undeclared_scope`, `:16066`, reading
+> digest-checked payloads at `:16019-16048`) and still fires. So an empty change
+> set costs the UNDER-COVERAGE DIRECTION of scope, not scope as a whole, and the
+> other three conjuncts (untested criterion, unmapped unit, moved artifact hash)
+> read durable records and are unaffected. *(Draft one said an empty change set
+> made the whole rollup vacuous; draft two said the scope conjunct could not
+> fire. Both overstated the defect. Recorded because corrections that make a
+> release look better are the ones nobody chases.)* **Why this was never observed:**
+> `compute_design_coherence` returns not-applicable without running any check
+> when the task is not itself a satisfied design task (`:15694`) — the ordinary
+> case for a task-per-unit child — and the F4 validation run's only approval was
+> on such a child, its governing parent never having entered the gate. Not a
+> bypass; the coherence axis has none. See `DP9` in the audit for the full
+> derivation. `design-conform` has been
+> observed on a real repository exactly **twice**, and BOTH observations were
+> VACUOUS, by two independent routes — a denylist collision on an ancestor
+> directory name (`claude-workflow-plugin-pqoj`), then a cross-session
+> gate-baseline swallow on a denylist-clean path
+> (`claude-workflow-plugin-q5l6`). It reported
+> "conforms" while naming the three files that had just been written and
+> green-tested as untouched, because the change set it read was empty. Shipping
+> that as a mandatory gate would hand every user a new check that reports
+> success while checking nothing, which is the defect this entire release was
+> written to remove.
+>
+> **What it costs, measured on a real product repository.** Default path: a
+> small code change took **3m57s** and a doc-only change **17m51s**, each one
+> round, each approved — both measured gate-`enter` to change-set-bound
+> approval, from the F4 clone's own Beads store (`bd show <id> --json
+> --include-comments`: `target-2c5` 15:14:07Z→15:18:04Z, `target-w8v`
+> 14:51:19Z→15:09:10Z). *(An earlier draft said "5 minutes" and "19
+> minutes" with no anchor; neither reproduced at any anchor, and
+> CONTRIBUTING.md binds a CHANGELOG entry to carry the command and the commit
+> behind every number.)* Design path, one small unit — **two anchors, because
+> the two numbers answer different questions and only one is comparable to the
+> pair above**. Same anchor as that pair (gate-`enter`→approval): **12m10s**
+> (`target-23z.1`, 2026-09-29 15:41:15Z→15:53:25Z). The design phase itself,
+> which is the cost the opt-in ADDS in front of implementation (design task
+> created→design-review verdict `satisfied`): **2h08m16s** (`target-23z`
+> created 2026-09-28 16:03:55Z→DESIGN-REVIEW `satisfied` 18:12:11Z), across
+> **three** review rounds — two `needs_revision`, one `satisfied` — producing
+> a **49,512-byte** artifact (`wc -c docs/specs/target-23z.md`). Budget
+> against **2h08m16s**, not the gate cycle. *(Two earlier drafts of this
+> sentence were wrong and are superseded. The first published "3 hours 24
+> minutes" beside the gate-`enter` pair with no anchor at all, inviting a
+> like-for-like reading it does not support. The second anchored it to "last
+> implementation completion", which does not produce that figure: `target-23z.1`
+> carries THREE `COMPLETION v1` records — 2026-09-28 18:53:07Z and 19:27:38Z,
+> and 2026-09-29 15:49:44Z — so under the stated anchor the span is 23h45m49s,
+> not 3h23m43s. 3h23m43s was the last SAME-DAY completion, a qualifier the
+> sentence dropped. No total-elapsed figure is published here at all: the run
+> spans an overnight gap, which makes wall-clock totals meaningless.)* It did
+> **not** reach a meaningful
+> approval. It completed its mechanism end to end, and the approval it produced
+> bound an empty change set. That is not softened here because opt-in users
+> should see the cost profile before choosing.
+>
+> **What would make it the default**, all three evidence-gated and none true
+> today: the change-set rewrite landed (`claude-workflow-plugin-qnvo`, written
+> and preserved, deferred to v5.0.1); the test-fixture migration landed; and
+> the flagship path completing end to end in a real target with an approval
+> that binds real work.
 
 **Design becomes a first-class, reviewed, continuously-enforced phase.**
 Through 4.1.0 the orchestrator both designed and delegated, and nothing
@@ -59,9 +151,19 @@ any prior release has no `designer`/`design_reviewer` keys at all, which is
 exactly the shape the major criterion's "operators may need to re-run the
 installer in fresh mode" clause describes. Stated so it is not read as an
 unmapped second criterion: the QA gate also gains new preconditions this
-release — an epic cannot proceed to implementation without
-`design-satisfied` plus a bound `design_artifact`, and cannot approve
-without a coherent rollup — but that is the gate enforcing the new agent
+release — **`approve` refuses an unsatisfied design, and refuses an
+incoherent rollup**. *(Corrected 2026-09-30: an earlier version of this
+sentence said "an epic cannot proceed to implementation without
+`design-satisfied` plus a bound `design_artifact`". That was wrong three
+ways, and the correction is not cosmetic because this paragraph is a
+normative argument resting on it. One: the design phase ships OPT-IN, so an
+epic CAN proceed with no design at all. Two: the refusal is waivable —
+`--no-design '<reason>'` bypasses the whole design-satisfied check, not just
+the design-less case. Three: there is no PRE-implementation enforcement point
+in any form; `design-gate-precheck`'s own help calls itself "a PRE-DELEGATION
+convenience the orchestrator MAY run … never enforced from here (nothing can
+force a prompt to run a script before deciding to delegate)", and `approve`
+is the only real backstop.)* — but that is the gate enforcing the new agent
 contract's consequences, not an independent widening of gate semantics in
 the sense v4.0.0 used the term (two new NECESSARY conditions on every
 approval, independent of role). The agent contract is where this release's

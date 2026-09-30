@@ -1,9 +1,9 @@
 ---
-version: 2
+version: 3
 name: default
 ---
 
-# Default rubric (v2)
+# Default rubric (v3)
 
 Applies to every task graded under the rubric-grader QA loop (spec Phase A). Each criterion below is a pass/fail assertion the grader evaluates from the grading packet: `bd show` for the task, the SPEC doc, the diff of the files listed in `.qa-tracking/changed-files.txt`, the F7 completion contract returned by the specialist, and `LESSONS.md`. One-line justification per criterion. No numeric score theater — pass or fail.
 
@@ -66,3 +66,15 @@ The F7 payload's seventh field records three things, in order: the sources the s
 This is not a new principle. It is the evidence-before-fix discipline (`docs/AGENTS.md`) applied *before* the change rather than after — that protocol arms only on bug-typed tasks, and the ordinary feature work that produced the motivating 14-PR speculative-fix chain never gets typed as a bug at all.
 
 Evidence that satisfies it: named files or artefacts (paths, doc names, task ids, log lines) in the "read" part; at least one explicit omission carrying its reason; and an unknown concrete enough that a reviewer could act on it. Grade it against the diff, not against its own confidence — the sources named should be the ones the change actually depends on.
+
+### C9. Accuracy is symmetric: a claim that OVERSTATES a defect fails like one that understates it.
+
+Every factual claim in the change — in code comments, docs, the CHANGELOG, an audit row, a completion payload, a review finding — is graded against what the artefact actually does, in BOTH directions. A statement that a check is more broken than it is fails this criterion exactly as a statement that it is sounder than it is. So does a severity inflated past the evidence, and a defect described as observed when it was inferred from reading the code.
+
+**Why this is its own criterion rather than a note on C1.** Optimistic errors get caught: a reviewer's whole posture is hunting for claims that flatter the work. Pessimistic errors survive, because "it's worse than I said" feels conservative and nobody re-derives it. That asymmetry is measured, not asserted — in this repo's own v5.0.0 release review, the same claim about the coherence rollup was overstated twice in successive rounds ("the whole rollup is vacuous", then "the scope conjunct cannot fire"), and each survived a round that was explicitly looking for the previous one. Both were wrong in the direction that makes the product look worse. The correcting round also had to retract its OWN prior clearance of the phrasing.
+
+An overstated defect is not harmless. It misroutes fixes, it inflates deferral scope, and when it lands in release text it tells users a working mechanism is broken — a false claim that happens to be unflattering is still a false claim, and this project's whole thesis is that a claim nothing checked must not render identically to one that was verified.
+
+**Automatic needs_revision:** an inference presented in the voice of an observation. "X fails when Y" derived by reading control flow, stated in the same register as "X was observed failing when Y", is the defect family the release gate exists to refuse, and `LESSONS.md` records it directly: an inference relayed as an observation is indistinguishable from a measurement to everyone downstream.
+
+Evidence that satisfies it: each claim about behaviour is traceable to either a named execution (a run, a test, a recorded trace) or an explicit statement that it is derived from reading the code — and the derived ones say so in the text a reader sees, not only in the reviewer's notes. Where a claim was narrowed or widened during the change, the correction is recorded rather than silently replaced, so a later reader can tell which direction the error ran.

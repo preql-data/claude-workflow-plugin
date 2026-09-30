@@ -134,7 +134,7 @@ test:
 # afford to run on every iteration; the full tier remains the pre-commit and
 # CI gate.
 test-fast:
-	bash .claude/scripts/tests/run-tests.sh --filter 'review-check\.test\.sh\|impact-report\.test\.sh\|run-with-timeout\.test\.sh\|gate-claim-honesty\.test\.sh\|qa-gate-choose\.test\.sh\|qa-gate-lock-recovery\.test\.sh\|qa-gate-pipefail\.test\.sh\|scoped-log-dir\.test\.sh\|denylist-source\.test\.sh\|review-count\.test\.sh\|tree-lease\.test\.sh\|reviewer-lane-structural\.test\.sh\|qa-impact-of-cue\.test\.sh\|override-disclosure\.test\.sh'
+	bash .claude/scripts/tests/run-tests.sh --filter 'review-check\.test\.sh\|impact-report\.test\.sh\|run-with-timeout\.test\.sh\|gate-claim-honesty\.test\.sh\|qa-gate-choose\.test\.sh\|qa-gate-lock-recovery\.test\.sh\|qa-gate-pipefail\.test\.sh\|scoped-log-dir\.test\.sh\|denylist-source\.test\.sh\|review-count\.test\.sh\|tree-lease\.test\.sh\|reviewer-lane-structural\.test\.sh\|qa-impact-of-cue\.test\.sh\|override-disclosure\.test\.sh\|release-claims-check\.test\.sh'
 
 # Component tier (Phase B). The runner discovers specs under
 # .claude/tests/component/specs/ and pre-sources the lib/ helpers. Specs
