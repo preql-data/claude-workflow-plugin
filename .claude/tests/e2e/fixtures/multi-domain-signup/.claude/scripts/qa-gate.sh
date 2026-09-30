@@ -3552,6 +3552,18 @@ assert_unit_id_scalar() {
 #      second gate. The harm in 94d.1 was not that approve proceeded; it was
 #      that NOTHING SAID the bound set was short. That is what this fixes.
 #
+# AMENDED (claude-workflow-plugin-q5l6): all five reasons above are reasons
+# about a PARTIAL miss — every measured shape names some overlap (reason 0's
+# 19-of-40, reason 1's spelling-normalised match). A TOTAL miss (matched=0,
+# with at least one declared file surviving the shared denylist) shares
+# NOTHING with the bound set by construction, and MEASURED proved it is the
+# shape an empty-tracker-at-first-`enter` swallow produces: a real, reviewed,
+# multi-file diff bound to change_set_hash = sha256(""). None of the five
+# reasons above defends that shape, so cmd_approve now promotes it to a
+# refusal (error_key completion_files_total_miss) — see
+# COMPLETION-XCHECK-TOTAL-MISS-REFUSAL there. This function's own
+# computation is unchanged; only the caller's severity decision is.
+#
 # So the result is recorded in the DURABLE approval record as well as the
 # envelope, on the same bracketed-suffix shape as the rubric mismatch and after
 # every machine token. `unestablished` is recorded too: silence would read as
@@ -6897,6 +6909,68 @@ cmd_approve() {
             completion_obs="$completion_obs; completeness cross-check UNESTABLISHED — $COMPLETION_XCHECK_DETAIL (the impact-report freshness check above proves the report is not STALE; it cannot prove the change set is not SHORT, because both of its numbers come from the same tracker — fkm.1.20)"
             completion_suffix=" [completion cross-check: unestablished]"
         elif [ "$COMPLETION_XCHECK_MISSING" -gt 0 ]; then
+            # COMPLETION-XCHECK-TOTAL-MISS-REFUSAL BEGIN (claude-workflow-plugin-q5l6)
+            #
+            # A TOTAL miss (matched=0: NONE of the declared files are in the
+            # bound change set) REFUSES; a PARTIAL miss (matched>0) still only
+            # REPORTS, per the five reasons in this function's own header.
+            # Every one of those five reasons is a reason about overlap —
+            # reason 0 measured 19-of-40 matched, reason 1's spelling-mismatch
+            # concern presumes some shared member survives normalisation. Zero
+            # overlap out of a non-trivial declared list is not explained by
+            # "spelled differently", and the function's own header already
+            # says as much: "no real session declares eight files and touches
+            # eight entirely different ones".
+            #
+            # MEASURED (q5l6): approve bound change_set_hash = sha256("") for
+            # a real, reviewed, three-file diff on a denylist-clean path, and
+            # this cross-check's only response was the WARNING branch below —
+            # printed, then a change-set-bound approval record was written
+            # anyway. change_set_reconstructed (94d.1) cannot close this: its
+            # refusal requires RECONCILE_ADDED>0, and a tracker that was
+            # empty-or-absent at the FIRST `enter` gets the entire git status
+            # baselined as pre-existing dirt (write_gate_baseline --if-missing
+            # --exclude-tracked can only exclude what changed-files.txt
+            # already knows), so the rebuild's survivor count is 0 and the
+            # four-clause AND short-circuits false — a gap disclosed at
+            # qa-gate.sh:5713-5721 (SUBTRACTION-ACCOUNTING) and deliberately
+            # not touched here. This cross-check is the only one holding the
+            # implementer's OWN declared list, so it alone can tell "this
+            # session's declared work is missing" from "nothing happened".
+            #
+            # DENYLISTED DECLARATIONS ARE EXEMPT, computed against the SAME
+            # shared filter every other consumer of changed-files.txt uses
+            # (workflow-denylist.sh's WORKFLOW_DENYLIST_REGEX), not a second
+            # copy of it: a specialist who legitimately declared only
+            # denylisted paths produces matched=0 honestly, and refusing that
+            # would be the exact false positive the function's header warns a
+            # refusal must not be. COMPLETION_XCHECK_MISSING_PATHS IS the full
+            # (normalised, deduped) declared list in this branch — matched=0
+            # means missing = declared - bound equals declared exactly, since
+            # nothing was subtracted from it.
+            local xtotal_survivor_count=0 xtotal_line
+            if [ "$COMPLETION_XCHECK_MATCHED" = "0" ]; then
+                while IFS= read -r xtotal_line; do
+                    [ -z "$xtotal_line" ] && continue
+                    # Guarded exactly like this file's other WORKFLOW_DENYLIST_REGEX
+                    # call sites (e.g. the design-conform reader): bash's `=~`
+                    # treats an EMPTY pattern as matching every string, so an
+                    # unloaded library must read as "nothing is denylisted",
+                    # never as "everything is" — the latter would silently
+                    # disarm this refusal instead of firing it.
+                    if [ -n "${WORKFLOW_DENYLIST_REGEX:-}" ] && [[ "$xtotal_line" =~ $WORKFLOW_DENYLIST_REGEX ]]; then
+                        continue
+                    fi
+                    xtotal_survivor_count=$((xtotal_survivor_count + 1))
+                done <<< "$COMPLETION_XCHECK_MISSING_PATHS"
+            fi
+            if [ "$xtotal_survivor_count" -gt 0 ]; then
+                emit_error_json "approve" "$tid" "completion_files_total_miss" \
+                    "approve refused: NONE of the $COMPLETION_XCHECK_DECLARED declared file(s) are in the change set this approval would bind (declared=$COMPLETION_XCHECK_DECLARED bound=$COMPLETION_XCHECK_BOUND matched=0), and $xtotal_survivor_count of them are not denylisted, so this is not the legitimate all-denylisted case. Declared (first $COMPLETION_XCHECK_INLINE_CAP shown): $(printf '%s' "$COMPLETION_XCHECK_MISSING_PATHS" | head -n "$COMPLETION_XCHECK_INLINE_CAP" | tr '\n' ' '). A TOTAL miss is the shape a swallowed tracker produces: an 'enter' whose FIRST run found changed-files.txt absent-or-empty baselines the WHOLE current git status as pre-existing dirt, so real, already-completed work reads as nothing to review — and change_set_reconstructed cannot catch this shape, because a total swallow leaves RECONCILE_ADDED=0 and its own refusal requires added>0. RECOVER by WIDENING the change set toward review, never by narrowing it — do NOT run baseline-capture, which would re-snapshot this same work as pre-existing and make it PERMANENTLY unreviewable: (1) rm -f $GATE_BASELINE_FILE (a MISSING gate baseline is itself the documented, legitimate no-subtraction state — gate_baseline_entries returns no subtraction when the file is simply absent); (2) bash .claude/scripts/qa-gate.sh reconcile-tracker (folds the now-unsubtracted git-visible delta into changed-files.txt); (3) bash .claude/scripts/impact-report.sh $tid (regenerates the report so change_set_hash covers it); (4) retry approve. If instead the DECLARATION itself was simply wrong (a mistyped path), correct it the ordinary way — bash .claude/scripts/qa-gate.sh completion-record $tid --file <corrected-payload.json> — then retry approve." \
+                    "qa-gate.sh approve <task-id> <summary>"
+                exit 2
+            fi
+            # COMPLETION-XCHECK-TOTAL-MISS-REFUSAL END (claude-workflow-plugin-q5l6)
             local xnote=""
             if [ "$COMPLETION_XCHECK_MATCHED" = "0" ] && [ "$COMPLETION_XCHECK_BOUND" -gt 0 ]; then
                 xnote=" NOTE matched=0 with both lists non-empty is the signature of a PATH-SPELLING mismatch (absolute vs relative, a symlinked checkout, a linked worktree), not of loss; the loss shape is PARTIAL overlap"

@@ -1785,4 +1785,129 @@ if assert_mutant_applied "P7-META" "$QG_P7_REAL" "$QG_P7_STRIPPED"; then
         "change-set-bound approval record written" "$P7M_OUT"
 fi
 
+# === claude-workflow-plugin-q5l6 =============================================
+# approve bound change_set_hash = sha256("") for a real, tested, multi-file
+# diff when changed-files.txt was empty at the first `enter` (an over-broad
+# gate-baseline swallowed the whole tree as pre-existing dirt), and the ONLY
+# check that noticed — completion_files_crosscheck's matched=0 case — merely
+# WARNED. This promotes a TOTAL miss (matched=0, declared>0, at least one
+# declared path surviving the shared denylist) to a refusal. Reuses the SAME
+# shared FIXTURE_P7/QG_P7/TRACK_P7 the P7 family above set up; QG_P7_REAL is
+# already defined by P7-META above.
+
+# --- Q5L6-1 / Q5L6-1-META: the promotion is load-bearing --------------------
+# Strip ONLY the new sentinel region and prove: (1) the strip landed
+# (non-vacuity), (2) the SHIPPED script refuses a real total miss, (3) the
+# SAME total miss, same task, same state, approves under the STRIPPED script
+# (specific misbehaviour: the mutant reproduces the pre-fix defect exactly),
+# and (4) both legs DRIVE the real artifact (execution) — per .claude/tests/
+# README.md "The pairing requirement".
+QG_Q5L6_STRIPPED="$FIXTURE_P7/.claude/scripts/qa-gate-nototalmiss.sh"
+Q5L6_STRIP_RC=0
+awk '
+    /^ *# COMPLETION-XCHECK-TOTAL-MISS-REFUSAL BEGIN/ { skip = 1; found = 1; next }
+    /^ *# COMPLETION-XCHECK-TOTAL-MISS-REFUSAL END/   { skip = 0; next }
+    skip { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$QG_P7_REAL" > "$QG_Q5L6_STRIPPED" || Q5L6_STRIP_RC=$?
+chmod +x "$QG_Q5L6_STRIPPED" 2>/dev/null || true
+assert_eq "Q5L6-1-META: the COMPLETION-XCHECK-TOTAL-MISS-REFUSAL sentinels are present in qa-gate.sh" \
+    "0" "$Q5L6_STRIP_RC"
+if assert_mutant_applied "Q5L6-1-META" "$QG_P7_REAL" "$QG_Q5L6_STRIPPED"; then
+    Q5L6_PARSE=0
+    bash -n "$QG_Q5L6_STRIPPED" 2>/dev/null || Q5L6_PARSE=$?
+    assert_eq "Q5L6-1-META: the stripped copy still parses (it must fail for the reason under test)" \
+        "0" "$Q5L6_PARSE"
+
+    # Build a task whose DECLARED file list is real, but whose BOUND change
+    # set is empty — the measured defect's exact shape (sha256("")). Seed the
+    # review FIRST, against p7_new's real one-file tracker, THEN truncate:
+    # review-check.sh's OWN validator refuses reviewed_hash =
+    # e3b0c442...855 outright (error_key reviewed_hash_unusable — "the
+    # SHA-256 empty-content sentinel ... would compare equal to itself and
+    # to every other unread artifact forever"), so a review can never be
+    # seeded against an already-empty tracker; it can only predate a swallow
+    # that happens afterward, which is exactly the measured defect's shape
+    # (the review runs on the real diff, then a session boundary empties the
+    # tracker before approve). approve's own D6 handling of a reviewed_hash
+    # that predates the bound change set is a WARNING, never a refusal, so
+    # this divergence does not mask the completion crosscheck outcome below.
+    TID_Q1=$(p7_new "Q5L6: total miss must refuse" "src/q5l6-unrelated-one.ts")
+    p7_seed_review "$TID_Q1"
+    : > "$TRACK_P7/changed-files.txt"
+    Q1_PAY=$(p7_payload "$TID_Q1" '["src/q5l6-a.ts","src/q5l6-b.ts","src/q5l6-c.ts"]')
+    CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_Q1" --file "$Q1_PAY" >/dev/null 2>&1
+    p7_settle "$TID_Q1"
+
+    # POSITIVE: the shipped script refuses this exact total miss.
+    Q1_RC=0
+    Q1_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_Q1" "a total miss must refuse" 2>/dev/null) || Q1_RC=$?
+    assert_eq "Q5L6-1: a total miss (matched=0, declared>0, none denylisted) REFUSES (rc=2)" "2" "$Q1_RC"
+    assert_json_field "Q5L6-1: ...error_key=completion_files_total_miss" "$Q1_OUT" '.error_key' "completion_files_total_miss"
+    assert_contains "Q5L6-1: ...names the arithmetic" \
+        "declared=3 bound=0 matched=0" "$Q1_OUT"
+    # THE RECOVERY PATH, asserted verbatim — condition (c): widen toward
+    # review via EXISTING machinery, never baseline-capture (which narrows).
+    assert_contains "Q5L6-1: ...names the baseline-removal step (widening, not baseline-capture)" \
+        "rm -f $TRACK_P7/gate-baseline" "$Q1_OUT"
+    assert_contains "Q5L6-1: ...names reconcile-tracker as the fold-back step" \
+        "bash .claude/scripts/qa-gate.sh reconcile-tracker" "$Q1_OUT"
+    assert_contains "Q5L6-1: ...names the impact-report regeneration step" \
+        "bash .claude/scripts/impact-report.sh $TID_Q1" "$Q1_OUT"
+    assert_contains "Q5L6-1: ...and explicitly rules out baseline-capture as the recovery" \
+        "do NOT run baseline-capture" "$Q1_OUT"
+
+    # NEGATIVE CONTROL / MUTANT: the exact same task, exact same state — the
+    # stripped copy does NOT refuse (reproduces the pre-fix defect).
+    Q1M_RC=0
+    Q1M_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_Q5L6_STRIPPED" approve "$TID_Q1" \
+        --no-design "Q5L6 spec: no design phase for this task" \
+        "stripped copy must NOT refuse" 2>/dev/null) || Q1M_RC=$?
+    assert_eq "Q5L6-1-META: the stripped copy approves over the SAME total miss (promotion removed)" \
+        "0" "$Q1M_RC"
+    assert_json_field "Q5L6-1-META: ...status=approved" "$Q1M_OUT" '.status' "approved"
+    assert_contains "Q5L6-1-META: ...but still only WARNS (pre-fix behaviour, non-vacuous)" \
+        "WARNING completeness cross-check" "$Q1M_OUT"
+fi
+
+# --- Q5L6-2: a genuinely empty change set with declared=0 still APPROVES ----
+# The deadlock check (condition d): the fix must not touch the case that
+# matters most — a doc-only / no-op cycle where nothing was declared at all.
+TID_Q2=$(p7_new "Q5L6: empty declared set still approves" "src/q5l6-q2-unrelated.ts")
+p7_seed_review "$TID_Q2"
+: > "$TRACK_P7/changed-files.txt"
+Q2_PAY=$(p7_payload "$TID_Q2" '[]')
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_Q2" --file "$Q2_PAY" >/dev/null 2>&1
+p7_settle "$TID_Q2"
+Q2_RC=0
+Q2_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_Q2" \
+    --no-design "Q5L6 spec: no design phase for this task" \
+    "empty declared set" 2>/dev/null) || Q2_RC=$?
+assert_eq "Q5L6-2: declared=0 on a genuinely empty change set still APPROVES (rc=0)" "0" "$Q2_RC"
+assert_json_field "Q5L6-2: ...status=approved" "$Q2_OUT" '.status' "approved"
+assert_contains "Q5L6-2: ...and the cross-check PASSED, never refused" \
+    "completeness cross-check PASSED" "$Q2_OUT"
+
+# --- Q5L6-3: declared>0 but ALL denylisted still APPROVES (condition b) ----
+# A specialist who legitimately declared only denylisted paths must not be
+# refused — computed against the SAME shared workflow-denylist.sh filter
+# every other consumer of changed-files.txt uses, not a reimplementation.
+TID_Q3=$(p7_new "Q5L6: all-denylisted declaration still approves" "src/q5l6-q3-unrelated.ts")
+p7_seed_review "$TID_Q3"
+: > "$TRACK_P7/changed-files.txt"
+Q3_PAY=$(p7_payload "$TID_Q3" '["node_modules/pkg-a/index.js","dist/bundle.js"]')
+CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" completion-record "$TID_Q3" --file "$Q3_PAY" >/dev/null 2>&1
+p7_settle "$TID_Q3"
+Q3_RC=0
+Q3_OUT=$(CLAUDE_PROJECT_DIR="$FIXTURE_P7" bash "$QG_P7" approve "$TID_Q3" \
+    --no-design "Q5L6 spec: no design phase for this task" \
+    "all declared paths are denylisted" 2>/dev/null) || Q3_RC=$?
+assert_eq "Q5L6-3: declared>0 but ALL denylisted still APPROVES (rc=0, condition b)" "0" "$Q3_RC"
+assert_json_field "Q5L6-3: ...status=approved" "$Q3_OUT" '.status' "approved"
+assert_contains "Q5L6-3: ...the arithmetic is still reported (as a WARNING, not silence)" \
+    "declared=2 bound=0 matched=0" "$Q3_OUT"
+assert_contains "Q5L6-3: ...and it is a WARNING, never a refusal" \
+    "WARNING completeness cross-check" "$Q3_OUT"
+
 [ "$FAIL" -eq 0 ]
