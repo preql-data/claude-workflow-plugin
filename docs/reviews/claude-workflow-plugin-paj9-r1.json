@@ -1,0 +1,64 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-paj9",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "1f3256a4cc9cfe60a032c35a0634b9e2a93e222ca6eb2a6e6c3fcf4e7cd1311f",
+  "risk_threshold": "high",
+  "stop_condition": "every claim the two edits make is checked by MUTATION rather than by reading, and no finding at or above high remains in the rollup-staleness or rubric-version checks",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/design-rollup.test.sh:729",
+      "evidence": "M5 — the PRE-FIX spec (git show fe278a8^:.claude/scripts/tests/design-rollup.test.sh) run against the same shipped qa-gate.sh, with a debug capture at H.3. Observed: approve exit 2, error_key=completion_files_total_miss, observations 'NONE of the 1 declared file(s) are in the change set this approval would bind (declared=1 bound=1 matched=0) ... Declared (first 12 shown): src/a.sh'. The tracker AT THAT MOMENT held exactly one path: docs/specs/<epic>.md. bound=1, not bound=0 — the tracker was NOT empty at H.3.",
+      "description": "The new comment attributes the pre-fix total miss to the tracker being truncated ('G.1's successful approve TRUNCATES $TRACKING, so by this point ...'). Measured, that is not the operative cause. Section H replaces the tracker wholesale at line 674 (printf '%s\\n' \"$ART\" > \"$TRACKING\" — a '>' overwrite, not '>>') two steps before H.3, so src/a.sh leaves the bound change set whether or not G.1's approve truncated anything; had truncation been the cause, bound would have been 0 and the empty-tracker/persisted-report path would have applied instead. The sentence's CONCLUSION — a genuine total miss, the q5l6 guard preempting the rollup-staleness check, H.3 measuring the wrong refusal — is TRUE and independently confirmed by the same run, and the fix itself is right. Only the cited cause is wrong. Suggested one-line replacement: 'Section H replaces $TRACKING with the amended design artifact (line ~674), so the change set an approval would bind no longer contains src/a.sh — the only file the epic's recorded completion declares. (G.1's own approve truncates the tracker on success too, but the replacement alone is what produces the miss.)' Classified medium rather than high because the false part is an attributed intermediate step in an explanation, not a statement about shipped behaviour that a reader acts on: the remedy is a comment amendment, and no assertion, exit code, or user-visible claim changes. If 'shipped claim' in the stop rule is read to cover comment prose, this is the one finding in the diff that would be HIGH under that reading."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "medium",
+      "location": ".claude/.qa-tracking/changed-files.txt",
+      "evidence": "qa-gate.sh enter bound change_set_hash=1f3256a4cc9cfe60a032c35a0634b9e2a93e222ca6eb2a6e6c3fcf4e7cd1311f over exactly 2 files at 2026-10-01T09:21:50Z (impact-report-claude-workflow-plugin-paj9.json, mtime 16:24 local -> 16:22:37). At 16:24:17 local, .claude/scripts/tests/workflow-doctor.test.sh was modified in the working tree (+13 lines, uncommitted; git diff --stat) and changed-files.txt grew to 3 entries in the same second. impact-report.sh --hash-only now returns 273b01b9fccc8e7532e64c41103428816bf04c2f79fb71eeaed7e9e074571b92.",
+      "description": "The task's change set moved UNDER this review: a concurrent edit (a diagnostics improvement to workflow-doctor.test.sh META-TEST 8a, i.e. the CI item the fe278a8 commit message explicitly did NOT fix) entered changed-files.txt after the gate was entered. This review covers only the 2 files the operator scoped and the impact report binds; workflow-doctor.test.sh is NOT reviewed here. The gate already refuses this state mechanically (approve would exit 2 with impact_report_stale), so nothing can be certified over the contaminated set by accident. Per qa.md's own guidance the tracker was left untouched rather than trimmed mid-cycle. Resolution is the operator's: either land/park the third file and re-run impact-report.sh so a later round binds a 3-file set with workflow-doctor.test.sh reviewed, or take it out of the working tree before approving the 2-file set."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/design-rollup.test.sh:741",
+      "evidence": "The inserted seed uses the path list 'src/b.sh', which is also the path list of the very next call at line 757 (epic_review_and_complete \"$EPIC\" \"3\" \"src/b.sh\"). The helper's own doc comment (lines 354-370) says the file set 'MUST be varied across consecutive calls on the SAME epic' because change_set_hash hashes the PATH LIST alone. In M3b and M3c — where H.3's approve SUCCEEDS because the staleness property was broken — H.6 ('RESTORE CONTROL: approve succeeds once the rollup is fresh again') still PASSED, with hash([src/b.sh]) by then bound to a prior QA-GATE APPROVED record. cmd_approve's IDEMPOTENT-APPROVE-CONFLICT-RECHECK arm returns status=approved, exit 0 (qa-gate.sh ~5635: 'idempotent no-op — nothing rewritten'), and H.6 asserts only .status and the exit code.",
+      "description": "Not a present defect: today H.3's approve REFUSES, so no approval record binds hash([src/b.sh]) and H.6's success is genuinely attributable to the fresh rollup. It is a latent coupling the file elsewhere goes to great lengths to avoid — Section K's own 'ORDER IS LOAD-BEARING' comment documents this exact wrong-reason pass, measured. Suggested v5.0.1 hardening: give the inserted seed a path list no other round uses (for example '.claude/scripts/tests/dr-u2.test.sh', declared by U2, and never used as a path list elsewhere in this file), so H.6's control stays discriminating even if H.3's expectation ever changes."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "info",
+      "location": ".claude/scripts/tests/design-rollup.test.sh:741,757,918",
+      "evidence": "cmd_review_record reads the iteration from the piped JSON — iter=$(printf '%s' \"$raw\" | jq -r '.iterations') — and derives the canonical path via review_artifact_path_for \"$tid\" \"$iter\" = $PROJECT_DIR/$REVIEW_ARTIFACT_SUBDIR/<tid>-r<iterations>.json. epic_review_and_complete hardcodes \"iterations\":1 in every artifact it writes and pipes it on stdin (< \"$eart\"), never --file. seed_review_and_enter is only ever called on CHILD tasks (line 433), so no other r1 artifact exists for this epic.",
+      "description": "The commit's 'review iterations renumbered to stay unique' is an accurate description of the edit, but the renumbering is inert: the $iter argument names only the staging file under .claude/.qa-tracking/, while every recorded artifact carries iteration=1 and lands at docs/reviews/<epic>-r1.json. No iteration collision was possible before the renumber and none exists after. Noted so a future reader does not treat the numbering as load-bearing state."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "info",
+      "location": ".claude/scripts/tests/qa-gate-grade-record.test.sh:801",
+      "evidence": "design-rollup.test.sh: the diff adds one helper call plus a comment and changes two helper arguments — no assert_* line is touched. qa-gate-grade-record.test.sh: RUBRIC_VERSIONS is consumed by expected_rubric_version() and feeds assert_eq \"rubric $r.md: frontmatter declares version $want\" \"$want\" \"$got\" at line 842, so default=2 -> default=3 moves an EXPECTED VALUE, not setup. The other three edits are prose (header line 32, the table rationale at 790-800, the META comment and the META assertion's label at 845-848); the META assertion's expected value stays \"no\".",
+      "description": "The 'both fixes are setup-only' framing holds exactly for design-rollup and not quite for grade-record, where the table IS the expectation. Nothing is weakened by it: no assertion was added, removed, or relaxed, the new expected value matches the shipped artifact (.claude/rubrics/default.md declares version: 3 and carries '### C9. Accuracy is symmetric...'), both landed in e2f81b5 (verified with git log -S), and a second, independent pin already asserted 3 (completion-contract-parity.test.sh:489-490)."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "info",
+      "location": "CHANGELOG.md",
+      "evidence": "git log -S 'Accuracy is symmetric' and -S 'version: 3' on .claude/rubrics/default.md both return exactly e2f81b5 (the v5.0.0 release commit). grep over the whole CHANGELOG for 'accuracy is symmetric', 'C9', 'default.md version 3' returns nothing; the v5.0.0 entry (lines 19-2944) mentions only the design rubric's DS1-DS8 at version 1. The v4.1.0 entry does record the previous bump ('.claude/rubrics/default.md goes to version 2', line 3201).",
+      "description": "Out of scope for this diff (it is about e2f81b5, not fe278a8), but it is the one place the operator's sweep could not reach by grepping for '2': the default rubric gained a criterion and a version in v5.0.0 and the CHANGELOG never says so, while the equivalent v4.1 change was recorded. The rubric is an operator-class installed artifact, so this changes what the grader enforces for every user. An omission, not a false claim — a v5.0.1 CHANGELOG line."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "info",
+      "location": ".claude/tests/component/specs/rubric-binding.sh:117-119",
+      "evidence": "Comment reads: 'rubric_version is \"1\" because that is what the shipped rubrics declare (.claude/rubrics/*.md frontmatter version: 1)'. On disk: default=3, backend/frontend/devops/bugfix/design=1. The canned verdict's own rubric_version value is not asserted against any rubric file (the F2 selector is the generic ^RUBRIC [0-9]+ iteration), so nothing breaks.",
+      "description": "Pre-existing and out of scope — stale since v4.1 rather than since this release, and a comment rather than a pin. Reported because the operator asked for the sweep to be verified rather than inherited: a grep for 'default=2' or 'version 2' does not find it. Also checked and CLEAN: design-rubric.test.sh:176 writes a synthetic default.md with 'version: 2' into a temp tree, but that file only exercises workflow-manifest.sh's directory scan and nothing asserts its version; CHANGELOG.md:3201's 'goes to version 2' is a historical v4.1 entry and correct in context."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

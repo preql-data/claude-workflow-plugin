@@ -1322,6 +1322,19 @@ else
             "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$CTRL8A_JSON" 2>/dev/null || echo "")"
 
         if [ "$CTRL8A_STATUS" != "PASS" ]; then
+            # NAME THE PAIR THAT WAS ACTUALLY OBSERVED. Without this the
+            # control's failure is undiagnosable from a CI log: the doctor
+            # DOES compute and report "bd-version-vs-schema DRIFT: installed
+            # bd <v> / store schema v<n>", but it lands in a tempdir JSON the
+            # assertions read and nothing ever prints. A CI run on 2026-10-01
+            # failed here with unchanged code that passed on 2026-09-28, and
+            # the log could not say which pair the host had — so the next step
+            # had to be guessed rather than read. A check that will not say
+            # what it saw cannot be acted on.
+            printf '  observed pair (beads detail): %s\n' \
+                "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$CTRL8A_JSON" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-400)"
+            printf '  validated set: %s\n' \
+                "$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' "$DOCTOR" | head -1)"
             printf '  note: META-TEST 8a mutant legs skipped — the control did not pass (this host'\''s bd/schema pair is not in DOCTOR_BD_SCHEMA_VALIDATED), so a mutant FAIL would not be attributable to the pin logic.\n'
         else
             MUT8A_JSON="$WORK/meta8a-mutant.json"

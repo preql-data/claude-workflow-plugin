@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-paj9",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "88b6f09c6c1d53e11e40b6ba813d0d7022ab5491d8a067ab539561fac85c6505",
+  "risk_threshold": "high",
+  "stop_condition": "every factual clause ADDED SINCE ROUND 1 (the rewritten H.3 comment, the reverted-R1-F3 explanation, the workflow-doctor diagnostic, the CHANGELOG C9 entry) is checked by measurement rather than reading, and no finding at or above high remains",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/design-rollup.test.sh:752",
+      "evidence": "The new comment reads 'THE PATH LIST REPEATS line 770's'. Working tree line 770 is `assert_eq \"H.4b error_key=design_rollup_hash_stale\" \"design_rollup_hash_stale\" \"$(json_field '.error_key' \"$OUT\")\"` \u2014 an assertion with no path list. The repeated list is at line 777 (`epic_review_and_complete \"$EPIC\" \"3\" \"src/b.sh\"`); grep -n 'epic_review_and_complete' returns exactly 656/761/777/938 as call sites. 770 was never correct in any state: in the committed fe278a8 the call sits at 757, and in fe278a8^ there is no \"3\" call at all (the third call there is \"3\" \"src/a.sh\" \"src/b.sh\" at 904). 757 + the 20 comment lines this round adds = 777.",
+      "description": "A false cross-reference in a comment whose entire purpose is to let the next reader verify a claimed repetition. The PROPOSITION is true and independently checkable \u2014 only two `src/b.sh` path lists exist in the file (761, 777) and they are consecutive calls on the same epic, exactly as the helper contract at 354-370 describes \u2014 so a reader lands on the right line within seven lines of the wrong pointer. That is why I grade it medium and not high: nothing about SHIPPED BEHAVIOUR is misstated, and the remedy is one digit. DISCLOSED FOR SYMMETRY, as round 1 disclosed the same thing about R1-F1: if 'makes a shipped claim FALSE' in the operator's stop rule is read to cover any false clause in shipped text rather than only claims about behaviour, this is the one finding in the diff that would be HIGH under that reading, and it is the operator's rule to apply. Fix: 770 -> 777."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "info",
+      "location": ".claude/scripts/tests/design-rollup.test.sh:757-759",
+      "evidence": "MEASURED, not read. I rebuilt the substitution in an isolated mirror (scratchpad copy, PLUGIN_DIR pointed at a mirror of .claude/scripts; nothing written into the repo) replacing ONLY line 761's path list with src/h3-isolation.sh, plus debug captures at H.3 and H.4. Result: Total 73, Passed 65, Failed 8 \u2014 H.3, H.3b, H.4, H.4b, H.5, H.5b, H.6, H.6b. The comment names H.3 and H.4. The unnamed four are the restore-control tail: H.5 (fresh verdict against the CURRENT hash records cleanly) expected 0 got 2, H.5b needle design_hash=bfcd70ac... against a record still carrying 31b17bff..., H.6 expected approved got error, H.6b exit 0.",
+      "description": "'also breaks H.4' is TRUE and incomplete: the substitution collapses every assertion in Section H from H.3 onward. The cited CAUSE is correct and does explain all eight (one open coherence issue blocks H.3's approve, blocks the H.4 record attempt as design_rollup_mechanical_prerequisite, and therefore blocks H.5's restore control and H.6's approve), so no reader is misled about the mechanism \u2014 only about the blast radius, and in the direction that UNDERSTATES how firmly the obvious fix was ruled out. Flagged explicitly because C9, the criterion this same release adds, says accuracy is symmetric; by the operator's pre-registered stop rule for this round an understated-but-true claim is INFO, not blocking, and I am not escalating it. Suggested wording: 'puts H.3 back to exit 2 and collapses the rest of Section H (H.4 through H.6b \u2014 measured: 8 failures)'."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/design-rollup.test.sh:740-742",
+      "evidence": "The parenthetical reads: 'An earlier version of this comment blamed G.1's successful approve for TRUNCATING the tracker. That is false: the tracker is non-empty here, and the replacement two steps up is what drops src/a.sh.' Approve DOES truncate the tracker: truncate_changed_files_tracker() at qa-gate.sh:1647-1650 (`: > \"$tracking\"  # truncate, preserve file`), called from approve's tracking-state finalization (qa-gate.sh:7935-7946, '0wk.2 fix: truncate changed-files.txt - paired with the baseline'). Round 1's suggested wording carried an explicit guard for this \u2014 '(G.1's own approve truncates the tracker on success too, but the replacement alone is what produces the miss.)' \u2014 which is not in the shipped text.",
+      "description": "Not a false claim under the supported reading: 'That is false' attaches to the ATTRIBUTION, and the disproof offered ('the tracker is non-empty here') is the right disproof of the attribution rather than of truncation-in-general, so a careful reader reaches the correct conclusion. Graded low because the sentence can still be read as denying a real shipped side effect of qa-gate.sh approve, which is the kind of thing a later reader debugging a change set would act on. One-clause remedy: append 'approve does truncate on success; it is simply not what produces the miss here.'"
+    },
+    {
+      "id": "R2-F4",
+      "severity": "info",
+      "location": ".claude/scripts/tests/design-rollup.test.sh:742",
+      "evidence": "'the replacement two steps up' \u2014 the replacement is at line 675 and the comment begins at 729. Intervening statements: checkpoint_git (676), reconcile-tracker (677), impact-report.sh (678), HASH_V2= (679), assert H.1 (680), design-review-record (681), seed_spec_injection x2 (699-700), design-unit-bind x2 (720-721), design-rollup-status (723), asserts H.2/H.2b (724,726) \u2014 thirteen, not two.",
+      "description": "Loose prose, no reader harm: the sentence four lines above quotes the line verbatim (`printf '%s\\n' \"$ART\" > \"$TRACKING\"`, note `>` not `>>`), so the referent is unambiguous regardless of the count. Round 1's own finding used the same loose phrase ('two steps before H.3'), so this is inherited, not introduced. Noted only because this round's subject is comment accuracy. v5.0.1 at most: 'the replacement at the top of this section'."
+    },
+    {
+      "id": "R2-F5",
+      "severity": "info",
+      "location": ".claude/scripts/tests/workflow-doctor.test.sh:1335",
+      "evidence": "The diagnostic ends `| cut -c1-400` with no truncation marker. Measured in situ: I ran the SHIPPED test with CLAUDE_PROJECT_DIR pointed at a mirror whose workflow-doctor.sh carries DOCTOR_BD_SCHEMA_VALIDATED=\"9.9.9:99\", forcing the 8a control to fail. It printed: 'observed pair (beads detail): bd-version-vs-schema DRIFT: installed bd 1.3.0 / store schema v66 is not in the validated set {9.9.9:99} (bd:schema)' and 'validated set: 9.9.9:99' \u2014 ~130 characters, comfortably inside 400, and both lines correct (the pair is this host's real one; the set is the one the failing run actually used, read from the same $DOCTOR the control ran against, not from the repo's canonical copy).",
+      "description": "Cosmetic and contingent: if the FAIL detail ever grows past 400 characters the operator reads a truncated line as complete, with nothing saying so. Today's detail is a single ~130-char line so it cannot bite. Suggested v5.0.1 polish: append a marker when the cut fires. Everything else about this diagnostic checks out \u2014 see the record's own notes for the absent/malformed/jq-failure matrix and the proof it changes no assertion outcome."
+    },
+    {
+      "id": "R2-F6",
+      "severity": "info",
+      "location": ".claude/scripts/tests/workflow-doctor.test.sh:1329-1331 versus commit fe278a8's message",
+      "evidence": "The new comment says 'A CI run on 2026-10-01 failed here with unchanged code that passed on 2026-09-28'. fe278a8's own commit message says 'the same assertion passed in CI on 2026-09-30 and failed in both 2026-10-01 runs'. gh run list: the last successful `tests` run is 2026-09-28T21:21:58Z; there are NO runs at all on 2026-09-29 or 2026-09-30; 2026-10-01 has three runs, all failure. workflow-doctor.sh last changed in 730759d (2026-09-28 23:37 +0700 = 16:37Z) and workflow-doctor.test.sh in 752270c (2026-09-29 01:12 +0700 = 2026-09-28 18:12Z), both BEFORE the 21:21Z success \u2014 so 'unchanged code that passed on 2026-09-28' is exact.",
+      "description": "Recorded as a CORRECTION LANDING, not a defect: the new comment fixes a date the commit message got wrong. Logged so a future reader who finds the two texts disagreeing knows which one the CI record supports, since a commit message cannot be amended in place. Also measured and worth having in the record: the 2026-10-01 failure is JOB-specific, not host-wide \u2014 in the same run, job 'L1 \u2014 workflow-doctor (bd max end)' PASSED META-TEST 8a while job 'L1 \u2014 bash unit tests' FAILED it, which supports fe278a8's environment-drift reading and is exactly the kind of thing this new diagnostic will now print."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

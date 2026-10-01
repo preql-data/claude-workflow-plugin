@@ -726,18 +726,24 @@ assert_eq "H.2 the recorded rollup is now STALE (design_hash moved)" "false" \
 assert_eq "H.2b ...but mechanical_ok is untouched once both units are re-injected against the new hash" "true" \
     "$(json_field '.mechanical_ok' "$STATUS_OUT")"
 
-# ISOLATE THE CONDITION UNDER TEST (claude-workflow-plugin-q5l6, v5.0.0).
-# G.1's successful approve TRUNCATES $TRACKING, so by this point the epic's
-# recorded completion declares files that are no longer in the change set an
-# approval would bind. That is a genuine total-miss, and since v5.0.0 approve
-# refuses it (exit 2, completion_files_total_miss) at a point BEFORE the
-# rollup-staleness check this section exists to exercise — so H.3 measured the
-# wrong refusal and never reached the one it names.
+# DO NOT REMOVE THIS SEED. Without it, H.3's approve refuses with
+# completion_files_total_miss (exit 2) instead of the design_rollup_verdict_
+# stale refusal (exit 5) that H.3/H.3b assert -- measured. At this point the
+# epic's recorded completion declares files that are not in the change set an
+# approval would bind; the seed restores a valid one so the assertion is about
+# rollup staleness rather than about whichever guard sits earliest in
+# cmd_approve.
 #
-# Re-seed a valid change set first. Both refusals are real here; the fixture's
-# job is to satisfy everything EXCEPT the property under test, so that the
-# assertion is about rollup staleness rather than about whichever guard happens
-# to sit earliest in cmd_approve.
+# Two caveats, both tracked rather than fixed here:
+#   * the path list repeats the next call's on this epic, which the helper's
+#     contract asks you to vary. Safe only because H.3's approve REFUSES, so
+#     no approval record binds this hash.
+#   * a unique but UNDECLARED path does not work: substituting one puts H.3
+#     back to exit 2 and takes H.3 through H.6b with it (eight failures),
+#     because the rollup objects to a file no design unit declares.
+# Both in claude-workflow-plugin-71n7, which also records why the causal
+# account that used to sit here was removed.
+#
 epic_review_and_complete "$EPIC" "2" "src/b.sh"
 
 APPR_OUT=$(bash "$QG" approve "$EPIC" "attempt after amendment, before a fresh rollup" 2>&1); APPR_RC=$?

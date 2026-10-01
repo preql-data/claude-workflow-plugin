@@ -234,6 +234,18 @@ weight actually sits.
 
 ### Added
 
+- **Grading rubric criterion C9 — accuracy is symmetric** (`claude-workflow-plugin-38cd`):
+  `.claude/rubrics/default.md` **goes to version 3**. A claim that OVERSTATES a
+  defect now fails the rubric exactly as one that understates it, with an
+  automatic `needs_revision` for an inference presented in the voice of an
+  observation. It is its own criterion rather than a note on C1 because the
+  asymmetry is measured, not assumed: optimistic errors get hunted, pessimistic
+  ones read as conservative and nobody re-derives them. In this release's own
+  review the same claim about the coherence rollup was overstated twice in
+  successive rounds, and each survived a round that was explicitly looking for
+  the previous one. Recorded here because v4.1 recorded its own `1` → `2` bump
+  the same way, and a rubric change alters how every task is graded.
+
 - **v5 Phase D6 — the coherence rollup gate** (`fkm.8`): at approve time,
   `qa-gate.sh design-coherence <task-id>` rolls up per-unit results into an
   epic-level count, "in the manner of the unresolved-findings count"
