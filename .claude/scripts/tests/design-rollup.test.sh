@@ -726,6 +726,20 @@ assert_eq "H.2 the recorded rollup is now STALE (design_hash moved)" "false" \
 assert_eq "H.2b ...but mechanical_ok is untouched once both units are re-injected against the new hash" "true" \
     "$(json_field '.mechanical_ok' "$STATUS_OUT")"
 
+# ISOLATE THE CONDITION UNDER TEST (claude-workflow-plugin-q5l6, v5.0.0).
+# G.1's successful approve TRUNCATES $TRACKING, so by this point the epic's
+# recorded completion declares files that are no longer in the change set an
+# approval would bind. That is a genuine total-miss, and since v5.0.0 approve
+# refuses it (exit 2, completion_files_total_miss) at a point BEFORE the
+# rollup-staleness check this section exists to exercise — so H.3 measured the
+# wrong refusal and never reached the one it names.
+#
+# Re-seed a valid change set first. Both refusals are real here; the fixture's
+# job is to satisfy everything EXCEPT the property under test, so that the
+# assertion is about rollup staleness rather than about whichever guard happens
+# to sit earliest in cmd_approve.
+epic_review_and_complete "$EPIC" "2" "src/b.sh"
+
 APPR_OUT=$(bash "$QG" approve "$EPIC" "attempt after amendment, before a fresh rollup" 2>&1); APPR_RC=$?
 assert_eq "H.3 approve refuses the STALE rollup: exit 5" "5" "$APPR_RC"
 assert_eq "H.3b error_key=design_rollup_verdict_stale (QA round 1, R1-F10: distinct from the never-recorded/incoherent shapes)" "design_rollup_verdict_stale" \
@@ -740,7 +754,7 @@ assert_eq "H.5 RESTORE CONTROL: a fresh verdict against the CURRENT hash records
 LATEST_ROLLUP=$(bd comments "$EPIC" --json 2>/dev/null | jq -r '[.[].text | select(startswith("DESIGN-ROLLUP v1 "))] | last')
 assert_contains "H.5b the new record carries the NEW hash" "design_hash=$HASH_V2" "$LATEST_ROLLUP"
 
-epic_review_and_complete "$EPIC" "2" "src/b.sh"
+epic_review_and_complete "$EPIC" "3" "src/b.sh"
 EPIC_APPR2=$(bash "$QG" approve "$EPIC" "epic approval after amendment + fresh rollup" 2>&1); EPIC_APPR2_RC=$?
 assert_eq "H.6 RESTORE CONTROL: approve succeeds once the rollup is fresh again" "approved" "$(json_field '.status' "$EPIC_APPR2")"
 assert_eq "H.6b exit 0" "0" "$EPIC_APPR2_RC"
@@ -901,7 +915,7 @@ bash "$QG" design-unit-bind "$CHILD2" --design-task "$EPIC" --unit-id U2 --rebin
 # short-circuit would make this METatest pass for the wrong reason (an
 # unrelated fast path) rather than because the freshness check did or did
 # not run.
-epic_review_and_complete "$EPIC" "3" "src/a.sh" "src/b.sh"
+epic_review_and_complete "$EPIC" "4" "src/a.sh" "src/b.sh"
 
 # ORDER IS LOAD-BEARING: the shipped script's OWN refusal runs FIRST,
 # against the untouched, not-yet-approved state, and the mutant's wrong
