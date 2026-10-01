@@ -685,6 +685,57 @@ scan_declared_dir() {
 runtime_contract_rows() {
     emit_row runtime-contract "CLAUDE.md"
     scan_declared_dir design-artifact "$DESIGN_SPEC_SUBDIR" '*.md'
+    release_claim_rows
+}
+
+# THE CLAIMS DOCUMENTS. These state what the project asserts about itself -- the
+# audit ledger's verdicts and tally, the release notes, and the README sections
+# describing what each mechanism does. They are governing artifacts for one
+# reason, and it is not their importance in the abstract:
+#
+# BEING ABSENT FROM THIS SET IS WHAT AUTO-APPROVED THEM. The Stop hook's
+# doc-only fast path takes any `*.md` path that is NOT a governing artifact and
+# releases it without review. On 2026-09-30 that fired on the v5.0.0 release
+# documents themselves: all three matched `is_doc_only_path`, none was in this
+# set, and the gate recorded an approval with `reviewed_by=none` EIGHTY-FOUR
+# SECONDS after the reviewer was spawned -- the approval's cleanup then
+# baselined the whole tree as pre-existing, so the change set it bound was the
+# empty-input sentinel. The documents describing a release whose headline fix is
+# "an approval must not bind nothing" were approved by that exact defect.
+#
+# Routing them through a review once, by hand, for one release, does not fix
+# that: the next release's notes would take the fast path again. Classification
+# is the fix, because it is the thing the fast path actually consults.
+#
+# SCOPED TO A TREE THAT KEEPS A CLAIMS LEDGER, and the scoping is the whole
+# design rather than a convenience. An unconditional rule here would classify
+# EVERY consumer project's README and CHANGELOG as governing, which is precisely
+# the error `doc-only-classifier.test.sh` names in its own section 2c:
+#
+#     ANTI-OVERREACH. Documentation must not lose the fast path -- F1 exists for
+#     exactly these commits, and a fix that deadlocks them is the same error in
+#     the other direction.
+#
+# That guard is correct and this must not break it. The incident being fixed is
+# about THIS project's claims surfaces, not about documentation in general, so
+# the trigger is the presence of the claims ledger itself: a tree that maintains
+# `docs/RELEASE_AUDIT.md` is a tree that makes auditable release claims, and its
+# claims documents are governing. `install.sh` ships only
+# `docs/CODEX_SETUP.md` and `docs/HOOKS.md` into a target (SHIPPED_DOCS), so no
+# consumer acquires the ledger by installing the plugin and no consumer's
+# ordinary doc commit is deadlocked by this rule.
+#
+# The cost, where it applies, is deliberate and small: a typo fix in this repo's
+# README now needs a review round. That is the correct trade for a surface whose
+# whole function is to make claims a reader will act on.
+# Filed as `claude-workflow-plugin-v6pr`.
+release_claim_rows() {
+    [ -f "docs/RELEASE_AUDIT.md" ] || return 0
+    local f
+    for f in "CHANGELOG.md" "README.md" "docs/RELEASE_AUDIT.md"; do
+        [ -f "$f" ] || continue
+        emit_row release-claim "$f"
+    done
 }
 
 governing_rows() {
