@@ -1321,6 +1321,18 @@ else
             "is in the validated set" \
             "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$CTRL8A_JSON" 2>/dev/null || echo "")"
 
+        # DISCLOSE THE MEASURED BINARY ON BOTH ARMS, pass included. The
+        # bd-max lane PASSES this control, and its green is what the claim
+        # "1.3.0:66 is validated" rests on — but a pass proves the pair was
+        # in the set, not that the pair came from the bd that lane pinned.
+        # Those render identically when only failures are diagnosed, which
+        # is how the floor lane went green for weeks while (on current
+        # evidence) never measuring the floor. A lane that will not say what
+        # it measured cannot support a claim about what it validated.
+        printf '  [8a] measured: %s\n' \
+            "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$CTRL8A_JSON" 2>/dev/null \
+                | tr '\n' ' ' | sed 's/  */ /g' | grep -oE '(Measured binary|bd-version-vs-schema)[^|]*' | head -1 | cut -c1-300)"
+
         if [ "$CTRL8A_STATUS" != "PASS" ]; then
             # NAME THE PAIR THAT WAS ACTUALLY OBSERVED. Without this the
             # control's failure is undiagnosable from a CI log: the doctor
@@ -1335,6 +1347,52 @@ else
                 "$(jq -r '.checks[] | select(.name == "beads") | .detail' "$CTRL8A_JSON" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-400)"
             printf '  validated set: %s\n' \
                 "$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' "$DOCTOR" | head -1)"
+            # NAME THE BINARY AND EVERY RIVAL ON PATH. The pair alone was not
+            # enough. A lane that installs bd 1.1.2 from a pinned,
+            # sha256-verified tarball reported "installed bd 1.3.1", and
+            # grepping the entire job log showed NO second bd downloaded
+            # anywhere — so "which binary answered, and why that one" could
+            # not be settled from any artifact the run produced, and each
+            # hypothesis cost a 45-minute round. The bd-max lane measures the
+            # binary it pinned and passes; this lane does not. That makes the
+            # fault lane-specific, which is only actionable if the lane says
+            # what it resolved. See claude-workflow-plugin-wyt3.
+            printf '  PATH: %s\n' "$PATH"
+            printf '  every bd on PATH, in resolution order:\n'
+            type -a bd 2>&1 | sed 's/^/    /'
+            _bd_n=0
+            while IFS= read -r _bd_cand; do
+                [ -n "$_bd_cand" ] || continue
+                _bd_n=$((_bd_n + 1))
+                printf '    [%s] %s -> %s\n' "$_bd_n" "$_bd_cand" \
+                    "$("$_bd_cand" --version 2>/dev/null | head -1 | tr -d '\n')"
+                if [ "$(head -c 2 "$_bd_cand" 2>/dev/null)" = '#!' ]; then
+                    printf '        (script, forwards to) %s\n' \
+                        "$(grep -m1 '^exec ' "$_bd_cand" 2>/dev/null)"
+                fi
+            done < <(type -aP bd 2>/dev/null)
+            [ "$_bd_n" -eq 0 ] && printf '    (no bd resolved on PATH at all)\n'
+            # The store half is an INDEPENDENT witness: bd 1.1.2 writes
+            # schema 53 (measured directly), so a store at v66 was not
+            # written by the pinned binary and no version misparse could
+            # produce it. Print every store under the fixture, not just the
+            # one the doctor resolved, so "resolved the wrong store" and
+            # "ran the wrong binary" stay distinguishable.
+            printf '  fixture target: %s\n' "$SCHEMA_TARGET"
+            printf '  embedded-Dolt stores under it:\n'
+            _st_n=0
+            while IFS= read -r _st_dot; do
+                [ -n "$_st_dot" ] || continue
+                _st_n=$((_st_n + 1))
+                _st_dir=$(dirname "$_st_dot")
+                if command -v dolt >/dev/null 2>&1; then
+                    printf '    [%s] %s schema=%s\n' "$_st_n" "$_st_dir" \
+                        "$( (cd "$_st_dir" && dolt sql -r csv -q 'SELECT COALESCE(MAX(version),0) FROM schema_migrations' 2>/dev/null | tail -n1) )"
+                else
+                    printf '    [%s] %s schema=(dolt not on PATH)\n' "$_st_n" "$_st_dir"
+                fi
+            done < <(find "$SCHEMA_TARGET/.beads" -maxdepth 4 -name '.dolt' -type d 2>/dev/null)
+            [ "$_st_n" -eq 0 ] && printf '    (none found)\n'
             printf '  note: META-TEST 8a mutant legs skipped — the control did not pass (this host'\''s bd/schema pair is not in DOCTOR_BD_SCHEMA_VALIDATED), so a mutant FAIL would not be attributable to the pin logic.\n'
         else
             MUT8A_JSON="$WORK/meta8a-mutant.json"

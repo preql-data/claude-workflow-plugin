@@ -1425,8 +1425,29 @@ NOTE: bd doctor reported $warns advisory warning(s) (informational only). Run
     # (claude-workflow-plugin-0cr6: bd names it after the project directory
     # it was `init`'d in, not literally "beads" except when that IS the
     # directory's name) — see resolve_bd_schema_store's own header above.
-    local live_bd_ver
+    local live_bd_ver live_bd_path
     live_bd_ver=$(env "PATH=$shim_path" bd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    # NAME THE BINARY THAT ANSWERED, not just its version
+    # (claude-workflow-plugin-wyt3). A CI lane that installs bd 1.1.2 from a
+    # pinned, sha256-verified tarball — with no second bd downloaded anywhere
+    # in the job, verified by grepping the whole job log — was measured
+    # reporting "installed bd 1.3.1". The doctor's own output could not say
+    # WHICH binary answered, so each hypothesis cost a 45-minute CI round.
+    # A version with no path is not a measurement anyone can act on: an
+    # operator cannot tell a doctor that measured the wrong bd from one that
+    # measured the right one, and those render identically. Reported on BOTH
+    # the OK and the DRIFT arm, because the happy path is exactly where a
+    # wrong binary hides — a pair that happens to be in the validated set
+    # passes just as quietly whether or not it came from the bd in use.
+    live_bd_path=$(env "PATH=$shim_path" bash -c 'command -v bd' 2>/dev/null)
+    if [ -n "$live_bd_path" ] && [ "$live_bd_path" = "$WORKDIR/bin/bd" ]; then
+        # This doctor's own shim forwards to a real binary; naming only the
+        # wrapper would hide the very thing the path exists to disclose.
+        local _bd_shim_target
+        _bd_shim_target=$(sed -n 's|^exec \(.*\) "$@"$|\1|p' "$live_bd_path" 2>/dev/null)
+        [ -n "$_bd_shim_target" ] && live_bd_path="$live_bd_path -> $_bd_shim_target"
+    fi
+    [ -n "$live_bd_path" ] || live_bd_path="(not resolvable on the doctor's PATH)"
     if ! command -v dolt >/dev/null 2>&1; then
         note="$note
 NOTE: bd-version-vs-schema pin DISARMED (dolt not on PATH — cannot query any
@@ -1477,9 +1498,10 @@ Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
                 # assertion checking for it failed for exactly that reason.
                 note="$note
 NOTE: bd-version-vs-schema pin OK:
-$live_bd_ver:$live_schema_ver is in the validated set: $DOCTOR_BD_SCHEMA_VALIDATED."
+$live_bd_ver:$live_schema_ver is in the validated set: $DOCTOR_BD_SCHEMA_VALIDATED.
+Measured binary: $live_bd_path"
             else
-                record beads FAIL "bd-version-vs-schema DRIFT: installed bd $live_bd_ver / store schema v$live_schema_ver is not in the validated set {$DOCTOR_BD_SCHEMA_VALIDATED} (bd:schema)" \
+                record beads FAIL "bd-version-vs-schema DRIFT: installed bd $live_bd_ver / store schema v$live_schema_ver is not in the validated set {$DOCTOR_BD_SCHEMA_VALIDATED} (bd:schema) [measured binary: $live_bd_path; store: $schema_store]" \
 "bd auto-migrates a LOCAL (non-remote-backed) store's schema on first run of a
 NEWER binary, with no confirmation and no opt-out — this is bd's own
 documented behaviour (\`bd migrate --help\`: \"Without subcommand, checks and
