@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "532dc675bc1eef0ddb2524e8f4868b3613a384f4967f15f91720002406881410",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the ART_PREFIX_HEAD/ART_PREFIX_TAIL partition and its scoped extractors have been examined ONCE for an input yielding an undeclared key=value, a mis-computed boundary, or a partition failure returning a value rather than refusing; then either a finding at or above high, or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. fkm.1.1 must still exit 4; i8cx must still resolve iteration=10/sol-codex.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R7-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:2609",
+      "evidence": "The accepted record `REVIEW-ARTIFACT v1 iteration=7 reviewer=sol-codex model=gpt-5.6-sol pin=gpt-5.6-sol reviewed_hash=abc risk_threshold=high verdict=findings stopped_by=verdict findings=[R7-F1:high,findings=[] at 2026-09-03T00:00:00Z: summary` produced a nonempty ART_PREFIX and correctly partitioned HEAD/TAIL, but the scoped sed extractor returned ART_FINDINGS empty. The grammar at line 2271 permits the bracket content `R7-F1:high,findings=[`; sed's greedy `.*findings=\\[` therefore starts at the nested undeclared token and consumes the sole closing bracket.",
+      "description": "The partition excludes bracket content only from the other field extractors; ART_FINDINGS retains the same unanchored greedy mechanism. A record author can include an undeclared nested `findings=[` in the permitted findings content and make a declared high finding parse as no findings, directly changing the gate outcome."
+    }
+  ],
+  "iterations": 7,
+  "stopped_by": "verdict"
+}

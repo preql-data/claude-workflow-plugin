@@ -226,9 +226,11 @@ function git(fixturePath: string, args: string[]): SpawnSyncReturns<string> {
  *  indicating whether a stash was actually created (i.e. there were
  *  uncommitted changes to stash). On clean trees, no stash is created
  *  but the HEAD SHA is still captured — that's the safety net against
- *  run-time `bd sync` (or any other process) that COMMITS to the
- *  fixture during the run and would otherwise leave HEAD advanced past
- *  the canonical fixture state. */
+ *  ANY process that COMMITS to the fixture during a run and would
+ *  otherwise leave HEAD advanced past the canonical fixture state.
+ *  `bd sync` used to be the concrete offender; it was removed in bd
+ *  1.1.2 and the harness now flushes with `bd export -o`, which makes
+ *  no commits. The net stays: it guards the class, not that one cause. */
 /** File names that are harness metadata (never written by the agent
  *  under test) and must survive a restore cycle even if their working
  *  copy contained uncommitted edits at snapshot time.
@@ -411,11 +413,12 @@ export function snapshotFixture(
   }
   // Capture the pre-run HEAD SHA. This is what `restoreFixture` resets
   // to — NOT plain `HEAD`, because the run itself can advance HEAD via
-  // `bd sync` commits (discovered claude-workflow-plugin-0wk.10 Phase A.2:
-  // the bd post-edit hook commits beads/issues.jsonl to fixture HEAD,
-  // so resetting to `HEAD` after a run keeps those commits and means
-  // subsequent runs see the previous run's beads tasks as
-  // already-present → beadsTasksCreated reports 0 spuriously).
+  // commits made DURING the run (discovered claude-workflow-plugin-0wk.10
+  // Phase A.2 with `bd sync`: a bd git hook committed beads/issues.jsonl to
+  // fixture HEAD, so resetting to `HEAD` after a run kept those commits and
+  // subsequent runs saw the previous run's beads tasks as already-present →
+  // beadsTasksCreated reported 0 spuriously). `bd sync` is gone as of bd
+  // 1.1.2, but a fixture's own git hooks can still commit, so this stays.
   const headSha = git(fixturePath, ["rev-parse", "HEAD"]);
   if (headSha.status !== 0) {
     throw new Error(
@@ -547,8 +550,9 @@ export function selfHealOnEntry(fixturePath: string): void {
  *  fails, so the fixture is never left in a partially-mutated state.
  *
  *  Resets to the exact pre-run SHA (NOT plain `HEAD`) so any commits
- *  the run made — e.g. `bd sync` auto-committing beads/issues.jsonl
- *  via the post-edit hook — are rolled back. Without this, fixture
+ *  the run made are rolled back — historically `bd sync` auto-committing
+ *  beads/issues.jsonl via a git hook, and now any hook that does the
+ *  same. Without this, fixture
  *  HEAD would accumulate spurious commits across runs and the
  *  beadsTasksCreated diff would degrade to 0 after the first run.
  *
@@ -564,7 +568,8 @@ export function restoreFixture(
   snapshot: { stashed: boolean; headSha: string; harnessMetadata?: Record<string, string> },
 ): void {
   // Hard-reset to the captured pre-run SHA. This rolls back BOTH
-  // tracked changes AND any commits the run made (e.g. bd sync).
+  // tracked changes AND any commits the run made (historically bd sync;
+  // now any fixture git hook that commits).
   git(fixturePath, ["reset", "--hard", snapshot.headSha]);
   // Remove untracked files (e.g. .qa-tracking, .beads/wal mutations,
   // node_modules under fixture if the run installed any).
@@ -1216,9 +1221,10 @@ export async function runFixture(opts: RunFixtureOptions): Promise<Trace> {
     // Flush bd's pending JSONL exports before reading `beadsAfter`. The
     // daemon path (MCP `bd_create_task` and similar) writes SQLite eagerly
     // but flushes JSONL on a 5s poll interval, so a naive read here misses
-    // any task created within ~5s of end-of-run. The flush is run with
-    // BD_NO_DAEMON=1 and `--flush-only` (skips git ops), so it's fast and
-    // hermetic. Tolerant of failure — see flushFixtureBeads docstring.
+    // any task created within ~5s of end-of-run. The flush is one
+    // `bd export -o` (no git ops, and no daemon exists on bd 1.1.x), so it
+    // is fast and hermetic. Tolerant of failure — see the
+    // flushFixtureBeads docstring.
     // The matching spec assertion in fixtures uses the established OR-shape
     // (harness diff OR MCP tool call OR Bash bd create) so a flush failure
     // here doesn't break workflow assertions. Cross-ref:

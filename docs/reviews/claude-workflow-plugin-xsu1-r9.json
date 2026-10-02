@@ -1,0 +1,40 @@
+{
+  "contract_version": 1,
+  "task_id": "claude-workflow-plugin-xsu1",
+  "scope_label": "D4b full slice + 6im2 spec - round 9 final verification (gating round)",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "e6680249b88f02931cb0d4a7f9ca9c42881f9fca9ab2ea97d629d0969bffca6e",
+  "reviewed_hash_basis": "sha256 over epic-gate.sh, qa-gate.sh, review-check.sh, plan-batches.test.sh, design-accessors.test.sh, design-artifact.test.sh, design-unit-bind-parity.test.sh, run-tests.sh, docs/HOOKS.md concatenated in that order. The reviewer was NOT given the expected hash - it computed and reported its own, and the orchestrator confirmed it matches the tree under acceptance byte for byte.",
+  "scope_files": [".claude/scripts/epic-gate.sh", ".claude/scripts/qa-gate.sh", ".claude/scripts/review-check.sh", ".claude/scripts/tests/plan-batches.test.sh", ".claude/scripts/tests/design-accessors.test.sh", ".claude/scripts/tests/design-artifact.test.sh", ".claude/scripts/tests/design-unit-bind-parity.test.sh", ".claude/scripts/tests/run-tests.sh", "docs/HOOKS.md"],
+  "risk_threshold": "high",
+  "stop_condition": "every round-8 fix verified as new code; the two new scoped-pipefail subshells and the consolidated triple-extraction reviewed as restructurings; the recurring successful-but-empty class swept once more; vacuity re-checked across all four spec files",
+  "verdict": "approved",
+  "iterations": 9,
+  "stopped_by": "verdict",
+  "ship_recommendation": "ship-with-noted-residuals",
+  "round8_fix_assessment": [
+    {"id": "R8-F1", "status": "fixed", "basis": "epic-gate.sh:1478-1517 uses one guarded `jq -c '.unit_ids, .unit_files, .unit_deps'`; all three lines read with IFS disabled, independently type-checked array/object/object; any rc or shape failure degrades set_computation_failed without child ids, yielding batches:[]. _PB_DEGRADE_DEPS_JSON assigned only after validation. Compact JSON escapes embedded newlines and [] / {} are nonempty, so whitespace or genuine empty collections cannot misalign the three reads."},
+    {"id": "R8-F2", "status": "fixed", "basis": "epic-gate.sh:1990-1998 places set -o pipefail inside the distinct-count command substitution and captures failure in distinct_rc. The 9t sabotage expects set_computation_failed with pipeline rc=9; its line-revert mutant becomes parallel_safe:true with one collapsed binding."},
+    {"id": "R8-F3", "status": "fixed", "basis": "The cheap checks are present at :2063 and :2165. The omitted ud_r edge check and independent file-conflict/dependency-order output validation are explicitly documented at :2059-2062 and :2161-2164 as operator-deferred follow-up (claude-workflow-plugin-ig9r), rather than silently omitted."},
+    {"id": "R8-F4", "status": "fixed", "basis": "design-unit-bind-parity.test.sh:268-280 scopes pipefail within an explicit subshell. The truncating sed shim at :339-349 emits the valid partial set --req-a and exits 9; assertions require rc 9 and prove the partial output existed. Rightmost-nonzero semantics retain awk's exit 7."},
+    {"id": "R8-F5", "status": "fixed", "basis": "run-tests.sh:328-335 now says application-state read-only but explicitly NOT file-creation-free, explaining the usage heredoc temp-file behaviour. The former side-effect-free wording is absent."}
+  ],
+  "marker_uniqueness_check": {"claim_verified": "yes", "basis": "The exact triple program text occurs once in the runtime epic-gate.sh and zero times in qa-gate.sh, review-check.sh and workflow-manifest.sh. review-check.sh's single-field extraction remains `.unit_deps`, so the whole-argument triple marker cannot fire there or at an earlier support-script call."},
+  "pipefail_scoping_check": {"leaks_beyond_subshell": "no", "basis": "The epic count uses command-substitution subshell scope; parse_required_flags uses explicit ( ... ) scope. A bash probe produced `scoped_rc=1 outer_rc=0`, confirming an inner pipefail failure propagated while the following outer pipeline retained normal last-stage status."},
+  "keys_unsorted_risk_judgment": "agree - the comparison is intentionally order-sensitive and could false-trip if a future refactor constructs unit_task_map in a different insertion order. Today both sides derive from unit_ids using the same filter and order, and any future mismatch fails CLOSED as set_computation_failed rather than emitting an unsafe plan.",
+  "findings": [],
+  "vacuity_sweep": {
+    "legs_examined": 16,
+    "non_discriminating": [],
+    "basis": "The 16 dimensions are non-vacuity, specific mutant/fault behaviour, restore control, and shipped-artifact execution across each of the four scoped specs; dynamic per-carrier/per-flag cells included. No earlier-site marker collision was established."
+  },
+  "correctness_statement": "Honest batching compares each candidate against the accumulated batch file union and admits a dependent only after its prerequisites are placed, with min_start strictly after dependency batches.",
+  "accepted_residuals": [
+    {"id": "claude-workflow-plugin-uopo", "what": "No guarded json_emit/json_read primitive; ~250 sites. emit_json/emit_error_json untouched by design; the .ok // false reads at qa-gate.sh:5707 and :5974; an rc-0 jq that lies with an internally consistent valid shape."},
+    {"id": "claude-workflow-plugin-i8cx", "what": "No file-wide pipefail; 338 pipelines mask upstream failure; plus process substitution `< <(cmd)` discarding producer status (7 occurrences in the shipped scripts)."},
+    {"id": "claude-workflow-plugin-ig9r", "what": "Independent file-conflict and dependency-order re-validation of the batching output, and ud_r edge re-validation."}
+  ],
+  "notes": "Static read-only review only; no test tier or individual spec was executed (an L2 tier was running concurrently as the acceptance measurement). bash -n passed for all eight scoped shell files. The reviewer was deliberately NOT given the expected scope hash; it computed e6680249... independently and the orchestrator confirmed the match against the tree under acceptance. This is the first round of nine to return zero findings."
+}

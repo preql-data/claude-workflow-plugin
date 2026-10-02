@@ -170,7 +170,7 @@ labels_for() {
 }
 
 comment_count_matching() {
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r --arg pat "$2" \
             'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test($pat))) | length' \
         2>/dev/null || echo "0"
@@ -180,7 +180,7 @@ comment_count_matching() {
 # Section 1: enter sets rubric-pending alongside qa-gate-entered.
 
 TID=$(cd "$FIXTURE" && bd create "Rubric loop happy-path" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
-assert_match "rubric-loop-1: seed task id present" '^[a-z0-9-]+\.' "$TID"
+assert_match "rubric-loop-1: seed task id present" "$BD_ID_RE" "$TID"
 
 ENTER_OUT=$(bash "$QG" enter "$TID")
 assert_json_field "rubric-loop-1: enter ok=true" "$ENTER_OUT" '.ok' "true"

@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-xsu1",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "4f74713bbc4af7b1e88b55b5fe11c5c7c54de9cc8c46f3e6788e66d67dfa1997",
+  "risk_threshold": "high",
+  "stop_condition": "all eight R1 findings adjudicated against the post-fix tree; every path to parallel_safe:true re-attacked from scratch rather than fix-by-fix; the two reasoned omissions judged on their arguments; vacuity sweep re-run after substantial source movement",
+  "verdict": "findings",
+  "iterations": 2,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/scripts/epic-gate.sh:969 (canonical + case-collision gates)",
+      "evidence": "The gates still admit byte-distinct declarations that identify the SAME filesystem file. Two reachable shapes, both probed against the shipped reduce: (1) THIS REPOSITORY tracks `tests` as a symlink to `.claude/scripts/tests` (confirmed independently: `readlink tests` -> `.claude/scripts/tests`). Units declaring `tests/plan-batches.test.sh` and `.claude/scripts/tests/plan-batches.test.sh` pass both gates, and an exact targeted probe of the shipped reduce CO-BATCHED them returning ok:true. (2) `ascii_downcase` misses non-ASCII case aliases and Unicode normalisation aliases: probed `src/К.js` vs `src/к.js` (Cyrillic) produced no case-collision group and an empty byte intersection, and on this workspace's APFS data volume a non-ASCII case variant resolved to the same existing file despite being byte-distinct; NFC/NFD aliases behaved the same way.",
+      "description": "R1-F3 fixed the specific instance (`src/A.js` vs `src/a.js`) without reaching the underlying property. The safety requirement is not 'no case aliases' but 'no two declarations that identify the same file' — and byte comparison plus ASCII case-folding cannot establish that. The symlink case is the sharper one: it needs no exotic characters and is reachable with paths that exist in this repo today."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/plan-batches.test.sh:857; targets at epic-gate.sh:1174 and :1268, stranded at :1161 and :1251",
+      "evidence": "Two of the three widened R1-F2 fault-injection controls never reach their claimed targets. `PB_FAIL_MARKER='.ud_r'` first matches the EARLIER aggregate shape check at :1161, so execution degrades before the `.ud_r` extraction at :1174. `PB_FAIL_MARKER='.batches'` first matches the batch-result shape check at :1251, before the final extraction at :1268. So removing the combined extraction guard at :1175-1183, or the final extraction guard at :1269-1273, would go unnoticed by these controls. Verified by source ordering plus exact marker matching.",
+      "description": "R1-F2 is PARTIALLY FIXED: every affected PRODUCTION guard is genuinely fail-closed by reading, but two of the controls proving it are vacuous. NOTE the recurrence — this is the THIRD instance in this project of a fault-injection marker matching an earlier site than the one it names (claude-workflow-plugin-fkm.6's R2-F4 was the first two). Separately, the implementer's shared-shape-check argument IS true by reading: r_ids_json, unresolved_json, blocked_json and ud_filtered_json share one sticky rc and one combined shape guard. The omission is still a gap, but only because the representative shim never reaches that guard — not because the reasoning was wrong."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/epic-gate.sh:724 (degraded-path sort)",
+      "evidence": "The process-substitution idiom works as intended — the loop runs in the parent shell, the accumulator survives, and `LC_ALL=C sort` orders child ids deterministically. But batch INDEXES carry dependency order on the clean path, while nothing documents degraded batches as unordered. With a prerequisite task `Z-prerequisite` and a dependent task `A-dependent`, a degradation emits `A-dependent` FIRST purely because of task-id sorting. A consumer executing the singleton batches in order violates the declared dependency.",
+      "description": "R1-F4's determinism fix is correct; this is a new issue the fix surfaced. Determinism was achieved by sorting on a key that carries no dependency information. Either degraded batches must preserve an established topological order, or the contract must explicitly declare them unordered/non-executable and require consumers to derive serial order elsewhere. Silently deterministic-but-wrong ordering is worse than the nondeterminism it replaced."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/epic-gate.sh:689 (envelope construction) vs the narrowed contract in the script header and docs/HOOKS.md",
+      "evidence": "The narrowed R1-F7 contract ('every guard-list degradation exits 0 with a full envelope') still does not hold for a PRESENT-but-BROKEN jq. Probed by exporting a jq function that always returns 1, against a project without `.beads`: `command -v jq` passes, the epic_children_unreadable guard is reached, but envelope construction then fails and the command emits `envelope_construction_failed` with rc 2, omitting both graph fields. The jq-ABSENT path was dynamically verified correct — rc 0, valid JSON, parallel_safe:false, both graph fields present.",
+      "description": "R1-F7 is PARTIALLY FIXED. The absence case is handled; the breakage case is not, and it is the harder one because the guard that detects absence cannot detect malfunction. Same shape as the original finding one level in: the error path for jq's failure is itself jq-dependent."
+    },
+    {
+      "id": "R2-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/plan-batches.test.sh:790",
+      "evidence": "The spec contains an unconditional write to a hard-coded, developer-specific path OUTSIDE its own mktemp fixture: it writes the fixture path into `/private/tmp/claude-501/.../scratchpad/pbtest-fixture.txt` and never cleans it up. If the directory is absent it emits an error but continues, because the spec does not use `set -e`.",
+      "description": "A shipped test writing into one particular machine's session scratchpad. Harmless here, meaningless anywhere else, and it leaves litter. It also silently no-ops on any other host, which is the kind of environment-dependence that makes a spec behave differently for the next reader."
+    },
+    {
+      "id": "R2-F6",
+      "severity": "low",
+      "location": ".claude/scripts/epic-gate.sh:585 (header prose); docs/HOOKS.md:2582",
+      "evidence": "Authoritative comments retain pre-fix behaviour: the header still says out-of-R dependency edges are DROPPED (R1-F1 changed that to a degradation), that degraded children retain enumeration order (R1-F4 changed that to a sort), and that only one inner guard lacks a backup (R1-F5 added three sentinels). docs/HOOKS.md:2582 still describes a 13-condition list, without the new unresolved-dependency and case-collision reasons.",
+      "description": "The documentation describes the code as it was before this round. Every one of these is a statement a future reader would reasonably rely on, and each is now false — the same documentation-drift class this project has hit repeatedly, here created by the fixes themselves."
+    }
+  ]
+}

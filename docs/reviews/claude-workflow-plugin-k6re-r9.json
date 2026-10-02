@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "59abecf171aeb8be74297b145c27e6a65316412108a54663e19fdc61b9114edb",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the tightened findings content class and the rewritten anchored ART_FINDINGS extraction have been examined ONCE for (a) any remaining permitted character that lets a finding value impersonate structure, and (b) any case where the new extraction disagrees with the grammar that accepted the record; then either a finding at or above high, or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. fkm.1.1 must still exit 4; i8cx must still resolve iteration=10/sol-codex/gpt-5.6-sol; model= and pin= must still accept bracketed identifiers.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R9-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:2899",
+      "evidence": "The tightened class at line 2083 still permits ERE metacharacters such as `.` and `*`. The anchored extractor faithfully returns `.*:high`, after which `fid=.*` is interpolated unescaped into `grep -E \"^RESOLVED ${fid} \"` here and the equivalent ARBITRATION lookup at line 2906. Thus any unrelated `RESOLVED R1-F1 fix=x test=y` record matches and clears the declared high finding.",
+      "description": "A grammar-accepted finding value can impersonate another finding ID as an ERE. An attacker can combine `findings=[.*:high]` with an unrelated or attacker-posted RESOLVED/overrule record and make the gate report zero open findings, so the fix has not ended the structure-impersonation class."
+    }
+  ],
+  "iterations": 9,
+  "stopped_by": "verdict"
+}

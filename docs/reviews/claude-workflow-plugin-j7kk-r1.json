@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-j7kk",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "a5a39c9a92a05df1fbc34f6e69aa5d0d46a7c095b24109a44502bdf35606b6c5",
+  "risk_threshold": "high",
+  "stop_condition": "Every attack item in the operator brief is verified against the landed diff (STORE-CANARY pairing legs incl. execution+disarm; model-roles bd isolation driven with the production store provably untouched; the B1 skip predicate requires both instruments and refuses sentinels on write and read sides; the reuse reason is operator-visible; status unavailable fails closed at every consumer; --check leaves the write path unreachable; the quarantine predicate re-derives), and no critical/high finding remains unresolved in the gate or store-isolation paths.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:2350 (record_verified_state), sole call site :3877",
+      "evidence": "record_verified_state() takes its ONE tree_fingerprint reading at call time (line 2353), and its only call site (line 3877) executes AFTER the suite commands complete. grep of every tree_fingerprint capture in the file (lines 882, 925, 2353, 2382) shows no pre-suite capture is persisted anywhere; the pre-dispatch reading verified_state_unchanged computes at line 2382 (when a prior record exists) is discarded. Therefore a write landing DURING the suite run is absorbed into the recorded baseline: the next Stop compares the post-mutation tree against a baseline hashed from that same post-mutation tree, matches, and VERIFY_SKIP_UNCHANGED replays a green the suite never measured end-to-end over that content. The precondition is this batch's own documented operating mode: the SKIP-UNCHANGED header itself cites a reviewer run contended by this gate Stop-hook L1 run, suite runs measured 353-853s wide, and mid-review the coordinator reported a live gate collision on this very task. gate-claim-honesty Section 6 covers edits AFTER a record (6.4a/6.4b); escalation-basis Leg J covers edits BETWEEN Stops; neither covers an edit DURING the run, and no stated KNOWN LIMIT claims it.",
+      "description": "The recorded baseline can bless content the last real run never verified — a skip firing over a tree that moved mid-measurement, the exact unsafe direction the task named as strictly worse than the contention the feature prevents. It also overstates the region claim that a skip proves nothing changed since the suite ran end to end: the end-to-end half is unproven at the measurement boundary. Cheap fix in the region own stated degradation direction: capture fp_pre (and hash_pre) immediately before the suite dispatch; in record_verified_state take the post-run reading and PERSIST ONLY IF post equals pre, else write nothing — costing at most one redundant re-run (the direction the header already documents for persist-time failures), never a false skip. Pair it with a leg whose fixture TEST_CMD mutates a tracked file mid-run and assert the following Stop re-runs for real."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "low",
+      "location": ".claude/scripts/tests/run-tests.sh (STORE-CANARY per-spec sampling block)",
+      "evidence": "When STORE_HASH_AFTER differs from STORE_HASH_BEFORE but the store moved to a NON-DESCENDANT (mid-run rollback/reset — the v65-to-v53 schema rollback performed during this batch is the live example of the class), dolt log BEFORE..AFTER emits nothing, wc -l yields the numeric string 0, the empty-or-non-numeric guard does not catch it, STORE_WRITES stays 0, and the dedicated elif never fires — an otherwise-green spec stays green with no printed note (STORE_NOTE only surfaces in FAIL arms). A transient dolt-log failure after a successful cd degrades identically.",
+      "description": "A moved-but-not-advanced protected store is silently unreported for that spec. The stated threat model — bd auto-commit writes, which always advance — is unaffected, hence low. Cheapest fix: when the hash moved and the parsed count is 0, set STORE_WRITES=1 with a non-linear-movement detail instead of staying silent."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": ".claude/scripts/verify-before-stop.sh:3144 (F1_BINDING_NOTE case arm)",
+      "evidence": "The note-composition arm matches not-entered|entered|pending|error|empty and its own header says it covers every status on which F1 was eligible OR unreadable; the new unavailable status is a second unreadable spelling and does not match, so on an unavailable store with a non-safe F1 verdict the Stop blocks (correctly — the dispatch case at :3166 excludes it from the fast path) while composing no F1-declined explanation, the silent-refusal message gap the placement comment says this composition exists to prevent.",
+      "description": "Message-only degradation on a rare combination (doc-only change set + unreadable store + in-flight implementer). Add unavailable to the note-composition arm alongside error."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-38cd",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "8969684b7614c6f1bb2428b74011fc10d13a9ef1db0f79797622089f341558ee",
+  "risk_threshold": "high",
+  "stop_condition": "Every round-4 finding is independently re-verified as fixed against the code and the F4 clone store rather than against the author's prose; the 8/9/0/1/18 tally is re-derived by the ledger's own five scoped greps; zero NOT-PROVEN still holds; and no surface introduced by this round's fixes asserts a proposition the shipped code contradicts.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R5-F1",
+      "severity": "high",
+      "location": "docs/RELEASE_AUDIT.md:897",
+      "evidence": "The line reads: '**THE CURRENT STATEMENT: the split is `9 / 8 / 0 / 1` and v5.0.0 MEETS the \"NOT-PROVEN = 0\" rule'. The ledger's own tally table at :838-843 reads 8 / 9 / 0 / 1, and I re-derived that independently with the five scoped greps (PROVEN=8, PROVEN-WITH-CAVEAT=9, NOT-PROVEN=0, REMOVED=1, total=18; per-row extraction agrees, 8+9+0+1=18). :849, :862 and :936 all carry 8/9. This line does not. It is NOT pre-existing staleness: `git diff -U0` shows the hunk `@@ -882 +897 @@` changed it in THIS change set, from `10 / 7 / 0 / 1` to `9 / 8 / 0 / 1` -- i.e. it was updated for DP4's move and left one step behind for DP9's move, which happened in the same change set. :883, :884 and :891 also carry old figures but are correctly inside the block headed '**SUPERSEDED 2026-09-29 -- READ THE NEXT PARAGRAPH INSTEAD.**', so they are quoted history; :897 is the live, current-tense statement and is labelled as such.",
+      "description": "The ledger's release-decision sentence asserts a tally its own table contradicts. This is the precise defect commit 2b58370 fixed for this same paragraph family ('fix(pgq1): the ledger's prose still claimed the release rule was met after the table said otherwise'), and the precise failure mode of the lesson this very change set ADDS at LESSONS.md:344 ('A correction is scoped to a PROPOSITION, not to the location field of the finding that named it. Three consecutive rounds on one change set lost the same way') -- this makes four. A reader who stops at the bolded CURRENT STATEMENT takes away the wrong split for the one figure the release decision is read off. Fix: `9 / 8 / 0 / 1` -> `8 / 9 / 0 / 1` at :897. The 'MEETS the rule' half stays true (NOT-PROVEN is still 0)."
+    },
+    {
+      "id": "R5-F2",
+      "severity": "high",
+      "location": "docs/RELEASE_AUDIT.md:815 (DP9), :861, :1025-1028; CHANGELOG.md:46-48; README.md:219-227",
+      "evidence": "The claim under review is DP9's 'PRECISE SCOPE OF THE DEFECT, narrower than an earlier draft of this caveat claimed: of the four conjuncts, only \"any touched file falls outside every declared unit set\" reads the live session-scoped tracker. Over an empty change set under_coverage = $diff - $roll (:16194) is empty, so that conjunct cannot fire and the rollup reports coherent without having checked scope'. Checked against compute_design_coherence, not against the prose. The scope conjunct is implemented TWICE, not once. (a) LIVE arm: tracker_diff_mismatch under-coverage, `under_coverage_json=$(jq -nc ... '$diff - $roll')` at :16194, fed by `live_diff_raw=$(bash \"$IMPACT_REPORT_SCRIPT\" --relativized-changed-files)` at :16119 -- this one is indeed dead over an empty change set. (b) DURABLE arm: undeclared_scope, `scope_drift_json=$(jq -nc ... '$a - $d')` at :16066 pushed as a coh_issue at :16073-16075, where `$a` (actual_filtered_json) is built at :16019-16048 from each mapped unit task's PERSISTED completion payload (`payload_file=$(completion_payload_path_for \"$mapped_task\" \"$impl_role\")`, :16024, reading .files_changed) and `$d` from the design artifact. The function's OWN header states this at :15627-15633: 'undeclared_scope -- a file some resolved unit's PERSISTED completion contract claims to have touched is not declared by ANY unit -- the UNION check plan 174 asks for'. Neither input is the live tracker, so arm (b) fires and gates over an empty change set. I verified every other anchor in the caveat resolves exactly and the rest of the claim is TRUE: :15694 is `DESIGN_COHERENCE_APPLICABLE=\"false\"`, :15182 is `if [ \"$mode\" != \"rollup\" ]; then`, :15963 is `compute_design_alignment \"$mapped_task\" \"rollup\"`, :16241 is the 'informational, not gated' observation, and the other three conjuncts (incomplete, hash_divergence) do read durable records.",
+      "description": "The narrowed statement is still too broad by exactly one arm, on five surfaces: DP9 ('that conjunct cannot fire and the rollup reports coherent without having checked scope'), :861 ('one of its four conjuncts cannot fire over an empty change set'), :1025-1028 ('an empty change set disables THAT conjunct'), CHANGELOG:46-48 ('its SCOPE conjunct ... cannot fire ... while it reports coherent'), README:219-227 ('it stops checking scope while reporting coherent ... only the scope check is disabled'). This is the R4-F1 / R3-F1 recurrence one level further down: a correction whose own claimed precision is unearned, in the sentence that explicitly advertises itself as the precise scope. It ERRS TOWARD OVERSTATING the defect, so DP9's PROVEN-WITH-CAVEAT verdict and the 8/9/0/1/18 tally are unaffected -- the under-coverage gap alone justifies the caveat. Accurate restatement: over an empty change set the rollup stops checking the UNDER-COVERAGE direction of scope (files genuinely changed that no unit declares and no completion contract claims); it still checks the declared-vs-claimed direction via undeclared_scope from persisted contracts, and untested-criterion / unmapped-unit / hash-divergence are unaffected."
+    },
+    {
+      "id": "R5-F3",
+      "severity": "low",
+      "location": "docs/RELEASE_AUDIT.md:1360-1363",
+      "evidence": "The Re-verification addendum reads '`DP6`, `DP7` and `DP9`'s evidence class is \"commit subject plus task state\", which can be confirmed to reproduce but not independently corroborated; each claim's mechanism was spot-checked in code anyway and all three are backed by real implementations.' DP9 moved to PROVEN-WITH-CAVEAT in this change set and this paragraph carries no supersession note. The sibling addendum at :1308-1316 DID receive exactly such a note for DP4's move in this same change set ('**SUPERSEDED IN PART, 2026-09-30 -- `DP4`'s VERDICT DID LATER CHANGE.** ... Read the `DP4` row, not this table, for its current verdict.'). I confirmed DP9 does not appear in that table's rows (which are DP4, DP13, DP15, DP16, DP17, DP18, DP1), so no note was owed there -- the gap is at :1360 only.",
+      "description": "Asymmetric annotation, not a false statement: 'backed by real implementations' remains true, and the DP9 caveat is precisely that the implementation exists but has never run on a real target. But a reader treating the addendum as re-verification clearance for DP9 would not learn the row has since been caveated, which is exactly the harm the DP4 note was added to prevent. Fix: one clause at :1360 pointing DP9 at its row, mirroring :1313's 'Read the `DP4` row, not this table'."
+    },
+    {
+      "id": "R5-F4",
+      "severity": "info",
+      "location": "docs/RELEASE_AUDIT.md:815 (DP9, the ':7330-7339' citation)",
+      "evidence": "DP9 says 'not because it was bypassed (the coherence axis has no bypass, `:7330-7339`)'. The words 'no bypass flag' are at :7329; :7330 begins mid-sentence at 'exists, and --no-design has no bearing on it either way'. The cited range does support the proposition (it carries '--no-design has no bearing on it either way: this axis asks a question about <task-id>'s OWN artifact') and the proposition is independently true (`:16310`: 'there is no bypass flag by design'), so only the range boundary is off.",
+      "description": "Citation hygiene: the range should start at :7328 or :7329 to include the phrase it is cited for. Noted rather than blocking because the claim itself is correct and independently corroborated. I also verified the adjacent code comment at :7335-7341 independently supports the stronger half of the caveat: 'a v5 task-per-unit CHILD (which needs --no-design above, or carries no unit binding at all) never reaches this leg with APPLICABLE=true' -- so 'not applicable, not bypassed' is the shipped code's own account."
+    },
+    {
+      "id": "R5-F5",
+      "severity": "info",
+      "location": "claude-workflow-plugin-bebu (task title); HANDOFF.md:330, :335, :507",
+      "evidence": "bebu's title reads '...instructs \"confirm 11 / 6 / 0 / 1\" against a ledger that now reads 9 / 8 / 0 / 1'. The ledger now reads 8 / 9 / 0 / 1. HANDOFF.md still carries 11 / 6 / 0 / 1 at :330, :335 and :507 (and 11/6/1/0 at :333).",
+      "description": "Pre-existing and already tracked; out of scope for this change set. Recorded only so that whoever works bebu updates its target figure to 8 / 9 / 0 / 1 rather than the 9 / 8 / 0 / 1 the task title currently names, which would land HANDOFF one step stale again."
+    }
+  ],
+  "iterations": 5,
+  "stopped_by": "verdict"
+}

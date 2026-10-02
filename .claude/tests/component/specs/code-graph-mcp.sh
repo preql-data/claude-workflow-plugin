@@ -15,7 +15,12 @@
 #      well-formed inputSchema and an informative description (>30
 #      chars).
 #   3. Health round-trip: tools/call code_index_health returns ok
-#      (uninitialised first, healthy after a code_search build).
+#      (uninitialised first, healthy after a code_search build). The
+#      build and the health check that observes it run in SEPARATE
+#      server processes, with a bounded wait for index.db between
+#      them — see the "one observation per process" block above
+#      wait_for_index. Merging them back into one round reintroduces
+#      claude-workflow-plugin-dxz.
 #   4. Malformed args: tools/call code_search with `query: 123`
 #      surfaces a structured error envelope carrying both `hint:` and
 #      `example:` lines (the agent self-correction contract).
@@ -124,8 +129,9 @@ TS
 # --------------------------------------------------------------------------
 # Helper: send JSON-RPC frames over stdio to the MCP server and
 # capture the responses. The server reads line-delimited JSON-RPC
-# from stdin and writes line-delimited frames to stdout; we use a
-# 30s `sleep` tail so the server has time to flush before SIGPIPE.
+# from stdin and writes line-delimited frames to stdout; the trailing
+# `sleep 1` holds the pipe open so the server has time to answer and
+# flush before it sees EOF.
 #
 # Args:
 #   $1 — path to write captured stdout
@@ -139,7 +145,95 @@ mcp_call() {
             sleep 0.05
         done
         sleep 1
-    } | CLAUDE_PROJECT_DIR="$SAMPLE" node "$MCP_BIN" > "$out_file" 2>/tmp/code-graph-mcp-stderr.log
+    } | CLAUDE_PROJECT_DIR="$SAMPLE" node "$MCP_BIN" > "$out_file" 2>"$FIXTURE/code-graph-mcp-stderr.log"
+}
+
+# --------------------------------------------------------------------------
+# ONE OBSERVATION PER PROCESS — the invariant that makes this spec
+# deterministic. Never put a state-CHANGING call and the call that
+# OBSERVES that state into the same mcp_call.
+#
+# Why (claude-workflow-plugin-dxz). The MCP SDK does not serialise
+# requests. `processReadBuffer` in @modelcontextprotocol/sdk's
+# server/stdio.js drains EVERY complete frame in one stdin chunk in a
+# single synchronous loop, and `_onrequest` in shared/protocol.js
+# dispatches each as `Promise.resolve().then(() => handler(...))` and
+# returns immediately. So two tool calls delivered in the same chunk are
+# both queued as microtasks before EITHER handler has run a line.
+#
+# code_search's handler then runs first and suspends on ensureIndex()'s
+# `await preloadParsers(...)` — before it has indexed anything — and
+# code_index_health's microtask runs right behind it, finds
+# existsSync(index.db) false, and correctly answers `uninitialized`. Its
+# response overtakes code_search's on the wire.
+#
+# The measured behaviour, driving this repo's own server over stdio with
+# controlled write timing (dxz):
+#
+#   frames 50 ms apart, 2-file project   -> health answers `healthy`
+#   frames 50 ms apart, 151-file project -> health answers `healthy`,
+#       even though the build takes ~1.9 s. Measured: the health frame
+#       was written at t=156 ms and answered at t=2007 ms, 2 ms behind
+#       search's own response — i.e. it sat unread for the entire build,
+#       because the event loop is never free while ensureIndex's await
+#       chain resolves
+#   all frames in ONE write, 2-file      -> health answers `uninitialized`
+#   all frames in ONE write, 151-file    -> health answers `uninitialized`
+#
+# So the variable is NOT the gap between frames — it is whether the two
+# frames land in the same stdin read, which bash's buffering of `printf`
+# into the pipe and the OS scheduler decide, and which machine load
+# moves. That is why this spec flipped in BOTH directions across
+# sessions with identical code, and it is why raising the `sleep` would
+# have fixed nothing while looking like it worked: a 1.9 s build with a
+# 50 ms gap still answers `healthy`.
+#
+# The fix is therefore the SPLIT, not the barrier: one tool call per
+# process leaves nothing to chunk with and nothing to overtake. Every
+# round in this spec now issues AT MOST ONE tools/call (round 1 issues
+# none — tools/list is stateless) — keep it that way; a second one in
+# any round reopens this bug.
+#
+# Nothing here is a server defect: resolve.js is shared by both tools and
+# both read the same CLAUDE_PROJECT_DIR, so the two never disagreed about
+# WHERE the index lives, only about WHEN it exists — and orchestrator.md
+# and qa.md both tell agents that an empty or missing health result is
+# the expected pre-build state. Serialising the server would change a
+# documented contract to paper over a test bug.
+#
+# The barrier below is the readiness CONTRACT between the split halves,
+# not the race fix: it states that round 3b (and Sections 4 and 5) may
+# only run once round 3a's build actually reached disk. In the healthy
+# case the first probe already finds the file — bash waits for every
+# member of a pipeline, so node has exited, and therefore finished
+# persisting, by the time mcp_call returns. The loop keeps that from
+# being an unstated assumption if the server ever persists from a
+# detached child or exits on stdin EOF before persist.
+#
+# A timeout here is a FAIL. Not a skip, not a retry, not "flaky": if the
+# lazy build produced no index, every assertion downstream of it is
+# meaningless, and a spec that cried flake would teach the next reader to
+# re-run instead of to believe it.
+# --------------------------------------------------------------------------
+INDEX_WAIT_TRIES=20            # x INDEX_WAIT_SLEEP = the ceiling below
+INDEX_WAIT_SLEEP=0.25          # fractional sleep is already required by mcp_call
+INDEX_WAIT_BUDGET=$(awk -v n="$INDEX_WAIT_TRIES" -v s="$INDEX_WAIT_SLEEP" \
+    'BEGIN { printf "%.10g", n * s }')
+
+# wait_for_index <db-path> — 0 once the index exists and is non-empty,
+# 1 once the budget is spent. Prints nothing; the caller owns the message
+# so the failure text can name the round it belongs to.
+wait_for_index() {
+    local db_path="$1"
+    local tries=0
+    while [ "$tries" -lt "$INDEX_WAIT_TRIES" ]; do
+        if [ -f "$db_path" ] && [ -s "$db_path" ]; then
+            return 0
+        fi
+        sleep "$INDEX_WAIT_SLEEP"
+        tries=$((tries + 1))
+    done
+    return 1
 }
 
 # --------------------------------------------------------------------------
@@ -194,18 +288,19 @@ HEALTH_STATUS=$(grep -F '"id":2' "$OUT2" | head -1 | jq -r '.result.structuredCo
 assert_eq "code-graph-mcp-2: pre-build health reports status=uninitialized" \
     "uninitialized" "$HEALTH_STATUS"
 
-# Now trigger a build via code_search, then re-ask health.
-OUT3="$FIXTURE/round3.jsonl"
-mcp_call "$OUT3" \
+# Round 3a — trigger the build via code_search, in a process of its own.
+# Adding a code_index_health frame to THIS round IS the dxz bug; see the
+# "one observation per process" block above wait_for_index.
+OUT3A="$FIXTURE/round3a.jsonl"
+mcp_call "$OUT3A" \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"l2","version":"0.0.0"}}}' \
     '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"code_search","arguments":{"query":"flagshipSymbol"}}}' \
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"code_index_health","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"code_search","arguments":{"query":"flagshipSymbol"}}}'
 
 # code_search response.
-SEARCH_OK=$(grep -F '"id":2' "$OUT3" | head -1 | jq -r '.result.structuredContent.ok // ""' 2>/dev/null || echo "")
+SEARCH_OK=$(grep -F '"id":2' "$OUT3A" | head -1 | jq -r '.result.structuredContent.ok // ""' 2>/dev/null || echo "")
 assert_eq "code-graph-mcp-2: code_search returns ok=true after lazy build" "true" "$SEARCH_OK"
-SEARCH_COUNT=$(grep -F '"id":2' "$OUT3" | head -1 | jq -r '.result.structuredContent.data.matches | length' 2>/dev/null || echo "0")
+SEARCH_COUNT=$(grep -F '"id":2' "$OUT3A" | head -1 | jq -r '.result.structuredContent.data.matches | length' 2>/dev/null || echo "0")
 if [ "$SEARCH_COUNT" -ge 1 ]; then
     PASS=$((PASS + 1))
     printf '  PASS: code-graph-mcp-2: code_search found flagshipSymbol (count=%s)\n' "$SEARCH_COUNT"
@@ -215,9 +310,33 @@ else
     printf '  FAIL: code-graph-mcp-2: code_search returned 0 matches; expected >= 1\n'
 fi
 
-POST_HEALTH=$(grep -F '"id":3' "$OUT3" | head -1 | jq -r '.result.structuredContent.data.status // ""' 2>/dev/null || echo "")
-assert_eq "code-graph-mcp-2: post-build health reports status=healthy" \
-    "healthy" "$POST_HEALTH"
+# Readiness barrier between 3a and 3b. Round 3a's server has already
+# exited (bash waited for the whole pipeline), so this normally returns on
+# the first probe. Sections 4 and 5 below both depend on this file, so
+# establishing it HERE — once, with a message that names the mechanism —
+# is what keeps their failures readable.
+INDEX_DB="$SAMPLE/.claude/.code-graph/index.db"
+if ! wait_for_index "$INDEX_DB"; then
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("code-graph-mcp-2: the lazy build did not persist an index within ${INDEX_WAIT_BUDGET}s (no $INDEX_DB after code_search) — a BUILD FAILURE, not a flake; do not re-run past this")
+    printf '  FAIL: code-graph-mcp-2: the lazy build did not persist an index within %ss — expected %s\n' \
+        "$INDEX_WAIT_BUDGET" "$INDEX_DB"
+    printf '    (code_search returned ok=%s; check %s for indexer errors)\n' \
+        "${SEARCH_OK:-<none>}" "$FIXTURE/code-graph-mcp-stderr.log"
+else
+    # Round 3b — ask health in a FRESH process. One tool call after the
+    # handshake means nothing can interleave, so `healthy` here is a
+    # statement about the index on disk rather than about scheduling.
+    OUT3B="$FIXTURE/round3b.jsonl"
+    mcp_call "$OUT3B" \
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"l2","version":"0.0.0"}}}' \
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"code_index_health","arguments":{}}}'
+
+    POST_HEALTH=$(grep -F '"id":2' "$OUT3B" | head -1 | jq -r '.result.structuredContent.data.status // ""' 2>/dev/null || echo "")
+    assert_eq "code-graph-mcp-2: post-build health reports status=healthy" \
+        "healthy" "$POST_HEALTH"
+fi
 
 # --------------------------------------------------------------------------
 # Section 3: malformed args → structured error envelope with hint + example.
@@ -240,8 +359,13 @@ assert_contains "code-graph-mcp-3: error envelope mentions invalid characters" \
 
 # --------------------------------------------------------------------------
 # Section 4: META-TEST — corrupt the index DB; health flips to unhealthy.
+#
+# Deterministic on both counts. Its input — index.db on disk — was
+# established by Section 2's barrier rather than assumed from round 3's
+# timing; and round 5 below issues exactly ONE tool call after the
+# handshake, so it has no interleaving window of its own (the dxz race
+# needed two in-flight requests). $INDEX_DB is set in Section 2.
 # --------------------------------------------------------------------------
-INDEX_DB="$SAMPLE/.claude/.code-graph/index.db"
 if [ ! -f "$INDEX_DB" ]; then
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("code-graph-mcp-4: index DB not present at $INDEX_DB after build — cannot run META-TEST")
@@ -352,7 +476,7 @@ else
                 sleep 0.05
             done
             sleep 1
-        } | CLAUDE_PROJECT_DIR="$STUB_SAMPLE" node "$STUB_BIN" > "$out_file" 2>/tmp/code-graph-mcp-stub-stderr.log
+        } | CLAUDE_PROJECT_DIR="$STUB_SAMPLE" node "$STUB_BIN" > "$out_file" 2>"$FIXTURE/code-graph-mcp-stub-stderr.log"
     }
 
     # Build the index against the stubbed server.
@@ -367,12 +491,17 @@ else
     assert_eq "code-graph-mcp-5: stubbed-server code_search ok (lazy build still works)" \
         "true" "$STUB_BUILD_OK"
 
-    # Now corrupt the stubbed-server's index DB and re-ask health.
+    # Now corrupt the stubbed-server's index DB and re-ask health. Same
+    # barrier as Section 2 — round 6 built, round 7 observes, and the two
+    # are separate processes, so the only question is whether the build
+    # landed. Rounds 6 and 7 each issue one tool call, so neither has an
+    # interleaving window.
     STUB_INDEX_DB="$STUB_SAMPLE/.claude/.code-graph/index.db"
-    if [ ! -f "$STUB_INDEX_DB" ]; then
+    if ! wait_for_index "$STUB_INDEX_DB"; then
         FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("code-graph-mcp-5: stubbed-server index DB not present — cannot complete sensitivity check")
-        printf '  FAIL: code-graph-mcp-5: stubbed-server index DB missing at %s\n' "$STUB_INDEX_DB"
+        FAILED_TESTS+=("code-graph-mcp-5: the stubbed server's lazy build did not persist an index within ${INDEX_WAIT_BUDGET}s (no $STUB_INDEX_DB) — cannot complete sensitivity check")
+        printf '  FAIL: code-graph-mcp-5: stubbed-server lazy build did not persist an index within %ss — expected %s\n' \
+            "$INDEX_WAIT_BUDGET" "$STUB_INDEX_DB"
     else
         printf 'NOT-A-SQLITE-FILE — CORRUPTED-FOR-CODE-GRAPH-MCP-SENSITIVITY-META-TEST\n' > "$STUB_INDEX_DB"
 

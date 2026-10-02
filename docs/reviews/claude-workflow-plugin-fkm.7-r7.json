@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.7",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "51721193de06450070d39a271b11bb2a314d47b8bd0c2a98216b3dc959f68a4d",
+  "risk_threshold": "high",
+  "stop_condition": "Every acceptance criterion the D5 piece 4 brief states is traced to a shipped mechanism, every shipped surface describing criteria_tests or design-unit-align matches what the code actually guarantees, and no critical/high finding remains in the alignment or approve-refusal paths.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R7-F1",
+      "severity": "high",
+      "location": ".claude/rubrics/default.md:32 (and its mirror .claude/tests/e2e/fixtures/rubric-revision-loop/.claude/rubrics/default.md:32)",
+      "evidence": "C3 states: \"A payload that reaches grading with `unit_id` set has therefore already cleared that mechanical bar\". MEASURED: compute_design_alignment has exactly two call sites (grep -n compute_design_alignment .claude/scripts/qa-gate.sh -> 6391 in cmd_approve, 13803 in cmd_design_unit_align); design-gate-precheck does NOT call it. qa.md:481 places grading \"BEFORE approving\"; orchestrator.md:520-523 runs grade-record then re-engages QA, which then approves. Approve is therefore STRICTLY AFTER grading.",
+      "description": "The rubric tells the grader that design-unit-align's completeness and existence checks have ALREADY run at grading time. They have not run and cannot have: they run at approve, which follows grading. The grader is the workflow's one independent scoring mechanism, and this sentence instructs it to stand down on two checks on the strength of a guarantee that does not yet exist. Final safety is preserved (approve still refuses), so the cost is a wasted relay round plus a false statement on a governing artifact -- the same surface-overclaim class that took piece 3 six rounds."
+    },
+    {
+      "id": "R7-F2",
+      "severity": "high",
+      "location": ".claude/agents/grader.md:50",
+      "evidence": "Item 4 states design-unit-align is \"a SEPARATE, EARLIER gate from this grading pass\" -- in the SAME sentence that correctly says it runs \"at `approve` time\". Both cannot hold: approve follows grading (same evidence as R7-F1). The sentence is internally contradictory as well as wrong.",
+      "description": "Same false ordering as R7-F1, on the surface the grader itself reads. \"EARLIER\" is the load-bearing word: it is the reason the grader is given for treating the mechanical checks as already satisfied. Fix both surfaces together -- the honest form is that a bound payload will have to clear that bar at approve, AFTER grading, so C3 need not duplicate it."
+    },
+    {
+      "id": "R7-F3",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:13362-13364 (LEG 3 region header, corroboration item (d))",
+      "evidence": "Header says green_after is \"the state a real command produced (qa-gate.sh green-check), never an unexecuted claim (the \\\"actually ran\\\" half)\". MEASURED: the code at 13680-13687 reads `.green_after` out of the payload and compares it to the string \"green\" -- nothing else. `grep -rn GREEN-CHECK .claude/scripts/*.sh` (excluding tests) returns 4 hits: two comments, one region sentinel, and the WRITER at 14495. The GREEN-CHECK v1 record has NO mechanical consumer anywhere. review-check.sh only enum-checks green|red|none.",
+      "description": "Leg (d) is presented as the \"actually ran\" half of a two-part corroboration, and asserted to be \"never an unexecuted claim\". Mechanically it is an unverified self-declaration on the same payload as criteria_tests -- the same family it is supposed to corroborate. The honest count is three externally-corroborated checks (acceptance-id set difference both directions; digest-bound payload read; filesystem existence) plus one self-declared field, not four-way corroboration. This matters beyond wording: the header's own argument for why the grep shallowness is an acceptable residual rests on \"Both halves, neither alone\", and one of those halves is weaker than stated. A future editor reading this could also drop qa.md's GREEN-CHECK cross-check as redundant, which is the only place that binding is actually performed."
+    },
+    {
+      "id": "R7-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:13714-13728 (LEG 3, step 3e) vs its own bound at 13381-13382",
+      "evidence": "3e resolves a ref as: case $ref_file in /*) abs=$ref_file ;; *) abs=$PROJECT_DIR/$ref_file ;; esac -- then -f and `grep -qF`. No containment check (0 matches for realpath/cd -P/is_subdir in 13703-13732), though this same file already ships review_dir_is_review_subdir and design_dir_is_spec_dir with exactly that discipline. DEMONSTRATED: `grep -qF root /etc/passwd` succeeds, so criteria_tests {\"AC1\":[\"/etc/passwd::root\"]} with the same string in tests_added and green_after=green satisfies 3e end to end. A `../`-relative ref escapes identically.",
+      "description": "The header discloses the residual as bounded by \"a materially smaller set than \\\"any string appearing anywhere in the repo\\\"\". The actual search space is the whole filesystem, not the repo -- the stated bound is wrong in the one paragraph written to state it honestly. Not a privilege boundary (the specialist already has write access and must name the absurd ref twice), so the practical risk is low; but the DISCLOSURE is what this piece is being judged on, and the cheap fix (require the ref to resolve inside PROJECT_DIR, reusing the in-file idiom) is smaller than the correction to the sentence."
+    },
+    {
+      "id": "R7-F5",
+      "severity": "low",
+      "location": ".claude/scripts/review-check.sh:1092",
+      "evidence": "The criteria_tests_value_empty detail string claims \"the alignment check (qa-gate.sh) would refuse it as an uncovered criterion regardless, so refusing the shape here fails faster\". DEMONSTRATED against LEG 3's own jq: acc=[\"AC1\",\"AC2\"], ct={\"AC1\":[],\"AC2\":[]} -> {\"missing\":[],\"unknown\":[]} (completeness PASSES) and [ .[][] ]|unique -> [] (3e iterates zero refs), so alignment would PASS, not refuse.",
+      "description": "A claimed defense-in-depth that is not there. Unreachable in practice -- the validator refuses empty arrays at 1057 and validate-completion-criteria-tests.test.sh pins that -- so this is a comment-accuracy issue, not a live hole. Worth correcting because it is the stated reason the shape check is described as merely \"faster\" rather than load-bearing, and a future editor could remove the check on that basis."
+    }
+  ],
+  "iterations": 7,
+  "stopped_by": "stop_condition"
+}

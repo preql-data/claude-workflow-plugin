@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-q5l6",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "85246735bc173bba3c36f920511ba77cc9c648afc64204cc30c848e49e54601b",
+  "risk_threshold": "high",
+  "stop_condition": "All seven brief items adjudicated against measured evidence from the shipped artifact, with the scope judgement ruled on explicitly; no finding at or above high remains in the new refusal condition, its recovery path, the denylist exemption, or the untouched change_set_reconstructed guard.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:6917",
+      "evidence": "PROBE E (isolated git fixture, shipped script): tracker holds the same two files under an alias spelling of the project root. `impact-report.sh --relativized-changed-files` resolves them to src/e1.ts and src/e2.ts, so change_set_hash DOES cover the declared work; the cross-check nonetheless reports `declared=2 bound=2 matched=0` and approve exits 2 with completion_files_total_miss. Grepping the refusal text for spelling|symlink|worktree returns 0 matches. Mechanism: the cross-check norm (qa-gate.sh:3643, ltrimstr($root+\"/\")) is strictly weaker than impact-report.sh's git-aware, sibling-worktree-safe relativize_for_impact() (:223); the report stores raw tracker spelling in .files[].file while the hash is computed over relativized paths.",
+      "description": "The amendment justifies promoting matched=0 by asserting that \"reason 1's spelling-mismatch concern presumes some shared member survives normalisation\". That premise is false: a divergence in the ROOT PREFIX breaks every member simultaneously, which is exactly how matched=0 arises — so reason 1 is dismissed using a premise the mechanism contradicts. Consequence: a correctly and completely bound change set is refused and told its tracker was swallowed, while the pre-existing xnote at :6975 that names this exact cause is now unreachable whenever survivors>0 (the refusal exits first). NOT BLOCKING: the named recovery demonstrably rescues it (PROBE D: rc=2 -> rm baseline + reconcile-tracker + impact-report -> approved, cross-check PASSED), no bypass is needed and nothing false is certified. Remedy (non-bypass): compare against the relativized list, or restore the spelling/worktree cause to the refusal text when bound>0."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "medium",
+      "location": ".claude/tests/component/specs/qa-gate.sh:1788",
+      "evidence": "PROBE M (narrowing mutation of the shipped script, diff shown and `bash -n` clean): condition narrowed to `matched==0 && bound==0`. CASE 1 (Q5L6-1's exact shape, declared=3 bound=0): shipped rc=2, mutant rc=2 — identical. CASE 2 (declared=2 bound=1): shipped rc=2 completion_files_total_miss, mutant rc=0 APPROVES. Q5L6-1 and Q5L6-3 both assert `bound=0` in their arithmetic strings; Q5L6-2 has declared=0 and never enters the branch. Therefore all 20 shipped Q5L6 assertions pass under the narrowed variant.",
+      "description": "The deliberate widening — refusing on matched=0 regardless of bound, which the implementer explicitly flagged for QA to rule on — has no regression control. I RULE THE WIDENING CORRECT (see the approval summary), which makes pinning it the natural closeout: a future editor narrowing to bound==0, the most likely 'simplification' since the task description is written around the bound=0 case, would turn the gate green with no assertion noticing. This is NOT a pairing-requirement violation: the check itself is fully paired on all four legs. Remedy: one assertion with bound>0 and matched=0 expecting rc=2."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:6955",
+      "evidence": "Measured on /bin/bash 3.2.57(1)-release (arm64-apple-darwin25), the only bash on this host: `re=\"\"; [[ \"abc\" =~ $re ]]` returns rc=2 (not a match), both quoted and unquoted. The guard's own behaviour is correct and fail-CLOSED either way — measured: with WORKFLOW_DENYLIST_REGEX unset, survivors=2 over a 2-path list, so the refusal FIRES rather than being disarmed.",
+      "description": "The guard comment states that \"bash's `=~` treats an EMPTY pattern as matching every string\", which is not what the platform bash does. Comment accuracy only — no behavioural impact, and the guard is the right shape regardless. Flagged because this file's headers are explicitly relied on by future editors."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

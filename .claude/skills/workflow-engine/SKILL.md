@@ -18,18 +18,34 @@ keyword trigger). Per cross-cutting principle 4, it is always-on.
 
 ## Mandatory roles
 
-The plugin enforces a three-layer role split. The user types intent in plain
+The plugin enforces a layered role split. The user types intent in plain
 English; Claude internally maps to these roles.
 
 - **Orchestrator** — coordinates and delegates. Does NOT write implementation
   code. Tool list omits `Write`/`Edit`/`MultiEdit`; the
   `prevent-orchestrator-edits.sh` PreToolUse hook is a defense-in-depth
   complement.
+- **Designer** — `@designer`. Produces the design artifact and nothing else:
+  problem framing, testable acceptance criteria, and the decomposition into
+  independently buildable units. Writes no implementation code. (v5.0.0
+  Phase D1.)
+- **Design reviewer** — `@design-reviewer`. Reviews that artifact in a fresh
+  context against `.claude/rubrics/design.md`, and must resolve to an identity
+  distinct from the designer. Spawned from the ROOT, never by the designer:
+  subagents cannot spawn subagents. (v5.0.0 Phase D2.)
 - **Specialists** — `@backend`, `@frontend`, `@devops`. Implement code in
   their domain. Have full broad tool access.
 - **QA** — mandatory gate. No code reaches the user without QA approval. QA
   approves/blocks via the `qa-gate.sh` helper, not manual `bd label add/remove`
-  commands.
+  commands. Two more agents ride the same `reviewer` model-role class as QA
+  but are never auto-routed: `@grader` (separate-context rubric scoring) and
+  `@judge` (separate-context mutation-survivor classification). Both are
+  spawned from the ROOT conversation only, relayed by QA's own request —
+  subagents cannot spawn subagents.
+
+Nine agents ride five model-role classes in total (`designer`,
+`design_reviewer`, `orchestrator`, `implementer`, `reviewer`) — see
+`.claude/model-roles` and `docs/AGENTS.md`.
 
 ## Mandatory delegation flow
 
@@ -81,6 +97,22 @@ After creation, persist the active id:
 ```bash
 bash .claude/scripts/current-task.sh set <task-id>
 ```
+
+**Design-derived decomposition (v5 D4b).** When the tasks you just created
+implement units from a reviewed design artifact (Phase D: grilling ->
+`@designer` -> the design-review relay; `orchestrator.md` section 5e reaching
+`satisfied`), bind each child task to its unit before delegating:
+
+```bash
+bash .claude/scripts/qa-gate.sh design-unit-bind <child-task-id> \
+    --design-task <design-task-id> --unit-id <unit-id>
+```
+
+`qa-gate.sh design-conform <task-id>` later reads this binding to check that
+task's changed files against its unit's declared `files[]` — a task with no
+binding cannot be conformance-checked, and nothing else writes the binding.
+`orchestrator.md` section 2b carries the full procedure, including what this
+does and does not enforce today.
 
 ## Task documents (J4)
 
@@ -198,7 +230,7 @@ short summary:
 | PreToolUse          | `prevent-orchestrator-edits.sh`     | Blocks orchestrator from writing code.                         |
 | PostToolUse         | `post-edit.sh` + `github-link.sh`   | Tracks changed files (Edit*); auto-links Beads <-> GitHub PRs (Bash gh*) (I3). |
 | Stop                | `verify-before-stop.sh`             | Polyglot test/lint/type, QA gate, epic gate (multi-repo aware: I8). |
-| SessionEnd          | `session-end.sh`                    | `bd sync` with error logging.                                  |
+| SessionEnd          | `session-end.sh`                    | Checks the Beads JSONL ledger (read-only) and logs divergence. |
 
 ## Plugin scripts (Claude-invoked)
 
@@ -260,6 +292,9 @@ bd update $TASK --notes "COMPLETED: JWT auth endpoints"
 bash .claude/scripts/qa-gate.sh enter $TASK
 bash .claude/scripts/qa-gate.sh approve $TASK 'Verified: login, logout, token refresh'
 
-# 7. Beads task closes when Stop hook clears (verify-before-stop.sh handles
-#    the bd update --status closed call).
+# 7. The Stop hook releases — and does NOT close the task (qzv). An approval
+#    binds a CHANGE SET; closing is a claim about the TASK's work, which only
+#    the caller knows. The released envelope names the command; run it when the
+#    task really is done, and leave the task open when more change sets remain.
+bd close $TASK --reason '<what shipped>'
 ```

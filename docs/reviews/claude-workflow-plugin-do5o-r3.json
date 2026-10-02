@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-do5o",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "f0526f12d2a8088475610812e6dc691f86339a11968d937abac86451ba713517",
+  "risk_threshold": "high",
+  "stop_condition": "The corrected LESSONS.md entry is verifiably present in the working tree by checks that depend on it, every figure in both new entries reproduces against an independent measurement, and R2-F2 and R2-F3 are confirmed fixed.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "info",
+      "location": "LESSONS.md:338, opening clause",
+      "evidence": "The entry opens 'the first two times this lesson was written it under-measured its own evidence'. Authoring 1 did under-measure (45 against a floor of 139). Authoring 2 did NOT: its figures were correct and complete at 139 across six specs -- I verified every one of them in round 2 -- and it failed by being destroyed by a hard reset and then falsely confirmed by a grammar-only suite, which is a different failure from under-measurement.",
+      "description": "A compression rather than an error, and non-blocking: the body of the same entry narrates the second failure accurately two sentences later ('that revert was done with `git reset --hard` ... The entry had to be authored a third time'), so a reader reaches the right account. Recorded at info rather than buried in prose because the entry's subject is measurement precision, and because a future reader counting instances of under-measurement from the opening clause would count two where the evidence supports one. No action required; noted for whoever next edits this line, given it cannot be edited in place once committed."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

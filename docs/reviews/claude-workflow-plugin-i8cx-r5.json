@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "222877b5a706796fffe4aab802880b303b407b72bf4bf4b47f669dbfb8d16a77",
+  "risk_threshold": "high",
+  "stop_condition": "Stop when R2-F5 is adjudicated closed or still-open, having checked every path that can RELEASE or REPLAY without disclosing an active override, including a cached run whose override state cannot be established. Scope is verify-before-stop.sh only.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R5-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:6212",
+      "evidence": "The vanished-change-set release at lines 6212-6213 and worktree-resolution release at lines 6552-6553 emit bare `{}` and exit after suite dispatch. `OVERRIDE_RELEASE_NOTE` is not computed until line 7100, so neither release can disclose a fresh narrowed run, a replayed narrowed run, or unknown cached override state.",
+      "description": "R2-F5 remains open on alternate successful-release paths. Although the ordinary bottom release now discloses overrides correctly, a passing narrowed run can still release silently through either early exit."
+    },
+    {
+      "id": "R5-F2",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:6665",
+      "evidence": "After either cached-replay branch sets `SUITE_REUSED=true`, the label-without-record block at line 6665, review-discipline block at line 6697, and design-discipline block at line 6748 call `emit_block` directly without `checks_scope_claim` or `checks_scope_note`; `emit_block` exits immediately. Consequently these replay paths disclose neither an active cached override nor an unknown cached override state.",
+      "description": "R2-F5 remains open on specialized blocking replay paths. An unchanged-tree replay while an approval binding, review verdict, or design verdict is defective silently consumes the cached result without the required override disclosure."
+    },
+    {
+      "id": "R5-F3",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:2991",
+      "evidence": "`replay_cached_override_for` marks the cache known whenever `read` succeeds and all three fields are merely nonempty; it never validates that each field is exactly `true` or `false` or rejects extra fields. For example, `false false t` is accepted as known, but `override_active type` treats `t` as false, causing claim, note, and release paths to emit neither an override warning nor UNKNOWN.",
+      "description": "A corrupt, partially written, or future-format three-token cache fails toward reassuring silence rather than disclosure. Cached override state is not actually established unless every field is validated against the boolean format."
+    }
+  ],
+  "iterations": 5,
+  "stopped_by": "stop_condition"
+}

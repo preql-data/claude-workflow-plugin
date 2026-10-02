@@ -21,11 +21,13 @@
  * `--no-daemon`, so its writes are subject to the race. See Beads task
  * claude-workflow-plugin-l1r.7 for the offline repro that confirms it.
  *
- * The fix is to call `bd sync --flush-only` against the fixture's .beads/
- * before BOTH the pre-run snapshot and the post-run diff. `--flush-only`
- * exports pending JSONL without any git operations — exactly what we
- * want for a hermetic flush. We pass `BD_NO_DAEMON=1` so the flush
- * itself is unambiguous (it never gets enqueued on the daemon).
+ * The fix is to export the fixture's .beads/ to JSONL before BOTH the
+ * pre-run snapshot and the post-run diff. That was `bd sync --flush-only`
+ * until bd 1.1.2 removed `bd sync`; it is now `bd export -o
+ * .beads/issues.jsonl`, which rewrites the target from the DB on every
+ * supported bd and performs no git operations — exactly what a hermetic
+ * flush needs. `BD_NO_DAEMON=1` is still passed: inert on 1.1.x (no daemon
+ * exists) and still meaningful on 0.47.x.
  *
  * The flush is best-effort: if bd isn't installed, or the .beads/ isn't
  * initialised yet, we log and proceed. Capture stays best-effort — specs
@@ -234,11 +236,10 @@ export interface FlushResult {
 /**
  * Flush the fixture's beads DB to `.beads/issues.jsonl` synchronously.
  *
- * Uses `bd sync --flush-only` (--help: "Only export pending changes to
- * JSONL (skip git operations)") with `BD_NO_DAEMON=1` so the flush
- * itself never gets enqueued on the daemon. Runs from `fixturePath` as
- * cwd, so bd auto-discovers the FIXTURE's `.beads/` (and not the
- * harness's parent project's `.beads/`).
+ * Uses `bd export -o .beads/issues.jsonl` — one unconditional call that
+ * rewrites the ledger from the DB on both bd 0.47.x and 1.1.2. Runs from
+ * `fixturePath` as cwd, so bd auto-discovers the FIXTURE's `.beads/` (and
+ * not the harness's parent project's `.beads/`).
  *
  * Tolerant of:
  *   - Missing `.beads/` directory (fixture before `bd init`) → no-op.
@@ -267,12 +268,32 @@ export function flushFixtureBeads(
 
   const issuesJsonl = path.join(beadsDir, "issues.jsonl");
   const timeoutMs = opts.timeoutMs ?? 15_000;
+  // BD_NO_DAEMON is inert on bd 1.1.x (there is no daemon — the engine is
+  // in-process embedded Dolt) but still correct on 0.47.x, where the daemon
+  // could enqueue the flush instead of performing it. An unknown env var is
+  // ignored, unlike an unknown FLAG, so keeping it costs nothing.
   const env = { ...process.env, BD_NO_DAEMON: "1" };
 
-  // Step 1: try the cheap `bd sync --flush-only` path first. When bd has
-  // pending dirty rows AND issues.jsonl exists with a stale hash, this is
-  // the fast path that produces the correct file.
-  const flushResult = spawnSync(bd, ["sync", "--flush-only"], {
+  // ONE authoritative call: `bd export -o <file>` (fkm.1.1).
+  //
+  // This used to be a two-step dance — `bd sync --flush-only` first, then
+  // `bd export --force -o` only when issues.jsonl was still ABSENT. bd 1.1.2
+  // broke both halves and the guard between them:
+  //
+  //   - `bd sync` was REMOVED outright, so step 1 always failed.
+  //   - `--force` was REMOVED, so the step-2 fallback always failed too.
+  //   - Worse, step 2 only fired when the file was MISSING. Under 1.1.2 the
+  //     common shape is a ledger that exists but is STALE, so the fallback
+  //     never ran and the harness captured a stale ledger while reporting
+  //     success — a fresh instance of the very 366.5 bug the fallback was
+  //     added to fix.
+  //
+  // Plain `bd export -o` is the right primitive on BOTH supported versions,
+  // and this was measured rather than assumed: on 0.47.1 it recreates a
+  // deleted target AND picks up a subsequently-created issue, so the hash
+  // short-circuit that motivated `--force` belonged to `sync --flush-only`,
+  // not to `export`. Unconditional means no guard can go stale again.
+  const exportResult = spawnSync(bd, ["export", "-o", issuesJsonl], {
     cwd: fixturePath,
     encoding: "utf8",
     timeout: timeoutMs,
@@ -283,8 +304,8 @@ export function flushFixtureBeads(
   // installed; capture is best-effort so we log via the returned struct
   // rather than throwing.
   if (
-    flushResult.error &&
-    (flushResult.error as NodeJS.ErrnoException).code === "ENOENT"
+    exportResult.error &&
+    (exportResult.error as NodeJS.ErrnoException).code === "ENOENT"
   ) {
     return {
       ok: false,
@@ -295,72 +316,15 @@ export function flushFixtureBeads(
     };
   }
 
-  // Step 2: if issues.jsonl is still absent after the flush, fall back
-  // to `bd export --force -o .beads/issues.jsonl`. This is needed
-  // because bd 0.47.1's `--flush-only` short-circuits with "JSONL
-  // unchanged (hash match)" when the metadata table's
-  // jsonl_content_hash matches a SIBLING file (e.g. sync_base.jsonl
-  // — the prior run's import baseline, gitignored, survives
-  // `git clean -fd`). In that state flush-only exits 0 but writes
-  // nothing, leaving readBeadsIssues with an empty map and
-  // beadsTasksCreated with an empty diff. The live-trace evidence is
-  // .claude/tests/e2e/cassettes/replays/node-react-auth-2026-06-11T23-34-49-784Z.jsonl
-  // — see claude-workflow-plugin-366.5 forensic notes.
-  //
-  // `bd export --force` always rewrites the target from the DB
-  // regardless of hash state, so this is the reliable "ensure
-  // issues.jsonl reflects DB state" primitive. We only invoke it when
-  // the cheap path failed to produce the file — keeping the fast path
-  // for the common case where bd's flush did the right thing.
-  if (!existsSync(issuesJsonl)) {
-    const exportResult = spawnSync(
-      bd,
-      ["export", "--force", "-o", issuesJsonl],
-      {
-        cwd: fixturePath,
-        encoding: "utf8",
-        timeout: timeoutMs,
-        env,
-      },
-    );
-    if (
-      exportResult.error &&
-      (exportResult.error as NodeJS.ErrnoException).code === "ENOENT"
-    ) {
-      // Shouldn't happen — the flush above would have caught this —
-      // but be paranoid.
-      return {
-        ok: false,
-        status: null,
-        stderrTail: `bd binary not found at ${bd}`,
-        noBeadsDir: false,
-        bdMissing: true,
-      };
-    }
-    const exportStderr = exportResult.stderr ?? "";
-    const exportStderrTail =
-      exportStderr.length > 500 ? exportStderr.slice(-500) : exportStderr;
-    // The export pass is authoritative — its result is what we return.
-    // ok:true requires the export to succeed AND issues.jsonl to exist
-    // after it runs (catches the "exit 0 but empty stdout" edge case).
-    return {
-      ok: exportResult.status === 0 && existsSync(issuesJsonl),
-      status: exportResult.status,
-      stderrTail: exportStderrTail,
-      noBeadsDir: false,
-      bdMissing: false,
-    };
-  }
-
-  // Cheap path succeeded — issues.jsonl is present. Report the original
-  // flush result.
-  const flushStderr = flushResult.stderr ?? "";
-  const flushStderrTail =
-    flushStderr.length > 500 ? flushStderr.slice(-500) : flushStderr;
+  const exportStderr = exportResult.stderr ?? "";
+  const exportStderrTail =
+    exportStderr.length > 500 ? exportStderr.slice(-500) : exportStderr;
+  // ok requires BOTH a zero exit and the file existing afterwards — the
+  // "exit 0 but wrote nothing" edge case is exactly what 366.5 was.
   return {
-    ok: flushResult.status === 0,
-    status: flushResult.status,
-    stderrTail: flushStderrTail,
+    ok: exportResult.status === 0 && existsSync(issuesJsonl),
+    status: exportResult.status,
+    stderrTail: exportStderrTail,
     noBeadsDir: false,
     bdMissing: false,
   };

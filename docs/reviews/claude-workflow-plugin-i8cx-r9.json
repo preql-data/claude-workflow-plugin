@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "1a618a14041af6ca8aeb09e63b3e08a5b3142780bec684e9db255fb4cf1a4d5c",
+  "risk_threshold": "high",
+  "stop_condition": "Report HIGH only for a route by which an open design_conflict can be cleared or\nauthorized without a superseding satisfied DESIGN-REVIEW under which the\ndisputed unit's own content changed; or for a legitimate task the removal has\ndeadlocked. MEDIUM/LOW for everything else. If you find no HIGH, say so\nplainly rather than manufacturing one.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R9-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:8324",
+      "evidence": "cmd_design_gate_precheck calls compute_design_conflict_open only inside the DESIGN_SATISFIED=true branch, then returns ready for no_design_attempted at line 8398 without reading conflicts. cmd_design_conflict accepts any validating docs/specs/<tid>.md artifact and does not require a DESIGN-ARTIFACT record. Therefore a task can be approved with --no-design while an unrecorded artifact already exists, receive a legitimate DESIGN-CONFLICT afterward, and still pass the Stop-time precheck because filing the conflict changes only Beads state.",
+      "description": "This authorizes an open design_conflict without any unit amendment or superseding satisfied DESIGN-REVIEW. Section 8h cannot catch the route because its subject has a recorded satisfied design, while Section 8i proves only the no-design case with no conflict."
+    }
+  ],
+  "iterations": 9,
+  "stopped_by": "stop_condition"
+}

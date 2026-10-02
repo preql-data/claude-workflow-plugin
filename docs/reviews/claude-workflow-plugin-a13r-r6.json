@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-a13r",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "78262fa80243bc664f6a7c579baf34226acd8ef5a669d265b5174ab0ea509bd4",
+  "risk_threshold": "high",
+  "stop_condition": "Only the round-6 responses to R5-F1 and R5-F2 were reviewed. I independently read every named region; tested 3.1c against the current extraction, a valid comment-bearing split arm with divergent executable payloads, duplicate ROLE_KEYS, and a sixth role; traced role identity through 1.4/3.1b/3.2 and the existing 14.14 literal-five fixture; checked the corrected 6.3 source-shape wording and disclosed widening against its later live behavioural legs; and ran ShellCheck 0.11.0 with the SC2086 directive removed to verify that only the intentional unquoted count expansion is suppressed. The sandbox still denies mktemp (`mktemp: ... Operation not permitted`), so I did not execute the full suite and produced no suite pass/fail figure. The packet's clean 436 passed / 0 failed, rc=0 is orchestrator-reproduced; A 433/2 rc=1, B 433/0 rc=0, C 435/1 rc=1, and D 435/0 rc=0 are implementer-measured, not independently re-executed. Because impact-report.sh --hash-only also requires mktemp, reviewed_hash was independently produced with the same readable-tracker, LC_ALL=C sort-u, denylist, and SHA-256 pipeline in memory.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R6-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/model-roles.test.sh:459-462",
+      "evidence": "The new predicate is substring-based: `^        ${_313_role}).*printf`. I transformed only the extracted `designer)` arms in memory into valid multi-line case arms whose selected label was identical on both sides — `designer)        # printf payload follows` — while the following executable continuation printed `designer` in role_agents() and `WRONG` in _expected_members(). `bash -n` returned 0 and executing the extracted functions returned those divergent values. Nevertheless, the shipped selector omitted both executable continuation lines, the selected sets compared equal, ROLE_KEYS still counted 5, and every one of the five per-role greps returned 1 because `printf` occurred in the comment. Thus both completeness assertions and the byte comparison pass over the exact split-arm payload drift the new comment says is closed.",
+      "description": "`.*printf` does not prove that the selected line carries a printf command; a comment, identifier, argument, or trailing payload can supply the substring. Require printf as the first command token after the case label (for example `^        ${role})[[:space:]]+printf[[:space:]]`) or parse/execute the extracted arm, and ship the comment-bearing split-arm mutant as the negative control."
+    },
+    {
+      "id": "R6-F2",
+      "severity": "low",
+      "location": ".claude/scripts/tests/model-roles.test.sh:454-458",
+      "evidence": "The assertion says ROLE_KEYS has one key per concrete role, but it checks only word count. With the independently probed value `designer designer design_reviewer orchestrator implementer`, the raw count is 5, the unique count is 4, `reviewer` is never iterated, and both incompleteness accumulators remain empty against the current arm sets. A one-file corruption is caught elsewhere by 3.1b/3.1/3.2, so this is not a suite-wide silent pass today; however, lines 436-441 explicitly reject relying on another section's coupled assertion and claim the condition is guarded locally. It is not: exactly five words can contain a duplicate and omit a concrete role.",
+      "description": "The count pin closes zero/partial cardinality and makes a legitimate sixth role fail loudly, but it does not establish uniqueness or identity. Compare the locally parsed set with the independently parsed CONCRETE_ROLES set and/or require five unique keys before the loop. The other literal five at 14.14 would also need updating for a sixth role; its later missing-member assertions fail loudly, so it is maintenance coupling rather than another current silent green."
+    },
+    {
+      "id": "R6-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/model-roles.test.sh:419-467; .claude/tests/README.md:535-560",
+      "evidence": "This response adds three checks — the ROLE_KEYS precondition and two completeness assertions — but adds no committed mutation/control block. A repository search for the new assertion names and accumulators finds only these assertions and their explanatory comments. The packet's A-vs-B and C-vs-D scratch measurements show present sensitivity but do not ship and therefore cannot run in future CI. The named project rule is explicit that a new check ships with a paired negative control and that a pair includes non-vacuity, specific misbehaviour, restore control, and execution of the shipped artifact.",
+      "description": "The response does not meet the repository's mandatory pairing requirement. Persist a 3.1c META block that constructs the relevant source mutations, proves each landed and still parses, demonstrates the old comparison's false success/new guard's failure, and restores the shipped functions. The control should include the comment-bearing split arm from R6-F1; otherwise it would pin only the already-known shared-reindent instance."
+    }
+  ],
+  "iterations": 6,
+  "stopped_by": "stop_condition"
+}

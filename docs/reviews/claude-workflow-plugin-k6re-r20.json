@@ -1,0 +1,36 @@
+{
+ "contract_version": "1",
+ "task_id": "claude-workflow-plugin-k6re",
+ "reviewer_identity": "qa-claude",
+ "reviewer_model": "claude-opus-5[1m]",
+ "reviewer_pin": "claude-opus-5",
+ "reviewed_hash": "b4c49eefdb2164a589c3adb7047923b832840582b480aefc191fa14129f80935",
+ "risk_threshold": "high",
+ "stop_condition": "Round 20 is scoped to confirming the R19-F1/R19-F2 corrections are TRUE and that the round is comments-only: every corrected assertion re-derived on this interpreter rather than read; the comments-only claim measured against a baseline that isolates THIS round; the has_label corrected example verified in both halves; the published timing figures checked arithmetically. Settled matter from rounds 1-19 is explicitly out of scope and is not re-opened.",
+ "verdict": "approve",
+ "findings": [
+  {
+   "id": "R20-F1",
+   "severity": "medium",
+   "location": ".claude/scripts/qa-gate.sh:463 (census, newly written this round); :3734 and :3743 (has_label header, pre-existing)",
+   "evidence": "The census says 'Checked individually: every one of has_label's ten call sites, both of set_terminal_label's, and restore_labels' one currently sits inside an if/&&/||/! context' (:463). has_label has ELEVEN call sites, not ten. Enumerated from the current tree: 2062, 2076, 3820, 3848, 3849, 3927, 3928, 3985, 4542, 4552, 4553. The one the count omits is qa-gate.sh:3820 \u2014 remove_label()'s tail statement `! has_label \"$1\" \"$2\"`, structurally unlike the other ten (it is has_label used as another helper's RETURN VALUE, not a condition inside a cmd_* function). Independent baseline: `git show HEAD:.claude/scripts/qa-gate.sh` also has eleven (1683, 1697, 3278, 3306, 3307, 3385, 3386, 3443, 3959, 3969, 3970), so the miscount predates this change set and was carried forward into text re-authored this round at 12:57:58Z rather than re-derived. The two adjacent counts in the same sentence ARE right: set_terminal_label has exactly 2 call sites (6616, 6914 \u2014 2017/2033/2109 are string literals naming the function, not calls) and restore_labels exactly 1 (2084). THE OPERATIVE CONCLUSION IS UNAFFECTED AND I VERIFIED IT: all eleven sit in exempt contexts, including :3820 \u2014 probed directly, the `!` exempts has_label's body even when remove_label is itself invoked bare (BODY-CONTINUED at rc=0 for bare/if/|| forms), while the same shape without the `!` aborts at rc=7, so the probe discriminates. The guard at :3762 (`|| true`) is present regardless, so no live defect exists on any path. This is a cardinality error in a sentence that explicitly claims individual enumeration, not a false safety claim.",
+   "description": "Below risk_threshold=high, so it does not block. It is recorded rather than waived because it is the same failure mode R19-F1 blocked on, one order of magnitude smaller: a claim about a set asserted from the prior draft instead of re-counted against the tree. Cost to a future reader is bounded \u2014 they grep, find eleven, see ten, and must re-derive which site the census did not look at. Remedy is three words in three places: :463 'ten' -> 'eleven', :3734 '(10 of them' -> '(11 of them', :3743 'ten callers' -> 'eleven callers', and ideally one clause naming :3820 as the structurally different one so the next re-count starts from a complete list."
+  },
+  {
+   "id": "R20-F2",
+   "severity": "low",
+   "location": ".claude/scripts/tests/run-tests.sh:699",
+   "evidence": "The R19-F2 remedy paragraph argues this round's growth '(+71-95s depending which pair of figures is compared) is roughly half the prior round's (~147s)'. Every other number in that paragraph is sourced and arithmetically correct \u2014 I recomputed all of them: 900/771.35 = 1.16679 -> '1.167x'; 756.16/900 = 84.02% and 771.35/900 = 85.71% -> '84-86%'; 900-756.16 = 143.84 -> '144s'; and the '+71-95s' range is exactly the min/max over all four implementer/QA pairings (71.25, 79.56, 86.44, 94.75). '~147s' is the only figure with no derivation on file: grepping run-tests.sh, review-separation.test.sh and unrecorded-review-artifact.test.sh turns up no prior-round pair that yields it. The nearest documented candidate is the 849s -> ~1000s growth recorded at run-tests.sh:640-644, which is 151s.",
+   "description": "The conclusion survives any candidate base (79.56/147 = 0.54, 79.56/151 = 0.53 \u2014 'roughly half' either way), so nothing downstream changes. Flagged against CONTRIBUTING.md's 'every number carries the command that produced it and the commit it was measured at', in a paragraph that is otherwise a model of that rule."
+  },
+  {
+   "id": "R20-F3",
+   "severity": "info",
+   "location": "docs/reviews/impact-report-approve_XXXXXX_*-r1.json (10 files); .claude/test-cmd",
+   "evidence": "`qa-gate.sh enter` subtracted 11 git-visible paths as already-baselined and emitted the 94d.1 notice that reconcile cannot distinguish pre-existing dirt from lost session work. I checked: all 11 have mtimes of 2026-08-27/08-28, roughly seventeen days before this change set, and their task ids are mktemp-shaped (approve_XXXXXX_KfqBGyjet7-21e etc). They are test-run leakage into the PRODUCTION docs/reviews/ directory, not lost work from this task. They are outside the change set and outside change_set_hash, and they cannot perturb cmd_approve's unrecorded-artifact walk for this task because that walk is scoped to <tid>-r*.json and these carry different task ids.",
+   "description": "Not this task's defect and not a reason to hold it. Worth a follow-up: a test that writes review artifacts into the real docs/reviews/ is writing into the same namespace the approve-time walk reads."
+  }
+ ],
+ "iterations": 20,
+ "stopped_by": "stop_condition"
+}

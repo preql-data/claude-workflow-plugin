@@ -94,6 +94,18 @@ seed_review_records "$TID_A"
 assert_eq "baseline-A: baseline absent pre-approve" "1" \
     "$([ -f "$BASELINE" ] && echo 0 || echo 1)"
 
+# 94d: removing the baseline above makes EVERY path in the tree un-baselined, so
+# `approve`'s reconcile correctly folds them into the change set — which moves the
+# hash away from the one `enter`'s impact report bound (the empty set, since this
+# spec never seeds the tracker) and makes approve refuse `impact_report_stale`.
+# It never reached the baseline refresh, which is why all four assertions below
+# saw no file. Settle the change set and re-bind the artifact to it, in that
+# order, which is exactly the remediation the refusal prints. This does NOT
+# reintroduce a baseline: the assertion above still holds, and what approve writes
+# is still what the assertions measure.
+bash "$QG" reconcile-tracker >/dev/null 2>&1 || true
+CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" "$TID_A" >/dev/null 2>&1 || true
+
 # Capture what git sees BEFORE approve so we can compare against the
 # baseline file. LC_ALL=C to match the writer's collation.
 EXPECTED=$(cd "$FIXTURE" && git status --porcelain | LC_ALL=C sort)

@@ -124,7 +124,7 @@ set -u
 #      offline machine — a network dependency in the component tier.
 #   2. workflow-doctor.sh, exiting 3 ("installed, verification FAILED") when a
 #      functional check does not pass. This spec's fixtures are not built to
-#      satisfy eleven functional checks, and every `install.sh exits 0`
+#      satisfy thirteen functional checks, and every `install.sh exits 0`
 #      assertion here would start reporting a fixture gap as an installer bug.
 # Both are covered for real by `make install-test`, which installs into a
 # tempdir and requires a fully green doctor — that is the surface that proves
@@ -374,7 +374,7 @@ stop_reason() { printf '%s' "$STOP_OUT" | jq -r '.reason // empty' 2>/dev/null; 
 # list. jq -cS makes it a byte-comparable string; ids and created_at are fixed
 # at write time, so including them makes the comparison STRICTER, not flakier.
 task_state() {
-    bdt show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" "$T" \
         | jq -cS '(if type == "array" then .[0] else . end)
                   | {labels: (.labels // []), comments: (.comments // [])}' 2>/dev/null \
         || echo ""
@@ -383,7 +383,7 @@ task_state() {
 # approval_records <tid> - every `QA-GATE APPROVED ...` comment on the task, one
 # per line. Same source the Stop hook reads.
 approval_records() {
-    bdt show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" "$T" \
         | jq -r '(if type == "array" then .[0].comments else .comments end) // []
                  | .[].text' 2>/dev/null \
         | grep '^QA-GATE APPROVED ' || true
@@ -397,6 +397,60 @@ add_note() {
 
 # new_task <title> - create a task and print its id.
 new_task() {
+    # claude-workflow-plugin-rqer (v5 D2): a PREVIOUS section's review
+    # artifact (docs/reviews/<other-tid>-r1.json) is a REAL, git-visible file
+    # that a successful approve deliberately leaves in place (AC-5 — only
+    # .claude/.qa-tracking scratch copies get wiped), and sections 4, 4b and 6
+    # share ONE $T checkout.
+    #
+    # COMMITTED, narrowly, NOT rm -rf'd — measured, not guessed: git reports a
+    # WHOLLY UNTRACKED directory as ONE porcelain line (`?? docs/reviews/`),
+    # never expanded per-file, until something inside it is tracked. Section
+    # 4's approve baselines that exact line. rm -rf'ing the directory and
+    # letting the NEXT task's seed_review_records recreate it from nothing
+    # reproduces the IDENTICAL line, so reconcile's baseline comparison (94d.1
+    # compares raw porcelain LINES, not content) read the new task's artifact
+    # as "the same pre-existing dirt" and silently dropped it — reproduced
+    # directly: the fresh cycle's own review-record artifact never reconciled
+    # in, and the approval that followed was checked against a Stop-hook
+    # recompute over that same collapsed line. Committing the prior content
+    # instead makes the directory carry at least one TRACKED entry, so a
+    # later untracked file inside it reports as an INDIVIDUAL line git has
+    # never seen before — nothing for an earlier baseline to collide with.
+    # Sections that need "the tree is dirty with exactly N files" afterward
+    # remove ONLY what is still untracked (`git clean -fd`, never `rm -rf`,
+    # which would delete this commit's tracked content and report a
+    # DELETION — a different kind of dirt with the same collision shape).
+    # `>/dev/null 2>&1` on the commit, not just `-q`: with nothing STAGED
+    # (this directory's content already committed by an earlier call), git
+    # commit prints "On branch main / nothing to commit, working tree clean"
+    # to STDOUT regardless of --quiet, and this function's stdout is the
+    # task id its caller captures via $(new_task ...) — that message
+    # concatenated onto the id corrupted the fixture row, breaking every
+    # later `bd` and `qa-gate.sh` call for it (measured directly).
+    if [ -d "$T/docs/reviews" ] && [ -n "$(ls -A "$T/docs/reviews" 2>/dev/null)" ]; then
+        ( cd "$T" && git add -- docs/reviews \
+            && git commit -qm "checkpoint: commit prior review artifact(s)" ) >/dev/null 2>&1 || true
+    fi
+    # claude-workflow-plugin-fkm.4 (v5 D2): the IDENTICAL collision, for the
+    # IDENTICAL reason, now exists for docs/specs/<other-tid>.md — every
+    # gate_cycle/seed_review_records call also writes one (seed_design_verdict),
+    # it is real and git-visible, and a successful approve leaves it in place
+    # too (the same AC-5 exemption: only .claude/.qa-tracking scratch copies get
+    # wiped). Confirmed empirically, not just by symmetry with the block above:
+    # with only the docs/reviews commit, `arm_stop` restoring the design doc
+    # (the fkm.4 companion fix on that function) turned upgrade-gate 4b and 7
+    # META red — section 4b's OWN design doc collapsed onto section 4's
+    # identical `?? docs/specs/` porcelain line (baselined by section 4's
+    # approve), so reconcile_tracker silently dropped it from the hash 4b's
+    # approval actually binds while `arm_stop` (correctly) restored it anyway,
+    # a mismatch neither existed before this fix nor should exist after it.
+    # Same fix, same reasoning, same narrow scope (commit, never rm -rf, for
+    # the same DELETION-vs-collision reason given above) closes it.
+    if [ -d "$T/docs/specs" ] && [ -n "$(ls -A "$T/docs/specs" 2>/dev/null)" ]; then
+        ( cd "$T" && git add -- docs/specs \
+            && git commit -qm "checkpoint: commit prior design artifact(s)" ) >/dev/null 2>&1 || true
+    fi
     bdt create "$1" -t task -p 1 -l devops,qa-pending --json 2>/dev/null \
         | jq -r '.id // empty' 2>/dev/null
 }
@@ -459,7 +513,29 @@ gate_cycle() {
 # verify-before-stop.sh's own llh.18 section.
 arm_stop() {
     bash "$CT" set "$1" >/dev/null 2>&1
-    printf '%s\n' "$2" > "$TRACKER"
+    # claude-workflow-plugin-rqer (v5 D2): if $1 has a canonical review
+    # artifact on disk (every caller here seeds one via seed_review_records
+    # / gate_cycle before arming the Stop), it is real, uncommitted, and was
+    # part of what a preceding approve actually bound — so "the live
+    # session's change set" has to include it too, or the Stop hook's
+    # current-hash recompute no longer matches the approval it is checking
+    # against for a reason unrelated to whatever this call is testing.
+    local art="$T/docs/reviews/$1-r1.json"
+    # claude-workflow-plugin-fkm.4 (v5 D2): the SAME reasoning applies to the
+    # design doc seed_review_records also writes for every caller here
+    # (docs/specs/$1.md, via seed_design_verdict) — it is real, uncommitted,
+    # and reconciled into the tracker before the preceding approve runs, so a
+    # restore that omits it is not "the same change set" that approve bound.
+    local design="$T/docs/specs/$1.md"
+    if [ -f "$art" ] && [ -f "$design" ]; then
+        printf '%s\n%s\n%s\n' "$2" "$art" "$design" > "$TRACKER"
+    elif [ -f "$art" ]; then
+        printf '%s\n%s\n' "$2" "$art" > "$TRACKER"
+    elif [ -f "$design" ]; then
+        printf '%s\n%s\n' "$2" "$design" > "$TRACKER"
+    else
+        printf '%s\n' "$2" > "$TRACKER"
+    fi
 }
 
 # baseline_header_field <file> <key> - read one provenance header field of a v2
@@ -537,13 +613,18 @@ assert_eq "upgrade-gate 2: the upgraded session-start hook exits 0 on a v3.5-upg
 assert_json_field "upgrade-gate 2: ...and emits a valid SessionStart envelope" \
     "$SS_OUT" '.hookSpecificOutput.hookEventName' "SessionStart"
 
-# session-start runs model-select.sh apply, whose JOB is to rewrite the model
-# pins in .claude/settings.json when a better snapshot exists. That is correct
-# behaviour and nothing here should assert against it - but it is tracked churn,
-# and the assertions below need a clean tree to be about the CLOSED TASK rather
-# than about settings drift. Restore tracked files to HEAD and assert the result
-# so a surprise (an untracked stray this .gitignore does not cover) fails loudly
-# instead of silently turning the next ALLOW into a BLOCK.
+# session-start runs `model-select.sh apply --check` (claude-workflow-plugin-
+# j7kk, B2: DETECT-AND-WARN since the R4-F1 ruling — this used to be a plain
+# `apply`, whose JOB was to rewrite the model pins in .claude/settings.json
+# and agent frontmatter whenever a better snapshot existed; --check reports
+# the same drift without writing). So this checkout should see NO tracked
+# churn from that call any more — but the git checkout + tracker reset below
+# stay as a defensive restore rather than an assumption: the assertions past
+# this point need a clean tree to be about the CLOSED TASK, not about
+# whatever session-start touched, and a surprise (an untracked stray this
+# .gitignore does not cover, or a future regression that reintroduces a
+# write) fails loudly instead of silently turning the next ALLOW into a
+# BLOCK.
 git -C "$T" checkout -- . >/dev/null 2>&1 || true
 : > "$TRACKER"
 assert_eq "upgrade-gate 2: precondition - the tree is clean and the tracker empty before the Stop" \
@@ -671,8 +752,13 @@ arm_stop "$TID_OPEN" "$WORK_PATH"
 # after which --hash-only would answer with the empty-set hash.
 CUR_HASH=$(CLAUDE_PROJECT_DIR="$T" bash "$IR" --hash-only 2>/dev/null || echo "")
 V4_RECORD=$(approval_records "$TID_OPEN")
-assert_match "upgrade-gate 4: the NEW record is in the v4 grammar (hash, reviewed_by, worktree, then the timestamp)" \
-    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ at $ISO: " \
+# claude-workflow-plugin-rqer (v5 D2): artifact_hash=<64 hex> now sits between
+# worktree= and the timestamp whenever the review-artifact binding verifies
+# (gate_cycle's seed_review_records writes a real, reconciled canonical
+# artifact, so it always does here) — the shape is pinned, not the value;
+# review-artifact-durability.sh pins the value.
+assert_match "upgrade-gate 4: the NEW record is in the v4 grammar (hash, reviewed_by, worktree, design, artifact, design-verdict, then the timestamp)" \
+    "^QA-GATE APPROVED change_set_hash=[A-Za-z0-9-]+ reviewed_by=qa-claude worktree=[^ ]+ design_hash=[0-9a-fA-F]{64} artifact_hash=[0-9a-f]{64} design_verdict_hash=[0-9a-fA-F]{64} at $ISO: " \
     "$V4_RECORD"
 assert_eq "upgrade-gate 4: ...whose change_set_hash is the hash of the reviewed change set" \
     "$CUR_HASH" \
@@ -762,6 +848,23 @@ bash "$CT" clear >/dev/null 2>&1
 : > "$TRACKER"
 rm -f "$BASE_V2" "$BASE_V1"
 git -C "$T" checkout -- . >/dev/null 2>&1 || true
+# claude-workflow-plugin-rqer (v5 D2): `checkout -- .` only reverts TRACKED
+# files, so section 4b's OWN review artifact (docs/reviews/$TID_LEGACY-r1.json
+# — real, still untracked at this point, and deliberately left in place by a
+# successful approve; see qa-gate.sh's wipe_review_artifacts header) survives
+# it. This section's whole premise is a tree containing EXACTLY the one
+# pre-upgrade file, so remove it explicitly rather than widen the
+# porcelain-count assertions below to tolerate a leftover from an earlier,
+# unrelated section. `git clean`, NOT `rm -rf`: new_task's own checkpoint
+# commit (above) may have already made an EARLIER artifact (section 4's)
+# TRACKED, and rm -rf would delete that too, reporting a DELETION — a
+# different kind of dirt this section does not expect either. `-fd` removes
+# only what git still considers untracked.
+# claude-workflow-plugin-fkm.4 (v5 D2): docs/specs/ carries the SAME kind of
+# leftover as docs/reviews/ — the design doc each preceding gate_cycle wrote
+# via seed_review_records, real and untracked, and this section's whole
+# premise is a tree containing EXACTLY the one pre-upgrade file.
+(cd "$T" && git clean -fdq -- docs/reviews docs/specs 2>/dev/null) || true
 assert_eq "upgrade-gate 5: precondition - no v2 gate-baseline exists" \
     "no" "$(yesno test -e "$BASE_V2")"
 assert_eq "upgrade-gate 5: precondition - no v1 approved-baseline exists yet" \
@@ -910,8 +1013,18 @@ assert_not_contains "upgrade-gate 7 META: ...with the change_set_hash token stri
     "change_set_hash=" "$META_RECORD"
 assert_eq "upgrade-gate 7 META: ...while every other 4b ingredient is present - the label still reads approved" \
     "approved" "$(bash "$QG" status "$TID_META" 2>/dev/null | jq -r '.status // empty' 2>/dev/null || echo "")"
-assert_eq "upgrade-gate 7 META: ...and the change set is the same one 4b released" \
-    "$LEGACY_HASH" "$META_HASH"
+# claude-workflow-plugin-rqer (v5 D2): this used to assert META_HASH ==
+# LEGACY_HASH outright, back when "same construction" (same $LEGACY_PATH,
+# nothing else in the tracker) meant byte-identical sets. It no longer does:
+# each task's OWN review artifact is now task-id-keyed
+# (docs/reviews/$TID-r1.json — AC-4, the artifact enters ITS OWN task's
+# change set), so 4b's and this section's sets differ by construction in
+# exactly one entry, and their hashes are NEVER equal regardless of anything
+# this spec does. What "the same one 4b released" actually needs to mean now
+# is "a real, computable hash over this task's own analogous set" — the
+# shape check below — not byte-identity with a DIFFERENT task's hash.
+assert_match "upgrade-gate 7 META: ...and the change set is a real, computable hash (task-scoped, so no longer byte-identical to 4b's own)" \
+    '^[0-9a-f]{64}$' "$META_HASH"
 
 stop_run
 assert_eq "upgrade-gate 7 META: without the hash token the Stop BLOCKS (4b's release assertion WOULD fail)" \

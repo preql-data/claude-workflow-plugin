@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-tnue",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "1d78474c1b433bf8097c9a5bc92b065baa4d5f183efe670f5e68e906928bc5e7",
+  "risk_threshold": "medium",
+  "stop_condition": "REVIEWER IDENTITY: the codex MCP was invoked with NO model override, so it ran as the configured default `model = \"gpt-5.6-sol\"` (~/.codex/config.toml, model_reasoning_effort = xhigh); asked to state its identity it self-reported 'gpt-5', recorded here rather than in the id field, which the validator constrains to the model-id character class. WHY THIS ARTIFACT IS WRITTEN LATE, stated plainly: this round happened and drove 627 lines of repair cited 21 times in the code, but no artifact was persisted at the time -- the QA gate caught that as R3-F2 in round 3. It is the SAME lapse that occurred on claude-workflow-plugin-h2zz, where ten review rounds produced no durable record because writing a file was mistaken for recording one. THE bd RECORD IS DELIBERATELY NOT POSTED for this artifact: `review-record` stamps the comment with the current time, and the selector takes max-iteration AND max-timestamp independently, so posting iteration 2 after QA's iteration 3 would manufacture `review_artifact_selection_disagreement` -- the exact failure a naive backfill produced earlier in this arc and which review-check.sh:2370-2386 documents as anticipated. Timestamp-preserving recording is claude-workflow-plugin-k6re's open work. This committed file is the durable record until then. PACKET: the reviewer read `git diff 77a3d54..44a1777 -- .claude/scripts/tests/green-check.test.sh`, built by hand and verified non-empty (269 changed lines) because the project's `review-request-build` diffs HEAD against the worktree and would have produced diff_included_files=0 for a committed change -- a request passing every schema check while containing none of the change under review (filed as claude-workflow-plugin-8wbl). The reviewer confirmed the packet byte-identical to that diff and the live file identical to 44a1777. It ran no suite and wrote nothing. CONTEXT: round 1 repaired a background-process leak whose root cause was the PATH_WITH_TIMEOUT shim running its cap as `( sleep \"$dur\"; ... ) &` -- a non-tail statement in a multi-command subshell forks, so `kill \"$killer\"` reaped only the leader and orphaned the sleep. That shim fix was independently verified CORRECT by the QA gate (three-way byte equality against the real pre-fix shim) and is untouched by this round's findings. This round reviewed the EVIDENCE for it, which is where the defects were. VERDICT BLOCK: R1-F1 downgraded from FIXED to PARTIAL, plus three new findings. The reviewer's central ruling, which the orchestrator then applied as a waiver: a static duration cannot establish ownership in a global process table, so making the needle more distinctive is not a repair but a reduction in how often the missing proof is exercised.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/tests/green-check.test.sh:1458",
+      "evidence": "The live file has five textual 2011 occurrences, all associated with this constant and its commentary, and no other in-file sleeper -- so the in-file collision with Section 10.1's own `sleep 20` IS closed, and the new needle DOES match the mutant's bare `sleep 2011` (the mutant retains `sleep \"$dur\"`, receives dur=2011, and removes the group kill). But lines 1458-1466 still select and kill every process-table row whose argv is exactly `sleep 2011`, with no provenance, no baseline subtraction and no per-run nonce, and lines 1471-1477 treat file-wide uniqueness as sufficient to rule out another process.",
+      "description": "CARRIED FROM THE QA GATE'S R1-F1, STATUS DOWNGRADED FROM FIXED TO PARTIAL. 2011 is SOURCE-FILE-unique, not PROCESS-TABLE-unique. Two concurrent invocations of this spec both use 2011 and collide exactly as `sleep 20` did; an unrelated host `sleep 2011` is equally indistinguishable. The original false-green mechanism therefore remains reachable: META.5 accepts any positive count, the cleanup SIGKILLs every match, so foreign activity can satisfy the mutant leg and be destroyed before the restore control samples -- both legs green, nothing proved, and a process the spec does not own killed. FIX: a per-run numeric duration derived from an invocation nonce, an assertion that no exact match exists before dispatch, and pre/post PID snapshots so only newly-appearing matches are attributed and reaped. This preserves detection of a dropped group-kill without resorting to a pgid filter."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/green-check.test.sh:1220",
+      "evidence": "Applying the shipped awk program to the live file produces BEGIN/END matches at 154/194 AND again at 1220/1221 -- a strict count reports begin_matches=2, end_matches=2. Executing the extracted bytes under `bash -x` invokes `/# ...`, `print` and `next`, ending rc=127 when the driver is omitted; `bash -n` still returns 0, so a parse check cannot see it.",
+      "description": "The `GC13-BYSTANDER-TRAP BEGIN/END` marker regexes are UNANCHORED and therefore match their own literal awk-program lines. Two consequences. First, the extraction appends those awk source lines to each generated harness, where they execute as shell and fail silently behind stderr redirection, masked by the later nounset exit. Second and seriously: REMOVING THE REAL MARKERS WOULD NOT MAKE TRAP_EXTRACT_RC NONZERO, because the pattern lines themselves set `found`. META-5.1 therefore certifies an extraction that could have extracted nothing real -- a non-vacuity guard that cannot detect its own subject's absence, inside the pairing added one round earlier to fix the previous instance of this same family. FIX: anchor uniquely-formatted marker lines, stop after the first complete pair, require exactly one BEGIN and one END with a closed capture, parse-check both generated harnesses, and assert the extraction contains only the intended bounded block."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/green-check.test.sh:1283",
+      "evidence": "The child processes are spawned at lines 1246-1247. The mutant is executed at line 1283, liveness is sampled at lines 1291-1296, and only then are the PIDs added to the outer GC13_BYSTANDER_PIDS array at line 1301.",
+      "description": "The new pairing reintroduces the very leak GC13_BYSTANDER_PIDS exists to prevent. The mutant harness creates two live sleeps, including a deliberately foreign-pgid one, but the parent does not learn or register their PIDs until after the harness returns, several assertions execute, and a 0.3-second delay completes. A SIGTERM or runner timeout inside that window leaves the parent's cleanup trap holding neither PID; the same-pgid process may still be caught by a runner group sweep, but the deliberately foreign-pgid sleep can remain orphaned for its full duration. FIX: pre-spawn each mutant/control pair in the parent and register it immediately before handing the PIDs to the harness, or publish each PID to parent-owned cleanup state the instant the child starts -- preserving the live mutant observation while making ownership interruption-safe from creation onward."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/green-check.test.sh:177",
+      "evidence": "Lines 174-184 store and test only bare PID numbers. The direct reaps at lines 1055, 1114, 1150, 1188 and 1302 do not remove their entries from GC13_BYSTANDER_PIDS.",
+      "description": "`kill -0` checks only whether a signalable process currently bears that numeric PID; it does not prove the process is the one originally registered, and a smaller recycle window remains between the probe and the `kill -9`. Compounding it, the array retains PIDs after their explicit mid-spec reap, so cleanup later probes stale entries: a registered bystander is killed normally, its PID is reused before EXIT cleanup, the probe succeeds, and cleanup kills the unrelated replacement. FIX: after a verified direct reap, remove or blank that PID's entry; for entries that must remain, retain and verify identity metadata before signalling, and keep `kill -0` only as a liveness optimisation rather than describing it as an identity guarantee."
+    },
+    {
+      "id": "R2-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/green-check.test.sh:264",
+      "evidence": "The live shim header at line 264 still claims 13.B uses dur=20 and leaves at most a roughly 20-second orphan.",
+      "description": "Recorded from the reviewer's notes rather than as a numbered finding in its own output. The shim header went stale when the duration constant changed, and states both a value and a consequence that are no longer true. Same stale-claim family as the rest of this arc; the fix should re-check the whole header block rather than the single sentence."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

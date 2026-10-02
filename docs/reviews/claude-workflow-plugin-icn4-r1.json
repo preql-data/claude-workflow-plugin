@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-icn4",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "6ddbd60d8ec6823dc1189ef8c101f82cc1d0817cfa7dc5695048cd710b050845",
+  "risk_threshold": "high",
+  "stop_condition": "Every acceptance criterion of icn4 is verifiably met: all three items land with a four-leg pairing or an explicit UNPAIRED-with-reason declaration EACH (per .claude/tests/README.md closeout requirement, named in the task description), the widened lane-guard pattern is a proven strict superset of the retired one with every live citation updated, run.sh refuses every unrecognised argument shape before any spec executes, and no finding at or above high remains in the change set.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/tests/component/run.sh:135-172",
+      "evidence": "Item 3 ships a new refusal guard (the ARG PARSING case statement) with NO shipped pairing and NO UNPAIRED declaration. The task description states: 'Each of the three needs its own pairing per .claude/tests/README.md.' README line 532 makes this a closeout requirement: every check added by the change is either paired to the four-leg standard or 'listed as UNPAIRED with a reason'. CLAUDE.md names 'guard' as a check kind. The F7 payload confirms the gap: tests_added lists 4 entries, all in reviewer-lane-structural.test.sh (items 1-2 only); decision 6 claims only a one-time manual drive ('verified each refusal completes in ~5ms'). Nothing in the change set invokes run.sh with a refusal shape: runner-completeness.test.sh already drives the real L2 runner at L1 cadence against CLAUDE_PROJECT_DIR-pointed fixture spec trees with mutation idioms (lines 611-1606), but only with no-args or valid --filter shapes. The refusal behaviour itself is correct today (I drove all 5 shapes: bare positional, --filter with no pattern, --filter with empty pattern, trailing junk after a pattern, --filter=equals form; all exit 2 naming the argument, before any spec executes) — but nothing red exists to stop a regression to silent swallowing, which is this very task's own diagnosis (a check is only as good as how often it runs), and the identical defect is live in run-tests.sh today (filed separately), proving the shape recurs in this codebase.",
+      "description": "Unmet explicit acceptance criterion. Fix is bounded, and a natural home exists: add a pairing for the refusal — in runner-completeness.test.sh or a dedicated L1 leg — with the four legs: (1) non-vacuity: excise/revert the ARG PARSING region in a COPY of run.sh and prove the strip landed (cmp against shipped + bash -n on the mutant); (2) misbehaviour: the mutant SWALLOWS a bare positional (falls through toward a full run against a fixture spec tree), naming the refusal assertion that would fail; (3) restore: the shipped run.sh refuses the same invocation rc=2 naming the argument; (4) execution: leg 3 already observes the shipped artifact running if it drives the real file. Alternative honest exit per the standard: declare item 3 UNPAIRED with a reason at closeout. Either satisfies the requirement; neither happened."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "low",
+      "location": ".claude/scripts/tests/reviewer-lane-structural.test.sh:198-200",
+      "evidence": "The section C comment claims verify-before-stop.sh with stop_hook_active=true 'returns BEFORE any file write'. Empirically false in general: the unconditional mkdir -p of QA_TRACKING_DIR at verify-before-stop.sh:86 executes before the circuit breaker (~line 2640), and PROJECT_DIR falls back to $(pwd) when CLAUDE_PROJECT_DIR is unset. Probe: running the exact spec invocation from a foreign cwd with CLAUDE_PROJECT_DIR unset created ./.claude/.qa-tracking/ in that cwd. In every standard harness context (make test from repo root, or CLAUDE_PROJECT_DIR set) the dir already exists and mkdir -p is a no-op — my full-spec run from repo root wrote zero repo files (find -newer marker: empty) and left .beads untouched (354 lines before and after).",
+      "description": "Comment-precision fix: the breaker returns before any file write EXCEPT the unconditional mkdir -p of the tracking dir, which is a no-op wherever the dir exists. Behaviourally the spec is side-effect-free as the harness runs it; the absolute claim would mislead a future editor auditing side effects, and a run-tests.sh invocation from a foreign cwd without CLAUDE_PROJECT_DIR would litter that cwd with an empty .claude/.qa-tracking tree."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "info",
+      "location": ".claude/tests/component/run.sh:146-149",
+      "evidence": "bash run.sh '' (an explicit empty-string positional) matches the quoted-empty case arm and silently runs the FULL tier. Identical to pre-change behaviour.",
+      "description": "Listed for completeness only: the arm comment calls no-args 'the only silent case'; an empty-string positional is a second, vanishingly-rare one. Not worth an arm on its own; worth a word in the comment if the file is touched again."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

@@ -1,0 +1,78 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.7",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "1a21e4019acc2cc8ee632d8f2812ebfa6a50dd0f06c5c9ec1d5543bb01608565",
+  "risk_threshold": "high",
+  "stop_condition": "Every D5-piece-3 acceptance criterion is traced to a test that would fail without the shipped change, the four adjudication requests D-1..D-4 are each ruled on with executed evidence, and no critical or high finding remains in the validator, the green-check runner, or the L1 tier.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/scripts/tests/design-accessors.test.sh:389 and :392",
+      "evidence": "grep -cF of the rc-capture idiom over the shipped .claude/scripts/qa-gate.sh returns 5, not 4 (sites: 11389 cmd_design_conform, 11772 cmd_design_unit_show, 12229 resolve_design_conflict_subject, 13029 cmd_spec_injection_status, 13275 cmd_green_check -- the last added by this change set). Re-applying the spec's own sed to a copy and recomputing its two comparands as pure text, no bd and no fixture: 3.1 actual 5|0 vs expected 4|0 -> FAIL; 3.1b actual 0|5 vs expected 0|4 -> FAIL. Matches the coordinator's live tier observation (rc=1, 152 assertions, 13s).",
+      "description": "The L1 tier is RED at this tree, which is blocking on its own. cmd_green_check is a CORRECT fifth consumer -- green-check must consult the binding because cannot_start_from_green is scoped to unit-bound tasks (decision D-1). The defect is the assertion's hardcoded ABSOLUTE, which needs a hand-bump every time the code legitimately grows. THE REPAIR IS THE COUNT-INDEPENDENT INVARIANT, NEVER A 4->5 BUMP: shipped_failopen==0, mutant_rc==0, mutant_failopen==shipped_rc, shipped_rc>0. All four hold at this tree (5,0,0,5) and at any N. Bumping to 5 makes the tier green today and re-arms the identical trap at call site six -- the third repetition of this mechanism in this arc, after the L1 runner headroom figure (stale three times) and EXPECTED_SPECS."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:13146 (GREEN_CHECK_TIMEOUT_S) and :13157-13171 (green_check_run)",
+      "evidence": "Demonstrated, not argued. This host has neither timeout nor gtimeout (command -v fails for both; verify-before-stop.sh's own header names this repo's authoring box as such a host). Extracting both functions verbatim and driving them in memory: SHIPPED green_check_run with GREEN_CHECK_TIMEOUT_S=1 over a 5s sleep returned '0 none' at elapsed=5s -- the cap is NOT enforced. RESTORE CONTROL, same host, same shell: verify-before-stop.sh run_with_timeout with cap 2s over a 10s sleep returned rc=124 at elapsed=5s with TIMEOUT_NOT_ENFORCED=1 -- the 03tf watchdog fired. One bounds; the other does not.",
+      "description": "Three compounding defects, all needing repair together. (1) UNBOUNDED on a host without timeout/gtimeout: the region header calls this an interactive call site, but backend.md, frontend.md and devops.md -- added in this same diff -- instruct IMPLEMENTER AGENTS to run green-check before writing a line of implementation. That is unattended. This is the UNBOUNDED-WAITER family in LESSONS.md. (2) WRONG IN THE MORE DAMAGING DIRECTION on a host WITH timeout: GREEN_CHECK_TIMEOUT_S=1200 is below this project's own measured suite (verify-before-stop.sh header: 1731s and 1777s uncontended, 3336-3913s contended), so a GREEN suite is killed at 1200s, rc=124 is derived as red, and on a unit-bound task at phase before that becomes cannot_start_from_green exit 2 -- refusing legitimate work and instructing an agent to file a bug for a red baseline that does not exist. (3) THE DISCLOSURE IS COMPUTED THEN DISCARDED: green_check_run returns dispatch (timeout|gtimeout|none), cmd_green_check captures it and throws it away at :13323, and the ten-key envelope carries no bound/enforcement field, so a caller cannot tell a bounded run from an unbounded one, nor a 124-from-timeout from a 124-from-the-runner. REPAIR NEEDS ALL OF: both halves of the bound (wall-clock deadline AND liveness check, each reporting which fired); surfacing dispatch or a bounded flag in the envelope; and sizing the constant against the real suite instead of copying 1200. Porting only the watchdog fixes the host without timeout and leaves every host WITH it broken. Also note zero test coverage in either direction: green-check.test.sh has no hang test, and its only bounded call (section 8.6) guards the argument-parse loop and is itself skipped on this host."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "high",
+      "location": ".claude/rubrics/default.md:30 and .claude/tests/e2e/fixtures/rubric-revision-loop/.claude/rubrics/default.md:30",
+      "evidence": "The rubric states that validate-completion enforces 'that unit_id/design_hash are either both empty or both populated'. Driving the shipped validator against exactly that shape (unit_id=U-9, design_hash empty, everything else legal) returns {ok:true, error_key:''} rc=0 -- accepted, not refused. The spec's own section 6.2 asserts the same thing as a restore control, and I reproduced it independently (43/43).",
+      "description": "The rubric claims a mechanical check that does not exist and that the code deliberately does NOT implement -- the asymmetry is decision D-2, and refusing the reverse pairing would break the very best-effort spec-injection gap this release documents. The sentence also contradicts itself inside one parenthesis: if the rule were both-or-neither there would be no 'reverse asymmetry' to cross-reference. docs/AGENTS.md states it correctly ('the reverse pairing is legal'); the rubric is the sole carrier that does not. This matters because the rubric is grading-packet item 6 and this text sits under criterion C3, so a grader applying it could fail the exact legal payload the release permits. FIX IN BOTH THE RUBRIC AND ITS BYTE-IDENTICAL FIXTURE MIRROR VIA sync-fixtures (cmp confirms they are identical today)."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "medium",
+      "location": ".claude/.qa-tracking/completion-claude-workflow-plugin-fkm.7-devops.json (verification scope)",
+      "evidence": "The implementer ran the two specs it wrote (43/43, 57/57), the parity spec it extended (72/72) and one component spec (259/259) -- all green -- but did not run design-accessors.test.sh, the spec covering the accessor it added a consumer to. That spec is the one that went red.",
+      "description": "The implied-spec set for a change is not 'the specs I wrote', it is 'the specs that cover what I touched'. cmd_green_check calls latest_design_unit_binding and assert_unit_id_scalar, and both have dedicated specs (design-accessors.test.sh, design-conform.test.sh). A cheap mechanical form for next time: for each function the diff CALLS, grep the tiers for a spec that names it, and run those too. Recorded as a finding in its own right because the class outlives this instance."
+    },
+    {
+      "id": "R2-F5",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/design-conform.test.sh:389",
+      "evidence": "assert_eq '4.3 precondition: the guard line exists (exactly twice) in the shipped script' with a hardcoded 2 over the needle assert_unit_id_scalar 'design-unit-bind' ... . This change set ADDED a fourth assert_unit_id_scalar call site (qa-gate.sh:13286, subcommand green-check; the four are 10849, 10942, 12322, 13286). The assertion still passes only because its needle is subcommand-qualified, so the live count is still 2 -- verified.",
+      "description": "Second instance of R2-F1's class: an absolute count over a shared idiom. It survived by the needle's accidental specificity, not by design -- and its own message reads as a claim about the guard's population when it is a claim about one subcommand's two call sites. SAME REPAIR AS R2-F1, not a different one: 4.3's absolute 2 becomes a before>0 check (4.3b already asserts after==0). CLASS SWEEP RESULT, for the record: these are the only two instances in the tiers. The discriminator is that the vulnerable shape is an absolute over an UNQUALIFIED idiom that new call sites legitimately reproduce, while the safe ones are variable-name- or spelling-scoped singletons -- design-accessors 8.5, 9.3, 9.3b, 11.5, 12.7, 12.7b were each verified LIVE at this tree (all still 1|0 or 0|1), and plan-batches 2516-2518 assert genuine marker uniqueness rather than a population."
+    },
+    {
+      "id": "R2-F6",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:13322",
+      "evidence": "cmd_green_check does rm -f on the captured log unconditionally and surfaces nothing from it; the envelope's observations field carries only the one-line summary (for example, suite red before starting).",
+      "description": "A red result arrives with zero evidence of what failed -- including the cannot_start_from_green refusal, whose own text instructs the agent to open the red baseline as its own task typed bug. That asks an agent to file a bug report in direct contradiction of the evidence-before-fix protocol's first step (record the full error message, the complete stack trace). verify-before-stop.sh keeps last-test-output.log and tails 50 lines into the block reason for precisely this reason. Keep the log (a stable per-task path) or fold a tail of it into observations."
+    },
+    {
+      "id": "R2-F7",
+      "severity": "low",
+      "location": ".claude/tests/e2e/lib/invariants.ts:435-448",
+      "evidence": "The file is in completion-contract-parity.test.sh's CARRIERS list; its docblock enumerates the seven F7 fields and line 447 records the precedent verbatim -- 'v4.1 (context_coverage, C2) widened the field list this invariant WOULD check'. The v5 D5 analogue was added to .claude/tests/README.md's table row for the SAME invariant but not here.",
+      "description": "Carrier drift against a precedent the file itself records. The invariant is skipped, so nothing behavioural depends on it; this is consistency of the documented field list only."
+    },
+    {
+      "id": "R2-F8",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:13286",
+      "evidence": "assert_unit_id_scalar is called on a unit_id that latest_design_unit_binding's own capture regex has already constrained to [A-Za-z0-9._-]+ -- the same class the assert enforces. Its failure message would emit the usage string 'qa-gate.sh green-check <task-id> --design-task <id> --unit-id <U-n>', flags green-check does not have.",
+      "description": "Unreachable-by-construction defensive call whose failure text would misdirect if it ever did fire. Either drop it or give it a green-check-correct usage string. Lowest priority of the nine."
+    },
+    {
+      "id": "R2-F9",
+      "severity": "low",
+      "location": ".claude/scripts/epic-gate.sh:202-215 (qa_state_of), reached from check at :318-320",
+      "evidence": "qa_state_of reads bd show labels and matches qa-approved FIRST, so a task carrying both qa-approved and qa-pending resolves to approved and the qa-pending arm is unreachable for it; check then reports 'All N sub-task(s) qa-approved under epic; epic can close'. fkm.7 is a real child of epic claude-workflow-plugin-fkm with live siblings (fkm.1, fkm.8, fkm.9 open; fkm.10 in_progress/qa-pending), so the path is reachable rather than theoretical.",
+      "description": "Decision D-4's claim is VERIFIED for the release path -- verify-before-stop.sh:6364 requires the label AND a non-empty current hash AND task_has_matching_approval_record, and label-without-record falls into the fail-closed LABEL_WITHOUT_RECORD branch at :7446 -- but it was generalised from one reader and is OVERBROAD as stated: epic-gate does read label presence alone. Impact is advisory only (a non-blocking B2 note) and the label-only read is pre-existing, not introduced here. Largely self-correcting in practice: qa-gate.sh enter on this cycle cleared the stale qa-approved on its own. Recorded so the reasoning carries its caveat rather than the conclusion being remembered as unqualified."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

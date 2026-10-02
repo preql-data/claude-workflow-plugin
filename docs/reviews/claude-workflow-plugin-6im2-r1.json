@@ -1,0 +1,51 @@
+{
+  "contract_version": 1,
+  "task_id": "claude-workflow-plugin-6im2",
+  "scope_label": "6im2 - design-unit-bind caller + carrier-parity census. FIRST review of this task.",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "ccb41351462cd66e6048c0e90acf8d949479b655d64c6be91b45fc6c4b2e3681",
+  "reviewed_hash_basis": "sha256 over .claude/agents/orchestrator.md + .claude/skills/workflow-engine/SKILL.md + .claude/scripts/tests/design-unit-bind-parity.test.sh concatenated in that order; reproduced by the reviewer (hash_reproduced=yes) and independently by the orchestrator",
+  "scope_files": [".claude/agents/orchestrator.md", ".claude/skills/workflow-engine/SKILL.md", ".claude/scripts/tests/design-unit-bind-parity.test.sh"],
+  "why_this_review_exists": "This task was P0 and in_progress with ZERO review artifacts (ls docs/reviews | grep 6im2 = 0 of 27) while its files sat in the same working tree as claude-workflow-plugin-xsu1, which had had seven review rounds. An independent evidence audit caught that gating xsu1 on this tree would commit another task's unreviewed, unclosed work. See claude-workflow-plugin-z7ni.",
+  "risk_threshold": "high",
+  "stop_condition": "the census's own pairing checked against .claude/tests/README.md's four-part requirement; the live probe's side-effect claim verified; the documented invocation compared against the shipped grammar; the recurring fail-open class hunted inside the guard itself",
+  "verdict": "findings",
+  "iterations": 1,
+  "stopped_by": "verdict",
+  "ship_recommendation": "do-not-ship",
+  "spec_run": {
+    "reviewer_observed": "Total: 19  Passed: 12  Failed: 7 (exit 1)",
+    "reviewer_caveat": "The reviewer's managed read-only sandbox denied the live usage here-document and the mktemp-based mutants. It failed CLOSED rather than falsely passing; git-visible state, .beads/issues.jsonl and QA-tracking hashes were unchanged.",
+    "authoritative_result": "PASSED (19 assertion(s) in 0s), recorded in the orchestrator's own non-sandboxed full L1 tier at Completeness floor HELD 51/51, 4741 assertions, 0 FAILED",
+    "resolution": "All 19 assertions pass in a normal environment. The 7 failures are sandbox artifacts and must not be reported as real."
+  },
+  "findings": [
+    {"id": "S6-F1", "severity": "high", "location": ".claude/scripts/tests/design-unit-bind-parity.test.sh:191",
+     "description": "Section 3's required-flag census has NO paired negative control. The META loop mutates and rechecks only the Section 2 invocation needle, so neither flag assertion can discriminate anything.",
+     "evidence": "The mutation at :210 removes only lines containing `design-unit-bind`; :225-235 rebuild only the `qa-gate.sh design-unit-bind` census. The flags live on continuation lines that SURVIVE that strip - orchestrator.md:270 (`    --design-task <design-task-id> --unit-id <unit-id>`) and SKILL.md:100. Reviewer probes confirmed both flags remain present in both carriers after `grep -v 'design-unit-bind'`, so Section 3 stays green regardless. This independently confirms a concern raised by the evidence audit.",
+     "suggested_fix": "For each carrier x each required flag, build a separate mutant removing that flag, prove presence-and-removal (non-vacuity), run the Section-3-shaped census requiring EXACTLY the mutated carrier to report missing, then re-run against the shipped carrier as the restore control."},
+    {"id": "S6-F2", "severity": "medium", "location": ".claude/scripts/tests/design-unit-bind-parity.test.sh:159",
+     "description": "The claimed side-effect-free live probe is not file-creation-free on the shipped bash path: the missing-task branch calls `usage`, whose here-document requires a temporary file.",
+     "evidence": "The direct shipped invocation failed with `.claude/scripts/qa-gate.sh: line 2304: cannot create temp file for here document: Operation not permitted`. It does not reach require_bd, add a comment, or mutate repository state, but it does attempt temp-file creation and cannot run on a genuinely read-only host.",
+     "suggested_fix": "Either ground the census through a shipped path performing no here-document/temp-file creation, or correct the claim to 'application-state read-only' rather than 'side-effect-free'. Do not leave a claim the code does not support."},
+    {"id": "S6-F3", "severity": "medium", "location": ".claude/scripts/tests/design-unit-bind-parity.test.sh:191",
+     "description": "The flag census claims the flags are read back from shipped usage and never hardcoded, but they are hardcoded twice. If shipped usage later adds a third required flag while keeping these two, every assertion stays green while both prompt carriers omit the new flag - the census cannot detect the drift it exists to catch.",
+     "evidence": "SHIPPED_USAGE is assigned at :172, but :175-178 hardcode the two expected needles and :191 hardcodes them again in `for flag in '--design-task' '--unit-id'`.",
+     "suggested_fix": "Parse the required flag tokens from the live .usage value into a validated NON-EMPTY exact set and drive Section 3 and its mutants from it; an empty or unparseable set must REFUSE, not silently assert nothing. Alternatively declare a fixed two-flag contract and delete the dynamic-read claims."}
+  ],
+  "pairing_assessment": [
+    {"section": "Section 2 invocation census, both carriers", "non_vacuity_proven": "yes", "mutant_fails_specifically": "yes", "restore_control": "yes", "runs_shipped_artifact": "yes",
+     "basis": "Each carrier has a pre-mutation presence check, a shorter-copy and absent-needle landing check, an exact carrier-specific missing result, and a real-path restore check. Section 1 invokes the shipped qa-gate.sh, subject to the S6-F2 temp-file defect."},
+    {"section": "Section 3 required-flag census, both flags and both carriers", "non_vacuity_proven": "no", "mutant_fails_specifically": "no", "restore_control": "no", "runs_shipped_artifact": "yes",
+     "basis": "The shipped script is invoked in Section 1, but no META leg mutates a flag or runs the Section 3 census against such a mutant. The sole mutation leaves every asserted flag present."}
+  ],
+  "confirmed_correct": [
+    "cmd_design_unit_bind (qa-gate.sh, pinned at sha256 44d54ddbc115578d322a208c8555168e40cce9072fb12cf20bcf83ad6f4c6806, lines 7905-7975) accepts --design-task, --unit-id and optional --rebind EXACTLY as both prompt invocations document.",
+    "No nested-subagent spawn instruction was introduced; no-nested-spawn-instructions.test.sh is satisfied.",
+    "Discovered L1 specs and EXPECTED_SPECS both equal 51; this spec is correctly counted.",
+    "bash -n passes for the scoped spec and the implementation snapshot."
+  ],
+  "notes": "Scoped hash reproduced exactly and remained stable across the review. qa-gate.sh was pinned by content while read because a concurrent agent is editing it. The spec's true result is PASSED 19/19 in a normal environment; the reviewer's 12/19 is a sandbox artifact, recorded here explicitly so it is never quoted as a real failure."
+}

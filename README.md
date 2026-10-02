@@ -43,7 +43,8 @@ every step.
   labels, records no approval, and with Codex absent the workflow is
   byte-identical (proved by a degradation spec, not asserted). The
   review turn is manual and cost-confirmed, and it meters your own
-  OpenAI account. See [The tri-model workflow](#-the-tri-model-workflow)
+  OpenAI account. See
+  [The model-role-class workflow](#-the-model-role-class-workflow)
   below; setup, billing, and troubleshooting:
   [`docs/CODEX_SETUP.md`](docs/CODEX_SETUP.md).
 - **Two MCP servers ship in the box.** `bd-mcp` exposes 21 typed Beads
@@ -71,25 +72,29 @@ every step.
   grading packet. The two seed lessons (parallel-agent worktree
   isolation; boundary-mock fidelity) shipped with v3.1.0.
 
-## 🧠 The tri-model workflow
+## 🧠 The model-role-class workflow
 
-Three classes of agent, three model lanes, one gate. `.claude/model-roles`
-maps each **role** to a selection **strategy**, and `model-select.sh`
-re-resolves every lane at session start — so each class auto-adopts the
-newest model in its own tier without anyone editing a version string.
+Five role classes, one gate. `.claude/model-roles` maps each **role** to a
+selection **strategy**, and `model-select.sh` re-resolves every lane at
+session start — so each class auto-adopts the newest model in its own
+tier without anyone editing a version string.
 
 | Role | Agents | Strategy | Resolves to |
 |------|--------|----------|-------------|
-| `orchestrator` | `orchestrator` | `top` | the resolver's single best pick — the newest, most capable family in your account listing |
-| `implementer` | `backend`, `frontend`, `devops` | `opus-class` | the newest `claude-opus-*` model listed, falling back to `top` when your account lists none |
-| `reviewer` | `qa`, `grader`, `judge` | `top` | the top pick for the fresh-context Claude review path; the optional external lane routes the review turn to Sol via Codex when connected |
+| `designer` | `designer` | `top` | the resolver's single best pick — the newest, most capable family in your account listing |
+| `design_reviewer` | `design-reviewer` | `top` | same pick as `designer`; the optional external lane routes design review to Sol via Codex when connected, which is what keeps the two from reviewing each other under the same identity |
+| `orchestrator` | `orchestrator` | `opus-class` | the newest `claude-opus-*` model listed, falling back to `top` when your account lists none |
+| `implementer` | `backend`, `frontend`, `devops` | `sonnet-class` | the newest `claude-sonnet-*` model listed, falling back to `top` when your account lists none |
+| `reviewer` | `qa`, `grader`, `judge` | `opus-class` | the newest `claude-opus-*` model listed; the optional external lane routes the review turn to Sol via Codex when connected |
 
 The model each lane lands on is **resolver output, not configuration**.
 Read the live mapping with `bash .claude/scripts/model-select.sh roles`
-(prints `role  strategy  resolved-id`), see it in the statusline
-(`orch:… impl:… rev:…`, collapsing to the single-model shape only when all
-three lanes resolved to the same id *and* the reviewer lane is `claude`),
-and override with `/workflow-model`. Setting every role to `top` in
+(prints `role  strategy  resolved-id`), see it in the statusline (fixed
+render order `des dsr orch impl rev`, roles sharing a resolved model
+joined with `+`, at most three groups printed before the tail becomes
+` +<k> more`, collapsing to the single-model shape only when **all five**
+roles resolve to the same id *and* both review lanes are `claude`), and
+override with `/workflow-model`. Setting every role to `top` in
 `.claude/model-roles` reproduces the v3.5 single-model behavior exactly.
 
 ### Nobody signs off on their own work
@@ -111,6 +116,39 @@ record cannot know about them. Both ends call one counter
 (`review-check.sh gate`) — there is no second implementation of it, and no
 second way to release. A missing or unrunnable counter fails **closed** at
 both ends.
+
+### An approval can bind nothing — and v5.0.0 refuses the worst case
+
+The credential above binds a **change set**, and through v4.1 that change set
+could be silently empty. The tracker behind it is fed by a `PostToolUse` hook
+on `Write|Edit|MultiEdit|NotebookEdit` — **not `Bash`** — so a file you edit in
+vim, in your IDE, or from a shell script never enters it. Work that pre-dates
+the session is invisible for the same reason: the gate's baseline treats
+anything already in the tree as pre-existing. Approve over either and you get:
+
+```
+impact-report.sh --hash-only   ->  e3b0c442…855      # sha256 of empty input
+approve                        ->  "impact-report verified (change_set_hash match)"
+```
+
+An approval bound to that hash covers zero files, permanently, no matter what
+is in your tree. **v4.1 does not warn about this. It says "verified".**
+
+v5.0.0 refuses the total case and only warns on the partial one:
+
+| Situation | v5.0.0 |
+|---|---|
+| **None** of the declared files in the bound change set, and at least one of them is not denylisted | **refuses**, `error_key=completion_files_total_miss`, and names the recovery commands |
+| **None** of them, but *every* declared file is denylisted | **approves** — deliberately: that is the legitimate all-denylisted case, not a swallowed tracker |
+| **Some** of them missing | **warns** (`completion_files_crosscheck`) and still approves |
+| No completion record at all | **refuses** — separately, because nothing states what was done |
+
+A partially-wrong change set is still bindable. The rewrite that closes the
+whole family (`claude-workflow-plugin-qnvo`) is implemented and independently
+verified, preserved on branch `qnvo/primitive-replacement` at `1f4bd81`, and
+**deferred to v5.0.1** — it broke six test specs, and that fixture work needs
+its own design. (Its own task record shows a QA block: that block is what
+established the six-spec floor, and is why it is deferred rather than shipped.)
 
 ### Arbitration
 
@@ -162,6 +200,100 @@ plain xhigh session from inside the plugin. SessionStart therefore *detects
 and warns* when the live effort, the floor, and the verdict disagree —
 detect-and-warn is the ceiling here, and the plugin does not claim to
 enforce the session level.
+
+## 📐 The design phase (v5.0.0) — **opt-in**
+
+**This phase is opt-in in v5.0.0.** You opt IN by running it:
+`qa-gate.sh grilling-record` → `design-record` → `design-review-record` until
+`design-satisfied` holds. A task with no design phase takes the ordinary
+documented exit at approve — `--no-design '<reason>'` — and the reason is
+recorded in the approval comment. Neither path is new; both are pre-existing
+semantics.
+
+**Why opt-in, stated plainly:** `design-conform` has been observed on a real
+target project exactly twice, and both observations were vacuous — it reported
+"conforms" while naming the files that had just been written as untouched,
+because the change set it read was empty. Until that is fixed, the design
+phase's conformance check is not something to rely on.
+
+The coherence rollup has a defect of the same shape, independently — it skips
+the conformance leg and reads the same session-scoped tracker itself. Two
+qualifications, because the evidence here is weaker and the effect narrower
+than above, and saying so is the point:
+
+- **Never observed.** The rollup has never been run on a real target, in either
+  direction — it returns not-applicable without checking anything when the task
+  is not itself a satisfied design task, which is the ordinary case for a
+  task-per-unit child. So this is an inference from reading the code, not
+  something we watched happen.
+- **Narrow.** Scope is checked by two arms and only one reads the tracker. An
+  empty change set costs you the *under-coverage* direction — "a file was
+  touched that no unit covers". The other direction, "a unit's completion
+  contract claims a file no unit declares", reads persisted records and still
+  fires, as do the untested-criterion, unmapped-unit and moved-artifact-hash
+  checks.
+
+**What it costs**, measured on a real product repository. Measured gate-`enter`
+to change-set-bound approval, from that project's own Beads store:
+
+| Path | Time | Rounds | Outcome |
+|---|---|---|---|
+| Default, small code change | **3m57s** | 1 | approved |
+| Default, doc-only change | **17m51s** | 1 | approved |
+| Design, one small unit | **12m10s** | 1 | approved, but bound an empty change set |
+
+That last row is the gate cycle only. The cost you are actually opting into is
+the design phase that runs before implementation starts: **2h08m16s**, from the
+design task being created to the design review returning `satisfied`, across
+three review rounds (two `needs_revision`, one `satisfied`), producing a
+49,512-byte artifact. Budget against that number. No total-elapsed figure is
+given: the validation run spans an overnight gap, so a wall-clock total would
+not mean anything.
+
+And it did **not** reach a meaningful approval — the approval it produced bound
+an empty change set.
+
+Before any implementation task exists, a `designer` produces a design
+artifact and a `design-reviewer` scores it against `.claude/rubrics/design.md`
+through a review loop. **On a stock install those two roles resolve to the
+SAME model** — both are `top` — so the design is reviewed by its own identity
+family. The resolver reports that rather than blocking it: it sets
+`identity_collapse: true`, writes `.claude/.qa-tracking/design-family-collapse`,
+warns at SessionStart, and the statusline shows `!id`. What IS enforced
+mechanically is narrower — `qa-gate.sh design-record` refuses a verdict whose
+`reviewer_identity` equals the designer's. **Design review is Claude-lane only
+in v5.0.0.** `design_reviewer_lane` is resolved and displayed, but no script
+drives design review through Codex — `design-reviewer.md` instructs the agent
+to emit `design-claude` unconditionally, and it has no tool to read the lane.
+Worse, installing Codex sets the lane to `codex`, which makes
+`identity_collapse` report **false** while both roles still resolve to the same
+model — a cleared flag over an uncleared risk (`claude-workflow-plugin-yvpe`).
+**The one real clearance today is to set `design_reviewer` to a family-class
+distinct from whatever `top` resolves to** (e.g. `design_reviewer=opus-class`)
+in `.claude/model-roles`; that changes the resolved model rather than a label.
+Implementation
+then runs green-to-green per unit, and a coherence rollup blocks approval
+while any acceptance criterion is untested or any touched file falls outside
+every declared unit.
+
+**Design artifacts live in your repository, as files.** The path is
+`docs/specs/<task-id>.md`, derived from the task id — the same derivation
+`qa-gate.sh design-record` enforces, so there is exactly one path to check.
+The directory is created on demand in your project the first time the design
+phase runs; it does not ship with the plugin.
+
+**v5 ships no Linear integration.** There is no design-store adapter, no
+external issue-tracker write path, and nothing to configure. Design artifacts
+are files in your repo and task state is in Beads. If you read anywhere that
+a Linear path exists, that text is wrong — there is no Linear path for one to
+work.
+
+**Parallel batching is file-set-only.** Two units are scheduled concurrently
+when their declared file sets do not intersect. The `impact_of` half of the
+intersection check described in the design is **deferred**
+(`claude-workflow-plugin-l7gd`), and every batch readout says so with
+`graph_intersection_computed:false` rather than degrading silently. See
+Caveats for what that means in practice.
 
 ## ⚡ Install
 
@@ -232,17 +364,48 @@ exact command, on any output-shape mismatch):
 bash .claude/tests/component/run.sh --filter bd-compat
 ```
 
+Separately, `workflow-doctor.sh`'s `beads` check validates the **embedded-
+Dolt schema** of a *local* bd store — a narrower, different question from
+CLI compatibility above, because bd silently auto-migrates a local store's
+schema on first run of a newer binary, with no confirmation and no opt-out.
+The schema number does not order with bd's release number (measured
+2026-09-27, claude-workflow-plugin-we57: bd 1.2.2 ships schema 53, *lower*
+than 1.2.1's 65 — it is the documented rollback of 1.2.1's migration), so
+this is a **validated SET of exact `bd:schema` pairs**, membership-tested,
+not a floor or an interval:
+
+| bd version | schema | status |
+|---|---|---|
+| 1.1.2 | 53 | validated — the CI floor (`l1-unit`, every run) |
+| 1.2.1 | 65 | measured, not validated — no suite exercises it |
+| 1.2.2 | 53 | measured, not validated — no suite exercises it |
+| 1.3.0 | 66 | validated — the CI ceiling (`l1-doctor-bd-max`) and the development host |
+
+A live pair inside the set PASSes the doctor's `beads` check (the note names
+which member matched); a pair outside it — including the two measured-but-
+unvalidated rows above — FAILs as `bd-version-vs-schema DRIFT`, which is what
+converts a silent bd self-upgrade back into a reviewed one instead of a
+missed one. See `DOCTOR_BD_SCHEMA_VALIDATED`'s own header comment in
+`.claude/scripts/workflow-doctor.sh` for the full measurement method and the
+procedure for adding a pair once it gains suite coverage, and run the doctor
+to check your own install:
+
+```bash
+bash .claude/scripts/workflow-doctor.sh
+```
+
 ## 📦 What you get on disk
 
-Counts re-derived from the tree on 2026-07-30 for the v4.1.0 release audit,
-not carried forward from the previous release.
+Counts re-derived from the tree on 2026-09-18 for the v5.0.0 release
+(claude-workflow-plugin-fkm.9), not carried forward from the v4.1.0
+release audit. The command behind each changed row is in that row.
 
 | Component | Count | Where |
 |-----------|-------|-------|
-| Agents | 7 | `.claude/agents/{orchestrator,qa,backend,frontend,devops,grader,judge}.md` |
-| Shell scripts | 26 | `.claude/scripts/*.sh` — of which **7** are hook entry points, wired across **7** hook events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, `SessionEnd`); the rest are helpers the agents and hooks call (`qa-gate`, `impact-report`, `review-check`, `workflow-doctor`, `workflow-manifest`, `worktree-sweep`, `model-select`, `lessons`, `statusline`, …) |
+| Agents | 9 | `.claude/agents/{orchestrator,designer,design-reviewer,qa,backend,frontend,devops,grader,judge}.md` — `ls .claude/agents/*.md \| wc -l` |
+| Shell scripts | 29 | `.claude/scripts/*.sh` (`ls .claude/scripts/*.sh \| wc -l`) — of which **7** are hook entry points, wired across **7** hook events (`SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` — `jq '.hooks\|keys\|length' .claude/settings.json`); the rest are helpers the agents and hooks call (`qa-gate`, `epic-gate`, `impact-report`, `review-check`, `workflow-doctor`, `workflow-manifest`, `worktree-sweep`, `model-select`, `codex-detect`, `lessons`, `statusline`, …) |
 | MCP servers | 2 | `.claude/mcp/{bd-mcp,code-graph-mcp}/` — 21 and 7 tools respectively; `bash .claude/scripts/workflow-doctor.sh` spawns both and asserts those exact counts |
-| Rubrics | 5 | `.claude/rubrics/{default,backend,frontend,devops}.md` + `bugfix.md` overlay |
+| Rubrics | 6 | `.claude/rubrics/{default,backend,frontend,devops,design}.md` + `bugfix.md` overlay — `ls .claude/rubrics/*.md \| wc -l` |
 | Slash commands | 3 | `.claude/commands/{workflow-model,mutation-sweep,workflow-doctor}.md` |
 | Skills | 1 | `.claude/skills/workflow-engine/SKILL.md` — the only registered skill, and `plugin.json`'s `skills[]` array is asserted to be length 1 by `vendored-skills.test.sh` |
 | Vendored reference | 1 | `.claude/vendor/superpowers/` — `brainstorming/SKILL.md` from `obra/superpowers` at pin `3dcbd5c4` (MIT), plus `MANIFEST.md` and `LICENSE.upstream`. Deliberately **not** under `.claude/skills/` and **not** registered: an explicit `Read` in `orchestrator.md` loads it exactly where it is wired instead of session-wide. Provenance and the ten local modifications are in `MANIFEST.md`; see also `THIRD_PARTY.md` |
@@ -297,11 +460,15 @@ enforce that contract — `prevent-orchestrator-edits.sh` blocks Write/Edit
 from the orchestrator role, and `verify-before-stop.sh` refuses Stop
 without `qa-approved` on the active task. Cross-repo work and GitHub
 auto-linking land via I3/I8 hooks (`bd-github-link.sh`,
-`current-task.sh`). Two of the seven agents are spawned from the root
-conversation only (the `grader` for rubric verdicts and the `judge`
-for mutation classification) because Claude Code subagents cannot
-spawn other subagents — both arrive via root-orchestrated relays
-(`RUBRIC-RELAY` and `JUDGE-RELAY`).
+`current-task.sh`). Three of the nine agents are spawned from the root
+conversation only (the `grader` for rubric verdicts, the `judge`
+for mutation classification, and the `design-reviewer` for design
+verdicts) because Claude Code subagents cannot spawn other subagents —
+all three arrive via root-orchestrated relays (`RUBRIC-RELAY`,
+`JUDGE-RELAY`, and the design relay). The nine agents ride five model
+role classes (`designer`, `design_reviewer`, `orchestrator`,
+`implementer`, `reviewer`), each pinned to a *strategy* rather than a
+model version in `.claude/model-roles`.
 
 For the deep dive, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 For the test pyramid that gates every change, read
@@ -314,6 +481,20 @@ evidence pointer in [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md).
 
 ## ⚠ Caveats
 
+- **File-disjoint units can still conflict semantically, and nothing catches
+  that automatically.** Parallel batching proves that two units touch no file
+  in common; it does not prove they are behaviourally independent. The
+  `impact_of` half that would strengthen this is deferred
+  (`claude-workflow-plugin-l7gd`), and its own precondition
+  (`claude-workflow-plugin-kk9y`) is that the code indexer resolves call edges
+  through `"$SCRIPT_DIR/other.sh" --flag`-style invocations, which it does not
+  yet — so building the impact half alone would add a conjunct that is
+  uninformative on shell-heavy repositories. Worktree isolation for batch
+  members is an orchestrator responsibility, not something the batching
+  mechanism allocates or records, so a later unit's full-suite run cannot be
+  relied on to see an earlier unit's changes. **Run the cross-cutting
+  integration sweep yourself after a parallel batch; the gate does not do it
+  for you** — `epic-gate.sh` calls it "recommended", which means exactly that.
 - Live e2e runs cost roughly $5–10 per fixture against the
   SessionStart-resolved models (whichever family/tier the resolver picks
   for each role per `.claude/model-roles`, honouring the exclusions in

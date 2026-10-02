@@ -31,7 +31,7 @@ set -u
 #      offline machine — a network dependency in the component tier.
 #   2. workflow-doctor.sh, exiting 3 ("installed, verification FAILED") when a
 #      functional check does not pass. This spec's fixtures are not built to
-#      satisfy eleven functional checks, and every `install.sh exits 0`
+#      satisfy thirteen functional checks, and every `install.sh exits 0`
 #      assertion here would start reporting a fixture gap as an installer bug.
 # Both are covered for real by `make install-test`, which installs into a
 # tempdir and requires a fully green doctor — that is the surface that proves
@@ -221,10 +221,33 @@ assert_eq "installer-mcp-config: rendered install has at least one tree-sitter w
 #     and the rubric files the grader reads. These assertions guard
 #     install.sh against forgetting a newly-shipped agent / tier when
 #     subsequent versions land more.
-assert_eq "installer-mcp-config: rendered install has grader.md (Phase A)" "0" \
-    "$([ -f "$INSTALL_TARGET/.claude/agents/grader.md" ] && echo 0 || echo 1)"
-assert_eq "installer-mcp-config: rendered install has judge.md (Phase C)" "0" \
-    "$([ -f "$INSTALL_TARGET/.claude/agents/judge.md" ] && echo 0 || echo 1)"
+# EVERY agent the manifest declares must be present in the rendered install —
+# DISCOVERED from plugin.json's agents[] (v5.0.0 / D0), not two names.
+#
+# This was `grader.md (Phase A)` and `judge.md (Phase C)`, added one per
+# release. That pattern is exactly the defect it was written for: install.sh's
+# hardcoded agent list silently dropped grader.md for two releases while the
+# repo's own tests stayed green (LESSONS.md). A per-release assertion inherits
+# the same blind spot one release later — an agent shipped and never added
+# here is unasserted, and the failure is a green suite. Reading the manifest
+# closes it for every future agent at once.
+MANIFEST_AGENTS=$(jq -r '(.agents // [])[]' "$INSTALL_TARGET/.claude-plugin/plugin.json" 2>/dev/null || true)
+MISSING_AGENTS=""
+MANIFEST_AGENT_COUNT=0
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    case "$rel" in ./*) rel="${rel#./}" ;; esac
+    MANIFEST_AGENT_COUNT=$((MANIFEST_AGENT_COUNT + 1))
+    [ -f "$INSTALL_TARGET/$rel" ] || MISSING_AGENTS="${MISSING_AGENTS:+$MISSING_AGENTS,}$rel"
+done <<EOF
+$MANIFEST_AGENTS
+EOF
+assert_eq "installer-mcp-config: every plugin.json agents[] entry is present in the rendered install" \
+    "" "$MISSING_AGENTS"
+# Non-vacuity: an empty or unreadable manifest would make the loop iterate zero
+# times and the check above pass over nothing.
+assert_eq "installer-mcp-config: the manifest declared a plausible agent set (>= 7)" \
+    "yes" "$([ "$MANIFEST_AGENT_COUNT" -ge 7 ] && echo yes || echo "no($MANIFEST_AGENT_COUNT)")"
 assert_eq "installer-mcp-config: rendered install has .claude/rubrics/default.md (Phase A)" "0" \
     "$([ -f "$INSTALL_TARGET/.claude/rubrics/default.md" ] && echo 0 || echo 1)"
 assert_eq "installer-mcp-config: rendered install has .claude/rubric-config (Phase A)" "0" \

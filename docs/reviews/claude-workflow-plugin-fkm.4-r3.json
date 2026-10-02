@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.4",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "6a1fde5523eb6c59c7888ea8e1de1907b53d01a6d3e3c5ee14c915e54ffb8fd4",
+  "risk_threshold": "high",
+  "stop_condition": "Both R2 findings are verified resolved with evidence; the five migrated specs prove GREEN by my own execution; the enumerated denominator survives an independent repo-wide enumeration attack (any missed success-path approve call site in the acceptance tiers is a blocking finding); the two source corrections are textually true; and no critical/high finding remains open in the gate or design paths.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "medium",
+      "location": ".claude/tests/component/lib/fixture.sh:549-553 (seed_design_verdict header, the corrected completeness paragraph)",
+      "evidence": "The corrected header states the five specs were fixed '(some via a seeded design-review-record where the spec's own record-grammar assertions could tolerate the extra machine token, most via --no-design ...)'. Measured: `grep -n 'seed_design_verdict\\|design-record\\|design-review-record\\|design_verdict' .claude/tests/component/specs/{verify-review-discipline,arbitration-acceptance,review-artifact-durability,worktree-approval-resolution,qa-gate}.sh` returns comment text only — zero seeded design verdicts in any of the five; all 13 sites carry --no-design. The RESOLVED R2-F1 record and the 'denominator' task doc both state 13/13 --no-design, zero seeded.",
+      "description": "A new false clause inside the very paragraph that was rewritten to correct a false completeness claim (fkm.4 R2-F1). 'Some via a seeded design-review-record' describes zero of the five specs; the accurate statement is 'all via --no-design'. No behavioral impact, the authoritative records elsewhere are correct, and it does not certify anything — but it misdirects the next migrator to hunt for a seeded-verdict precedent among the five that does not exist. Same claim-accuracy class this review cycle blocked on twice; below threshold because it is fix-history prose, not a mechanism or completeness claim. Fix with the next edit touching fixture.sh: replace the parenthetical with 'all via --no-design <reason> at the approve call site'."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "low",
+      "location": "bd doc 'denominator' (task claude-workflow-plugin-fkm.4): rows C16, D1; missing row for .claude/tests/component/specs/bd-mcp.sh",
+      "evidence": "Independent repo-wide sweep (`grep -rln --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.beads -e \"qa-gate\\.sh['\\\"]* approve|qa-gate\\.sh approve|cmd_approve|bd_qa_approve\" .`): (a) L2 spec bd-mcp.sh matches (bd_qa_approve tool-name parity assertions at :111 and :231) but appears in no C row — it never INVOKES the tool, so its classification would be needs-neither; (b) C16 lists post-edit.sh under 'zero approve references' though it carries comment references at :167 and :292 (no invocation — outcome unchanged); (c) D1 counts 'the 7 copies' of qa-gate.sh/verify-before-stop.sh under fixtures, but 9 copies of each exist counting the two frozen worktree remnants under node-react-auth/.claude/worktrees/agent-*/ (482- and 774-line ancient versions vs 7235/5635 shipped; inert, never synced by make sync-fixtures, reachable only by a test-live replay resuming stale recorded worktrees).",
+      "description": "Census precision nicks in the enumerated denominator. None changes any classification outcome and no unclassified live approve call site exists anywhere in the sweep (CI test.yml:239 is a comment; install.sh/install.ps1, agents' prompts, cassettes and .qa-tracking artifacts are prose/frozen state). Recorded so the denominator doc can be amended to say what the sweep actually finds: the census survives, with these three rows imprecise."
+    },
+    {
+      "id": "R3-F3",
+      "severity": "info",
+      "location": ".claude/tests/e2e/specs/ (the 7 live fixture specs, make test-live) — denominator row E2",
+      "evidence": "Disclosed by the fix round as UNVERIFIED (real API cost, manual-only, not in CI or make test-e2e-unit). Fixture script copies re-verified byte-identical to shipped by my own `cmp` over all 14 (7 fixtures x 2 scripts) after the round's `make sync-fixtures`.",
+      "description": "QA ruling requested by the round-3 brief: this gap does NOT block D2. The live tier is outside the phase's acceptance measurement; a live agent hitting no_design_attempted receives an envelope that names both remedies (design-review-record or --no-design '<reason>'), the same self-explanation this QA cycle itself navigated; and the tier's next paid run is the correct place to observe it. Residual worth naming: live trace-matchers have never seen the new [design bypass:] suffix or design tokens in approval records, so the first test-live run after D2 should expect matcher drift there."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

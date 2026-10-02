@@ -11,7 +11,7 @@ permissionMode: plan
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.
-model: claude-fable-5
+model: claude-opus-5
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. The session-level effort (launch wiring — `make session` /
 # `claude --effort` — or /effort) takes precedence per session; this
@@ -74,6 +74,22 @@ Determine:
 
 Before decomposing anything non-trivial, read `LESSONS.md` at the repo root. It is the append-only ledger of production lessons the plugin has learned — boundary-mock fidelity, worktree isolation, and whatever else QA has captured since. Plans that ignore the ledger re-run the same failure modes; one minute of reading there saves a QA bounce.
 
+Scope the read rather than `cat`-ing the file; it grows every session:
+
+```bash
+# The most recent entries — the ledger is append-ordered, so this is "lately".
+bash .claude/scripts/lessons.sh list --limit 25
+# Or bound by date: --since reads each entry's existing `recorded:` field.
+bash .claude/scripts/lessons.sh list --since 2026-06-01
+# Or by domain. Closed vocabulary, OR-combined across repeats:
+# gate, testing, packaging, agents, evidence, process.
+bash .claude/scripts/lessons.sh list --tag packaging --tag gate
+```
+
+Scoping is a convenience for the common case, not a cap on what you may see: when the work is broad, or you cannot tell which slice applies, run `lessons.sh list` with no flags and read the whole thing. Never re-order, re-section or sort the ledger to make it easier to scan — `grader.md` and `.claude/rubrics/default.md` cite lessons by ordinal position, and this file cites "entry 1" below, so a reordering repoints all of them silently. That is why scoping is a tag filter and not a restructuring.
+
+Any of the filtered forms above also print a JSON accounting line to stderr — total ledger size, how many matched, how many `--limit` cut, and which filters produced that — even when the match count is zero. Read it: a scoped call that matches nothing prints `"matched":0` there, distinguishable from a call that failed (`"ok":false` with a named error) and from one that silently returned less than it should have. Never treat an empty scoped result as equivalent to "nothing relevant exists" without checking that line first.
+
 Also before decomposing anything non-trivial, read
 `.claude/vendor/superpowers/brainstorming/SKILL.md` — a vendored design-dialogue
 method (`obra/superpowers`, MIT; the pin and ten local modifications are
@@ -94,9 +110,13 @@ negotiable:
   amount of design dialogue is a sign-off on anything. If you find yourself
   running a second acceptance procedure, you are running someone else's
   workflow.
-- **Spec location.** The design lands on the Beads task via
-  `bd_doc_write(task_id=…, name="spec")` per section 4a — never in a file under
-  `docs/`, which belongs to the operator.
+- **Spec location.** The per-task implementation SPEC lands on the Beads task via
+  `bd_doc_write(task_id=…, name="spec")` per section 4a — never in an ad-hoc file
+  under `docs/`, which belongs to the operator. ONE exception, and it is a named
+  path rather than a licence: the v5 design artifact at `docs/specs/<task-id>.md`,
+  which the designer writes, `qa-gate.sh design-record` hash-binds, and the gate
+  reads. That file is a gate input with a schema and a digest, not documentation
+  the operator has to maintain.
 - **Debugging.** Where any vendored material prescribes a debugging threshold or
   sequence, the delimited EBF-CORE region in `qa.md`, `backend.md`,
   `frontend.md` and `devops.md` wins. That region says so itself, in its first
@@ -140,6 +160,18 @@ bd_doc_write(task_id="<id>", name="spec", content="""
 
 The QA agent runs a complementary `impact_of` pass during regression assessment (extending J19 — see `.claude/agents/qa.md` section 3a). Doing it on the orchestrator side too is not redundant: the orchestrator's pass shapes the SPEC and the delegation; QA's pass scores the diff that actually landed.
 
+### 1b. Record the grilling before spawning `@designer` (v5 D3)
+
+When the dialogue above concludes and a design phase follows (i.e. you are about to spawn `@designer`, not for ordinary single-domain work), record it — **you are the one that ran it; no subagent can, and `qa-gate.sh design-record` will refuse without this**:
+
+```bash
+bash .claude/scripts/qa-gate.sh grilling-record <task-or-epic-id> \
+    --rounds <n> --questions <n> --approaches <n> --unresolved <n> \
+    '<one-line summary of what was explored and left open>'
+```
+
+Record it on the task if there is one yet, or on the parent epic if you are grilling before any child task exists — `design-record`'s precondition reads either. `--approaches` must be at least 2 (the method's own bar: "Propose 2-3 different approaches with trade-offs"); a lower count refuses `insufficient_approaches` rather than recording a dialogue that skipped it. For the same trivial-work carve-out above, or a design record produced under it, `design-record --no-grilling '<reason>'` is the audited bypass — do not reach for it merely because the dialogue felt short; a short but genuine grilling still records normally. Full behavioral spec: `docs/HOOKS.md` under "A design cannot be recorded without having been grilled first (`GRILLING-PRECONDITION`)".
+
 ### 2. Create Beads task(s)
 
 ```bash
@@ -148,8 +180,13 @@ bd create "Fix: Login timeout" -t bug -p 1 -l backend,qa-pending
 
 # Complex (multiple domains) — use an epic
 EPIC=$(bd create "Epic: User Auth" -t epic -p 1 --json | jq -r '.id')
-bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending
+# --no-inherit-labels is NOT optional: bd COPIES the parent's labels onto every
+# child, so a task filed under a parent carrying qa-approved / qa-gate-entered is
+# born asserting a review that never happened (claude-workflow-plugin-rmz). The
+# bd_create_task / bd_create_epic MCP tools suppress this for you; a bare
+# `bd create --parent` does not.
+bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending --no-inherit-labels
 ```
 
 **Task right-sizing.** A task is the smallest unit that carries its own test
@@ -209,6 +246,63 @@ When the specialist returns, step 2 → `completed`, step 3 → `in_progress`.
 
 For trivial single-step tasks, `TaskCreate` is optional. For anything
 multi-step or multi-domain, always emit both.
+
+#### 2b. Bind each task to its design unit (v5 D4b, claude-workflow-plugin-6im2)
+
+Conditional step — applies only when the task(s) you just created implement
+units enumerated in a design artifact whose review relay (section 5e) reached
+`satisfied`. Ordinary decomposition with no design phase skips this entirely.
+
+`qa-gate.sh design-conform` (fkm.6) checks a task's changed files against the
+unit it implements, but it can only do that once a per-task binding exists —
+and nothing writes that binding except this step. You are the only actor that
+opens one task per design unit (neither `@designer` nor `@design-reviewer`
+carries a `Bash` tool grant, so neither can invoke `qa-gate.sh` at all), so
+this is the only call site there can be. Skip it and every unit's task stays
+unbound, and `design-conform` on it takes the fail-closed `unit_not_in_design`
+path forever — not because the task violated its unit, but because nothing
+ever said which unit it was.
+
+For each task you create against one unit, bind it right after `bd create` /
+`bd_create_task` and before your first `Task()` to the implementing
+specialist:
+
+```bash
+bash .claude/scripts/qa-gate.sh design-unit-bind <child-task-id> \
+    --design-task <design-task-id> --unit-id <unit-id>
+```
+
+- `<child-task-id>` — the Beads id you just created for this unit.
+- `<design-task-id>` — the id carrying the `DESIGN-ARTIFACT`/`DESIGN-REVIEW`
+  records: the same id section 1b's `grilling-record` and section 5e's
+  `design-review-record` ran against. Usually the epic (grilling commonly runs
+  before any child task exists), but state whatever id it actually is — this
+  script never infers it through a parent-child walk, because a re-plan or
+  restructuring can make that inference wrong. (`design-gate-precheck`,
+  section 4c, is a separate mechanism entirely: it reads records directly off
+  the single task id you pass it, with no parent-epic walk of its own either,
+  which is why it cannot substitute for this step.)
+- `<unit-id>` — that unit's own `unit_id` from the design artifact's
+  `<!-- DESIGN-UNITS -->` block (`@designer` writes values like `U1`, `U2`;
+  read the real one back, never invent one).
+
+Refuses `unit_not_in_artifact` if `<unit-id>` is not currently declared — a
+binding to a nonexistent unit is worse than none — and refuses a second write
+to the same task (`design_binding_exists`) unless you pass
+`--rebind '<reason>'`, which you need whenever a design amendment (section 5e)
+splits, merges or renumbers units after tasks already exist against the old
+numbering.
+
+**This is currently advisory, not enforced — say so rather than treating it as
+closed.** `design-conform` is deterministic and has no bypass flag, but
+nothing calls it automatically today, and it is not wired into `approve`
+(deliberately deferred; see `qa-gate.sh`'s own `DESIGN-CONFORM` header).
+Binding every task is still mandatory practice: it is the only way a future
+`design-conform` call — by you, by QA, or by a later automated wiring — has
+anything to check. Per `LESSONS.md` entry 6 (prose cues do not reliably drive
+subagent tool use), treat this paragraph as necessary and not sufficient — the
+mechanical backstop this step is missing is a live e2e invariant over a real
+trace, which does not exist yet either.
 
 ### 3. Persist the active task id (F3)
 
@@ -338,6 +432,23 @@ Task("@backend", "Hotfix: race in session-renew handler.")
 ```
 
 Mechanism reference: `code.claude.com/docs/en/sub-agents` documents `isolation: "worktree"` as a Task-tool parameter; `code.claude.com/docs/en/worktrees` documents `.worktreeinclude` (`.gitignore` syntax, only matching gitignored files are copied, applies to subagent worktrees). Worktrees with no changes are auto-removed when the subagent finishes.
+
+#### 4c. Design-gate precheck before delegating implementation (v5 D2)
+
+Before your FIRST `Task()` spawn to an implementation specialist (`@backend`, `@frontend`, `@devops`) on a given task, run the precheck:
+
+```bash
+bash .claude/scripts/qa-gate.sh design-gate-precheck <task-id>
+```
+
+This is a **pre-delegation convenience, never an enforcement point** — nothing can force this prompt to run a script before you decide to delegate; the real, unavoidable backstop is `qa-gate.sh approve`'s own design-satisfied refusal, which fires later regardless of whether you ran this. Running it first means you discover you are about to spawn an implementer on an unreviewed design BEFORE paying for that spawn, rather than only when approve refuses at the end.
+
+**Read the exit code.** `design-gate-precheck` reads `compute_design_satisfied` — the ONE predicate `qa-gate.sh approve`'s design-satisfied refusal also defers to — and is DELIBERATELY MORE LENIENT than that refusal:
+
+- **Exit 0, `"ready"`.** Either the design is genuinely satisfied, or the task never had a design phase at all (`no_design_attempted`) — the ordinary case for most tasks today. Delegate normally.
+- **Exit 4**, error_key one of `design_verdict_missing` / `design_not_satisfied` / `design_hash_unreadable` / `design_artifact_unreadable` / `design_verdict_stale` — a design was STARTED (a `DESIGN-ARTIFACT` record exists on the task) but is not yet satisfied. Do NOT spawn the implementer. Clear it through the design-review relay (section 5e) before your next `Task()` to that specialist.
+
+This check answers exactly one question — is there an unreviewed design in flight on THIS task — and nothing more. It is not the grilling-record precondition (a separate, mechanical check inside `qa-gate.sh design-record` itself — see section 1b above) and not the decomposition-conformance check (`design-unit-bind` / `design-conform`, v5 D4 — see section 2b for the binding step this precheck does not perform); those are separate phases and separate call sites, and this precheck never consults a unit binding at all — `compute_design_satisfied` reads records directly off the task id you pass it, with no parent-epic walk and no binding lookup. Full behavioral spec: `docs/HOOKS.md` under "The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`)".
 
 ### 5. QA review (mandatory)
 
@@ -587,7 +698,7 @@ RC=$?
 printf 'codex-review exit=%s artifact=%s\n' "$RC" "${ART:-<none>}"
 ```
 
-On success the driver prints the artifact path on stdout and exits 0. It validates the request through `review-check.sh`, drives the Codex MCP server over JSON-RPC in a read-only sandbox, bounds the turn by every cap in `review-config`, and writes a schema-valid artifact to `.claude/.qa-tracking/review-artifact-<task-id>-r<n>.json`. You do not paste a prompt or parse model output — the driver owns the transport.
+On success the driver prints the artifact path on stdout and exits 0. It validates the request through `review-check.sh`, drives the Codex MCP server over JSON-RPC in a read-only sandbox, bounds the turn by every cap in `review-config`, and writes a schema-valid artifact to `docs/reviews/<task-id>-r<n>.json` (claude-workflow-plugin-rqer, v5 D2: the canonical, committed location — moved from `.claude/.qa-tracking/`, which `qa-gate.sh approve` wipes on every completed cycle). You do not paste a prompt or parse model output — the driver owns the transport.
 
 **Step C — record the artifact, then re-engage QA.**
 
@@ -595,7 +706,7 @@ On success the driver prints the artifact path on stdout and exits 0. It validat
 bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TASK_ID" --file "$ART"
 ```
 
-`review-record` re-validates through the same one validator and appends the durable `REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> ... findings=[<id>:<sev>,...] at <ts>: <summary>` comment. It is a record writer only: no labels change, no approval is created. Then re-engage QA with a fresh spawn so it folds the artifact into the packet:
+`review-record` re-validates through the same one validator, hashes the artifact (`workflow-manifest.sh hash-file`) and appends the durable `REVIEW-ARTIFACT v1 iteration=<n> reviewer=<id> ... findings=[<id>:<sev>,...] artifact_hash=<64 hex> at <ts>: <summary>` comment — the hash names the bytes at `$ART`, so a later approval's own re-verification can tell whether they are still the ones reviewed. It is a record writer only: no labels change, no approval is created. `--file "$ART"` works here because `$ART` is already the driver's own canonical path; review-record refuses a `--file` naming anywhere else (`artifact_path_not_derived`), it does not silently record different bytes. Then re-engage QA with a fresh spawn so it folds the artifact into the packet:
 
 ```
 Task("@qa", "Independent review recorded for $TASK_ID (review iteration $REVIEW_ITERATION, reviewer=sol-codex). Read the latest REVIEW-ARTIFACT comment, fold it into the grading packet as ADVISORY item 8 per qa.md section 6-prime, and continue the gate. The artifact informs your verdict; it does not bind it.")
@@ -708,6 +819,177 @@ bash .claude/scripts/qa-gate.sh arbitrate "$TASK_ID" <finding-id> <overrule|sust
 
 **Trace-level proof.** The `approval-cites-independent-review` invariant (`.claude/tests/e2e/lib/invariants.ts`) replays this whole chain over a recorded run: every `QA-GATE APPROVED` record must cite an independent reviewer and leave zero at-threshold findings open, counting a `RESOLVED … fix= test=` or a latest `ARBITRATION … decision=overrule` as clearing and a `sustain` as not. If you arbitrate honestly, it stays green for free.
 
+#### 5e. Design-review relay (DESIGN-RELAY: design-review)
+
+Phase D2 reuses the rubric-grader relay's shape (section 5a) for the design axis. The designer and the design reviewer are both subagents, and a review loop between them — revise, re-review, revise again — has to be driven from THIS conversation level exactly like the rubric-grader loop is: `code.claude.com/docs/en/sub-agents` states `Agent(agent_type)` has no effect inside a subagent definition, so neither the designer nor the reviewer can spawn the other (`design-reviewer.md`'s own "Identity and scope" section states this from its side). This subsection is the canonical DESIGN-RELAY: design-review procedure.
+
+**Trigger.** Either:
+- `@designer` returns having written or revised the design artifact at `docs/specs/<task-id>.md`, with a fresh `design_hash` from `qa-gate.sh design-record` in its completion contract.
+- An amendment forces a re-review: an implementer's `design_conflict` blocker (D5), a material deviation you need to make (D4), or a `design-gate-precheck` refusal you are clearing (section 4c) — in each case the designer revises the artifact in place first, and this relay runs on the result.
+
+Unlike the rubric loop, the iteration counter is not tracked in a Beads label — read it from the latest `DESIGN-REVIEW` comment's `iteration=` field (`bd show` on the task), defaulting to 1 for a fresh artifact's first review.
+
+**Step A — read the iteration cap.** Same file, same key, same default as the rubric relay (section 5a):
+
+```bash
+ITERATION_CAP=$(grep -E '^iteration_cap=' "$CLAUDE_PROJECT_DIR/.claude/rubric-config" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '[:space:]')
+ITERATION_CAP="${ITERATION_CAP:-3}"
+```
+
+If `ITERATION` > `ITERATION_CAP`, do NOT spawn the reviewer; jump to Step E (cap escalation).
+
+**Step B — spawn the design reviewer at root.**
+
+```
+Task(
+    subagent_type="design-reviewer",
+    description="Review design for $TASK_ID (iteration $ITERATION)",
+    prompt="""
+        ## Design review packet — iteration $ITERATION
+        1. The design artifact — docs/specs/$TASK_ID.md (paste verbatim, or the path; the reviewer Reads it directly)
+        2. The grilling record — the `GRILLING v1` comment on the task or its parent epic (v5 D3), pasted verbatim; the reviewer has no Beads-tool grant of its own to pull it
+        3. impact_of output for the units' declared files (paste it, or state the degradation plainly if the server is unavailable)
+        4. LESSONS.md — the whole ledger, never a filtered slice
+    """,
+)
+```
+
+The reviewer returns a single JSON object as its final message — capture it verbatim per `design-reviewer.md`'s output contract (`{verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity}`). Do NOT re-narrate it; do NOT edit it. A non-JSON response or a missing key is a malformed handoff — `design-review-record` in Step C rejects it with a structured error naming the offending key; re-spawn with the corrective hint inlined rather than patching the JSON yourself.
+
+**Step C — record the verdict, then branch.**
+
+```bash
+# --design-hash is REQUIRED here (unlike the rubric relay's --graded-hash):
+# an unbound design verdict cannot support cmd_approve's hard design-satisfied
+# refusal. Use the hash the designer's own completion contract named, or a
+# fresh one: bash .claude/scripts/workflow-manifest.sh hash-file docs/specs/$TASK_ID.md
+DESIGN_HASH="<the artifact's design_hash>"
+
+printf '%s' "$REVIEWER_JSON" \
+    | bash .claude/scripts/qa-gate.sh design-review-record "$TASK_ID" --design-hash "$DESIGN_HASH"
+```
+
+`design-review-record` refuses (`design_reviewer_not_independent`) when `reviewer_identity` equals the task's recorded designer — checked here, at record time, not deferred to approve. On success it appends a `DESIGN-REVIEW v1` comment and moves NO Beads label: the design-satisfied state is read live by `compute_design_satisfied` (section 4c's precheck and `qa-gate.sh approve` both defer to it), so there is no label to keep in sync.
+
+- `satisfied` — `design-gate-precheck` (section 4c) now reads ready for this task. Proceed with your next `Task()` to the implementation specialist(s).
+- `needs_revision` — re-spawn `@designer` with the reviewer's `required_fixes` verbatim; it revises the artifact IN PLACE (a `Revision log` row, a moved `design_hash` — never a second `<!-- DESIGN-UNITS BEGIN/END -->` block, which is refused as an amendment rather than merged with the first) and returns. Run Steps A-C again at `iteration + 1`.
+
+**Step D — re-engage whichever side needs the result.** Unlike the rubric relay (which always re-engages QA), here the next actor depends on Step C's branch: `@designer` on `needs_revision` (with the required fixes), or the waiting implementation specialist on `satisfied` (a fresh `Task()`, not a re-engagement — it never saw the design-gate refusal that paused it). On `satisfied`, if the per-unit child tasks do not exist yet, create them now (section 2) and bind each one to its unit (section 2b) before that `Task()` — binding after the fact works too, but binding before delegating means the implementer's very first changed file is already covered by a task `design-conform` can check.
+
+**Step E — cap-hit escalation.** When `ITERATION` > `ITERATION_CAP` (or the reviewer returns `needs_revision` AT iteration == cap), stop relaying. Same J21 escalation every loop in this file uses:
+
+```bash
+bash .claude/scripts/qa-gate.sh choose <approve|continue|tech-debt|defer> "$TASK_ID" '<note>'
+```
+
+`choose approve` is not an unconditional escape here either — it delegates to `cmd_approve`, so it still needs a satisfied design verdict or an explicit `--no-design '<reason>'`, and `choose` has no flag slot to forward that reason through (qa.md documents the identical gap from QA's side). Prefer the direct form — `qa-gate.sh approve "$TASK_ID" --no-design '<reason>' '<summary>'` — when the cap-hit resolution is "accept this design as-is."
+
+**Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
+
+- Reviewer's `reviewer_identity` matches the designer's own → `design-review-record` refuses `design_reviewer_not_independent`; re-spawn with a genuinely separate identity (`design-claude` is the only wired lane as of this writing — `design-reviewer.md`'s own "Identity and scope" section states why).
+- `design-review-record` refuses `design_review_iteration_not_advancing` → the `iteration` you passed is at or below the latest recorded one; increment and retry.
+- Two consecutive cap-hits on the same artifact → the design itself is likely the problem, not the reviewer's patience. Surface to the operator via `AskUserQuestion` rather than raising the cap or re-spawning blind.
+
+#### 5f. Coherence-rollup relay (ROLLUP-RELAY: coherence-rollup)
+
+v5 D6's judgement half (`claude-workflow-plugin-fkm.8`, plan:718-737) reuses the SAME design-reviewer agent a THIRD time on a given design arc — once per revision at 5e (the artifact, pre-implementation), and once more here, after every declared unit has been implemented and independently approved, to judge the three whole-system criteria a mechanical check cannot: DS1 (are the criteria still falsifiable now that the system exists), DS2 (is the decomposition still complete and disjoint now that it is built), and DS8 (does the FINISHED system contradict `LESSONS.md`, and is this verdict being waved through under cap pressure). Same structural reason as every relay in this file: subagents cannot spawn subagents, so this spawn lives here, at the root, never inside `qa.md` or `design-reviewer.md` itself.
+
+**Trigger.** Either:
+- `epic-gate.sh check <epic-id>` reports `decision: "block"` with an observations string naming "the coherence rollup for `<epic-id>` itself is not both mechanically clean AND judged coherent" — this is the ADVISORY signal (plan:718-737's own words), surfaced to you via a Stop hook's `EPIC_DEFER_NOTE` on any child's own completion, or by running the check yourself.
+- You notice directly (via `bd_list_tasks` under the epic, or a specialist's own completion contract) that every child bound to a unit under a design-governing task is now `qa-approved`, and you are about to attempt that governing task's own `approve`.
+
+Either way, do NOT attempt the governing task's own `approve` yet if `qa-gate.sh design-coherence <epic-id>` reports `ok:false` — that is the MECHANICAL half (section 4c's own axis, D5/`fkm.7`), a DIFFERENT and prior gate this relay does not touch. Fix or amend against that breakdown first; this relay's own first step (`design-rollup-packet`) refuses outright when the mechanics are not yet settled, precisely so a spawn is never wasted judging data that is about to change.
+
+**Step A — read the iteration cap.** Same file, same key, same default as every relay in this file (5a/5e):
+
+```bash
+ITERATION_CAP=$(grep -E '^iteration_cap=' "$CLAUDE_PROJECT_DIR/.claude/rubric-config" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '[:space:]')
+ITERATION_CAP="${ITERATION_CAP:-3}"
+```
+
+Unlike 5e, there is no iteration counter recorded on the `DESIGN-ROLLUP v1` grammar itself (plan:718-737's own record shape carries `reviewer`/`model`/`design_hash`/`units`/`verdict`/`gaps` only) — the round you are on is however many times you have run this relay for the CURRENT `design_hash`, tracked in your own relay notes, defaulting to 1 for a hash that has never had a rollup verdict recorded against it yet. This can genuinely reach 2 or more against the SAME hash (not only after an artifact amendment moves it): each `incoherent` verdict for an implementation-side gap is superseded by a fresh record at that SAME hash (Step D's own `incoherent` branch below), so a design that took several rounds to get right on the implementation side, never touching the artifact, still needs its own iteration count tracked and capped like any other loop in this file.
+
+If `ITERATION` > `ITERATION_CAP`, do NOT spawn the reviewer; jump to Step F (cap escalation).
+
+**Step B — assemble the packet.**
+
+```bash
+PKT_OUT=$(bash .claude/scripts/qa-gate.sh design-rollup-packet "$EPIC_ID")
+```
+
+If this refuses (`error_key: design_rollup_mechanical_prerequisite`), STOP — this is not a cap-hit and not a reviewer disagreement, it means the mechanical rollup (section 4c's own axis) has reopened since you last checked. Re-run `qa-gate.sh design-coherence "$EPIC_ID"` for the breakdown, route the fix or amendment to whichever unit's task needs it, and only return to Step B once that axis reports `ok:true` again. If it refuses `design_rollup_not_applicable`, this task was never the right target for this relay at all — re-check which task actually governs the design (`design-unit-show` on the child that surfaced the trigger).
+
+On success, `Read` the packet at `.packet_path` — it is a plain file under `.claude/.qa-tracking/`, the same convention `impact-report.sh`'s own JSON artifact already uses, not a `bd_doc`.
+
+**Step C — spawn the design reviewer at root, a second time.**
+
+```
+Task(
+    subagent_type="design-reviewer",
+    description="Coherence rollup for $EPIC_ID (round $ITERATION)",
+    prompt="""
+        ## Design rollup packet — round $ITERATION
+        (Paste the packet file's contents verbatim here — it already carries
+        all four sections: the artifact, every unit's F7 contract, the
+        union diff, and the conflict/amendment history.)
+
+        This is the SECOND invocation (design-reviewer.md's own "Second
+        invocation — the coherence rollup" section): grade DS1, DS2 and
+        DS8 substantively against what was actually built; mark DS3
+        through DS7 pass, citing that they are already discharged by the
+        per-unit mechanical rollup and the original design review. Return
+        the SAME six-key JSON your first invocation always returns.
+    """,
+)
+```
+
+The reviewer returns the SAME `{verdict, criterion_results, required_fixes, iteration, rubric_version, reviewer_identity}` shape 5e's own Step B already documents — capture it verbatim, do not re-narrate or edit it. A non-JSON response or a missing key is a malformed handoff; `design-rollup` in Step D rejects it with a structured error naming the offending key, exactly like `design-review-record` does.
+
+**Step D — record the verdict.**
+
+```bash
+# --design-hash and --model are BOTH required (unlike the rubric relay's
+# optional --graded-hash): an unbound or unattributed rollup verdict
+# cannot support cmd_approve's own hard DESIGN-ROLLUP-REFUSAL.
+DESIGN_HASH="<the packet's own design_hash field>"
+MODEL="<the model that actually produced this verdict — your own runtime
+        self-report for the design-reviewer spawn, the SAME 46w9 split
+        every other model-bearing record in this file's relays already
+        uses; never re-derived from re-reading design-reviewer.md's
+        frontmatter a second time>"
+
+printf '%s' "$REVIEWER_JSON" \
+    | bash .claude/scripts/qa-gate.sh design-rollup "$EPIC_ID" \
+        --design-hash "$DESIGN_HASH" --model "$MODEL"
+```
+
+`design-rollup` refuses (`design_reviewer_not_independent`) when `reviewer_identity` equals the recorded designer, exactly like `design-review-record`; refuses (`design_rollup_hash_stale`) when `--design-hash` no longer matches the epic's CURRENT governing hash — an amendment landed while the reviewer was working, and this verdict cannot be bound to a state that no longer exists; and refuses (`design_rollup_mechanical_prerequisite`) if the mechanical rollup itself reopened in that same window. Any of these three means: re-run Step B against the current state and re-spawn, never retry the record call with the same inputs.
+
+- `coherent` — `epic-gate.sh check` now reads `pass` for this epic and `qa-gate.sh approve` on it no longer refuses on this axis at all (`design_rollup_missing`, `design_rollup_verdict_stale`, or `design_rollup_incoherent` — three distinct `error_key`s for the three ways this refusal could have fired, since QA round 1 on `fkm.8`). Proceed with the governing task's own approval (yours, or QA's, depending on who owns that call in your workflow).
+- `incoherent` — this is a WHOLE-SYSTEM finding, not a per-unit one, and WHICH kind of gap it names determines the route out (QA round 2 on `fkm.8`, R2-F1: `cmd_design_rollup`'s own duplicate-hash check refuses a second verdict at the SAME `design_hash` only when the PRIOR one at that hash was itself `coherent` — an incoherent prior verdict can always be superseded by a fresh one at the SAME hash, no amendment required). Read the reviewer's `required_fixes` first to tell the two cases apart:
+  - **Implementation-side gaps** (the ordinary case — DS1/DS2/DS8 judging what units actually built, not what the design document says): fix the implementation the fixes name, re-run `design-rollup-packet` against the UNCHANGED `design_hash` (the packet now reflects the fixed work), re-spawn the reviewer (Step C), and record the superseding verdict at Step D with the SAME `--design-hash` you started with. No artifact edit, no `@designer` spawn, no moved hash — the design document was never what was wrong.
+  - **Design-side gaps** (the `required_fixes` name the ARTIFACT itself — an acceptance criterion that was never falsifiable as written, a decomposition that is missing a unit): re-spawn `@designer` with the reviewer's `required_fixes` verbatim (the same relay shape as 5e's own `needs_revision` branch). The designer amends the artifact in place (a fresh `Revision log` row, a moved `design_hash`); once a fresh `DESIGN-REVIEW v1` verdict is satisfied again (re-run 5e if the amendment is substantial enough to warrant a full re-review, or record one directly if it is not), decide with the operator's own judgement whether any unit's own implementation needs to change too — an incoherent DS2 finding in particular ("the decomposition no longer reads as complete") can mean a unit's scope needs to grow, which is a NEW unit-binding decision (section 2b), not something this relay resolves on its own.
+  Either way, return to Step B at `iteration + 1` — against the SAME `design_hash` for an implementation-side fix, or the amended one for a design-side fix.
+
+**Step E — re-engage whichever side needs the result,** the same "depends on Step D's branch" shape 5e's own Step D uses: the waiting approver on `coherent`, or `@designer` (with the required fixes) on `incoherent`.
+
+**Step F — cap-hit escalation.** Same J21 escalation every loop in this file uses:
+
+```bash
+bash .claude/scripts/qa-gate.sh choose <approve|continue|tech-debt|defer> "$EPIC_ID" '<note>'
+```
+
+`choose approve` is not an unconditional escape here either: it delegates to `cmd_approve`, which still refuses on this axis — at a cap-hit the LATEST recorded verdict, if any, is most often `design_rollup_incoherent` (the reason you are escalating at all is that superseding it with a fresh coherent one, per Step D's own `incoherent` branch above, kept not happening), though `design_rollup_missing`/`design_rollup_verdict_stale` are also possible if the cap was hit before a verdict was ever successfully recorded at the current hash — and `choose` has no flag to waive any of the three, deliberately, per this region's own header in `qa-gate.sh` ("no bypass flag exists on this axis"). A cap-hit on the judgement half means the operator decides whether an incoherent-but-capped rollup is accepted as tech debt (filed as its own follow-up task, `discovered-from` the epic) or the arc stays open past the cap.
+
+**Failure modes to surface in your relay notes (TaskUpdate or Beads comment):**
+
+- `design-rollup-packet` refuses `design_rollup_mechanical_prerequisite` on EVERY retry → some unit's own per-unit alignment (section 4c) is not actually settled; do not keep re-running this relay against it, route back to whichever child owns the gap.
+- Reviewer's `reviewer_identity` matches the designer's own → same `design_reviewer_not_independent` refusal 5e's own failure-modes list names, same fix.
+- `design-rollup` refuses `design_rollup_duplicate_hash` → this fires ONLY when the LATEST verdict already recorded against this exact `design_hash` was itself `coherent` (QA round 2 on `fkm.8`, R2-F1 — narrowed from the unconditional rule an earlier version of this bullet described). If you are seeing this, either: the epic already has a coherent, current rollup and you should be proceeding to approval instead of re-running this relay; or you are re-running Step D against genuinely stale state (re-check `design-rollup-status`). It is NEVER the correct response to spawn `@designer` for an artifact amendment on THIS refusal specifically — if the prior verdict at this hash was `incoherent`, Step D's own record call does not refuse at all; it records the fresh verdict as the new latest.
+- Two consecutive cap-hits on the same epic → the same signal 5e's own list names: the design itself, or its decomposition, is likely the problem. Surface to the operator via `AskUserQuestion` rather than raising the cap.
+
 ## Self-check
 
 Before responding, verify:
@@ -716,6 +998,8 @@ Before responding, verify:
 - [ ] Did I create Beads task(s)?
 - [ ] Did I persist the active task id via `current-task.sh set` (or did `qa-gate.sh enter` do it)?
 - [ ] For non-trivial work, did I write a `spec` (and `context` if needed) doc via `bd_doc_write` BEFORE spawning the specialist?
+- [ ] Did I run `qa-gate.sh design-gate-precheck` before my first `Task()` to an implementation specialist (section 4c), and route through the design-review relay (section 5e) rather than delegate if it refused?
+- [ ] If this decomposition came from a reviewed design, did I bind each per-unit task with `qa-gate.sh design-unit-bind` (section 2b) before delegating to it?
 - [ ] Did I delegate to specialists with `Task()`?
 - [ ] Am I writing code myself? (If yes, delegate instead.)
 

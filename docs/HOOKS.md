@@ -6,19 +6,22 @@ Complete documentation of all hook scripts in the claude-workflow plugin.
 
 ## Overview
 
-The plugin wires 6 Claude Code hook events in `.claude/settings.json`
-(the plugin-manifest `.claude/hooks/hooks.json` adds a 7th, SubagentStart,
-for plugin-scoped installs):
+The plugin wires **7** Claude Code hook events in `.claude/settings.json`
+(confirmed via `jq '.hooks|keys|length' .claude/settings.json`). The
+plugin-manifest `.claude/hooks/hooks.json` mirrors the same seven events;
+its only addition beyond `settings.json` is a second `PostToolUse` matcher
+(`^Bash$` → `bd-github-link.sh`) for plugin-scoped installs — see "Hook
+Configuration" below for the exact diff between the two files:
 
 | Hook | File | Trigger |
 |------|------|---------|
 | SessionStart | `session-start.sh` | Session begins |
 | UserPromptSubmit | `intent-router.sh` | User submits prompt |
 | PreToolUse | `prevent-orchestrator-edits.sh` | Before Write/Edit/MultiEdit (blocks orchestrator edits) |
-| PostToolUse | `post-edit.sh` | After Write/Edit/MultiEdit tools |
+| PostToolUse | `post-edit.sh` | After Write/Edit/MultiEdit/NotebookEdit tools |
 | Stop | `verify-before-stop.sh` | Claude attempts to stop |
 | SessionEnd | `session-end.sh` | Session ends |
-| SubagentStart (`hooks.json` only) | `subagent-start.sh` | A subagent starts (auto-assign injection) |
+| SubagentStart | `subagent-start.sh` | A subagent starts (auto-assign injection) |
 
 ---
 
@@ -26,7 +29,7 @@ for plugin-scoped installs):
 
 **File**: `.claude/settings.json`
 
-The shipped `hooks` block wires all six event types (the file also carries
+The shipped `hooks` block wires all seven event types (the file also carries
 `statusLine`, an `env` block, and a `permissions.allow` list alongside
 `hooks` — omitted here for focus):
 
@@ -69,7 +72,7 @@ The shipped `hooks` block wires all six event types (the file also carries
     ],
     "PostToolUse": [
       {
-        "matcher": "^(Write|Edit|MultiEdit)$",
+        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit)$",
         "hooks": [
           {
             "type": "command",
@@ -149,16 +152,25 @@ DEGRADED_BLOCK="<workflow_degraded severity=\"high\">...</workflow_degraded>"
 # 4. Create session marker
 touch "$PROJECT_DIR/.claude/.session-start"
 
-# 5. Reset QA tracking
+# 5. Reset QA tracking. ONE read of "is a cycle in flight?" serves BOTH this
+#    and 5b — see "The tracker survives a session boundary" below for why two
+#    independent reads is itself the bug (94d.1).
+SS_ACTIVE_TASK=$(current-task.sh get)
 rm -f "$QA_TRACKING_DIR/approved"
-rm -f "$QA_TRACKING_DIR/changed-files.txt"
+if [ -n "$SS_ACTIVE_TASK" ]; then
+    : # PRESERVE changed-files.txt: a review cycle is mid-flight and this file
+      # is the change set it is reviewing. Reported via workflow_warnings.
+else
+    rm -f "$QA_TRACKING_DIR/changed-files.txt"
+fi
+rm -f "$QA_TRACKING_DIR/edit-count"
 
-# 5b. Capture the gate baseline (v4) — ONLY when no review cycle is active.
-#     Records "this dirt was already here on arrival" so the Stop gate
-#     evaluates the session's delta. Fails OPEN: SessionStart must never
-#     break a session, so a failure is one sync-errors.log line and nothing
-#     more. See "The gate baseline" under the PostToolUse hook.
-if [ -z "$(current-task.sh get)" ]; then
+# 5b. Capture the gate baseline (v4) — ONLY when no review cycle is active,
+#     the SAME predicate as 5. Records "this dirt was already here on arrival"
+#     so the Stop gate evaluates the session's delta. Fails OPEN: SessionStart
+#     must never break a session, so a failure is one sync-errors.log line and
+#     nothing more. See "The gate baseline" under the PostToolUse hook.
+if [ -z "$SS_ACTIVE_TASK" ]; then
     qa-gate.sh baseline-capture --by session-start
 fi
 
@@ -256,6 +268,62 @@ runs on a host where bd is present, so it passes against the pre-C0c hook.
    - Mandatory QA gate reminder
    - Structured notes format
 
+### The tracker survives a session boundary (`TRACKER-PRESERVE`)
+
+Step 5 above used to `rm -f changed-files.txt` unconditionally. That is right for
+a new session and wrong for every other reason this hook fires: **SessionStart
+runs on `startup`, `resume`, `clear` *and* `compact`**, so a conversation that
+compacted in the middle of a QA review deleted the change set out from under the
+review that was reading it.
+
+Reproduced live on this repository's own `94d` review: **26 tracked paths → 0**,
+then `qa-gate.sh enter`'s reconcile rebuilt **10** of them from `git status` minus
+a 35-hour-old, 159-entry gate baseline. Every step reported `ok:true`,
+`change_set_hash` moved `01296db9… → 0b5a546e…`, and nothing anywhere said 16
+paths had gone. This is strictly worse than the pre-reconcile behaviour it
+replaced: a destroyed tracker used to hash to the empty-list `e3b0c442…`, which is
+loudly and self-evidently wrong. The reconciler is what made the truncated set
+look correct.
+
+**The guard.** `changed-files.txt` is preserved when `current-task` names a task —
+**the same predicate step 5b has used for the gate-baseline capture since
+3mg.1**, deliberately identical rather than merely similar. Two decisions in one
+hook turning on one question must not be able to answer it differently: the
+disagreement that matters is "tracker preserved, and then the work it names
+baselined as pre-existing", which is the same lost-change-set state by another
+route. So the read is hoisted once and both blocks consume it.
+
+Notes on the shape, each of which was a rejected alternative:
+
+- **No bd label read.** An earlier draft required `qa-gate-entered`/`qa-pending`
+  as well. That made a decision about a local file depend on bd + jq + a
+  `bd show` round-trip (against this hook's whole "a degraded install still
+  works" contract), and re-opened the asymmetry from the other end.
+  `session-lifecycle.sh` 8.3 pins that the preserve works for a `current-task`
+  naming no Beads issue at all.
+- **`edit-count` is *not* preserved with it.** Its only consumer is
+  `post-edit.sh`'s every-10-edits progress comment; it carries no evidence about
+  *which* paths changed, so nothing downstream can certify less because it reset.
+- **The stickiness is real and reported, not hidden.** `approve` clears
+  `current-task`; `block` deliberately does not (a block/fix loop is one cycle).
+  So a session that dies mid-cycle leaves the id set and the tracker pinned open
+  until something clears it. That direction is *over*-reporting — it blocks a
+  Stop until someone looks, and `current-task.sh clear` resolves it — whereas
+  under-reporting certifies a subset of what shipped. It is also not a new
+  exposure: step 5b has carried the identical stickiness since 3mg.1.
+- **It says so.** A carried-over tracker emits a `workflow_warnings` line naming
+  the cycle, the path count, and that recovery command. Invisibility is what made
+  94d.1 expensive; a silent preserve would fix the data and still leave the
+  operator unable to tell a carried-over tracker from a fresh one.
+
+The region is sentinel-wrapped (`# TRACKER-PRESERVE BEGIN/END (94d.1)`) and the
+`rm -f` sits **outside** it behind `if [ "${SS_TRACKER_KEEP:-0}" != "1" ]`, so
+excising the region yields an unset variable, a `0` default, and the *pre-fix
+unconditional delete* — which is what `session-lifecycle.sh` 8M strips and
+measures (tracker destroyed mid-cycle, valid envelope, no warning), with a
+restore-control leg. Do not rename the sentinels, and do not fold the `rm` inside
+them.
+
 ---
 
 ## UserPromptSubmit Hook
@@ -328,23 +396,54 @@ The Orchestrator uses its intelligence to understand:
 
 ### Matcher
 
-Configured in `settings.json` with matcher `^(Write|Edit|MultiEdit|Bash)$`.
-The Write/Edit/MultiEdit tools trigger tracking of `tool_input.file_path`.
-Bash invocations are inspected too (llh.19): a *write-shaped* Bash command
-(heredoc-to-file, `>`/`>>` into a path, `tee`, `sed -i`, `dd of=`, or
-`cp`/`mv` into the tree) has its target source path(s) recovered and tracked
-so a Bash-laundered edit is still visible to the QA change-set. Transient
-sinks (`/tmp`, `/dev/null`, …) and read-only Bash (git, reads, test runs)
-produce no tracked entry. This recovery is a best-effort heuristic — see the
-threat-model boundary note in `prevent-orchestrator-edits.sh`; specialists
-should still prefer the Write/Edit tools so the edit surfaces cleanly.
+Configured in `settings.json` **and** `.claude/hooks/hooks.json` with matcher
+`^(Write|Edit|MultiEdit|NotebookEdit)$` — the two manifests are pinned to agree
+by `platform-audit.test.sh` (f), so this matcher is edited in both files or
+neither. Those four tools are exactly the ones whose `tool_input` carries a
+path: `file_path` for Write/Edit/MultiEdit, `notebook_path` for NotebookEdit
+(added in 94d — before that the extraction knew only `file_path`/`path`, so a
+notebook edit produced a valid `{}` envelope and tracked nothing at all).
+
+The `notebook_path` spelling is **measured, not assumed** (fkm.1.15 review). The
+published hooks reference documents `tool_input` per tool but never mentions
+NotebookEdit, so the source is the shipping runtime: Claude Code 2.1.221
+(`BUILD_TIME 2026-08-03T03:19:26Z`, `GIT_SHA 6efaf12e`) declares the tool input as
+`strictObject({notebook_path: string().describe("The absolute path to the Jupyter
+notebook file to edit (must be absolute, not relative)"), cell_id: …})` and builds
+every hook payload as `{tool_name: <call>.name, tool_input: <call>.input,
+tool_use_id: …}` — so `tool_input` *is* the validated tool input, and
+`strictObject` means `file_path` is rejected rather than accepted as an alias.
+Both strings are greppable in the installed binary; re-confirm there on a newer
+release. Note what the component spec's `11a` leg does and does not prove: it
+proves the hook READS the field the test sends, which is not the same claim as the
+runtime sending it. The two halves together are the evidence.
+
+**Bash is deliberately not matched here, and cannot be.** `tool_input.command`
+is a shell string with no path field, so there is nothing for an extraction to
+read; a `^Bash$` matcher would fire and track nothing. Bash-written files are
+covered instead by the git-status reconcile described below — **partially**: it
+folds in the ones whose path was clean when the gate baseline was captured, and
+misses a second write to a path the baseline already lists. See "The tracker
+reconcile", the line-granularity limit under "Known limits".
+
+> **Corrected 94d (prove-or-remove).** This section used to claim the matcher
+> was `^(Write|Edit|MultiEdit|Bash)$` and that a *write-shaped* Bash command had
+> its target paths "recovered and tracked" (llh.19). That mechanism was
+> **REVERTED in `5535a6d`** — the same commit that added this prose — because
+> fail-closing on an identity the runtime does not surface to PreToolUse broke
+> specialist edits (a P0-class regression for a P2; the shape is recorded in
+> `LESSONS.md`). The code went; the paragraph stayed, and for seven weeks the
+> docs described coverage that did not exist for the exact class of edit 94d had
+> to build a reconcile for. Neither manifest has ever contained `Bash` in this
+> matcher, and `post-edit.sh` has never carried a command-string parser.
 
 ### What It Does
 
 ```bash
-# 1. Extract file path from tool input. Both `.file_path` and `.path` are
-#    accepted because different tools expose the field differently.
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // empty')
+# 1. Extract file path from tool input. Three spellings are accepted because
+#    different tools expose the field differently: Write/Edit/MultiEdit use
+#    `file_path`, some payloads use `path`, NotebookEdit uses `notebook_path`.
+FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // .tool_input.notebook_path // empty')
 
 # 2. Skip when the path is empty (defensive — Edit/MultiEdit always emit a
 #    file path, but the hook never errors on unexpected input).
@@ -352,10 +451,19 @@ if [ -z "$FILE_PATH" ]; then
     echo '{}'; exit 0
 fi
 
-# 3. Apply the build-artefact denylist. The pre-Phase-1 hook used an
-#    extension allowlist (B6) which silently dropped .md, .yaml, .toml,
-#    Dockerfile, .tf, .proto, etc. The current hook tracks EVERYTHING
-#    except known build/lock noise.
+# 3. Apply the THREE filters, in this order. Only the first is shown inline;
+#    the regex below is illustrative — the shipped one lives in
+#    workflow-denylist.sh (see "The shared denylist"), and the other two
+#    filters have their own sections ("The second rule", "The third rule").
+#
+#    3a. rule 1, the build-artefact denylist. The pre-Phase-1 hook used an
+#        extension allowlist (B6) which silently dropped .md, .yaml, .toml,
+#        Dockerfile, .tf, .proto, etc. The current hook tracks EVERYTHING
+#        except known build/lock noise.
+#    3b. rule 2, workflow_self_written — gate state the workflow rewrites as a
+#        side effect of running, which must not enter its own change set.
+#    3c. rule 3, record-time containment — a path outside $CLAUDE_PROJECT_DIR
+#        is dropped AND logged to sync-errors.log.
 DENYLIST_REGEX='(^|/)(node_modules|dist|build|coverage|\.git|\.next)/|\.(lock|pyc|map)$|\.min\.(js|css)$|(^|/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|Cargo\.lock|poetry\.lock|go\.sum)$'
 if [[ "$FILE_PATH" =~ $DENYLIST_REGEX ]]; then
     echo '{}'; exit 0
@@ -377,10 +485,21 @@ else
 fi
 
 # 5. Soft cap at ~500 unique entries; only trim when above 1000 so concurrent
-#    appenders don't lose data.
+#    appenders don't lose data. FLOCK-ONLY since 94d: the trim is a
+#    read-modify-write, and any append landing between its read and its `mv` is
+#    DISCARDED — a discarded path is a file the Stop gate never sees and the
+#    change-set hash never covers. Without flock there is no way to close that
+#    window, so the trim is skipped (and logged) and the file is allowed to grow:
+#    an oversized tracker costs disk, a lost path costs an unreviewed change.
 if [ "$LINE_COUNT" -gt 1000 ]; then
-    sort -u "$TRACKING_FILE" | tail -500 > "$TRACKING_FILE.tmp"
-    mv "$TRACKING_FILE.tmp" "$TRACKING_FILE"
+    if command -v flock >/dev/null 2>&1; then
+        ( flock -x 9
+          sort -u "$TRACKING_FILE" | tail -500 > "$TRACKING_FILE.tmp"
+          mv "$TRACKING_FILE.tmp" "$TRACKING_FILE" ) 9>"$LOCK_FILE"
+    else
+        log_sync_error "trim SKIPPED at $LINE_COUNT lines: no flock, and a
+                        non-atomic trim can drop tracked paths"
+    fi
 fi
 
 # 6. Edit-count batching: emit a progress comment to Beads every 10 edits.
@@ -428,14 +547,22 @@ place. Note that a denied path is not merely untracked: it never enters
 
 ### The shared denylist (`workflow-denylist.sh`)
 
-The denylist is **one definition with three consumers**, and it lives in
+The denylist is **one definition with four consumers**, and it lives in
 `.claude/scripts/workflow-denylist.sh`:
 
 | Consumer | Question it answers |
 | --- | --- |
 | `post-edit.sh` | what gets TRACKED into `changed-files.txt` |
+| `qa-gate.sh` | what `reconcile_tracker` APPENDS to `changed-files.txt` (94d) |
 | `impact-report.sh` | what enters the canonical change set and its HASH |
 | `verify-before-stop.sh` | what the Stop gate treats as needing REVIEW |
+
+`qa-gate.sh` became the fourth consumer in 94d: `reconcile_tracker` is the
+*second writer* of `changed-files.txt`, and two writers of one file applying
+different filters is the same drift class this lib exists to prevent — the
+reconciler would append build output the other writer is careful to drop. It
+consumes the lib for that filter only; canonicalisation still defers to
+`impact-report.sh --hash-only` (llh.18), so there is still exactly one hash.
 
 Before v4 each script carried its own copy and they drifted: only the Stop
 hook's knew about `.claude/worktrees/` and the e2e fixture churn, so post-edit
@@ -495,29 +622,196 @@ would silently empty both change sets and both specs would keep passing while
 proving nothing. The narrow `/tmp/claude-<session>/` branch above is safe
 precisely because those fixtures are created as
 `mktemp -d -t component-fixture.XXXXXX`, which never yields a `claude-` prefix.
+
 Agent-chosen scratch outside that prefix (`/tmp/qa-p5n-probe/`, a bare
-`/tmp/enc-diff.sh`) is addressed by **prompt guidance** — `qa.md` and the three
-specialist prompts direct throwaway probes to the session scratchpad or
-`.claude/.qa-tracking/` — never by widening the regex. Prompts suggest and
-mechanics guarantee; here the mechanic would break the guarantees.
+`/tmp/enc-diff.sh`) is **not this regex's problem, and is no longer unsolved**:
+since claude-workflow-plugin-fkm.1.15 it is dropped at record time by
+`post-edit.sh`'s containment check — see
+["The third rule"](#the-third-rule-record-time-containment) below. That rule
+compares the path against `$CLAUDE_PROJECT_DIR` rather than matching a pattern,
+which is exactly why it can drop those probes while KEEPING the two specs'
+fixture paths: those live *inside* the `mktemp -d` root their own fixture points
+`CLAUDE_PROJECT_DIR` at. A regex here cannot tell the two apart; a root
+comparison can. Widening this regex is still refused. Prompt guidance (`qa.md`
+and the three specialist prompts direct throwaway probes to the session
+scratchpad or `.claude/.qa-tracking/`) remains as the belt to that braces.
 
 If the lib is missing, each consumer fails closed in its own idiom:
 `impact-report.sh` exits 3 and emits no hash (upstream treats an empty hash as
 refuse-to-release); `verify-before-stop.sh` BLOCKS with a remediation reason
 (emitted **after** the `stop_hook_active` circuit breaker, never before it);
+`qa-gate.sh`'s `reconcile_tracker` REFUSES (`approve` exits 2 with
+`error_key: tracker_unreconcilable`, no bypass flag), because an unfiltered
+reconcile would append build output to an append-only file with no way back;
 `post-edit.sh` tracks the path unfiltered, because for a hook that feeds the
 gate, over-tracking is the fail-closed side.
+
+#### The second rule: `workflow_self_written`
+
+The same lib carries a **second, narrower rule**, added in 94d, and it answers a
+different question. The denylist answers "is this reviewable work?".
+`workflow_self_written` / `WORKFLOW_SELF_WRITTEN_REGEX` answers "**may this path
+enter the change set as a side effect of the gate itself running?**" Two members,
+and the list is deliberately short — rewritten by the gate's own machinery on
+essentially every invocation, and never authored by the work under review:
+
+| Member | Why |
+| --- | --- |
+| `.claude/.qa-tracking/**` | Gate state: the tracker, the gate baseline, the impact report, the completion-contract payloads. Not gitignored in every install — `install.sh` writes that rule only when the target has no `.gitignore` at all. (The review artifact's CANONICAL copy no longer lives here — claude-workflow-plugin-rqer, v5 D2 moved it to `docs/reviews/<task-id>-r<n>.json`, a committed, task-derived path, precisely so a completed approve's cleanup of this directory cannot reach it. A scratch hand-off copy may still transiently appear under this directory in some flows and IS wiped on approve, same as before.) |
+| `.beads/interactions.jsonl` | bd rewrites it on **every** call, including the gate's own `add_comment` and `label add`. |
+
+**`.beads/issues.jsonl` is not a member.** It is the committed ledger, a real
+deliverable, and bd 1.1.2 rewrites it only on an explicit export — so its content
+is stable across a cycle and it belongs in the change set. That one-file boundary
+*is* the rule; `denylist-source.test.sh` and `denylist-shared.sh` section E pin it
+from both sides.
+
+It stays **separate from** `WORKFLOW_DENYLIST_REGEX` rather than being folded in,
+and that is a classification call, not an accident: denylisting these would drop
+them from the change set *entirely*, which flips a beads-only change set from the
+`beads-state` fast path (releases **with** a gate record) to `empty` (releases
+with none). `workflow_self_written`'s own header in the lib carries the full
+argument.
+
+Three places apply it — the two **writers** of `changed-files.txt` and the Stop
+hook's git walk:
+
+| Applier | Effect |
+| --- | --- |
+| `post-edit.sh` | never records a self-written path at all (the sentinel-wrapped `SELF-WRITTEN-FILTER` block) |
+| `qa-gate.sh` `reconcile_tracker` | never appends one |
+| `verify-before-stop.sh` `reviewable_changes()` | the git half skips them, so the gate's own bookkeeping cannot make somebody else's change set look mixed |
+
+`impact-report.sh` deliberately does **not** apply it. It *reads* the tracker the
+other two write, so by hash time a self-written path has already been filtered at
+the source; adding the rule at a reader would make that reader disagree with the
+other readers about an entry an older install had already recorded, which is the
+hash-and-gate-disagree failure this lib exists to prevent.
+
+For the production consequence of the Stop-hook half — why the F1 doc-only fast
+path was dead before the rule existed — read the in-code rationale in
+`reviewable_changes()` in `verify-before-stop.sh` (the `KNOWN LIMITS` note above
+it, and the `skip=0` dedup inside it). It is the authoritative account and is
+not restated here.
+
+> **Corrected in 94d (QA finding R2-F5).** The rule shipped with `post-edit.sh`
+> **not** applying it, which meant the primary route into the tracker contradicted
+> the rule's stated intent. The consequence was deterministic on the Claude review
+> lane: a reviewer writing `review-artifact-<tid>-r<n>.json` with the `Write` tool
+> moved `change_set_hash`, which made the impact report `enter` had just generated
+> stale, which made `approve` refuse with `error_key: impact_report_stale`. The
+> reason it went unnoticed for two review rounds is that the *other* writers of
+> gate state use shell redirects (`codex-review.sh`, and the review-request
+> assembly in `qa.md` 6p.1), and `post-edit.sh` is not wired to `Bash` — so the
+> Sol lane was immune by accident and the Claude lane was not. Fixed at the writer;
+> pinned by `specs/post-edit.sh` section 12 and its 12M strip-META.
+
+#### The third rule: record-time containment
+
+`post-edit.sh` carries a **third** filter that is NOT in the shared lib, added in
+claude-workflow-plugin-fkm.1.15: a path outside `$CLAUDE_PROJECT_DIR` never
+enters `changed-files.txt`. It lives in the sentinel-wrapped
+`CONTAINMENT-FILTER` region, immediately after the second rule.
+
+**Why it exists.** The 2026-07-29 bug report on 94d documents two failure modes
+and closes with two numbered acceptance items. Item (1) — reconcile the tracker
+against `git status` — shipped as `reconcile-tracker` above. Item (2), "drop
+paths outside `CLAUDE_PROJECT_DIR` at record time", did not, and went unnoticed
+through four review rounds. They are the two directions of one defect: item (1)
+is under-coverage (the hash certified LESS than the diff), this is
+over-coverage (`$FILE_PATH` is recorded verbatim, so the change set was not
+bounded by the project at all). The recorded instance: a QA scratch file at
+`/tmp/enc-diff.sh`, written with the `Write` tool, moved `change_set_hash`
+`a950fa6b… -> cb000516…` and made `qa-gate.sh approve` refuse the *correct*
+impact report as stale. Such an entry is also unreviewable by construction —
+`impact-report.sh` records it `ok:false` ("outside the analyzed project"), and a
+reviewer's `git diff` over the tracker paths cannot show it.
+
+**Why it is not in the shared lib**, in one line each: exactly one applier by
+construction (the other tracker writer, `reconcile_tracker`, derives its paths
+from `git status --porcelain` inside the repo and *cannot* emit an out-of-project
+path); the readers must not apply it, for the same reason they must not apply
+rule 2; and it is not a path pattern at all but a comparison against a runtime
+root, while the lib is deliberately root-agnostic — every consumer sources it
+`BASH_SOURCE`-relative precisely so it never depends on `$CLAUDE_PROJECT_DIR`.
+
+**How it decides**, biased to be reluctant to drop (a false drop is
+under-coverage, the failure 94d exists to close):
+
+| Input | Verdict |
+| --- | --- |
+| relative path | kept, resolved against the root — that is how every reader already interprets a relative tracker entry |
+| absolute, under the root in either spelling (as given, or `pwd -P`) | kept; macOS hands out `/var/folders/…` while the physical path is `/private/var/folders/…` and either can arrive |
+| absolute, outside both — but whose own **directory** resolves back inside | kept; one `cd` on the drop path only. The dirname is resolved physically and the leaf is reattached by name, never followed |
+| absolute, outside after all of the above | **dropped, and logged** |
+| project root unresolvable | tracked, and logged — over-tracking is the fail-closed side for a hook that feeds the gate |
+
+Normalisation is lexical (`.`, `..`, `//` collapsed, no filesystem access), so a
+`..` escape that is string-prefixed by the root is still caught and a
+just-deleted path still classifies.
+
+**No symlink is ever resolved on the keep path**, so a symlink that crosses the
+project boundary is kept in *either* direction. Nothing in the hook follows a
+link: no executable line calls `readlink`, `realpath` or `stat`, and none tests
+`-L`. `pwd -P` runs in exactly two places and both are `cd <directory> && pwd -P`
+— never the edited leaf. All three shapes below are tracked, and none writes a
+`sync-errors.log` line — measured on the canonical hook with `CLAUDE_PROJECT_DIR`
+pointed at a scratch tree (`$ROOT` is the project root, `$OUT` a directory
+outside it):
+
+| Shape | Verdict |
+| --- | --- |
+| in-repo **directory** symlink whose target is outside — `$ROOT/dirlink/g.ts` | tracked; the lexical comparison answers "inside" first, so the `cd` retry never runs |
+| in-repo **file** symlink whose target is outside — `$ROOT/filelink.ts` | tracked; same first comparison, and the retry would keep it regardless — it resolves the dirname and reattaches the leaf by name |
+| out-of-repo symlink pointing **into** the project — `$OUT/inlink/x.ts` | tracked; the one shape the retry exists for, and the only one whose verdict it changes |
+
+> **Corrected in 94d (QA finding R5-F1, `claude-workflow-plugin-dmi`).** This
+> section and the in-code header both used to state the opposite for the first
+> shape — "a symlink *inside* the repo whose target is outside resolves to the
+> target and is dropped". Measurement contradicts it: the path is spelled through
+> the root, so it is judged inside on the first, lexical comparison and the
+> physical retry never runs. The direction of the error was safe — over-tracking
+> is this rule's own fail-closed side — so the documented limit was corrected to
+> match the code rather than the code changed to match the limit. Pinned by
+> `specs/post-edit.sh` section `13e`, with `13N` excising the retry alone to show
+> it is the third row's cause and nothing else's, and `13R` forcing the retry to
+> run for every path — which is what pins the *counterfactual* in the second row
+> (the two in-repo shapes diverge under the retry: the directory shape drops, the
+> file shape does not). `13N` on its own cannot say that: it shows only that
+> neither in-repo shape *reaches* the retry, which is symmetric. That gap was
+> QA finding R4-F3 — the claim was true and the coverage for it was prose.
+
+**The drop is always logged** to `sync-errors.log`, which SessionStart surfaces.
+That is what separates this rule from the other two: rules 1 and 2 drop
+known-inert classes, while this one can drop a file somebody genuinely edited, so
+it must never do it silently. Pinned by `specs/post-edit.sh` section 13 (in-repo
+keeps in `13a`, four out-of-repo drops in `13b`, the envelope in `13c`, the log in
+`13d`, the three symlink shapes above in `13e`, two strip-METAs — `13M` for
+the whole region, `13N` for the retry alone — and `13R`, which forces the retry
+instead of excising it) and by `specs/denylist-shared.sh`
+D4, which asserts both halves: rule 1 still *keeps* `/tmp/qa-p5n-probe/notes.md`
+while the hook drops it.
 
 #### Denylist changes are a hash migration
 
 `change_set_hash` is a sha256 over the **denylist-filtered** changed-files
-list. Editing the regex therefore changes the recomputed hash of any change
-set containing a newly-(un)matched path. An approval recorded before the edit
-no longer matches what the Stop hook recomputes after it, so the gate emits
-`LABEL_WITHOUT_RECORD` and re-blocks.
+list, so **two** independent things move it and both are hash migrations:
+
+1. **Editing the regex** changes the recomputed hash of any change set
+   containing a newly-(un)matched path.
+2. **Changing what reaches `changed-files.txt` in the first place.** 94d added
+   `reconcile_tracker` (the git-visible paths no Write/Edit hook recorded) and
+   widened `post-edit.sh` to `NotebookEdit`. Any session with git-visible dirt
+   beyond what its tracker already held hashes differently afterwards, with the
+   regex untouched. The list is the hash's input; growing the input is the same
+   migration as re-filtering it.
+
+Either way an approval recorded before the change no longer matches what the
+Stop hook recomputes after it, so the gate emits `LABEL_WITHOUT_RECORD` and
+re-blocks.
 
 That is the correct direction — a stale approval must not release — but it is
-user-visible friction, so **ship every denylist addition in ONE landing**: one
+user-visible friction, so **ship each kind of change in ONE landing**: one
 landing costs in-flight cycles exactly one migration.
 
 Recovery for a cycle caught mid-flight is exactly what the block reason prints —
@@ -548,7 +842,7 @@ commit**, because the change set turned out never to have been bounded by the
 repo: `(^|/)\.claude/plans/`, `^(/private)?/tmp/claude-[^/]+/`, and
 `(^|/)\.claude/\.mutation-(runs|worktrees)/`. Sections C and D of
 `denylist-shared.sh` split the proof between them: **C** drives an invented
-canary and shows that editing the lib moves all three consumers and re-blocks a
+canary and shows that editing the lib moves the consumers it drives and re-blocks a
 stale approval; **D** pins the *pre-landing* lib — the shipped regex with those
 three alternatives stripped by literal substring — records an honest approval
 under it, and then restores the real lib, so the restore *is* the v4.1 landing.
@@ -560,7 +854,21 @@ the shipped one would let every other D assertion pass while proving nothing.
 
 ```
 .claude/.qa-tracking/
-├── changed-files.txt        # Deduplicated list of changed files (one per line)
+├── changed-files.txt        # The change set: one ABSOLUTE path per line, deduped at
+│                            # read time (sort -u). TWO writers — post-edit.sh (tool
+│                            # edits) and qa-gate.sh reconcile_tracker (the git-visible
+│                            # remainder, 94d). This file is what change_set_hash is
+│                            # computed over, so a path missing here is a path no
+│                            # approval covers. See "The tracker reconcile".
+│                            # PRESERVED across a session boundary while a cycle is
+│                            # in flight (94d.1) — SessionStart used to delete it
+│                            # unconditionally, including on `compact`
+├── reconcile-subtracted.txt # What the LAST reconcile dropped as already-baselined and
+│                            # NOT covered by the tracker: one ABSOLUTE path per line,
+│                            # rewritten (and truncated) on every reconcile. The durable
+│                            # half of the 94d.1 accounting — RECONCILE_OBS carries only
+│                            # the first 12, and the Stop hook discards the string
+│                            # entirely on its success path
 ├── edit-count               # Counter for the every-10-edits batched bd comments
 ├── current-task             # Single source of truth: active task id (F3)
 ├── current-task.repo        # Repo fingerprint at set time (I8 cross-repo guard)
@@ -584,9 +892,9 @@ step described under the Stop hook.
 ### The gate baseline (`gate-baseline`)
 
 A snapshot of `git status --porcelain` that says "this dirt was already here;
-it is not this session's work". The Stop hook's git-status fallback subtracts
-it, so the gate evaluates the session **delta** rather than the whole working
-tree. Without one, opening a session in a repo that is merely dirty — a
+it is not this session's work". Both git-side readers subtract it — the Stop
+hook's git walk and `reconcile_tracker` — so the gate evaluates the session
+**delta** rather than the whole working tree. Without one, opening a session in a repo that is merely dirty — a
 half-finished refactor, a vendored file, an unstaged config tweak — made every
 Stop report "N file(s) changed - all require QA review" for changes the
 session never made.
@@ -607,7 +915,7 @@ Three writers, each with a different rule:
 
 | Writer | Rule | Why |
 | --- | --- | --- |
-| `session-start.sh` | full snapshot, **only when no review cycle is active** | an in-flight cycle's work is dirty right now; baselining it would release it unreviewed |
+| `session-start.sh` | full snapshot, **only when no review cycle is active** | an in-flight cycle's work is dirty right now; baselining it would release it unreviewed. Since 94d.1 the SAME predicate also decides whether `changed-files.txt` is reset, from one hoisted read — two independent reads could preserve the tracker and then baseline the work it names |
 | `qa-gate.sh enter` | **write-if-missing**, minus paths already in `changed-files.txt` | a cycle opened mid-session must not baseline the edits that session already made |
 | `qa-gate.sh approve` | full refresh | approve means "everything dirty right now has been reviewed" |
 
@@ -615,15 +923,264 @@ Three writers, each with a different rule:
 is the entry point session-start calls; it takes no task id and touches no
 labels.
 
-There is deliberately **no hash-side subtraction**. `changed-files.txt` is fed
-only by post-edit from actual tool edits, so pre-existing dirt cannot enter it,
-and an edit to an already-dirty file must still gate.
+There is deliberately **no hash-side subtraction**, and 94d did not add one — it
+moved *where* the subtraction happens. `changed-files.txt` now has two writers:
+`post-edit.sh` (actual tool edits, unfiltered by the baseline, so an edit to an
+already-dirty file must still gate) and `qa-gate.sh reconcile-tracker` (the
+git-visible remainder, which subtracts the baseline before appending).
+Pre-existing dirt still cannot enter the tracker from either writer, which is
+the property the no-subtraction rule rests on.
 
-Both the writer and the Stop hook's fallback ask `git rev-parse --git-dir`
+Both the writer and the Stop hook's git walk ask `git rev-parse --git-dir`
 rather than testing `-d "$PROJECT_DIR/.git"`. In a linked worktree `.git` is a
 FILE, so the old test answered "not a git repo" and silently switched off both
-the snapshot and the fallback — with an empty `changed-files.txt` the gate then
+the snapshot and the walk — with an empty `changed-files.txt` the gate then
 had no detector at all and failed OPEN.
+
+### The tracker reconcile (`reconcile-tracker`)
+
+The baseline's other half, and most of the reason the change-set hash can be
+trusted — bounded by one named residual under "Known limits, named rather than
+latent" below, which is worth reading before treating this section as a coverage
+guarantee.
+
+**The defect (claude-workflow-plugin-94d).** `changed-files.txt` had exactly one
+writer: `post-edit.sh`, on PostToolUse events carrying a path. A file written by
+a Bash redirect, `cp`, `mv`, `sed -i`, or a generator script never entered it.
+That was never merely a readout problem, because four different consumers read
+that one file:
+
+| Consumer | What it derives from the tracker |
+| --- | --- |
+| `verify-before-stop.sh` | `CHANGE_COUNT` and the block reason's `Files changed:` list |
+| `verify-before-stop.sh` | `compute_intent_payload`'s `changed_files[]` (J18 routing) |
+| `impact-report.sh` | the canonical change set the impact analysis covers |
+| `impact-report.sh` | **`change_set_hash`** — the value an approval record binds |
+
+So an under-covering tracker let the gate name N paths and **release on an
+approval binding M < N**. Measured live four times over two days; at one point
+the tracker held **37 of 71** changed files. The empty-set case is the extreme
+of the same bug: a tracker wiped mid-cycle hashes to `e3b0c442…` (pinned as a
+constant by `impact-report.test.sh` section 6) and a cycle bound a hollow
+approval over zero files while looking perfectly valid.
+
+**The repair.** `qa-gate.sh reconcile-tracker` takes `git status --porcelain`,
+subtracts the gate baseline (`comm -23`, `LC_ALL=C` on both sides), subtracts
+the shared denylist, subtracts what the tracker already holds, and appends the
+remainder as **absolute** paths under the same `flock` `post-edit.sh` uses.
+It only ever grows the reviewed set.
+
+That baseline subtraction compares raw porcelain **lines**, not content, which is
+where the line-granularity limit below comes from: a path the baseline already
+lists cannot come back, however much it changes afterwards. So this repair is
+complete for paths that were **clean when the baseline was captured**, and
+partial for the rest.
+
+**It is not a recovery path, and that is structural (94d.1).** If
+`changed-files.txt` is *lost*, what this rebuilds is necessarily a **subset** of
+what was lost — no refinement of the baseline, the `comm`, or the filters changes
+that. The loss that produced 94d.1 went through two channels, and only the first
+is even addressable here:
+
+| Channel | What went | Visible to `git status`? |
+| --- | --- | --- |
+| A | 14 paths whose porcelain line was byte-identical to a baseline entry, so `comm -23` subtracted them | yes — reportable, and now reported |
+| B | 2 paths that existed **only** in the tracker: `.claude/review-config`, whose content had been reverted so it was not dirty, and a `.claude/.qa-tracking/review-artifact-*.json`, which the self-written rule keeps out of the change set by design | **no** |
+
+Channel B is why prevention lives at the deleter and not here, and why this
+function's job is to *announce* that it reconstructed rather than to imply that
+it restored. A rebuild from an absent-or-empty tracker says so in its
+observations, names the assumption it made ("no tool edit had happened yet" — it
+cannot tell that from "the tracker was destroyed"), and writes a
+`sync-errors.log` line when a cycle was in flight at the time.
+
+Called at three points, all of them *before* anything reads the tracker:
+
+| Caller | When | On failure |
+| --- | --- | --- |
+| `qa-gate.sh enter` | before `generate_impact_report`, on both the fresh and re-enter arms | tolerant (`enter` is documented tolerant); warns in `observations` |
+| `qa-gate.sh approve` | immediately before the impact-report refusal | **REFUSES**, exit 2, `error_key: tracker_unreconcilable` — no bypass flag |
+| `verify-before-stop.sh` | top of the detection stage | **BLOCKS** (after the `stop_hook_active` circuit breaker) |
+
+`approve` has no bypass for this and `--no-impact-report` does not cover it:
+that flag waives an *analysis* whose degradation is documented, whereas an
+unreconcilable tracker means the change set itself is unknown, so every
+credential the approval writes would be a claim about an unknown quantity.
+
+**`approve` also refuses a change set that was *reconstructed and is provably
+short*** — `error_key: change_set_reconstructed`, exit 2, immediately after the
+reconcile and *before* the impact-report refusal. Three conditions, none of them
+read from the tracker's own contents:
+
+1. the tracker was **absent-or-empty** when the reconcile ran, so every path in
+   the set being bound came from `git status` rather than from a recorded edit;
+2. the rebuild produced a **non-empty** set, so this approve is certifying actual
+   work;
+3. it **also dropped** git-visible reviewable paths as already-baselined — so
+   what is being certified is a proven *subset* of the working tree.
+
+The live 94d.1 occurrence sits exactly there (`added=10`, `subtracted=16`).
+Condition 2 is measured, not decorative: without it the refusal also fires on
+`added=0, subtracted>0`, which is an **empty** change set with baselined dirt
+around it — a task closed with no code change, a doc-only fast path, or a session
+that did nothing in a checkout that was dirty on arrival. That state broke the L1
+`qa-gate-choose` and `qa-gate-grade-record` fixtures before condition 2 existed
+(their single "subtracted" entry is the fixture's own untracked
+`.claude/scripts/` directory), and the gate treats an empty change set as
+"nothing to review" everywhere else.
+
+**What condition 2 leaves open, deliberately.** A session whose work was
+*entirely* Bash-written to paths that were *all* already dirty at baseline
+capture reads as `added=0` and is not refused, even though its change set is
+hollow. That is `fkm.1.2`'s original empty-binding concern, and this predicate
+cannot separate it from the legitimate empty cases above — the observations are
+identical. It is **reported** either way (`subtracted=N`, the paths, and the
+rebuild announcement); escalating to a refusal there would block every no-op
+approve in a dirty checkout.
+
+This is `claude-workflow-plugin-fkm.1.2` half (b), generalised. Its original form
+— "refuse when the change set is EMPTY while git shows un-baselined dirt" — is
+**unreachable** post-94d: the reconcile folds un-baselined dirt in, so `approve`
+can never observe that pair. The failure changed shape rather than going away:
+the same trigger now yields a non-empty, plausible, 10-of-26-path set. There is
+no zero left to trip on, hence "materially short" rather than "empty".
+
+Why not simply compare two counts? Because both counts a truncated tracker can
+offer are derived from the truncated tracker — which is exactly how the
+impact-report freshness check missed this: `recorded_hash == current_hash` holds
+when *both* describe the shrunken set, so that check detects **drift** and is
+blind to **loss**.
+
+Unlike `tracker_unreconcilable`, this one **has** a bypass —
+`--accept-reconstructed '<reason>'`, recorded in the approval comment as
+`[reconstructed change set accepted: …]` and in the gate JSON. The difference is
+what each predicate can prove: "git status failed" is mechanical and no human
+judgement can supply the answer, whereas "the tracker was empty and N paths were
+subtracted" is *inferential* — a destroyed tracker and an all-Bash session in a
+repo that was dirty on arrival look identical to the reconcile, and a human
+reading the named paths can tell them apart. Refusing with no exit would deadlock
+the second case with nothing to fix. Pinned by `gate-baseline-v2.sh` 7S.3 (the
+refusal), 7S.4 (the control: a non-empty tracker with the same subtraction does
+*not* refuse), 7S.5 (the bypass, and that an unexplained one is rejected) and
+7SM (strip the accounting: the refusal goes inert and the drop goes silent).
+
+Details worth knowing:
+
+- **Absolute paths, deliberately.** `post-edit.sh` records
+  `tool_input.file_path` verbatim and the runtime passes absolute paths, so a
+  repo-relative spelling here would double-count into the hash (`sort -u`
+  collapses duplicates, not two spellings of one file). The prefix is
+  `$PROJECT_DIR` when it *is* the working-tree root, and git's
+  `--show-toplevel` when `$PROJECT_DIR` sits below it (porcelain paths are
+  root-relative). The two are compared through `pwd -P`, because git returns
+  symlink-resolved paths while `CLAUDE_PROJECT_DIR` may not —
+  `/var/folders/…` vs `/private/var/folders/…` on macOS is exactly how a
+  mixed-spelling double count would arrive.
+- **`??` untracked and `D` deletions both count.** Git collapses an untracked
+  directory into one `?? dir/` entry, so a surviving collapsed entry is
+  expanded with `status --porcelain -uall` run from the working-tree root.
+  Without that, a file added later *inside* an already-listed directory would
+  not move the hash.
+- **The gate's own state is excluded**, and not for tidiness. `install.sh`
+  writes the `.qa-tracking/` gitignore rule only when the target has no
+  `.gitignore` at all, so in many real installs the gate's own state is
+  git-visible. Reconciling it would make the change-set hash a function of the
+  gate's own progress and deadlock every cycle by construction: `enter`
+  reconciles and *then* writes `impact-report-<tid>.json`; `approve` reconciles,
+  sees that file as new, appends it, and the report it just checked for freshness
+  is now stale against a hash the check itself moved.
+
+  Which paths those are is **not** a local decision here — it is the shared
+  `workflow_self_written` rule, described under
+  ["The second rule"](#the-second-rule-workflow_self_written) above:
+  `.claude/.qa-tracking/**` and `.beads/interactions.jsonl`, and nothing else.
+  In particular **`.beads/issues.jsonl` is *not* excluded** — it is the committed
+  ledger, a real deliverable, and bd 1.1.2 rewrites it only on an explicit export,
+  so it reconciles in like any other changed file. (An earlier draft of this
+  bullet said `.beads/*.jsonl` was not excluded, full stop. That was wrong for
+  `interactions.jsonl`, and wrong in the same change set that introduced the rule
+  — QA finding R1-F2.)
+- **Non-git tree: no-op.** There is no delta to reconcile against.
+- **Known limits, named rather than latent.** Three, and the first one bounds
+  every coverage claim this section makes:
+
+  1. **The baseline is subtracted at LINE granularity, so a re-write of an
+     already-baselined path is invisible.** `comm -23` compares raw porcelain
+     lines, which are not content-addressed. If a path was dirty when the
+     baseline was captured, a further write of any size leaves ` M path`
+     byte-identical and is subtracted as pre-existing dirt: it reaches neither
+     the tracker, nor the change-set hash, nor the block reason, nor the
+     reviewer, and `reconcile-tracker` still returns success. **No commit is
+     required**; a second write in the same session is enough, which makes this
+     strictly wider than limit 3 below (and wider than
+     `claude-workflow-plugin-dpe`, which frames the hole as needing an
+     intervening commit). The collapsed `?? dir/` case is the same mechanism —
+     a file created inside an already-baselined untracked directory does not
+     surface — and the Stop hook's git walk shares the blind spot, because it
+     subtracts the same file the same way.
+
+     **It is no longer SILENT, which is a different claim from "it is fixed"
+     (94d.1).** This paragraph used to end "nothing in the readout says a path
+     was dropped", and that was true and was the expensive part. Every
+     observation now carries `subtracted=N` beside `denylisted=N`, names the
+     dropped paths (inline up to 12, in full in
+     `.claude/.qa-tracking/reconcile-subtracted.txt`), and says which question
+     the reconcile cannot answer about them — it cannot tell pre-existing
+     arrival dirt from session work whose tracker entry was lost. `added=0` can
+     no longer stand alone as the whole story. The hole itself is unchanged.
+
+     **The magnitude, and the trigger that actually produces it.** This limit
+     was written for an *incremental* second write to one path. Measured, the
+     shape that matters is a **session boundary**: SessionStart deleted
+     `changed-files.txt` unconditionally (including on `compact`), and the next
+     reconcile re-derived the *whole* change set through this subtraction at
+     once. On 94d's own review that cost **16 of 26 paths (62%)** in a single
+     step — 54% by QA's independent count of the same tree (60 git-visible, 29
+     baseline-identical, 21 denylisted, 10 recovered) — and the readout was
+     `+10 git-visible path(s) … (added=10)`, indistinguishable from a healthy
+     call. It scales with **baseline age**, not with write count: every path
+     that has been dirty since the last capture is a line the subtraction
+     matches, and that baseline was ~35 hours old, written by an earlier cycle's
+     approve. The deletion half is fixed at the deleter (see "The tracker
+     survives a session boundary"); what remains is this limit, now bounded by
+     baseline age and reported rather than silent.
+
+     **What that means for the writes this reconcile exists to catch** (a Bash
+     redirect, `cp`, `mv`, `sed -i`, a generator script — everything no
+     PostToolUse event covers): it folds in the ones whose path was **clean at
+     baseline capture**, or whose porcelain status code has changed since, and
+     only those. It is not a general answer to "did every byte of `git diff`
+     reach QA". Tool edits are unaffected — `post-edit.sh` records those
+     unconditionally, without consulting the baseline, which is why an Edit to
+     an already-dirty file still gates.
+
+     Both directions are pinned rather than described:
+     `gate-baseline-v2.sh` 7.6 (the baselined path stays out, hash unmoved, no
+     commit involved), 7.7 (a path clean at capture is folded in by the same
+     call), and 7R, which forces the subtraction branch alone and flips 7.6.
+     Tracked as `claude-workflow-plugin-dpe` and **not** fixed here:
+     content-addressing the baseline is a change-set-hash migration of its own,
+     and the cheaper candidate — invalidating baseline entries against the
+     recorded `head` — closes only the committed variant while leaving this one
+     open and looking closed.
+  2. **A path git *quotes*** (`"src/na\303\257ve.ts"`, control characters) is
+     appended in its quoted spelling, because the baseline is written with the
+     same quoting and `comm -23` needs identical bytes. The result over-reports
+     a literal path that does not exist, which is fail-closed, and it is logged.
+  3. **Work already committed is invisible to `git status`**, so a tracker
+     destroyed after a commit cannot be recovered here.
+
+`reconcile_tracker`'s regions in both scripts are wrapped in
+`# TRACKER-RECONCILE BEGIN/END (94d)` sentinels; section 7M of
+`gate-baseline-v2.sh` strips every region from fixture copies of both files and
+asserts the Bash-written file disappears from the tracker and from the block
+reason's absolute-spelled list, with a restore-control leg. Do not rename them.
+
+**This landing is a hash migration.** Any session with git-visible dirt beyond
+what its tracker already held hashes differently afterwards, so in-flight
+approvals stop matching and the gate emits `LABEL_WITHOUT_RECORD` with the
+recovery it already prints. Same fail-closed direction and same one-landing rule
+as a denylist edit — see "Denylist changes are a hash migration".
 
 ---
 
@@ -647,13 +1204,24 @@ fi
 #     ahead of that guard re-enters the Stop hook forever).
 if [ -z "$WORKFLOW_DENYLIST_REGEX" ]; then emit_block "..."; fi
 
+# 1c. Reconcile the tracker against git BEFORE anything reads it (94d), so the
+#     block reason, the J18 payload, the impact analysis and the change-set
+#     hash all describe the same change set. BLOCKS when it cannot run — see
+#     "The tracker reconcile".
+qa-gate.sh reconcile-tracker || emit_block "..."
+
 # 2. Check for tracked changes. `reviewable_changes` is the ONE definition of
-#    "what counts as a change right now": the denylist-filtered tracker, or —
-#    only when that yields nothing — 2b's git fallback. Step 6a re-reads it.
+#    "what counts as a change right now": the denylist-filtered tracker UNION
+#    2b's git walk — both halves, always. It used to short-circuit on the
+#    tracker, which made the detector a strict subset of git whenever even one
+#    tool edit had been recorded (94d). Step 6a re-reads it.
 while IFS= read -r f; do CODE_CHANGES_DETECTED=true; done < <(reviewable_changes)
 
-# 2b. Fallback (inside reviewable_changes): git status MINUS the gate baseline,
-#     so only entries NEW since the baseline count. Requires
+# 2b. The git half (inside reviewable_changes): git status MINUS the gate
+#     baseline, so only entries NEW since the baseline count, and MINUS
+#     anything the tracker half already emitted (in either spelling — the
+#     tracker is absolute, porcelain is relative, and an unfiltered union
+#     would report both spellings of every file). Requires
 #     `git rev-parse --git-dir`, not `-d .git` (linked worktrees). See "The gate
 #     baseline".
 #     comm -23 <(git status --porcelain | LC_ALL=C sort) \
@@ -676,14 +1244,16 @@ if [ -n "$FAILED_CHECKS" ]; then
 fi
 
 # 6. Check for QA approval — SINGLE source of truth: the qa-approved label,
-#    read through qa-gate.sh status (verify-before-stop.sh:982-992).
+#    read through qa-gate.sh status (see the `GATE_STATUS=` reads in
+#    verify-before-stop.sh).
 QA_APPROVED=false
 GATE_STATUS=$("$QA_GATE" status "$TASK" | jq -r '.status')
 if [ "$GATE_STATUS" = "approved" ]; then
     QA_APPROVED=true
 fi
 # There is NO comment-text fallback and NO marker file. Both were deleted
-# (verify-before-stop.sh:20-22); a comment that merely says "QA APPROVED"
+# (the B1/D1/J2 and B13 lines in verify-before-stop.sh's header); a comment
+# that merely says "QA APPROVED"
 # does NOT release the gate, and `.qa-tracking/approved` is never read.
 
 # 6a. Label present but no record matches? Re-read reviewable_changes from
@@ -703,7 +1273,8 @@ fi
 
 # 8. If approved, allow and clean up. The legacy `approved` marker is rm'd
 #    defensively (to clean stale files from old installs) but is never an
-#    approval source (verify-before-stop.sh:1177-1181).
+#    approval source (the `Clean up tracking` block at the end of the approved
+#    path).
 rm -f "$QA_TRACKING_DIR/approved"
 rm -f "$QA_TRACKING_DIR/changed-files.txt"
 echo "{}"
@@ -737,25 +1308,394 @@ Cannot complete without QA approval.
 ### Approval Detection
 
 **One source of truth: the `qa-approved` Beads label**, read via
-`qa-gate.sh status` (`verify-before-stop.sh:982-992`). The label is set
+`qa-gate.sh status` (the `GATE_STATUS=` reads in `verify-before-stop.sh`). The
+label is set
 atomically by `qa-gate.sh approve` (which also drops `qa-pending` /
 `qa-gate-entered` and writes an audit comment). There is no comment-text
-fallback and no marker-file fallback — both were deleted
-(`verify-before-stop.sh:20-22`):
+fallback and no marker-file fallback — both were deleted (the `B1/D1/J2` and
+`B13` lines in `verify-before-stop.sh`'s header):
 
 - A comment whose body contains the literal text "QA APPROVED" does **not**
   release the gate. The earlier comment-text method (B13) was removed so the
   gate has a single deterministic signal.
 - The legacy `.claude/.qa-tracking/approved` marker is **never read**. The
-  Stop hook `rm`s it defensively (`verify-before-stop.sh:1177-1181`) only to
-  clear stale files left by pre-v3 installs.
+  Stop hook `rm`s it defensively (the `Clean up tracking` block at the end of
+  the approved path) only to clear stale files left by pre-v3 installs.
 
 The gate also auto-approves without QA when there is nothing reviewable to
-review — the **F1 fast path** (`verify-before-stop.sh:616-691`), which fires
-when every changed path is doc-only, is Beads/gate bookkeeping
-(`.beads/*.jsonl`, `beads.db`, `.qa-tracking/*`), or the change-set is empty
-after the build-artifact denylist. A mixed diff (bookkeeping **plus** one
-real source file) is not fast-path eligible and still requires the label.
+review — the **F1 fast path** (`verify-before-stop.sh`, the block guarded by
+`FASTPATH_CLASS`), which fires when every changed path is doc-only, is
+Beads/gate bookkeeping (`.beads/*.jsonl`, `beads.db`, `.qa-tracking/*`), or the
+change-set is empty after the build-artifact denylist. A mixed diff
+(bookkeeping **plus** one real source file) is not fast-path eligible and still
+requires the label.
+
+**Neither a file's position nor a name glob confers documentation status**
+(`claude-workflow-plugin-bbh`). `is_doc_only_path` carried two arms that decided
+content type from path SHAPE, and each was a release-authorising bypass needing
+no privilege beyond where a file sat or what it was called:
+
+| arm | reach | measured |
+| --- | --- | --- |
+| `*/docs/*\|docs/*` | any path under any `docs/` directory, any depth, any tree | `docs/deploy.sh`, `docs/scripts/migrate.py`, `docs/Dockerfile`, `docs/.github/workflows/ci.yml`, `src/docs/handler.ts` all classified as documentation |
+| `LICENSE.*` | any extension after that one name, **root only** (no `*/` prefix) | `LICENSE.sh` and `LICENSE.py` were documentation while `src/LICENSE.sh` was not |
+
+Both are **removed**, not narrowed. Requiring a documentation extension *inside*
+the `docs/` arm — the obvious narrowing — is an exclusion list, i.e. a new place
+for the next extension to be missing, and it is also inert: `docs/guide.md`
+already matches `*.md`, so the arm's entire marginal contribution was the files
+that match nothing else. Measured over a 1120-path cross product, removing both
+arms moves **438 paths** from doc-only to reviewable and **0** the other way.
+
+Two further properties, both pinned by
+`.claude/scripts/tests/doc-only-classifier.test.sh`:
+
+- **An affirmative content veto.** The surviving arms still read a type off a
+  name, so a matching name is necessary and no longer sufficient: a file whose
+  **executable bit is set**, or whose **first two bytes are `#!`**, is never
+  doc-only whatever it is called. That reasons about the file rather than its
+  spelling, and it is what covers the extension-less `LICENSE` / `CHANGELOG` /
+  `NOTICE` / `AUTHORS` arms. Each veto writes a `sync-errors.log` line naming the
+  path and the evidence, because an unexplained block is a dead end.
+- **Positive evidence only.** A path that does not resolve to a regular file —
+  a deletion, a rename's old side, a tracker entry spelled from another
+  worktree — is no evidence either way, and the name arms decide as before. The
+  stricter reading (unresolvable ⇒ reviewable) would deadlock every
+  documentation *deletion* while buying nothing: a deleted file ships no
+  content. So the veto can only narrow the name arms, never widen them.
+
+**What it costs.** A `docs/` tree carrying non-prose files stops fast-pathing:
+`docs/img/diagram.png`, `docs/fixtures/payload.json`, an extension-less
+`docs/Makefile` or `docs/README` now need a QA round when they change alone.
+That is the correct direction — F1's whole licence is that there is nothing to
+review — and `docs/README` is now merely consistent with the repo-root `README`,
+which never had an arm.
+
+**A document the project declares as its own surface is not documentation about
+the system — it IS the system** (`claude-workflow-plugin-s5qf`). `bbh` closed
+the shape half and disclosed the half it could not: an agent prompt, a rubric,
+`CLAUDE.md` and the lessons ledger are markdown carrying neither an exec bit nor
+a `#!`, so the content veto correctly has no opinion about them and the `*.md`
+arm called them documentation. They are executable policy in prose — the runtime
+loads `.claude/agents/*.md` as the agent, the grader reads `.claude/rubrics/*.md`
+as its criteria and `LESSONS.md` as criteria by reference. The live illustration
+is on `bbh`'s own change set: `.claude/agents/qa.md` was a member of it, and had
+that edit landed alone F1 would have released an unreviewed change to the QA
+agent's own prompt.
+
+The fix adds **no third path arm** — that would be `bbh`'s inference wearing a
+new suffix. It asks a question with a factual answer instead: *is this path one
+the project declares it ships?* The answer already exists, in
+`workflow-manifest.sh` — the enumeration `install.sh` copies from and every
+frozen table under `manifests/` is cut from. A new `governing <source-root>`
+subcommand re-serves it without hashes as `<path><TAB><origin>`, plus the named
+runtime-contract files the plugin does not ship but whose content governs it
+(`CLAUDE.md`, which Claude Code auto-loads into every agent's context).
+`is_doc_only_path` looks the path up by exact equality and vetoes on a hit,
+logging the path and the origin.
+
+| property | behaviour |
+| --- | --- |
+| covered today | `.claude/agents/*.md`, `.claude/rubrics/*.md`, `.claude/commands/*.md`, `.claude/skills/**`, `.claude/vendor/**`, `LESSONS.md`, `docs/HOOKS.md`, `docs/CODEX_SETUP.md`, `CLAUDE.md` |
+| generalises | a NEW declared artifact is covered with no list edited anywhere — create `.claude/agents/designer.md` and it is disqualified on the next Stop |
+| anti-overreach | an ordinary doc is untouched, *including in the same directory*: `.claude/agents/notes.txt` still fast-paths, because the manifest scans that directory for `*.md` and does not declare it |
+| fails OPEN | if the query cannot run (manifest script absent, or it failed) the set is empty, nothing is vetoed, and F1 behaves exactly as before — logged once to `sync-errors.log`, never silent |
+| never an install row | `CLAUDE.md` reaches the governing set only through `governing`; `generate` still omits it, so no upgrade verdict and no uninstall walk sees it |
+| cost | maxdepth-1 scans plus three pruned walks over `.claude/`, no digests, at most once per Stop: **0.032s / 134 rows** on this repo at `b8f0095`, versus 0.339s for the hashed `generate` |
+
+**Availability, measured rather than assumed** — over this repo's whole history
+at `b8f0095`, 142 non-merge commits, classifier extracted from the shipped hook
+and driven per path, manifest regenerated from each commit's own tree via `git
+archive`: **7** commits were doc-only (F1-eligible) and **1** of those also
+touched a governing artifact (`ea6ae385`, `docs/HOOKS.md` alone). Counted from
+churn instead: **60** commits touched a veto-reachable governing artifact and
+**59** carried a reviewable path anyway, so F1 was never available to them. These
+files change constantly here (`LESSONS.md` 37, `docs/HOOKS.md` 23,
+`.claude/agents/qa.md` 22) and essentially never alone.
+
+**What still cannot be seen.** For anything not affirmatively executable and not
+declared, the classifier still reads content type off the NAME: a `.txt` that is
+a golden test assertion, a bare `LICENSE` that is really a data file, and any
+behaviour-bearing document an install target keeps where the manifest does not
+look. One specific residual:
+
+- a **deletion** of a declared path, which resolves to no file and so is not in
+  the enumeration. The same asymmetry, and the same defence, as the content
+  veto's deletion contract above; a *correct* deletion of a plugin-owned
+  artifact also moves `.claude-plugin/plugin.json` or a frozen table, neither of
+  which is doc-named. **This one is now MEASURED rather than described** —
+  `doc-only-classifier.test.sh` section 6h.3 drives the deletion of an agent
+  prompt, a rubric, `CLAUDE.md` and a design artifact and pins the current
+  DOC-ONLY verdict, with a surviving declared sibling as the discriminator, so
+  closing it is a loud test change rather than a silent drift. Tracked as
+  `claude-workflow-plugin-e4ox`, which also carries the costed design (the
+  declaration's *rules* rather than its results) and the reason it was filed
+  instead of half-built.
+
+**The design artifact was the other residual, and v5 D1
+(`claude-workflow-plugin-fkm.3`) closed it.** `docs/specs/*.md` is now declared
+in `runtime_contract_rows` beside `CLAUDE.md`, with origin `design-artifact`, so
+a change set consisting of exactly the design document no longer auto-approves
+with `reviewed_by=none`. It is the same mechanism as `CLAUDE.md` — a fact the
+project states about its own layout, inside the function `generate_rows` never
+calls, so still no install row, no upgrade verdict and no uninstall walk — with
+one difference stated plainly: `CLAUDE.md` is a named file and this is a
+**declared directory**, because the artifact is named for the task it designs
+and the set is only knowable at scan time. It remains a declaration rather than
+the path inference `bbh` removed: the row exists because the workflow writes its
+design artifact there, not because the name ends in `.md` or sits under `docs/`.
+An operator's own `docs/architecture.md`, and every other file in `docs/`, are
+untouched. Availability cost: one QA round per design revision, which is the
+review the design phase mandates anyway.
+
+**The declared directory is scanned for ENTRIES, not for regular files** (QA
+round 2 on that task, finding R2-F2). `scan_flat`, which builds the shipped
+surface, uses `find -maxdepth 1 -type f` — and that **excludes symlinks**, so a
+`docs/specs/<task-id>.md` pointing anywhere emitted no governing row at all and
+the fast path reopened for the design artifact itself. The declaration therefore
+has its own scanner, `scan_declared_dir`, which enumerates entries and declares a
+symlink — dangling ones included, on the same "an absent target is not evidence"
+reasoning the deletion residual above states. `scan_flat` is deliberately
+unchanged: it builds the surface whose output is frozen per release under
+`manifests/`, and `install.sh` copies files rather than links, so widening it
+would move frozen rows for a case no install path produces. The boundary is
+asserted from both sides — a symlink in the declared directory IS governing, a
+symlink in `.claude/agents/` leaves `generate` byte-identical.
+
+**The declared directory itself is scanned even when it is a symlink, and a
+directory it cannot READ is a failure rather than an empty answer** (QA round 4
+on the same task, findings R4-F3 and R4-F2). `find` will not descend a final
+directory-symlink operand without `-H`/`-L` — the same on BSD find and GNU
+findutils — while the `[ -d ]` guard above it does follow, so a `docs/specs`
+that is a symlink passed the guard and produced a silently empty scan. The
+scanner passes `-H`, which follows command-line operands only, leaving entries
+*inside* the directory reported as themselves. And the enumeration's exit status
+is now read: it used to run inside a process substitution with `2>/dev/null`, so
+a directory that is searchable but not listable (mode `0311`) returned zero rows
+at rc 0 while the artifact stayed readable by name. `governing` now exits
+non-zero and quotes find's own diagnostic. **Operationally that means one thing
+worth knowing:** if the declared directory's permissions are broken, the whole
+governing query fails, and `load_governing_set` logs
+`F1: the governing-artifact query failed …` to `sync-errors.log` and classifies
+as it did before the declaration existed. That is the documented fail-open on an
+*unanswerable* query; what changed is that an unreadable directory is now
+unanswerable instead of answering "nothing is declared".
+
+**An exact-path match over un-normalised strings is not an exact match over
+paths** (`claude-workflow-plugin-mdnc`). The declaration's membership test is
+exact string equality — deliberately, because a pattern match would widen the
+veto — but until this fix the *reduction* that produced the string chained its
+attempts with `elif`, so the first attempt that produced **any** string won and
+the rest were never tried. Producing a string is not finding the artifact, and a
+bare `.` was enough to defeat the whole veto. Measured, with the canonical
+spellings reading `reviewable` beside them and every anti-overreach control
+holding:
+
+| spelling | verdict before |
+| --- | --- |
+| `$ROOT/./docs/specs/T-1.md` | `DOC-ONLY` |
+| `docs/./specs/T-1.md` | `DOC-ONLY` |
+| `docs/specs/../specs/T-1.md` | `DOC-ONLY` |
+| `.claude/agents/../agents/qa.md` | `DOC-ONLY` |
+
+uniformly across **every** declared path — agent prompts, rubrics, `CLAUDE.md`
+and the design artifact. Anything that records a path with a dot in it reached
+the ungated exit, which made two shipped announcements false at once: `bbh`
+announced path-shape inference was gone, and `s5qf` announced governing
+artifacts are disqualified from the fast path.
+
+The fix is **every reduction is a candidate and any hit wins**, with three of
+the six candidates handed to the shell's own path machinery rather than to
+string surgery. All three are different functions of the same input, and none
+subsumes the others:
+
+| # | reduction | what only it can answer |
+| --- | --- | --- |
+| 4 | `cd -P` on the parent — **kernel-physical** | a symlinked directory mid-path *inside* the tree (`docs/speclink/T-1.md`) |
+| 5 | `cd` on the parent — **logical** | an artifact under a declared directory that is itself a symlink *out* of the tree; resolve that physically and the answer leaves the root |
+| 6 | `cd` then `cd -P .` — **physical resolution of the logical collapse** | a path reaching the tree through an alias with a `..` after a symlink, and a `CLAUDE_PROJECT_DIR` containing `..` |
+
+The leaf name is never resolved: a declared artifact may itself be a symlink and
+is declared under its own name, which is also why a **hardlink** to a governing
+artifact under an undeclared name still fast-paths. This veto asks what the
+project declares about a path, never what inode sits behind it. Every `cd`
+capture uses a sentinel byte (`printf '%sX'`, then `${…%X}`) because `$( )` eats
+trailing newlines and cannot tell one that ends the output from one that is the
+last byte of a directory name.
+
+**Candidate 6 is `s5qf`'s own reduction, kept rather than replaced, and the
+reason it is called out is that the first cut of this fix DELETED it.** `cd -P
+"$d"` was substituted for `cd "$d" && pwd -P` at two sites — the parent
+reduction and `_GOV_ROOT_PHYS` itself — on the reading that `-P` was a
+*correction*. It is not; it is a second question, and the two answers diverge
+exactly when a symlink precedes a `..`. The substitution therefore removed a
+reduction, and the removal failed **open**: measured on macOS bash 3.2.57 and
+ubuntu bash 5.2.21 aarch64, `$P/alias/.claude/x/../agents/qa.md` went back to
+`DOC-ONLY`, and with `CLAUDE_PROJECT_DIR` spelled `$R/.claude/x/../..` the root
+itself resolved outside the tree so **every** absolute governing path missed
+every candidate. The rule the region now states: **never remove a reduction,
+only add one.** The original defect was removal by short-circuit (`elif`); this
+would have been removal by substitution.
+
+Operationally: the fork-free candidates answer the common cases (a relative path
+from `git status`, an absolute path from `post-edit.sh`), so the three `cd`
+subshells run only on a path that already missed — i.e. on ordinary
+documentation, of which a doc-only change set has a handful.
+
+Both vetoes are pinned by
+`.claude/scripts/tests/doc-only-classifier.test.sh` (sections 4-10, including a
+strip-the-region META for each) and at the hook level by
+`.claude/tests/component/specs/verify-before-stop.sh` legs 9-10; the query
+itself by `.claude/scripts/tests/workflow-manifest.test.sh` section 1g. Section
+6h drives the full spelling matrix — `./`, `../`, a leaf symlink, a directory
+symlink mid-path, a hardlink, a root and leaves containing **spaces** and
+**non-ASCII** characters — each paired with the identical spelling aimed at an
+ordinary document, which must still fast-path. The space-and-unicode root is not
+padding: a character-class filter proposed during this arc read correct and
+would have refused every project living under `/My Drive`, and only measurement
+caught it.
+
+**Section 10 is the leg that catches a reduction being removed, and it exists
+because sections 1-9 structurally could not.** Every one of them drives *one*
+artifact — 6h runs the shipped bytes, 9 runs the shipped bytes against a
+region-stripped copy of themselves — while monotonicity is a claim about the
+DIFFERENCE between the old artifact and the new one. 109 green assertions were
+compatible with the fail-open above. Section 10 therefore runs BOTH: a
+sha256-pinned frozen copy of the pre-`mdnc` classifier
+(`.claude/scripts/tests/fixtures/gov-classifier-baseline-s5qf.sh`, never
+maintained, never refreshed) and — while the tree is dirty — the same extraction
+from `git show HEAD:`, sweeping 1219 paths across 9 project roots and asserting
+that **zero** of them lose the veto. Its negative control is the defect itself:
+strip the `GOV-LPHYS` region and the differential must name the alias route and
+the three artifacts under the `..`-bearing root.
+
+**The fast path is bound to the change set it judged, and it no longer speaks
+for a task an implementer is working on** (`claude-workflow-plugin-qzv`, the
+`F1-CHANGE-SET-BINDING` and `EXPECTED-HASH-REFUSAL` regions). The defect: F1's
+verdict is a statement about a CHANGE SET ("no reviewable source changed") while
+its `qa-approved` label is a statement about a TASK, so any doc-only Stop that
+landed while a task was open converted the first into the second. It fired four
+times live, the last on the `v4.1.0` release task 22 seconds into its
+implementer's spawn, binding a *previous* task's doc-only change set. Three
+things changed:
+
+- **A binding predicate.** F1 may auto-approve only when no `IMPLEMENTER:
+  role=… task=… at <ts>` record on the active task is at-or-newer than the most
+  recent `QA-GATE: entered at <ts>`. Both timestamps come from
+  `review-check.sh gate`'s envelope — `cycle_opened_ts` and
+  `latest_implementer_ts`, resolved before that subcommand's artifact gate so
+  they are present on the `review_artifact_missing` envelope F1 always gets —
+  so there is no second parser for either grammar. **No implementer record is
+  SAFE, not unknown:** doc-only work is orchestrator-authored and never produces
+  one, and requiring one would deadlock every documentation commit. A tie on the
+  same whole second is refused, because whole-second stamps cannot order it.
+- **The record the predicate reads is re-written per review CYCLE**
+  (`claude-workflow-plugin-qzv.1`, the `IMPLEMENTER-CYCLE-KEY` region in
+  `subagent-start.sh`). `record_implementer` was idempotent per `(role, task)` —
+  its guard matched any comment on the task ever — so `latest_implementer_ts` was
+  that role's **first** spawn permanently, and from the second cycle onward the
+  predicate compared a stale record against a fresh cycle open, read "previous
+  cycle", and auto-approved mid-implementation: the same defect, one cycle later.
+  QA reproduced it end to end (cycle 1 entered 18:31:36Z / spawned 18:31:38Z
+  blocked; a fresh enter at 18:32:06Z plus a re-spawn that posted nothing
+  released, stamping `qa-approved reviewed_by=none`). The key is now
+  `(role, task, cycle)`: a record is skipped only when that role already has one
+  at-or-newer than the newest `QA-GATE: entered` — which reuses the two facts the
+  predicate already compares, so it adds no state and no third parser. The
+  **grammar is unchanged**, so every reader (`max_record_ts`'s end-of-line
+  anchor, the `^IMPLEMENTER: role=([a-z]+) ` set capture, `is_implementer_role`)
+  is untouched; only how often a record is written changed. The anti-spam intent
+  survives — re-spawns inside one cycle still post nothing — and a task that has
+  never opened a cycle keeps the old per-`(role, task)` behaviour, because in
+  that state the predicate already refuses on the record's mere existence.
+- **The `qa` role is out of scope for the predicate, deliberately.**
+  `is_implementer_role` is `backend|frontend|devops` only, so a QA agent — which
+  holds `Write`/`Edit`/`MultiEdit` — writes no `IMPLEMENTER` record and the
+  in-flight check has nothing of QA's to see. Recording it was considered and is
+  worse twice over: the record would outlive its cycle for every task QA has ever
+  reviewed, so F1 would refuse on any task with QA history (deadlocking the
+  documentation commits it exists for), and `qa` would enter the implementer
+  **set** `approve`'s review-separation reads, where it can only refuse an
+  approval that should stand. **What the exemption leaves open is `DOC_ONLY`,
+  and the only accurate statement of which paths those are is
+  `is_doc_only_path` itself** — read it at the top of `verify-before-stop.sh`,
+  or generate the answer:
+  `.claude/scripts/tests/doc-only-classifier.test.sh` drives it over 1120 paths.
+  This sentence used to enumerate the *complement* in English ("only a file
+  placed elsewhere — a test at `tests/`, a hook at `.claude/scripts/` — makes
+  `DOC_ONLY` false"); that enumeration shipped false in three consecutive
+  rounds and was falsified by both of its own examples (`tests/spec.txt` and
+  `.claude/scripts/hook.txt` are doc-only via the extension arm, at any
+  location). Do not write a fourth one.
+- **A refusal at `approve`, not a trust at `enter`.** F1 passes `--expect-hash
+  <h>` naming the set it classified, captured *before* the `enter` that
+  reconciles the tracker and regenerates the impact report. `approve` compares it
+  against the hash it is about to bind and refuses (exit 2,
+  `expected_hash_mismatch`) on a mismatch, naming **both** hashes. This is why
+  the check lives at `approve` rather than `enter` — `enter` is documented
+  tolerant, and F1 calls it on exactly the classes with no completion payload.
+- **Unestablishable is a refusal, not a pass.** `review-check.sh` missing, an
+  envelope without the two fields (a pre-qzv or partially-synced copy), a record
+  whose timestamp is not single-line ISO-8601-UTC, `bd`/`jq` off the hook's PATH,
+  or the label saying a cycle is open while no `QA-GATE: entered` record comes
+  back (the bd-1.1.2 comment-inlining failure) all fall through to the
+  QA-required block with the cause named in the reason. The exit code is
+  deliberately **not** the discriminator: F1 fires on change sets with nothing to
+  review, so `review-check.sh gate` exits 4 on the normal path here, and keying
+  on rc would refuse every doc-only Stop.
+- **A REFUSED approval blocks and keeps the change set**
+  (`claude-workflow-plugin-qzv.3`). The arm used to run `approve … >/dev/null
+  2>&1 || log_sync_error`, then fall straight through to the tracker cleanup and
+  `echo "{}"`. Any non-zero `approve` was logged and ignored, so the gate
+  released a change set, recorded **no** approval for it, and truncated the
+  tracker that named it — reproduced with `impact-report.sh` removed (a
+  partially-synced install): decision `ALLOW`, 0 `QA-GATE APPROVED` records,
+  `changed-files.txt` **wiped**, one line in `sync-errors.log`. Now `approve`'s
+  stdout+stderr are captured, a non-zero exit emits a block naming the
+  `error_key` and the refusal's own `observations`, and the `rm -f` cleanup is
+  scoped to a **successful** approval so the change set survives for the retry.
+  Three refusals reach it in practice — `impact_report_*` (degraded install),
+  `expected_hash_mismatch` (a path arrived after F1 classified; qzv's own guard,
+  which until this landed also ended in a silent release) and exit 3 (a
+  rolled-back label write). `change_set_reconstructed` and
+  `tracker_unreconcilable` do not: the hook's own unconditional
+  `reconcile-tracker` fail-closes first, so the in-arm `enter` is an idempotent
+  reconcile. Nothing in `qa-gate.sh`'s `APPROVE-COMMIT ORDER` moved — approve's
+  refusals all exit before that finalization.
+- **`approve`'s `impact_report_unverifiable` refusal is now reachable at all**
+  (same task, second defect). `qa-gate.sh` runs under `set -e` and
+  `compute_change_set_hash` returns 1 when `impact-report.sh` is missing, so the
+  bare assignment `current_hash=$(compute_change_set_hash)` aborted the script
+  three lines above the refusal written for that exact condition. Measured
+  two-arm: shipped/`set -e` gave rc=1 with **empty stdout and empty stderr**;
+  the same call under `set +e` gave rc=2 with
+  `error_key=impact_report_unverifiable`. The same slip sat on the second call
+  site (`approved_hash`), which is the one the audited `--no-impact-report`
+  bypass reaches — so the documented exit from a missing artifact was itself
+  unusable when the artifact was missing. Both are now `|| var=""`, matching the
+  three call sites in the file that always were.
+
+**What that does NOT establish.** Binding a verdict to the change set it judged
+proves *bound == classified*. It does **not** prove the set is COMPLETE: both
+sides come from one canonicalisation of one tracker, so the comparison detects
+drift and is structurally blind to loss (`claude-workflow-plugin-fkm.1.20`). An
+independent witness for completeness — cross-checking against the F7 contract's
+`files_changed` — is separate work and is not in this mechanism.
+
+**The Stop hook no longer sets `status=closed`.** Both call sites are gone (the
+F1 fast path's and the end-of-QA-approved-flow's), and the reasoning is recorded
+at each. An approval binds a CHANGE SET; closing is a claim about the TASK's
+work, and nothing in a change set can tell you whether a task's acceptance
+criteria are met — so the close was structurally a guess, and it silently
+overrode whatever the caller intended. `docs/WORKFLOW.md`'s status table has
+always said `closed` is set by the agent after QA approval; that is now the only
+writer. The release path emits the close command as a non-blocking
+`additionalContext` note (`CLOSE_HINT_NOTE`) rather than dropping the affordance
+silently. Nothing was lost mechanically: `bd-github-link.sh` recognises
+`bd update <tid> --status closed` but is keyed on `tool_name == "Bash"`, and this
+call ran inside the hook process, never as a Bash tool call; and
+`epic-gate.sh check`'s verdict is computed *above* the removed line, so the
+active task already counted as `in_progress` on its own Stop.
 
 One more precondition on the label itself: `qa-gate.sh approve` refuses
 (exit 2) unless a hash-current per-file impact report exists at
@@ -770,7 +1710,11 @@ comments and answers three questions — is there a `REVIEW-ARTIFACT v1` record
 at all, is its `reviewer_identity` different from every `IMPLEMENTER: role=...`
 record on the task, and is every finding at or above the artifact's
 `risk_threshold` either `RESOLVED` (with fix + test evidence) or
-`ARBITRATION ... decision=overrule`. The implementer records are written by
+`ARBITRATION ... decision=overrule`. Since 2ty it also answers a fourth,
+non-gating question for the Stop hook's escalation basis — how many
+`REVIEW-ARTIFACT v1` firstlines carry `reviewed_hash=<h>` (`rounds` /
+`rounds_hash`, optional `--change-set-hash <h>`); see "Escalation State
+Machine". The implementer records are written by
 `subagent-start.sh` at spawn time for the three implementing roles only
 (backend / frontend / devops — `qa` reviews, so recording it would make every
 single-agent review non-independent). The approval comment names the reviewer
@@ -795,6 +1739,53 @@ recorded *after* an approval — a second review round, a re-opened issue — an
 the approval record, written once, cannot know about them. Both sides fail
 CLOSED: a missing or unrunnable `review-check.sh` refuses/blocks rather than
 waving the change through.
+
+### What a change-set-bound approval attests
+
+**Membership plus review-at-review-time.** These paths were the change set, and
+a reviewer looked at them then. **It does not attest content.**
+
+`change_set_hash` is a sha256 over the sorted, denylist-filtered **path list**
+(`impact-report.sh` `change_set_hash` / `canonical_changed_files`); the bytes in
+those files are never hashed. Measured against the shipped script: a tracked
+file rewritten from end to end produced a byte-identical hash. Three record
+types inherit this today — `QA-GATE APPROVED`, `REVIEW-ARTIFACT reviewed_hash`,
+and `RUBRIC` — because all three bind the same one definition. That is
+deliberate: a second, content-aware canonicalisation invented at one of the
+consumers is the duplicate-definition failure `llh.18` exists to forbid, so any
+repair belongs at that single definition or nowhere.
+
+What the binding still catches, all four blocking:
+
+| Attack / accident | Why it is caught |
+| --- | --- |
+| a bare `bd label add <tid> qa-approved` | no record exists at all |
+| approving a decoy task and redirecting `current-task` | the record binds the decoy's path set |
+| a path entering or leaving the change set after approval | the path list, and so the hash, differs |
+| a denylist edit, or a change to what reaches the tracker | the whole set re-hashes (see "Denylist changes are a hash migration") |
+
+What it does not catch:
+
+- **Hand-forged records.** An agent with arbitrary shell can reproduce the
+  comment. This is a disclosure record, not a cryptographic sandbox
+  (`llh.18`, `pqnd`).
+- **Re-editing exactly the approved set.** `approve` truncates the tracker, so
+  the live hash afterwards covers the paths touched *since*. Touch precisely the
+  approved set again and the hash returns to the approved value, and that new
+  content is not re-reviewed. Reachable in one step whenever the approved change
+  set is a single file. Measured on the shipped `impact-report.sh --hash-only`;
+  filed, and scheduled as a prerequisite of the v5 coherence claim, because
+  coherence is a content assertion and a membership-only binding cannot support
+  one.
+
+The operator-facing statement of the same thing is the closing note of the
+`LABEL_WITHOUT_RECORD` block reason in `verify-before-stop.sh`, and that note is
+what `.claude/scripts/tests/gate-claim-honesty.test.sh` pins: it asserts the
+text the shipped function EMITS against the *measured* behaviour of the shipped
+hash rather than against a fixed string — so if the hash ever becomes
+content-sensitive, the assertion flips with it instead of going quietly stale.
+This section is prose and is **not** pinned: no test asserts anything about its
+wording, so it is kept true by review.
 
 ### Approve idempotency is hash-aware
 
@@ -826,19 +1817,41 @@ envelopes name which of the two references they compared against, so the
 comparison is never invisible.
 
 **Known residual of the empty-tracker arm** (reproduced and pinned as section H
-of the spec below): if the tracker is empty *and* real un-baselined dirt exists —
-work written by a helper rather than the Edit tool, which never reaches
-`changed-files.txt` — the Stop hook blocks on the git half of its predicate while
-the persisted report still witnesses the *previous* approval, so a bare `approve`
-no-ops and the block stands. Run the remediation the block prints, all three
-lines of it: step 2 (`impact-report.sh`) re-persists the report, after which no
-record binds it and `approve` proceeds. Closing this inside `approve` would mean a
-second copy of the Stop hook's baseline-relative git walk, and that walk lives in
-exactly one place (`reviewable_changes`) on purpose.
+of the spec below): if the tracker is empty *and* real un-baselined dirt exists,
+the Stop hook blocks on the git half of its predicate while the persisted report
+still witnesses the *previous* approval, so a bare `approve` no-ops and the block
+stands. Run the remediation the block prints, all three lines of it: step 2
+(`impact-report.sh`) re-persists the report, after which no record binds it and
+`approve` proceeds.
+
+94d **narrowed** this without closing it. The trigger used to be routine — a
+helper-written file never reached `changed-files.txt` at all — and now
+`reconcile_tracker` puts it there, so `enter` and every Stop fire leave the
+tracker non-empty. What remains is the case where `approve` is called with an
+empty tracker and un-baselined dirt still present, because
+`set_idempotency_reference` runs *before* approve's reconcile.
+
+94d also **invalidated the reason recorded here for leaving it open**. That reason
+was "closing this inside `approve` would mean a second copy of the Stop hook's
+baseline-relative git walk" — true when the walk existed only inside
+`reviewable_changes`, and no longer true now that `reconcile_tracker` is exactly
+that walk in a callable, single-definition form. Moving approve's reconcile above
+the idempotency check would close the residual; it would also change behaviour
+that section H pins deliberately, so it is a decision for the approve-idempotency
+work (`nnr`), not a side effect of the tracker fix.
 
 The contract change is reflected in the `bd_qa_approve` MCP tool description and
 pinned by `.claude/tests/component/specs/approve-idempotency.sh` (sections A-C
 and H, plus a META that reverts the guard and shows the deadlock return).
+
+**Interaction with the `change_set_reconstructed` refusal (94d.1).** That refusal
+sits *after* this idempotency guard, so a genuine no-op — label set and a record
+already binding the change set this approve would bind — short-circuits before it
+and is never refused. The refusal can therefore only fire on a `approve` that is
+actually about to write a record. That ordering is deliberate: re-refusing an
+approval that already exists would break the printed
+`enter → impact-report → approve` remediation for the second time, which is the
+deadlock `gz3` closed.
 
 ### Rubric verdicts are bound to the change set they graded
 
@@ -970,6 +1983,665 @@ METAs that revert each half of the preservation fix, the version validation, and
 the sentinel refusals, and a reader differential that attributes R2-F3 to the
 selector rather than to the writer check).
 
+### Design verdicts are bound to the design they reviewed (`design-record` / `design-review-record`)
+
+v5 Phase D1 (`claude-workflow-plugin-fkm.3`) added a design phase ahead of
+implementation: a designer writes `docs/specs/<task-id>.md` — prose sections
+plus one machine `<!-- DESIGN-UNITS BEGIN/END -->` block — and records it with
+`qa-gate.sh design-record <task-id>`:
+
+```
+DESIGN-ARTIFACT v1 task=<tid> designer=<id> design_hash=<h> units=<n> at <ts>: <summary>
+```
+
+`--file` on this command is an **assertion, not an input** — the artifact path
+is always derived from the task id (`docs/specs/<task-id>.md`), so the flag can
+only confirm that derivation or be omitted; anything else is
+`artifact_path_not_derived`. The record binds a live `workflow-manifest.sh
+hash-file` digest of the artifact's raw bytes (bracketed across
+`review-check.sh validate-design`'s own read, so a concurrent edit cannot bind
+bytes the validator never saw), and it is a second layer of the designer's
+edit ban: `designer_touched_source` refuses to record while the change set
+holds a path that is not this one artifact and no `IMPLEMENTER` record has
+posted yet (the check disarms at implementer *spawn*, not completion).
+
+Phase D2 (`claude-workflow-plugin-fkm.4`) added the reviewer's half —
+deliberately a **separate** record with its own grammar, author and lifetime,
+because the independence check below needs a durable statement of who the
+designer was that only a distinct record can carry:
+
+```
+DESIGN-REVIEW v1 task=<tid> reviewer=<id> verdict=<satisfied|needs_revision>
+  design_hash=<h> iteration=<n> rubric_version=<v> at <ts>: <summary>[ [amends: <prev-h>]]
+```
+
+`qa-gate.sh design-review-record <task-id> --design-hash <sha256> [--file
+<path>]` reads a strict-JSON verdict from `--file` or stdin — the shape the
+design-reviewer agent emits (`.claude/rubrics/design.md`'s DS1-DS8), validated
+inline the same way `grade-record` validates the code rubric's verdict (no
+second schema: there is no file-based artifact to validate here, unlike
+`design-record`'s artifact). `--design-hash` is **required** and is a *claim*,
+not a live recompute — the same reasoning `grade-record`'s `--graded-hash`
+documents: recomputing at record time would bind whatever the artifact happens
+to be *then*, not necessarily the revision the reviewer actually read.
+
+**Independence is enforced at record time, not at approve time.** A verdict
+whose `reviewer_identity` equals the `designer=` on the task's latest
+`DESIGN-ARTIFACT` record is refused (`design_reviewer_not_independent`) before
+it is ever written; recording against a task with no `DESIGN-ARTIFACT` record
+at all is also refused (`design_artifact_record_missing` — there is no
+designer identity to check against). The comparison is **string equality**,
+not a role-membership test: `design-reviewer.md` fixes `reviewer_identity` to
+the literal `"design-claude"`, and `design-record`'s own default designer
+identity is the literal `"designer"` — textually distinct by construction.
+`review-check.sh`'s own independence computation (used for the *code* review)
+is not reusable here: it is a membership test against implementer *role*
+tokens, and both of these identities are plain strings, not roles.
+
+**Amendments.** The same subcommand records again at a later `iteration`
+against an artifact revised in place (its `Revision log` gains a row, so
+`design_hash` moves — never a second `DESIGN-UNITS` block, which
+`validate-design` refuses structurally). Two rules enforce this: a new
+record's `iteration` must be **greater** than the latest recorded one for the
+task (a repeat at the same or an earlier number is refused,
+`design_review_iteration_not_advancing`), and when the prior record's
+`design_hash` differs from this one, the comment carries `[amends:
+<prev-design-hash>]` — free-text audit prose, never a value a program parses.
+
+**`qa-gate.sh approve` refuses without design-satisfied — unconditionally,
+mirroring the completion-contract's own shape.** A task with no satisfied,
+independent, fresh `DESIGN-REVIEW` verdict is refused (exit 2, one of
+`no_design_attempted` / `design_verdict_missing` / `design_not_satisfied` /
+`design_hash_unreadable` / `design_artifact_unreadable` /
+`design_verdict_stale`), leaving the task untouched — the same "no record, no
+release" shape `completion_record_missing` already established. `--no-design
+'<reason>'` is the audited bypass, ordinary for the overwhelming majority of
+tasks that never have a design phase at all; the reason lands in the approval
+comment as `[design bypass: <reason>]`.
+
+This is a **new, sibling block** (`DESIGN-SATISFIED-REFUSAL`), not a
+conversion of the existing `DESIGN-BINDING-TOKEN` ladder's "no record" arm —
+that ladder answers a narrower question ("does a design artifact exist, and
+does it still hash to what was recorded"), orthogonal to whether anyone ever
+reviewed it, and it still computes the `design_hash=` audit token on every
+path. `claude-workflow-plugin-rqer` set the precedent for this split when it
+added `REVIEW-ARTIFACT-BINDING-TOKEN` alongside `REVIEW-SEPARATION` rather
+than folding the review artifact's own file-hash question into the refusal
+that already existed for independence.
+
+Once design-satisfied holds, the approval record carries a fifth machine
+token, `design_verdict_hash=<h>` — last among the machine tokens, immediately
+before `at <ts>`:
+
+```
+QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
+  design_hash=<h> artifact_hash=<h> design_verdict_hash=<h> at <ts>: <summary>
+```
+
+**A capped code review cannot certify the change set on its own
+(`cap_terminated`).** `review-check.sh gate`'s envelope has exposed
+`.artifact.cap_terminated` (derived from the latest `REVIEW-ARTIFACT`'s
+`stopped_by`) since `claude-workflow-plugin-nq5f`, with no consumer until D2.
+A review that stopped at a CAP (`max_findings` / `max_review_iterations` /
+`timeout`) ran out of turns or budget, not out of things to find — the same
+principle `.claude/rubrics/design.md`'s DS8 states for the design-review
+loop, applied here to its sibling. `qa-gate.sh approve` now refuses
+(`review_cap_terminated`) inside `REVIEW-SEPARATION` when this is true,
+sharing that block's own `--no-review` bypass — a **new arm of an existing
+refusal**, not a new block, since the question ("is the code review
+complete") is exactly REVIEW-SEPARATION's own. The read is
+`has("cap_terminated")`-guarded rather than `// false`: the alternative
+treats a literal JSON `false` as "absent" and falls through to its
+right-hand side, which would misreport every ordinary non-cap review the
+moment that fallback was anything but `"false"` itself.
+
+**The Stop hook re-checks design-satisfied too (`DESIGN-DISCIPLINE`),**
+mirroring `REVIEW-DISCIPLINE` above for the design axis: a design can be
+amended, or re-reviewed to `needs_revision`, *after* approval — a fact the
+approval record, written once, cannot know about — so the gate re-arms at
+Stop by calling `qa-gate.sh design-gate-precheck <task-id>` (the same
+predicate `compute_design_satisfied` backs). It shares REVIEW-DISCIPLINE's
+audited escape: an approval record carrying `[design bypass:` skips the
+re-check. This block lives entirely **outside** `SKIP-UNCHANGED`'s file-based
+skip region (`tree_fingerprint()` minus the tracked-path denylist) —
+deliberately, because a design verdict recorded only as a Beads comment moves
+neither instrument the skip predicate reads, so a design regression with no
+matching file change could otherwise replay a stale, already-green tech-check
+result right past it. Reading bd state fresh on every Stop, regardless of
+whether the suite itself replayed, is what closes that hole.
+
+**`design-gate-precheck <task-id>`** is a pre-delegation convenience the
+orchestrator may run before its first `Task()` spawn on a task — never
+enforced from there (nothing can force a prompt to run a script before
+delegating; `approve`'s own refusal is the real backstop). It is
+**deliberately more lenient** than `approve`: a task with no design phase at
+all (`no_design_attempted`) reads as ready to proceed, because the
+overwhelming majority of tasks never have one, and treating "nothing
+started" as a precheck failure would fire on nearly every ordinary task. What
+it *does* flag is a design that was **started** (a `DESIGN-ARTIFACT` record
+exists) but is not yet satisfied — the case worth stopping to fix before
+paying for an implementer spawn.
+
+Pinned by `.claude/scripts/tests/design-review-record.test.sh` (shape
+validation, independence, amendments, the approve refusal with its own
+METatest, cap_terminated with its own METatest, and the bjx scalar-class
+discipline) and `.claude/tests/component/specs/verify-design-discipline.sh`
+(the Stop-hook re-check).
+
+### The coherence rollup (`COHERENCE-ROLLUP-REFUSAL`)
+
+v5 Phase D6 (`claude-workflow-plugin-fkm.8`) adds the epic-level check that
+closes the loop D2/D5 open per task: DESIGN-SATISFIED-REFUSAL (above) asks
+whether *this task's* design was reviewed; DESIGN-ALIGNMENT-REFUSAL (D5,
+`fkm.7`, undocumented here — a known gap this phase does not attempt to
+close) asks whether *one unit's* implementation matches its own declared
+scope. Neither ever asks whether **the whole decomposition still adds up**:
+every declared unit implemented, every criterion covered, nothing built
+outside what was declared anywhere. That is `qa-gate.sh design-coherence
+<task-id>` — "in the manner of the unresolved-findings count"
+(`review-check.sh gate`'s own `OPEN_COUNT`): a rollup over every unit the
+bound artifact declares, not a fresh scan (`compute_design_alignment` is
+reused per unit, in a `mode=rollup` that skips its files leg — see that
+function's own header for why re-running a live-tracker comparison against
+a *historical* unit is unsound, not merely redundant).
+
+**Applicability is self-determined, like DESIGN-ALIGNMENT-REFUSAL, never a
+caller's bypass flag.** `<task-id>` must be a satisfied design task **itself**
+(`compute_design_satisfied "$tid"` called directly — the same convention
+`design-status` and `epic-gate.sh plan-batches` already use), and its
+artifact must declare at least one unit. Both are the ordinary state for the
+task that owns a decomposed design (typically the epic), and neither holds
+for a v5 task-per-unit **child** — which already needs `--no-design` for the
+unrelated reason DESIGN-SATISFIED-REFUSAL's own section states. Applicable
+and not-yet-coherent both report `ok:true`/`ok:false` at exit 0 vs 4 from the
+standalone subcommand; wired into `approve` both collapse to **exit 2**,
+matching this axis's own established convention (error_key is what
+distinguishes an infra failure from a substantive one, not the exit code).
+
+**A third, easy-to-miss applicability gate: at least one bd parent-child
+dependent must actually exist.** A satisfied design task can legitimately
+declare units and never be decomposed via D4 at all — the common case is a
+single small task that is its own design holder, with no separate
+per-unit children ever created (`compute_design_alignment` itself is only
+ever asked of a *bound* unit's own task; nothing forces that binding to
+happen). `compute_design_coherence` enumerates children via `epic-gate.sh
+check "$tid"` before resolving any unit's binding, and when the count is
+zero it reports **not applicable** (`ok:true`, not a defect) rather than
+"every declared unit is unresolved" — the coherence question is about
+whether a decomposition that happened still adds up, not about penalizing a
+design that was never decomposed in the first place. Getting this wrong
+regressed a pre-existing fixture directly: several `design-review-record`
+cases use one task as both the design holder and the sole unit of work, and
+before this check existed every one of them tripped `coherence_issues_open`
+on first approval, unrelated to whatever the test was actually exercising.
+The distinction that matters is "never decomposed" (not applicable) vs.
+"decomposed but a specific unit isn't bound yet" (applicable, and an
+`incomplete` issue against that unit) — the latter is exercised in
+`design-coherence.test.sh` by creating real bd children first and leaving
+one deliberately unbound, precisely so it cannot be confused with the
+zero-children case.
+
+**Four kinds of issue, aggregated into one count and one array** — plan
+176's own three conditions plus the tracker/diff trap (below), never a
+single boolean:
+
+- `incomplete` — a declared unit has no bound task at all (its own criteria
+  named as uncovered by construction), or its bound task's own
+  `criteria_incomplete` (or any other LEG-3 failure) means some criterion
+  lacks a corroborated passing test.
+- `undeclared_scope` — a resolved unit's *persisted completion contract*
+  claims a file no unit declares anywhere. This is the union check
+  `design-conform`'s own per-task, per-own-unit-only comparison is never
+  asked; it reads from the same digest-verified payload LEG 3 already
+  establishes how to read, not from a second, live-tracker comparison.
+- `hash_divergence` — a unit's own `DESIGN-UNIT` binding hash no longer
+  equals the artifact's current governing hash (an amendment landed and
+  this unit was never re-bound), or its spec injection is stale
+  (`spec_injection_stale`, LEG 2) — "the hash the unit was **built
+  against**" no longer matching, plan 174's own words. **This is not
+  `change_set_hash`** — that hash is a sha256 over the sorted,
+  denylist-filtered *path list*, so re-editing the same files never moves
+  it; using it here would produce a check that passes forever on a stable
+  file set. `design_hash` (the artifact's own content hash) is the only
+  correct subject.
+- `tracker_diff_mismatch` — plan 177's own trap, and the one most likely to
+  be weakened by a future edit, so its shape is spelled out fully: the
+  rollup's own file set (every unit's declared scope, union every resolved
+  unit's claimed-touched files) is compared against the **live,
+  denylist-filtered change-set tracker** for `<task-id>`
+  (`impact-report.sh --relativized-changed-files` — the exact same reader
+  `design-conform`'s own "actual" side uses). Two directions, computed and
+  reported **separately**, never collapsed into one boolean: *diff minus
+  rollup* (a file is genuinely, freshly changed and nothing this rollup
+  examined accounts for it) **gates** — the 94d-shaped under-coverage case
+  this condition exists for; *rollup minus diff* (declared/claimed paths
+  absent from today's tiny residual diff) is normal at ordinary rollup
+  time — most of a design's history is not in today's tracker — and is
+  reported in `observations` but does not gate. Before comparing, the
+  governing task's own design artifact and every resolved unit's own
+  review artifact(s) are excluded from the live-diff side
+  (`GATE-EVIDENCE-EXCLUSION`, `qa-gate.sh`) — the same principle
+  `design-conform`'s own `REVIEW-ARTIFACT-EXCLUSION` established one task
+  at a time, generalised here across every resolved child: gate-written
+  evidence is not implementation work, and nothing should have to declare
+  it to pass. Without this exclusion an otherwise-coherent epic fails this
+  condition on every ordinary run, on its own design doc and its
+  children's own review artifacts.
+
+**Clearing is two-way, both recorded, never silent — no bypass flag exists
+on this axis.** Fix the work (add the missing test, drop or declare a
+scope-drift file), or amend the artifact through the D2 review loop and
+re-bind the affected unit(s) (`qa-gate.sh design-unit-bind --rebind`).
+"Silent approval-time editing of the design is not available" (plan 175) is
+enforced by construction: `design-coherence` takes exactly one argument.
+
+Once coherent, the approval record carries a sixth machine token,
+`design_artifact=<ref>@<hash>` — last among the machine tokens, immediately
+before `at <ts>` — present **only** when the rollup found `<task-id>`
+applicable and coherent:
+
+```
+QA-GATE APPROVED change_set_hash=<h> reviewed_by=<id> worktree=<tok>
+  design_hash=<h> artifact_hash=<h> design_verdict_hash=<h>
+  design_artifact=<ref>@<h> at <ts>: <summary>
+```
+
+`<ref>` is `<task-id>` itself and `<hash>` is the same confirmed-fresh
+`design_hash` `design_verdict_hash=` already names — the two tokens answer
+different questions (was this design ever reviewed, vs. was the whole
+decomposition found coherent) but can never disagree about which bytes they
+describe.
+
+Pinned by `.claude/scripts/tests/design-coherence.test.sh`: the two
+not-applicable states, all five named issue kinds each with its own restore
+control (including `tracker_diff_mismatch` proven **distinct** from
+`undeclared_scope`, not merely a renamed duplicate), the full success path,
+the `approve` wiring end to end, and a METatest stripping only the
+issue-count translation step (never the individual condition checks) to
+confirm a real, present defect clears when it is stubbed to zero.
+
+### The coherence rollup's judgement half (`DESIGN-ROLLUP-REFUSAL`)
+
+v5 D6's second half (`claude-workflow-plugin-fkm.8`, added after the
+operator's ruling that `docs/plans/v5-design-phase-plan.md` governs where
+it disagrees with the directive this phase was originally briefed from —
+see the FINDING comment on `claude-workflow-plugin-fkm` for the full
+evidence trail). The mechanical rollup above answers "does every declared
+unit map to a complete, aligned, correctly-scoped task" — a question a
+deterministic check can fully answer. It cannot answer three others
+plan:718-737 names explicitly: DS1 (are the acceptance criteria, now that
+the system is actually built, still genuinely falsifiable), DS2 (is the
+decomposition, now that it is implemented, still complete and disjoint),
+and DS8 (does the FINISHED system contradict `LESSONS.md`, and is this
+verdict being waved through under iteration-cap pressure). Those three go
+to a SECOND, cheaper `design-reviewer` spawn — the same agent D2 already
+uses for the pre-implementation review, spawned a second time against a
+different packet, root-relayed exactly like the rubric grader (subagents
+cannot spawn subagents) — documented as `design-reviewer.md`'s own "Second
+invocation — the coherence rollup" section and `orchestrator.md`'s "5f.
+Coherence-rollup relay". **No change to the agent's output contract**: it
+still returns the same six keys (`verdict`, `criterion_results`,
+`required_fixes`, `iteration`, `rubric_version`, `reviewer_identity`) the
+first invocation already does; only the packet and the scoping instruction
+in the spawn prompt differ.
+
+**Three new subcommands**, deliberately split (packet assembly, verdict
+recording, and a read-only status accessor are three different
+operations with three different callers):
+
+```
+qa-gate.sh design-rollup-packet <epic-id>
+qa-gate.sh design-rollup <epic-id> --design-hash <sha256> --model <m> [--file <path>]
+qa-gate.sh design-rollup-status <epic-id>
+```
+
+`design-rollup-packet` assembles the FOUR items plan:718-737 names — the
+design artifact, every resolved unit's own F7 completion contract, the
+union diff (`git diff --stat` always, full content under a 100,000-byte
+cap, a named `DEGRADED:` note when git or HEAD is unavailable — the SAME
+"disclose, never silently grade around it" convention the first
+invocation's own missing-packet-item rule already states), and every
+`DESIGN-CONFLICT`/`DESIGN-REVIEW` record on the task — and persists it to
+`.claude/.qa-tracking/design-rollup-packet-<id>.md`, a plain file the
+orchestrator `Read`s directly and pastes into the spawn prompt (the same
+convention `impact-report.sh`'s own JSON artifact already uses, not a
+`bd_doc`). It **refuses** (`design_rollup_mechanical_prerequisite`, exit 2)
+unless the mechanical rollup already reports `ok:true` — the judgement half
+is "cheaper" precisely because it never re-derives what the mechanical half
+already discharged, so assembling a packet before that axis is settled
+would spend a spawn on data about to change.
+
+**The union diff is `HEAD` vs the WORKING TREE** (QA round 1, R1-F3, HIGH,
+fixed — it was originally `git diff [--stat] "$base...HEAD"` against a
+locally-resolved branch merge-base). MEASURED as wrong in two directions
+at once, not assumed: on this repo, `main...HEAD` reported 14,532
+insertions / 997,254 bytes for a D6-scoped change alone — 9.97x the
+packet's own cap, silently degrading to `--stat` only — while the ACTUAL
+uncommitted change set under review was 2,189 insertions / 150,097 bytes,
+invisible to a merge-base comparison entirely, because this workflow gates
+UNCOMMITTED working-tree changes and `base...HEAD` only ever sees committed
+history. `HEAD` needs no branch-name resolution and cannot be "unavailable"
+the way a remote-tracking ref can; untracked (brand-new) files — which
+`git diff` never shows regardless of base — are rendered via `git diff
+--no-index -- /dev/null <path>` per file, without touching the index.
+
+`design-rollup` records the reviewer's verdict as:
+
+```
+DESIGN-ROLLUP v1 reviewer=<id> model=<m> design_hash=<h> units=<n>/<n>
+  verdict=<coherent|incoherent> gaps=<n> at <ts>: <summary>
+```
+
+translating the agent's own `satisfied`/`needs_revision`/`required_fixes`
+vocabulary to this record's `coherent`/`incoherent`/`gaps` on the recording
+side only — `gaps=<n>` is a **count**, not the array plan:718-737's own
+illustrative `gaps=[…]` shows: a genuine D6 deviation from the governing
+plan, recorded on `claude-workflow-plugin-uwzv` (QA round 1, R1-F6). The
+REAL reason (an earlier version of this doc, like the shipped code's own
+comment, gave a FALSE one — "no record in this codebase stores an array
+verbatim" — which `REVIEW-ARTIFACT`'s own `findings=[R8-F1:medium,...]`
+directly contradicts): `required_fixes` elements are free-text sentences
+that can contain spaces and commas, and carry no gap-id space analogous to
+`REVIEW-ARTIFACT`'s own `R<n>-F<n>` ids, so a verbatim array of them
+cannot survive this grammar's single-line, space/comma-delimited machine
+prefix — the same "prefix stays scalar, free text stays in the tail"
+convention `grade-record`'s own `RUBRIC` comment and `design-review-
+record`'s own `DESIGN-REVIEW` comment already use for `required_fixes`,
+for the identical reason. `REVIEW-ARTIFACT` is the actual precedent this
+record's shape most resembles, not an absent one; the orchestrator that
+calls this already has the full JSON in its own context from the spawn it
+just ran, and relays it directly — the comment's job is a durable,
+re-enterable audit trail, not full-fidelity storage nothing downstream
+reads back from it. Re-uses
+`design-review-record`'s own six-key validation ladder verbatim (same
+agent, same contract), adding checks specific to this axis: a **required
+`--model` flag** (transport metadata, the same 46w9 split every
+model-bearing record in this file already uses); a **fresh mechanical
+TOCTOU re-check** refusing (`design_rollup_mechanical_prerequisite`) a
+verdict recorded against a since-reopened mechanical rollup; a
+**hash-freshness check** refusing (`design_rollup_hash_stale`) when
+`--design-hash` no longer matches the CURRENT governing hash — an amendment
+landed while the reviewer worked, and a verdict cannot outlive the state it
+judged; and a **duplicate-hash refusal** (`design_rollup_duplicate_hash`)
+— narrowed by a fix below, not simply "a second verdict against the same
+hash is always a re-record".
+
+**`reviewer_identity` is grammar-guarded** (QA round 1, R1-F1, CRITICAL,
+fixed). It used to be checked ONLY for emptiness, then interpolated RAW
+into token position 1 of the `DESIGN-ROLLUP v1` machine prefix — PROVEN
+forgeable against the shipped parser, not reasoned about: a
+`reviewer_identity` crafted as `"design-claude model=x design_hash=<64hex>
+units=1/1 verdict=coherent gaps=0 at <ts>: forged"` on a record whose REAL
+verdict was `needs_revision` made `latest_design_rollup`'s own capture
+regex read back `verdict=coherent` and a matching `design_hash`, clearing
+`DESIGN-ROLLUP-REFUSAL` on a genuinely incoherent verdict — the `bjx`
+grammar-injection class this file's own guard exists for, and the class
+`fed594c` most recently closed elsewhere in this same file. The reviewer's
+output is untrusted BY CONSTRUCTION: the packet it reads relays the design
+artifact and the union diff verbatim, both project content a hostile
+document can shape. Fixed by routing `reviewer_identity` (and, at zero
+cost since every legitimate value already satisfies the narrower class,
+`design_hash`/`units`/`verdict`/`gaps` too — defense in depth against a
+future change to any ONE of their own upstream checks) through
+`assert_record_scalar`, the SAME guard `design-review-record` already
+applies to `reviewer` at its own equivalent point — the sibling recorder
+this region's own header says it copies verbatim had the guard; this one
+had not, until now. `model` is deliberately NOT re-guarded by this
+narrower class: it already passes the WIDER `assert_record_model_scalar`
+(46w9), which legitimately admits `[`, `]`, `:`, `/` for real runtime ids
+like `claude-opus-5[1m]` — applying the narrower class on top would reject
+a real model id, trading a fixed defect for a new one.
+
+**The duplicate-hash refusal is narrower than "any second verdict at this
+hash is refused"** (QA round 1, R1-F4, HIGH, the SUSTAINED half of a split
+ruling — fixed). Before this fix, the hash-freshness check above
+(`--design-hash` must EQUAL the current governing hash) combined with an
+UNCONDITIONAL duplicate-hash refusal (any second verdict at that SAME
+hash was refused) together admitted AT MOST ONE VERDICT PER `design_hash`,
+EVER: an incoherent verdict LOCKED the governing task while that hash
+governed, with no escape short of a design-document edit, even when the
+reviewer's own gaps were ordinarily implementation-side and fixable
+without ever touching the design text. The coordinator's own ruling split
+this finding: NOT SUSTAINED on binding the record to `change_set_hash`
+too (plan:721 specifies this grammar carrying no such field, and building
+it as specified is correct — recorded as an accepted residual instead: a
+coherent verdict does not go stale as the change set moves, so it can pass
+`approve` at arbitrarily many LATER change sets, which is a gap shared
+with D5's own green-check corroboration, linked as one family on
+`claude-workflow-plugin-r7ed`); SUSTAINED on the deadlock itself, fixed
+WITHOUT any new persisted field: the duplicate-hash refusal now fires only
+when the PRIOR record at this same hash was itself `coherent` — a coherent
+verdict remains a terminus at its own `design_hash` (re-recording over an
+already-passing judgement at unchanged design content is a genuine
+duplicate), but an INCOHERENT prior verdict is no longer one, since that is
+exactly the state a re-spawned reviewer judging updated evidence (fresh F7
+contracts, a fresh union diff) is expected to supersede.
+
+`design-rollup-status` is READ-ONLY (`{applicable, mechanical_ok,
+rollup_recorded, rollup_coherent, rollup_hash_fresh}`) — the accessor
+`epic-gate.sh cmd_check` shells out to, so `qa-gate.sh` remains the ONE
+authoritative reader of this axis (exactly as for design-satisfied/
+design-unit-align/design-coherence). It never enforces anything itself.
+
+**Two enforcement surfaces, plan:718-737's own words.** `epic-gate.sh
+cmd_check`'s existing "all children approved → pass" branch now ALSO
+checks this axis, downgrading to `block` (with a named reason) when the
+epic's own design axis is applicable but not both mechanically clean and
+judged coherent and current — this is **advisory only**: it changes what a
+Stop hook's `EPIC_DEFER_NOTE` prints, never any individual task's own
+`approve`. The HARD gate is `qa-gate.sh approve` on the governing task
+itself: **`DESIGN-ROLLUP-REFUSAL`**, exit 5 for all three shapes — but,
+since QA round 1 (R1-F10, "also fix"), THREE DISTINCT `error_key`s, not
+one: `design_rollup_missing` (never recorded), `design_rollup_verdict_
+stale` (recorded, but against a design_hash an amendment has since
+superseded — distinct from the record-time `design_rollup_hash_stale`
+above, which is a different check at a different moment), and
+`design_rollup_incoherent` (recorded, current, but the reviewer's own
+verdict was `needs_revision`). A caller no longer has to parse the
+observations string to tell the three apart. Reached only once
+`COHERENCE-ROLLUP-REFUSAL` (the mechanical axis, exit 2) has already NOT
+fired — the two axes are fully independent: a genuinely coherent
+`DESIGN-ROLLUP v1` record can never make the mechanical check pass if the
+mechanics are actually broken, and reopening a mechanical issue after a
+coherent rollup was already recorded still refuses at exit 2, never
+silently waved through because a "coherent" record exists on file. No
+bypass flag exists on either axis. (Exit 2 is not EXCLUSIVE to the
+mechanical axis, contrary to an earlier draft of this region's own header:
+`design_rollup_history_unreadable`, an infra-read failure inside the
+judgement block itself, also exits 2 — the boundary the two axes actually
+keep is "mechanical vs. judged", not "exit 2 vs. exit 5".)
+
+**Split** (QA round 1, R1-F2, HIGH): the incoherent-verdict scenario and
+the duplicate-hash-deadlock fix above moved to their own file,
+`design-rollup-incoherent.test.sh` — self-contained on its own epic.
+Pre-split, both readings (806.83s/823.17s) were above the 800s split
+trigger `run-tests.sh` already names, against `SPEC_TIMEOUT_S=900`
+(1.093x headroom, 76.83s margin). POST-split (QA round 2, R2-F4 — the
+figure this claim was missing): parent 709.07s (73/73), child 221.22s
+(13/13), headroom 900/709.07 = **1.269x**, margin **190.93s** — measured
+under concurrent load (four competing `run-tests.sh --filter` processes),
+so these are upper bounds. The split costs total tier time even as it
+buys per-spec headroom: 709.07 + 221.22 = 930.29s versus 823.17s
+(+107.12s, the child's own duplicated fixture bootstrap) — the right
+trade against a per-spec cap.
+
+**Five real defects found by driving the shipped code, not by reading it,
+all fixed structurally rather than patched at the symptom** (the first
+three are QA round 1 findings; the last two predate that round):
+
+1. **A forgeable `reviewer_identity`** (R1-F1, CRITICAL) — see the record
+   grammar section above for the full mechanism and fix.
+2. **A union diff that was both too wide and blind to the change under
+   review** (R1-F3, HIGH) — see the packet section above.
+3. **A duplicate-hash check that admitted at most one verdict per
+   design_hash, ever** (R1-F4, HIGH, the sustained half of a split
+   ruling) — see the record grammar section above.
+4. **A genuine unbounded recursion**, MEASURED live as a runaway
+   subprocess chain, not reasoned about in the abstract: `epic-gate.sh
+   check` shells out to `qa-gate.sh design-rollup-status` (the new
+   enforcement surface above), which calls `compute_design_coherence`,
+   which — for its own, PRE-EXISTING children-enumeration step — shells
+   back out to `epic-gate.sh check`, closing the cycle. Fixed with a
+   reentrancy guard (`QA_GATE_SKIP_EPIC_GATE_REENTRY=1`, set only by
+   `epic-gate.sh`'s own new call site) that switches `compute_design_
+   coherence`'s children read to a direct, non-recursive `bd show
+   --include-dependents` query instead of the ordinary shell-out —
+   changing nothing for any OTHER caller of `design-coherence`, including
+   this file's own test suite, which never sets it. A SECOND,
+   complementary guard (`EPIC_GATE_SKIP_ROLLUP_CHECK=1`, set on that same
+   call site) additionally skips `epic-gate.sh`'s own rollup side-check
+   entirely for that ONE call, closing a real efficiency gap the
+   reentrancy guard alone left open: without it, every `design-coherence`/
+   `design-rollup`/`approve` call on a task with an applicable design axis
+   would ALSO trigger a full, wasted rollup-status round-trip through
+   `epic-gate.sh` for a result nothing downstream reads.
+5. **A `set -e` interaction**: this file runs under `set -e` throughout,
+   and a bare `compute_design_coherence "$tid"` call — not part of an
+   `if`/`while`/`&&`/`||` list — trips `errexit` on any non-zero return
+   (the ordinary "not applicable" or "mechanical issues open" cases),
+   terminating the WHOLE PROCESS before the calling function's own `local
+   rc=$?` line, its own error-envelope construction, or its own `exit 2`
+   ever run. Every one of this axis's five internal call sites now uses
+   the established `fn "$tid" || rc=$?` guard the ORIGINAL `compute_design_
+   coherence`/`cmd_design_coherence` pair already used correctly. Caught
+   by this axis's own L1 suite (`design-rollup.test.sh`), not by manual
+   review or by the ad hoc smoke-testing that preceded it — the smoke
+   test's own looser assertions (an empty `packet_path` on refusal) could
+   not distinguish "a well-formed refusal envelope" from "no output at all
+   because the process already exited", which is exactly what the formal
+   suite's explicit `error_key` assertions caught.
+
+Pinned by `.claude/scripts/tests/design-rollup.test.sh`: packet assembly's
+own not-applicable and mechanical-prerequisite refusals with a restore
+control; a NON-EMPTY union diff observed directly (R1-F3's own required
+leg — a fixture where the diff is empty by construction could never catch
+that class): an uncommitted modification to a tracked file, asserted
+present in the packet's own diff section verbatim; a forged
+`reviewer_identity` refused (`reviewer_invalid_chars`) with a non-vacuity
+check that no record was actually written, and a restore control proving
+a legitimate one still records (R1-F1); the record's full validation
+ladder (model required, independence, hash-staleness, duplicate-hash) and
+its exact grammar on a genuine `coherent` and a genuine `incoherent`
+verdict; `design-rollup-status` reflecting all three states (never
+recorded, stale, current); `epic-gate.sh check`'s new block branch AND a
+negative control proving a non-design epic's own `pass` text is
+byte-for-byte unchanged; the reentrancy fix's own termination bounded
+directly (not assumed) by a wall-clock timing assertion; `approve`'s
+exit-5 refusal (never-recorded and stale-hash shapes) plus its success
+path; the mechanical axis (exit 2) proven independent of a recorded
+coherent rollup by deliberately reopening a mechanical issue AFTER
+recording one; and a METatest stripping only `DESIGN-ROLLUP-REFUSAL`'s own
+hash-freshness comparison — the coordinator's own explicit instruction —
+proving that a **genuinely** `coherent` verdict (not a forged one) still
+must not clear the gate once it is bound to a superseded hash, because the
+axis's trustworthiness was never the verdict's semantic content; it is the
+binding to current state.
+
+Pinned by `.claude/scripts/tests/design-rollup-incoherent.test.sh` (split
+off the former file, R1-F2): a genuinely incoherent verdict records
+cleanly and `approve` still refuses it (`design_rollup_incoherent`); and
+the duplicate-hash-deadlock fix proven as three states in sequence —
+incoherent → incoherent (still allowed), incoherent → coherent (the actual
+escape the fix exists for, no artifact amendment needed), then
+coherent → anything at that same hash (refused again, `design_rollup_
+duplicate_hash` — proving the fix narrowed the check rather than removing
+it).
+
+### A design cannot be recorded without having been grilled first (`GRILLING-PRECONDITION`)
+
+v5 Phase D3 (`claude-workflow-plugin-fkm.5`) adds the design phase's own
+starting precondition: `qa-gate.sh design-record` refuses
+(`grilling_record_missing`) unless a `GRILLING v1` record exists on the task
+**or its parent epic**. The design phase begins with a grilling dialogue
+(`.claude/vendor/superpowers/brainstorming/SKILL.md`'s question-at-a-time
+method); this check is what makes skipping it observable rather than merely
+discouraged.
+
+```
+qa-gate.sh grilling-record <task-id> --rounds <n> --questions <n> \
+    --approaches <n> --unresolved <n> ['<summary>']
+
+GRILLING v1 rounds=<n> questions=<n> approaches=<n> unresolved=<n>
+  vendor_hash=<h> at <ts>: <summary>
+```
+
+**Written by the orchestrator, at root — it ran the dialogue.** Nothing in
+the script checks that identity, and that is a considered choice rather than
+a gap: the record carries no `who=` field for a check to compare against,
+because there is no second identity in this picture (unlike designer/
+reviewer). The structural guarantee sits one layer up — `designer.md`'s tool
+list omits `Bash` entirely, so the designer cannot invoke this subcommand at
+all, and no specialist prompt ever instructs one to.
+
+**`approaches` must be at least 2** (else `insufficient_approaches`) — the
+vendored brainstorming method's own bar ("Propose 2-3 different approaches
+with trade-offs"), not an arbitrary threshold. `rounds`/`questions`/
+`unresolved` are each required and must be non-negative integers
+(`<field>_not_integer` otherwise) — every counter is interpolated into the
+record's machine prefix, which the precondition reader parses as `[0-9]+`.
+
+**`vendor_hash` is not a flag.** It is a *live* `workflow-manifest.sh
+hash-file` recompute over the vendored `brainstorming/SKILL.md`, taken at
+record time — the same instrument `design-record` uses for the design
+artifact, under the same "continuous enforcement is the live recompute, not
+a label" doctrine. The point is naming *which method text was in force* when
+the dialogue happened, so later drift in the vendored file cannot
+retroactively validate a dialogue that never followed it. This is a
+*separate*, orthogonal integrity claim from `.claude/vendor/superpowers/
+MANIFEST.md`'s own recorded hash (below): that one asserts the MANIFEST is
+honest about the file's *current* bytes; a `GRILLING v1` record asserts what
+a *past* dialogue's record saw. Neither reads the other.
+
+**The precondition itself** (`design-record`'s `# GRILLING-PRECONDITION
+BEGIN/END` block) reads `grilling_record_exists`: it checks the task's own
+comments first, then — only if absent — its **direct** parent's, via `bd show
+<id> --json`'s inlined `.parent` field (one level only — a grilling recorded
+on a grandparent epic is invisible to a grandchild task; this matches the
+documented contract of "the task or its parent epic" exactly, so a deeper
+hierarchy that wants a design phase records the grilling on the immediate
+parent, not a more distant ancestor). Anchored on the FULL machine-prefix
+grammar — `^GRILLING v1 rounds=[0-9]+ questions=[0-9]+ approaches=[0-9]+
+unresolved=[0-9]+ vendor_hash=[0-9a-f]{64} at ` — never a bare prefix test and
+never a substring search (QA R1-F1: an earlier version checked only
+`startswith("GRILLING v1 ")`, MEASURED to accept a hand-posted comment
+carrying none of the real fields; the tightened grammar requires the SAME
+shape the one real writer always produces, closing that forgery gap to the
+bar every other record reader in this file already holds). FAIL-CLOSED — bd
+unreachable, the task
+unreadable, or no record on either task or epic all refuse.
+
+**This is the pre-delegation path, and it is a script — not Stop.** Same
+reasoning the v4.1 closure gives for the brainstorming ceremony generally: a
+Stop-time change-set classifier fires *after* the work it would gate, and by
+the time an implementer's Stop hook runs, the moment to have grilled is long
+past. Checked first inside `cmd_design_record`, before any of the
+containment/hashing work, so an ungrilled task fails fast on that rather
+than on an unrelated path or hash detail three checks later.
+
+**`--no-grilling '<reason>'`** is the audited bypass — the F1 doc-only class
+and the single-line-typo path (`orchestrator.md`'s own existing carve-out
+for skipping the brainstorming read, and therefore the whole design phase,
+entirely), reused here for the rarer case where a design record is still
+produced for work that fell under them. The reason lands in the
+`DESIGN-ARTIFACT` record as `[grilling bypass: <reason>]`.
+
+**`.claude/vendor/superpowers/MANIFEST.md` records its own, separate hash**
+of `brainstorming/SKILL.md`'s current bytes, and
+`.claude/scripts/tests/vendored-skills.test.sh` (section 13) asserts it
+against a live recompute on every run — a drift detector for the MANIFEST's
+own claim, not a content check (the ten surgical modifications and their
+bans, documented above that file's own provenance table, are what police
+content).
+
+Pinned by `.claude/scripts/tests/grilling-record.test.sh` (the validation
+ladder, the record grammar and vendor_hash, the precondition on the task, on
+the parent epic, the `--no-grilling` bypass, a METatest proving the
+precondition block is load-bearing, a forged-comment regression with its own
+METatest proving the tightened grammar — not the bare prefix it replaced —
+is what refuses it, and failure-injection for both hash-availability
+refusals) and `.claude/scripts/tests/vendored-skills.test.sh` (the
+MANIFEST.md hash claim).
+
 ### The vanished-change-set release (`VANISHED-CHANGE-SET`)
 
 The Stop hook reads the change set **twice**: once at its detection stage, and
@@ -988,8 +2660,10 @@ state and releases when it is empty — the same decision the detection stage ma
 on the next fire. It grants nothing new: "nothing to review -> allow" is already
 the detection stage's rule, reached before any label is consulted. In particular
 it does **not** release when the tracker is empty but real un-baselined dirt
-exists (work written by a helper rather than the Edit tool never reaches the
-tracker), because the git half of `reviewable_changes` still reports it.
+exists, because the git half of `reviewable_changes` still reports it — and
+since 94d that half runs on every call rather than only when the tracker is
+empty, so the probe cannot be fooled by a tracker holding one stale entry
+either.
 
 Three ordering rules in `qa-gate.sh approve` support this (see its
 `APPROVE-COMMIT ORDER` note; all three are pinned by
@@ -1044,6 +2718,32 @@ proven:
 | nothing changed in `W` after the approval | `W`'s `git status --porcelain` minus `W`'s own `gate-baseline` is empty |
 | this checkout ships nothing extra | every reviewable path here is inside that report's `.files[].file` set, compared repo-relative |
 | the review is still clean | the same `review-check.sh gate` predicate the same-checkout path re-runs, with the same `[review bypass:` escape |
+| the design is still satisfied | `qa-gate.sh design-gate-precheck`, run with `CLAUDE_PROJECT_DIR=W` (never the primary) — `wtres_design_is_ready` (claude-workflow-plugin-3otl) |
+
+**Why the design check runs against `W`, not the primary (`wtres_design_is_ready`,
+claude-workflow-plugin-3otl).** `review-check.sh gate` is bd-comment-only, so
+running it with the primary's `cwd` already sees the one shared database
+regardless of which worktree's approval is being bridged. `design-gate-precheck`
+is not: it hashes the design artifact file on disk
+(`docs/specs/<tid>.md`), and that file is exactly the kind of uncommitted,
+worktree-local content this bridge exists to reach — the primary checkout may
+never have seen it. So this one check is pointed at `W` via
+`CLAUDE_PROJECT_DIR`, while `bd` (never `cd`-ed anywhere) still resolves the
+one shared store. It is read-only in the same sense as every other check
+here (`design-gate-precheck` shells out to `bd`, `jq` and a plain
+`sha256sum`/`shasum`/`openssl` hash — no `git worktree` writes, no code-graph
+MCP boot) and, like `wtres_review_is_clean`, it can only refuse a release,
+never grant one on its own.
+
+Before this landed, `design-gate-precheck`'s only call site in this file was
+the same-checkout branch above it — structurally unreachable from
+`LABEL_WITHOUT_RECORD` (the two are mutually exclusive arms of the same `if`)
+— so a design regression filed against a task after its cross-worktree
+approval (a `DESIGN-CONFLICT`, or an amendment invalidating the recorded
+verdict; both bd-only, touching no file the other conditions above can see
+move) shipped through this bridge with nothing to catch it. Same reach-around
+shape as claude-workflow-plugin-ehfy's idempotent-approve arm, closed the same
+way: the missing call site, added rather than a broader restructure.
 
 **Record-based, never recomputed.** `approve` truncates `changed-files.txt` in
 the approving checkout, so re-running `impact-report.sh --hash-only` in `W`
@@ -1070,6 +2770,18 @@ comment; the Stop hook honours that marker and skips its re-check. The F1 fast
 path above uses it automatically (a doc-only change has no implementer and
 nothing to review, so without the flag every documentation commit would
 deadlock on the review refusal).
+
+**A second, independent review-related refusal** (`k6re`, R13-F3) can also
+block the F1 fast path: `review_artifact_unrecorded`, when a review artifact
+sits on disk for the task with no corresponding record. `--no-review` does
+NOT waive it — the unrecorded-artifact check is deliberately independent of
+whether review-separation itself was waived, since a stray unrecorded
+artifact is a fact about the filesystem and comment stream, not about
+whether *this* approval relies on review evidence at all. Its own audited
+escape is `--accept-unrecorded-review '<reason>'`, which the F1 fast path
+does not pass, so the ordinary recovery is `qa-gate.sh review-record` (the
+current round) or `qa-gate.sh review-reconcile` (a historic one) rather than
+a flag. See the `qa-gate.sh` row above.
 
 **Clearing a disputed finding.** Only two records clear an open at-threshold
 finding, and both are written by existing `qa-gate.sh` subcommands:
@@ -1104,19 +2816,101 @@ captured bd comments skips rather than retro-failing.
 ### Escalation State Machine (spec 0.2)
 
 The Stop hook tracks a per-task iteration counter at
-`.qa-tracking/iteration-count.<task-id>`. The counter bumps on every Stop
-fire that detects tracked changes. When the counter reaches
+`.qa-tracking/iteration-count.<task-id>`. When the escalation BASIS reaches
 `MAX_ITERATIONS` (default 3) the gate transitions into an `escalated`
 state to prevent the runaway loop captured in the bug report (iteration
 7+ still re-running the suite with no behavioral consequence).
+
+**The basis is `max(verification iterations, review rounds)`, not the Stop count**
+(`claude-workflow-plugin-2ty`). Three measured instances in one session had the
+cap firing on tasks where nothing had failed and, twice, where nobody had
+reviewed anything: the counter used to bump once per Stop fire, and an
+orchestrator waiting on a long review — or interrupted by infrastructure — Stops
+repeatedly. That is not a bookkeeping error, because reaching the cap forces a
+J21 decision whose DEFAULT (no choice recorded by the next Stop) is *defer*,
+which sets `qa-deferred` and lets the following Stop release. An over-charging
+counter therefore steers work toward release-without-approval on a timer. Three
+rules make the counter non-authoritative:
+
+1. **The iteration counter charges verification iterations only.** It bumps when
+   this Stop will actually run a verification pass, and reads without writing
+   otherwise: not while `qa-escalated` (the escalation contract does not re-run
+   the suite), not while `qa-deferred` (the Stop is allowed through), and not
+   when no test/lint/type command is configured at all (there is no suite, so a
+   Stop was never an iteration). On a project with no runner the basis is
+   therefore review rounds alone.
+2. **Review rounds count records, not polls.** `review-check.sh gate <id>
+   --change-set-hash <h>` reports `rounds` — the number of `REVIEW-ARTIFACT v1`
+   FIRSTLINES whose `reviewed_hash=` equals `<h>` — plus `rounds_hash`. The count
+   is anchored on the firstline grammar (`^[[:space:]]*REVIEW-ARTIFACT v1 `)
+   because prose mentions are the normal case on any task with review history: on
+   `8zi`, before any artifact existed, an unanchored `grep -c REVIEW-ARTIFACT`
+   returned 1 and the hit was a reviewer's own sentence *"zero REVIEW-ARTIFACT
+   firstlines"*. Rounds reset when the change set moves, which is correct — a new
+   change set has needed no rounds yet.
+3. **Escalation is suppressed while a review is in flight.** When a cycle is open
+   (the `qa-gate-entered` label agrees with a `QA-GATE: entered` record), zero
+   artifacts exist for the current hash, and no technical check is failing, the
+   cap does not fire and the J21 options are not offered: a reviewer has claimed
+   the cycle and not yet spoken, so nobody has disagreed with anything. The
+   scope — *no technical check failing* — is load-bearing. A red suite is its own
+   evidence and must still reach J21; a cycle is open during almost all
+   implementation work, so an unscoped suppression would delete the J21 escape
+   from the failing-test loop entirely.
+
+   **Suppression governs whether an escalation STARTS, not whether a live one
+   continues.** `qa-escalated` is sticky: once set it survives until `approve`,
+   `enter`, or a `choose` records a decision. So a task can be escalated *and*
+   subsequently enter the review-in-flight state — most easily by moving its
+   change set, which drops `rounds` to 0 — and in that state the J21 options are
+   still offered (the escalation is live and has to be answerable) while the
+   suppression paragraph is not printed (an escalated task is not suppressed).
+   The auto-defer chain also still runs from there; that residual is filed as
+   part of `claude-workflow-plugin-2ty`'s QA round and pinned by an L2 leg
+   (`escalation-basis.sh`, `H-RESIDUAL(R1-F3)`) so closing it turns a test red
+   rather than going unnoticed.
+
+If `rounds` cannot be established (no active task, no `review-check.sh`, no
+computable change-set hash, or an envelope with no `rounds` key — a pre-2ty or
+partially-synced copy), the basis falls back to the iteration count alone,
+suppression does not apply, and the machinery behaves as it did before. An
+unavailable new signal must never disable the old one.
+
+**What the block reasons claim, and what they do not.** Every block reason on the
+capped paths names the basis it used and both components, and the `QA-GATE
+ESCALATED` record carries the same triple. The escalation banners state the
+*relationship* to the cap rather than asserting it: `basis N >= 3; cap reached`
+when the cap is currently met, and `escalated on an earlier Stop at basis M; the
+current basis N is BELOW the cap of 3` when it is not. Both forms are computed
+from the live basis plus the triggering basis persisted in
+`.qa-tracking/escalation-posted.<task-id>` at the moment of escalation; when that
+marker
+predates this change it is empty, and the phrasing drops the number rather than
+inventing one. The claim these sentences make is exactly "here is what was
+compared" — they do not claim the count is a complete history of the task, and a
+`rounds` reset after a change-set move is a real drop, not a lost round.
 
 States — each row lists the trigger, label set, and Stop-hook behaviour:
 
 | State | Trigger | Labels on task | Stop hook |
 | ----- | ------- | -------------- | --------- |
 | `pending` | normal review cycle | `qa-pending` (+ `qa-gate-entered`) | Run full suite each loop; block until approved |
-| `escalated` | iteration counter reaches `MAX_ITERATIONS` | `+qa-escalated` | Skip full suite; reuse cached failure; block with "record a J21 choice" wording; post J21 options comment exactly once |
-| `deferred` | `qa-gate.sh choose defer` OR one more Stop while escalated with no recorded choice (auto-defer) | `+qa-deferred` (qa-pending preserved) | Allow Stop immediately — the single audited escape valve permitted by principle 6 |
+| `escalated` | `max(iterations, rounds)` reaches `MAX_ITERATIONS`, and no review is in flight (or a check is failing) | `+qa-escalated` | Skip full suite; reuse cached failure; block with "record a J21 choice" wording; post J21 options comment exactly once |
+| `deferred` | `qa-gate.sh choose defer` OR `AUTO_DEFER_AFTER_ESCALATED_STOPS` (2) Stops fired while escalated with no recorded choice (auto-defer) | `+qa-deferred` (qa-pending preserved) | Allow Stop immediately — the single audited escape valve permitted by principle 6 |
+
+**Auto-defer counts Stops, on its own counter**
+(`.qa-tracking/escalated-stops.<task-id>`), and that separation is deliberate.
+Auto-defer asks "how many chances has the agent had to answer?", which is
+legitimately a Stop count; the iteration counter asks "how many verification
+passes has this taken?". They used to be the same number
+(`ITER > MAX_ITERATIONS + 1`), so once the iteration counter stopped charging
+Stops that run nothing it would have frozen at the cap and auto-defer — a
+documented escape — would have become silently unreachable. Timing is unchanged
+Stop-for-Stop: the cap-hit Stop shows the J21 options, the first escalated Stop
+after it still blocks, the second auto-defers. The counter is wiped by the same
+`wipe_iteration_state` that clears the iteration counter (`enter`, `approve`,
+`choose continue`, `choose tech-debt`), because a count that survived a fresh
+cycle would auto-defer on that cycle's FIRST escalated Stop.
 
 Exit transitions:
 
@@ -1149,7 +2943,7 @@ on task B does NOT pick up where task A left off.
 
 **File**: `.claude/scripts/session-end.sh`
 
-**Purpose**: Sync Beads state before session ends.
+**Purpose**: Detect a Beads JSONL ledger divergence before the session ends. It writes nothing.
 
 ### What It Does
 
@@ -1157,13 +2951,24 @@ on task B does NOT pick up where task A left off.
 # Guard cwd: a missing PROJECT_DIR no longer corrupts state.
 cd "$PROJECT_DIR" || { echo '{}'; exit 0; }
 
-# Run bd sync and capture stderr for sync-errors.log so SessionStart can
-# surface a one-line warning next session.
-SYNC_ERR_FILE="$(mktemp -t bd-sync.XXXXXX)"
-if ! bd sync >/dev/null 2>"$SYNC_ERR_FILE"; then
-    TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    ERR_LINE=$(head -1 "$SYNC_ERR_FILE" | tr -d '\n')
-    printf '%s\tbd sync failed: %s\n' "$TS" "${ERR_LINE:-unknown error}" \
+# CHECK the JSONL ledger and capture output for sync-errors.log so
+# SessionStart can surface a one-line warning next session.
+#
+# This hook no longer WRITES the ledger (R4-F1). It ran `bd sync` until bd
+# 1.1.2 removed that command, then `beads-ledger.sh export`, then the
+# classifier-driven `refresh`; five defects came out of an unattended hook
+# deciding to write, so the automatic write was removed. `check` is read-only,
+# and repair is an explicit `beads-ledger.sh reconcile --apply`.
+LEDGER_SH="$PROJECT_DIR/.claude/scripts/beads-ledger.sh"
+SYNC_ERR_FILE="$(mktemp -t bd-ledger.XXXXXX)"
+LEDGER_RC=0
+bash "$LEDGER_SH" check >"$SYNC_ERR_FILE" 2>&1 || LEDGER_RC=$?
+TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [ "$LEDGER_RC" = "1" ] || [ "$LEDGER_RC" = "3" ]; then
+    printf '%s\tledger NOT written — it diverges from the database and no hook may repair that automatically. Run: bash .claude/scripts/beads-ledger.sh reconcile --apply\n' \
+        "$TS" >> "$SYNC_LOG"
+elif [ "$LEDGER_RC" != "0" ]; then
+    printf '%s\tledger check failed: %s\n' "$TS" "$(head -1 "$SYNC_ERR_FILE" | tr -d '\n')" \
         >> "$SYNC_LOG"
 fi
 rm -f "$SYNC_ERR_FILE"
@@ -1196,9 +3001,9 @@ the count is non-zero — appends one `<ts>\t<message>` line to
 that file and renders warning 6, so the notice fires once per event.
 
 **Its own log file, deliberately.** `session-start.sh` renders
-`sync-errors.log`'s head line verbatim as *"Last session's bd sync failed at
-…"* regardless of how the line is tagged, so a sweep line landing there first
-would be reported to the operator as a Beads failure.
+`sync-errors.log`'s head line verbatim as *"Last session logged a Beads sync
+error at …"* regardless of how the line is tagged, so a sweep line landing
+there first would be reported to the operator as a Beads failure.
 
 `session-end.sh` runs under `set -e`, so every leg of the sweep block is
 `|| true`-guarded: an unguarded failure would kill the hook before its
@@ -1214,8 +3019,7 @@ bash .claude/scripts/worktree-sweep.sh --apply    # actually remove
 
 ### sync-errors.log Surfacing
 
-When `bd sync` fails (typically because the bd daemon is unreachable —
-see bug 0wk.5), the failure is appended to
+When the ledger export fails, the failure is appended to
 `.claude/.qa-tracking/sync-errors.log` rather than swallowed silently.
 SessionStart reads recent entries from this file on the next session and
 surfaces a one-line `<sync_warnings>` block in `additionalContext` so
@@ -1232,22 +3036,78 @@ hooks; they are invoked by hooks, slash commands, and specialist agents.
 
 | Script | Purpose |
 |--------|---------|
-| `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`, `choose` (spec 0.2), `baseline-capture` (v4). Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`, plus `qa-escalated` and `qa-deferred` after spec 0.2). `enter` writes the `gate-baseline` snapshot if one is missing (minus already-tracked paths); `approve` refreshes it in full + truncates `changed-files.txt` (closes 0wk.2). See "The gate baseline". |
-| `workflow-denylist.sh` | Not a hook and not executable on its own — the ONE definition of which paths the workflow treats as reviewable (`WORKFLOW_DENYLIST_REGEX` + `workflow_denylisted`). Sourced BASH_SOURCE-relative by `post-edit.sh`, `impact-report.sh` and `verify-before-stop.sh`. Editing it is a change-set-hash migration; see "Denylist changes are a hash migration". |
+| `qa-gate.sh` | QA gate state machine. Subcommands: `enter`, `status`, `approve`, `block`, `choose` (spec 0.2), `baseline-capture` (v4), `reconcile-tracker` (94d). Single source of truth: Beads labels (`qa-gate-entered`, `qa-pending`, `qa-approved`, `qa-blocked`, plus `qa-escalated` and `qa-deferred` after spec 0.2). `enter` writes the `gate-baseline` snapshot if one is missing (minus already-tracked paths); `approve` refreshes it in full + truncates `changed-files.txt` (closes 0wk.2). Both reconcile the tracker against `git status` before the change-set hash is computed, and `approve` REFUSES (exit 2, `tracker_unreconcilable`, no bypass) when it cannot — and separately (exit 2, `change_set_reconstructed`, bypass `--accept-reconstructed '<reason>'`) when the set it would bind was rebuilt from an absent-or-empty tracker AND that rebuild dropped git-visible paths as already-baselined (94d.1). `approve` ALSO REFUSES (exit 4, `review_artifact_unrecorded` — `k6re`, the headline defect) when a `docs/reviews/<task-id>-r*.json` artifact's content hash binds no `REVIEW-ARTIFACT v1` / `REVIEW-ARTIFACT-RECONCILED v1` record, naming the file(s), each with its SHA-256 when one could be computed (a file outside the declared review directory, not a regular file, or otherwise unhashable is named with that reason instead — there is no hash to report there); bypass `--accept-unrecorded-review '<reason>'` (a dedicated flag, not folded into `--no-review`, since the two waive orthogonal facts). `qa-gate.sh review-reconcile <task-id> --file <path> [--acknowledge-findings] <reason>` appends the NON-GOVERNING `REVIEW-ARTIFACT-RECONCILED v1` grammar for a historic round already on disk — accounted for by `review-check.sh recorded-hashes` but never matched by `gate`'s K3 selector, so backfilling several historic rounds this way cannot invert the selector's iteration-vs-timestamp agreement requirement the way backfilling through `review-record` can (`review_artifact_selection_disagreement`). Refuses (exit 1, `reconcile_open_findings_unacknowledged`) when the artifact carries a `findings[]` entry at or above its own `risk_threshold`, unless `--acknowledge-findings` is given — the durable comment then gains a `[open findings acknowledged: <id>:<severity>,...]` marker so the finding is never silently dropped from the trust chain. See "The gate baseline" and "The tracker reconcile". |
+| `workflow-denylist.sh` | Not a hook and not executable on its own — the ONE definition of which paths the workflow treats as reviewable. TWO rules: `WORKFLOW_DENYLIST_REGEX` + `workflow_denylisted` ("is this reviewable work?") and, since 94d, `WORKFLOW_SELF_WRITTEN_REGEX` + `workflow_self_written` ("may this path enter the change set as a side effect of the gate running?" — `.claude/.qa-tracking/**` and `.beads/interactions.jsonl`, but **not** `.beads/issues.jsonl`). Sourced BASH_SOURCE-relative by FOUR consumers: `post-edit.sh`, `qa-gate.sh` (94d — `reconcile_tracker` is the second writer of `changed-files.txt` and must apply the same filters as the first), `impact-report.sh` and `verify-before-stop.sh`; the second rule is applied by the first, second and fourth of those. A THIRD filter — record-time containment against `$CLAUDE_PROJECT_DIR` (fkm.1.15) — deliberately does **not** live here: it is not a path pattern but a comparison against a runtime root, and it has exactly one applier (`post-edit.sh`), because the only other tracker writer derives its paths from `git status` inside the repo. Editing either rule here is a change-set-hash migration; so is changing what reaches the tracker in the first place. See "The second rule: `workflow_self_written`", "The third rule: record-time containment" and "Denylist changes are a hash migration". |
 | `current-task.sh` | F3 single source of truth for the active Beads task id. Subcommands: `set`, `get`, `get-repo`. Persists task id at `.qa-tracking/current-task` plus repo fingerprint at `.qa-tracking/current-task.repo` (I8 cross-repo guard). |
-| `prevent-orchestrator-edits.sh` | PreToolUse hook (matcher `^(Write\|Edit\|MultiEdit\|Bash)$`) blocking code edits by the `orchestrator`. Denies the Write/Edit/MultiEdit tools AND *write-shaped* Bash (redirection into source, `tee`, `sed -i`, `dd of=`, `cp`/`mv` into the tree) so the orchestrator cannot launder a write through Bash (llh.19). Legitimate orchestrator Bash (git/bd/reads/test-runs, redirects into `/tmp`/`/dev/null`) is allowed (anti-overreach). For a WRITE with no probeable agent identity it fails CLOSED (deny) — an unattributed write is treated as a possible mis-attributed orchestrator edit. Emits `hookSpecificOutput.permissionDecision: deny`. Defense in depth (the Bash detector is a raise-the-bar heuristic, not airtight); the primary guard is the orchestrator's omitted Write/Edit tools. |
-| `epic-gate.sh` | Epic-level QA gate (B2). Subcommands: `check`, `siblings`, `shared-files`. Returns `pass`/`defer`/`block` based on sibling status and file-intersection across in-progress tasks under the same epic. |
-| `subagent-start.sh` | J3 cross-session auto-assign. SubagentStart hook: when the spawned subagent is a specialist AND `current-task` is non-empty, injects `additionalContext` with the task id + brief summary so the orchestrator doesn't need to repeat the brief. |
-| `tech-debt.sh` | TECHNICAL_DEBT.md append (J22). Subcommands: `add <severity> <file:line> <effort> <description>`, `list`. Optional `--bd-task` creates a paired Beads task with `--deps blocks:<active-task>`. |
+| `prevent-orchestrator-edits.sh` | PreToolUse hook (matcher `^(Write\|Edit\|MultiEdit)$`) blocking code edits by the `orchestrator`. Emits `hookSpecificOutput.permissionDecision: deny`. Defense in depth only — **the primary guard is the orchestrator's omitted Write/Edit tools.** Bash is NOT matched and there is no write-shaped-Bash detector: llh.19 added one and `5535a6d` **reverted it**, because failing closed on an identity the runtime does not surface to PreToolUse broke specialist edits (P0-class regression for a P2; `LESSONS.md` records the shape, and v5 plan correction 9 forbids re-scoping this hook). The Bash write vector is therefore an accepted, documented residual at *this* hook, and the net downstream is **partial, not complete**: `qa-gate.sh reconcile-tracker` folds git-visible paths into the change set, so a Bash write to a path that was **clean at gate-baseline capture** does still reach QA even though nothing prevented it — while a Bash write to a path the baseline already lists does **not**. The baseline is subtracted over raw porcelain lines, so the second write leaves ` M path` byte-identical and `comm -23` removes it as pre-existing dirt; no commit is needed, and the reconcile reports success either way — `added=0` when that was the only pending write, and a count that silently omits it when it was not. Reproduced and pinned by `gate-baseline-v2.sh` 7.6/7.7/7R; tracked as `claude-workflow-plugin-dpe`; see "The tracker reconcile", the line-granularity limit under "Known limits". Accepting this residual therefore means accepting that the part of it landing on already-baselined paths is invisible — not that every Bash write is visible. Corrected twice in 94d: this row first described the reverted mechanism, and then (QA finding R4-F1) asserted a coverage the reconcile does not have. |
+| `epic-gate.sh` | Epic-level QA gate (B2). Subcommands: `check`, `siblings`, `shared-files`, `plan-batches` (v5 D4b, claude-workflow-plugin-fkm.6). `check`/`siblings`/`shared-files` return `pass`/`defer`/`block` based on sibling status and file-intersection across in-progress tasks under the same epic. `plan-batches <epic-id> [--design <path>]` (docs/plans/v5-design-phase.md:158-159) computes a dependency-respecting, file-set-non-intersecting parallel batch plan over an epic's design units, from the epic's own design record (qa-gate.sh design-status / design-unit-show, both new). File-set NON-INTERSECTION IS SCOPED TO WHAT THE FOUR ALIAS CHECKS ACTUALLY ESTABLISH (round-5 review, R5-F3 — the claim is narrowed to the code, the code is not widened to the claim): two declared spellings are recognised as the same file when they are byte-identical, when either is or passes through a symlink (leaf or ancestor, dangling included — the whole plan degrades), when both already exist and name one device+inode (`-ef`, which also covers Unicode/case aliasing whenever at least one side exists on a filesystem that folds them), or when they are ASCII case-equivalent; NOT caught, disclosed rather than implied closed: two spellings that are Unicode-normalisation-equivalent or non-ASCII-case-equivalent where NEITHER path exists yet and no symlink is involved — those can co-batch (operator decision: failing closed on every non-ASCII declared path would cost any project with one such filename ALL parallel batching, and bash 3.2 has no reliable NFC/NFD fold to narrow that later; `parallel_safe:true` means established up to exactly this named residual). Every guard-list degradation exits 0 with a full envelope carrying `parallel_safe` (true only when positively established — the inverse-polarity field this subcommand's own delegation brief required, so the house `$(cmd) || echo '{}'` idiom reads a crash as unsafe, never as "fully parallel") and `degradation_reason`; every one of a guard list (jq/bd/validator unavailable, no design attempted, an unsatisfied or stale design, a set computation that failed rather than reading empty, an unbound/stale/multiply-bound child binding, a non-canonical/case-colliding/symlink-or-inode-aliased/control-character-bearing declared path [round-4 review: a trailing newline is stripped by every command substitution, so the alias checks would test a different spelling than the byte-exact one the batching intersection compares — rejected, never sanitised], a resolvable unit depending on one with no implementing task yet [`unit_depends_on_unresolved_unit`, round-1 review]) collapses the WHOLE plan to `parallel_safe:false`, never a partial one. Degraded `batches` are singleton serial batches ONLY when the child ids could be enumerated AND a dependency-safe order over them is computable from the published binding/dependency data; otherwise `batches` is explicitly `[]` with annotated `observations` (rounds 4-8: degradations firing before children can be enumerated, the jq-unavailable and envelope-construction fallbacks, a failed binding-pair encoding after the bindings were read, a failed re-extraction of the validated design's unit_ids/unit_files/unit_deps declarations [round-8 review, R8-F1 — previously substituted with empty []/{}, which told the degraded schedule "no edges"], an input-cardinality mismatch or residual cycle in the schedule construction, and — round-7 review, R7-F1 — a bound unit whose design dependency has no bound implementing task, since erasing a known design edge because its task cannot be resolved would be a failed computation reading as "no constraint"). An ordering that could not be computed is never emitted as a runnable one, the same direction as "a set difference that did not compute must never read as an empty one". See epic-gate.sh's own file-top header for the current, named list (it has grown repeatedly under independent review and is documented there rather than as a fixed count here, to avoid re-staling this line the next time it grows). `graph_intersection_computed` is always `false` this release (the `impact_of` half is deferred, claude-workflow-plugin-l7gd) and does not by itself force degradation — file-set-only batching is a real, narrower answer, named as such. Persists a regenerable cache manifest to `$QA_TRACKING_DIR/design-batch-<epic>.json` (byte-identical to stdout; no lock — tmp-then-`mv -f`). `--design <path>` is an ASSERTION against the derived artifact path, never a second source, matching `qa-gate.sh design-record`'s own `--file` convention. |
+| `subagent-start.sh` | J3 cross-session auto-assign. SubagentStart hook: when the spawned subagent is a specialist AND `current-task` is non-empty, injects `additionalContext` with the task id + brief summary so the orchestrator doesn't need to repeat the brief. Also posts the `IMPLEMENTER` identity record for the three implementing roles (see "A binding predicate" below) and, since v5 D5 (`claude-workflow-plugin-fkm.7`), spec injection at spawn: when the active task carries a `DESIGN-UNIT` binding (`qa-gate.sh design-unit-show`), its unit's declaration is read VERBATIM from the mirrored artifact (`review-check.sh design-unit-json` — never a second DESIGN-UNITS parser) and spliced into `additionalContext`, with a per-unit content hash (never the whole-artifact hash — the same reason `design_conflict`'s R2-F3 fix moved off it) recorded as a `SPEC-INJECTED v1` Beads comment so a later drift is visible via `qa-gate.sh spec-injection-status <task-id>`. This hook itself gates nothing — a hook of this kind cannot block the spawn at all, so an unreadable binding/artifact degrades LOUDLY into `additionalContext` rather than silently omitting the packet; no binding at all (the ordinary case for most tasks) is silent. Since v5 D5 piece 4, the freshness record it writes here IS read by a gate one step removed: `qa-gate.sh design-unit-align`, run at `approve`, composes `spec-injection-status`'s output as its FRESHNESS leg. The artifact-path resolution here (`resolve_design_artifact_path`) is a byte-for-byte-pinned sibling of `qa-gate.sh`'s own `design_artifact_path_for` — a design_task with a `+` in it resolves to the same sanitised filename on both the write and read sides; `design-artifact-parity.test.sh` is the parity check. See `inject_unit_spec`'s own header in the script for the full resolution path. |
+| `tech-debt.sh` | TECHNICAL_DEBT.md append (J22). Subcommands: `add <severity> <file:line> <effort> <description>`, `list`. Optional `--bd-task` creates a paired Beads task and links it to the active task with an explicit `bd dep add` (it used `--deps blocks:` until bd 1.1.2, which records that edge backwards). |
 | `bd-github-link.sh` | I3 Beads ↔ GitHub auto-link. PostToolUse hook on Bash invocations. When a Beads task closes, posts a `gh issue comment` linking back; when `gh pr create` runs, parses `Closes #N` and writes `gh-link:` into the task notes. |
 | `detect-stack.sh` | F8/J17 polyglot test runner detection. Emits JSON `{runner, test_cmd, lint_cmd, type_cmd, manifest, overrides}`. Supports npm, pytest, go, cargo, maven, gradle, phpunit, rake, swift, dotnet, make, plus `.claude/test-cmd` overrides. |
-| `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`. Drains stdin (Claude Code passes a session envelope it doesn't need). |
+| `statusline.sh` | E4/I2 statusline. Reads `current-task`, the task's bd labels, and the changed-files count. Emits `[<task-id>] qa: <state> · N files changed`, plus the model segment described below. **Reads** stdin (it did drain it until v5.0.0 / D0): the session envelope is the ONLY place the live session model is observable, so the session-model guard has to live here. |
 | `worktree-sweep.sh` | v4.1 (C1b) sweeper for the subagent worktrees at `.claude/worktrees/<name>`. Ones with NO changes are auto-removed when the subagent finishes; ones WITH changes survive, and until this script nothing removed them. **Dry run is the default; `--apply` is the only thing that removes**, and removal is `git worktree remove` + `git worktree prune` — there is no `rm -rf` in the file and `worktree remove` is never `--force`d (both asserted structurally by `worktree-sweep.test.sh`). A worktree is removable only if ALL of: (1) its `cd … && pwd -P`-**resolved** path is physically inside the resolved `.claude/worktrees/` — a string-prefix test is not a containment guard, and this is what excludes an operator's sibling checkout whose name merely *extends* the root's; (2) same repo by `--git-common-dir` identity; (3) `git status --porcelain` empty; (4) `@{upstream}..HEAD` == 0 commits, else `merge-base --is-ancestor <branch> <default>` — **decided locally, never a fetch**; (5) directory mtime older than `--age-days` (default 7); (6) a Beads task resolved from EVIDENCE (the worktree's own `.qa-tracking/current-task`, else a task-shaped branch token bd actually knows) that bd reports `closed`. Any error, unreadable path or ambiguity is NOT a candidate, and each keeper prints its FIRST failing gate. Worktree NAMING is deliberately off the safety path. Flags: `--apply`, `--age-days N`, `--report-only` (wins over `--apply`), `--json`, `--max-candidates N` (default 16, the same bound as the Stop hook's `WTRES_MAX_CANDIDATES`), `--help`. Exit 0 / 1 (a removal failed) / 2 (bad invocation). Invoked report-only by `session-end.sh`; see "Worktree sweep (report-only)". |
-| `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Eleven named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, and drives both gate hooks. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
+| `workflow-doctor.sh` | v4.1 FUNCTIONAL post-install verification (C0a) — an operator CLI, not a hook, and the only surface that asks whether an install *runs* rather than whether its files exist. Thirteen named checks (`deps`, `agents`, `skill`, `mcp_config`, `settings_hooks`, `beads`, `beads_ledger`, `model_parity`, `session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`), each PASS/FAIL/SKIP with its own `fix:` line. It EXECUTES the SessionStart hook and asserts the emitted envelope carries the delegation contract, BOOTS both MCP servers over stdio and asserts `tools/list` returns exactly 21 / 7, drives both gate hooks, and (claude-workflow-plugin-a13r) runs `model-select.sh check-parity` in the sandbox to gate per-role model pin agreement — FAILing on real drift, SKIPping (never a silent PASS) when the local model-select cache was never populated, since nothing in the install path ever populates it and install.sh's own `--verify` step runs with no `--skip` flags at all. Flags: `--target`, `--json-out`, `--skip <names>` (unknown names are rejected with exit 2 so a typo can never look like a pass), `--quiet`. Exit 0 / 1 / 2. Three front doors: `bash install.sh --verify`, `/workflow-doctor`, direct invocation. Safe mid-session — every dynamic check runs in a throwaway sandbox EXCEPT `beads`, which runs `bd doctor` against the real target on purpose and therefore rewrites `.beads/beads.db{,-shm,-wal}`; `--skip beads` is the run that provably touches nothing. |
 
 Each helper is independently testable via the L1 bash unit tier
 (`.claude/scripts/tests/*.sh`) — see `.claude/tests/README.md` for the
 five-tier pyramid that exercises them.
+
+### The statusline model segment and the session-model guard (v5.0.0 / D0)
+
+`statusline.sh` renders the resolved role→model mapping from
+`.claude/.qa-tracking/model-roles-resolved.json`, grouped so five roles fit on a
+shared line: roles with the same model are joined with `+` in the fixed order
+`des dsr orch impl rev`, groups are space-separated, and at most three groups
+print before the tail becomes ` +<k> more`. All roles equal with both review
+lanes on Claude collapses to ` • model: <short>`. A non-Claude lane substitutes
+the literal `sol` for that lane. **The render iterates the roles PRESENT in
+`.roles`**, so a leftover three-role v4 artifact still renders correctly with no
+upgrade step.
+
+Three flags may follow, in this order:
+
+| Flag | Source | Meaning |
+| --- | --- | --- |
+| `!esc` | `.claude/.qa-tracking/implementer-escalation.json` exists | A per-unit implementer escalation is active, so the implementer lane is not on its configured strategy. Reverse with `model-select.sh restore`. |
+| `!id` | `.identity_collapse` in the artifact | `designer` and `design_reviewer` resolved to the same model on the Claude design lane. Reported, never blocking. The ONE real clearance is `design_reviewer=<family>-class` in `.claude/model-roles`. **Do NOT install Codex expecting it to help**: no script drives design review through Codex, so it only moves the lane off `claude`, which SILENCES this very flag while both roles still resolve to the same model (`claude-workflow-plugin-yvpe`). |
+| `!sess` | `.claude/.qa-tracking/session-model-drift.json` | The live session model differs from the resolved `orchestrator` id. |
+
+**The session-model guard is read-compare-write only.** The statusline runs on
+every render, so the drift record is rewritten only when the `(expected, live)`
+pair it holds would change, and removed only when a *completed* comparison finds
+no drift. An absent envelope, an absent `.model.id`, an absent artifact or a
+missing `jq` all mean "no comparison was possible", which is **not** the same as
+"no drift" — those paths leave any existing record exactly as they found it.
+`session-start.sh` Warning 8 re-validates the record against the current
+artifact (a record whose `expected` no longer matches is stale and is not
+reported) and emits the fix verbatim. Nothing here ever blocks.
+
+**The comparison is by model identity, not by id string.** A trailing bracketed
+context-window marker (`claude-fable-5[1m]`) is separated from the base id
+before comparing, and the rule is asymmetric:
+
+| resolved `orchestrator` | live session model | verdict |
+| --- | --- | --- |
+| `claude-fable-5` | `claude-fable-5[1m]` | **no drift** — same model, and the resolver named no variant to violate |
+| `claude-fable-5[1m]` | `claude-fable-5` | **drift** — `pick_best` sorts `_ctx` DESC, so a resolved `[1m]` was a deliberate pick, and the fix line names it |
+| `claude-fable-5` | `claude-opus-4-5[1m]` | **drift** — different model |
+
+Row 1 is why this exists: as literal equality the guard reported the 1M variant
+of the *correct* model as drift on every render, with a fix line that moved the
+operator to a smaller context window. Row 2 is why both sides are not simply
+stripped — that would trade a true positive away to fix the false one. Sharp
+edge that remains: an id differing in any other way (a dated variant, an alias)
+is still reported as drift; this hook cannot know an alias resolves to the same
+weights, and the fix line names the exact id either way.
+
+Warnings 9 and 10 carry the other two D0 notices — identity collapse, and the
+`missing_keys` list that makes an un-upgraded `operator`-class
+`.claude/model-roles` visible. **None of the three routes through
+`model-select.sh`'s `_warn`**: Warning 2 keeps only the LAST `^model-select:`
+line, so a new loud warning added to the helper is swallowed by whatever the
+helper prints afterwards. Each notice rides the artifact or its own state file
+and is read from disk at SessionStart, where it gets its own line.
 
 ---
 

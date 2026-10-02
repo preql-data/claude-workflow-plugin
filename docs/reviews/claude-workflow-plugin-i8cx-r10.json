@@ -1,0 +1,14 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "8855f633f921f5989544e8a95daad81c09df3ccf8b5bc15d3827815c1557ff02",
+  "risk_threshold": "high",
+  "stop_condition": "Report HIGH only for a route by which an open design_conflict escapes detection\nat design-gate-precheck or approve, for a legitimate no-design task that the\nhoist has now deadlocked, or for an incorrect locals capture that makes the\nsatisfied-state branching read clobbered values. MEDIUM/LOW otherwise. If there\nis no HIGH, say so plainly rather than manufacturing one.",
+  "verdict": "approve",
+  "findings": [],
+  "iterations": 10,
+  "stopped_by": "verdict"
+}

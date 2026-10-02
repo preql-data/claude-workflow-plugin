@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "222877b5a706796fffe4aab802880b303b407b72bf4bf4b47f669dbfb8d16a77",
+  "risk_threshold": "high",
+  "stop_condition": "Stop when R2-F1 is adjudicated closed or still-open against this diff with a concrete failure path, and the ONE-validator question is answered: whether design-unit-json genuinely preserves the single-parser guarantee or is a second extraction behind a validate call. Scope is review-check.sh only.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:1145",
+      "evidence": "R2-F1 is closed: lines 1789-1795 put sed and sort at the tail of separate pipelines, capture both statuses, and fail closed; reusing implementer_set_unreadable loses no required consumer information because the envelope observations preserve the failing transform and exit statuses. However, design-unit-json validates one read at line 1146 and then independently re-counts sentinels, locates and extracts the block, handles fences, and parses/selects the unit at lines 1177-1223. Reusing regex constants does not make those operations the validator's original parse.",
+      "description": "design-unit-json is a second extraction behind a validate call, so it does not preserve the single-parser guarantee. There is also a concrete TOCTOU success path: after validate-design returns for task A/unit U1, replace the file before line 1177 with content having one sentinel pair and parseable JSON containing U1 but lacking required sections or unit schema fields. The rereader checks neither schema nor task identity, so it emits ok:true with task_id from the original validated artifact and unit_json from the unvalidated replacement. A downstream unit hash can consequently bind or clear a conflict using content the authoritative validator never approved. The full unit object must come from the authoritative parse, such as through its validated envelope or a shared single-pass parser result, rather than by reopening and reparsing the path."
+    }
+  ],
+  "iterations": 4,
+  "stopped_by": "stop_condition"
+}

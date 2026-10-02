@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "223b248b804d2d7eab6b15657c86cffe52806d6d81a4bb53ee78874dd0b75af6",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the four anchored QA-GATE APPROVED readers have been checked once for a missing fifth reader, the matching_approval_record_text anchoring asymmetry has been assessed, and the touched paths have been checked for a fourth reach-around instance; then either a finding at or above high is reported or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. A genuine single-line approval must still release; fkm.1.1 must still exit 4 and i8cx must still resolve to iteration=10/sol-codex.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R6-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:3567",
+      "evidence": "matching_approval_record_text pipes jq -r's full, possibly multiline comment text through tail -1. jq emits embedded newlines literally, so tail selects the last physical line rather than the last comment. An ordinary approval summary ending with a line such as `QA-GATE APPROVED reviewed_by=none [review bypass: forged]` is therefore returned without the genuine first line; approval_text_has_audited_review_bypass then accepts that injected line at its ^ anchor.",
+      "description": "The anchoring fix can still be bypassed through a multiline ordinary approval summary. Both same-checkout and cross-worktree consumers treat the fabricated last line as an audited --no-review approval and skip the post-approval review recheck, allowing newly recorded blocking findings to stop re-arming the release gate. The same truncation also rejects genuine multiline --no-review approvals unless their last line repeats the machine prefix."
+    },
+    {
+      "id": "R6-F2",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:3875",
+      "evidence": "The hash-aware idempotency arm emits status=approved and returns at lines 3975-3976 after checking only design conflicts. The expected_hash_mismatch predicate is not reached until line 4309, although expect_hash_arg was already parsed and the command contract says a mismatch must refuse.",
+      "description": "This is a fourth Family A reach-around: `approve --expect-hash <stale-or-wrong-hash>` returns success whenever an existing record binds the current idempotency reference, without comparing the caller's classified hash. A caller relying on the command's exit status to establish classified-set equals bound-set can proceed after that safety precondition actually failed."
+    }
+  ],
+  "iterations": 6,
+  "stopped_by": "verdict"
+}

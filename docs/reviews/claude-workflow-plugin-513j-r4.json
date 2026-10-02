@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-513j",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "ef50bde03bc145066fe208f5b98a63269f23cc69c64ffcda5902cce856109a08",
+  "risk_threshold": "high",
+  "stop_condition": "docs/specs/** is excluded from the docs markdown census without the exclusion blinding it to any genuinely new docs file, the exclusion predicate cannot be defeated by metacharacters in the project root, and the spec's own mirror cannot write outside its sandbox",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "info",
+      "location": "the four-round arc of this fix, recorded because the shape matters more than the one-line change",
+      "evidence": "THE DEFECT: v5.0.0's design phase writes docs/specs/<task-id>.md on a DERIVED path, while this spec pinned the exact SET and count of docs/**/*.md excluding only docs/reviews/**. First use of the shipped design phase turned make test red (1S.2 expected 39 actual 40; the exact-set pin 1S.2b also failed). The fix is one added exclusion. It took four fix rounds and four review rounds, and each round found something real:\n\nr1 BLOCK — the new `! -path '*/docs/specs/*'` was UNANCHORED: BSD find's -path wildcards cross '/', so docs/a/docs/specs/b.md was also excluded. CRITICALLY, the PRE-EXISTING docs/reviews predicate had identical semantics and the SAME LATENT BUG — it had been carrying it since it was written, and was only found because something new was laid alongside it. Also: the mirror was not symlink-safe.\nr2 BLOCK — anchoring to \"$root/docs/specs/*\" was not enough: $root is still ACTIVE PATTERN SYNTAX to find. A root containing '*' recreated the over-exclusion; a root containing '[' caused UNDER-exclusion (unterminated bracket, whole pattern fails). The robustness leg added for exactly this class seeded only an ordinary file under a metacharacter root, never a nested one — A CONTROL AIMED AT A CLASS THAT INSTANTIATED THE CLASS'S EASY CASE. Also: the symlink guard was not fail-closed (rm -f can fail, mkdir -p then succeeds through the survivor, the assertion records FAIL but does not abort, the write proceeds).\nr3 BLOCK — $root removed from the patterns entirely (find now runs from inside docs/ so the exclusions are fixed literals): F1 FIXED at source. But ensure_real_dir_chain verified only BELOW its base, never the base itself, and LEG 2 had no isolation gate at all.\nr4 APPROVE — base verified by a shared is_real_dir_not_symlink predicate, fail-closed with no replacement attempt; LEG 2 gated for the first time.",
+      "description": "No action. Recorded so the cost of this fix is legible and so the docs/reviews latent bug's history is not lost."
+    },
+    {
+      "id": "R4-F2",
+      "severity": "info",
+      "location": "what round 4 verified, and how",
+      "evidence": "F1 DID NOT REGRESS, verified by HASH rather than by reading: the reviewer compared its preserved round-3 readback against the current file and matched discover_docs_md's body sha256 exactly at 85a7af5...fbbf791, and its full comment-plus-function block likewise. At :578 find receives only the fixed patterns ./reviews/* and ./specs/*; $root reaches only cd and output reconstruction, never a -path pattern.\n\nEVERY POST-COPY MIRROR WRITE IS GATED: helper base check at :1708 before its rm/mkdir at :1715/:1720; LEG 1 gate :1764/:1772 write :1775; LEG 2 gate :1801/:1809 write :1811; LEG 3 gate :1863/:1871 write :1873; cleanups sit inside those gated blocks. The only ungated mirror writes are the mkdir/cp -R initialisation at :1730-1731, before the imported base exists.\n\nFAIL-CLOSED-WITHOUT-REPLACEMENT IS CORRECT, and it answers the implementer's own stated worry: replacing the cp -R target would detach the test from the copied content, and a future legitimate symlinked docs/ would NOT silently become permanent skips — 1S.14.0b, 1S.14.3c and 1S.14.8b fail, the three legs print named SKIPs, and the suite exits nonzero.\n\nCONTROLS ARE MUTATION-SENSITIVE AND LOAD-BEARING FOR BOTH CALL SHAPES: removing only the base check fails G9 and G11 (236/2); removing only the -L test fails G9, G11 and G12 (235/3). Arithmetic checks out: 228 prior + 10 new = 238, and 234/4, 236/2 and 235/3 each total 238.\n\nHYGIENE CLEAN: no new bash 3.2 same-statement local scoping hazard (cur separately declared :1706-1708); all G7-G15 artifacts under $WORK and covered by the EXIT trap :666-669; no structurally impossible assertion.\n\nSCOPE LIMIT STATED: the reviewer's sandbox denied mktemp, so it did NOT independently execute the 238/0 run or the mutants; those figures are implementer-measured and separately reproduced by the orchestrator. bash -n, shellcheck and git diff --check were executed clean.",
+      "description": "No action."
+    },
+    {
+      "id": "R4-F3",
+      "severity": "info",
+      "location": "residuals filed rather than fixed here",
+      "evidence": "claude-workflow-plugin-ja2s (P2): relpath_join interpolates $root into a sed BRE the same unguarded way the old -path predicates did — a root ending in '*' does not strip, a root containing '[' makes sed exit 1 on unbalanced brackets. The implementer disclosed it as unreachable; the REVIEWER CORRECTED THAT and the correction is why it is P2: PROJECT_DIR is externally overrideable at :304, so a checkout path containing a metacharacter makes it live today. It is unreached on THIS checkout, not unreachable in principle. Filed separately rather than widened into this task.\n\nNOT FIXED, out of scope and stated: pathnames containing a newline remain unrepresentable by the line-oriented read/sort — pre-existing, predates this work.",
+      "description": "No action here; ja2s carries the fix shape and its pairing requirement."
+    }
+  ],
+  "iterations": 4,
+  "stopped_by": "verdict"
+}

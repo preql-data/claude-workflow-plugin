@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-bbes",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "8b106137755ce43d674da2e3c7638300bbccd2361ad6e75d626949a74582e3b0",
+  "risk_threshold": "high",
+  "stop_condition": "Every arm of the task's own pairing is traced to an observed-green test (commit+re-dirty path IS bound; no-commit path still subtracted; fail-closed on unprovable head), the live gate cycle itself shows subtracted=0 with no hand-repair, and no critical/high finding remains in qa-gate.sh's reconcile/baseline path.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "low",
+      "location": "docs/reviews/impact-report-approve_XXXXXX_*-r1.json (4 files)",
+      "evidence": "Four untracked review-artifact files leaked by impact-report.test.sh section 8 (s8_artifact/s8_completion run qa-gate.sh without CLAUDE_PROJECT_DIR=$F8, inheriting the ambient real-repo value; qa-gate.sh:158 PROJECT_DIR fallback). mtimes 18:10/18:11 and 22:53 match the two L1 runs of 2026-08-26. Two were already in changed-files.txt; enter reconciled the other two (+2). All four are bound into this change set.",
+      "description": "Test-isolation leak pollutes the bound change set with non-work paths. Below threshold for THIS review because the leak is not part of the diff under review, is disclosed in the approval, and is filed with mechanism and pairing as claude-workflow-plugin-kyj5. Every future L1 run adds two more until kyj5 lands."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "info",
+      "location": ".claude/scripts/verify-before-stop.sh:2074 (gate_baseline_entries twin)",
+      "evidence": "The Stop hook carries its own copy of gate_baseline_entries which did NOT receive the head-binding fix; the qa-gate.sh diff discloses this and the ordering argument (reconcile-tracker shellout runs before the union walk, so the fixed reader recovers the paths first). Residual: the standalone LABEL_WITHOUT_RECORD / VANISHED_PROBE re-read path still reads through the unfixed twin.",
+      "description": "Known, disclosed, and filed as claude-workflow-plugin-9jtd. Scope of bbes was qa-gate.sh only; the in-sync header claim was corrected rather than left false."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "info",
+      "location": ".claude/scripts/verify-before-stop.sh:157 (TEST_TIMEOUT_S=1200)",
+      "evidence": "make test measures 1731s/1777s uncontended (recorded; the acceptance run measured 1707s) while the Stop hook external cap is 1320000ms (.claude/settings.json, read directly) — no internal budget can let the full suite complete in-hook on this host.",
+      "description": "The gate on this repo now times out deterministically at 1200s per iteration and fails CLOSED with an honest disclosure; approval flows through QA out-of-band, as this cycle did. Workflow-design residual filed as claude-workflow-plugin-yzo9. Not a defect in this diff: the constant is sized for watchdog-beats-external-kill layering, explained at its definition."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

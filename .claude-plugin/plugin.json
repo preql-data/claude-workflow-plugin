@@ -1,6 +1,6 @@
 {
   "name": "claude-workflow",
-  "version": "4.1.0",
+  "version": "5.0.0",
   "description": "Mandatory orchestrator -> specialists -> QA workflow with Beads task tracking",
   "author": {
     "name": "preql-data",
@@ -24,7 +24,9 @@
     "./.claude/agents/frontend.md",
     "./.claude/agents/devops.md",
     "./.claude/agents/grader.md",
-    "./.claude/agents/judge.md"
+    "./.claude/agents/judge.md",
+    "./.claude/agents/designer.md",
+    "./.claude/agents/design-reviewer.md"
   ],
   "commands": [
     "./.claude/commands/workflow-model.md",

@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "0586eb042acd387a2b4bd53619f4e1a43ebf03acda5341ce25279924389b3173",
+  "risk_threshold": "high",
+  "stop_condition": "Report HIGH only for: a surviving route by which a malformed or wrong record is selected as\ngoverning; a dormant quarantine path a refactor could re-enable; a regression of refuse-on-\nambiguity; a legitimate task deadlocked more easily than the stated residual admits; or any\nremaining claim the gate makes that nothing actually checks. MEDIUM/LOW otherwise. If there\nis no HIGH, say so plainly — do not manufacture one.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:1958",
+      "evidence": "The selector accepts any substring matching findings=\\[[^]]*\\], while line 2224 later extracts the last findings=[...] occurrence with greedy sed. Thus a candidate such as `... findings=[R3-F1:high artifact_hash=ah at 2026-08-30T10:00:00Z: summary findings=[]` passes the selector: its malformed first token is closed only by the trailing prose token, then ART_FINDINGS becomes empty. If this candidate owns both maximum iteration and timestamp, it is selected and the gate reaches success at line 2434.",
+      "description": "The claimed unconditional refusal of every malformed REVIEW-ARTIFACT candidate is false. A malformed findings record arriving through the acknowledged bd-import/hand-typed channels can smuggle a second findings=[] token in prose, be selected as governing, and suppress its open HIGH finding instead of deadlocking. The removal is therefore incomplete at the parser boundary even though the quarantine mechanism itself is gone."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "stop_condition"
+}

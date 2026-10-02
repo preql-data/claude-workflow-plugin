@@ -447,6 +447,13 @@ function invOrchestratorNoEdits(trace: Trace): InvariantResult {
  * v4.1 (context_coverage, C2) widened the field list this invariant
  * WOULD check. It did not narrow the trace gap, so the skip stands.
  *
+ * v5 D5 (claude-workflow-plugin-fkm.7 D5 piece 3) widened it again: four
+ * more fields — unit_id, design_hash, green_before, green_after — append
+ * after the seven above on every completion payload. Same non-narrowing
+ * of the trace gap, same skip; the analogue of this sentence lives in
+ * .claude/tests/README.md's row for this same invariant (QA round 2,
+ * R2-F7 — this file's docblock had drifted out of step with that row).
+ *
  * TRACE GAP: capturing the completion payload as structured trace
  * fields is a Phase A follow-up (it ties into the rubric grader's
  * input packet). When that lands, this skip becomes a real check.
@@ -1119,12 +1126,27 @@ function invApprovalCitesIndependentReview(
     };
   }
 
-  // Pre-V3 recording guard: `reviewed_by=` and the `[review bypass:`
-  // marker are both jio.1 constructs. An approval set with neither means
-  // the run predates V3 — SKIP, don't retro-fail (the pre-n6d precedent).
-  const v3Aware = approvals.some(
-    (a) => REVIEWED_BY.test(a.line) || a.line.includes(REVIEW_BYPASS),
-  );
+  // Pre-V3 recording guard: `reviewed_by=` is a jio.1 (V3) construct present
+  // on EVERY record the current writer emits (qa-gate.sh:5051 always writes
+  // `reviewed_by=$reviewed_by` unconditionally, never inside an optional
+  // field) — an approval set with none means the run predates V3. SKIP,
+  // don't retro-fail (the pre-n6d precedent).
+  //
+  // claude-workflow-plugin-yrij: this used to also accept a bare
+  // `line.includes(REVIEW_BYPASS)` as V3 evidence on its own
+  // (`REVIEWED_BY.test(a.line) || a.line.includes(REVIEW_BYPASS)`), which an
+  // approval whose SUMMARY merely contains the marker's spelling could
+  // satisfy with no reviewed_by= token at all — forged V3-awareness for a
+  // record that carries no genuine machine-written evidence of it. Dropped
+  // rather than anchored: REVIEWED_BY.test() and REVIEWED_BY.exec() run the
+  // SAME regex over the SAME string, so "the marker is present AND
+  // REVIEWED_BY.exec(a.line)?.[1] === 'none'" can never be true when
+  // REVIEWED_BY.test(a.line) is false — the disjunct would be a PROVABLY
+  // unreachable branch once anchored, not merely an unlikely one, and this
+  // codebase's own stance on that shape (qa-gate.sh's D5 removal of the
+  // design-conflict waiver) is that dead code which still LOOKS load-bearing
+  // is worse than code that is visibly absent.
+  const v3Aware = approvals.some((a) => REVIEWED_BY.test(a.line));
   if (!v3Aware) {
     return {
       pass: true,
@@ -1141,14 +1163,29 @@ function invApprovalCitesIndependentReview(
   for (const ap of approvals) {
     const where = `${ap.task}@comment[${ap.order}]`;
 
-    // (a) the audited escape — EXEMPT, by design.
-    if (ap.line.includes(REVIEW_BYPASS)) {
+    const reviewedBy = REVIEWED_BY.exec(ap.line)?.[1] ?? "";
+
+    // (a) the audited escape — EXEMPT, by design, but ANCHORED on
+    // reviewedBy === "none" (claude-workflow-plugin-yrij): this used to be
+    // `ap.line.includes(REVIEW_BYPASS)` alone, which an approval whose
+    // SUMMARY merely contains the marker's spelling could satisfy with a
+    // REAL reviewer on record — forging the exemption for an approval that
+    // was never audited-bypassed at all. qa-gate.sh's writer
+    // (qa-gate.sh:4235, 4268-4327) sets reviewed_by to the literal "none"
+    // if, and only if, --no-review was genuinely passed (bypass_review=1 at
+    // qa-gate.sh:3713, the ONE site that ever sets it); every other path
+    // that reaches add_comment leaves a real identity. REVIEWED_BY's own
+    // capture is unanchored but still safe against a forged summary: the
+    // token is interpolated BEFORE $summary in the write template
+    // (qa-gate.sh:5051), so nothing operator-controlled can appear earlier
+    // in `ap.line` than the genuine one, and `.exec()` (no "g" flag) always
+    // returns the first (i.e. genuine) match.
+    if (ap.line.includes(REVIEW_BYPASS) && reviewedBy === "none") {
       exempted++;
       notes.push(`${where}: exempt via the audited [review bypass:] marker`);
       continue;
     }
 
-    const reviewedBy = REVIEWED_BY.exec(ap.line)?.[1] ?? "";
     if (!reviewedBy) {
       violations.push(
         `${where}: approval record carries NO reviewed_by= token and no [review bypass:] marker — it was not written by qa-gate.sh approve (V3 always emits one). Record line: "${ap.line.slice(0, 160)}"`,

@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-h2zz",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "9093e897699e4fa5c3d0ac29b821297398c87cb188dd21921f4afb03b1b64656",
+  "risk_threshold": "medium",
+  "stop_condition": "REVIEWER IDENTITY: the review ran through the codex MCP with NO model override, so it used the configured default, `model = \"gpt-5.6-sol\"` in ~/.codex/config.toml (model_reasoning_effort = xhigh). Asked to state its identity the reviewer self-reported the product name 'OpenAI GPT-5 Codex'; that is recorded here rather than in the id field, which the artifact validator constrains to the model-id character class. HASH: reviewed_hash moved from 88313659 (rounds 5 and 6) to 9093e897 because the r5 and r6 review artifacts were ADDED to the change set -- change_set_hash binds MEMBERSHIP, not content, so adding files moves it while the intervening content edits did not. The reviewer VERIFIED this independently rather than accepting the orchestrator's account: it computed the canonical membership hash as 9093e897699e4fa5c3d0ac29b821297398c87cb188dd21921f4afb03b1b64656 and, removing exactly the two review artifacts, reproduced 88313659afbabb394abd18347c673215fb8d4c92fd51e493307fa3ac72655e09, confirming both artifacts' self-description. ARTIFACT ACCURACY: both h2zz-r5.json and h2zz-r6.json were adjudicated ACCURATE -- verdicts, findings, severities, lane and reviewed_hash all correct, and neither overstates the checks performed nor claims a suite run. No suite was run this round either (read-only sandbox); evidence came from the packet, the live files, targeted `make -n` and `git check-ref-format` inspection, and a small read-only Bash job-control probe. CLEARED THIS ROUND, with no defect found: the run-tests.sh exemption removal and its tombstone, the BSD-sed fixture rewrite in plan-batches.test.sh, the alias-symlink handling in doc-only-classifier.test.sh, the exact RRV-GUARD sentinel grep in review-separation-records.sh, the GIT_CONFIG_GLOBAL identity provisioning, and the pinned tool-download structure. SCOPED OUT AND CONFIRMED PROPERLY HANDLED: R6-F1's two causes are filed as claude-workflow-plugin-we57 and claude-workflow-plugin-qwny, the reviewer confirmed both tasks accurately describe the defects, and confirmed that nothing in this change set falsely claims CI is green -- the workflow documents the two red checks explicitly. THE UNIFYING QUESTION put to this round was 'is there anything here that CLAIMS something nothing checks'; the reviewer's answer names five, all recorded below or in the adjudication: the TABLE FIDELITY universals, the PGID-as-universal-ownership assertion, the always-in-tree META 4 assertion, the exact spaced-ref legality assertion, and the stale bundled-ShellCheck header.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R5-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/workflow-manifest.test.sh:28-31",
+      "evidence": "The paragraph claims every verdict becomes wrong and that any untouched file lands on preserve-custom. Checked against .claude/scripts/workflow-manifest.sh:911-939: the merged path remains `merge`, missing-target remains `copy-new`, and source-equal remains `skip-current`; only custom OPERATOR files reach `preserve-custom`, while custom WORKFLOW files reach `replace-custom`. The paragraph's OTHER anchors are now correct: cmd_classify starts at workflow-manifest.sh:794, install.sh invokes classify at :1269-1271, and META 4 uses RELEASE_TABLE rather than the frozen v3.5.0 table.",
+      "description": "CARRIED, STATUS NOT_FIXED FOR THE THIRD CONSECUTIVE ROUND. Round 5 flagged two false claims; the round-6 fix corrected them and missed a third site; the follow-up corrected that; this round finds the rewritten paragraph asserting DIFFERENT false universals. Three rewrites, wrong in a new way each time. RESOLUTION TAKEN: this project's standing waiver ruling -- when a defect family survives repeated rounds against the same mechanism, remove the mechanism rather than guard it again -- applied to explanatory prose rather than to code. The over-reaching sentences are DELETED rather than rewritten a fourth time; what survives is limited to what this spec itself tests, with the classification decision table left to cmd_classify as the source of truth and to Section 4 of this same file, which tests all six verdicts directly."
+    },
+    {
+      "id": "R6-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/green-check.test.sh:751-759",
+      "evidence": "green-check.test.sh:751-759 claims another concurrent run or unrelated process has a different PGID; :808-815 select and kill every ppid-1, same-PGID, exact-argv process. The file supports direct `bash green-check.test.sh` invocation at :85-87 and concedes at :834-836 that plain backgrounding without job control inherits the script PGID. META-2 at :858-889 constructs only a DIFFERENT-PGID bystander, so it cannot detect the same-PGID case. Reparenting changes PPID but not PGID.",
+      "description": "CARRIED, STATUS PARTIAL. Adding PGID fixes the normal run-tests.sh case, because that runner enables job control and each spec gets its own process group. It does NOT establish ownership for every supported invocation: two concurrent DIRECT invocations launched from one non-job-controlled shell share a PGID, so each can still select and kill the other's reparented sleep. The comment asserting that a concurrent run has a different PGID is true only under job control -- another false universal. FIX: make ownership survive reparenting WITHOUT depending on the invoking shell's job-control state, via a per-run nonce carried in the spawned process's own argv, and add the SAME-PGID foreign-bystander negative control that META-2 structurally cannot provide."
+    },
+    {
+      "id": "R7-F1",
+      "severity": "low",
+      "location": ".claude/scripts/tests/workflow-manifest.test.sh:1213",
+      "evidence": "Lines 1213-1215 state the release manifest is always in-tree and META 4 never has a reason to skip. Line 1216 guards the block with `[ -f \"$RELEASE_TABLE\" ]` and lines 1250-1252 emit a META4 SKIPPED line. Lines 113-116 of the same file describe the version-bump-to-freeze window in which the table is legitimately absent.",
+      "description": "The comment asserts an invariant that the adjacent guard exists precisely to handle, and that the same file elsewhere documents as false during a known window. After plugin.json is bumped but before its manifest is frozen, RELEASE_TABLE is absent and META 4 reports SKIPPED, contradicting the stated invariant. FIX: describe META 4 as conditional during the version-bump window and say why that is acceptable, or make table presence an enforced prerequisite and delete the skip path."
+    },
+    {
+      "id": "R7-F2",
+      "severity": "low",
+      "location": "Makefile:509",
+      "evidence": "`git check-ref-format 'refs/tags/v1;printf PWNED'` returns status 1 -- the string contains an ASCII space and is not a legal ref. Legal command-bearing refs do exist: `refs/tags/v1;id` and `refs/tags/v$(id)` both return status 0. The same inaccurate assertion also appears in .claude/scripts/tests/verify-release-manifest.test.sh:282-285.",
+      "description": "The negative control's comment claims the exact value `v1;printf PWNED` is a legal Git tag and therefore demonstrates injection through an ordinary tag value. The injection class and the fix are REAL and the regression genuinely proves safety against a hostile make-variable override -- but the provenance sentence is false, so the proof is narrower than it claims. This is the defect family in miniature: a true finding carrying an unchecked claim about WHY it is true. FIX: use a genuinely legal command-bearing ref in the proof (strictly stronger), or describe the fixture honestly as an arbitrary hostile make-variable override rather than as a legal tag. Both sites must be corrected."
+    },
+    {
+      "id": "R7-F3",
+      "severity": "low",
+      "location": ".github/workflows/test.yml:26",
+      "evidence": "Lines 26-27 retain the statement that all jobs run on ubuntu-latest and that shellcheck is pre-installed on the runner image. Lines 118-143 now download and checksum-verify pinned ShellCheck v0.11.0 before invoking `make lint`.",
+      "description": "The workflow header is stale against what the workflow now does. A maintainer following it could remove or overlook the pinning step believing the runner-provided binary defines the tested version -- which would silently change what the advisory lint job measures. FIX: state that CI installs checksum-pinned ShellCheck 0.11.0, and re-check the rest of that header block against the dolt pinning and git-identity provisioning that also landed in this change set."
+    }
+  ],
+  "iterations": 7,
+  "stopped_by": "verdict"
+}

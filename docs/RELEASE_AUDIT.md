@@ -619,19 +619,30 @@ section-scoped greps below, re-run at authoring on 2026-07-30:
 
 | Status | Count | Scoped grep |
 | ------ | ----- | ----------- |
-| PROVEN | 13 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
-| PROVEN-WITH-CAVEAT | 3 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
-| NOT-PROVEN | 0 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
-| REMOVED | 0 | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
-| **Total** | **16** | `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '^\| UW[0-9]+ \|'` |
+| PROVEN | 13 | `awk '/^## v4\.1\.0 claims ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
+| PROVEN-WITH-CAVEAT | 3 | `awk '/^## v4\.1\.0 claims ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
+| NOT-PROVEN | 0 | `awk '/^## v4\.1\.0 claims ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
+| REMOVED | 0 | `awk '/^## v4\.1\.0 claims ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
+| **Total** | **16** | `awk '/^## v4\.1\.0 claims ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md \| grep -cE '^\| UW[0-9]+ \|'` |
 
-> **TO WHOEVER APPENDS THE NEXT LEDGER: these five ranges end at `,0` and are
-> correct ONLY while v4.1.0 is the last section.** Before you write a single
-> new row, change every `,0` above to `,/^## v<next>\.0 claims ledger/` and
-> re-run the five commands to confirm the counts are still 13 / 3 / 0 / 0 / 16.
-> This is the third ledger and the second time this correction has been owed;
-> v4.0.0 left no such instruction, which is precisely why it was missed until
-> the row it would have corrupted was already being drafted.
+> **RE-SCOPED 2026-09-18 (`claude-workflow-plugin-fkm.9`, D7), paid a third
+> time.** These five ranges used to end at `,0`; that was correct only while
+> v4.1.0 was the last section, and a fourth ledger (`v5.0.0`, below) now sits
+> under it. Re-pointed to `,/^## v5\.0\.0 claims ledger/` in the same commit
+> that adds the v5.0.0 rows — counts confirmed unchanged, still
+> 13 / 3 / 0 / 0 / 16 (re-run above). **TO WHOEVER APPENDS THE NEXT LEDGER:
+> these five ranges end at `,/^## v5\.0\.0 claims ledger/` and are correct
+> ONLY while v5.0.0 is the last claims-ledger section** — `## Standing
+> attestations` below carries no status cells and does not count. Before you
+> write a single new row, change every occurrence above to
+> `,/^## v<next>\.0 claims ledger/` and re-run the five commands to confirm
+> the counts are still 13 / 3 / 0 / 0 / 16. This is the fourth ledger and the
+> third time this exact correction has been paid: v3.5.0 -> v4.0.0, then
+> v4.0.0 -> v4.1.0 (`uvk`), and now v4.1.0 -> v5.0.0 (`fkm.9`). It is a
+> recurring obligation of appending a ledger, not a one-off fix, and skipping
+> it is not a smaller mistake for being the fourth chance to make it — see the
+> v5.0.0 section's own trap note below for what skipping it would have done
+> this time.
 
 **The v4.1 release rule (zero NOT-PROVEN rows among the new claims) is MET:
 0 NOT-PROVEN, 0 bare rows, every row citing an artifact executed green on
@@ -719,3 +730,662 @@ No row in this section asserts an adjective without an artifact pointer,
 every cited artifact was executed green in the authoring session, and every
 assertion count was read out of that session's run log rather than copied
 from the commit that introduced it.
+
+---
+
+## v5.0.0 claims ledger — design becomes a first-class, reviewed, continuously-enforced phase
+
+> **LEDGER CONVENTION, adopted 2026-09-29 and binding on every future ledger.**
+> Two rules, both paid for by this arc:
+>
+> 1. **Every row cites its mechanism's CODE LOCATION** — a file and line, or a
+>    named subcommand — not merely a task id, a commit subject, or a grep that
+>    returns non-zero. A citation that does not point at an implementation
+>    cannot be checked against one. `DP1`'s `grep -c` returning 152 and `DP5`'s
+>    grep landing on `cmd_shared_files` instead of `plan-batches` are both this
+>    failure: a command that passes while proving something adjacent.
+>
+> 2. **A row whose mechanism HAS NO IMPLEMENTATION is REMOVED, never
+>    NOT-PROVEN.** NOT-PROVEN means "no executed evidence *yet*" and invites a
+>    reader to wait for validation. If there is nothing to validate, waiting is
+>    the wrong response and the claim should not exist. **`DP17` was carried as
+>    NOT-PROVEN — awaiting a live Linear run — for the entire arc, when there
+>    was no Linear adapter to run against at all**: measured at F5, zero
+>    `DESIGN_STORE` references in `.claude/scripts/`, zero `linear` in any
+>    agent or rubric file, and no `docs/specs/` directory. The row was not
+>    awaiting evidence; it was describing a mechanism that had never been
+>    built. Ask "does the mechanism exist?" BEFORE assigning NOT-PROVEN, and
+>    if the answer is no, withdraw the claim.
+
+Compiled 2026-09-18 (`claude-workflow-plugin-fkm.9`, Phase D7) against branch
+`v5/design-phase` at HEAD `261e09e`, with this ledger's own edits and the
+three sibling documents (`HANDOFF.md`, `CHANGELOG.md`) the only uncommitted
+change on top of it. The v3.5.0/v4.0.0/v4.1.0 ledgers above are FROZEN and
+untouched apart from the five tally ranges re-scoped immediately above this
+section (counts unchanged, proof at the `RE-SCOPED` note in the v4.1.0
+tally). This section adds one row per NEW v5.0.0 claim, drawn from the
+directive's own release row (`docs/plans/v5-design-phase.md:185`) and the
+governing plan's D7 audit-row list (`docs/plans/v5-design-phase-plan.md:772-777`),
+under the same rule every earlier ledger ran on: **no adjective without an
+artifact.**
+
+**Updated 2026-09-19, still `claude-workflow-plugin-fkm.9`:** `DP18` was
+appended once LIVE-1 (the plan's own D7 "Live validations" deliverable,
+"LIVE-1 (upgrade + verify), RUN") actually ran; `DP15`'s and `DP16`'s
+evidence cells were each extended the same day to fold in what LIVE-1
+measured against their own claims. Neither row's verdict changed as a
+result — `DP15` stays PROVEN-WITH-CAVEAT on a narrower, corrected caveat,
+and `DP16` stays PROVEN-WITH-CAVEAT with its central finding (this
+checkout's `install.sh --verify` does not pass) restated, not softened.
+This section therefore carries two authorship dates, named at the row
+level rather than smoothed into one.
+
+Evidence discipline for this section, stated so a reader can check it, and
+narrower than the sections above it: **this ledger was compiled by the D7
+docs/audit piece, which owns `RELEASE_AUDIT.md`/`HANDOFF.md`/`CHANGELOG.md`
+exclusively and does not own the implementation it is auditing.** Every row
+below is backed by one of three evidence classes, and each row states which:
+(a) a command **executed live in this session** against the working tree —
+`grep`/`jq`/`ls`/`wc` structural checks and one live `bash install.sh
+--verify` run, all read-only and safe to run alongside concurrent sibling
+work on this same task; (b) the phase's own Beads task, closed with a
+`qa-approved` label and a change-set-bound approval record — a real
+artifact (an independent reviewer's sign-off), but not re-derived by this
+piece from the underlying diff; (c) the shipped source text itself, quoted
+directly (rubric criteria, script comments, agent frontmatter) rather than
+paraphrased from the plan. **This ledger does not re-run any phase's test
+suite** — `make test`/`make test-component` were out of scope for this piece
+by explicit instruction (concurrent sibling agents on this same task would
+race the bd writes a full run performs) — so a row's PROVEN status here
+means "the shipped mechanism exists and was independently reviewed," not
+"this session re-verified every assertion behind it." Where this piece's own
+live checks turned up something the plan asserts but the tree does not yet
+show, the row says so plainly rather than rounding up.
+
+| # | Claim (source) | Verification method | Evidence pointer | Status |
+| --- | --- | --- | --- | --- |
+| DP1 | **SCOPED 2026-09-30 — "Design is mandatory" is NO LONGER THE CLAIM, because v5.0.0 ships the design phase OPT-IN and the release text says so.** The narrowed, accurate claim: **`approve` refuses on an unsatisfied design UNLESS `--no-design '<reason>'` is given, and that reason is recorded in the approval comment.** **CORRECTED AGAIN 2026-09-30 (R1-F3): an earlier narrowing of this row asserted an asymmetry the code does NOT implement** — it said a design that was STARTED must be SATISFIED while only a design-less task takes the audited exit. `--no-design` is a GENERAL bypass of the entire design-satisfied refusal, not one scoped to `no_design_attempted`. Proof at `897b7fe`: `grep -n 'bypass_design=' .claude/scripts/qa-gate.sh` returns exactly two sites — `:5269` (the local initialiser) and `:5423` (inside the `--no-design)` arm) — so nothing else can set it; `cmd_approve`'s DESIGN-SATISFIED-REFUSAL block is `if [ "$bypass_design" = "1" ]; then <observation only>; else compute_design_satisfied; … fi`, and `compute_design_satisfied` is the sole producer of `DESIGN_SATISFIED_KEY`, so `design_not_satisfied` / `design_verdict_missing` / `design_verdict_stale` cannot fire under the flag. The shipped specs confirm the intent: `design-artifact.test.sh:1042` and `:1131` drive `approve --no-design` on tasks that DO carry `DESIGN-ARTIFACT` records and expect success. The one refusal `--no-design` cannot waive is `design_conflict_open`, which is a filed DESIGN-CONFLICT record rather than a design-review verdict. **So enforcement is: refuse by default, waivable by an audited flag, with a filed design conflict as the only unwaivable case.** That is weaker than "mandatory" and weaker than the asymmetry previously claimed here, and stating it correctly is the point of this row. `approve` refuses with `no_design_attempted` unless `--no-design '<reason>'` is given; `design-gate-precheck` deliberately exits 0 on a design-less task, its own words being that "the overwhelming majority of tasks never have a design phase". An earlier version of this row claimed implementation orchestration "cannot begin" without `design-satisfied` and a bound `design_artifact` reference (directive `:185` "design is mandatory"; plan D2 "Gate precondition") | Structural: the precondition is implemented as a gate/relay condition, not a new hook (per correction 5, enforced at `approve`, not `enter`); D4's task-per-unit conformance check depends on it existing | `grep -c 'design.satisfied\|design_artifact' .claude/scripts/qa-gate.sh` returns non-zero (checked live, 2026-09-18); Phase D0-D4 (`fkm.2`-`fkm.6`) all `status=closed labels=[...,qa-approved]` in Beads, each a change-set-bound independent-review artifact | PROVEN |
+| DP2 | Design is independently reviewed: `design_reviewer` is read-only (no Write/Edit/Bash) and mechanically forbidden from sharing the designer's identity. **NARROWED 2026-09-29: the conjunct "a collapse is reported, never silently accepted" is WITHDRAWN — it is FALSE on a Codex-present install** (`claude-workflow-plugin-yvpe`; see the evidence and the withdrawal note at the end of this row). What remains claimed is the read-only tool surface and the identity-string refusal, both of which hold unconditionally. (directive `:185` "independently reviewed"; D0 table; D2 "identity-collapse refusal") | Direct read of shipped agent frontmatter, PLUS the resolver's own CODE (`model-select.sh:1373-1376`) — **corrected 2026-09-29: this row originally cited only the resolver's documentation COMMENT, which is exactly why it could not detect that comment being wrong. Per the ledger convention adopted in this same change set, a row must cite its mechanism's code location.** | `.claude/agents/design-reviewer.md:4` — `tools: Read, Grep, Glob, LS` (no Write, no Bash); `.claude/agents/designer.md:4` grants `Write` (needed to produce the artifact) but no `Edit`/`MultiEdit`/`Bash`. `.claude/model-roles`, "IDENTITY COLLAPSE" section, quoted verbatim: "on a stock install WITHOUT Codex they resolve to the same model and the design would be reviewed by its own identity. That is reported, never blocked: the resolver sets `identity_collapse: true`... warns at SessionStart, and the statusline shows `!id`." That block documented TWO clearances (install Codex; or pin `design_reviewer` to a distinct `<family>-class`) — **and one of them was false; see the withdrawal below. Only the `<family>-class` pin works.** **WITHDRAWAL, 2026-09-29 — "the collapse is never silent" WAS FALSE AND IS WITHDRAWN.** This row previously read "the mechanism is real and the collapse is never silent". Measured live: `designer=claude-fable-5`, `design_reviewer=claude-fable-5` — the same model — with `design_reviewer_lane=codex`, `"identity_collapse": false`, and `.claude/.qa-tracking/design-family-collapse` **absent**. The collapse was silently accepted. `model-select.sh:1373-1376` raises the flag only when the picks are identical **AND** `dlane == claude`, so moving the lane off `claude` clears it without changing which model reviews the design — and nothing drives design review through Codex (`grep -c -i design .claude/scripts/codex-review.sh` → 0; `design-reviewer.md:39` states it is "the only wired path… you have no tool that could read the lane config"). Because `design_reviewer_lane` is not set in `.claude/model-roles` at all — only a commented example — it defaults to `auto`, so **this is the DEFAULT on any Codex-present host, not an operator opt-in**. Filed as `claude-workflow-plugin-yvpe`. **THIS ROW'S OWN VERIFICATION METHOD IS WHY IT WAS MISSED, and it is the case the ledger convention adopted in this same change set was written for:** the method is "Direct read of shipped agent frontmatter and the resolver's own documentation comment" — it quotes `.claude/model-roles` verbatim and NEVER reads `model-select.sh:1374-1376`, the condition that actually decides. A row that cites documentation instead of its mechanism's code location cannot detect the documentation being wrong. CAVEAT, on the narrowed claim: self-review of designs is the DEFAULT on EVERY install today — a Codex-absent one warns about it, a Codex-present one does not — and the ONE real clearance is pinning `design_reviewer` to a distinct `<family>-class`. "Independently reviewed" is a claim about the structural separation (separate spawn, fresh context, read-only tools, distinct identity string), NOT about model-family independence, which no install has by default. | PROVEN-WITH-CAVEAT |
+| DP3 | Unit sizing is enforced pre-implementation: every unit must be independently buildable/verifiable and "small enough for one coherent change," with a declared file set, dependencies, and (for `implementer_class: high`) a stated reason (directive `:185` "unit sizing is enforced pre-implementation"; D1 schema; D2 rubric DS2/DS3) | Direct read of the shipped design rubric | `.claude/rubrics/design.md` — `### DS2. The decomposition is complete and disjoint.` ("Evidence that satisfies it: a one-line trace from each acceptance criterion to the unit that owns it, plus a pairwise check of every unit's `files[]` against every other unit's."); `### DS3. Every unit with a dependent declares its interface; verification is a real command.` Both read in full 2026-09-18; `fkm.3` (D1, schema + edit-scoping) and `fkm.4` (D2, rubric) both `status=closed labels=[...,qa-approved]`. **CORRECTED 2026-09-29 by independent re-verification — PROVEN → PROVEN-WITH-CAVEAT. The cited command passes and does not prove the "small enough for one coherent change" half.** DS2 and DS3 are present verbatim as quoted, but neither checks SIZE, and no criterion in the rubric does: `grep -n -i 'size\|sizing\|small\|coherent change\|too large\|granular' .claude/rubrics/design.md` returns **zero hits, exit 1**, across DS1–DS8. `review-check.sh` has no size check either (`grep -n -i 'too_large\|unit_size\|size_limit\|max_files\|small enough'` → no hits). The phrase exists in exactly one place, `.claude/agents/designer.md:165`, under "The controlling standard" — and it is absent from the designer's own four-item pre-declaration checklist immediately below it (`:170-177`: falsifiable criteria; files list; runnable verification; no undeclared file sharing). The reviewer cannot score it either: `design-reviewer.md:52` states it reads `.claude/rubrics/design.md` and that there is "One rubric, one reader, always applied whole" — and that rubric contains no sizing criterion. CAVEAT, precisely scoped: the REST of this claim is genuinely enforced — `escalation_reason`-whenever-`implementer_class: high` is mechanical (`review-check.sh:1467`, named as a precondition at `design.md:10`), and the declared file set and non-empty `verification` are schema-enforced, with disjointness covered by DS2. Only "small enough to be implemented and verified as one coherent change" is an ASPIRATION IN PROSE with no check anywhere. | PROVEN-WITH-CAVEAT |
+| DP4 | Decomposition conformance is deterministic — no LLM, no review round: every task maps to a design unit, no orphans, dependency edges match the artifact, the bound hash matches (directive `:185`; D4 "Conformance check") | Structural: located the subcommand and its call sites directly | `grep -n 'design-conform' .claude/scripts/qa-gate.sh` returns hits at three sites (a dispatcher entry plus two internal consultation points), confirmed live 2026-09-18; the accountability table (`docs/plans/v5-design-phase.md:76`) names this row's owner as "Deterministic conformance check (D4) — no review round," matching what the code contains: a `case`-dispatched subcommand, not an agent spawn. `fkm.6` (D4) `status=closed labels=[...,qa-approved]`. **SCOPED TO F4's EVIDENCE, 2026-09-30 — PROVEN → PROVEN-WITH-CAVEAT. THE MECHANISM IS DETERMINISTIC; ITS RESULT IN A TARGET PROJECT IS NOT ESTABLISHED, AND BOTH REAL-PROJECT OBSERVATIONS OF IT WERE VACUOUS.** In the F4 validation run against a real product repository, `design-conform` returned `ok:true` with `"conforms: … touched no files outside its declared set"` while naming, as `unbuilt_files`, the exact three files that had just been written and green-tested: `agent/common/config.py`, `agent/common/dolt_pool.py`, `tests/agent/common/test_dolt_pool_ensure_bounded.py`. It conformed because it saw NOTHING — the change set it read was the empty-set hash `e3b0c442…855`. That happened twice, by two independent routes: first on a path whose ancestor directory name collided with the shared denylist (`claude-workflow-plugin-pqoj`), then again on a denylist-clean path via a cross-session gate-baseline swallow (`claude-workflow-plugin-q5l6`). **CAVEAT, precisely scoped:** the determinism claim holds — this is a `case`-dispatched subcommand with no LLM and no review round, and its unit tests pass. What is NOT established is that it produces a meaningful answer on a real target, because its INPUT can be empty while it reports success. v5.0.0 mitigates the input problem at `approve` (`completion_files_total_miss` now refuses a total miss) but does not fix it, and `design-conform` itself gained no such guard. **No release text may cite this row as evidence that `design-conform` works in a target project. The honest statement is that it has never been observed producing a MEANINGFUL answer, in either direction — it was observed twice, and both times it was reading an empty change set, so neither observation tested it.** *Flip:* land the task-scoped baseline (v5.0.1) and re-run the flagship path end to end in a real target with an approval that binds real work. | PROVEN-WITH-CAVEAT |
+| DP5 | **Parallel batches never share FILES. NARROWED 2026-09-29 to file-set intersection only — the `impact_of` half does not ship in v5.0.0.** Two units may run concurrently only when their declared file sets do not intersect, with the graph half's absence named in the readout (`graph_intersection_computed:false`) rather than silent (directive `:185`; D4 "Parallel batching, computed not judged"). **DEFERRAL: `claude-workflow-plugin-l7gd`** (open, created 2026-08-22) is the impact half. **ITS PRECONDITION: `claude-workflow-plugin-kk9y`** — on this repo's shell-heavy surface `impact_of(file=…)` commonly returns `file_dependents:[]` even for a file another script directly sources, because the indexer's bash grammar resolves a call edge only for a bare command word, not `"$SCRIPT_DIR/other.sh" --flag`. So implementing `l7gd` alone would add a conjunct that is uninformative here; `kk9y` is what makes it mean anything. **TRIGGER: implement `kk9y`, then `l7gd`, then re-verdict this row against a computed impact set.** | Structural: `epic-gate.sh shared-files` exists and is documented as intersection computation; cross-checked against `dxz`'s own filed residual on this repo's specific graph behaviour | `grep -n 'shared-files\|shared_files' .claude/scripts/epic-gate.sh` returns the subcommand plus its help text ("Compute file-intersection with in-progress siblings"), confirmed live 2026-09-18. `fkm.6` (D4a/D4b, commits `6d0011f`/`ed45abe`) `status=closed labels=[...,qa-approved]`, titled "a batching plan that cannot compute its answer refuses instead of reporting one" — i.e. the no-silent-degradation half is the shipped headline, not an afterthought. CAVEAT: `dxz`'s own completion record (closed, P6) measured that on THIS repo's dominant shell idiom, `impact_of(file=...)` commonly returns `file_dependents:[]` even for a file another script directly `source`s, because the indexer's bash grammar only resolves a call edge when the invoked command is a bare word, not `"$SCRIPT_DIR/other.sh" --flag`. On a shell-heavy repo, near-every pair of units can therefore compute an empty (non-intersecting) `impact_of` set whether or not they actually touch related code — batches would not report degradation (the graph IS present and healthy), but the impact half of the intersection check would be silently uninformative. `dxz`'s own record names this "worth flagging now" for D4 and assigns it to `kk9y`, unresolved as of this ledger. **CORRECTED 2026-09-29 by independent re-verification of all 18 rows (see the Re-verification addendum at the foot of this section) — this row was PROVEN-WITH-CAVEAT and is now NOT-PROVEN, and the caveat above describes a residual that CANNOT OCCUR.** The claim is a CONJUNCTION and only the first conjunct ships. `graph_intersection_computed` is the literal `false` at every emission site in `epic-gate.sh` (1014, 1093, 1394, 1412, 1423, 1430, header 564), with no `true` path; `:1082` goes further and VALIDATES the field is false (`and (.graph_intersection_computed == false)`), so it is structurally pinned rather than merely defaulted. `epic-gate.sh` never invokes the code-graph server. The script's own shipped help (`:95-97`) states "the `impact_of` half is deferred (claude-workflow-plugin-l7gd); `graph_intersection_computed` is always false this release", and its own final observation (`:2326`) says "file-set intersection only (impact_of half deferred)". `bd show claude-workflow-plugin-l7gd` → `status=open`, created **2026-08-22 — 27 days before this ledger was compiled**. Because nothing computes an impact set at all, the `file_dependents:[]` residual the caveat warns about is unreachable; the real residual is larger and was unstated. Separately, `graph_degradation_reason` is the unconditional literal `code_graph_absent` while the graph on this tree is present and healthy (`workflow-doctor`: `PASS mcp_code_graph  serverInfo.name=code-graph-mcp, tools/list returned exactly 7 tool(s)`), so the readout names a degradation with a false cause. THE CODE IS HONEST — every disclosure above is in the shipped artifact; the overclaim was entirely at this ledger layer. The original evidence grep compounded it by targeting the wrong subcommand: `shared-files` is `cmd_shared_files` (`:456`), the B2 helper intersecting against in-progress siblings, not the `plan-batches` mechanism (`~:512`) the claim is about — it passed, and proved something adjacent. **RESOLVED 2026-09-29 BY PROVE-OR-REMOVE REWRITE, operator-ruled (`claude-workflow-plugin-6ye1`).** The conjunction was withdrawn and the claim narrowed to what actually ships — file-set intersection only — rather than left asserting a mechanism that does not exist. The narrowed claim is PROVEN against the code: `bash .claude/scripts/tests/plan-batches.test.sh` → **319 passed / 0 failed** at `2b58370`, and `graph_intersection_computed:false` is emitted on every envelope so the absence is named, never silent. **THE NARROWING IS CARRIED ON EVERY SURFACE THAT DESCRIBES BATCHING** — this row, `CHANGELOG.md` and `README.md`, each verifiable by grep for `l7gd` / `graph_intersection_computed` — so no shipped surface claims the impact half exists. **BINDING ON THE RELEASE ANNOUNCEMENT TOO**, which is drafted at hand-back and must carry it; stated here as a requirement on that draft rather than as a completed fact, because an earlier version of this sentence asserted the CHANGELOG already carried it when it did not — caught as R1-F1 in the `claude-workflow-plugin-auic` review, and exactly the shape this ledger exists to catch. **CAVEAT, and it is the honest one rather than the one this row used to carry: FILE-DISJOINT UNITS CAN STILL CONFLICT SEMANTICALLY, AND NO AUTOMATIC CONTROL CATCHES THAT.** Two units may touch entirely disjoint files and still break each other's behaviour; file-set disjointness is not semantic independence. Measured, because an earlier draft of this caveat claimed a compensating control that does not exist: `.claude/scripts/epic-gate.sh` contains **zero** occurrences of `worktree`, **none of the `plan-batches` envelope's fourteen keys is a worktree field** (`sed -n '1011,1017p' .claude/scripts/epic-gate.sh | grep -oE '[a-z_]+:' | wc -l` → 14; an earlier draft of this sentence listed four of them as though that were the whole envelope), and `plan-batches.test.sh` never mentions one — while `docs/plans/v5-design-phase.md:45` and `:158` require "each member getting its own worktree per the existing isolation rule" and `:77` assigns worktree allocation to the **orchestrator**, a prompt. **CORRECTED 2026-09-30 — an earlier draft of this sentence was wrong in BOTH directions and is superseded here.** It implied nothing prescribes isolation: in fact `.claude/agents/orchestrator.md:417-434` (spec 0.6) prescribes it explicitly and in detail, instructing the orchestrator to pass `isolation: "worktree"` on every concurrently-spawned `Task` call, with worked examples and `.worktreeinclude` support, and `docs/AGENTS.md:1172-1206` documents the same. What the earlier draft got RIGHT is that nothing ENFORCES it. The platform mechanism is a **per-call `Task` parameter** (`docs/AGENTS.md:1177`, citing the platform docs) with no agent-frontmatter equivalent, so it is necessarily passed per spawn and therefore necessarily prompt-driven. **The load-bearing evidence is a PAIR of counts, not one** (a count of occurrences in a prompt file cannot by itself show that no mechanism enforces the thing; an earlier draft of this cell cited only the prompt-side count, which does not carry the conclusion): `grep -c worktree .claude/scripts/epic-gate.sh` → **0** — the scheduler that computes parallel batches never mentions a worktree — against `grep -c 'isolation: "worktree"' .claude/agents/orchestrator.md` → **4**. Prescribed in the prompt, absent from the mechanism. Nothing verifies or records that it was passed. **It is also inherited identically from v4.1.0**: `git show v4.1.0:.claude/agents/orchestrator.md | grep -c 'isolation: "worktree"'` → 4, same as HEAD. So isolation is prescribed but unverified — an agent judgement backed by a documented instruction, not a mechanism, and not a v5 regression. **Either branch yields no automatic control:** if members ARE isolated, a later unit's full-suite `green-check --phase after` cannot see earlier units' changes until integration, and the integration sweep is explicitly MANUAL (`epic-gate.sh:6` "a cross-cutting integration check passes"; `:19` "requiring a manual integration sweep"; `:500` "integration check recommended"); if members are NOT isolated, that is the contamination failure recorded as the FIRST entry in this repo's lessons ledger (`LESSONS.md:103`, `e0d.7`, 2026-06-11 — "Parallel agents in the same working tree contaminate each other's branches"). **Operators running parallel batches must perform the integration sweep themselves; the gate does not do it for them.** | PROVEN-WITH-CAVEAT |
+| DP6 | Specs are injected verbatim at spawn: each implementer's packet includes its unit's spec, criterion texts, and file set read from the mirrored artifact at spawn time via SubagentStart, with the injected hash recorded for later-mismatch visibility (directive `:185`; D5 "Spec injection at spawn") | Phase task record; commit inspected for subject/scope | `claude-workflow-plugin-fkm.7` (D5), commit `0dfb82a` "an implementer is handed its unit's spec at spawn, and the hash it was handed is recorded where a later mismatch can be seen" — commit subject read directly from `git log`, 2026-09-18; task `status=closed labels=[...,qa-approved]`. | PROVEN |
+| DP7 | `design_conflict` routes to amendment, never improvisation: when a unit's acceptance criteria cannot be satisfied as written, the implementer stops with evidence rather than reinterpreting, and the blocker routes through the D2 review loop (directive `:185`; D5 "design_conflict blocker") | Structural + self-referential: this is the same mechanism `devops.md`'s own "When the design is wrong" section operationalizes, which this piece's own spawn prompt carries verbatim | `fkm.7` (D5) `status=closed labels=[...,qa-approved]`; `fkm.4` (D2) notes, "Amendments run through this same loop" (`docs/plans/v5-design-phase.md:139`), quoted directly. The devops agent prompt this task ran under (`.claude/agents/devops.md`, section "When the design is wrong") instructs exactly this stop-and-report shape, checked live 2026-09-18 as the file this session's own spawn was given. | PROVEN |
+| DP8 | Implementation is green-to-green per unit: suite green recorded before and after, `unit_id`/`design_hash`/`green_before`/`green_after` on the completion contract, refused when malformed at the point completion payloads are recorded (directive `:185`; D5 "Green-to-green per unit") | Structural: located `cmd_green_check` directly; cross-checked against the operator-facing doc this piece's own spawn prompt carries | `grep -n 'cmd_green_check()' .claude/scripts/qa-gate.sh` — defined at one site, confirmed live 2026-09-18. Commits `0c3106b` "a green claim now comes from a command that ran, and every field it produces is refused when malformed" and `6de6c9e` "a unit's criteria must be covered by tests that exist, and the green claim now has a reader" (`fkm.7`, D5). `devops.md`'s own "Green-to-green per unit (v5 D5)" section documents the exact `--phase before`/`--phase after` protocol this piece's spawn prompt required it to follow, had it been unit-bound. | PROVEN |
+| DP9 | The three deliverables (design, tests, code) are verified coherent: a rollup blocks approval while any acceptance criterion is untested, any implemented unit is unmapped, any touched file falls outside every declared unit set, or the bound artifact hash has moved (directive `:185`; D6) | Phase task record, read in full — the most heavily reviewed phase in the arc | `claude-workflow-plugin-fkm.8` (D6), commit `b372d6d`, `status=closed labels=[...,qa-approved]`. Two QA rounds on record: round 1 (`artifact_hash a7bbb3e2`) found 1 CRITICAL + 3 HIGH, all fixed (reviewer-identity forgeability; a spec exceeding its time cap, split; the union-diff scope bug, `base...HEAD` replaced with HEAD-vs-working-tree; a duplicate-hash deadlock closed); round 2 (`artifact_hash 051bcf8e`) re-verified all four independently by driving the shipped code rather than re-reading claims, plus fixed one HIGH (orchestrator.md 5c section left describing the pre-fix workflow one round after the code changed). Four issue kinds, each with a negative control: `incomplete`, `undeclared_scope`, `hash_divergence`, `tracker_diff_mismatch`. Test files on record from that closure: `design-rollup.test.sh` 73/73, `design-coherence.test.sh` 55/55, `design-unit-align.test.sh` 64/64, `design-review-record.test.sh` 203/203, `design-rollup-incoherent.test.sh` 13/13. **SCOPED TO F4's EVIDENCE, 2026-09-30 — PROVEN → PROVEN-WITH-CAVEAT. THE ROLLUP HAS NEVER RUN ON A REAL TARGET, IN EITHER DIRECTION, AND OVER AN EMPTY CHANGE SET ONE DIRECTION OF THE SCOPE CONJUNCT — UNDER-COVERAGE — GOES UNCHECKED.** This row was left PROVEN while the claim it backs — the coherence rollup — was described elsewhere in this release as untrustworthy, because that description was attached to `DP4` (`design-conform`) on the since-disproved theory that the rollup inherited `design-conform`'s answer. It does not; it fails, when it fails, by its own route. That makes this the backing row and it must carry the caveat. **NOT OBSERVED, AND THIS IS AN INFERENCE FROM THE CODE, NOT A MEASUREMENT:** `compute_design_coherence` returns `APPLICABLE=false`/`OK=true` without running any check when the task is not itself a satisfied design task (`qa-gate.sh:15694` — "the ordinary case for a v5 task-per-unit CHILD"). F4's only approval was on `target-23z.1`, whose own approval comment records it as a task-per-unit CHILD; the governing parent `target-23z` is `status=open` with zero QA-GATE comments. So the rollup did not run in F4 — not because it was bypassed (the coherence axis has no bypass, `:7328-7339`) but because it was not applicable. **PRECISE SCOPE OF THE DEFECT, narrowed TWICE and this is the second narrowing:** the scope conjunct is implemented by TWO arms, not one, and only one of them is tracker-fed. The LIVE arm (`under_coverage = $diff - $roll`, `:16194`, fed by the tracker at `:16119`) asks "was a file actually touched that no unit covers"; over an empty change set that difference is empty, so this arm is dead and the under-coverage direction goes unchecked. The DURABLE arm (`undeclared_scope`, `scope_drift = $a - $d` at `:16066`) asks "does some unit's PERSISTED completion contract claim a file no unit declares" — `$a` is built at `:16019-16048` from `latest_implementer_completion_record` → `completion_payload_path_for` → the persisted payload's `.files_changed`, digest-checked against the recorded `payload_sha`, and `$d` from the design artifact. Neither input is the tracker, so **this arm still fires over an empty change set** (the function's own header states it at `:15627-15633`: "a file some resolved unit's PERSISTED completion contract claims to have touched is not declared by ANY unit — the UNION check"). So the accurate statement is that an empty change set disables the UNDER-COVERAGE DIRECTION of scope, not the scope check as a whole. An earlier draft of this cell said the conjunct "cannot fire and the rollup reports coherent without having checked scope", which OVERSTATED the defect — recorded because a ledger that only corrects overclaims in the flattering direction is not being audited. The other three conjuncts — untested criterion, unmapped unit, moved artifact hash — read durable, digest-verified records and are unaffected; the rollup-minus-diff direction is explicitly "informational, not gated" (`:16241`). **The unit tests above all pass and are not in question; what is unestablished is the behaviour on a real target, which has never been exercised.** *Flip:* run the governing design task itself through approve on a real target, with a change set that binds real work, and observe the rollup gating in both directions. | PROVEN-WITH-CAVEAT |
+| DP10 | Role classes resolve per family with fallbacks: five classes (`designer`, `design_reviewer`, `orchestrator`, `implementer`, `reviewer`) replace three; `<family>-class` parses any `claude-<family>-*` from one rule (`^[a-z][a-z0-9]*-class$`) with no per-family enum to extend, auto-adopting a brand-new family on day zero (directive `:185` "role classes resolve per family with fallbacks and per-unit escalation"; D0) | Direct read of the shipped config file, verbatim, RE-CHECKED after a sibling piece landed mid-task | `.claude/model-roles`, read in full 2026-09-18 (twice — once before, once after `claude-workflow-plugin-fkm.10` landed its second row). Quoted: "`<family>-class` the newest `claude-<family>-*` model in the listing. ... parse from ONE rule (`^[a-z][a-z0-9]*-class$`) — there is no per-family enum to extend. Selection is deliberately NOT gated on the family appearing in `.claude/model-ranking`, so a brand-new family is usable on day zero." Roles enumerated in the same file's header comment: designer, design_reviewer, orchestrator, implementer, reviewer. `bash .claude/scripts/workflow-model-apply.sh --print-role-map` (run live 2026-09-18, both before and after) returns exactly these 5 roles across the 9 agents (`designer`, `design-reviewer` 1:1; `implementer` -> backend/frontend/devops; `reviewer` -> qa/grader/judge) — unchanged by the landing, confirming it is a strategy-value change, not a role-count change. Live state, checked directly: `orchestrator=opus-class`, `reviewer=opus-class`, `implementer=sonnet-class`, `designer=top`, `design_reviewer=top` — every row now matches the D0 table on its own terms (design lanes via correction 7, which licenses `top` there because Fable already IS the top family) or exceeds it in the previously-deviant direction now closed. `claude-workflow-plugin-fkm.10` — the task tracking exactly this deviation — closed 2026-09-18 with close_reason "Both deviation rows landed... matching the directive's own D0 table," read directly from the task record, not inferred from the file alone. `fkm.2` (D0) and `fkm.10` both `status=closed`. | PROVEN |
+| DP11 | Per-unit escalation is a declared, audited, reversible pin change (PROVEN); whether the runtime honours a mid-session frontmatter `model:` change is NOT-PROVEN, and no test, doc or release note claims an escalated unit ran on the escalated model (directive plan D0 "Per-unit escalation"; correction 13; Step-3 audit-row list) | `model-select.sh escalate <task-id>` / `restore` located directly; the NOT-PROVEN half is the shipped file's own disclaimer, quoted verbatim, not this piece's inference | `grep -n 'cmd_escalate()\|cmd_restore()' .claude/scripts/model-select.sh` — both defined, dispatched from `escalate)`/`restore)` case arms, confirmed live 2026-09-18. `.claude/model-roles`, quoted verbatim: "Escalation is a DECLARED, AUDITED, REVERSIBLE pin change and nothing more. Whether the runtime honours a mid-session frontmatter `model:` change is not established anywhere in this tree and is not verifiable offline, so no test, doc or release note here claims that an escalated unit RAN on the escalated model." Experiment that would close the NOT-PROVEN half, named rather than left open-ended: escalate a real unit, have its implementer report its own `model`/`pin` split at F7 completion-record time (the same split this piece's own contract carries — `docs/AGENTS.md` "Specialist Completion Contract (F7)"), and compare the runtime self-report against the pinned frontmatter across a mid-session escalation boundary. CAVEAT: this row's own claim is a conjunction of a PROVEN half and a disclosed NOT-PROVEN half; reported as one row because the directive states it as one claim. | PROVEN-WITH-CAVEAT |
+| DP12 | Design-reviewer lane priority is Sol via Codex first, Claude fallback, resolved by a single bounded probe rather than a retry loop (directive plan correction 3 "Sol via Codex first, Claude fallback"; D0 "reviewer" row; Step-3 audit-row list) | Direct read of the detection script plus a live structural re-check of the isolation guarantee correction 10 requires | `.claude/scripts/codex-detect.sh` header, quoted: "a truthful, bounded, fail-open probe that ALWAYS resolves to a lane," `method` one of `handshake\|config-absent\|handshake-failed\|timeout\|no-codex-tool` — one handshake attempt per resolution, not a retry loop. `.claude/model-roles`: `reviewer_lane=auto` default, "let the workflow detect a review lane via `.claude/scripts/codex-detect.sh` — Sol via Codex when present, Claude otherwise." Correction 10 ("Sol-first must never touch the three gate scripts") re-verified LIVE by this piece rather than by reading the test file: `grep -icE 'codex\|reviewer[._]lane' .claude/scripts/qa-gate.sh .claude/scripts/verify-before-stop.sh .claude/scripts/review-check.sh` (run 2026-09-18) returns `0` for all three. The dedicated L1 guard for this, `.claude/scripts/tests/reviewer-lane-structural.test.sh` (244 lines), exists on disk; its own header states it now runs on every `make test`, superseding an L2-only check that QA measured surviving four green passes at the L2 tier's ~65-minute cadence. | PROVEN |
+| DP13 | The session-model guard warns and never blocks: on a mismatch between the live session model and the resolved `orchestrator`-class model, it prints the fix and sets a statusline flag, and never aborts the session (directive plan D0 "The root session is the orchestrator seat... warn loudly... Never block") | Direct read of the shipped warning text | `.claude/scripts/session-start.sh:836`, quoted: "Warning 8: the live session model is not the resolved orchestrator model." Rendered warning body (`:852`) ends "Never blocking. Fix: `/model $SS_DRIFT_EXPECTED` (or relaunch via: `make session`)" — read live 2026-09-18. `.claude/scripts/statusline.sh:44` carries `SESSION_DRIFT_FILE`, the flag this warning sets. | PROVEN |
+| DP14 | The agent census is bumped, not merely one file updated: multiple independent counts of the roster all agree at 9 (directive plan D0 "Nine agents with role-class pins"; Step-3 audit-row list "the census is gone or bumped (three measured counts equal 9)") | Three independent counting methods, all run live in this session, none copied from a doc | (1) `jq '.agents\|length' .claude-plugin/plugin.json` -> `9`. (2) `ls .claude/agents/*.md \| wc -l` -> `9`. (3) `bash install.sh --verify`'s own `agents` check, executed live: `PASS agents  9 declared agent(s), all present with name/description/tools/model`. All three run 2026-09-18 against the same working tree; the two new names in all three counts are `designer` and `design-reviewer`. | PROVEN |
+| DP15 | Upgrade preserves operator files: `.claude/model-roles` is manifest class `operator`, so an install whose copy was edited receives the v5 defaults as a `.claude/model-roles.new` sidecar rather than a silent overwrite (directive `:185` "upgrade... extend the upgrade machinery to v4->v5"; plan D7 "Upgrade") | The general mechanism is pre-existing and already PROVEN in the frozen v4.1.0 ledger (`UW2`/`UW4`); this row checks whether it was re-verified specifically for the v4.1.0 -> v5.0.0 transition — which LIVE-1 (plan D7 "Live validations", run 2026-09-19) supplies: a real v4.1.0-installed scratch target, upgraded in place with THIS checkout's installer, is exactly the transition this row asks about | The general preserve-custom/`.new`-sidecar mechanism is unchanged since v4.1.0 (`UW2`, this file, above) and `.claude/model-roles` documents its own classification in its own header, quoted: "this file is manifest class `operator`, so an install whose copy was EDITED receives the new defaults as a `.claude/model-roles.new` sidecar and keeps running the old key set silently. `missing_keys` is what makes that visible instead of silent." `manifests/v5.0.0.sha256` now EXISTS: `ls manifests/` (re-run live 2026-09-19) returns `v3.5.0.sha256`, `v4.1.0.sha256` and `v5.0.0.sha256` — three files, not two — and `git status --porcelain -- manifests/` shows it `??` (untracked: present on disk, not yet part of HEAD `261e09e`). That closes the existence half of this row's original caveat. LIVE-1 (`git archive v4.1.0` into its own source directory, installed fresh into a scratch target; `.claude/model-roles` hand-edited, `implementer=opus-class` -> `implementer=top`; `.claude/agents/qa.md` left byte-stock as the control; THIS checkout's `install.sh --upgrade <target>`, exit 0 — full procedure and logs in `DP18` below) supplies the live behavioural half this row actually asks about: exactly ONE sidecar was written, `.claude/model-roles.new`, confirmed two ways that agree — the upgrade's own printed list and an independent `find <target> -name '*.new'` (re-run live 2026-09-19, one hit) — and the operator's edit survived inside the preserved original (`implementer=top` still on disk, re-confirmed live). The stock control received NO sidecar and its hash moved cleanly to the shipped value (verdict `replace-stock`), the documented correct outcome for a file nobody customized. Both new v5 agents were absent before (the v4.1.0 install log lists exactly 7 `.claude/agents/*.md`, neither new name among them) and present after (9, matching `DP14`'s own independent count). **CAVEAT, narrowed rather than closed, after reading `install.sh:1500-1531` directly:** existing does not mean this transition READ it. `install.sh` resolves an `--upgrade` run's OLD table from two sources in a fixed preference order — the target's own `.claude/install-manifest` when present and parsing (source 1, and what every v4.1.0-installed target carries, since install-manifest has shipped on every install since v4.1), falling back to the frozen `manifests/v<release>.sha256` (source 2) only for a genuine v3.x target or a target whose install-manifest is missing or unreadable. LIVE-1's own classification line, read directly from its upgrade log, confirms source 1 fired: "Classifying the installed tree against .claude/install-manifest (v4.1.0)..." — so `manifests/v5.0.0.sha256` was never a candidate in this run, even in principle, and the `UW1`-style regenerate-and-`cmp` byte comparison against a tagged v5.0.0 checkout — the thing that would actually exercise the frozen table rather than the shared install-manifest classify path every realistic v4.1.0 upgrade takes — has NOT been performed against it, by this piece, by LIVE-1, or by anyone on record as of this ledger. That half stays open, independent of the file now existing. Separately, per LIVE-1's own disclosed provenance: it ran against the WORKING TREE ("Using local plugin source: /Users/edk0/Desktop/projects/claude-workflow-plugin", its own install log), and `.claude/model-roles` is one of the files this working tree modifies relative to HEAD, so `.claude/model-roles.new`'s CONTENT matches the working-tree copy exactly (`shasum -a 256` on both, re-run live 2026-09-19: `7a9a1c21...` for both) rather than HEAD `261e09e`'s committed copy (`git show 261e09e:.claude/model-roles \| shasum -a 256`, re-run live 2026-09-19: `f666919e...`, confirmed different). `install.sh` itself and `.claude/agents/qa.md` are unmodified in this working tree (`git status --porcelain` on both, checked live: clean), so the MECHANISM measurement — preserve-custom fires correctly, stock replaces cleanly — is valid at HEAD `261e09e` exactly; only this one input file's specific bytes are not. | PROVEN-WITH-CAVEAT |
+| DP16 | `install.sh --verify` exits 0, all checks passing, with the MCP tool counts exactly 21 and 7 (plan "Whole-release gates": `bash install.sh --verify  # exit 0, 11/11`; Step-3 audit-row list "`--verify` exits 0 at 11/11 and exactly 21/7") | LIVE EXECUTION, this session (`install.sh --verify` installs nothing and modifies no source file, configuration file, agent prompt, hook script, skill, manifest or gate artifact — confirmed by reading `install.sh:376-411`, whose `exec` of the target's `workflow-doctor.sh` at `:410` passes no `--skip` flags; that doctor's own header names the one disclosed exception, `beads`, which runs `bd doctor` against the REAL target: opening the database in WAL mode creates/rewrites `.beads/beads.db-shm` and `.beads/beads.db-wal`, and a checkpoint can rewrite `.beads/beads.db` itself — only a run with `--skip beads` provably touches nothing), INDEPENDENTLY RE-REPRODUCED by the coordinator on the same tree before this row's evidence was finalised | Run 2026-09-18, `bash install.sh --verify` against this checkout: `mcp_bd` — "serverInfo.name=bd-mcp, tools/list returned exactly 21 tool(s)" — PASS. `mcp_code_graph` — "serverInfo.name=code-graph-mcp, tools/list returned exactly 7 tool(s)" — PASS. **21/7 confirmed exactly, live, reproduced twice.** The check-count claim does not hold as stated: `DOCTOR_CHECK_NAMES` in `.claude/scripts/workflow-doctor.sh` (checked live) now lists **12** names, not 11 — `beads_ledger` was added by `fdfd6ce` ("migrate to bd 1.1.2 and remove the ledger auto-repair", Phase P / `fkm.1.1`), after the 11-check baseline the plan's gate line describes (the same 11 `UW7` names in the frozen v4.1.0 ledger above). The live run reports `workflow-doctor: 12 check(s) — 11 passed, 1 failed, 0 skipped`, real exit code **1** (verified by capturing `$?` directly rather than through a pipe, which the first attempt at this measurement got wrong). The one FAIL is `beads_ledger`, MEASURED TWICE INDEPENDENTLY WITH THE SAME VERDICT AND A MOVING COUNT (expected — the live store grows every turn): this piece's own run read "on disk 442 record(s), database 536"; the coordinator's independent re-run minutes later, same tree, read database 538 — the divergence itself reproduces, the exact count does not need to, and that is the correct behaviour for a check reading a live, growing store rather than a symptom of flakiness. **THREE FACTS ESTABLISH THIS IS DEV-CHECKOUT STATE, NOT SHIPPED-ARTIFACT BEHAVIOUR, each checked live rather than assumed:** (1) `workflow-doctor.sh`'s own header (`:272`, `:291`) states every dynamic check EXCEPT `beads` and `beads_ledger` runs against a throwaway sandbox copy — those two deliberately read the REAL target's database, `beads_ledger` explicitly because "a sandboxed copy would answer for the wrong ledger"; the divergence this row reports is therefore a fact about THIS repository's own live Beads store, not about anything `--verify` renders into a fresh target. (2) `.beads/` is not shipped/manifested surface: `grep -c '\.beads/' manifests/v4.1.0.sha256` → `0`. (3) Ledger and database start in agreement BY CONSTRUCTION on both paths that create them: a genuinely fresh install with no pre-existing `.beads/` runs `bd init --quiet` (`install.sh:2971-2974`) into an empty directory, trivially in sync; and the separate bd-binary-version-upgrade repair path, when the upgraded `bd` cannot read an old-format store but a ledger exists, rebuilds the database FROM the ledger via `bd bootstrap` (`install.sh:610-622`, "Step 4 — ALREADY-INSTALLED PATH") — both are read directly, and neither is the same code path as the other, so citing both is two independent mechanisms rather than one restated. Divergence is therefore only reachable AFTER a checkout has been worked in, which is exactly this repository's own state after weeks of concurrent multi-agent development on this very release. CAVEAT, restated per the standard this ledger holds every other row to — a red gate is not rounded up because its cause is understood: 21/7 is exactly right and reproduces on demand; "11/11" is stale on two independent axes (the correct clean-state denominator is 13; the CURRENT live state is 12/13 with exit 1, not 0, and DOES NOT PASS on this tree); and the three facts above explain WHY without excusing the number — `--verify` does not exit 0 here, full stop. The `beads_ledger` divergence is gated behind `claude-workflow-plugin-0rbi` (open) and the `.beads/quarantine.tsv` contamination it names (5 data rows under 1 header line — `tail -n +2 .beads/quarantine.tsv \| wc -l`, checked live: `claude-workflow-plugin-ofd` alone carries 10,123 comments matching `text LIKE 'MODEL SWITCH%'`). Neither this piece nor the coordinator ran `beads-ledger.sh reconcile --apply` against it: that command imports the ledger and RE-EXPORTS THE UNION into the git-tracked `.beads/issues.jsonl`, which would write the quarantined contamination permanently into a committed file — the prohibition is sound and the gate stays red here, on purpose, until `0rbi` lands. Whoever runs the release-gates checklist for real should expect **13/13**, not 11/11, once the ledger is reconciled; that correction to the plan's own gate line is owed independent of the reconciling. **LIVE-1 ADDENDUM (`fkm.9`, run 2026-09-19), folded in as a DIRECT MEASUREMENT of claim (3) above — install and upgrade start ledger and database in agreement by construction — and nothing more:** a genuinely fresh v4.1.0-installed scratch target, upgraded to v5.0.0 with THIS checkout's installer and verified twice, read `workflow-doctor: 12 check(s) — 12 passed, 0 failed, 0 skipped` and `exit=0` both times (full procedure, logs and predictions in `DP18` below). **This measurement is VACUOUS for the cross-checking half of claim (3), not merely weak evidence for it:** the scratch target carried ZERO Beads records on either side of the `beads_ledger` comparison it passed — `bd export` on the target wrote an empty file and `.beads/issues.jsonl` does not exist there at all (both re-confirmed live 2026-09-19) — so the pass is "0 agrees with 0." It demonstrates that install-and-upgrade do not themselves CREATE ledger/database drift, which is exactly the fresh-install half of the two mechanisms this row already cites; it demonstrates NOTHING about a target that goes on to accumulate real operational history the way THIS repository's own checkout has over weeks of concurrent multi-agent work. **It does not redeem this checkout: `install.sh --verify` against THIS tree, right now, is still the `12/13`, exit-`1` result this row already reports, and that finding is restated here, not softened.** | PROVEN-WITH-CAVEAT |
+| DP17 | The Linear adapter's live validation status is exactly NOT-PROVEN, never PROVEN-WITH-CAVEAT — no live run was performed, and no line in any shipped doc asserts the Linear path works (directive plan correction 4; D7 "LIVE-3 (Linear-connected), NOT RUN"; explicit constraint on this task) | This piece's own constraint, checked against what exists on disk rather than asserted, RE-CHECKED after a sibling D7 piece landed the mechanical guard mid-task | No `docs/specs/` directory exists in this tree (checked live, 2026-09-18 — `ls docs/specs/` -> "No such file or directory"), consistent with D1's stated fallback path never having been exercised against a connected Linear workspace. This row's first draft (earlier on 2026-09-18) found the mechanical honesty guard the plan names, "cloned from `reviewer-lane-degradation.sh`," absent. **It has since landed**, built by D7 Piece D while this ledger was being written, and then rewritten substantially twice more under two rounds of independent, non-Claude review (sol-codex) before this row's own correction pass on 2026-09-19: `.claude/tests/component/specs/design-degradation.sh` (234 lines, `wc -l`, checked live 2026-09-19 — BEHAVIOURAL half) and `.claude/scripts/tests/design-structural.test.sh` (1015 lines, `wc -l`, same check — STRUCTURAL half, grown from an initial 333 as both review rounds found real defects in the detector, not stylistic ones). Both confirmed on disk live, both still uncommitted (`git status --porcelain` shows `??` for both, consistent with a concurrent sibling piece). **CORRECTION to this row's own prior evidence, not only to the guard it describes:** the sentence just replaced said the structural half was re-derived via an independent two-pattern grep and that "the guard proves the CURRENT absence is safe and consistent." Both oversell in the same direction independent review round 2 found IN THE GUARD ITSELF and fixed — the guard's own shipped header now states, quoted verbatim: "a TRIPWIRE for three literal spellings ... across exactly three files ... NOT a proof that the invariant above holds," naming the reviewer's own diagnosis as correct: "the detector recognises SPELLINGS, not backend-selection BEHAVIOUR." No lexical grep over three files can prove a negative about program behaviour, so repeating "proves ... safe and consistent" here would leave this row's own evidence carrying the overclaim its cited guard was just corrected for. What is actually enforced is three separate, narrower things, not one: (a) DOCUMENTATION — no shipped line asserts the Linear path works. Checked live 2026-09-19: `grep -rn -i linear CHANGELOG.md README.md HANDOFF.md docs/*.md .claude/agents/*.md .claude/rubrics/*.md LESSONS.md`, every non-benign hit read directly; each pairs `linear`/`Linear` with `unproven`, `NOT-PROVEN`, `UNVERIFIED` or `no live validation` in the same sentence, or is ledger/plan prose about this very claim — none asserts the path works. (b) A LEXICAL TRIPWIRE at L1 (`design-structural.test.sh`) — `qa-gate.sh`, `verify-before-stop.sh` and `review-check.sh` contain none of three tracked literal spellings (`DESIGN_STORE`, capitalised `Linear`, bare lowercase `linear` as a comment-stripped standalone code token); re-run live 2026-09-19, **33/33 assertions pass, exit 0**. Independent review found this evadable twice: round 1 found the original single-pattern detector (an alternation of `DESIGN_STORE`, `Linear`, and `linear:`) evaded entirely by the plan's own natural external-ref bypass (a prefix-stripped `case` arm on the bare value), which the three-signal redesign above fixed; round 2 then found the REDESIGNED detector still evadable (case-folding via `tr`; quote-reassembly) and, decisively, that it scans only three files — a gate can source a helper that reads `DESIGN_STORE` while the gate itself contains none of the three tracked spellings. Per the operator's standing waiver ruling ("when a defect family survives repeated rounds against the same mechanism, remove the mechanism rather than guard it again"), round 2 retracted the COMPLETENESS CLAIM rather than patching a third time; the detection signals stayed as real, disclosed, non-vacuity evidence that the three tracked spellings are caught when present — the file's own header just no longer claims that is coverage. (c) A BEHAVIOURAL equivalence test at L2 (`design-degradation.sh`) — with `DESIGN_STORE=linear` set versus explicitly unset in a subshell (closing a vacuity risk independent review round 1 caught: an inherited exported value could otherwise make both conditions secretly identical; this file's own pre-flight section now proves the subshell-unset genuinely clears it), the `review-record` -> `review-check` gate sequence produces byte-identical stdout. Genuinely behavioural — it drives the real, unmodified gate scripts end-to-end against a real Beads-backed fixture, not static text — but scoped to exactly that one sequence; the file's own header names why the result is unsurprising rather than reassuring: `DESIGN_STORE` has no reader anywhere in `.claude/scripts` today, so a byte-identical result is the mechanical consequence of nothing in the enforcement path currently reading the variable, not evidence a future reader would be caught. (a), (b) and (c) are each real and each narrower than the retracted claim; none is a completeness proof and none moves this row off NOT-PROVEN by itself — only a live run against a connected Linear workspace, or the claim's own withdrawal, would. At the time this sentence was written the CHANGELOG's `[5.0.0]` entry stated the required sentence verbatim: "The Linear adapter ships unproven — no live validation was run." **UPDATE, 2026-09-28 (`claude-workflow-plugin-qttq`, F5 of the operator's finishing-pass brief) — REMOVED, not flipped to PROVEN and not left NOT-PROVEN:** offered a live Linear run to close this row the honest way, the operator declined it — asked where the design phase may write during F4's real-project validation, the answer was "Do not write to Linear at all." Per the brief's own rule ("DP17: flip to PROVEN if the Linear run passes, else cut the adapter so the ledger meets zero NOT-PROVEN"), F4/F5 then measured whether there was an adapter to cut, live, at HEAD `aaf8f45`: `grep -rn DESIGN_STORE .claude/scripts/*.sh` — zero hits; `grep -rn Linear .claude/scripts/*.sh` — exactly one hit, `subagent-start.sh:673`, an English-language code comment ("any Beads/Linear id that legally contains one"), not a code path; `grep -rnw linear .claude/scripts/*.sh` — three hits, all the English word (`codex-review.sh:143` "NOT linear", `qa-gate.sh:2329` "non-linear", `qa-gate.sh:2550` "a linear scan"); `grep -rn -i linear .claude/agents/*.md .claude/rubrics/*.md` — zero hits, widened from designer/design-reviewer-only to every agent file. There is no adapter, so there was nothing to cut — the CHANGELOG's own sentence was the thing that overstated reality ("written and unit-tested" asserted a mechanism that does not exist), and it is the sentence that was withdrawn: CHANGELOG.md `[5.0.0]` item 3 now reads "v5 ships no Linear integration," with `docs/specs/<task-id>.md` named as the only design-artifact path. **Nothing else in this row changes, and nothing written above this update is disturbed by it** — the absent-`docs/specs/`-directory finding, the two independent review rounds, and the retracted completeness claim under the operator's standing waiver ruling are exactly as accurate today as when they were written, because none of them was ever a claim about an adapter's existence — only about a documentation guarantee and a tripwire's own honesty. Both guards named above still ship, unchanged in the property that matters (detection logic and assertion count), re-verified live in this same task: `wc -l` on `.claude/tests/component/specs/design-degradation.sh` and `.claude/scripts/tests/design-structural.test.sh` now reads 256 and 1070 lines respectively (grown from the 234/1015 cited above through continued hardening since 2026-09-19), and `bash .claude/scripts/tests/design-structural.test.sh` still ends `PASSED: 33 assertion(s)`, exit 0. Both headers were corrected in this same task to describe what they now guard (the absence of a store-selection path) rather than what they used to (an unproven claim's honesty), with no change to either file's detection logic or assertion count. This row's own status moves from NOT-PROVEN to REMOVED accordingly — a claim withdrawn, not a claim proven, and not a lapse rounded up. | REMOVED |
+| DP18 | LIVE-1: the v4.1.0 -> v5.0.0 upgrade path works end to end against a real installed target — a real v4.1.0 install, hand-customized like an operator's tree, upgrades cleanly with THIS release's installer and leaves the target passing `install.sh --verify` (plan D7 "Live validations", "LIVE-1 (upgrade + verify), RUN"; directive `:185` "Whole-release gates") | LIVE EXECUTION against a disposable scratch target, run 2026-09-19 — the only row in this section whose evidence is entirely dated a day after this ledger's original 2026-09-18 compilation (`DP15` and `DP16` carry a 2026-09-19 addendum layered onto their original date; this row IS that addendum's subject). Procedure per the plan's own LIVE-1 bullet: `git archive v4.1.0` extracted to its own source directory (not this working tree); that tree's `install.sh` installed fresh into a scratch target; one operator file hand-edited on the target, one left byte-stock as the negative control; THIS checkout's `install.sh --upgrade <target>`; `install.sh --verify <target>` run twice, before and after `npm ci --omit=dev` in both MCP server directories. Five predictions were committed to writing before step 4 ran (the brief's own P1-P5) and are scored below individually, per this arc's standing rule that a runner reporting only its hits is not a measurement. | Full logs from the run: `v410-install.log`/`.exit`, `v5-upgrade.log`/`.exit`, `v5-verify-1.log`/`.exit`, `v5-verify-2.log`/`.exit` (scratch-session-local paths). Every figure below was re-read from these logs and re-confirmed directly against the live scratch target on 2026-09-19, not only transcribed from the run's own summary. (A) CLASSIFICATION LINE, verbatim from the upgrade log: "Classifying the installed tree against .claude/install-manifest (v4.1.0)..." / "OK upgrade plan: 138 file(s) classified" — the `install.sh:1569` forced-migration template (`--upgrade` on a target declaring a non-3.x version), NOT the `:1664` auto-detect template; old table = the target's own v4.1.0 manifest. (B) VERDICT COUNTS, verbatim: copied (new) 6, replaced (stock) 49, already current 80, replaced (customized) 0, preserved (yours) 1, merged key-wise 2, total classified 138 (6+49+80+0+1+2=138, internally consistent). (C) SIDECARS: exactly ONE, `.claude/model-roles.new` — the upgrade's own printed list and an independent `find <target> -name '*.new'` (re-run live 2026-09-19) agree. The stock control, `.claude/agents/qa.md`, received NO sidecar; its hash moved to the v5 shipped value (verdict `replace-stock`), the correct outcome for an uncustomized file. The operator's edit survived: `implementer=top` is still in the target's `.claude/model-roles` (re-confirmed live via `grep`). (D) BOTH NEW AGENTS: `designer.md` and `design-reviewer.md` absent from the v4.1.0 install (its log lists exactly 7 `.claude/agents/*.md`, neither name among them) and present after (the upgrade log lists both as freshly-copied `OK` lines; the target's `.claude/agents/` holds 9 files, re-counted live). (E) `install.sh --verify <target>`: **12 check(s) — 12 passed, 0 failed, 0 skipped, exit 0**, both times — the two verify logs are BYTE-IDENTICAL (`diff`, re-run live 2026-09-19, exit 0) and both exit-code files read `exit-code:0`. All twelve contractual check names (deps, agents, skill, mcp_config, settings_hooks, beads, beads_ledger, session_start, mcp_bd, mcp_code_graph, gate_pretooluse, gate_stop) appear exactly once each, all PASS; `mcp_bd`/`mcp_code_graph` report exactly 21/7 tools; `beads_ledger` PASSED — see the vacuity note below for why this pass proves less than it looks like. PREDICTIONS, scored individually (5 stated in writing before the run): P2 HIT — sidecar list matched exactly (C). P3 HIT — agent census matched exactly (D). P4 HIT but VACUOUS (see below) — `beads_ledger` PASSED on the fresh target as predicted, between two empty sets. P1 MISSED — predicted the `:1664` install-manifest-variant template; `:1569` fired instead (A). Mechanism: `--upgrade` forces a migration through the `:1569` branch regardless of which old table it goes on to resolve; `:1664` is the separate auto-detect path taken when `--upgrade` is NOT passed. The old-table half of the prediction (v4.1.0's own manifest) was correct; the template half was not. P5 MISSED — predicted `mcp_bd`/`mcp_code_graph` would FAIL on absent `node_modules` (the known v4 packaging defect) on the first, pre-`npm ci` verify. Both PASSED on that first run. Mechanism, read directly from the v4.1.0 install log: the v4.1.0 FRESH install already ran its own dependency install successfully ("added 91 packages" / "added 94 packages", both MCP dirs reported "dependencies installed") before the upgrade ever ran; the upgrade log then reports both MCP dirs' dependencies "already match the lockfile (skipped)", so the upgrade inherited working `node_modules` rather than fixing an absence. The defect does not reproduce ON THE UPGRADE PATH when the prior install already resolved deps; it may still exist on a fresh v5 install with no prior deps, on `--skip-mcp-deps`, or offline — none of which this procedure exercised, and none of which this row claims to have tested. Net: 3 HIT / 2 MISSED, both misses named with mechanism rather than dropped. ALSO ON RECORD, disclosed per the same standard though not one of the five predictions: the v4.1.0 fresh install's OWN bundled verification exited 3 with "FAIL beads: bd doctor exited 1 with no output (unreachable)". It did NOT persist: the same target's `beads` check PASSED in both later `--verify` runs ("PASS beads .beads/ present; bd doctor reachable (exit 0)", both logs). Root cause was not isolated; recorded as an unexplained transient, not as a defect and not as nothing. **THE VACUITY NOTE (P4 / `DP16` claim (3)):** the scratch target had ZERO Beads records on both sides of the `beads_ledger` comparison — `bd export` on the target wrote an empty file (0 lines, re-confirmed live) and `.beads/issues.jsonl` does not exist on the target at all (re-confirmed live: ABSENT). A PASS between two empty sets confirms install-and-upgrade do not themselves CREATE ledger/database drift; it confirms nothing about a target that accumulates real operational history the way this repository's own checkout has over weeks of concurrent work (the 442-vs-538 divergence `DP16` reports). Folded into `DP16` itself as well, since it bears on that row's claim (3) at least as directly as on this one. **THE PROVENANCE NOTE:** this run used THIS checkout's `install.sh` against the WORKING TREE, not a clean checkout of HEAD `261e09e` — the install log's "Using local plugin source: /Users/edk0/Desktop/projects/claude-workflow-plugin" names the working tree directly, and `.claude/model-roles` is one of this session's uncommitted modified files (`git status --porcelain`, re-confirmed live: ` M .claude/model-roles`, nothing else among the files this row's measurements touch). Consequence, checked rather than assumed: `.claude/model-roles.new`'s content is byte-identical to the working tree's `.claude/model-roles` (`shasum -a 256`, both `7a9a1c21...`) and DIFFERENT from HEAD's committed copy (`git show 261e09e:.claude/model-roles \| shasum -a 256` = `f666919e...`). `install.sh` and `.claude/agents/qa.md` are NOT among the modified files (checked live: clean), so every measurement in (A)-(E) above that depends on install.sh's OWN behaviour — the mechanism, not this one input file's bytes — is valid at HEAD `261e09e` exactly. **VERDICT JUSTIFICATION:** PROVEN-WITH-CAVEAT rather than bare PROVEN. The claim as stated is true — a real, hand-customized v4.1.0 target upgrades cleanly and passes `--verify` — but it carries three disclosed items materially shaping what it does and does not license reusing elsewhere: the `beads_ledger` PASS is vacuous, two of five stated predictions missed (both with mechanism), and the measurement's provenance is the working tree rather than a clean HEAD checkout for the one file it edited. This section's own convention (`DP2`, `DP5`, `DP11`) keeps a row at PROVEN-WITH-CAVEAT exactly when the claim holds but a real, named residual rides along with it, rather than rounding either up or down; this row follows that convention. | PROVEN-WITH-CAVEAT |
+
+### v5.0.0 tally
+
+Counts over the 18 rows in this section only. Machine-counted with the
+section-scoped greps below. **Provenance of THESE numbers: last machine-counted
+2026-09-30**, after `DP9` was scoped to F4's evidence (PROVEN →
+PROVEN-WITH-CAVEAT). An earlier version of this sentence attested "re-run at
+authoring on 2026-09-18 and again on 2026-09-19" above numbers that had moved
+three times since — a true count carrying a false provenance line, in the one
+table the release decision is read off. The full movement history is two
+paragraphs down and is the authority on when each figure changed:
+
+| Status | Count | Scoped grep |
+| ------ | ----- | ----------- |
+| PROVEN | 8 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN \|$'` |
+| PROVEN-WITH-CAVEAT | 9 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| PROVEN-WITH-CAVEAT \|$'` |
+| NOT-PROVEN | 0 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| NOT-PROVEN \|$'` |
+| REMOVED | 1 | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '\| REMOVED \|$'` |
+| **Total** | **18** | `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md \| grep -cE '^\| DP[0-9]+ \|'` |
+
+> **TO WHOEVER APPENDS THE NEXT LEDGER: these five ranges end at `,0` and are
+> correct ONLY while v5.0.0 is the last claims-ledger section.** Before you
+> write a single new row, change every `,0` above to
+> `,/^## v<next>\.0 claims ledger/` and re-run the five commands to confirm
+> the counts are still 8 / 9 / 0 / 1 / 18. **That figure moved FOUR TIMES
+> across 2026-09-29–30 (twice on 09-29, twice on 09-30) and the intermediate
+> state matters**, so it is recorded rather
+> than collapsed:
+>
+> <!-- TALLY-HISTORY BEGIN -->
+> from `11 / 6 / 0 / 1 / 18`, independent re-verification of
+> every row moved `DP5` PROVEN-WITH-CAVEAT → **NOT-PROVEN** and `DP3` PROVEN
+> → PROVEN-WITH-CAVEAT, giving `10 / 6 / 1 / 1 / 18`; an operator-ruled
+> prove-or-remove rewrite then narrowed `DP5` to the file-set-only claim that
+> actually ships, giving `10 / 7 / 0 / 1 / 18`; then on 2026-09-30 `DP4` was
+> scoped to F4's evidence, PROVEN -> PROVEN-WITH-CAVEAT, because BOTH
+> real-project observations of `design-conform` were VACUOUS — giving
+> `9 / 8 / 0 / 1 / 18`; then, later the same day, `DP9` was scoped the same way,
+> PROVEN -> PROVEN-WITH-CAVEAT, because the coherence rollup it backs has never
+> run on a real target in either direction and over an empty change set one
+> direction of its scope conjunct — under-coverage — goes unchecked
+> — giving `8 / 9 / 0 / 1 / 18`. That fourth move
+> exists because the third one was incomplete: while the rollup was believed to
+> INHERIT `design-conform`'s answer, caveating `DP4` looked sufficient; once
+> that was disproved, the rollup needed its own backing row to carry the caveat,
+> and `DP9` was still reading PROVEN. (`11 / 6 / 0 / 1 / 18` had
+> itself moved from `11 / 6 / 1 / 0 / 18` on 2026-09-28 when `DP17` was
+> withdrawn.)
+> <!-- TALLY-HISTORY END -->
+>
+> See those rows, the Re-verification addendum at the foot of
+> this section, and the tally note below. **NOTE FOR THE RELEASE DECISION:
+> this ledger satisfies the zero-NOT-PROVEN rule, and how it got there is
+> part of the record.** `DP17` was withdrawn specifically to reach zero
+> NOT-PROVEN; re-verification then established that `DP5` had been
+> NOT-PROVEN all along, for an unrelated reason, so **the property was NOT
+> actually held at the moment it was first declared** — it is held now only
+> because `DP5` was subsequently narrowed to the truth. This is the fourth ledger and the
+> third time this correction has been paid — v3.5.0 -> v4.0.0, v4.0.0 ->
+> v4.1.0 (`uvk`), and v4.1.0 -> v5.0.0 (`fkm.9`, this ledger, which also had
+> to re-point a positive control in `HANDOFF.md` that this exact re-scope
+> would otherwise have made vacuous — see that file's v4.1.0 verify block).
+
+<!-- TALLY-HISTORY BEGIN -->
+**SUPERSEDED 2026-09-29 — READ THE NEXT PARAGRAPH INSTEAD.** This paragraph
+read, until the re-verification: *"Stated plainly rather than rounded up:
+v5.0.0 NOW MEETS the strict 'NOT-PROVEN = 0' release rule v3.5.0 set and
+v4.1.0 also met (`11 / 6 / 0 / 1`, not the `11 / 6 / 1 / 0` this section held
+from 2026-09-18 through F4 of the operator's finishing-pass brief)."* It is
+preserved rather than deleted because the reasoning below it about `DP17` is
+still sound and still worth reading; only its headline conclusion was wrong.
+
+**THE CORRECTED STATEMENT, IN TWO STEPS ON THE SAME DAY.** Independent
+re-verification of all 18 rows on 2026-09-29 first moved `DP5` to NOT-PROVEN
+and `DP3` to PROVEN-WITH-CAVEAT, taking the split to `10 / 6 / 1 / 1` — at
+which point **v5.0.0 did NOT meet the rule**. `DP5` was then resolved by an
+operator-ruled prove-or-remove rewrite (`claude-workflow-plugin-6ye1`)
+narrowing its claim to file-set intersection only, which is what actually
+ships and is PROVEN by `plan-batches.test.sh` (319/319 at `2b58370`).
+<!-- TALLY-HISTORY END -->
+
+**THE CURRENT STATEMENT: the split is `8 / 9 / 0 / 1 / 18` and v5.0.0 MEETS the
+"NOT-PROVEN = 0" rule — by narrowing an overclaiming row to the truth, not by
+redefining the row until it passed.** The distinction matters and is the whole
+point of the prove-or-remove mechanism: the conjunct that does not ship was
+WITHDRAWN and its deferral named (`l7gd`, with `kk9y` as its precondition), so
+no reader is told the impact half exists. See `DP5`, `DP3`, and the
+Re-verification addendum at the foot of this section.
+
+And the correction is sharper than a count changing. `DP17` was withdrawn
+**specifically** to reach zero NOT-PROVEN — that is what the paragraphs below
+are arguing about. Re-verification then established that `DP5` had been
+NOT-PROVEN **all along**, for an entirely unrelated reason, and was simply
+not measured. So the property this section declared was never actually held
+at the moment it was declared: the withdrawal did not achieve zero, it
+achieved one, and nobody checked. Tracked as
+`claude-workflow-plugin-6ye1`, which carries the three options for resolving
+it. That is not a lapse quietly patched and left unremarked. At planning time (correction 4: "Linear ships as an
+unproven adapter... its live validation is recorded NOT-PROVEN — not
+PROVEN-WITH-CAVEAT, because there is no artifact at all") the decision was
+to ship Linear as an unproven adapter and disclose that plainly — "no
+artifact at all" meant no VALIDATION artifact, at the time. F4/F5
+(`claude-workflow-plugin-qttq`, 2026-09-28) measured that the sentence was
+truer than intended: not merely no validation artifact, but no adapter
+artifact of any kind — no reader of a `DESIGN_STORE` variable exists
+anywhere in `.claude/scripts` (re-verified live in this task, HEAD
+`aaf8f45`). Offered the live Linear run that would have closed this the
+other way, the operator declined it ("Do not write to Linear at all"); per
+the brief's own rule — flip to PROVEN if the run passes, else cut the
+adapter so the ledger meets zero NOT-PROVEN — the row carrying this claim,
+`DP17`, is REMOVED rather than proven or left open. What IS true, and is
+still the bar this ledger holds itself to: no row in this section is bare
+about how it got to its status. `DP17` names what it said, why it was false
+rather than merely unvalidated, and the task that withdrew it, per the
+status-vocabulary table's own REMOVED rule above — and, **as this section
+read until 2026-09-29, no row in it was NOT-PROVEN. CORRECTED: `DP5` WAS
+NOT-PROVEN and always had been — it was simply never measured until the
+re-verification. It is no longer, because it was then narrowed to the
+file-set-only claim that ships; but for the whole arc up to that day this
+section asserted a property it did not hold.** A future ledger auditing this
+one should read the **`8/9/0/1/18`** split as the honest count, not as a
+near-miss on `13/3/0/0/16`'s shape <!-- tally-xref --> — one claim withdrawn is not one claim proven, and this
+ledger does not blur the two. **Nor should it read the withdrawal of `DP17` as
+having delivered zero NOT-PROVEN, which is what this section believed at the
+time and what the superseded paragraph above claimed: it did not, because a
+different row was already NOT-PROVEN and unexamined.** The lesson that
+generalises is the one this whole audit keeps restating — withdrawing the row
+you were looking at does not establish anything about the rows you were not.
+
+### v5.0.0 residuals carried into the release notes
+
+- **EVERY install self-reviews its own designs by default, and a
+  Codex-present one does so SILENTLY (`DP2`).** The self-review is disclosed
+  in `.claude/model-roles`, not hidden. What was NOT disclosed until
+  2026-09-29 is that one of the two documented clearances does not work:
+  installing Codex moves `design_reviewer_lane` off `claude`, and the collapse
+  condition (`model-select.sh:1374-1376`) requires identical pick **AND**
+  lane == `claude`, so **the flag clears while both roles still resolve to the
+  same model**. No script drives design review through Codex. Measured live:
+  `designer=claude-fable-5`, `design_reviewer=claude-fable-5`, lane `codex`,
+  `identity_collapse: false`, and the `design-family-collapse` marker absent.
+  Because the lane is not set in `model-roles` at all (only a commented
+  example) it defaults to `auto`, so this is the DEFAULT behaviour on a
+  Codex-present host, not an opt-in. Filed as `claude-workflow-plugin-yvpe`.
+  *Flip:* the ONE real clearance — pin `design_reviewer` to a distinct
+  `<family>-class` — plus fixing `yvpe` so the flag tracks the resolved model
+  rather than a lane label.
+- **~~`impact_of` under-reports cross-script dependencies on this repo's own
+  shell-heavy surface, which can make D4's batching intersection silently
+  uninformative rather than silently wrong (`DP5`).~~ RETIRED 2026-09-29 —
+  THIS RESIDUAL CANNOT OCCUR.** It described a way the `impact_of` half of the
+  intersection could be uninformative. Re-verification established that the
+  `impact_of` half **is not computed at all**, so there is no impact set to
+  under-report. The `kk9y` flip (teach the indexer's bash grammar to resolve
+  `"$SCRIPT_DIR/other.sh" --flag`) is real work but is **not** the flip for
+  this row, and carrying it into release notes would tell a reader the smaller
+  problem is the one they have.
+- **THE RESIDUAL THAT REPLACES IT: file-disjoint units can still conflict
+  SEMANTICALLY, and no automatic control catches that (`DP5`,
+  PROVEN-WITH-CAVEAT on a claim narrowed 2026-09-29).** The row's overclaim
+  was resolved, not carried: `DP5` briefly read NOT-PROVEN, then an
+  operator-ruled prove-or-remove rewrite (`claude-workflow-plugin-6ye1`)
+  withdrew the `impact_of` conjunct and narrowed the claim to file-set
+  intersection only — what ships, PROVEN by `plan-batches.test.sh` 319/319 at
+  `2b58370`, with `graph_intersection_computed:false` naming the absence on
+  every envelope. What REMAINS a residual is the thing narrowing cannot fix:
+  two units may touch entirely disjoint files and still break each other's
+  behaviour, and nothing runs automatically to catch it. Worktree isolation
+  for batch members is an orchestrator responsibility — `epic-gate.sh` has
+  zero occurrences of `worktree` and the batch envelope carries no worktree
+  field — so a later unit's full-suite run cannot be relied on to observe an
+  earlier unit's changes, and the cross-cutting integration sweep is
+  explicitly MANUAL (`epic-gate.sh:6`, `:19`, `:500`). **Operators running
+  parallel batches must perform that sweep themselves.** *Flip:* implement
+  `claude-workflow-plugin-kk9y` (so `impact_of` resolves call edges through
+  `"$SCRIPT_DIR/other.sh" --flag` invocations and becomes informative on
+  shell-heavy repositories), then `claude-workflow-plugin-l7gd` (the impact
+  conjunct itself), then re-verdict this row against a computed impact set.
+  Building `l7gd` without `kk9y` first would add a conjunct that is
+  uninformative here.
+- **`design-conform` returns `ok:true` over an empty change set on a real
+  target (`DP4`, PROVEN-WITH-CAVEAT as of 2026-09-30); the coherence rollup has
+  a defect of the same shape, INDEPENDENTLY, but it has NEVER RUN on a real
+  target and its case is an INFERENCE FROM THE CODE, NOT AN OBSERVATION
+  (`DP9`, PROVEN-WITH-CAVEAT as of 2026-09-30).** The two are separately
+  backed, and the rollup's backing row is `DP9`, not this one: while the rollup
+  was believed to inherit `design-conform`'s answer, `DP4` appeared to cover
+  both; once that was disproved the rollup needed its own row, and `DP9` was
+  still reading PROVEN until it was scoped on 2026-09-30.
+  The determinism claim holds — it is a `case`-dispatched
+  subcommand with no LLM and no review round — but its INPUT can be empty while
+  it reports success. Observed on a real product repository exactly **twice**,
+  and BOTH observations were vacuous: it reported "conforms" while naming the
+  three just-written, green-tested files as `unbuilt_files`. Two independent
+  routes reached it (`claude-workflow-plugin-pqoj`'s denylist collision, then
+  `claude-workflow-plugin-q5l6`'s cross-session baseline swallow on a clean
+  path). **The rollup does NOT inherit that answer — it would fail by its own
+  route:** `compute_design_alignment` shells out to `design-conform`
+  only when `mode != "rollup"` (`qa-gate.sh:15182`), and
+  `compute_design_coherence` calls it WITH `mode="rollup"` (`:15963`), skipping
+  that leg entirely; it then reads the same session-scoped tracker directly
+  (`impact-report.sh --relativized-changed-files`, `:16119`). Fixing
+  `design-conform` alone would therefore NOT fix the rollup. **Stated in the
+  conditional because it is an inference: the rollup was never exercised in F4
+  and has never been observed on a real target in either direction.** It
+  returns `APPLICABLE=false`/`OK=true` without running any check when the task
+  is not itself a satisfied design task (`:15694`), F4's only approval was on a
+  task-per-unit CHILD, and the governing parent is `status=open` with zero
+  QA-GATE comments. **And the inference is NARROWER than an earlier draft of
+  this bullet claimed, and narrowed TWICE:** the scope check has TWO arms and
+  only one is tracker-fed. An empty change set kills the LIVE arm
+  (`under_coverage = $diff - $roll`, `:16194`), so the UNDER-COVERAGE direction
+  goes unchecked; the DURABLE arm (`undeclared_scope`, `:16066`) reads each
+  unit's persisted, digest-checked completion payload rather than the tracker
+  (`:16019-16048`) and still fires. Untested-criterion, unmapped-unit and
+  hash-divergence likewise read durable records and still gate. Two earlier
+  drafts overstated this in sequence — "makes the rollup vacuous", then "the
+  scope conjunct cannot fire" — and both are recorded rather than quietly
+  replaced, because each correction moved in the direction that makes the
+  release look worse, and those are the ones that get left uncorrected.
+  v5.0.0 mitigates the input problem at `approve`
+  (`completion_files_total_miss` now refuses a total miss) but `design-conform`
+  itself gained no such guard. *Flip:* land the task-scoped baseline (v5.0.1)
+  and re-run the flagship path end to end in a real target with an approval
+  that binds real work.
+- **"Small enough for one coherent change" is enforced nowhere (`DP3`,
+  PROVEN-WITH-CAVEAT as of 2026-09-29).** No sizing criterion exists in
+  `DS1`–`DS8` and none in `review-check.sh`; the phrase lives only in
+  `.claude/agents/designer.md:165` as prose, absent from the designer's own
+  pre-declaration checklist, and the reviewer has no criterion to score it
+  against. The rest of `DP3` is genuinely mechanical. *Flip:* add a sizing
+  criterion to the rubric so the reviewer can score it, or drop the phrase
+  from the claim.
+- **RESOLVED DURING THIS LEDGER'S OWN AUTHORING, not left as a residual
+  (`DP10`).** This row's first draft (earlier on 2026-09-18) listed the D0
+  orchestrator tier deviation here as still open — `orchestrator` shipping
+  `top` (Fable) rather than the plan's Opus-class, tracked on
+  `claude-workflow-plugin-fkm.10`. A sibling D7 piece landed the fix
+  (`orchestrator=opus-class`) and closed `fkm.10` while this ledger was
+  being written; `DP10` was re-checked against the live file and the closed
+  task record, found accurate, and upgraded from `PROVEN-WITH-CAVEAT` to
+  `PROVEN` in place, rather than this bullet being quietly deleted. Recorded
+  here for the same reason RELEASE_AUDIT.md never silently edits a dated
+  claim: so a reader comparing this ledger against an earlier read of it
+  understands why the row changed mid-session, instead of wondering whether
+  it was missed.
+- **Whether escalation is runtime-honoured remains NOT-PROVEN (`DP11`), by
+  the shipped file's own admission.** *Flip:* the experiment `DP11` names —
+  compare an escalated unit's F7 `model`/`pin` self-report against the
+  pinned frontmatter across the escalation boundary.
+- **`manifests/v5.0.0.sha256` now EXISTS, and LIVE-1 exercised the
+  preserve-custom/`.new`-sidecar mechanism live for this exact transition
+  (`DP15`) — but the frozen table itself remains unexercised.** A
+  v4.1.0-installed target's `--upgrade` always classifies against its OWN
+  `.claude/install-manifest` when one parses (LIVE-1's did — its
+  classification line names the target's manifest, not the frozen table),
+  so `manifests/v<release>.sha256` is architecturally never consulted on
+  that path; its role is confined to a genuine v3.x target or a
+  manifest-missing fallback, neither of which this transition is. *Flip:*
+  the `UW1`-style regenerate-and-`cmp` byte comparison against a tagged
+  v5.0.0 checkout — the only thing that would actually exercise the frozen
+  table rather than the shared install-manifest classify path.
+- **`install.sh --verify` is 12/13 (exit 1) on THIS checkout right now, and
+  does NOT pass — that is not rounded up regardless of cause. The plan's own
+  "11/11" gate line is ALSO stale in a clean state — the correct clean
+  denominator is 13 (`DP16`).** The failing check, `beads_ledger`, was
+  independently reproduced by the coordinator on the same tree (database
+  count moved 536 -> 538 between the two runs, which is the live store
+  growing, not flakiness) and is established, on evidence rather than
+  assumption, to be dev-checkout state rather than shipped-artifact
+  behaviour: `workflow-doctor.sh`'s own header names `beads`/`beads_ledger`
+  as the two checks that deliberately read the REAL target rather than a
+  sandbox copy; `.beads/` carries zero rows in the shipped manifest
+  (`grep -c '\.beads/' manifests/v4.1.0.sha256` -> `0`); and both a
+  genuinely fresh install (`bd init --quiet` into an empty `.beads/`) and
+  the separate bd-version-upgrade repair path (`bd bootstrap` rebuilding the
+  database FROM the ledger) put the two in agreement by construction, so
+  divergence is only reachable after a checkout has been worked in.
+  `CLAUDE.md` already documents the live store as running ahead of
+  `.beads/issues.jsonl`, and a `.beads/quarantine.tsv` contamination issue
+  (`claude-workflow-plugin-0rbi`, open) is the stated reason not to
+  `bd export`/reconcile blind — `beads-ledger.sh reconcile --apply` would
+  import the ledger and re-export the union into that git-tracked file,
+  writing the quarantined contamination in permanently. *Flip:* land `0rbi`,
+  then `bash .claude/scripts/beads-ledger.sh reconcile --apply`, then confirm
+  `bash install.sh --verify` reads `13/13` before the release tag is cut —
+  and correct the plan's own gate line from 11/11 to 13/13 regardless, since
+  that correction is owed independent of the ledger reconciling.
+  **LIVE-1 (2026-09-19) measured the `12/12` clean-state denominator
+  directly, on a fresh target, both `--verify` runs: exit 0, no failures —
+  but between two EMPTY Beads stores (the target had zero records on either
+  side), so it confirms install-and-upgrade do not themselves create drift
+  and confirms nothing about a target with accumulated history. It does not
+  redeem this checkout, which remains `12/13`, exit `1`, right now (`DP18`).**
+- **RESOLVED, not carried forward as a residual (`DP17`, 2026-09-28,
+  `claude-workflow-plugin-qttq`, F5 of the operator's finishing-pass
+  brief).** This bullet's prior form (through 2026-09-19) read: "The Linear
+  adapter is NOT-PROVEN (`DP17`); its L1/L2 guard landed DURING this
+  ledger's own authoring, not before it, and was then narrowed twice more
+  under independent review before this ledger's own correction pass on
+  2026-09-19." — recounting that this bullet's first draft named
+  `specs/design-degradation.sh` as unbuilt; D7 Piece D landed it (plus the
+  L1 structural half, `design-structural.test.sh`) while this section was
+  being written; two further rounds of independent review (sol-codex) then
+  found the L1 half's original detector evadable and its own claim
+  overstated, so the shipped file now states its scope as a TRIPWIRE for
+  three literal spellings across three files, explicitly "NOT a proof that
+  the invariant above holds" (its own header, quoted in full in `DP17`
+  above) — and closing with *"Flip: that live run is the live-validations
+  piece's to perform and record; the guard, in its now-correctly-scoped
+  form, is no longer part of what is owed."* That live run never happened —
+  the operator declined it ("Do not write to Linear at all") — but the flip
+  this bullet asked for turned out to be moot: F4/F5 measured that no
+  adapter exists to run a live validation against in the first place (zero
+  readers of a `DESIGN_STORE` variable anywhere in `.claude/scripts`,
+  re-verified live at HEAD `aaf8f45`). `DP17` above moved to REMOVED, not
+  PROVEN — the CHANGELOG's Linear sentence was withdrawn, not confirmed.
+  The L1/L2 guard history this bullet recorded is untouched by the
+  resolution: both guards still ship, re-verified live in this same task at
+  256 and 1070 lines respectively, `design-structural.test.sh` still
+  `PASSED: 33 assertion(s)`, exit 0 — see `DP17` above for the full
+  re-verification and for why their header framing (not their detection
+  logic) is what changed.
+
+No row in this section asserts an adjective without an artifact pointer.
+Most rows combine more than one evidence class — a live command run in this
+session, a closed `qa-approved` change-set-bound Beads record this piece
+read but did not re-derive from the underlying diff, and/or shipped source
+text quoted verbatim rather than paraphrased from the plan — and each row
+states which. One row (`DP17`) WAS NOT-PROVEN by explicit design decision
+rather than a gap, until F5 (`claude-workflow-plugin-qttq`, 2026-09-28)
+found no adapter for that decision to track and withdrew the claim; it is
+REMOVED now, per the same no-adjective-without-an-artifact rule this
+paragraph opens with — a withdrawal is its own artifact pointer, not a gap
+either. None of the caveated rows' caveats are
+new discoveries hidden from the phases that shipped them — `DP2`,
+`DP10` and `DP11` are each the shipping phase's own disclosed residual,
+**(UPDATED 2026-09-29, superseding a correction made earlier the same day
+which said `DP5` was no longer caveated. `DP5` IS caveated again: it was
+briefly NOT-PROVEN, then resolved by an operator-ruled prove-or-remove
+rewrite narrowing it to file-set intersection only, and it carries a NEW
+caveat — that file-disjoint units can still conflict semantically with no
+automatic control. That caveat is this auditing pass's own finding, not the
+shipping phase's. `DP3` likewise joined the caveated set on this date with a
+caveat the shipping phase did not disclose. Both therefore belong with
+`DP15`/`DP16`/`DP18` as findings by an auditing pass rather than
+shipping-phase disclosures — NOT, as an earlier draft of this parenthetical
+put it, as "the one exception" to this sentence. That phrasing was wrong
+against the very sentence it sat in, which already names three such rows;
+it was raised as R2-F1 and is corrected here.)**
+independently re-confirmed live where this piece could do so cheaply; `DP15`,
+`DP16` and `DP18` are this piece's own live findings — `DP15`/`DP16` from
+this ledger's original 2026-09-18 authoring, `DP18` from the LIVE-1 run
+recorded into it a day later — surfaced here rather than smoothed over
+because a docs-only piece is exactly the vantage point from which "the gate
+line says 11/11 and the gate says 11/12" is visible.
+
+---
+
+## Standing attestations — what the release credentials actually mean
+
+**This is not a claims ledger and it deliberately contains no status
+cells.** It carries no `PROVEN` / `PROVEN-WITH-CAVEAT` / `NOT-PROVEN` /
+`REMOVED` row and no `| UW<n> |` / `| V<n> |` row, so appending it does not
+move any scoped range's count — a claims-ledger section (one with a
+`## v<N> claims ledger` header and status cells) is what the ranges above
+must stop at, and this section is neither.
+<!-- TALLY-HISTORY BEGIN -->
+**HISTORICAL, as measured when
+this section was written:** at `1233ea5` the five v4.1.0 scoped greps still
+returned 13 / 3 / 0 / 0 / 16 with their `,0` ranges genuinely untouched by
+this section's own addition, and the appending obligation recorded in the
+v4.1.0 tally was at that time not yet paid. **That is no longer the current
+state of the file.** The v5.0.0 ledger below re-scoped those same five
+ranges on 2026-09-18 (`claude-workflow-plugin-fkm.9`) to stop at
+`## v5.0.0 claims ledger` instead of running to end-of-file — they still
+return 13 / 3 / 0 / 0 / 16 (re-run in the v4.1.0 tally's own `RE-SCOPED`
+note above)
+<!-- TALLY-HISTORY END -->
+— and the appending obligation was **paid**, for the third time,
+by that same change. The same obligation is re-armed against the v5.0.0
+tally below for whoever appends a fifth ledger next; this section stays
+positioned after the newest ledger's full block (rows, tally, residuals) —
+it moved down one block to make room for v5.0.0's, the same way it will move
+again for the next one — and it does not itself need re-scoping when a
+ledger is appended, precisely because it carries no status cells to be swept
+up.
+
+Its purpose is different from a ledger's. A row says *this claim was checked*.
+This section says *what the credential means at all*, so a later reader does
+not infer a stronger guarantee from a green row than the mechanism can carry.
+
+### A change-set-bound approval attests membership plus review-at-review-time
+
+**These paths were the change set, and a reviewer looked at them then. It does
+not attest content.**
+
+`change_set_hash` is a sha256 over the sorted, denylist-filtered **path list**;
+file contents are never hashed. Measured, not inferred:
+
+| What was measured | Command | Result |
+| --- | --- | --- |
+| does rewriting a tracked file move the hash | `CLAUDE_PROJECT_DIR=<sandbox> bash .claude/scripts/impact-report.sh --hash-only`, before and after replacing a listed file's contents entirely | **no** — byte-identical hash both sides |
+| does adding a path move it | same command, after appending one new path to `changed-files.txt` | yes |
+| does re-touching exactly the approved set after approval move it | same command, after `truncate_changed_files_tracker` then re-adding the same paths | **no** — returns to the approved value |
+
+Measured at `1233ea5` on 2026-08-08 by `claude-workflow-plugin-ko82`.
+
+Three record types inherit this today — `QA-GATE APPROVED`,
+`REVIEW-ARTIFACT reviewed_hash` and `RUBRIC` — because all three bind the same
+single definition (`impact-report.sh` `change_set_hash` /
+`canonical_changed_files`). Any repair belongs at that one definition or
+nowhere: a content-aware second canonicalisation invented at a consumer is the
+duplicate-definition failure `llh.18` exists to forbid.
+
+**What this does not weaken.** The binding still blocks a bare `bd label add`,
+a decoy-task redirect, a path entering or leaving the set, and a denylist
+re-hash. Two residuals, both stated rather than discovered later: a hand-forged
+record is possible for an agent with arbitrary shell (a disclosure record,
+not a cryptographic sandbox — `llh.18`, `pqnd`), and re-editing **exactly**
+the approved set of paths
+reproduces the approved hash, so that content is not re-reviewed — reachable in
+one step whenever the approved change set is a single file.
+
+**Consequence for a future coherence claim.** Coherence is a *content*
+assertion: it says design, tests and code describe the same system. A
+membership-only binding cannot support one. So if the content-binding repair
+has not landed by the release that claims coherence, that row is **scoped to
+membership** rather than claimed at content.
+
+Operator-facing statement of the same thing: the closing note of the
+`LABEL_WITHOUT_RECORD` block reason in `.claude/scripts/verify-before-stop.sh`.
+Developer-facing: `docs/HOOKS.md` § "What a change-set-bound approval attests".
+The **block-reason note** is pinned by
+`.claude/scripts/tests/gate-claim-honesty.test.sh`, which asserts the text the
+shipped function EMITS against the *measured* behaviour of the shipped hash
+rather than against a fixed string. The two PROSE copies — this section and the
+`docs/HOOKS.md` one — are **not** pinned: no test asserts anything about their
+wording, and they are kept true by review.
+
+### The Stop gate's technical-check claim is scoped to the runner's default target
+
+The Stop hook resolves one runner via `detect-stack.sh` and runs that runner's
+**default** test/lint/type targets. Measured on this repo at `1233ea5` with
+`CLAUDE_PROJECT_DIR=$PWD bash .claude/scripts/detect-stack.sh`:
+
+| Field | Value |
+| --- | --- |
+| `runner` | `make` |
+| `test_cmd` | `cd "<repo>" && make test` → `Makefile:40` → `run-tests.sh` — the L1 tier only |
+| `lint_cmd` | `cd "<repo>" && make lint` → shellcheck |
+| `type_cmd` | *(empty — the type stage runs nothing on this repo)* |
+
+`make test-ci` — the target chaining L1 + L2 + L3-unit + manifest-validate — is
+**not** what the gate runs and the gate cannot discover it. Until
+`claude-workflow-plugin-fkm.1.11` the block reason nevertheless read `technical
+checks passed`; with four L2 specs red and 28 assertion failures outstanding it
+said exactly that, on every attempt of that session. The gate now names the
+commands it executed and the stages it skipped, and reads
+`.claude/.qa-tracking/verification-ledger` for anything wider — the last
+recorded command, its exit code, the tree it was measured at, and whether the
+tree has moved since. `make test-ci` does record its own result, but
+`record_verification` takes the label and the code as arguments and the ledger
+line has no writer field, so the readout claims **no provenance** for it:
+**the gate did not run it and does not vouch for it**, and the readout says so
+in those words. (It said more than that until `fkm.1.11` QA round 1 — "the
+command recorded its own result" — which was false of the only record this
+repo's ledger held, one an operator had typed by hand after running the four
+tiers separately.)
+
+---
+
+## Re-verification addendum — 2026-09-29 — all 18 v5.0.0 rows re-run
+
+Before the release tag was placed, every `DP` row's own evidence was **re-run
+against the tree at `430fe99`** by an independent lane, rather than re-read.
+The distinction is the one this arc keeps relearning: reconciling a document
+against its own stated totals catches arithmetic, and only re-executing the
+commands catches a claim that has stopped being true.
+
+**Sixteen of eighteen rows hold.** Two moved, and both moves are recorded in
+the rows themselves:
+
+<!-- TALLY-HISTORY BEGIN -->
+- **`DP5` PROVEN-WITH-CAVEAT → NOT-PROVEN → (same day, after an
+  operator-ruled prove-or-remove rewrite) PROVEN-WITH-CAVEAT on a NARROWED
+  claim.** The finding below is what the re-verification established and is
+  unchanged; the row's *resolution* came afterwards. The conjunction was
+  withdrawn and the claim narrowed to file-set intersection only — what
+  actually ships, PROVEN by `plan-batches.test.sh` 319/319 at `2b58370` — with
+  `l7gd` named as the deferral and `kk9y` as its precondition. The row's new
+  caveat is that file-disjoint units can still conflict semantically and **no
+  automatic control catches it**. The original finding:
+  the `impact_of` conjunct was deferred to `claude-workflow-plugin-l7gd` —
+  **open, created 2026-08-22, twenty-seven days before this ledger was
+  compiled.** Tracked as `claude-workflow-plugin-6ye1`, which carries the full
+  measurement and the three options for resolving it.
+- **`DP3` PROVEN → PROVEN-WITH-CAVEAT.** "Small enough for one coherent
+  change" has no check anywhere — zero hits for any sizing term across
+  `DS1`–`DS8`, and none in `review-check.sh`.
+<!-- TALLY-HISTORY END -->
+
+### Corrections to rows whose verdicts did NOT change
+
+<!-- TALLY-HISTORY BEGIN -->
+> **SUPERSEDED IN PART, 2026-09-30 — `DP4`'s VERDICT DID LATER CHANGE.** This
+> addendum is commit-pinned ("re-run against the tree at `430fe99`") and is
+> accurate as history: at that commit `DP4` was PROVEN and only its evidence
+> shape was corrected. It has since moved to **PROVEN-WITH-CAVEAT**, scoped to
+> F4's evidence that `design-conform` returned a vacuous `ok:true` on a real
+> target. Read the `DP4` row, not this table, for its current verdict. The
+> statement above that "two moved" likewise counts only the two that moved on
+> 2026-09-29.
+<!-- TALLY-HISTORY END -->
+
+Recorded because a row can be right in its conclusion and wrong in the
+evidence a reader would use to re-derive it.
+
+| Row | Stated | Measured at `430fe99` |
+| --- | ------ | --------------------- |
+| `DP4` | "returns hits at three sites" | `grep -n 'design-conform' .claude/scripts/qa-gate.sh \| wc -l` → **65** (18 non-comment). The claim survives on structure checked directly: `cmd_design_conform()`@12773, dispatcher@18177, subprocess reuse@15079, no agent spawn. |
+| `DP13` | `session-start.sh:836` / `:852` | **`:837`** and **`:853`** — drifted by one. Quoted text verbatim; `statusline.sh:44` exact. |
+| `DP15` | `git status --porcelain -- manifests/` returns `??` | Returns **empty** — `manifests/v5.0.0.sha256` is now tracked (committed `c5ba7cc`, updated `569174e`). Moves in the safe direction, but the release notes would have carried it wrong. |
+| `DP16` | "now lists **12** names"; `12 check(s) — 11 passed, 1 failed, 0 skipped` | The registry holds **13** (`grep '^DOCTOR_CHECK_NAMES=' … \| wc -w` → 13; `model_parity` landed `ea8031d`, 2026-09-22). Live: **`13 check(s) — 11 passed, 1 failed, 1 skipped`, exit 1.** The cell is internally inconsistent — it carries both the 12 sentences and later 13 sentences added `569174e`. Its central finding holds and worsened: `beads_ledger` FAIL now reads **442 on disk / 599 in database** (was 442/536). The 442 independently confirmed: `grep -c '"_type":"issue"' .beads/issues.jsonl` → 442. **PROVENANCE CORRECTION — the two halves of that pair are not the same kind of number.** 442 is a count of lines in a git-tracked file and IS pinned by the commit. **599 is a live-Dolt reading and is NOT pinnable by any commit**: re-running `workflow-doctor.sh --target . --skip beads` hours later on the same tree returned **603**, because the store accrued tasks filed during this very session. Whether 599 was correct when taken is **UNVERIFIABLE** and will stay so. Cite the database side as "≈600 and rising, read live on 2026-09-29", never as a figure measured at a commit — the divergence is the finding, and the exact right-hand number never was. Two line citations resolve to nothing (`workflow-doctor.sh:272` is `# Usage`, `:291` a JSON fragment; the sandbox statement is at `:35/:41/:52/:71` and now names all three exempt checks, including `model_parity`). |
+| `DP17` | `design-structural.test.sh` is 1070 lines | **1076.** `design-degradation.sh` is 256, exact. The REMOVED verdict itself is confirmed complete — widening the ledger's non-recursive globs with `git grep -l 'DESIGN_STORE' -- .` finds only guard files naming their own tripwire and documentation about the absence. **Zero live readers.** `docs/specs/` still does not exist. |
+| `DP18` | scratch-session-local log paths | **Partly UNVERIFIABLE.** The scratch target and all four log pairs are gone, so the classification line, verdict counts, sidecars, the twelve-check verify and the P1–P5 prediction scoring cannot be re-executed. The structural half re-verifies from git objects: `git ls-tree --name-only v4.1.0 .claude/agents/` → 7 files with neither `designer.md` nor `design-reviewer.md`; HEAD has 9. Rate it **structurally corroborated, behaviourally unreproducible** — the verdict is defensible, the evidence is no longer re-runnable, and the row should say so rather than cite paths that do not resolve. |
+| `DP1` | `grep -c` returns non-zero | Returns **152** (87 non-comment) — true, but near-unfalsifiable: it would stay non-zero after almost any regression. The substance was checked separately and holds (`no_design_attempted` IS a refusal at `approve`). Two things the claim text omits: enforcement is at `approve`, not before delegation begins — the code is explicit that *nothing* can gate delegation — and there is an audited `--no-design '<reason>'` bypass (`qa-gate.sh:5398-5416`). "Mandatory" carries an operator escape hatch. |
+
+### Closed by this re-verification
+
+`DP15`/`DP18`'s **provenance caveat is now retired.** It warned that LIVE-1 ran
+against a working tree whose `.claude/model-roles` differed from HEAD. Both
+hashes the ledger states reproduce exactly, and the bytes LIVE-1 measured are
+now the release's committed bytes:
+
+```
+working tree : 7a9a1c2103b03df7f6597555cfcde5988ef025d7f0639b3145018292b0279c4e
+HEAD 430fe99 : 7a9a1c2103b03df7f6597555cfcde5988ef025d7f0639b3145018292b0279c4e
+HEAD 261e09e : f666919e071f863030259b4ed7c45d6079d582bbb4823f38d8ce407c256e96b6
+```
+
+The **other** half of `DP15`'s caveat stays open: the frozen
+`manifests/v5.0.0.sha256` table has still never been exercised by a
+regenerate-and-`cmp`.
+
+### Method, and what it did not cover
+
+Read-only. No files written by the verifying lane, no Beads writes, and
+`make test` deliberately not run (it writes tracking state). Where a row's
+evidence was a test, only that spec was run — `design-rollup` 73/73,
+`design-coherence` 55/55, `design-unit-align` 64/64, `design-review-record`
+203/203, `design-rollup-incoherent` 13/13, `design-structural` 33/33, all
+exact. `install.sh --verify` was **not** run in full; the lane ran the exact
+binary it `exec`s (`workflow-doctor.sh --target . --skip beads`, the only mode
+its own header documents as provably non-writing, confirmed by byte-identical
+`git status` and `.beads/` hashes before and after). **Consequence stated
+rather than hidden: that lane's `13 check(s) — 11 passed, 1 failed, 1 skipped`
+becomes `DP16`'s `12/13` only if `beads` passes, which is an inference, not a
+measurement.** `DP6`, `DP7` and `DP9`'s evidence class is "commit subject plus
+task state", which can be confirmed to reproduce but not independently
+corroborated; each claim's mechanism was spot-checked in code anyway and all
+three are backed by real implementations. **SUPERSEDED IN PART, 2026-09-30, for
+`DP9` only: do not read this paragraph as clearance for that row.** `DP9` moved
+PROVEN → PROVEN-WITH-CAVEAT on 2026-09-30. "Backed by a real implementation"
+remains true of it and is exactly the distinction its caveat turns on — the
+implementation exists and its unit tests pass; what is unestablished is that it
+has ever RUN on a real target, in either direction. See the row itself.

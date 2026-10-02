@@ -99,9 +99,31 @@ quiet_stack() {
 # gate_fixture — a fresh git fixture with the no-op detect-stack stub every gate
 # spec uses (empty test/lint/type commands, so the assertions measure the GATE
 # decision rather than a toolchain run). Result in $COMPONENT_FIXTURE_PATH.
+#
+# THE .gitignore IS LOAD-BEARING (94d). This spec's drive points REWRITE the
+# harness's own instrumentation mid-cycle: `drive_point_bd` and the E1 selective
+# shim overwrite `bin/bd`, and `racing_stack`/`quiet_stack` overwrite
+# `.claude/scripts/detect-stack.sh`. Those writes are real, git-visible,
+# un-baselined changes, so once `qa-gate.sh reconcile-tracker` existed they were
+# correctly folded into the change set — which moved the change-set hash between
+# `enter` and `approve` and made four sections fail for a reason that has nothing
+# to do with the gate: E1 refused with impact_report_stale before it ever reached
+# the label step it was written to probe, and section A's approval bound a file
+# set containing the harness's own scaffolding.
+#
+# The instrumentation is not the subject matter, so it must not be in the
+# fixture's git view. This is the same call the shared denylist already makes for
+# the e2e tier — `.claude/tests/e2e/fixtures/<f>/.claude/{scripts,beads}/` is
+# denylisted precisely as "churn the harness rewrites mechanically" — applied to
+# the L2 tier, whose fixtures are `mktemp -d` roots that no denylist branch can
+# name. `.claude/.qa-tracking/` is listed for the same reason the real plugin
+# repo gitignores it (per-session ephemera). The spec's SUBJECT — src/*.ts,
+# smuggled.ts, helper-written.ts — stays fully tracked and fully reviewable.
 gate_fixture() {
     mk_fixture
     bd_required_or_skip
+    printf 'bin/\n.claude/scripts/\n.claude/.qa-tracking/\n' \
+        > "$COMPONENT_FIXTURE_PATH/.gitignore"
     (cd "$COMPONENT_FIXTURE_PATH" && git init -q 2>/dev/null \
         && git config user.email t@t.t && git config user.name t \
         && git add -A && git commit -qm baseline 2>/dev/null) || true
@@ -134,7 +156,7 @@ json_field() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null || echo ""; }
 # approval_records <root> <tid> — every QA-GATE APPROVED comment, one per line,
 # from the same source the Stop hook reads.
 approval_records() {
-    bdq "$1" show "$2" --json 2>/dev/null \
+    bd_show_with_comments "$2" "$1" \
         | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text' 2>/dev/null \
         | grep '^QA-GATE APPROVED ' || true
 }
@@ -166,9 +188,39 @@ FA="$COMPONENT_FIXTURE_PATH"
 
 TID_A=$(new_task "$FA" "gz3: printed remediation recovers")
 armed_cycle "$FA" "$TID_A" "src/a.ts"
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — armed_cycle's own seed_review_records call already
+# reconciled its canonical artifact in (AC-4), so this is exactly the set
+# approve is about to bind. A `reconcile-tracker` call AFTER approve cannot
+# recover it: approve's own baseline refresh is a FULL, unconditional
+# snapshot of everything dirty at that instant (0wk.2 — "everything dirty
+# right now has been reviewed"), so by the time a later reconcile runs, the
+# artifact (and any other incidental fixture dirt already swept in by an
+# earlier `enter`) reads as ALREADY BASELINED, pre-existing, and reconcile
+# adds nothing — measured directly: the "restore the same 2 files, then
+# reconcile" shape recomputed a DIFFERENT hash than the one just approved.
+TID_A_TRACKER_SNAPSHOT=$(cat "$FA/.claude/.qa-tracking/changed-files.txt" 2>/dev/null)
 qg "$FA" approve "$TID_A" "reviewed a.ts" >/dev/null 2>&1
-seed_tracker "$FA" "src/a.ts"
+printf '%s\n' "$TID_A_TRACKER_SNAPSHOT" > "$FA/.claude/.qa-tracking/changed-files.txt"
 ct "$FA" set "$TID_A" >/dev/null 2>&1
+# claude-workflow-plugin-rqer round 2 (QA R1-F4): this section used to carry
+# two "DEBUG A0" lines here that fired a FULL, unasserted verify-before-stop.sh
+# invocation before the one below. That extra call is itself a successful
+# release on the matching-approval path, and a successful release TRUNCATES
+# changed-files.txt (verify-before-stop.sh's own "Clean up tracking" section,
+# by design — the same tracker reset qa-gate.sh approve does). So the debug
+# call silently consumed the tracker this assertion depends on, and the ONE
+# call actually measured below had to reconstruct the change set from `git
+# status` instead (qa-gate.sh reconcile_tracker's absent-tracker fallback) —
+# a DIFFERENT, DEGRADED arm that still returns ALLOW even when the intended
+# "labeled, hash-matching approval" path is broken. Measured directly: with
+# the debug lines in place, sync-errors.log recorded a
+# "reconcile_tracker: changed-files.txt was absent-or-empty ... REBUILT from
+# git status alone" line between the debug call and this one; with them
+# removed, this ONE call produces no such line and changed-files.txt still
+# holds the FULL restored snapshot right up to the call it makes. Do not
+# reintroduce a probe call here: any extra Stop invocation before this
+# assertion reproduces the same masking.
 assert_eq "approve-idem-A0: control — the matching approval RELEASES" \
     "ALLOW" "$(stop_decision "$FA")"
 
@@ -182,9 +234,25 @@ assert_contains "approve-idem-A1: ...on the LABEL_WITHOUT_RECORD branch" \
     "no change-set-bound approval record matches" "$A_REASON"
 
 # Extract every `bash .claude/scripts/...` line from the reason, in order, and
-# run exactly those.
+# run exactly those. Bounded to BEFORE the disclosure tail checks_scope_note
+# appends (claude-workflow-plugin-i8cx R5-F2): that function's own
+# broader_verification_note() prints a separate, generic "record a broader
+# verification run" suggestion whenever the ledger is empty (the case in this
+# fixture, which never calls record-verification), and its example line
+# (`... record-verification '<command>' <exit-code>`) also matches this grep
+# even though it is advisory boilerplate about an unrelated axis, not a step
+# in "the WHOLE recipe" the block text closes above it. Verified live: A4
+# below still releases the gate having run only the 3 lines this bound
+# extracts, and the unbounded 4th line would misparse if actually eval'd —
+# `<exit-code>` is unquoted, unlike the two placeholders this spec DOES
+# substitute ($CURRENT_TASK, '<approval summary>'), so bash reads it as an
+# input redirection from a file named exit-code rather than a placeholder.
+# "WHAT THIS GATE RAN, EXACTLY." is checks_scope_note's own first line, shared
+# by all three emit_block sites it was added to, so this bound is not
+# specific to the LABEL_WITHOUT_RECORD wording tested here.
 REMEDY_FILE="$FA/.claude/.qa-tracking/printed-remediation.txt"
-printf '%s\n' "$A_REASON" | grep -E '^[[:space:]]*bash \.claude/scripts/' \
+printf '%s\n' "$A_REASON" | sed '/^WHAT THIS GATE RAN, EXACTLY\.$/,$d' \
+    | grep -E '^[[:space:]]*bash \.claude/scripts/' \
     | sed 's/^[[:space:]]*//' > "$REMEDY_FILE"
 assert_eq "approve-idem-A2: the block prints a 3-command remediation" \
     "3" "$(grep -c . "$REMEDY_FILE" | tr -d '[:space:]')"
@@ -194,17 +262,29 @@ assert_contains "approve-idem-A2: ...and says so explicitly (do NOT remove the l
     "do NOT remove the qa-approved label first" "$A_REASON"
 
 A_APPROVE_OUT=""
+A_ENTER_OUT=""
 while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
     cmd=${cmd//\'<approval summary>\'/\'re-reviewed after the post-approval edit\'}
     OUT_LINE=$( cd "$FA" && CLAUDE_PROJECT_DIR="$FA" eval "$cmd" 2>&1 | tail -1 )
-    case "$cmd" in *"qa-gate.sh approve"*) A_APPROVE_OUT="$OUT_LINE" ;; esac
+    case "$cmd" in
+        *"qa-gate.sh approve"*) A_APPROVE_OUT="$OUT_LINE" ;;
+        *"qa-gate.sh enter"*)   A_ENTER_OUT="$OUT_LINE" ;;
+    esac
 done < "$REMEDY_FILE"
 
 assert_json_field "approve-idem-A3: the printed approve SUCCEEDS" "$A_APPROVE_OUT" '.status' "approved"
 assert_not_contains "approve-idem-A3: ...and is NOT reported as an idempotent no-op" \
     "idempotent no-op" "$A_APPROVE_OUT"
-assert_contains "approve-idem-A3: ...it names the stale-label re-bind in the audit trail" \
+# 8zi/jue: WHICH of the two closures does the work on THIS path, asserted rather
+# than assumed. The printed remediation runs `enter` first, and `enter` now clears
+# a prior cycle's qa-approved (jue) — so by the time approve runs there is no
+# stale label left to re-bind, and the envelope must NOT claim one. The
+# `stale-label re-bind` diagnostic belongs to the plain re-run path with no
+# intervening enter, and is asserted there, in section G's shipped-guard leg.
+assert_contains "approve-idem-A3: the remediation's ENTER step clears the prior cycle's qa-approved (jue)" \
+    "cleared a prior cycle's qa-approved" "$A_ENTER_OUT"
+assert_not_contains "approve-idem-A3: ...so the approve that follows is a clean re-bind, NOT a stale-label one" \
     "stale-label re-bind" "$A_APPROVE_OUT"
 assert_contains "approve-idem-A3: ...and re-verified the impact report rather than skipping it" \
     "impact-report verified" "$A_APPROVE_OUT"
@@ -230,13 +310,19 @@ FB="$COMPONENT_FIXTURE_PATH"
 
 TID_B=$(new_task "$FB" "gz3: matching-hash re-approve")
 armed_cycle "$FB" "$TID_B" "src/b1.ts"
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — see the A0 note above for why a POST-approve
+# `reconcile-tracker` cannot recover it (approve's own baseline refresh
+# consumes the "newness" of everything dirty at that instant, including
+# armed_cycle's canonical review artifact).
+TID_B_TRACKER_SNAPSHOT=$(cat "$FB/.claude/.qa-tracking/changed-files.txt" 2>/dev/null)
 qg "$FB" approve "$TID_B" "reviewed b1.ts" >/dev/null 2>&1
 assert_eq "approve-idem-B0: precondition — one bound record after the first approve" \
     "1" "$(record_count "$FB" "$TID_B")"
 
 # B1. The same change set back in the tracker: the live recompute matches the
 # recorded hash -> no-op.
-seed_tracker "$FB" "src/b1.ts"
+printf '%s\n' "$TID_B_TRACKER_SNAPSHOT" > "$FB/.claude/.qa-tracking/changed-files.txt"
 B1_OUT=$(qg "$FB" approve "$TID_B" "same approval again" 2>&1 | tail -1)
 assert_json_field "approve-idem-B1: a matching-hash re-approve still succeeds" "$B1_OUT" '.status' "approved"
 assert_contains "approve-idem-B1: ...as an explicit idempotent no-op" "idempotent no-op" "$B1_OUT"
@@ -293,6 +379,18 @@ assert_eq "approve-idem-C1: ...and still no second record" "1" "$(record_count "
 # expression verify-before-stop.sh RELEASES on, writer and reader could disagree
 # about what counts as an approval — the class of bug gz3 is. Compared as text,
 # extracted from the two shipped scripts.
+#
+# claude-workflow-plugin-yrij (APPROVAL-SELECTOR-ANCHOR): the selector itself
+# — `select(test("^QA-GATE APPROVED .*change_set_hash="))` — is now ANCHORED
+# at `^` in both files (it used to be unanchored: a comment whose first line
+# was prose and whose LATER line fabricated a record satisfied it with no
+# `qa-gate.sh approve` ever having run). D1's count-check below is updated to
+# the anchored string so it does not itself go stale the moment the fix
+# lands; D1b is NEW — the original section only ever compared the CAPTURE
+# expression across files (D1 proper), never the SELECTOR that gates it, so
+# a drift in `select(...)` specifically could pass D1 unnoticed. Same
+# text-extracted-and-compared discipline as D1, applied to the clause D1
+# skipped.
 # ===========================================================================
 PLUGIN_D=$(plugin_root)
 QG_CAPTURE=$(grep -o 'capture("change_set_hash=(?<h>\[A-Za-z0-9-\]+)")\.h' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | sort -u)
@@ -302,7 +400,14 @@ assert_eq "approve-idem-D1: qa-gate.sh carries the hash-capture expression at al
 assert_eq "approve-idem-D1: ...byte-identical to verify-before-stop.sh's release expression" \
     "$VBS_CAPTURE" "$QG_CAPTURE"
 assert_eq "approve-idem-D1: ...and the same record selector" "1" \
-    "$(grep -c 'select(test("QA-GATE APPROVED .\*change_set_hash="))' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | tr -d '[:space:]')"
+    "$(grep -c 'select(test("\^QA-GATE APPROVED .\*change_set_hash="))' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | tr -d '[:space:]')"
+QG_SELECTOR=$(grep -o 'select(test("\^QA-GATE APPROVED .\*change_set_hash="))' "$PLUGIN_D/.claude/scripts/qa-gate.sh" | sort -u)
+VBS_SELECTOR_TASK_HAS=$(sed -n '/^task_has_matching_approval_record()/,/^}/p' "$PLUGIN_D/.claude/scripts/verify-before-stop.sh" \
+    | grep -o 'select(test("\^QA-GATE APPROVED .\*change_set_hash="))' | sort -u)
+assert_eq "approve-idem-D1b: qa-gate.sh's selector is ANCHORED (yrij APPROVAL-SELECTOR-ANCHOR)" \
+    "yes" "$([ -n "$QG_SELECTOR" ] && echo yes || echo no)"
+assert_eq "approve-idem-D1b: ...byte-identical to task_has_matching_approval_record's own selector" \
+    "$VBS_SELECTOR_TASK_HAS" "$QG_SELECTOR"
 
 # ===========================================================================
 # SECTION E — the approve-commit ORDER.
@@ -328,12 +433,19 @@ armed_cycle "$FE" "$TID_E" "src/e.ts"
 # which exits 1. Same idiom as qa-gate.sh spec's Step-3 rollback case; the real
 # bd path is read out of the existing wrapper because $FE/bin is already first on
 # PATH (so `command -v bd` resolves to the wrapper itself).
-REAL_BD_E=$(sed -n 's/^exec \(.*\) --no-daemon.*/\1/p' "$FE/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+# The extraction is anchored on the trailing `"$@"`, NOT on any bd flag: the
+# wrapper used to end `--no-daemon "$@"` until bd 1.1.2 removed that flag, and a
+# pattern keyed to it silently returns empty on the new wrapper. That is not a
+# harmless miss — the `command -v bd` fallback below resolves to $FE/bin (first
+# on PATH), i.e. to THIS wrapper, so the regenerated file would exec itself
+# forever. The failure mode is a spec that hangs printing nothing (the runner
+# captures stdout in a command substitution). See lib/shim.sh's gz3 guard.
+REAL_BD_E=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$FE/bin/bd" 2>/dev/null | tr -d '"' | head -1)
 [ -z "$REAL_BD_E" ] && REAL_BD_E=$(command -v bd)
 cat > "$FE/bin/bd" <<EOF
 #!/bin/bash
 if [ "\$1" = "label" ] && [ "\$2" = "add" ] && [ "\$4" = "qa-approved" ]; then exit 1; fi
-exec $REAL_BD_E --no-daemon "\$@"
+exec $REAL_BD_E "\$@"
 EOF
 chmod +x "$FE/bin/bd"
 E_RC=0
@@ -345,7 +457,7 @@ E_OUT=$(printf '%s\n' "$E_RAW" | tail -1)
 # restore still has to be done by hand).
 cat > "$FE/bin/bd" <<EOF
 #!/bin/bash
-exec $REAL_BD_E --no-daemon "\$@"
+exec $REAL_BD_E "\$@"
 EOF
 chmod +x "$FE/bin/bd"
 assert_eq "approve-idem-E1: a failed qa-approved add exits 3 (atomic refusal)" "3" "$E_RC"
@@ -362,7 +474,15 @@ assert_contains "approve-idem-E1: ...and the envelope says the record is inert w
 QG_REAL="$PLUGIN_D/.claude/scripts/qa-gate.sh"
 line_of() { grep -n -- "$2" "$1" | head -1 | cut -d: -f1; }
 L_RECORD=$(line_of "$QG_REAL" '    add_comment "$tid" "QA-GATE APPROVED ')
-L_LABEL=$(line_of "$QG_REAL" '    if ! add_label "$tid" "qa-approved"; then')
+# 8zi re-pointed this anchor. The INVARIANT is untouched — the record is still
+# written before the qa-approved label, and the tracking-state finalization still
+# comes after the rollback-capable label steps — but the statement that writes the
+# label is no longer a bare `add_label`: approve now performs the whole terminal
+# transition (add qa-approved, clear every other cycle label, restore exactly on
+# failure) through one call. Anchored WITHOUT the trailing `"${sweep_clear[@]}"`
+# because line_of greps a BRE and the `[...]` would be read as a bracket
+# expression rather than a literal.
+L_LABEL=$(line_of "$QG_REAL" '    if ! set_terminal_label "$tid" "qa-approved"')
 L_BASELINE=$(line_of "$QG_REAL" '    if ! write_gate_baseline "qa-gate-approve"; then')
 L_TRUNCATE=$(grep -n '^    truncate_changed_files_tracker$' "$QG_REAL" | head -1 | cut -d: -f1)
 L_CLEARTASK=$(grep -n '^    clear_current_task$' "$QG_REAL" | head -1 | cut -d: -f1)
@@ -391,9 +511,11 @@ assert_eq "approve-idem-E2: the tracking-state finalization stays AFTER the roll
 # drive_point_bd <root> <argv1> <argv2> <argv4>: wrap bd so the FIRST call
 # matching (argv1, argv2, argv4) runs for real, snapshots what a Stop would see,
 # runs the Stop hook, and stores its envelope. Everything else passes through.
+# Anchored on the trailing `"$@"`, never on a bd flag — see the note at the E1
+# wrapper above for why a missed match here hangs the spec instead of failing it.
 real_bd_of() {
     local p
-    p=$(sed -n 's/^exec \(.*\) --no-daemon.*/\1/p' "$1/bin/bd" 2>/dev/null | tr -d '"' | head -1)
+    p=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$1/bin/bd" 2>/dev/null | tr -d '"' | head -1)
     [ -z "$p" ] && p=$(command -v bd)
     printf '%s' "$p"
 }
@@ -405,8 +527,8 @@ drive_point_bd() {
 #!/bin/bash
 if [ "\$1" = "$a1" ] && [ "\$2" = "$a2" ] && [ "\$4" = "$a4" ] && [ ! -f "$root/.claude/.qa-tracking/.drive-fired" ]; then
     : > "$root/.claude/.qa-tracking/.drive-fired"
-    $real --no-daemon "\$@"; rc=\$?
-    $real --no-daemon show "\$3" --json 2>/dev/null \\
+    $real "\$@"; rc=\$?
+    $real show "\$3" --json --include-comments 2>/dev/null \\
         | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text' 2>/dev/null \\
         | grep -c '^QA-GATE APPROVED ' > "$root/.claude/.qa-tracking/.drive-records" 2>/dev/null
     if [ -f "$root/.claude/.qa-tracking/current-task" ]; then
@@ -424,14 +546,14 @@ if [ "\$1" = "$a1" ] && [ "\$2" = "$a2" ] && [ "\$4" = "$a4" ] && [ ! -f "$root/
         | tail -1 > "$root/.claude/.qa-tracking/.drive-stop.json" )
     exit \$rc
 fi
-exec $real --no-daemon "\$@"
+exec $real "\$@"
 EOF
     chmod +x "$root/bin/bd"
 }
 # Restore the plain wrapper by hand (never via mk_bd_shim — see its guard).
 restore_bd() {
     local root="$1" real; real=$(real_bd_of "$root")
-    printf '#!/bin/bash\nexec %s --no-daemon "$@"\n' "$real" > "$root/bin/bd"
+    printf '#!/bin/bash\nexec %s "$@"\n' "$real" > "$root/bin/bd"
     chmod +x "$root/bin/bd"
 }
 drive_read() { tr -d '[:space:]' < "$1/.claude/.qa-tracking/$2" 2>/dev/null || printf 'missing'; }
@@ -619,9 +741,28 @@ assert_eq "approve-idem-F2: a forged label + EMPTY tracker + real dirt STILL BLO
 assert_contains "approve-idem-F2: ...on the LABEL_WITHOUT_RECORD branch (the release did not swallow it)" \
     "no change-set-bound approval record matches" "$(json_field "$F2_JSON" '.reason')"
 # Causation: remove the cause, the release returns.
+#
+# 94d CHANGED WHAT "THE CAUSE" IS, and the probe has to follow. The Stop above
+# ran `qa-gate.sh reconcile-tracker`, which folded smuggled.ts INTO
+# changed-files.txt — so deleting the file no longer restores the release on its
+# own: the tracker remembers it. That stickiness is deliberate and is exactly the
+# semantics post-edit.sh has always had (Write a file, delete it with Bash, and
+# the path still gates until an approve truncates the tracker); reconciled paths
+# now behave the same way, and pruning the tracker to "fix" it would reintroduce
+# the lose-a-tracked-path failure mode that cost post-edit.sh its unlocked trim.
+# So the causation probe removes BOTH halves of the cause — the file and the
+# tracker entry the reconcile derived from it — which is the state a fresh cycle
+# reaches anyway, and asserts the release returns. The stickiness itself is
+# asserted first so it is recorded behaviour rather than an incidental detail.
 rm -f "$FG2/smuggled.ts"
 ct "$FG2" set "$TID_F2" >/dev/null 2>&1
-assert_eq "approve-idem-F2: removing the un-baselined dirt restores the release (block was attributable)" \
+assert_eq "approve-idem-F2: 94d — a reconciled path is STICKY: deleting the file alone still blocks" \
+    "block" "$(stop_decision "$FG2")"
+assert_eq "approve-idem-F2: ...because the reconcile recorded it in the tracker" "1" \
+    "$(grep -c 'smuggled\.ts' "$FG2/.claude/.qa-tracking/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+: > "$FG2/.claude/.qa-tracking/changed-files.txt"
+ct "$FG2" set "$TID_F2" >/dev/null 2>&1
+assert_eq "approve-idem-F2: removing the dirt AND its tracker entry restores the release (block was attributable)" \
     "ALLOW" "$(stop_decision "$FG2")"
 
 # ===========================================================================
@@ -631,6 +772,30 @@ assert_eq "approve-idem-F2: removing the un-baselined dirt restores the release 
 # changed. A copy whose guard short-circuits unconditionally must reproduce the
 # original deadlock: approve reports an idempotent no-op and the gate stays
 # blocked.
+#
+# 8zi/jue UPDATE — WHY THIS FLOW NO LONGER RUNS `enter`, and what that costs.
+#
+# The deadlock this META reproduces now has TWO independent closures in the tree,
+# and they overlap on exactly one path:
+#   gz3  approve refuses to no-op when no record binds the current change set;
+#   jue  `enter` clears a prior cycle's qa-approved, in both of its arms.
+# The printed remediation is `enter` -> `impact-report.sh` -> `approve`, so after
+# the jue fix the label is already GONE by the time approve runs on that path:
+# had_approved is 0, the idempotency guard is not reached at all, and a mutant of
+# that guard cannot express anything. Driving the mutant through `enter` would
+# therefore assert nothing about the guard — a green leg measuring an unreachable
+# branch, which is the failure mode this whole spec exists to prevent.
+#
+# So this flow drops the `enter` step and keeps the other two. That is not a
+# weaker scenario: it is the plain re-run — edit, regenerate the report, approve
+# again — where qa-approved is still set, the change set has moved, and the
+# hash-aware guard is the ONLY thing standing between the operator and the
+# original deadlock. One variable, and it is the guard.
+#
+# WHAT IS NO LONGER COVERED HERE, named rather than left implicit: the
+# enter-mediated recovery under a label-only guard. It is covered instead by the
+# jue legs in specs/qa-gate.sh (jue-4a/4b and jue-META), which pin the enter-side
+# clear and show a mutant of it leaving the label behind.
 # ===========================================================================
 gate_fixture
 FH="$COMPONENT_FIXTURE_PATH"
@@ -657,12 +822,16 @@ armed_cycle "$FH" "$TID_G" "src/g.ts"
 ( cd "$FH" && CLAUDE_PROJECT_DIR="$FH" bash "$QG_MUT" approve "$TID_G" "first approval" >/dev/null 2>&1 )
 assert_eq "approve-idem-G META: precondition — the mutant's first approve wrote a record" \
     "1" "$(record_count "$FH" "$TID_G")"
-# The post-approval edit, then the printed remediation, driven against the mutant.
+# The post-approval edit, then the plain re-run (regenerate the report, approve
+# again) driven against the mutant. NO `enter` — see the section header: with the
+# jue fix an intervening enter clears qa-approved, so had_approved is 0 and the
+# mutated guard is never reached.
 seed_tracker "$FH" "src/g.ts" "src/g2.ts"
 ct "$FH" set "$TID_G" >/dev/null 2>&1
 assert_eq "approve-idem-G META: precondition — the mutant's post-edit state BLOCKS" \
     "block" "$(stop_decision "$FH")"
-( cd "$FH" && CLAUDE_PROJECT_DIR="$FH" bash "$QG_MUT" enter "$TID_G" >/dev/null 2>&1 )
+assert_contains "approve-idem-G META: precondition — qa-approved is still SET (so the guard is reachable)" \
+    "qa-approved" "$(labels_of "$FH" "$TID_G")"
 ir "$FH" "$TID_G" >/dev/null 2>&1
 G_APPROVE=$( cd "$FH" && CLAUDE_PROJECT_DIR="$FH" bash "$QG_MUT" approve "$TID_G" "re-approved after the edit" 2>&1 | tail -1 )
 assert_contains "approve-idem-G META: under the label-only guard approve is an idempotent no-op (A3 WOULD fail)" \
@@ -673,32 +842,52 @@ ct "$FH" set "$TID_G" >/dev/null 2>&1
 assert_eq "approve-idem-G META: ...and the gate is STILL blocked (A4 WOULD fail — the original deadlock)" \
     "block" "$(stop_decision "$FH")"
 # The shipped script recovers the identical state, so the difference is the guard.
-qg "$FH" approve "$TID_G" "shipped guard recovers" >/dev/null 2>&1
+G_SHIPPED=$( qg "$FH" approve "$TID_G" "shipped guard recovers" 2>&1 | tail -1 )
+# 8zi/jue moved this assertion here from A3/H3. On THIS path — a plain re-run with
+# no intervening enter — qa-approved is still set and no record binds the current
+# change set, so the hash-aware guard falls through loudly and NAMES it. That is
+# the only remaining place the literal is reachable, which is exactly why the
+# assertion has to live here now rather than be dropped.
+assert_contains "approve-idem-G META: the SHIPPED guard names the stale-label re-bind in the audit trail" \
+    "stale-label re-bind" "$G_SHIPPED"
+assert_not_contains "approve-idem-G META: ...and does NOT report an idempotent no-op" \
+    "idempotent no-op" "$G_SHIPPED"
 seed_tracker "$FH" "src/g.ts" "src/g2.ts"
 ct "$FH" set "$TID_G" >/dev/null 2>&1
 assert_eq "approve-idem-G META: the SHIPPED guard recovers the identical state" \
     "ALLOW" "$(stop_decision "$FH")"
 
 # ===========================================================================
-# SECTION H — the RESIDUAL of the empty-tracker reference, pinned as reality.
+# SECTION H — the empty-tracker reference: its residual, and how 94d closed it.
 #
 # The empty-tracker arm of set_idempotency_reference reads the PERSISTED impact
 # report, because after an approve the tracker no longer witnesses what was
-# approved (section B2 depends on that). The cost is a bounded residual, found by
-# probing this arm rather than by waiting for it in the field:
+# approved (section B2 depends on that). Before 94d that carried a bounded
+# residual, found by probing this arm rather than by waiting for it in the field:
 #
 #   tracker empty + real UN-BASELINED dirt (work written by a helper, never seen
 #   by post-edit.sh — LESSONS.md/bi3.2) => the Stop hook blocks on the git half
 #   of its predicate, while the persisted report still witnesses the PREVIOUS
-#   approval. A bare `approve` therefore no-ops and the block stands.
+#   approval. A bare `approve` therefore no-op'd and the block stood.
 #
-# This is pinned, not papered over, and it is NOT the gz3 deadlock: the printed
-# remediation still recovers, because its step 2 (impact-report.sh) re-persists
-# the report — after which no record binds it and approve proceeds. H3 proves
-# exactly that. Fixing the no-op inside approve would require a second copy of
-# the Stop hook's baseline-relative git walk (reviewable_changes), which is the
-# drift the one-definition rule exists to prevent; the chosen mitigation is that
-# the no-op NAMES the reference it matched, asserted in H2.
+# 94d CLOSED IT, and from an unexpected direction. The no-op depended on the
+# tracker still being EMPTY at approve time; the Stop hook now runs
+# `qa-gate.sh reconcile-tracker` before it reads anything, so the helper-written
+# file is in the tracker by the time approve runs. set_idempotency_reference
+# therefore takes its LIVE-RECOMPUTE arm, no record binds that hash, and approve
+# PROCEEDS into its preconditions — where the persisted report is correctly
+# refused as STALE. The operator gets a precise refusal naming both hashes and
+# the regenerate step, instead of a "success" that leaves the gate blocked.
+#
+# H2 below asserts that new behaviour; H3 (unchanged) still proves the printed
+# remediation recovers the state. Note that the OLD justification for leaving the
+# residual open — "fixing the no-op inside approve would require a second copy of
+# the Stop hook's baseline-relative git walk" — no longer holds either:
+# reconcile_tracker IS that walk, in a single callable definition. Moving
+# approve's own reconcile above the idempotency check would close the remaining
+# sliver (approve invoked with an empty tracker and no Stop in between); that is
+# a deliberate decision for the approve-idempotency work, not a side effect of
+# the tracker fix, so this spec pins the behaviour as shipped.
 # ===========================================================================
 gate_fixture
 FR="$COMPONENT_FIXTURE_PATH"
@@ -713,37 +902,389 @@ ct "$FR" set "$TID_R" >/dev/null 2>&1
 H_JSON=$(stop_json "$FR")
 assert_eq "approve-idem-H1: un-baselined dirt after an approval BLOCKS (the git half still sees it)" \
     "block" "$(json_field "$H_JSON" '.decision')"
-H2_OUT=$(qg "$FR" approve "$TID_R" "bare approve, no regenerated report" 2>&1 | tail -1)
-assert_json_field "approve-idem-H2: THE RESIDUAL — a bare approve reports success..." \
-    "$H2_OUT" '.status' "approved"
-assert_contains "approve-idem-H2: ...as an idempotent no-op against the previous approval" \
+# The Stop above reconciled the helper-written file into the tracker (94d), which
+# is what takes the no-op off the table. Asserted first, because every H2 claim
+# below follows from it.
+assert_eq "approve-idem-H2: 94d — the Stop reconciled the helper-written file into the tracker" \
+    "1" "$(grep -c 'helper-written\.ts' "$FR/.claude/.qa-tracking/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+H2_RC=0
+H2_RAW=$(qg "$FR" approve "$TID_R" "bare approve, no regenerated report" 2>&1) || H2_RC=$?
+H2_OUT=$(printf '%s\n' "$H2_RAW" | tail -1)
+assert_eq "approve-idem-H2: a bare approve now REFUSES (exit 2) instead of no-op'ing" "2" "$H2_RC"
+assert_json_field "approve-idem-H2: ...with status=error" "$H2_OUT" '.status' "error"
+assert_json_field "approve-idem-H2: ...on the impact-report staleness check, not the idempotency guard" \
+    "$H2_OUT" '.error_key' "impact_report_stale"
+assert_not_contains "approve-idem-H2: ...and is NOT reported as an idempotent no-op (the pre-94d residual)" \
     "idempotent no-op" "$H2_OUT"
-assert_contains "approve-idem-H2: ...NAMING the persisted report as the reference it matched" \
-    "persisted impact report" "$H2_OUT"
-assert_contains "approve-idem-H2: ...and steering to the step that resolves it" \
-    "re-run impact-report.sh" "$H2_OUT"
+assert_contains "approve-idem-H2: ...steering to the step that resolves it" \
+    "impact-report.sh" "$H2_OUT"
 ct "$FR" set "$TID_R" >/dev/null 2>&1
-assert_eq "approve-idem-H2: ...so the gate still blocks (the residual, stated as reality)" \
+assert_eq "approve-idem-H2: ...and the gate still blocks (nothing was released on a stale binding)" \
     "block" "$(stop_decision "$FR")"
 # H3. The printed remediation — all three lines — still recovers this state.
+# Bounded before the checks_scope_note disclosure tail, same reasoning as A2's
+# extraction above (i8cx R5-F2's broader_verification_note "record one"
+# suggestion is not part of this recipe).
 H3_REMEDY="$FR/.claude/.qa-tracking/printed-remediation.txt"
 printf '%s\n' "$(json_field "$(stop_json "$FR")" '.reason')" \
+    | sed '/^WHAT THIS GATE RAN, EXACTLY\.$/,$d' \
     | grep -E '^[[:space:]]*bash \.claude/scripts/' | sed 's/^[[:space:]]*//' > "$H3_REMEDY"
 assert_eq "approve-idem-H3: the still-blocking Stop prints the same 3-command remediation" \
     "3" "$(grep -c . "$H3_REMEDY" | tr -d '[:space:]')"
 H3_APPROVE=""
+H3_ENTER=""
 while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
     cmd=${cmd//\'<approval summary>\'/\'re-reviewed including the helper-written file\'}
     LINE=$( cd "$FR" && CLAUDE_PROJECT_DIR="$FR" eval "$cmd" 2>&1 | tail -1 )
-    case "$cmd" in *"qa-gate.sh approve"*) H3_APPROVE="$LINE" ;; esac
+    case "$cmd" in
+        *"qa-gate.sh approve"*) H3_APPROVE="$LINE" ;;
+        *"qa-gate.sh enter"*)   H3_ENTER="$LINE" ;;
+    esac
 done < "$H3_REMEDY"
 assert_not_contains "approve-idem-H3: with step 2 run, approve is NOT a no-op" \
     "idempotent no-op" "$H3_APPROVE"
-assert_contains "approve-idem-H3: ...it re-binds against the regenerated report" \
+# 8zi/jue, same reasoning as A3: the remediation's own `enter` step removes the
+# stale label, so the approve after it re-binds against the regenerated report
+# WITHOUT a stale-label note. The step that made that true is asserted directly.
+assert_contains "approve-idem-H3: the remediation's ENTER step clears the prior cycle's qa-approved (jue)" \
+    "cleared a prior cycle's qa-approved" "$H3_ENTER"
+assert_not_contains "approve-idem-H3: ...so the approve re-binds cleanly, with no stale-label note" \
     "stale-label re-bind" "$H3_APPROVE"
 ct "$FR" set "$TID_R" >/dev/null 2>&1
 assert_eq "approve-idem-H3: ...and the gate releases (residual is recoverable, not a deadlock)" \
     "ALLOW" "$(stop_decision "$FR")"
+
+# ===========================================================================
+# SECTION I — `--expect-hash`: did the CALLER'S verdict cover the set being
+# bound? (claude-workflow-plugin-qzv)
+#
+# THE DEFECT. `verify-before-stop.sh`'s F1 fast path classifies a change set
+# ("doc-only — nothing reviewable here") and THEN calls approve. Two reads, two
+# instants, with `enter` — which reconciles the tracker and regenerates the impact
+# report — in between. A path arriving in that window is inside what approve binds
+# and outside what F1 judged. On the v4.1.0 release task the recorded approval
+# bound `9942b2bd` while the work that shipped hashed to `914ceeff`.
+#
+# `--expect-hash <h>` makes the caller STATE the set it judged, and approve
+# refuses when that is not the set it would bind. Mirrors `grade-record
+# --graded-hash` in argument handling; the refusal names BOTH hashes, because
+# "they differ" does not tell an operator which one is stale.
+#
+# WHAT SECTION I DOES NOT CLAIM. The check proves bound == classified. It does NOT
+# prove the set is COMPLETE: both sides come from one canonicalisation of one
+# tracker, so it detects drift and is structurally blind to loss
+# (claude-workflow-plugin-fkm.1.20). No assertion below implies otherwise.
+# ===========================================================================
+gate_fixture
+FI="$COMPONENT_FIXTURE_PATH"
+
+TID_I=$(new_task "$FI" "qzv: --expect-hash binds the classified set")
+armed_cycle "$FI" "$TID_I" "src/i.ts"
+I_HASH=$(ir "$FI" --hash-only 2>/dev/null || echo "")
+assert_eq "approve-idem-I0: precondition — the armed change set has a computable hash" \
+    "yes" "$([ -n "$I_HASH" ] && echo yes || echo no)"
+
+# I1. The MATCHING expectation approves, and says so in the audit trail.
+I1_OUT=$(qg "$FI" approve "$TID_I" --expect-hash "$I_HASH" "reviewed i.ts" 2>&1 | tail -1)
+assert_json_field "approve-idem-I1: a matching --expect-hash approves" "$I1_OUT" '.status' "approved"
+assert_contains "approve-idem-I1: ...naming the verified expectation in the envelope" \
+    "expected-hash verified" "$I1_OUT"
+assert_contains "approve-idem-I1: ...and NOT claiming completeness (it binds, it does not witness)" \
+    "NOT a completeness claim" "$I1_OUT"
+assert_eq "approve-idem-I1: ...writing exactly one bound record" "1" "$(record_count "$FI" "$TID_I")"
+assert_eq "approve-idem-I1: ...bound to the expected hash" "$I_HASH" "$(record_hash "$FI" "$TID_I")"
+
+# I2. THE HEADLINE: a MISMATCHED expectation is REFUSED, nothing is written, and
+# both hashes are named. Driven exactly as the live defect arrives — the caller
+# classified set A, a path landed, and the set approve would bind is A+B.
+TID_I2=$(new_task "$FI" "qzv: --expect-hash refuses a moved change set")
+armed_cycle "$FI" "$TID_I2" "src/i2.ts"
+I2_CLASSIFIED=$(ir "$FI" --hash-only 2>/dev/null || echo "")
+# The path that arrives after the caller classified the set.
+seed_tracker "$FI" "src/i2.ts" "src/i2-arrived-late.ts"
+ir "$FI" "$TID_I2" >/dev/null 2>&1          # a FRESH report, so staleness is not the refusal
+I2_BOUND=$(ir "$FI" --hash-only 2>/dev/null || echo "")
+assert_eq "approve-idem-I2: precondition — the classified and bindable sets really differ" \
+    "differ" "$([ -n "$I2_CLASSIFIED" ] && [ "$I2_CLASSIFIED" != "$I2_BOUND" ] && echo differ || echo same)"
+I2_RC=0
+# NB: capture the rc WITHOUT a pipe — `cmd | tail` yields tail's status, which is
+# always 0 and would pass this assertion whatever approve did.
+I2_RAW=$(qg "$FI" approve "$TID_I2" --expect-hash "$I2_CLASSIFIED" "doc-only verdict over a moved set" 2>&1) || I2_RC=$?
+I2_OUT=$(printf '%s\n' "$I2_RAW" | tail -1)
+assert_eq "approve-idem-I2: a mismatched --expect-hash is REFUSED (exit 2)" "2" "$I2_RC"
+assert_json_field "approve-idem-I2: ...with error_key=expected_hash_mismatch" \
+    "$I2_OUT" '.error_key' "expected_hash_mismatch"
+assert_contains "approve-idem-I2: ...naming the hash the caller CLASSIFIED" "$I2_CLASSIFIED" "$I2_OUT"
+assert_contains "approve-idem-I2: ...and the hash it would have BOUND" "$I2_BOUND" "$I2_OUT"
+assert_contains "approve-idem-I2: ...and steering to the recompute that resolves it" \
+    "impact-report.sh --hash-only" "$I2_OUT"
+assert_contains "approve-idem-I2: ...while refusing to imply the binding proves completeness" \
+    "does NOT prove that set is complete" "$I2_OUT"
+assert_eq "approve-idem-I2: ...writing NO approval record" "0" "$(record_count "$FI" "$TID_I2")"
+assert_not_contains "approve-idem-I2: ...and adding NO qa-approved label" \
+    "qa-approved" "$(labels_of "$FI" "$TID_I2")"
+# The refusal is not the impact-report staleness check wearing a different name:
+# the report was regenerated above, so that check passes and this one is what
+# fires. Asserted so a future reordering cannot make I2 pass for the wrong reason.
+assert_not_contains "approve-idem-I2: ...and it is NOT the staleness refusal in disguise" \
+    "impact_report_stale" "$I2_OUT"
+
+# I3/I4. Argument handling, mirroring --graded-hash. Both are USAGE errors (exit
+# 1) and must be distinguishable from a real mismatch — a shell-mangled value
+# reported as `expected_hash_mismatch` would look like a genuine drift detection.
+I3_RC=0
+I3_RAW=$(qg "$FI" approve "$TID_I2" --expect-hash 2>&1) || I3_RC=$?
+assert_eq "approve-idem-I3: --expect-hash with no value is a usage error (exit 1)" "1" "$I3_RC"
+assert_json_field "approve-idem-I3: ...with error_key=missing_expected_hash" \
+    "$(printf '%s\n' "$I3_RAW" | tail -1)" '.error_key' "missing_expected_hash"
+I4_RC=0
+I4_RAW=$(qg "$FI" approve "$TID_I2" --expect-hash "not a hash" "summary" 2>&1) || I4_RC=$?
+assert_eq "approve-idem-I4: a non-hash --expect-hash value is a usage error (exit 1)" "1" "$I4_RC"
+assert_json_field "approve-idem-I4: ...with error_key=expected_hash_invalid_chars" \
+    "$(printf '%s\n' "$I4_RAW" | tail -1)" '.error_key' "expected_hash_invalid_chars"
+assert_contains "approve-idem-I4: ...explicitly NOT reported as a change-set mismatch" \
+    "NOT a change-set mismatch" "$(printf '%s\n' "$I4_RAW" | tail -1)"
+
+# I5. ABSENT flag -> unchanged behaviour. The refusal must not become a new
+# mandatory precondition: every existing caller passes no --expect-hash.
+I5_OUT=$(qg "$FI" approve "$TID_I2" "no expectation stated" 2>&1 | tail -1)
+assert_json_field "approve-idem-I5: with no --expect-hash, approve still approves" \
+    "$I5_OUT" '.status' "approved"
+assert_not_contains "approve-idem-I5: ...and says nothing about an expectation it was not given" \
+    "expected-hash verified" "$I5_OUT"
+assert_eq "approve-idem-I5: ...binding the current set" "$I2_BOUND" "$(record_hash "$FI" "$TID_I2")"
+
+# ---------------------------------------------------------------------------
+# SECTION IM — META: strip the EXPECTED-HASH-REFUSAL region and I2 goes green
+# for the wrong reason, i.e. the mismatched expectation APPROVES.
+#
+# The region is arranged so stripping it yields the PRE-QZV function rather than a
+# syntax error: the flag's parse arm, the refusal and the audit-observation
+# assignment are all inside sentinels, and the envelope reads
+# `${expect_hash_obs:-}` so the stripped copy still composes.
+# ---------------------------------------------------------------------------
+gate_fixture
+FIM="$COMPONENT_FIXTURE_PATH"
+QG_REAL_IM=$(readlink "$FIM/.claude/scripts/qa-gate.sh" 2>/dev/null || printf '%s' "$FIM/.claude/scripts/qa-gate.sh")
+QG_IM_MUT="$FIM/.claude/scripts/qa-gate-noexpect.sh"
+awk '
+    /^ *# EXPECTED-HASH-REFUSAL BEGIN/ { skip = 1; next }
+    /^ *# EXPECTED-HASH-REFUSAL END/   { skip = 0; next }
+    !skip { print }
+' "$QG_REAL_IM" > "$QG_IM_MUT"
+chmod +x "$QG_IM_MUT"
+if assert_mutant_applied "approve-idem-IM META" "$QG_REAL_IM" "$QG_IM_MUT"; then
+    # Counted on the CODE line, not on the identifier — the same trap the 8M META
+    # records. `expected_hash_mismatch` is also named in the `usage` text and in
+    # the parse arm's explanatory comment, both DELIBERATELY outside the sentinels
+    # (the usage block documents the flag for a human; excising it would make the
+    # stripped copy advertise a flag it no longer has). A bare identifier grep
+    # therefore answers 3 and this leg would fail for a reason that has nothing to
+    # do with the mutation. Measured, not predicted: it did.
+    #
+    # COUNTS UPDATED for claude-workflow-plugin-k6re R6-F2 (measured red against
+    # the shipped fix before this update: expected 0/1, got 1/2). Before that fix
+    # there was exactly one `emit_error_json ... "expected_hash_mismatch"` call
+    # site in the whole script — this block's own, inside EXPECTED-HASH-REFUSAL.
+    # R6-F2 added a SECOND, independent one inside emit_approve_success
+    # (APPROVE-SUCCESS-GATE-EXPECT-HASH, above cmd_approve) — same error_key, same
+    # remediation text, on purpose (see that block's own header: "a caller or test
+    # keyed on error_key must not care which of cmd_approve's two success exits
+    # caught the mismatch" — the identical reasoning A2 already established for
+    # design_conflict_open). This mutant strips ONLY the EXPECTED-HASH-REFUSAL
+    # sentinel region, which — per this section's own header above — also removes
+    # the ARG-PARSE arm (`--expect-hash)` itself lives inside these sentinels), so
+    # $expect_hash_arg never becomes non-empty under the mutant and
+    # emit_approve_success's OWN (untouched, unrelated) check never has anything
+    # to compare — it is not "bypassed", it simply never receives an argument.
+    # The shipped script's total is therefore 2, not 1; the stripped copy's
+    # surviving count is 1 (emit_approve_success's own site), not 0 — both counts
+    # moved for the SAME reason, not because either emit site relocated.
+    assert_eq "approve-idem-IM META: THIS block's own emit site is gone (the strip landed where it was aimed)" \
+        "1" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_IM_MUT" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: ...and the shipped script now carries TWO such emit sites (k6re R6-F2's independent second one, not a strip failure)" \
+        "2" "$(grep -c 'emit_error_json "approve" "\$tid" "expected_hash_mismatch"' "$QG_REAL_IM" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: ...and the ONE site surviving the strip is emit_approve_success's, not a duplicate of this block's" \
+        "1" "$(grep -c '^emit_approve_success() {' "$QG_IM_MUT" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: ...and the --expect-hash parse arm is gone with it" \
+        "0" "$(grep -c -- '--expect-hash)' "$QG_IM_MUT" | tr -d '[:space:]')"
+    assert_eq "approve-idem-IM META: the stripped copy still parses" "0" \
+        "$(bash -n "$QG_IM_MUT" 2>/dev/null && echo 0 || echo 1)"
+    TID_IM=$(new_task "$FIM" "qzv META: stripped refusal approves a moved set")
+    armed_cycle "$FIM" "$TID_IM" "src/im.ts"
+    IM_CLASSIFIED=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
+    seed_tracker "$FIM" "src/im.ts" "src/im-arrived-late.ts"
+    # claude-workflow-plugin-rqer (v5 D2): reconcile BEFORE regenerating, so
+    # armed_cycle's own canonical review artifact (still real and uncommitted
+    # on disk) is folded back into the "bindable" set this leg's whole point
+    # is to classify — the shipped qa-gate.sh's reconcile, since the IM
+    # mutation touches only the --expect-hash refusal, never this.
+    qg "$FIM" reconcile-tracker >/dev/null 2>&1
+    ir "$FIM" "$TID_IM" >/dev/null 2>&1
+    IM_BOUND=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
+    assert_eq "approve-idem-IM META: precondition — classified and bindable sets differ" \
+        "differ" "$([ -n "$IM_CLASSIFIED" ] && [ "$IM_CLASSIFIED" != "$IM_BOUND" ] && echo differ || echo same)"
+    # Under the stripped copy `--expect-hash <h>` is not a known flag, so the
+    # pre-qzv parser folds it into the SUMMARY — which is precisely the pre-qzv
+    # world: the caller's expectation is inert and the approval binds whatever the
+    # set happens to be now.
+    IM_RC=0
+    IM_RAW=$( cd "$FIM" && CLAUDE_PROJECT_DIR="$FIM" bash "$QG_IM_MUT" approve "$TID_IM" \
+        --expect-hash "$IM_CLASSIFIED" "doc-only verdict over a moved set" 2>&1 ) || IM_RC=$?
+    IM_OUT=$(printf '%s\n' "$IM_RAW" | tail -1)
+    assert_eq "approve-idem-IM META: with the refusal stripped the mismatched expectation APPROVES (I2 WOULD fail)" \
+        "0" "$IM_RC"
+    assert_json_field "approve-idem-IM META: ...with status=approved" "$IM_OUT" '.status' "approved"
+    assert_eq "approve-idem-IM META: ...binding the set the caller never classified" \
+        "$IM_BOUND" "$(record_hash "$FIM" "$TID_IM")"
+    # Restore control: the SHIPPED script refuses the identical state.
+    TID_IMC=$(new_task "$FIM" "qzv META: shipped refusal refuses the same state")
+    armed_cycle "$FIM" "$TID_IMC" "src/imc.ts"
+    IMC_CLASSIFIED=$(ir "$FIM" --hash-only 2>/dev/null || echo "")
+    seed_tracker "$FIM" "src/imc.ts" "src/imc-arrived-late.ts"
+    # claude-workflow-plugin-rqer (v5 D2): same reconcile-before-regenerate
+    # reasoning as TID_IM above.
+    qg "$FIM" reconcile-tracker >/dev/null 2>&1
+    ir "$FIM" "$TID_IMC" >/dev/null 2>&1
+    IMC_RC=0
+    ( cd "$FIM" && CLAUDE_PROJECT_DIR="$FIM" bash "$FIM/.claude/scripts/qa-gate.sh" approve "$TID_IMC" \
+        --expect-hash "$IMC_CLASSIFIED" "doc-only verdict over a moved set" >/dev/null 2>&1 ) || IMC_RC=$?
+    assert_eq "approve-idem-IM META: restore control — the shipped script refuses it (exit 2)" "2" "$IMC_RC"
+    assert_eq "approve-idem-IM META: ...and wrote no record" "0" "$(record_count "$FIM" "$TID_IMC")"
+fi
+
+# ===========================================================================
+# SECTION J — `--expect-hash` on the IDEMPOTENT NO-OP PATH
+# (claude-workflow-plugin-k6re R6-F2, the SECOND independently-found
+# reach-around of the SAME hash-aware idempotency arm A2/i8cx already had to
+# patch once, for a DIFFERENT precondition).
+#
+# THE DEFECT. Section I proves --expect-hash refuses a moved change set on
+# the FRESH (non-idempotent) approval path. It says nothing about the
+# hash-aware IDEMPOTENCY no-op (SECTION B/G, above): that arm reports
+# status=approved and `return 0`s from a point in cmd_approve well BEFORE
+# the EXPECTED-HASH-REFUSAL check (Section I's own subject) ever runs. A
+# caller passing --expect-hash to an ALREADY-approved task whose bound
+# record covers a DIFFERENT hash than expected therefore got an unqualified
+# success envelope — the exact contract violation --expect-hash exists to
+# prevent, on the one path nobody had driven it against. Fixed in qa-gate.sh
+# by emit_approve_success (APPROVE-SUCCESS-GATE, immediately above
+# cmd_approve): both of cmd_approve's success-reporting exits now call the
+# same function, which refuses on a mismatch no matter which one is firing.
+# ===========================================================================
+gate_fixture
+FJ="$COMPONENT_FIXTURE_PATH"
+
+TID_J=$(new_task "$FJ" "k6re R6-F2: --expect-hash on the idempotent no-op path")
+armed_cycle "$FJ" "$TID_J" "src/j1.ts"
+qg "$FJ" approve "$TID_J" "first approval" >/dev/null 2>&1
+assert_eq "approve-idem-J0: precondition — one bound record after the first approve" \
+    "1" "$(record_count "$FJ" "$TID_J")"
+J_BOUND=$(record_hash "$FJ" "$TID_J")
+assert_eq "approve-idem-J0b: precondition — the bound hash is computable" \
+    "yes" "$([ -n "$J_BOUND" ] && echo yes || echo no)"
+
+# J1. A re-approve with the CORRECT --expect-hash on an already-approved,
+# unchanged task: still a genuine no-op — the essential anti-overreach
+# companion to J2 (a fix that re-verified EVERYTHING on the idempotent path
+# would also satisfy J2 while breaking this).
+J1_OUT=$(qg "$FJ" approve "$TID_J" --expect-hash "$J_BOUND" "re-approve, correct expectation" 2>&1 | tail -1)
+assert_json_field "approve-idem-J1: a MATCHING --expect-hash on the idempotent no-op path still succeeds" \
+    "$J1_OUT" '.status' "approved"
+assert_contains "approve-idem-J1: ...still reported as an idempotent no-op" "idempotent no-op" "$J1_OUT"
+assert_contains "approve-idem-J1: ...and names the verified expectation" "expected-hash verified" "$J1_OUT"
+assert_eq "approve-idem-J1: ...and writes NO second record" "1" "$(record_count "$FJ" "$TID_J")"
+
+# J2. THE HEADLINE: a MISMATCHED --expect-hash on the already-approved,
+# unchanged task must now REFUSE — not silently no-op, which was the R6-F2
+# defect. Driven exactly as A2's own repro shape: nothing about the FILES
+# changed (idem_ref is unchanged from J0), only the CALLER's stated
+# expectation is wrong.
+J2_RC=0
+J2_RAW=$(qg "$FJ" approve "$TID_J" \
+    --expect-hash "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    "re-approve, WRONG expectation" 2>&1) || J2_RC=$?
+J2_OUT=$(printf '%s\n' "$J2_RAW" | tail -1)
+assert_eq "approve-idem-J2: a MISMATCHED --expect-hash on the idempotent no-op path is REFUSED (exit 2) — THE R6-F2 FIX" \
+    "2" "$J2_RC"
+assert_json_field "approve-idem-J2: ...with error_key=expected_hash_mismatch (identical to the fresh-path refusal)" \
+    "$J2_OUT" '.error_key' "expected_hash_mismatch"
+assert_contains "approve-idem-J2: ...naming the hash it would have bound" "$J_BOUND" "$J2_OUT"
+assert_contains "approve-idem-J2: ...naming the hash the caller wrongly expected" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$J2_OUT"
+assert_eq "approve-idem-J2: ...and writes NO second record" "1" "$(record_count "$FJ" "$TID_J")"
+assert_not_contains "approve-idem-J2: ...and it is NOT reported as an idempotent no-op in disguise" \
+    "idempotent no-op" "$J2_OUT"
+
+# J3. ABSENT flag on the idempotent path: unchanged behaviour — the second
+# essential anti-overreach control. The refusal must not become a new
+# mandatory precondition: every existing caller of a repeat approve passes
+# no --expect-hash at all.
+J3_OUT=$(qg "$FJ" approve "$TID_J" "re-approve, no expectation stated" 2>&1 | tail -1)
+assert_json_field "approve-idem-J3: with NO --expect-hash, the idempotent no-op still succeeds" \
+    "$J3_OUT" '.status' "approved"
+assert_contains "approve-idem-J3: ...still an idempotent no-op" "idempotent no-op" "$J3_OUT"
+assert_not_contains "approve-idem-J3: ...and says nothing about an expectation it was not given" \
+    "expected-hash verified" "$J3_OUT"
+assert_eq "approve-idem-J3: ...and still writes NO second record" "1" "$(record_count "$FJ" "$TID_J")"
+
+# ---------------------------------------------------------------------------
+# SECTION JM — META: strip emit_approve_success's --expect-hash check from a
+# COPY and watch J2's exact scenario go green for the wrong reason (the
+# mismatched expectation silently APPROVES again) — the anchor-revert control
+# that would have caught R6-F2 itself.
+#
+# The region is sentinel-delimited inside emit_approve_success specifically
+# so this strip removes ONLY the mismatch check, not the function's own
+# success emission — a copy with the whole function gone would not parse.
+# ---------------------------------------------------------------------------
+gate_fixture
+FJM="$COMPONENT_FIXTURE_PATH"
+QG_REAL_JM=$(readlink "$FJM/.claude/scripts/qa-gate.sh" 2>/dev/null || printf '%s' "$FJM/.claude/scripts/qa-gate.sh")
+QG_JM_MUT="$FJM/.claude/scripts/qa-gate-noapprovegate.sh"
+awk '
+    /# APPROVE-SUCCESS-GATE-EXPECT-HASH BEGIN/{s=1}
+    !s{print}
+    /# APPROVE-SUCCESS-GATE-EXPECT-HASH END/{s=0}
+' "$QG_REAL_JM" > "$QG_JM_MUT"
+STRIP_DELTA_JM=$(( $(wc -l < "$QG_REAL_JM") - $(wc -l < "$QG_JM_MUT") ))
+assert_eq "approve-idem-JM META: the region strip actually removed lines" "yes" \
+    "$([ "$STRIP_DELTA_JM" -gt 3 ] && echo yes || echo no)"
+chmod +x "$QG_JM_MUT"
+if assert_mutant_applied "approve-idem-JM META" "$QG_REAL_JM" "$QG_JM_MUT"; then
+    assert_eq "approve-idem-JM META: the stripped copy still parses" "0" \
+        "$(bash -n "$QG_JM_MUT" 2>/dev/null && echo 0 || echo 1)"
+
+    TID_JM=$(new_task "$FJM" "k6re R6-F2 META: stripped gate approves a mismatched idempotent no-op")
+    armed_cycle "$FJM" "$TID_JM" "src/jm1.ts"
+    ( cd "$FJM" && CLAUDE_PROJECT_DIR="$FJM" bash "$QG_JM_MUT" approve "$TID_JM" "first approval, mutant" >/dev/null 2>&1 )
+    assert_eq "approve-idem-JM META: precondition — the mutant's first approve wrote a record" \
+        "1" "$(record_count "$FJM" "$TID_JM")"
+    JM_BOUND=$(record_hash "$FJM" "$TID_JM")
+    assert_eq "approve-idem-JM META: precondition — the mutant's bound hash is computable" \
+        "yes" "$([ -n "$JM_BOUND" ] && echo yes || echo no)"
+
+    JM_RAW=$( cd "$FJM" && CLAUDE_PROJECT_DIR="$FJM" bash "$QG_JM_MUT" approve "$TID_JM" \
+        --expect-hash "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+        "re-approve, WRONG expectation, mutant" 2>&1 ); JM_RC=$?
+    JM_OUT=$(printf '%s\n' "$JM_RAW" | tail -1)
+    assert_eq "approve-idem-JM META: with the gate's check stripped, the MISMATCHED expectation APPROVES (J2 WOULD fail) — the exact R6-F2 forgery reproduced" \
+        "0" "$JM_RC"
+    assert_json_field "approve-idem-JM META: ...with status=approved" "$JM_OUT" '.status' "approved"
+    assert_contains "approve-idem-JM META: ...silently reported as an idempotent no-op, over a hash the caller explicitly rejected" \
+        "idempotent no-op" "$JM_OUT"
+    assert_eq "approve-idem-JM META: ...and STILL writes no second record (only the caller's expectation was wrong, not the arm's no-op-ness)" \
+        "1" "$(record_count "$FJM" "$TID_JM")"
+
+    # Restore control: the SHIPPED script refuses the identical state.
+    JMC_RC=0
+    ( cd "$FJM" && CLAUDE_PROJECT_DIR="$FJM" bash "$FJM/.claude/scripts/qa-gate.sh" approve "$TID_JM" \
+        --expect-hash "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+        "re-approve, WRONG expectation, shipped" >/dev/null 2>&1 ) || JMC_RC=$?
+    assert_eq "approve-idem-JM META: restore control — the shipped script refuses the identical state (exit 2)" "2" "$JMC_RC"
+    assert_eq "approve-idem-JM META: ...and still wrote no second record" "1" "$(record_count "$FJM" "$TID_JM")"
+fi
+rm -f "$QG_JM_MUT"
 
 [ "$FAIL" -eq 0 ]

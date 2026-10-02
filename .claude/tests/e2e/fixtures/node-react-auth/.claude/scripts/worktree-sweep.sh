@@ -201,7 +201,13 @@ resolve_task() {
     SWEEP_TASK_ID=""; SWEEP_TASK_STATUS=""
     f="$w/.claude/.qa-tracking/current-task"
     if [ -f "$f" ]; then
-        seg=$(head -1 "$f" 2>/dev/null | tr -d '[:space:]') || seg=""
+        # i8cx: scoped pipefail — a failing `head` (the marker file vanishes
+        # mid-read) used to be masked by `tr`'s trivial success on whatever
+        # partial bytes arrived, which could in principle leave a TRUNCATED
+        # but still shape-valid-looking task id rather than the honest empty
+        # string the shape check below is built to reject. Neither head nor
+        # tr has an "expected nonzero" case here, so scoping is safe.
+        seg=$( set -o pipefail; head -1 "$f" 2>/dev/null | tr -d '[:space:]' ) || seg=""
         if printf '%s' "$seg" | grep -qE "$SWEEP_TASK_SHAPE"; then
             SWEEP_TASK_ID="$seg"
             SWEEP_TASK_STATUS=$(task_status "$seg")
@@ -314,13 +320,34 @@ SWEEP_ROOT=$(canon "$PROJECT_DIR/.claude/worktrees") || SWEEP_ROOT=""
     "$SWEEP_ROOT" "$ARG_AGE_DAYS" "$MODE" "$SWEEP_MAX_CANDIDATES"
 
 CANDIDATES=()
-while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    [ "$(canon "$line")" = "$CURRENT_TOP" ] && continue   # never ourselves
-    TOTAL=$((TOTAL + 1))
-    [ "${#CANDIDATES[@]}" -ge "$SWEEP_MAX_CANDIDATES" ] && continue
-    CANDIDATES+=("$line")
-done < <(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+# i8cx: this used to be `done < <(git worktree list ... | sed -n ...)` — a
+# process substitution feeding a pipe, so neither `git`'s nor `sed`'s exit
+# status ever reached this loop (rc cannot cross a `< <(...)` boundary at
+# all, and even if it could, pipefail would have reported sed's, not git's).
+# A failing `git worktree list` used to look exactly like "no worktrees
+# exist" — TOTAL/EXAMINED/REMOVABLE/REMOVED/KEPT all report 0, identical to
+# a genuinely clean state. This is the SAFE polarity (an enumeration failure
+# means fewer things get examined, never more get removed — nothing in
+# CANDIDATES means the removal loop below never runs), but it is still a
+# silent false-"clean" report that could hide an accumulating worktree
+# problem indefinitely, so it is now surfaced on stderr. `sed -n 's/.../p'`
+# has no "expected nonzero" shape (it signals only genuine errors, never "no
+# match" the way grep does), so wrapping the whole pipe is safe.
+WT_LIST_OUT="" wt_list_rc=0
+WT_LIST_OUT=$( set -o pipefail; git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' ) || wt_list_rc=$?
+if [ "$wt_list_rc" -ne 0 ]; then
+    printf 'worktree-sweep: could not enumerate worktrees (git worktree list --porcelain exited %s); reporting zero rather than guessing — re-run once git is healthy\n' "$wt_list_rc" >&2
+else
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [ "$(canon "$line")" = "$CURRENT_TOP" ] && continue   # never ourselves
+        TOTAL=$((TOTAL + 1))
+        [ "${#CANDIDATES[@]}" -ge "$SWEEP_MAX_CANDIDATES" ] && continue
+        CANDIDATES+=("$line")
+    done <<EOF
+$WT_LIST_OUT
+EOF
+fi
 
 for wt in ${CANDIDATES[@]+"${CANDIDATES[@]}"}; do
     EXAMINED=$((EXAMINED + 1))

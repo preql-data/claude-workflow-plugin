@@ -89,7 +89,7 @@ set -u
 #      offline machine — a network dependency in the component tier.
 #   2. workflow-doctor.sh, exiting 3 ("installed, verification FAILED") when a
 #      functional check does not pass. This spec's fixtures are not built to
-#      satisfy eleven functional checks, and every `install.sh exits 0`
+#      satisfy thirteen functional checks, and every `install.sh exits 0`
 #      assertion here would start reporting a fixture gap as an installer bug.
 # Both are covered for real by `make install-test`, which installs into a
 # tempdir and requires a fully green doctor — that is the surface that proves
@@ -1186,7 +1186,60 @@ assert_eq "installer-v3-upgrade 8d META-TEST: the file is re-created either way 
 # v3.5 table by construction (both arrived in v4). That is asserted below, not
 # assumed: if either ever appeared in the frozen table the discrimination would
 # quietly weaken and this META would stop proving anything.
-FROZEN_ABSENT_OPERATOR=".claude/model-roles"
+# THE OPERATOR FILE IS SELECTED BY PROPERTY, NOT BY NAME (v5.0.0 / D0).
+#
+# Leg B deletes the install-manifest so classification falls back to the frozen
+# table for the version the target DECLARES. For its premise to be
+# constructible — "this file is STOCK in the target and CHANGED in the source"
+# — the target's copy must be recognisable as stock, and with no manifest the
+# only thing that can recognise it is that frozen table. So the chosen file's
+# WORKING-TREE bytes must still hash to its row in the declared release's table.
+#
+# This was hardcoded to `.claude/model-roles`, and it worked only because that
+# file happened to be byte-identical to its v4.1.0 row. D0 edits it (five role
+# classes), the identity breaks, and leg B's target classifies as CUSTOMIZED —
+# three assertions red for a fixture premise that had silently stopped holding.
+# The frozen table is deliberately never regenerated, so that is PERMANENT for
+# this file, not transient.
+#
+# Two other operator files (`.claude/review-config`, `LESSONS.md`) already fail
+# the same property today, so the coupling was latent for three of eleven and
+# `model-roles` was simply the one the fixture named. Selecting on the property
+# closes the class for every future release instead of moving the hardcode to
+# the next file that happens to match.
+#
+# NOTE the comment further down leg B claiming this leg is not coupled to the
+# frozen table. That is true for every OTHER shipped file — classify compares
+# target-hash against source-hash first and skips when they agree — but NOT for
+# the two files this section edits source-side on purpose, which is exactly why
+# the coupling could hide there.
+select_frozen_absent_operator() {
+    local declared_table="$1" p cur frz
+    while IFS="$(printf '\t')" read -r p _cls frz; do
+        [ -n "$p" ] || continue
+        # Must be absent from the v3.5 table (the discrimination this META
+        # needs) and present, unchanged, in the working tree.
+        awk -F'\t' -v q="$p" '$1 == q { found = 1 } END { exit !found }' "$FROZEN_TABLE" && continue
+        [ -f "$PLUGIN_ROOT/$p" ] || continue
+        cur=$(shasum -a 256 "$PLUGIN_ROOT/$p" 2>/dev/null | awk '{print $1}')
+        [ "$cur" = "$frz" ] || continue
+        printf '%s' "$p"
+        return 0
+    done <<EOF
+$(awk -F'\t' '$2 == "operator" { print }' "$declared_table" 2>/dev/null)
+EOF
+    return 1
+}
+UPG44_DECLARED_TABLE="$PLUGIN_ROOT/manifests/v$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN_ROOT/.claude-plugin/plugin.json" | head -1).sha256"
+FROZEN_ABSENT_OPERATOR=""
+if [ -f "$UPG44_DECLARED_TABLE" ]; then
+    FROZEN_ABSENT_OPERATOR=$(select_frozen_absent_operator "$UPG44_DECLARED_TABLE" || true)
+fi
+# Fail-open to the historical name so the leg still RUNS (and says why it is
+# unconstructible) rather than silently selecting nothing.
+[ -n "$FROZEN_ABSENT_OPERATOR" ] || FROZEN_ABSENT_OPERATOR=".claude/model-roles"
+assert_eq "installer-v3-upgrade 8e: an operator file whose working-tree bytes still match the declared release's frozen row was found (leg B's premise is constructible)" \
+    "yes" "$(yesno test -n "$(select_frozen_absent_operator "$UPG44_DECLARED_TABLE" 2>/dev/null || true)")"
 FROZEN_ABSENT_WORKFLOW=".claude/scripts/review-check.sh"
 assert_eq "installer-v3-upgrade 8e: $FROZEN_ABSENT_OPERATOR is absent from the frozen v3.5 table" \
     "0" "$(awk -F'\t' -v p="$FROZEN_ABSENT_OPERATOR" '$1 == p { n++ } END { printf "%d", n + 0 }' "$FROZEN_TABLE")"

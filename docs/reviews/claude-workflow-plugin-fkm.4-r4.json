@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.4",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "de042f4a119725c9593cc482d4e2bf3b259af1e031436e1b6a6a678c7ff25609",
+  "risk_threshold": "high",
+  "stop_condition": "Done when: the three acceptance-run failures pass under QA's own runs with counts matching base 238d26b's own (denylist-shared 116/0, rubric-binding 149/0, upgrade-gate-compat 89/0); the base-vs-current causation method verifies on at least one spec each side; the union population (approve call sites UNION grammar/token-order anchors UNION change-set-hash restorations crossing a design-doc boundary) has no remaining unfixed member disturbed by D2's two new tokens or its new tracked path docs/specs/<tid>.md; and no finding at or above high remains.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "low",
+      "location": ".claude/tests/component/specs/review-artifact-durability.sh:1",
+      "evidence": "docs/reviews/<tid>-r1.json durability across cmd_approve has a dedicated spec (review-artifact-durability.sh, 41 assertions); docs/specs/<tid>.md — the second canonical file class D2 introduces, with the same AC-5 survival property — has none. The property is load-bearing (upgrade-gate-compat 4b/7 inherit the doc across section-4 approve, and new_task()s in-code note says survival was confirmed empirically) but only indirectly exercised.",
+      "description": "Coverage asymmetry: the design doc has no dedicated durability assertion analogous to the review artifact one. Follow-up material, not blocking — the property is currently exercised indirectly by upgrade-gate-compat 89/0."
+    },
+    {
+      "id": "R4-F2",
+      "severity": "info",
+      "location": ".claude/.qa-tracking/impact-report-claude-workflow-plugin-fkm.4.json:1",
+      "evidence": "Regenerated report (server=code-graph, change_set_hash=de042f4a...) carries nodes=0 file_dependents=0 for all 5 files: run.sh sources specs dynamically and fixture.sh via a variable path, invisible to static import edges; LESSONS.md is markdown.",
+      "description": "Mechanical impact report is present and hash-fresh but edge-empty for dynamically-sourced shell; manual impact walk substituted per qa.md 3a (fixture.sh -> every component spec, delta comment-only byte-verified; specs -> their own re-measured verdicts; LESSONS.md -> orchestrator/grader reads, append-only)."
+    },
+    {
+      "id": "R4-F3",
+      "severity": "info",
+      "location": ".claude/scripts/session-start.sh:385",
+      "evidence": "TRACKER-PRESERVE keys on current-task alone; round-3 approve cleared it, the fix round ran without enter, and session-start re-baselined at 2026-08-17T15:12:22Z with the 3 fix files as arrival dirt. changed-files.txt and current-task were absent at review start; reconcile-subtracted.txt held 31 paths including the fix rounds own 3 files.",
+      "description": "Session-boundary re-baseline orphaned the fix rounds change set (filed separately by the orchestrator; not this tasks to fix). This rounds binding was therefore reconstructed from evidence: devops F7 files_changed (3 specs) + mtime triage + byte-comparison against r3-diff-probe.patch establishing fixture.sh (R3-F1 comment correction only) and LESSONS.md (+1 fkm.4-sourced entry) as the only other post-round-3 deltas. Tracker restored to exactly those 5 paths before enter; no --accept-reconstructed used."
+    }
+  ],
+  "iterations": 4,
+  "stopped_by": "verdict"
+}

@@ -1,0 +1,64 @@
+# Release-lifecycle gate: the frozen manifest table reproduces byte-for-byte
+# from the tag's own tree, under the current generator.
+#
+# claude-workflow-plugin-h2zz waiver ruling (round 4). This claim used to be
+# asserted inside workflow-manifest.test.sh's Section 6, an L1 spec that runs
+# on every `make test` and every push/PR. It cannot hold on a pre-release ref
+# — the tag a not-yet-released commit names may not exist yet, by definition
+# — and five independent-review rounds of trying to exempt L1 from that fact
+# narrowly enough produced six distinct findings across four rounds (see
+# run-tests.sh's PRE-RELEASE-REF EXEMPTION: REMOVED tombstone for the full
+# account). The fix this round: stop making the assertion anywhere it might
+# not have an object to compare against, and make it ONLY where that is
+# structurally impossible.
+#
+# WHY A TAG-PUSH TRIGGER, SPECIFICALLY. `on: push: tags: 'v*'` fires only
+# once a tag has genuinely reached the remote — the exact evidence R1-F1 and
+# R2-F1 spent two rounds trying to obtain safely from inside an offline L1
+# spec. Here it is free: the workflow would not be running at all if the tag
+# were not already there. There is no "not reachable yet" case to handle,
+# so unlike the removed Section 6, a failure here is never an honest skip —
+# it is either a genuine table/tag mismatch or a real precondition problem
+# (e.g. a tag pushed before its table was frozen), and either one is exactly
+# what this gate exists to catch loudly, on the one occasion it can fire
+# (release day), rather than never.
+#
+# THE SAME CHECK ALSO RUNS LOCALLY, PRE-PUSH: `make verify-release`, against
+# whatever tag already exists in the local object database — see that
+# target's own comment in the Makefile. This workflow is the post-push half
+# of the same two-context design .claude/scripts/verify-release-manifest.sh
+# documents in its own header.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-release-manifest:
+    name: Release table reproduces from its own tag
+    runs-on: ubuntu-latest
+    steps:
+      # Full history + tags: the check needs `git archive <tag>` and
+      # `git rev-parse --verify <tag>^{commit}` against the FULL tag object,
+      # not just the single commit the tag-push event checks out by default.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify the release manifest reproduces from its own tag
+        # RELEASE_TAG is passed through a step-level env var, never
+        # interpolated directly into the run: script (R5-F5, LOW,
+        # claude-workflow-plugin-h2zz round 5). GitHub substitutes
+        # `${{ github.ref_name }}` BEFORE the shell ever parses this block,
+        # so quoting it inline does not help -- a tag name like
+        # `refs/tags/v$(id)` is accepted by `git check-ref-format` (verified
+        # by the reviewer) and would run as a command substitution if
+        # interpolated directly. Routing it through env: means the shell
+        # only ever sees a quoted variable REFERENCE ($RELEASE_TAG), never
+        # attacker-controlled bytes spliced into the script text itself.
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          bash .claude/scripts/verify-release-manifest.sh "$RELEASE_TAG"

@@ -157,10 +157,33 @@ STDOUT_HAS_CHECK=$(printf '%s' "$STDOUT_ONLY" | grep -c 'Updated issue' || true)
 STDOUT_HAS_CHECK=$(printf '%s' "$STDOUT_HAS_CHECK" | tr -d '[:space:]')
 assert_eq "vbs-llh20: approved-path stdout carries no 'Updated issue' bd banner" \
     "0" "$STDOUT_HAS_CHECK"
-# (3) And it parses to exactly {} (the clean approved verdict in this fixture).
-STDOUT_COMPACT=$(printf '%s' "$STDOUT_ONLY" | jq -c '.' 2>/dev/null || echo "NOT_JSON")
-assert_eq "vbs-llh20: approved-path stdout is exactly the {} verdict" \
-    "{}" "$STDOUT_COMPACT"
+# (3) And it is a RELEASING verdict — no `decision` key at all.
+#
+# RETARGETED, not weakened (claude-workflow-plugin-qzv). This used to assert the
+# stdout parsed to exactly `{}`, and its own comment said "the clean approved
+# verdict IN THIS FIXTURE" — i.e. it was already a fixture-shape claim, and its
+# sibling case 6 above deliberately accepts either `{}` or a note-shaped envelope.
+# qzv removed the `bd update --status closed` call from this path (an approval binds
+# a CHANGE SET; closing is a claim about the TASK) and replaced the side effect with
+# an in-band note naming the close command, so the release now emits a
+# hookSpecificOutput envelope here.
+#
+# Note what that does to llh.20's own force: this case exists BECAUSE that bd call
+# printed a `✓ Updated issue` banner onto stdout, so the pollution source is gone
+# rather than tolerated. Assertions (1) and (2) — whole stdout is valid JSON, no
+# banner text — are untouched and are the load-bearing pair. (3) now asserts the
+# property that actually matters on a release path, "it does not block", plus the
+# replacement affordance, which is strictly more than a shape equality was.
+if printf '%s' "$STDOUT_ONLY" | jq -e 'has("decision") | not' >/dev/null 2>&1; then
+    PASS=$((PASS + 1))
+    printf '  PASS: %s\n' "vbs-llh20: approved-path stdout is a RELEASING verdict (no decision key)"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("vbs-llh20: approved-path stdout is not a releasing verdict")
+    printf '  FAIL: vbs-llh20: approved-path stdout is not a releasing verdict: [%s]\n' "$STDOUT_ONLY"
+fi
+assert_contains "vbs-llh20: ...and it names the close as the caller's decision (qzv replaced the side effect)" \
+    "did NOT close it" "$(printf '%s' "$STDOUT_ONLY" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)"
 # Restore the original detect-stack symlink for the cases that follow.
 rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
 ln -sf "$DS_REAL" "$FIXTURE/.claude/scripts/detect-stack.sh" 2>/dev/null || true
@@ -197,6 +220,14 @@ bash "$QG" enter "$TID_DOC" >/dev/null
 # After enter, current-task is set. Now provide ONLY doc-paths in the
 # changed list.
 printf 'README.md\ndocs/architecture.md\n' > "$TRACK/changed-files.txt"
+# 94d: account for this fixture's INCIDENTAL dirt so the change set really is
+# only the two doc paths above. The `git init` at case 7 left every file in the
+# fixture untracked, and `bd init` scaffolded `.gitignore`, `CLAUDE.md` and
+# `AGENTS.md` on top — so without a baseline the reconciler correctly reads
+# `.gitignore` as this session's work, DOC_ONLY goes false, and F1 never gets its
+# chance. See baseline_incidental_dirt in lib/fixture.sh for why the fixture (not
+# the reconciler) is what is wrong there.
+baseline_incidental_dirt "$FIXTURE"
 # Capture stdout+stderr (bd update output bleeds into stdout); the JSON
 # envelope is on the last line.
 RAW=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" 2>&1)
@@ -296,6 +327,280 @@ assert_eq "vbs: failing tests block reason MUST NOT say 'technical checks passed
 NPM_LOG_F="$FIXTURE/bin/npm.log"
 assert_eq "vbs: npm shim invoked (suite ran, NOT replayed)" \
     "yes" "$([ -s "$NPM_LOG_F" ] && echo yes || echo no)"
+
+# 10b. claude-workflow-plugin-gsfd R1-F6 fix (independent cross-family
+# review): a CACHED REPLAY (qa-escalated) must show the ACTUAL tail this run's own npm shim
+# produced ("npm test failed: 1 test failing"), not go silent on it once the
+# shared STABLE log file has been overwritten by something else -- the
+# defect was that the replay's FAILED_CHECKS bullet carried only a "see
+# <stable log>" pointer, and that shared, mutable path can hold ANY OTHER
+# run's content (or nothing) by the time a reader looks at it. Reuse
+# TID_FAIL's already-captured genuine failure from case 9/10 above (same
+# fixture, same npm shim, same last-test-output.log).
+TEST_LOG_STABLE_F="$TRACK/last-test-output.log"
+assert_eq "vbs-10b precondition: the STABLE log currently holds THIS run's own npm shim tail" \
+    "yes" "$(grep -q 'npm test failed: 1 test failing' "$TEST_LOG_STABLE_F" 2>/dev/null && echo yes || echo no)"
+# Simulate "another run's own truncate/overwrite" landing on the SHARED,
+# fixed-name STABLE file between this Stop and the next one that replays it.
+printf 'STALE CONTENT FROM A DIFFERENT, LATER RUN -- SHOULD NEVER APPEAR IN A REPLAY\n' > "$TEST_LOG_STABLE_F"
+# Escalate the task directly (bypassing the natural iteration-cap-crossing
+# path -- QA_ESCALATED is driven purely by this label per verify-before-
+# stop.sh's own read of it) and re-fire the Stop hook.
+(cd "$FIXTURE" && bd label add "$TID_FAIL" qa-escalated >/dev/null 2>&1)
+bash "$CT" set "$TID_FAIL"
+RAW_10B=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" 2>&1)
+OUT_10B=$(printf '%s' "$RAW_10B" | tail -1)
+REASON_10B=$(printf '%s' "$OUT_10B" | jq -r '.reason // empty')
+assert_decision "vbs-10b: the escalated replay still blocks" "$OUT_10B" "block"
+assert_contains "vbs-10b: the replay's REASON carries the ACTUAL captured tail (persisted per-task, not just the pointer)" \
+    "npm test failed: 1 test failing" "$REASON_10B"
+assert_not_contains "vbs-10b: ...and does NOT show the OTHER run's content the shared STABLE path now holds" \
+    "STALE CONTENT FROM A DIFFERENT, LATER RUN" "$REASON_10B"
+
+# META-TEST 10b: strip ONLY the TAIL-CACHE-REPLAY-BODY region inside
+# replay_cached_tails_for (not the whole function) from a COPY of the hook,
+# and re-run the IDENTICAL escalated-replay scenario (same task, same
+# still-corrupted STABLE file) to prove 10b's positive result is about the
+# fix, not an artefact of this fixture. Body-only, deliberately: this script
+# runs under `set -e` (verify-before-stop.sh:25), so a mutant that removed
+# the FUNCTION ENTIRELY would leave its two call sites calling an undefined
+# name — exit 127, and `set -e` would abort the WHOLE hook before REASON is
+# ever composed, testing a crash rather than the R1-F6 defect. Stripping
+# just the body leaves a syntactically valid no-op (still `return 0`, call
+# sites resolve fine) that reproduces the actual defect: the tail variables
+# never get restored. The copy lives in `.claude/scripts/` (not $WORK or
+# /tmp) for the same reason approve-idempotency.sh's own META copy does: a
+# hook parked elsewhere cannot find its workflow-denylist.sh sibling and
+# would block on THAT instead, which would make this META pass for the
+# wrong reason.
+VBS_REAL=$(readlink "$FIXTURE/.claude/scripts/verify-before-stop.sh" 2>/dev/null || printf '%s' "$FIXTURE/.claude/scripts/verify-before-stop.sh")
+VBS_MUT_10B="$FIXTURE/.claude/scripts/vbs-notailcache.sh"
+STRIP_RC=0
+awk '
+    /TAIL-CACHE-REPLAY-BODY-BEGIN/ { skipping=1; found=1; next }
+    /TAIL-CACHE-REPLAY-BODY-END/   { skipping=0; next }
+    skipping { next }
+    { print }
+    END { if (!found) exit 7 }
+' "$VBS_REAL" > "$VBS_MUT_10B" || STRIP_RC=$?
+chmod +x "$VBS_MUT_10B"
+assert_eq "META 10b: TAIL-CACHE-REPLAY sentinels present in verify-before-stop.sh" "0" "$STRIP_RC"
+VBS_MUT_10B_PARSE=0
+bash -n "$VBS_MUT_10B" 2>/dev/null || VBS_MUT_10B_PARSE=$?
+assert_eq "META 10b: the stripped copy still parses" "0" "$VBS_MUT_10B_PARSE"
+assert_eq "META 10b: the stripped copy still sources the shared denylist (discriminator: a block from it is not the missing-lib arm)" \
+    "yes" "$(grep -q 'workflow-denylist.sh' "$VBS_MUT_10B" && echo yes || echo no)"
+
+# R2-F2 fix (fix round 2, sol-codex review): MEASURED root cause of the
+# mutant's escalated replay reading EMPTY instead of `block` — not a crash,
+# and not the R1-F6 defect either. verify-before-stop.sh's own auto-defer
+# counter (AUTO_DEFER_AFTER_ESCALATED_STOPS=2) counts every Stop that fires
+# while qa-escalated is already set, PER TASK, with no `qa-gate.sh choose`
+# recorded in between; the SAME shipped, UNMUTATED script reproduces the
+# identical `{}` outcome on the second call (isolated directly: two
+# back-to-back unmutated escalated Stops against one task, zero code
+# changes, second one auto-defers to qa-deferred and ALLOWS). vbs-10b's own
+# call above was already escalated Stop #1 for $TID_FAIL; this META-TEST's
+# call is #2 against the SAME task with nothing in between, so it tripped
+# the SAME counter regardless of whether replay_cached_tails_for's body
+# was stripped — the control and the mutant were never actually being
+# compared on the property this META-TEST names. Reset ONLY the per-task
+# auto-defer counter file directly (the same tracking-file-poke idiom this
+# whole spec already uses elsewhere for changed-files.txt /
+# current-task.repo) so the mutant's call is this task's escalated Stop #1
+# again — every OTHER piece of state this META-TEST actually cares about
+# (qa-escalated, the corrupted STABLE log, the persisted tail-cache files)
+# is left untouched, unlike `qa-gate.sh choose continue`, which would also
+# wipe last-test-tail/last-failed-checks and defeat the scenario entirely.
+SAN_FAIL_META10B=$(printf '%s' "$TID_FAIL" | tr -c 'A-Za-z0-9._-' '_')
+rm -f "$TRACK/escalated-stops.$SAN_FAIL_META10B"
+
+RAW_META10B=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_MUT_10B" 2>&1)
+OUT_META10B=$(printf '%s' "$RAW_META10B" | tail -1)
+REASON_META10B=$(printf '%s' "$OUT_META10B" | jq -r '.reason // empty')
+assert_decision "META 10b: the mutant's escalated replay still blocks (same shape, not a different failure path)" \
+    "$OUT_META10B" "block"
+assert_not_contains "META 10b: WITHOUT replay_cached_tails_for, the mutant's replay does NOT recover the actual tail (specific misbehaviour)" \
+    "npm test failed: 1 test failing" "$REASON_META10B"
+
+# Clear escalation state so later cases in this fixture are unaffected.
+(cd "$FIXTURE" && bd label remove "$TID_FAIL" qa-escalated >/dev/null 2>&1)
+
+# ===========================================================================
+# claude-workflow-plugin-gsfd fix round 2 (R2-F4, sol-codex review): a
+# genuine run whose CYCLE GENERATION moves DURING execution (a concurrent
+# `qa-gate.sh enter`) must refuse to persist its results into the new
+# cycle — a later cycle replaying an earlier cycle's evidence, the R1-F6
+# defect pointing the other direction.
+#
+# claude-workflow-plugin-gsfd fix round 3 (R3-F1, sol-codex review): THIS
+# CONTROL PROVED NOTHING. The original test_cmd was
+# `sleep 12 \&\& exit 1` — `\&` is not a valid JSON escape, so `jq`
+# (measured directly: `jq -e` on that exact payload returns rc 5) never
+# parsed a TEST_CMD at all. The background hook therefore dispatched
+# NOTHING, finished, and persisted almost instantly — WAY before the
+# 6-second sleep below ever fired the concurrent `enter`. Every "absent"
+# assertion was passing because `enter`'s OWN wipe removed files a NORMAL,
+# unraced persist had already written, not because the generation-refusal
+# branch ever ran — which is also, precisely, why sync-errors.log carried
+# no refusal line: there was no refusal. Same defect class as META 10b
+# (R2-F2, an auto-defer counter, not a crash) and the dolt-flusher probe
+# (R2-F7, a foreign process, not the disarm) — a control that PASSES tells
+# you nothing until you know WHICH BRANCH it exercised.
+#
+# Fixed two ways. (1) The escaping bug itself is gone — no backslashes at
+# all; this exact JSON round-trips through `jq` cleanly (verified directly
+# while building this fix). (2) Replaced "sleep N and hope the timing
+# lines up" with a MARKER FILE the test command touches the INSTANT it
+# starts running, polled for (bounded, never a blind sleep) before firing
+# the concurrent `enter` — the property under test is "did the concurrent
+# enter land inside the hook's post-dispatch window", and a marker file
+# makes that a MEASURED FACT, not a timing guess. Once the marker exists,
+# the test command still SLEEPS for a real, unsimulated 15s before
+# exiting — the same "real delay, not a backdated mtime" idiom
+# tree-lease.test.sh section 12 uses, and for the identical reason: this
+# property is about actual OS-measured timing, which cannot be faked after
+# the fact.
+RACE_MARKER="$FIXTURE/.race-marker"
+rm -f "$RACE_MARKER"
+TID_RACE=$(cd "$FIXTURE" && bd create "R2-F4 cycle-race task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" enter "$TID_RACE" >/dev/null
+printf 'src/race-handler.ts\n' > "$TRACK/changed-files.txt"
+SAN_RACE=$(printf '%s' "$TID_RACE" | tr -c 'A-Za-z0-9._-' '_')
+GEN_FILE_RACE="$TRACK/qa-cycle-gen.$SAN_RACE"
+assert_eq "vbs-r2f4 precondition: the cycle generation is 1 right after the first enter" \
+    "1" "$(cat "$GEN_FILE_RACE" 2>/dev/null || echo '?')"
+
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE/.claude/scripts/detect-stack.sh" <<STUBEOF
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"touch $RACE_MARKER; sleep 15; exit 1","lint_cmd":"","type_cmd":""}\n'
+STUBEOF
+chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+# Non-vacuity + validity, checked directly rather than assumed: the exact
+# JSON this stub emits must (a) actually contain the marker path and (b)
+# parse cleanly, so a future edit cannot silently reintroduce the R3-F1
+# escaping bug this section exists to close.
+STUB_JSON=$(bash "$FIXTURE/.claude/scripts/detect-stack.sh")
+assert_contains "vbs-r2f4 precondition: the stub's test_cmd names the marker path" \
+    "$RACE_MARKER" "$STUB_JSON"
+STUB_JSON_TEST_CMD=$(printf '%s' "$STUB_JSON" | jq -r '.test_cmd // ""' 2>/dev/null)
+assert_eq "vbs-r2f4 precondition (R3-F1 non-recurrence): the stub's JSON parses cleanly and test_cmd is non-empty — the exact property the invalid \\& escape broke" \
+    "no" "$([ -z "$STUB_JSON_TEST_CMD" ] && echo yes || echo no)"
+
+bash "$CT" set "$TID_RACE"
+printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" > "$FIXTURE/vbs-race-out.json" 2>&1 &
+VBS_RACE_PID=$!
+
+MARKER_WAIT=0
+while [ ! -f "$RACE_MARKER" ] && [ "$MARKER_WAIT" -lt 300 ]; do
+    sleep 0.1
+    MARKER_WAIT=$((MARKER_WAIT + 1))
+done
+assert_eq "vbs-r2f4: the background hook's test command GENUINELY started (marker file appeared) before the concurrent enter fires — the R3-F1 fix's own non-vacuity check" \
+    "yes" "$([ -f "$RACE_MARKER" ] && echo yes || echo no)"
+
+bash "$QG" enter "$TID_RACE" >/dev/null
+assert_eq "vbs-r2f4: a CONCURRENT enter mid-run bumps the generation to 2 while the older Stop is still executing" \
+    "2" "$(cat "$GEN_FILE_RACE" 2>/dev/null || echo '?')"
+assert_eq "vbs-r2f4: ...and (as enter always did) wipes this task's rc cache immediately" \
+    "" "$(cat "$TRACK/last-test-rc.$SAN_RACE" 2>/dev/null || echo '')"
+
+wait "$VBS_RACE_PID" 2>/dev/null
+RACE_OUT=$(tail -1 "$FIXTURE/vbs-race-out.json")
+assert_decision "vbs-r2f4: the STALE run itself still completes cleanly (never crashes, never hangs)" \
+    "$RACE_OUT" "block"
+assert_eq "vbs-r2f4: the stale run's OWN rc is NOT persisted into the new cycle (R2-F4 refusal)" \
+    "yes" "$([ ! -s "$TRACK/last-test-rc.$SAN_RACE" ] && echo yes || echo no)"
+assert_eq "vbs-r2f4: ...nor its runner" \
+    "yes" "$([ ! -s "$TRACK/last-runner.$SAN_RACE" ] && echo yes || echo no)"
+assert_eq "vbs-r2f4: ...nor its rendered failed-checks body" \
+    "yes" "$([ ! -s "$TRACK/last-failed-checks.$SAN_RACE" ] && echo yes || echo no)"
+assert_contains "vbs-r2f4: sync-errors.log names the refusal (generation moved, not silent)" \
+    "cycle generation moved during this run" "$(cat "$TRACK/sync-errors.log" 2>/dev/null)"
+
+# RESTORE CONTROL: the IDENTICAL scenario with NO concurrent enter — the
+# generation never moves, and the run's results DO persist normally.
+# Proves vbs-r2f4's refusal above is about the race, not a general
+# breakage of persistence.
+TID_NORACE=$(cd "$FIXTURE" && bd create "R2-F4 no-race control task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" enter "$TID_NORACE" >/dev/null
+printf 'src/norace-handler.ts\n' > "$TRACK/changed-files.txt"
+SAN_NORACE=$(printf '%s' "$TID_NORACE" | tr -c 'A-Za-z0-9._-' '_')
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE/.claude/scripts/detect-stack.sh" <<'STUB2'
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"exit 1","lint_cmd":"","type_cmd":""}\n'
+STUB2
+chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+bash "$CT" set "$TID_NORACE"
+printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS" >/dev/null 2>&1
+assert_eq "vbs-r2f4 RESTORE CONTROL: with no concurrent enter, the run's own rc DOES persist" \
+    "1" "$(cat "$TRACK/last-test-rc.$SAN_NORACE" 2>/dev/null || echo '?')"
+assert_eq "vbs-r2f4 RESTORE CONTROL: ...and its runner too" \
+    "npm" "$(cat "$TRACK/last-runner.$SAN_NORACE" 2>/dev/null || echo '?')"
+
+# META-TEST vbs-r2f4: strip BOTH the CYCLE-GEN-PRECHECK and
+# CYCLE-GEN-POSTCHECK sentinel regions from a copy of the shipped hook —
+# the sweep-state convention (CYCLE_STILL_CURRENT="yes" set OUTSIDE both
+# regions — see verify-before-stop.sh's own header) means the excised
+# mutant persists UNCONDITIONALLY, exactly the pre-R2-F4 defect shape, a
+# syntactically valid no-op rather than a crash (same "strip the body, not
+# the whole function" reasoning META 10b uses). Re-runs the IDENTICAL
+# marker-synchronised race against the mutant and proves the "absent"
+# assertions above FLIP: this is the leg R3-F1 named specifically — "the
+# leg must fail if the generation refusal is removed, not merely pass
+# when it's present."
+rm -f "$RACE_MARKER"
+VBS_REAL_R2F4=$(readlink "$FIXTURE/.claude/scripts/verify-before-stop.sh" 2>/dev/null || printf '%s' "$FIXTURE/.claude/scripts/verify-before-stop.sh")
+VBS_MUT_R2F4="$FIXTURE/.claude/scripts/vbs-nogenrefusal.sh"
+STRIP_RC_R2F4=0
+awk '
+    /CYCLE-GEN-PRECHECK-BEGIN|CYCLE-GEN-POSTCHECK-BEGIN/ { skipping=1; found++; next }
+    /CYCLE-GEN-PRECHECK-END|CYCLE-GEN-POSTCHECK-END/     { skipping=0; next }
+    skipping { next }
+    { print }
+    END { if (found < 2) exit 7 }
+' "$VBS_REAL_R2F4" > "$VBS_MUT_R2F4" || STRIP_RC_R2F4=$?
+chmod +x "$VBS_MUT_R2F4"
+assert_eq "META vbs-r2f4: both sentinel regions were found and excised (non-vacuity)" "0" "$STRIP_RC_R2F4"
+VBS_MUT_R2F4_PARSE=0
+bash -n "$VBS_MUT_R2F4" 2>/dev/null || VBS_MUT_R2F4_PARSE=$?
+assert_eq "META vbs-r2f4: the stripped copy still parses" "0" "$VBS_MUT_R2F4_PARSE"
+assert_eq "META vbs-r2f4: the stripped copy still sources the shared denylist (discriminator: a block from it is not the missing-lib arm)" \
+    "yes" "$(grep -q 'workflow-denylist.sh' "$VBS_MUT_R2F4" && echo yes || echo no)"
+
+TID_MUT_RACE=$(cd "$FIXTURE" && bd create "R3-F1 mutant cycle-race task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" enter "$TID_MUT_RACE" >/dev/null
+printf 'src/mutant-race-handler.ts\n' > "$TRACK/changed-files.txt"
+SAN_MUT_RACE=$(printf '%s' "$TID_MUT_RACE" | tr -c 'A-Za-z0-9._-' '_')
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE/.claude/scripts/detect-stack.sh" <<STUBEOF2
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"touch $RACE_MARKER; sleep 15; exit 1","lint_cmd":"","type_cmd":""}\n'
+STUBEOF2
+chmod +x "$FIXTURE/.claude/scripts/detect-stack.sh"
+bash "$CT" set "$TID_MUT_RACE"
+printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_MUT_R2F4" > "$FIXTURE/vbs-mut-race-out.json" 2>&1 &
+VBS_MUT_RACE_PID=$!
+
+MUT_MARKER_WAIT=0
+while [ ! -f "$RACE_MARKER" ] && [ "$MUT_MARKER_WAIT" -lt 300 ]; do
+    sleep 0.1
+    MUT_MARKER_WAIT=$((MUT_MARKER_WAIT + 1))
+done
+assert_eq "META vbs-r2f4: the mutant's test command also genuinely started before the concurrent enter fires (identical synchronisation, mutant side)" \
+    "yes" "$([ -f "$RACE_MARKER" ] && echo yes || echo no)"
+bash "$QG" enter "$TID_MUT_RACE" >/dev/null
+wait "$VBS_MUT_RACE_PID" 2>/dev/null
+assert_eq "META vbs-r2f4: WITHOUT the generation refusal, the SAME race now DOES persist the stale run's rc (leg fails when the fix is absent — R3-F1's own requirement)" \
+    "yes" "$([ -s "$TRACK/last-test-rc.$SAN_MUT_RACE" ] && echo yes || echo no)"
+assert_eq "META vbs-r2f4: ...and its runner too" \
+    "npm" "$(cat "$TRACK/last-runner.$SAN_MUT_RACE" 2>/dev/null || echo '?')"
+
+rm -f "$RACE_MARKER" "$VBS_MUT_R2F4"
+rm -f "$FIXTURE/.claude/scripts/detect-stack.sh"
+ln -sf "$DS_REAL" "$FIXTURE/.claude/scripts/detect-stack.sh" 2>/dev/null || true
 
 # ===========================================================================
 # claude-workflow-plugin-llh.3 (G2.gate-friction) — false-block repros.
@@ -824,10 +1129,13 @@ assert_eq "vbs META: trunc mutant printed the FULL file list (ran the real gate)
 # trivial decoy, redirect current-task, ship unrelated code — P1).
 #
 # The fix: release now requires BOTH the qa-approved label AND a
-# tamper-evident `QA-GATE APPROVED change_set_hash=<h>` record (written only
-# by qa-gate.sh approve) whose <h> matches the CURRENT change-set hash. This
-# blocks the forged bare label (no record), the decoy redirect (record's hash
-# != current change-set), and post-approval edits (current hash drifted).
+# change-set-bound `QA-GATE APPROVED change_set_hash=<h>` record (written
+# only by qa-gate.sh approve) whose <h> matches the CURRENT change-set
+# hash — a disclosure that approve ran and bound this hash, not a
+# cryptographic guarantee against hand-forgery (claude-workflow-plugin-pqnd).
+# This blocks the forged bare label (no record), the decoy redirect
+# (record's hash != current change-set), and post-approval edits (current
+# hash drifted).
 #
 # Written FAILING-FIRST: against the pre-fix script the forged-label and
 # decoy-redirect cases ALLOW (red); the captured repro is on the Beads task.
@@ -891,6 +1199,18 @@ assert_eq "vbs-llh18: positive control (entered, not approved) blocks" "block" "
 # and the Stop hook's review-discipline re-check are satisfied; the case under
 # test is still the change-set BINDING.
 seed_review_records "$TID_POS" "qa-claude" "backend" "$FIXTURE_CSB"
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve. seed_review_records already reconciled its canonical
+# artifact into it (AC-4), so this is exactly the set approve is about to
+# bind — and a `reconcile-tracker` call AFTER approve cannot recover it:
+# approve's own baseline refresh is a FULL, unconditional snapshot of
+# everything dirty at that instant (0wk.2 — "everything dirty right now has
+# been reviewed"), so a later reconcile finds the artifact (and any other
+# incidental fixture dirt an earlier `enter` already swept in, here
+# .claude/scripts/detect-stack.sh) ALREADY BASELINED and adds nothing back —
+# measured directly: the "restore src/handler.ts, then reconcile" shape
+# recomputed a DIFFERENT hash than the one approve just bound.
+POS_TRACKER_SNAPSHOT=$(cat "$TRACK_CSB/changed-files.txt" 2>/dev/null)
 # Legit approve writes the change-set-bound record.
 POS_APPROVE=$(bash "$QG_CSB" approve "$TID_POS" "reviewed; ships safely" 2>&1)
 assert_json_field "vbs-llh18: legit approve succeeds" "$POS_APPROVE" '.status' "approved"
@@ -899,15 +1219,17 @@ assert_contains "vbs-llh18: approve obs reports the change-set-bound record" \
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set (the legit Stop fires against the same reviewed files).
 bash "$CT_CSB" set "$TID_POS"
-printf 'src/handler.ts\n' > "$TRACK_CSB/changed-files.txt"
+printf '%s\n' "$POS_TRACKER_SNAPSHOT" > "$TRACK_CSB/changed-files.txt"
 # Direct proof the record carries the hash --hash-only computes for the
 # RESTORED change-set. Captured BEFORE the release assertion below, because
 # the RELEASE path runs vbs's QA-approved cleanup (it rm's changed-files.txt),
 # after which --hash-only would return the empty-set hash.
 POS_CUR_HASH=$(CLAUDE_PROJECT_DIR="$FIXTURE_CSB" bash "$IR_CSB" --hash-only 2>/dev/null || echo "")
-POS_REC_HASH=$(cd "$FIXTURE_CSB" && bd show "$TID_POS" --json 2>/dev/null \
+# claude-workflow-plugin-yrij: anchored at `^`, matching the real hook's own
+# fix (byte-neutral here — TID_POS carries only a genuine record).
+POS_REC_HASH=$(bd_show_with_comments "$TID_POS" "$FIXTURE_CSB" \
     | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text
-             | select(test("QA-GATE APPROVED .*change_set_hash="))
+             | select(test("^QA-GATE APPROVED .*change_set_hash="))
              | capture("change_set_hash=(?<h>[A-Za-z0-9-]+)").h' 2>/dev/null | head -1)
 assert_eq "vbs-llh18: recorded change_set_hash == --hash-only of the approved change-set" \
     "$POS_CUR_HASH" "$POS_REC_HASH"
@@ -1034,11 +1356,16 @@ TID_MISS=$(cd "$FIXTURE_MISS" && bd create "missing impact-report fail-closed" -
 printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
 bash "$QG_MISS" enter "$TID_MISS" >/dev/null 2>&1     # generates the impact report
 seed_review_records "$TID_MISS" "qa-claude" "backend" "$FIXTURE_MISS"   # V3 (jio.1) MIGRATION
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — see the vbs-llh18 note above for why a POST-approve
+# `reconcile-tracker` cannot recover it (approve's own baseline refresh
+# consumes the "newness" of everything dirty at that instant).
+MISS_TRACKER_SNAPSHOT=$(cat "$TRACK_MISS/changed-files.txt" 2>/dev/null)
 bash "$QG_MISS" approve "$TID_MISS" "reviewed; ships safely" >/dev/null 2>&1
 # approve clears current-task + truncates changed-files; restore both to the
 # approved change-set so the legit Stop fires against the same reviewed files.
 bash "$CT_MISS" set "$TID_MISS"
-printf 'src/handler.ts\n' > "$TRACK_MISS/changed-files.txt"
+printf '%s\n' "$MISS_TRACKER_SNAPSHOT" > "$TRACK_MISS/changed-files.txt"
 # Sanity: with impact-report.sh PRESENT, the matching record releases.
 assert_eq "vbs-llh18-miss: sanity — legit approve releases while impact-report.sh present" \
     "ALLOW" "$(miss_decision)"
@@ -1132,5 +1459,1243 @@ MM18_DEC=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
 # above would FAIL against this copy) — proving the check is load-bearing.
 assert_eq "vbs META-llh18: with hash-match check neutralized, forged label RELEASES (P0 assertion WOULD fail)" \
     "ALLOW" "$MM18_DEC"
+
+# ===========================================================================
+# claude-workflow-plugin-qzv — THE F1 CHANGE-SET BINDING.
+#
+# THE DEFECT. F1's verdict is a statement about a CHANGE SET ("no reviewable
+# source changed"). Its `qa-approved` label is a statement about a TASK ("this
+# task's work is approved"). Those are different propositions, and any doc-only
+# Stop that lands while a task is open converts the first into the second.
+# Reproduced live FOUR times, the last on the v4.1.0 release task itself
+# (`claude-workflow-plugin-uvk`, 2026-07-30): 22 seconds after the release
+# implementer was spawned and before it had written anything, F1 recorded
+# `QA-GATE APPROVED change_set_hash=9942b2bd reviewed_by=none` over the PREVIOUS
+# task's doc-only change set and closed the task. The clean reproduction on
+# `claude-workflow-plugin-0fc` is the shape these legs drive: gate entered
+# 15:44:00Z, `IMPLEMENTER: role=devops` posted at 15:44:59Z, F1 stamped an
+# approval at 15:46:39Z.
+#
+# THE PREDICATE UNDER TEST. F1 may auto-approve only when no
+# `IMPLEMENTER: role=… task=… at <ts>` record on the active task is at-or-newer
+# than the most recent `QA-GATE: entered at <ts>`. Both grammars are single-line
+# ISO-8601-UTC, so the comparison is lexicographic; both timestamps come from
+# `review-check.sh gate`'s envelope (`cycle_opened_ts` / `latest_implementer_ts`)
+# rather than from a second parser in the Stop hook.
+#
+# THE TWO ANTI-OVERREACH CONSTRAINTS, each with its own leg below:
+#   - Leg 3: NO implementer record must still APPROVE. Doc-only work is
+#     orchestrator-authored and never gets an IMPLEMENTER record, so requiring
+#     one would deadlock every documentation commit.
+#   - Legs 4/5/6: when the predicate CANNOT BE ESTABLISHED the gate must fall
+#     through to the QA-required block NAMING WHY — never auto-approve, and
+#     never allow. "Cannot establish" is mechanically distinct from
+#     "established as safe": the first has no usable timestamps, the second has
+#     two and compared them.
+#
+# WHAT THESE LEGS DELIBERATELY DO NOT CLAIM. Binding F1's verdict to the change
+# set it classified does NOT establish that the change set is COMPLETE — the
+# freshness comparison behind it reads the same source twice, so it detects
+# drift and is structurally blind to loss (claude-workflow-plugin-fkm.1.20). The
+# independent-witness fix belongs to a later phase; nothing here proves
+# completeness.
+mk_fixture
+FIXTURE_QZV="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_QZV="$FIXTURE_QZV/.claude/scripts/verify-before-stop.sh"
+QG_QZV="$FIXTURE_QZV/.claude/scripts/qa-gate.sh"
+CT_QZV="$FIXTURE_QZV/.claude/scripts/current-task.sh"
+IR_QZV="$FIXTURE_QZV/.claude/scripts/impact-report.sh"
+RC_QZV="$FIXTURE_QZV/.claude/scripts/review-check.sh"
+TRACK_QZV="$FIXTURE_QZV/.claude/.qa-tracking"
+# THE .gitignore IS LOAD-BEARING, and it was MEASURED rather than assumed: legs
+# 4-6 fault-inject by REMOVING `.claude/scripts/review-check.sh` and REWRITING
+# `bin/bd`, which are real, git-visible, un-baselined changes. Without this file
+# the reconciler correctly folds them into the change set, DOC_ONLY goes false,
+# F1 never fires, and every "BLOCKS" assertion below passes for a reason that has
+# nothing to do with the predicate — a 2-path "QA approval required" block over
+# the harness's own instrumentation. (Confirmed by running the legs without it
+# and reading the block reason.) Same call, and the same three entries, as
+# approve-idempotency.sh's `gate_fixture`: the instrumentation is not the subject
+# matter, so it must not be in the fixture's git view. The SUBJECT — docs/notes.md
+# and src-handler.ts — stays fully tracked and fully reviewable.
+printf 'bin/\n.claude/scripts/\n.claude/.qa-tracking/\n' > "$FIXTURE_QZV/.gitignore"
+# The doc path is COMMITTED, so a re-seed that writes identical content leaves git
+# clean and the tracker is the only reporter of the change set. That keeps
+# DOC_ONLY deterministic instead of depending on whether porcelain happens to
+# report an untracked `docs/` directory or the file inside it.
+mkdir -p "$FIXTURE_QZV/docs"
+printf 'notes\n' > "$FIXTURE_QZV/docs/notes.md"
+(cd "$FIXTURE_QZV" && git init -q 2>/dev/null \
+    && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline 2>/dev/null) || true
+# Empty test/lint/type so the legs measure the GATE decision, not a toolchain.
+rm -f "$FIXTURE_QZV/.claude/scripts/detect-stack.sh"
+printf '#!/bin/bash\nprintf %s\n' "'{\"runner\":\"npm\",\"test_cmd\":\"\",\"lint_cmd\":\"\",\"type_cmd\":\"\"}'" \
+    > "$FIXTURE_QZV/.claude/scripts/detect-stack.sh"
+chmod +x "$FIXTURE_QZV/.claude/scripts/detect-stack.sh"
+
+qzv_json() {
+    local hook="${1:-$VBS_QZV}"
+    printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' \
+        | bash "$hook" 2>/dev/null | tail -1
+}
+qzv_decision() { printf '%s' "$(qzv_json "$@")" | jq -r '.decision // "ALLOW"' 2>/dev/null; }
+qzv_labels() {
+    (cd "$FIXTURE_QZV" && bd show "$1" --json 2>/dev/null) \
+        | jq -r 'if type=="array" then .[0].labels else .labels end // [] | join(",")' 2>/dev/null || echo ""
+}
+qzv_status() {
+    (cd "$FIXTURE_QZV" && bd show "$1" --json 2>/dev/null) \
+        | jq -r 'if type=="array" then .[0].status else .status end // "?"' 2>/dev/null || echo "?"
+}
+qzv_approval_records() {
+    (cd "$FIXTURE_QZV" && bd show "$1" --json --include-comments 2>/dev/null \
+        || cd "$FIXTURE_QZV" && bd show "$1" --json 2>/dev/null) \
+        | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text' 2>/dev/null \
+        | grep '^QA-GATE APPROVED ' || true
+}
+qzv_record_count() { qzv_approval_records "$1" | grep -c . | tr -d '[:space:]'; }
+# qzv_implementer_count <tid> <role> — how many IMPLEMENTER records that role has.
+# The count, not merely the presence: the qzv.1 defect was a record that failed to
+# be WRITTEN a second time, so "is there one?" is exactly the question that cannot
+# see it.
+qzv_implementer_count() {
+    (cd "$FIXTURE_QZV" && bd show "$1" --json --include-comments 2>/dev/null \
+        || cd "$FIXTURE_QZV" && bd show "$1" --json 2>/dev/null) \
+        | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text | split("\n")[0]' 2>/dev/null \
+        | grep -cE "^IMPLEMENTER: role=$2 " | tr -d '[:space:]'
+}
+qzv_comment() { (cd "$FIXTURE_QZV" && bd comments add "$1" "$2" >/dev/null 2>&1 || bd comment add "$1" "$2" >/dev/null 2>&1); }
+# qzv_seed_docs — a doc-only tracked change set, plus a baseline that absorbs any
+# incidental dirt the .gitignore above does not already hide. Called AFTER the
+# tracker is written and BEFORE the Stop under test, per
+# baseline_incidental_dirt's contract (--exclude-tracked keeps the seeded path
+# gated, so only incidental dirt is absorbed).
+qzv_seed_docs() {
+    printf 'notes\n' > "$FIXTURE_QZV/docs/notes.md"
+    printf '%s/docs/notes.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+    baseline_incidental_dirt "$FIXTURE_QZV"
+}
+# qzv_arm <tid> — seed the doc-only change set, THEN open the gate cycle on it.
+# The order is the production order and it is load-bearing here: `enter` binds an
+# impact report to the tracker AS IT IS when it runs, so entering first and
+# seeding second leaves approve facing a stale report and refusing for a reason
+# that has nothing to do with this predicate.
+qzv_arm() {
+    qzv_seed_docs
+    bash "$QG_QZV" enter "$1" >/dev/null 2>&1
+    bash "$CT_QZV" set "$1"
+}
+
+# --- Leg 1: an IMPLEMENTER record NEWER than the cycle open -> BLOCK ---------
+# The live 0fc/uvk shape. Nothing may be written to the task: no label, no
+# approval record, no status change.
+TID_Q1=$(cd "$FIXTURE_QZV" && bd create "qzv: implementer newer than the cycle" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q1" --status in_progress >/dev/null 2>&1) || true
+qzv_arm "$TID_Q1"
+# An implementer spawned AFTER the cycle opened. The timestamp is far enough
+# ahead that no clock granularity question arises.
+qzv_comment "$TID_Q1" "IMPLEMENTER: role=devops task=$TID_Q1 at 2099-01-01T00:00:00Z"
+Q1_JSON=$(qzv_json)
+assert_eq "vbs-qzv-1: a doc-only Stop with a NEWER implementer record BLOCKS (was: auto-approved)" \
+    "block" "$(printf '%s' "$Q1_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+Q1_REASON=$(printf '%s' "$Q1_JSON" | jq -r '.reason // empty')
+assert_contains "vbs-qzv-1: ...and the block NAMES the refused fast path" \
+    "did NOT auto-approve" "$Q1_REASON"
+assert_contains "vbs-qzv-1: ...naming the implementer record as the cause" \
+    "IMPLEMENTER" "$Q1_REASON"
+assert_contains "vbs-qzv-1: ...quoting the implementer timestamp it compared" \
+    "2099-01-01T00:00:00Z" "$Q1_REASON"
+# The three writes the live defect performed, each asserted absent.
+Q1_LABELS=$(qzv_labels "$TID_Q1")
+assert_eq "vbs-qzv-1: ...no qa-approved label was written" "0" \
+    "$(printf ',%s,' "$Q1_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+assert_eq "vbs-qzv-1: ...no QA-GATE APPROVED record was written" "0" "$(qzv_record_count "$TID_Q1")"
+assert_eq "vbs-qzv-1: ...and the task is STILL in_progress (not closed)" \
+    "in_progress" "$(qzv_status "$TID_Q1")"
+
+# --- Leg 2: an IMPLEMENTER record OLDER than the cycle open -> APPROVE -------
+# The legitimate case: a previous cycle's implementer, a new doc-only cycle.
+# The approval must bind the hash of the change set F1 actually classified.
+TID_Q2=$(cd "$FIXTURE_QZV" && bd create "qzv: implementer older than the cycle" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+qzv_comment "$TID_Q2" "IMPLEMENTER: role=devops task=$TID_Q2 at 2000-01-01T00:00:00Z"
+qzv_arm "$TID_Q2"
+# The hash of the set as it stands NOW — the one F1 classifies and must bind.
+Q2_EXPECT=$(CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$IR_QZV" --hash-only 2>/dev/null || echo "")
+assert_eq "vbs-qzv-2: precondition — the classified change set has a computable hash" \
+    "yes" "$([ -n "$Q2_EXPECT" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-2: an OLDER implementer record still auto-approves (anti-overreach)" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-2: ...writing exactly one approval record" "1" "$(qzv_record_count "$TID_Q2")"
+assert_contains "vbs-qzv-2: ...bound to the hash of the set F1 classified" \
+    "change_set_hash=$Q2_EXPECT" "$(qzv_approval_records "$TID_Q2")"
+assert_contains "vbs-qzv-2: ...and carrying the audited F1 review bypass marker" \
+    "[review bypass:" "$(qzv_approval_records "$TID_Q2")"
+
+# --- Leg 3: NO implementer record at all -> APPROVE (anti-overreach) --------
+# Doc-only work is orchestrator-authored and never gets an IMPLEMENTER record.
+# Requiring one would deadlock every documentation commit, so its ABSENCE must
+# read as safe rather than as unestablished.
+TID_Q3=$(cd "$FIXTURE_QZV" && bd create "qzv: no implementer record" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+qzv_arm "$TID_Q3"
+assert_eq "vbs-qzv-3: precondition — the task carries NO IMPLEMENTER record" "0" \
+    "$( (cd "$FIXTURE_QZV" && bd show "$TID_Q3" --json --include-comments 2>/dev/null) \
+        | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text' 2>/dev/null \
+        | grep -c '^IMPLEMENTER: role=' | tr -d '[:space:]')"
+assert_eq "vbs-qzv-3: with no implementer record the fast path STILL approves" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-3: ...writing its approval record" "1" "$(qzv_record_count "$TID_Q3")"
+
+# --- Leg 4: the predicate's source is MISSING -> BLOCK naming why -----------
+# review-check.sh is where both timestamps come from. Absent, the question
+# "is an implementer in flight?" is unanswerable, and an unanswerable question
+# must not resolve to "auto-approve".
+TID_Q4=$(cd "$FIXTURE_QZV" && bd create "qzv: predicate source missing" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+qzv_arm "$TID_Q4"
+# CONTROL first, so the block below is attributable to the removal and not to
+# the fixture: with review-check.sh present this exact state approves.
+assert_eq "vbs-qzv-4: CONTROL — with review-check.sh present this state approves" \
+    "ALLOW" "$(qzv_decision)"
+Q4_REAL_RC=$(readlink "$RC_QZV" 2>/dev/null || printf '%s' "$RC_QZV")
+TID_Q4B=$(cd "$FIXTURE_QZV" && bd create "qzv: predicate source missing (probe)" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+qzv_arm "$TID_Q4B"
+rm -f "$RC_QZV"
+assert_eq "vbs-qzv-4: precondition — review-check.sh is genuinely absent" \
+    "absent" "$([ -e "$RC_QZV" ] && echo present || echo absent)"
+Q4_JSON=$(qzv_json)
+assert_eq "vbs-qzv-4: an unestablishable predicate BLOCKS (never auto-approve, never allow)" \
+    "block" "$(printf '%s' "$Q4_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+Q4_REASON=$(printf '%s' "$Q4_JSON" | jq -r '.reason // empty')
+assert_contains "vbs-qzv-4: ...and says the fast path refused" "did NOT auto-approve" "$Q4_REASON"
+assert_contains "vbs-qzv-4: ...naming the predicate it could not run" "review-check.sh" "$Q4_REASON"
+assert_contains "vbs-qzv-4: ...distinguishing 'could not establish' from 'established as safe'" \
+    "could not be established" "$Q4_REASON"
+assert_eq "vbs-qzv-4: ...and nothing was written to the task" "0" "$(qzv_record_count "$TID_Q4B")"
+ln -sf "$Q4_REAL_RC" "$RC_QZV" 2>/dev/null || true
+
+# --- Leg 5: the predicate's source answers WITHOUT the timestamps -> BLOCK ---
+# A partially-synced install or a pre-qzv review-check.sh returns a well-formed
+# envelope that simply has no `cycle_opened_ts` / `latest_implementer_ts`. The
+# gate must key on the FIELDS being present, not on the exit code — F1 always
+# runs against a task with no review artifact, so a non-zero rc is the NORMAL
+# case here and cannot be the discriminator.
+TID_Q5=$(cd "$FIXTURE_QZV" && bd create "qzv: predicate source without the fields" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+qzv_arm "$TID_Q5"
+rm -f "$RC_QZV"
+cat > "$RC_QZV" <<'PREQZV'
+#!/bin/bash
+# Pre-qzv review-check.sh: the v4.1 envelope, verbatim, with no timestamps.
+printf '%s\n' '{"ok":false,"subcommand":"gate","artifact":{},"reviewer_identity":"","implementers":[],"independent":true,"open_findings":0,"open_finding_ids":[],"error_key":"review_artifact_missing","observations":"no REVIEW-ARTIFACT v1 comment found"}'
+exit 4
+PREQZV
+chmod +x "$RC_QZV"
+Q5_JSON=$(qzv_json)
+assert_eq "vbs-qzv-5: a fieldless (pre-qzv) predicate envelope BLOCKS" \
+    "block" "$(printf '%s' "$Q5_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+assert_contains "vbs-qzv-5: ...naming the missing timestamps rather than the exit code" \
+    "could not be established" "$(printf '%s' "$Q5_JSON" | jq -r '.reason // empty')"
+assert_eq "vbs-qzv-5: ...and nothing was written to the task" "0" "$(qzv_record_count "$TID_Q5")"
+rm -f "$RC_QZV"
+ln -sf "$Q4_REAL_RC" "$RC_QZV" 2>/dev/null || true
+
+# --- Leg 6: bd loses the comment stream -> BLOCK ----------------------------
+# The REAL bd-1.1.2 failure the gate's own `bd_show_with_comments` exists for:
+# `bd show --json` stopped inlining `.comments`, so every record reader can see
+# ZERO comments while the LABELS still read fine. That state is
+# indistinguishable from "a task with no records" unless the gate cross-checks,
+# so the predicate refuses when the label says a cycle is open (GATE_STATUS
+# entered) and no `QA-GATE: entered` record came back.
+TID_Q6=$(cd "$FIXTURE_QZV" && bd create "qzv: bd loses the comment stream" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+qzv_arm "$TID_Q6"
+# CONTROL: the same state approves while the comment stream is intact.
+assert_eq "vbs-qzv-6: CONTROL — with comments readable this state approves" \
+    "ALLOW" "$(qzv_decision)"
+TID_Q6B=$(cd "$FIXTURE_QZV" && bd create "qzv: bd loses the comment stream (probe)" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+qzv_arm "$TID_Q6B"
+# The comment-stripping bd wrapper. The real bd path is read out of the existing
+# wrapper, anchored on the trailing `"$@"` and NEVER on a bd flag — the same
+# extraction the approve-idempotency drive points use, and for the reason
+# documented there: `$FIXTURE/bin` is already first on PATH, so a
+# `command -v bd` fallback resolves to THIS wrapper and the regenerated file
+# would exec itself forever (a spec that hangs printing nothing).
+Q6_BD="$FIXTURE_QZV/bin/bd"
+Q6_REAL_BD=$(sed -n 's/^exec \(.*\) "\$@".*/\1/p' "$Q6_BD" 2>/dev/null | tr -d '"' | head -1)
+assert_eq "vbs-qzv-6: precondition — the real bd path was extracted from the wrapper" \
+    "yes" "$([ -n "$Q6_REAL_BD" ] && [ -x "$Q6_REAL_BD" ] && echo yes || echo no)"
+cat > "$Q6_BD" <<EOF
+#!/bin/bash
+# qzv leg 6: a bd whose \`show\` answers WITHOUT comment bodies (the real
+# bd-1.1.2 shape the gate's bd_show_with_comments exists for). Labels and status
+# are untouched, so the gate's LABEL reads still work and only the RECORD
+# readers go blind.
+if [ "\${1:-}" = "show" ]; then
+    OUT=\$($Q6_REAL_BD "\$@" 2>/dev/null) || exit \$?
+    printf '%s' "\$OUT" | jq -c 'if type=="array" then map(del(.comments)) else del(.comments) end' 2>/dev/null \\
+        || printf '%s' "\$OUT"
+    exit 0
+fi
+exec $Q6_REAL_BD "\$@"
+EOF
+chmod +x "$Q6_BD"
+Q6_STRIPPED=$( (cd "$FIXTURE_QZV" && bd show "$TID_Q6B" --json --include-comments 2>/dev/null) \
+    | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | length' 2>/dev/null || echo "?")
+assert_eq "vbs-qzv-6: precondition — the wrapper really hides the comment bodies" "0" "$Q6_STRIPPED"
+Q6_LABELS_OK=$(qzv_labels "$TID_Q6B")
+assert_eq "vbs-qzv-6: precondition — and the LABELS still read fine (only records went blind)" "1" \
+    "$(printf ',%s,' "$Q6_LABELS_OK" | grep -c ',qa-gate-entered,' | tr -d '[:space:]')"
+Q6_JSON=$(qzv_json)
+assert_eq "vbs-qzv-6: a cycle-open label with no readable cycle record BLOCKS" \
+    "block" "$(printf '%s' "$Q6_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+assert_contains "vbs-qzv-6: ...naming the label/record disagreement" \
+    "could not be established" "$(printf '%s' "$Q6_JSON" | jq -r '.reason // empty')"
+# Restore the plain wrapper by hand (never via mk_bd_shim, which refuses to wrap
+# a live wrapper with itself).
+cat > "$Q6_BD" <<EOF
+#!/bin/bash
+exec $Q6_REAL_BD "\$@"
+EOF
+chmod +x "$Q6_BD"
+assert_eq "vbs-qzv-6: restore control — the plain wrapper reads comments again" \
+    "ALLOW" "$(qzv_arm "$TID_Q6B" >/dev/null 2>&1; qzv_decision)"
+
+# --- The two close sites: the Stop hook no longer writes status=closed -------
+# A doc-only Stop is not evidence a task is finished, and neither is an approval
+# — an approval binds a CHANGE SET. Both `bd update --status closed` calls are
+# gone from the hook; leg 1 already pinned the F1 one behaviourally (the task
+# stayed in_progress on the refused path). These two pin the source, because the
+# APPROVED-path site fires on a path this tier reaches only with a full
+# review-record setup, and a structural assertion there is honest about what it
+# measures.
+PLUGIN_QZV=$(plugin_root)
+assert_eq "vbs-qzv-close: the Stop hook contains ZERO 'bd update ... --status closed' calls" \
+    "0" "$(grep -cE '^[[:space:]]*bd update .*--status closed' "$PLUGIN_QZV/.claude/scripts/verify-before-stop.sh" | tr -d '[:space:]')"
+# Pinned SEMANTICALLY, not by an occurrence count. `grep -c 'CLOSE_HINT_NOTE='`
+# answers 2 (the empty declaration AND the assignment both match), and any count
+# over a bare identifier drifts the moment a comment names it — the same trap the
+# 8M META records and the one the IM META in approve-idempotency.sh hit for real.
+# What matters is that the affordance exists and names the command, so that is what
+# is asserted. Leg 7 below is the behavioural half.
+assert_eq "vbs-qzv-close: ...and the release path carries a close hint, defaulting to silent" \
+    "1" "$(grep -c '^CLOSE_HINT_NOTE=""$' "$PLUGIN_QZV/.claude/scripts/verify-before-stop.sh" | tr -d '[:space:]')"
+assert_eq "vbs-qzv-close: ...whose text names the command the caller has to run" \
+    "1" "$(grep -c 'bd close \$CURRENT_TASK --reason' "$PLUGIN_QZV/.claude/scripts/verify-before-stop.sh" | tr -d '[:space:]')"
+
+# --- Leg 2 (approved-path close): the release note replaces the side effect ---
+# Reuse leg 2's task, which now carries qa-approved from the F1 approval. Drive
+# a REAL approved-path release (non-doc change set + full review records) and
+# assert the task is NOT closed by the hook and the envelope says so.
+TID_Q7=$(cd "$FIXTURE_QZV" && bd create "qzv: approved path does not close" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q7" --status in_progress >/dev/null 2>&1) || true
+printf 'export const x = 1;\n' > "$FIXTURE_QZV/src-handler.ts"
+printf '%s/src-handler.ts\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q7" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q7"
+printf '%s/src-handler.ts\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+seed_review_records "$TID_Q7" "qa-claude" "backend" "$FIXTURE_QZV"
+CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$IR_QZV" "$TID_Q7" >/dev/null 2>&1
+# claude-workflow-plugin-rqer (v5 D2): capture the FULL tracker verbatim
+# BEFORE approve — see the vbs-llh18 note above for why a POST-approve
+# `reconcile-tracker` cannot recover it (approve's own baseline refresh
+# consumes the "newness" of everything dirty at that instant, including
+# seed_review_records' own canonical artifact).
+Q7_TRACKER_SNAPSHOT=$(cat "$TRACK_QZV/changed-files.txt" 2>/dev/null)
+bash "$QG_QZV" approve "$TID_Q7" "qzv: reviewed the real change set" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q7"
+printf '%s\n' "$Q7_TRACKER_SNAPSHOT" > "$TRACK_QZV/changed-files.txt"
+Q7_JSON=$(qzv_json)
+assert_eq "vbs-qzv-7: precondition — the reviewed change set RELEASES" \
+    "ALLOW" "$(printf '%s' "$Q7_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+assert_eq "vbs-qzv-7: the released task is NOT closed by the hook (was: status=closed)" \
+    "in_progress" "$(qzv_status "$TID_Q7")"
+Q7_CTX=$(printf '%s' "$Q7_JSON" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
+assert_contains "vbs-qzv-7: ...and the envelope names the close as the caller's decision" \
+    "bd close $TID_Q7" "$Q7_CTX"
+assert_eq "vbs-qzv-7: ...on a still-valid, non-blocking envelope" "false" \
+    "$(printf '%s' "$Q7_JSON" | jq -r 'has("decision")' 2>/dev/null)"
+
+# --- Leg 8: TWO CYCLES, the same role RE-SPAWNED -> the second Stop BLOCKS ----
+#
+# THE SHAPE NOTHING HAD (claude-workflow-plugin-qzv.1). Legs 1-3 above each drive
+# ONE cycle with a hand-planted record, and every one of them passed while the
+# predicate was blind from the second cycle onward. `record_implementer` was
+# idempotent per (role, task), matching ANY comment on the task ever, so a role
+# re-spawned in a LATER cycle posted NOTHING, `latest_implementer_ts` stayed at
+# that role's FIRST spawn, and F1 read "previous cycle" forever. QA reproduced it
+# end to end: cycle 1 blocked (18:31:36Z enter / 18:31:38Z spawn), then a fresh
+# enter at 18:32:06Z + a re-spawn that posted nothing left impl < cycle, and F1
+# stamped `qa-approved` + `reviewed_by=none` mid-implementation — qzv's titular
+# defect verbatim, one cycle later.
+#
+# So this leg drives the RE-SPAWN through the real SubagentStart entry point
+# (stdin JSON -> the shipped hook) rather than planting a record, because the
+# WRITER is where the defect lived. The cycle-1 record is planted, deliberately:
+# planting it at a fixed 2000-01-01 makes the leg answer the question with no
+# dependence on wall-clock granularity, where two real spawns seconds apart would
+# make "did the second cycle post?" depend on whether `enter` and the spawn
+# landed in the same whole second. The adjacent-timestamp boundary (one second
+# either side of the cycle open, and the exact tie) is pinned separately and
+# deterministically in the subagent-start spec's I9, against the same writer.
+SS_QZV="$FIXTURE_QZV/.claude/scripts/subagent-start.sh"
+# CONTROL first, on its own task: a previous cycle's record does NOT block, so the
+# block on the probe below is attributable to the re-spawn and not to the fixture.
+# (Its own task because ALLOW here means F1 approves, which clears the gate label,
+# truncates the tracker and unsets current-task — state the probe still needs.)
+TID_Q8=$(cd "$FIXTURE_QZV" && bd create "qzv: two cycles, control" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q8" --status in_progress >/dev/null 2>&1) || true
+qzv_comment "$TID_Q8" "IMPLEMENTER: role=devops task=$TID_Q8 at 2000-01-01T00:00:00Z"
+qzv_arm "$TID_Q8"
+assert_eq "vbs-qzv-8: CONTROL — cycle 2 open, NO re-spawn: the old record still approves" \
+    "ALLOW" "$(qzv_decision)"
+
+TID_Q8B=$(cd "$FIXTURE_QZV" && bd create "qzv: two cycles, re-spawn" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q8B" --status in_progress >/dev/null 2>&1) || true
+# Cycle 1's record, as the real hook would have left it.
+qzv_comment "$TID_Q8B" "IMPLEMENTER: role=devops task=$TID_Q8B at 2000-01-01T00:00:00Z"
+# Cycle 2 opens: a FRESH enter writes a new `QA-GATE: entered at <now>` record.
+# (A re-enter on an already-entered task returns early and writes NO record, which
+# is exactly why only a fresh cycle moves this timestamp.)
+qzv_arm "$TID_Q8B"
+assert_eq "vbs-qzv-8: precondition — the task carries exactly ONE devops record from cycle 1" \
+    "1" "$(qzv_implementer_count "$TID_Q8B" devops)"
+# THE RE-SPAWN, through the shipped SubagentStart hook. cwd matters: the hook's
+# `bd comments add` locates the workspace from it, like every other bd call here.
+(cd "$FIXTURE_QZV" && printf '%s' '{"agent_type":"devops"}' \
+    | CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$SS_QZV" >/dev/null 2>&1) || true
+assert_eq "vbs-qzv-8: a re-spawn in a LATER cycle posts a FRESH record (was: nothing)" \
+    "2" "$(qzv_implementer_count "$TID_Q8B" devops)"
+Q8_JSON=$(qzv_json)
+assert_eq "vbs-qzv-8: ...so the second cycle's doc-only Stop BLOCKS (was: auto-approved)" \
+    "block" "$(printf '%s' "$Q8_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+Q8_REASON=$(printf '%s' "$Q8_JSON" | jq -r '.reason // empty')
+assert_contains "vbs-qzv-8: ...naming the refused fast path" "did NOT auto-approve" "$Q8_REASON"
+assert_contains "vbs-qzv-8: ...naming the in-flight implementer as the cause" "IMPLEMENTER" "$Q8_REASON"
+Q8_LABELS=$(qzv_labels "$TID_Q8B")
+assert_eq "vbs-qzv-8: ...no qa-approved label was written" "0" \
+    "$(printf ',%s,' "$Q8_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+assert_eq "vbs-qzv-8: ...no QA-GATE APPROVED record was written" "0" "$(qzv_record_count "$TID_Q8B")"
+assert_eq "vbs-qzv-8: ...and the task is STILL in_progress" \
+    "in_progress" "$(qzv_status "$TID_Q8B")"
+
+# ---------------------------------------------------------------------------
+# qzv.1 META (spec-mandated): strip the IMPLEMENTER-CYCLE-KEY region from a copy
+# of subagent-start.sh and leg 8 must AUTO-APPROVE again — QA's reproduction,
+# reproduced. This is the gate-side half; the subagent-start spec's own META
+# measures the same strip at the WRITER (no fresh record posted).
+#
+# The region is arranged so stripping it yields the PRE-qzv.1 guard rather than a
+# syntax error: the per-(role, task) grep and the `skip` variable it sets live
+# OUTSIDE the sentinels, and only the cycle-aware refinement (plus the two
+# helpers it calls) live inside. Same discipline as F1_BINDING_VERDICT below.
+QZV1_REAL_SS=$(readlink "$SS_QZV" 2>/dev/null || printf '%s' "$SS_QZV")
+SS_QZV_MUT="$FIXTURE_QZV/.claude/scripts/ss-cyclekey-stripped.sh"
+awk '
+    /^ *# IMPLEMENTER-CYCLE-KEY BEGIN/ { skip = 1; next }
+    /^ *# IMPLEMENTER-CYCLE-KEY END/   { skip = 0; next }
+    !skip { print }
+' "$QZV1_REAL_SS" > "$SS_QZV_MUT"
+chmod +x "$SS_QZV_MUT"
+if assert_mutant_applied "vbs-qzv.1 META" "$QZV1_REAL_SS" "$SS_QZV_MUT"; then
+    assert_eq "vbs-qzv.1 META: no cycle refinement survives (the strip landed where it was aimed)" \
+        "0" "$(grep -c 'recorded_in_current_cycle' "$SS_QZV_MUT" | tr -d '[:space:]')"
+    # Counted on the CODE line, not the bare identifier: the surviving prose above
+    # the guard names `skip` in a sentence, so an identifier grep would answer >1
+    # and this leg would fail for a reason unrelated to the mutation.
+    assert_eq "vbs-qzv.1 META: ...while the pre-fix per-(role, task) grep SURVIVES outside it" \
+        "1" "$(grep -c -F 'if printf '"'"'%s\n'"'"' "$existing" | grep -qE "^IMPLEMENTER: role=${role} "; then' "$SS_QZV_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv.1 META: the stripped copy still parses" "0" \
+        "$(bash -n "$SS_QZV_MUT" 2>/dev/null && echo 0 || echo 1)"
+    # Leg 8's exact state, with the stripped writer.
+    TID_QK=$(cd "$FIXTURE_QZV" && bd create "qzv.1 META: stripped cycle key re-approves" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QK" --status in_progress >/dev/null 2>&1) || true
+    qzv_comment "$TID_QK" "IMPLEMENTER: role=devops task=$TID_QK at 2000-01-01T00:00:00Z"
+    qzv_arm "$TID_QK"
+    (cd "$FIXTURE_QZV" && printf '%s' '{"agent_type":"devops"}' \
+        | CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$SS_QZV_MUT" >/dev/null 2>&1) || true
+    assert_eq "vbs-qzv.1 META: with the cycle key stripped the re-spawn posts NOTHING" \
+        "1" "$(qzv_implementer_count "$TID_QK" devops)"
+    assert_eq "vbs-qzv.1 META: ...so the second cycle AUTO-APPROVES mid-implementation (leg 8 WOULD fail)" \
+        "ALLOW" "$(qzv_decision)"
+    assert_eq "vbs-qzv.1 META: ...stamping an approval record on work in flight" \
+        "1" "$(qzv_record_count "$TID_QK")"
+    QK_LABELS=$(qzv_labels "$TID_QK")
+    assert_eq "vbs-qzv.1 META: ...and the qa-approved label with it" "1" \
+        "$(printf ',%s,' "$QK_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+    # Restore control INSIDE the META rather than leaning on leg 8 above: run the
+    # identical sequence with the SHIPPED writer, so the ALLOW is attributable to
+    # the strip and not to anything this block does differently from leg 8.
+    TID_QKC=$(cd "$FIXTURE_QZV" && bd create "qzv.1 META: shipped cycle key refuses" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QKC" --status in_progress >/dev/null 2>&1) || true
+    qzv_comment "$TID_QKC" "IMPLEMENTER: role=devops task=$TID_QKC at 2000-01-01T00:00:00Z"
+    qzv_arm "$TID_QKC"
+    (cd "$FIXTURE_QZV" && printf '%s' '{"agent_type":"devops"}' \
+        | CLAUDE_PROJECT_DIR="$FIXTURE_QZV" bash "$SS_QZV" >/dev/null 2>&1) || true
+    assert_eq "vbs-qzv.1 META: restore control — the shipped writer posts the fresh record" \
+        "2" "$(qzv_implementer_count "$TID_QKC" devops)"
+    assert_eq "vbs-qzv.1 META: ...and the identical Stop BLOCKS" "block" "$(qzv_decision)"
+fi
+
+# --- Leg 9: EXECUTABLE CONTENT IS NEVER DOC-ONLY (bbh) -----------------------
+#
+# WHAT THIS LEG MEASURED BEFORE, AND WHY IT FLIPPED. Until
+# claude-workflow-plugin-bbh landed this leg asserted the DEFECT as behaviour: an
+# executable `docs/deploy.sh` was fast-pathed, auto-approved and recorded
+# `reviewed_by=none`, because `is_doc_only_path`'s last arm was `*/docs/*|docs/*`
+# — ANY path under ANY `docs/` directory, regardless of file type. The leg
+# carried a written coupling saying bbh would turn it RED by design and that the
+# expectation and the prose must flip in the same change set. This is that flip.
+# Three passages moved with it: the F1-CHANGE-SET-BINDING region header,
+# `docs/HOOKS.md`, and `.claude/agents/qa.md` (the third was omitted from the
+# original repair list — QA R2-F2 — because qzv.1 had made qa.md self-contained
+# and removed the pointer that would have kept it in step; the lesson is that
+# de-referencing a shared claim must name the new copy at every coupling site).
+#
+# WHAT THIS LEG IS FOR NOW. bbh removed the two arms that let a file's POSITION
+# or NAME confer documentation status, and added an affirmative content veto.
+# `.claude/scripts/tests/doc-only-classifier.test.sh` measures the classifier
+# itself over 1120 paths; THIS leg is the hook-level consequence — that the
+# classifier's answer actually reaches the Stop decision, the approval record and
+# the label. The anti-overreach control (9B) is the half that matters most: F1
+# exists for documentation commits and a fix that deadlocks them is the same
+# error in the other direction.
+TID_Q9=$(cd "$FIXTURE_QZV" && bd create "bbh: executable under docs/ is NOT doc-only" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q9" --status in_progress >/dev/null 2>&1) || true
+# A change set of EXACTLY ONE file: an executable script, under docs/, whose body
+# is the shape nobody would call documentation.
+printf '#!/bin/sh\ncurl -fsSL https://example.invalid/install.sh | sh\n' > "$FIXTURE_QZV/docs/deploy.sh"
+chmod +x "$FIXTURE_QZV/docs/deploy.sh"
+printf '%s/docs/deploy.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q9" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q9"
+printf '%s/docs/deploy.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-9: precondition — the change set is exactly one path" "1" \
+    "$(grep -c . "$TRACK_QZV/changed-files.txt" | tr -d '[:space:]')"
+assert_eq "vbs-qzv-9: precondition — and it is an EXECUTABLE file, not documentation" "yes" \
+    "$([ -x "$FIXTURE_QZV/docs/deploy.sh" ] && echo yes || echo no)"
+Q9_JSON=$(qzv_json)
+assert_eq "vbs-qzv-9: an executable under docs/ BLOCKS (was: fast-pathed on placement)" \
+    "block" "$(printf '%s' "$Q9_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+# The ORDINARY QA-required block, NOT the F1 decline note: DOC_ONLY went false, so
+# the fast path was never eligible and there is nothing for it to decline.
+assert_contains "vbs-qzv-9: ...through the ordinary QA-required path" \
+    "require QA review" "$(printf '%s' "$Q9_JSON" | jq -r '.reason // empty')"
+assert_eq "vbs-qzv-9: ...and NOTHING was approved (was: 1 record, reviewed_by=none)" \
+    "0" "$(qzv_record_count "$TID_Q9")"
+Q9_LABELS=$(qzv_labels "$TID_Q9")
+assert_eq "vbs-qzv-9: ...and no qa-approved label was written" "0" \
+    "$(printf ',%s,' "$Q9_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+
+# CONTROL 9B — ANTI-OVERREACH. Documentation in the SAME docs/ directory must
+# still fast-path. Without this the leg above passes for a fixture that blocks
+# everything, and the fix would have deadlocked the commits F1 exists for.
+TID_Q9B=$(cd "$FIXTURE_QZV" && bd create "bbh: CONTROL documentation under docs/ still fast-paths" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q9B" --status in_progress >/dev/null 2>&1) || true
+qzv_arm "$TID_Q9B"
+assert_eq "vbs-qzv-9B: CONTROL — docs/notes.md in the same directory STILL auto-approves" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-9B: ...with its approval recorded" "1" "$(qzv_record_count "$TID_Q9B")"
+
+# 9C — THE NAME-GLOB HALF. `LICENSE.*` matched any extension after that one name
+# at the repo root, so a filename alone was enough; no docs/ directory was even
+# needed. Measured on the task: LICENSE.sh and LICENSE.py were documentation
+# while src/LICENSE.sh was not (the arm had no `*/` prefix).
+TID_Q9C=$(cd "$FIXTURE_QZV" && bd create "bbh: LICENSE.sh at the root is NOT doc-only" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q9C" --status in_progress >/dev/null 2>&1) || true
+printf '#!/bin/sh\ncurl -fsSL https://example.invalid/install.sh | sh\n' > "$FIXTURE_QZV/LICENSE.sh"
+printf '%s/LICENSE.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q9C" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q9C"
+printf '%s/LICENSE.sh\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-9C: a root LICENSE.sh BLOCKS (was: fast-pathed on the name glob)" \
+    "block" "$(qzv_decision)"
+assert_eq "vbs-qzv-9C: ...and nothing was approved for it" "0" "$(qzv_record_count "$TID_Q9C")"
+
+# 9D — THE CONTENT VETO AT THE HOOK. A documentation NAME with the executable bit
+# set. This is the only leg in the spec where the DECISION turns on a fact about
+# the FILE rather than about its path: `docs/install.txt` matches the extension
+# arm and is stopped by the veto alone. Its control is the identical name and
+# content at mode 644.
+TID_Q9D=$(cd "$FIXTURE_QZV" && bd create "bbh: an executable .txt is NOT doc-only" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q9D" --status in_progress >/dev/null 2>&1) || true
+printf 'installation notes\n' > "$FIXTURE_QZV/docs/install.txt"
+chmod 755 "$FIXTURE_QZV/docs/install.txt"
+printf '%s/docs/install.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q9D" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q9D"
+printf '%s/docs/install.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-9D: precondition — the name matches the .txt documentation arm" "txt" \
+    "$(printf '%s' "${FIXTURE_QZV}/docs/install.txt" | sed 's/.*\.//')"
+assert_eq "vbs-qzv-9D: an EXECUTABLE docs/install.txt BLOCKS (the content veto, not the name)" \
+    "block" "$(qzv_decision)"
+assert_eq "vbs-qzv-9D: ...and nothing was approved for it" "0" "$(qzv_record_count "$TID_Q9D")"
+# CONTROL: same path, same bytes, mode 644. If this also blocked, 9D would be
+# measuring the .txt name rather than the executable bit.
+TID_Q9E=$(cd "$FIXTURE_QZV" && bd create "bbh: CONTROL the same .txt at mode 644 fast-paths" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q9E" --status in_progress >/dev/null 2>&1) || true
+printf 'installation notes\n' > "$FIXTURE_QZV/docs/install.txt"
+chmod 644 "$FIXTURE_QZV/docs/install.txt"
+printf '%s/docs/install.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q9E" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q9E"
+printf '%s/docs/install.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-9E: CONTROL — the identical file at mode 644 auto-approves" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-9E: ...with its approval recorded" "1" "$(qzv_record_count "$TID_Q9E")"
+# Leave the fixture's docs/ clean for the legs below: only docs/notes.md is
+# supposed to be a live doc-only member of the change set.
+rm -f "$FIXTURE_QZV/docs/deploy.sh" "$FIXTURE_QZV/docs/install.txt" "$FIXTURE_QZV/LICENSE.sh"
+
+# --- Leg 10: A GOVERNING ARTIFACT IS NEVER DOC-ONLY (s5qf) -------------------
+#
+# bbh closed the half of the classifier that read content type off a path's
+# POSITION or NAME GLOB, and disclosed the half it could not: a `.md` that is an
+# agent prompt, a rubric or CLAUDE.md carries neither an exec bit nor a `#!`, so
+# the content veto correctly has no opinion about it and the `*.md` arm calls it
+# documentation. The live illustration was on bbh's own change set —
+# `.claude/agents/qa.md` was a member of it, and had that edit landed alone F1
+# would have auto-approved a change to the QA agent's own prompt with
+# `reviewed_by=none`.
+#
+# `doc-only-classifier.test.sh` sections 6-8 measure the classifier itself.
+# THESE legs are the hook-level consequence: that the answer reaches the Stop
+# DECISION, the approval record and the label. 10B is the half that matters
+# most — the control lives in the SAME directory as 10A's subject and must
+# still fast-path, because the veto reads the project's declared enumeration
+# and not the directory. If it read the directory it would be the path-shape
+# inference bbh removed, wearing a new suffix.
+TID_Q10=$(cd "$FIXTURE_QZV" && bd create "s5qf: an agent prompt is NOT doc-only" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10" --status in_progress >/dev/null 2>&1) || true
+mkdir -p "$FIXTURE_QZV/.claude/agents"
+printf 'You are the designer specialist.\n' > "$FIXTURE_QZV/.claude/agents/designer.md"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10: precondition — the change set is exactly one path" "1" \
+    "$(grep -c . "$TRACK_QZV/changed-files.txt" | tr -d '[:space:]')"
+# THE DISCRIMINATOR. Both preconditions rule the bbh veto out: this file is mode
+# 644 and its first bytes are not `#!`, so if the Stop blocks it can only be the
+# s5qf veto that did it. Without these, leg 10 would pass just as well against a
+# fixture where the file happened to be executable.
+assert_eq "vbs-qzv-10: precondition — NOT executable (so the bbh content veto cannot fire)" "no" \
+    "$([ -x "$FIXTURE_QZV/.claude/agents/designer.md" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10: precondition — no shebang either (same reason)" "no" \
+    "$([ "$(head -c 2 "$FIXTURE_QZV/.claude/agents/designer.md")" = '#!' ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10: precondition — and the project DECLARES it (manifest row, class workflow)" \
+    "workflow" "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" governing "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == ".claude/agents/designer.md" { print $2 }')"
+Q10_JSON=$(qzv_json)
+assert_eq "vbs-qzv-10: an agent prompt alone BLOCKS (was: auto-approved, reviewed_by=none)" \
+    "block" "$(printf '%s' "$Q10_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+assert_contains "vbs-qzv-10: ...through the ordinary QA-required path" \
+    "require QA review" "$(printf '%s' "$Q10_JSON" | jq -r '.reason // empty')"
+assert_eq "vbs-qzv-10: ...and NOTHING was approved (was: 1 record, reviewed_by=none)" \
+    "0" "$(qzv_record_count "$TID_Q10")"
+assert_eq "vbs-qzv-10: ...and no qa-approved label was written" "0" \
+    "$(printf ',%s,' "$(qzv_labels "$TID_Q10")" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+
+# CONTROL 10B — ANTI-OVERREACH, in the SAME DIRECTORY. `.claude/agents/` is
+# scanned for `*.md`, so a `.txt` beside the prompts is not a declared path and
+# must keep the fast path. This is the leg that distinguishes reading the
+# ENUMERATION from reading the directory; without it, leg 10 passes for a
+# fixture that blocks everything under .claude/.
+TID_Q10B=$(cd "$FIXTURE_QZV" && bd create "s5qf: CONTROL an undeclared doc beside the prompts fast-paths" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10B" --status in_progress >/dev/null 2>&1) || true
+printf 'scratch notes, not an agent\n' > "$FIXTURE_QZV/.claude/agents/notes.txt"
+printf '%s/.claude/agents/notes.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10B" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10B"
+printf '%s/.claude/agents/notes.txt\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10B: precondition — it is NOT a declared path" "" \
+    "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" governing "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == ".claude/agents/notes.txt" { print $2 }')"
+assert_eq "vbs-qzv-10B: CONTROL — an undeclared .txt in the SAME directory auto-approves" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-10B: ...with its approval recorded" "1" "$(qzv_record_count "$TID_Q10B")"
+
+# 10C — CLAUDE.md, the named runtime-contract entry. It is deliberately NOT a
+# manifest row (the installer never seeds it and an uninstall walk must never
+# offer to move an operator's own project memory), so it reaches the governing
+# set by being NAMED, the way docs/HOOKS.md and .worktreeinclude are named in
+# the surface. Claude Code auto-loads it into every agent's context, which makes
+# it a fact about the runtime rather than an inference from `.md`.
+TID_Q10C=$(cd "$FIXTURE_QZV" && bd create "s5qf: CLAUDE.md is NOT doc-only" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10C" --status in_progress >/dev/null 2>&1) || true
+printf '# project memory\nrule: delegate to a specialist\n' > "$FIXTURE_QZV/CLAUDE.md"
+printf '%s/CLAUDE.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10C" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10C"
+printf '%s/CLAUDE.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10C: precondition — CLAUDE.md is NOT an install-surface row" "0" \
+    "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" generate "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == "CLAUDE.md"' | grep -c . | tr -d '[:space:]')"
+assert_eq "vbs-qzv-10C: precondition — ...but it IS a governing artifact, by name" \
+    "runtime-contract" "$(bash "$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh" governing "$FIXTURE_QZV" 2>/dev/null | awk -F'\t' '$1 == "CLAUDE.md" { print $2 }')"
+assert_eq "vbs-qzv-10C: a CLAUDE.md-only change set BLOCKS (was: auto-approved)" \
+    "block" "$(qzv_decision)"
+assert_eq "vbs-qzv-10C: ...and nothing was approved for it" "0" "$(qzv_record_count "$TID_Q10C")"
+
+# 10D — THE ABSENT-DECLARATION ARM, at the hook. The plugin installs into
+# arbitrary projects and a partial install must not deadlock every documentation
+# commit, so an unanswerable query fails OPEN: the classifier behaves exactly as
+# it did before s5qf. Removed rather than emptied, because "the tool is not
+# there" is the shape a partial install actually has. `.claude/scripts/` is
+# gitignored in this fixture, so this instrumentation cannot enter the change set
+# and make the ALLOW happen for the wrong reason (LESSONS.md, 2026-08-04).
+TID_Q10D=$(cd "$FIXTURE_QZV" && bd create "s5qf: an unanswerable query fails OPEN" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10D" --status in_progress >/dev/null 2>&1) || true
+Q10_WFM="$FIXTURE_QZV/.claude/scripts/workflow-manifest.sh"
+Q10_WFM_SAVED="$FIXTURE_QZV/.claude/.qa-tracking/wfm-saved-target"
+readlink "$Q10_WFM" > "$Q10_WFM_SAVED" 2>/dev/null || printf '' > "$Q10_WFM_SAVED"
+rm -f "$Q10_WFM"
+printf 'You are the designer specialist, revised.\n' > "$FIXTURE_QZV/.claude/agents/designer.md"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10D" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10D"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10D: precondition — the query tool really is gone" "no" \
+    "$([ -f "$Q10_WFM" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10D: with the query unanswerable, the SAME path auto-approves again (fail-open)" \
+    "ALLOW" "$(qzv_decision)"
+assert_eq "vbs-qzv-10D: ...with its approval recorded" "1" "$(qzv_record_count "$TID_Q10D")"
+assert_eq "vbs-qzv-10D: ...and the fail-open is LOGGED, not silent" "1" \
+    "$(grep -c 'governing-artifact query is unavailable' "$TRACK_QZV/sync-errors.log" 2>/dev/null | tr -d '[:space:]')"
+# RESTORE CONTROL. Put the tool back and the identical path blocks again — so
+# 10D measured the tool's absence and not some drift the legs above introduced.
+if [ -s "$Q10_WFM_SAVED" ]; then ln -sf "$(cat "$Q10_WFM_SAVED")" "$Q10_WFM"; fi
+rm -f "$Q10_WFM_SAVED"
+TID_Q10E=$(cd "$FIXTURE_QZV" && bd create "s5qf: RESTORE control, the query is back" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10E" --status in_progress >/dev/null 2>&1) || true
+printf 'You are the designer specialist, revised twice.\n' > "$FIXTURE_QZV/.claude/agents/designer.md"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+baseline_incidental_dirt "$FIXTURE_QZV"
+bash "$QG_QZV" enter "$TID_Q10E" >/dev/null 2>&1
+bash "$CT_QZV" set "$TID_Q10E"
+printf '%s/.claude/agents/designer.md\n' "$FIXTURE_QZV" > "$TRACK_QZV/changed-files.txt"
+assert_eq "vbs-qzv-10E: precondition — the query tool is back" "yes" \
+    "$([ -f "$Q10_WFM" ] && echo yes || echo no)"
+assert_eq "vbs-qzv-10E: RESTORE control — the identical path BLOCKS again" \
+    "block" "$(qzv_decision)"
+assert_eq "vbs-qzv-10E: ...and nothing was approved for it" "0" "$(qzv_record_count "$TID_Q10E")"
+# Leave the fixture as the legs below expect: docs/notes.md is the only live
+# doc-only member of the change set, and nothing under .claude/agents/ survives
+# to make a later change set accidentally governing.
+rm -rf "$FIXTURE_QZV/.claude/agents"
+
+# ---------------------------------------------------------------------------
+# qzv META (spec-mandated): strip the F1-CHANGE-SET-BINDING regions from a copy
+# and leg 1 must AUTO-APPROVE again — the live defect, reproduced.
+#
+# The regions are arranged so stripping them yields the PRE-FIX arm rather than a
+# syntax error: the verdict variable is declared with the RELEASING default
+# OUTSIDE the sentinels (the same discipline REVIEW_DISCIPLINE_BLOCKED uses),
+# and the guard's `if`/`else`/`fi` all live INSIDE them.
+#
+# The copy lives in the fixture's `.claude/scripts/` so it keeps resolving its
+# BASH_SOURCE-relative siblings (workflow-denylist.sh, qa-gate.sh); a copy parked
+# elsewhere blocks on the missing-denylist arm and would satisfy "leg 1 blocked"
+# for entirely the wrong reason. Anchored patterns (`^ *#`) for the same reason
+# the 8M META uses them: unanchored, a prose line naming the sentinel mid-sentence
+# starts the excision early.
+QZV_REAL_VBS=$(readlink "$VBS_QZV" 2>/dev/null || printf '%s' "$VBS_QZV")
+VBS_QZV_MUT="$FIXTURE_QZV/.claude/scripts/vbs-qzv-stripped.sh"
+awk '
+    /^ *# F1-CHANGE-SET-BINDING BEGIN/ { skip = 1; next }
+    /^ *# F1-CHANGE-SET-BINDING END/   { skip = 0; next }
+    !skip { print }
+' "$QZV_REAL_VBS" > "$VBS_QZV_MUT"
+chmod +x "$VBS_QZV_MUT"
+# THE GUARD FIRST: a strip that matched nothing leaves a byte-identical copy, and
+# then every leg below measures the SHIPPED hook while reporting on a mutant.
+if assert_mutant_applied "vbs-qzv META" "$QZV_REAL_VBS" "$VBS_QZV_MUT"; then
+    assert_eq "vbs-qzv META: no F1_BINDING_VERDICT guard survives (the strip landed where it was aimed)" \
+        "0" "$(grep -c 'F1_BINDING_VERDICT" = "safe"' "$VBS_QZV_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv META: ...while the releasing DEFAULT survives outside the region" "1" \
+        "$(grep -c '^F1_BINDING_VERDICT=safe$' "$VBS_QZV_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv META: the stripped copy still parses" "0" \
+        "$(bash -n "$VBS_QZV_MUT" 2>/dev/null && echo 0 || echo 1)"
+    # Leg 1's exact state, against the stripped copy.
+    TID_QM=$(cd "$FIXTURE_QZV" && bd create "qzv META: stripped guard auto-approves" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QM" --status in_progress >/dev/null 2>&1) || true
+    qzv_arm "$TID_QM"
+    qzv_comment "$TID_QM" "IMPLEMENTER: role=devops task=$TID_QM at 2099-01-01T00:00:00Z"
+    assert_eq "vbs-qzv META: with the binding stripped, the in-flight implementer's task is AUTO-APPROVED (leg 1 WOULD fail)" \
+        "ALLOW" "$(qzv_decision "$VBS_QZV_MUT")"
+    assert_eq "vbs-qzv META: ...stamping an approval record on work that does not exist" \
+        "1" "$(qzv_record_count "$TID_QM")"
+    QM_LABELS=$(qzv_labels "$TID_QM")
+    assert_eq "vbs-qzv META: ...and the qa-approved label with it" "1" \
+        "$(printf ',%s,' "$QM_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+    # Restore control: the SHIPPED hook refuses the identical state.
+    TID_QMC=$(cd "$FIXTURE_QZV" && bd create "qzv META: shipped guard refuses" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QMC" --status in_progress >/dev/null 2>&1) || true
+    qzv_arm "$TID_QMC"
+    qzv_comment "$TID_QMC" "IMPLEMENTER: role=devops task=$TID_QMC at 2099-01-01T00:00:00Z"
+    assert_eq "vbs-qzv META: restore control — the shipped hook refuses the identical state" \
+        "block" "$(qzv_decision)"
+fi
+
+# ---------------------------------------------------------------------------
+# Legs 10-11 + META: A REFUSED APPROVAL MUST BLOCK AND KEEP THE CHANGE SET
+# (claude-workflow-plugin-qzv.3)
+# ---------------------------------------------------------------------------
+#
+# THE DEFECT, measured against the shipped scripts before the fix. The F1 arm ran
+#
+#     "$QA_GATE" approve … >/dev/null 2>&1 || log_sync_error "…"
+#
+# and then fell straight through to the `rm -f` cleanup and `echo "{}"; exit 0`.
+# Every non-zero approve was therefore logged and ignored. With
+# `.claude/scripts/impact-report.sh` removed — a partially-synced install, the
+# same degradation class legs 4/5/6 already model for review-check.sh — a
+# doc-only Stop on an entered task produced:
+#
+#     Stop decision            : ALLOW  (bare {})
+#     QA-GATE APPROVED records : 0
+#     changed-files.txt        : WIPED
+#     current-task             : survives
+#     sync-errors.log          : "qa-gate approve failed … no approval was recorded"
+#
+# i.e. the gate released a change set, recorded no approval for it, and destroyed
+# the tracker that named it. The wipe is what makes the failure self-erasing
+# rather than merely silent, and it is why leg 10's tracker assertion is not
+# decoration: a block whose recovery needs the change set, delivered over a wiped
+# change set, is unrecoverable.
+#
+# SECOND DEFECT, on the same path and fixed in the same change set (leg 11).
+# `qa-gate.sh` runs under `set -e`, `compute_change_set_hash` returns 1 when
+# impact-report.sh is missing, and cmd_approve assigned from it with no `||`
+# guard — so the assignment aborted the script three lines above the
+# `impact_report_unverifiable` refusal written for exactly that condition. Two-arm
+# control against the shipped script: `set -e` gave rc=1 with EMPTY stdout and
+# EMPTY stderr, the same call under `set +e` gave rc=2 with the error_key. Fixing
+# only that buys nothing an operator can see (the hook discarded both streams);
+# fixing only the hook leaves it blocking on an approve that explains nothing.
+
+Q10_REAL_IR=$(readlink "$IR_QZV" 2>/dev/null || printf '%s' "$IR_QZV")
+
+# --- Leg 10: the hook. approve REFUSES -> block, tracker SURVIVES ------------
+# CONTROL first, on its own task, so the block below is attributable to the
+# removal and not to the fixture. (Its own task because ALLOW means F1 approves,
+# which clears the gate label, truncates the tracker and unsets current-task.)
+TID_Q10=$(cd "$FIXTURE_QZV" && bd create "qzv.3: approve refusal, control" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10" --status in_progress >/dev/null 2>&1) || true
+qzv_arm "$TID_Q10"
+assert_eq "vbs-qzv.3-10: CONTROL — with impact-report.sh present this state auto-approves" \
+    "ALLOW" "$(qzv_decision)"
+
+TID_Q10B=$(cd "$FIXTURE_QZV" && bd create "qzv.3: approve refusal, probe" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q10B" --status in_progress >/dev/null 2>&1) || true
+# ARM the cycle while impact-report.sh is STILL PRESENT, so `enter` writes the
+# artifact. Removing the script first would make approve refuse with
+# impact_report_MISSING instead, which is a different refusal reached without
+# ever calling compute_change_set_hash — the leg would then pass for a reason
+# that has nothing to do with either defect.
+qzv_arm "$TID_Q10B"
+assert_eq "vbs-qzv.3-10: precondition — enter wrote the impact-report artifact" "yes" \
+    "$(ls "$TRACK_QZV"/impact-report-*.json >/dev/null 2>&1 && echo yes || echo no)"
+rm -f "$IR_QZV"
+assert_eq "vbs-qzv.3-10: precondition — impact-report.sh is genuinely absent" "absent" \
+    "$([ -e "$IR_QZV" ] && echo present || echo absent)"
+assert_eq "vbs-qzv.3-10: precondition — the tracker names the change set going in" "1" \
+    "$(grep -c . "$TRACK_QZV/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+Q10_JSON=$(qzv_json)
+assert_eq "vbs-qzv.3-10: a REFUSED approve BLOCKS the Stop (was: ALLOW, bare {})" \
+    "block" "$(printf '%s' "$Q10_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+Q10_REASON=$(printf '%s' "$Q10_JSON" | jq -r '.reason // empty')
+assert_contains "vbs-qzv.3-10: ...naming the refusal rather than releasing silently" \
+    "qa-gate.sh approve\` REFUSED" "$Q10_REASON"
+assert_contains "vbs-qzv.3-10: ...carrying approve's error_key so the block is actionable" \
+    "impact_report_unverifiable" "$Q10_REASON"
+assert_contains "vbs-qzv.3-10: ...and approve's own observations, not a bare 'approve failed'" \
+    "cannot recompute the current change-set hash" "$Q10_REASON"
+assert_contains "vbs-qzv.3-10: ...and the exit status it refused with" \
+    "approve exit: 2" "$Q10_REASON"
+assert_eq "vbs-qzv.3-10: ...nothing was approved" "0" "$(qzv_record_count "$TID_Q10B")"
+Q10_LABELS=$(qzv_labels "$TID_Q10B")
+assert_eq "vbs-qzv.3-10: ...no qa-approved label was written" "0" \
+    "$(printf ',%s,' "$Q10_LABELS" | grep -c ',qa-approved,' | tr -d '[:space:]')"
+# THE HALF QA'S WRITE-UP MISSED: the cleanup ran on the failure path too, so the
+# refusal cost the change set as well as the approval.
+assert_eq "vbs-qzv.3-10: THE CHANGE SET SURVIVES the refusal (was: changed-files.txt WIPED)" \
+    "1" "$(grep -c . "$TRACK_QZV/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+# Read through the canonical helper rather than cat-ing the file: the pointer's
+# on-disk shape is current-task.sh's business, and QA's round-8 refinement to the
+# filing (current-task SURVIVES the failure path; only changed-files.txt was
+# wiped) is the fact this pins.
+assert_eq "vbs-qzv.3-10: ...and current-task still names the task (it always survived; only the tracker did not)" \
+    "$TID_Q10B" "$(bash "$CT_QZV" get 2>/dev/null | tr -d '[:space:]')"
+ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
+
+# --- Leg 11: approve itself. The refusal is REACHABLE under set -e -----------
+# This leg fails RED against the shipped script as it stood: rc=1, stdout empty,
+# stderr empty, no envelope at all.
+TID_Q11=$(cd "$FIXTURE_QZV" && bd create "qzv.3: approve refusal is reachable" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q11" --status in_progress >/dev/null 2>&1) || true
+qzv_arm "$TID_Q11"
+rm -f "$IR_QZV"
+Q11_RC=0
+Q11_OUT=$(bash "$QG_QZV" approve "$TID_Q11" \
+    --no-review "F1 doc-only fast path: no reviewable source changed" \
+    --no-completion "F1 doc-only fast path: no specialist, no completion payload" \
+    "spec: the F1 approval, by hand" 2>&1) || Q11_RC=$?
+assert_eq "vbs-qzv.3-11: approve exits 2, the documented refusal code (was: 1, an errexit abort)" \
+    "2" "$Q11_RC"
+assert_eq "vbs-qzv.3-11: ...with a PARSEABLE envelope (was: empty stdout AND empty stderr)" \
+    "yes" "$(printf '%s' "$Q11_OUT" | jq -e 'type == "object"' >/dev/null 2>&1 && echo yes || echo no)"
+assert_eq "vbs-qzv.3-11: ...naming the refusal that was dead code under set -e" \
+    "impact_report_unverifiable" "$(printf '%s' "$Q11_OUT" | jq -r '.error_key // "(none)"' 2>/dev/null)"
+assert_eq "vbs-qzv.3-11: ...and nothing was approved" "0" "$(qzv_record_count "$TID_Q11")"
+
+# 11B: the SECOND unguarded assignment, reached only through the audited
+# --no-impact-report bypass — the exit an operator is told to take when the
+# artifact is unavailable, which was itself unusable in that exact situation
+# (rc=1, empty output, 0 records). It must now succeed and say the binding is
+# missing rather than dying.
+#
+# fkm.4 (v5 D2, R1-F1 fix round): also carries --no-design now. This leg's own
+# task has no design phase — it exists to test the impact-report axis, not the
+# design one — but DESIGN-SATISFIED-REFUSAL is unconditional and sits AFTER
+# impact-report in the ladder, so once --no-impact-report clears the axis this
+# leg is actually testing, the design refusal was the next thing reached and
+# this call started failing on it (`no_design_attempted`, exit 2, 0 records)
+# instead of reaching the success this leg asserts. Same fix, same reasoning,
+# as the shipped F1 call site this component spec exercises.
+#
+# THE CLAIM THAT USED TO BE HERE — "this was simply the one other hand-built
+# F1-shaped approve call the migration missed" — WAS FALSE, measured by R2-F1
+# (fkm.4 round 2): the R1-F1 fix round found this one HAND-BUILT F1-shaped
+# call site by an existential search (look for other places shaped like the
+# one just fixed) rather than an enumerated one, and an existential search
+# stops at the first hit it is satisfied by. It never asked whether any
+# SPEC-LOCAL SEED HELPER (a world away from a hand-built F1-shaped call —
+# this is a single assertion, those are shared setup functions every approve
+# call in a whole spec file routes through) had the same gap. Five did:
+# verify-review-discipline.sh, arbitration-acceptance.sh,
+# review-artifact-durability.sh, worktree-approval-resolution.sh, and
+# qa-gate.sh's own P7 family, together accounting for 91 failing assertions
+# when finally measured by running every spec rather than searching by eye.
+# The corrected discipline, stated once so it does not need restating at
+# every site like this one: a completeness claim about a migration needs an
+# enumerated denominator — every call site, listed and classified — not an
+# existential search that stops at the first (or second) hit.
+TID_Q11B=$(cd "$FIXTURE_QZV" && bd create "qzv.3: the impact bypass works when the script is gone" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q11B" --status in_progress >/dev/null 2>&1) || true
+ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
+qzv_arm "$TID_Q11B"
+rm -f "$IR_QZV"
+Q11B_RC=0
+Q11B_OUT=$(bash "$QG_QZV" approve "$TID_Q11B" \
+    --no-impact-report "spec: the artifact cannot be recomputed here" \
+    --no-review "F1 doc-only fast path: no reviewable source changed" \
+    --no-completion "F1 doc-only fast path: no specialist, no completion payload" \
+    --no-design "spec: no design phase for this synthetic task" \
+    "spec: the audited bypass" 2>&1) || Q11B_RC=$?
+assert_eq "vbs-qzv.3-11B: the --no-impact-report bypass SUCCEEDS with the script absent (was: rc=1, empty)" \
+    "0" "$Q11B_RC"
+assert_eq "vbs-qzv.3-11B: ...recording the approval it was asked for (was: 0 records)" \
+    "1" "$(qzv_record_count "$TID_Q11B")"
+assert_contains "vbs-qzv.3-11B: ...while SAYING the change-set binding is missing rather than faking one" \
+    "WITHOUT a change-set binding" "$(printf '%s' "$Q11B_OUT" | jq -r '.observations // empty' 2>/dev/null)"
+ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
+
+# --- Leg 12: the SUCCESS path's stdout is still exactly `{}` -----------------
+# The regression this change could most plausibly have introduced. qzv.3 stopped
+# sending approve's stdout to /dev/null and started CAPTURING it; if any of it
+# reached the hook's own stdout, the whole output stops being a JSON object and
+# Claude silently ignores the verdict — the llh.20 antipattern, on the
+# most-travelled path in the gate. Section 6a pins that property for the
+# APPROVED path; this is the F1 fast path's own copy, and it reads the WHOLE
+# stdout with no `tail -1` salvage, exactly as 6a does, because a salvage would
+# hide the very thing it is looking for.
+TID_Q12=$(cd "$FIXTURE_QZV" && bd create "qzv.3: F1 success stdout is a bare envelope" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q12" --status in_progress >/dev/null 2>&1) || true
+qzv_arm "$TID_Q12"
+Q12_RAW=$(printf '%s' '{"stop_reason":"end_turn","stop_hook_active":false}' | bash "$VBS_QZV" 2>/dev/null)
+assert_eq "vbs-qzv.3-12: the F1 success path's WHOLE stdout is exactly '{}' (no captured approve output leaked)" \
+    "{}" "$Q12_RAW"
+assert_eq "vbs-qzv.3-12: ...and it parses as JSON without tail salvage" "yes" \
+    "$(printf '%s' "$Q12_RAW" | jq -e . >/dev/null 2>&1 && echo yes || echo no)"
+assert_eq "vbs-qzv.3-12: ...over a real auto-approval, not an empty run" "1" \
+    "$(qzv_record_count "$TID_Q12")"
+
+# --- Leg 13: approve fails with NO parseable envelope ------------------------
+# The arm that used to be the NORMAL shape of this failure rather than an edge
+# case: under the pre-qzv.3 qa-gate.sh, `approve` died on an unguarded
+# `current_hash=$(compute_change_set_hash)` and emitted rc=1 with EMPTY stdout
+# AND EMPTY stderr. That is fixed at the source (leg 11), so this arm now covers
+# an OLDER qa-gate.sh on disk or an outright crash — and it must still block and
+# still say something, rather than printing an empty "approve reported:" section.
+# Driven with a stub so the shape is exact and does not depend on any refusal.
+TID_Q13=$(cd "$FIXTURE_QZV" && bd create "qzv.3: approve fails with no envelope" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+(cd "$FIXTURE_QZV" && bd update "$TID_Q13" --status in_progress >/dev/null 2>&1) || true
+qzv_arm "$TID_Q13"
+Q13_REAL_QG=$(readlink "$QG_QZV" 2>/dev/null || printf '%s' "$QG_QZV")
+rm -f "$QG_QZV"
+# `status` must keep answering `entered` — the F1 arm reads it to decide
+# eligibility, and a stub that failed there would take the arm out of play and
+# the leg would pass without ever reaching the branch under test.
+cat > "$QG_QZV" <<'Q13STUB'
+#!/bin/bash
+case "${1:-}" in
+    status) printf '{"ok":true,"subcommand":"status","status":"entered"}\n'; exit 0 ;;
+    enter)  printf '{"ok":true,"subcommand":"enter"}\n'; exit 0 ;;
+    approve) exit 1 ;;
+    reconcile-tracker) printf '{"ok":true,"added":0,"subtracted":0}\n'; exit 0 ;;
+    *) printf '{"ok":true}\n'; exit 0 ;;
+esac
+Q13STUB
+chmod +x "$QG_QZV"
+Q13_JSON=$(qzv_json)
+assert_eq "vbs-qzv.3-13: an approve that fails with NO envelope still BLOCKS" \
+    "block" "$(printf '%s' "$Q13_JSON" | jq -r '.decision // "ALLOW"' 2>/dev/null)"
+Q13_REASON=$(printf '%s' "$Q13_JSON" | jq -r '.reason // empty')
+assert_contains "vbs-qzv.3-13: ...saying the output was unparseable rather than printing an empty section" \
+    "no parseable JSON envelope" "$Q13_REASON"
+assert_contains "vbs-qzv.3-13: ...and naming the empty-output case explicitly" \
+    "approve wrote nothing to stdout or stderr" "$Q13_REASON"
+assert_eq "vbs-qzv.3-13: ...and the change set survives here too" "1" \
+    "$(grep -c . "$TRACK_QZV/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+rm -f "$QG_QZV"
+ln -sf "$Q13_REAL_QG" "$QG_QZV" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# qzv.3 META (spec-mandated): strip the F1-APPROVE-REFUSAL region from a copy and
+# leg 10 must RELEASE again, over a WIPED tracker — the live defect, reproduced.
+#
+# The region is arranged so stripping it yields the PRE-qzv.3 arm rather than a
+# syntax error: the capture, the rc variable and the sync-error log line live
+# OUTSIDE the sentinels with the releasing default, and only the block guard
+# lives inside. Same discipline as F1_BINDING_VERDICT above. The copy lives in
+# the fixture's .claude/scripts/ so it keeps resolving its BASH_SOURCE-relative
+# siblings; a copy parked elsewhere blocks on the missing-denylist arm and would
+# satisfy "leg 10 released" for entirely the wrong reason.
+QZV3_REAL_VBS=$(readlink "$VBS_QZV" 2>/dev/null || printf '%s' "$VBS_QZV")
+VBS_QZV3_MUT="$FIXTURE_QZV/.claude/scripts/vbs-qzv3-stripped.sh"
+awk '
+    /^ *# F1-APPROVE-REFUSAL BEGIN/ { skip = 1; next }
+    /^ *# F1-APPROVE-REFUSAL END/   { skip = 0; next }
+    !skip { print }
+' "$QZV3_REAL_VBS" > "$VBS_QZV3_MUT"
+chmod +x "$VBS_QZV3_MUT"
+if assert_mutant_applied "vbs-qzv.3 META" "$QZV3_REAL_VBS" "$VBS_QZV3_MUT"; then
+    assert_eq "vbs-qzv.3 META: no block guard survives (the strip landed where it was aimed)" \
+        "0" "$(grep -c 'F1_APPROVE_KEY=' "$VBS_QZV3_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv.3 META: ...nor the block reason it composes" "0" \
+        "$(grep -c 'QA gate cannot release' "$VBS_QZV3_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv.3 META: ...while the releasing DEFAULT survives outside the region" "1" \
+        "$(grep -c '^                F1_APPROVE_RC=0$' "$VBS_QZV3_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv.3 META: ...and so does the pre-fix sync-error line" "1" \
+        "$(grep -c 'no approval was recorded' "$VBS_QZV3_MUT" | tr -d '[:space:]')"
+    assert_eq "vbs-qzv.3 META: the stripped copy still parses" "0" \
+        "$(bash -n "$VBS_QZV3_MUT" 2>/dev/null && echo 0 || echo 1)"
+    # Leg 10's exact state, against the stripped copy.
+    TID_QW=$(cd "$FIXTURE_QZV" && bd create "qzv.3 META: stripped guard releases" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QW" --status in_progress >/dev/null 2>&1) || true
+    ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
+    qzv_arm "$TID_QW"
+    rm -f "$IR_QZV"
+    assert_eq "vbs-qzv.3 META: with the guard stripped, a REFUSED approve RELEASES the Stop (leg 10 WOULD fail)" \
+        "ALLOW" "$(qzv_decision "$VBS_QZV3_MUT")"
+    assert_eq "vbs-qzv.3 META: ...having approved nothing" "0" "$(qzv_record_count "$TID_QW")"
+    assert_eq "vbs-qzv.3 META: ...and DESTROYED the change set on the way out" "WIPED" \
+        "$([ -f "$TRACK_QZV/changed-files.txt" ] && echo present || echo WIPED)"
+    # Restore control INSIDE the META rather than leaning on leg 10: run the
+    # identical sequence with the SHIPPED hook, so the ALLOW is attributable to
+    # the strip and not to anything this block does differently.
+    TID_QWC=$(cd "$FIXTURE_QZV" && bd create "qzv.3 META: shipped guard blocks" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+    (cd "$FIXTURE_QZV" && bd update "$TID_QWC" --status in_progress >/dev/null 2>&1) || true
+    ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
+    qzv_arm "$TID_QWC"
+    rm -f "$IR_QZV"
+    assert_eq "vbs-qzv.3 META: restore control — the shipped hook BLOCKS the identical state" \
+        "block" "$(qzv_decision)"
+    assert_eq "vbs-qzv.3 META: ...and keeps the change set" "1" \
+        "$(grep -c . "$TRACK_QZV/changed-files.txt" 2>/dev/null | tr -d '[:space:]')"
+    # fkm.4 R2-F2: this restore-control state is exactly where the
+    # F1-APPROVE-REFUSAL block's step-3 recovery recipe ("run the same
+    # approval by hand") gets printed for real — so assert on it HERE,
+    # against the shipped hook genuinely reaching the block, rather than a
+    # byte-equality snapshot of the source (a document check per
+    # .claude/tests/README.md "The pairing requirement" P7). The recipe must
+    # reconstruct the SAME call the F1 auto-drive actually makes: three
+    # bypasses, not two — R2-F2 found this recipe still printing only
+    # --no-review/--no-completion after --no-design became a required third
+    # flag on the real call, so "run this by hand" could no longer reproduce
+    # the F1 approval it names.
+    QWC_REASON=$(printf '%s' "$(qzv_json)" | jq -r '.reason // empty' 2>/dev/null)
+    assert_contains "vbs-qzv.3 R2-F2: the recovery recipe carries --no-review" \
+        "--no-review 'F1 " "$QWC_REASON"
+    assert_contains "vbs-qzv.3 R2-F2: ...--no-completion" \
+        "--no-completion 'F1 " "$QWC_REASON"
+    assert_contains "vbs-qzv.3 R2-F2: ...and --no-design (the flag this recipe was missing)" \
+        "--no-design 'F1 " "$QWC_REASON"
+    ln -sf "$Q10_REAL_IR" "$IR_QZV" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+# vbs-tmo: watchdog-fallback disclosure in the operator-facing gate summary
+# (claude-workflow-plugin-gsfd, disclosure fix; wording updated by
+# claude-workflow-plugin-03tf when the `*)` branch stopped running genuinely
+# unbounded and started enforcing the cap itself via an in-process watchdog
+# — see run_with_timeout's own header). run_with_timeout's own
+# function-level behaviour (does the LOG carry the marker, does the exit
+# code still pass through, does a genuine hang actually return 124) is
+# covered directly, awk-extracted, in
+# .claude/scripts/tests/run-with-timeout.test.sh sections 2a/2b/3 — as of
+# 03tf that function's `*)` branch also needs `sleep`/`ps`/`awk` on PATH
+# (not just `bash`) for the watchdog itself, which is why THAT file's PATH
+# fixtures were widened rather than left at bash-only; this section forces
+# nothing (see tmo-a below) and relies on the ambient host instead, so it is
+# unaffected. This section is the END-TO-END half: does checks_scope_note's
+# paragraph actually reach the Stop hook's JSON `.reason`, through the real
+# detect-stack -> npm -> run_with_timeout dispatch, for a task that is not
+# yet qa-approved?
+#
+# tmo-b (restore control) is forced on ANY host: PATH is searched in order,
+# so PREPENDING a working `timeout` stub always wins regardless of what the
+# ambient PATH holds further down.
+#
+# tmo-a (absent leg) is NOT forced the same way. Forcing "neither binary
+# resolves" for the FULL hook — which shells out to jq/git/bd/sed/awk and to
+# its sibling scripts (qa-gate.sh, detect-stack.sh, current-task.sh,
+# workflow-denylist.sh, tree-lease.sh) — would need a curated PATH covering
+# every tool ALL of those touch, unlike run_with_timeout's own single-binary
+# surface. Building that blind is a worse trade than an honest, named skip:
+# this L2 tier cannot be run from inside the session that wrote this section
+# (make test-component is explicitly the operator's own call, kept separate
+# from L1), so a fragile reconstruction would ship unverified by execution.
+# Instead: assert the PRECONDITION this dev box (and, per the shipped
+# function's own header, stock macOS generally) already satisfies, and skip
+# the leg honestly, by name, when a host does not (Linux ships `timeout` in
+# coreutils, so CI is the expected skip site) — matching this tier's own
+# established idiom for an environment the harness cannot force (see e.g.
+# failure-cross-repo.sh section 5, gate-baseline-v2.sh section 6: "SKIPPED:
+# <section> (<reason>)"). A skip here does not fail the tier: per
+# .claude/tests/README.md, L2 "reports skips honestly ... but still exits 0
+# on skips" and has no section-level strict mode, unlike L1.
+#
+# Both legs fire against the SAME git-less fixture and the SAME task, back to
+# back. This is safe from cache-replay: mk_fixture's fixtures carry no .git
+# (removed by contract), so tree_fingerprint() always returns FP_NO_GIT for
+# them, record_verified_state refuses to persist against that sentinel (see
+# that function's own header), verified_state_unchanged therefore always
+# reads "false", and VERIFY_SKIP_UNCHANGED never fires here — both Stop-hook
+# calls below genuinely re-dispatch through run_with_timeout rather than one
+# of them replaying the other's cached tail.
+mk_fixture
+FIXTURE_TMO="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+VBS_TMO="$FIXTURE_TMO/.claude/scripts/verify-before-stop.sh"
+QG_TMO="$FIXTURE_TMO/.claude/scripts/qa-gate.sh"
+CT_TMO="$FIXTURE_TMO/.claude/scripts/current-task.sh"
+TRACK_TMO="$FIXTURE_TMO/.claude/.qa-tracking"
+
+rm -f "$FIXTURE_TMO/.claude/scripts/detect-stack.sh"
+cat > "$FIXTURE_TMO/.claude/scripts/detect-stack.sh" <<'STUB'
+#!/bin/bash
+printf '{"runner":"npm","test_cmd":"npm test","lint_cmd":"","type_cmd":""}\n'
+STUB
+chmod +x "$FIXTURE_TMO/.claude/scripts/detect-stack.sh"
+
+# A PASSING test, unlike sections 9/10's failing one above: the disclosure is
+# a property of the ENVIRONMENT, not of pass/fail, and a clean-pass scenario
+# is otherwise uncovered by this file (every existing run_with_timeout
+# dispatch elsewhere here drives a FAILING command).
+mk_shim "npm" "$FIXTURE_TMO" 0 "npm test passed: 3 tests" >/dev/null
+
+TID_TMO=$(cd "$FIXTURE_TMO" && bd create "tmo: disclosure end-to-end" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG_TMO" enter "$TID_TMO" >/dev/null
+bd label add "$TID_TMO" qa-pending >/dev/null 2>&1
+bash "$CT_TMO" set "$TID_TMO" >/dev/null
+printf 'src/handler.ts\n' > "$TRACK_TMO/changed-files.txt"
+
+# --- tmo-a: absent leg, conditional on the ambient host (see header above) -
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    printf 'SKIPPED: vbs-tmo-a (this host already resolves timeout or gtimeout on PATH -- the absent-leg precondition does not hold here; see the vbs-tmo section header above for why it is not force-shimmed)\n'
+else
+    OUT_TMOA=$(printf '%s' '{"stop_reason":"end_turn"}' | bash "$VBS_TMO")
+    REASON_TMOA=$(printf '%s' "$OUT_TMOA" | jq -r '.reason // empty')
+    assert_decision "vbs-tmo-a: not-yet-approved task still blocks (unrelated to the disclosure itself)" \
+        "$OUT_TMOA" "block"
+    assert_contains "vbs-tmo-a: RAN tests line present (a real dispatch happened, not a replay)" \
+        "RAN      tests       npm test" "$REASON_TMOA"
+    assert_contains "vbs-tmo-a: gate summary discloses the watchdog fallback (claude-workflow-plugin-03tf: neither binary present, but the cap IS enforced -- by the in-process watchdog)" \
+        "WATCHDOG FALLBACK ENFORCED" "$REASON_TMOA"
+    assert_contains "vbs-tmo-a: ...names why (neither binary on PATH)" \
+        "neither timeout nor gtimeout is on PATH" "$REASON_TMOA"
+    # 1200s is TEST_TIMEOUT_S's shipped literal (verify-before-stop.sh); if
+    # that constant ever changes, update this literal alongside it.
+    # claude-workflow-plugin-03tf.1: this needle round-tripped to 6000s and
+    # back to 1200s the same day -- 1200 is bounded ABOVE by the Stop
+    # hook's external timeout (settings.json, 1320s), not by how long
+    # `make test` takes; see TEST_TIMEOUT_S's own comment in
+    # verify-before-stop.sh for why raising this past ~1300s makes the
+    # external kill (which may orphan `make`) win instead of this file's
+    # own clean tree-kill.
+    assert_contains "vbs-tmo-a: ...names which RAN check(s) and their advertised cap" \
+        "tests (1200s)" "$REASON_TMOA"
+    STABLE_LOG_TMOA="$TRACK_TMO/last-test-output.log"
+    assert_eq "vbs-tmo-a precondition: the persisted STABLE log exists" "yes" \
+        "$([ -s "$STABLE_LOG_TMOA" ] && echo yes || echo no)"
+    assert_contains "vbs-tmo-a: the persisted STABLE log ALSO carries the disclosure (not just the in-memory summary)" \
+        "WATCHDOG FALLBACK ENFORCED" "$(cat "$STABLE_LOG_TMOA" 2>/dev/null)"
+fi
+
+# --- tmo-b: restore control, forced on ANY host (see header above) --------
+mkdir -p "$FIXTURE_TMO/faketimeout-bin"
+cat > "$FIXTURE_TMO/faketimeout-bin/timeout" <<'SHIM'
+#!/bin/bash
+# Minimal test double for GNU/BSD `timeout`: drop the duration argument and
+# exec the rest, preserving its exit code exactly. Restore-control purposes
+# only -- it does not itself enforce any bound (claude-workflow-plugin-v4jn
+# tracks the separate, still-open genuine-hang-returns-124 gap).
+shift
+exec "$@"
+SHIM
+chmod +x "$FIXTURE_TMO/faketimeout-bin/timeout"
+assert_eq "vbs-tmo-b precondition: prepending faketimeout-bin resolves timeout to the stub" \
+    "$FIXTURE_TMO/faketimeout-bin/timeout" \
+    "$(PATH="$FIXTURE_TMO/faketimeout-bin:$PATH" command -v timeout)"
+
+bash "$CT_TMO" set "$TID_TMO" >/dev/null
+printf 'src/handler.ts\n' > "$TRACK_TMO/changed-files.txt"
+# PATH is prefixed on this ONE pipeline stage only (verified in isolation
+# before this section was written: a prefix assignment on the second stage
+# of a pipe scopes to that command and everything it execs, then reverts —
+# the fixture's own exported PATH, and every other assertion in this file,
+# is unaffected after this line).
+OUT_TMOB=$(printf '%s' '{"stop_reason":"end_turn"}' \
+    | PATH="$FIXTURE_TMO/faketimeout-bin:$PATH" bash "$VBS_TMO")
+REASON_TMOB=$(printf '%s' "$OUT_TMOB" | jq -r '.reason // empty')
+assert_decision "vbs-tmo-b: not-yet-approved task still blocks" "$OUT_TMOB" "block"
+assert_contains "vbs-tmo-b: RAN tests line still present (a real dispatch happened)" \
+    "RAN      tests       npm test" "$REASON_TMOB"
+assert_not_contains "vbs-tmo-b: gate summary does NOT disclose the watchdog fallback (a working timeout suppresses it)" \
+    "WATCHDOG FALLBACK ENFORCED" "$REASON_TMOB"
+
+# ---------------------------------------------------------------------------
+# vbs-r3fix: DELETED (claude-workflow-plugin-gsfd, operator-directed, round 6
+# DESIGN COLLAPSE). This section covered the in-process heartbeat inside
+# run_with_timeout — the one this comment used to describe as the successor
+# to the original background-daemon heartbeat. Both are gone now:
+# run_with_timeout is back to the shipped, pre-fix-arc `timeout`/`gtimeout`
+# dispatch (see that function's own header), and nothing touches a lease
+# file's mtime mid-dispatch anymore. There is no "lease mtime advances during
+# a long dispatch" property left to prove, and this section's own META mutant
+# — a `sed` over the retired `[ "$hb_tick" -ge 30 ]` literal — no longer
+# matches anything in the shipped file: DIFF_LINES_HB reads 0 where the
+# landing guard requires 2, so the mutant is byte-identical to the original
+# and the section was failing RED (R5-F2). A control invalidated by the
+# removal it should have been deleted alongside, exactly the "guards absent
+# code" defect this round exists to catch. Deleted with the mechanism rather
+# than repaired, matching tree-lease.test.sh's own precedent (its old section
+# 9) for the identical situation.
 
 [ "$FAIL" -eq 0 ]

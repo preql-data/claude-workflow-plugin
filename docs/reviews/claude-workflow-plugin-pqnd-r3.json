@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-pqnd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "2d0b9383795aa2aff3177d3dad1a66a3f820a6080076c6f10803750e631818ae",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the transitive closure has been checked once for a text path the self-check cannot see, and the self-check itself has been checked once for a definition form or call shape it misses; then either a finding at or above high, or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. make lint must stay 0, the spec must stay 108/0, sections 1-2Q must stay at 62, and both review-check baselines must not move.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:3391",
+      "evidence": "verified_state_unchanged_detail emits editable static prose, its output is assigned to SUITE_REUSE_DETAIL at line 5104, and checks_scope_note emits that variable into the operator block at line 5649. Section 3 applies extract_bare_vars only to LWR (test lines 831-833); CSN receives only call accounting (lines 835-837), so this producer is neither discovered nor source-pinned.",
+      "description": "The transitive closure remains incomplete. A false security claim added to this real producer can reach the label-without-record block without moving any Section 3 source pin or failing its self-check, recreating R2-F1 through an assignment-and-later-interpolation path."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "high",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh:792",
+      "evidence": "is_local_fn recognizes only a column-1 `name() {` definition, while valid, lint-clean Bash `function hidden_contributor { ... }` is missed. In addition, extract_calls at line 799 sees only `$(name` and returns no match for a direct `hidden_contributor` invocation, even though its stdout would become checks_scope_note output and then operator text.",
+      "description": "The self-maintaining check can become vacuous for valid definition and call forms. After re-blessing the directly edited pinned region, an unpinned local prose producer can remain classified as external or remain wholly invisible, leaving every Section 3 accounting assertion green."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

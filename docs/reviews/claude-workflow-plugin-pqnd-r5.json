@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-pqnd",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "0ac78e8b9e172b21c885656194b9cb068202e4ea486a00187cc9f7e4f4cbf42b",
+  "risk_threshold": "high",
+  "stop_condition": "Done when (1) the STATED COVERAGE RESIDUAL and four-shape history are judged for honesty against the file's own contents - no overstated coverage anywhere in the spec; (2) the 'REMOVED, not re-guarded' claim is verified mechanically; (3) all five anti-overreach outcomes are confirmed with actual output. Then either a finding at or above high, or verdict=approve with findings=[]. Bounded: no fifth guard shape is proposed.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R5-F1",
+      "severity": "high",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh:693",
+      "evidence": "Section 3's banner still claims IN PRESENT TENSE that the removed 3.2 closure check is live: line 657 'see 3.2 for the mechanical version of the same check', and lines 693-701 'SELF-MAINTAINING, NOT HAND-MAINTAINED... 3.2 does not trust the list above by assertion - it extracts the ACTUAL $(...) calls... A sixth interpolation added to ANY pinned region - a new call, a new bare variable - fails 3.2 the moment it is written, before anyone has to remember this comment exists.' 3.2 was REMOVED (the file's own lines 818-866 and the round-5-fixed header Sections: list both say so; grep confirms zero live closure machinery - extract_bare_vars 0 occurrences, assert_calls_accounted_for 1 comment-only mention inside the removal note). The banner additionally labels the 7-region list 'THE FULL CONTRIBUTOR SET, verified by reading the call graph' (line 655) - a list that omits the SUITE_REUSE_DETAIL / verified_state_unchanged_detail global-variable contributor R3-F1 proved reaches the operator, via the exact method (call-graph reading) R3-F1 defeated.",
+      "description": "The coverage document overstates its own coverage: it promises a mechanical self-maintenance property that no longer exists, so a maintainer adding a new producer would believe the file catches it automatically when the enumeration is in fact hand-maintained (the 3.2 removal note says exactly this at lines 860-866). This is the same stale-3.2 defect class as the header Sections: entry round 5 DID fix, missed by an incomplete sweep - the 0ggk failure shape recurring inside the deliverable that documents it. Fix is comment-only and moves no pins: rewrite the two banner passages to past tense pointing at the 3.2 removal note, and drop or qualify 'THE FULL CONTRIBUTOR SET... verified by reading the call graph'."
+    },
+    {
+      "id": "R5-F2",
+      "severity": "high",
+      "location": ".claude/scripts/tests/approval-record-disclosure-claim.test.sh:1270",
+      "evidence": "assert_absent is invoked at line 1270 (assertion 4.6b) but never defined in this self-contained spec - it exists only as local copies in three sibling specs (runner-completeness:92, override-disclosure:129, gate-claim-honesty:257), none of which this file sources. Measured on a live run: the output contains 'line 1270: assert_absent: command not found'; 4.6b neither passes nor fails (output shows 4.6a, the error, then 4.6c); the suite still prints '149 passed, 0 failed' and exits 0. The spec therefore has 150 WRITTEN assertions of which 149 execute, and the recorded '149/0' acceptance figure silently includes a check that structurally cannot run. Fix verified in a scratchpad copy: inserting gate-claim-honesty.test.sh:257's assert_absent verbatim yields 150 passed / 0 failed with 4.6b PASS - so the asserted property (M6 carries no Reused-because line) does hold in shipped text, nothing was masked, and no sha256 pin moves.",
+      "description": "A shipped assertion in the release gate's own regression guard that cannot execute - emitting an unread 'command not found' into every run since round 4 - is a live instance of the defect family this task exists to repair: a check that claims to check and does not. It survived four independent review rounds and the round-4/round-5 'confirmed identical' output diff (the error line was identical on both sides, so the diff could not surface it). Fix: add the local assert_absent definition (drop-in), re-run standalone, and record the corrected floor as 150/0 wherever 149/0 is cited going forward."
+    }
+  ],
+  "iterations": 5,
+  "stopped_by": "verdict"
+}

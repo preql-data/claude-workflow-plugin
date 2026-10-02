@@ -111,7 +111,7 @@ set -u
 #      offline machine — a network dependency in the component tier.
 #   2. workflow-doctor.sh, exiting 3 ("installed, verification FAILED") when a
 #      functional check does not pass. This spec's fixtures are not built to
-#      satisfy eleven functional checks, and every `install.sh exits 0`
+#      satisfy thirteen functional checks, and every `install.sh exits 0`
 #      assertion here would start reporting a fixture gap as an installer bug.
 # Both are covered for real by `make install-test`, which installs into a
 # tempdir and requires a fully green doctor — that is the surface that proves

@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-do5o",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "166f32179b98e3efe1b04733d641199c7138a065b9eec35853b538fb58fa39ad",
+  "risk_threshold": "high",
+  "stop_condition": "Every figure cited in the LESSONS.md entry and in the do5o decision record is either reproduced by running the command it names at the commit it was measured at, or is explicitly recorded as unverified; and the recorded blast radius is confirmed complete against the implementer's own scan list.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": "LESSONS.md:338 and the claude-workflow-plugin-do5o decision record (description body)",
+      "evidence": "The implementer's own scan (.claude/.qa-tracking/completion-claude-workflow-plugin-qnvo-devops.json, blockers[1], verbatim) names FOUR specs at grep level, not three: 'qa-gate.sh (L2, 21 tracker refs, 0 git-init), approve-idempotency.sh (20, 0), worktree-approval-resolution.sh (13, 1), denylist-shared.sh (15, 5)', plus 'gate-baseline-v2.sh (12, 2) and qa-gate-baseline.sh (5, 2) look lower-risk ... but were not individually re-run'. The record ran four specs and reported 45 failing assertions across FOUR broken specs. qa-gate.sh -- the FIRST-listed and most-exposed entry in that scan (21 tracker refs, 0 git-init) -- was never run. MEASURED by me on the qnvo tree at 1f4bd81 via `bash .claude/tests/component/run.sh --filter qa-gate` in a worktree at that commit: qa-gate.sh pass=172 fail=87 (364s); qa-gate-baseline.sh pass=16 fail=7 (59s). NEGATIVE CONTROL, same command in a worktree at HEAD 91b8e6d: qa-gate.sh pass=259 fail=0 (664s); qa-gate-baseline.sh pass=23 fail=0 (106s) -- identical assertion totals (259 and 23), so every one of those 94 failures is caused by the qnvo change and none is pre-existing. The measured blast radius is therefore at least 139 failing assertions across SIX specs, not 45 across four.",
+      "description": "The entry's headline number is a ~3x undercount, and it was produced by exactly the error the entry exists to name. The entry's sole evidentiary content is 'Running all four found 45 failing assertions'; it reached that by accepting the scan's own list minus one of its members without running it, and by not running the two the scan flagged as lower-risk-but-unverified (one of which, qa-gate-baseline.sh, is broken). This does NOT weaken the decision to defer -- it strengthens it substantially -- but it makes the recorded figure wrong in the one entry whose subject is the difference between a scan and a measurement. Severity is high rather than medium because of where it lands: LESSONS.md is read by the orchestrator before decomposing non-trivial work and is pasted into every grading packet, and lessons.sh dedup-merges by NORMALIZED TEXT, so a corrected entry lands as a duplicate rather than replacing this one. The number cannot be cheaply repaired after it is committed; it has to be right now, while it is still an uncommitted working-tree line. Fix: revert the working-tree line (git checkout -- LESSONS.md) and re-add via lessons.sh with the corrected count and spec list, and correct the decision record's 'FOUR of them break, 45 assertions' and 'the other three' to match what the scan actually listed and what running it actually shows."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "medium",
+      "location": "claude-workflow-plugin-do5o decision record, 'WHAT WAS BUILT AND VERIFIED' block",
+      "evidence": "The record prints two commands and two results in the present tense ('Its own L1 specs pass: bash .claude/scripts/tests/impact-report.test.sh -> PASSED: 127 / bash .claude/scripts/tests/denylist-source.test.sh -> PASSED: 60') and names no commit. Both figures ARE correct at 1f4bd81 -- I reproduced them exactly in a worktree at that commit (127 and 60), but only after satisfying the spec's own section-4 guard by symlinking code-graph-mcp node_modules into the worktree; without it section 4 self-skips and the same command yields 117, which is how a reader can get a wrong answer from the right command. Running the record's two literal commands in a worktree at HEAD 91b8e6d yields PASSED: 116 and PASSED: 59.",
+      "description": "A reader at HEAD who runs the record's own commands gets 116/59 against a claimed 127/60, both green, with nothing in the record explaining the gap. This violates the repo's own stated rule (CONTRIBUTING.md: 'Every number carries the command that produced it and the commit it was measured at'), which is the rule most load-bearing for a record whose entire purpose is to preserve a measurement taken on a tree that no longer exists. The numbers are honest but unattributed. Fix: state the commit (1f4bd81) next to the two figures, and note the section-4/code-graph-mcp precondition, since without it the same command at the same commit returns 117."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": "claude-workflow-plugin-do5o decision record: 'canonical_changed_files() (impact-report.sh:261)'",
+      "evidence": "grep -n '^canonical_changed_files() {' on each tree: line 261 in a worktree at HEAD 91b8e6d; line 337 in a worktree at 1f4bd81.",
+      "description": "The sentence attributes the NEW behaviour ('now derives the change set from git status') to line 261, which is where the function sits in the shipping tree -- where it still has the OLD behaviour. At the commit where the described behaviour actually exists the function is at :337. The function name is unambiguous so nothing is unfindable, but the citation resolves to the wrong tree's line for the claim it supports."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "low",
+      "location": "LESSONS.md:338, sentence 'Three \"maybes\" were four-for-four broken.'",
+      "evidence": "Three cannot be four-for-four. Per R1-F1 the scan named four maybes, not three, and of the specs actually run the result is six-for-six broken.",
+      "description": "The sentence does not parse arithmetically, and both of its numbers are wrong once the scan list is read as written. In an entry about the precision of measurement this is more than a typo; it should be restated against the corrected counts from R1-F1."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "info",
+      "location": "LESSONS.md:338, sentence 'The first was a container-versus-runner assertion count.'",
+      "evidence": "grep -i for container/runner in LESSONS.md returns exactly two entries: this new one, and a9hh dated 2026-08-11 ('A runner or hook that will execute on a different OS or shell major version than the dev box must be measured on that platform before it ships'), which is a different claim from a different date and is not an assertion-count under-report. No task in the store matches. The entry's sources: list names only claude-workflow-plugin-qnvo, which covers the second instance and not the first.",
+      "description": "The entry leans on a prior in-session instance to establish a pattern ('the second instance in one session of the same shape'), but a future reader cannot locate the first. Either cite the task id for the first instance in sources:, or drop the pattern claim to what the entry can support on its own evidence."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

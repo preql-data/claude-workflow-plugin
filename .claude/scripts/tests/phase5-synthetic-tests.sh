@@ -88,21 +88,25 @@ cp "$PLUGIN_DIR/.claude/skills/workflow-engine/SKILL.md" \
     "$FIXTURE/.claude/skills/workflow-engine/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
+# No BD_SHIM_ONLY skip arm any more (a9hh): CI installs the real bd
+# (pinned release, checksum-verified — see .github/workflows/test.yml), and
+# a bd-less environment is a hard failure everywhere. The statusline +
+# qa-gate + memory-bridge sections all require real bd state — no useful
+# partial coverage is possible, so absence fails loudly instead of skipping.
 if ! command -v bd >/dev/null 2>&1; then
-    # Match the L2 spec convention: in BD_SHIM_ONLY=1 mode (CI runner,
-    # no public bd installer), skip-with-log instead of hard-fail. The
-    # statusline + qa-gate + memory-bridge sections all require real bd
-    # state — no useful partial coverage is possible. Dev-machine path
-    # stays loud so misconfigurations are caught.
-    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
-        echo "SKIPPED: phase5-synthetic-tests.sh (bd not available; CI env BD_SHIM_ONLY=1)"
-        exit 0
-    fi
     echo "bd CLI not on PATH — these synthetic tests require Beads."
     exit 1
 fi
 
 cd "$FIXTURE" && bd init >/dev/null 2>&1
+# Section 3.7 drives the Stop hook's ALLOW path by emptying the changed-files
+# tracker. With the tracker empty the hook falls back to `git status`, so the
+# fixture must not be a git checkout — otherwise the fallback reports the
+# fixture's own untracked .claude/ tree as pending work and the hook BLOCKS.
+# bd 1.1.2's `bd init` runs `git init` (0.47.x did not), which silently made
+# this fixture a repo. Drop it: the premise moved, not the hook's behaviour.
+# bd is unaffected — the store is .beads/embeddeddolt, not git.
+rm -rf "$FIXTURE/.git"
 
 export CLAUDE_PROJECT_DIR="$FIXTURE"
 
@@ -123,13 +127,115 @@ seed_review_records() {
     bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || return 1
+
+    # v5 D2 Part B (claude-workflow-plugin-fkm.4) MIGRATION: approve now ALSO
+    # refuses (exit 2, no_design_attempted) without a satisfied, independent
+    # DESIGN-REVIEW verdict, unless --no-design. Section 1.6's subject is the
+    # STATUSLINE's approved shape, which only exists once approve has
+    # actually flipped the label, so this precondition has to be satisfied
+    # too — seeded through the real writers, same reasoning as the review
+    # artifact and completion contract above. Placed BEFORE the review
+    # artifact so the reconcile a few lines down would fold in
+    # docs/specs/<tid>.md too, if this fixture reconciled (it does not stage
+    # a git repo at all — see the `rm -rf "$FIXTURE/.git"` above — so there
+    # is no tracker reconcile step here to worry about ordering against).
+    local design_sanitized design_art design_hash
+    design_sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    mkdir -p "$FIXTURE/docs/specs" 2>/dev/null || true
+    design_art="$FIXTURE/docs/specs/$design_sanitized.md"
+    cat > "$design_art" <<DESIGNDOC
+# Design — $tid
+
+## Problem
+Seeded fixture design (phase5 synthetic harness only).
+
+## Approaches considered
+1. A second seed convention — rejected: no reuse to justify one.
+2. This minimal artifact — chosen: matches every other seed helper here.
+
+## Chosen approach
+Seed a schema-valid design so approve's design-satisfied refusal does not
+block a spec that is not testing it.
+
+## Units
+See the machine block.
+
+## Global constraints
+None.
+
+## Out of scope
+Everything this fixture does not seed.
+
+## Verification plan
+make test
+
+## Revision log
+- v1 seeded by the phase5 synthetic fixture.
+
+<!-- DESIGN-UNITS BEGIN -->
+\`\`\`json
+{
+  "contract_version": "1",
+  "task_id": "$tid",
+  "designer_identity": "designer",
+  "units": [
+    {
+      "unit_id": "U1",
+      "role": "$role",
+      "goal": "seeded unit",
+      "acceptance": [ { "id": "AC1", "text": "seeded fixture: nothing asserted" } ],
+      "files": [ ".claude/scripts/qa-gate.sh" ],
+      "verification": "make test",
+      "depends_on": []
+    }
+  ]
+}
+\`\`\`
+<!-- DESIGN-UNITS END -->
+DESIGNDOC
+    # v5 D3 (claude-workflow-plugin-fkm.5): design-record now refuses
+    # grilling_record_missing without one; bypass rather than seed a real
+    # grilling record, since this fixture never copies the vendor tree
+    # grilling-record would need to hash, and this seed exists only so
+    # approve's design-satisfied refusal does not block a spec that is not
+    # testing grilling.
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-record "$tid" --no-grilling "phase5-synthetic-tests.sh: seeding design-satisfied, not testing grilling" \
+        >/dev/null 2>&1 || return 1
+    design_hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/workflow-manifest.sh" hash-file "$design_art" 2>/dev/null) || design_hash=""
+    if [ -z "$design_hash" ]; then return 1; fi
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-review-record "$tid" --design-hash "$design_hash" \
+        <<< '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"seeded fixture"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
+        >/dev/null 2>&1 || return 1
+
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     [ -z "$hash" ] && hash="unverified"
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
-    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$reviewer" "$hash" > "$art"
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
-        review-record "$tid" --file "$art" >/dev/null 2>&1
+        review-record "$tid" < "$art" >/dev/null 2>&1 || return 1
+    # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
+    # (exit 2, completion_record_missing) without a validated COMPLETION v1
+    # record. Section 1.6's subject is the STATUSLINE's approved shape, which
+    # only exists once approve has actually flipped the label — so the
+    # precondition has to be satisfied, not bypassed. Seeded through the REAL
+    # writer, so a grammar change breaks this loudly.
+    #
+    # files_changed is [] deliberately: the two files this fixture stages in the
+    # tracker are the SUBJECT of the surrounding assertions ("2 files changed" ->
+    # "0 files changed"), and declaring them would put a cross-check line into
+    # observations that nothing here reads but a future reader would have to
+    # explain. An empty declaration is accurate for a fixture that authored none.
+    local pay
+    pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
+    printf '{"task_id":"%s","role":"%s","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the phase5 synthetic fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none","criteria_tests":{}}\n' \
+        "$tid" "$role" > "$pay"
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }
 export HOME="$TEST_HOME"
 

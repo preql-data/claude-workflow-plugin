@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "4852950886ed83f60fa8873c7e6ab9981264a9a2a817c2343670cc2b97b9bce3",
+  "risk_threshold": "high",
+  "stop_condition": "Report HIGH only for: a record the anchored walk parses wrongly; an extractor that can still\nsee past the prefix boundary; a historical record that no longer parses or now parses to a\nwrong value; a legitimate findings token rejected by the whitespace class; or any remaining\nclaim the gate makes that nothing actually checks. MEDIUM/LOW otherwise. If there is no HIGH,\nsay so plainly — do not manufacture one.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:6269",
+      "evidence": "finding_id_in_latest_artifact extracts complete comment texts without split(\"\\n\")[0], then lines 6271-6307 grep every embedded line before applying the new prefix parser. A REVIEW-ARTIFACT whose summary continues with a newline followed by a well-formed-looking REVIEW-ARTIFACT line selects that summary line via tail -1; direct reproduction selected iteration=999 and extracted token R9-F9:high instead of the real iteration=4 token R4-F1:high.",
+      "description": "The resolve-finding/arbitrate extractor can still cross the real artifact's summary boundary. ART_PREFIX only slices the already misselected injected line, so it does not provide the claimed boundary protection. Normalize each comment to its first line before selecting artifacts, as review-check.sh does."
+    }
+  ],
+  "iterations": 4,
+  "stopped_by": "stop_condition"
+}

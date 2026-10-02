@@ -1,0 +1,64 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.6",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "3dda57dd6c55545cdab192c84847f5f93b3728e142da48a38384db3474fc3b70",
+  "risk_threshold": "high",
+  "stop_condition": "D4 first slice reviewed whole: the DESIGN-UNIT binding grammar, design-conform's failure semantics, and the two out-of-brief changes to impact-report.sh and review-check.sh; plus a vacuity sweep over the new spec's mutation anchors",
+  "verdict": "findings",
+  "iterations": 1,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:8089-8111 (cmd_design_conform set computation)",
+      "evidence": "jq EXECUTION failures after the availability check fail OPEN. Each new computation falls back to `[]` or `0`, so a present-but-failing jq — during `jq -R -s`, either `jq -nc` difference, or the final `length` — can make undeclared_n=0 and reach the ok:true emitter at :8111. Verified by reading :8089-8111; not executed.",
+      "description": "Directly contradicts the claimed fail-closed degradation. The implementer fixed 'jq is MISSING' (checked as the literal first action) and left 'jq is PRESENT but FAILS', which reaches a conforms verdict on a set difference that never computed. undeclared_files has deliberately no overrule path, so this is the one direction that must never fail open."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:8030 (satisfied-hash read) vs :8047 (validate-design read)",
+      "evidence": "The satisfied-hash check and the unit_files extraction are two UNBRACKETED reads. If satisfied artifact A is replaced by a schema-valid artifact B after compute_design_satisfied hashes A but before validate-design reads at :8047, B's unreviewed file declarations drive the set difference and can produce ok:true. There is no post-validation satisfaction/hash re-check. Control flow verified by reading; the race scenario is inferred.",
+      "description": "A conformance verdict can be issued against declarations no reviewer ever saw. The fix shape is a bracket: re-establish the satisfied hash after the read that consumed the artifact, and refuse if it moved — the same TOCTOU bracket this repo already applies elsewhere."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/impact-report.sh:206 (_git_lookup_dir), fallback at :242-246, spelling preserved at :343-349; pinned by .claude/scripts/tests/design-conform.test.sh:531",
+      "evidence": "The documented removed-directory case is a legitimate FALSE REFUSAL with no durable remedy. _git_lookup_dir refuses an absent parent; the fallback at :242-246 is disabled because this is a git checkout; :343-349 preserve the absolute tracker spelling, which therefore cannot match the relative declaration and trips the no-overrule gate.",
+      "description": "Answers the orchestrator's explicit question against the implementer: 'safe direction' is fail-closed against false PASSES but is NOT operationally safe. A legitimate directory deletion becomes unshippable, because undeclared_files has deliberately no overrule path. The spec pins the behaviour, which makes it intentional rather than accidental — but it needs a remedy, not just a pin."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:7874 (latest_design_unit_binding) vs writer at :7759 and :7836",
+      "evidence": "The reader does NOT carry the writer's grammar, contrary to the claim. The writer requires a 64-hex sha256; the reader accepts any non-empty `[A-Za-z0-9-]+`, and requires only a space after the hash rather than `at <timestamp>:`. So `DESIGN-UNIT v1 task=T design_task=D unit_id=U1 design_hash=x anything` is accepted as a binding despite being impossible for the writer to emit. Verified by comparing the three sites.",
+      "description": "This is precisely the writer/reader divergence the brief warned about and the implementer reported as closed via 'a single capture carrying the identical classes'. The classes are not identical, and a hand-written or corrupted record is accepted as a valid binding."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:7649 (cmd_design_unit_bind) vs emit_error_json fields at :2652-2656",
+      "evidence": "The sibling new subcommand can reach jq-dependent emitters WITHOUT checking jq. On a jq-less PATH its missing-argument and validation branches call emit_error_json, whose fields become empty and produce invalid JSON. By contrast design-conform's hand-built jq-free object is valid for every supplied task id, because it emits task_id:null and interpolates no caller text.",
+      "description": "The jq-availability fix was applied to one of the two new subcommands. The other reproduces exactly the defect the fix was written for — an error report about jq's absence that itself requires jq."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:7821 (rebind check)",
+      "evidence": "'Any repeat write requires --rebind' is not concurrency-safe: two bind processes can both read no existing binding before either appends, then both write without --rebind. There is no lock or atomic compare-and-append around the check. Verified by reading; concurrency not attempted.",
+      "description": "The invariant holds sequentially and is the one the implementer tested. Two bindings on one task with no rebind marker leaves the reader's last-wins choice unexplained in the audit trail — the exact ambiguity the refusal exists to prevent."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "low",
+      "location": ".claude/scripts/review-check.sh:86 (pre-dispatch jq-missing error path)",
+      "evidence": "Every error routed through emit_validate_design carries unit_files:{}, but the pre-dispatch jq-missing error bypasses that emitter and omits the field entirely. Not currently exploitable: design-conform checks jq first and checks .ok before reading unit_files.",
+      "description": "The claimed all-error-paths envelope default is not universal. Harmless today only because two independent guards happen to order correctly; a future consumer reading unit_files before .ok would read an absent field as 'no declared files', making every actual path undeclared."
+    }
+  ]
+}

@@ -87,6 +87,9 @@ param(
     # ($env:CWP_SKIP_MCP_DEPS = "1") available to them.
     [switch]$SkipMcpDeps,
     [switch]$SkipVerify,
+    # PowerShell twin of --skip-beads-upgrade. The install still proceeds on an
+    # old bd (the hard floor is 0.47) but the target keeps the 64KB ledger bug.
+    [switch]$SkipBeadsUpgrade,
     [switch]$Verify
 )
 
@@ -98,8 +101,26 @@ if (-not $RepoBranch) { $RepoBranch = "main" }
 # Environment forms, applied on top of the switches (either enables the skip).
 if ($env:CWP_SKIP_MCP_DEPS) { $SkipMcpDeps = $true }
 if ($env:CWP_SKIP_VERIFY)   { $SkipVerify  = $true }
+if ($env:CWP_SKIP_BEADS_UPGRADE) { $SkipBeadsUpgrade = $true }
 
+# HARD FLOOR. Deliberately still 0.47, matching install.sh: every bd call the
+# plugin makes is version-tolerant, so an older bd is degraded, not broken.
+# $RecommendedBdVersion below is how users move off it.
 $MinBdVersion = [Version]"0.47"
+# BEGIN RECOMMENDED_BD_VERSION (installer-beads-upgrade.sh extracts this block)
+$RecommendedBdVersion = [Version]"1.1.2"
+# END RECOMMENDED_BD_VERSION
+#
+# WHY A RECOMMENDED FLOOR EXISTS AT ALL (claude-workflow-plugin-fkm.1.1)
+# bd 0.47.x cannot re-import its own ledger once any single issue's JSONL line
+# exceeds Go's 64KB bufio.Scanner limit: `bd import` fails outright and a fresh
+# clone recovers ZERO issues. A target left on 0.47.x keeps that bug, silently,
+# until the day someone clones. The bash twin of this block is install.sh's
+# upgrade_beads_if_old.
+#
+# The upgrade command is a SEAM, not a hardcoded irm, for the same reason the
+# bash side uses BD_UPGRADE_COMMAND: it makes the path substitutable.
+$BdUpgradeCommand = if ($env:BD_UPGRADE_COMMAND) { $env:BD_UPGRADE_COMMAND } else { "irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex" }
 # Both shipped MCP servers declare "engines": {"node": ">=18.17"}, and both
 # launchers are dynamic-import shims that fail opaquely on an older runtime.
 # [Version] comparison is what this file already uses for the bd floor, so the
@@ -276,9 +297,9 @@ function Invoke-GitCheckIgnore {
 #
 # PLACED BEFORE THE PREREQUISITE BLOCK, exactly as install.sh places it: -Verify
 # on a node-less machine has to WORK, and the doctor's own `deps` check is what
-# should report the missing runtime — in the doctor's vocabulary, alongside the
-# other ten checks. Aborting here with "node not found - REQUIRED" would answer
-# a diagnostic request with an installer error.
+# should report the missing runtime — in the doctor's vocabulary, alongside
+# every other check in the registry. Aborting here with "node not found -
+# REQUIRED" would answer a diagnostic request with an installer error.
 if ($Verify) {
     if (-not (Test-Path -LiteralPath $Path)) {
         Write-Color "-Verify: not a directory: $Path" Red
@@ -371,6 +392,167 @@ if ($BdVersionNum -and $BdVersionNum -lt $MinBdVersion) {
     Write-Host "  irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
     exit 1
 }
+
+# ---------------------------------------------------------------------------
+# Beads upgrader — the PowerShell twin of install.sh's upgrade_beads_if_old
+# (claude-workflow-plugin-fkm.1.1 / R2-F3).
+#
+# VERIFIED BY TEXT PARITY, NOT BY EXECUTION. Per the v4.1 closure this file has
+# never been executed by anyone, anywhere; every mechanism in it is kept honest
+# by asserting it matches its bash twin. So this block is a deliberate
+# step-for-step mirror of install.sh, in the same order, with the same refusals
+# and the same messages. Do not "improve" it out of parity — change both.
+#
+# THE ORDER IS THE DESIGN, and it was established by measurement on the bash
+# side: bd 1.1.2 CANNOT READ a 0.47.x SQLite store (it reports "no beads
+# database found"), so the JSONL ledger is the only thing that crosses the
+# version boundary and it must be written BEFORE the binary is replaced.
+#
+# WHICH WRITER MATTERS AS MUCH AS THE ORDER (R2-F1). bd 0.47.1's `bd export`
+# emits every ISSUE and DROPS EVERY COMMENT (974 -> 0 on the plugin's own repo),
+# which would destroy the QA audit trail — approval records, rubric verdicts,
+# reviewer identity — while looking like a faithful backup. 0.47.x's
+# `bd sync --flush-only` preserves comments, so the writer is a chain with the
+# comment-preserving leg first, and the result is VERIFIED rather than trusted:
+# if the rewritten ledger has fewer comments than the one already on disk, the
+# backup is restored and the upgrade refuses.
+function Get-LedgerCommentCount {
+    param([string]$LedgerPath)
+    if (-not (Test-Path $LedgerPath)) { return 0 }
+    $total = 0
+    foreach ($line in (Get-Content -LiteralPath $LedgerPath -ErrorAction SilentlyContinue)) {
+        if (-not $line.Trim()) { continue }
+        try {
+            $rec = $line | ConvertFrom-Json -ErrorAction Stop
+            if ($rec.PSObject.Properties.Name -contains 'comments' -and $rec.comments) {
+                $total += @($rec.comments).Count
+            }
+        } catch { continue }
+    }
+    return $total
+}
+
+function Invoke-BeadsUpgradeIfOld {
+    param([Version]$Current, [string]$TargetDir)
+
+    if (-not $Current) { return }
+    if ($SkipBeadsUpgrade) { return }
+    if ($Current -ge $RecommendedBdVersion) { return }
+
+    Write-Host ""
+    Write-Color "Beads $Current is older than the recommended $RecommendedBdVersion." Yellow
+    Write-Host "  On 0.47.x, 'bd import' fails on any issue whose JSONL line exceeds 64KB,"
+    Write-Host "  so a fresh clone of this project can recover ZERO issues. Upgrading now."
+    Write-Host "  (Skip with -SkipBeadsUpgrade.)"
+
+    $beadsDir = Join-Path $TargetDir ".beads"
+    $ledger   = Join-Path $beadsDir "issues.jsonl"
+    $backup   = "$ledger.pre-upgrade.bak"
+    $haveBackup = $false
+    $commentsBefore = 0
+
+    # Step 1 — SAFEGUARD, with the comment-preserving writer first.
+    if (Test-Path $beadsDir) {
+        if (Test-Path $ledger) {
+            Copy-Item -LiteralPath $ledger -Destination $backup -Force -ErrorAction SilentlyContinue
+            $haveBackup = Test-Path $backup
+            $commentsBefore = Get-LedgerCommentCount $ledger
+        }
+        Push-Location $TargetDir
+        $syncOk = $false
+        try {
+            & bd sync --flush-only 2>$null | Out-Null
+            $syncOk = ($LASTEXITCODE -eq 0) -and (Test-Path $ledger) -and ((Get-Item $ledger).Length -gt 0)
+        } catch { $syncOk = $false }
+        if ($syncOk) {
+            Write-Color "OK ledger written with bd $Current before upgrading (sync --flush-only, comment-preserving)" Green
+        } else {
+            try { & bd export -o $ledger 2>$null | Out-Null } catch { }
+            if ($LASTEXITCODE -ne 0) {
+                Pop-Location
+                if ($haveBackup) { Copy-Item -LiteralPath $backup -Destination $ledger -Force -ErrorAction SilentlyContinue }
+                Write-Color "SKIPPED Beads upgrade: could not write the ledger with the current bd." Yellow
+                Write-Host "  Refusing to upgrade - bd $RecommendedBdVersion cannot read a 0.47.x store, so"
+                Write-Host "  upgrading now would strand the database behind an out-of-date"
+                Write-Host "  .beads/issues.jsonl. Fix the export first, then rerun."
+                if ($haveBackup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
+                return
+            }
+            Write-Color "OK ledger written with bd $Current before upgrading (export -o)" Green
+        }
+        Pop-Location
+
+        $commentsAfter = Get-LedgerCommentCount $ledger
+        if ($commentsAfter -lt $commentsBefore) {
+            if ($haveBackup) { Copy-Item -LiteralPath $backup -Destination $ledger -Force -ErrorAction SilentlyContinue }
+            if ($haveBackup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
+            Write-Color "REFUSING the Beads upgrade: this bd's exporter DROPPED comments" Red
+            Write-Host "  ($commentsBefore in the existing ledger, $commentsAfter after re-writing it)."
+            Write-Host "  Those comments are the QA audit trail - approval records, rubric"
+            Write-Host "  verdicts, reviewer identity. Migrating from that file would destroy"
+            Write-Host "  them permanently, so the ledger has been RESTORED and nothing changed."
+            Write-Host "  Upgrade bd by hand, then run: cd $TargetDir; bd bootstrap"
+            return
+        }
+        if ($haveBackup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Step 2 — replace the binary, through the substitutable seam.
+    try {
+        Invoke-Expression $BdUpgradeCommand | Out-Null
+        $upgradeRan = ($LASTEXITCODE -eq 0) -or ($null -eq $LASTEXITCODE)
+    } catch { $upgradeRan = $false }
+    if (-not $upgradeRan) {
+        Write-Color "NOTE the Beads upgrade command failed (offline?). Continuing on bd $Current." Yellow
+        Write-Host "  Upgrade by hand later: $BdUpgradeCommand"
+        return
+    }
+
+    # Step 3 — confirm the swap before touching any database.
+    $afterRaw = (bd --version 2>$null | Select-Object -First 1)
+    $afterMatch = [regex]::Match("$afterRaw", '(\d+)\.(\d+)(?:\.(\d+))?')
+    $after = $null
+    if ($afterMatch.Success) {
+        $pa = if ($afterMatch.Groups[3].Success) { $afterMatch.Groups[3].Value } else { "0" }
+        $after = [Version]"$($afterMatch.Groups[1].Value).$($afterMatch.Groups[2].Value).$pa"
+    }
+    if (-not $after -or $after -eq $Current) {
+        Write-Color "NOTE Beads still reports $after after the upgrade command." Yellow
+        Write-Host "  Not migrating the database. Upgrade by hand, then rerun this installer."
+        return
+    }
+    Write-Color "OK Beads upgraded: $Current -> $after" Green
+
+    # Step 4 — ALREADY-INSTALLED PATH. Rebuild from the ledger when the new bd
+    # cannot read the old store. `bd bootstrap` is the documented SQLite -> Dolt
+    # bridge; it is non-destructive setup for fresh clones and recovery.
+    if (Test-Path $beadsDir) {
+        Push-Location $TargetDir
+        & bd list --json 2>$null | Out-Null
+        $readable = ($LASTEXITCODE -eq 0)
+        if ($readable) {
+            Write-Color "OK the upgraded Beads reads the existing database" Green
+        } elseif ((Test-Path $ledger) -and ((Get-Item $ledger).Length -gt 0)) {
+            Write-Host "  The upgraded Beads cannot read the old store; rebuilding from the ledger..."
+            & bd bootstrap 2>$null | Out-Null
+            & bd list --json 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Color "OK database rebuilt from .beads/issues.jsonl (bd bootstrap)" Green
+            } else {
+                Write-Color "WARN could not rebuild the database automatically." Yellow
+                Write-Host "  Your issues are still in .beads/issues.jsonl. Recover with:"
+                Write-Host "    cd $TargetDir; bd bootstrap"
+            }
+        } else {
+            Write-Color "WARN no readable database and no ledger to rebuild from at $beadsDir." Yellow
+        }
+        Pop-Location
+    }
+}
+
+Invoke-BeadsUpgradeIfOld -Current $BdVersionNum -TargetDir $Target
+# Re-read the version: everything downstream should describe the bd in use.
+$BdVersionRaw = (bd --version 2>$null | Select-Object -First 1)
 
 # node + npm are HARD prerequisites (v4.1 / C0b) ------------------------------
 #
@@ -489,12 +671,18 @@ try {
     # target's dependency install is `npm ci`, which REFUSES without a
     # lockfile — a truncated clone would otherwise yield a target whose MCP
     # servers can never be installed. Kept in sync with install.sh's list.
+    # designer.md / design-reviewer.md (v5.0.0 / D0): v5 makes design a
+    # mandatory phase with its own review loop, so a target missing either
+    # cannot run the workflow it advertises. grader.md / judge.md stay out,
+    # as in install.sh - optional tiers, not the core loop.
     $Required = @(
         ".claude/agents/orchestrator.md",
         ".claude/agents/qa.md",
         ".claude/agents/backend.md",
         ".claude/agents/frontend.md",
         ".claude/agents/devops.md",
+        ".claude/agents/designer.md",
+        ".claude/agents/design-reviewer.md",
         ".claude/scripts/session-start.sh",
         ".claude/scripts/intent-router.sh",
         ".claude/scripts/post-edit.sh",

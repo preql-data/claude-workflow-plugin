@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-gsfd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "c4ec5a4e99898a0cf35e3af3d72ec9a92031e857b94e4e510196d9fbeae25720",
+  "risk_threshold": "high",
+  "stop_condition": "all eight R2 findings adjudicated against the post-round-2 tree. NOTE: reviewed_hash is IDENTICAL to round 2's despite substantial content changes, because change_set_hash covers the PATH LIST and not content (claude-workflow-plugin-k0mc) and the path set did not move. This artifact reviews a materially different tree than the r2 artifact bound to the same token; artifact_hash is the discriminator.",
+  "verdict": "findings",
+  "iterations": 3,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": ".claude/tests/component/specs/verify-before-stop.sh:451 (the vbs-r2f4 race control), CHANGELOG.md:281-283",
+      "evidence": "The control emits `sleep 12 \\&\\& exit 1`. `\\&` is not a valid JSON escape: Sol rendered that exact payload and piped it to `jq -e`, which returned rc 5. The hook therefore parses no TEST_CMD and never sleeps, so it finishes and persists BEFORE the six-second concurrent `enter`; that later `enter` then wipes the files, and every absence assertion passes WITHOUT the refusal branch ever executing. This also explains precisely the discrepancy the implementer reported and could not root-cause: the writes were absent while sync-errors.log carried no refusal line, because no refusal occurred.",
+      "description": "The negative control for R2-F4 proves nothing: it never places the background hook in its post-capture execution window, so it cannot demonstrate the generation refusal it is named for. CHANGELOG.md:281-283 describes it as a genuine `sleep 12` race, which is false. SEVERITY NOTE: the reviewer rated this MEDIUM; the orchestrator elevated it to HIGH because a shipped document claims a verification that does not exist, which is this release's defining defect class and its third instance inside this batch."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh:4358 (generation read) and :4362-4401 (the six writes), vs qa-gate.sh wipe_iteration_state",
+      "evidence": "The generation comparison is still time-of-check-to-time-of-use. A Stop reads generation 1 at :4358; a concurrent `enter` then removes the cache and bumps to 2; the older Stop proceeds to write its six stale files at :4362-4401. There is no lock, no generation-bound atomic snapshot, and no post-write validation. Because wipe_iteration_state bumps only AFTER deleting the files, this is the original cross-cycle repopulation failure in a narrower window rather than a closed one. Separately, the counter's publication is atomic (temp+rename) but its read-modify-write increment is not, so overlapping wipes can lose a generation bump.",
+      "description": "R2-F4 is PARTIALLY FIXED. The implementer disclosed a same-cycle residual accurately, but that is not the only remaining window: the cross-cycle case it claimed to close is still reachable."
+    },
+    {
+      "id": "R3-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/tree-lease.sh:470 (classification) and :590-594 (notice text)",
+      "evidence": "Every reader handles UNCONFIRMED consistently — verified by reading: lease_reclaim_stale matches only STALE*, lease_conflict_summary explicitly handles LIVE / LIVE-BUT-OLD / UNCONFIRMED, the CLI prints raw status, and the runners and Stop hook only test whether the normalised summary is non-empty. No conflicting 'not LIVE' vs 'not STALE' reader pair exists. But a locally crashed runner now yields local_dead=yes, stays unreclaimed for the default 10800s, and is rendered at :590-594 as a concurrent-run notice claiming another runner is active. Every restart therefore reports a process known LOCALLY to be dead, for up to three hours.",
+      "description": "R2-F1 is PARTIALLY FIXED: the instant cross-host removal is genuinely gone, but the ordinary crash path — by far the common case — now produces a routinely false ownership signal, and a notice that is usually wrong is one operators learn to ignore. A safe AND prompt same-host reading needs stronger host-instance evidence (e.g. boot id plus pid-namespace identity on Linux) or active heartbeats with a short missed-heartbeat grace, with UNCONFIRMED retained only on platforms that cannot supply it. Also inferred (not executed): a hostname-colliding foreign lease whose pid AND start time coincidentally match an unrelated local process reads confirmed-live and can persist as LIVE-BUT-OLD indefinitely."
+    },
+    {
+      "id": "R3-F4",
+      "severity": "low",
+      "location": "CHANGELOG.md:34; .claude/scripts/tests/tree-lease.test.sh:41-64,107; .claude/scripts/tree-lease.sh:102-107",
+      "evidence": "Three documentation surfaces now contradict the shipped grammar. CHANGELOG.md:34 still describes the superseded three-way behaviour in which same-host dead pids and pid-reuse mismatches become instantly stale. The spec's own assertion catalogue at :41-64 and :107 repeats those stale expectations while its executable assertions expect UNCONFIRMED. And tree-lease.sh:102-107 states that an ordinary different-host lease reads UNCONFIRMED while fresh, whereas the implementation falls through to LIVE.",
+      "description": "No execution changes, but the new four-way status grammar is internally contradictory across the header, the CHANGELOG and the spec's catalogue — the next reader cannot tell which description is authoritative."
+    }
+  ]
+}

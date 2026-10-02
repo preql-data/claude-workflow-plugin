@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "30440a68a175edd406e757c910d534b832a715ee448e3fd03dd15c43da338ba8",
+  "risk_threshold": "high",
+  "stop_condition": "Stop when R5-F1, R5-F2 and R5-F3 are each adjudicated closed or still-open with a concrete failure path, the 21-exit enumeration is checked for completeness and correct classification, and the unconditional design-gate-precheck call is confirmed not to deadlock the no-design-phase case. Scope is verify-before-stop.sh only.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R8-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:5127",
+      "evidence": "The override cache is overwritten with `printf ... > file 2>/dev/null || true`. If opening that existing file for writing fails, the failure is swallowed and its previous, syntactically valid boolean triple remains. The same run can still successfully replace `last-verified-state`, so a later unchanged-tree replay accepts the stale triple as KNOWN at line 3025; exact boolean validation cannot distinguish it from this run's state.",
+      "description": "A failed cache write can still produce reassuring silence. Concrete path: an earlier run leaves `false false false`; make only that cache file unwritable, then run fresh with an active override. The override write fails while the verified-state write succeeds. After a post-run review/design blocker is cleared without moving the tree, the next Stop replays the new result but reads the old false triple, omitting both the override disclosure and UNKNOWN warning on its eventual release. The write path must invalidate an old record when replacement fails or publish the new record atomically."
+    }
+  ],
+  "iterations": 8,
+  "stopped_by": "stop_condition"
+}

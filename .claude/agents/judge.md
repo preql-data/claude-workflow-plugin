@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, LS
 # /workflow-model remains the manual override path. workflow-model-apply.sh
 # includes `judge` in its agent list so this pin tracks the others
 # automatically.
-model: claude-fable-5
+model: claude-opus-5
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. The session-level effort (launch wiring — `make session` /
 # `claude --effort` — or /effort) takes precedence per session; this
@@ -82,7 +82,9 @@ Verdict (when discarded):
 ### Example 2 — genuine (label sentinel diverges)
 
 ```bash
-# target: qa-gate.sh, line 177
+# target: qa-gate.sh, the qa-escalated removal in remove_escalation_labels
+# (anchor on the text, not a line number — this cited "line 177" until the
+# line moved, and by then line 177 was an unrelated shellcheck directive)
 remove_label "$tid" "qa-escalated" 2>/dev/null || true   # mutant: "qa-escalate"
 ```
 
@@ -97,11 +99,12 @@ Verdict:
 ### Example 3 — subtle / hard call (default removal in a defended caller)
 
 ```bash
-# target: lessons.sh, line 34
+# target: lessons.sh, the PROJECT_DIR assignment (anchor on the text, not a
+# line number — this example cited "line 34" until the line moved twice)
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"   # mutant: ${CLAUDE_PROJECT_DIR}
 ```
 
-Under `set -u` (which `lessons.sh` declares with `set -e`, NOT `set -u`), removing the default would crash when `CLAUDE_PROJECT_DIR` is unset. Under default shell rules without `set -u`, the variable expands to an empty string and `PROJECT_DIR=""` downstream. Whether a test could distinguish depends on whether downstream callers tolerate an empty `PROJECT_DIR`. They DON'T — `LEDGER_FILE="$PROJECT_DIR/LESSONS.md"` becomes `/LESSONS.md` (an absolute path the test fixture doesn't own), so the seed-file existence check on line 134 fires and the script exits with a clear error message. A test that runs `lessons.sh add ...` in a tempdir without `CLAUDE_PROJECT_DIR` set would observe the divergence: original succeeds (reads the tempdir's LESSONS.md), mutant fails (reads `/LESSONS.md` which doesn't exist).
+Under `set -u` (which `lessons.sh` declares with `set -e`, NOT `set -u`), removing the default would crash when `CLAUDE_PROJECT_DIR` is unset. Under default shell rules without `set -u`, the variable expands to an empty string and `PROJECT_DIR=""` downstream. Whether a test could distinguish depends on whether downstream callers tolerate an empty `PROJECT_DIR`. They DON'T — `LEDGER_FILE="$PROJECT_DIR/LESSONS.md"` becomes `/LESSONS.md` (an absolute path the test fixture doesn't own), so the seed-file existence check in `cmd_add` — the `[ ! -f "$LEDGER_FILE" ]` guard whose message is "Seed file is required (do not auto-create)" — fires and the script exits with a clear error message. A test that runs `lessons.sh add ...` in a tempdir without `CLAUDE_PROJECT_DIR` set would observe the divergence: original succeeds (reads the tempdir's LESSONS.md), mutant fails (reads `/LESSONS.md` which doesn't exist).
 
 Verdict:
 ```json

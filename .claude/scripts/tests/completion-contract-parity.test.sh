@@ -50,7 +50,17 @@
 #      4, the quality taxonomy, the working procedure), the default rubric's
 #      C3 and C8, qa.md's section 3 review checklist, and both READMEs.
 #   5. Forbidden phrases: the stale count words and the frontend hedge occur
-#      ZERO times across the carrier set.
+#      ZERO times across the carrier set. Since P7 that list also denies the
+#      "enforced by convention, not schema validation" sentence, which was true
+#      until runtime validation landed and is now the exact false claim a
+#      careless revert would reintroduce.
+#   7. Every carrier that hands the contract to an agent NAMES THE INVOCATION
+#      that records it. A contract with a runtime refusal and no prompt telling
+#      anyone how to satisfy it is worse than one with neither: every approve
+#      deadlocks. This is asserted as a COUNT per carrier for the same reason
+#      section 1 is — "every mention we found is well-formed" is vacuously true
+#      of a prompt with no mention at all, which is precisely the shape the
+#      devops gap had.
 #   6. Each .claude/rubrics/*.md is byte-identical to the rubric-revision-loop
 #      e2e fixture's copy. That identity is currently accidental — nothing
 #      syncs them and nothing checked them. This turns it into an assertion,
@@ -82,12 +92,48 @@
 #     would falsify the evidence.
 #   - CHANGELOG.md entries are historical for the same reason.
 #
-# HONEST CEILING. This spec guards the DOCUMENTS. There is no runtime
-# enforcement of the contract anywhere in the plugin: nothing rejects a
-# completion payload that omits a field, and the e2e `completion-contract`
-# invariant remains `skipped` on its documented trace gap. The contract is
-# enforced by convention plus the QA review checklist plus rubric C3/C8 —
-# and this spec only makes sure those three say the same thing.
+# HONEST CEILING (REWRITTEN at P7 / claude-workflow-plugin-qbhw; the previous
+# text is quoted below because it was true when written and its replacement is
+# the whole point of that task).
+#
+# WAS: "This spec guards the DOCUMENTS. There is no runtime enforcement of the
+# contract anywhere in the plugin: nothing rejects a completion payload that
+# omits a field ... The contract is enforced by convention plus the QA review
+# checklist plus rubric C3/C8 — and this spec only makes sure those three say
+# the same thing."
+#
+# NOW: runtime enforcement EXISTS, and this spec's ceiling moved rather than
+# disappeared. Precisely what changed:
+#   - `review-check.sh validate-completion` REJECTS a payload that omits any of
+#     the canonical seven (or `role`, `model`, `pin` — claude-workflow-plugin-46w9),
+#     carries a control character in `task_id` or `role`, types a field wrongly,
+#     leaves `llm_observations` / `context_coverage` empty after trimming, or
+#     has a `model` / `pin` that fails the model-id character class.
+#   - `qa-gate.sh completion-record` records a validated payload and refuses
+#     every grammar-injecting scalar (the bjx class).
+#   - `qa-gate.sh approve` REFUSES (exit 2, completion_record_missing) without
+#     such a record, and REPORTS how many of the contract's declared
+#     `files_changed` are absent from the change set it binds (fkm.1.20).
+# Section 7 below asserts each carrier tells its specialist to make that call;
+# the enforcement itself is pinned in .claude/tests/component/specs/qa-gate.sh
+# (section P7) and .claude/scripts/tests/review-separation.test.sh.
+#
+# WHAT IS STILL NOT ENFORCED, stated as narrowly as the old text was:
+#   - QUALITY. The validator accepts "read the relevant code" as
+#     `context_coverage`. Whether a coverage note is substantive is judged by
+#     the rubric grader (C3/C8) and QA, and this spec still only makes those
+#     documents agree with each other.
+#   - TRUTH. Nothing verifies that a declared file was really read or that a
+#     listed test really exists. The `files_changed` cross-check compares two
+#     lists and reports; it does not adjudicate.
+#   - THE FINAL MESSAGE. The e2e `completion-contract` invariant remains
+#     `skipped` on its documented trace gap — the Trace schema still does not
+#     capture specialist final messages, so nothing checks that the payload the
+#     specialist EMITTED matches the one it RECORDED.
+#   - A DETERMINED ADVERSARY. `bd comments add "COMPLETION v1 ..."` forges the
+#     record, exactly as it forges the approval record (llh.18) and the rubric
+#     verdict (bjx). The bar moved from "nothing at all" to "a validated payload
+#     plus a digest-bound artifact"; it is not a cryptographic sandbox.
 #
 # Exit codes:
 #   0  every assertion passed and both META-TESTs flagged their fixtures
@@ -123,7 +169,32 @@ assert_eq() {
 # The canonical field list, in the canonical order. `context_coverage` is
 # SEVENTH and last on purpose: appending it leaves the original six in the
 # positions qa.md section 10 promises they keep.
+#
+# THIS VARIABLE STAYS EXACTLY AS IS — v5 D5 (claude-workflow-plugin-fkm.7 D5
+# piece 3) decision, not an oversight. The four new green-to-green fields
+# (below) get a SEPARATE constant and a SEPARATE assertion (Section 2b)
+# rather than being folded in here: if one check covered both the canonical
+# seven and the extended eleven, a regression dropping a base field and one
+# dropping a new field would be indistinguishable — exactly the failure
+# shape this whole spec exists to catch, turned on itself.
 CANONICAL="task_id,files_changed,tests_added,decisions,blockers,llm_observations,context_coverage"
+
+# v5 D5 piece 3 (claude-workflow-plugin-fkm.7): the four green-to-green
+# fields APPEND after the canonical seven, identity first (which unit, which
+# version of it) then evidence (green_before, green_after, temporally
+# ordered) — docs/plans/v5-design-phase.md Phase D5's own field order.
+EXTENDED_ELEVEN="$CANONICAL,unit_id,design_hash,green_before,green_after"
+
+# v5 D5 piece 4 (claude-workflow-plugin-fkm.7): ONE more field —
+# criteria_tests — APPENDS after the eleven, for the SAME reason
+# EXTENDED_ELEVEN is its own constant rather than folded into CANONICAL: a
+# regression in the base seven, a regression in the four green-to-green
+# fields, and a regression in this fifth field must each be their OWN
+# assertion (Section 2c, below), never indistinguishable from one another.
+# It is grouped with the green-to-green evidence fields (append LAST, after
+# green_after) because it IS more evidence about the same unit — which
+# criteria that unit's declared tests actually cover — not a new category.
+EXTENDED_TWELVE="$EXTENDED_ELEVEN,criteria_tests"
 
 # Files that carry a copy of the contract or its field list. Order is the
 # reading order a maintainer would follow: definition, then the prompts that
@@ -192,6 +263,30 @@ f7_fence() {
 fence_head7() {
     printf '%s' "$1" \
         | jq -r 'keys_unsorted[0:7] | join(",")' 2>/dev/null \
+        || printf 'PARSE_ERROR'
+}
+
+# fence_head11 <json-text> — v5 D5 piece 3 (claude-workflow-plugin-fkm.7):
+# the first ELEVEN keys in DOCUMENT order, comma joined; PARSE_ERROR when
+# the body is not valid JSON. A SEPARATE function from fence_head7 (not a
+# parameterised fence_head_n) for the same reason EXTENDED_ELEVEN is a
+# separate constant from CANONICAL above — two independent checks, so one
+# regressing never masks the other.
+fence_head11() {
+    printf '%s' "$1" \
+        | jq -r 'keys_unsorted[0:11] | join(",")' 2>/dev/null \
+        || printf 'PARSE_ERROR'
+}
+
+# fence_head12 <json-text> — v5 D5 piece 4 (claude-workflow-plugin-fkm.7):
+# the first TWELVE keys in DOCUMENT order, comma joined; PARSE_ERROR when the
+# body is not valid JSON. A SEPARATE function from fence_head7/fence_head11
+# for the identical reason those two are separate from each other — three
+# independent checks, so a regression in any one of the three field groups
+# is never masked by, or mistaken for, a regression in either other group.
+fence_head12() {
+    printf '%s' "$1" \
+        | jq -r 'keys_unsorted[0:12] | join(",")' 2>/dev/null \
         || printf 'PARSE_ERROR'
 }
 
@@ -266,6 +361,39 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== Section 2b: every fence's first ELEVEN keys are the extended eleven ==="
+echo "    (v5 D5 piece 3, claude-workflow-plugin-fkm.7 -- a SEPARATE assertion"
+echo "    from Section 2 above, over the SAME fences, so a regression in the"
+echo "    base seven and a regression in the four new fields are never the"
+echo "    same failure)"
+
+for spec in "${FENCES[@]}"; do
+    file="${spec%:*}"
+    idx="${spec##*:}"
+    body=$(f7_fence "$PROJECT_DIR/$file" "$idx")
+    assert_eq "$file fence #$idx: first eleven keys are the extended eleven, in order" \
+        "$EXTENDED_ELEVEN" "$(fence_head11 "$body")"
+done
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 2c: every fence's first TWELVE keys are the extended twelve ==="
+echo "    (v5 D5 piece 4, claude-workflow-plugin-fkm.7 -- a SEPARATE assertion"
+echo "    from Sections 2/2b above, over the SAME fences, so a regression in"
+echo "    the base seven, a regression in the four green-to-green fields, and"
+echo "    a regression in criteria_tests are three independent failures, never"
+echo "    one masking another)"
+
+for spec in "${FENCES[@]}"; do
+    file="${spec%:*}"
+    idx="${spec##*:}"
+    body=$(f7_fence "$PROJECT_DIR/$file" "$idx")
+    assert_eq "$file fence #$idx: first twelve keys are the extended twelve, in order" \
+        "$EXTENDED_TWELVE" "$(fence_head12 "$body")"
+done
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Section 3: qa.md's three blocks are a SUPERSET, not a variant ==="
 
 # The QA contract adds fields ON TOP of the base seven. Count the blocks that
@@ -329,6 +457,15 @@ assert_eq "stale count: 'the six fields' is gone"  "0" "$(phrase_hits 'the six f
 # The frontend hedge (see the header). Denied by exact wording.
 assert_eq "hedge: the conditional mandatoriness phrasing is gone" \
     "0" "$(phrase_hits 'when there is anything notable to say')"
+# P7: the sentence that was TRUE until runtime validation landed, and is now
+# the precise false claim a careless revert reintroduces. Denied by exact
+# wording, like the hedge above, and for the same reason: a paraphrase is a
+# judgement call, an exact string is a fact. (Quoting it as an antipattern
+# anywhere in the carrier set turns this red, by design — paraphrase instead.
+# This spec is not a carrier, which is why its own META-B fixture below can
+# still contain the words.)
+assert_eq "stale enforcement claim: 'enforced by convention, not schema validation' is gone" \
+    "0" "$(phrase_hits 'enforced by convention, not schema validation')"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -349,8 +486,74 @@ done
 
 # The version bump is the thing most likely to be applied to one copy only,
 # so pin it explicitly rather than relying on cmp alone to explain the break.
-assert_eq "default rubric declares version 2 (C8 landed in v4.1)" \
-    "1" "$(phrase_hits 'version: 2' "$PROJECT_DIR/.claude/rubrics/default.md")"
+assert_eq "default rubric declares version 3 (C9 landed in v5.0.0)" \
+    "1" "$(phrase_hits 'version: 3' "$PROJECT_DIR/.claude/rubrics/default.md")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 7: every carrier NAMES the invocation that records the contract ==="
+
+# P7. approve now REFUSES without a COMPLETION v1 record. A refusal whose
+# remediation appears in no prompt is not an enforcement, it is a deadlock: the
+# specialist finishes, QA calls approve, approve refuses, and nothing anywhere
+# tells either of them what to run. So the four prompts that hand the contract
+# to an agent, plus the canonical definition, must each name the call.
+#
+# A COUNT PER CARRIER, not "every mention is well-formed" — that phrasing is
+# vacuously true of a prompt with zero mentions, which is exactly the shape the
+# devops gap had (see the header). Asserted as ONE completeness line so a
+# carrier cannot pass by being absent from the loop.
+INVOKE_CENSUS=""
+for pair in "docs/AGENTS.md:AGENTS" \
+            ".claude/agents/backend.md:backend" \
+            ".claude/agents/frontend.md:frontend" \
+            ".claude/agents/devops.md:devops" \
+            ".claude/agents/qa.md:qa"; do
+    file="${pair%%:*}"
+    label="${pair##*:}"
+    # >=1 collapses to a yes/no so a carrier that legitimately names the call
+    # twice (prose plus a code block) is not a failure. The question is whether
+    # the invocation is REACHABLE from that document, not how often it appears.
+    hits=$(phrase_hits 'qa-gate.sh completion-record' "$PROJECT_DIR/$file")
+    INVOKE_CENSUS="$INVOKE_CENSUS $label=$([ "${hits:-0}" -ge 1 ] && echo yes || echo NO)"
+done
+INVOKE_CENSUS="${INVOKE_CENSUS# }"
+assert_eq "invocation census: every carrier names 'qa-gate.sh completion-record'" \
+    "AGENTS=yes backend=yes frontend=yes devops=yes qa=yes" "$INVOKE_CENSUS"
+
+# The `role` key is the one thing a specialist would otherwise get wrong: it is
+# required by the validator and is NOT in the fences above, so a prompt that
+# names the command without naming the key sends its agent into a
+# missing_key:role refusal on the first try.
+ROLE_CENSUS=""
+for pair in ".claude/agents/backend.md:backend" \
+            ".claude/agents/frontend.md:frontend" \
+            ".claude/agents/devops.md:devops" \
+            ".claude/agents/qa.md:qa"; do
+    file="${pair%%:*}"
+    label="${pair##*:}"
+    hits=$(phrase_hits "\"role\": \"$label\"" "$PROJECT_DIR/$file")
+    ROLE_CENSUS="$ROLE_CENSUS $label=$([ "${hits:-0}" -ge 1 ] && echo yes || echo NO)"
+done
+ROLE_CENSUS="${ROLE_CENSUS# }"
+assert_eq "role census: every specialist prompt shows its own role value" \
+    "backend=yes frontend=yes devops=yes qa=yes" "$ROLE_CENSUS"
+
+# The claim the HONEST CEILING now makes about itself. If the validator
+# subcommand stops existing, this spec's header becomes fiction — and a header
+# that describes enforcement which is not there is the exact failure the
+# rewritten ceiling replaced.
+assert_eq "the ONE validator's subcommand is dispatched in review-check.sh" \
+    "1" "$([ "$(phrase_hits 'validate-completion) cmd_validate_completion' "$PROJECT_DIR/.claude/scripts/review-check.sh")" -ge 1 ] && echo 1 || echo 0)"
+# BEGIN and END asserted SEPARATELY rather than counting the bare name: the
+# name also appears in prose (the note on the variables declared outside the
+# region), so a bare count would pin an incidental sentence. What this needs to
+# establish is that the strippable PAIR exists, which is what the L2 META-TEST
+# excises.
+assert_eq "approve carries the completion-contract refusal BEGIN sentinel" \
+    "1" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL BEGIN' "$PROJECT_DIR/.claude/scripts/qa-gate.sh")"
+assert_eq "approve carries the completion-contract refusal END sentinel" \
+    "1" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL END' "$PROJECT_DIR/.claude/scripts/qa-gate.sh")"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -439,6 +642,174 @@ assert_eq "META-B: the scanner flags a doc still carrying the hedge" \
     "1" "$(phrase_hits 'when there is anything notable to say' "$META_HEDGE")"
 assert_eq "META-B: ...and the shipped tree does not" \
     "0" "$(phrase_hits 'when there is anything notable to say')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== META-TEST C: section 7's presence checks must fail when the call is gone ==="
+
+# Section 7 asserts a string is PRESENT. That shape fails in a quieter way than
+# an absence assertion: a needle that matches something incidental passes
+# forever and proves nothing. So mutate a copy until the thing being asserted is
+# genuinely absent, and confirm the SAME checker disagrees.
+#
+# Both mutations are anchored on text, never on line numbers, and both run
+# against a COPY under mktemp — an experiment that edits the tree under review
+# changes the change-set hash out from under whoever is reviewing it.
+META_C_DIR=$(mktemp -d -t ccp-metac.XXXXXX)
+
+# C1. A devops.md with the invocation stripped — the state the file was in
+#     before P7, and the state a careless revert would restore.
+META_NOCALL="$META_C_DIR/devops-nocall.md"
+grep -v 'qa-gate.sh completion-record' "$PROJECT_DIR/.claude/agents/devops.md" > "$META_NOCALL"
+assert_eq "META-C: the strip landed (the mutated copy no longer names the call)" \
+    "0" "$(phrase_hits 'qa-gate.sh completion-record' "$META_NOCALL")"
+assert_eq "META-C: ...so the census checker reports NO for it (section 7 WOULD fail)" \
+    "NO" "$([ "$(phrase_hits 'qa-gate.sh completion-record' "$META_NOCALL")" -ge 1 ] && echo yes || echo NO)"
+assert_eq "META-C: control — the shipped devops.md still reports yes" \
+    "yes" "$([ "$(phrase_hits 'qa-gate.sh completion-record' "$PROJECT_DIR/.claude/agents/devops.md")" -ge 1 ] && echo yes || echo NO)"
+
+# C2. A qa-gate.sh whose refusal sentinels are renamed — the mutation the
+#     region's own header forbids ("Do not rename them"), and the one that would
+#     silently disarm the L2 META-TEST that strips them.
+META_NOSENT="$META_C_DIR/qa-gate-renamed.sh"
+sed -e 's/# COMPLETION-CONTRACT-REFUSAL BEGIN/# SOMETHING-ELSE BEGIN/' \
+    -e 's/# COMPLETION-CONTRACT-REFUSAL END/# SOMETHING-ELSE END/' \
+    "$PROJECT_DIR/.claude/scripts/qa-gate.sh" > "$META_NOSENT"
+assert_eq "META-C: the rename landed (mutant differs from its source)" \
+    "differs" "$(cmp -s "$PROJECT_DIR/.claude/scripts/qa-gate.sh" "$META_NOSENT" && echo identical || echo differs)"
+assert_eq "META-C: the renamed copy has no BEGIN sentinel (section 7 WOULD fail)" \
+    "0" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL BEGIN' "$META_NOSENT")"
+assert_eq "META-C: the renamed copy has no END sentinel either" \
+    "0" "$(phrase_hits '# COMPLETION-CONTRACT-REFUSAL END' "$META_NOSENT")"
+
+# C3. The forbidden-phrase leg added to section 5 has the same never-seen-red
+#     problem every absence assertion has. Prove the scanner fires on the exact
+#     sentence docs/AGENTS.md carried until P7.
+META_STALE_ENF="$META_C_DIR/stale-enforcement.md"
+cat > "$META_STALE_ENF" <<'FIXTURE'
+The contract is enforced by convention, not schema validation — the QA gate
+doesn't reject missing fields.
+FIXTURE
+assert_eq "META-C: the scanner flags a doc still claiming convention-only enforcement" \
+    "1" "$(phrase_hits 'enforced by convention, not schema validation' "$META_STALE_ENF")"
+assert_eq "META-C: ...and the shipped carrier set does not (the fixture is the only hit)" \
+    "0" "$(phrase_hits 'enforced by convention, not schema validation')"
+
+rm -rf "$META_C_DIR"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== META-TEST D: a fence with unit_id deleted must be flagged by Section 2b,"
+echo "    and NOT by Section 2 (the two are independent, per the header on CANONICAL)"
+
+# The mutation happens on a COPY in a mktemp dir (reuses META_DIR, still live).
+# unit_id (not green_after) is the mutation target deliberately: it is
+# FOLLOWED by three more keys (design_hash, green_before, green_after)
+# inside the fence, so removing its one line leaves valid JSON with a clean
+# comma between its neighbours. Stripping the LAST key in the object
+# (green_after) was tried first and rejected — it leaves a dangling
+# trailing comma before the closing brace, which breaks the WHOLE fence's
+# JSON syntax and makes fence_head7 disagree too, which is not what this
+# META-TEST is trying to isolate.
+META_D_PROMPT="$META_DIR/devops-d5.md"
+cp "$PROJECT_DIR/.claude/agents/devops.md" "$META_D_PROMPT"
+
+# Anchored on the field's own line text, never on a line number.
+grep -v '"unit_id": ""' "$META_D_PROMPT" > "$META_DIR/stripped-d5" \
+    && mv "$META_DIR/stripped-d5" "$META_D_PROMPT"
+
+# 1. Non-vacuity: the mutation landed and did not decapitate the fence.
+assert_eq "META-D: the mutated copy still has exactly one F7 fence" \
+    "1" "$(f7_fence_count "$META_D_PROMPT")"
+META_D_BODY=$(f7_fence "$META_D_PROMPT" 1)
+assert_eq "META-D: the mutation landed (unit_id no longer in the fence)" \
+    "0" "$(printf '%s' "$META_D_BODY" | grep -c '"unit_id"' | tr -d '[:space:]')"
+assert_eq "META-D: ...and the mutated fence still PARSES as JSON (the strip did not corrupt syntax)" \
+    "yes" "$(fence_parses "$META_D_BODY")"
+
+# 2. SPECIFIC MISBEHAVIOUR: Section 2b's own checker (fence_head11) now
+#    disagrees with the extended eleven — this is the sensitivity proof,
+#    without it Section 2b could be matching something true of any prompt.
+assert_eq "META-D: the eleven-key checker (fence_head11) flags the stripped fence" \
+    "no" "$([ "$(fence_head11 "$META_D_BODY")" = "$EXTENDED_ELEVEN" ] && echo yes || echo no)"
+
+# 3. THE INDEPENDENCE CLAIM, made mechanical: Section 2's checker
+#    (fence_head7) does NOT flag this same mutant — removing a field at
+#    position 11 cannot perturb a check that only ever looks at positions
+#    1-7. This is what "a regression in the new fields is never confused
+#    with a regression in the base seven" means, demonstrated rather than
+#    asserted.
+assert_eq "META-D: ...but the SEVEN-key checker (fence_head7) still agrees — the base seven are untouched by this mutation" \
+    "yes" "$([ "$(fence_head7 "$META_D_BODY")" = "$CANONICAL" ] && echo yes || echo no)"
+
+# 4. RESTORE CONTROL: the shipped devops.md still passes fence_head11.
+assert_eq "META-D: control — the shipped devops.md still matches the extended eleven" \
+    "yes" "$([ "$(fence_head11 "$(f7_fence "$PROJECT_DIR/.claude/agents/devops.md" 1)")" = "$EXTENDED_ELEVEN" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== META-TEST E: a fence with criteria_tests deleted must be flagged by"
+echo "    Section 2c, and NOT by Section 2 or 2b (three independent checks)"
+
+# The mutation happens on a COPY in a mktemp dir (reuses META_DIR, still
+# live). criteria_tests is qa.md's target rather than backend/frontend/
+# devops's: in THOSE three files criteria_tests is now the LAST key before
+# the closing brace, and stripping the last key leaves a dangling trailing
+# comma that breaks the WHOLE fence's JSON syntax (the exact failure mode
+# META-D's own header already rejected green_after for, one field over) —
+# in qa.md's first fence, criteria_tests is FOLLOWED by a blank line and the
+# QA-specific superset (`"approved": false,` and friends), so removing its
+# one line leaves valid JSON with a clean comma between its neighbours,
+# exactly like META-D's own unit_id choice in devops.md.
+META_E_PROMPT="$META_DIR/qa-e.md"
+cp "$PROJECT_DIR/.claude/agents/qa.md" "$META_E_PROMPT"
+
+# Anchored on the field's own line text, never on a line number.
+grep -v '"criteria_tests": {},' "$META_E_PROMPT" > "$META_DIR/stripped-e" \
+    && mv "$META_DIR/stripped-e" "$META_E_PROMPT"
+
+# 1. Non-vacuity: the mutation landed. `grep -v` removes EVERY matching
+#    line file-wide, and qa.md's three F7 fences all carry the IDENTICAL
+#    `"criteria_tests": {},` text, so this strip removes it from all three
+#    at once (unlike META-D's devops.md target, which has only one fence to
+#    begin with) — confirmed directly rather than assumed, and the fence
+#    COUNT itself must stay three (only field lines were removed, not
+#    whole fences).
+BEFORE_CT_COUNT=$(printf '%s' "$(cat "$PROJECT_DIR/.claude/agents/qa.md")" | grep -c '"criteria_tests": {},')
+AFTER_CT_COUNT=$(printf '%s' "$(cat "$META_E_PROMPT")" | grep -c '"criteria_tests": {},')
+assert_eq "META-E: the shipped qa.md carries criteria_tests in all three fences before the strip" \
+    "3" "$BEFORE_CT_COUNT"
+assert_eq "META-E: the mutation landed — ZERO occurrences remain after the strip" \
+    "0" "$AFTER_CT_COUNT"
+assert_eq "META-E: the mutated copy still has exactly three F7 fences (field lines were removed, not whole fences)" \
+    "3" "$(f7_fence_count "$META_E_PROMPT")"
+META_E_BODY=$(f7_fence "$META_E_PROMPT" 1)
+assert_eq "META-E: the mutation landed on fence #1 (criteria_tests no longer in it)" \
+    "0" "$(printf '%s' "$META_E_BODY" | grep -c '"criteria_tests"' | tr -d '[:space:]')"
+assert_eq "META-E: ...and the mutated fence #1 still PARSES as JSON (the strip did not corrupt syntax)" \
+    "yes" "$(fence_parses "$META_E_BODY")"
+
+# 2. SPECIFIC MISBEHAVIOUR: Section 2c's own checker (fence_head12) now
+#    disagrees with the extended twelve — the sensitivity proof, without it
+#    Section 2c could be matching something true of any prompt.
+assert_eq "META-E: the twelve-key checker (fence_head12) flags the stripped fence" \
+    "no" "$([ "$(fence_head12 "$META_E_BODY")" = "$EXTENDED_TWELVE" ] && echo yes || echo no)"
+
+# 3. THE INDEPENDENCE CLAIM, made mechanical, TWICE: Section 2's checker
+#    (fence_head7) and Section 2b's (fence_head11) do NOT flag this same
+#    mutant — removing a field at position 12 cannot perturb a check that
+#    only ever looks at positions 1-7 or 1-11. This is what "a regression
+#    in criteria_tests is never confused with a regression in the base
+#    seven or the four green-to-green fields" means, demonstrated rather
+#    than asserted.
+assert_eq "META-E: ...but the SEVEN-key checker (fence_head7) still agrees — the base seven are untouched" \
+    "yes" "$([ "$(fence_head7 "$META_E_BODY")" = "$CANONICAL" ] && echo yes || echo no)"
+assert_eq "META-E: ...and the ELEVEN-key checker (fence_head11) still agrees too — positions 8-11 are untouched" \
+    "yes" "$([ "$(fence_head11 "$META_E_BODY")" = "$EXTENDED_ELEVEN" ] && echo yes || echo no)"
+
+# 4. RESTORE CONTROL: the shipped qa.md's fence #1 still passes fence_head12.
+assert_eq "META-E: control — the shipped qa.md fence #1 still matches the extended twelve" \
+    "yes" "$([ "$(fence_head12 "$(f7_fence "$PROJECT_DIR/.claude/agents/qa.md" 1)")" = "$EXTENDED_TWELVE" ] && echo yes || echo no)"
 
 rm -rf "$META_DIR"
 

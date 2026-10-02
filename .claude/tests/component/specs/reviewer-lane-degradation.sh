@@ -4,16 +4,29 @@
 #
 # Sol is ADVISORY and STRICTLY OPTIONAL. The release-defining invariant is that
 # the gate/record machinery behaves IDENTICALLY whether or not the Codex lane
-# is connected. Two guarantees, both proved here:
-#
-#   STRUCTURAL (D5): qa-gate.sh, verify-before-stop.sh, and review-check.sh
-#   contain ZERO references to codex or the reviewer lane. Lane selection is
-#   prompt/statusline-side only. A META injection proves the grep is sensitive.
+# is connected. Originally two guarantees were proved in this one file; as of
+# claude-workflow-plugin-icn4 item 1 this file proves only:
 #
 #   BEHAVIOURAL: the identical sequence (seed comments -> review-record a
 #   qa-claude artifact -> review-check gate) produces BYTE-IDENTICAL outputs and
 #   comments (timestamps normalised) in a fixture WITH reviewer-lane.json=codex
 #   + a registered stub server, and in a fixture with NEITHER.
+#
+# THE STRUCTURAL GUARANTEE MOVED TO L1 (claude-workflow-plugin-icn4 item 1).
+# "qa-gate.sh, verify-before-stop.sh and review-check.sh contain zero
+# references to codex or the reviewer lane" is a ~7-SECOND grep-only check
+# with its own META injection — it needs none of this file's Beads-backed
+# fixture scaffolding. QA measured a correction-10 violation surviving FOUR
+# green verification passes and two commits BECAUSE that cheap check ran only
+# at this tier's reserved ~65-minute cadence ("guard cadence must be at least
+# violation cadence"). It now lives at
+# .claude/scripts/tests/reviewer-lane-structural.test.sh, runs on every
+# `make test`, and is the sole authority for that half of the invariant —
+# read it for the exact pattern and its documented semantics
+# (claude-workflow-plugin-mruw corrected and WIDENED the pattern; this file's
+# own header used to use the phrase "reviewer lane" in prose without ever
+# remarking on why that was safe). This file's BEHAVIOURAL half is unaffected
+# and stays here: it needs the fixture, the stub Codex MCP server, and Beads.
 
 set -u
 
@@ -27,26 +40,6 @@ STUB="$PLUGIN/.claude/tests/component/lib/stub-codex-mcp.js"
 ISO='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
 
 # ---------------------------------------------------------------------------
-# STRUCTURAL: the three gate-critical scripts are codex/lane-free. (No bd
-# needed — runs even on CI runners without Beads.)
-GATE_SCRIPTS="qa-gate.sh verify-before-stop.sh review-check.sh"
-for f in $GATE_SCRIPTS; do
-    CNT=$(grep -cEi 'codex|reviewer[._]lane' "$PLUGIN/.claude/scripts/$f" 2>/dev/null || true)
-    [ -z "$CNT" ] && CNT=0
-    assert_eq "structural: $f has zero codex/reviewer-lane references" "0" "$CNT"
-done
-
-# META: inject a codex/lane reference into a COPY and confirm the same grep
-# TRIPS — proving the structural check above is sensitive, not vacuous.
-cp "$PLUGIN/.claude/scripts/review-check.sh" "$FIXTURE/review-check-injected.sh"
-printf '\n# reviewer_lane hook for codex (deliberate injection for the META test)\n' \
-    >> "$FIXTURE/review-check-injected.sh"
-INJ_CNT=$(grep -cEi 'codex|reviewer[._]lane' "$FIXTURE/review-check-injected.sh" 2>/dev/null || true)
-[ -z "$INJ_CNT" ] && INJ_CNT=0
-assert_eq "META: an injected codex/lane reference trips the structural grep" "1" \
-    "$([ "$INJ_CNT" -gt 0 ] && echo 1 || echo 0)"
-
-# ---------------------------------------------------------------------------
 # BEHAVIOURAL: the diff proof needs Beads (review-record posts a comment).
 bd_required_or_skip
 
@@ -57,7 +50,7 @@ TID=$(bd create "degradation proof" -t task --json 2>/dev/null | jq -r '.id // e
 # --comments-json seam keeps the gate deterministic regardless of how many
 # times review-record has appended to the live task.
 cat > "$FIXTURE/art.json" <<EOF
-{"contract_version":"1","task_id":"$TID","reviewer_identity":"qa-claude","reviewer_model":"claude","reviewed_hash":"h","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}
+{"contract_version":"1","task_id":"$TID","reviewer_identity":"qa-claude","reviewer_model":"claude","reviewer_pin":"claude","reviewed_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","risk_threshold":"high","stop_condition":"x","verdict":"findings","findings":[{"id":"R1-F1","severity":"critical","location":"a:1","evidence":"e","description":"d"}],"iterations":1,"stopped_by":"verdict"}
 EOF
 cat > "$FIXTURE/comments.json" <<'EOF'
 ["IMPLEMENTER: role=backend built it",
@@ -67,7 +60,12 @@ EOF
 # run_sequence <output-file> — the identical sequence; outputs normalised.
 run_sequence() {
     {
-        bash "$QAGATE" review-record "$TID" --file "$FIXTURE/art.json" 2>/dev/null
+        # claude-workflow-plugin-rqer (v5 D2): --file now asserts the
+        # CANONICAL derived path; piped via stdin instead — deterministic
+        # given the FIXED $TID and identical content, so the byte-identical
+        # comparison below (which already normalises the timestamp) is
+        # unaffected.
+        bash "$QAGATE" review-record "$TID" < "$FIXTURE/art.json" 2>/dev/null
         bash "$RCHECK" gate "$TID" --comments-json "$FIXTURE/comments.json" 2>/dev/null
     } | sed -E "s/${ISO}/<TS>/g"
 }

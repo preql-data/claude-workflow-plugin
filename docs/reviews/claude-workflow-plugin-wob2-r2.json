@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-wob2",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "90c507f4e781393bb7838b222370ef265c18c8708c36d125d084799cdccf9d76",
+  "risk_threshold": "high",
+  "stop_condition": "every wob2 round-1 finding is traced to a mutation-proven regression leg; no new HIGH/critical in the guards, the envelope/force ordering, or the shipped-invariant greps",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:211,217,235 (all inside CHANGE-SET-HASH-GUARD, 206-256)",
+      "evidence": "Correction-10 shipped invariant violated, and the repo's own L1 guard is RED. `bash .claude/scripts/tests/reviewer-lane-structural.test.sh` -> exit 1, FAILED: 3; reproduced on two independent solo runs at HEAD 9aa000d. NEW with this change set: `git show HEAD:.claude/scripts/review-check.sh | grep -ciE 'codex|reviewer[ _.-]*lane'` = 0 vs `grep -ciE ... .claude/scripts/review-check.sh` = 3. Siblings still clean (qa-gate.sh 0, verify-before-stop.sh 0). The CODE half is compliant and this is NOT a design finding: `grep -vE '^[[:space:]]*#' review-check.sh | grep -ciE '...'` = 0, and no added non-comment line mentions codex/lane/model/reviewer_identity, so cmd_validate_request shape-checks a hash without branching on lane. Two of the three failures CASCADE from the one cause (item2 legs grep a `cp` of the real file, so the 3 pre-existing tokens are counted); one root cause, three symptoms. GATE-VISIBLE: reviewer-lane-structural.test.sh is inside `make test-fast`'s filter, and `.claude/test-cmd` is `make test-fast`, so this change set cannot pass its own Stop-hook tier.",
+      "description": "The spec header (lines 17-40) makes qa-gate.sh, verify-before-stop.sh and review-check.sh hold ZERO references to codex or the reviewer lane, because 'a gate that reasons about model/lane selection acquires a second, invisible way to refuse'. The project already ruled on the remedy: when mruw's widened pattern newly tripped qa-gate.sh, it was 'reworded, not exempted ... preserve the information, drop the token, never loosen the guard'. So: REWORD the three comments, preserving the rationale (they document why the new change_set_hash guard is shape-only, which is load-bearing). Do not exempt the file, narrow the pattern, or delete the explanation. The rewording must clear BOTH tokens: `reviewer[[:space:]_.-]*lane` uses `*`, so the bare phrase 'reviewer lane' also trips (measured: count 1). Measured-clear substitutes: 'the paid review driver', 'the external review driver script' (both 0). qa-gate.sh's own house style is simply never to name the driver."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "high",
+      "location": ".claude/scripts/codex-review.sh:249 (envelope placeholder) vs :364 (validate_candidate) vs :517 (the force)",
+      "evidence": "The R1-F2 remediation validates a field it then discards, creating a NEW paid-lane failure path. Measured with the shipped stub (.claude/tests/component/lib/stub-codex-mcp.js) at the PRODUCTION malformed_retry=1: Sol returns a well-formed-but-wrong hash -> exit 0, 1 paid turn, artifact correct (the force works, R1-F2's fix is real); Sol truncates to 63 chars -> exit 5, 2 paid turns, NO artifact; right-length uppercase -> exit 5, 2 paid turns, NO artifact; the sentinel -> exit 5, 2 paid turns, NO artifact. In the 63-char run Sol's CRITICAL finding (sqli) was discarded over a one-character slip in a field that was about to be overwritten. ROOT CAUSE, mechanically derived: of the 8 fields the final jq FORCES (task_id, iterations, risk_threshold, stop_condition, reviewed_hash, reviewer_identity, reviewer_model, reviewer_pin), SEVEN are interpolated literals in the envelope; reviewed_hash alone is the placeholder \"<change-set hash from the request>\", so Sol must transcribe 64 random hex characters out of a request capped at 100000 bytes. The corrective prompt is only 'Validation failed: <error_key>' and never restates the value, so Sol must re-derive it; malformed_retry=1 means one slip costs a turn and two lose the round.",
+      "description": "The force exists precisely because Sol's value is not trusted; validating that same value BEFORE overwriting it has no upside and a real downside. The two halves of the R1-F2 remediation are on opposite sides of each other in the wrong order. Cheapest coherent fix, one line, matching the seven siblings: interpolate $REQ_CSH into the envelope schema so Sol copies a literal it has been handed. Stronger fix: apply the force BEFORE validate_candidate so the field cannot fail validation at all. Either removes the failure mode; the first also removes the transcription burden. This matters beyond cost: exit 5 degrades the lane to Claude-on-Claude, which is the dual-family guarantee this arc exists to protect."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/codex-review.sh:512-517 (force applied after validate_candidate, never re-validated); .claude/scripts/review-check.sh:206-256 (the sentinel exemption)",
+      "evidence": "The driver can emit an artifact its own validator rejects, while exiting 0 and reporting success. Measured end-to-end with the shipped stub: a request whose change_set_hash IS the empty-content sentinel passes validate-request (exit 0, ok=true, by the guard's deliberate exemption); one paid turn is spent; validate_candidate passes on Sol's well-formed raw hash; the force then sets reviewed_hash=<sentinel> and the artifact is written with driver exit 0; `review-check.sh validate-artifact` on that written artifact then returns exit 4 reviewed_hash_unusable. So the failure surfaces one step later at the recorder, with no indication the cause was a degenerate change set upstream. This is the exact pre-spend waste the CHANGE-SET-HASH-GUARD's own comment says it exists to prevent, occurring for the one value it deliberately exempts.",
+      "description": "The asymmetry between reviewed_hash (refuses the sentinel) and change_set_hash (accepts it) is two answers to one question, and the exemption is the wrong one. Its stated basis, 'must still reach the review flow', is not satisfied by any path: in the codex lane the turn is spent and the artifact is unrecordable; in the claude lane qa.md now instructs QA not to author an artifact at all. Recommend refusing the sentinel at validate-request too, with a message naming the audited path (`approve --no-review`), which is the earliest boundary, costs no spend, and mechanically enforces what qa.md already says. Separately and independently: re-validate after the force, so the driver can never claim success over an artifact its own validator refuses."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/review-check.sh:227; .claude/scripts/qa-gate.sh:2862; .claude/agents/qa.md:423",
+      "evidence": "A false factual premise, repeated in three places this round touched including the QA agent prompt, and attributed to a source that does not say it. The claim is that 'a genuinely empty or DOC-ONLY change set legitimately hashes to the SHA-256 empty-content sentinel'. Measured against impact-report.sh --hash-only with a controlled tracker: empty tracker -> the sentinel; one doc (docs/FOO.md) -> e1096ddd...; three docs (docs/A.md, docs/B.md, README.md) -> 60354f28...; LICENSE + CHANGELOG.md -> bd9defcb...; a tracker holding only denylisted scratch paths -> the sentinel. So ONLY an empty (or wholly-denylisted) tracker yields the sentinel; a doc-only change set yields a real hash. impact-report.sh documents change_set_hash as 'sha256 of the sorted, denylist-filtered changed-files list' and the denylist has no documentation arm; `grep -cin 'doc-only' .claude/scripts/impact-report.sh` = 0, so the cited 'impact-report.sh's own documented behaviour' does not contain the claim.",
+      "description": "The empty half is true and the doc-only half is false, which matters because this sentence is the stated load-bearing justification for R2-F3's exemption and because one copy of it now instructs the QA agent. Correct all three sites to say 'a genuinely empty change set (or one whose every entry is denylisted)', and drop the appeal to impact-report.sh for the doc-only part. Note that 'doc-only' is a verify-before-stop.sh F1 auto-approval concept (is_doc_only_path) and has nothing to do with how change_set_hash is computed; conflating the two is what produced the error."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

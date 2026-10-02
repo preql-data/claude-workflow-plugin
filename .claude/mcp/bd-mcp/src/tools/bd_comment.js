@@ -16,7 +16,12 @@ import {
     validateTaskId,
     HINT_LIST_TO_FIND_IDS,
     runBdJson,
+    runBdShowJson,
     normalizeShowResult,
+    resolveComments,
+    commentsUnavailableError,
+    COMMENTS_UNAVAILABLE,
+    COMMENTS_VERIFIED,
 } from '../lib/exec-bd.js';
 import { ok, fail, safe } from '../lib/format.js';
 
@@ -115,7 +120,12 @@ export function registerCommentTools(server) {
                 "author, text, and created_at.\n\n" +
                 "Comments embedded with bd_add_comment metadata expose their JSON header in the text — " +
                 "callers may parse <!-- BD-MCP-META: {...} --> on the first line.\n\n" +
-                "Replaces shell: `bd show <id> --json | jq '.comments'`",
+                "AN EMPTY `comments` ARRAY MEANS THE TASK GENUINELY HAS NONE. If the bodies cannot be " +
+                "read, this tool returns isError rather than a successful zero — the two are always " +
+                "distinguishable. `count_verified` on the payload says whether the returned length was " +
+                "cross-checked against bd's own comment_count.\n\n" +
+                "Replaces shell: `bd show <id> --json --include-comments | jq '.comments'` " +
+                "(bd 1.1.2 does NOT inline .comments on a plain show — it returns comment_count only).",
             inputSchema: {
                 task_id: z.string().min(1).max(256),
                 cwd: z.string().optional(),
@@ -131,8 +141,18 @@ export function registerCommentTools(server) {
         safe(async (input) => {
             const tid = validateTaskId(input.task_id);
             // bd show is more reliable than `bd comments <id> --json`, which
-            // doesn't exist as a standalone JSON-list mode in 0.47.x.
-            const raw = await runBdJson(['show', tid, '--json'], {
+            // doesn't exist as a standalone JSON-list mode in 0.47.x. (It DOES
+            // exist in 1.1.2, but a version-conditional transport buys nothing
+            // over the hydration flag, which runBdShowJson handles for both.)
+            //
+            // includeComments is load-bearing: bd 1.1.2 returns only a
+            // comment_count on a plain show. This flag landed in fkm.1.1 and was
+            // NOT enough on its own — the tool still answered "0 comment(s)" a
+            // day later against a stale server, because nothing verified that
+            // the hydration had worked. The resolveComments() check below is the
+            // part that makes the transport's failure visible instead of silent.
+            const raw = await runBdShowJson(tid, {
+                includeComments: true,
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });
@@ -142,11 +162,34 @@ export function registerCommentTools(server) {
                     new BdError(`Task '${tid}' not found`, { hint: HINT_LIST_TO_FIND_IDS }),
                 );
             }
-            const comments = task.comments || [];
+            // fkm.1.18. `task.comments || []` was the whole defect: it turned a
+            // response that carried no bodies into ok:true with 0 comment(s) on
+            // a task holding 76 — every completion contract, every review
+            // artifact, every RUBRIC verdict — and the agent that received it
+            // could not tell that from a genuinely empty task. This tool's
+            // entire contract IS the bodies, so an unreadable source is a total
+            // failure of it: refuse, never report a zero we did not establish.
+            const resolved = resolveComments(task);
+            if (resolved.status === COMMENTS_UNAVAILABLE) {
+                return fail(
+                    commentsUnavailableError(
+                        tid,
+                        resolved,
+                        "because returning them IS this tool's contract",
+                    ),
+                );
+            }
+            const verified = resolved.status === COMMENTS_VERIFIED;
             return ok(
-                `bd_list_comments ${tid}: ${comments.length} comment(s)`,
-                { task_id: tid, comments },
-                null,
+                `bd_list_comments ${tid}: ${resolved.comments.length} comment(s)` +
+                    (verified ? '' : ' (count NOT verified)'),
+                {
+                    task_id: tid,
+                    comments: resolved.comments,
+                    count_verified: verified,
+                    comment_count: resolved.count,
+                },
+                verified ? null : resolved.reason,
             );
         }),
     );

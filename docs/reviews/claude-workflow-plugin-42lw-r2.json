@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-42lw",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "703778168a1338cc6a8479b143893f00daa98e8a9bef3f20c418377dbb7aef06",
+  "risk_threshold": "medium",
+  "stop_condition": "Compared the packet diff byte-for-byte with the working-tree CHANGELOG.md diff and ran git diff --check successfully. At c5ba7cc, verified session-start.sh's three apply --quiet --check invocations at lines 618, 620, and 625; model-select.sh writes the resolved-role artifact at 1326 before CHECK_ONLY suppresses frontmatter writes at 1345-1353. At HEAD those invocations are instead at 619, 621, and 626 because ea8031d inserted one earlier line. Verified cmd_approve spans qa-gate.sh:5210 onward with no intervening function definition: reconcile_tracker is called at 5642, compute_design_satisfied at 6985, the refusal exits 2 at 6990, and the durable QA-GATE APPROVED comment is not written until 7784. Verified the 513j rewrite against docs/reviews/claude-workflow-plugin-513j-r4.json and commit 26dac6c: the pre-existing reviews predicate, fix-introduced root-pattern defect, fail-closed symlink work, base check, LEG 2 gate, and every post-copy mirror-write gate are represented accurately. Verified locally that v5.0.0 peels to c5ba7cc and origin/v5/design-phase is 91bfcc8. The live remote checks did not happen successfully: git ls-remote for both the tag and branch exited 128 because github.com DNS could not resolve, and gh pr view 5 failed to connect to api.github.com; therefore remote tag absence and PR #5 were not independently verified, and the implementer's remote measurement is not reported as mine. Verified the r1 reviewed_hash equals the SHA-256 of git diff 91bfcc8^ 91bfcc8 -- CHANGELOG.md, while the repository contract requires reviewed_hash to carry the request's canonical change_set_hash. review-check.sh validate-artifact accepted the file structurally, but that validator checks hash shape rather than semantic provenance. Sandbox denials: direct mktemp -d failed with Operation not permitted; impact-report.sh --hash-only exited 3 after its impact-canon tempfile creation was denied, so I could not independently recompute the packet change_set_hash; bd show failed because both .beads.gate.lock and the embedded database LOCK were denied; and Git repeatedly reported denial creating /tmp/xcrun_db-* cache files, although the read-only Git operations themselves still returned results. No test suite was claimed or run, and no files were modified.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "medium",
+      "location": "CHANGELOG.md:2462-2464",
+      "evidence": "At c5ba7cc, qa-gate.sh:5642 invokes reconcile_tracker, but that function does not invariably write changed-files.txt. It unconditionally truncates reconcile-subtracted.txt at :1273, can return without touching changed-files.txt for a clean tree at :1385-1387, no survivors at :1522-1524, or an already-complete tracker at :1601-1603, and appends changed-files.txt only when to_add is non-empty at :1615-1625. The same cmd_approve body later exits 2 at :6990 before the durable approval write at :7784.",
+      "description": "The corrected safety conclusion is right, but the new qualifier again overstates the earlier write: reconcile_tracker has already run and may append changed-files.txt; it does not always do so. Say that it already writes/truncates reconciliation bookkeeping, or that it can append changed-files.txt."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "medium",
+      "location": "docs/reviews/claude-workflow-plugin-42lw-r1.json:7,43-44",
+      "evidence": "The value 13139e50... is exactly the content SHA-256 of git diff 91bfcc8^ 91bfcc8 -- CHANGELOG.md, as the envelope discloses. But .claude/agents/qa.md:398 and :420 define reviewed_hash as the request's change_set_hash; .claude/scripts/codex-review.sh:179-190 and :539 force that value; and docs/HOOKS.md:1748-1755 says REVIEW-ARTIFACT reviewed_hash shares the canonical changed-path-list hash with approval and rubric records. The envelope cannot alter that machine-field contract.",
+      "description": "This is an honest disclosure of what was hashed, but it is still a misuse of reviewed_hash in a REVIEW-ARTIFACT v1 object. Preserve the diff digest in a separately named provenance field or explicitly nonconforming archival record; do not place it in the standardized change-set-binding field."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "low",
+      "location": "CHANGELOG.md:2416-2418",
+      "evidence": "session-start.sh:618-625 is accurate only in c5ba7cc. In the HEAD tree where a reader opens this changelog, the same block is at 619-626; ea8031d inserted one unrelated docstring line earlier in the file. The citation itself contains no revision qualifier.",
+      "description": "The behavior claim is correct, but an unqualified file:line locator that is already wrong at the changelog's own HEAD is misleading. Write c5ba7cc:.claude/scripts/session-start.sh:618-625 or cite the HEAD lines."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

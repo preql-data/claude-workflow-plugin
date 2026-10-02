@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "222877b5a706796fffe4aab802880b303b407b72bf4bf4b47f669dbfb8d16a77",
+  "risk_threshold": "high",
+  "stop_condition": "Stop when R2-F2, R2-F3 and R2-F4 are each adjudicated closed or still-open against this diff with a concrete failure path, and the qa-gate side of the ONE-validator question is answered: whether its accessors genuinely delegate or still parse structure themselves. Both directions of the R2-F3 clearing predicate must be checked together — an outside-the-unit change must NOT clear, a genuine same-unit amendment MUST. Scope is qa-gate.sh only.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:4638",
+      "evidence": "R2-F4 remains open. The waiver-disclosure branch calls `compute_design_conflict_open` only when `compute_design_satisfied` returns true. `cmd_design_conflict` does not require a satisfied verdict, so a valid artifact can receive an open U1 conflict while its verdict is missing, stale, or needs_revision. `approve --no-design` then skips the conflict reader and writes only the generic `[design bypass: ...]` marker at line 4951.",
+      "description": "A known open conflict can still be waived with a durable record indistinguishable from an ordinary no-design-phase bypass. The exact failure path is: create or amend a valid artifact, file U1's conflict before obtaining a satisfied current review, then approve with `--no-design`; the conflict-specific suffix is omitted."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:4951",
+      "evidence": "R2-F2 is closed only for approvals that reach `design-gate-precheck`: line 8420 now checks conflicts and returns nonzero. Every `--no-design` approval still carries the generic marker, however, and the new `[design conflict waived: units=...]` suffix is only additive. The Stop reader short-circuits on the generic marker and never consumes the new suffix. Thus an unconflicted satisfied design can be approved with `--no-design`, followed by a Beads-only U1 conflict that leaves the change-set hash unchanged; Stop skips the precheck and releases. Likewise, after waiving U1, a later U2 conflict is silently covered although the recorded unit list authorized only U1.",
+      "description": "The Stop-time path is not genuinely covered for bypass-bearing approvals, and the conflict-specific distinction is write-only rather than load-bearing on read. A conflict filed after approval can therefore remain releasable—the concrete R2-F2 failure class—and the R2-F4 unit-scoped disclosure cannot constrain later conflicts."
+    },
+    {
+      "id": "R3-F3",
+      "severity": "info",
+      "location": ".claude/scripts/qa-gate.sh:10289",
+      "evidence": "R2-F3 is closed for both required directions. Each record is compared with `design_unit_content_hash` for its own `unit_id`: changing only U2 leaves U1's canonical hash equal and therefore open, while a genuine U1-object amendment produces a different hash and clears U1 once the whole artifact has a fresh satisfied review. The writer also compares an explicit `--design-hash` with the live artifact hash at line 10085, so stale caller values are rejected.",
+      "description": "The unit-specific clearing predicate and live-hash confirmation correct the two R2-F3 failure paths in this diff."
+    },
+    {
+      "id": "R3-F4",
+      "severity": "info",
+      "location": ".claude/scripts/qa-gate.sh:9872",
+      "evidence": "The qa-gate side of the ONE-validator question is closed: `design_unit_json` delegates to `review-check.sh design-unit-json`, `design_declared_unit_ids` delegates to `validate-design`, and `design_unit_content_hash` hashes the delegated canonical result. qa-gate.sh parses only returned envelopes with jq; it contains no DESIGN-UNITS sentinel extraction in these accessors.",
+      "description": "The accessors genuinely delegate structural extraction and do not retain an independent artifact parser in qa-gate.sh."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "stop_condition"
+}

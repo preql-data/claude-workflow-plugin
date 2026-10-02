@@ -1,0 +1,85 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "dcadadeb193e11cef31210da379cb5e5608a57d2fda2161c9bab82d1b55f7b14",
+  "risk_threshold": "high",
+  "stop_condition": "Every assertion in the pre-split review-separation.test.sh is accounted for in exactly one half; both halves run standalone with no surviving cross-dependency; the L1 tier is at its known baseline; and no new defect was introduced by the R16 fix round that produced this change set.",
+  "verdict": "findings",
+  "iterations": 17,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R17-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:5120",
+      "evidence": "REPRODUCED end to end against the shipped script with an A/B whose ONLY difference is the JSON validity of one on-disk file. CONTROL (unrecorded artifact = well-formed JSON): approve rc=4, stdout 1930 bytes, error_key=review_artifact_unrecorded. SUBJECT (same fixture, same records, unrecorded artifact = truncated JSON): approve rc=5, stdout 0 BYTES, no error_key, labels unchanged. Cause: `unrecorded_content_iter=$(cat -- \"$unrecorded_f\" | jq -r .iterations // \"\")` is a bare command substitution; qa-gate.sh runs under `set -e` (line 196) and jq exits non-zero on a parse error, so cmd_approve dies on the spot with jq exit code and no envelope. Isolated probe confirms `set -e` aborts this exact shape inside a function on bash 3.2.57. The line is NEW in this change set: `grep -c unrecorded_content_iter` is 0 at HEAD and 5 in the worktree.",
+      "description": "This is the R16-F1 defect class, un-swept, 110 lines below the line R16-F1 fixed, and introduced by the same R16 fix round (the R16-F3 remedy). It fails CLOSED, so nothing unsafe releases, but a correct and documented refusal (review_artifact_unrecorded - the file IS genuinely unrecorded) is replaced by an undiagnosable bare abort. Every OTHER degradation mode in this same block was deliberately enumerated and given a clean refusal by the R16-F2 census a few lines above (outside the directory, not a regular file, unhashable, dir unreadable, dangling symlink); malformed-but-hashable is the sole exception, and the census predates it, so the census is incomplete as shipped. The trigger is squarely in the block threat model: the block exists for artifacts written by processes the gate does not control, and a truncated write is the canonical failure of the unchecked `mv` this file own comments cite for the external reviewer driver. Untested by construction: plant_unrecorded documents itself as writing a well-formed VALID artifact, and no leg in either spec ever plants malformed JSON under docs/reviews/. Fix: `|| true` (matching lines 5230/6001/8924), plus a leg modelled on 8.12/8.12.M with a malformed-artifact fixture and the well-formed control."
+    },
+    {
+      "id": "R17-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:4705,4813,4836",
+      "evidence": "Line 4705 is the ONLY one of the four `review-check.sh gate` call sites that captures stderr into the variable later parsed as JSON (`2>&1`); the other three use `2>/dev/null`. Lines 4813 and 4836, inside the rc=4 arm, then run `review_remedy=$(printf %s \"$review_out\" | jq -r .observations // empty)` with no `|| ` fallback - the same unguarded shape as R17-F1. Both lines are followed by `[ -z \"$review_remedy\" ] && review_remedy=...`, i.e. the author guarded the empty VALUE but not the non-zero EXIT.",
+      "description": "I could NOT verify reachability either way in the time available, and I am recording that rather than asserting a defect: reaching it needs gate to exit 4 while emitting something that is not parseable JSON, which the `2>&1` makes possible (any stderr line prepended to the envelope) but which I did not reproduce. Flagged because it is the identical class as R17-F1 and because the stderr-capture asymmetry against the other three call sites is verifiable regardless. The specialist should either drive it with a stderr-emitting gate stub or apply the same `|| true` prophylactically and narrow 4705 to `2>/dev/null` for consistency."
+    },
+    {
+      "id": "R17-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/unrecorded-review-artifact.test.sh (whole file)",
+      "evidence": "Implementer measurements: 676.60s standalone (75.2% of SPEC_TIMEOUT_S=900) and 711s under tier contention (79.0%), corroborated by their full-tier log. Per-review-round growth of the moved family, counted by me from the section bands: R13 57, R14 31, R15 42, R16 37 static assertions - mean 36.7/round across R14-R16. At the measured ~4.0s/assertion that is ~147s per round, so one more round of the same size lands at ~824s standalone / ~858s in-tier (95% of cap) and two crosses it. My own contended standalone of the OTHER half ran 382.37s against their 315.62s (+21%), so ambient load on this box alone moves these figures materially.",
+      "description": "Not a defect in the change set - the split strictly IMPROVES the position (the pre-split file at ~1000s would have failed outright). The residual is that nothing times either half routinely: make test-fast is a 14-spec allowlist that excludes both, `.claude/test-cmd` is armed so the Stop hook test stage IS that fast tier, and the `tests` CI workflow - which does run the full unfiltered tier on ubuntu-latest - has not run since 2026-07-30 (gh run list), so no CI timing exists for either half on the actual target runner, which run-tests.sh own comment says is typically slower than this box. Answering the orchestrator framing question directly: `the routine tier does not time these specs` is true of the Stop hook but NOT of CI; the real gap is six weeks of untimed tier growth. Recommend a margin warning in run-tests.sh (it would fire in CI, where it is most informative) and getting CI green on this branch."
+    },
+    {
+      "id": "R17-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/review-count.test.sh:2655,2659",
+      "evidence": "Line 2655 reads `UNRECORDED-REVIEW-ARTIFACT-REFUSAL (review-separation.test.sh Section 7)` and 2659 reads `the end-to-end review-separation.test.sh coverage`. Section 7 and that end-to-end coverage now live in unrecorded-review-artifact.test.sh.",
+      "description": "A third file pointer into the moved region. The implementer swept its own two files (both headers carry accurate forwarding notes) but did not sweep the repo. Navigable via the trimmed file 23-line pointer comment, which is why this is low rather than medium, but it states a division of responsibility between two specs and now names the wrong one."
+    },
+    {
+      "id": "R17-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/unrecorded-review-artifact.test.sh:208,319,679,711,1413",
+      "evidence": "L208 `Section 4.1 asserts...` (4.1 is in the other file, and it is the stated reason for this file own `rm -rf $FIXTURE/.git`); L319 `Section 1-6 above prove...` - `above` is now false; L679 `the same technique Section 5 (FAIL CLOSED) already uses`; L711 and L1413 `the discipline Section 2.1 already uses`.",
+      "description": "The file header explicitly justifies preserving section numbering so the audit trail `stays citable by the same section and finding ids`. These five in-body references undercut that: a reader inside this file searching for Section 5 or 2.1 will not find them and is not told they are in the sibling file. Cheap to fix by qualifying each with the filename."
+    },
+    {
+      "id": "R17-F6",
+      "severity": "low",
+      "location": ".claude/scripts/tests/unrecorded-review-artifact.test.sh:271",
+      "evidence": "record_completion still seeds `\"tests_added\":[\"review-separation.test.sh::seeded\"]` and `\"llm_observations\":\"seeded by the review-separation fixture\"`. Byte-identical to the trimmed file line 244. Nothing asserts on either string (grep for `seeded by the` / `::seeded` finds only these two definitions), so they are inert.",
+      "description": "The completion contract claims two self-identifying preamble strings were renamed (mktemp template, bd-absent message). There are four; these two were missed. Consequence of the deliberately byte-identical preamble duplication, so cosmetic - but a future reader grepping `review-separation` inside this file gets a false dependency hit."
+    },
+    {
+      "id": "R17-F7",
+      "severity": "low",
+      "location": ".claude/test-cmd",
+      "evidence": "Present, untracked, and NOT gitignored (`git check-ignore` reports nothing; `git log --all -- .claude/test-cmd` is empty). Contents: `cd \"${CLAUDE_PROJECT_DIR:-$PWD}\" && make test-fast`. detect-stack.sh reads it as a test-stage override, so the Stop hook test stage is the 14-spec fast tier, not the 61-spec tier. qa-gate.sh enter SUBTRACTED it from the change set as already-baselined, so it is outside what this approval would bind. install.sh uses an explicit required-file list and does not copy `.claude/` wholesale, so it would not reach installed projects even if committed.",
+      "description": "Raised because the orchestrator states it will commit on approval: a `git add -A` would ship a narrowed Stop tier into the repo for everyone working on the plugin. The arming itself is deliberate and disclosed (yzo9 - Makefile test-fast rationale, verify-before-stop.sh checks_scope_claim/checks_scope_note), so this is a commit-hygiene decision to make consciously, not a defect."
+    },
+    {
+      "id": "R17-F8",
+      "severity": "low",
+      "location": "CHANGELOG.md (Unreleased / Added, k6re bullet)",
+      "evidence": "Sibling entries in the same Unreleased section name their new L1 spec with an assertion count (`New L1 spec: tree-lease.test.sh (64 assertions...)`, `new L1 spec scoped-log-dir.test.sh (24...)`). The k6re bullet names none. CHANGELOG.md mtime is 2026-09-10 09:00, before the split on 2026-09-12.",
+      "description": "The split created a new L1 spec (unrecorded-review-artifact.test.sh, 170 assertions) and the CHANGELOG entry was not updated to name it, breaking the section own convention."
+    },
+    {
+      "id": "R17-F9",
+      "severity": "info",
+      "location": "Makefile:92",
+      "evidence": "The test-fast exclusion rationale reads `the remaining qa-gate-grade-record.test.sh / review-separation.test.sh (each independently measured over 200s under contention)`. Post-split review-separation.test.sh is 316s and the expensive half is the unnamed 676s unrecorded-review-artifact.test.sh.",
+      "description": "Functionally correct (test-fast is an allowlist, so the new file is excluded by default) but the documented reason now names the cheaper of the two files and omits the expensive one."
+    },
+    {
+      "id": "R17-F10",
+      "severity": "info",
+      "location": ".claude/scripts/tests/unrecorded-review-artifact.test.sh:1396-1402",
+      "evidence": "The Section 8.13 comment reads `a genuinely CLEAN task (nothing unrecorded at all) still approves normally with the directory unreadable -- wait, no: an unreadable directory must ALSO refuse a clean task`.",
+      "description": "An unedited thinking-out-loud self-correction in shipped source. The conclusion it reaches is correct and the legs below it are right; only the prose is draft. In byte-identical moved content, so not introduced by the split - but new since the r16 review."
+    }
+  ]
+}

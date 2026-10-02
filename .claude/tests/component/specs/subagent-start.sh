@@ -20,7 +20,7 @@ CT="$FIXTURE/.claude/scripts/current-task.sh"
 
 # Seed an active Beads task.
 TID=$(cd "$FIXTURE" && bd create "Test subagent task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
-assert_match "subagent-start: seed task id created" '^[a-z0-9-]+\.' "$TID"
+assert_match "subagent-start: seed task id created" "$BD_ID_RE" "$TID"
 bash "$CT" set "$TID"
 
 # 1. agent_type=backend + active task -> additionalContext injected.
@@ -98,7 +98,7 @@ assert_empty_envelope "subagent-start: empty JSON no-op" "$OUT"
 
 implementer_lines() {
     # All IMPLEMENTER record first-lines on a task (one per line).
-    bd show "$1" --json 2>/dev/null \
+    bd_show_with_comments "$1" \
         | jq -r '(if type == "array" then .[0].comments else .comments end) // []
                  | .[].text | split("\n")[0]' 2>/dev/null \
         | grep -E '^IMPLEMENTER: ' || true
@@ -116,9 +116,17 @@ bash "$CT" set "$TID_IMPL"
 printf '%s' '{"agent_type":"backend"}' | bash "$HOOK" >/dev/null
 assert_eq "implementer: backend spawn records the identity" "1" \
     "$(count_role "$TID_IMPL" backend)"
-assert_match "implementer: record matches the counter's grammar (role, task, ISO ts)" \
-    "^IMPLEMENTER: role=backend task=${TID_IMPL} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" \
+assert_match "implementer: record matches the counter's grammar (role, task, model, pin, ISO ts)" \
+    "^IMPLEMENTER: role=backend task=${TID_IMPL} model=[^ ]+ pin=[^ ]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" \
     "$(implementer_lines "$TID_IMPL" | grep 'role=backend' | head -1)"
+# 46w9: model=/pin= fall back to "unknown" in THIS fixture because mk_fixture
+# does not seed .claude/agents/*.md or model-roles-resolved.json (see the
+# dedicated model-pin-fields leg below, which seeds both and asserts the real
+# values). "unknown" here is the fail-safe path working, not a defect — but
+# pin it explicit rather than leaving assert_match's "any non-space token"
+# to accept a genuinely wrong fallback silently.
+assert_contains "implementer: in THIS fixture (no agent files, no resolved artifact) both fall back to unknown" \
+    "model=unknown pin=unknown" "$(implementer_lines "$TID_IMPL" | grep 'role=backend' | head -1)"
 
 # I2. IDEMPOTENT: re-spawning the same role on the same task adds nothing.
 # (A re-spawn per iteration is normal; duplicate records would make the audit
@@ -166,12 +174,248 @@ NOBD_JSON_OK=$(printf '%s' "$NOBD_OUT" | jq -e . >/dev/null 2>&1 && echo yes || 
 assert_eq "implementer: bd absent -> hook still emits valid JSON (never blocks a spawn)" \
     "yes" "$NOBD_JSON_OK"
 
+# ===========================================================================
+# THE IDEMPOTENCY KEY INCLUDES THE REVIEW CYCLE (claude-workflow-plugin-qzv.1).
+#
+# I2 above pins "a re-spawn does not duplicate", and it passed for a year while
+# the guard was WRONG: `grep -qE "^IMPLEMENTER: role=${role} "` matched ANY
+# comment on the task ever, so the record was idempotent per (role, task) with no
+# expiry. The Stop hook's F1 predicate compares that record's TIMESTAMP against
+# the most recent `QA-GATE: entered at <ts>` to refuse auto-approving a doc-only
+# change set while an implementer is in flight — and against a permanently-first
+# timestamp it read "previous cycle" from the second cycle onward and auto-
+# approved mid-implementation (QA reproduced it end to end; see qzv.1).
+#
+# Every leg below is deterministic BY CONSTRUCTION rather than by timing: the
+# cycle records are planted at fixed stamps, so no assertion depends on whether
+# `enter` and a spawn landed in the same whole second. The counterpart — a real
+# `qa-gate.sh enter` writing the cycle record, and the Stop-hook consequence —
+# is leg 8 of the verify-before-stop spec, which drives this same hook.
+#
+# A note on the planted stamps: the PAST-cycle legs use 2000-01-01 and the
+# FUTURE-cycle legs 2099-01-01 so the comparison against the record this hook
+# writes (always `date -u` NOW) has the same answer on any plausible clock. In a
+# future-dated cycle every spawn posts, which is the fail-safe direction and only
+# reachable through clock skew or a forged comment.
+# ===========================================================================
+
+plant_comment() {
+    # plant_comment <tid> <text> — append a record to the task, newest last.
+    (cd "$FIXTURE" && bd comments add "$1" "$2" >/dev/null 2>&1 \
+        || bd comment add "$1" "$2" >/dev/null 2>&1)
+}
+spawn_as() {
+    # spawn_as <agent_type> [hook] — drive the real SubagentStart entry point.
+    printf '%s' "{\"agent_type\":\"$1\"}" | bash "${2:-$HOOK}" >/dev/null 2>&1 || true
+}
+new_cycle_task() {
+    # new_cycle_task <title> -> id, claimed as the active task.
+    local tid
+    tid=$(cd "$FIXTURE" && bd create "$1" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$CT" set "$tid"
+    printf '%s' "$tid"
+}
+
+# I9a. Inside ONE open cycle, a re-spawn still posts nothing. This is the
+# anti-spam property the guard exists for — preserved, not traded away.
+TID_C1=$(new_cycle_task "cycle key: one cycle")
+plant_comment "$TID_C1" "QA-GATE: entered at 2000-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9a: the first spawn in an open cycle records once" "1" \
+    "$(count_role "$TID_C1" devops)"
+spawn_as devops
+spawn_as @devops
+assert_eq "cycle key I9a: ...and re-spawns INSIDE the same cycle add nothing" "1" \
+    "$(count_role "$TID_C1" devops)"
+
+# I9b. THE DEFECT. A cycle opened AFTER this role's record -> a fresh record.
+# Pre-fix this posted nothing and the count stayed 1, which is the whole bug.
+TID_C2=$(new_cycle_task "cycle key: later cycle")
+plant_comment "$TID_C2" "IMPLEMENTER: role=devops task=$TID_C2 at 2000-01-01T00:00:00Z"
+plant_comment "$TID_C2" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9b: a re-spawn in a LATER cycle posts a FRESH record (was: nothing)" \
+    "2" "$(count_role "$TID_C2" devops)"
+assert_match "cycle key I9b: ...and every reader still parses it (model=/pin= sit before 'at', the timestamp anchor is untouched)" \
+    "^IMPLEMENTER: role=devops task=${TID_C2} model=[^ ]+ pin=[^ ]+ at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" \
+    "$(implementer_lines "$TID_C2" | tail -1)"
+
+# I9c/d/e. THE BOUNDARY, one second either side and the exact tie. The tie counts
+# as "current" deliberately: F1 refuses same-second pairs (whole-second stamps
+# cannot order an enter and a spawn), so the record already there blocks and a
+# duplicate would add a line for nothing.
+TID_C3=$(new_cycle_task "cycle key: one second before")
+plant_comment "$TID_C3" "IMPLEMENTER: role=devops task=$TID_C3 at 2098-12-31T23:59:59Z"
+plant_comment "$TID_C3" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9c: a record ONE SECOND before the cycle open -> posts" "2" \
+    "$(count_role "$TID_C3" devops)"
+
+TID_C4=$(new_cycle_task "cycle key: same second")
+plant_comment "$TID_C4" "IMPLEMENTER: role=devops task=$TID_C4 at 2099-01-01T00:00:00Z"
+plant_comment "$TID_C4" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9d: a record in the SAME SECOND as the cycle open -> no post" "1" \
+    "$(count_role "$TID_C4" devops)"
+
+TID_C5=$(new_cycle_task "cycle key: one second after")
+plant_comment "$TID_C5" "IMPLEMENTER: role=devops task=$TID_C5 at 2099-01-01T00:00:01Z"
+plant_comment "$TID_C5" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9e: a record ONE SECOND after the cycle open -> no post" "1" \
+    "$(count_role "$TID_C5" devops)"
+
+# I9f. THE LEXICOGRAPHIC MAX, not the last line in comment order. The newer cycle
+# record is planted FIRST, so a reader keying on comment order would see the OLDER
+# open, conclude the role's record is newer than it, and skip.
+TID_C6=$(new_cycle_task "cycle key: max not last line")
+plant_comment "$TID_C6" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+plant_comment "$TID_C6" "QA-GATE: entered at 2000-01-01T00:00:00Z"
+plant_comment "$TID_C6" "IMPLEMENTER: role=devops task=$TID_C6 at 2050-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9f: the MAX cycle open wins over the last-listed one -> posts" "2" \
+    "$(count_role "$TID_C6" devops)"
+
+# I9g. PER-ROLE, which is why `review-check.sh gate`'s cross-role
+# `latest_implementer_ts` could not be reused for this decision: reusing it would
+# suppress devops's record because backend already posted one this cycle, and the
+# implementer SET is what makes `approve` refuse a self-review (jio.1).
+TID_C7=$(new_cycle_task "cycle key: per role")
+plant_comment "$TID_C7" "QA-GATE: entered at 2000-01-01T00:00:00Z"
+spawn_as backend
+assert_eq "cycle key I9g: precondition — backend recorded in this cycle" "1" \
+    "$(count_role "$TID_C7" backend)"
+spawn_as devops
+assert_eq "cycle key I9g: ...and devops still gets its OWN record (never suppressed)" "1" \
+    "$(count_role "$TID_C7" devops)"
+
+# I9h. An UNPARSEABLE stamp posts rather than skips. `date` failing makes this
+# hook write a literal `at ?`, so it is a stamp the writer can really produce; the
+# two records cannot be ordered, and a fresh well-formed one is the only answer
+# that makes the predicate readable again.
+TID_C8=$(new_cycle_task "cycle key: unparseable stamp")
+plant_comment "$TID_C8" "IMPLEMENTER: role=devops task=$TID_C8 at ?"
+plant_comment "$TID_C8" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+spawn_as devops
+assert_eq "cycle key I9h: an unparseable existing stamp -> posts (fail-safe)" "2" \
+    "$(count_role "$TID_C8" devops)"
+
+# ===========================================================================
+# MODEL-PIN-FIELDS (claude-workflow-plugin-46w9). The legs above all ran
+# against a fixture with no .claude/agents/*.md and no
+# model-roles-resolved.json, which is why every model=/pin= read "unknown" —
+# that IS the fail-safe path, proven above, but the happy path (real values)
+# needs its own fixture state to exercise at all.
+REAL_HOOK=$(readlink "$HOOK" 2>/dev/null || printf '%s' "$HOOK")
+
+mkdir -p "$FIXTURE/.claude/agents"
+cat > "$FIXTURE/.claude/agents/backend.md" <<'EOF'
+---
+name: backend
+model: claude-sonnet-5
+---
+seeded fixture agent file, not a real prompt.
+EOF
+
+TID_MP1=$(new_cycle_task "model-pin: matching pin and resolved model")
+cat > "$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json" <<'EOF'
+{"schema":2,"roles":{"implementer":"claude-sonnet-5","reviewer":"claude-fable-5"}}
+EOF
+spawn_as backend
+MP1_LINE=$(implementer_lines "$TID_MP1" | grep 'role=backend' | head -1)
+assert_contains "model-pin: pin= reads the role's own frontmatter" \
+    "pin=claude-sonnet-5" "$MP1_LINE"
+assert_contains "model-pin: model= reads the resolved implementer-class pick" \
+    "model=claude-sonnet-5" "$MP1_LINE"
+
+# DIVERGENCE: the frontmatter and the resolved artifact disagree (a stale
+# artifact, or a hand-edit since the last apply). BOTH values are recorded —
+# neither is silently reconciled to the other — because the divergence is
+# exactly the signal 46w9 exists to make visible. Spawns as "backend" (not a
+# different role) so it reads the SAME seeded backend.md as MP1 — a fixture
+# with only one agent file on disk, which every OTHER leg here also has.
+TID_MP2=$(new_cycle_task "model-pin: pin and resolved model DIVERGE")
+cat > "$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json" <<'EOF'
+{"schema":2,"roles":{"implementer":"claude-opus-9","reviewer":"claude-fable-5"}}
+EOF
+spawn_as backend
+MP2_LINE=$(implementer_lines "$TID_MP2" | grep 'role=backend' | head -1)
+assert_contains "model-pin: divergence — pin= still names the frontmatter value" \
+    "pin=claude-sonnet-5" "$MP2_LINE"
+assert_contains "model-pin: divergence — model= still names the resolved value, UNRECONCILED" \
+    "model=claude-opus-9" "$MP2_LINE"
+
+# BRACKET-CONTAINING MODEL ID (the bjx class, applied to a real observed
+# runtime id — claude-workflow-plugin-gz3's ledger note records
+# `claude-opus-5[1m]` verbatim, the model that actually ran a review versus
+# the frontmatter pin that would normally apply). Must survive verbatim, not
+# truncate at the bracket and not reject to "unknown".
+TID_MP3=$(new_cycle_task "model-pin: bracket-suffixed id survives verbatim")
+cat > "$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json" <<'EOF'
+{"schema":2,"roles":{"implementer":"claude-opus-5[1m]","reviewer":"claude-fable-5"}}
+EOF
+spawn_as backend
+MP3_LINE=$(implementer_lines "$TID_MP3" | grep 'role=backend' | head -1)
+assert_contains "model-pin: a bracket-suffixed real id survives verbatim in model=" \
+    "model=claude-opus-5[1m]" "$MP3_LINE"
+
+# OUT-OF-CLASS VALUE (an injection-shaped resolved value) falls back to
+# "unknown" rather than embedding it — reject, never sanitise.
+TID_MP4=$(new_cycle_task "model-pin: out-of-class resolved value falls back")
+cat > "$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json" <<'EOF'
+{"schema":2,"roles":{"implementer":"claude sonnet; rm -rf /","reviewer":"claude-fable-5"}}
+EOF
+spawn_as backend
+MP4_LINE=$(implementer_lines "$TID_MP4" | grep 'role=backend' | head -1)
+assert_contains "model-pin: an out-of-class resolved value falls back to unknown" \
+    "model=unknown" "$MP4_LINE"
+assert_not_contains "model-pin: ...and the raw value never reaches the record" \
+    "rm -rf" "$MP4_LINE"
+
+# META (load-bearing): neutralise model_id_class_ok (replace its body with an
+# unconditional accept) in a copy, and the SAME out-of-class value from MP4
+# must now survive into the record — proving MP4's rejection is the guard's
+# doing and not some unrelated reason the value never landed.
+CLASS_MUT="$FIXTURE/subagent-start-noclass.sh"
+awk '
+    /^model_id_class_ok\(\) \{/ { print; print "    return 0  # META: neutralised"; skip = 1; next }
+    skip && /^\}$/ { print; skip = 0; next }
+    skip { next }
+    { print }
+' "$REAL_HOOK" > "$CLASS_MUT"
+chmod +x "$CLASS_MUT"
+if assert_mutant_applied "model-pin class META" "$REAL_HOOK" "$CLASS_MUT"; then
+    assert_eq "model-pin class META: the neutralised guard is gone from the mutant" "0" \
+        "$(grep -cF "printf '%s' \"\$1\" | grep -qE" "$CLASS_MUT" | tr -d '[:space:]')"
+    assert_eq "model-pin class META: mutated hook parses" "0" \
+        "$(bash -n "$CLASS_MUT" 2>/dev/null && echo 0 || echo 1)"
+    TID_MP5=$(new_cycle_task "model-pin class META: no guard")
+    cat > "$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json" <<'EOF'
+{"schema":2,"roles":{"implementer":"claude sonnet; rm -rf /","reviewer":"claude-fable-5"}}
+EOF
+    spawn_as backend "$CLASS_MUT"
+    MP5_LINE=$(implementer_lines "$TID_MP5" | grep 'role=backend' | head -1)
+    assert_contains "model-pin class META: WITHOUT the guard the out-of-class value now reaches the record" \
+        "claude sonnet; rm -rf /" "$MP5_LINE"
+fi
+
+# Restore a clean resolved artifact for the legs below.
+cat > "$FIXTURE/.claude/.qa-tracking/model-roles-resolved.json" <<'EOF'
+{"schema":2,"roles":{"implementer":"claude-sonnet-5","reviewer":"claude-fable-5"}}
+EOF
+
 # I8. META: break the idempotency guard in a COPY (invert the grep so the
 # "already recorded" branch never fires) -> a re-spawn DUPLICATES the record,
 # i.e. assertion I2 would fail. Proves I2 is sensitive to the guard rather
 # than to some incidental de-duplication elsewhere. TEXT-anchored on the guard
 # (LESSONS llh.20), not on a line number.
-REAL_HOOK=$(readlink "$HOOK" 2>/dev/null || printf '%s' "$HOOK")
+#
+# qzv.1 kept this anchor line byte-identical on purpose: the pre-fix
+# per-(role, task) grep still lives outside the IMPLEMENTER-CYCLE-KEY region and
+# still decides the first half of the guard, so rewriting it to a constant-false
+# condition still makes every spawn post. What changed is that it now sets a
+# `skip` variable the region refines, instead of returning directly.
+# ($REAL_HOOK is set once, above, by the model-pin-fields section.)
 HOOK_MUT="$FIXTURE/subagent-start-dupmut.sh"
 awk '
     /if printf .%s\\n. "\$existing" \| grep -qE "\^IMPLEMENTER: role=\$\{role\} "; then/ {
@@ -193,5 +437,259 @@ if [ "$MUT_RC" -eq 0 ]; then
     assert_eq "implementer META: with the guard broken a re-spawn DUPLICATES (I2 WOULD fail)" \
         "2" "$(count_role "$TID_MUT" backend)"
 fi
+
+# I10. META (spec-mandated for qzv.1): strip the IMPLEMENTER-CYCLE-KEY region and
+# a re-spawn in a LATER cycle posts NOTHING again — I9b's exact state, pre-fix.
+# This is the writer-side half; the gate-side half (the same strip making a
+# doc-only Stop auto-approve mid-implementation) is the qzv.1 META in the
+# verify-before-stop spec.
+#
+# The strip yields the PRE-FIX guard rather than a syntax error because the
+# per-(role, task) grep and the `skip` variable it sets live OUTSIDE the
+# sentinels; only the refinement and its two helpers live inside. Anchored
+# patterns (`^ *#`) so a prose line naming the sentinel cannot start the excision
+# early.
+CK_MUT="$FIXTURE/subagent-start-cyclekey-stripped.sh"
+awk '
+    /^ *# IMPLEMENTER-CYCLE-KEY BEGIN/ { skip = 1; next }
+    /^ *# IMPLEMENTER-CYCLE-KEY END/   { skip = 0; next }
+    !skip { print }
+' "$REAL_HOOK" > "$CK_MUT"
+chmod +x "$CK_MUT"
+if assert_mutant_applied "implementer I10 META" "$REAL_HOOK" "$CK_MUT"; then
+    assert_eq "implementer I10 META: no cycle refinement survives (the strip landed where aimed)" \
+        "0" "$(grep -c 'recorded_in_current_cycle' "$CK_MUT" | tr -d '[:space:]')"
+    assert_eq "implementer I10 META: ...while the pre-fix per-(role, task) grep SURVIVES outside it" \
+        "1" "$(grep -c -F 'if printf '"'"'%s\n'"'"' "$existing" | grep -qE "^IMPLEMENTER: role=${role} "; then' "$CK_MUT" | tr -d '[:space:]')"
+    assert_eq "implementer I10 META: the stripped copy still parses" "0" \
+        "$(bash -n "$CK_MUT" 2>/dev/null && echo 0 || echo 1)"
+    TID_CKM=$(new_cycle_task "cycle key META: stripped writer goes blind")
+    plant_comment "$TID_CKM" "IMPLEMENTER: role=devops task=$TID_CKM at 2000-01-01T00:00:00Z"
+    plant_comment "$TID_CKM" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+    spawn_as devops "$CK_MUT"
+    assert_eq "implementer I10 META: with the cycle key stripped the later cycle posts NOTHING (I9b WOULD fail)" \
+        "1" "$(count_role "$TID_CKM" devops)"
+    # Restore control: the SHIPPED hook, identical state, posts the fresh record.
+    TID_CKC=$(new_cycle_task "cycle key META: shipped writer records")
+    plant_comment "$TID_CKC" "IMPLEMENTER: role=devops task=$TID_CKC at 2000-01-01T00:00:00Z"
+    plant_comment "$TID_CKC" "QA-GATE: entered at 2099-01-01T00:00:00Z"
+    spawn_as devops
+    assert_eq "implementer I10 META: restore control — the shipped hook posts it" "2" \
+        "$(count_role "$TID_CKC" devops)"
+    # ...and the stripped copy is NOT broken in some blanket way that would make
+    # the leg above pass for the wrong reason: with no cycle record at all, both
+    # copies agree (this is the state I2 covers, where the keys are equivalent).
+    TID_CKN=$(new_cycle_task "cycle key META: no cycle, both agree")
+    spawn_as devops "$CK_MUT"
+    spawn_as devops "$CK_MUT"
+    assert_eq "implementer I10 META: ...and with NO cycle record the stripped copy still de-dupes" \
+        "1" "$(count_role "$TID_CKN" devops)"
+fi
+
+# ===========================================================================
+# SPEC INJECTION AT SPAWN (v5 D5, claude-workflow-plugin-fkm.7).
+#
+# Each IMPLEMENTER spawn (never qa — same implementer-only scope as the
+# IMPLEMENTER records above) whose task is bound to a design unit gets that
+# unit's spec injected VERBATIM from the mirrored artifact, read at spawn
+# time — never the orchestrator's paraphrase — with the injected hash
+# recorded so a later mismatch is visible via `qa-gate.sh
+# spec-injection-status`. See subagent-start.sh's own SPEC INJECTION AT
+# SPAWN header for the full resolution path and failure-direction rationale;
+# design-accessors.test.sh Section 12 (L1) covers that reader's OWN logic
+# against engineered fixtures exhaustively. THIS section proves the REAL
+# WRITER (this hook) and the REAL READER (spec-injection-status) agree end
+# to end over an actual spawn and an actual design artifact on disk — the
+# thing no engineered fixture can prove on its own.
+# ===========================================================================
+
+QG="$FIXTURE/.claude/scripts/qa-gate.sh"
+mkdir -p "$FIXTURE/docs/specs"
+
+# A distinctive criterion text and goal, chosen so they cannot appear in
+# additionalContext by any path OTHER than verbatim injection from the
+# artifact bytes below (never authored into any task title/notes in this
+# file) — the "compare against the artifact's bytes, not a re-derivation"
+# leg of the pairing requirement.
+cat > "$FIXTURE/docs/specs/E-SI-DESIGN.md" <<'ART'
+## Problem
+p
+## Approaches considered
+a
+## Chosen approach
+c
+## Units
+u
+## Global constraints
+g
+## Out of scope
+o
+## Verification plan
+v
+## Revision log
+r
+<!-- DESIGN-UNITS BEGIN -->
+{
+  "contract_version": "1",
+  "task_id": "E-SI-DESIGN",
+  "designer_identity": "designer-claude",
+  "units": [
+    { "unit_id": "U1", "goal": "the flux capacitor must recalibrate before every jump", "verification": "make test",
+      "files": ["src/flux.sh"],
+      "acceptance": [ { "id": "AC1", "text": "a jump attempted without recalibration raises FluxMisalignment" } ],
+      "depends_on": [] },
+    { "unit_id": "U2", "goal": "g2", "verification": "v2",
+      "files": ["src/b.sh"],
+      "acceptance": [ { "id": "AC2", "text": "t2" } ],
+      "depends_on": [] }
+  ]
+}
+<!-- DESIGN-UNITS END -->
+ART
+
+si_comments_of() {
+    bd_show_with_comments "$1" \
+        | jq -r '(if type == "array" then .[0].comments else .comments end) // []
+                 | .[].text' 2>/dev/null || echo ""
+}
+si_count_spec_injected() {
+    si_comments_of "$1" | grep -cE '^SPEC-INJECTED v1 ' | tr -d '[:space:]'
+}
+
+# SI1. A bound implementer task's spawn gets the unit injected VERBATIM.
+TID_SI1=$(cd "$FIXTURE" && bd create "spec-inject: bound implementer" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" design-unit-bind "$TID_SI1" --design-task E-SI-DESIGN --unit-id U1 "bound for spec-injection spec" >/dev/null 2>&1
+bash "$CT" set "$TID_SI1"
+SI1_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+assert_valid_envelope "spec-inject SI1: envelope still valid with injection" "$SI1_OUT"
+SI1_CTX=$(printf '%s' "$SI1_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "spec-inject SI1: additionalContext carries the VERBATIM criterion text" \
+    "a jump attempted without recalibration raises FluxMisalignment" "$SI1_CTX"
+assert_contains "spec-inject SI1: ...and the verbatim goal text" \
+    "the flux capacitor must recalibrate before every jump" "$SI1_CTX"
+assert_contains "spec-inject SI1: ...and the declared file path" "src/flux.sh" "$SI1_CTX"
+assert_eq "spec-inject SI1: exactly one SPEC-INJECTED record posted" "1" "$(si_count_spec_injected "$TID_SI1")"
+assert_match "spec-inject SI1: the record matches its own grammar (task, design_task, unit_id, both 64-hex hashes, ISO ts)" \
+    "^SPEC-INJECTED v1 task=${TID_SI1} design_task=E-SI-DESIGN unit_id=U1 design_hash=[0-9a-fA-F]{64} unit_hash=[0-9a-fA-F]{64} at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z: injected at spawn$" \
+    "$(si_comments_of "$TID_SI1" | grep '^SPEC-INJECTED v1 ')"
+
+# SI2. The REAL reader agrees the injection landed fresh, end to end.
+SI2_STATUS=$(bash "$QG" spec-injection-status "$TID_SI1" 2>/dev/null)
+assert_eq "spec-inject SI2: the REAL spec-injection-status reads it back injected:true, fresh:true" "true|true" \
+    "$(printf '%s' "$SI2_STATUS" | jq -r '.injected')|$(printf '%s' "$SI2_STATUS" | jq -r '.fresh')"
+
+# SI3. Unbound task: no injection, silent (the ordinary, ubiquitous case).
+TID_SI3=$(cd "$FIXTURE" && bd create "spec-inject: never bound" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$CT" set "$TID_SI3"
+SI3_OUT=$(printf '%s' '{"agent_type":"devops"}' | bash "$HOOK")
+SI3_CTX=$(printf '%s' "$SI3_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_not_contains "spec-inject SI3: an unbound task gets NO 'SPEC INJECTION' text at all" \
+    "SPEC INJECTION" "$SI3_CTX"
+assert_eq "spec-inject SI3: ...and posts no SPEC-INJECTED record" "0" "$(si_count_spec_injected "$TID_SI3")"
+
+# SI4. A QA spawn is never spec-injected, even on a BOUND task (same scope
+# as record_implementer — qa reviews the unit, it does not implement it).
+TID_SI4=$(cd "$FIXTURE" && bd create "spec-inject: qa spawn, same binding" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" design-unit-bind "$TID_SI4" --design-task E-SI-DESIGN --unit-id U1 "bound, but qa will spawn" >/dev/null 2>&1
+bash "$CT" set "$TID_SI4"
+SI4_OUT=$(printf '%s' '{"agent_type":"qa"}' | bash "$HOOK")
+SI4_CTX=$(printf '%s' "$SI4_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_not_contains "spec-inject SI4: a QA spawn on a BOUND task still gets no injection (implementer-only scope)" \
+    "SPEC INJECTION" "$SI4_CTX"
+assert_eq "spec-inject SI4: ...and posts no SPEC-INJECTED record" "0" "$(si_count_spec_injected "$TID_SI4")"
+
+# SI5. The artifact vanishes after binding: LOUD degradation, never silent,
+# and no record is posted (nothing trustworthy to record).
+TID_SI5=$(cd "$FIXTURE" && bd create "spec-inject: artifact vanishes" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG" design-unit-bind "$TID_SI5" --design-task E-SI-DESIGN --unit-id U1 "bound, artifact will vanish" >/dev/null 2>&1
+mv "$FIXTURE/docs/specs/E-SI-DESIGN.md" "$FIXTURE/docs/specs/E-SI-DESIGN.md.hidden"
+bash "$CT" set "$TID_SI5"
+SI5_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+mv "$FIXTURE/docs/specs/E-SI-DESIGN.md.hidden" "$FIXTURE/docs/specs/E-SI-DESIGN.md"
+assert_valid_envelope "spec-inject SI5: envelope still valid even when the artifact is missing" "$SI5_OUT"
+SI5_CTX=$(printf '%s' "$SI5_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "spec-inject SI5: a LOUD, distinguishable degradation notice, never silent" \
+    "SPEC INJECTION DEGRADED" "$SI5_CTX"
+assert_eq "spec-inject SI5: ...and NOTHING was recorded (no trustworthy hash to bind)" "0" "$(si_count_spec_injected "$TID_SI5")"
+
+# SI6. A hash mismatch surfaces end to end: amend the unit's content AFTER
+# injection (no re-spawn), then ask the REAL reader — never the whole-
+# artifact hash, the same false-alarm-on-an-unrelated-unit concern
+# DESIGN-CONFLICT's own R2-F3 fix exists for. Re-arm the active task back to
+# TID_SI1 first — SI3/SI4/SI5 moved it on to their OWN tasks in between, and
+# SI7 below re-spawns, so leaving it pointed at SI5's task would silently
+# write and read the wrong task's record instead of failing loudly.
+bash "$CT" set "$TID_SI1"
+sed 's/a jump attempted without recalibration raises FluxMisalignment/UPDATED: recalibration failure is now a warning, not an error/' \
+    "$FIXTURE/docs/specs/E-SI-DESIGN.md" > "$FIXTURE/docs/specs/E-SI-DESIGN.md.new"
+mv "$FIXTURE/docs/specs/E-SI-DESIGN.md.new" "$FIXTURE/docs/specs/E-SI-DESIGN.md"
+SI6_STATUS=$(bash "$QG" spec-injection-status "$TID_SI1" 2>/dev/null)
+assert_eq "spec-inject SI6: a real amendment after injection surfaces as fresh:false via the REAL reader" "true|false" \
+    "$(printf '%s' "$SI6_STATUS" | jq -r '.injected')|$(printf '%s' "$SI6_STATUS" | jq -r '.fresh')"
+assert_match "spec-inject SI6: ...naming the content-change reason" "CHANGED since injection" \
+    "$(printf '%s' "$SI6_STATUS" | jq -r '.observations')"
+
+# SI7. Re-spawn refreshes the injection (deliberately NOT idempotent per
+# cycle, unlike IMPLEMENTER): a second spawn after the amendment above posts
+# a SECOND record carrying the amended content's OWN hash, and the reader
+# now reports fresh again against the CURRENT (amended) content.
+SI7_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+SI7_CTX=$(printf '%s' "$SI7_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "spec-inject SI7: the re-spawn injects the AMENDED text, not the stale original" \
+    "UPDATED: recalibration failure is now a warning, not an error" "$SI7_CTX"
+assert_eq "spec-inject SI7: a re-spawn posts a FRESH SPEC-INJECTED record (not idempotent — two total now)" "2" \
+    "$(si_count_spec_injected "$TID_SI1")"
+SI7_STATUS=$(bash "$QG" spec-injection-status "$TID_SI1" 2>/dev/null)
+assert_eq "spec-inject SI7: ...and the REAL reader now reports fresh again (reads the LATEST record)" "true|true" \
+    "$(printf '%s' "$SI7_STATUS" | jq -r '.injected')|$(printf '%s' "$SI7_STATUS" | jq -r '.fresh')"
+
+# ===========================================================================
+# META: strip the SPEC INJECTION AT SPAWN region and watch a bound task's
+# injection silently disappear, WITHOUT crashing the hook and WITHOUT
+# touching the unrelated IMPLEMENTER-recording mechanism (the discriminator
+# — claude-workflow-plugin-ybhc's lesson: prove the strip's damage is
+# narrow, not a blanket break that would pass for the wrong reason).
+# ===========================================================================
+SI_MUT="$FIXTURE/subagent-start-nospecinject.sh"
+awk '
+    /^# SPEC INJECTION AT SPAWN BEGIN/ { skip = 1; next }
+    /^# SPEC INJECTION AT SPAWN END/   { skip = 0; next }
+    !skip { print }
+' "$REAL_HOOK" > "$SI_MUT"
+chmod +x "$SI_MUT"
+if assert_mutant_applied "spec-inject META" "$REAL_HOOK" "$SI_MUT"; then
+    assert_eq "spec-inject META: NON-VACUITY — the function definition is gone from the mutant" "0" \
+        "$(grep -c '^inject_unit_spec() {' "$SI_MUT" | tr -d '[:space:]')"
+    assert_eq "spec-inject META: ...while it remains in the shipped hook" "1" \
+        "$(grep -c '^inject_unit_spec() {' "$REAL_HOOK" | tr -d '[:space:]')"
+    assert_eq "spec-inject META: the mutated hook still parses" "0" \
+        "$(bash -n "$SI_MUT" 2>/dev/null && echo 0 || echo 1)"
+
+    TID_SIM=$(cd "$FIXTURE" && bd create "spec-inject META: bound, stripped hook" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
+    bash "$QG" design-unit-bind "$TID_SIM" --design-task E-SI-DESIGN --unit-id U1 "bound for the META" >/dev/null 2>&1
+    bash "$CT" set "$TID_SIM"
+    SIM_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$SI_MUT")
+    assert_valid_envelope "spec-inject META: the stripped hook still emits a valid envelope (never crashes the spawn)" "$SIM_OUT"
+    SIM_CTX=$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+    assert_not_contains "spec-inject META: SPECIFIC MISBEHAVIOUR — a BOUND task's spec silently vanishes (SI1 WOULD fail)" \
+        "SPEC INJECTION" "$SIM_CTX"
+    assert_eq "spec-inject META: ...and no record is posted either" "0" "$(si_count_spec_injected "$TID_SIM")"
+    assert_contains "spec-inject META: ...yet the task id is still present (the rest of the envelope is intact)" \
+        "$TID_SIM" "$SIM_CTX"
+
+    # DISCRIMINATOR: the SAME stripped hook, same spawn, still writes the
+    # UNRELATED IMPLEMENTER record correctly — the strip's damage is confined
+    # to spec injection, not a blanket break of the whole hook.
+    assert_eq "spec-inject META DISCRIMINATOR: the unrelated IMPLEMENTER record still posts correctly under the SAME stripped hook" \
+        "1" "$(count_role "$TID_SIM" backend)"
+
+    # RESTORE CONTROL: the SAME bound task state, the SHIPPED hook, re-spawned
+    # — the injection is back.
+    RESTORE_OUT=$(printf '%s' '{"agent_type":"backend"}' | bash "$HOOK")
+    RESTORE_CTX=$(printf '%s' "$RESTORE_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
+    assert_contains "spec-inject META: RESTORE CONTROL — the shipped hook, same task, injects again" \
+        "the flux capacitor must recalibrate before every jump" "$RESTORE_CTX"
+fi
+rm -f "$SI_MUT"
 
 [ "$FAIL" -eq 0 ]

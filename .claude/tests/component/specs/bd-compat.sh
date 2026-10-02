@@ -35,15 +35,30 @@
 #                                     bd-mcp bd_create.js   epic id parses
 #    7. bd create <t> -t task --parent <epic> --json
 #                                     bd-mcp bd_create.js   child id = <epic>.<n> (dotted)
-#    8. bd show <id> --json           qa-gate.sh:348, verify-before-stop.sh:319,
-#                                     epic-gate.sh:69/87/98/112/133, bd-mcp tools
+#    8. bd show <id> --json           qa-gate.sh, verify-before-stop.sh,
+#                                     review-check.sh, subagent-start.sh,
+#                                     bd-github-link.sh, epic-gate.sh, bd-mcp
 #                                                           top-level OBJECT or 1-elem
-#                                                           ARRAY (0.47.1: array);
+#                                                           ARRAY (0.47.1 AND 1.1.2:
+#                                                           array);
 #                                                           .labels string[]; .status;
-#                                                           .notes; .comments[].text;
+#                                                           .notes;
 #                                                           .dependencies[] with
-#                                                           dependency_type/issue_type;
+#                                                           dependency_type/issue_type
+#                                     ^ all of the above are inlined on BOTH versions.
+#    8b. bd show <id> --json --include-comments (|| plain show)
+#                                     every record reader (bd_show_with_comments)
+#                                                           .comments[].text
+#    8c. bd show <id> --json --include-dependents (|| plain show)
+#                                     epic-gate.sh sub_tasks_of, bd-mcp bd_dep.js
 #                                                           .dependents[] (epic side)
+#       NOTE: 8b/8c are the bd 1.1.2 break. Plain `show --json` stopped INLINING
+#       .comments and .dependents there — it returns comment_count /
+#       dependent_count integers instead — so a plain read yields [] and the QA
+#       gate silently sees "no approval record". bd 0.47.x has neither flag and
+#       exits 1 on them, but inlines both arrays. Hence the `hydrated || plain`
+#       chain in production and here: pin the CHAIN, not the leg (same shape as
+#       #12). .dependencies is NOT affected — only the reverse edges are.
 #    9. bd show <id> --json --refs    bd-mcp bd_list.js     exit 0; stdout valid JSON
 #   10. bd label add <id> <label>     qa-gate.sh:362, verify-before-stop.sh:628/786,
 #                                     bd-mcp bd_label.js    exit 0; visible in show .labels
@@ -118,6 +133,63 @@
 #   bd_doc.js's `update <id> --notes <c> --json` (union of #14 + #15).
 #   lessons.sh and current-task.sh make NO bd invocations (verified by
 #   grep at pin time).
+#
+# bd 1.1.2 MIGRATION — every row below was re-pinned, none are knowingly red
+#   (claude-workflow-plugin-vfh, then fkm.1.1)
+#
+#   vfh migrated the COMMENT and reverse-dependency readers (rows 8b/8c) and
+#   left four rows deliberately failing, because their production callers had
+#   not moved yet and re-pinning them green would have silenced a correct
+#   signal. fkm.1.1 migrated those callers, so the rows are now re-pinned to
+#   1.1.2's real behaviour:
+#
+#   #4  create --deps blocks:<id>   bd 1.1.2 still ACCEPTS --deps (it is in
+#                                   `bd create --help`) and records the edge
+#                                   INVERTED: `create D --deps blocks:A` should
+#                                   mean "D is blocked by A" but yields "A is
+#                                   blocked by D". Silent CORRUPTION, not silent
+#                                   loss — and it poisons the correct call
+#                                   afterwards, since `bd dep add D A` is then
+#                                   refused as a cycle. tech-debt.sh and
+#                                   bd-mcp's bd_create.js no longer pass the
+#                                   flag at all and issue an explicit
+#                                   `bd dep add`. The row pins the inversion AND
+#                                   the replacement (#4b, on a clean pair), so a
+#                                   bd that fixes the direction is noticed too.
+#   #17 close a BLOCKED issue       FIXED upstream. 0.47.x exited 0 and changed
+#                                   nothing, which made bd-mcp's bd_close_task
+#                                   claim success for a no-op; 1.1.2 exits 1
+#                                   with "cannot close ...: blocked by open
+#                                   issues [...]". Re-pinned to the honest exit
+#                                   code, so a regression to the silent no-op
+#                                   is caught.
+#   #29 sync                        REMOVED. Pinned as an ABSENCE now: the root
+#                                   command must reject it. The old row pinned
+#                                   "rc 0 or 1, error on stderr", which an
+#                                   unknown-command error satisfied — which is
+#                                   precisely why the removal was survivable and
+#                                   invisible (session-end logged a failure
+#                                   every session while the ledger silently
+#                                   stopped being written).
+#   #30/#31 the flush primitive     `sync --flush-only` and `export --force` are
+#                                   both gone. Plain `bd export -o` replaces
+#                                   them on BOTH supported versions and is now
+#                                   the single pinned primitive, plus #31b
+#                                   pinning that the export is BYTE-DETERMINISTIC
+#                                   — beads-ledger.sh's staleness predicate is a
+#                                   sha256 comparison and would report permanent
+#                                   staleness without it.
+#
+#   Also observed on 1.1.2 and NOT pinned here (no caller depends on them):
+#   `bd init` now runs `git init` and scaffolds CLAUDE.md / AGENTS.md /
+#   .claude/settings.json / .codex/ — it MERGES into an existing settings.json
+#   (adding a `bd prime --hook-json` SessionStart hook) rather than clobbering
+#   it, and appends a sentinel-delimited block to an existing CLAUDE.md. The
+#   component fixtures compensate in lib/fixture.sh's mk_fixture. The derived
+#   issue prefix is also sanitised now (`.` -> `_`), which is why the id
+#   assertions moved to lib/fixture.sh's BD_ID_RE. And `bd sql` is refused in
+#   embedded mode, which is why beads-ledger.sh cannot use a cheap SQL
+#   aggregate as its staleness predicate.
 #
 # FAILURE WORDING CONTRACT
 #   Every mismatch prints:
@@ -226,8 +298,14 @@ production_parent_epic_of() {
 }
 
 production_sub_tasks_of() {
-    # epic-gate.sh:87 sub_tasks_of.
-    bd show "$1" --json 2>/dev/null \
+    # epic-gate.sh sub_tasks_of, transport included. The chain mirrors
+    # epic-gate.sh's bd_show_with_dependents: bd 1.1.2 stopped inlining
+    # .dependents (it returns a dependent_count integer) and needs
+    # --include-dependents; bd 0.47.x has no such flag but inlines them. Pin the
+    # CHAIN, not the leg — same shape as the add_comment pin (#12).
+    { bd show "$1" --json --include-dependents 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true; } \
         | jq -r 'if type == "array" then .[0] else . end
                  | (.dependents // [])
                  | map(select(.dependency_type == "parent-child"))
@@ -336,16 +414,55 @@ TID_E=$(bd create "bd-compat probe echo" -t task -p 2 --json 2>/dev/null | jq -r
 TID_F=$(bd create "bd-compat probe foxtrot" -t task -p 2 --json 2>/dev/null | jq -r '.id // empty' 2>/dev/null || echo "")
 TID_G=$(bd create "bd-compat probe golf" -t task -p 2 --json 2>/dev/null | jq -r '.id // empty' 2>/dev/null || echo "")
 
-# Pin #4: tech-debt.sh's --deps form (new task blocked by the active one).
+# Pin #4: how a dependency actually gets recorded at creation time.
+#
+# RE-PINNED for bd 1.1.2 (fkm.1.1). `bd create --deps blocks:<id>` is still
+# accepted — it is in `bd create --help` — and records the edge BACKWARDS:
+# exit 0, and the BLOCKER ends up depending on the new task. tech-debt.sh and
+# bd-mcp's bd_create.js used to rely on it and now issue an explicit
+# `bd dep add`, so this row pins BOTH halves: the inversion (so a bd that fixes
+# the direction is noticed) and the replacement path production depends on.
+#
+# TYPE-SPECIFIC, and worth stating precisely so nobody widens the blast radius:
+# only `blocks:` inverts. `discovered-from:` and `parent-child:` record the
+# right direction on 1.1.2 (verified live), so `--deps discovered-from:` in the
+# prompts and docs is NOT affected and must not be "fixed".
 TID_D=$(bd create "bd-compat probe debt" -t task -p 2 --deps "blocks:$TID_A" --json 2>/dev/null \
     | jq -r '.id // empty' 2>/dev/null || echo "")
 shape_assert_match "create <title> -t task -p 2 --deps blocks:<id> --json" \
-    "create with --deps returns a parseable id" '^[a-z0-9][a-z0-9-]*$' "$TID_D"
-DEPS_D=$(bd show "$TID_D" --json 2>/dev/null \
-    | jq -r 'if type == "array" then .[0] else . end | (.dependencies // []) | map(.id) | join(",")' 2>/dev/null || echo "")
+    "create with --deps still returns a parseable id (the flag is accepted)" '^[a-z0-9][a-z0-9-]*$' "$TID_D"
+deps_of() {
+    bd show "$1" --json 2>/dev/null \
+        | jq -r 'if type == "array" then .[0] else . end | (.dependencies // []) | map(.id) | join(",")' \
+        2>/dev/null || echo ""
+}
+# THE ACTUAL 1.1.2 BEHAVIOUR: the edge is recorded INVERTED, not dropped.
+# `bd create D --deps blocks:A` should mean "D is blocked by A"; 1.1.2 records
+# "A is blocked by D". So the new task's own .dependencies stays empty while
+# the BLOCKER acquires a dependency on it — silent corruption rather than
+# silent loss, and it also poisons the correct call afterwards: a subsequent
+# `bd dep add D A` is refused with "adding dependency would create a cycle".
+shape_assert_eq "create <title> -t task -p 2 --deps blocks:<id> --json" \
+    "the new task records NO dependency of its own (the flag did not do what it says)" \
+    "" "$(deps_of "$TID_D")"
 shape_assert_contains "create <title> -t task -p 2 --deps blocks:<id> --json" \
-    "--deps blocks:<id> records the dependency (visible in show .dependencies)" \
-    "$TID_A" "$DEPS_D"
+    "THE CORRUPTION — the edge lands INVERTED: the blocker ends up depending on the new task" \
+    "$TID_D" "$(deps_of "$TID_A")"
+
+# Pin #4b: the replacement production actually uses. Run on a CLEAN pair —
+# TID_A/TID_D now carry the inverted edge above, so a dep add between them
+# would be refused as a cycle and would prove nothing about the happy path.
+TID_D2=$(bd create "bd-compat probe debt-clean" -t task -p 2 --json 2>/dev/null | jq -r '.id // empty' 2>/dev/null || echo "")
+TID_D3=$(bd create "bd-compat probe debt-blocker" -t task -p 2 --json 2>/dev/null | jq -r '.id // empty' 2>/dev/null || echo "")
+DEP_ADD_RC=0
+bd dep add "$TID_D2" "$TID_D3" >/dev/null 2>&1 || DEP_ADD_RC=$?
+shape_assert_eq "dep add <dependent> <blocker>" "exits 0" "0" "$DEP_ADD_RC"
+shape_assert_contains "dep add <dependent> <blocker>" \
+    "records the edge in the RIGHT direction (dependent -> blocker) — tech-debt.sh + bd_create.js path" \
+    "$TID_D3" "$(deps_of "$TID_D2")"
+shape_assert_eq "dep add <dependent> <blocker>" \
+    "...and NOT inverted (the blocker gains no dependency) — the control for #4's corruption" \
+    "" "$(deps_of "$TID_D3")"
 
 # ---------------------------------------------------------------------------
 # Phase 2 — show/label/comment/notes pins on TID_A while it is still open
@@ -378,14 +495,34 @@ bd comments add "$TID_A" "$COMMENT_MARKER" >/dev/null 2>&1 \
     || CMT_RC=1
 shape_assert_eq "comments add <id> <text>" \
     "add_comment chain (comments add || comment add) exits 0" "0" "$CMT_RC"
-COMMENTS_JSON=$(bd show "$TID_A" --json 2>/dev/null \
+# The read chain mirrors the production bd_show_with_comments helper (qa-gate.sh,
+# verify-before-stop.sh, review-check.sh, subagent-start.sh, bd-github-link.sh):
+# bd 1.1.2 stopped inlining .comments in `bd show --json` — it returns a
+# comment_count integer and needs --include-comments — while bd 0.47.x rejects
+# that flag ("unknown flag") and inlines .comments already. Pin the CHAIN, not
+# the leg, exactly as pin #12 does for `comments add || comment add`.
+COMMENTS_JSON=$({ bd show "$TID_A" --json --include-comments 2>/dev/null \
+    || bd show "$TID_A" --json 2>/dev/null \
+    || true; } \
     | jq -c 'if type == "array" then .[0] else . end | .comments // []' 2>/dev/null || echo "[]")
-shape_assert_match "show <id> --json" \
+shape_assert_match "show <id> --json --include-comments || show <id> --json" \
     ".comments is a non-empty array after comments add" '^\[.+\]$' "$COMMENTS_JSON"
-shape_assert_contains "show <id> --json" \
+shape_assert_contains "show <id> --json --include-comments || show <id> --json" \
     "comment text round-trips into show .comments" "$COMMENT_MARKER" "$COMMENTS_JSON"
+# The un-hydrated read is pinned too, so a future bd that resumes inlining (or
+# one that drops the flag) is caught rather than silently making the fallback
+# leg dead. On 1.1.2 the plain read yields [] and comment_count carries the
+# truth; on 0.47.x it yields the array. Both are accepted — what is NOT
+# acceptable is the chain above returning nothing.
+COMMENTS_PLAIN=$(bd show "$TID_A" --json 2>/dev/null \
+    | jq -c 'if type == "array" then .[0] else . end
+             | {inlined: ((.comments // []) | length > 0), count: (.comment_count // null)}' \
+    2>/dev/null || echo '{}')
+shape_assert_match "show <id> --json" \
+    "plain show either inlines .comments or reports comment_count (never neither)" \
+    '"inlined":true|"count":[1-9]' "$COMMENTS_PLAIN"
 COMMENT_HAS_TEXT=$(printf '%s' "$COMMENTS_JSON" | jq -r '.[0] | has("text")' 2>/dev/null || echo "false")
-shape_assert_eq "show <id> --json" \
+shape_assert_eq "show <id> --json --include-comments || show <id> --json" \
     "comment objects expose a .text key (bd-mcp bd_list_comments consumer)" \
     "true" "$COMMENT_HAS_TEXT"
 
@@ -477,16 +614,20 @@ shape_assert_contains "show <id> --json" \
 # ---------------------------------------------------------------------------
 # Phase 5 — mutations (#13, #15, #16, #17, #11, #9, #32).
 
-# Pin #17 (quirk half): closing a BLOCKED issue is an exit-0 NO-OP on
-# 0.47.x. bd-mcp's bd_close_task reports success from the exit code alone,
-# so production behavior depends on this exact contract. If a future bd
-# flips this to a non-zero exit, bd-mcp starts surfacing errors where it
-# previously claimed success — we want to know.
+# Pin #17 (blocked-close half): RE-PINNED for bd 1.1.2 (fkm.1.1).
+#
+# 0.47.x exited 0, printed "cannot close" and changed NOTHING. bd-mcp's
+# bd_close_task reports success from the exit code alone, so that quirk made it
+# claim success for a no-op — which is why the old row pinned exit 0 and called
+# it load-bearing. 1.1.2 FIXED it: the close exits 1 with
+# "cannot close <id>: blocked by open issues [...] (use --force to override)".
+# bd_close_task therefore became correct for free. The row now pins the honest
+# exit code, so a regression back to the silent no-op is caught.
 BLOCKED_CLOSE_OUT=$(bd close "$TID_C" -r "bd-compat blocked close probe" --json 2>&1)
 BLOCKED_CLOSE_RC=$?
 shape_assert_eq "close <id> -r <reason> --json" \
-    "QUIRK: closing a blocked issue exits 0 (bd-mcp tolerates the no-op)" \
-    "0" "$BLOCKED_CLOSE_RC"
+    "closing a BLOCKED issue exits NON-ZERO (1.1.2 fixed the 0.47.x silent no-op)" \
+    "1" "$BLOCKED_CLOSE_RC"
 shape_assert_contains "close <id> -r <reason> --json" \
     "QUIRK: blocked close prints the cannot-close notice" \
     "cannot close" "$BLOCKED_CLOSE_OUT"
@@ -578,55 +719,85 @@ shape_assert_eq "doctor --quiet" \
 # Phase 7 — sync / flush / export pins (#29, #30, #31). These are the
 # regression anchors for the two real capture bugs in the header.
 
-# Pin #29: session-end.sh runs `bd sync` and, on failure, logs the FIRST
-# LINE OF STDERR. The sandbox has no git remote, so full sync may
-# legitimately fail — the pinned contract is: rc is 0 or 1 (the subcommand
-# exists; no usage error), and when it fails the error text is on stderr.
-SYNC_ERR_FILE="$FIXTURE/bdcompat/sync-stderr.txt"
+# Pin #29: `bd sync` is GONE in bd 1.1.2, and NOTHING may still call it.
+#
+# RE-PINNED (fkm.1.1). This row used to pin session-end.sh's `bd sync`
+# invocation ("rc 0 or 1; error text on stderr"). That contract was satisfied
+# by an unknown-command error, which is exactly why the removal was survivable
+# but invisible: session-end logged a failure every session and the ledger
+# silently stopped being written. Every caller has been migrated to
+# `bd export -o`, so what is worth pinning now is the ABSENCE — a bd that
+# resurrects `sync` would let the old call sites creep back.
 SYNC_RC=0
-bd sync >/dev/null 2>"$SYNC_ERR_FILE" || SYNC_RC=$?
-shape_assert_match "sync" \
-    "terminates with rc 0 or 1 (subcommand exists; session-end.sh tolerates failure)" \
-    '^[01]$' "$SYNC_RC"
-if [ "$SYNC_RC" -ne 0 ]; then
-    shape_assert_eq "sync" \
-        "on failure the error text lands on stderr (session-end.sh logs its first line)" \
-        "0" "$([ -s "$SYNC_ERR_FILE" ] && echo 0 || echo 1)"
-fi
+bd sync >/dev/null 2>&1 || SYNC_RC=$?
+shape_assert_match "sync (REMOVED in 1.1.2)" \
+    "the root command rejects it — no caller may rely on bd sync" \
+    '^[1-9][0-9]*$' "$SYNC_RC"
 
-# Pin #30: the beadsCapture.ts daemon-safe flush. New dirty row first, then
-# the EXACT production invocation: env BD_NO_DAEMON=1 against the real
-# binary (not the fixture wrapper — the env var itself is under test).
+# Pin #30/#31: the ledger-write primitive. session-end.sh no longer writes the
+# ledger at all (R4-F1 removed the automatic write; it runs `beads-ledger.sh
+# check`, which is read-only), so the live consumers of this primitive are the
+# e2e harness (beadsCapture.ts) and the OPERATOR path — `beads-ledger.sh
+# export/reconcile --apply`. Still pinned here because that operator path is
+# the only thing that writes the ledger now, which makes it more load-bearing
+# than when a hook did it, not less.
+#
+# RE-PINNED (fkm.1.1). Was `BD_NO_DAEMON=1 bd sync --flush-only` with a
+# `bd export --force -o` fallback; 1.1.2 removed the subcommand AND the flag.
+# Plain `bd export -o` is the primitive on BOTH supported bd versions —
+# measured on 0.47.1, where it recreates a deleted target and picks up a
+# subsequently-created issue, so the hash short-circuit that motivated
+# `--force` belonged to `sync --flush-only`, not to `export`.
+#
+# BD_NO_DAEMON=1 is still passed because that is the exact production
+# invocation: inert on 1.1.x (no daemon exists), meaningful on 0.47.x.
 TID_H=$(bd create "bd-compat probe hotel" -t task -p 2 --json 2>/dev/null | jq -r '.id // empty' 2>/dev/null || echo "")
-FLUSH_RC=0
-BD_NO_DAEMON=1 "$REAL_BD" sync --flush-only >/dev/null 2>&1 || FLUSH_RC=$?
-shape_assert_eq "BD_NO_DAEMON=1 sync --flush-only" "exits 0" "0" "$FLUSH_RC"
-shape_assert_eq "BD_NO_DAEMON=1 sync --flush-only" \
-    "materializes .beads/issues.jsonl (366.5 regression: flush must produce the file)" \
-    "0" "$([ -f "$SANDBOX/.beads/issues.jsonl" ] && echo 0 || echo 1)"
-shape_assert_eq "BD_NO_DAEMON=1 sync --flush-only" \
-    "flushed file contains the freshly created issue (daemon-race regression)" \
-    "0" "$(grep -q "$TID_H" "$SANDBOX/.beads/issues.jsonl" 2>/dev/null && echo 0 || echo 1)"
-
-# Pin #31: the 366.5 fallback primitive. `bd export --force -o` must
-# rewrite issues.jsonl from the DB even when the file is missing — this is
-# what beadsCapture.ts relies on when flush-only short-circuits on a
-# metadata hash match.
 rm -f "$SANDBOX/.beads/issues.jsonl"
 EXPORT_RC=0
-BD_NO_DAEMON=1 "$REAL_BD" export --force -o "$SANDBOX/.beads/issues.jsonl" >/dev/null 2>&1 || EXPORT_RC=$?
-shape_assert_eq "BD_NO_DAEMON=1 export --force -o .beads/issues.jsonl" \
-    "exits 0" "0" "$EXPORT_RC"
-shape_assert_eq "BD_NO_DAEMON=1 export --force -o .beads/issues.jsonl" \
-    "rewrites issues.jsonl after deletion (366.5 fallback primitive)" \
+BD_NO_DAEMON=1 "$REAL_BD" export -o "$SANDBOX/.beads/issues.jsonl" >/dev/null 2>&1 || EXPORT_RC=$?
+shape_assert_eq "BD_NO_DAEMON=1 export -o .beads/issues.jsonl" "exits 0" "0" "$EXPORT_RC"
+shape_assert_eq "BD_NO_DAEMON=1 export -o .beads/issues.jsonl" \
+    "rewrites issues.jsonl after deletion (366.5 fallback primitive, new spelling)" \
     "0" "$([ -f "$SANDBOX/.beads/issues.jsonl" ] && echo 0 || echo 1)"
+shape_assert_eq "BD_NO_DAEMON=1 export -o .beads/issues.jsonl" \
+    "the export contains the freshly created issue (daemon-race regression)" \
+    "0" "$(grep -q "$TID_H" "$SANDBOX/.beads/issues.jsonl" 2>/dev/null && echo 0 || echo 1)"
 EXPORTED_IDS=$(grep -c '"id":' "$SANDBOX/.beads/issues.jsonl" 2>/dev/null || echo 0)
-shape_assert_match "BD_NO_DAEMON=1 export --force -o .beads/issues.jsonl" \
-    "exported file contains all 10 sandbox issues (full DB materialization)" \
+shape_assert_match "BD_NO_DAEMON=1 export -o .beads/issues.jsonl" \
+    "exported file contains all sandbox issues (full DB materialization)" \
     '^(1[0-9]|[2-9][0-9])$' "$EXPORTED_IDS"
-shape_assert_eq "BD_NO_DAEMON=1 export --force -o .beads/issues.jsonl" \
+shape_assert_eq "BD_NO_DAEMON=1 export -o .beads/issues.jsonl" \
     "exported file contains the dotted child id (hierarchy survives export)" \
     "0" "$(grep -q "$CHILD_ID" "$SANDBOX/.beads/issues.jsonl" 2>/dev/null && echo 0 || echo 1)"
+# Pin #31b: DETERMINISM. beads-ledger.sh's divergence predicate compares the
+# sha256 of a fresh export against the on-disk ledger, so a non-deterministic
+# export would make every session report a divergent ledger forever. Pinned
+# here rather than left as an assumption in that script's header.
+#
+# The hash helper is the same TWO-BRANCH idiom beads-ledger.sh and
+# impact-report.sh use (shasum on macOS, sha256sum on Linux). It was
+# shasum-only, which on a sha256sum-only host left BOTH values empty and made
+# this pin compare "" to "" — passing vacuously on exactly the platform where
+# nobody would notice. The emptiness is asserted separately so the comparison
+# below can never be satisfied by two absent hashes.
+bdcompat_sha256() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    else
+        printf ''
+    fi
+}
+EXPORT_SHA_1=$(bdcompat_sha256 "$SANDBOX/.beads/issues.jsonl")
+BD_NO_DAEMON=1 "$REAL_BD" export -o "$SANDBOX/.beads/issues.jsonl" >/dev/null 2>&1 || true
+EXPORT_SHA_2=$(bdcompat_sha256 "$SANDBOX/.beads/issues.jsonl")
+shape_assert_match "export -o .beads/issues.jsonl" \
+    "a sha256 tool is available, so the determinism pin below is not vacuous" \
+    '^[0-9a-f]{64}$' "$EXPORT_SHA_1"
+shape_assert_eq "export -o .beads/issues.jsonl" \
+    "is BYTE-DETERMINISTIC across runs (beads-ledger.sh's hash predicate depends on it)" \
+    "$EXPORT_SHA_1" "$EXPORT_SHA_2"
 
 # ---------------------------------------------------------------------------
 # Phase 8 — META-TEST: prove the pins bite. A fake bd (PATH shim) returns

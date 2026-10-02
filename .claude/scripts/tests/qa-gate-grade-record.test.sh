@@ -29,9 +29,13 @@
 #        is preserved as audit trail.
 #   5. status output exposes rubric state.
 #   6. Every rubric file under .claude/rubrics/ declares the version the
-#      per-file expectation table names (default=2 since v4.1's C8; the four
-#      overlays stay at 1), plus a META-TEST that a stale-version fixture is
-#      flagged by the same extractor.
+#      per-file expectation table names (default=3 since v5.0.0's C9; the four
+#      overlays stay at 1; the standalone design.md rubric — v5.0.0 Phase D2
+#      Part A, claude-workflow-plugin-fkm.4, no extends: — is 1 too), plus a
+#      META-TEST that a stale-version fixture is flagged by the same
+#      extractor, plus design.md's own structural checks: no extends:,
+#      name: design, and exactly the eight DS1-DS8 criterion headings (with
+#      its own META-TEST proving a 7-heading fixture is caught).
 #   7. META-TEST: a stubbed qa-gate.sh with the satisfied-branch label
 #      calls removed asserts the rubric-satisfied test FAILS — proving
 #      the assertion is sensitive to the script's label-flip behaviour,
@@ -39,7 +43,8 @@
 #
 # Conventions mirror .claude/scripts/tests/qa-gate-choose.test.sh —
 # plain bash, `set -u`, assert helpers, trailing summary, tempdir
-# fixture with a bd --no-daemon shim.
+# fixture with a pass-through bd shim (it carried --no-daemon until bd 1.1.2
+# removed the flag along with the daemon).
 #
 # Exit codes:
 #   0  every assertion passed
@@ -139,20 +144,20 @@ mkdir -p "$FIXTURE/.claude/scripts" "$FIXTURE/.claude/.qa-tracking" \
 cp "$PLUGIN_DIR/.claude/scripts/"*.sh "$FIXTURE/.claude/scripts/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
+# No BD_SHIM_ONLY skip arm any more (a9hh): CI installs the real bd, and a
+# bd-less environment is a hard failure everywhere.
 if ! command -v bd >/dev/null 2>&1; then
-    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
-        echo "SKIPPED: qa-gate-grade-record.test.sh (bd not available; CI env BD_SHIM_ONLY=1)"
-        exit 0
-    fi
     echo "bd CLI not on PATH — qa-gate-grade-record tests require Beads."
     exit 1
 fi
 
-# bd --no-daemon wrapper so the tempdir DB doesn't race the daemon.
+# bd wrapper: a pass-through so the fixture has one PATH-controlled bd. It
+# injected --no-daemon until bd 1.1.2 removed the flag (and the daemon: 1.1.x
+# runs an in-process embedded Dolt engine, so there is no tempdir race left).
 REAL_BD=$(command -v bd)
 cat > "$FIXTURE/bin/bd" <<EOF
 #!/bin/bash
-exec ${REAL_BD} --no-daemon "\$@"
+exec ${REAL_BD} "\$@"
 EOF
 chmod +x "$FIXTURE/bin/bd"
 export PATH="$FIXTURE/bin:$PATH"
@@ -181,13 +186,164 @@ seed_review_records() {
     bd comments add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || bd comment add "$tid" "IMPLEMENTER: role=$role task=$tid at $ts" >/dev/null 2>&1 \
         || return 1
+
+    # v5 D2 Part B (claude-workflow-plugin-fkm.4) MIGRATION: approve now ALSO
+    # refuses (exit 2, no_design_attempted) without a satisfied, independent
+    # DESIGN-REVIEW verdict, unless --no-design. Section 6's subject is the
+    # RUBRIC warning approve emits, which is only observable on an approve
+    # that SUCCEEDS — same reasoning the P7 completion-record migration
+    # states just below — so the design precondition has to be satisfied
+    # here too, seeded through the real writers.
+    local design_sanitized design_art design_hash
+    design_sanitized=$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')
+    mkdir -p "$FIXTURE/docs/specs" 2>/dev/null || true
+    design_art="$FIXTURE/docs/specs/$design_sanitized.md"
+    cat > "$design_art" <<DESIGNDOC
+# Design — $tid
+
+## Problem
+Seeded fixture design (qa-gate-grade-record harness only).
+
+## Approaches considered
+1. A second seed convention — rejected: no reuse to justify one.
+2. This minimal artifact — chosen: matches every other seed helper here.
+
+## Chosen approach
+Seed a schema-valid design so approve's design-satisfied refusal does not
+block a spec that is not testing it.
+
+## Units
+See the machine block.
+
+## Global constraints
+None.
+
+## Out of scope
+Everything this fixture does not seed.
+
+## Verification plan
+make test
+
+## Revision log
+- v1 seeded by the qa-gate-grade-record fixture.
+
+<!-- DESIGN-UNITS BEGIN -->
+\`\`\`json
+{
+  "contract_version": "1",
+  "task_id": "$tid",
+  "designer_identity": "designer",
+  "units": [
+    {
+      "unit_id": "U1",
+      "role": "$role",
+      "goal": "seeded unit",
+      "acceptance": [ { "id": "AC1", "text": "seeded fixture: nothing asserted" } ],
+      "files": [ ".claude/scripts/qa-gate.sh" ],
+      "verification": "make test",
+      "depends_on": []
+    }
+  ]
+}
+\`\`\`
+<!-- DESIGN-UNITS END -->
+DESIGNDOC
+    # v5 D3 (claude-workflow-plugin-fkm.5): design-record now refuses
+    # grilling_record_missing without a GRILLING v1 record. This spec-local
+    # helper seeds a minimal design ONLY so approve's design-satisfied
+    # refusal does not block a spec that is not testing it (its own comment
+    # above) — bypass rather than seed a real grilling record, since this
+    # fixture never copies the vendor tree grilling-record would need to
+    # hash.
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-record "$tid" --no-grilling "qa-gate-grade-record.test.sh: seeding design-satisfied, not testing grilling" \
+        >/dev/null 2>&1 || return 1
+    design_hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/workflow-manifest.sh" hash-file "$design_art" 2>/dev/null) || design_hash=""
+    if [ -z "$design_hash" ]; then return 1; fi
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        design-review-record "$tid" --design-hash "$design_hash" \
+        <<< '{"verdict":"satisfied","criterion_results":[{"criterion":"DS1","pass":true,"justification":"seeded fixture"}],"required_fixes":[],"iteration":1,"rubric_version":"1","reviewer_identity":"design-claude"}' \
+        >/dev/null 2>&1 || return 1
+
+    # claude-workflow-plugin-wob2 (L2): put a KNOWN, task-specific path into
+    # the tracker BEFORE computing the hash this review pins itself to, not
+    # just after (as the comment below this block already does once
+    # review-record has written a new tracked file). Without this, the
+    # tracker is still absent-or-empty at this exact point (nothing in this
+    # fixture populates changed-files.txt directly), so impact-report.sh
+    # --hash-only legitimately answers the SHA-256 empty-content digest — a
+    # well-formed 64-hex string that review-check.sh validate-artifact now
+    # refuses outright as reviewed_hash_unusable (a degradation sentinel
+    # that would compare equal to itself forever; see that check's own
+    # header).
+    #
+    # A DIRECT APPEND, NOT reconcile-tracker's git-status discovery: measured
+    # (this task's own reproduction) that `reconcile-tracker` alone is not
+    # reliable across this file's MULTIPLE seed_review_records calls (three,
+    # for TID_E2/TID_AW/TID_AS in the same fixture, no commits ever made) —
+    # the FIRST call's design doc makes `docs/` an untracked DIRECTORY, `git
+    # status --porcelain` then collapses it to one opaque `?? docs/` line,
+    # and once a later baseline capture records that line, EVERY path under
+    # docs/ — including files that do not exist yet — reads as
+    # "already-baselined, pre-existing dirt" forever after: reconcile then
+    # finds nothing new to add and change_set_hash silently reverts to the
+    # empty-set digest for the SECOND and THIRD calls, exactly the input
+    # this check now refuses. Appending this task's own design_art path
+    # directly sidesteps that git/baseline granularity question entirely —
+    # it is the same direct-write shape run_cycle_pre_approve in
+    # review-artifact-durability.sh already uses for identical reasons.
+    mkdir -p "$FIXTURE/.claude/.qa-tracking" 2>/dev/null || true
+    printf '%s\n' "$design_art" >> "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
     hash=$(CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" --hash-only 2>/dev/null || echo "")
     [ -z "$hash" ] && hash="unverified"
     art="$FIXTURE/.claude/.qa-tracking/review-artifact-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json"
-    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
+    printf '{"contract_version":"1","task_id":"%s","reviewer_identity":"%s","reviewer_model":"seeded-fixture","reviewer_pin":"seeded-fixture","reviewed_hash":"%s","risk_threshold":"high","stop_condition":"seeded fixture: acceptance criteria traced","verdict":"approve","findings":[],"iterations":1,"stopped_by":"verdict"}\n' \
         "$tid" "$reviewer" "$hash" > "$art"
+    # claude-workflow-plugin-rqer (v5 D2): --file now asserts the CANONICAL
+    # derived path; piped via stdin instead.
     CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
-        review-record "$tid" --file "$art" >/dev/null 2>&1
+        review-record "$tid" < "$art" >/dev/null 2>&1 || return 1
+    # claude-workflow-plugin-rqer (v5 D2): the artifact just written now lives
+    # at a TRACKED path (docs/reviews/), so this fixture's git-visible dirt
+    # includes it from this instant — but changed-files.txt does not know that
+    # yet. If a caller lets this function return with the tracker still
+    # absent-or-empty, the NEXT `approve` reconciles from a blank tracker via
+    # `git status`, and 94d.1's change_set_reconstructed refusal fires
+    # (measured: it names this fixture's own uncommitted `.claude/scripts/`
+    # and `bin/` as dropped-as-baselined, because `bd create` auto-inits git
+    # here and nothing in this fixture ever commits it). Append the artifact's
+    # own path DIRECTLY (claude-workflow-plugin-wob2 — same reason and same
+    # shape as the design_art append above: reconcile-tracker's git-status
+    # discovery silently finds nothing once `docs/` has collapsed into one
+    # opaque baselined directory line, which is exactly the state review-record
+    # just created for the FIRST time on THIS task), then reconcile (for
+    # anything else genuinely git-dirty) and regenerate the impact report so
+    # approve's freshness check sees the WITH-artifact set rather than
+    # refusing on staleness a moment later.
+    if [ -f "$FIXTURE/.claude/scripts/impact-report.sh" ]; then
+        printf '%s\n' "$FIXTURE/docs/reviews/$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_')-r1.json" \
+            >> "$FIXTURE/.claude/.qa-tracking/changed-files.txt"
+        CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+            reconcile-tracker >/dev/null 2>&1 || true
+        CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/impact-report.sh" \
+            "$tid" >/dev/null 2>&1 || true
+    fi
+    # P7 (claude-workflow-plugin-qbhw) MIGRATION: approve additionally REFUSES
+    # (exit 2, completion_record_missing) without a validated COMPLETION v1
+    # record. Section 6's subject is the RUBRIC warning approve emits, which is
+    # only observable on an approve that SUCCEEDS — so the completion
+    # precondition has to be satisfied here rather than bypassed, or the
+    # observations under test never get written. Seeded through the REAL writer.
+    #
+    # files_changed is [] because this fixture changes no files: the accurate
+    # declaration, and it keeps approve's completeness cross-check (fkm.1.20)
+    # from adding a WARNING to the very observations section 6 asserts on.
+    local pay
+    pay="$FIXTURE/.claude/.qa-tracking/completion-draft-$(printf '%s' "$tid" | tr -c 'A-Za-z0-9._-' '_').json"
+    printf '{"task_id":"%s","role":"%s","model":"seeded","pin":"seeded","files_changed":[],"tests_added":[],"decisions":["seeded fixture"],"blockers":[],"llm_observations":"seeded by the qa-gate-grade-record fixture","context_coverage":"seeded fixture: nothing read, nothing omitted, no unknown","unit_id":"","design_hash":"","green_before":"none","green_after":"none","criteria_tests":{}}\n' \
+        "$tid" "$role" > "$pay"
+    CLAUDE_PROJECT_DIR="$FIXTURE" bash "$FIXTURE/.claude/scripts/qa-gate.sh" \
+        completion-record "$tid" --file "$pay" >/dev/null 2>&1
 }
 
 # Helper: read the current labels for a task as a comma-joined string.
@@ -199,9 +355,18 @@ labels_for() {
 }
 
 # Helper: count comments matching a regex on a task.
+# Same version-tolerant reader the production scripts use: bd 1.1.2 returns
+# only a comment_count on a plain `show --json` and needs --include-comments;
+# bd 0.47.x rejects that flag but inlines .comments. Pin the chain, not the leg.
+bd_show_with_comments() {
+    bd show "$1" --json --include-comments 2>/dev/null \
+        || bd show "$1" --json 2>/dev/null \
+        || true
+}
+
 comment_count_matching() {
     local tid="$1" pat="$2"
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r --arg pat "$pat" \
             'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test($pat))) | length' \
         2>/dev/null || echo "0"
@@ -210,7 +375,7 @@ comment_count_matching() {
 # Helper: pull the first comment matching a regex (or empty).
 comment_first_matching() {
     local tid="$1" pat="$2"
-    bd show "$tid" --json 2>/dev/null \
+    bd_show_with_comments "$tid" \
         | jq -r --arg pat "$pat" \
             'if type == "array" then .[0].comments else .comments end // [] | map(select(.text | test($pat))) | .[0].text // ""' \
         2>/dev/null || echo ""
@@ -535,17 +700,50 @@ assert_not_contains "approve-warn: qa-gate-entered removed" \
 TID_AS=$(bd create "approve-with-satisfied audit-trail test" -t task -p 1 --json | jq -r '.id')
 bash "$QG" enter "$TID_AS" >/dev/null
 bd label add "$TID_AS" qa-pending >/dev/null 2>&1
+
+# claude-workflow-plugin-wob2 (L2): seed BEFORE grading, not after. "The happy
+# path" this scenario names means "nothing changed since grading" — that is
+# only TRUE if the change set grade-record binds to is the SAME one approve
+# later sees. seed_review_records populates changed-files.txt (design_art,
+# then the review artifact) and regenerates the persisted impact report as
+# its last step; grade-record with no --graded-hash falls back to "live
+# recompute, corroborated by the persisted impact report" (cmd_grade_record's
+# own comment) — so calling it AFTER seeding means both the live and the
+# persisted hash already reflect the fully-seeded tracker, and grade-record
+# binds to that same real hash rather than to the fixture's pre-seed empty
+# one. Calling it BEFORE (the previous order) bound the RUBRIC record to the
+# empty-set hash honestly captured at that instant, then seeding added two
+# more tracked paths afterward — a REAL "the change set moved after grading"
+# event, which is exactly what the mismatch warning below exists to catch;
+# it was firing correctly, the fixture's ordering was what made "the happy
+# path" not actually happy.
+seed_review_records "$TID_AS"   # V3 (jio.1) MIGRATION
 # Record a satisfied verdict to set rubric-satisfied.
 VERDICT=$(build_verdict "satisfied" 1 "v1")
 printf '%s' "$VERDICT" | bash "$QG" grade-record "$TID_AS" >/dev/null
 
-seed_review_records "$TID_AS"   # V3 (jio.1) MIGRATION
 OUT=$(bash "$QG" approve "$TID_AS" "All criteria passed per RUBRIC v1 iteration 1.")
 STATUS=$(printf '%s' "$OUT" | jq -r '.status')
 assert_eq "approve-sat: status=approved" "approved" "$STATUS"
 OBS=$(printf '%s' "$OUT" | jq -r '.observations')
-assert_not_contains "approve-sat: observations DO NOT contain WARNING" \
-    "WARNING" "$OBS"
+# claude-workflow-plugin-wob2 (L2): a bare "no WARNING at all" check is no
+# longer correct to ask for here. review-record's own reviewed_hash is
+# necessarily computed BEFORE its artifact file exists — the artifact
+# cannot be hashed into a change set that does not yet contain it — so once
+# that artifact's own path lands in the tracker (seed_review_records' own
+# post-write reconcile, same as production's review-record + reconcile
+# flow), approve's D6 staleness note ALWAYS fires for a genuine review:
+# "the review artifact recorded reviewed_hash=X but this approval binds
+# change_set_hash=Y" is not a defect, it is the audited-never-blocking
+# behaviour cmd_approve's own D6 comment documents. What THIS scenario
+# actually asserts — the one thing that must NOT reappear once grading and
+# seeding are correctly ordered (see the comment above seed_review_records's
+# call, this section) — is the RUBRIC mismatch warning specifically, so
+# check for its exact, distinguishing text rather than the word "WARNING"
+# in general, which the unrelated and expected review-staleness note also
+# contains.
+assert_not_contains "approve-sat: observations do not contain the RUBRIC mismatch warning" \
+    "rubric-satisfied is set, but the satisfied verdict binds a DIFFERENT change set" "$OBS"
 assert_contains "approve-sat: observations cite preserved audit trail" \
     "rubric-satisfied preserved" "$OBS"
 
@@ -587,17 +785,20 @@ echo ""
 echo "=== Section 8: structural sanity of .claude/rubrics/ files ==="
 
 RUBRICS_DIR="$PLUGIN_DIR/.claude/rubrics"
-EXPECTED_RUBRICS=(default backend frontend devops bugfix)
+EXPECTED_RUBRICS=(default backend frontend devops bugfix design)
 
 # Per-file EXPECTED version. Through v4.0 this loop grepped one hardcoded
 # literal for all five files, which quietly asserted "every rubric is on the
 # same version" — a property nobody wanted and which went red the first time
 # a single rubric was revised on its own (v4.1 / C2 added criterion C8 for
-# `context_coverage` to default.md and bumped it to 2; the four overlays were
+# `context_coverage` to default.md and bumped it to 2, then v5.0.0 added C9
+# (accuracy is symmetric) and bumped it to 3; the four overlays were
 # untouched and stay at 1). A table makes each rubric's version a deliberate,
 # independently-editable fact, and a NEW rubric file that nobody adds here
-# fails rather than inheriting someone else's number.
-RUBRIC_VERSIONS="default=2 backend=1 frontend=1 devops=1 bugfix=1"
+# fails rather than inheriting someone else's number. `design=1` (v5.0.0
+# Phase D2 Part A) joined the same way: standalone, not an overlay, but its
+# version is exactly as deliberate a fact as any of the other five.
+RUBRIC_VERSIONS="default=3 backend=1 frontend=1 devops=1 bugfix=1 design=1"
 
 # expected_rubric_version <name> — the table's value; exit 1 (empty output)
 # when the rubric is absent from the table.
@@ -643,7 +844,7 @@ done
 
 # META-TEST: the version check is only worth having if a WRONG version fails
 # it. Feed the identical extractor a fixture rubric that declares version 1
-# where the table says default is 2, and confirm the comparison disagrees.
+# where the table says default is 3, and confirm the comparison disagrees.
 # Anchored on the frontmatter text, never on a line number.
 META_RUBRIC=$(mktemp -t rubric-version-meta.XXXXXX)
 cat > "$META_RUBRIC" <<'FIXTURE'
@@ -659,7 +860,7 @@ meta_want=$(expected_rubric_version default) || meta_want=""
 # 1. the mutation landed: the fixture really does say 1.
 assert_eq "META: stale fixture rubric really declares version 1" "1" "$meta_got"
 # 2. and the table really expects something else, so the check fires.
-assert_eq "META: the table expects 2 for default, so the stale fixture is flagged" \
+assert_eq "META: the table expects 3 for default, so the stale fixture is flagged" \
     "no" "$([ "$meta_got" = "$meta_want" ] && echo yes || echo no)"
 # 3. control: the SHIPPED default.md agrees with the table (the check is not
 #    simply always-disagreeing).
@@ -688,6 +889,63 @@ else
     FAILED_TESTS+=("rubric bugfix.md: missing applies_to: bug")
     printf '  FAIL: rubric bugfix.md: missing "applies_to: bug"\n'
 fi
+
+# design.md (v5.0.0 Phase D2 Part A, claude-workflow-plugin-fkm.4) is
+# STANDALONE — the opposite assertion from the extends: loop above. Pulling
+# code-review criteria into a design review is a category error, so this
+# rubric must NOT declare extends: default the way backend/frontend/devops
+# do.
+DESIGN_RUBRIC="$RUBRICS_DIR/design.md"
+if [ -f "$DESIGN_RUBRIC" ] && ! head -10 "$DESIGN_RUBRIC" | grep -qE '^extends:'; then
+    PASS=$((PASS + 1))
+    printf '  PASS: rubric design.md: does NOT declare extends: (standalone)\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("rubric design.md: unexpectedly declares extends: (should be standalone)")
+    printf '  FAIL: rubric design.md: unexpectedly declares extends: (should be standalone)\n'
+fi
+
+# design.md declares name: design (no other rubric's name: is asserted here
+# individually — filename and `name:` never drifted apart for the other
+# five, but design.md is new enough that nothing else in the tree checks it
+# yet, so it is worth asserting explicitly rather than trusting the loop
+# above, which only checks version).
+if head -10 "$DESIGN_RUBRIC" | grep -qE '^name:[[:space:]]*design[[:space:]]*$'; then
+    PASS=$((PASS + 1))
+    printf '  PASS: rubric design.md: name: design declared\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("rubric design.md: missing name: design")
+    printf '  FAIL: rubric design.md: missing "name: design"\n'
+fi
+
+# design.md declares exactly the eight DS1-DS8 criteria (AC 4.2 of
+# claude-workflow-plugin-fkm.4). Anchored on the heading grammar
+# ("### DS<n>."), never on a line count, the same anchoring convention this
+# section already uses for `version:`/`extends:`/`applies_to:`.
+ds_heading_count=$(grep -cE '^### DS[1-8]\.' "$DESIGN_RUBRIC")
+assert_eq "rubric design.md: exactly 8 DS1-DS8 criterion headings" "8" "$ds_heading_count"
+
+# META-TEST: the DS-count check is only worth having if a design.md with one
+# criterion missing is flagged. Built the same way the version META-TEST
+# above builds its stale fixture — a throwaway file, never the shipped one.
+META_DS_RUBRIC=$(mktemp -t design-rubric-ds-meta.XXXXXX)
+{
+    printf -- '---\nversion: 1\nname: design\n---\n\n# Design rubric (deliberately incomplete fixture, not shipped)\n\n'
+    for n in 1 2 3 4 5 6 7; do
+        printf '### DS%d. Placeholder criterion %d.\n\nBody text.\n\n' "$n" "$n"
+    done
+} > "$META_DS_RUBRIC"
+meta_ds_count=$(grep -cE '^### DS[1-8]\.' "$META_DS_RUBRIC")
+# 1. the mutation landed: the fixture really declares 7, not 8.
+assert_eq "META: 7-criterion fixture really declares 7 DS headings" "7" "$meta_ds_count"
+# 2. the check disagrees with the fixture (the assertion above WOULD fail).
+assert_eq "META: the count check would flag the 7-criterion fixture" "no" \
+    "$([ "$meta_ds_count" = "8" ] && echo yes || echo no)"
+# 3. control: the SHIPPED design.md still declares all 8.
+assert_eq "META: control — shipped design.md still declares all 8" "yes" \
+    "$([ "$(grep -cE '^### DS[1-8]\.' "$DESIGN_RUBRIC")" = "8" ] && echo yes || echo no)"
+rm -f "$META_DS_RUBRIC"
 
 # Rubric-config has the iteration_cap key.
 RUBRIC_CONFIG="$PLUGIN_DIR/.claude/rubric-config"
@@ -784,7 +1042,7 @@ fi
 mkdir -p "$STUB_DIR/bin"
 cat > "$STUB_DIR/bin/bd" <<EOF
 #!/bin/bash
-exec ${REAL_BD} --no-daemon "\$@"
+exec ${REAL_BD} "\$@"
 EOF
 chmod +x "$STUB_DIR/bin/bd"
 

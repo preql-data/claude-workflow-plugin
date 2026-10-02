@@ -30,11 +30,57 @@ set -e
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 OVERRIDE_DIR="$PROJECT_DIR/.claude"
 
+# READ-OVERRIDE-FIX BEGIN (claude-workflow-plugin-yzo9)
+#
+# i8cx shape 1: a bare pipeline as a function's return value. `[ -s "$f" ]`
+# above proves the file EXISTS and is non-empty; it proves nothing about
+# whether it can actually be READ. This function's body used to be exactly
+# the pipeline below with no capture at all -- its own exit status, and so
+# the exit status this function returned to its caller, was `sed`'s alone
+# (this file carries no `set -o pipefail`, deliberately -- see the scoped-only
+# convention below). A `head` that fails to read $f -- permission denied, an
+# I/O error, or, reproduced directly, a `head` on PATH that exits nonzero
+# regardless of input -- hands `tr`/`sed` a genuinely empty stdin, and `sed`
+# over an empty stream is not an error: it exits 0 having printed nothing.
+# Measured at 2eced52 with a `head` shim exiting 9: rc=0, value=`''`,
+# INDISTINGUISHABLE from the healthy empty-file-not-present case (`[ -s ]`
+# returning 1) except that THIS one still reports success.
+#
+# The caller (`if v=$(read_override "test-cmd"); then TEST_CMD="$v"; fi`)
+# reads that as "override read, value is empty" and OVERWRITES an already
+# auto-detected TEST_CMD with the empty string -- silently disabling
+# verification, since verify-before-stop.sh's dispatch is `[ -n "$TEST_CMD" ]`
+# and an empty TEST_CMD runs nothing. That is a materially worse outcome than
+# "no override" (which leaves TEST_CMD at its auto-detected value untouched),
+# and it is indistinguishable from success at every layer above this
+# function -- until this fix, nothing downstream could ever tell the two
+# apart.
+#
+# THE FIX: capture the pipeline's real exit status via a SCOPED
+# `set -o pipefail` (subshell-local to this one command substitution --
+# matches the epic-gate.sh ~:2053 template; this file gets no file-wide
+# pipefail, per the same house rule that template documents: measured traps
+# include `( set -o pipefail; printf '' | grep -c . )` -> rc 1 on a healthy
+# zero-match case, and `seq ... | head -1` -> rc 141 from SIGPIPE when a
+# bounded consumer cuts an unbounded producer short. Neither trap applies
+# here -- `head -1` is the UPSTREAM, bounded stage, reading a tiny one-line
+# override file to natural EOF, never cut short by `tr`/`sed` downstream --
+# but the scope stays local to this call regardless, so a future stage added
+# to this pipeline does not inherit a file-wide setting nobody re-audited).
+# A failed read now returns 1, exactly like "no override file": the caller's
+# existing `if v=$(read_override ...); then ... fi` already does the right
+# thing on failure -- it leaves TEST_CMD/LINT_CMD/TYPE_CMD at whatever
+# auto-detection produced -- so no caller-side change was needed once this
+# function stopped lying about its own exit status.
 read_override() {
     local f="$OVERRIDE_DIR/$1"
+    local out rc=0
     [ -s "$f" ] || return 1
-    head -1 "$f" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+    out=$(set -o pipefail; head -1 "$f" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//') || rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    printf '%s\n' "$out"
 }
+# READ-OVERRIDE-FIX END (claude-workflow-plugin-yzo9)
 
 # ---------------------------------------------------------------------------
 # Auto-detect runner. We pick the FIRST manifest matched in priority order.

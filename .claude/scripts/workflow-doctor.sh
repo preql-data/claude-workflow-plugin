@@ -58,12 +58,20 @@
 # bytes and mtimes do change — so "the doctor writes nothing anywhere" would be
 # a false claim and is not made.
 #
-# MEASURED, not assumed. On an isolated 6,936-file target: a full 11-check run
-# changed exactly those three .beads/* files and nothing else; the same run with
+# MEASURED, not assumed. On an isolated 6,936-file target: a full run changed
+# exactly those three .beads/* files and nothing else; the same run with
 # `--skip beads` left all 6,936 files byte-identical; and `beads` alone
 # reproduced the change. (QA independently measured the same on a 10,358-file
-# target.) So `--skip beads` is the run that provably touches nothing — use it
-# on a read-only mount, mid-`bd` operation, or when you need that guarantee.
+# target.) That measurement predates two checks added since, not one
+# (claude-workflow-plugin-a13r round 4, LOW: `beads_ledger` was named here as
+# "the only" one; `model_parity` is the other). Both leave the result
+# unchanged: `beads_ledger` reads the real target but writes nothing into it
+# — it exports to a temp file OUTSIDE the target — and `model_parity` never
+# even reads the real target directly; it runs entirely inside its own
+# mk_probe_sandbox COPY (see that check's own header) and never writes that
+# copy back out either.
+# So `--skip beads` is the run that provably touches nothing — use it on a
+# read-only mount, mid-`bd` operation, or when you need that guarantee.
 
 set -u
 
@@ -77,7 +85,7 @@ set -u
 # the runtime registry agree exactly, and other specs assert on individual
 # names. Renaming one is a breaking change to that contract.
 # BEGIN DOCTOR_CHECK_NAMES (workflow-doctor.test.sh extracts this block; keep the sentinels)
-DOCTOR_CHECK_NAMES="deps agents skill mcp_config settings_hooks beads session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop"
+DOCTOR_CHECK_NAMES="deps agents skill mcp_config settings_hooks beads beads_ledger model_parity session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop"
 # END DOCTOR_CHECK_NAMES
 
 # Expected tools/list cardinality per shipped MCP server, as
@@ -97,6 +105,144 @@ DOCTOR_TOOL_COUNTS="bd-mcp:21 code-graph-mcp:7"
 # Minimum tool versions the workflow depends on.
 DOCTOR_MIN_BD_VERSION="0.47"
 DOCTOR_MIN_NODE_VERSION="18.17"
+
+# The validated SET of <bd-binary-version>:<store-schema-version> pairs for
+# the TARGET this doctor is running against (39cy rider, claude-workflow-
+# plugin-j7kk; generalised from a single exact pin to a validated set by
+# claude-workflow-plugin-we57/0cr6 — read both for the full incident and
+# measurement trail this header summarises). DOCTOR_MIN_BD_VERSION above is
+# a FLOOR — every one of bd 1.1.2, 1.2.1 and 1.2.2 satisfies it — and floors
+# cannot catch the hazard this one exists for: bd auto-migrates a LOCAL
+# (non-remote-backed) store's schema on first run of a newer binary, with no
+# confirmation and no opt-out (measured: `bd migrate --help` — "Without
+# subcommand, checks and updates database metadata to current version" —
+# and the installed binary's own embedded changelog string "NEW:
+# Auto-migrate SQLite to Dolt on first bd command"; `BD_ALLOW_REMOTE_MIGRATE`
+# only gates a REMOTE-backed store, which this repo does not configure).
+# This repo lived that hazard directly: bd self-upgraded 1.1.2 -> 1.2.1 ->
+# 1.2.2 across one work arc, and 1.2.1 silently migrated the Dolt schema,
+# which then made `qa-gate.sh status` misreport an unreachable store as
+# "not-entered" (see cmd_status's own fix) until the schema was rolled back
+# to v53.
+#
+# WHY A SET, AND NOT A FLOOR OR AN INTERVAL ON THE SCHEMA NUMBER. MEASURED
+# 2026-09-27 (F1, claude-workflow-plugin-we57), method: for each release,
+# `git init` a throwaway directory with an isolated HOME, run that release's
+# own `bd init`, then read the schema_migrations table of the store it
+# created (dolt 2.3.0; two independent trials for 1.2.1 and 1.2.2, which
+# agreed):
+#   bd 1.1.2 -> schema 53
+#   bd 1.2.1 -> schema 65
+#   bd 1.2.2 -> schema 53   (the documented rollback described just above —
+#                            LOWER than 1.2.1's 65 despite being the newer
+#                            release)
+#   bd 1.3.0 -> schema 66
+# The schema number is NOT MONOTONIC in release order, so neither a floor
+# nor an interval on it means anything: 1.2.2 >= 1.2.1 by version but
+# 53 < 65 by schema — an interval wide enough to admit 1.2.1:65 would also
+# admit any schema between 53 and 65 for ANY intervening version, validated
+# or not. The only sound form is a SET of pairs, tested by MEMBERSHIP: it
+# accepts every configuration the project has actually validated while
+# still refusing one nobody has checked, which is what "a range, not one
+# pair" means for a quantity that does not order.
+#
+# ONLY TWO OF THE FOUR MEASURED PAIRS ARE VALIDATED BELOW, DELIBERATELY.
+# "Validated" means a suite this project actually runs exercises the pair,
+# not merely that it was measured once above — claiming an unexercised pair
+# as validated would be the exact defect family this pin exists to catch,
+# committed by the pin's own constant:
+#   1.1.2:53  the CI floor. .github/workflows/test.yml's l1-unit job
+#             installs exactly this bd release on every run.
+#   1.3.0:66  the CI ceiling as of the same workflow change (see that job's
+#             "Install bd (max)" step, added alongside this set), and the
+#             development host's own bd.
+# 1.2.1:65 and 1.2.2:53 are measured above but exercised by no suite, so
+# they are KNOWN, not validated, and are deliberately left out of the set.
+# If either gains suite coverage later, add it in the SAME commit as that
+# coverage (see UPDATE PROCEDURE below) — do not add a pair on the strength
+# of a one-off measurement alone, here or anywhere this pattern recurs.
+#
+# EXACT MEMBERSHIP is still the point, same reasoning DOCTOR_TOOL_COUNTS
+# above uses for exact equality: a drift to anything OUTSIDE the validated
+# set — bd newer than every validated entry, or a schema version that entry
+# never wrote — is the thing to catch, not a floor satisfied by every
+# version that ever shipped. A live pair INSIDE the set still gets a
+# VISIBLE pass: the note names which member matched (see check_beads), so
+# "the CI floor" and "the dev ceiling" stay distinguishable instead of
+# collapsing into one unconditional green — the drift signal is preserved,
+# not merely widened.
+#
+# THIS IS STILL THE DRIFT DETECTOR the single pin was; the purpose has not
+# changed, only the shape of what counts as expected. Update it in the SAME
+# commit as a DELIBERATE bd upgrade WITH suite coverage, or a deliberate
+# schema migration — exactly the EXPECTED_SPECS convention
+# (.claude/scripts/tests/run-tests.sh) applied to a constant nobody else was
+# watching. An untracked drift firing this check is the friction working: it
+# converts a silent, automatic version change back into a reviewed one.
+# "Disable unprompted self-upgrade" (the same 39cy rider) has no bd-side
+# lever to pull — there is no flag that turns off the local-store
+# auto-migration above, confirmed by reading `bd --help`, `bd config --help`,
+# `bd upgrade --help` and `bd migrate --help` in full — so prevention here IS
+# detection: validate the known-good pairs, fail loudly on anything else,
+# and let the FAIL's own fix text (below) be the place a maintainer is told
+# to add the new pair deliberately, with coverage, rather than let a package
+# manager update it silently.
+#
+# DELIBERATELY NOT DERIVED, for the identical reason the single-pin version
+# of this constant gave: a set computed FROM the live bd/schema pair it is
+# supposed to be checking compares that pair against itself and can never
+# disagree — vacuous by construction, the exact class of self-deriving check
+# claude-workflow-plugin-gytz's own EXPECTED_SPEC_FILES header warns against.
+# The whole point here is catching an UNPROMPTED, UNREVIEWED bd self-upgrade;
+# a derived set would make that upgrade invisible to this check by
+# definition, which is precisely the hazard this exists to surface.
+#
+# UPDATE PROCEDURE (a pin with no stated update procedure goes stale again
+# by construction — this one already has, once, silently, mid-arc — see
+# claude-workflow-plugin-dhh7/u443 for the incident this paragraph was added
+# after: bd self-upgraded 1.2.2 -> 1.3.0 partway through a multi-day task
+# arc, and nothing here noticed until an unrelated test started failing).
+# When you have DELIBERATELY upgraded bd, or a migration has DELIBERATELY
+# run, measure the new live pair with the SAME two commands this check
+# itself runs (do not trust a CHANGELOG or a version string alone — the
+# schema half is a separate, independently-drifting number). Resolve the
+# store directory by what EXISTS rather than assuming a name: bd names it
+# after the PROJECT DIRECTORY it was `init`'d in, non-alphanumerics folded
+# to `_`, so ".../embeddeddolt/beads" only exists when that directory is
+# literally named "beads" (claude-workflow-plugin-0cr6 — measured true of
+# THIS repo's own store, but not to be assumed of any other target):
+#   bd --version
+#   ls <target>/.beads/embeddeddolt/            # find the actual name first
+#   ( cd <target>/.beads/embeddeddolt/<name-from-the-ls-above> && dolt sql \
+#       -r csv -q "SELECT COALESCE(MAX(version),0) FROM schema_migrations" )
+# then, ONLY once a suite exercises the new pair (most naturally a CI leg,
+# mirroring the "Install bd (max)" step), add "<bd-version>:<schema-version>"
+# to the set below in the SAME commit as that coverage, and re-run
+# workflow-doctor.test.sh's META-TEST 8 to confirm the new pair is what this
+# check now accepts. Until it has coverage, record it in this header as
+# measured-but-unvalidated instead of adding it to the set. If bd upgrades
+# UNPROMPTED again (no deliberate action taken, the check just starts
+# failing) — that is this check doing its job, not a stale assumption; treat
+# the FAILURE itself as the finding, re-measure with the two steps above, and
+# decide whether to invest in coverage for the new pair (then add it) or
+# investigate why bd moved without anyone asking it to.
+# BEGIN DOCTOR_BD_SCHEMA_VALIDATED (workflow-doctor.test.sh extracts this block; keep the sentinels.
+# Renamed from BEGIN/END DOCTOR_BD_SCHEMA_PIN by claude-workflow-plugin-we57/
+# 0cr6 — deliberately, per that pair's own license to "keep the sentinels or
+# update the extractor deliberately": nothing greps this BEGIN/END comment
+# text as an extraction boundary — confirmed by reading workflow-doctor.
+# test.sh in full: its sentinel_names() helper anchors on the unrelated
+# DOCTOR_CHECK_NAMES="..." line, and META-TEST 8 (the only place that reads
+# this constant) anchors its sed/grep directly on the bare
+# DOCTOR_BD_SCHEMA_VALIDATED="..." assignment line below, never on this
+# comment — so the rename is a pure readability fix, carries no runtime
+# behaviour change, and needed no extractor update beyond META-TEST 8's own
+# pattern (already updated separately for the set-membership format change).
+# Left as-is, a sentinel still naming the retired single-pin design while the
+# variable inside is a set would be exactly the stale-prose defect this
+# codebase's own culture exists to catch.)
+DOCTOR_BD_SCHEMA_VALIDATED="1.1.2:53 1.3.0:66"
+# END DOCTOR_BD_SCHEMA_VALIDATED
 
 # Minimum bytes of post-frontmatter SKILL.md body. The `skill` check exists to
 # catch the one-line fallback stub session-start.sh substitutes when SKILL.md
@@ -152,6 +298,10 @@ Flags:
                      past this check's 30s bound and FAIL a healthy install.
                      `--skip beads` is also the way to guarantee the run touches
                      nothing at all in the target (see the note below).
+                     `model_parity` needs no entry here: a target whose
+                     model-select cache has never been populated (no
+                     ANTHROPIC_API_KEY set — a normal, often-permanent
+                     state) makes it self-skip, never a FAIL.
   --quiet            Suppress PASS and SKIP lines. FAIL lines, their indented
                      `fix:` lines, and the final summary still print.
   -h, --help         Print this message and exit 0.
@@ -176,8 +326,24 @@ Checks (the names are a stable contract; specs assert on them):
                    that exists in the target
   beads            .beads/ present and `bd doctor` reachable (tolerant: bd's
                    section wording varies by version, so text findings only
-                   downgrade to a NOTE). THE ONE CHECK THAT RUNS AGAINST THE
-                   REAL TARGET — see the note below.
+                   downgrade to a NOTE). RUNS AGAINST THE REAL TARGET, and is
+                   the only check that WRITES there — see the note below.
+  beads_ledger     .beads/issues.jsonl is in step with the database. Also runs
+                   against the real target, but READ-ONLY (it exports to a temp
+                   file outside the target and compares). A divergence is a
+                   FAIL: the JSONL is what a fresh clone recovers from. The two
+                   directions get DIFFERENT remedies — database-ahead means
+                   export, ledger-ahead means import, and prescribing the wrong
+                   one destroys data.
+  model_parity     runs `model-select.sh check-parity` in the sandbox: does
+                   every agent file's model: pin agree with what its role's
+                   strategy in .claude/model-roles resolves to against the
+                   cached model listing? FAILs on real drift; SKIPs (never a
+                   silent PASS) when the cache was never populated, which
+                   needs ANTHROPIC_API_KEY — a normal state for many
+                   installs, not a broken one, so no --skip is needed for
+                   it. See check-parity's own header for exactly what this
+                   does and does not establish.
   session_start    EXECUTES the target's session-start.sh and asserts a valid
                    SessionStart envelope carrying a non-empty additionalContext
                    with the workflow_engine block and the delegation contract
@@ -190,8 +356,9 @@ Checks (the names are a stable contract; specs assert on them):
                    with no approval and asserts the Stop is blocked
 
 WHAT A RUN TOUCHES (safe to run mid-session; the exception is named)
-  Every dynamic check EXCEPT `beads` runs in a throwaway sandbox copy of the
-  target. No source file, config file, agent prompt, hook script, skill,
+  Every dynamic check EXCEPT `beads` and `beads_ledger` runs in a throwaway
+  sandbox copy of the target; of those two only `beads` writes anything.
+  No source file, config file, agent prompt, hook script, skill,
   manifest or gate artifact in the target is modified: your QA approval
   (.claude/.qa-tracking/approved), changed-files tracker, gate baseline,
   current-task pointer, settings.json, .mcp.json, SKILL.md, .beads/issues.jsonl
@@ -207,6 +374,14 @@ WHAT A RUN TOUCHES (safe to run mid-session; the exception is named)
   three and nothing else, and the same run with `--skip beads` changed nothing
   at all. So pass `--skip beads` when you need a run that provably touches
   nothing (read-only mount, or a `bd` operation in flight).
+
+  `beads_ledger` also reads the REAL target's database — a sandboxed copy would
+  answer for the wrong ledger — but writes nothing there: it exports to a
+  mktemp file OUTSIDE the target and compares sha256. It deliberately does not
+  repair what it measures, because a checker that fixes a fault cannot then
+  report it. Nothing else repairs it automatically either — since R4-F1 the
+  ledger is written only by an explicit `beads-ledger.sh reconcile --apply`.
+  `--skip beads_ledger` opts out.
 
 AIR-GAPPED / OFFLINE INSTALL RECIPE
   The two MCP servers have no native dependencies (zero install scripts, zero
@@ -231,6 +406,14 @@ AIR-GAPPED / OFFLINE INSTALL RECIPE
   report a false FAIL on a healthy install:
 
     bash .claude/scripts/workflow-doctor.sh --skip beads,mcp_bd,mcp_code_graph
+
+  `model_parity` needs no entry in that list. An air-gapped host also never
+  has ANTHROPIC_API_KEY populate the model-select cache, but unlike `beads`
+  that is not a bounded probe that can time out — the check self-skips
+  (never a FAIL) for as long as the cache stays empty, which is exactly the
+  install.sh functional-verification path's own default invocation (no
+  --skip flags at all): an air-gapped install must still be able to verify
+  clean.
 USAGE
 }
 
@@ -347,9 +530,9 @@ doctor_cleanup() {
 }
 trap doctor_cleanup EXIT
 
-# mk_bd_shim <bin-dir> — write a `bd` wrapper into <bin-dir> that injects
-# `--no-daemon`, and echo <bin-dir>. Returns non-zero (and writes nothing) when
-# no real bd is on PATH; the `deps` check is what reports bd's absence.
+# mk_bd_shim <bin-dir> — write a `bd` wrapper into <bin-dir>, and echo
+# <bin-dir>. Returns non-zero (and writes nothing) when no real bd is on PATH;
+# the `deps` check is what reports bd's absence.
 #
 # ONE definition, two callers (mk_probe_sandbox and check_beads). It used to be
 # inline in the sandbox builder only, which meant the `beads` check invoked the
@@ -358,6 +541,15 @@ trap doctor_cleanup EXIT
 # (cmd/bd/daemon_autostart.go:228), which is exactly why every e2e fixture
 # pre-installs this same wrapper. A health checker that can itself be taken down
 # by the bug the shim exists to dodge is not much of a health checker.
+#
+# The wrapper no longer injects `--no-daemon`: bd 1.1.2 removed the flag along
+# with the daemon (`bd dolt status` -> "embedded (in-process, no server)"), so
+# the 0.47.1 autostart crash it dodged cannot occur. Keeping it would have been
+# far worse than inert here — an unknown flag makes cobra swallow the NEXT
+# token as its value, so `bd --no-daemon doctor` became `unknown command`, and a
+# health checker whose every probe fails for a reason unrelated to the thing
+# being probed reports garbage. The wrapper is kept (rather than dropped) so
+# both callers keep a single, PATH-controlled bd entry point.
 mk_bd_shim() {
     local bindir="$1" real_bd
     real_bd=$(command -v bd 2>/dev/null || echo "")
@@ -365,8 +557,8 @@ mk_bd_shim() {
     mkdir -p "$bindir" 2>/dev/null || return 1
     {
         printf '#!/bin/bash\n'
-        printf '# workflow-doctor shim: bd 0.47.1 daemon autostart crashes.\n'
-        printf 'exec %s --no-daemon "$@"\n' "$real_bd"
+        printf '# workflow-doctor shim: single PATH-controlled bd entry point.\n'
+        printf 'exec %s "$@"\n' "$real_bd"
     } > "$bindir/bd" || return 1
     chmod +x "$bindir/bd" 2>/dev/null || true
     printf '%s' "$bindir"
@@ -440,9 +632,17 @@ run_bounded() {
 # .claude/scripts/*.sh set (matching install.sh's glob — .claude/scripts/tests/
 # is repo-only and never shipped, see workflow-manifest.sh's scan scopes), the
 # skill, the agents (model-select.sh apply rewrites their frontmatter pins —
-# in here, harmlessly), settings.json, hooks/, and the operator config files
-# the resolvers read. A git repo with one empty commit so the gate's
-# git-identity and baseline machinery work.
+# in here, harmlessly), settings.json, hooks/, the operator config files the
+# resolvers read, and (claude-workflow-plugin-a13r) the cached model listing.
+# The cache is READ-ONLY input like everything else copied here — no check in
+# this file ever writes it back out — but it is copied deliberately rather
+# than left to the empty .qa-tracking/ mkdir below: `model_parity` runs
+# `model-select.sh check-parity` inside the sandbox, and that subcommand
+# NEVER fetches (its own header) — it reads ONLY this file. Without a copy,
+# `model_parity` would be permanently UNVERIFIABLE regardless of the real
+# target's state, which is not a weaker check, it is a different, useless
+# one. A git repo with one empty commit so the gate's git-identity and
+# baseline machinery work.
 #
 # Callers get a FRESH sandbox each time on purpose: session-start.sh truncates
 # changed-files.txt, so sharing one sandbox between the session_start and
@@ -480,12 +680,49 @@ mk_probe_sandbox() {
         fi
     done
 
+    # claude-workflow-plugin-a13r ROUND 3 ITEM 2: `cp -R` above silently
+    # DROPS a file it cannot read — permission denied on one agent file does
+    # not fail the directory copy (the redirected stderr and `|| true` both
+    # hide it), so an unreadable agent file is simply ABSENT from the
+    # sandbox. model-select.sh's own missing-agent-file exclusion (section
+    # 14.6: a LEGITIMATE skip for a role that was never installed) cannot
+    # tell that apart from a file that EXISTS on the real TARGET but could
+    # not be read — so `model_parity`, run inside the sandbox, silently
+    # excluded exactly the file the real target's own permission problem was
+    # hiding, and reported OK/PASS whenever every readable file happened to
+    # agree. Detected here, against the SOURCE ($TARGET, not $sb): the
+    # sandbox's own directory listing is not a reliable signal — a role that
+    # never had an agent file and one `cp` failed to populate look
+    # IDENTICAL from inside `$sb`. Handed to check_model_parity below as a
+    # named, un-skippable finding — never silently folded into "no agent
+    # file, nothing to check".
+    local unreadable_agents="" src_agent
+    if [ -d "$TARGET/.claude/agents" ]; then
+        for src_agent in "$TARGET"/.claude/agents/*.md; do
+            [ -e "$src_agent" ] || continue
+            [ -r "$src_agent" ] && continue
+            unreadable_agents="${unreadable_agents:+$unreadable_agents, }$(basename "$src_agent")"
+        done
+    fi
+    if [ -n "$unreadable_agents" ]; then
+        printf '%s\n' "$unreadable_agents" > "$sb/.claude/.qa-tracking/model-parity-unreadable-agents.txt"
+    fi
+
     local f
     for f in settings.json rubric-config review-config model-ranking model-roles effort-verdict; do
         if [ -f "$TARGET/.claude/$f" ]; then
             cp "$TARGET/.claude/$f" "$sb/.claude/$f" 2>/dev/null || true
         fi
     done
+
+    # claude-workflow-plugin-a13r: model-select.sh's local cache, read-only
+    # input for `model_parity` (see this function's own header). Not under
+    # the settings.json-style flat-file loop above because it lives one
+    # directory down, in .qa-tracking/ (already created a few lines up).
+    if [ -f "$TARGET/.claude/.qa-tracking/model-select-cache.json" ]; then
+        cp "$TARGET/.claude/.qa-tracking/model-select-cache.json" \
+            "$sb/.claude/.qa-tracking/model-select-cache.json" 2>/dev/null || true
+    fi
 
     mk_bd_shim "$sb/bin" >/dev/null || true
 
@@ -509,7 +746,7 @@ mk_probe_sandbox() {
 #                            claude without probing the operator's real
 #                            ~/.claude.json.
 #   CODEX_DETECT_TIMEOUT_S=1 keeps the advisory probe off the critical path.
-# PATH carries the sandbox's bd shim first (bd 0.47.1 daemon autostart crash).
+# PATH carries the sandbox's bd shim first (one controlled bd entry point).
 run_in_sandbox() {
     local sb="$1" secs="$2" outf="$3" errf="$4"; shift 4
     run_bounded "$secs" "$outf" "$errf" env \
@@ -576,6 +813,55 @@ version_at_least() {
     [ "$have" = "$want" ] && return 0
     lowest=$(printf '%s\n%s\n' "$have" "$want" | sort -V 2>/dev/null | head -1)
     [ "$lowest" = "$want" ]
+}
+
+# resolve_bd_schema_store <target> — the embedded-Dolt store directory under
+# <target>/.beads/embeddeddolt/, located by what EXISTS rather than assumed
+# to be named "beads" (claude-workflow-plugin-0cr6: bd derives that
+# subdirectory's name from the PROJECT DIRECTORY bd was `init`'d in —
+# non-alphanumerics folded to `_` — so ".../embeddeddolt/beads" only exists
+# when the project directory is literally named "beads", true of this
+# repo's own store but not to be assumed of any other target). Echoes the
+# resolved path on stdout (which may not itself exist, on a miss) and
+# returns:
+#   0  exactly one candidate directory (one with a `.dolt` subdirectory)
+#      found under <target>/.beads/embeddeddolt/
+#   1  no candidate found — a store-less target, a pre-1.1.x/SQLite bd
+#      install, or embeddeddolt/ absent entirely
+#   2  more than one candidate found — refuses to guess which is live
+#      (e.g. leftover state from a renamed project directory)
+# No `dolt` binary needed to resolve the PATH; only to query it once found,
+# which check_beads does separately.
+resolve_bd_schema_store() {
+    local target="$1" base candidate found="" count=0
+    base="$target/.beads/embeddeddolt"
+    if [ ! -d "$base" ]; then
+        printf '%s' "$base"
+        return 1
+    fi
+    for candidate in "$base"/*/; do
+        [ -d "${candidate}.dolt" ] || continue
+        found="${candidate%/}"
+        count=$((count + 1))
+    done
+    case "$count" in
+        0) printf '%s' "$base"; return 1 ;;
+        1) printf '%s' "$found"; return 0 ;;
+        *) printf '%s' "$base"; return 2 ;;
+    esac
+}
+
+# bd_schema_pair_in_set <pair> <space-separated-set> — membership test, same
+# idiom as tool_count_for()'s iteration over DOCTOR_TOOL_COUNTS above. Exact
+# string equality per member; no version-ordering semantics, deliberately —
+# see DOCTOR_BD_SCHEMA_VALIDATED's own header for why an ordered comparison
+# is meaningless for this quantity.
+bd_schema_pair_in_set() {
+    local want="$1" set="$2" item
+    for item in $set; do
+        [ "$item" = "$want" ] && return 0
+    done
+    return 1
 }
 
 # frontmatter_of <file> — the first `---`-delimited block's body.
@@ -773,7 +1059,26 @@ makes every agent invisible to the SDK with no error surfaced."
                 || problems="$problems ${rel}:no-${key};"
         done
 
-        tools_line=$(printf '%s\n' "$fm" | sed -n 's/^tools:[[:space:]]*//p' | head -1)
+        # tools_line extraction BEGIN (i8cx wave 2)
+        #
+        # Reuse the SAME reliable predicate the key-presence loop above just
+        # ran for key=tools (printf | grep -q, grep last, in-memory producer —
+        # not masking-vulnerable) rather than inferring "tools: absent" from
+        # an empty tools_line. Without this, a masked sed/head failure on the
+        # THREE-stage extraction pipeline below is indistinguishable from a
+        # genuinely-absent tools: line, and both silently `continue` past the
+        # bd-grant check on a CORE agent — a failed read reading as a clean
+        # exemption, the exact defect class this phase exists to close, sitting
+        # inside the one check whose whole job is to verify bd MCP grants.
+        tools_line=""
+        if printf '%s\n' "$fm" | grep -q '^tools:'; then
+            if ! tools_line=$( (set -o pipefail
+                    printf '%s\n' "$fm" | sed -n 's/^tools:[[:space:]]*//p' | head -1) ); then
+                problems="$problems ${rel}:tools-line-present-but-unreadable;"
+                continue
+            fi
+        fi
+        # tools_line extraction END (i8cx wave 2)
         # An absent `tools:` line inherits every tool (per the sub-agents doc),
         # so there is no allowlist to audit; the missing-key problem above
         # already reported it.
@@ -1013,12 +1318,18 @@ hook failure per fire and the gate it belonged to is simply absent."
 # ===========================================================================
 # Check: beads
 #
-# DELIBERATELY TOLERANT. Presence of .beads/ and reachability of `bd doctor`
-# are the only FAIL conditions. bd's section wording changes across versions
-# (0.47.1 prints "⚠ CLI Version ... (latest: ...)" on a perfectly healthy
-# install) and bd-compat.sh pins 0.47.1 only, so text parsing may downgrade to
-# a NOTE and never to a failure. A doctor that cried wolf on cosmetic bd
-# output would be turned off, which is worse than one that under-reports.
+# DELIBERATELY TOLERANT of bd's own free-text wording. Presence of .beads/,
+# reachability of `bd doctor`, and (claude-workflow-plugin-j7kk, 39cy;
+# generalised to a validated SET by claude-workflow-plugin-we57/0cr6) bd-
+# version-vs-store-schema MEMBERSHIP in DOCTOR_BD_SCHEMA_VALIDATED are the
+# three FAIL conditions — the third is a deterministic structural comparison
+# against a constant THIS repo maintains, not bd's own prose, so it is held
+# to a different standard than the text findings below. bd's section wording
+# changes across versions (0.47.1 prints "⚠ CLI Version ... (latest: ...)" on
+# a perfectly healthy install) and bd-compat.sh pins 0.47.1 only, so TEXT
+# parsing may downgrade to a NOTE and never to a failure. A doctor that cried
+# wolf on cosmetic bd output would be turned off, which is worse than one
+# that under-reports.
 #
 # THE ONE UNSANDBOXED CHECK, on purpose. `.beads/` is the workflow's live task
 # state; a probe copy would be checking a database nothing uses, which is not a
@@ -1031,10 +1342,10 @@ hook failure per fire and the gate it belonged to is simply absent."
 # commands/workflow-doctor.md all name `beads` as the documented exception
 # instead of claiming the run touches nothing. `--skip beads` opts out.
 #
-# The invocation goes through the SAME `bd --no-daemon` shim mk_probe_sandbox
-# installs (mk_bd_shim): bd 0.47.1's daemon-autostart path crashes, and a health
-# checker that can be taken down by the bug the shim exists to dodge would
-# report a false FAIL on a healthy install.
+# The invocation goes through the SAME bd shim mk_probe_sandbox installs
+# (mk_bd_shim), so every bd call in the doctor has one PATH-controlled entry
+# point. The shim used to inject --no-daemon because bd 0.47.1's
+# daemon-autostart path crashes; bd 1.1.2 has no daemon and no such flag.
 # ===========================================================================
 check_beads() {
     if [ ! -d "$TARGET/.beads" ]; then
@@ -1051,8 +1362,8 @@ not read your login profile): compare \`bash -lc 'command -v bd'\` with
         return
     fi
 
-    # Route through the --no-daemon shim (see the header note). Falls back to
-    # the raw PATH only if the shim could not be written.
+    # Route through the bd shim (see the header note). Falls back to the raw
+    # PATH only if the shim could not be written.
     local shim_path="$PATH"
     if mk_bd_shim "$WORKDIR/bin" >/dev/null 2>&1; then
         shim_path="$WORKDIR/bin:$PATH"
@@ -1065,9 +1376,9 @@ not read your login profile): compare \`bash -lc 'command -v bd'\` with
         record beads FAIL "\`bd doctor\` did not complete within 30s (unreachable)" \
 "Two common causes. (1) NO NETWORK: bd doctor performs a GitHub release check,
 so an air-gapped host can blow this 30s bound on an otherwise healthy install —
-re-run with \`--skip beads\`. (2) A wedged daemon: this check already invokes bd
-through a \`--no-daemon\` shim, so if plain \`bd --no-daemon doctor\` also hangs
-in the target, the database itself needs attention."
+re-run with \`--skip beads\`. (2) A wedged database: if plain \`bd doctor\` also
+hangs in the target, the database itself needs attention — check
+\`bd dolt status\` for the backend state."
         return
     fi
     if [ ! -s "$out" ] && [ "$rc" -ne 0 ]; then
@@ -1095,7 +1406,441 @@ $(printf '%s\n' "$flagged" | sed 's/^[[:space:]]*/  /')"
 NOTE: bd doctor reported $warns advisory warning(s) (informational only). Run
 \`bd doctor\` in the target to read them."
     fi
+
+    # bd-VERSION-vs-STORE-SCHEMA MEMBERSHIP (39cy; generalised from an exact
+    # pin to a validated SET by claude-workflow-plugin-we57/0cr6). Membership
+    # in DOCTOR_BD_SCHEMA_VALIDATED (see that constant's own header for the
+    # full reasoning) — a deterministic structural comparison, not bd's
+    # free-text wording, so it does not inherit the "never fail on cosmetic
+    # output" tolerance above. READ-ONLY: `bd version` never writes, and the
+    # schema read is a direct `dolt sql` SELECT against the schema_migrations
+    # table bd itself queries internally (same predicate string bd's own
+    # binary embeds) — this does not invoke `bd doctor` a second time, so it
+    # cannot also be the thing that triggers that call's own WAL-checkpoint
+    # side effect (see this check's header). The sandboxed-copy helper this
+    # file uses for every OTHER dynamic check builds only an EMPTY .beads/
+    # (see its own definition further down), so a probe copy carries no
+    # schema at all — this, like the `bd doctor` call above, has to read the
+    # REAL target instead. The store directory is RESOLVED, not assumed
+    # (claude-workflow-plugin-0cr6: bd names it after the project directory
+    # it was `init`'d in, not literally "beads" except when that IS the
+    # directory's name) — see resolve_bd_schema_store's own header above.
+    local live_bd_ver live_bd_path
+    live_bd_ver=$(env "PATH=$shim_path" bd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    # NAME THE BINARY THAT ANSWERED, not just its version
+    # (claude-workflow-plugin-wyt3). A CI lane that installs bd 1.1.2 from a
+    # pinned, sha256-verified tarball — with no second bd downloaded anywhere
+    # in the job, verified by grepping the whole job log — was measured
+    # reporting "installed bd 1.3.1". The doctor's own output could not say
+    # WHICH binary answered, so each hypothesis cost a 45-minute CI round.
+    # A version with no path is not a measurement anyone can act on: an
+    # operator cannot tell a doctor that measured the wrong bd from one that
+    # measured the right one, and those render identically. Reported on BOTH
+    # the OK and the DRIFT arm, because the happy path is exactly where a
+    # wrong binary hides — a pair that happens to be in the validated set
+    # passes just as quietly whether or not it came from the bd in use.
+    live_bd_path=$(env "PATH=$shim_path" bash -c 'command -v bd' 2>/dev/null)
+    if [ -n "$live_bd_path" ] && [ "$live_bd_path" = "$WORKDIR/bin/bd" ]; then
+        # This doctor's own shim forwards to a real binary; naming only the
+        # wrapper would hide the very thing the path exists to disclose.
+        local _bd_shim_target
+        _bd_shim_target=$(sed -n 's|^exec \(.*\) "$@"$|\1|p' "$live_bd_path" 2>/dev/null)
+        [ -n "$_bd_shim_target" ] && live_bd_path="$live_bd_path -> $_bd_shim_target"
+    fi
+    [ -n "$live_bd_path" ] || live_bd_path="(not resolvable on the doctor's PATH)"
+    if ! command -v dolt >/dev/null 2>&1; then
+        note="$note
+NOTE: bd-version-vs-schema pin DISARMED (dolt not on PATH — cannot query any
+store's schema_migrations table regardless of whether one exists here).
+Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
+    else
+        local schema_store resolve_rc=0
+        schema_store=$(resolve_bd_schema_store "$TARGET") || resolve_rc=$?
+        case "$resolve_rc" in
+        1)
+            note="$note
+NOTE: bd-version-vs-schema pin DISARMED (no embedded-Dolt store found under
+$schema_store — a store-less target, or a pre-1.1.x/SQLite bd install).
+Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
+            ;;
+        2)
+            note="$note
+NOTE: bd-version-vs-schema pin DISARMED (more than one embedded-Dolt store
+found under $schema_store — refusing to guess which one this target's bd
+actually uses). Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
+            ;;
+        *)
+            local live_schema_ver
+            live_schema_ver=$(cd "$schema_store" 2>/dev/null \
+                && dolt sql -r csv -q "SELECT COALESCE(MAX(version),0) FROM schema_migrations" 2>/dev/null | tail -n1)
+            case "$live_schema_ver" in ''|*[!0-9]*) live_schema_ver="" ;; esac
+            if [ -z "$live_bd_ver" ] || [ -z "$live_schema_ver" ]; then
+                note="$note
+NOTE: bd-version-vs-schema pin could not be evaluated (\`bd --version\` or the
+schema_migrations query at $schema_store produced no parseable value).
+Validated pairs (bd:schema): $DOCTOR_BD_SCHEMA_VALIDATED."
+            elif bd_schema_pair_in_set "$live_bd_ver:$live_schema_ver" "$DOCTOR_BD_SCHEMA_VALIDATED"; then
+                # STATE THE MATCH, not just the absence of a failure — a
+                # check that can silently do nothing extra on its happy path
+                # is indistinguishable from a check that never ran (the
+                # exact class this task exists to close). See "M-2 is data
+                # plumbing, not a check" for why THAT script states the
+                # opposite thing instead. Naming WHICH member matched (not
+                # just "OK") is what keeps a multi-member set from
+                # collapsing into one undifferentiated green — see
+                # DOCTOR_BD_SCHEMA_VALIDATED's own header.
+                # The break is placed BEFORE "is in the validated set", not
+                # inside it: the phrase is a search anchor other tooling
+                # greps for verbatim (workflow-doctor.test.sh's META-TEST 8a
+                # among them), and `grep -F` does not match a needle split
+                # across a line break — measured directly, not assumed,
+                # after an earlier wording wrapped mid-phrase and the
+                # assertion checking for it failed for exactly that reason.
+                note="$note
+NOTE: bd-version-vs-schema pin OK:
+$live_bd_ver:$live_schema_ver is in the validated set: $DOCTOR_BD_SCHEMA_VALIDATED.
+Measured binary: $live_bd_path"
+            else
+                record beads FAIL "bd-version-vs-schema DRIFT: installed bd $live_bd_ver / store schema v$live_schema_ver is not in the validated set {$DOCTOR_BD_SCHEMA_VALIDATED} (bd:schema) [measured binary: $live_bd_path; store: $schema_store]" \
+"bd auto-migrates a LOCAL (non-remote-backed) store's schema on first run of a
+NEWER binary, with no confirmation and no opt-out — this is bd's own
+documented behaviour (\`bd migrate --help\`: \"Without subcommand, checks and
+updates database metadata to current version\"), not a bug this doctor can
+fix. This repo lived the hazard directly: bd self-upgraded 1.1.2 -> 1.2.1 ->
+1.2.2 across one work arc, and 1.2.1 silently migrated the Dolt schema, which
+then made \`qa-gate.sh status\` misreport an unreachable store as
+\"not-entered\" until the schema was rolled back.
+If this drift was DELIBERATE (you meant to upgrade bd, or ran a migration on
+purpose) and you can add suite coverage for the new pair (most naturally a
+CI leg — see the l1-unit job's bd-max leg for the pattern): add
+\"$live_bd_ver:$live_schema_ver\" to DOCTOR_BD_SCHEMA_VALIDATED in
+workflow-doctor.sh in the SAME commit as that coverage — the EXPECTED_SPECS
+convention (run-tests.sh) applied to this set. Until it has coverage, record
+it in that constant's own header as measured-but-unvalidated instead of
+adding it to the set.
+If it was NOT deliberate: something (a package manager, a reinstall script)
+upgraded bd without telling you. Pin bd at the OS/package-manager level (e.g.
+\`brew pin bd\`) so it cannot happen again unprompted, and read \`bd doctor\`'s
+own 'Database version and migration status' section for what changed."
+                return
+            fi
+            ;;
+        esac
+    fi
     record beads PASS ".beads/ present; \`bd doctor\` reachable (exit $rc)$note"
+}
+
+# ===========================================================================
+# Check: beads_ledger — is .beads/issues.jsonl in step with the database?
+#
+# WHY THIS IS A NAMED CHECK (claude-workflow-plugin-fkm.1.1)
+# .beads/issues.jsonl is the portable ground truth: a fresh clone recovers the
+# whole issue database from it, and .beads/embeddeddolt/ is gitignored
+# machine-local state. Before this check, a ledger that silently stopped being
+# written had NO surface at all — it announced itself at the next clone, as
+# missing issues. That is exactly how this repo lost its ledger: bd 1.1.2
+# removed `bd sync` (session-end.sh's only write path) and bd's own pre-commit
+# hook exits 0 without exporting, so every commit recorded a stale ledger
+# behind a green hook.
+#
+# SECOND TARGET-TOUCHING CHECK, AND WHY IT IS STILL SAFE. `beads` is documented
+# as the ONE check that runs against the real target because `bd doctor`
+# rewrites .beads/beads.db*. This check also runs bd against the real target,
+# but READ-ONLY by construction: beads-ledger.sh's `check` exports to a mktemp
+# file OUTSIDE the target and compares hashes. It never writes the ledger and
+# never writes into .beads/. A health checker that repairs what it measures
+# cannot report on it — and since R4-F1 nothing repairs the ledger
+# automatically at all: the write happens only under an explicit
+# `reconcile --apply`. `--skip beads_ledger` opts out.
+#
+# The predicate costs one full `bd export` (~0.5s here). beads-ledger.sh's
+# header records why nothing cheaper is honest: `bd sql` is unsupported in
+# embedded mode, and mtime/count proxies are wrong rather than merely
+# imprecise — a comment added with no issue edit changes the ledger while
+# leaving the record count identical.
+# ===========================================================================
+check_beads_ledger() {
+    if [ ! -d "$TARGET/.beads" ]; then
+        # The `beads` check above already FAILs on this; do not double-report.
+        record beads_ledger PASS "no .beads/ in the target — nothing to compare (the \`beads\` check owns that failure)"
+        return
+    fi
+    local script="$TARGET/.claude/scripts/beads-ledger.sh"
+    if [ ! -f "$script" ]; then
+        record beads_ledger FAIL "missing: .claude/scripts/beads-ledger.sh (partial install)" \
+"This script is the workflow's ONLY ledger-write path since bd 1.1.2 removed
+\`bd sync\`. Without it session-end.sh cannot write .beads/issues.jsonl, and a
+fresh clone of this repo will recover an out-of-date issue database. Re-run
+install.sh in Update mode."
+        return
+    fi
+
+    local out="$WORKDIR/beads-ledger.out" err="$WORKDIR/beads-ledger.err" rc=0
+    run_bounded 30 "$out" "$err" env "CLAUDE_PROJECT_DIR=$TARGET" \
+        bash "$script" check || rc=$?
+
+    if [ "$rc" = "124" ]; then
+        record beads_ledger FAIL "\`beads-ledger.sh check\` did not complete within 30s" \
+"The check runs one \`bd export\`. If that hangs, the database itself needs
+attention — start with \`bd dolt status\` and \`bd doctor\` in the target."
+        return
+    fi
+
+    local detail
+    detail=$(head -1 "$out" 2>/dev/null || echo "")
+    case "$rc" in
+        0)
+            record beads_ledger PASS ".beads/issues.jsonl matches the database"
+            ;;
+        1)
+            record beads_ledger FAIL "${detail:-the ledger differs from the database (database ahead)}" \
+"The database is ahead of .beads/issues.jsonl, so a fresh clone would recover an
+out-of-date issue set. NOTHING repairs this automatically — no hook writes the
+ledger. Repair it deliberately:
+  bash .claude/scripts/beads-ledger.sh reconcile --apply
+then commit .beads/issues.jsonl. (\`reconcile\` is dry-run without --apply, and
+is preferred over \`export\` because it is safe in BOTH directions.)"
+            ;;
+        3)
+            # THE OPPOSITE DIRECTION (R1-F1). The ledger holds records the
+            # database does not — a fresh clone before its first import, a
+            # second machine after `git pull`, a restored backup. Prescribing
+            # an export here would tell the operator to destroy exactly the
+            # records that are only in the ledger, so the remedy names
+            # `bd import` and the reconcile helper instead. bd 1.1.2 never
+            # auto-imports a newer ledger, so nothing repairs this on its own.
+            record beads_ledger FAIL "${detail:-the ledger is AHEAD of the database}" \
+"The LEDGER holds records the database does not, so this is NOT a stale-export
+problem and \`beads-ledger.sh export\` would DESTROY them. Import first — the
+order matters, and \`reconcile\` is the single command that gets it right:
+  bash .claude/scripts/beads-ledger.sh reconcile --apply
+which runs \`bd import .beads/issues.jsonl\` and then re-exports the union.
+Without --apply it reports what it would do and changes nothing. If this is a
+fresh clone that has never been imported, \`bd bootstrap\` does the same job
+from the git-tracked ledger."
+            ;;
+        *)
+            # Undetermined (no bd, export failed). `deps` already FAILs when bd
+            # is absent, so this stays a NOTE rather than a second red for the
+            # same root cause.
+            record beads_ledger PASS "ledger freshness could not be determined (informational)
+NOTE: ${detail:-beads-ledger.sh check returned $rc}"
+            ;;
+    esac
+}
+
+# ===========================================================================
+# Check: model_parity (claude-workflow-plugin-a13r)
+#
+# WHY THIS EXISTS. claude-workflow-plugin-fkm.10 was closed on the strength
+# of a `.claude/model-roles` edit that was real and committed, but the agent
+# file's frontmatter pin was never rewritten to match — nothing checked the
+# difference, so a config file asserting `opus-class` and an agent file
+# spawning Fable rendered identically to anyone reading the config alone.
+# `model-select.sh check-parity` is the mechanical comparison; this check is
+# what makes it a GATE something actually runs, rather than a diagnostic an
+# operator has to remember to invoke by hand — the exact "recorded but not
+# effected" failure shape the underlying bug is named for, reappearing one
+# level up, in the fix's own delivery. It is deliberately NOT wired into
+# SessionStart's `apply --check` path: that path is fail-open by design
+# (spec 0.3 principle 1 — a session must never fail to start over an
+# enumeration hiccup) and must stay that way. This check is the surface that
+# actually gates.
+#
+# check-parity's exit code IS its own contract (0 OK / 1 DISAGREEMENT /
+# 2 UNVERIFIABLE — see model-select.sh's cmd_check_parity for the full
+# scope statement). NEITHER non-zero code is silently folded into a pass:
+#   1 DISAGREEMENT is a real, actionable finding — an agent file's model:
+#     pin disagrees with what its role's strategy resolves to. FAILs, no
+#     exceptions, no self-skip: this is the finding the whole check exists
+#     to surface.
+#   2 UNVERIFIABLE is NOT ONE THING (claude-workflow-plugin-a13r round 4,
+#     item (b)), and this check's own rc=2 handling below now reads
+#     check-parity's own tag (:NO-DATA vs :HELPER-FAILURE) rather than
+#     treating every rc=2 identically — the two are only described together
+#     here because the reasoning for the FIRST one's self-skip (below) is
+#     what the SECOND must NOT inherit by accident.
+#   2 UNVERIFIABLE:NO-DATA means nothing could be evaluated at all, MOST
+#     OFTEN because the model-select cache has never been populated — which
+#     needs ANTHROPIC_API_KEY, a credential this plugin's own spec 0.3
+#     treats as optional EVERYWHERE ELSE it touches model selection
+#     (fail-open on every path that needs it: fetch_models_from_api,
+#     get_models, pick_best's whole ranking machinery — "no key, no fresh
+#     cache: emit a warning, exit 0" is spec 0.3 principle 1, not an
+#     oversight this check gets to override). This SELF-SKIPS rather than
+#     FAILing — SKIP != PASS in this file's own vocabulary (see the header
+#     note: "a skipped check must count as SKIPPED, never as passed"), so
+#     "never read as a pass" still holds, but a FAIL here would make
+#     install.sh's OWN internal `--verify` step (TARGET_DOCTOR invoked with
+#     NO --skip flags at all — see install.sh's functional-verification
+#     block) exit 3 on EVERY fresh install: nothing in the install path
+#     ever populates this cache, so an UNVERIFIABLE-as-FAIL mapping would
+#     have broken "installed, verification FAILED" for any operator with no
+#     Anthropic API key configured — which, given this plugin's primary
+#     audience authenticates Claude Code by subscription/OAuth rather than
+#     a raw API key, is not a fringe case. Measured, not assumed: running
+#     install.sh's actual verify block against a freshly rendered target
+#     with the FAIL mapping in place produced exactly that exit 3. Once a
+#     cache DOES exist — one session with a real key, or one manual
+#     `model-select.sh resolve` (NOT `status`, which only reads an existing
+#     cache and can never populate a cold one) — this check activates
+#     automatically and stays active (check-parity has no TTL on the cache
+#     it reads), so the self-skip is a startup gap, not a permanent blind
+#     spot, for anyone who ever resolves a model at all. For an install that
+#     never does, the underlying auto-selection FEATURE is equally inert, so
+#     a check asking "does the config agree with what would be resolved"
+#     has no more of an answer than the feature itself does.
+#   2 UNVERIFIABLE:HELPER-FAILURE means the OPPOSITE of the above: data WAS
+#     available (or would have been) but workflow-model-apply.sh's own
+#     --print-role-map is broken or truncated, so nothing could be trusted
+#     to evaluate against it — a DETECTED DEFECT, not an absence of a key.
+#     This FAILs. Before round 4 it rendered as the identical self-skip
+#     above: "a broken --print-role-map produces zero failed checks and
+#     doctor exit 0" was the finding this distinction exists to close.
+#
+# SANDBOXED, not a `beads`/`beads_ledger`-style real-target exception:
+# unlike `bd doctor` (which needs the LIVE database — a copy would be
+# answering for a database nothing uses) check-parity's only external input
+# is STATIC files — .claude/model-roles, every .claude/agents/*.md
+# frontmatter pin, and the cached model listing — and it NEVER writes any
+# of them (its own header: "NEVER fetches"). mk_probe_sandbox already
+# copies the first two; it is taught to copy the cache file too (see that
+# function's own comment) so the copy this check reads is the same
+# point-in-time snapshot every other sandboxed check already works from,
+# not a materially weaker one. The one real consequence of sandboxing is a
+# narrow TOCTOU window (something edits the live cache/config/agents WHILE
+# the doctor is mid-run) — negligible, and no different from every other
+# sandboxed check's existing exposure to the same window.
+# ===========================================================================
+check_model_parity() {
+    local script="$TARGET/.claude/scripts/model-select.sh"
+    if [ ! -f "$script" ]; then
+        record model_parity FAIL "missing: .claude/scripts/model-select.sh" \
+"Re-run the plugin installer. Without this script nothing resolves or checks
+per-role model pins at all."
+        return
+    fi
+
+    local sb
+    sb=$(mk_probe_sandbox) || {
+        record model_parity FAIL "could not build a probe sandbox" \
+"Check that TMPDIR is writable."
+        return
+    }
+
+    # claude-workflow-plugin-a13r ROUND 3 ITEM 2: an unreadable agent file on
+    # the REAL target never made it into the sandbox at all (mk_probe_sandbox's
+    # own comment, above the block that writes this sentinel) — so asking
+    # check-parity inside the sandbox can only ever answer for the files that
+    # DID copy. Fail closed on that gap BEFORE running check-parity, naming
+    # the specific file(s), rather than letting a directory that is quietly
+    # smaller than the target's report an OK/PASS it never actually earned.
+    local unreadable_marker="$sb/.claude/.qa-tracking/model-parity-unreadable-agents.txt"
+    if [ -s "$unreadable_marker" ]; then
+        local unreadable
+        unreadable=$(cat "$unreadable_marker" 2>/dev/null || true)
+        record model_parity FAIL "the real target's .claude/agents/ has unreadable file(s) that the probe sandbox could not copy, so they could not be evaluated at all: $unreadable" \
+"A permission problem is hiding these agent file(s) from every reader,
+including a real Claude Code spawn -- not just this doctor run. This is NOT
+the same as a role that legitimately has no agent file yet; fix the
+permission and re-run:
+  chmod +r .claude/agents/*.md
+  bash .claude/scripts/workflow-doctor.sh"
+        return
+    fi
+
+    local out="$WORKDIR/model-parity.out" err="$WORKDIR/model-parity.err" rc=0
+    run_in_sandbox "$sb" 20 "$out" "$err" \
+        bash "$sb/.claude/scripts/model-select.sh" check-parity || rc=$?
+
+    # check-parity prints its ONE verdict line to stderr, always — never
+    # stdout (see its own header: stdout is reserved elsewhere in this
+    # script for resolved values, and check-parity emits none). Take the
+    # LAST matching line so a stray earlier warning cannot be mistaken for
+    # the verdict.
+    local detail
+    detail=$(grep '^model-select: check-parity:' "$err" 2>/dev/null | tail -1 || true)
+
+    if [ "$rc" = "124" ]; then
+        record model_parity FAIL "model-select.sh check-parity did not complete within 20s" \
+"check-parity reads only local files and never fetches (see its own header),
+so a stall here means jq is missing or wedged, not a network hang. Run it by
+hand in the target:
+  bash .claude/scripts/model-select.sh check-parity"
+        return
+    fi
+
+    case "$rc" in
+        0)
+            record model_parity PASS "${detail:-check-parity exited 0 (OK) but printed no detail line on stderr}"
+            ;;
+        1)
+            record model_parity FAIL "${detail:-check-parity exited 1 (CONFIG/FILE DISAGREEMENT) but printed no detail line on stderr}" \
+"At least one agent file's model: pin disagrees with what its role's
+strategy resolves to (or exists but could not be read at all) against the
+cached model listing. Apply the SPECIFIC fix named in the detail line above,
+or bring every lane into agreement at once:
+  bash .claude/scripts/model-select.sh apply"
+            ;;
+        2)
+            # claude-workflow-plugin-a13r ROUND 4, ITEM (b): rc=2 covers TWO
+            # conditions that must not share one verdict — see
+            # model-select.sh's own "rc=2 IS NOT ONE THING" note on
+            # cmd_check_parity for the full statement. check-parity's detail
+            # line now carries a machine-readable tag right after the word
+            # UNVERIFIABLE (:NO-DATA or :HELPER-FAILURE); branch on THAT, not
+            # on rc alone, which is what let "a broken --print-role-map
+            # produces zero failed checks and doctor exit 0" ship in the
+            # first place (round 4's own finding).
+            #
+            # DEFAULT IS SKIP, not FAIL, including when $detail is EMPTY
+            # (check-parity printed nothing evaluable on stderr) or carries a
+            # tag this doctor does not yet know about. This is the same
+            # fail-open direction every other enumeration hiccup in this
+            # plugin takes (spec 0.3 principle 1): an unanticipated new
+            # UNVERIFIABLE reason degrades to "unverified", never to
+            # breaking a fresh install the way an unconditional FAIL default
+            # would (the measured install.sh --verify consequence is in this
+            # function's own header). Only a POSITIVELY matched
+            # HELPER-FAILURE tag escalates to FAIL.
+            case "$detail" in
+                *'UNVERIFIABLE:HELPER-FAILURE'*)
+                    record model_parity FAIL "${detail:-check-parity exited 2 (UNVERIFIABLE) but printed no detail line on stderr}" \
+"model-select.sh's own role/agent map helper (workflow-model-apply.sh
+--print-role-map) is broken or returned a truncated map, so config/file
+agreement could not be evaluated at all -- this is a DETECTED DEFECT in the
+helper, not a missing cache, and self-skipping it would hide a real
+regression behind the same green a fresh, cache-less install gets. Run it by
+hand and read the failure:
+  bash .claude/scripts/workflow-model-apply.sh --print-role-map
+  bash .claude/scripts/model-select.sh check-parity"
+                    ;;
+                *)
+                    # SKIP, not FAIL — see this function's own header for
+                    # why (in short: install.sh's internal --verify runs
+                    # every check with no --skip flags, and nothing in the
+                    # install path ever populates this cache, so FAILing
+                    # here broke every fresh install with no
+                    # ANTHROPIC_API_KEY). SKIP is still never a pass — the
+                    # summary line and .skipped count both say so honestly.
+                    record model_parity SKIP "${detail:-check-parity exited 2 (UNVERIFIABLE) but printed no detail line on stderr} -- UNVERIFIABLE IS NOT A PASS: no cached model listing to compare against, so config/file agreement was never actually checked (self-skipped, not silently treated as healthy)" \
+"Populate the cache once — this needs ANTHROPIC_API_KEY on a cold cache:
+  bash .claude/scripts/model-select.sh resolve
+then re-run the doctor to actually exercise this check. If this target
+deliberately never sets ANTHROPIC_API_KEY (a CI runner, an install with no
+Anthropic API billing), that is a normal, often-permanent state for this
+plugin's optional model-selection feature, and this check will keep
+self-skipping — which is the correct behaviour, not a gap to silence with
+--skip model_parity (harmless if you do; simply unnecessary)."
+                    ;;
+            esac
+            ;;
+        *)
+            record model_parity FAIL "model-select.sh check-parity exited $rc (expected 0, 1 or 2); stderr: ${detail:-$(head -c 200 "$err" 2>/dev/null | tr '\n' ' ')}" \
+"Run it by hand in the target and read the full output:
+  bash .claude/scripts/model-select.sh check-parity"
+            ;;
+    esac
 }
 
 # ===========================================================================
@@ -1488,6 +2233,8 @@ for _check in $DOCTOR_CHECK_NAMES; do
         mcp_config)      check_mcp_config ;;
         settings_hooks)  check_settings_hooks ;;
         beads)           check_beads ;;
+        beads_ledger)    check_beads_ledger ;;
+        model_parity)    check_model_parity ;;
         session_start)   check_session_start ;;
         mcp_bd)          check_mcp_server "bd-mcp" ;;
         mcp_code_graph)  check_mcp_server "code-graph-mcp" ;;

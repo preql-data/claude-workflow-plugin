@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "5a3e65de46593b76cea7c11b4717cf7888c48b50d0e84f7467bd9961b889bb1c",
+  "risk_threshold": "high",
+  "stop_condition": "Report HIGH only for: a forgeable, over-broad, or non-deliberate route to a quarantine\noverride; a path by which a malformed or wrong record is selected as governing; a regression\nof refuse-on-ambiguity; an unreachable recovery for an operator who hits the deadlock;\nuntrusted text reaching a shell or awk interpolation; or a legitimate task deadlocked.\nMEDIUM/LOW otherwise. If there is no HIGH, say so plainly rather than manufacturing one.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:1902",
+      "evidence": "The selector converts the unbounded digit string with `iters[n] = itraw + 0` before computing and comparing maxima. On this host, awk reports `9007199254740992` and `9007199254740993` as equal. Thus an older record with iteration=9007199254740993 and a newer record with iteration=9007199254740992 are treated as sharing the maximum iteration.",
+      "description": "The lower-iteration timestamp winner is then considered simultaneously maximal on both axes and selected as governing, instead of producing review_artifact_selection_disagreement. This is a wrong-record selection and a regression of refuse-on-ambiguity. Compare iteration strings exactly by length and lexicographic order, or impose and validate a safely representable upper bound before numeric conversion."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "stop_condition"
+}

@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-3otl",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "5e06a66ad4ec1ac9fee9fdd86cb6e02d4fe7f6932fff5aa8747b3602c12a9967",
+  "risk_threshold": "high",
+  "stop_condition": "Round 2 re-review: every claim in the three RESOLVED records is verified from the source of both sides rather than the record asserting it; both re-pinned constants are proven load-bearing in BOTH directions by measurement; the new operator-facing remediation wording is ruled on as text an operator reads under pressure; every other sentinel-pinned region in the same spec is checked for the R1-F1 read-outside-assign shape; then no finding at or above high remains.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "low",
+      "location": ".claude/scripts/verify-before-stop.sh:7251 (APPROVAL-RECORD-DETAIL-WORKTREE-APPEND, the remediation tail)",
+      "evidence": "MEASURED by rendering the REAL shipped ARDW + LABEL-WITHOUT-RECORD-BLOCK regions for all three sub-states of the new axis (review-only, design-only, both), using the same extract-and-source-under-set-u method render_matrix_state uses. All three emit the IDENTICAL tail: `resolve-finding/arbitrate the review, or record a fresh design verdict, then re-run`. The body above it is composed PER AXIS (three `if [ -n ... ]` arms at :7241-:7250) and so is the sync-errors reason (WTRES_BLOCK_REASON, :7215-:7225, whose own new comment says it `names EVERY axis that refused`); the tail at :7251 is a single unconditional append.",
+      "description": "RULING ON THE QUESTION ASKED, first: the top-level `or` DOES correctly separate review remediation from design remediation, and the specialist judged this right. Each remedy names its own axis explicitly (`...the review` / `...a fresh design verdict`), so no remedy can be mis-attributed, and demoting the review-internal alternation to `/` is what makes that work. Updating the test to match rather than reverting the feature was the correct call, and 4.3b/EXPECTED_M3_SHA256 now pin text the shipped template actually emits. The residual, well below threshold: the tail is emitted UNCONDITIONALLY while the problem statement is per-axis, so review-only offers a design remedy that cannot help; design-only offers `arbitrate`, which is a REVIEW-finding instrument that cannot clear a design conflict (qa-gate.sh:5000 states the single legal clearing path and that no flag waives it); and the both-axes render joins with `or` what the body two clauses earlier joins with `and`. Cost is bounded to operator confusion or one wasted Stop cycle - the gate still blocks, and the next fire names whichever axis remains - so this is not a release or safety issue. Worth fixing because the pattern to copy is already three lines above it in the same change set."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "low",
+      "location": ".claude/scripts/verify-before-stop.sh CHECKS-SCOPE-NOTE-FN region (TEST_TIMEOUT_S / LINT_TIMEOUT_S / TYPE_TIMEOUT_S)",
+      "evidence": "MEASURED, with a negative control, answering the bounded question directly. Scanned all 10 sentinel regions the spec extracts for variables READ inside the region but ASSIGNED outside it. Bare (non-${x:-} guarded) reads: ARDW 6 (all now seeded), LABEL-WITHOUT-RECORD-BLOCK 3, APPROVAL-RECORD-DETAIL-INIT 2, BROADER-VERIFICATION-NOTE-FN 3 - all seeded by reset_matrix_baseline. CHECKS-SCOPE-NOTE-FN reads TEST_TIMEOUT_S, LINT_TIMEOUT_S and TYPE_TIMEOUT_S BARE and the spec seeds NONE of them (`grep -n TEST_TIMEOUT_S <spec>` -> no match). Negative control: flipping the one dimension that gates them (reset_matrix_baseline TIMEOUT_NOT_ENFORCED= to \"true\") gives 190 passed, 6 failed with `TEST_TIMEOUT_S: unbound variable` printed 7x - R1-F1s exact shape. HEAD-vs-working-tree scan diff: exactly ONE new bare read in the entire change set (WTRES_DESIGN_DETAIL), now seeded, so this change set introduced one instance and closed it.",
+      "description": "ANSWER: the class is NOT closed in this file, but nothing in it belongs to this change set. Three sibling instances are PRE-EXISTING at HEAD, latent because reset_matrix_baseline holds TIMEOUT_NOT_ENFORCED at \"\" and the section header already declares that dimension UNEXERCISED. They differ from R1-F1 in blast shape: the reads sit inside a command substitution, so activation costs the checks-scope paragraph and fails 6 pins LOUDLY rather than vacating the whole render and leaving restore-controls passing for the wrong reason. Blast radius bounded: ARDW is extracted by exactly ONE spec, and WTRES_DESIGN_DETAIL / WTRES_RELEASE_OK are named only in that spec, the script, and its 7 byte-identical mirrors. Recording so the general task the orchestrator filed inherits the enumeration and the control rather than re-deriving it."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "info",
+      "location": ".claude/scripts/verify-before-stop.sh:6694-6702 (the A1b DISPOSITIONs RESIDUAL paragraph)",
+      "evidence": "I probed the one case that would have refuted the residual: a design conflict open BEFORE the window, with producer 1 (F1s audited --no-design) as the tracker-emptier. It does NOT refute it. qa-gate.sh:4856 states --no-design `bypasses ONLY the satisfied-verdict requirement; an open DESIGN-CONFLICT is never bypassed`, and the DESIGN-CONFLICT-REFUSAL region (:4871-:5005) is unconditional in cmd_approve and fail-closes even on an unreadable conflict source (design_conflict_source_unreadable, exit 2). So a producer-1 release implies no conflict was open at that instant, and `posted in the narrow window` is the complete residual.",
+      "description": "No defect - the disposition is correct as written. The note is that its residual is complete BECAUSE of a fact it does not cite, and by the dispositions own standard it should: for producer 3 it cites TRACKER-PRESERVE by name and quotes that guards own future-edit warning verbatim, precisely so the reasoning does not outlive the guard. The same courtesy for DESIGN-CONFLICT-REFUSAL (also sentinel-wrapped, also META-guarded, also strippable) would make the residual self-supporting. Purely additive."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

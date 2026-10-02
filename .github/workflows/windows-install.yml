@@ -415,6 +415,13 @@ jobs:
             Write-Host "OK $server has node_modules (installed by install.ps1)"
           }
 
+          # The skip list, declared ONCE. It is joined into the --skip argument,
+          # subtracted from the vacuity floor below, and rendered into the step
+          # summary. Three spellings of the same list is how the old hardcoded
+          # floor went stale without anyone noticing.
+          $skipChecks = @("deps", "beads", "session_start")
+          $skipArg = $skipChecks -join ','
+
           $reportPath = Join-Path $env:RUNNER_TEMP "workflow-doctor.json"
           # Scoped 'Continue': Windows PowerShell turns a redirected native
           # command's stderr into ErrorRecords, and under 'Stop' those become a
@@ -422,7 +429,7 @@ jobs:
           # of reporting a FAILing check. Same reasoning as install.ps1's
           # Invoke-BashScript.
           $ErrorActionPreference = "Continue"
-          & bash $doctor --target $target --json-out $reportPath --skip deps,beads,session_start
+          & bash $doctor --target $target --json-out $reportPath --skip $skipArg
           $doctorRc = $LASTEXITCODE
           $ErrorActionPreference = "Stop"
           Write-Host "workflow-doctor.sh exit code: $doctorRc"
@@ -434,18 +441,51 @@ jobs:
 
           # Vacuity guard. `failed == 0` over an empty or truncated check list is
           # green by construction, and a report with only skips would sail
-          # through. The registry ships 11 checks and 3 are skipped above, so 8
-          # is the floor this step is entitled to assert anything with.
+          # through. The floor is the registry size minus the checks skipped
+          # above.
+          #
+          # DERIVED, NOT TYPED. This used to be a literal 8, hand-derived from a
+          # registry that has grown twice since: first when `beads_ledger`
+          # joined, again when `model_parity` (claude-workflow-plugin-a13r)
+          # did, and the literal never moved either time, so a report
+          # truncated to 8 entries sailed straight through the guard written
+          # to catch exactly that. A fresh literal would be the same defect
+          # one increment later, so the size is read from the registry
+          # sentinel in the doctor THIS INSTALL landed. It currently declares
+          # thirteen named checks. (.claude/scripts/tests/workflow-doctor.test.sh
+          # section 7 asserts this step still derives it rather than
+          # reverting to a literal, and keeps the count named in this
+          # comment honest.)
+          #
+          # The pattern deliberately does not anchor on the closing quote: a
+          # checkout under core.autocrlf=true leaves a trailing CR on the line,
+          # and a quote-then-end-of-line anchor would silently find nothing.
+          $registryPattern = '^DOCTOR_CHECK_NAMES="([^"]*)"'
+          $registryMatch = Select-String -LiteralPath $doctor -Pattern $registryPattern | Select-Object -First 1
+          if (-not $registryMatch) {
+            Write-Error "could not read DOCTOR_CHECK_NAMES from $doctor - refusing to guess the vacuity floor"
+            exit 1
+          }
+          $registryNames = @(($registryMatch.Matches[0].Groups[1].Value -split '\s+') | Where-Object { $_ -ne "" })
+          $floor = $registryNames.Count - $skipChecks.Count
+          # A failed parse must never produce a floor that nothing can fall
+          # below - that is the vacuity this guard exists to prevent, relocated.
+          if ($registryNames.Count -lt 1 -or $floor -lt 1) {
+            Write-Error "derived a nonsensical vacuity floor (registry=$($registryNames.Count), skipped=$($skipChecks.Count), floor=$floor) - refusing to treat the run as a pass"
+            exit 1
+          }
+          Write-Host "vacuity floor: $($registryNames.Count) registry check(s) - $($skipChecks.Count) skipped = $floor"
+
           $checkCount = @($report.checks).Count
-          if ($checkCount -lt 8) {
-            Write-Error "workflow-doctor.sh reported only $checkCount check(s); refusing to treat that as a pass"
+          if ($checkCount -lt $floor) {
+            Write-Error "workflow-doctor.sh reported only $checkCount check(s), below the derived floor of $floor; refusing to treat that as a pass"
             exit 1
           }
 
           $sb = New-Object System.Text.StringBuilder
           [void]$sb.AppendLine("## workflow-doctor.sh on the rendered Windows install")
           [void]$sb.AppendLine("")
-          [void]$sb.AppendLine("**$($report.passed) passed, $($report.failed) failed, $($report.skipped) skipped** (``--skip deps,beads,session_start`` - the runner's ``bd`` is a shim).")
+          [void]$sb.AppendLine("**$($report.passed) passed, $($report.failed) failed, $($report.skipped) skipped** (``--skip $skipArg`` - the runner's ``bd`` is a shim).")
           [void]$sb.AppendLine("")
           [void]$sb.AppendLine("| Result | Check | Detail |")
           [void]$sb.AppendLine("| --- | --- | --- |")

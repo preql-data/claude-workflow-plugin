@@ -54,6 +54,24 @@
 # carve-out literal `single-line typo fix`, and the four wiring sentinels in
 # orchestrator.md — are asserted too.
 #
+# ---------------------------------------------------------------------------
+# VENDOR_HASH INTEGRITY (v5 D3, claude-workflow-plugin-fkm.5) — section 13
+#
+# A SEPARATE claim from the ten modifications above, and orthogonal to it:
+# MANIFEST.md records a sha256 of the vendored SKILL.md's raw bytes
+# (workflow-manifest.sh hash-file), and section 13 asserts it against a LIVE
+# recompute — never a hardcoded golden value, matching this file's own
+# "continuous enforcement is the live recompute, not a label" doctrine
+# (qa-gate.sh's design-binding ladder states the same principle for the
+# design artifact). This proves MANIFEST.md's hash claim is honest about the
+# file's CURRENT bytes; it does not inspect what those bytes say — a
+# deliberate edit that also updates the recorded hash passes just as cleanly
+# as no edit at all, which is why this section does not replace the ten
+# modifications' bans, it supplements them with a drift detector. D3's
+# `qa-gate.sh grilling-record` records the SAME live hash at the moment a
+# grilling dialogue concludes, so a later reader can tell whether the method
+# text drifted since a given grilling happened.
+#
 # Exit codes:
 #   0  every assertion passed and the assertion count is complete
 #   1  an assertion failed, or the count moved
@@ -621,6 +639,59 @@ assert_eq "META-9b: reverse parity NAMES a manifest row with no file on disk" \
 # Restore-after: every META wrote only inside $META_DIR, never the live repo.
 rm -rf "$META_DIR"
 
+printf "\n=== Section 13: vendor_hash integrity — MANIFEST.md's claim vs the live file (D3) ===\n"
+
+WM_TOOL="$PROJECT_DIR/.claude/scripts/workflow-manifest.sh"
+
+# manifest_vendor_hash <manifest> — every distinct 64-hex string recorded.
+# Like manifest_pins (40-hex git commits) above, but for a SEPARATE claim:
+# what byte-content of the vendored SKILL.md was recorded, not which upstream
+# commit it descends from. The two regexes never collide by LENGTH (40 vs
+# 64) — measured directly: a bare `\b[0-9a-f]{40}\b` cannot match inside a
+# contiguous 64-hex-character token, because every character in the run is a
+# word character, so no `\b` boundary exists at an internal offset.
+manifest_vendor_hash() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    grep -oE '\b[0-9a-f]{64}\b' "$f" 2>/dev/null | LC_ALL=C sort -u
+}
+
+VHASH_LIST=$(manifest_vendor_hash "$VENDOR_MANIFEST")
+VHASH_COUNT=$(printf '%s\n' "$VHASH_LIST" | grep -c . | tr -d ' \n')
+assert_eq "13.1 MANIFEST.md records exactly ONE sha256 vendor_hash (no stale second one)" \
+    "1" "$VHASH_COUNT"
+
+LIVE_VHASH=$(bash "$WM_TOOL" hash-file "$VENDORED_SKILL" 2>/dev/null)
+assert_eq "13.2 the recorded vendor_hash equals workflow-manifest.sh hash-file's LIVE recompute over brainstorming/SKILL.md" \
+    "$LIVE_VHASH" "$(printf '%s' "$VHASH_LIST" | head -1)"
+
+# --- META-10: a byte-perturbed COPY must disagree with the recorded hash ---
+# Non-vacuity (part 1): the perturbation must actually change the bytes.
+# Specific misbehaviour (part 2): if the LIVE file had silently drifted to
+# match this perturbed copy while MANIFEST.md's line stayed stale, THIS is
+# the comparison that would catch it (recorded != live) — proven here by
+# showing the perturbed copy's hash differs from both the live file's hash
+# AND the recorded one. Restore control (part 3): 13.1/13.2 already showed
+# the real, unperturbed pairing agrees; META-10d re-asserts it after the
+# mutation to prove the meta touched only its own scratch copy. Execution
+# (part 4): every hash in this block comes from actually RUNNING
+# workflow-manifest.sh hash-file, the shipped instrument, not a re-derivation
+# of sha256 by another tool.
+V13_DIR=$(mktemp -d -t vendor-hash-meta.XXXXXX)
+cp "$VENDORED_SKILL" "$V13_DIR/perturbed-skill.md"
+printf 'x' >> "$V13_DIR/perturbed-skill.md"
+assert_eq "META-10a: the perturbation actually changed the copy's bytes" \
+    "differ" "$(cmp -s "$VENDORED_SKILL" "$V13_DIR/perturbed-skill.md" && echo same || echo differ)"
+
+PERTURBED_HASH=$(bash "$WM_TOOL" hash-file "$V13_DIR/perturbed-skill.md" 2>/dev/null)
+assert_eq "META-10b: the perturbed copy hashes to something DIFFERENT from the live file (the mutation is measurable, not just byte-different)" \
+    "differ" "$([ "$PERTURBED_HASH" != "$LIVE_VHASH" ] && echo differ || echo same)"
+assert_eq "META-10c: the perturbed copy's hash does NOT match MANIFEST's recorded vendor_hash (the check WOULD catch this drift if the live file had moved to it)" \
+    "differ" "$([ "$PERTURBED_HASH" != "$(printf '%s' "$VHASH_LIST" | head -1)" ] && echo differ || echo same)"
+assert_eq "META-10d: control — the real vendored file still verifies clean against MANIFEST.md after the meta ran" \
+    "$LIVE_VHASH" "$(printf '%s' "$(manifest_vendor_hash "$VENDOR_MANIFEST")" | head -1)"
+rm -rf "$V13_DIR"
+
 printf '\n=== Summary ===\n'
 
 if [ "$FAIL" -gt 0 ]; then
@@ -648,7 +719,14 @@ fi
 #                  control; META-2 adds the stale-second-pin case; META-9 is
 #                  two directions of one parity checker)
 # Counts measured from a real run on 2026-07-30, not estimated.
-EXPECTED_ASSERTIONS=94
+#
+#   6  section 13  vendor_hash integrity (v5 D3, claude-workflow-plugin-fkm.5):
+#                  2 direct (count==1, recorded==live) + META-10's 4 parts
+#                  (perturbation landed, perturbed hash differs from live,
+#                  perturbed hash differs from recorded, control re-verifies
+#                  clean). 94 -> 100, measured against a real run 2026-08-18
+#                  at commit d8f75ab.
+EXPECTED_ASSERTIONS=100
 RUN=$((PASS + FAIL))
 printf '\nTotal: %d assertion(s) run (expected %d)\n' "$RUN" "$EXPECTED_ASSERTIONS"
 if [ "$RUN" -ne "$EXPECTED_ASSERTIONS" ]; then

@@ -11,10 +11,13 @@
 import { z } from 'zod';
 import {
     runBdJson,
+    runBdShowJson,
     BdError,
     validateTaskId,
     HINT_LIST_TO_FIND_IDS,
     normalizeShowResult,
+    resolveComments,
+    COMMENTS_UNAVAILABLE,
 } from '../lib/exec-bd.js';
 import { ok, fail, safe } from '../lib/format.js';
 
@@ -114,8 +117,9 @@ export function registerListTools(server) {
                     .describe(
                         "Advanced: pass `bd show --refs` which returns a reverse-reference MAP keyed by " +
                         "the requested id (different shape than the default object). Most callers should " +
-                        "leave this false — plain show already includes `dependencies` (blockers) and " +
-                        "`dependents` (reverse refs) in the returned task. Default: false.",
+                        "leave this false — this tool already returns `dependencies` (blockers) and " +
+                        "`dependents` (reverse refs) on the task, hydrating them explicitly where the " +
+                        "installed bd does not inline them. Default: false.",
                     ),
                 cwd: z.string().optional(),
             },
@@ -129,9 +133,17 @@ export function registerListTools(server) {
         },
         safe(async (input) => {
             const tid = validateTaskId(input.task_id);
-            const args = ['show', tid, '--json'];
-            if (input.include_refs) args.push('--refs');
-            const raw = await runBdJson(args, {
+            // This tool's contract is the task's FULL state, so it hydrates
+            // both arrays bd 1.1.2 stopped inlining. Without them the payload
+            // silently loses .comments and .dependents while still reporting
+            // comment_count / dependent_count — the shape would also differ
+            // between bd 0.47.x and 1.1.2, which is worse than either choice.
+            // Measured cost on this repo's heaviest bead: ~30-40ms on a ~350ms
+            // baseline (bd process startup dominates).
+            const raw = await runBdShowJson(tid, {
+                includeComments: true,
+                includeDependents: true,
+                extraArgs: input.include_refs ? ['--refs'] : [],
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });
@@ -144,10 +156,23 @@ export function registerListTools(server) {
                 );
             }
             const labels = (task.labels || []).join(',') || '(none)';
+            // fkm.1.18. This observation used to read `comments: 0` whenever the
+            // bodies did not arrive — a number the tool had not established.
+            // Unlike bd_list_comments, this tool does NOT refuse on that: its
+            // contract is the task's whole state and the other fields are
+            // sound, so it degrades by SAYING SO instead. The payload still
+            // carries bd's own comment_count, so a caller can see the truth.
+            const resolved = resolveComments(task);
+            const commentNote =
+                resolved.status === COMMENTS_UNAVAILABLE
+                    ? `comments: UNAVAILABLE (bd reports comment_count=${resolved.count ?? 'unknown'}, ` +
+                      `bodies not returned — use bd_list_comments, which refuses rather than reporting a ` +
+                      `zero it cannot establish)`
+                    : `comments: ${resolved.comments.length}`;
             return ok(
                 `bd_show_task ${tid}: status=${task.status || '?'} labels=[${labels}]`,
                 task,
-                `comments: ${(task.comments || []).length}, dependencies: ${(task.dependencies || []).length}`,
+                `${commentNote}, dependencies: ${(task.dependencies || []).length}`,
             );
         }),
     );

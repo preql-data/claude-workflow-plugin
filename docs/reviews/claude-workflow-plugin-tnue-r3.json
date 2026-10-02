@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-tnue",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "1d78474c1b433bf8097c9a5bc92b065baa4d5f183efe670f5e68e906928bc5e7",
+  "risk_threshold": "high",
+  "stop_condition": "The two properties the orchestrator asked me to scrutinise are established by my own measurement rather than by the spec's own legs: (a) ownership is proved by construction against a planted foreign process bearing the identical needle WHILE a real leak is in flight, and (b) the anchored extraction guard is shown to fail on a marker-stripped copy while the pre-repair form is shown to pass on the same copy. Stop when no finding at or above high remains, and every kill site in the file has a named ownership basis.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "low",
+      "location": ".claude/scripts/tests/green-check.test.sh:1725-1740 (13.B-TEARDOWN-META, between the MUTANT dispatch and the reap of the attributed set)",
+      "evidence": "This is the ONE process in Section 13 that exists by design and is DISCOVERED rather than spawned, and it is the only one the trap safety net does not cover. Every registration site in the file is :1100, :1165, :1207, :1249, :1415, :1417 and :1775 — all of them pids the spec itself spawned. The mutant's leaked timer becomes known at :1730 (MUTANT_LEAKED_PIDS) and is reaped at :1738-1740; nothing registers it with GC13_BYSTANDER_PIDS in between, so an abort inside those ten lines leaves it unreaped by cleanup(). What makes this worth recording rather than ignoring is the round-2 change to the needle: the timer is now `sleep $((2011000000 + $$))`, which I measured at 63 years, where before this task it was `sleep 20`. Pre-repair, an abort in this window left a self-limiting 20-second orphan; now it leaves one that never self-expires. Under run-tests.sh this is fully backstopped — I confirmed the leak sits in the spec's own pgid (the mutant shim has no `set -m`), so the SURVIVOR-SWEEP at run-tests.sh:2112-2113 group-kills it, and my runner-mediated run came back PASSED 173 in 87s with no survivor and a clean host. The exposure is a direct `bash green-check.test.sh` invocation that aborts inside that specific ten-line window.",
+      "description": "NOT blocking, and deliberately not raised higher: the window is ten lines, the runner backstops the normal path, and the long cap is a deliberate and CORRECT trade the shim header argues well — it converts the runner's sweep from a timing-dependent detector into a guaranteed one, which is exactly what made the original bug Linux-only. The repair is one line of the file's own newly-established convention: register the attributed pids at :1731 (the instant they are known, per R2-F3's own wording) and `_gc13_unregister_bystander` each after the verified reap, exactly as :1775/:1812 already do for the planted foreign. Recording it because the file just spent a round establishing that convention everywhere else, and this is the one place it was not applied."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "low",
+      "location": "claude-workflow-plugin-tnue task record; .claude/scripts/tests/green-check.test.sh (21 citations of R2-F1/R2-F2/R2-F3/R2-F4)",
+      "evidence": "The round-2 independent review by sol-codex produced four findings that between them drove a 627-line change, and none of them is recorded as a REVIEW-ARTIFACT v1 on the task. The only artifact on the task, and the only file in docs/reviews/ for it, is my own iteration-1 artifact. The code cites the ids heavily — R2-F1 seven times, R2-F2 six, R2-F3 once, R2-F4 seven — so a reader who asks 'what exactly was R2-F2?' gets a rich answer from the code comments and nothing at all from the durable record the workflow maintains for precisely that question. Two concrete consequences, one of which I hit immediately: the finding-id namespace is now ambiguous (I had to record this artifact as iteration 3 rather than 2, because an R2-F1 of mine would collide with the R2-F1 the code cites), and `review-check.sh gate`'s open-findings count never saw sol's findings at all, so its ledger understates how many rounds this change actually took.",
+      "description": "NOT blocking — the findings were acted on, the repairs are real and I verified them, and the code comments preserve the substance unusually well. Recording it because the durable-record discipline is this repo's own, and a review round that changed 600 lines should be reconstructable from the task rather than from a commit message. Recommend recording sol's round-2 artifact retroactively via `qa-gate.sh review-record` so the ids the code cites resolve to something, or, if its raw JSON was never captured, a single comment naming the four findings and their outcomes."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

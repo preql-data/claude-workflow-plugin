@@ -1,4 +1,4 @@
-# Model roles — v4.0.0 Phase V1 (role-aware model selection).
+# Model roles — v5.0.0 Phase D0 (five role classes; was three in v4.0.0/V1).
 #
 # Maps each workflow ROLE to a selection STRATEGY. model-select.sh reads
 # this on SessionStart and rewrites every agent's `model:` pin per its
@@ -10,41 +10,197 @@
 # Simple `key=value` lines. Comments (`#`) and blank lines are ignored.
 # Whitespace around the `=` is tolerated. Same shape as .claude/rubric-config.
 #
-# Roles (fixed set)
-# -----------------
-#   orchestrator   the planning/delegation agent (orchestrator.md).
-#   implementer    the writing agents (backend.md, frontend.md, devops.md).
-#   reviewer       the read-only review agents (qa.md, grader.md, judge.md).
+# Roles (fixed set — model-select.sh's ALL_ROLES)
+# ----------------------------------------------
+#   designer         the design agent (designer.md).
+#   design_reviewer  the independent design reviewer (design-reviewer.md).
+#   orchestrator     the planning/delegation agent (orchestrator.md).
+#   implementer      the writing agents (backend.md, frontend.md, devops.md).
+#   reviewer         the read-only review agents (qa.md, grader.md, judge.md).
 #
 # Strategies
 # ----------
-#   top          the resolver's single best pick — newest, most capable
-#                family in the listing (Fable-class today), exactly the
-#                v3.5 behavior. Honours .claude/model-ranking exclusions.
-#   opus-class   the newest claude-opus-* model in the listing (Opus 4.8
-#                today; auto-adopts Opus 5 the moment the account lists it).
-#                Ranking exclusions still apply inside the Opus subset. If
-#                no Opus-class model is listed (or all are excluded), the
-#                implementer lane falls back to `top`.
+#   top             the resolver's single best pick — newest model in the
+#                   most capable family in the listing (Fable-class today),
+#                   exactly the v3.5 behavior. Honours .claude/model-ranking
+#                   exclusions.
+#   <family>-class  the newest claude-<family>-* model in the listing.
+#                   `opus-class`, `sonnet-class`, `fable-class`, `haiku-class`
+#                   and any family shipped in the future all parse from ONE
+#                   rule (`^[a-z][a-z0-9]*-class$`) — there is no per-family
+#                   enum to extend. Selection is deliberately NOT gated on the
+#                   family appearing in .claude/model-ranking, so a brand-new
+#                   family is usable on day zero. Ranking exclusions still
+#                   apply INSIDE the subset; an empty or fully-excluded subset
+#                   warns and falls back to `top`. When the family is also
+#                   absent from the ranking tiers the warning adds "not a
+#                   known tier — check for a typo", which is how `sonnnet-class`
+#                   is told apart from a genuinely unlisted family.
 #
 # A missing file, a missing key, or an unrecognised strategy value all
 # resolve to `top` (fail-open) — setting every role to `top` reproduces
-# v3.5 single-pin behavior exactly.
+# v3.5 single-pin behavior exactly. Keys this file does NOT carry are
+# reported in the resolved artifact's `missing_keys` array and surfaced as a
+# SessionStart warning: this file is manifest class `operator`, so an install
+# whose copy was EDITED receives the new defaults as a `.claude/model-roles.new`
+# sidecar and keeps running the old key set silently. `missing_keys` is what
+# makes that visible instead of silent.
 #
-# Reviewer lane (optional)
-# ------------------------
+# WHY THE DESIGN LANES ARE `top` AND NOT `fable-class`
+# ----------------------------------------------------
+# `fable-class` would say what we mean today and be wrong tomorrow. Pinning a
+# lane to a family FREEZES it to that family: pick_best ranks an unrecognised
+# family in the TOP capability class, so `top` adopts a newly-launched tier
+# above Fable on day zero, while `fable-class` would keep the design lanes on
+# Fable until somebody edits this file. `top` resolves to Fable today AND
+# auto-adopts. Ship `<family>-class` as legal grammar; do not use it here.
+#
+# Per-unit escalation (a strategy, NOT a role)
+# --------------------------------------------
+#   implementer_class_high=<strategy>
+#     The strategy a single unit of work escalates to when the design artifact
+#     declares `implementer_class: high` for it (mechanised as the Beads label
+#     `impl-class-high`). It owns no agent files and NEVER appears under
+#     `roles` in the resolved artifact — it is resolved through the same
+#     role_strategy + pick_for_role path and recorded under `escalation`.
+#
+#       model-select.sh escalate <task-id>   # pin the implementer lane up
+#       model-select.sh restore              # put it back
+#
+#     Escalation is a DECLARED, AUDITED, REVERSIBLE pin change and nothing
+#     more. Whether the runtime honours a mid-session frontmatter `model:`
+#     change is not established anywhere in this tree and is not verifiable
+#     offline, so no test, doc or release note here claims that an escalated
+#     unit RAN on the escalated model.
+#
+# Reviewer lane / design-reviewer lane (optional)
+# -----------------------------------------------
 #   reviewer_lane=auto|claude
-#     auto    (default) let the workflow detect a review lane. V1 always
-#             resolves to the Claude review path; V2 adds the Sol-via-Codex
-#             probe (.claude/scripts/codex-detect.sh) behind this same key.
-#     claude  force the Claude review path regardless of any probe.
-#   The WORKFLOW_REVIEWER_LANE environment variable overrides this key
-#   (test/operator seam). The reviewer agents ALWAYS carry a Claude `model:`
-#   pin in frontmatter — the lane only affects which reviewer is engaged,
-#   never the frontmatter pin, and never blocks the session.
+#   design_reviewer_lane=auto|claude
+#     auto    (default) let the workflow detect a review lane via
+#             .claude/scripts/codex-detect.sh — Sol via Codex when present,
+#             Claude otherwise.
+#     claude  force the Claude path regardless of any probe.
+#   WORKFLOW_REVIEWER_LANE / WORKFLOW_DESIGN_REVIEWER_LANE override their key
+#   (test/operator seam). Reviewer and design-reviewer agents ALWAYS carry a
+#   Claude `model:` pin in frontmatter — never the frontmatter pin, and a lane
+#   never blocks the session.
+#   THE TWO LANES ARE NOT SYMMETRIC, despite the symmetric key names:
+#     reviewer_lane        REAL. codex-review.sh drives the Sol code review, so
+#                          this lane genuinely changes which reviewer is engaged
+#                          and the statusline renders the literal `sol` for it.
+#     design_reviewer_lane RESOLVED AND REPORTED, BUT NOT DRIVEN. Nothing
+#                          executes design review through Codex, so this lane
+#                          changes neither the reviewer nor (since
+#                          claude-workflow-plugin-yvpe) the statusline, which
+#                          always renders the design reviewer's resolved Claude
+#                          id. Its only remaining effect is the one documented
+#                          as a defect below: it suppresses the identity-collapse
+#                          flag.
+#
+# IDENTITY COLLAPSE — and the ONE way to clear it
+# -----------------------------------------------
+# `designer` and `design_reviewer` are both `top` by default, so on a stock
+# install WITHOUT Codex they resolve to the same model and the design would be
+# reviewed by its own identity. That is reported, never blocked: the resolver
+# sets `identity_collapse: true` in the artifact, writes
+# .claude/.qa-tracking/design-family-collapse, warns at SessionStart, and the
+# statusline shows `!id`. Pins are still written and the exit status is 0 —
+# blocking here would make the Codex-absent arm unrunnable.
+#
+# ONE REAL CLEARANCE, and one that only LOOKS like one:
+#   1. Set `design_reviewer=opus-class` (or any family-class distinct from
+#      whatever `top` resolves to). The two lanes then resolve to different
+#      models on the Claude path alone. THIS IS THE ONLY ONE THAT WORKS.
+#   2. DO NOT RELY ON INSTALLING CODEX. It was documented here as a clearance
+#      and it is not one (claude-workflow-plugin-yvpe). Installing Codex makes
+#      design_reviewer_lane resolve away from `claude`, and the collapse
+#      condition below requires (identical pick AND lane == claude) — so the
+#      flag goes out while BOTH ROLES STILL RESOLVE TO THE SAME MODEL. No
+#      script drives design review through Codex: codex-review.sh is the
+#      CODE-review driver and contains no design handling, and
+#      .claude/agents/design-reviewer.md instructs the reviewer to emit
+#      `design-claude` unconditionally because it has no tool to read this
+#      lane. Taking this "clearance" therefore leaves you strictly worse off
+#      than not taking it: the risk is unchanged and the warning that would
+#      have told you is gone.
+#
+# RIDER (v5.0.0): implementer moved from opus-class to sonnet-class. That is a
+# deliberate quality-for-cost trade the reviewed design artifact and the
+# green-to-green per-unit tests are meant to absorb, with per-unit escalation
+# as the safety valve. Track grader rounds per implementation task before and
+# after; if rounds rise materially the revert is the ONE line below
+# (`implementer=opus-class`) and the observation belongs in LESSONS.md.
+#
+# DEVIATION LANDED: BOTH D0 ROWS NOW MATCH THE PLAN'S TABLE
+# -----------------------------------------------------------
+# (v5.0.0 / claude-workflow-plugin-fkm.10, raised as QA finding R1-F3 on
+# fkm.2; reviewer landed 2026-09-07, orchestrator landed 2026-09-18 in
+# fkm.9 / D7. Both rows closed fkm.10 — see that task for the full record.)
+#
+# D0 shipped two rows above the directive's own table
+# (docs/plans/v5-design-phase.md:106-110 — verified at that location on
+# 2026-09-18; earlier citations of :86-92 had drifted). The plan's own D0
+# "Config grammar" illustration (v5-design-phase-plan.md:362-374) shows
+# `orchestrator = top` and `reviewer = top` too — that block documents what
+# D0 actually SHIPPED, not the directive's target, so it is not a second
+# vote for `top`; read it as the deviation's starting point, not its cover.
+#
+#   role          directive (D0 table)              shipped in D0
+#   orchestrator  latest Opus-class                  top   (Fable today)
+#   reviewer      Sol via Codex, fallback Opus-class  top + reviewer_lane
+#
+# Correction 7 does NOT cover either row, and it is worth being exact about
+# why: it licenses `top` for the DESIGN lanes because Fable IS the top
+# family there, so `top` resolves to precisely what the plan asked for
+# while still adopting a newer top family on day zero. Opus is not the top
+# family, so `top` on these two rows was a HIGHER tier than the plan
+# specified — a deviation, in the safe direction, named here rather than
+# left to be inferred from the file.
+#
+# WHY BOTH WERE DEFERRED IN D0: D0 shipped no working designer (D1) or
+# design-review loop (D2), so the ORCHESTRATOR SEAT was still where design
+# judgment happened, and `reviewer` is the gate's own seat — demoting
+# either before its replacement/safety-net existed would have removed
+# capability from the surface doing (or catching) that work.
+#
+# REVIEWER LANDED EARLY (2026-09-07), ahead of its own deferral. The
+# deferral reason didn't survive contact with the operator's actual
+# standing instruction: QA and review run on Sol in priority to Opus, and
+# NEVER on Fable (a weekly-limit constraint). `top` resolving to Fable was
+# silently violating that instruction on every reviewer spawn — Fable was
+# never a legitimate seat for this role, so the capability trade the
+# deferral was protecting did not apply here. `reviewer` shipped
+# `opus-class` (the directive's own fallback tier) without waiting for D4.
+#
+# ORCHESTRATOR LANDS HERE (2026-09-18, fkm.9 / D7), also ahead of its D4
+# deferral, for the SAME weekly-limit reason at HIGHER volume: `top`
+# resolved to Fable, and the orchestrator is spawned on essentially every
+# non-trivial turn — far more often than any reviewer — so it was the seat
+# burning the protected weekly Fable budget hardest, not the seat the
+# deferral was protecting. DISCLOSURE, so this can be challenged rather
+# than inherited: the operator's instruction as literally stated names QA
+# and review, not the orchestrator; extending it here is an inference from
+# the same weekly-limit rationale, made explicit rather than assumed. The
+# directive's own D0 table is not an inference — it independently
+# specifies latest Opus-class for this row on its own terms, and D1/D2
+# (the design lanes) are now shipped, so the capability-removal concern
+# above no longer applies either. Re-checked at this landing: the
+# identity-collapse condition is unaffected (it compares `designer`
+# against `design_reviewer`, never `orchestrator`), and the statusline
+# group render still degrades correctly through more than three distinct
+# groups — see `.claude/scripts/tests/model-roles.test.sh` section 4
+# (4.7-4.12 cover the grouping/truncation mechanism generally; it is
+# strategy-agnostic, so no new case was required for this specific
+# role-value combination).
 
-orchestrator=top
-implementer=opus-class
-reviewer=top
+designer=top
+design_reviewer=top
+orchestrator=opus-class
+implementer=sonnet-class
+reviewer=opus-class
+
+implementer_class_high=opus-class
 
 # reviewer_lane=auto
+# design_reviewer_lane=auto

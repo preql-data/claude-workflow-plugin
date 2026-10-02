@@ -28,8 +28,9 @@ misconfiguration, a crash, a hang, or a server that speaks MCP but exposes no `c
 resolve to `reviewer_lane=claude`, and the review happens on the Claude lane instead. The plugin
 proves this rather than asserting it — `.claude/tests/component/specs/reviewer-lane-degradation.sh`
 runs the identical record/gate sequence with and without a Codex registration and diffs the outputs
-byte-for-byte, and greps `qa-gate.sh`, `verify-before-stop.sh`, and `review-check.sh` for zero
-references to Codex or to the lane.
+byte-for-byte, and (as of claude-workflow-plugin-icn4, hoisted to L1 for cadence)
+`.claude/scripts/tests/reviewer-lane-structural.test.sh` greps `qa-gate.sh`, `verify-before-stop.sh`,
+and `review-check.sh` for zero references to Codex or to the lane, in any spelling.
 
 **Sol is advisory, always.** Its artifact is grading-packet item 8. It writes no labels, records no
 approval, and the Stop hook does not consider it. The change-set-hash-bound `qa-approved` record
@@ -613,7 +614,7 @@ process at all.
 | Lane stays `claude`, server connects | `no-codex-tool` | The server answered but advertises no tool named `codex` — usually a wrapper package rather than the official CLI, or a version that renamed the tool. | Use the official CLI's own `codex mcp-server` mode. Confirm the surface: it should advertise exactly `codex` and `codex-reply`. |
 | Everything looks right, lane still `claude` | any | `reviewer_lane=claude` is pinned in `.claude/model-roles`, or `WORKFLOW_REVIEWER_LANE` is exported in your environment. Both intentionally force the free lane. | Remove the pin / unset the variable, or leave it — this is the supported opt-out. |
 | Probe prints `claude` with no artifact written | n/a | `jq` is missing. The probe cannot parse a registration without it and resolves to `claude` by design. | Install `jq` (the plugin requires it anyway). |
-| A relay round returns exit 5 | n/a | The review turn hit the wall-clock cap, the server died mid-turn, **or the model resolved from `~/.codex/config.toml` is one your account cannot use.** No artifact is written. | Discriminate by timing, which is the only reliable tell: a fail *at* the cap (300s by default) is the wall clock — see [Exit 5 at the wall-clock cap](#exit-5-at-the-wall-clock-cap). Instant and every time is the model pin — see [The model pin lives in `config.toml`](#the-model-pin-lives-in-configtoml-not-in-the-registration). Either way nothing is broken: the orchestrator records a degradation note and QA authors the artifact on the Claude lane that round. |
+| A relay round returns exit 5 | n/a | The review turn hit the wall-clock cap, the server died mid-turn, the tool-call frame could not be marshalled, **or the model resolved from `~/.codex/config.toml` is one your account cannot use.** No artifact is written. | **Read the driver's stderr line first — it is the discriminator, and timing only splits what is left.** A line beginning `could not marshal the codex tool call` is the frame guard; nothing was sent and no turn was billed — see [Exit 5 before anything was sent](#exit-5-before-anything-was-sent). Otherwise: a fail *at* the cap (300s by default) is the wall clock — see [Exit 5 at the wall-clock cap](#exit-5-at-the-wall-clock-cap); instant with no named reason is the model pin — see [The model pin lives in `config.toml`](#the-model-pin-lives-in-configtoml-not-in-the-registration). Either way nothing is broken: the orchestrator records a degradation note and QA authors the artifact on the Claude lane that round. |
 
 ### The model pin lives in `config.toml`, not in the registration
 
@@ -698,6 +699,36 @@ model lands on the same row of the table below as any other mid-flight failure �
 QA authors the artifact on the Claude lane that round, and the release mechanics do not change. You
 lose the second opinion for one round; you lose nothing else.
 
+### Exit 5 before anything was sent
+
+**Check for this one first**, because it is the cheapest to rule in or out and it means something
+different from every other exit 5: no request left the machine, so no turn was billed and retrying
+would fail identically.
+
+What it looks like — instant, and it names itself:
+
+```
+[codex-review] could not marshal the codex tool call — frame is empty or not valid JSON (jq rc=0, envelope 1568552 bytes); nothing was sent, no artifact
+```
+
+The driver assembles the JSON-RPC `tools/call` frame with `jq` and refuses to send one that is empty
+or unparseable. Before that guard existed the same condition was **invisible**: the blank line was
+written to the server's stdin, a JSON-RPC reader had nothing to parse, no reply for that request id
+ever arrived, and the wait burned the entire `timeout_seconds` budget — measured at 45 minutes of dead
+wait presenting as a paid review in progress. It then reported itself as the wall-clock line quoted in
+the next section. So an instant exit 5 now has **two** possible causes, not one: this, and the model
+pin. The stderr line tells them apart, which is why the table above says to read it before reasoning
+about timing.
+
+A staging failure one step earlier reads similarly and means the same thing operationally
+(`could not stage the review envelope for jq --rawfile …`): the temp file the frame is built from could
+not be written. Neither message names a path on purpose — the driver's work directory is removed by its
+`EXIT` trap on the same exit that prints the line, so a path there would be gone before you could look
+at it.
+
+Nothing to configure either way. The round degrades to the Claude lane exactly like a cap-hit; if it
+recurs on the same change set, that is a driver bug worth filing rather than an operator setting.
+
 ### Exit 5 at the wall-clock cap
 
 This is the failure you are most likely to meet, and unlike the model pin it is not something you
@@ -715,6 +746,12 @@ the driver genuinely cannot tell the two apart here.** A timed-out wait and a se
 mid-turn reach the same line. Timing separates them: a failure *at* the cap is the wall clock, a
 failure seconds in is the server dying, and that second case belongs to a different row of the table
 above (start with [the model pin](#the-model-pin-lives-in-configtoml-not-in-the-registration)).
+
+**One cause that used to reach this line no longer does.** An unbuildable tool-call frame was never
+sent, so no reply could arrive and the wait ran to the cap — reaching this exact message, with the
+whole budget spent on a request that did not exist. The frame guard now catches that before the send
+and names it instantly; see [Exit 5 before anything was sent](#exit-5-before-anything-was-sent). If you
+are reading this line, the request really was delivered and really did go unanswered.
 
 What happens next is the designed path, automatically: the orchestrator records a degradation note and
 QA authors the review artifact on the Claude lane for that round. **The review still happens.** The
@@ -754,6 +791,7 @@ Every failure mode collapses to the same place. This is the contract, not a best
 | Server present, no `codex` tool (`no-codex-tool`) | `claude` | Same. |
 | Lane forced off (`model-roles` / env) | `claude` | Same. |
 | Review turn hit the wall clock or died mid-flight ([driver exit 5](#exit-5-at-the-wall-clock-cap)) | `claude`, that round | Degradation note on the task; QA authors the artifact that round. |
+| Tool-call frame unmarshalable, nothing sent ([driver exit 5](#exit-5-before-anything-was-sent)) | `claude`, that round | Same — and no paid turn was consumed. |
 | Review iteration above the cap (driver exit 6) | n/a | No paid call. J21 escalation; the loop stops rather than iterating. |
 
 In every row the artifact schema, the `REVIEW-ARTIFACT v1` record grammar, the grading packet's item

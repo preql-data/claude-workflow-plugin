@@ -2,14 +2,17 @@
 # AgentLint W1 looks for `make test` / `make build` style commands as a
 # language-agnostic signal that build and test paths are documented.
 
-.PHONY: help session test test-component test-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test clean
+.PHONY: help session test test-fast test-component test-all test-linux test-linux-all test-live test-e2e test-e2e-record test-e2e-install test-e2e-unit test-ci manifest-validate cassette-diff sync-fixtures lint shellcheck check doctor install-test verify-release clean
 
 help:
 	@echo "Targets:"
 	@echo "  session           — launch Claude at the recorded effort verdict (.claude/effort-verdict; see docs/EFFORT-AB-TEST.md)"
 	@echo "  test              — run the plugin's bash test suite (L1 unit)"
+	@echo "  test-fast         — run a CONSEQUENCE-selected subset of L1 (Stop-hook budget; claude-workflow-plugin-yzo9; NOT a substitute for 'test')"
 	@echo "  test-component    — run hook-pipeline component tests (L2; Phase B)"
 	@echo "  test-all          — run L1 unit + L2 component tiers (offline; CI-friendly)"
+	@echo "  test-linux        — run the L1 tier inside a Linux container (GNU tooling; needs docker)"
+	@echo "  test-linux-all    — same, L1 + L2. Reports which tiers ran; a skip is never a pass"
 	@echo "  test-live         — run live E2E for ONE OR MORE fixtures (requires FIXTURE=name OR FIXTURES=\"a b c\";"
 	@echo "                      paid; needs ANTHROPIC_API_KEY; pass CONFIRM=1 to skip the cost prompt; RECORD=1 to refresh cassettes)"
 	@echo "  test-e2e          — DEPRECATED alias (prints pointer to test-live and exits 2)"
@@ -25,6 +28,7 @@ help:
 	@echo "  check             — run AgentLint against this repo"
 	@echo "  doctor            — functional health check of an install (TARGET=<dir>, DOCTOR_ARGS=\"...\"); safe mid-session (only 'beads' touches the target)"
 	@echo "  install-test      — install into a tempdir, then run the doctor against it (expected GREEN; needs the npm registry)"
+	@echo "  verify-release    — the frozen manifest table reproduces byte-for-byte from its own tag (RELEASE_TAG=vX.Y.Z to override; run pre-push, against a deliberately-local tag)"
 	@echo "  clean             — remove transient .qa-tracking state"
 
 # Launch a working session at the effort level the A/B interference test
@@ -40,6 +44,98 @@ session:
 test:
 	bash .claude/scripts/tests/run-tests.sh
 
+# test-fast (claude-workflow-plugin-yzo9) — a SUBSET of the L1 tier, chosen by
+# CONSEQUENCE, not by speed, and it is this repo's own Stop-hook TEST_CMD
+# override (.claude/test-cmd) from here on, not merely an offered convenience.
+#
+# WHY THIS EXISTS. `make test` measures 1731s/1777s uncontended (two
+# independent runs, this session) against settings.json's Stop-hook wall-clock
+# ceiling of 1320s (.claude/settings.json, hooks.Stop[0].hooks[0].timeout) --
+# 1731 > 1320, so the full suite CANNOT complete inside a Stop no matter how
+# verify-before-stop.sh's own internal TEST_TIMEOUT_S is tuned (see that
+# constant's own header for why it must stay below the external cap rather
+# than be raised to try to cover the suite). The operator's decision: narrow
+# the Stop tier rather than raise the external cap (which would turn every
+# Stop-with-unapproved-changes into a 30-40 minute wait -- worse than the
+# problem) or leave both (a permanently-red, ignored gate).
+#
+# THE SELECTION, justified file by file, not just by budget:
+#   review-check.test.sh, impact-report.test.sh, qa-gate-choose.test.sh,
+#     qa-gate-lock-recovery.test.sh, qa-gate-pipefail.test.sh --
+#     review-check.sh, impact-report.sh and qa-gate.sh's own core commands
+#     (choose/enter/approve's lock recovery, the i8cx pipefail-in-the-
+#     evidence-chain defect class) are three of the four "gate scripts" this
+#     task names directly; a defect in any of them changes whether a release
+#     is actually safe, which is exactly what a NARROWED Stop tier most needs
+#     to keep catching.
+#   gate-claim-honesty.test.sh, run-with-timeout.test.sh, scoped-log-dir.test.sh,
+#     tree-lease.test.sh -- the fourth "gate script" (verify-before-stop.sh
+#     itself) and the machinery THIS task's own change touches or depends on:
+#     gate-claim-honesty pins the checks_scope_claim/checks_scope_note
+#     disclosure this task extends with override-awareness; run-with-timeout
+#     pins the dispatch mechanism that will run whatever TEST_CMD this file
+#     resolves to, override or not; scoped-log-dir and tree-lease cover the
+#     per-run log/lease bookkeeping in the same dispatch region.
+#   override-disclosure.test.sh -- direct coverage of yzo9's own two fixes
+#     (the override disclosure this comment describes, and detect-stack.sh's
+#     read_override fail-open correction this narrowing now depends on for
+#     real, every Stop, not hypothetically).
+#   denylist-source.test.sh, review-count.test.sh, reviewer-lane-structural.test.sh,
+#     qa-impact-of-cue.test.sh -- cheap (each well under two seconds
+#     uncontended) structural guards on the change-set membership rule, the
+#     review-resolution predicate, and two prompt-surface regressions that
+#     previously survived multiple green verification passes specifically
+#     because their only guard ran at a wider cadence than the violation --
+#     the exact failure mode a NARROWED tier risks reintroducing if it is not
+#     careful about what "cheap but load-bearing" means.
+# Deliberately EXCLUDED: the design-workflow specs (design-*, plan-batches,
+# grilling-record), packaging/installer/mcp-deps parity, and the remaining
+# qa-gate-grade-record.test.sh / review-separation.test.sh (each
+# independently measured over 200s under contention elsewhere in this
+# repo's own test history) and, since the k6re test-suite split,
+# unrecorded-review-artifact.test.sh (the expensive half of that split,
+# measured 676-711s) -- real coverage, but peripheral to "did this Stop's
+# release decision stay safe", and expensive enough to defeat the point of
+# a fast tier if included.
+#
+# MEASURED 2026-08-27, HEAD 2eced52 + claude-workflow-plugin-yzo9 (uncommitted;
+# other specialists' wave-2 work concurrently active in the same tree AND a
+# separate verify-before-stop.sh + run-tests.sh pair observed still running
+# from an earlier lease age_s=617 during one of these runs -- so none of these
+# are clean-machine numbers). THREE full `make test-fast` runs, in order:
+#   1. 13 of these 14 files (override-disclosure.test.sh did not exist yet):
+#      ~240s, rc=1 -- run-tests.sh's own STORE-CANARY guard fired on
+#      qa-gate-choose.test.sh ("contaminated the protected Beads store:
+#      advanced by 4 commit(s)"). Consistent with the guard's own documented
+#      inability to distinguish a spec's own write from a concurrent writer
+#      landing in the same window (run-tests.sh's STORE-CANARY-BEGIN
+#      comment) -- this ran while another Stop hook's own verify-before-
+#      stop.sh was independently active (see the lease note above).
+#   2. Same 13 files, immediate re-run: 235s, rc=0, clean -- the contamination
+#      did not reproduce, consistent with a one-off concurrent write rather
+#      than a defect in the spec.
+#   3. All 14 files (override-disclosure.test.sh added): 212s, rc=0, clean --
+#      the number this file's own header cites.
+# Budget was <=300s target / 600s hard ceiling: met on all three (even run 1's
+# ~240s), but with less margin than the individual per-spec sum (~207s, timed
+# spec-by-spec outside this harness) suggested -- run-tests.sh's own per-spec
+# overhead (STORE-CANARY hashing, lease bookkeeping) and general contention
+# account for the rest. qa-gate-choose.test.sh's STORE-CANARY exposure is a
+# property of run-tests.sh watching the live .beads store for ANY spec, not
+# of this selection -- but narrowing the tier means it now runs on EVERY
+# Stop instead of inside a `make test` that rarely finished at all, which
+# raises the ABSOLUTE number of windows it can land in. A hit blocks (fails
+# closed), never passes silently; the recovery is re-running the Stop.
+#
+# `--filter` DISARMS the L1 completeness floor and this recipe inherits that
+# disclosure unmodified (run-tests.sh:236-250: "the runner says the floor is
+# disarmed rather than pretending the subset describes the tier"). This
+# target is NOT a substitute for `make test` -- it is what the Stop hook can
+# afford to run on every iteration; the full tier remains the pre-commit and
+# CI gate.
+test-fast:
+	bash .claude/scripts/tests/run-tests.sh --filter 'review-check\.test\.sh\|impact-report\.test\.sh\|run-with-timeout\.test\.sh\|gate-claim-honesty\.test\.sh\|qa-gate-choose\.test\.sh\|qa-gate-lock-recovery\.test\.sh\|qa-gate-pipefail\.test\.sh\|scoped-log-dir\.test\.sh\|denylist-source\.test\.sh\|review-count\.test\.sh\|tree-lease\.test\.sh\|reviewer-lane-structural\.test\.sh\|qa-impact-of-cue\.test\.sh\|override-disclosure\.test\.sh\|release-claims-check\.test\.sh'
+
 # Component tier (Phase B). The runner discovers specs under
 # .claude/tests/component/specs/ and pre-sources the lib/ helpers. Specs
 # exercise each hook script via crafted stdin payloads against a tempdir
@@ -51,6 +147,28 @@ test-component:
 # `test` scope (L1 only) so anything that pinned `make test` keeps working;
 # new wiring (CI, docs) should target `test-all` for the full offline gate.
 test-all: test test-component
+
+# THE LINUX TIER. Everything above runs on whatever the developer's box is,
+# which here is macOS: BSD find, BSD sed, `shasum`, bash 3.2. CI runs on
+# ubuntu-latest: GNU findutils, GNU coreutils, `sha256sum`, bash 5.2. These two
+# targets run the SAME tier bytes against the second set, in a container, before
+# a push — so a red CI run is one unknown (the code) rather than two (the code
+# and the CI wiring nobody has exercised either).
+#
+# The repo is bind-mounted READ-ONLY and the mount is verified per run (the
+# driver hashes the tracked tree on both sides and refuses a mismatch), so this
+# is safe to run mid-session: a container cannot write into .beads/ or
+# .claude/.qa-tracking/ and cannot leave root-owned files in the checkout.
+#
+# EXIT CODES ARE THREE-VALUED, matching the L1 runner's outcome discipline:
+# 0 every requested tier ran and passed, 1 a tier ran and failed, 2 the tier
+# could NOT be measured (no docker, no daemon, build failure, byte mismatch).
+# A missing docker is a named skip and exit 2 — never a silent green.
+test-linux:
+	bash .claude/tests/linux/run-linux-tier.sh --tiers l1
+
+test-linux-all:
+	bash .claude/tests/linux/run-linux-tier.sh --tiers l1,l2 --keep-going
 
 # L3 live tier — MANUAL ONLY. Per v3.1.0 spec item 0.8, live testing is
 # a development-cycle activity, gated behind explicit operator invocation
@@ -173,7 +291,72 @@ manifest-validate:
 # manifest-validate as part of test-all (which has older semantics) —
 # it gets its own line here so a manifest-only regression surfaces
 # distinctly.
-test-ci: test test-component test-e2e-unit manifest-validate
+#
+# claude-workflow-plugin-fkm.1.11 — TWO changes, both deliberate:
+#
+# 1. IT RECORDS ITS OWN RESULT. The Stop gate runs the detected runner's
+#    DEFAULT target, which on this repo is `make test` (L1) plus `make lint`.
+#    It does not run this target and has no way to discover it, so it used to
+#    print "technical checks passed" over a tree with four L2 specs red. The
+#    gate now reads .claude/.qa-tracking/verification-ledger and reports what
+#    was last recorded, against the tree it was measured at.
+#
+#    THE RECORDING COMMAND IS THIS RECIPE, NOT AN AGENT. That is the whole
+#    reason it can be trusted at all: nobody types the exit code. It calls the
+#    ONE definition of the tree fingerprint (verify-before-stop.sh
+#    record-verification) rather than recomputing it here, so the writer and
+#    the reader cannot drift — a second copy of that hash is exactly the
+#    duplicate canonicalisation llh.18 exists to forbid.
+#
+# 2. IT NO LONGER FAILS FAST. The tiers were prerequisites, so make aborted at
+#    the first red one — which meant a FAILING run recorded nothing and the
+#    ledger would still be showing the last GREEN result. A staleness signal
+#    that silently keeps a stale green is the defect this task is about, at one
+#    remove. Running all four and returning the worst rc also matches CI, which
+#    runs them as independent jobs.
+#
+# `|| true` on the record call: this is instrumentation. It must never be the
+# reason a test run reports failure.
+#
+# THE DRY-RUN GUARD IS LOAD-BEARING, and it is here because it bit on the first
+# try. `make -n` does NOT skip a recipe line that contains `$(MAKE)` — it runs
+# it, so the whole line above executes under -n, the sub-makes print instead of
+# running, rc stays 0, and the record call wrote `make test-ci exited 0` over a
+# suite that had not run. A dry run minting a green record is the exact defect
+# this feature exists to report on, so it is refused: under -n / -q / -t,
+# MAKEFLAGS' first word carries the single-letter flags (measured: `n` for
+# `make -n`, empty for `make --no-print-directory`), and we skip the write.
+# Matching only the FIRST WORD is what keeps a long option that happens to
+# contain the letter n from silently disabling the record on a real run.
+# Regression: .claude/scripts/tests/gate-claim-honesty.test.sh section 5 drives
+# both a real and a dry run of a Makefile carrying this exact guard — extracted
+# from THIS file, never re-typed, so the probe cannot pass over a guard the repo
+# does not ship. (It read "section 4" until fkm.1.11 QA round 2; section 4 is
+# the tree fingerprint and invokes no make at all. A control attribution naming
+# the wrong control is the same defect class as the claim below it.)
+#
+# STRICT_SECTIONS=1 is exported here and NOT in `make test` (a9hh R1-F1). This
+# target's whole claim is "what CI runs", and .claude/tests/README.md says in
+# so many words that a green test-ci means a green CI. The CI l1-unit job sets
+# STRICT_SECTIONS=1, so without it here that implication is false in exactly
+# the direction that hurts: a section skip is green locally and red in CI. It
+# also means test-ci needs what CI provisions — both MCP servers' node_modules
+# — and says so when they are missing, which is the point. `make test` stays
+# lenient: it is the target you run fifty times a day on a laptop.
+test-ci:
+	@rc=0 ; \
+	mf_first="$${MAKEFLAGS%% *}" ; dry=0 ; \
+	case "$$mf_first" in *n*|*q*|*t*) dry=1 ;; esac ; \
+	STRICT_SECTIONS=1 $(MAKE) --no-print-directory test || rc=$$? ; \
+	$(MAKE) --no-print-directory test-component || rc=$$? ; \
+	$(MAKE) --no-print-directory test-e2e-unit || rc=$$? ; \
+	$(MAKE) --no-print-directory manifest-validate || rc=$$? ; \
+	if [ "$$dry" = "1" ]; then \
+		echo "test-ci: dry/question/touch run (MAKEFLAGS='$$MAKEFLAGS') — NOT recording a verification result" ; \
+	else \
+		bash .claude/scripts/verify-before-stop.sh record-verification "make test-ci" "$$rc" || true ; \
+	fi ; \
+	exit $$rc
 
 # Diff the most recent replay against its committed golden. The FIXTURE
 # variable scopes the search; default is whatever has the freshest
@@ -215,7 +398,7 @@ shellcheck:
 		echo "shellcheck not on PATH (skipping); install via 'brew install shellcheck' or apt for stricter local lint"; \
 		exit 0; \
 	else \
-		shellcheck .claude/scripts/*.sh .claude/scripts/tests/*.sh .claude/tests/mutation/*.sh .claude/tests/mutation/lib/*.sh install.sh uninstall.sh; \
+		shellcheck .claude/scripts/*.sh .claude/scripts/tests/*.sh .claude/tests/linux/*.sh .claude/tests/mutation/*.sh .claude/tests/mutation/lib/*.sh install.sh uninstall.sh; \
 	fi
 
 check:
@@ -297,6 +480,96 @@ install-test:
 doctor:
 	@t="$${TARGET:-$$(pwd)}" ; \
 	bash .claude/scripts/workflow-doctor.sh --target "$$t" $(DOCTOR_ARGS)
+
+# verify-release — the release-lifecycle gate (claude-workflow-plugin-h2zz
+# waiver ruling, round 4). The claim used to live inside workflow-manifest.
+# test.sh's Section 6, an L1 spec that runs on every `make test`; it cannot
+# hold on a pre-release ref (the tag may not exist yet, by definition), and
+# six independent-review findings across four rounds of trying to exempt L1
+# from that fact narrowly enough is why it moved here instead of being
+# guarded a seventh time — see run-tests.sh's PRE-RELEASE-REF EXEMPTION:
+# REMOVED tombstone for the full account.
+#
+# RUN THIS BEFORE PUSHING A RELEASE TAG. `git tag vX.Y.Z` creates the tag
+# LOCALLY; this target checks the frozen manifests/vX.Y.Z.sha256 against
+# that local tag's own tree before anything is pushed, catching a stale
+# table (forgot to regenerate) or a stale generator assumption before either
+# ships. RELEASE_TAG defaults to whatever .claude-plugin/plugin.json
+# currently names (the same derivation the removed Section 6 used); pass it
+# explicitly to check a different tag.
+#
+# THE SAME CHECK RUNS AGAIN IN CI, POST-PUSH: .github/workflows/
+# release-verify.yml, triggered by the tag push itself, where "not reachable
+# yet" cannot occur — the two contexts .claude/scripts/verify-release-
+# manifest.sh's own header documents.
+#
+# RELEASE_TAG REACHES THE SCRIPT AS ENVIRONMENT DATA, QUOTED (claude-
+# workflow-plugin-h2zz round 6, R6-F2, MEDIUM): a caller controls this value
+# (`make verify-release RELEASE_TAG=...`), and `git check-ref-format` has no
+# objection to a tag containing shell metacharacters -- `v1;id` and `v$(id)`
+# are both LEGAL refs (`git check-ref-format` exits 0 for each, verified
+# directly), so this was reachable via an entirely ordinary-looking tag, not
+# just a deliberately hostile override. Splicing $(RELEASE_TAG) straight
+# into recipe source, unquoted, handed the shell an extra command for free:
+# `make -n verify-release RELEASE_TAG='v1;printf PWNED'` used to print
+# `bash .claude/scripts/verify-release-manifest.sh v1;printf PWNED` — two
+# commands on one line. That is the SAME injection class R5-F5 already fixed
+# in .github/workflows/release-verify.yml's step (env: + a quoted `"$
+# RELEASE_TAG"` reference); it was left open here, the local half of the
+# same check. `$${RELEASE_TAG:+"$$RELEASE_TAG"}` below is POSIX parameter
+# expansion, evaluated by the RECIPE'S OWN SHELL, never by make: it forwards
+# the value as exactly one quoted word when RELEASE_TAG is set and
+# non-empty, and contributes NOTHING AT ALL — not even an empty argument —
+# when it is unset or empty, so the script's own no-argument default
+# (derive the tag from .claude-plugin/plugin.json) is unchanged. Beware two
+# near-miss fixes: wrapping in single quotes AT THE MAKE LEVEL
+# ('$(RELEASE_TAG)') still splices raw text before the shell ever sees a
+# quote character, so a value containing a single quote breaks out exactly
+# as the unquoted form does; wrapping in double quotes at the make level
+# ("$(RELEASE_TAG)") has the identical flaw for a value containing a double
+# quote (git-legal: neither `'` nor `"` is on check-ref-format's forbidden
+# list). Only a shell-side reference, expanded after make has finished
+# substituting, is safe against a value make itself cannot see coming.
+#
+# THAT SHELL-SIDE REFERENCE IS NOT THE ONLY THING THAT TOUCHES THIS VALUE,
+# THOUGH (claude-workflow-plugin-h2zz round 8, R8-F2, LOW): an earlier
+# revision of this comment claimed make "never touches the value" and that
+# the recipe forwards RELEASE_TAG "as exactly one untouched word" — true of
+# the RECIPE TEXT (nothing above splices $(RELEASE_TAG) into it), but false
+# of MAKE ITSELF. `make verify-release RELEASE_TAG=...` sets RELEASE_TAG as
+# an ordinary, RECURSIVELY-EXPANDED make variable; getting it into the
+# recipe's environment (so the shell-side reference above has something to
+# read) requires make to compute a concrete string, which means expanding
+# anything inside it that LOOKS like make's own `$(...)`/`${...}` syntax —
+# and `v$(id)` is exactly such a value: legal per `git check-ref-format`
+# (verified above), and ALSO a make reference to an undefined variable named
+# `id`, which make silently expands to empty. Reproduced directly, against
+# this Makefile as it read before this round:
+#   $ make verify-release 'RELEASE_TAG=v$(id)'
+#   verify-release-manifest.sh: manifests/v.sha256 has not been frozen yet
+# — "$(id)" never reached the shell, or the script, at all; make consumed it
+# while building the recipe's environment. FIXED by normalising the raw
+# command-line value into a SIMPLY-expanded variable, via the `value`
+# function: `$(value RELEASE_TAG)` returns a variable's text WITHOUT
+# expanding anything inside it, so the `override` line below captures
+# whatever RELEASE_TAG was set to (command line, inherited environment, or
+# absent) as an inert string exactly once — and every later use of it,
+# including make's own export into the recipe's environment, treats that
+# string as final rather than re-scanning it for `$(...)` syntax. Verified
+# directly, same reproduction, after the fix:
+#   $ make verify-release 'RELEASE_TAG=v$(id)'
+#   verify-release-manifest.sh: manifests/v$(id).sha256 has not been frozen yet
+# — the value now reaches the script whole (it still fails, correctly: no
+# such tag or table exists — this is a round-trip proof, not a claim that
+# this particular value is a usable release tag). The no-argument default
+# path (derive from .claude-plugin/plugin.json) is unaffected either way:
+# `$(value RELEASE_TAG)` on an unset variable is simply empty, exactly what
+# an unset variable already was. verify-release-manifest.test.sh Section 5.5
+# pins this round-trip.
+override RELEASE_TAG := $(value RELEASE_TAG)
+export RELEASE_TAG
+verify-release:
+	@bash .claude/scripts/verify-release-manifest.sh $${RELEASE_TAG:+"$$RELEASE_TAG"}
 
 clean:
 	rm -rf .claude/.qa-tracking
