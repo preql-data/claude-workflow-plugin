@@ -2979,8 +2979,9 @@ assert_eq "parity 8.3: both installers recommend the SAME bd version" "$PARITY_R
 assert_eq "parity 8.4: ...and it is a real dotted version" "yes" \
     "$(printf '%s' "$PARITY_REC_SH" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$' && echo yes || echo no)"
 
-# The hard floor must NOT have moved on either side — an old bd is degraded,
-# not refused, and that decision is shared.
+# MIN_BD_VERSION, the CLI floor, must NOT have moved on either side. It only
+# rejects a bd too old to talk to and admits none: below RECOMMENDED_BD_VERSION
+# both installers REFUSE (8.20-8.22), and that decision is shared.
 assert_eq "parity 8.5: install.sh keeps the 0.47 hard floor" "0.47" \
     "$(sed -n 's/^MIN_BD_VERSION="\(.*\)"$/\1/p' "$INSTALL_SH" | head -1)"
 # shellcheck disable=SC2016
@@ -2996,7 +2997,7 @@ parity_both() {
     assert_eq "parity $1: $2 — install.ps1" "yes" \
         "$(grep -qF -- "$4" "$INSTALL_PS1" && echo yes || echo no)"
 }
-parity_both "8.7"  "an opt-out exists" "--skip-beads-upgrade" "SkipBeadsUpgrade"
+parity_both "8.7"  "the skip flag exists (it stops the opt-in upgrade; it admits no old bd)" "--skip-beads-upgrade" "SkipBeadsUpgrade"
 parity_both "8.8"  "the upgrade command is a substitutable seam" "BD_UPGRADE_COMMAND" "BdUpgradeCommand"
 parity_both "8.9"  "the safeguard prefers the COMMENT-PRESERVING writer" "bd sync --flush-only" "bd sync --flush-only"
 parity_both "8.10" "...with the export fallback" "bd export -o" "bd export -o"
@@ -3005,7 +3006,14 @@ parity_both "8.12" "comment loss is DETECTED, not assumed away" "DROPPED comment
 parity_both "8.13" "...and refuses the upgrade when it happens" "QA audit trail" "QA audit trail"
 parity_both "8.14" "the already-installed path rebuilds via bootstrap" "bd bootstrap" "bd bootstrap"
 parity_both "8.15" "the version swap is confirmed before migrating" "Not migrating the database" "Not migrating the database"
-parity_both "8.16" "a failed upgrade command is survivable" "Upgrade by hand later" "Upgrade by hand later"
+parity_both "8.16" "a failed upgrade command names the manual command" "Upgrade by hand: " "Upgrade by hand: "
+# THE REFUSAL ITSELF (claude-workflow-plugin-ishe R5-F1). Until then a failed
+# upgrade was "survivable" (the install carried on with the old bd), and the
+# skip flag returned before the version was compared. Both installers now end
+# every below-floor path in one shared refusal; these pin that each one does.
+parity_both "8.20" "every below-floor path ends in the one shared refusal" "refuse_below_floor" "Invoke-RefuseBelowFloor"
+parity_both "8.21" "...which says the skip flag admits no old bd" "does not admit a bd below" "does not admit a bd below"
+parity_both "8.22" "...and an upgrade that lands below the floor is refused too" "still below" "still below"
 
 # META: the parity check must be able to FAIL. Strip the PowerShell bootstrap
 # call from a copy and prove 7.14's PS leg flips — otherwise every assertion

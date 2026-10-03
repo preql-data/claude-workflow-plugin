@@ -297,8 +297,16 @@ Caveats for what that means in practice.
 
 ## ⚡ Install
 
-The plugin requires Beads (`bd`) ≥ 0.47 and `jq`. The installer fails
-fast if either is missing and prints the upgrade command.
+The plugin requires Beads (`bd`) ≥ 1.1.2 and `jq`. The installer fails
+fast if either is missing, and on an older bd it REFUSES before writing
+any plugin file and prints the upgrade procedure. v5 raised this floor from v4's
+0.47, and on 0.47.x the upgrade is a one-way storage-engine migration
+(SQLite to embedded Dolt): back up `.beads/` first, then install exactly
+bd 1.1.2, the version measured to migrate a 0.47.x store (bd 1.3.1 refuses
+one outright). The installer does not upgrade bd itself unless you supply
+the command (`BD_UPGRADE_COMMAND`, plus `CWP_BEADS_UPGRADE=1`), and it
+refuses if that upgrade fails or leaves bd below 1.1.2. `--skip-beads-upgrade`
+only stops that upgrade from running; it never admits an older bd.
 
 ### Fresh install
 
@@ -355,7 +363,8 @@ The hooks and MCP servers are verified against `bd $(bd --version)` by
 `.claude/tests/component/specs/bd-compat.sh`, which pins all 32 bd
 invocations the production scripts depend on — exit codes, JSON shapes,
 id formats, and the `BD_NO_DAEMON` flush/export path. Supported range:
-**>= 0.47.x** with no known upper break. That spec is the compatibility
+**>= 1.1.2**, the floor the installer enforces (see Install), with no known
+upper break. That spec is the compatibility
 oracle: after upgrading bd, run it to certify the new version (it prints
 the detected `bd --version` in its header and fails loudly, naming the
 exact command, on any output-shape mismatch):
@@ -376,10 +385,30 @@ not a floor or an interval:
 
 | bd version | schema | status |
 |---|---|---|
-| 1.1.2 | 53 | validated — the CI floor (`l1-unit`, every run) |
+| 1.1.2 | 53 | pair measured directly; CI floor coverage **UNCONFIRMED** — see below |
 | 1.2.1 | 65 | measured, not validated — no suite exercises it |
 | 1.2.2 | 53 | measured, not validated — no suite exercises it |
-| 1.3.0 | 66 | validated — the CI ceiling (`l1-doctor-bd-max`) and the development host |
+| 1.3.0 | 66 | validated — its own CI lane (`l1-doctor-bd-max`) and the development host |
+| 1.3.1 | 66 | validated — the CI ceiling, its own lane (`l1-doctor-bd-1-3-1`); it refuses a 0.47.x store, so it cannot be the upgrade bridge |
+
+**Why the floor row says UNCONFIRMED** (claude-workflow-plugin-wyt3, 2026-10-02).
+`1.1.2:53` is a correct pair — a store created by bd 1.1.2 reports schema 53
+under the doctor's own query, measured directly. What is NOT established is
+that CI's `l1-unit` lane exercises it. That lane installs bd 1.1.2 from a
+pinned, sha256-verified tarball, yet the doctor running inside it reported
+`installed bd 1.3.1 / store schema v66`. The cause, found by hashing bd
+before and after every spec: `installer-flags.test.sh` drove `install.sh`
+below its bd floor with a fake old bd, and the installer's then-default
+upgrade (an unpinned `curl | bash`, never in a released version) replaced the
+job's bd mid-suite with the newest release. Before bd 1.3.1 was published the
+same lane would have observed `1.3.0:66` — a set member — and passed. So its
+green history is consistent with never having measured the floor at all, and
+this row will not claim otherwise until the lane is shown to measure 1.1.2.
+That default is gone, the test runner stubs the upgrade command for every
+spec, and it fails any spec that replaces a bd binary on `PATH` or at a
+default install location. The 1.3.0 and 1.3.1 rows are unaffected: neither
+lane runs `installer-flags.test.sh`; each runs only `workflow-doctor.test.sh`
+against the bd it pins.
 
 A live pair inside the set PASSes the doctor's `beads` check (the note names
 which member matched); a pair outside it — including the two measured-but-

@@ -87,8 +87,9 @@ param(
     # ($env:CWP_SKIP_MCP_DEPS = "1") available to them.
     [switch]$SkipMcpDeps,
     [switch]$SkipVerify,
-    # PowerShell twin of --skip-beads-upgrade. The install still proceeds on an
-    # old bd (the hard floor is 0.47) but the target keeps the 64KB ledger bug.
+    # PowerShell twin of --skip-beads-upgrade: never run the opt-in bd upgrade.
+    # It does NOT admit an older bd — below $RecommendedBdVersion the installer
+    # still refuses (Invoke-BeadsUpgradeIfOld; claude-workflow-plugin-ishe R5-F1).
     [switch]$SkipBeadsUpgrade,
     [switch]$Verify
 )
@@ -103,9 +104,10 @@ if ($env:CWP_SKIP_MCP_DEPS) { $SkipMcpDeps = $true }
 if ($env:CWP_SKIP_VERIFY)   { $SkipVerify  = $true }
 if ($env:CWP_SKIP_BEADS_UPGRADE) { $SkipBeadsUpgrade = $true }
 
-# HARD FLOOR. Deliberately still 0.47, matching install.sh: every bd call the
-# plugin makes is version-tolerant, so an older bd is degraded, not broken.
-# $RecommendedBdVersion below is how users move off it.
+# CLI FLOOR. Deliberately still 0.47, matching install.sh (packaging-parity
+# pins both). It is checked first and only rejects a bd too old to talk to; it
+# does not admit one. Anything below $RecommendedBdVersion is then REFUSED by
+# Invoke-BeadsUpgradeIfOld, with the upgrade procedure.
 $MinBdVersion = [Version]"0.47"
 # BEGIN RECOMMENDED_BD_VERSION (installer-beads-upgrade.sh extracts this block)
 $RecommendedBdVersion = [Version]"1.1.2"
@@ -120,7 +122,12 @@ $RecommendedBdVersion = [Version]"1.1.2"
 #
 # The upgrade command is a SEAM, not a hardcoded irm, for the same reason the
 # bash side uses BD_UPGRADE_COMMAND: it makes the path substitutable.
-$BdUpgradeCommand = if ($env:BD_UPGRADE_COMMAND) { $env:BD_UPGRADE_COMMAND } else { "irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex" }
+# NO DEFAULT, deliberately (claude-workflow-plugin-wyt3), mirroring install.sh.
+# This defaulted to an unpinned `irm .../beads/main/install.ps1 | iex` until
+# 2026-10-02 and was executed automatically. Empty by default means the upgrade
+# arm cannot fire unless an operator supplies a command they have pinned and
+# verified AND sets CWP_BEADS_UPGRADE=1. It stays a seam so the spec can drive it.
+$BdUpgradeCommand = if ($env:BD_UPGRADE_COMMAND) { $env:BD_UPGRADE_COMMAND } else { "" }
 # Both shipped MCP servers declare "engines": {"node": ">=18.17"}, and both
 # launchers are dynamic-import shims that fail opaquely on an older runtime.
 # [Version] comparison is what this file already uses for the bd floor, so the
@@ -432,18 +439,101 @@ function Get-LedgerCommentCount {
     return $total
 }
 
+# Invoke-RefuseBelowFloor — the one exit for "bd is below
+# $RecommendedBdVersion", mirroring install.sh's refuse_below_floor: print the
+# procedure and exit 1. Every below-floor path in Invoke-BeadsUpgradeIfOld
+# calls this instead of returning, so neither the skip switch nor a failed
+# opt-in step can let the install proceed on a bd v5 does not support
+# (claude-workflow-plugin-ishe R5-F1; the q5l6 lesson). Both arms say no PLUGIN
+# file was written, not that nothing was (ishe R7-F2): the target directory may
+# already have been created. -OptIn marks a refusal after the operator's own
+# upgrade step ran, which may also have re-flushed .beads/issues.jsonl, and
+# that arm says so.
+function Invoke-RefuseBelowFloor {
+    param($Have, [switch]$OptIn)
+    # SCOPE OF THIS CLAIM, stated because the bash side's is stronger: on
+    # install.sh the refusal-before-any-write property was VERIFIED by
+    # execution — a run against a fake bd 0.47.1 exits non-zero and leaves
+    # no .claude/ in the target (installer-flags.test.sh section 9). Here it
+    # is asserted by INSPECTION ONLY. install.ps1 has never been executed
+    # anywhere, on any machine or in CI. The Windows job
+    # (.github/workflows/windows-install.yml) WOULD run it end to end, but it
+    # is dispatch-only and has never been dispatched. Its bd shim reports
+    # 0.47.0, below the floor, so by reading, a dispatch today would stop at
+    # exactly this refusal (claude-workflow-plugin-fnft, v5.0.1). The ordering argument is the
+    # same one and the code is the mirror image, but "verified" would
+    # overstate it. Treat it as reviewed, not run.
+    Write-Host ""
+    Write-Color "REFUSING to install: v5 requires bd >= $RecommendedBdVersion and you have $Have." Red
+    if ($OptIn) {
+        Write-Host "  No plugin file has been written. Your existing install is untouched;"
+        Write-Host "  the opt-in step above may have re-flushed .beads/issues.jsonl with your bd."
+    } else {
+        Write-Host "  No plugin file has been written. Your existing install is untouched."
+    }
+    if ($SkipBeadsUpgrade) {
+        Write-Host "  (-SkipBeadsUpgrade / CWP_SKIP_BEADS_UPGRADE only stops the opt-in"
+        Write-Host "  upgrade from running. It does not admit a bd below $RecommendedBdVersion.)"
+    }
+    Write-Host ""
+    Write-Host "  This is a STORAGE-ENGINE change, not just a version bump: 0.47.x"
+    Write-Host "  keeps issues in SQLite, $RecommendedBdVersion+ uses embedded Dolt, and the"
+    Write-Host "  migration is ONE WAY - an older bd cannot read the result. Do this"
+    Write-Host "  in order:"
+    Write-Host ""
+    Write-Host "    1. Back up your issues FIRST - the migration is not reversible:"
+    Write-Host "         Copy-Item -Recurse .beads .beads.backup"
+    Write-Host "         cd <project>; bd sync --flush-only   # writes .beads/issues.jsonl"
+    Write-Host ""
+    Write-Host "    2. Install an EXACT bd version this release validates. Do not use"
+    Write-Host "       an install-latest command: the newest bd may be outside the"
+    Write-Host "       validated set, and the doctor will then fail on it."
+    Write-Host "         https://github.com/steveyegge/beads/releases/tag/v$RecommendedBdVersion"
+    Write-Host "       Verify what you downloaded against that release's checksums.txt."
+    Write-Host ""
+    Write-Host "    3. Recover the store with the new bd, then re-run this installer:"
+    Write-Host "         cd <project>; bd bootstrap     # rebuilds from the ledger"
+    Write-Host "         pwsh install.ps1 <project>"
+    Write-Host ""
+    Write-Host "    4. The installer's own check will report a STALE LEDGER after a"
+    Write-Host "       cross-era rebuild. That is expected and is the last step:"
+    Write-Host "         bash .claude/scripts/beads-ledger.sh reconcile --apply"
+    Write-Host ""
+    Write-Host "  (Automatic upgrade is opt-in and has no default: set BD_UPGRADE_COMMAND"
+    Write-Host "  to a command you have pinned and verified, plus CWP_BEADS_UPGRADE=1.)"
+    exit 1
+}
+
 function Invoke-BeadsUpgradeIfOld {
     param([Version]$Current, [string]$TargetDir)
 
     if (-not $Current) { return }
-    if ($SkipBeadsUpgrade) { return }
+    # Decided BEFORE the skip switch is read: the switch governs only whether
+    # the OPT-IN upgrade may run, and can never admit a bd below the floor.
     if ($Current -ge $RecommendedBdVersion) { return }
 
     Write-Host ""
     Write-Color "Beads $Current is older than the recommended $RecommendedBdVersion." Yellow
     Write-Host "  On 0.47.x, 'bd import' fails on any issue whose JSONL line exceeds 64KB,"
-    Write-Host "  so a fresh clone of this project can recover ZERO issues. Upgrading now."
-    Write-Host "  (Skip with -SkipBeadsUpgrade.)"
+    Write-Host "  so a fresh clone of this project can recover ZERO issues."
+
+    # REPORT, DO NOT ACT — mirrors install.sh's upgrade_beads_if_old exactly
+    # (claude-workflow-plugin-wyt3). An automatic path may not make a
+    # destructive decision, and a newer bd migrates the store's schema one way
+    # with no confirmation and no downgrade. Until 2026-10-02 this arm ran
+    # $BdUpgradeCommand automatically, defaulting to an UNPINNED
+    # `irm .../beads/main/install.ps1 | iex` — whatever beads released most
+    # recently, executed as remote code the operator never asked for, over the
+    # bd on their PATH. Reachable with NO FLAGS by anyone on bd 0.47.x.
+    # No released version shipped it: v3.5.0, v4.0.0 and v4.1.0 contain no
+    # BdUpgradeCommand at all.
+    if ($SkipBeadsUpgrade -or (-not $BdUpgradeCommand) -or ($env:CWP_BEADS_UPGRADE -ne "1")) {
+        # REFUSE, DO NOT CONTINUE — mirrors install.sh. Returning would write v5
+        # over a working v4.1 into a bd configuration v5 does not support, and
+        # the post-install doctor would fail: warning where the installer should
+        # refuse (claude-workflow-plugin-q5l6). The skip switch lands here too.
+        Invoke-RefuseBelowFloor -Have $Current
+    }
 
     $beadsDir = Join-Path $TargetDir ".beads"
     $ledger   = Join-Path $beadsDir "issues.jsonl"
@@ -476,7 +566,7 @@ function Invoke-BeadsUpgradeIfOld {
                 Write-Host "  upgrading now would strand the database behind an out-of-date"
                 Write-Host "  .beads/issues.jsonl. Fix the export first, then rerun."
                 if ($haveBackup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
-                return
+                Invoke-RefuseBelowFloor -Have $Current -OptIn
             }
             Write-Color "OK ledger written with bd $Current before upgrading (export -o)" Green
         }
@@ -492,7 +582,7 @@ function Invoke-BeadsUpgradeIfOld {
             Write-Host "  verdicts, reviewer identity. Migrating from that file would destroy"
             Write-Host "  them permanently, so the ledger has been RESTORED and nothing changed."
             Write-Host "  Upgrade bd by hand, then run: cd $TargetDir; bd bootstrap"
-            return
+            Invoke-RefuseBelowFloor -Have $Current -OptIn
         }
         if ($haveBackup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
     }
@@ -503,9 +593,9 @@ function Invoke-BeadsUpgradeIfOld {
         $upgradeRan = ($LASTEXITCODE -eq 0) -or ($null -eq $LASTEXITCODE)
     } catch { $upgradeRan = $false }
     if (-not $upgradeRan) {
-        Write-Color "NOTE the Beads upgrade command failed (offline?). Continuing on bd $Current." Yellow
-        Write-Host "  Upgrade by hand later: $BdUpgradeCommand"
-        return
+        Write-Color "NOTE the Beads upgrade command failed (offline?)." Yellow
+        Write-Host "  Upgrade by hand: $BdUpgradeCommand"
+        Invoke-RefuseBelowFloor -Have $Current -OptIn
     }
 
     # Step 3 — confirm the swap before touching any database.
@@ -519,7 +609,14 @@ function Invoke-BeadsUpgradeIfOld {
     if (-not $after -or $after -eq $Current) {
         Write-Color "NOTE Beads still reports $after after the upgrade command." Yellow
         Write-Host "  Not migrating the database. Upgrade by hand, then rerun this installer."
-        return
+        Invoke-RefuseBelowFloor -Have $(if ($after) { $after } else { $Current }) -OptIn
+    }
+    # ...and that it reached the floor: a swap to another bd still below
+    # $RecommendedBdVersion changed the binary without making it supported.
+    if ($after -lt $RecommendedBdVersion) {
+        Write-Color "NOTE the upgrade command left bd at $after, still below $RecommendedBdVersion." Yellow
+        Write-Host "  Not migrating the database."
+        Invoke-RefuseBelowFloor -Have $after -OptIn
     }
     Write-Color "OK Beads upgraded: $Current -> $after" Green
 

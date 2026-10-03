@@ -220,15 +220,34 @@ jobs:
     #     now describes a PAST failure, not a current one. `DOCTOR_BD_SCHEMA_
     #     PIN` (a single exact pair) became `DOCTOR_BD_SCHEMA_VALIDATED` (a
     #     membership set), specifically including `1.1.2:53` — THIS job's own
-    #     pinned pair — alongside `1.3.0:66`. META-TEST 8's control now PASSES
-    #     here, because this job's live pair is a validated member, not
-    #     because the check stopped checking. See workflow-doctor.sh's own
+    #     pinned pair — alongside `1.3.0:66`.
+    #   SUPERSEDED, then RESOLVED (claude-workflow-plugin-wyt3). From bd
+    #     v1.3.1's publication on 2026-09-30T23:37Z this job's META-TEST 8a
+    #     control FAILED: run 36971074875's disclosure reported `installed bd
+    #     1.3.1 / store schema v66`, with exactly ONE bd on PATH —
+    #     /usr/local/bin/bd, the path THIS job installs 1.1.2 to,
+    #     sha256-verified — and no second bd downloaded in the job. The pinned
+    #     binary was being overwritten mid-suite.
+    #     THE AGENT, named by hashing /usr/local/bin/bd before and after every
+    #     spec in a container: installer-flags.test.sh. It drove install.sh
+    #     past its bd version floor with a fabricated bd reporting 0.99.0, and
+    #     install.sh then ran its beads upgrade — an UNPINNED `curl ... |
+    #     bash` that installs whatever beads released last — over this job's
+    #     pinned binary. Three fixes close it: the fixture now reports a
+    #     validated version, install.sh no longer upgrades bd automatically,
+    #     and run-tests.sh exports BD_UPGRADE_COMMAND=true for every spec. The
+    #     BD-CANARY in run-tests.sh now fails, by name, any spec that rewrites
+    #     a bd binary. Installing a version is still not the same as measuring
+    #     it, which is why this job's evidence is the doctor's own disclosure
+    #     of the measured pair and binary, not the install step.
+    #     See workflow-doctor.sh's own
     #     DOCTOR_BD_SCHEMA_VALIDATED header for why a set rather than a wider
     #     pin (the schema number is not monotonic in bd's release order — a
     #     floor or interval would be meaningless), and the l1-doctor-bd-max
-    #     job just below this one for how the set's OTHER member (1.3.0:66)
-    #     is now exercised too, rather than resting on "the development host
-    #     agrees" the way this paragraph originally had to.
+    #     and l1-doctor-bd-1-3-1 jobs below this one for how the set's other
+    #     members (1.3.0:66, 1.3.1:66) are exercised too, rather than resting
+    #     on "the development host agrees" the way this paragraph originally
+    #     had to.
     #   - model-roles.test.sh's 11.4 (and the identically-gated setup earlier
     #     in that file computing the same production-store HEAD) checks the
     #     PROJECT'S OWN store at a fixed path, `.beads/embeddeddolt/beads` —
@@ -513,19 +532,24 @@ jobs:
         run: bash .claude/scripts/tests/run-tests.sh
 
   # ---------------------------------------------------------------------------
-  # L1 — bd MAX-END leg. workflow-doctor's DOCTOR_BD_SCHEMA_VALIDATED ceiling
-  # (claude-workflow-plugin-we57/0cr6) — see the job body below for why this
-  # is a separate job rather than a matrix leg of l1-unit above.
+  # L1 — bd 1.3.0 leg, one member of workflow-doctor's
+  # DOCTOR_BD_SCHEMA_VALIDATED (claude-workflow-plugin-we57/0cr6) — see the job
+  # body below for why this is a separate job rather than a matrix leg of
+  # l1-unit above. Its id says "max" because 1.3.0 was the set's ceiling when
+  # this job was written; since claude-workflow-plugin-wyt3 added 1.3.1:66, the
+  # ceiling is l1-doctor-bd-1-3-1 below. The id is kept, not renamed, because
+  # README, CHANGELOG and workflow-doctor.sh refer to it.
   # ---------------------------------------------------------------------------
   l1-doctor-bd-max:
-    name: L1 — workflow-doctor (bd max end)
+    name: L1 — workflow-doctor (bd 1.3.0)
     runs-on: ubuntu-latest
-    # Exercises the CEILING of workflow-doctor.sh's DOCTOR_BD_SCHEMA_VALIDATED
-    # set (claude-workflow-plugin-we57/0cr6). l1-unit above pins the FLOOR
-    # (bd 1.1.2) on every run; before this job, the validated set's other
-    # member (1.3.0:66) could honestly be described only as "the development
-    # host's own bd" — measured, but exercised by no suite. This job is that
-    # suite, for exactly the claim the set makes.
+    # Exercises the 1.3.0:66 member of workflow-doctor.sh's
+    # DOCTOR_BD_SCHEMA_VALIDATED set (claude-workflow-plugin-we57/0cr6) — the
+    # set's ceiling until 1.3.1:66 joined it. l1-unit above pins the FLOOR
+    # (bd 1.1.2) on every run; before this job, 1.3.0:66 could honestly be
+    # described only as "the development host's own bd" — measured, but
+    # exercised by no suite. This job is that suite, for exactly the claim the
+    # set makes.
     #
     # WHY A SEPARATE, NARROW JOB RATHER THAN A MATRIX LEG OF l1-unit ABOVE. bd
     # 1.3.0 is not a drop-in replacement for 1.1.2 across everything this tier
@@ -561,8 +585,9 @@ jobs:
           git config --file "$GIT_ID_CONFIG" user.email "ci@example.com"
           git config --file "$GIT_ID_CONFIG" user.name "ci"
           echo "GIT_CONFIG_GLOBAL=$GIT_ID_CONFIG" >> "$GITHUB_ENV"
-      - name: Install bd (Beads CLI) — MAX end, pinned release, checksum-verified
-        # The ceiling of DOCTOR_BD_SCHEMA_VALIDATED (workflow-doctor.sh) and
+      - name: Install bd (Beads CLI) — 1.3.0, pinned release, checksum-verified
+        # The 1.3.0:66 member of DOCTOR_BD_SCHEMA_VALIDATED (workflow-doctor.sh;
+        # its ceiling until claude-workflow-plugin-wyt3 added 1.3.1:66) and
         # the development host's own bd as of claude-workflow-plugin-we57/
         # 0cr6. Same discipline as l1-unit's bd (floor) step above: pinned
         # tarball, verified against the published release digest
@@ -588,7 +613,7 @@ jobs:
           echo "c49d4c3e004cf1581ba0d4a00c5023a26f84eb2ec15d5fe876eed36d5343f463  /tmp/dolt.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/dolt.tar.gz -C /usr/local/bin --strip-components=2 dolt-linux-amd64/bin/dolt
           dolt version
-      - name: Run workflow-doctor.test.sh (bd max end)
+      - name: Run workflow-doctor.test.sh (bd 1.3.0)
         # NOT run-tests.sh, and no node/MCP-server provisioning: this job
         # exists to exercise ONE claim (1.3.0:66 is a validated pair) rather
         # than to re-run the whole L1 tier a second time under a bd version
@@ -598,6 +623,55 @@ jobs:
         # laptop without those servers installed — that degradation is this
         # file's own designed behaviour, not a gap this job introduces, and
         # STRICT_SECTIONS is deliberately not set for the same reason.
+        run: bash .claude/scripts/tests/workflow-doctor.test.sh
+
+  # ---------------------------------------------------------------------------
+  # L1 — bd 1.3.1 lane (claude-workflow-plugin-wyt3). ADDED ALONGSIDE the
+  # 1.3.0 lane above, not in place of it.
+  #
+  # The rule: every member of DOCTOR_BD_SCHEMA_VALIDATED is exercised by its
+  # OWN lane. A pair in the set that no lane runs is a claim without an
+  # artifact. Replacing the 1.3.0 lane would have left 1.3.0:66 in the set with
+  # nothing exercising it — or forced dropping it and failing the doctor on
+  # every machine running 1.3.0. Both releases writing schema 66 does not make
+  # either redundant: same schema is not same behaviour.
+  #
+  # COUPLED WITH ITS PAIR. This lane and the 1.3.1:66 entry land in the same
+  # commit and are kept only if EVERY tier passes on them in the same run; if
+  # this lane fails anything, the lane and the pair are reverted together.
+  #
+  # PIN VERIFIED TWO WAYS, not one: the sha256 below is the value in the
+  # v1.3.1 release's own published checksums.txt AND the digest of an
+  # independently downloaded copy of the asset (2026-10-03). Both agree.
+  # Why 1.3.1 at all: it is what a fresh `curl | bash` beads install lands on
+  # today, so it is what a new teammate will actually have.
+  # ---------------------------------------------------------------------------
+  l1-doctor-bd-1-3-1:
+    name: L1 — workflow-doctor (bd 1.3.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git identity (fixture git commits need one)
+        run: |
+          GIT_ID_CONFIG="$RUNNER_TEMP/git-identity.gitconfig"
+          git config --file "$GIT_ID_CONFIG" user.email "ci@example.com"
+          git config --file "$GIT_ID_CONFIG" user.name "ci"
+          echo "GIT_CONFIG_GLOBAL=$GIT_ID_CONFIG" >> "$GITHUB_ENV"
+      - name: Install bd (Beads CLI) 1.3.1 — pinned release, checksum-verified
+        run: |
+          curl -fsSL --retry 3 -o /tmp/beads.tar.gz \
+            "https://github.com/steveyegge/beads/releases/download/v1.3.1/beads_1.3.1_linux_amd64.tar.gz"
+          echo "3219443a9734b89b93fb16ee8d65844759fa1b3cd3cf139c606b7353cfb0715c  /tmp/beads.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/beads.tar.gz -C /usr/local/bin bd
+          bd version
+      - name: Install dolt — pinned release, checksum-verified
+        run: |
+          curl -fsSL --retry 3 -o /tmp/dolt.tar.gz \
+            "https://github.com/dolthub/dolt/releases/download/v2.3.5/dolt-linux-amd64.tar.gz"
+          echo "c49d4c3e004cf1581ba0d4a00c5023a26f84eb2ec15d5fe876eed36d5343f463  /tmp/dolt.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/dolt.tar.gz -C /usr/local/bin --strip-components=2 dolt-linux-amd64/bin/dolt
+          dolt version
+      - name: Run workflow-doctor.test.sh (bd 1.3.1)
         run: bash .claude/scripts/tests/workflow-doctor.test.sh
 
   # ---------------------------------------------------------------------------

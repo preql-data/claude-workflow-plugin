@@ -194,6 +194,29 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 # in a 1-in-6 CI flake).
 export BD_DISABLE_METRICS=1
 
+# NO SPEC MAY RUN A REAL beads INSTALLER. install.sh routes its beads-upgrade
+# step through BD_UPGRADE_COMMAND, which until 2026-10-02 defaulted to an
+# unpinned `curl -fsSL .../beads/main/scripts/install.sh | bash`. Any spec that
+# drives install.sh past its version floor therefore executed that command and
+# REPLACED THE HOST'S bd BINARY with whatever beads had most recently released.
+#
+# MEASURED (claude-workflow-plugin-wyt3): installer-flags.test.sh did exactly
+# that, rewriting /usr/local/bin/bd from 1.1.2 to 1.3.1 mid-run. On CI that is
+# what broke META-TEST 8a — the l1-unit job pins bd 1.1.2 sha256-verified, and
+# the doctor later measured 1.3.1 because a spec had overwritten the pin. It
+# also explains three unexplained upgrades of a developer's local bd.
+#
+# SET AT THE RUNNER, not per spec. That spec now stubs it too, and install.sh no
+# longer has an auto-upgrade default — but both of those are instance fixes.
+# This is the family fix: a test host's toolchain is not a test's to modify, and
+# the next spec to invoke an installer should inherit the protection rather than
+# have to remember it. `true` is a command that cannot replace anything. A spec
+# that does not opt in never reaches it: below the floor install.sh refuses,
+# exit 1. A spec that DOES opt in (CWP_BEADS_UPGRADE=1) gets a no-op "upgrade",
+# after which install.sh sees bd unchanged and refuses the same way
+# (installer-flags 9.14). Either way no real beads installer runs.
+export BD_UPGRADE_COMMAND=true
+
 # claude-workflow-plugin-gsfd (7tfe): bd EMBEDS dolt, and the embedded engine
 # spawns ITS OWN telemetry flusher ("dolt send-metrics") that the export above
 # cannot reach — icn4's fix round measured the leaked survivor BY NAME (ppid=1,
@@ -2005,6 +2028,83 @@ else
 fi
 # --- STORE-CANARY-ARM-END (claude-workflow-plugin-j7kk) ---------------------
 
+# --- BD-CANARY-ARM (claude-workflow-plugin-wyt3) ----------------------------
+# A TEST THAT REWRITES THE HOST'S bd BINARY HAS ESCAPED ITS SANDBOX. Same family
+# as the store canary above, different asset: that one watches the project's
+# issue database, this one watches the toolchain the whole tier measures with.
+#
+# MEASURED, which is why it exists: installer-flags.test.sh drove install.sh
+# past its version floor with a fabricated bd reporting 0.99.0, install.sh ran
+# its (then unpinned, then automatic) BD_UPGRADE_COMMAND, and /usr/local/bin/bd
+# was rewritten from 1.1.2 to 1.3.1 mid-tier. On CI that silently defeated a
+# sha256-verified version pin and broke META-TEST 8a; locally it upgraded a
+# developer's bd three times across one work arc and skewed their store schema.
+# Nothing noticed for weeks, because every surface that could have noticed was
+# measuring with the replaced binary.
+#
+# WATCHED PATHS — the REAL PATH, plus the two locations the beads installer
+# writes to. Watching only the PATH a spec happens to run under would miss the
+# case that actually bit: the local upgrades landed in ~/.local/bin, which the
+# specs' own MINIMAL_PATH deliberately excludes.
+# Portable digest: macOS ships `shasum`, Linux images ship `sha256sum`, and the
+# tier runs on both. Prints the digest alone, or the empty string if neither
+# tool could read the file — an unreadable candidate must not silently look
+# identical to an unchanged one, which is why the caller treats "" as a value
+# that can differ rather than skipping the path.
+bd_canary_digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+    fi
+}
+bd_canary_fingerprint() {
+    {
+        type -aP bd 2>/dev/null
+        printf '%s\n' "$HOME/.local/bin/bd" "/usr/local/bin/bd" "/opt/homebrew/bin/bd"
+    } | sort -u | while IFS= read -r _bdp; do
+        [ -n "$_bdp" ] && [ -f "$_bdp" ] || continue
+        printf '%s %s\n' "$_bdp" "$(bd_canary_digest "$_bdp")"
+    done
+}
+BD_CANARY_ARMED=0
+BD_CANARY_DISARM_REASON="the BD-CANARY-ARM region did not run"
+BD_FP_BEFORE=""
+BD_CANARY_TAINTED=0
+BD_CANARY_TAINT_SPEC=""
+if ! command -v bd >/dev/null 2>&1 && [ ! -f "$HOME/.local/bin/bd" ] && [ ! -f /usr/local/bin/bd ]; then
+    BD_CANARY_DISARM_REASON="no bd binary found on PATH or at either default install location"
+else
+    BD_FP_BEFORE=$(bd_canary_fingerprint)
+    if [ -z "$BD_FP_BEFORE" ]; then
+        BD_CANARY_DISARM_REASON="every candidate bd path was unreadable, so no baseline could be taken"
+    else
+        BD_CANARY_ARMED=1
+    fi
+fi
+if [ "$BD_CANARY_ARMED" = "1" ]; then
+    # "tracking", not the verb the STORE-CANARY's own arm line uses, and that
+    # verb is deliberately not repeated anywhere in this block — not even to
+    # explain the rule. runner-completeness.test.sh 13a.6 COUNTS that exact
+    # string to prove a mutant excised the store canary's arm-time diagnostic,
+    # so any occurrence outside the excised sentinels makes a correct assertion
+    # about a different guard report a false failure. Measured twice: once when
+    # this line reused the phrase, and again when the comment explaining the
+    # rule quoted it.
+    # awk, NOT `wc -l`: runner-completeness.test.sh 13v intercepts `wc` with a
+    # ONE-SHOT fake to prove the store canary reports an unreadable commit count
+    # as UNREADABLE rather than fabricating one. A `wc` call here consumes that
+    # interception before the code under test reaches it, so the fake never
+    # fires where it was aimed and two correct assertions about a different
+    # guard go red. Measured: 13v.9 and 13v.10 failed for exactly this reason.
+    printf 'BD-CANARY: ARMED — tracking %s bd binary/binaries; a spec that rewrites one fails, by name\n' \
+        "$(printf '%s\n' "$BD_FP_BEFORE" | awk 'END{print NR}')"
+else
+    printf 'BD-CANARY: DISARMED — %s; this run cannot detect a spec replacing bd\n' \
+        "$BD_CANARY_DISARM_REASON"
+fi
+# --- BD-CANARY-ARM-END ------------------------------------------------------
+
 # attribute_store_advance() — REMOVED (claude-workflow-plugin-gytz waiver
 # ruling). This was the self-vs-external ATTRIBUTION decision (including the
 # DEPADD-PRECURSOR-SKIP and ACTOR-ISSUE-EXTRACT regions, and the
@@ -2318,6 +2418,77 @@ for test_file in "${TESTS[@]}"; do
     fi
     # --- STORE-CANARY-END (claude-workflow-plugin-j7kk) -----------------------
 
+    # --- BD-CANARY-BEGIN (claude-workflow-plugin-wyt3) ------------------------
+    # Did THIS spec rewrite a bd binary? Compared against the previous confirmed
+    # sample, the same carry-forward scheme the store canary uses, so the cost is
+    # one fingerprint per spec rather than two.
+    BD_CANARY_TRIPPED=0
+    BD_CANARY_DETAIL=""
+    if [ "$BD_CANARY_ARMED" = "1" ]; then
+        BD_FP_AFTER=$(bd_canary_fingerprint)
+        if [ -z "$BD_FP_AFTER" ]; then
+            # LOUD, never a silent pass: losing the ability to sample is itself
+            # a finding — a spec that DELETED the bd it ran under lands here.
+            BD_CANARY_TRIPPED=1
+            BD_CANARY_PREV="$BD_FP_BEFORE"
+            BD_CANARY_DETAIL="the BD-CANARY after-sample returned nothing; every watched bd path became unreadable during this spec"
+        elif [ "$BD_FP_AFTER" != "$BD_FP_BEFORE" ]; then
+            BD_CANARY_TRIPPED=1
+            # SNAPSHOT THE PRE-TRIP BASELINE HERE, before the carry-forward
+            # below overwrites it. The trip message compares every watched
+            # path's current digest against this snapshot to name which one
+            # changed; built from BD_FP_BEFORE after the carry-forward, it
+            # compared each digest with itself, matched every time, and
+            # printed no path, no before/after and no version at all.
+            # Measured: runner-completeness 14.4 failed on exactly that.
+            # Lives inside the trip branches on purpose, so the common
+            # no-change path executes nothing new.
+            BD_CANARY_PREV="$BD_FP_BEFORE"
+            BD_CANARY_DETAIL="this spec CHANGED a bd binary on this host: $(diff <(printf '%s\n' "$BD_FP_BEFORE") <(printf '%s\n' "$BD_FP_AFTER") 2>/dev/null | grep -E '^[<>]' | tr '\n' ' ' | cut -c1-300)"
+        fi
+        [ -n "$BD_FP_AFTER" ] && BD_FP_BEFORE="$BD_FP_AFTER"
+    fi
+    if [ "$BD_CANARY_TRIPPED" = "1" ]; then
+        # SAY WHAT WAS DAMAGED, NOT JUST THAT SOMETHING CHANGED. By the time
+        # this fires the binary is already replaced, and on a developer's
+        # machine that is their own system bd — which is exactly what happened
+        # three times in one work arc before this guard existed, unnoticed each
+        # time. Versions are read only HERE, on the changed paths, so the happy
+        # path pays nothing for it.
+        printf '\nBD-CANARY TRIPPED: %s REPLACED A bd BINARY ON THIS HOST.\n' "$base"
+        printf '  %s\n' "$BD_CANARY_DETAIL"
+        printf '%s\n' "$BD_CANARY_PREV" | while IFS=' ' read -r _p _h; do
+            _now=$(bd_canary_digest "$_p")
+            if [ "$_now" != "$_h" ]; then
+                printf '  path:   %s\n' "$_p"
+                printf '  before: sha %s\n' "$(printf '%s' "$_h" | cut -c1-16)"
+                printf '  after:  sha %s  (version now: %s)\n' \
+                    "$(printf '%s' "$_now" | cut -c1-16)" \
+                    "$("$_p" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+            fi
+        done
+        printf '  THIS IS YOUR SYSTEM bd, not a fixture. To restore, reinstall the\n'
+        printf '  version you had from its pinned release and verify the checksum:\n'
+        printf '    https://github.com/steveyegge/beads/releases\n'
+        printf '  Look first at whatever in this spec can install a bd. install.sh\n'
+        printf '  upgrades bd only with an explicit opt-in (BD_UPGRADE_COMMAND plus\n'
+        printf '  CWP_BEADS_UPGRADE=1), and the runner exports BD_UPGRADE_COMMAND=true\n'
+        printf '  so even an opt-in runs nothing; a spec that overrides either owns this.\n'
+        # TAINT EVERYTHING AFTER THIS POINT. The remaining specs will run against
+        # a DIFFERENT bd than the one this tier started with, so their results
+        # describe a toolchain nobody chose. Carrying the baseline forward keeps
+        # the FIRST culprit attributable; this flag stops the rest of the run
+        # from reporting as though it measured the original binary.
+        BD_CANARY_TAINTED=1
+        BD_CANARY_TAINT_SPEC="$base"
+        FAIL=$((FAIL + 1))
+        FAILED_FILES+=("$base (BD-CANARY: replaced a bd binary on this host)")
+    elif [ "${BD_CANARY_TAINTED:-0}" = "1" ]; then
+        printf 'BD-CANARY: TAINTED — this spec ran against a bd replaced by %s; its result does not describe the bd this tier started with\n' \
+            "$BD_CANARY_TAINT_SPEC"
+    fi
+    # --- BD-CANARY-END --------------------------------------------------------
+
     cat "$SPEC_OUT"
 
     # Assertion lines actually executed — the same `PASS:`/`FAIL:` shape the
@@ -2537,6 +2708,21 @@ fi
 if [ "$STORE_CANARY_ARMED" != "1" ]; then
     printf 'STORE-CANARY: DISARMED — %s; this run could not detect writes to %s\n' \
         "$STORE_CANARY_DISARM_REASON" "$PROTECTED_STORE"
+fi
+if [ "$BD_CANARY_ARMED" != "1" ]; then
+    printf 'BD-CANARY: DISARMED — %s; this run could not detect a spec replacing bd\n' \
+        "$BD_CANARY_DISARM_REASON"
+fi
+if [ "${BD_CANARY_TAINTED:-0}" = "1" ]; then
+    # Said at the END as well as at the trip, because the trip scrolls away and
+    # the summary is what anyone reads. Every result after that spec describes a
+    # toolchain nobody chose, so the tier total is not a clean measurement even
+    # if the remaining specs all passed.
+    printf 'BD-CANARY: TAINTED — %s replaced a bd binary mid-run. Every spec after it\n' \
+        "$BD_CANARY_TAINT_SPEC"
+    printf '  ran against a DIFFERENT bd than this tier started with; those results do\n'
+    printf '  not describe the pinned toolchain. Restore bd and re-run before trusting\n'
+    printf '  this tier, and treat any PASS after that point as unmeasured.\n'
 fi
 if [ "$FAIL" -gt 0 ]; then
     printf 'Failed tests:\n'

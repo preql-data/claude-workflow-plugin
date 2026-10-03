@@ -169,9 +169,28 @@ the sense v4.0.0 used the term (two new NECESSARY conditions on every
 approval, independent of role). The agent contract is where this release's
 weight actually sits.
 
-> **UPGRADE NOTE — four things to act on, in this order.**
+> **UPGRADE NOTE — five things to act on, in this order.**
 >
-> **1. `.claude/model-roles` is operator-owned, and an edited copy does not
+> **1. bd must be 1.1.2 or newer BEFORE you run the installer, and on 0.47.x
+> that is a one-way storage-engine migration.** v5 raises the bd floor from
+> 0.47 to 1.1.2. On an older bd, `install.sh` REFUSES, exit 1, before writing
+> any plugin file (verified by execution), and so does `install.ps1` by inspection —
+> it has never been executed. Both print an upgrade procedure; neither upgrades
+> bd itself unless you supply the command (`BD_UPGRADE_COMMAND`, plus
+> `CWP_BEADS_UPGRADE=1`), and both refuse if that upgrade fails or leaves bd
+> below 1.1.2. `--skip-beads-upgrade` only stops that upgrade from running; it
+> never admits an older bd. The procedure `install.sh` prints, executed end to
+> end from a real bd 0.47.1 store: back up `.beads/` and run
+> `bd sync --flush-only`; install exactly bd 1.1.2, verified against that
+> release's `checksums.txt` — the version measured to migrate a 0.47.x store,
+> where bd 1.3.1 refuses one outright ("historical SQLite workspace
+> detected"); run `bd bootstrap`; re-run the installer, which exits 3 with a
+> stale-ledger report (expected); then dry-run
+> `bash .claude/scripts/beads-ledger.sh reconcile`, and run it with `--apply`
+> only if it reports that nothing would be discarded. Already on 1.1.2 or
+> later: nothing to do for bd (`claude-workflow-plugin-wyt3`).
+>
+> **2. `.claude/model-roles` is operator-owned, and an edited copy does not
 > self-upgrade.** The file is manifest class `operator`, so an install whose
 > copy was customized receives the v5 defaults as a
 > `.claude/model-roles.new` sidecar and silently keeps running the OLD key
@@ -183,7 +202,7 @@ weight actually sits.
 > and merge in the two design-lane keys plus the escalation/reviewer-lane
 > grammar by hand.
 >
-> **2. Implementers move from Opus-class to Sonnet-class.** `backend`,
+> **3. Implementers move from Opus-class to Sonnet-class.** `backend`,
 > `frontend` and `devops` now resolve to the latest Sonnet-class model — a
 > deliberate quality-for-cost trade that the reviewed design artifact and
 > per-unit green-to-green tests are meant to absorb, with a unit's own
@@ -199,7 +218,7 @@ weight actually sits.
 > closing that deviation; see the Added section below for the full
 > rationale and dates.
 >
-> **3. v5 ships no Linear integration.** `docs/specs/<task-id>.md` is the
+> **4. v5 ships no Linear integration.** `docs/specs/<task-id>.md` is the
 > design-artifact path — the only one that ships. No reader of a
 > `DESIGN_STORE` variable exists anywhere in `.claude/scripts`: there is no
 > adapter, written or otherwise, so there is nothing to validate live and
@@ -214,7 +233,7 @@ weight actually sits.
 > or the drafted Slack update may assert the Linear path works, and none
 > does — there is no Linear path for one to work.
 >
-> **4. Re-run `--verify` after upgrading.** `bash install.sh --verify` now
+> **5. Re-run `--verify` after upgrading.** `bash install.sh --verify` now
 > runs thirteen named checks (up from eleven — Phase P added `beads_ledger`,
 > then `a13r` added `model_parity`), including two that spawn the MCP
 > servers over stdio and assert exact tool counts (21 / 7, unchanged) and
@@ -2757,7 +2776,9 @@ weight actually sits.
     SET: the store schema version is **non-monotonic across bd releases**
     (1.1.2:53, 1.2.1:65, 1.2.2:53, 1.3.0:66), so a floor or an interval is
     meaningless and only an explicit set can be correct. A new CI job
-    `l1-doctor-bd-max` pins the upper end; README gained a "Supported bd range".
+    `l1-doctor-bd-max` pinned the upper end, 1.3.0; README gained a "Supported
+    bd range". (Since `wyt3`, `1.3.1:66` is also in the set with its own lane,
+    `l1-doctor-bd-1-3-1`, which is now the ceiling.)
 
   - **`qwny`** — `model-roles.test.sh` Section 11's isolation witness was not
     hermetic; it now builds its fixture through `"$REAL_BD" init --database

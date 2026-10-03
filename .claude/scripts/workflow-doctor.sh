@@ -50,28 +50,28 @@
 #
 # The exception: `beads` deliberately runs `bd doctor` against the REAL target,
 # because a sandboxed copy would be checking a database that is not the one the
-# workflow uses — a meaningless check. `bd doctor` is a read-mostly SQLite
-# client: it writes no issue data, but opening the database in WAL mode
-# creates/rewrites `.beads/beads.db-shm` and `.beads/beads.db-wal` and a
-# CHECKPOINT rewrites `.beads/beads.db` itself (the WAL is left at zero bytes).
-# The DB content is equivalent and issues.jsonl is never touched, but the file
-# bytes and mtimes do change — so "the doctor writes nothing anywhere" would be
-# a false claim and is not made.
+# workflow uses — a meaningless check. It writes no issue data and never
+# touches .beads/issues.jsonl, but it is NOT side-effect free, and the
+# mechanism depends on which bd the target has. On bd 0.47.x the SQLite store
+# is opened in WAL mode and a CHECKPOINT rewrites .beads/beads.db together with
+# its -wal and -shm siblings. On bd 1.1.2 and 1.3.0 those files do not exist;
+# there the schema read below creates .dolt/stats/ when it is absent.
 #
-# MEASURED, not assumed. On an isolated 6,936-file target: a full run changed
-# exactly those three .beads/* files and nothing else; the same run with
-# `--skip beads` left all 6,936 files byte-identical; and `beads` alone
-# reproduced the change. (QA independently measured the same on a 10,358-file
-# target.) That measurement predates two checks added since, not one
-# (claude-workflow-plugin-a13r round 4, LOW: `beads_ledger` was named here as
-# "the only" one; `model_parity` is the other). Both leave the result
-# unchanged: `beads_ledger` reads the real target but writes nothing into it
-# — it exports to a temp file OUTSIDE the target — and `model_parity` never
-# even reads the real target directly; it runs entirely inside its own
-# mk_probe_sandbox COPY (see that check's own header) and never writes that
-# copy back out either.
-# So `--skip beads` is the run that provably touches nothing — use it on a
-# read-only mount, mid-`bd` operation, or when you need that guarantee.
+# THE COMPLETE INVENTORY IS DELIBERATELY NOT STATED HERE. Every attempt to keep
+# one in prose has gone stale against the code it describes: the version that
+# stood here until 2026-10-02 named three SQLite-era files that exist under no
+# bd in DOCTOR_BD_SCHEMA_VALIDATED, and cited a measurement taken before half
+# the code it covered was written. Nothing asserts the inventory either, so
+# nothing catches the next drift. claude-workflow-plugin-tfzm carries the
+# executable replacement (snapshot, run, diff, assert against a declared list);
+# claude-workflow-plugin-44yh carries the measured details.
+#
+# What you can rely on: `--skip beads` skips the `bd doctor` call AND the
+# schema SELECT, and is the run that touches nothing. The other two checks that
+# read the real target do not write to it — `beads_ledger` exports to a temp
+# file OUTSIDE the target, and `model_parity` runs entirely inside its own
+# mk_probe_sandbox copy. Use `--skip beads` on a read-only mount, mid-`bd`
+# operation, or whenever you need that guarantee.
 
 set -u
 
@@ -137,6 +137,10 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 #                            LOWER than 1.2.1's 65 despite being the newer
 #                            release)
 #   bd 1.3.0 -> schema 66
+#   bd 1.3.1 -> schema 66   (measured 2026-10-03 on a fresh `bd init`, under
+#                            this check's own query; same schema as 1.3.0,
+#                            which does NOT make either redundant — same
+#                            schema is not same behaviour)
 # The schema number is NOT MONOTONIC in release order, so neither a floor
 # nor an interval on it means anything: 1.2.2 >= 1.2.1 by version but
 # 53 < 65 by schema — an interval wide enough to admit 1.2.1:65 would also
@@ -146,16 +150,37 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # still refusing one nobody has checked, which is what "a range, not one
 # pair" means for a quantity that does not order.
 #
-# ONLY TWO OF THE FOUR MEASURED PAIRS ARE VALIDATED BELOW, DELIBERATELY.
+# THREE OF THE FIVE MEASURED PAIRS ARE IN THE SET BELOW, DELIBERATELY, and
+# each has its OWN CI lane: a member that no lane runs would be a claim
+# without an artifact. Read each entry for its coverage, not this count.
 # "Validated" means a suite this project actually runs exercises the pair,
 # not merely that it was measured once above — claiming an unexercised pair
 # as validated would be the exact defect family this pin exists to catch,
 # committed by the pin's own constant:
-#   1.1.2:53  the CI floor. .github/workflows/test.yml's l1-unit job
-#             installs exactly this bd release on every run.
-#   1.3.0:66  the CI ceiling as of the same workflow change (see that job's
-#             "Install bd (max)" step, added alongside this set), and the
-#             development host's own bd.
+#   1.1.2:53  the CI floor (l1-unit), and the ONLY version measured to
+#             migrate a 0.47.x SQLite store — install.sh pins it as
+#             BRIDGE_BD_VERSION, and installer-flags.test.sh 9.6d fails if it
+#             ever leaves this set. A store created by bd 1.1.2 reports schema
+#             53 under this check's own query, measured directly.
+#             Its lane did NOT measure it until 2026-10-02: installer-flags.
+#             test.sh drove install.sh past its version floor with a
+#             fabricated bd, install.sh ran an unpinned `curl | bash` beads
+#             upgrade, and the pinned 1.1.2 binary was overwritten mid-job with
+#             whatever beads had released last — so the doctor in that lane
+#             measured 1.3.1:66, not the floor (claude-workflow-plugin-wyt3).
+#             All three are now closed: the fixture reports a validated
+#             version, install.sh no longer upgrades bd automatically, and the
+#             runner exports BD_UPGRADE_COMMAND=true. With them in place a full
+#             L1 tier in a container matched to CI on run user, locale, dolt
+#             and bd version measured 1.1.2:53 from /usr/local/bin/bd and
+#             passed, rc=0, 76/76 — on linux/arm64, where CI is amd64.
+#   1.3.0:66  its own lane, l1-doctor-bd-max, and the development host's bd.
+#   1.3.1:66  its own lane, l1-doctor-bd-1-3-1, added 2026-10-03 in the same
+#             commit as this entry and kept only if every tier passes on it.
+#             It is what a fresh beads install lands on today. Measured: a
+#             store created by bd 1.3.1 reports schema 66. Its pin is verified
+#             against BOTH the release's published checksums.txt and an
+#             independently downloaded copy of the asset.
 # 1.2.1:65 and 1.2.2:53 are measured above but exercised by no suite, so
 # they are KNOWN, not validated, and are deliberately left out of the set.
 # If either gains suite coverage later, add it in the SAME commit as that
@@ -241,7 +266,7 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # Left as-is, a sentinel still naming the retired single-pin design while the
 # variable inside is a set would be exactly the stale-prose defect this
 # codebase's own culture exists to catch.)
-DOCTOR_BD_SCHEMA_VALIDATED="1.1.2:53 1.3.0:66"
+DOCTOR_BD_SCHEMA_VALIDATED="1.1.2:53 1.3.0:66 1.3.1:66"
 # END DOCTOR_BD_SCHEMA_VALIDATED
 
 # Minimum bytes of post-frontmatter SKILL.md body. The `skill` check exists to
@@ -366,14 +391,18 @@ WHAT A RUN TOUCHES (safe to run mid-session; the exception is named)
 
   The one exception is `beads`, which runs `bd doctor` against the REAL target
   on purpose — a sandboxed copy would be checking a database the workflow does
-  not use. `bd doctor` writes no issue data, but opening the database in WAL
-  mode creates/rewrites .beads/beads.db-shm and .beads/beads.db-wal, and a
-  CHECKPOINT rewrites .beads/beads.db itself. No issue changes, no data loss,
-  issues.jsonl never touched — but those three files' bytes and mtimes do
-  change. Measured on a 6,936-file target: a full run changed exactly those
-  three and nothing else, and the same run with `--skip beads` changed nothing
-  at all. So pass `--skip beads` when you need a run that provably touches
-  nothing (read-only mount, or a `bd` operation in flight).
+  not use. `bd doctor` writes no issue data and never touches issues.jsonl, but
+  it is NOT side-effect free, and the mechanism depends on which bd you have.
+  On bd 0.47.x the SQLite store is opened in WAL mode and a CHECKPOINT rewrites
+  .beads/beads.db plus its -wal and -shm siblings. On bd 1.1.2 and 1.3.0 those
+  files do not exist; there the schema read creates .dolt/stats/ when absent.
+  A full inventory is deliberately NOT listed: every prose version has gone
+  stale against the code (the one that stood here until 2026-10-02 gave only
+  the WAL case, unconditionally). See claude-workflow-plugin-tfzm and -44yh.
+
+  What you can rely on: `--skip beads` skips both the `bd doctor` call and the
+  schema read, and is the run that touches nothing — use it on a read-only
+  mount or with a `bd` operation in flight.
 
   `beads_ledger` also reads the REAL target's database — a sandboxed copy would
   answer for the wrong ledger — but writes nothing there: it exports to a
@@ -1336,11 +1365,16 @@ hook failure per fire and the gate it belonged to is simply absent."
 # check at all. The cost is stated honestly rather than hidden: `bd doctor`
 # writes no issue data, but opening the SQLite database can CHECKPOINT ITS WAL,
 # which rewrites .beads/beads.db and .beads/beads.db-shm and truncates
-# .beads/beads.db-wal to zero. issues.jsonl is untouched. This is the only file
-# change a full run makes anywhere in the target (QA verified against an
-# isolated 10,358-file tree), and it is why the file header, --help and
-# commands/workflow-doctor.md all name `beads` as the documented exception
-# instead of claiming the run touches nothing. `--skip beads` opts out.
+# .beads/beads.db-wal to zero. issues.jsonl is untouched. This is NOT the only
+# file change a full run makes: the schema SELECT further down also creates
+# `.dolt/stats/` (11 paths) whenever it does not already exist — see that
+# call's own comment. The 10,358-file verification cited here predates that
+# SELECT (it entered at 33e45fa, 2026-08-16) and so could not have observed
+# it; the sentence that stood here claimed exclusivity on the strength of a
+# measurement taken before the code existed. Both effects are why the file
+# header, --help and commands/workflow-doctor.md all name `beads` as the
+# documented exception instead of claiming the run touches nothing.
+# `--skip beads` opts out of both.
 #
 # The invocation goes through the SAME bd shim mk_probe_sandbox installs
 # (mk_bd_shim), so every bd call in the doctor has one PATH-controlled entry
@@ -1412,8 +1446,16 @@ NOTE: bd doctor reported $warns advisory warning(s) (informational only). Run
     # in DOCTOR_BD_SCHEMA_VALIDATED (see that constant's own header for the
     # full reasoning) — a deterministic structural comparison, not bd's
     # free-text wording, so it does not inherit the "never fail on cosmetic
-    # output" tolerance above. READ-ONLY: `bd version` never writes, and the
-    # schema read is a direct `dolt sql` SELECT against the schema_migrations
+    # output" tolerance above. NOT READ-ONLY, though this comment said it was
+    # until 2026-10-02: whenever `.dolt/stats/` does not already exist, the
+    # SELECT below creates it. Measured on dolt 2.3.0 against empty and
+    # populated stores; the store's contents are irrelevant, and the delta is
+    # 0 only when stats already exists. `.beads/embeddeddolt/` is gitignored,
+    # so nothing enters a change set or a commit, and `--skip beads` skips
+    # this SELECT along with the rest of the check. Measured details and the
+    # executable replacement for the hand-written inventory:
+    # claude-workflow-plugin-44yh and -tfzm.
+    # The schema read is a direct SELECT against the schema_migrations
     # table bd itself queries internally (same predicate string bd's own
     # binary embeds) — this does not invoke `bd doctor` a second time, so it
     # cannot also be the thing that triggers that call's own WAL-checkpoint
@@ -1429,10 +1471,13 @@ NOTE: bd doctor reported $warns advisory warning(s) (informational only). Run
     live_bd_ver=$(env "PATH=$shim_path" bd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
     # NAME THE BINARY THAT ANSWERED, not just its version
     # (claude-workflow-plugin-wyt3). A CI lane that installs bd 1.1.2 from a
-    # pinned, sha256-verified tarball — with no second bd downloaded anywhere
-    # in the job, verified by grepping the whole job log — was measured
-    # reporting "installed bd 1.3.1". The doctor's own output could not say
-    # WHICH binary answered, so each hypothesis cost a 45-minute CI round.
+    # pinned, sha256-verified tarball was measured reporting "installed bd
+    # 1.3.1". Grepping the job log for a second download found none, and that
+    # proved nothing: the download ran inside a test's captured subshell, whose
+    # output never reaches the log — installer-flags.test.sh drove install.sh's
+    # unpinned `curl | bash` upgrade over the pinned bd, found later by hashing
+    # bd around every spec. The doctor's own output could not say WHICH binary
+    # answered, so each hypothesis cost a 45-minute CI round.
     # A version with no path is not a measurement anyone can act on: an
     # operator cannot tell a doctor that measured the wrong bd from one that
     # measured the right one, and those render identically. Reported on BOTH
@@ -1596,10 +1641,15 @@ attention — start with \`bd dolt status\` and \`bd doctor\` in the target."
             record beads_ledger FAIL "${detail:-the ledger differs from the database (database ahead)}" \
 "The database is ahead of .beads/issues.jsonl, so a fresh clone would recover an
 out-of-date issue set. NOTHING repairs this automatically — no hook writes the
-ledger. Repair it deliberately:
+ledger. Repair it deliberately, DRY RUN FIRST so you see the effect before
+anything is written:
+  bash .claude/scripts/beads-ledger.sh reconcile
+and only if it reports that nothing would be discarded:
   bash .claude/scripts/beads-ledger.sh reconcile --apply
-then commit .beads/issues.jsonl. (\`reconcile\` is dry-run without --apply, and
-is preferred over \`export\` because it is safe in BOTH directions.)"
+then commit .beads/issues.jsonl. (\`reconcile\` is preferred over \`export\`
+because it is safe in BOTH directions. install.sh prints this same two-step
+order for a cross-era bd upgrade; installer-flags.test.sh 9.10 asserts the two
+surfaces name the same commands in the same order.)"
             ;;
         3)
             # THE OPPOSITE DIRECTION (R1-F1). The ledger holds records the
@@ -1612,7 +1662,9 @@ is preferred over \`export\` because it is safe in BOTH directions.)"
             record beads_ledger FAIL "${detail:-the ledger is AHEAD of the database}" \
 "The LEDGER holds records the database does not, so this is NOT a stale-export
 problem and \`beads-ledger.sh export\` would DESTROY them. Import first — the
-order matters, and \`reconcile\` is the single command that gets it right:
+order matters, and \`reconcile\` is the single command that gets it right. DRY
+RUN FIRST, then apply only if nothing would be discarded:
+  bash .claude/scripts/beads-ledger.sh reconcile
   bash .claude/scripts/beads-ledger.sh reconcile --apply
 which runs \`bd import .beads/issues.jsonl\` and then re-exports the union.
 Without --apply it reports what it would do and changes nothing. If this is a

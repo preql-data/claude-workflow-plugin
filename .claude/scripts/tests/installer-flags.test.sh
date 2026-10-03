@@ -60,6 +60,29 @@ INSTALL_SH="$PROJECT_DIR/install.sh"
 # reliably prereq-hostile — but section 3 verifies that rather than assuming it.
 MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
+# NEUTRALISE THE REAL beads INSTALLER BEFORE ANY INVOCATION RUNS.
+# install.sh's beads-upgrade step executes `sh -c "$BD_UPGRADE_COMMAND"`, whose
+# default is `curl -fsSL .../beads/main/scripts/install.sh | bash` — the real
+# upstream installer, which writes a bd binary over whatever is on PATH. This
+# spec invokes install.sh 27 times and, until 2026-10-02, stubbed that command
+# ZERO times, so any invocation reaching a complete install replaced the HOST's
+# bd with whatever beads had most recently released.
+#
+# MEASURED, which is how this was found (claude-workflow-plugin-wyt3): running
+# this spec in a container with bd 1.1.2 installed at /usr/local/bin left
+# /usr/local/bin/bd at version 1.3.1, sha256 1db3b1b5… -> 21351856…. On CI that
+# is exactly what breaks META-TEST 8a — the l1-unit job pins bd 1.1.2,
+# sha256-verified, and the doctor later measures 1.3.1, because this spec
+# overwrote the pinned binary mid-job. It also explains three unexplained
+# upgrades of a developer's local bd across one work arc.
+#
+# The seam already exists for precisely this reason (see install.sh's
+# BD_UPGRADE_COMMAND header: "a SEAM, not a hardcoded curl"), and the component
+# tier's installer-beads-upgrade.sh already substitutes a fake. This spec is an
+# ARGUMENT-CONTRACT spec; it has no business running a real installer at all,
+# so the seam is closed here unconditionally rather than per-invocation.
+export BD_UPGRADE_COMMAND='true'
+
 WORK=$(mktemp -d -t installer-flags-test.XXXXXX)
 # Invoked indirectly, by the EXIT trap immediately below.
 # shellcheck disable=SC2329
@@ -548,16 +571,37 @@ printf 'synthetic hooks reference\n' > "$SYNTH/docs/HOOKS.md"
 # fake-bd: the whole `bd` surface install.sh touches (--version, init, hooks,
 # doctor). `doctor` must never print the string 'error' — install.sh greps for
 # it case-insensitively.
-cat > "$SYNTH/bin/bd" <<'FAKE_BD'
+# The fixture must report a version AT OR ABOVE the floor, and that version is
+# DERIVED from the doctor's validated set rather than hardcoded, so bumping the
+# set cannot leave this fixture pinned to a version the release no longer
+# validates. The set's HIGHEST member is taken — any validated member clears the
+# floor, and tracking the ceiling keeps the fixture representative of what a
+# current install actually has.
+#
+# This line said `bd 0.99.0` until 2026-10-02, which sorts BELOW the 1.1.2 floor
+# and so drove install.sh into its beads-upgrade arm on every invocation — the
+# arm that ran an unpinned `curl | bash` and replaced the HOST's bd
+# (claude-workflow-plugin-wyt3). An argument-contract spec has no business
+# manufacturing a below-floor install.
+FIXTURE_BD_VER=$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' \
+    "$PROJECT_DIR/.claude/scripts/workflow-doctor.sh" 2>/dev/null \
+    | head -1 | tr ' ' '\n' | cut -d: -f1 | grep -E '^[0-9]' | sort -V | tail -1)
+assert_eq "8.0 the fixture's bd version is derivable from the validated set (else the fixture is vacuous)" \
+    "yes" "$([ -n "$FIXTURE_BD_VER" ] && echo yes || echo no)"
+: "${FIXTURE_BD_VER:=1.3.0}"
+
+cat > "$SYNTH/bin/bd" <<FAKE_BD
 #!/bin/bash
-case "${1:-}" in
-    --version|-v|version) printf 'bd 0.99.0 (fake-bd for installer-flags)\n' ;;
+case "\${1:-}" in
+    --version|-v|version) printf 'bd $FIXTURE_BD_VER (fake-bd for installer-flags)\n' ;;
     doctor)               printf 'fake-bd: all checks passed\n' ;;
-    *)                    printf 'fake-bd: ok (%s)\n' "${1:-}" ;;
+    *)                    printf 'fake-bd: ok (%s)\n' "\${1:-}" ;;
 esac
 exit 0
 FAKE_BD
 chmod +x "$SYNTH/bin/bd"
+assert_eq "8.0b ...and the generated fixture really reports it" "yes" \
+    "$("$SYNTH/bin/bd" --version 2>/dev/null | grep -qF "bd $FIXTURE_BD_VER" && echo yes || echo no)"
 
 MUTANT_TARGET="$WORK/mutant-target"
 mkdir -p "$MUTANT_TARGET"
@@ -668,6 +712,182 @@ assert_eq "META-TEST control: ...refusing for the documented reason" "yes" \
     "$(contains "$RUN_OUT" "$EXCLUSIVITY_MSG")"
 assert_eq "META-TEST control: ...and never reaches the doctor" "no" \
     "$(contains "$RUN_OUT" "stub-doctor ran")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 9: a bd below the floor is REFUSED, not warned (wyt3) ==="
+
+# v5 requires bd >= RECOMMENDED_BD_VERSION. Continuing on an older bd would
+# write v5 over a working v4.1 install into a storage configuration v5 does not
+# support, and only the POST-install doctor would notice — warning where the
+# installer must refuse (claude-workflow-plugin-q5l6). The refusal has to land
+# BEFORE anything is written, or "nothing has been changed" is a false claim.
+OLD_BD_DIR="$WORK/old-bd-bin"
+mkdir -p "$OLD_BD_DIR"
+cat > "$OLD_BD_DIR/bd" <<'OLD_BD'
+#!/bin/bash
+case "${1:-}" in
+    --version|-v|version) printf 'bd 0.47.1 (fake old bd)\n' ;;
+    doctor)               printf 'fake-bd: all checks passed\n' ;;
+    *)                    printf 'fake-bd: ok (%s)\n' "${1:-}" ;;
+esac
+exit 0
+OLD_BD
+chmod +x "$OLD_BD_DIR/bd"
+
+FLOOR_TARGET="$WORK/floor-target"
+mkdir -p "$FLOOR_TARGET"
+FLOOR_OUT=$(env PATH="$OLD_BD_DIR:$PATH" "$BASH_BIN" "$INSTALL_SH" "$FLOOR_TARGET" </dev/null 2>&1)
+FLOOR_RC=$?
+
+assert_eq "9.1 a bd below the floor makes the installer EXIT NON-ZERO" "yes" \
+    "$([ "$FLOOR_RC" -ne 0 ] && echo yes || echo no)"
+assert_eq "9.2 ...and says it is REFUSING, not warning" "yes" \
+    "$(contains "$FLOOR_OUT" "REFUSING to install")"
+assert_eq "9.3 ...and NOTHING was written into the target (no .claude/)" "no" \
+    "$([ -d "$FLOOR_TARGET/.claude" ] && echo yes || echo no)"
+assert_eq "9.4 ...and it names the one-way storage migration" "yes" \
+    "$(contains "$FLOOR_OUT" "ONE WAY")"
+assert_eq "9.5 ...and tells the operator to back up .beads FIRST" "yes" \
+    "$(contains "$FLOOR_OUT" "Back up your issues FIRST")"
+# PINNED, not latest: printing an install-latest command recreates by hand the
+# moving target the automatic path was removed for.
+BRIDGE_VER=$(sed -n 's/^BRIDGE_BD_VERSION="\(.*\)"$/\1/p' "$INSTALL_SH" | head -1)
+assert_eq "9.6a the bridge version is readable from install.sh (else 9.6b is vacuous)" "yes" \
+    "$([ -n "$BRIDGE_VER" ] && echo yes || echo no)"
+assert_eq "9.6b ...and the refusal points at that EXACT pinned release, not install-latest" "yes" \
+    "$(contains "$FLOOR_OUT" "releases/tag/v$BRIDGE_VER")"
+
+# THE BRIDGE IS PINNED, AND THIS IS WHAT STOPS THE PIN GOING STALE SILENTLY.
+# "Can migrate a 0.47.x store" was MEASURED on specific versions; it is not
+# implied by membership of the validated set, nor by being its lowest member.
+# If the set ever stops containing the bridge, the printed instruction is
+# telling operators to install a version this release no longer validates, and
+# a newer bd REFUSES a 0.47.x workspace outright. Failing here forces a
+# re-measurement instead of a silent change (claude-workflow-plugin-wyt3).
+VALIDATED_SET=$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' \
+    "$PROJECT_DIR/.claude/scripts/workflow-doctor.sh" 2>/dev/null | head -1)
+assert_eq "9.6c the validated set is readable (else 9.6d is vacuous)" "yes" \
+    "$([ -n "$VALIDATED_SET" ] && echo yes || echo no)"
+assert_eq "9.6d ...and the PINNED bridge version is still a member of it" "yes" \
+    "$(printf '%s' "$VALIDATED_SET" | tr ' ' '\n' | cut -d: -f1 | grep -qxF "$BRIDGE_VER" && echo yes || echo no)"
+
+# DRY RUN BEFORE APPLY, IN THAT ORDER. "nothing was discarded" was the result on
+# a 3-issue fixture, not a guarantee for anyone's ledger; --apply was made
+# explicit precisely so a write's effect is visible first.
+assert_eq "9.8a the procedure names the dry-run reconcile" "yes" \
+    "$(contains "$FLOOR_OUT" "beads-ledger.sh reconcile")"
+assert_eq "9.8b ...and the --apply form too" "yes" \
+    "$(contains "$FLOOR_OUT" "beads-ledger.sh reconcile --apply")"
+# ORDER, not mere presence: the bare form must appear BEFORE the --apply form.
+FLOOR_DRY_LINE=$(printf '%s\n' "$FLOOR_OUT" | grep -n 'beads-ledger\.sh reconcile$' | head -1 | cut -d: -f1)
+FLOOR_APPLY_LINE=$(printf '%s\n' "$FLOOR_OUT" | grep -n 'beads-ledger\.sh reconcile --apply' | head -1 | cut -d: -f1)
+assert_eq "9.8c NON-VACUITY: both reconcile lines were actually located" "yes" \
+    "$([ -n "$FLOOR_DRY_LINE" ] && [ -n "$FLOOR_APPLY_LINE" ] && echo yes || echo no)"
+assert_eq "9.8d ...and the DRY RUN is printed BEFORE the --apply" "yes" \
+    "$([ -n "$FLOOR_DRY_LINE" ] && [ -n "$FLOOR_APPLY_LINE" ] && [ "$FLOOR_DRY_LINE" -lt "$FLOOR_APPLY_LINE" ] && echo yes || echo no)"
+# The installer's own exit code is part of the procedure, so it must be stated.
+assert_eq "9.9 the procedure warns that the installer EXITS 3 at that point" "yes" \
+    "$(contains "$FLOOR_OUT" "EXITS 3")"
+
+# ---------------------------------------------------------------------------
+# TWO SURFACES, ONE SEQUENCE — CHECKED, NOT ASSERTED IN A COMMENT.
+#
+# A teammate hits this ledger repair from either direction: install.sh prints it
+# as step 4 of the cross-era upgrade, and workflow-doctor.sh prints it as the
+# beads_ledger FAIL fix. If those two ever name different commands, or the same
+# commands in a different order, one of them is teaching a dry-run-first
+# discipline the other quietly skips.
+#
+# This replaces a comment that said the two "must not diverge". A note telling
+# future editors to keep two copies in step is exactly the mechanism behind this
+# release's tally drift, its duplicated rubric pin, and its four copies of the
+# doctor's side-effect inventory — in every case the note survived and the
+# agreement did not. One assertion outlives the note.
+# Scoped to RUNNABLE COMMAND LINES — two-space-indented `bash ...` — not to
+# every mention of the string. The first version of this grepped the whole file
+# and picked up a PROSE reference ("written only by an explicit
+# `beads-ledger.sh reconcile --apply`") that sits above the fix blocks, so it
+# reported a divergence that did not exist. The assertion caught that itself,
+# which is the point: a comment saying the two must agree could not have.
+DOCTOR_SH="$PROJECT_DIR/.claude/scripts/workflow-doctor.sh"
+DOC_SEQ=$(grep -oE '^  bash \.claude/scripts/beads-ledger\.sh reconcile( --apply)?$' "$DOCTOR_SH" 2>/dev/null \
+    | sed 's/^  bash \.claude\/scripts\///' | awk '!seen[$0]++')
+INST_SEQ=$(printf '%s\n' "$FLOOR_OUT" | grep -oE 'beads-ledger\.sh reconcile( --apply)?' | awk '!seen[$0]++')
+assert_eq "9.10a NON-VACUITY: both surfaces actually name the reconcile command" "yes" \
+    "$([ -n "$DOC_SEQ" ] && [ -n "$INST_SEQ" ] && echo yes || echo no)"
+assert_eq "9.10b the doctor's fix lines and the installer's steps name the SAME commands in the SAME order" \
+    "$INST_SEQ" "$DOC_SEQ"
+# And that shared order is dry-run first, in BOTH — checked on the doctor side
+# here, since 9.8d already pins the installer side.
+assert_eq "9.10c ...and the doctor leads with the DRY RUN, not --apply" \
+    "beads-ledger.sh reconcile" "$(printf '%s\n' "$DOC_SEQ" | head -1)"
+assert_eq "9.7 ...and does NOT print an install-latest pipe-to-shell command" "no" \
+    "$(contains "$FLOOR_OUT" "scripts/install.sh | bash")"
+
+# NEGATIVE CONTROL: the refusal must be caused by the OLD bd, not by this
+# fixture shape. Same invocation, same target, a bd AT the floor instead.
+NEW_BD_DIR="$WORK/new-bd-bin"
+mkdir -p "$NEW_BD_DIR"
+sed 's/bd 0\.47\.1 (fake old bd)/bd 1.3.0 (fake current bd)/' "$OLD_BD_DIR/bd" > "$NEW_BD_DIR/bd"
+chmod +x "$NEW_BD_DIR/bd"
+assert_eq "9.C0 NON-VACUITY: the control fixture really reports a different version" "yes" \
+    "$("$NEW_BD_DIR/bd" --version | grep -q '1\.3\.0' && echo yes || echo no)"
+CTRL_TARGET="$WORK/floor-control-target"
+mkdir -p "$CTRL_TARGET"
+CTRL_OUT=$(env PATH="$NEW_BD_DIR:$PATH" "$BASH_BIN" "$INSTALL_SH" "$CTRL_TARGET" </dev/null 2>&1)
+assert_eq "9.C1 CONTROL: a bd at the floor is NOT refused" "no" \
+    "$(contains "$CTRL_OUT" "REFUSING to install")"
+
+# NO PATH ADMITS A BD BELOW THE FLOOR (claude-workflow-plugin-ishe R5-F1).
+# --skip-beads-upgrade / CWP_SKIP_BEADS_UPGRADE=1 used to return before the
+# version was compared, which installed v5 over a fake 0.47.1 (6965 files,
+# exit 3, measured by the review). Every failed opt-in step returned and
+# continued on the old bd as well. Each leg below runs the SHIPPED installer
+# end to end and must be refused, with nothing written. 9.14 is the runner's
+# own stub (BD_UPGRADE_COMMAND=true) plus the opt-in: a no-op "upgrade" that
+# used to report "still 0.47.1" and then carry on installing.
+refused_cleanly() { # <label-prefix> <out> <rc> <target>
+    local claude_state
+    if [ ! -d "$4" ]; then
+        claude_state="TARGET-MISSING"   # no target means "no .claude/" proves nothing
+    elif [ -e "$4/.claude" ]; then
+        claude_state="yes"
+    else
+        claude_state="no"
+    fi
+    assert_eq "$1 ...exits non-zero" "yes" "$([ "$3" -ne 0 ] && echo yes || echo no)"
+    assert_eq "$1 ...says it is REFUSING" "yes" "$(contains "$2" "REFUSING to install")"
+    assert_eq "$1 ...and wrote no .claude/ into the target" "no" "$claude_state"
+}
+SKIPF_T="$WORK/floor-skip-flag-target"; mkdir -p "$SKIPF_T"
+SKIPF_OUT=$(env PATH="$OLD_BD_DIR:$PATH" CWP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" --skip-beads-upgrade "$SKIPF_T" </dev/null 2>&1); SKIPF_RC=$?
+refused_cleanly "9.11 --skip-beads-upgrade on bd 0.47.1, opt-in also set:" "$SKIPF_OUT" "$SKIPF_RC" "$SKIPF_T"
+assert_eq "9.11 ...and names the flag as not admitting the old bd" "yes" \
+    "$(contains "$SKIPF_OUT" "does not admit a bd below")"
+
+SKIPE_T="$WORK/floor-skip-env-target"; mkdir -p "$SKIPE_T"
+SKIPE_OUT=$(env PATH="$OLD_BD_DIR:$PATH" CWP_SKIP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" "$SKIPE_T" </dev/null 2>&1); SKIPE_RC=$?
+refused_cleanly "9.12 CWP_SKIP_BEADS_UPGRADE=1 on bd 0.47.1:" "$SKIPE_OUT" "$SKIPE_RC" "$SKIPE_T"
+
+OPTF_T="$WORK/floor-optin-fails-target"; mkdir -p "$OPTF_T"
+OPTF_OUT=$(env PATH="$OLD_BD_DIR:$PATH" BD_UPGRADE_COMMAND=false CWP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" "$OPTF_T" </dev/null 2>&1); OPTF_RC=$?
+refused_cleanly "9.13 opt-in whose upgrade command FAILS:" "$OPTF_OUT" "$OPTF_RC" "$OPTF_T"
+assert_eq "9.13 ...and it does not claim to be continuing" "no" \
+    "$(contains "$OPTF_OUT" "Continuing on bd")"
+
+OPTN_T="$WORK/floor-optin-noop-target"; mkdir -p "$OPTN_T"
+OPTN_OUT=$(env PATH="$OLD_BD_DIR:$PATH" BD_UPGRADE_COMMAND=true CWP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" "$OPTN_T" </dev/null 2>&1); OPTN_RC=$?
+refused_cleanly "9.14 opt-in with the runner's no-op stub (bd stays 0.47.1):" "$OPTN_OUT" "$OPTN_RC" "$OPTN_T"
+
+# CONTROL for 9.11-9.12: the skip flag on a bd AT the floor is not refused, so
+# those legs fail because the bd is old, not because the flag refuses.
+SKIPC_T="$WORK/floor-skip-control-target"; mkdir -p "$SKIPC_T"
+SKIPC_OUT=$(env PATH="$NEW_BD_DIR:$PATH" "$BASH_BIN" "$INSTALL_SH" --skip-beads-upgrade "$SKIPC_T" </dev/null 2>&1)
+assert_eq "9.C2 CONTROL: --skip-beads-upgrade on a bd at the floor is NOT refused" "no" \
+    "$(contains "$SKIPC_OUT" "REFUSING to install")"
+assert_eq "9.C2 CONTROL: ...and it really installed (.claude/ present)" "yes" \
+    "$([ -d "$SKIPC_T/.claude" ] && echo yes || echo no)"
 
 # --- Summary ---------------------------------------------------------------
 

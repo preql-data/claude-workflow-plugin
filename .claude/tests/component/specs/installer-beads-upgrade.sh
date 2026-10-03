@@ -22,7 +22,20 @@
 #                                       target (unreadable store + stale
 #                                       ledger) is worse than an old bd.
 #   4. Already current               -> no-op, no upgrade command run.
-#   5. --skip-beads-upgrade          -> opt-out honoured.
+#   5. Below the floor WITHOUT a     -> the install is REFUSED (exit 1), and
+#      working opt-in upgrade           so is every opt-in step that leaves bd
+#                                       below the floor. --skip-beads-upgrade
+#                                       stops the opt-in upgrade from running;
+#                                       it never admits an old bd.
+#
+# THE UPGRADE IS OPT-IN (claude-workflow-plugin-wyt3): it runs only when the
+# operator sets BD_UPGRADE_COMMAND AND CWP_BEADS_UPGRADE=1. The harness below
+# therefore sets CWP_BEADS_UPGRADE=1 by default, so sections 1-3 and 6 still
+# exercise the upgrade path itself; section 4 clears it to test the refusal.
+# Every refusal is the installer's refuse_below_floor, which this spec extracts
+# alongside the upgrader (claude-workflow-plugin-ishe R5-F1: until then a skip
+# flag or a failed opt-in step returned instead, and the install proceeded on
+# an unsupported bd).
 #
 # HERMETIC BY CONSTRUCTION. Nothing here touches the network or swaps a real
 # binary: BD_UPGRADE_COMMAND is the installer's documented seam and is pointed
@@ -53,7 +66,7 @@ assert_eq "installer-beads-upgrade 0: install.sh is present" "yes" \
 RECOMMENDED=$(sed -n 's/^RECOMMENDED_BD_VERSION="\(.*\)"$/\1/p' "$INSTALLER" | head -1)
 assert_match "installer-beads-upgrade 0: RECOMMENDED_BD_VERSION is declared and dotted-numeric" \
     '^[0-9]+\.[0-9]+(\.[0-9]+)?$' "$RECOMMENDED"
-assert_eq "installer-beads-upgrade 0: the HARD floor is still 0.47 (an old bd is degraded, not refused)" \
+assert_eq "installer-beads-upgrade 0: MIN_BD_VERSION is still 0.47 (the CLI floor checked first; it rejects a bd too old to talk to and admits none)" \
     "0.47" "$(sed -n 's/^MIN_BD_VERSION="\(.*\)"$/\1/p' "$INSTALLER" | head -1)"
 
 # ---------------------------------------------------------------------------
@@ -141,6 +154,10 @@ UPGRADER_SRC="$WORK/upgrader.sh"
     # The safeguard's loss detector lives beside the upgrader in install.sh;
     # extract it too, anchored on its name so a rename fails loudly here.
     awk '/^ledger_comment_count\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALLER"
+    # ...and the refusal every below-floor path ends in. Without it, a call to
+    # an undefined function would print an error and CONTINUE, so the guard
+    # below is what keeps this spec from passing a refusal that never exited.
+    awk '/^refuse_below_floor\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALLER"
     extract_upgrader
     printf '%s\n' 'upgrade_beads_if_old "$1" "$2"'
 } > "$UPGRADER_SRC"
@@ -148,6 +165,9 @@ UPGRADER_SRC="$WORK/upgrader.sh"
 assert_eq "installer-beads-upgrade 0: the upgrader function was extracted (guards a rename)" \
     "yes" \
     "$(grep -q 'upgrade_beads_if_old() {' "$UPGRADER_SRC" && echo yes || echo no)"
+assert_eq "installer-beads-upgrade 0: the refusal function was extracted too (guards a rename)" \
+    "yes" \
+    "$(grep -q 'refuse_below_floor() {' "$UPGRADER_SRC" && echo yes || echo no)"
 
 # The modelled database: two issues, one carrying the three gate records whose
 # survival across the migration is the whole point of R2-F1.
@@ -168,11 +188,17 @@ ledger_comments() {
     jq -rR 'fromjson? | ((.comments // []) | length)' "$1" 2>/dev/null \
         | awk '{n += $1} END { printf "%d", n + 0 }'
 }
+# The opt-in defaults ON here (CWP_BEADS_UPGRADE=1) because the upgrade path is
+# unreachable without it; a caller clears it with CWP_BEADS_UPGRADE= to test the
+# default refusal. The exit status is the subshell's, so `OUT=$(run_upgrader
+# ...); RC=$?` captures it without adding anything to the output.
 run_upgrader() {
     local oldver="$1" target="$2"
     env PATH="$WORK/bin:$PATH" STATE="$STATE" \
         FAKE_NEW_VERSION="${FAKE_NEW_VERSION:-$RECOMMENDED}" \
         SKIP_BEADS_UPGRADE="${SKIP_BEADS_UPGRADE:-false}" \
+        CWP_SKIP_BEADS_UPGRADE="${CWP_SKIP_BEADS_UPGRADE:-}" \
+        CWP_BEADS_UPGRADE="${CWP_BEADS_UPGRADE-1}" \
         BD_UPGRADE_COMMAND="${BD_UPGRADE_COMMAND:-$WORK/bin/fake-upgrade}" \
         bash "$UPGRADER_SRC" "$oldver" "$target" 2>&1
 }
@@ -251,13 +277,17 @@ reset_state "0.47.1"
 # the other one succeeding and there is nothing to refuse.
 printf 'no' > "$STATE/sync-ok"
 printf '1' > "$STATE/export-rc"
-OUT3=$(run_upgrader "0.47.1" "$REFUSE")
+OUT3=$(run_upgrader "0.47.1" "$REFUSE"); RC3=$?
 assert_contains "installer-beads-upgrade 3.1: THE SAFETY PROPERTY — a failed export REFUSES the upgrade" \
     "Refusing to upgrade" "$OUT3"
 assert_eq "installer-beads-upgrade 3.2: ...and the upgrade command never ran" "no" \
     "$(calls_contain "upgrade-ran" && echo yes || echo no)"
 assert_contains "installer-beads-upgrade 3.3: ...saying WHY, in terms of what would be stranded" \
     "cannot read a 0.47.x store" "$OUT3"
+assert_eq "installer-beads-upgrade 3.4: ...and the INSTALL is refused too, exit 1 (bd is still below the floor)" \
+    "1" "$RC3"
+assert_contains "installer-beads-upgrade 3.5: ...saying no plugin file was written" \
+    "No plugin file has been written" "$OUT3"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -279,34 +309,91 @@ assert_eq "installer-beads-upgrade 4.3: a NEWER bd is left alone (version compar
     "no" "$(calls_contain "upgrade-ran" && echo yes || echo no)"
 assert_eq "installer-beads-upgrade 4.4: ...and says nothing" "" "$(printf '%s' "$OUT4B" | tr -d '[:space:]')"
 
+# THE SKIP FLAGS DO NOT ADMIT AN OLD BD (claude-workflow-plugin-ishe R5-F1).
+# They used to return before the version was even compared, which let v5 install
+# over bd 0.47.1 — 6965 files and exit 3, measured. They now only stop the
+# opt-in upgrade from running. The harness's opt-in is ON here, so 4.6 also
+# shows the flag beating an operator who set both.
 SKIPD="$WORK/skipped"; mkdir -p "$SKIPD/.beads"
 reset_state "0.47.1"
-OUT5=$(SKIP_BEADS_UPGRADE=true run_upgrader "0.47.1" "$SKIPD")
-assert_eq "installer-beads-upgrade 4.5: --skip-beads-upgrade opts out entirely" "no" \
+OUT5=$(SKIP_BEADS_UPGRADE=true run_upgrader "0.47.1" "$SKIPD"); RC5=$?
+assert_eq "installer-beads-upgrade 4.5: --skip-beads-upgrade does NOT admit an old bd: the install is REFUSED, exit 1" \
+    "1" "$RC5"
+assert_eq "installer-beads-upgrade 4.6: ...and the opt-in upgrade still never ran" "no" \
     "$(calls_contain "upgrade-ran" && echo yes || echo no)"
-assert_eq "installer-beads-upgrade 4.6: ...silently" "" "$(printf '%s' "$OUT5" | tr -d '[:space:]')"
+assert_contains "installer-beads-upgrade 4.7: ...and the refusal says the flag does not admit it" \
+    "does not admit a bd below" "$OUT5"
+
+SKIPE="$WORK/skipped-env"; mkdir -p "$SKIPE/.beads"
+reset_state "0.47.1"
+OUT5E=$(CWP_SKIP_BEADS_UPGRADE=1 run_upgrader "0.47.1" "$SKIPE"); RC5E=$?
+assert_eq "installer-beads-upgrade 4.8: the environment form CWP_SKIP_BEADS_UPGRADE=1 is refused the same way, exit 1" \
+    "1" "$RC5E"
+assert_contains "installer-beads-upgrade 4.9: ...printing the refusal" "REFUSING to install" "$OUT5E"
+
+# The default path: no opt-in at all. Refused, and nothing ran.
+NOOPT="$WORK/no-opt-in"; mkdir -p "$NOOPT/.beads"
+reset_state "0.47.1"
+OUT5N=$(CWP_BEADS_UPGRADE='' run_upgrader "0.47.1" "$NOOPT"); RC5N=$?
+assert_eq "installer-beads-upgrade 4.10: with no opt-in, an old bd is REFUSED, exit 1" "1" "$RC5N"
+assert_contains "installer-beads-upgrade 4.11: ...saying no plugin file has been written (not \"nothing\": ishe R7-F2)" \
+    "No plugin file has been written" "$OUT5N"
+assert_eq "installer-beads-upgrade 4.12: ...and no upgrade command ran" "no" \
+    "$(calls_contain "upgrade-ran" && echo yes || echo no)"
+
+# CONTROL: the same skip flag on a bd AT the floor is not refused and says
+# nothing. Without this leg, 4.5-4.9 could pass because the flag itself had
+# started refusing everything, rather than because the bd was below the floor.
+SKIPC="$WORK/skipped-at-floor"; mkdir -p "$SKIPC/.beads"
+reset_state "$RECOMMENDED"
+OUT5C=$(SKIP_BEADS_UPGRADE=true run_upgrader "$RECOMMENDED" "$SKIPC"); RC5C=$?
+assert_eq "installer-beads-upgrade 4.13: CONTROL — the skip flag on a bd AT the floor is not refused (exit 0)" \
+    "0" "$RC5C"
+assert_eq "installer-beads-upgrade 4.14: CONTROL — ...and says nothing" "" "$(printf '%s' "$OUT5C" | tr -d '[:space:]')"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Section 5: a failed upgrade command is survivable ==="
+echo "=== Section 5: a failed opt-in upgrade REFUSES the install ==="
 
+# Each of these used to return and let the install continue on the old bd
+# ("Continuing on bd 0.47.1"), which is warning where the installer should
+# refuse. They now end in the same refusal as never upgrading at all.
 FAILU="$WORK/failed-upgrade"; mkdir -p "$FAILU/.beads"
 printf '{"id":"pre-existing"}\n' > "$FAILU/.beads/issues.jsonl"
 reset_state "0.47.1"
-OUT6=$(BD_UPGRADE_COMMAND="false" run_upgrader "0.47.1" "$FAILU")
-assert_contains "installer-beads-upgrade 5.1: an offline/failed upgrade is reported, not fatal" \
-    "Continuing on bd 0.47.1" "$OUT6"
-assert_contains "installer-beads-upgrade 5.2: ...with the manual command to run later" \
-    "Upgrade by hand later" "$OUT6"
+OUT6=$(BD_UPGRADE_COMMAND="false" run_upgrader "0.47.1" "$FAILU"); RC6=$?
+assert_contains "installer-beads-upgrade 5.1: an offline/failed upgrade is reported" \
+    "the Beads upgrade command failed" "$OUT6"
+assert_contains "installer-beads-upgrade 5.2: ...with the manual command to run" \
+    "Upgrade by hand" "$OUT6"
+assert_eq "installer-beads-upgrade 5.3: ...and the install is REFUSED, exit 1, not continued on 0.47.1" \
+    "1" "$RC6"
+assert_eq "installer-beads-upgrade 5.4: ...so nothing says it is continuing" "no" \
+    "$(printf '%s' "$OUT6" | grep -q 'Continuing on bd' && echo yes || echo no)"
 
-# And the version-did-not-move case: the command "succeeded" but bd is the same.
+# The version-did-not-move case: the command "succeeded" but bd is the same.
 STUCK="$WORK/stuck"; mkdir -p "$STUCK/.beads"
 printf '{"id":"pre-existing"}\n' > "$STUCK/.beads/issues.jsonl"
 reset_state "0.47.1"
-OUT7=$(BD_UPGRADE_COMMAND="true" run_upgrader "0.47.1" "$STUCK")
-assert_contains "installer-beads-upgrade 5.3: a no-op upgrade command does NOT migrate the database" \
+OUT7=$(BD_UPGRADE_COMMAND="true" run_upgrader "0.47.1" "$STUCK"); RC7=$?
+assert_contains "installer-beads-upgrade 5.5: a no-op upgrade command does NOT migrate the database" \
     "Not migrating the database" "$OUT7"
-assert_eq "installer-beads-upgrade 5.4: ...and bootstrap was never called" "no" \
+assert_eq "installer-beads-upgrade 5.6: ...bootstrap was never called" "no" \
+    "$(calls_contain "bootstrap" && echo yes || echo no)"
+assert_eq "installer-beads-upgrade 5.7: ...and the install is REFUSED, exit 1" "1" "$RC7"
+
+# The swap happened but landed BELOW the floor: a changed binary is not a
+# supported one.
+LOWER="$WORK/still-below"; mkdir -p "$LOWER/.beads"
+printf '{"id":"pre-existing"}\n' > "$LOWER/.beads/issues.jsonl"
+reset_state "0.47.1"
+OUT8=$(FAKE_NEW_VERSION="1.0.0" run_upgrader "0.47.1" "$LOWER"); RC8=$?
+assert_eq "installer-beads-upgrade 5.8: precondition — the fake upgrade really did run" "yes" \
+    "$(calls_contain "upgrade-ran" && echo yes || echo no)"
+assert_contains "installer-beads-upgrade 5.9: an upgrade that lands below the floor is named as such" \
+    "still below $RECOMMENDED" "$OUT8"
+assert_eq "installer-beads-upgrade 5.10: ...the install is REFUSED, exit 1" "1" "$RC8"
+assert_eq "installer-beads-upgrade 5.11: ...and the database was not migrated (no bootstrap)" "no" \
     "$(calls_contain "bootstrap" && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
@@ -355,9 +442,10 @@ reset_state "0.47.1"
 printf 'no' > "$STATE/sync-ok"                 # comment-preserving writer unavailable
 printf 'yes' > "$STATE/export-drops-comments"  # ...leaving only the shredder
 printf '%s\n' "$DB_SEED" > "$SHRED/.beads/issues.jsonl"
-OUT6B=$(run_upgrader "0.47.1" "$SHRED")
+OUT6B=$(run_upgrader "0.47.1" "$SHRED"); RC6B=$?
 assert_contains "installer-beads-upgrade 6.8: a comment-dropping exporter REFUSES the upgrade" \
     "REFUSING" "$OUT6B"
+assert_eq "installer-beads-upgrade 6.8b: ...and the install, exit 1 (bd is still 0.47.1)" "1" "$RC6B"
 assert_contains "installer-beads-upgrade 6.9: ...naming what would have been destroyed" \
     "QA audit trail" "$OUT6B"
 assert_eq "installer-beads-upgrade 6.10: THE DATA-LOSS ASSERTION — the ledger is RESTORED with all 3 comments" \

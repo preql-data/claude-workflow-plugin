@@ -4592,6 +4592,96 @@ assert_absent "19f.c3 ...and therefore never carries the legacy-mode caveat eith
 # is now ARMED or DISARMED, full stop. Nothing here to test.
 
 # ===========================================================================
+printf -- '\n--- 14. BD-CANARY: a spec that replaces a bd binary FAILS, by name, and taints what follows ---\n'
+# A test may not modify the toolchain the tier measures with. This happened for
+# real (claude-workflow-plugin-wyt3): installer-flags.test.sh drove install.sh
+# past its bd version floor, install.sh ran its then-unpinned BD_UPGRADE_COMMAND,
+# and /usr/local/bin/bd was rewritten 1.1.2 -> 1.3.1 mid-tier. CI's sha256
+# version pin was silently defeated and META-TEST 8a broke; on developer
+# machines it replaced their own system bd three times, unnoticed.
+#
+# The fixture never touches a real bd: HOME is redirected into the work dir, so
+# the canary's watched path ($HOME/.local/bin/bd) IS the fixture's fake.
+# ===========================================================================
+FX_BD="$WORK/l1-bdcanary"
+mkdir -p "$FX_BD/.claude/scripts/tests" "$FX_BD/fakehome/.local/bin"
+printf '#!/bin/bash\nprintf "bd version 1.1.2 (fake)\\n"\n' > "$FX_BD/fakehome/.local/bin/bd"
+chmod +x "$FX_BD/fakehome/.local/bin/bd"
+# aaa- sorts first: the writer runs BEFORE the witness, so the taint has
+# something after it to mark.
+# shellcheck disable=SC2016
+# $HOME is LITERAL on purpose: it must expand when the generated spec runs
+# under the redirected HOME, not here.
+# The replacement must itself be a RUNNABLE bd that reports the new version —
+# the trip message reads the version off the changed path, so writing plain
+# text there would leave 14.4 asserting against an empty string.
+printf '#!/bin/bash\nprintf "#!/bin/bash\\nprintf \\"bd version 1.3.1 (replaced)\\\\n\\"\\n" > "$HOME/.local/bin/bd"\nchmod +x "$HOME/.local/bin/bd"\nprintf "  PASS: aaa-writer ran\\n"\nexit 0\n' \
+    > "$FX_BD/.claude/scripts/tests/aaa-bdwriter.sh"
+printf '#!/bin/bash\nprintf "  PASS: zzz-witness ran\\n"\nexit 0\n' \
+    > "$FX_BD/.claude/scripts/tests/zzz-witness.sh"
+
+# FILTER ALTERNATION IS BRE, NOT ERE. The runner matches with `grep -q`, not
+# `grep -Eq`, so `a|b` is a LITERAL pipe and matches nothing — the first version
+# of this section used it and every leg below failed with "matched no spec
+# files", including the control, which is what made it obvious rather than
+# subtly wrong. `\|` is the form the gate's own --filter command uses.
+BDC_FILTER='aaa-bdwriter\|zzz-witness'
+BDC_OUT=$(cd "$FX_BD" && HOME="$FX_BD/fakehome" PATH="$FX_BD/fakehome/.local/bin:$PATH" \
+    CLAUDE_PROJECT_DIR="$FX_BD" STRICT_SECTIONS=0 \
+    bash "$L1_RUNNER" --filter "$BDC_FILTER" 2>&1)
+BDC_RC=$?
+# NON-VACUITY ON THE FIXTURE ITSELF: if the filter matches nothing, every
+# assertion below is meaningless. Prove both specs actually executed.
+assert_contains "14.00 NON-VACUITY: the fixture's specs actually RAN under the filter" \
+    "zzz-witness ran" "$BDC_OUT"
+
+assert_contains "14.0 NON-VACUITY: the canary ARMED over the fixture's fake bd" \
+    "BD-CANARY: ARMED" "$BDC_OUT"
+assert_contains "14.1 a spec that rewrites a watched bd TRIPS the canary" \
+    "BD-CANARY TRIPPED" "$BDC_OUT"
+assert_contains "14.2 ...and the trip NAMES the spec that did it" \
+    "aaa-bdwriter.sh REPLACED A bd BINARY" "$BDC_OUT"
+# ANCHORED TO THE PER-PATH BREAKDOWN, not to the path appearing anywhere.
+# The path also appears in the one-line diff detail, so an unanchored match
+# PASSED while the breakdown this leg exists to check was never printed — the
+# guard carried its baseline forward before building the message, compared each
+# digest with itself, and emitted no path/before/after/version lines at all.
+# Measured: the unanchored 14.3 passed and 14.4 failed on that exact defect.
+# An assertion that can pass while its feature is broken is not checking it.
+assert_contains "14.3 ...and names the PATH that was overwritten, IN THE PER-PATH BREAKDOWN" \
+    "path:   $FX_BD/fakehome/.local/bin/bd" "$BDC_OUT"
+assert_contains "14.4 ...and reports the version it was replaced WITH" \
+    "version now: 1.3.1" "$BDC_OUT"
+assert_contains "14.5 ...and says it is the operator's own system bd, not a fixture" \
+    "THIS IS YOUR SYSTEM bd" "$BDC_OUT"
+assert_eq "14.6 ...and the tier FAILS (rc=1), so a replaced toolchain cannot pass" "1" "$BDC_RC"
+assert_contains "14.7 ...and the failure is attributed by spec name in the summary" \
+    "aaa-bdwriter.sh (BD-CANARY: replaced a bd binary on this host)" "$BDC_OUT"
+# TAINT: the specs after the culprit ran against a different bd, so their
+# results must not read as measurements of the pinned toolchain.
+assert_contains "14.8 the spec AFTER the culprit is marked TAINTED, not reported clean" \
+    "BD-CANARY: TAINTED" "$BDC_OUT"
+assert_contains "14.9 ...and the summary repeats the taint where people actually read it" \
+    "replaced a bd binary mid-run" "$BDC_OUT"
+
+# RESTORE CONTROL: the same two specs, with the writer not writing, must NOT
+# trip — otherwise 14.1 proves only that the canary fires always.
+printf '#!/bin/bash\nprintf "  PASS: aaa-writer ran\\n"\nexit 0\n' \
+    > "$FX_BD/.claude/scripts/tests/aaa-bdwriter.sh"
+printf 'bd version 1.1.2 (fake)\n' > /dev/null
+printf '#!/bin/bash\nprintf "bd version 1.1.2 (fake)\\n"\n' > "$FX_BD/fakehome/.local/bin/bd"
+chmod +x "$FX_BD/fakehome/.local/bin/bd"
+BDC_CTRL=$(cd "$FX_BD" && HOME="$FX_BD/fakehome" PATH="$FX_BD/fakehome/.local/bin:$PATH" \
+    CLAUDE_PROJECT_DIR="$FX_BD" STRICT_SECTIONS=0 \
+    bash "$L1_RUNNER" --filter "$BDC_FILTER" 2>&1)
+BDC_CTRL_RC=$?
+assert_contains "14.C0 NON-VACUITY: the control's specs ran too" \
+    "zzz-witness ran" "$BDC_CTRL"
+assert_eq "14.C1 CONTROL: with no write, the same fixture does NOT trip" "no" \
+    "$(printf '%s' "$BDC_CTRL" | grep -q 'BD-CANARY TRIPPED' && echo yes || echo no)"
+assert_eq "14.C2 CONTROL: ...and the tier passes" "0" "$BDC_CTRL_RC"
+
+# ===========================================================================
 printf '\nTotal: %d assertion(s)\n' "$((PASS + FAIL))"
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"

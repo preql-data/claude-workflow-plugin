@@ -1256,8 +1256,21 @@ else
     # does" rather than accidentally proving something about the versions.
     MUT8_SCHEMA="$WORK/doctor-mut8-schema.sh"
     sed -E '/^DOCTOR_BD_SCHEMA_VALIDATED=/ s/:[0-9]+/:99/g' "$DOCTOR" > "$MUT8_SCHEMA"
-    assert_eq "META-TEST 8: the schema-bump mutant's line really changed to two :99 halves" "true" \
-        "$(grep -qE '^DOCTOR_BD_SCHEMA_VALIDATED="1\.1\.2:99 1\.3\.0:99"$' "$MUT8_SCHEMA" && echo true || echo false)"
+    # DERIVED FROM THE SHIPPED SET, not from today's literal members — the
+    # same principle the comment above states for the sed itself. This
+    # assertion used to hardcode `1.1.2:99 1.3.0:99`, i.e. exactly two
+    # members, and so FAILED the first time a member was added deliberately
+    # (1.3.1:66, claude-workflow-plugin-wyt3) while the mutant it checks was
+    # correct throughout. A non-vacuity check pinned to the current values of
+    # the thing it protects goes red on every legitimate change to that thing.
+    MUT8_SHIPPED_SET=$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' "$DOCTOR" | head -1)
+    MUT8_MUTANT_SET=$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' "$MUT8_SCHEMA" | head -1)
+    assert_eq "META-TEST 8: the shipped validated set is readable and non-empty (else the two checks below are vacuous)" \
+        "yes" "$([ -n "$MUT8_SHIPPED_SET" ] && echo yes || echo no)"
+    assert_eq "META-TEST 8: the schema-bump mutant changed EVERY member's schema half to :99" \
+        "$(printf '%s' "$MUT8_SHIPPED_SET" | sed -E 's/:[0-9]+/:99/g')" "$MUT8_MUTANT_SET"
+    assert_eq "META-TEST 8: ...and left every member's VERSION half untouched (only the schema is the variable under test)" \
+        "$(printf '%s' "$MUT8_SHIPPED_SET" | sed -E 's/:[0-9]+//g')" "$(printf '%s' "$MUT8_MUTANT_SET" | sed -E 's/:[0-9]+//g')"
     assert_eq "META-TEST 8: the schema-bump mutant differs from the shipped doctor" \
         "differs" "$(cmp -s "$DOCTOR" "$MUT8_SCHEMA" && echo identical || echo differs)"
     assert_eq "META-TEST 8: the schema-bump mutant is still valid bash" "0" \
