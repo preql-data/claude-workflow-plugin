@@ -592,6 +592,23 @@ installer_rerun_cmd() {
     printf 'curl -fsSL %s | %sbash%s' "$url" "$env_prefix" "${extra:+ -s -- $extra}"
 }
 
+# installer_check_cmd <target>
+#
+# The --verify command for an EXISTING target, in installer_rerun_cmd's form:
+# from a checkout, that checkout's installer by absolute path with the target;
+# under `curl ... | bash`, a cd into the target and then the one-liner's
+# --verify. It is printed where a failed post-install check says how to
+# re-check, and on the 0.47.x procedure that is the end of step 3's expected
+# exit-3 run. The end-to-end curl measurement (claude-workflow-plugin-s229)
+# caught those lines still telling a curl user to run a local install.sh.
+installer_check_cmd() {
+    if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/.claude/agents" ] && [ -f "$SCRIPT_DIR/.claude-plugin/plugin.json" ]; then
+        printf 'bash "%s/install.sh" --verify "%s"' "$SCRIPT_DIR" "$1"
+        return 0
+    fi
+    printf 'cd "%s" && %s' "$1" "$(installer_rerun_cmd --verify)"
+}
+
 # refuse_below_floor <bd-version-now> [opt-in]
 #
 # The one exit for "bd is below RECOMMENDED_BD_VERSION": print the measured
@@ -3332,7 +3349,7 @@ else
                 "$VERIFY_JSON" 2>/dev/null || true
             echo ""
             echo "After fixing, re-verify without reinstalling:"
-            echo "  bash install.sh --verify \"$TARGET\""
+            echo "  $(installer_check_cmd "$TARGET")"
             echo "Offline host? bd doctor reaches GitHub, so the beads check can time out"
             echo "on a healthy install; re-verify with:"
             echo "  bash \"$TARGET_DOCTOR\" --target \"$TARGET\" --skip beads"
@@ -3634,7 +3651,7 @@ if [ "$INSTALL_EXIT_STATUS" -ne 0 ]; then
         echo "  Every file was written; workflow-doctor.sh could not produce a report."
     fi
     echo "  Scroll up for each failing check and its fix, or re-run:"
-    echo "    bash install.sh --verify \"$TARGET\""
+    echo "    $(installer_check_cmd "$TARGET")"
     echo ""
 fi
 exit "$INSTALL_EXIT_STATUS"

@@ -1059,6 +1059,60 @@ read -r M1_CD M1_CP _ <<< "$(step1_order "$SWAP_OUT")"
 assert_eq "9.17 META specific misbehaviour: the backup-first copy prints the copy before the cd, so 9.17b goes red" "yes" \
     "$([ "$M1_CD" != x ] && [ "$M1_CP" != x ] && [ "$M1_CP" -lt "$M1_CD" ] && echo yes || echo no)"
 
+# ---------------------------------------------------------------------------
+# 9.18 — THE RE-CHECK HINTS AT THE END OF STEP 3 (claude-workflow-plugin-s229).
+# Step 3's re-run is EXPECTED to exit 3, and a failed post-install check ends
+# with two "re-verify" hints. The end-to-end curl measurement caught both still
+# printing `bash install.sh --verify "<target>"` to a curl user, straight after
+# a procedure that had just told them how to check. They now print
+# installer_check_cmd: from a checkout, that checkout's installer by absolute
+# path with the target; under curl | bash, a cd into the target and the
+# one-liner's --verify.
+# Checkout side: the shipped installer, run in full by 9.C2, whose fake bd
+# makes the post-install check fail (exit 3).
+SKIPC_ABS=$(cd "$SKIPC_T" && pwd)
+after_line() { printf '%s\n' "$1" | awk -v pat="$2" 'found { print; exit } index($0, pat) { found = 1 }'; }
+assert_eq "9.18a NON-VACUITY: 9.C2's install really ended in a failed post-install check" "yes" \
+    "$(contains "$SKIPC_OUT" "VERIFICATION FAILED")"
+assert_eq "9.18b its after-fixing hint names this checkout's installer by absolute path, with the target" \
+    "  bash \"$INSTALL_DIR_ABS/install.sh\" --verify \"$SKIPC_ABS\"" \
+    "$(after_line "$SKIPC_OUT" "After fixing, re-verify without reinstalling:")"
+assert_eq "9.18c ...and so does the final banner's re-run hint" \
+    "    bash \"$INSTALL_DIR_ABS/install.sh\" --verify \"$SKIPC_ABS\"" \
+    "$(after_line "$SKIPC_OUT" "or re-run:")"
+# Curl side: install.sh's own two helpers, extracted verbatim and run with
+# SCRIPT_DIR empty, as `curl ... | bash` leaves it. A full curl-mode install
+# would clone from the network, which this tier does not touch.
+HELPERS="$WORK/rerun-helpers.sh"
+{
+    printf '%s\n' 'SCRIPT_DIR=""'
+    grep -E '^REPO_(URL|BRANCH)=' "$INSTALL_SH"
+    awk '/^installer_rerun_cmd\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALL_SH"
+    awk '/^installer_check_cmd\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALL_SH"
+} > "$HELPERS"
+assert_eq "9.18d NON-VACUITY: both helpers and both repo defaults were extracted" "4" \
+    "$(grep -cE '^(installer_(rerun|check)_cmd\(\) \{|REPO_(URL|BRANCH)=)' "$HELPERS")"
+# shellcheck disable=SC2016  # $1 is the inner shell's argument, not this one's
+CURL_CHECK=$(env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH "$BASH_BIN" -c '. "$1"; installer_check_cmd "/srv/my project"' _ "$HELPERS")
+assert_eq "9.18e under curl | bash the re-check hint cds into the target and runs the one-liner's --verify" \
+    "cd \"/srv/my project\" && curl -fsSL $RAW_MAIN | bash -s -- --verify" "$CURL_CHECK"
+# META: the pre-s229 hint, restored in a copy of the extracted helpers.
+MUTC="$WORK/rerun-helpers.pre-s229.sh"
+# shellcheck disable=SC2016  # bash SOURCE written into the mutant
+MUTC_LINE='    printf '\''bash install.sh --verify "%s"'\'' "$1"; return 0'
+awk -v line="$MUTC_LINE" '{ print } /^installer_check_cmd\(\) \{$/ { print line; hit = 1 } END { if (!hit) exit 7 }' \
+    "$HELPERS" > "$MUTC"; MUTC_RC=$?
+assert_eq "9.18 META non-vacuity: the mutation landed at installer_check_cmd's first line" "0" "$MUTC_RC"
+# shellcheck disable=SC2016  # $1 is the inner shell's argument, not this one's
+MUTC_OUT=$(env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH "$BASH_BIN" -c '. "$1"; installer_check_cmd "/srv/my project"' _ "$MUTC")
+assert_eq "9.18 META specific misbehaviour: the pre-s229 helper gives the bare local form, so 9.18e goes red" \
+    'bash install.sh --verify "/srv/my project"' "$MUTC_OUT"
+# install.ps1 side, READ from source (it never runs): its two hints on the same
+# path call Get-InstallerCheckCommand.
+# shellcheck disable=SC2016  # PowerShell source being matched
+assert_eq "9.18f install.ps1's after-fixing and final-banner hints both call Get-InstallerCheckCommand" "2" \
+    "$(grep -cE '^ +Write-Host "  +\$\(Get-InstallerCheckCommand \$Target\)"$' "$PS1_FILE")"
+
 # --- Summary ---------------------------------------------------------------
 
 if [ "$FAIL" -gt 0 ]; then

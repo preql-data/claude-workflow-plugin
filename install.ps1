@@ -484,6 +484,22 @@ function Get-InstallerRerunCommand {
     return "${EnvPrefix}irm $Url | iex"
 }
 
+# Get-InstallerCheckCommand <target> — the -Verify command for an EXISTING
+# target, in Get-InstallerRerunCommand's form, mirroring install.sh's
+# installer_check_cmd (claude-workflow-plugin-s229): from a checkout, that
+# checkout's installer by absolute path with the target; under `irm | iex`, a
+# cd into the target and then the script-block form. Printed where a failed
+# post-install check says how to re-check, which on the 0.47.x procedure is
+# the end of step 3's expected exit-3 run.
+function Get-InstallerCheckCommand {
+    param([string]$TargetDir)
+    if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot ".claude-plugin\plugin.json"))) {
+        $LocalInstaller = Join-Path $PSScriptRoot "install.ps1"
+        return "pwsh `"$LocalInstaller`" -Verify -Path `"$TargetDir`""
+    }
+    return "cd `"$TargetDir`"; $(Get-InstallerRerunCommand -Check)"
+}
+
 # Invoke-RefuseBelowFloor — the one exit for "bd is below
 # $RecommendedBdVersion", mirroring install.sh's refuse_below_floor: print the
 # procedure and exit 1. Every below-floor path in Invoke-BeadsUpgradeIfOld
@@ -3224,7 +3240,7 @@ try {
                     }
                     Write-Host ""
                     Write-Host "After fixing, re-verify without reinstalling:"
-                    Write-Host "  .\install.ps1 -Verify -Path `"$Target`""
+                    Write-Host "  $(Get-InstallerCheckCommand $Target)"
                 }
             }
             Remove-Item -LiteralPath $VerifyJson -Force -ErrorAction SilentlyContinue
@@ -3514,7 +3530,7 @@ try {
             Write-Host "  Every file was written; workflow-doctor.sh could not produce a report."
         }
         Write-Host "  Scroll up for each failing check and its fix, or re-run:"
-        Write-Host "    .\install.ps1 -Verify -Path `"$Target`""
+        Write-Host "    $(Get-InstallerCheckCommand $Target)"
         Write-Host ""
     }
     exit $script:InstallExitStatus
