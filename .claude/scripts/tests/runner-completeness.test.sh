@@ -4682,6 +4682,60 @@ assert_eq "14.C1 CONTROL: with no write, the same fixture does NOT trip" "no" \
 assert_eq "14.C2 CONTROL: ...and the tier passes" "0" "$BDC_CTRL_RC"
 
 # ===========================================================================
+printf -- '\n--- 20. runner-completeness.test.sh'"'"'s OWN cap (claude-workflow-plugin-v7sa): 5/3 of SPEC_TIMEOUT_S for that one spec, the cap itself for every other ---\n'
+# This spec is the one whose ordinary runtime sits near the 900s cap: on CI it
+# passed in 801-826s and was killed at the cap on three slower runners (the
+# measurements, with their commits and runs, are beside spec_cap_for in
+# run-tests.sh). So run-tests.sh gives a spec with THIS basename 5/3 of
+# SPEC_TIMEOUT_S (1500s at the default) and leaves every other spec at
+# SPEC_TIMEOUT_S (spec_cap_for). At SPEC_TIMEOUT_S=3 that is 5s:
+# - a 4s body passes under the raised cap when it carries this basename, and
+#   the identical body under any other name is killed at 3s;
+# - a 7s body shows the raised cap is still a bound, and that every message
+#   names the cap that spec actually had.
+FX_CAP="$WORK/l1-own-cap"
+mkdir -p "$FX_CAP/.claude/scripts/tests"
+mk_cap_spec() { # <spec name> <seconds of body>
+    printf '#!/bin/bash\nsleep %s\nprintf "  PASS: %s outlived its body\\n"\nexit 0\n' "$2" "$1" \
+        > "$FX_CAP/.claude/scripts/tests/$1"
+}
+CAP_FILTER='runner-completeness\.test\.sh\|zz-same-body'
+run_cap() { # <runner>
+    CAP_OUT=$(CLAUDE_PROJECT_DIR="$FX_CAP" SPEC_TIMEOUT_S=3 STRICT_SECTIONS=0 \
+        bash "$1" --filter "$CAP_FILTER" 2>&1)
+    CAP_RC=$?
+}
+mk_cap_spec runner-completeness.test.sh 4
+mk_cap_spec zz-same-body.test.sh 4
+run_cap "$L1_RUNNER"
+assert_contains "20.1 a spec NAMED runner-completeness.test.sh with a 4s body PASSES at SPEC_TIMEOUT_S=3 (its own cap is 5s)" \
+    "--- runner-completeness.test.sh: PASSED" "$CAP_OUT"
+assert_contains "20.2 CONTROL: the identical 4s body under any other name is still killed at the 3s cap" \
+    "--- zz-same-body.test.sh: FAILED — TIMEOUT at the 3s per-spec cap" "$CAP_OUT"
+assert_contains "20.3 ...and with only that spec timed out, the summary keeps its one-cap form" \
+    "Timed out (counted in Failed): 1 spec(s) at the 3s per-spec cap" "$CAP_OUT"
+assert_eq "20.3b ...and the tier is red for the control alone" "1" "$CAP_RC"
+# The raised cap is still a bound.
+mk_cap_spec runner-completeness.test.sh 7
+rm -f "$FX_CAP/.claude/scripts/tests/zz-same-body.test.sh"
+run_cap "$L1_RUNNER"
+assert_contains "20.4 the raised cap is still a BOUND: a 7s body under that name is killed at its own 5s cap" \
+    "--- runner-completeness.test.sh: FAILED — TIMEOUT at the 5s per-spec cap" "$CAP_OUT"
+assert_contains "20.5 ...and the summary names that spec's own cap rather than claiming 3s" \
+    "Timed out (counted in Failed): 1 spec(s) at their per-spec caps (3s; runner-completeness.test.sh: 5s)" "$CAP_OUT"
+# META: the exception stripped from a copy of the shipped runner.
+mk_cap_spec runner-completeness.test.sh 4
+MUT_CAP="$WORK/run-tests.no-own-cap.sh"
+awk '/^        runner-completeness\.test\.sh\) printf/ { found = 1; next } { print } END { if (!found) exit 7 }' \
+    "$L1_RUNNER" > "$MUT_CAP"
+MUT_CAP_RC=$?
+assert_eq "20.6 META non-vacuity: the exception's case arm was found and stripped" "0" "$MUT_CAP_RC"
+assert_eq "20.7 META non-vacuity: ...and the mutant still parses" "0" "$(bash -n "$MUT_CAP" 2>/dev/null; echo $?)"
+run_cap "$MUT_CAP"
+assert_contains "20.8 META specific misbehaviour: without the exception the named 4s spec is killed at 3s, so 20.1 goes red" \
+    "--- runner-completeness.test.sh: FAILED — TIMEOUT at the 3s per-spec cap" "$CAP_OUT"
+
+# ===========================================================================
 printf '\nTotal: %d assertion(s)\n' "$((PASS + FAIL))"
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED: %d\n' "$FAIL"

@@ -151,7 +151,10 @@ three outcomes, three reasons:
 - **PASSED** — exited 0 AND executed at least one assertion.
 - **FAILED** — exited non-zero, or was killed at the per-spec wall-clock cap
   (`SPEC_TIMEOUT_S`; default 900s at L1, 3600s at L2 — no "0 disables it"
-  arm, an unbounded spec is the mwrb defect), or **returned while background
+  arm, an unbounded spec is the mwrb defect; at L1,
+  `runner-completeness.test.sh` alone gets 5/3 of the cap until
+  claude-workflow-plugin-os0v splits it, see `spec_cap_for` in
+  `run-tests.sh`), or **returned while background
   work from its own process group was still alive** (a9hh R2-F2 — a late line
   can be a `FAIL:` or a `SKIPPED:`, so a transcript with live writers cannot
   be classified; the runner kills the leftovers and says so), or **exited 0

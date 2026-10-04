@@ -2173,8 +2173,10 @@ weight actually sits.
   (`EXPECTED_SPECS`) that fails the run when the discovered set shrinks —
   framed in-file as the negative control for the completeness line, the
   pairing convention's first application; and both runners kill a hung spec
-  at a per-spec wall-clock cap (`SPEC_TIMEOUT_S`; L1 900s, L2 3600s),
-  reporting it FAILED with a distinct TIMEOUT reason — never passed, never
+  at a per-spec wall-clock cap (`SPEC_TIMEOUT_S`; L1 900s, L2 3600s; at L1,
+  `runner-completeness.test.sh` alone gets 5/3 of it in this release, see
+  claude-workflow-plugin-v7sa), reporting it FAILED with a distinct TIMEOUT
+  reason — never passed, never
   skipped — with per-spec elapsed time printed (a hung tier emits no
   completeness line at all, measured three times as 45+ minute losses). The
   CI `l1-unit` job now installs the real `bd` (pinned v1.1.2,

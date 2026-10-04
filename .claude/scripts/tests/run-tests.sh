@@ -58,6 +58,8 @@
 #             mwrb defect, not a configuration. macOS has no `timeout(1)`, so
 #             the cap is a shell watchdog (poll + kill the spec's process
 #             tree). Raise it when measuring under known contention (mrd2).
+#             ONE EXCEPTION: runner-completeness.test.sh gets 5/3 of it (see
+#             spec_cap_for, beside the cap's own definition).
 #   STRICT_SECTIONS — 1 makes a PARTIAL spec fail the tier. Set by the CI
 #             l1-unit job, which provisions every prerequisite the tier's
 #             section arms name (bd, node, both MCP servers' node_modules),
@@ -1371,6 +1373,36 @@ case "$SPEC_TIMEOUT_S" in
         exit 2 ;;
 esac
 
+# ONE SPEC GETS ITS OWN CAP: runner-completeness.test.sh, at 5/3 of the cap
+# above (1500s at the default 900s). Operator-directed for v5.0.0, 2026-10-05
+# (claude-workflow-plugin-v7sa); the real fix is claude-workflow-plugin-os0v.
+# It is this runner's own meta-test, and on CI the one spec whose ORDINARY
+# runtime sits near the cap: the next slowest took 224-343s in the same jobs.
+# MEASURED in CI's l1-unit job on three commits of the v5.0.0 branch, every
+# job on the same runner image (ubuntu-24.04 20260927.320.1):
+#   - it passed in 826s at 71e1d16 (run 37187557586) and in 801s at 45b59ff
+#     (run 37211899753);
+#   - at 7517397 (run 37215138557, attempts 1-3) it was killed at the cap in
+#     903s, 904s and 904s, on three slower runners where the tier's summed
+#     per-spec time was 24-36% higher;
+#   - on fixed hardware (a 2-vCPU container, clean clones, alternated; the
+#     A/B is recorded on claude-workflow-plugin-s229) 7517397 ran it in 571s
+#     and 590s, against 558s and 572s for its parent, 45b59ff.
+# So the overrun is the runner's speed, not the code. The headroom figures in
+# the ledger above (measured 2026-09-13) do not include this spec. Raising
+# the cap above would loosen the hang detector for every spec. This raises
+# it for that one spec only, and the raised cap is still a bound: about 1.8x
+# its slowest passing CI run. It is relative rather than a fixed 1500 so the
+# runner's own fixtures can exercise it in seconds (runner-completeness
+# section 20: 5s at SPEC_TIMEOUT_S=3). Delete this exception once os0v splits
+# the spec so it fits the cap above.
+spec_cap_for() {
+    case "$1" in
+        runner-completeness.test.sh) printf '%s' "$(( SPEC_TIMEOUT_S * 5 / 3 ))" ;;
+        *) printf '%s' "$SPEC_TIMEOUT_S" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # SECTION-LEVEL SKIP DETECTION (a9hh R1-F1) — the floor above is SPEC-granular.
 #
@@ -2125,6 +2157,9 @@ FAIL=0
 SKIP=0
 PARTIAL=0
 TIMEOUT_COUNT=0
+# Any spec that timed out at a cap OTHER than SPEC_TIMEOUT_S, named with that
+# cap, so the summary's "at the Ns per-spec cap" stays true (spec_cap_for).
+TIMEOUT_OWN_CAPS=""
 ASSERTS_TOTAL=0
 FAILED_FILES=()
 SKIPPED_FILES=()
@@ -2136,6 +2171,7 @@ for test_file in "${TESTS[@]}"; do
         continue
     fi
     TOTAL=$((TOTAL + 1))
+    SPEC_CAP=$(spec_cap_for "$base")
     printf '\n=== %s ===\n' "$base"
 
     SPEC_OUT="$RUN_SCRATCH/spec-out.$TOTAL"
@@ -2168,7 +2204,7 @@ for test_file in "${TESTS[@]}"; do
     WD_SURVIVORS="$RUN_SCRATCH/wd-survivors.$TOTAL"
     (
         waited=0
-        while [ "$waited" -lt "$SPEC_TIMEOUT_S" ]; do
+        while [ "$waited" -lt "$SPEC_CAP" ]; do
             sleep 1
             waited=$((waited + 1))
             kill -0 "$spec_pid" 2>/dev/null || exit 0
@@ -2513,6 +2549,9 @@ for test_file in "${TESTS[@]}"; do
     if [ -f "$TIMEOUT_MARKER" ]; then
         FAIL=$((FAIL + 1))
         TIMEOUT_COUNT=$((TIMEOUT_COUNT + 1))
+        if [ "$SPEC_CAP" != "$SPEC_TIMEOUT_S" ]; then
+            TIMEOUT_OWN_CAPS="${TIMEOUT_OWN_CAPS:+$TIMEOUT_OWN_CAPS, }$base: ${SPEC_CAP}s"
+        fi
         # a9hh R6-F1/R8-F1: the watchdog NAMES what it KILLed, separating the
         # snapshot members that refused TERM from the ones it never TERMed and
         # cannot speak for, and — separately again — anything its escalation
@@ -2529,9 +2568,9 @@ for test_file in "${TESTS[@]}"; do
             [ "$WD_SURV_COUNT" -gt 0 ] && \
                 WD_SURV_NOTE="$WD_SURV_NOTE; $WD_SURV_COUNT process(es) SURVIVED the kill escalation — see survivor lines"
         fi
-        FAILED_FILES+=("$base (TIMEOUT: killed by the ${SPEC_TIMEOUT_S}s per-spec cap after emitting $ASSERTS assertion(s)$LEAK_NOTE$WD_SURV_NOTE$STORE_NOTE)")
+        FAILED_FILES+=("$base (TIMEOUT: killed by the ${SPEC_CAP}s per-spec cap after emitting $ASSERTS assertion(s)$LEAK_NOTE$WD_SURV_NOTE$STORE_NOTE)")
         printf -- '--- %s: FAILED — TIMEOUT at the %ss per-spec cap (%s assertion(s) emitted in %ss; never a pass, never a skip%s%s%s) ---\n' \
-            "$base" "$SPEC_TIMEOUT_S" "$ASSERTS" "$ELAPSED_S" "$LEAK_NOTE" "$WD_SURV_NOTE" "$STORE_NOTE"
+            "$base" "$SPEC_CAP" "$ASSERTS" "$ELAPSED_S" "$LEAK_NOTE" "$WD_SURV_NOTE" "$STORE_NOTE"
         [ -s "$WD_SURVIVORS" ] && cat "$WD_SURVIVORS"
     elif [ "$rc" -ne 0 ]; then
         FAIL=$((FAIL + 1))
@@ -2702,8 +2741,13 @@ printf 'Total: %d  Passed: %d  Failed: %d  Skipped: %d  Partial: %d\n' \
 # number that moves.
 printf 'Assertions executed: %d\n' "$ASSERTS_TOTAL"
 if [ "$TIMEOUT_COUNT" -gt 0 ]; then
-    printf 'Timed out (counted in Failed): %d spec(s) at the %ss per-spec cap\n' \
-        "$TIMEOUT_COUNT" "$SPEC_TIMEOUT_S"
+    if [ -n "$TIMEOUT_OWN_CAPS" ]; then
+        printf 'Timed out (counted in Failed): %d spec(s) at their per-spec caps (%ss; %s)\n' \
+            "$TIMEOUT_COUNT" "$SPEC_TIMEOUT_S" "$TIMEOUT_OWN_CAPS"
+    else
+        printf 'Timed out (counted in Failed): %d spec(s) at the %ss per-spec cap\n' \
+            "$TIMEOUT_COUNT" "$SPEC_TIMEOUT_S"
+    fi
 fi
 if [ "$STORE_CANARY_ARMED" != "1" ]; then
     printf 'STORE-CANARY: DISARMED — %s; this run could not detect writes to %s\n' \
