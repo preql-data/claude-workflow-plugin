@@ -127,7 +127,7 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # it. From fdfd6ce (2026-08-03) until claude-workflow-plugin-wyt3, install.sh
 # ran an unpinned `curl | bash` of the newest beads release whenever it found
 # a bd below its floor, and installer-flags.test.sh gave it one on every run
-# (found in CI by hashing bd before and after every spec).
+# (found by hashing bd before and after every spec in a container).
 #
 # WHY A SET, AND NOT A FLOOR OR AN INTERVAL ON THE SCHEMA NUMBER. MEASURED
 # 2026-09-27 (F1, claude-workflow-plugin-we57), method: for each release,

@@ -106,8 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > spans an overnight gap, which makes wall-clock totals meaningless.)* It did
 > **not** reach a meaningful
 > approval. It completed its mechanism end to end, and the approval it produced
-> bound an empty change set. That is not softened here because opt-in users
-> should see the cost profile before choosing.
+> bound an empty change set. That is not softened here because anyone
+> choosing to take the design phase should see the cost profile first.
 >
 > **What would make it the default**, all three evidence-gated and none true
 > today: the change-set rewrite landed (`claude-workflow-plugin-qnvo`, written
