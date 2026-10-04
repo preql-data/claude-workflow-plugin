@@ -791,13 +791,16 @@ assert_eq "9.9 the procedure warns that the installer EXITS 3 at that point" "ye
     "$(contains "$FLOOR_OUT" "EXITS 3")"
 
 # ---------------------------------------------------------------------------
-# TWO SURFACES, ONE SEQUENCE — CHECKED, NOT ASSERTED IN A COMMENT.
+# THREE SURFACES, ONE SEQUENCE — CHECKED, NOT ASSERTED IN A COMMENT.
 #
-# A teammate hits this ledger repair from either direction: install.sh prints it
-# as step 4 of the cross-era upgrade, and workflow-doctor.sh prints it as the
-# beads_ledger FAIL fix. If those two ever name different commands, or the same
-# commands in a different order, one of them is teaching a dry-run-first
-# discipline the other quietly skips.
+# A teammate hits this ledger repair from any of three directions: install.sh
+# prints it as step 4 of the cross-era upgrade, install.ps1 prints its own copy
+# of that procedure, and workflow-doctor.sh prints it as the beads_ledger FAIL
+# fix. If any two ever name different commands, or the same commands in a
+# different order, one of them is teaching a dry-run-first discipline another
+# quietly skips. install.ps1 did exactly that until claude-workflow-plugin-i4ac:
+# its step 4 went straight to --apply. 9.10d-e check it; 9.15 checks the rest of
+# its procedure line for line.
 #
 # This replaces a comment that said the two "must not diverge". A note telling
 # future editors to keep two copies in step is exactly the mechanism behind this
@@ -822,6 +825,32 @@ assert_eq "9.10b the doctor's fix lines and the installer's steps name the SAME 
 # here, since 9.8d already pins the installer side.
 assert_eq "9.10c ...and the doctor leads with the DRY RUN, not --apply" \
     "beads-ledger.sh reconcile" "$(printf '%s\n' "$DOC_SEQ" | head -1)"
+
+# The third surface. install.ps1's text is READ from the file, not run: this
+# suite never executes install.ps1 (9.15 says why). ps1_procedure renders its
+# printed steps 1-4 from source: each line is one `Write-Host "..."`, with
+# PowerShell's backtick escapes undone, the pinned bridge substituted, and the
+# installer's own re-run and check commands left as <RERUN> / <VERIFY>.
+PS1_FILE="$PROJECT_DIR/install.ps1"
+# Every `$` in the sed scripts below is PowerShell source being MATCHED, not a
+# shell expansion, so the single quotes are the point.
+# shellcheck disable=SC2016
+ps1_procedure() { # <path to an install.ps1>
+    local bridge
+    bridge=$(sed -n 's/^\$BridgeBdVersion = "\(.*\)"$/\1/p' "$1" | head -1)
+    awk '/^function Invoke-RefuseBelowFloor/{f=1} f && /Write-Host "    1\. Back up/{p=1} p{print} p && /Get-InstallerRerunCommand -Check/{exit}' "$1" \
+        | sed -e 's/^[[:space:]]*Write-Host "//' -e 's/"$//' \
+              -e 's/`"/"/g' -e 's/`\$/$/g' \
+              -e "s/\\\$BridgeBdVersion/$bridge/g" \
+              -e 's/\$(Get-InstallerRerunCommand -Check)/<VERIFY>/' \
+              -e 's/\$(Get-InstallerRerunCommand)/<RERUN>/'
+}
+PS1_PROC=$(ps1_procedure "$PS1_FILE")
+PS1_SEQ=$(printf '%s\n' "$PS1_PROC" | grep -oE 'beads-ledger\.sh reconcile( --apply)?' | awk '!seen[$0]++')
+assert_eq "9.10d NON-VACUITY: install.ps1's procedure was rendered and names the reconcile command" "yes" \
+    "$([ -n "$PS1_SEQ" ] && echo yes || echo no)"
+assert_eq "9.10e install.ps1 names the SAME commands in the SAME order: the dry run, then --apply (i4ac)" \
+    "$DOC_SEQ" "$PS1_SEQ"
 assert_eq "9.7 ...and does NOT print an install-latest pipe-to-shell command" "no" \
     "$(contains "$FLOOR_OUT" "scripts/install.sh | bash")"
 
@@ -888,6 +917,147 @@ assert_eq "9.C2 CONTROL: --skip-beads-upgrade on a bd at the floor is NOT refuse
     "$(contains "$SKIPC_OUT" "REFUSING to install")"
 assert_eq "9.C2 CONTROL: ...and it really installed (.claude/ present)" "yes" \
     "$([ -d "$SKIPC_T/.claude" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 9.15 — ONE PROCEDURE, TWO INSTALLERS (claude-workflow-plugin-i4ac).
+#
+# install.ps1 printed its own older copy of the cross-era procedure: no dry run
+# before --apply, no exit code, the floor where the pinned bridge belongs, and a
+# weaker reason not to install the newest bd. A comment asking two copies to
+# stay in step is how that happened, so this compares them LINE FOR LINE. Only
+# these differ, by design, and are mapped before comparing:
+#   - install.sh's em-dash is "-" in install.ps1, whose output stays ASCII;
+#   - the backup line and the `cd <project>; bd bootstrap` line use
+#     PowerShell's own syntax;
+#   - the re-run and check commands are each installer's own, compared here
+#     as <RERUN> / <VERIFY> (9.16 checks the bash ones).
+# HALF OF THIS IS A DOCUMENT CHECK, AND IT SAYS SO. The install.sh side RUNS
+# (FLOOR_OUT is the shipped installer's own output). The install.ps1 side is
+# READ from source: install.ps1 is never executed by this suite or anywhere
+# else, and running it here, even under pwsh on Linux, would falsify the
+# release text's "never executed on any host". The META below proves the
+# comparison can fail. Nothing here proves PowerShell renders the strings as
+# they read.
+sh_procedure() { # <installer output>: steps 1-4 as printed, re-run/check as placeholders
+    printf '%s\n' "$1" | awk '
+        /^    1\. Back up/ { p = 1 }
+        p && rerun  { print "         <RERUN>"; rerun = 0; next }
+        p && verify { print "         <VERIFY>"; exit }
+        p { print }
+        p && /# rebuilds from the ledger$/ { rerun = 1 }
+        p && /Then re-run the check:$/ { verify = 1 }'
+}
+# The `$(...)` on both sides of this sed are TEXT the two installers print.
+# shellcheck disable=SC2016
+ps1_mapped() { # <rendered install.ps1 procedure>: PowerShell syntax mapped to bash's
+    printf '%s\n' "$1" | sed \
+        -e 's#^         Copy-Item -Recurse \.beads "\.beads\.backup-\$(Get-Date -Format yyyyMMdd)"$#         cp -R .beads .beads.backup-$(date +%Y%m%d)#' \
+        -e 's#^         cd <project>; bd bootstrap #         cd <project> \&\& bd bootstrap #'
+}
+SH_PROC=$(sh_procedure "$FLOOR_OUT" | sed 's/—/-/g')
+PS1_PROC_MAPPED=$(ps1_mapped "$PS1_PROC")
+assert_eq "9.15a NON-VACUITY: both procedures were rendered, steps 1 to 4, each ending in its check" "yes" \
+    "$([ "$(printf '%s\n' "$SH_PROC" | grep -c .)" -gt 20 ] \
+        && printf '%s\n' "$SH_PROC" | grep -qxF '         <VERIFY>' \
+        && printf '%s\n' "$PS1_PROC_MAPPED" | grep -qxF '         <VERIFY>' && echo yes || echo no)"
+assert_eq "9.15b install.ps1 prints install.sh's procedure LINE FOR LINE (only the mapped platform lines differ)" \
+    "$SH_PROC" "$PS1_PROC_MAPPED"
+# shellcheck disable=SC2016  # `$BridgeBdVersion` is PowerShell source being matched
+assert_eq "9.15c ...and the two installers pin the SAME bridge version" "$BRIDGE_VER" \
+    "$(sed -n 's/^\$BridgeBdVersion = "\(.*\)"$/\1/p' "$PS1_FILE" | head -1)"
+# META: a copy of install.ps1 that skips the dry run, which is i4ac's defect.
+PS1_MUT="$WORK/install.ps1.no-dry-run"
+awk '/Write-Host "         bash \.claude\/scripts\/beads-ledger\.sh reconcile"$/ && !done { done = 1; next }
+     { print }
+     END { if (!done) exit 7 }' "$PS1_FILE" > "$PS1_MUT"; PS1_MUT_RC=$?
+assert_eq "9.15 META non-vacuity: the dry-run line was found and dropped from the mutant copy" "0" "$PS1_MUT_RC"
+assert_eq "9.15 META non-vacuity: ...so the mutant really differs from the shipped file" "yes" \
+    "$(cmp -s "$PS1_FILE" "$PS1_MUT" && echo no || echo yes)"
+assert_eq "9.15 META specific misbehaviour: a procedure that skips the dry run FAILS 9.15b" "no" \
+    "$([ "$(ps1_mapped "$(ps1_procedure "$PS1_MUT")")" = "$SH_PROC" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 9.16 — THE RE-RUN THE PROCEDURE PRINTS (claude-workflow-plugin-s229).
+#
+# The procedure is addressed to people on bd 0.47.x, and they install with the
+# README's curl one-liner: they have NO local install.sh. Until s229, steps 3
+# and 4 printed `bash install.sh <project>` regardless, so step 3 of a one-way
+# migration pointed the very people it addresses at a file that does not
+# exist. The end-to-end measurement ran from a clone and could not see that.
+# These legs run the SHIPPED installer down the path those people take, the
+# script fed to bash on stdin, which is exactly what `curl ... | bash` does. The
+# refusal fires before any source is fetched, so nothing touches the network.
+CURL_T="$WORK/floor-curl-target"; mkdir -p "$CURL_T"
+CURL_OUT=$(cd "$CURL_T" && env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH PATH="$OLD_BD_DIR:$PATH" \
+    "$BASH_BIN" -s < "$INSTALL_SH" 2>&1); CURL_RC=$?
+refused_cleanly "9.16 the shipped installer fed to bash on stdin (curl | bash), bd 0.47.1:" "$CURL_OUT" "$CURL_RC" "$CURL_T"
+RAW_MAIN="https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh"
+assert_eq "9.16a step 3 re-runs the installer with the curl one-liner" "yes" \
+    "$(printf '%s\n' "$CURL_OUT" | grep -qxF "         curl -fsSL $RAW_MAIN | bash" && echo yes || echo no)"
+assert_eq "9.16b ...and step 4's check is that one-liner with --verify" "yes" \
+    "$(printf '%s\n' "$CURL_OUT" | grep -qxF "         curl -fsSL $RAW_MAIN | bash -s -- --verify" && echo yes || echo no)"
+assert_eq "9.16c ...and no line sends the curl user to a local install.sh" "no" \
+    "$(printf '%s\n' "$CURL_OUT" | grep -qE 'bash [^ ]*install\.sh' && echo yes || echo no)"
+BR_T="$WORK/floor-curl-branch-target"; mkdir -p "$BR_T"
+BR_OUT=$(cd "$BR_T" && env -u CLAUDE_WORKFLOW_REPO PATH="$OLD_BD_DIR:$PATH" CLAUDE_WORKFLOW_BRANCH=feature/x \
+    "$BASH_BIN" -s < "$INSTALL_SH" 2>&1)
+assert_eq "9.16d a run started against a branch re-runs THAT branch, not main" "yes" \
+    "$(printf '%s\n' "$BR_OUT" | grep -qxF "         curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/feature/x/install.sh | CLAUDE_WORKFLOW_BRANCH=feature/x bash" && echo yes || echo no)"
+INSTALL_DIR_ABS=$(cd "$(dirname "$INSTALL_SH")" && pwd)
+assert_eq "9.16e run from a clone, step 3 names that clone's installer by ABSOLUTE path (step 1 has cd'd away from it)" "yes" \
+    "$(printf '%s\n' "$FLOOR_OUT" | grep -qxF "         bash \"$INSTALL_DIR_ABS/install.sh\" <project>" && echo yes || echo no)"
+assert_eq "9.16f ...and so does step 4's check" "yes" \
+    "$(printf '%s\n' "$FLOOR_OUT" | grep -qxF "         bash \"$INSTALL_DIR_ABS/install.sh\" --verify <project>" && echo yes || echo no)"
+# META: the pre-s229 behaviour, restored in a copy by making the helper return
+# the old local form at once.
+SH_MUT="$WORK/install.sh.pre-s229"
+# The line is bash SOURCE written into the mutant, so its `$1` must not expand.
+# shellcheck disable=SC2016
+MUT_LINE='    printf '\''bash install.sh%s <project>'\'' "${1:+ $1}"; return 0'
+awk -v line="$MUT_LINE" '{ print } /^installer_rerun_cmd\(\) \{$/ { print line; hit = 1 } END { if (!hit) exit 7 }' \
+    "$INSTALL_SH" > "$SH_MUT"; SH_MUT_RC=$?
+assert_eq "9.16 META non-vacuity: the mutation landed (the old form is returned at the helper's first line)" "0" "$SH_MUT_RC"
+assert_eq "9.16 META non-vacuity: ...and the mutant still parses" "yes" \
+    "$("$BASH_BIN" -n "$SH_MUT" 2>/dev/null && echo yes || echo no)"
+MUT_T="$WORK/floor-curl-mutant-target"; mkdir -p "$MUT_T"
+MUT_OUT=$(cd "$MUT_T" && env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH PATH="$OLD_BD_DIR:$PATH" \
+    "$BASH_BIN" -s < "$SH_MUT" 2>&1)
+assert_eq "9.16 META specific misbehaviour: run the curl way, the pre-s229 installer sends the curl user to a local install.sh, so 9.16c goes red" "yes" \
+    "$(printf '%s\n' "$MUT_OUT" | grep -qxF '         bash install.sh <project>' && echo yes || echo no)"
+assert_eq "9.16 META specific misbehaviour: ...and prints no curl one-liner, so 9.16a goes red too" "no" \
+    "$(printf '%s\n' "$MUT_OUT" | grep -qF "curl -fsSL $RAW_MAIN" && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 9.17 — cd BEFORE THE BACKUP (claude-workflow-plugin-s229). With the copy
+# first, a cp run from the wrong directory fails, and a hurried operator carries
+# on into a one-way migration with no backup.
+step1_order() { # <installer output>: "cd backup flush" line numbers
+    local out="$1" cd_n cp_n fl_n
+    cd_n=$(printf '%s\n' "$out" | grep -nxF '         cd <project>' | head -1 | cut -d: -f1)
+    cp_n=$(printf '%s\n' "$out" | grep -nF 'cp -R .beads .beads.backup-' | head -1 | cut -d: -f1)
+    fl_n=$(printf '%s\n' "$out" | grep -nF 'bd sync --flush-only' | head -1 | cut -d: -f1)
+    printf '%s %s %s' "${cd_n:-x}" "${cp_n:-x}" "${fl_n:-x}"
+}
+read -r S1_CD S1_CP S1_FL <<< "$(step1_order "$CURL_OUT")"
+assert_eq "9.17a NON-VACUITY: step 1's cd, backup and flush lines were all located" "yes" \
+    "$([ "$S1_CD" != x ] && [ "$S1_CP" != x ] && [ "$S1_FL" != x ] && echo yes || echo no)"
+assert_eq "9.17b step 1 changes into the project BEFORE it copies .beads" "yes" \
+    "$([ "$S1_CD" != x ] && [ "$S1_CP" != x ] && [ "$S1_CD" -lt "$S1_CP" ] && echo yes || echo no)"
+assert_eq "9.17c ...and copies .beads BEFORE the flush" "yes" \
+    "$([ "$S1_CP" != x ] && [ "$S1_FL" != x ] && [ "$S1_CP" -lt "$S1_FL" ] && echo yes || echo no)"
+# META: the backup-first order, restored in a copy.
+SWAP_MUT="$WORK/install.sh.backup-first"
+awk '/^    echo "         cd <project>"$/ && !held { held = $0; next }
+     held && /cp -R \.beads \.beads\.backup-/ { print; print held; held = ""; swapped = 1; next }
+     { print }
+     END { if (!swapped) exit 7 }' "$INSTALL_SH" > "$SWAP_MUT"; SWAP_RC=$?
+assert_eq "9.17 META non-vacuity: the cd and backup lines were found and swapped in the mutant copy" "0" "$SWAP_RC"
+SWAP_T="$WORK/floor-swap-mutant-target"; mkdir -p "$SWAP_T"
+SWAP_OUT=$(cd "$SWAP_T" && env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH PATH="$OLD_BD_DIR:$PATH" \
+    "$BASH_BIN" -s < "$SWAP_MUT" 2>&1)
+read -r M1_CD M1_CP _ <<< "$(step1_order "$SWAP_OUT")"
+assert_eq "9.17 META specific misbehaviour: the backup-first copy prints the copy before the cd, so 9.17b goes red" "yes" \
+    "$([ "$M1_CD" != x ] && [ "$M1_CP" != x ] && [ "$M1_CP" -lt "$M1_CD" ] && echo yes || echo no)"
 
 # --- Summary ---------------------------------------------------------------
 

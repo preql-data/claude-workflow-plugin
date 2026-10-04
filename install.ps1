@@ -112,6 +112,15 @@ $MinBdVersion = [Version]"0.47"
 # BEGIN RECOMMENDED_BD_VERSION (installer-beads-upgrade.sh extracts this block)
 $RecommendedBdVersion = [Version]"1.1.2"
 # END RECOMMENDED_BD_VERSION
+# THE BRIDGE IS PINNED SEPARATELY, mirroring install.sh's BRIDGE_BD_VERSION
+# (claude-workflow-plugin-i4ac). The version to tell a 0.47.x operator to
+# install is a different question from the floor above: it is the one version
+# MEASURED to migrate a 0.47.x SQLite store (a newer bd, 1.3.1 included,
+# refuses one outright: "historical SQLite workspace detected"). The two
+# coincide today and are kept apart so they cannot drift together.
+# installer-flags.test.sh 9.15 compares this file's printed procedure with
+# install.sh's, so a different bridge here fails it.
+$BridgeBdVersion = "1.1.2"
 #
 # WHY A RECOMMENDED FLOOR EXISTS AT ALL (claude-workflow-plugin-fkm.1.1)
 # bd 0.47.x cannot re-import its own ledger once any single issue's JSONL line
@@ -439,6 +448,42 @@ function Get-LedgerCommentCount {
     return $total
 }
 
+# Get-InstallerRerunCommand [-Check] — the command the below-floor procedure
+# prints for re-running THIS installer (step 3) and for its final check
+# (step 4), mirroring install.sh's installer_rerun_cmd
+# (claude-workflow-plugin-s229). The README's Windows install is
+# `irm ... | iex`, so most operators have NO local install.ps1: the
+# `pwsh install.ps1 <project>` printed here until s229 sent them to a file that
+# does not exist, at step 3 of a one-way migration. Under `irm | iex`
+# $PSScriptRoot is empty; run from a checkout it names the directory holding
+# this file, and the printed path is absolute because step 1 has already cd'd
+# into the project. The irm form carries CLAUDE_WORKFLOW_REPO /
+# CLAUDE_WORKFLOW_BRANCH whenever they differ from the defaults. `irm | iex`
+# cannot bind parameters, so the check passes -Verify through a script block.
+# The switch is -Check, not -Verify: packaging-parity 6s requires the script's
+# own [switch]$Verify to be declared exactly once.
+function Get-InstallerRerunCommand {
+    param([switch]$Check)
+    if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot ".claude-plugin\plugin.json"))) {
+        $LocalInstaller = Join-Path $PSScriptRoot "install.ps1"
+        if ($Check) { return "pwsh `"$LocalInstaller`" -Verify -Path <project>" }
+        return "pwsh `"$LocalInstaller`" -Path <project>"
+    }
+    $EnvPrefix = ""
+    if ($RepoUrl -ne "https://github.com/preql-data/claude-workflow-plugin.git") {
+        $EnvPrefix += "`$env:CLAUDE_WORKFLOW_REPO = `"$RepoUrl`"; "
+    }
+    if ($RepoBranch -ne "main") {
+        $EnvPrefix += "`$env:CLAUDE_WORKFLOW_BRANCH = `"$RepoBranch`"; "
+    }
+    $Url = "<the URL of the install.ps1 you ran>"
+    if ($RepoUrl -match '^https://github\.com/([^/]+/[^/]+?)(\.git)?$') {
+        $Url = "https://raw.githubusercontent.com/$($Matches[1])/$RepoBranch/install.ps1"
+    }
+    if ($Check) { return "$EnvPrefix& ([scriptblock]::Create((irm $Url))) -Verify" }
+    return "${EnvPrefix}irm $Url | iex"
+}
+
 # Invoke-RefuseBelowFloor — the one exit for "bd is below
 # $RecommendedBdVersion", mirroring install.sh's refuse_below_floor: print the
 # procedure and exit 1. Every below-floor path in Invoke-BeadsUpgradeIfOld
@@ -481,23 +526,45 @@ function Invoke-RefuseBelowFloor {
     Write-Host "  migration is ONE WAY - an older bd cannot read the result. Do this"
     Write-Host "  in order:"
     Write-Host ""
+    # THE PROCEDURE BELOW IS install.sh's, LINE FOR LINE (claude-workflow-plugin-
+    # i4ac): the same steps, the dry run before the one-way migration's last
+    # write, the exit code, and the pinned bridge. Only the platform's own
+    # backup, `cd ...;`, re-run and check commands differ, and "-" stands in
+    # for install.sh's em-dash so this file's output stays ASCII.
+    # installer-flags.test.sh 9.15 renders both procedures and fails if any
+    # other line differs.
     Write-Host "    1. Back up your issues FIRST - the migration is not reversible:"
-    Write-Host "         Copy-Item -Recurse .beads .beads.backup"
-    Write-Host "         cd <project>; bd sync --flush-only   # writes .beads/issues.jsonl"
+    Write-Host "         cd <project>"
+    Write-Host "         Copy-Item -Recurse .beads `".beads.backup-`$(Get-Date -Format yyyyMMdd)`""
+    Write-Host "         bd sync --flush-only   # writes .beads/issues.jsonl, comments preserved"
     Write-Host ""
-    Write-Host "    2. Install an EXACT bd version this release validates. Do not use"
-    Write-Host "       an install-latest command: the newest bd may be outside the"
-    Write-Host "       validated set, and the doctor will then fail on it."
-    Write-Host "         https://github.com/steveyegge/beads/releases/tag/v$RecommendedBdVersion"
-    Write-Host "       Verify what you downloaded against that release's checksums.txt."
+    Write-Host "    2. Install EXACTLY bd $BridgeBdVersion. Not 'the latest' - measured: a newer"
+    Write-Host "       bd REFUSES a 0.47.x workspace outright (`"historical SQLite"
+    Write-Host "       workspace detected`") and cannot recover your issues, so"
+    Write-Host "       install-latest would strand them. You can move up afterwards."
+    Write-Host "         https://github.com/steveyegge/beads/releases/tag/v$BridgeBdVersion"
+    Write-Host "       Verify what you downloaded against that release's checksums.txt"
+    Write-Host "       before installing it."
+    Write-Host "       This version is pinned, not computed: it is the one measured to"
+    Write-Host "       bridge the SQLite era. Do not substitute a newer one here."
     Write-Host ""
     Write-Host "    3. Recover the store with the new bd, then re-run this installer:"
     Write-Host "         cd <project>; bd bootstrap     # rebuilds from the ledger"
-    Write-Host "         pwsh install.ps1 <project>"
+    Write-Host "         $(Get-InstallerRerunCommand)"
     Write-Host ""
-    Write-Host "    4. The installer's own check will report a STALE LEDGER after a"
-    Write-Host "       cross-era rebuild. That is expected and is the last step:"
+    Write-Host "       EXPECTED: that installer run EXITS 3 and its check reports a"
+    Write-Host "       STALE LEDGER. Your install is fine - a cross-era rebuild always"
+    Write-Host "       leaves the ledger and database out of step. Step 4 clears it."
+    Write-Host ""
+    Write-Host "    4. Reconcile the ledger. DRY RUN FIRST - without --apply it only"
+    Write-Host "       reports, so you see the effect before anything is written:"
+    Write-Host "         bash .claude/scripts/beads-ledger.sh reconcile"
+    Write-Host "       It prints `"DRY RUN - nothing changed`" and, on a healthy"
+    Write-Host "       migration, `"nothing would be discarded from either side`"."
+    Write-Host "       Proceed ONLY if you see that:"
     Write-Host "         bash .claude/scripts/beads-ledger.sh reconcile --apply"
+    Write-Host "       Then re-run the check:"
+    Write-Host "         $(Get-InstallerRerunCommand -Check)"
     Write-Host ""
     Write-Host "  (Automatic upgrade is opt-in and has no default: set BD_UPGRADE_COMMAND"
     Write-Host "  to a command you have pinned and verified, plus CWP_BEADS_UPGRADE=1.)"

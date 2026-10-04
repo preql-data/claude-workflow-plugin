@@ -119,11 +119,15 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # and the installed binary's own embedded changelog string "NEW:
 # Auto-migrate SQLite to Dolt on first bd command"; `BD_ALLOW_REMOTE_MIGRATE`
 # only gates a REMOTE-backed store, which this repo does not configure).
-# This repo lived that hazard directly: bd self-upgraded 1.1.2 -> 1.2.1 ->
-# 1.2.2 across one work arc, and 1.2.1 silently migrated the Dolt schema,
-# which then made `qa-gate.sh status` misreport an unreachable store as
-# "not-entered" (see cmd_status's own fix) until the schema was rolled back
-# to v53.
+# This repo lived that hazard directly: its development host's bd went
+# 1.1.2 -> 1.2.1 -> 1.2.2 across one work arc, and 1.2.1 silently migrated the
+# Dolt schema, which then made `qa-gate.sh status` misreport an unreachable
+# store as "not-entered" (see cmd_status's own fix) until the schema was rolled
+# back to v53. bd did not upgrade itself; this repo's own installer replaced
+# it. From fdfd6ce (2026-08-03) until claude-workflow-plugin-wyt3, install.sh
+# ran an unpinned `curl | bash` of the newest beads release whenever it found
+# a bd below its floor, and installer-flags.test.sh gave it one on every run
+# (found in CI by hashing bd before and after every spec).
 #
 # WHY A SET, AND NOT A FLOOR OR AN INTERVAL ON THE SCHEMA NUMBER. MEASURED
 # 2026-09-27 (F1, claude-workflow-plugin-we57), method: for each release,
@@ -162,18 +166,18 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 #             BRIDGE_BD_VERSION, and installer-flags.test.sh 9.6d fails if it
 #             ever leaves this set. A store created by bd 1.1.2 reports schema
 #             53 under this check's own query, measured directly.
-#             Its lane did NOT measure it until 2026-10-02: installer-flags.
-#             test.sh drove install.sh past its version floor with a
-#             fabricated bd, install.sh ran an unpinned `curl | bash` beads
-#             upgrade, and the pinned 1.1.2 binary was overwritten mid-job with
-#             whatever beads had released last — so the doctor in that lane
-#             measured 1.3.1:66, not the floor (claude-workflow-plugin-wyt3).
-#             All three are now closed: the fixture reports a validated
-#             version, install.sh no longer upgrades bd automatically, and the
-#             runner exports BD_UPGRADE_COMMAND=true. With them in place a full
-#             L1 tier in a container matched to CI on run user, locale, dolt
-#             and bd version measured 1.1.2:53 from /usr/local/bin/bd and
-#             passed, rc=0, 76/76 — on linux/arm64, where CI is amd64.
+#             Before the wyt3 fix its lane's green history is consistent with
+#             never having measured it: installer-flags.test.sh drove
+#             install.sh past its version floor with a fabricated bd,
+#             install.sh ran an unpinned `curl | bash` beads upgrade, and the
+#             pinned 1.1.2 binary was overwritten mid-job with whatever beads
+#             had released last, so the doctor in that lane measured 1.3.1:66,
+#             not the floor (claude-workflow-plugin-wyt3). All three are now
+#             closed: the fixture reports a validated version, install.sh no
+#             longer upgrades bd automatically, and the runner exports
+#             BD_UPGRADE_COMMAND=true. CI run 37187557586 (2026-10-04, commit
+#             71e1d16) is the lane's first run with the fix, and its 8a
+#             measured 1.1.2:53 from /usr/local/bin/bd, the pinned binary.
 #   1.3.0:66  its own lane, l1-doctor-bd-max, and the development host's bd.
 #   1.3.1:66  its own lane, l1-doctor-bd-1-3-1, added 2026-10-03 in the same
 #             commit as this entry and kept only if every tier passes on it.
@@ -204,8 +208,8 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # (.claude/scripts/tests/run-tests.sh) applied to a constant nobody else was
 # watching. An untracked drift firing this check is the friction working: it
 # converts a silent, automatic version change back into a reviewed one.
-# "Disable unprompted self-upgrade" (the same 39cy rider) has no bd-side
-# lever to pull — there is no flag that turns off the local-store
+# Disabling the drift at its source (the same 39cy rider asked for that) has
+# no bd-side lever to pull — there is no flag that turns off the local-store
 # auto-migration above, confirmed by reading `bd --help`, `bd config --help`,
 # `bd upgrade --help` and `bd migrate --help` in full — so prevention here IS
 # detection: validate the known-good pairs, fail loudly on anything else,
@@ -218,15 +222,16 @@ DOCTOR_MIN_NODE_VERSION="18.17"
 # supposed to be checking compares that pair against itself and can never
 # disagree — vacuous by construction, the exact class of self-deriving check
 # claude-workflow-plugin-gytz's own EXPECTED_SPEC_FILES header warns against.
-# The whole point here is catching an UNPROMPTED, UNREVIEWED bd self-upgrade;
+# The whole point here is catching an UNPROMPTED, UNREVIEWED bd version change;
 # a derived set would make that upgrade invisible to this check by
 # definition, which is precisely the hazard this exists to surface.
 #
 # UPDATE PROCEDURE (a pin with no stated update procedure goes stale again
 # by construction — this one already has, once, silently, mid-arc — see
 # claude-workflow-plugin-dhh7/u443 for the incident this paragraph was added
-# after: bd self-upgraded 1.2.2 -> 1.3.0 partway through a multi-day task
-# arc, and nothing here noticed until an unrelated test started failing).
+# after: bd went 1.2.2 -> 1.3.0 partway through a multi-day task arc, replaced
+# by the installer step described above, and nothing here noticed until an
+# unrelated test started failing).
 # When you have DELIBERATELY upgraded bd, or a migration has DELIBERATELY
 # run, measure the new live pair with the SAME two commands this check
 # itself runs (do not trust a CHANGELOG or a version string alone — the
@@ -1551,10 +1556,11 @@ Measured binary: $live_bd_path"
 NEWER binary, with no confirmation and no opt-out — this is bd's own
 documented behaviour (\`bd migrate --help\`: \"Without subcommand, checks and
 updates database metadata to current version\"), not a bug this doctor can
-fix. This repo lived the hazard directly: bd self-upgraded 1.1.2 -> 1.2.1 ->
-1.2.2 across one work arc, and 1.2.1 silently migrated the Dolt schema, which
-then made \`qa-gate.sh status\` misreport an unreachable store as
-\"not-entered\" until the schema was rolled back.
+fix. This repo lived the hazard directly: its own installer (an unpinned
+\`curl | bash\` of the newest beads release, since removed) replaced its bd
+1.1.2 -> 1.2.1 -> 1.2.2 across one work arc, and 1.2.1 silently migrated the
+Dolt schema, which then made \`qa-gate.sh status\` misreport an unreachable
+store as \"not-entered\" until the schema was rolled back.
 If this drift was DELIBERATE (you meant to upgrade bd, or ran a migration on
 purpose) and you can add suite coverage for the new pair (most naturally a
 CI leg — see the l1-unit job's bd-max leg for the pattern): add
@@ -1647,9 +1653,9 @@ anything is written:
 and only if it reports that nothing would be discarded:
   bash .claude/scripts/beads-ledger.sh reconcile --apply
 then commit .beads/issues.jsonl. (\`reconcile\` is preferred over \`export\`
-because it is safe in BOTH directions. install.sh prints this same two-step
-order for a cross-era bd upgrade; installer-flags.test.sh 9.10 asserts the two
-surfaces name the same commands in the same order.)"
+because it is safe in BOTH directions. install.sh and install.ps1 print this
+same two-step order for a cross-era bd upgrade; installer-flags.test.sh 9.10
+asserts all three surfaces name the same commands in the same order.)"
             ;;
         3)
             # THE OPPOSITE DIRECTION (R1-F1). The ledger holds records the

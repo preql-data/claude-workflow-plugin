@@ -551,6 +551,47 @@ ledger_comment_count() {
         | awk '{n += $1} END { printf "%d", n + 0 }'
 }
 
+# installer_rerun_cmd [--verify]
+#
+# The command the below-floor procedure prints for re-running THIS installer
+# (step 3) and for its final check (step 4, with --verify). The procedure is
+# addressed to people on bd 0.47.x, and nearly all of them installed with the
+# README's curl one-liner, so they have NO local install.sh: the
+# `bash install.sh <project>` printed here until claude-workflow-plugin-s229
+# sent them to a file that does not exist, at step 3 of a one-way migration.
+# The end-to-end run that measured the procedure used a clone, so it could not
+# see that. The printed form now follows how THIS run was started:
+#   - from stdin (`curl ... | bash`): the curl one-liner. CLAUDE_WORKFLOW_REPO
+#     and CLAUDE_WORKFLOW_BRANCH are carried into it whenever they differ from
+#     the defaults, so a run started against a branch re-runs that branch, not
+#     main. Run from the project directory, it installs into it.
+#   - from a file in a plugin checkout: that file's ABSOLUTE path. Step 1
+#     has already cd'd into the project, where a relative install.sh does not
+#     exist either.
+# Every branch ends in printf, so this returns 0 under `set -e` inside $(...).
+installer_rerun_cmd() {
+    local extra="${1:-}"
+    if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/.claude/agents" ] && [ -f "$SCRIPT_DIR/.claude-plugin/plugin.json" ]; then
+        printf 'bash "%s/install.sh"%s <project>' "$SCRIPT_DIR" "${extra:+ $extra}"
+        return 0
+    fi
+    local env_prefix="" slug url
+    if [ "$REPO_URL" != "https://github.com/preql-data/claude-workflow-plugin.git" ]; then
+        env_prefix="CLAUDE_WORKFLOW_REPO=$(printf '%q' "$REPO_URL") "
+    fi
+    if [ "$REPO_BRANCH" != "main" ]; then
+        env_prefix="${env_prefix}CLAUDE_WORKFLOW_BRANCH=$(printf '%q' "$REPO_BRANCH") "
+    fi
+    slug=$(printf '%s' "$REPO_URL" | sed -n 's#^https://github\.com/\([^/]*/[^/]*\)$#\1#p')
+    slug="${slug%.git}"
+    if [ -n "$slug" ]; then
+        url="https://raw.githubusercontent.com/$slug/$REPO_BRANCH/install.sh"
+    else
+        url="<the URL of the install.sh you ran>"
+    fi
+    printf 'curl -fsSL %s | %sbash%s' "$url" "$env_prefix" "${extra:+ -s -- $extra}"
+}
+
 # refuse_below_floor <bd-version-now> [opt-in]
 #
 # The one exit for "bd is below RECOMMENDED_BD_VERSION": print the measured
@@ -586,8 +627,9 @@ refuse_below_floor() {
     echo "  in order:"
     echo ""
     echo "    1. Back up your issues FIRST — the migration is not reversible:"
+    echo "         cd <project>"
     echo "         cp -R .beads .beads.backup-\$(date +%Y%m%d)"
-    echo "         cd <project> && bd sync --flush-only   # writes .beads/issues.jsonl, comments preserved"
+    echo "         bd sync --flush-only   # writes .beads/issues.jsonl, comments preserved"
     echo ""
     local bridge="${BRIDGE_BD_VERSION:-$RECOMMENDED_BD_VERSION}"
     echo "    2. Install EXACTLY bd $bridge. Not 'the latest' — measured: a newer"
@@ -602,7 +644,7 @@ refuse_below_floor() {
     echo ""
     echo "    3. Recover the store with the new bd, then re-run this installer:"
     echo "         cd <project> && bd bootstrap     # rebuilds from the ledger"
-    echo "         bash install.sh <project>"
+    echo "         $(installer_rerun_cmd)"
     echo ""
     echo "       EXPECTED: that installer run EXITS 3 and its check reports a"
     echo "       STALE LEDGER. Your install is fine — a cross-era rebuild always"
@@ -615,10 +657,12 @@ refuse_below_floor() {
     echo "       migration, \"nothing would be discarded from either side\"."
     echo "       Proceed ONLY if you see that:"
     echo "         bash .claude/scripts/beads-ledger.sh reconcile --apply"
-    echo "       Then re-run the check: bash install.sh --verify <project>"
+    echo "       Then re-run the check:"
+    echo "         $(installer_rerun_cmd --verify)"
     echo ""
-    echo "  MEASURED END TO END (container, bd 0.47.1 -> $bridge, 3 issues +"
-    echo "  3 comments): steps 1-3 end with install.sh exiting 3 and the doctor"
+    echo "  MEASURED END TO END through the curl one-liner, from a directory with"
+    echo "  no clone of this repository (container, bd 0.47.1 -> $bridge, 3 issues"
+    echo "  + 3 comments): steps 1-3 end with the installer exiting 3 and the doctor"
     echo "  FAILING on beads_ledger; step 4 reports \"3 -> 3 records; nothing was"
     echo "  discarded\" and the doctor then exits 0 with every issue intact. The"
     echo "  \"nothing was discarded\" line is the result on THAT fixture, which is"

@@ -154,6 +154,15 @@ UPGRADER_SRC="$WORK/upgrader.sh"
     # The safeguard's loss detector lives beside the upgrader in install.sh;
     # extract it too, anchored on its name so a rename fails loudly here.
     awk '/^ledger_comment_count\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALLER"
+    # ...and the helper the refusal prints its re-run and check commands with
+    # (claude-workflow-plugin-s229), plus the two repo defaults it reads, taken
+    # verbatim from install.sh. SCRIPT_DIR is empty, as `curl ... | bash` leaves
+    # it, so the procedure prints the curl form. Without the helper, the
+    # refusal would print "command not found" where the command belongs and
+    # every assertion below would still pass.
+    printf '%s\n' 'SCRIPT_DIR=""'
+    grep -E '^REPO_(URL|BRANCH)=' "$INSTALLER"
+    awk '/^installer_rerun_cmd\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALLER"
     # ...and the refusal every below-floor path ends in. Without it, a call to
     # an undefined function would print an error and CONTINUE, so the guard
     # below is what keeps this spec from passing a refusal that never exited.
@@ -168,6 +177,9 @@ assert_eq "installer-beads-upgrade 0: the upgrader function was extracted (guard
 assert_eq "installer-beads-upgrade 0: the refusal function was extracted too (guards a rename)" \
     "yes" \
     "$(grep -q 'refuse_below_floor() {' "$UPGRADER_SRC" && echo yes || echo no)"
+assert_eq "installer-beads-upgrade 0: ...and the re-run helper it calls, with both repo defaults (guards a rename)" \
+    "yes" \
+    "$(grep -q 'installer_rerun_cmd() {' "$UPGRADER_SRC" && [ "$(grep -cE '^REPO_(URL|BRANCH)=' "$UPGRADER_SRC")" -eq 2 ] && echo yes || echo no)"
 
 # The modelled database: two issues, one carrying the three gate records whose
 # survival across the migration is the whole point of R2-F1.
@@ -194,7 +206,8 @@ ledger_comments() {
 # ...); RC=$?` captures it without adding anything to the output.
 run_upgrader() {
     local oldver="$1" target="$2"
-    env PATH="$WORK/bin:$PATH" STATE="$STATE" \
+    env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH \
+        PATH="$WORK/bin:$PATH" STATE="$STATE" \
         FAKE_NEW_VERSION="${FAKE_NEW_VERSION:-$RECOMMENDED}" \
         SKIP_BEADS_UPGRADE="${SKIP_BEADS_UPGRADE:-false}" \
         CWP_SKIP_BEADS_UPGRADE="${CWP_SKIP_BEADS_UPGRADE:-}" \
@@ -340,6 +353,16 @@ assert_contains "installer-beads-upgrade 4.11: ...saying no plugin file has been
     "No plugin file has been written" "$OUT5N"
 assert_eq "installer-beads-upgrade 4.12: ...and no upgrade command ran" "no" \
     "$(calls_contain "upgrade-ran" && echo yes || echo no)"
+# THE PRINTED RE-RUN (claude-workflow-plugin-s229). The procedure is addressed
+# to curl users, who have no local install.sh, so steps 3 and 4 must name the
+# curl one-liner. installer-flags.test.sh 9.16 drives the whole installer down
+# the stdin path, and carries the mutant that proves this check can fail.
+assert_contains "installer-beads-upgrade 4.15: step 3 re-runs the installer with the curl one-liner" \
+    "curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh | bash" "$OUT5N"
+assert_contains "installer-beads-upgrade 4.16: ...and step 4's check is the same one-liner with --verify" \
+    "/main/install.sh | bash -s -- --verify" "$OUT5N"
+assert_eq "installer-beads-upgrade 4.17: ...and nothing in the refusal reports a missing command" "no" \
+    "$(printf '%s\n' "$OUT5N" | grep -q 'command not found' && echo yes || echo no)"
 
 # CONTROL: the same skip flag on a bd AT the floor is not refused and says
 # nothing. Without this leg, 4.5-4.9 could pass because the flag itself had

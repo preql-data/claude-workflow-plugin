@@ -16,20 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Patch** (`x.y.Z`): Bug fixes, doc updates, internal refactors, prompt
   tightening. No behavior changes for the operator.
 
-## [5.0.0] - 2026-09-30
+## [5.0.0] - 2026-10-05
 
-> **THE DESIGN PHASE SHIPS OPT-IN.** Read this before the feature description
-> below, which was written when it was going to be the default.
+> **THE DESIGN PHASE IS OPT-OUT PER TASK.** Read this before the feature
+> description below, which was written when it was going to be the default.
 >
-> You opt IN by running the design phase — `grilling-record`, `design-record`,
-> `design-review-record` until `design-satisfied`. A task with no design phase
-> takes the documented ordinary exit at approve: `--no-design '<reason>'`, and
-> the reason is recorded in the approval comment. **No new flag and no new
-> config key were added for this** — both paths are pre-existing semantics, and
-> `qa-gate.sh`'s own precheck already assumed most tasks have no design phase
-> ("the overwhelming majority of tasks never have a design phase").
+> Every task either takes the design phase — `grilling-record`,
+> `design-record`, `design-review-record` until `design-satisfied` — or
+> declines it: a task with no design phase is REFUSED at approve
+> (`no_design_attempted`) until `--no-design '<reason>'` is passed, and the
+> reason is recorded in the approval comment. So every ordinary approval
+> actively declines the design phase. **No new flag and no new config key were
+> added for this** — both paths are pre-existing semantics, and `qa-gate.sh`'s
+> own precheck already assumed most tasks have no design phase ("the
+> overwhelming majority of tasks never have a design phase"). Requiring the flag
+> on every ordinary approval trains people to pass it reflexively, which would
+> defeat the design phase the day it becomes the default; that is a P1 for
+> v5.0.1 (`claude-workflow-plugin-502a`).
 >
-> **Why opt-in.** Two of the checks the design phase adds are not yet
+> **Why it is not the default path yet.** Two of the checks the design phase adds are not yet
 > trustworthy in a target project: `design-conform`, and the coherence
 > rollup. **The evidence for the two is NOT the same, and the difference is
 > stated rather than blurred: `design-conform` was OBSERVED failing; the
@@ -84,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > the two numbers answer different questions and only one is comparable to the
 > pair above**. Same anchor as that pair (gate-`enter`→approval): **12m10s**
 > (`target-23z.1`, 2026-09-29 15:41:15Z→15:53:25Z). The design phase itself,
-> which is the cost the opt-in ADDS in front of implementation (design task
+> which is the cost taking it ADDS in front of implementation (design task
 > created→design-review verdict `satisfied`): **2h08m16s** (`target-23z`
 > created 2026-09-28 16:03:55Z→DESIGN-REVIEW `satisfied` 18:12:11Z), across
 > **three** review rounds — two `needs_revision`, one `satisfied` — producing
@@ -156,8 +161,8 @@ incoherent rollup**. *(Corrected 2026-09-30: an earlier version of this
 sentence said "an epic cannot proceed to implementation without
 `design-satisfied` plus a bound `design_artifact`". That was wrong three
 ways, and the correction is not cosmetic because this paragraph is a
-normative argument resting on it. One: the design phase ships OPT-IN, so an
-epic CAN proceed with no design at all. Two: the refusal is waivable —
+normative argument resting on it. One: the design phase is OPT-OUT PER TASK,
+so an epic CAN proceed with no design at all. Two: the refusal is waivable —
 `--no-design '<reason>'` bypasses the whole design-satisfied check, not just
 the design-less case. Three: there is no PRE-implementation enforcement point
 in any form; `design-gate-precheck`'s own help calls itself "a PRE-DELEGATION
@@ -175,20 +180,25 @@ weight actually sits.
 > that is a one-way storage-engine migration.** v5 raises the bd floor from
 > 0.47 to 1.1.2. On an older bd, `install.sh` REFUSES, exit 1, before writing
 > any plugin file (verified by execution), and so does `install.ps1` by inspection —
-> it has never been executed. Both print an upgrade procedure; neither upgrades
-> bd itself unless you supply the command (`BD_UPGRADE_COMMAND`, plus
-> `CWP_BEADS_UPGRADE=1`), and both refuse if that upgrade fails or leaves bd
-> below 1.1.2. `--skip-beads-upgrade` only stops that upgrade from running; it
-> never admits an older bd. The procedure `install.sh` prints, executed end to
-> end from a real bd 0.47.1 store: back up `.beads/` and run
-> `bd sync --flush-only`; install exactly bd 1.1.2, verified against that
-> release's `checksums.txt` — the version measured to migrate a 0.47.x store,
-> where bd 1.3.1 refuses one outright ("historical SQLite workspace
-> detected"); run `bd bootstrap`; re-run the installer, which exits 3 with a
-> stale-ledger report (expected); then dry-run
-> `bash .claude/scripts/beads-ledger.sh reconcile`, and run it with `--apply`
-> only if it reports that nothing would be discarded. Already on 1.1.2 or
-> later: nothing to do for bd (`claude-workflow-plugin-wyt3`).
+> it has never been executed. Both print the same upgrade procedure, and
+> `install.ps1`'s copy is checked against `install.sh`'s line for line
+> (`claude-workflow-plugin-i4ac`). Neither upgrades bd itself unless you supply
+> the command (`BD_UPGRADE_COMMAND`, plus `CWP_BEADS_UPGRADE=1`), and both
+> refuse if that upgrade fails or leaves bd below 1.1.2. `--skip-beads-upgrade`
+> only stops that upgrade from running; it never admits an older bd. The
+> procedure `install.sh` prints, executed end to end from a real bd 0.47.1
+> store through the curl one-liner, from a directory with no clone: in the
+> project directory, back up `.beads/` and run `bd sync --flush-only`; install
+> exactly bd 1.1.2, verified against that release's `checksums.txt` — the
+> version measured to migrate a 0.47.x store, where bd 1.3.1 refuses one
+> outright ("historical SQLite workspace detected"); run `bd bootstrap`;
+> re-run the installer, which exits 3 with a stale-ledger report (expected);
+> then dry-run `bash .claude/scripts/beads-ledger.sh reconcile`, run it with
+> `--apply` only if it reports that nothing would be discarded, and re-run the
+> check. The re-run and the check are printed the way the installer was
+> started: the curl one-liner for a curl install, which has no local
+> `install.sh` (`claude-workflow-plugin-s229`). Already on 1.1.2 or later:
+> nothing to do for bd (`claude-workflow-plugin-wyt3`).
 >
 > **2. `.claude/model-roles` is operator-owned, and an edited copy does not
 > self-upgrade.** The file is manifest class `operator`, so an install whose

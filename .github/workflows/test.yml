@@ -202,8 +202,10 @@ jobs:
     #     RUN — but running is not the same as passing: its own "control"
     #     assertion fails, because `DOCTOR_BD_SCHEMA_PIN="1.3.0:66"` (that
     #     constant, this file's own workflow-doctor.sh) was set to match a
-    #     bd version (1.3.0) that self-upgraded on a dev machine mid-arc
-    #     (see that constant's own header, claude-workflow-plugin-dhh7/u443)
+    #     bd version (1.3.0) that this repo's own installer had put on a dev
+    #     machine mid-arc: its since-removed upgrade step, which
+    #     installer-flags.test.sh triggered (see that constant's own header;
+    #     claude-workflow-plugin-dhh7/u443, wyt3)
     #     and was never reconciled against the bd version this job actually
     #     pins everywhere (1.1.2). Measured directly, following that
     #     constant's own documented update procedure, against THIS job's

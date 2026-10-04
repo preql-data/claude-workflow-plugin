@@ -201,16 +201,20 @@ and warns* when the live effort, the floor, and the verdict disagree —
 detect-and-warn is the ceiling here, and the plugin does not claim to
 enforce the session level.
 
-## 📐 The design phase (v5.0.0) — **opt-in**
+## 📐 The design phase (v5.0.0) — **opt-out per task**
 
-**This phase is opt-in in v5.0.0.** You opt IN by running it:
-`qa-gate.sh grilling-record` → `design-record` → `design-review-record` until
-`design-satisfied` holds. A task with no design phase takes the ordinary
-documented exit at approve — `--no-design '<reason>'` — and the reason is
-recorded in the approval comment. Neither path is new; both are pre-existing
-semantics.
+**Every task either takes this phase or declines it.** A task with no design
+phase is REFUSED at approve (`no_design_attempted`) until you pass
+`--no-design '<reason>'`, and the reason is recorded in the approval comment,
+so every ordinary approval actively declines the design phase. To take it
+instead, run `qa-gate.sh grilling-record` → `design-record` →
+`design-review-record` until `design-satisfied` holds. Neither path is new;
+both are pre-existing semantics. Requiring the flag on every ordinary approval
+trains people to pass it reflexively, which would defeat the design phase the
+day it becomes the default; that is a P1 for v5.0.1
+(`claude-workflow-plugin-502a`).
 
-**Why opt-in, stated plainly:** `design-conform` has been observed on a real
+**Why it is not the default path yet, stated plainly:** `design-conform` has been observed on a real
 target project exactly twice, and both observations were vacuous — it reported
 "conforms" while naming the files that had just been written as untouched,
 because the change set it read was empty. Until that is fixed, the design
@@ -385,35 +389,37 @@ not a floor or an interval:
 
 | bd version | schema | status |
 |---|---|---|
-| 1.1.2 | 53 | pair measured directly; CI floor coverage **UNCONFIRMED** — see below |
+| 1.1.2 | 53 | validated — the CI floor, measured in `l1-unit` by CI run 37187557586 (2026-10-04); the only version measured to migrate a 0.47.x store, so it is the upgrade bridge |
 | 1.2.1 | 65 | measured, not validated — no suite exercises it |
 | 1.2.2 | 53 | measured, not validated — no suite exercises it |
 | 1.3.0 | 66 | validated — its own CI lane (`l1-doctor-bd-max`) and the development host |
 | 1.3.1 | 66 | validated — the CI ceiling, its own lane (`l1-doctor-bd-1-3-1`); it refuses a 0.47.x store, so it cannot be the upgrade bridge |
 
-**Why the floor row says UNCONFIRMED** (claude-workflow-plugin-wyt3, 2026-10-02).
+**How the floor row became validated** (claude-workflow-plugin-wyt3).
 `1.1.2:53` is a correct pair — a store created by bd 1.1.2 reports schema 53
-under the doctor's own query, measured directly. What is NOT established is
-that CI's `l1-unit` lane exercises it. That lane installs bd 1.1.2 from a
-pinned, sha256-verified tarball, yet the doctor running inside it reported
-`installed bd 1.3.1 / store schema v66`. The cause, found by hashing bd
-before and after every spec: `installer-flags.test.sh` drove `install.sh`
+under the doctor's own query, measured directly. Until the wyt3 fix, CI's
+`l1-unit` lane had not been shown to exercise it. That lane installs bd 1.1.2
+from a pinned, sha256-verified tarball, yet the doctor running inside it
+reported `installed bd 1.3.1 / store schema v66`. The cause, found by hashing
+bd before and after every spec: `installer-flags.test.sh` drove `install.sh`
 below its bd floor with a fake old bd, and the installer's then-default
 upgrade (an unpinned `curl | bash`, never in a released version) replaced the
 job's bd mid-suite with the newest release. Before bd 1.3.1 was published the
-same lane would have observed `1.3.0:66` — a set member — and passed. So its
-green history is consistent with never having measured the floor at all, and
-this row will not claim otherwise until the lane is shown to measure 1.1.2.
-That default is gone, the test runner stubs the upgrade command for every
+same lane would have observed `1.3.0:66` — a set member — and passed, so its
+earlier green history is consistent with never having measured the floor at
+all. That default is gone, the test runner stubs the upgrade command for every
 spec, and it fails any spec that replaces a bd binary on `PATH` or at a
-default install location. The 1.3.0 and 1.3.1 rows are unaffected: neither
-lane runs `installer-flags.test.sh`; each runs only `workflow-doctor.test.sh`
-against the bd it pins.
+default install location. With those in place, CI run 37187557586
+(2026-10-04, commit 71e1d16) measured the floor in that lane: META-TEST 8a
+reported `1.1.2:53` from `/usr/local/bin/bd`, the pinned binary, after
+`installer-flags.test.sh` had run. The 1.3.0 and 1.3.1 rows are unaffected:
+neither lane runs `installer-flags.test.sh`; each runs only
+`workflow-doctor.test.sh` against the bd it pins.
 
 A live pair inside the set PASSes the doctor's `beads` check (the note names
 which member matched); a pair outside it — including the two measured-but-
 unvalidated rows above — FAILs as `bd-version-vs-schema DRIFT`, which is what
-converts a silent bd self-upgrade back into a reviewed one instead of a
+converts a silent bd version change back into a reviewed one instead of a
 missed one. See `DOCTOR_BD_SCHEMA_VALIDATED`'s own header comment in
 `.claude/scripts/workflow-doctor.sh` for the full measurement method and the
 procedure for adding a pair once it gains suite coverage, and run the doctor
