@@ -7,7 +7,7 @@ tools: Read, Glob, Grep, LS, Write, WebFetch, WebSearch, AskUserQuestion, mcp__p
 # /workflow-model remains the manual override path. workflow-model-apply.sh
 # carries a `designer` role class so this pin tracks its own lane rather than
 # the orchestrator's.
-model: claude-fable-5
+model: claude-fable-5-1
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. The session-level effort (launch wiring — `make session` /
 # `claude --effort` — or /effort) takes precedence per session; this

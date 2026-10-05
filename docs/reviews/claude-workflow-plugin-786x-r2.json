@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-786x",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5-5",
+  "reviewer_pin": "claude-opus-5-5",
+  "reviewed_hash": "0c8bc08850d47e743a68dc39a6cab42ce1b5c11317e5f4ca3c6af18e702d9ead",
+  "risk_threshold": "high",
+  "stop_condition": "Every round-1 resolution (R1-F1..R1-F6) is verified against the bytes at e9bb811 with a recorded command and rc (including both CHANGELOG clearances, exercised end to end), the delta manifest rows are reproduced by the generator, the affected specs pass at e9bb811, and no finding at or above high remains open.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "low",
+      "location": "CHANGELOG.md:2044-2050 ([5.0.0] 786x entry, the stale-cache paragraph). The PR body's callout (scratchpad pr-786x-body.md, not in the change set) uses the same wording.",
+      "evidence": "PROSE. Sandbox = `git archive e9bb811` plus this host's .claude/.qa-tracking/model-select-cache.json, with bd and codex off PATH. The driver qa-786x-r2/drive.sh runs the REAL session-start.sh (CLAUDE_PROJECT_DIR=sandbox, `perl -e 'alarm 120'`) and statusline.sh (envelope model.id=claude-opus-5-5). STALE STATE: session-start rc=0 emits TWO downgrade lines in additionalContext. The first is `- model-select: resolver drift ... (apply: /workflow-model --role designer claude-fable-5); ...`. The second is `- session-model drift: the root session is the ORCHESTRATOR seat, but it last rendered on 'claude-opus-5-5' while the orchestrator role class resolves to 'claude-opus-5'. Never blocking. Fix: /model claude-opus-5  (or relaunch via: make session)`. The statusline prints `• des+dsr:fable-5 orch+rev:opus-5 impl:sonnet-5 !id !sess`: stale ids and no command. This host already carries the session record: `jq -c . .claude/.qa-tracking/session-model-drift.json` -> expected claude-opus-5, live claude-opus-5-5, observed_at 2026-10-02T17:43:38Z, so that advice predates 786x. BOTH REMEDIES CLEAR BOTH LINES. Refresh, simulated with ANTHROPIC_API_KEY=dummy and a fake curl serving a /v1/models body: `model-select.sh apply --check --refresh` reports `applied pins already match the config; 0 written`, made 1 fetch, and the agents+settings digest is unchanged (be8977ae723808e4 before and after); the next session start has 0 downgrade lines and the statusline reads `des+dsr:fable-5-1 orch+rev:opus-5-5 impl:sonnet-5-5`. Delete: session start reads `keeping current pin` with 0 downgrade lines even though the stale drift record stays on disk (session-start.sh:847 requires the resolved artifact as well); the statusline reads `model: claude-opus-5-5`; check-parity rc=2.",
+      "description": "The R1-F1 fix is right where it matters. The warning is prominent, and both clearances work exactly as written: the refresh changes no pin, and the deletion makes the checks skip. Only the list of surfaces is imprecise, in two ways. The statusline suggests no command; it shows the stale ids and `!sess`. And the list omits session-start's session-model-drift line, whose fix is `/model claude-opus-5`. That is a downgrade of the SESSION model rather than of the pins, and a reader watching for `/workflow-model` will not connect it to this warning. Suggested wording: 'Two of them, the session-start model-select line and model_parity, suggest `/workflow-model` commands that would downgrade the pins. The statusline shows the stale ids, and session-start's session-model-drift line suggests `/model <old id>`, a downgrade of the session. Either clearance below removes all of them.' Low and non-blocking: the operative instruction and both remedies are correct."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "info",
+      "location": "docs/CODEX_SETUP.md:69-74 (section 2, the curl and PowerShell installers paragraph)",
+      "evidence": "NON-BLOCKING. The coordinator's copies <S>/codex-install.sh and <S>/codex-install.ps1 are byte-identical to the 2026-10-05 fetches in qa-786x-r1 (`cmp`, rc=0 for both). install.sh: line 5 `RELEASE=\"${CODEX_RELEASE:-latest}\"`, line 86 `--release)`, line 83 `parse_args()`, line 1080 `parse_args \"$@\"`. install.ps1, lines 2-3: `param([string]$Release = $env:CODEX_RELEASE)`.",
+      "description": "The cited source facts are right, and R1-F3 is resolved. The section names flags rather than invocations, and each common one-liner has a trap. In `curl ... | sh`, the variable must prefix `sh` (`curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_RELEASE=0.145.0 sh`), and the flag needs `sh -s -- --release 0.145.0`. Prefixing curl instead silently installs the newest release. In PowerShell's `irm ... | iex` form, `-Release` cannot be bound, but `$env:CODEX_RELEASE='0.145.0'` can, because the param default reads it. The section's own `codex --version` check would catch a mis-pinned install, and it states that only npm was verified, so this is info only."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "stop_condition"
+}
