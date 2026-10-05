@@ -2042,12 +2042,14 @@ weight actually sits.
 
   **If your host's model-select cache predates these ids, do not apply the
   drift fixes it suggests.** The cache refreshes only when `ANTHROPIC_API_KEY`
-  is set. A stale cache makes three things report these pins as drift:
-  - the session-start check;
-  - the statusline;
-  - workflow-doctor's `model_parity`.
+  is set. A stale cache makes these surfaces report the new pins as drift:
+  - the session-start model-select line and workflow-doctor's
+    `model_parity` both suggest `/workflow-model` commands that would
+    DOWNGRADE the pins;
+  - the session-start session-model drift line, where one is recorded,
+    suggests a `/model <old id>` downgrade of the session model;
+  - the statusline shows the old ids.
 
-  Each one suggests `/workflow-model` commands that would DOWNGRADE the pins.
   Clear the stale state in either of two ways:
   - refresh the listing and the resolved mapping, without touching any pin,
     with `bash .claude/scripts/model-select.sh apply --check --refresh`

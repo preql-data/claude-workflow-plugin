@@ -71,6 +71,13 @@ the newest release, but their source accepts a version:
 - `--release 0.145.0`, or `CODEX_RELEASE=0.145.0`, for the shell script;
 - `-Release 0.145.0` for PowerShell.
 
+In the usual one-line install, the version has to reach the script, not the download:
+- For the shell installer, put the variable on `sh`, not `curl`:
+  `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_RELEASE=0.145.0 sh`. Or pass the flag
+  through: `… | sh -s -- --release 0.145.0`.
+- For PowerShell, `irm … | iex` cannot pass `-Release`, so set `$env:CODEX_RELEASE = "0.145.0"`
+  first.
+
 This page was verified with the pinned npm install only.
 
 Confirm it is on your `PATH` — the plugin spawns `codex` by name, so a binary that only works
