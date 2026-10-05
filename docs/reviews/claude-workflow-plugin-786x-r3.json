@@ -1,0 +1,14 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-786x",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5-5",
+  "reviewer_pin": "claude-opus-5-5",
+  "reviewed_hash": "d581db4f6a8fa110b433f6a7a81cc0c8188d6928b7ed9bdeef732a5961dfafc1",
+  "risk_threshold": "high",
+  "stop_condition": "Both round-2 resolutions (R2-F1, R2-F2) are verified against the bytes at e4fc6a6 with a recorded command and rc (the shell one-liners executed through the installer's own argument parsing), the manifest row is reproduced by the generator, the specs that read the changed files pass at e4fc6a6, and no finding at or above high remains open.",
+  "verdict": "approve",
+  "findings": [],
+  "iterations": 3,
+  "stopped_by": "stop_condition"
+}
